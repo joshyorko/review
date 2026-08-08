@@ -254,15 +254,86 @@ malformed_status=$?
 set -e
 ((malformed_status != 0))
 
-# --- the reviewer never approves, submits, or merges --------------------------
-# A menu that can merge is a different tool with a different authority claim.
-if grep -q 'pr merge' "$review"; then
-  echo "bluefin-review must never merge" >&2
+# --- maintainer actions stay gated and scoped ---------------------------------
+# The walk gained explicit maintainer action keys (m/M), so the old "never
+# merges" grep became these inverted invariants: the powers stay narrow, and
+# every mutation runs through exactly one confirmed call site.
+
+# No protection bypass, no branch deletion, no review submission, no push.
+if grep -qE -- '--admin' "$review"; then
+  echo "bluefin-review must never bypass branch protections with --admin" >&2
   exit 1
 fi
-if grep -q 'pr review' "$review"; then
+if grep -qE -- '--delete-branch' "$review"; then
+  echo "bluefin-review must never delete branches" >&2
+  exit 1
+fi
+if grep -qE 'gh pr review' "$review"; then
   echo "bluefin-review must never submit a review" >&2
   exit 1
 fi
+if grep -qE '(^|[^[:alnum:]_])git +push' "$review"; then
+  echo "bluefin-review must never push" >&2
+  exit 1
+fi
+
+# Every merge arms auto-merge pinned to the reviewed commit; an immediate or
+# unpinned merge would bypass GitHub's own gate or merge a head the reviewer
+# never saw. Backslash continuations are joined first so a wrapped call is
+# scanned as the one command it becomes.
+review_joined="$scratch/review-joined"
+sed -e :a -e '/\\$/N; s/\\\n//; ta' "$review" >"$review_joined"
+while IFS= read -r line; do
+  [[ "$line" == *'--squash --auto --match-head-commit'* ]] || {
+    echo "every gh pr merge must be --squash --auto --match-head-commit: $line" >&2
+    exit 1
+  }
+done < <(grep -E 'gh pr merge' "$review_joined" | grep -vE '^[[:space:]]*#')
+
+# Exactly one mutation call site: every state-changing gh invocation is the
+# argument of gh_mutate, whose typed-number confirmation is the gate.
+while IFS= read -r line; do
+  [[ "$line" == *'gh_mutate '* ]] || {
+    echo "mutating gh call outside gh_mutate: $line" >&2
+    exit 1
+  }
+done < <(grep -E 'gh (pr (merge|close|comment)|issue (close|comment|edit|reopen))' "$review_joined" | grep -vE '^[[:space:]]*#')
+
+# The confirmation is a typed number with no shortcut: no y/yes prompt and no
+# read timeout may gate a mutation.
+gate="$(sed -n '/^gh_mutate() {/,/^}/p' "$review")"
+[[ -n "$gate" ]] || {
+  echo "gh_mutate not found" >&2
+  exit 1
+}
+if grep -qiE '\(y/n\)|yes/no' <<<"$gate"; then
+  echo "gh_mutate must confirm with the PR number, never y/yes" >&2
+  exit 1
+fi
+if grep -qE -- '-t [1-9]' <<<"$gate"; then
+  echo "gh_mutate must not time a confirmation out" >&2
+  exit 1
+fi
+grep -q -- '-t 0' <<<"$gate" || {
+  echo "gh_mutate must drain buffered tty input before asking" >&2
+  exit 1
+}
+
+# A draft is refused before the confirmation is ever offered.
+grep -q 'EVIDENCE_IS_DRAFT' "$review" || {
+  echo "merge must refuse drafts from live evidence" >&2
+  exit 1
+}
+
+# Live-state skip and cache invalidation: the walk trusts GitHub, not a local
+# ledger, so stale stops are skipped and mutations invalidate the pull cache.
+grep -q 'state,headRefOid' "$review" || {
+  echo "show_evidence must read live state and headRefOid" >&2
+  exit 1
+}
+grep -q 'invalidate_repo_cache' "$review" || {
+  echo "mutations must invalidate the repository pull cache" >&2
+  exit 1
+}
 
 printf 'bluefin-review contract OK\n'

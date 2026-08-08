@@ -77,10 +77,14 @@ GitHub live, because the snapshot can be hours old and a stale "clean" reading
 is the one most likely to mislead a reviewer. Treat that split as the rule for
 any future consumer: the queue orders the walk, GitHub supplies the evidence.
 
-A consumer must not gain an approve or merge action. `ready-for-human-merge` is
-a recommendation to a person, not an instruction a tool may execute, so the
-menu offers neither and `tests/bluefin-review.sh` fails if a `pr merge` or
-`pr review` call appears in the reviewer.
+A consumer's mutations stay gated and narrow. `ready-for-human-merge` is a
+recommendation to a person; the walk's `m` and `M` keys execute that person's
+decision — never the queue's — through one confirmed call site: the exact
+command is printed, the maintainer types the pull request number, and every
+merge is `--squash --auto --match-head-commit`, so GitHub's required checks
+and branch protections still gate the actual merge. `tests/bluefin-review.sh`
+fails if a mutation appears outside that gate, or if `--admin`,
+`--delete-branch`, a push, or a `gh pr review` submission appears at all.
 
 The snapshot carries each pull request's `author` so a consumer can skip the
 walker's own work. Authorship is the one field that never changes after

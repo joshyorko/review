@@ -237,9 +237,21 @@ to mislead a reviewer. Then it offers a menu:
 | `r` | check the pull request out and review it through `goose review` |
 | `d` | show the diff |
 | `o` | open it in a browser |
-| `c` | leave a comment |
+| `c` | leave a comment (typed-number confirmation) |
+| `m` | arm auto-merge for this pull request (typed-number confirmation) |
+| `M` | resolve this duplicate cluster: arm the survivor, comment and close the superseded, recheck orphaned issues |
 | `p` | previous pull request |
 | `q` | stop |
+
+Stops that are no longer open on GitHub are skipped automatically — the
+snapshot can be hours old, and GitHub is the state.
+
+Every state-changing key prints the exact command and runs it only after you
+type the pull request number; empty aborts, and there is no y/yes shortcut. A
+merge is always `--squash --auto --match-head-commit <reviewed sha>`: it arms
+GitHub's own auto-merge pinned to the commit you looked at, and required
+checks and branch protections still gate the actual merge. Drafts are
+refused.
 
 ### Duplicates
 
@@ -312,12 +324,14 @@ contributor container, so the knowledge base, its refresh loop, and the
 `podman exec -it <container> tmux attach -t contributor`, or in any shell in
 that container.
 
-The menu deliberately offers no approve and no merge. This is the Managed
+The menu offers no approve and no unguarded merge. This is the Managed
 Reviewer Client from
 [`docs/factory/agentic-model.md`](docs/factory/agentic-model.md): it prepares a
-Review Draft and never claims review, approval, or merge authority. Those stay
+Review Draft, and the `m`/`M` action keys execute the human's decision through
+a single typed-number-confirmed call site that can only arm GitHub's own
+auto-merge. Approval and review submission stay
 human actions taken in GitHub, and `tests/bluefin-review.sh` fails if a merge
-or review-submission path is ever added. Queue mode needs an interactive
+escapes that gate or a review-submission path is ever added. Queue mode needs an interactive
 terminal and says so rather than looping silently without one.
 
 ## Configuration

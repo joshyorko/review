@@ -118,8 +118,11 @@ Pull requests authored by the GH_TOKEN owner are skipped: a walk is for
 reviewing other people's work.
 
 The queue is a recommendation snapshot. GitHub stays authoritative for pull
-request state, and every merge or approval remains a human action taken
-outside this tool.
+request state. The maintainer action keys [m] and [M] arm auto-merge and
+resolve duplicate clusters; every state-changing command is printed first and
+runs only after the maintainer types the pull request number, and a merge is
+always '--auto --match-head-commit', so GitHub's required checks and branch
+protections still gate the actual merge.
 EOF
 }
 
@@ -260,8 +263,17 @@ load_queue() {
 # Read-only Review Evidence. Live GitHub state, not the snapshot's copy of it,
 # because the snapshot can be hours old and a stale "clean" reading is exactly
 # the one that misleads a reviewer.
+#
+# The live read also feeds the maintainer actions: EVIDENCE_STATE drives the
+# auto-skip of stops that are no longer open, and EVIDENCE_HEAD_OID pins any
+# merge to the exact commit the reviewer looked at. GitHub is the state; there
+# is no local ledger, so these are reset on every stop.
 show_evidence() {
   local repo="$1" number="$2" position="$3" total="$4" action="$5" title="$6"
+
+  EVIDENCE_STATE=""
+  EVIDENCE_HEAD_OID=""
+  EVIDENCE_IS_DRAFT=""
 
   rule
   printf ' [%s/%s]  %s#%s\n' "$position" "$total" "$repo" "$number"
@@ -271,14 +283,19 @@ show_evidence() {
 
   local json
   if ! json="$(gh pr view "$number" --repo "$repo" \
-    --json author,isDraft,mergeable,mergeStateStatus,reviewDecision,additions,deletions,changedFiles,updatedAt,statusCheckRollup 2>&1)"; then
+    --json author,state,headRefOid,isDraft,mergeable,mergeStateStatus,reviewDecision,additions,deletions,changedFiles,updatedAt,statusCheckRollup 2>&1)"; then
     printf ' (could not read live state from GitHub: %s)\n' "$json"
     return 0
   fi
 
+  EVIDENCE_STATE="$(printf '%s' "$json" | jq -r '.state // ""')"
+  EVIDENCE_HEAD_OID="$(printf '%s' "$json" | jq -r '.headRefOid // ""')"
+  EVIDENCE_IS_DRAFT="$(printf '%s' "$json" | jq -r '.isDraft // ""')"
+
   printf '%s' "$json" | jq -r '
     def dash: if . == null or . == "" then "-" else . end;
     " author   \(.author.login // "-")",
+    " state    \(.state // "-")    head   \(.headRefOid // "-" | .[0:12])",
     " updated  \(.updatedAt // "-")",
     " draft    \(.isDraft)    review   \(.reviewDecision // "-")",
     " merge    \(.mergeable // "-") / \(.mergeStateStatus // "-")",
@@ -366,8 +383,127 @@ run_goose_review() {
   )
 }
 
+# --- maintainer actions --------------------------------------------------------
+
+# Every mutation invalidates the repository's pull cache: the walk's duplicate
+# evidence must reflect what the maintainer just changed, and GitHub — not a
+# local ledger — is the state.
+invalidate_repo_cache() {
+  local repo="$1"
+  rm -f "${CACHE_DIR}/${repo//\//_}.json"
+}
+
+# The ONLY mutation call site in queue mode. Every state-changing gh call is
+# executed here, behind a typed-number confirmation: the exact command is
+# printed, buffered terminal input is drained, and the maintainer types the
+# pull request number. One attempt; an empty or wrong answer aborts. Never a
+# y/yes prompt (too easy to type reflexively), never a timeout (a decision
+# must not expire into either outcome).
+gh_mutate() {
+  local repo="$1" expected="$2"
+  shift 2
+  printf '\n will run: %s\n' "$*"
+  # Drain buffered tty input first. 'read -t 0' probes without consuming, so
+  # each successful probe needs its own consuming read; a keystroke typed
+  # while review output scrolled past must not answer this confirmation.
+  while IFS= read -r -t 0 -u 3; do
+    IFS= read -r -u 3 || break
+  done
+  local answer=""
+  printf ' type the pull request number (%s) to run it, empty aborts: ' "$expected"
+  IFS= read -r answer <&3 || answer=""
+  if [[ -z "$answer" || "$answer" != "$expected" ]]; then
+    printf ' aborted; nothing was run.\n'
+    return 1
+  fi
+  "$@" || return 1
+  invalidate_repo_cache "$repo"
+}
+
+# Arm auto-merge for the pull request on screen. --match-head-commit pins the
+# merge to the exact commit the reviewer looked at, and --auto leaves GitHub's
+# own required checks and branch protections as the gate — this never forces a
+# merge past them.
+merge_current() {
+  local repo="$1" number="$2"
+  if [[ "${EVIDENCE_IS_DRAFT:-}" == "true" ]]; then
+    printf ' %s#%s is a draft; not merging.\n' "$repo" "$number"
+    return 1
+  fi
+  if [[ -z "${EVIDENCE_HEAD_OID:-}" ]]; then
+    printf ' live head commit is unknown; not merging without --match-head-commit.\n'
+    return 1
+  fi
+  if gh_mutate "$repo" "$number" \
+    gh pr merge "$number" --repo "$repo" --squash --auto --match-head-commit "$EVIDENCE_HEAD_OID"; then
+    printf ' auto-merge armed for %s#%s at %.12s; GitHub'\''s checks still gate the merge.\n' \
+      "$repo" "$number" "$EVIDENCE_HEAD_OID"
+  fi
+}
+
+# Resolve a duplicate cluster around the pull request on screen: arm the
+# survivor, then comment and close each superseded duplicate, then recheck for
+# issues the closed duplicates referenced that the survivor does not. Halts on
+# the first failed or aborted step so a half-resolved cluster is visible, not
+# silent.
+resolve_cluster() {
+  local repo="$1" survivor="$2"
+  local cache dup_numbers="" kind nums
+  if ! cache="$(repo_pulls "$repo")"; then
+    printf ' could not read open pull requests for %s; not resolving.\n' "$repo"
+    return 1
+  fi
+  while IFS=$'\t' read -r kind nums; do
+    [[ "$kind" == dupes ]] && dup_numbers="$nums"
+  done < <(python3 -c "$DUPLICATE_ANALYZER" --numbers "$survivor" "$cache" 2>/dev/null)
+  if [[ -z "${dup_numbers// /}" ]]; then
+    printf ' no duplicates of %s#%s among the open pull requests; nothing to resolve.\n' \
+      "$repo" "$survivor"
+    return 0
+  fi
+  printf ' cluster: survivor %s#%s; superseded: %s\n' "$repo" "$survivor" "$dup_numbers"
+
+  # Compute the orphan recheck from the pre-mutation snapshot: the closes
+  # below invalidate the cache, and the answer must describe the cluster that
+  # was actually resolved.
+  local orphans
+  # shellcheck disable=SC2086 # dup_numbers is a space-separated number list by construction
+  orphans="$(python3 - "$cache" "$survivor" $dup_numbers <<'PY' 2>/dev/null || true
+import json, sys
+prs = json.load(open(sys.argv[1]))
+survivor = int(sys.argv[2])
+dups = {int(n) for n in sys.argv[3:]}
+def issues(number):
+    for pr in prs:
+        if pr["number"] == number:
+            return {r["number"] for r in (pr.get("closingIssuesReferences") or [])}
+    return set()
+kept = issues(survivor)
+orphaned = sorted(set().union(set(), *[issues(d) for d in dups]) - kept)
+print(" ".join("#%d" % n for n in orphaned))
+PY
+)"
+
+  merge_current "$repo" "$survivor" || return 1
+
+  local dup note
+  for dup in $dup_numbers; do
+    note="${CACHE_DIR}/superseded-${dup}.md"
+    printf 'Superseded by #%s, which is armed to merge. Closing as a duplicate; the surviving change lands there.\n' \
+      "$survivor" >"$note"
+    gh_mutate "$repo" "$dup" gh pr comment "$dup" --repo "$repo" --body-file "$note" || return 1
+    gh_mutate "$repo" "$dup" gh pr close "$dup" --repo "$repo" || return 1
+  done
+
+  if [[ -n "$orphans" ]]; then
+    printf ' recheck by hand — issues referenced only by the closed duplicates: %s\n' "$orphans"
+  else
+    printf ' no orphaned issues: the survivor covers everything the duplicates closed.\n'
+  fi
+}
+
 menu() {
-  printf '\n [Enter] next   [r] review   [d] diff   [o] browser   [c] comment   [p] previous   [q] quit\n'
+  printf '\n [Enter] next   [r] review   [d] diff   [o] browser   [c] comment   [m] merge   [M] resolve duplicates   [p] previous   [q] quit\n'
   printf ' > '
 }
 
@@ -446,13 +582,22 @@ queue_mode() {
   fi
   exec 3</dev/tty
 
-  local index=0 item pr_repo pr_number pr_action pr_title key body
+  local index=0 item pr_repo pr_number pr_action pr_title key body note_file
   while ((index < total)); do
     item="${items[index]}"
     IFS=$'\t' read -r pr_repo pr_number pr_action pr_title <<<"$item"
 
     printf '\n'
     show_evidence "$pr_repo" "$pr_number" "$((index + 1))" "$total" "$pr_action" "$pr_title"
+
+    # The snapshot can be hours old; a stop that is no longer open is not
+    # reviewable work. GitHub is the state, so skip it instead of offering a
+    # menu whose every action would fail.
+    if [[ -n "${EVIDENCE_STATE:-}" && "$EVIDENCE_STATE" != OPEN ]]; then
+      printf ' %s#%s is %s on GitHub; skipping.\n' "$pr_repo" "$pr_number" "$EVIDENCE_STATE"
+      index=$((index + 1))
+      continue
+    fi
 
     menu
     IFS= read -r -n1 key <&3 || key=q
@@ -482,10 +627,19 @@ queue_mode() {
         printf ' comment (empty aborts): '
         IFS= read -r body <&3 || body=""
         if [[ -n "$body" ]]; then
-          gh pr comment "$pr_number" --repo "$pr_repo" --body "$body" || true
+          note_file="${CACHE_DIR}/comment-${pr_number}.md"
+          printf '%s\n' "$body" >"$note_file"
+          gh_mutate "$pr_repo" "$pr_number" \
+            gh pr comment "$pr_number" --repo "$pr_repo" --body-file "$note_file" || true
         else
           printf ' skipped\n'
         fi
+        ;;
+      m)
+        merge_current "$pr_repo" "$pr_number" || true
+        ;;
+      M)
+        resolve_cluster "$pr_repo" "$pr_number" || true
         ;;
       p)
         ((index > 0)) && index=$((index - 1))
