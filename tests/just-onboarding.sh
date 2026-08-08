@@ -156,6 +156,15 @@ case "${1:-}" in
     [[ "${FAKE_PODMAN_IMAGE_MISSING:-0}" == 1 ]] && exit 1
     exit 0
     ;;
+  stop)
+    printf '%s\n' "$*" >>"${RUNNER_LOG:?}"
+    exit 0
+    ;;
+  container)
+    # 'container exists' — only review-stop asks.
+    [[ "${FAKE_PODMAN_RUNNING:-0}" == 1 ]] && exit 0
+    exit 1
+    ;;
   inspect)
     # Only the liveness and ownership probes use 'podman inspect'; nothing is
     # running unless a scenario asks for it.
@@ -244,7 +253,7 @@ run_recipe() {
       -u REVIEW_GH_TOKEN -u FAKE_GH_TOKEN -u FAKE_GH_SCOPES \
       -u GOOSE_THINKING_EFFORT -u GOOSE_CONTEXT_LIMIT \
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
-      -u REVIEW_CONTAINER_NAME \
+      -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
       -u REVIEW_QUEUE_NAME \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
@@ -495,6 +504,47 @@ assert_file_not_contains "super-secret-registration-token" "$runner_log"
 # A moving tag must be refreshed on every launch, or a contributor silently
 # keeps running whatever copy they first pulled.
 assert_file_contains "pull ghcr.io/projectbluefin/review:stable" "$image_log"
+
+begin "review-container: REVIEW_DETACH=1 launches the marked worker"
+reset_logs
+run_recipe review-container GH_READY=1 REVIEW_DETACH=1
+assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
+assert_file_contains "run --rm --detach --replace --name review-container" "$runner_log"
+assert_file_contains "--label review.owner=detached" "$runner_log"
+assert_file_not_contains "--interactive" "$runner_log"
+assert_file_not_contains "--tty" "$runner_log"
+assert_contains "just review-stop review-container" "$OUT"
+assert_contains "podman logs -f review-container" "$OUT"
+
+begin "review-container: a running detached worker is never reclaimed"
+reset_logs
+run_recipe review-container GH_READY=1 \
+  FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached
+assert_nonzero_status "$STATUS" "a live detached worker must refuse a second launch"
+assert_contains "already running as a detached worker" "$OUT"
+assert_contains "just review-stop review-container" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "nothing may launch over a live detached worker"
+
+begin "review-stop: stops a detached worker politely"
+reset_logs
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached
+assert_zero_status "$STATUS" "stopping a detached worker must succeed"
+assert_file_contains "stop review-container" "$runner_log"
+assert_contains "stopped the detached worker" "$OUT"
+
+begin "review-stop: refuses an attended run and names Ctrl-C"
+reset_logs
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_OWNER_LABEL="boot-id:12345"
+assert_nonzero_status "$STATUS" "an attended run is not review-stop's to end"
+assert_contains "Ctrl-C" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "review-stop must not stop an attended run"
+
+begin "review-stop: an absent container is a clean no-op"
+reset_logs
+run_recipe review-stop
+assert_zero_status "$STATUS" "nothing to stop is success, not an error"
+assert_contains "no container named review-container" "$OUT"
 
 begin "hive selection: the current repository's registration wins when it exists"
 reset_logs
@@ -872,8 +922,18 @@ begin "static: an interactive launch can never background the container"
 code="$scratch/justfile-code"
 sed -E 's/^[[:space:]]*#.*$//' "$justfile" >"$code"
 
-if grep -nE 'podman run.*(^| )(-d|--detach)( |$)' "$code"; then
-  fail "podman run must never detach"
+# Exactly one sanctioned detach site exists: the deliberate worker launch,
+# which pairs --detach with the 'detached' owner label so a later launch
+# refuses to reclaim it and review-stop can stop it. Any other detach is a
+# hole.
+assert_eq "$(grep -c 'podman run --rm --detach --replace --name' "$code")" 1 \
+  "expected exactly one detached launch site (the marked worker)"
+assert_eq "$(grep -c 'review.owner=detached' "$code")" 1 \
+  "the detached label is stamped at exactly one launch site"
+assert_eq "$(grep -c '"detached"' "$code")" 2 \
+  "both the ownership check and review-stop must honor the detached marker"
+if grep -nE 'podman run' "$code" | grep -vE -- '--detach|--interactive --tty'; then
+  fail "every podman run is either the marked detached worker or interactive"
 fi
 # A lone trailing '&' backgrounds the launch; '&&' and '2>&1' must not match.
 if grep -nE '(podman run).*[^&>]&[[:space:]]*$' "$code"; then
@@ -902,17 +962,19 @@ joined="$scratch/justfile-code-joined"
 sed -e :a -e '/\\$/N; s/\\\n//; ta' "$code" >"$joined"
 # Everything that contributes arguments to a real launch: both podman
 # argument arrays (opened as CONTAINER_ARGS=( and appended to with +=), and
-# any bare 'podman run'/'podman create'.
+# any bare 'podman run'/'podman create'. The one sanctioned detach line —
+# the marked worker launch asserted above — is excluded so everything else
+# stays under the strict scan.
 launch_args="$scratch/justfile-launch-args"
 awk '
   /CONTAINER_ARGS\+?=\(/           { inargs = 1 }
   inargs                           { print; if ($0 ~ /\)[[:space:]]*$/) inargs = 0; next }
   /podman[[:space:]]+(run|create)/ { print }
-' "$joined" >"$launch_args"
+' "$joined" | grep -v 'podman run --rm --detach --replace --name' >"$launch_args"
 # 'podman run --detach-keys' is a foreground detach *sequence*, not
 # backgrounding, so the character after '--detach' has to be checked.
 if grep -nE -- '--detach([^-]|$)' "$launch_args"; then
-  fail "no launch argument may detach the run (--detach/--detach=true)"
+  fail "no other launch argument may detach the run (--detach/--detach=true)"
 fi
 if grep -nE -- '(^|[[:space:]])-d([[:space:]=]|$)' "$launch_args"; then
   fail "no launch argument may detach the run (-d/-d=true)"
@@ -974,20 +1036,27 @@ fi
 grep -q 'ghcr.io/projectbluefin/review:stable' "$code" ||
   fail "the default contributor image must be the published ':stable' tag"
 
-begin "static: the launcher ships no lifecycle command"
-# A stop/start/restart verb would mean a run can outlive its terminal. It
-# cannot: Ctrl-C is the only way a review run ends, and a stale name
-# is reclaimed at launch by --replace, not by a second command.
-if grep -nE '^review-(stop|start|restart|kill|clean|down|up)[ :]' "$code"; then
-  fail "the launcher must never ship a lifecycle recipe — Ctrl-C is the stop button"
+begin "static: the lifecycle verb is scoped to detached workers"
+# review-stop exists for exactly one thing: stopping a deliberately detached
+# worker. It must refuse attended runs (Ctrl-C owns those), refuse containers
+# this launcher did not label, and never force anything.
+grep -qE '^review-stop' "$code" ||
+  fail "review-stop must exist as the detached worker's lifecycle verb"
+stop_body="$(sed -n '/^review-stop/,/^[a-z]/p' "$code")"
+grep -q 'review.owner' <<<"$stop_body" ||
+  fail "review-stop must check the owner label before touching anything"
+grep -q 'Ctrl-C' <<<"$stop_body" ||
+  fail "review-stop must route attended runs back to Ctrl-C"
+if grep -nE 'podman (rm|kill)|--force|stop -f' <<<"$stop_body"; then
+  fail "review-stop must stop politely, never force-remove"
 fi
-if grep -n 'just review-stop' "$code"; then
-  fail "nothing may point a user at a stop command that must not exist"
+if grep -nE '^review-(start|restart|kill|clean|down|up)[ :]' "$code"; then
+  fail "no resurrection or force verbs: stop is the only lifecycle command"
 fi
-# The recipe list is exactly: launch the container, diagnose,
-# walk the PR queue.
-assert_eq "$(grep -cE '^review[a-z-]*[ :]' "$code")" 3 \
-  "expected exactly three recipes (review-container, -doctor, -queue)"
+# The recipe list is exactly: launch the container, stop a detached worker,
+# diagnose, walk the PR queue.
+assert_eq "$(grep -cE '^review[a-z-]*[ :]' "$code")" 4 \
+  "expected exactly four recipes (review-container, -stop, -doctor, -queue)"
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private

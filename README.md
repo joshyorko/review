@@ -43,10 +43,10 @@ silently create a second workflow, authority path, or task queue.
 
 `review` is evolving into a two-mode review appliance:
 
-1. **Headless queue worker** (`review-container`): runs unattended, ingests
+1. **Headless queue worker** (`review-container`): ingests
    Hive tasks, donates inference, and produces structured pre-review
-   feedback. A detached mode with an explicit `review-stop` lifecycle verb
-   is planned.
+   feedback. `REVIEW_DETACH=1` runs it detached, with `just review-stop` as
+   its lifecycle verb.
 2. **Interactive maintainer TUI** (`review-queue`): high-velocity PR and
    issue triage with batching, labels, priority, agent-assisted
    documentation updates, and build dispatch.
@@ -86,17 +86,20 @@ just review-container
 ## Commands
 
 `justfile` is the installable artifact and exposes exactly
-three public recipes:
+four public recipes:
 
 | Command | Purpose |
 |---|---|
-| `just review-container [profile] [effort]` | Run the Hive queue worker: the contributor container that receives assigned tasks and donates inference. |
+| `just review-container [profile] [effort]` | Run the Hive queue worker: the contributor container that receives assigned tasks and donates inference. `REVIEW_DETACH=1` runs it as a detached background worker. |
+| `just review-stop [name]` | Stop a detached worker. Refuses attended runs and containers this launcher did not start. |
 | `just review-queue [profile] [effort] [flags…]` | Walk the Bluefin PR queue interactively in the contributor container. |
 | `just review-doctor` | Perform read-only launch diagnostics. |
 
-Every run remains attached to its originating terminal. Ctrl-C or closing that
-terminal stops it; a detached worker mode with an explicit lifecycle verb is
-planned but not shipped yet.
+Interactive runs remain attached to their originating terminal, and Ctrl-C or
+closing that terminal stops them. A detached worker (`REVIEW_DETACH=1`) is
+the deliberate exception: it carries a `review.owner=detached` label, logs
+through `podman logs -f`, is never silently reclaimed by a later launch, and
+stops only through `just review-stop`.
 Detaching tmux (`prefix`, then `d`) detaches the view only—the originating
 terminal remains responsible for the run.
 

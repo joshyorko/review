@@ -21,11 +21,13 @@ Keep this repository focused: it ships the review appliance and nothing
 beside it. Persistent state stays limited to launcher configuration.
 
 The interactive recipes run in the foreground of the terminal that launched
-them, and Ctrl-C stops them: a maintainer steers `review-queue`, and
-`review-container` stays attended until the planned detached worker mode
-ships with its own explicit lifecycle verb. Until that verb exists, no
-launch path may background a run implicitly — no `nohup`, no accidental
-`podman run -d`, no job that silently outlives the terminal. Cleanup remains
+them, and Ctrl-C stops them: a maintainer steers `review-queue`, and an
+attended `review-container` stays under its terminal. The one sanctioned
+background path is the detached worker: `REVIEW_DETACH=1` labels the
+container `review.owner=detached`, a later launch refuses to reclaim it, and
+`just review-stop` is its explicit lifecycle verb. No launch path may
+background a run implicitly — no `nohup`, no unlabeled `podman run -d`, no
+job that silently outlives the terminal. Cleanup of interactive runs remains
 a startup concern: a launch reclaims whatever a previous run left behind.
 
 That rule scopes how the launcher starts the container; it is not a ban
@@ -93,7 +95,7 @@ labels. Never add a local workaround for an accepted upstream gap. See
 ## Repository layout
 
 - `justfile` is the only shipped launcher artifact. Its
-  three public recipes and private helpers intentionally live together.
+  four public recipes and private helpers intentionally live together.
 - `image/` builds the FSDK-derived contributor image and its layered runtime
   configuration.
 - `package.json` and `package-lock.json` at the root pin only the contributor

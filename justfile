@@ -15,8 +15,10 @@
 #                     worker that receives assigned tasks and donates
 #                     inference. Takes an optional model profile and
 #                     thinking effort, e.g. 'just review-container opus5
-#                     high'. Foreground today; a detached worker mode is
-#                     planned (see README).
+#                     high'. Foreground when attended; REVIEW_DETACH=1
+#                     runs it as a labeled detached worker.
+#   review-stop       Stop a detached worker. Refuses attended runs and
+#                     containers this launcher did not start.
 #   review-doctor     Read-only preflight diagnostics. Starts nothing.
 #   review-queue      The interactive maintainer review surface. Walks
 #                     the Bluefin PR queue in the contributor container —
@@ -29,23 +31,27 @@
 # ─────────────────────────────────────────────────────────────────────────
 # LIFECYCLE
 #
-# The interactive recipes (review-queue, and review-container until the
-# detached worker mode ships) run in the foreground of the terminal that
+# The interactive recipes run in the foreground of the terminal that
 # launched them: a maintainer steers the session, and Ctrl-C stops it.
-# Cleanup is a startup concern: a launch reclaims whatever a previous run
-# left behind, so there is no lifecycle verb to remember.
+# Cleanup of interactive runs is a startup concern: a launch reclaims
+# whatever a previous run left behind, so there is no lifecycle verb for
+# them.
 #
-# '--replace' is how that reclaim works: --rm removes the container when it
-# exits cleanly, but a hard-killed terminal, an OOM kill or a podman restart
-# can leave the fixed name behind, and the next launch would otherwise die
-# with 'the container name ... is already in use'. --replace takes the name
-# back at launch time instead of asking the user to run a lifecycle command.
+# The detached worker is the one sanctioned background launch. REVIEW_DETACH=1
+# stamps the container with the 'review.owner=detached' label; a later launch
+# refuses to reclaim it, and 'just review-stop' — a polite podman stop, never
+# a force flag — is its only lifecycle verb.
 #
-# The only background job in this file is nothing: every launch path ends in
-# an 'exec' or a final foreground command whose exit status propagates
-# verbatim. When the detached worker mode lands it will be an explicit,
-# labelled podman run with a matching 'review-stop' verb — not an accidental
-# orphan. tests/just-onboarding.sh pins the current behavior.
+# '--replace' is how interactive reclaim works: --rm removes the container
+# when it exits cleanly, but a hard-killed terminal, an OOM kill or a podman
+# restart can leave the fixed name behind, and the next launch would
+# otherwise die with 'the container name ... is already in use'. --replace
+# takes the name back at launch time instead of asking the user to run a
+# lifecycle command.
+#
+# Every interactive launch path ends in an 'exec' or a final foreground
+# command whose exit status propagates verbatim; the detached path is an
+# explicit, labeled podman run -d. tests/just-onboarding.sh pins all of it.
 # ─────────────────────────────────────────────────────────────────────────
 #
 # Bluefin's root Justfile (/usr/share/ublue-os/just/00-entry.just) imports a
@@ -234,19 +240,28 @@ owner_run_label() {
   printf 'review.owner=%s:%s\n' "$(launcher_boot_id)" "$$"
 }
 require_no_running_instance() {
-  # 'Running' alone does not mean 'in use'. Distinguish the two cases,
-  # because they deserve opposite treatment:
+  # 'Running' alone does not mean 'in use'. Distinguish three cases,
+  # because they deserve different treatment:
   #
-  #   owned  -- somebody is working in that terminal right now. Never touch
-  #             it; hand over the attach command instead.
-  #   orphan -- still running, but its terminal is gone, so no one can ever
-  #             reach it or Ctrl-C it again. Reclaim it silently.
+  #   owned    -- somebody is working in that terminal right now. Never touch
+  #               it; hand over the attach command instead.
+  #   detached -- a deliberate background worker. Never reclaim it silently;
+  #               'just review-stop' is its lifecycle verb.
+  #   orphan   -- still running, but its terminal is gone, so no one can ever
+  #               reach it or Ctrl-C it again. Reclaim it silently.
   #
   # Telling a user to run 'podman rm -f' for the orphan case would smuggle
-  # the stop command back in through the door it was thrown out of. The
-  # launcher cleans up after itself instead.
-  local name="$1" owner_pid owner_tty
+  # an undocumented stop command back in; the launcher cleans up after itself
+  # instead, and the detached case has its own explicit verb.
+  local name="$1" marker owner_pid owner_tty
   [[ "$(podman inspect --format '{{.State.Running}}' "$name" 2>/dev/null || echo false)" == "true" ]] || return 0
+  marker="$(podman inspect --format '{{index .Config.Labels "review.owner"}}' "$name" 2>/dev/null || true)"
+  if [[ "$marker" == "detached" ]]; then
+    echo "ERROR: ${name} is already running as a detached worker." >&2
+    echo "  Follow it:  podman logs -f ${name}" >&2
+    echo "  Stop it:    just review-stop ${name}" >&2
+    return 1
+  fi
   owner_pid="$(container_owner_pid "$name")"
   if [[ -z "$owner_pid" ]]; then
     echo "✓ reclaiming ${name} from a run whose terminal is gone."
@@ -708,9 +723,24 @@ review-container profile="" effort="":
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
 
-    CONTAINER_ARGS=(
-      podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
-      --label "$(owner_run_label)"
+    # REVIEW_DETACH=1 runs the worker as a deliberate background container:
+    # no terminal, entrypoint follows the agent without attaching, logs
+    # through podman, and 'just review-stop' is the explicit lifecycle verb.
+    # The 'detached' owner label is what separates this from an orphan, so a
+    # later launch refuses to reclaim it silently.
+    DETACH="${REVIEW_DETACH:-0}"
+    if [[ "$DETACH" == 1 ]]; then
+      CONTAINER_ARGS=(
+        podman run --rm --detach --replace --name "$CONTAINER_NAME"
+        --label "review.owner=detached"
+      )
+    else
+      CONTAINER_ARGS=(
+        podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
+        --label "$(owner_run_label)"
+      )
+    fi
+    CONTAINER_ARGS+=(
       # Rootless podman maps the host user to container root by default, so a
       # 0600 host file bind-mounts in as root-owned and the 'dev' user the
       # image runs as cannot read it -- contributor.env holds Hive's own
@@ -753,11 +783,45 @@ review-container profile="" effort="":
     fi
     CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE")
 
-    echo "✓ starting the review contributor container."
-    echo "  The entrypoint attaches to the 'contributor' tmux session for you."
-    echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
-    echo "  Stop any time with Ctrl-C — that is the only way it ends."
+    if [[ "$DETACH" == 1 ]]; then
+      echo "✓ starting the review contributor worker (detached)."
+      echo "  Follow it:  podman logs -f ${CONTAINER_NAME}"
+      echo "  Stop it:    just review-stop ${CONTAINER_NAME}"
+    else
+      echo "✓ starting the review contributor container."
+      echo "  The entrypoint attaches to the 'contributor' tmux session for you."
+      echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
+      echo "  Stop any time with Ctrl-C."
+    fi
     exec "${CONTAINER_ARGS[@]}"
+
+# Stop a detached review worker. This is the explicit lifecycle verb for
+# containers started with REVIEW_DETACH=1; it refuses to touch anything this
+# launcher did not start (no review.owner label) and never force-removes.
+# Interactive runs still end with Ctrl-C, not with this.
+review-stop name="review-container":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    NAME="{{name}}"
+    [[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || {
+      echo "ERROR: '${NAME}' is not a valid container name." >&2
+      exit 1
+    }
+    marker="$(podman inspect --format '{{{{index .Config.Labels "review.owner"}}' "$NAME" 2>/dev/null || true)"
+    if [[ -z "$marker" ]]; then
+      if podman container exists "$NAME" 2>/dev/null; then
+        echo "ERROR: ${NAME} was not started by this launcher; not touching it." >&2
+        exit 1
+      fi
+      echo "✓ no container named ${NAME} is running."
+      exit 0
+    fi
+    if [[ "$marker" != "detached" ]]; then
+      echo "ERROR: ${NAME} is an attended run; press Ctrl-C in its terminal instead." >&2
+      exit 1
+    fi
+    podman stop "$NAME" >/dev/null
+    echo "✓ stopped the detached worker ${NAME}."
 
 # Walk the Bluefin PR queue in the contributor container — no Hive.
 # The container runs `bluefin-review queue` instead of the contributor agent,

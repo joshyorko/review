@@ -32,26 +32,30 @@ Goose, or image build skill documents.
 
 ## Core Process
 
-1. Keep exactly three public recipes:
+1. Keep exactly four public recipes:
 
    | Recipe | Purpose |
    |---|---|
-   | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. |
+   | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. `REVIEW_DETACH=1` runs it detached. |
+   | `review-stop` | Stop a detached worker; refuses attended runs and unlabeled containers. |
    | `review-doctor` | Perform read-only preflight checks. |
    | `review-queue` | Walk the static PR queue in the container; no Hive registration. |
 
    `just` reads only the current directory's justfile, so these recipes fail
    with `justfile does not contain recipe` from any other checkout. That is
    `just`'s behavior, not a launcher bug: fix it outside the repository with a
-   `~/.local/bin` shim that forwards these three names to this justfile, and
+   `~/.local/bin` shim that forwards these four names to this justfile, and
    do not add a wrapper recipe here to compensate.
 
-2. Keep the interactive launch paths foreground. Until the detached worker
-   mode ships with its own explicit lifecycle verb, no launch may background
-   a run implicitly, and no persistent launcher state is allowed beyond the
-   pinned Hive checkout under `~/.local/state/review/`.
-   Ctrl-C is the stop mechanism; `--replace` only reclaims a container name
-   when a new launch starts.
+2. Keep the interactive launch paths foreground, and the detached worker
+   explicit. `REVIEW_DETACH=1` is the one sanctioned background launch: it
+   stamps `review.owner=detached`, a later launch refuses to reclaim it, and
+   `review-stop` is its only lifecycle verb — polite `podman stop`, never a
+   force flag, and it refuses attended runs and containers it did not label.
+   Nothing else may background a run, and no persistent launcher state is
+   allowed beyond the pinned Hive checkout under `~/.local/state/review/`.
+   Ctrl-C stops an interactive run; `--replace` only reclaims a container
+   name when a new launch starts.
 3. Keep the container path narrow. It mounts only the read-only Hive
    contributor configuration and runs the image entrypoint, which attaches to
    Hive's `contributor` session.
@@ -227,7 +231,7 @@ bash tests/just-onboarding.sh
 git diff --check
 ```
 
-The recipe list must contain only the three public commands. Doctor must not
+The recipe list must contain only the four public commands. Doctor must not
 start a container.
 
 ## Sources
