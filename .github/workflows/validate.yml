@@ -154,7 +154,7 @@ jobs:
           test "$(docker inspect review:test --format '{{.Config.User}}')" = "dev"
           test "$(docker inspect review:test --format '{{json .Config.Entrypoint}}')" = '["/usr/local/bin/review-entrypoint"]'
           # /home/dev, not /workspace: there is no workspace mount any more —
-          # the agent clones what it needs inside the disposable guest, and
+          # the agent clones what it needs inside the disposable container, and
           # Hive's config lives under the image's home.
           test "$(docker inspect review:test --format '{{.Config.WorkingDir}}')" = "/home/dev"
 

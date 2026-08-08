@@ -1,82 +1,67 @@
-# justfile — the local review launcher entrypoint.
+# justfile — the review appliance launcher entrypoint.
 #
 # The system image install path is still out of scope here; this root justfile
-# is the foreground launcher a checkout exposes directly.
+# is the launcher a checkout exposes directly.
 #
 # This is the ONLY file that ships/installs. Everything review needs
-# (host preflight, Goose selection, VM lifecycle, container lifecycle) is
+# (host preflight, Goose selection, container lifecycle) is
 # embedded below as private ('_'-prefixed variables and shared shell
 # functions) on purpose: a user browsing the image or this repo should find
 # one just-recipe file and the commands it exposes, not a scattered bin/ of
 # standalone scripts they might stumble into and run directly out of context.
 #
 # Public commands:
-#   review            Boot the pinned QEMU VM in the FOREGROUND and
-#                     hand the terminal to the contributor agent.
-#   review-container  Run only the contributor container — no VM —
-#                     for quick local development. Also foreground.
-#                     Takes an optional model profile and thinking effort,
-#                     e.g. 'just review-container opus5 high'.
+#   review-container  Run the contributor container: the Hive queue
+#                     worker that receives assigned tasks and donates
+#                     inference. Takes an optional model profile and
+#                     thinking effort, e.g. 'just review-container opus5
+#                     high'. Foreground today; a detached worker mode is
+#                     planned (see README).
 #   review-doctor     Read-only preflight diagnostics. Starts nothing.
-#   review-queue      Walk the Bluefin PR queue in the contributor
-#                     container — no Hive, no VM. Foreground; q or
-#                     Ctrl-C stops. Takes the same model profile and
-#                     effort as review-container, then passes the rest
-#                     through to `bluefin-review queue`, e.g.
+#   review-queue      The interactive maintainer review surface. Walks
+#                     the Bluefin PR queue in the contributor container —
+#                     no Hive registration required. q or Ctrl-C stops.
+#                     Takes the same model profile and effort as
+#                     review-container, then passes the rest through to
+#                     `bluefin-review queue`, e.g.
 #                     'just review-queue kimi high --repo bluefin'.
 #
 # ─────────────────────────────────────────────────────────────────────────
-# FOREGROUND GUARANTEE
+# LIFECYCLE
 #
-# The VM and the container ALWAYS run in the foreground of the terminal that
-# launched them. There is no '&', no 'nohup', no 'setsid', no 'podman run
-# -d', and no '--detach' on any launch path in this file, and there never
-# should be. Two reasons, both non-negotiable:
+# The interactive recipes (review-queue, and review-container until the
+# detached worker mode ships) run in the foreground of the terminal that
+# launched them: a maintainer steers the session, and Ctrl-C stops it.
+# Cleanup is a startup concern: a launch reclaims whatever a previous run
+# left behind, so there is no lifecycle verb to remember.
 #
-#   1. A human must be able to steer the agent. review is an
-#      attended tool: you watch the session, you interrupt it, you type into
-#      it. A backgrounded agent is an agent nobody is supervising.
-#   2. Ctrl-C must stop it. Signals have to reach the QEMU process or the
-#      container directly, so the run dies with the terminal. No daemon, no
-#      systemd unit, no orphaned state to reap later.
+# '--replace' is how that reclaim works: --rm removes the container when it
+# exits cleanly, but a hard-killed terminal, an OOM kill or a podman restart
+# can leave the fixed name behind, and the next launch would otherwise die
+# with 'the container name ... is already in use'. --replace takes the name
+# back at launch time instead of asking the user to run a lifecycle command.
 #
-# It follows that there is NO stop command, and there must never be one.
-# Shipping 'just review-stop' would be an admission that a run can outlive the
-# terminal that started it — the exact property this file exists to prevent.
-# Ctrl-C is the stop button. A run that needs a second command to end it is a
-# daemon wearing a disguise, and this repository does not ship daemons.
-# Cleanup is therefore a startup concern, never a user-facing verb: a launch
-# reclaims whatever a previous run left behind.
-#
-# '--replace' is how that reclaim works, and it is not a hole in the
-# guarantee: --rm removes the container when it exits cleanly, but a
-# hard-killed terminal, an OOM kill or a podman restart can leave the fixed
-# name behind, and the next launch would otherwise die with 'the container
-# name ... is already in use'. --replace takes the name back at launch time
-# instead of asking the user to run a lifecycle command.
-#
-# Concretely: the final process of every launch path is either 'exec'd (so
-# it replaces this shell and inherits its signals) or is the last foreground
-# command whose exit status is propagated verbatim. The only background job
-# in this file is the short-lived, host-local bootstrap socket server, which
-# is reaped by an EXIT/INT/TERM trap and never outlives the run.
-# tests/just-onboarding.sh enforces this by grepping the launch lines.
+# The only background job in this file is nothing: every launch path ends in
+# an 'exec' or a final foreground command whose exit status propagates
+# verbatim. When the detached worker mode lands it will be an explicit,
+# labelled podman run with a matching 'review-stop' verb — not an accidental
+# orphan. tests/just-onboarding.sh pins the current behavior.
 # ─────────────────────────────────────────────────────────────────────────
 #
 # Bluefin's root Justfile (/usr/share/ublue-os/just/00-entry.just) imports a
-# fixed list of files, NOT a glob. Making 'just review' work system-wide from
+# fixed list of files, NOT a glob. Making these recipes work system-wide from
 # the image still means baking this launcher into a custom image build (out of
 # scope here — see README "Scope").
 #
-# In this checkout, run plain 'just review' (or another recipe below) from the
-# repository root. Persistent state is limited to launcher configuration; the
-# VM runner receives only its per-run control/overlay directory, never a
-# workspace or host home/configuration mount.
+# In this checkout, run 'just review-container' (or another recipe below)
+# from the repository root. Persistent state is limited to launcher
+# configuration; the container receives credentials by environment and the
+# read-only ~/.config/hive mount, never a workspace or host home mount.
 # Goose is the only agent backend. There is no local inference, no model
 # profile catalogue, and no multi-CLI auto-detection: one backend means one
 # readiness check and one fix-it message when it fails.
 #
-# TOOL is read from the environment so 'TOOL=goose just review'
+# TOOL is read from the environment so 'TOOL=goose just review-container'
 # works as documented — 'just' recipe parameters are positional, not
 # KEY=VALUE, so it cannot be a plain recipe parameter. Any value other than
 # 'goose' is a hard error rather than a silent fallback.
@@ -95,11 +80,8 @@ opus_context_limit := "264000"
 # Kimi K3's default window is ~1M tokens, so the same clamp applies.
 kimi_model := "kimi-k3"
 kimi_context_limit := "264000"
-vm_raw_image := env("REVIEW_VM_RAW", "")
-vm_version := env("REVIEW_VM_VERSION", "25.08.15")
-# The fsdk-derived contributor image. Used by
-# review-container; the VM path gets the same image from inside the
-# guest, so this only matters for local development.
+# The fsdk-derived contributor image, used by every recipe that starts a
+# container.
 #
 # ':stable' moves on every merge to main, so the default is always what the
 # repository currently says. That is the point: the people running this are
@@ -137,7 +119,7 @@ GOOSE_FIXIT_HINT="Run: goose configure, select GitHub Copilot, and complete the 
 
 goose_configured() {
   # An explicit GOOSE_PROVIDER counts as configured because the launcher
-  # passes it straight through to the guest; otherwise Goose's own config
+  # passes it straight through to the container; otherwise Goose's own config
   # must name a provider. Current Goose records the selection as
   # 'active_provider:' beside a 'providers:' map; older releases wrote a
   # bare 'provider:' — accept either. A GitHub login alone is deliberately
@@ -361,11 +343,11 @@ resolve_copilot_token() {
   return 0
 }
 report_missing_copilot_credential() {
-  # Named so both launch paths tell the same story. A `gh auth token` is the
+  # Named so every caller tells the same story. A `gh auth token` is the
   # tempting substitute and the reason this message exists: it looks like a
   # GitHub credential, so a contributor reasonably assumes their gh login is
-  # enough, and then the agent dies on "failed to get api info" inside a guest
-  # they cannot read.
+  # enough, and then the agent dies on "failed to get api info" inside a
+  # container they were not watching.
   echo "! no Copilot credential found; the agent will ask for a device code." >&2
   echo "  A 'gh auth token' is NOT a substitute — Copilot inference rejects it." >&2
   echo "  Log in once on this host with: goose configure" >&2
@@ -428,15 +410,6 @@ report_missing_gh_token() {
   echo "  is not allowed to run. Every assigned task will die on arrival." >&2
   echo "  Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org" >&2
   echo "  Or export REVIEW_GH_TOKEN with a scoped PAT." >&2
-  return 0
-}
-report_vm_github_identity_blocked() {
-  # Unconditional on both callers: the current guest has no bootstrap mapping
-  # for a host GH_TOKEN, so whether the host happens to have one changes
-  # nothing about what the VM can do.
-  echo "! VM GitHub identity is blocked: the current guest cannot receive GH_TOKEN." >&2
-  echo "  A host gh login or REVIEW_GH_TOKEN cannot satisfy this VM prerequisite." >&2
-  echo "  Use review-container for work that needs fork, push, or PR access." >&2
   return 0
 }
 resolve_goose_selection() {
@@ -580,7 +553,7 @@ register_named_hive() {
   fi
   if ! can_run_attended_hive_setup; then
     echo "ERROR: no hive registration named '${HIVE_REGISTRATION_NAME}' at ${target}." >&2
-    echo "  Register one from an interactive terminal: REVIEW_HIVE=${HIVE_REGISTRATION_NAME} just ${REVIEW_RECIPE:-review}" >&2
+    echo "  Register one from an interactive terminal: REVIEW_HIVE=${HIVE_REGISTRATION_NAME} just ${REVIEW_RECIPE:-review-container}" >&2
     return 1
   fi
   for cmd in just gh git; do
@@ -607,7 +580,7 @@ register_named_hive() {
 }
 ensure_hive_contributor_env() {
   # Upstream 'just contribute-setup goose' writes these files. They are the
-  # only host state the guest genuinely needs, and Hive owns their format.
+  # only host state the container genuinely needs, and Hive owns their format.
   # Selection: an explicit REVIEW_HIVE name, then the current repository's
   # name, then the default registration.
   local hive_dir="${HOME}/.config/hive"
@@ -663,7 +636,7 @@ report_hive_selection() {
   else
     echo "✓ hive: ${hub:-unknown} (default registration)"
     if [[ -n "$HIVE_REGISTRATION_NAME" ]]; then
-      echo "  '${HIVE_REGISTRATION_NAME}' has no registration of its own; register one with: REVIEW_HIVE=${HIVE_REGISTRATION_NAME} just ${REVIEW_RECIPE:-review}"
+      echo "  '${HIVE_REGISTRATION_NAME}' has no registration of its own; register one with: REVIEW_HIVE=${HIVE_REGISTRATION_NAME} just ${REVIEW_RECIPE:-review-container}"
     fi
   fi
 }
@@ -671,373 +644,11 @@ read_hive_value() {
   local key="$1"
   awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$HIVE_CONTRIBUTOR_ENV"
 }
-vm_host_arch() {
-  case "$(uname -m)" in
-    x86_64|amd64) printf 'x86_64\n' ;;
-    aarch64|arm64) printf 'aarch64\n' ;;
-    *) echo "ERROR: unsupported host architecture: $(uname -m)" >&2; return 1 ;;
-  esac
-}
-vm_firmware() {
-  local arch="$1" name dir firmware
-  command -v find &>/dev/null || return 1
-
-  # Search brew's prefix first. On an immutable host (Bluefin, Aurora) the
-  # distro's edk2/OVMF package usually is not layered, but Homebrew's `qemu`
-  # formula ships firmware alongside the emulator it will actually run --
-  # so if qemu came from brew, its matching firmware is already present.
-  # Also search next to whichever qemu is on PATH, for the same reason.
-  local -a roots=()
-  if command -v brew &>/dev/null; then
-    roots+=("$(brew --prefix 2>/dev/null)/share/qemu")
-  fi
-  if command -v "qemu-system-${arch}" &>/dev/null; then
-    roots+=("$(dirname "$(dirname "$(command -v "qemu-system-${arch}")")")/share/qemu")
-  fi
-  roots+=(/usr/share /usr/lib /var/home/"${USER}"/.local/share/review/firmware)
-
-  # Both naming schemes are in the wild: distro packages use OVMF_CODE*.fd,
-  # while qemu's own bundled firmware uses edk2-<arch>-code.fd.
-  local -a names=()
-  case "$arch" in
-    x86_64)  names=(edk2-x86_64-code.fd 'OVMF_CODE*.fd' OVMF.fd) ;;
-    aarch64) names=(edk2-aarch64-code.fd AAVMF_CODE.fd QEMU_EFI.fd) ;;
-    *) return 1 ;;
-  esac
-
-  for dir in "${roots[@]}"; do
-    [[ -d "$dir" ]] || continue
-    for name in "${names[@]}"; do
-      # -L is required: Homebrew symlinks share/qemu into ../Cellar/qemu/<v>/,
-      # and find does not follow symlinks without it.
-      firmware="$(find -L "$dir" -name "$name" -print -quit 2>/dev/null)"
-      [[ -n "$firmware" ]] && { printf '%s\n' "$firmware"; return 0; }
-    done
-  done
-  return 1
-}
-vm_firmware_vars() {
-  # Split edk2/OVMF firmware is a pflash PAIR: a read-only CODE image plus a
-  # writable VARS image. `-bios` cannot load these; they must be attached as
-  # pflash units 0 and 1. The VARS template sits beside the CODE image under
-  # the same name with CODE->VARS (so OVMF_CODE_4M.fd pairs with
-  # OVMF_VARS_4M.fd), except that edk2's own tree names its variable stores
-  # after the 32-bit architecture. A name with no CODE in it is a single-blob
-  # firmware and has no pair at all.
-  local code="$1" dir base vars
-  dir="$(dirname "$code")"
-  base="$(basename "$code")"
-  vars="${base/CODE/VARS}"
-  vars="${vars/code/vars}"
-  vars="${vars/edk2-x86_64/edk2-i386}"
-  vars="${vars/edk2-aarch64/edk2-arm}"
-  [[ "$vars" != "$base" && -f "${dir}/${vars}" ]] || return 1
-  printf '%s\n' "${dir}/${vars}"
-}
-vm_firmware_hint() {
-  # brew is the one install path that works without layering or a reboot on an
-  # immutable host, and its qemu formula carries the firmware with it.
-  echo "  Install QEMU (which bundles UEFI firmware) with: brew install qemu" >&2
-  echo "  Already have brew qemu? Re-run 'brew reinstall qemu' to restore its share/qemu firmware." >&2
-  echo "  Or layer the distro package: sudo rpm-ostree install edk2-ovmf   (needs a reboot)" >&2
-}
-ensure_vm_host() {
-  local arch qemu
-  arch="$(vm_host_arch)" || return 1
-  qemu="qemu-system-${arch}"
-  command -v "$qemu" &>/dev/null || {
-    echo "ERROR: ${qemu} is required for local VM prototyping." >&2
-    return 1
-  }
-  [[ -e /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] || {
-    echo "ERROR: /dev/kvm is unavailable or not usable by this user." >&2
-    return 1
-  }
-  command -v python3 &>/dev/null || {
-    echo "ERROR: python3 is required to open the one-shot VM bootstrap channel." >&2
-    return 1
-  }
-}
-vm_raw_cache_path() {
-  local state_dir="$1" version="$2" arch="$3"
-  printf '%s/review-vm-%s-%s.raw
-' "$state_dir" "$version" "$arch"
-}
-verify_vm_raw() {
-  local raw="$1"
-  [[ -f "$raw" && -f "${raw}.sha256" ]] || return 1
-  (cd "$(dirname "$raw")" && sha256sum -c "$(basename "${raw}.sha256")") &>/dev/null
-}
-cached_vm_raw() {
-  # A cache entry is useful only when it is the requested version and
-  # architecture *and* its sidecar still verifies it. Never fall back to a
-  # convenient-looking raw from another release.
-  local state_dir="$1" version="$2" arch="$3" raw
-  raw="$(vm_raw_cache_path "$state_dir" "$version" "$arch")"
-  [[ -e "$raw" || -e "${raw}.sha256" ]] || return 1
-  if verify_vm_raw "$raw"; then
-    cleanup_obsolete_vm_cache "$state_dir" "$version" "$arch"
-    printf '%s
-' "$raw"
-    return 0
-  fi
-  echo "! cached VM ${version} for ${arch} is incomplete or failed verification; refetching it." >&2
-  rm -f "$raw" "${raw}.sha256" "${raw}.zst" "${raw}.zst.partial" "${raw}.partial" "${raw}.sha256.partial"
-  return 1
-}
-cleanup_obsolete_vm_cache() {
-  # There is exactly one current raw path per architecture. Anything else
-  # under that architecture's cache name — an older release, a dead partial,
-  # a leftover sidecar — is obsolete by definition.
-  local state_dir="$1" version="$2" arch="$3" current stale
-  current="$(vm_raw_cache_path "$state_dir" "$version" "$arch")"
-  shopt -s nullglob
-  for stale in "$state_dir"/review-vm-*-"${arch}".raw*; do
-    [[ "$stale" == "${current}"* ]] || rm -f "$stale"
-  done
-  shopt -u nullglob
-}
-vm_release_url() {
-  # projectbluefin/fsdk-containers still publishes the VM under its pre-rename
-  # asset name. This repository was renamed donate-clanker -> review, but that
-  # rename was never carried into the release artifacts: every published asset
-  # on v25.08.14 and v25.08.15 is 'donate-clanker-vm-<version>-<arch>...'.
-  # Verified with 'gh release view v25.08.15 --repo projectbluefin/fsdk-containers'.
-  # Track the name the publisher actually uses, not the name we wish it used;
-  # change this constant when fsdk-containers republishes under 'review-vm'.
-  # The local cache keeps the review-vm-* name — that is ours, not theirs.
-  local version="$1" arch="$2"
-  printf 'https://github.com/projectbluefin/fsdk-containers/releases/download/v%s/donate-clanker-vm-%s-%s.raw.zst
-'     "$version" "$version" "$arch"
-}
-vm_release_asset_available() {
-  command -v curl &>/dev/null || return 1
-  curl -fsIL --max-time 10 "$(vm_release_url "$1" "$2")" &>/dev/null
-}
-fetch_vm_raw() {
-  local state_dir="$1" version="$2" arch raw url checksum_url
-  arch="$(vm_host_arch)" || return 1
-  command -v curl &>/dev/null || { echo "ERROR: curl is required to fetch the VM artifact." >&2; return 1; }
-  command -v zstd &>/dev/null || { echo "ERROR: zstd is required to decompress the VM artifact." >&2; return 1; }
-  raw="$(vm_raw_cache_path "$state_dir" "$version" "$arch")"
-  local zst="${raw}.zst" checksum="${raw}.sha256"
-  url="$(vm_release_url "$version" "$arch")"
-  checksum_url="${url%.zst}.sha256"
-  mkdir -p "$state_dir"
-  echo "Fetching review VM ${version} for ${arch}..." >&2
-  curl -fL --retry 3 --output "${zst}.partial" "$url" || {
-    rm -f "${zst}.partial"
-    if [[ "$arch" == "aarch64" ]]; then
-      echo "ERROR: the aarch64 VM raw asset is unavailable for release ${version}: ${url}" >&2
-      echo "  Use review-container until that release asset exists." >&2
-    else
-      echo "ERROR: VM release asset is not published yet: ${url}" >&2
-    fi
-    return 1
-  }
-  mv "${zst}.partial" "$zst"
-  curl -fL --retry 3 --output "${checksum}.partial" "$checksum_url" || {
-    rm -f "$zst" "${zst}.partial" "$checksum" "${checksum}.partial"
-    echo "ERROR: VM release checksum sidecar is not published yet: ${checksum_url}" >&2
-    return 1
-  }
-  mv "${checksum}.partial" "$checksum"
-  python3 - "$checksum" "$(basename "$raw")" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-lines = path.read_text().splitlines()
-if lines:
-    checksum, *_rest = lines[0].split(maxsplit=1)
-    path.write_text(f"{checksum}  {sys.argv[2]}\n")
-PY
-  echo "Decompressing VM image..." >&2
-  zstd -d "$zst" -o "${raw}.partial" --force || {
-    rm -f "$zst" "$checksum" "${raw}.partial"
-    echo "ERROR: VM decompression failed." >&2
-    return 1
-  }
-  mv "${raw}.partial" "$raw"
-  rm -f "$zst"
-  (cd "$state_dir" && sha256sum -c "$(basename "$checksum")" >/dev/null) || {
-    rm -f "$raw" "$checksum"
-    echo "ERROR: downloaded VM checksum failed." >&2
-    return 1
-  }
-  cleanup_obsolete_vm_cache "$state_dir" "$version" "$arch"
-  printf '%s
-' "$raw"
-}
 '''
 
-# Start review cycles on the hive — foreground, Ctrl-C to stop.
-# Goose is the only backend; TOOL=goose is accepted, anything else is an
-# error. The VM boots in the foreground and the terminal belongs to the
-# agent until you stop it.
-# Usage: just review
-#        TOOL=goose just review
-#        REVIEW_HIVE=endusers just review   # use that named hive registration
-review:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    {{shared_functions}}
-    TOOL="{{tool_env}}"
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
-
-    STATE_DIR="${HOME}/.local/state/review"
-    HIVE_SRC_DIR="${STATE_DIR}/hive-src"
-    HIVE_REPO_URL="{{hive_repo_url}}"
-    HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
-    HIVE_COMMIT="${HIVE_COMMIT,,}"
-    mkdir -p "${STATE_DIR}"
-
-    require_goose_backend "$TOOL"
-    preflight_agent
-    resolve_goose_selection
-
-    COPILOT_TOKEN=""
-    if [[ "${GOOSE_PROVIDER:-}" == "github_copilot" ]]; then
-      resolve_copilot_token
-      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-        echo "✓ Copilot credential passed to the agent."
-      else
-        report_missing_copilot_credential
-      fi
-    fi
-    report_vm_github_identity_blocked
-
-    REVIEW_RECIPE=review
-    ensure_hive_contributor_env
-    report_hive_selection
-
-    RUN_ID="$(date +%s)-$$"
-    umask 077
-    RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/review.XXXXXX")" || {
-      echo "ERROR: could not create a private VM run directory." >&2
-      exit 1
-    }
-    chmod 700 "$RUN_DIR" || {
-      rm -rf "$RUN_DIR"
-      echo "ERROR: could not secure the VM run directory." >&2
-      exit 1
-    }
-    BOOTSTRAP_SOCKET="${RUN_DIR}/bootstrap-${RUN_ID}.sock"
-    BOOTSTRAP_PID=""
-    cleanup_bootstrap() {
-      if [[ -n "$BOOTSTRAP_PID" ]]; then
-        kill "$BOOTSTRAP_PID" 2>/dev/null || true
-        wait "$BOOTSTRAP_PID" 2>/dev/null || true
-      fi
-      rm -f "$BOOTSTRAP_SOCKET"
-      rm -rf "$RUN_DIR"
-    }
-    trap cleanup_bootstrap EXIT INT TERM
-
-    HIVE_ENDPOINT="$(read_hive_value HIVE_WS_URL)"
-    [[ -n "$HIVE_ENDPOINT" ]] || HIVE_ENDPOINT="$(read_hive_value HIVE_HUB)"
-    HIVE_REGISTRATION_TOKEN="$(read_hive_value HIVE_REGISTRATION_TOKEN)"
-    [[ -n "$HIVE_ENDPOINT" && -n "$HIVE_REGISTRATION_TOKEN" ]] || {
-      echo "ERROR: Hive setup is missing HIVE_HUB/HIVE_WS_URL or HIVE_REGISTRATION_TOKEN." >&2
-      exit 1
-    }
-
-    start_bootstrap_server() {
-      printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
-        "$HIVE_ENDPOINT" "$HIVE_REGISTRATION_TOKEN" "goose" "$RUN_ID" "$GOOSE_PROVIDER" "$GOOSE_MODEL" "${COPILOT_TOKEN:-}" |
-        python3 -c 'import json,os,socket,sys; path=sys.argv[1]; values=sys.stdin.buffer.read().split(b"\0"); len(values) < 7 and sys.exit("bootstrap input is incomplete"); payload={"version":2,"hive_endpoint":values[0].decode(),"registration_token":values[1].decode(),"backend":values[2].decode(),"run_id":values[3].decode(), **({"goose_provider":values[4].decode()} if values[4] else {}), **({"goose_model":values[5].decode()} if values[5] else {}), **({"provider_secret":values[6].decode()} if values[6] else {})}; os.path.exists(path) and os.unlink(path); server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); server.bind(path); os.chmod(path,0o600); server.listen(1); server.settimeout(float(os.environ.get("REVIEW_BOOTSTRAP_TIMEOUT","180"))); conn,_=server.accept(); conn.settimeout(30); conn.sendall((json.dumps(payload,separators=(",",":"))+"\n").encode()); ack_line=conn.makefile("rb").readline(65537); ack_line.endswith(b"\n") or sys.exit("bootstrap acknowledgement ended before newline"); len(ack_line) <= 65536 or sys.exit("bootstrap acknowledgement exceeds 65536 bytes"); ack=json.loads(ack_line); ack == {"version":2,"type":"control_ack"} or sys.exit("invalid bootstrap acknowledgement"); conn.close(); server.close(); os.unlink(path)' "$BOOTSTRAP_SOCKET" &
-      BOOTSTRAP_PID=$!
-      local ready_deadline=$((SECONDS + 5))
-      while [[ ! -S "$BOOTSTRAP_SOCKET" ]]; do
-        if ! kill -0 "$BOOTSTRAP_PID" 2>/dev/null; then
-          wait "$BOOTSTRAP_PID" || true
-          echo "ERROR: VM bootstrap server exited before binding ${BOOTSTRAP_SOCKET}." >&2
-          echo "  Check the bootstrap diagnostics above, then re-run review." >&2
-          exit 1
-        fi
-        if (( SECONDS >= ready_deadline )); then
-          echo "ERROR: VM bootstrap server did not bind ${BOOTSTRAP_SOCKET} within 5 seconds." >&2
-          echo "  Check that this host can create Unix sockets in ${RUN_DIR}, then re-run review." >&2
-          exit 1
-        fi
-        sleep 0.05
-      done
-    }
-
-    VM_RAW="{{vm_raw_image}}"
-    if [[ -z "$VM_RAW" ]]; then
-      VM_ARCH="$(vm_host_arch)"
-      VM_RAW="$(cached_vm_raw "$STATE_DIR" "{{vm_version}}" "$VM_ARCH" || true)"
-    fi
-    if [[ -z "$VM_RAW" && "${REVIEW_TEST_SKIP_VM_FETCH:-}" != 1 ]]; then
-      VM_RAW="$(fetch_vm_raw "$STATE_DIR" "{{vm_version}}")"
-    fi
-    if [[ -n "$VM_RAW" ]]; then
-      VM_ARCH="$(vm_host_arch)"
-      [[ -f "$VM_RAW" ]] || { echo "ERROR: VM raw disk not found: $VM_RAW" >&2; exit 1; }
-      [[ -f "${VM_RAW}.sha256" ]] || {
-        echo "ERROR: VM raw disk checksum sidecar not found: ${VM_RAW}.sha256" >&2
-        exit 1
-      }
-      (cd "$(dirname "$VM_RAW")" && sha256sum -c "$(basename "${VM_RAW}.sha256")") || {
-        echo "ERROR: VM raw disk checksum failed: $VM_RAW" >&2
-        exit 1
-      }
-      ensure_vm_host
-      FIRMWARE="$(vm_firmware "$VM_ARCH")" || {
-        echo "ERROR: matching UEFI firmware for ${VM_ARCH} was not found." >&2
-        vm_firmware_hint
-        exit 1
-      }
-      VM_OVERLAY="${RUN_DIR}/overlay.qcow2"
-      if command -v qemu-img &>/dev/null; then
-        qemu-img create -q -f qcow2 -F raw -b "$VM_RAW" "$VM_OVERLAY" >/dev/null || {
-          echo "ERROR: could not create the per-run VM overlay." >&2
-          exit 1
-        }
-        VM_DISK_ARGS=(-drive "file=${VM_OVERLAY},format=qcow2,if=virtio")
-      else
-        echo "ERROR: qemu-img is required to create a disposable VM overlay." >&2
-        echo "  Install QEMU with: brew install qemu" >&2
-        exit 1
-      fi
-
-      start_bootstrap_server
-
-      case "$VM_ARCH" in
-        x86_64) VM_MACHINE=q35; SERIAL_DEVICE=virtio-serial-pci ;;
-        aarch64) VM_MACHINE=virt; SERIAL_DEVICE=virtio-serial-device ;;
-      esac
-      echo "✓ booting local review VM (4 vCPU, 8 GiB RAM)."
-      echo "  Foreground by design: Ctrl-C stops it."
-
-      FIRMWARE_ARGS=()
-      if VARS_TEMPLATE="$(vm_firmware_vars "$FIRMWARE" 2>/dev/null)"; then
-        RUN_VARS="${RUN_DIR}/efivars.fd"
-        cp -f "$VARS_TEMPLATE" "$RUN_VARS"
-        chmod u+w "$RUN_VARS"
-        FIRMWARE_ARGS=(
-          -drive "if=pflash,format=raw,unit=0,readonly=on,file=${FIRMWARE}"
-          -drive "if=pflash,format=raw,unit=1,file=${RUN_VARS}"
-        )
-      else
-        FIRMWARE_ARGS=(-bios "$FIRMWARE")
-      fi
-
-      set +e
-      "qemu-system-${VM_ARCH}"         -enable-kvm -machine "$VM_MACHINE" -cpu host -smp 4 -m 8192         "${FIRMWARE_ARGS[@]}"         "${VM_DISK_ARGS[@]}"         -nic user,model=virtio         -chardev "socket,id=control,path=${BOOTSTRAP_SOCKET}"         -device "$SERIAL_DEVICE"         -device "virtserialport,chardev=control,name=org.projectbluefin.review.bootstrap"         -nographic
-      status=$?
-      set -e
-      exit "$status"
-    fi
-    echo "ERROR: no review VM disk is available for this host." >&2
-    echo "  Re-run review to fetch release {{vm_version}}, or point REVIEW_VM_RAW at a" >&2
-    echo "  verified raw disk with its .sha256 sidecar beside it." >&2
-    exit 1
-
-# Run ONLY the contributor container — no VM — for quick local development.
-# Same preflight and same provider/model selection as the VM path, minus the
-# hardware isolation, so it is the fast loop while hacking on the image.
+# Run the contributor container: the Hive queue worker.
+# Receives Hive-assigned tasks and donates inference through the
+# maintainer's credentials.
 #
 #   just review-container              # luna: gpt-5.6-luna at max effort
 #   just review-container luna         # the same, named explicitly
@@ -1142,13 +753,13 @@ review-container profile="" effort="":
     fi
     CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE")
 
-    echo "✓ starting the review contributor container (no VM)."
+    echo "✓ starting the review contributor container."
     echo "  The entrypoint attaches to the 'contributor' tmux session for you."
     echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
     echo "  Stop any time with Ctrl-C — that is the only way it ends."
     exec "${CONTAINER_ARGS[@]}"
 
-# Walk the Bluefin PR queue in the contributor container — no Hive, no VM.
+# Walk the Bluefin PR queue in the contributor container — no Hive.
 # The container runs `bluefin-review queue` instead of the contributor agent,
 # so no Hive registration is mounted or required. Foreground: q or Ctrl-C
 # stops. Arguments pass straight through to `bluefin-review queue`:
@@ -1240,8 +851,8 @@ review-queue *queue_args:
     echo "  q or Ctrl-C stops; the walk is the only thing running."
     exec "${CONTAINER_ARGS[@]}"
 
-# Preflight check: is this machine actually ready for 'just review'?
-# Never starts the VM or the container — read-only diagnostics only.
+# Preflight check: is this machine actually ready for 'just review-container'?
+# Never starts the container — read-only diagnostics only.
 review-doctor:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -1258,75 +869,6 @@ review-doctor:
 
     echo "=== Host ==="
     check "Podman installed" command -v podman
-    if [[ -e /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
-      echo "  ✓ /dev/kvm is available"
-      pass=$((pass+1))
-    else
-      echo "  ✗ /dev/kvm is unavailable or not usable by this user"
-      echo "    Enable KVM access before launching the pinned QEMU VM runner."
-      echo "    (review-container does not need it.)"
-      fail=$((fail+1))
-    fi
-    echo ""
-
-    echo "=== VM startup ==="
-    if VM_ARCH="$(vm_host_arch)"; then
-      echo "  ✓ supported VM architecture: ${VM_ARCH}"
-      pass=$((pass+1))
-      check "python3 installed (VM bootstrap socket)" command -v python3
-    else
-      echo "  ✗ this host architecture cannot run the local VM"
-      fail=$((fail+1))
-      VM_ARCH=""
-    fi
-    if [[ -n "{{vm_raw_image}}" ]]; then
-      echo "  ✓ configured VM raw disk: {{vm_raw_image}}"
-      pass=$((pass+1))
-      check "qemu-system-${VM_ARCH} installed" command -v "qemu-system-${VM_ARCH}"
-      check "qemu-img installed (disposable VM overlays)" command -v qemu-img
-      if FIRMWARE_PATH="$(vm_firmware "$VM_ARCH" 2>/dev/null)"; then
-        echo "  ✓ UEFI firmware found: ${FIRMWARE_PATH}"
-        pass=$((pass+1))
-      else
-        echo "  ✗ no UEFI firmware for ${VM_ARCH}"
-        vm_firmware_hint
-        fail=$((fail+1))
-      fi
-      if verify_vm_raw "{{vm_raw_image}}"; then
-        echo "  ✓ configured VM raw disk checksum verifies"
-        pass=$((pass+1))
-      else
-        echo "  ✗ configured VM raw disk is missing or its checksum sidecar does not verify"
-        echo "    Supply {{vm_raw_image}} and {{vm_raw_image}}.sha256, or unset REVIEW_VM_RAW."
-        fail=$((fail+1))
-      fi
-    elif [[ -n "$VM_ARCH" ]]; then
-      check "qemu-system-${VM_ARCH} installed" command -v "qemu-system-${VM_ARCH}"
-      check "qemu-img installed (disposable VM overlays)" command -v qemu-img
-      check "curl installed (VM artifact download)" command -v curl
-      check "zstd installed (VM artifact decompression)" command -v zstd
-      if FIRMWARE_PATH="$(vm_firmware "$VM_ARCH" 2>/dev/null)"; then
-        echo "  ✓ UEFI firmware found: ${FIRMWARE_PATH}"
-        pass=$((pass+1))
-      else
-        echo "  ✗ no UEFI firmware for ${VM_ARCH}"
-        vm_firmware_hint
-        fail=$((fail+1))
-      fi
-      VM_RELEASE_URL="$(vm_release_url "{{vm_version}}" "$VM_ARCH")"
-      if vm_release_asset_available "{{vm_version}}" "$VM_ARCH"; then
-        echo "  ✓ VM release artifact is published: ${VM_RELEASE_URL}"
-        pass=$((pass+1))
-      elif [[ "$VM_ARCH" == "aarch64" ]]; then
-        echo "  ✗ aarch64 VM release artifact is unavailable: ${VM_RELEASE_URL}"
-        echo "    Use review-container until the aarch64 raw asset is released."
-        fail=$((fail+1))
-      else
-        echo "  ✗ VM release artifact is unavailable: ${VM_RELEASE_URL}"
-        echo "    Check REVIEW_VM_VERSION, or point REVIEW_VM_RAW at a verified raw disk."
-        fail=$((fail+1))
-      fi
-    fi
     echo ""
 
     echo "=== GitHub ==="
@@ -1351,7 +893,6 @@ review-doctor:
       echo "    For container-only mode, run: ${GITHUB_LOGIN_COMMAND}, or export REVIEW_GH_TOKEN."
       fail=$((fail+1))
     fi
-    report_vm_github_identity_blocked
     unset GH_TOKEN_VALUE
     echo ""
 
@@ -1426,8 +967,8 @@ review-doctor:
     fi
     echo ""
 
-    echo "=== Guest repository model ==="
-    echo "  ✓ assigned repositories are cloned inside the disposable guest"
+    echo "=== Workspace model ==="
+    echo "  ✓ assigned repositories are cloned inside the disposable container"
     echo ""
     echo "${pass} checks passed, ${fail} failed."
     [[ "$fail" -eq 0 ]] || exit 1

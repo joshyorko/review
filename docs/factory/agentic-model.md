@@ -2,7 +2,7 @@
 
 This document is the canonical local model for `review`. It adapts
 [`projectbluefin/common`'s Agentic Operating Model][common-model] to this
-repository's thin foreground launcher. Read it after
+repository's two-mode review appliance. Read it after
 `AGENTS.md` and before task-specific skills.
 
 The model is documentation: the launcher, image, tests, skills, and
@@ -67,10 +67,12 @@ carries the operational form of this section.
 
 ## Repository boundary
 
-`review` owns only foreground VM boot, credential handoff, and review context.
+`review` owns the contributor image, credential handoff, and review context.
 Hive owns the contributor WebSocket protocol, task selection, assignment prompt
 injection, the `contributor` tmux session, and output capture. The launcher
-must not filter, prioritize, decline, retry, or otherwise manage assignments.
+must not decline, retry, or otherwise manage assignments mid-protocol; the
+one sanctioned filter is own-work exclusion on the maintainer-facing queue
+view, so a reviewer never receives their own authored pull requests.
 
 The human Maintainer Reviewer is the decision point. A Factory Worker,
 Managed Reviewer Client, Portable Reviewer Prompt, Review Evidence view, or

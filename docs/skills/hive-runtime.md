@@ -38,7 +38,7 @@ assigned contributor session behaves unexpectedly.
    podman exec -it <container> tmux attach -t contributor
    ```
 
-   Detaching tmux changes the display, not the foreground run. Ctrl-C or
+   Detaching tmux changes the display, not the run. Ctrl-C or
    closing the original terminal ends the contributor.
 3. Expect the agent to start in Hive's prepared workspace. `contributor-agent.sh`
    exports `HIVE_WORKSPACE_DIR` (default `$HOME/workspace`), creates it, and
@@ -85,11 +85,8 @@ assigned contributor session behaves unexpectedly.
 
 ### GitHub identity
 
-Container-only mode can pass one contributor GitHub token as inherited
-`GH_TOKEN`; it does not mount the host GitHub configuration. VM mode can pass
-the Copilot provider secret but the current guest cannot map a host GitHub
-identity to `GH_TOKEN`. Use `review-container` for work requiring
-fork, push, or pull-request access until the guest supports that mapping.
+The contributor container passes one contributor GitHub token as inherited
+`GH_TOKEN`; it does not mount the host GitHub configuration.
 Never log or persist either credential.
 
 To inspect earlier review output, enter tmux copy-mode with `Ctrl-b [`.

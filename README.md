@@ -1,7 +1,7 @@
 # review
 enslaving the oppressors since 2026
 
-**TLDR**: Automated VM/container designed to put the clankers to work. They're not going away, let's put them to work. Powered by [Kubestellar Hive's Contributor Relay](https://hive.kubestellar.io/) (ClankR). We did not make that up, real dads made these jokes.
+**TLDR**: Automated review-appliance container designed to put the clankers to work. They're not going away, let's put them to work. Powered by [Kubestellar Hive's Contributor Relay](https://hive.kubestellar.io/) (ClankR). We did not make that up, real dads made these jokes.
 
 ![img](https://github.com/user-attachments/assets/6b8425b8-dedf-4dc9-aa54-60fa9e6cfd91)
 
@@ -11,9 +11,9 @@ enslaving the oppressors since 2026
 
 The Bluefin Hive will send these agents work and coordinate - which will dole out work based on your standing in the project. New contributors will be given easier tasks until they level up, and maintainers are given more important tasks. Everything in here is `clanker-queue` only, the `human-queue` is not managed here.
 
-It owns only VM boot, credential handoff, and review context. Hive owns the
-contributor protocol, task selection, the `contributor` tmux session, prompt
-injection, and output capture.
+It owns the contributor image, credential handoff, and review context. Hive
+owns the contributor protocol, task selection, the `contributor` tmux
+session, prompt injection, and output capture.
 
 ## What this is for
 
@@ -39,6 +39,21 @@ authority, and the MCP app presents read-only Review Evidence. The
 documentation, launcher, image, and tests describe one model; none may
 silently create a second workflow, authority path, or task queue.
 
+## Roadmap
+
+`review` is evolving into a two-mode review appliance:
+
+1. **Headless queue worker** (`review-container`): runs unattended, ingests
+   Hive tasks, donates inference, and produces structured pre-review
+   feedback. A detached mode with an explicit `review-stop` lifecycle verb
+   is planned.
+2. **Interactive maintainer TUI** (`review-queue`): high-velocity PR and
+   issue triage with batching, labels, priority, agent-assisted
+   documentation updates, and build dispatch.
+
+The legacy QEMU VM mode has been removed; the contributor container is the
+only runtime.
+
 ## Reporting upstream
 
 Running a downstream consumer of Hive's contributor protocol means we find
@@ -53,9 +68,9 @@ downstream workaround becomes upstream's compatibility burden later. See
 ## Scope
 
 The root `justfile` is the public launcher surface for this repository.
-Run `just review`, `just review-container`, and `just review-doctor` from the
-repository root. If you ship it in a custom image, keep those same recipes
-available through the installed root Justfile.
+Run `just review-container`, `just review-queue`, and `just review-doctor`
+from the repository root. If you ship it in a custom image, keep those same
+recipes available through the installed root Justfile.
 
 ## Installing this into your own setup
 
@@ -65,7 +80,7 @@ For a checkout, run the recipes directly:
 
 ```bash
 just --list
-just review
+just review-container
 ```
 
 ## Commands
@@ -75,41 +90,15 @@ three public recipes:
 
 | Command | Purpose |
 |---|---|
-| `just review` | Run the contributor through a foreground QEMU VM. |
-| `just review-container [profile] [effort]` | Run the contributor container directly, without a VM. |
+| `just review-container [profile] [effort]` | Run the Hive queue worker: the contributor container that receives assigned tasks and donates inference. |
+| `just review-queue [profile] [effort] [flags…]` | Walk the Bluefin PR queue interactively in the contributor container. |
 | `just review-doctor` | Perform read-only launch diagnostics. |
 
 Every run remains attached to its originating terminal. Ctrl-C or closing that
-terminal stops it; the launcher provides no lifecycle commands or daemon.
+terminal stops it; a detached worker mode with an explicit lifecycle verb is
+planned but not shipped yet.
 Detaching tmux (`prefix`, then `d`) detaches the view only—the originating
-terminal remains responsible for the foreground run.
-
-### The two launch modes are not interchangeable
-
-`just review` and `just review-container` are two different products with
-different capabilities. Read this before choosing one:
-
-| | `just review` (VM) | `just review-container` |
-|---|---|---|
-| Credential channel | one-shot `0600` AF_UNIX JSON bootstrap | inherited `--env NAME` |
-| Copilot `provider_secret` | yes | yes |
-| GitHub identity (`GH_TOKEN`) | **no — structurally impossible** | yes |
-| Fork, push, open a pull request | **no** | yes |
-| Host mounts | none | `~/.config/hive`, read-only |
-| Host requirements | qemu, qemu-img, UEFI firmware, python3, curl, zstd, `/dev/kvm`, podman | podman |
-| First-run download | ~1.4 GB VM raw image | contributor image |
-
-**VM mode cannot fork, push, or open a pull request.** The current guest has no
-mapping from the bootstrap channel to a GitHub identity, so the launcher
-reports that block unconditionally on both VM branches. Hive's task prompt is
-unconditional and instructs the agent to fork, push, and open a pull request
-with `GH_TOKEN`, so VM mode can be assigned work it cannot structurally
-complete; Hive then books a failure cooldown on that issue. Use
-`review-container` for any contributor work that must produce a pull request.
-This is tracked by issue #50 and blocked on a republished VM guest artifact
-this repository does not own. Do not attempt to fix it by mounting GitHub
-configuration or adding an unconsumed bootstrap field, and do not filter or
-decline assignments — Hive is the sole authority for task selection.
+terminal remains responsible for the run.
 
 ## Public PR queue
 
@@ -133,20 +122,17 @@ an operations task outside this repository automation.
 ## Requirements and credentials
 
 - `gh auth login --web --hostname github.com --scopes repo,read:org` is a hard
-  prerequisite for both launch modes.
-- `podman` for either launch mode.
-- Readable, writable `/dev/kvm` for VM mode.
-- For a local raw VM: `qemu-system-<host-arch>`, `qemu-img`, matching UEFI
-  firmware, `curl`, and `zstd`.
+  prerequisite for every recipe.
+- `podman`.
 - Goose configured for GitHub Copilot, or `GITHUB_COPILOT_TOKEN`.
-- For container-only Git operations, a separate GitHub token via
+- For contributor Git operations, a separate GitHub token via
   `REVIEW_GH_TOKEN`.
 
 Goose is the only agent backend and GitHub Copilot is the only supported
 provider. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
 optionally overrides the `gpt-5.6-luna` default, and
 `GOOSE_THINKING_EFFORT` optionally overrides the default `max` reasoning
-effort for `review-container` (the VM default remains `high`). A `gh auth
+effort. A `gh auth
 token` does not authenticate Copilot inference.
 
 `review-container` takes two optional positional arguments, a model profile
@@ -193,12 +179,9 @@ base ships none of the linters and no package manager to obtain one, tracked
 as
 [fsdk-containers#89](https://github.com/projectbluefin/fsdk-containers/issues/89).
 
-The VM guest has no GitHub identity mapping; see
-[The two launch modes are not interchangeable](#the-two-launch-modes-are-not-interchangeable).
-
-Run `just review-doctor` to check the selected VM path, including
-local tools, firmware, raw-artifact availability, contributor image, Hive
-setup, and credentials. It never starts a VM or container. A normal attended
+Run `just review-doctor` to check launch readiness, including
+local tools, contributor image, Hive
+setup, and credentials. It never starts a container. A normal attended
 launch runs Hive's upstream setup when `~/.config/hive/contributor.env` is
 absent; doctor only reports that condition.
 
@@ -218,7 +201,7 @@ changes your view; Hive still owns task and output handling.
 ### Walking the queue
 
 `just review-queue` runs the walk in the contributor container — no Hive
-registration, no VM. It needs only a GitHub token (the walk reads live
+registration. It needs only a GitHub token (the walk reads live
 pull-request state) and, for `r`, the same Copilot credential the other launch
 paths pass through. Arguments pass straight through to `bluefin-review queue`:
 
@@ -343,8 +326,6 @@ All configuration is read at launch.
 
 | Variable | Purpose |
 |---|---|
-| `REVIEW_VM_RAW` | Verified local raw disk; its `.sha256` sidecar is required. |
-| `REVIEW_VM_VERSION` | Raw-release version used when neither VM override is set. |
 | `REVIEW_CONTRIBUTOR_IMAGE` | Contributor image; defaults to `ghcr.io/projectbluefin/review:stable`. |
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
@@ -362,8 +343,8 @@ All configuration is read at launch.
 `~/.config/review/last-selections.env` stores launcher configuration
 state such as the last Goose/provider selection between runs.
 
-`~/.local/state/review/` stores the pinned Hive checkout and verified
-VM artifact cache. It is the only state this launcher owns. Goose and provider
+`~/.local/state/review/` stores the pinned Hive checkout.
+It is the only state this launcher owns. Goose and provider
 selection is recomputed from the environment at every launch and never written
 to disk. `~/.config/hive/contributor.env` is host state that `review` reads but
 does not own; Hive's upstream setup creates it and owns its format. No other
@@ -377,12 +358,6 @@ indefinitely. The compensating control is credential scope — the agent holds a
 contributor GitHub token and runs unprivileged inside a disposable container,
 so its blast radius is that container plus whatever that token can reach.
 Prefer a `REVIEW_GH_TOKEN` limited to `public_repo` or `repo`.
-
-VM selection prefers an explicit raw disk, then an exact
-version-and-architecture raw release. Raw images are checksum
-verified, boot through disposable overlays, and cached by version and
-architecture. Once the requested raw image is verified, older caches for that
-architecture are removed.
 
 `stable` is the default contributor-image tag and is pulled at each launch.
 Use an immutable `sha-<commit>` tag or digest with

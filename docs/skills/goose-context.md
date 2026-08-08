@@ -3,7 +3,7 @@ name: goose-context
 version: "2.1"
 last_updated: 2026-08-08
 id: goose-context
-one_line_purpose: Keep Goose config and skill routing working in the guest.
+one_line_purpose: Keep Goose config and skill routing working in the container.
 entry_point: docs/skills/goose-context.md
 category: meta
 mcp_compliance_level: partial
@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [goose, context7, skills, mcp, config]
-description: "Keeps Goose configuration and global and repository skill routing available in the guest, and records that Context7 is Hive's hub-side capability the image must never configure. Use when Goose loses its config or misses a skill."
+description: "Keeps Goose configuration and global and repository skill routing available in the container, and records how Context7 reaches agents today. Use when Goose loses its config or misses a skill."
 metadata:
   type: reference
   context7-sources: [/aaif-goose/goose, /websites/cli_github_manual]

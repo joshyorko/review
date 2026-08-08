@@ -55,7 +55,7 @@ rejects. Write down the reproduction where someone can close it.
 Only two things belong in this repository. A code comment gets one line where
 the code is otherwise unreadable — what the line does and which issue deletes
 it — and nothing more. A user-visible limitation gets one sentence naming the
-issue, as `README.md` does for VM mode with #50.
+issue.
 
 Report what you can reproduce, follow the evidence rules in
 [`upstream-hive.md`](upstream-hive.md), and let the component owner decide the

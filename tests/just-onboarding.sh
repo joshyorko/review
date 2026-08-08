@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Hermetic regression harness for the root justfile.
 #
-# Everything the launcher can shell out to (gh, goose, gum, podman, qemu,
-# qemu-img, curl, find, brew, uname) is faked on PATH, so this test
-# never touches the network, never starts a real VM or container, and never
+# Everything the launcher can shell out to (gh, goose, gum, podman, git,
+# secret-tool) is faked on PATH, so this test never touches the network,
+# never starts a real container, and never
 # depends on what happens to be installed on the developer's machine.
 #
 # The launcher under test is Goose-only: there is no claude/copilot/codex
@@ -16,7 +16,6 @@ cd "$repo_root"
 # REVIEW_TEST_JUSTFILE exists so the harness itself can be negative-
 # tested against a deliberately broken copy of the launcher.
 justfile="${REVIEW_TEST_JUSTFILE:-$repo_root/justfile}"
-consumer="$repo_root/tests/guest-bootstrap-consumer.py"
 real_just="$(command -v just)"
 
 # Absolute scratch root: a relative TMPDIR used to leave stray
@@ -40,20 +39,14 @@ fake_bin="$scratch/bin"
 home="$scratch/home"
 cfg_dir="$home/.config/review"
 state_dir="$home/.local/state/review"
-firmware_dir="$scratch/firmware"
 gum_log="$scratch/gum.log"
 runner_log="$scratch/runner.log"
 image_log="$scratch/image.log"
-qemu_log="$scratch/qemu.log"
-qemu_img_log="$scratch/qemu-img.log"
-curl_log="$scratch/curl.log"
-find_log="$scratch/find.log"
 credential_log="$scratch/credentials.log"
-consumed_marker="$scratch/runner-consumed"
 
 trap 'rm -rf "$scratch" "$tmp_root"' EXIT
 
-mkdir -p "$fake_bin" "$tmp_root" "$firmware_dir" \
+mkdir -p "$fake_bin" "$tmp_root" \
   "$home/.config/goose" "$home/.config/hive" "$cfg_dir" "$state_dir"
 
 # ── failure reporting ─────────────────────────────────────────────────────
@@ -144,12 +137,6 @@ if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--show-toplevel" ]]; then
 fi
 exit 97
 EOF
-# brew is faked so vm_firmware's search roots can never resolve to a real
-# Homebrew prefix on the developer's machine.
-cat >"$fake_bin/brew" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "${FAKE_BREW_PREFIX:?}"
-EOF
 # secret-tool is faked so the harness can never read the developer's real login
 # keyring, and so a scenario can say whether a Copilot credential exists.
 cat >"$fake_bin/secret-tool" <<'EOF'
@@ -157,150 +144,6 @@ cat >"$fake_bin/secret-tool" <<'EOF'
 [[ -n "${FAKE_KEYRING_COPILOT_TOKEN:-}" ]] || exit 1
 printf '{"GITHUB_COPILOT_TOKEN":"%s","OTHER":"ignored"}\n' "$FAKE_KEYRING_COPILOT_TOKEN"
 EOF
-cat >"$fake_bin/curl" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-output=""
-url=""
-head_request=0
-while (($#)); do
-  case "$1" in
-    --output) output="$2"; shift 2 ;;
-    -I|--head|-fsIL) head_request=1; shift ;;
-    *) url="$1"; shift ;;
-  esac
-done
-printf '%s -> %s\n' "$url" "$output" >> "${CURL_LOG:?}"
-if [[ "$head_request" == 1 ]]; then
-  [[ "${TEST_CURL_MODE:-}" == "release-missing" ]] && exit 22
-  exit 0
-fi
-if [[ "${TEST_CURL_MODE:-}" == "checksum-fail" && "$url" == *.sha256 ]]; then
-  printf 'partial checksum\n' >"$output"
-  exit 98
-fi
-if [[ -n "${TEST_CURL_MODE:-}" ]]; then
-  if [[ "$url" == *.sha256 ]]; then
-    checksum="$(printf 'downloaded VM\n' | /usr/bin/sha256sum | awk '{print $1}')"
-    printf '%s  %s\n' "$checksum" "$(basename "${url%.sha256}")" >"$output"
-  else
-    printf 'downloaded VM\n' >"$output"
-  fi
-  exit 0
-fi
-echo "unexpected raw VM fetch" >&2
-exit 98
-EOF
-cat >"$fake_bin/zstd" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-input=""
-output=""
-while (($#)); do
-  case "$1" in
-    -d|--force) shift ;;
-    -o) output="$2"; shift 2 ;;
-    *) input="$1"; shift ;;
-  esac
-done
-cp "$input" "$output"
-EOF
-cat >"$fake_bin/python3" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${1:-}" == "-c" && "${2:-}" == *'server=socket.socket'* ]]; then
-  case "${REVIEW_TEST_BOOTSTRAP_MODE:-}" in
-    delayed) sleep 0.2 ;;
-    exit)
-      echo "simulated bootstrap bind failure" >&2
-      exit 87
-      ;;
-  esac
-fi
-exec /usr/bin/python3 "$@"
-EOF
-# The launcher's vm_firmware() searches several roots for a fixed list of
-# firmware names. This fake answers for every supported name itself and never
-# falls through to the real find for them, so a developer who genuinely has
-# /home/linuxbrew/.linuxbrew/share/qemu/edk2-x86_64-code.fd cannot change the
-# result. FAKE_FIRMWARE_MODE selects a split pflash pair or a single blob.
-cat >"$fake_bin/find" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >> "${FIND_LOG:?}"
-answer() {
-  [[ -f "${FAKE_FIRMWARE_DIR:?}/$1" ]] && printf '%s\n' "${FAKE_FIRMWARE_DIR}/$1"
-  exit 0
-}
-case " $* " in
-  *" edk2-x86_64-code.fd "*|*" edk2-aarch64-code.fd "*)
-    [[ "${FAKE_FIRMWARE_MODE:-pflash}" == "pflash" ]] || exit 0
-    case " $* " in
-      *" edk2-x86_64-code.fd "*) answer edk2-x86_64-code.fd ;;
-      *) answer edk2-aarch64-code.fd ;;
-    esac
-    ;;
-  *" OVMF_CODE*.fd "*|*" AAVMF_CODE.fd "*)
-    # Only the edk2 names are provided in pflash mode; these distro names
-    # deliberately resolve to nothing so the name order stays observable.
-    exit 0
-    ;;
-  *" OVMF.fd "*|*" QEMU_EFI.fd "*)
-    [[ "${FAKE_FIRMWARE_MODE:-pflash}" == "bios" ]] || exit 0
-    case " $* " in
-      *" OVMF.fd "*) answer OVMF.fd ;;
-      *) answer QEMU_EFI.fd ;;
-    esac
-    ;;
-esac
-exec /usr/bin/find "$@"
-EOF
-cat >"$fake_bin/uname" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${1:-}" == "-m" && -n "${TEST_UNAME_M:-}" ]]; then
-  printf '%s\n' "$TEST_UNAME_M"
-else
-  exec /usr/bin/uname "$@"
-fi
-EOF
-cat >"$fake_bin/qemu-img" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >> "${QEMU_IMG_LOG:?}"
-target="${!#}"
-: >"$target"
-exit 0
-EOF
-cat >"$fake_bin/qemu-system-x86_64" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s %s\n' "$(basename "$0")" "$*" >> "${QEMU_LOG:?}"
-# Stand in for the guest. The bootstrap socket qemu is handed as a chardev is
-# exactly what the guest agent connects to, so the v2 handshake is exercised
-# from here.
-socket_path=""
-while (($#)); do
-  case "$1" in
-    -chardev) socket_path="$(sed -E 's/.*path=([^,]+).*/\1/' <<<"${2:-}")"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-if [[ -n "${RUNNER_CONSUMED:-}" && -n "$socket_path" ]]; then
-  if [[ -S "$socket_path" ]]; then
-    printf 'bootstrap-socket-before-qemu:present\n' >> "${CREDENTIAL_LOG:?}"
-  else
-    printf 'bootstrap-socket-before-qemu:absent\n' >> "${CREDENTIAL_LOG:?}"
-  fi
-  printf 'vm-run-directory:%s\n' \
-    "$(/usr/bin/stat -c '%a' "$(dirname "$socket_path")")" >> "${CREDENTIAL_LOG:?}"
-  REVIEW_BOOTSTRAP_SOCKET="$socket_path" \
-    REVIEW_TEST_CONSUMED="${RUNNER_CONSUMED}" \
-    python3 "${REVIEW_TEST_CONSUMER:?}"
-fi
-exit 97
-EOF
-cp "$fake_bin/qemu-system-x86_64" "$fake_bin/qemu-system-aarch64"
 cat >"$fake_bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -357,14 +200,6 @@ exit 97
 EOF
 chmod +x "$fake_bin"/*
 
-# Split pflash pair (CODE + VARS) plus a single-blob fallback firmware.
-: >"$firmware_dir/edk2-x86_64-code.fd"
-: >"$firmware_dir/edk2-i386-vars.fd"
-: >"$firmware_dir/edk2-aarch64-code.fd"
-: >"$firmware_dir/edk2-arm-vars.fd"
-: >"$firmware_dir/OVMF.fd"
-: >"$firmware_dir/QEMU_EFI.fd"
-
 # ── fixtures ──────────────────────────────────────────────────────────────
 write_goose_config() {
   cat >"$home/.config/goose/config.yaml" <<'EOF'
@@ -387,12 +222,7 @@ reset_logs() {
   : >"$gum_log"
   : >"$runner_log"
   : >"$image_log"
-  : >"$qemu_log"
-  : >"$qemu_img_log"
-  : >"$curl_log"
-  : >"$find_log"
   : >"$credential_log"
-  rm -f "$consumed_marker"
   RECIPE_ARGS=()
 }
 reset_logs
@@ -412,23 +242,14 @@ run_recipe() {
       -u GITHUB_COPILOT_TOKEN -u FAKE_KEYRING_COPILOT_TOKEN \
       -u GH_TOKEN -u GITHUB_TOKEN \
       -u REVIEW_GH_TOKEN -u FAKE_GH_TOKEN -u FAKE_GH_SCOPES \
-      -u TEST_UNAME_M -u TEST_CURL_MODE \
       -u GOOSE_THINKING_EFFORT -u GOOSE_CONTEXT_LIMIT \
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
-      -u REVIEW_TEST_BOOTSTRAP_MODE -u REVIEW_CONTAINER_NAME \
+      -u REVIEW_CONTAINER_NAME \
       -u REVIEW_QUEUE_NAME \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
-      GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" QEMU_LOG="$qemu_log" \
+      GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
       IMAGE_LOG="$image_log" \
-      QEMU_IMG_LOG="$qemu_img_log" CURL_LOG="$curl_log" FIND_LOG="$find_log" \
       CREDENTIAL_LOG="$credential_log" \
-      RUNNER_CONSUMED="$consumed_marker" \
-      REVIEW_TEST_CONSUMER="$consumer" \
-      REVIEW_BOOTSTRAP_TIMEOUT=20 \
-      REVIEW_TEST_SKIP_VM_FETCH=1 \
-      FAKE_BREW_PREFIX="$scratch/no-such-brew-prefix" \
-      FAKE_FIRMWARE_DIR="$firmware_dir" \
-      FAKE_FIRMWARE_MODE=pflash \
       "$@" \
       "$real_just" --justfile "$justfile" "$recipe" "${RECIPE_ARGS[@]}" 2>&1
   )"
@@ -438,21 +259,9 @@ run_recipe() {
 
 error_line_count() { grep -c '^ERROR:' <<<"$1" || true; }
 
-# Seed a verified VM cache entry: the launch path refuses to boot anything it
-# has not checksum-verified, so scenarios that need a VM put one here first.
-seed_vm_cache() {
-  local arch="$1"
-  local raw="$state_dir/review-vm-25.08.15-${arch}.raw"
-  mkdir -p "$state_dir"
-  printf '%s guest\n' "$arch" >"$raw"
-  (cd "$state_dir" && sha256sum "$(basename "$raw")" >"$(basename "$raw").sha256")
-}
-
-kvm_usable() { [[ -e /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; }
-
 # ══ 1. Preflight: exactly one actionable ERROR per failure ════════════════
 begin "preflight: missing GitHub auth yields one actionable error"
-run_recipe review
+run_recipe review-container
 assert_nonzero_status "$STATUS" "unauthenticated gh must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "gh auth login" "$OUT"
@@ -462,7 +271,7 @@ assert_not_contains "codex" "$OUT"
 
 begin "preflight: missing Goose provider configuration yields one actionable error"
 rm -f "$home/.config/goose/config.yaml"
-run_recipe review GH_READY=1
+run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "an unconfigured goose must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "goose configure" "$OUT"
@@ -472,7 +281,7 @@ write_goose_config
 
 begin "preflight: an invalid Goose config (no provider) is treated as unconfigured"
 printf 'model: llama3.1\n' >"$home/.config/goose/config.yaml"
-run_recipe review GH_READY=1
+run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "a provider-less goose config must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "goose configure" "$OUT"
@@ -482,8 +291,8 @@ begin "preflight: Goose's current active_provider config counts as configured"
 # Goose >= 1.45 records the selection as 'active_provider:' beside a
 # 'providers:' map; the launcher must accept it or every launch dies on
 # "Goose has no usable provider configuration" after Goose migrates the
-# host config. No VM disk is seeded, so a passing preflight surfaces as
-# the VM-disk error instead.
+# host config. A passing preflight reaches the fake runner, which always
+# exits non-zero.
 cat >"$home/.config/goose/config.yaml" <<'EOF'
 providers:
   github_copilot:
@@ -492,14 +301,13 @@ providers:
     configured: true
 active_provider: github_copilot
 EOF
-run_recipe review GH_READY=1
-assert_nonzero_status "$STATUS" "no VM disk is available in this scenario"
+run_recipe review-container GH_READY=1
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_not_contains "Goose has no usable provider configuration" "$OUT"
-assert_contains "no review VM disk is available for this host" "$OUT"
 write_goose_config
 
 begin "preflight: unsupported GOOSE_PROVIDER yields one actionable Copilot-only error"
-run_recipe review GH_READY=1 GOOSE_PROVIDER=openai
+run_recipe review-container GH_READY=1 GOOSE_PROVIDER=openai
 assert_nonzero_status "$STATUS" "an unsupported provider must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "GOOSE_PROVIDER=openai is not supported" "$OUT"
@@ -507,7 +315,7 @@ assert_contains "GOOSE_PROVIDER=github_copilot" "$OUT"
 
 # ══ 2. TOOL handling: Goose only ══════════════════════════════════════════
 begin "TOOL=claude is rejected with a Goose-only error"
-run_recipe review GH_READY=1 TOOL=claude
+run_recipe review-container GH_READY=1 TOOL=claude
 assert_nonzero_status "$STATUS" "a non-Goose TOOL must be a hard error"
 assert_contains "TOOL=claude is not supported" "$OUT"
 assert_contains "review runs Goose only" "$OUT"
@@ -515,18 +323,11 @@ assert_not_contains "auto-detected" "$OUT"
 assert_not_contains "Multiple AI CLIs" "$OUT"
 
 begin "TOOL=goose is accepted"
-# No VM disk is cached here, so the launch stops on that instead of on TOOL.
-run_recipe review GH_READY=1 TOOL=goose
-assert_nonzero_status "$STATUS" "no VM disk is available in this scenario"
+# A passing TOOL check reaches the fake runner, which always exits non-zero.
+run_recipe review-container GH_READY=1 TOOL=goose
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_not_contains "is not supported" "$OUT"
 assert_not_contains "Unset TOOL" "$OUT"
-
-begin "review: an unresolvable VM disk is one actionable error, not a silent no-op"
-run_recipe review GH_READY=1
-assert_nonzero_status "$STATUS" "a launch with no VM disk must fail"
-assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
-assert_contains "no review VM disk is available for this host" "$OUT"
-assert_contains "REVIEW_VM_RAW" "$OUT"
 
 begin "selection: default Copilot model is noninteractive"
 reset_logs
@@ -658,249 +459,16 @@ run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
 assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
 assert_file_contains "queue --all" "$runner_log"
 
-# ══ 3. Doctor: advisory VM limitation, no failure on a fully provisioned host ══
-if kvm_usable; then
-  begin "review-doctor: fully provisioned x86_64 host exits 0 with VM advisory"
-  reset_logs
-  run_recipe review-doctor GH_READY=1 TEST_UNAME_M=x86_64 \
-    FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'repo', 'read:org'" \
-    FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
-  assert_zero_status "$STATUS" "a fully provisioned x86_64 doctor run must exit 0"
-  assert_contains "a GitHub token is available for the container-only agent" "$OUT"
-  assert_contains "! VM GitHub identity is blocked" "$OUT"
-  assert_contains "a Copilot credential is available" "$OUT"
-  assert_contains "0 failed." "$OUT"
-else
-  begin "review-doctor: SKIPPED (/dev/kvm is not usable by this user)"
-fi
-
-# ══ 4. VM path: bootstrap handshake into the foreground QEMU guest ════════
-seed_vm_cache x86_64
-if kvm_usable; then
-  begin "VM: foreground qemu, v2 bootstrap handshake, no secrets"
-  reset_logs
-  run_recipe review GH_READY=1 TEST_UNAME_M=x86_64 \
-    GOOSE_MODEL=gpt-test REVIEW_TEST_RECV_SIZE=1
-  assert_nonzero_status "$STATUS" "the fake qemu always exits non-zero"
-
-  assert_eq "$(wc -c <"$gum_log")" 0 "gum must not be invoked"
-  assert_file_not_exists "$cfg_dir/last-selections.env"
-
-  # The guest is a plain foreground qemu with a private control channel and no
-  # host secret material anywhere on its command line. No container is
-  # involved at all: the VM path never touches podman.
-  assert_eq "$(wc -c <"$runner_log")" 0 "the VM path must not start a container"
-  assert_file_contains "-chardev socket,id=control,path=${tmp_root}/review." "$qemu_log"
-  assert_file_contains "org.projectbluefin.review.bootstrap" "$qemu_log"
-  assert_file_not_contains "-daemonize" "$qemu_log"
-  assert_file_not_contains "${home}/.config/hive/contributor.env" "$qemu_log"
-  assert_file_not_contains "super-secret-registration-token" "$qemu_log"
-  assert_file_contains "vm-run-directory:700" "$credential_log"
-
-  # The version-2 envelope reached the guest consumer and was acknowledged.
-  assert_file_exists "$consumed_marker"
-  assert_file_contains "acknowledged" "$consumed_marker"
-  assert_file_not_exists "$cfg_dir/secrets.env"
-
-  # No secret in any log this run, and the per-run directory is cleaned up.
-  for log in "$runner_log" "$qemu_log" "$qemu_img_log" "$curl_log" "$find_log" "$gum_log"; do
-    assert_file_not_contains "super-secret-registration-token" "$log"
-  done
-  assert_not_contains "super-secret-registration-token" "$OUT"
-  assert_eq "$(/usr/bin/find "$tmp_root" -maxdepth 1 -name 'review.*' -print -quit)" "" \
-    "the per-run directory must be removed on exit"
-
-  begin "VM: waits for the bootstrap socket before handing its path to qemu"
-  reset_logs
-  run_recipe review GH_READY=1 TEST_UNAME_M=x86_64 \
-    GOOSE_MODEL=gpt-4o REVIEW_TEST_BOOTSTRAP_MODE=delayed
-  assert_nonzero_status "$STATUS" "the fake qemu always exits non-zero"
-  assert_file_contains "bootstrap-socket-before-qemu:present" "$credential_log"
-  assert_file_exists "$consumed_marker"
-
-  begin "VM: a bootstrap process that dies before bind fails before qemu"
-  reset_logs
-  run_recipe review GH_READY=1 TEST_UNAME_M=x86_64 \
-    GOOSE_MODEL=gpt-4o REVIEW_TEST_BOOTSTRAP_MODE=exit
-  assert_nonzero_status "$STATUS" "a dead bootstrap process must fail the launch"
-  assert_contains "VM bootstrap server exited before binding" "$OUT"
-  assert_contains "simulated bootstrap bind failure" "$OUT"
-  assert_eq "$(wc -c <"$qemu_log")" 0 "qemu must not receive an unbound socket path"
-
-  begin "VM: the Copilot credential rides the bootstrap envelope, not the guest argv"
-  # The container path already passes this token; without it here the VM path
-  # boots an agent that stalls on a device code nobody is there to type.
-  reset_logs
-  run_recipe review GH_READY=1 TEST_UNAME_M=x86_64 \
-    GOOSE_MODEL=gpt-4o \
-    FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token REVIEW_TEST_SPLIT_ACK=1
-  assert_contains "Copilot credential passed" "$OUT"
-  assert_file_contains "provider_secret:present" "$consumed_marker"
-  assert_file_contains "github_token:absent" "$consumed_marker"
-  # The secret travels over the one-shot socket only: never on a command line,
-  # never in the guest environment, never in this terminal.
-  assert_not_contains "ghu-keyring-token" "$OUT"
-  for log in "$runner_log" "$qemu_log" "$qemu_img_log" "$curl_log" "$find_log" "$gum_log"; do
-    assert_file_not_contains "ghu-keyring-token" "$log"
-  done
-
-  begin "VM: the GitHub identity block is reported the same way whatever the host has"
-  reset_logs
-  run_recipe review GH_READY=1 TEST_UNAME_M=x86_64 \
-    GOOSE_MODEL=gpt-4o \
-    FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token FAKE_GH_TOKEN=gho-test-token
-  assert_contains "VM GitHub identity is blocked" "$OUT"
-  assert_contains "cannot satisfy this VM prerequisite" "$OUT"
-  assert_contains "Use review-container for work that needs fork, push, or PR access" "$OUT"
-  assert_not_contains "gh auth login" "$OUT"
-  assert_file_contains "github_token:absent" "$consumed_marker"
-  assert_not_contains "gho-test-token" "$OUT"
-  for log in "$runner_log" "$qemu_log" "$qemu_img_log" "$curl_log" "$find_log" "$gum_log"; do
-    assert_file_not_contains "gho-test-token" "$log"
-  done
-
-  begin "VM: a missing Copilot credential is named plainly, not discovered in the guest"
-  reset_logs
-  run_recipe review GH_READY=1 TEST_UNAME_M=x86_64 \
-    GOOSE_MODEL=gpt-4o
-  assert_contains "no Copilot credential found" "$OUT"
-  assert_contains "gh auth token' is NOT a substitute" "$OUT"
-  assert_contains "goose configure" "$OUT"
-  assert_contains "VM GitHub identity is blocked" "$OUT"
-  assert_contains "cannot satisfy this VM prerequisite" "$OUT"
-  assert_not_contains "gh auth login" "$OUT"
-  assert_file_contains "provider_secret:absent" "$consumed_marker"
-
-  begin "VM: an unsupported provider is rejected before the guest starts"
-  reset_logs
-  run_recipe review GH_READY=1 TEST_UNAME_M=x86_64 GOOSE_PROVIDER=openai \
-    FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
-  assert_nonzero_status "$STATUS" "an unsupported provider must not start the VM"
-  assert_contains "GOOSE_PROVIDER=openai is not supported" "$OUT"
-  assert_eq "$(wc -c <"$qemu_log")" 0 "the VM must not start"
-  assert_not_contains "ghu-keyring-token" "$OUT"
-else
-  begin "VM: SKIPPED (/dev/kvm is not usable by this user)"
-fi
-
-# ══ Fetch/verify behaviour of the raw disk ════════════════════════════════
-begin "fetch: a raw disk is removed when its checksum sidecar download fails"
-rm -rf "$home/.local/state"
-mkdir -p "$state_dir"
-stale_raw="$state_dir/review-vm-25.08.13-x86_64.raw"
-printf 'stale guest\n' >"$stale_raw"
-(cd "$state_dir" && sha256sum "$(basename "$stale_raw")" >"$(basename "$stale_raw").sha256")
+# ══ 3. Doctor: no failure on a fully provisioned host ═════════════════════
+begin "review-doctor: fully provisioned host exits 0"
 reset_logs
-run_recipe review GH_READY=1 \
-  REVIEW_TEST_SKIP_VM_FETCH=0 TEST_UNAME_M=x86_64 TEST_CURL_MODE=checksum-fail
-assert_nonzero_status "$STATUS" "a failed sidecar download must fail the launch"
-assert_contains "VM release checksum sidecar is not published yet" "$OUT"
-assert_file_contains "review-vm-25.08.15-x86_64.raw" "$curl_log"
-# fsdk-containers still publishes the pre-rename asset name. Fetching
-# 'review-vm-...' 404s, so the URL must carry the name the release actually has
-# while the local cache keeps our own review-vm-* name.
-assert_file_contains "releases/download/v25.08.15/donate-clanker-vm-25.08.15-x86_64.raw.zst" "$curl_log"
-assert_file_contains "releases/download/v25.08.15/donate-clanker-vm-25.08.15-x86_64.raw.sha256" "$curl_log"
-assert_file_not_contains "releases/download/v25.08.15/review-vm-" "$curl_log"
-assert_file_not_contains "25.08.13-x86_64.raw.zst" "$curl_log"
-assert_file_exists "$stale_raw"
-assert_file_not_exists "$state_dir/review-vm-25.08.15-x86_64.raw"
-assert_file_not_exists "$state_dir/review-vm-25.08.15-x86_64.raw.partial"
-assert_file_not_exists "$state_dir/review-vm-25.08.15-x86_64.raw.sha256"
-assert_file_not_exists "$state_dir/review-vm-25.08.15-x86_64.raw.sha256.partial"
-
-begin "fetch: a successful raw fetch leaves command substitution with only the raw path"
-rm -rf "$home/.local/state"
-mkdir -p "$state_dir"
-reset_logs
-run_recipe review GH_READY=1 \
-  REVIEW_TEST_SKIP_VM_FETCH=0 TEST_UNAME_M=x86_64 TEST_CURL_MODE=fetch-success
-assert_file_exists "$state_dir/review-vm-25.08.15-x86_64.raw"
-assert_file_exists "$state_dir/review-vm-25.08.15-x86_64.raw.sha256"
-assert_not_contains "VM raw disk not found:" "$OUT"
-assert_contains "Fetching review VM 25.08.15 for x86_64..." "$OUT"
-assert_contains "Decompressing VM image..." "$OUT"
-
-begin "verify: an incomplete exact cache entry is never reused"
-mkdir -p "$state_dir"
-raw_x86="$state_dir/review-vm-25.08.15-x86_64.raw"
-raw_arm="$state_dir/review-vm-25.08.15-aarch64.raw"
-printf 'x86 guest\n' >"$raw_x86"
-run_recipe review GH_READY=1 TEST_UNAME_M=x86_64
-assert_nonzero_status "$STATUS" "an incomplete cache must not boot"
-assert_contains "cached VM 25.08.15 for x86_64 is incomplete or failed verification; refetching it" "$OUT"
-assert_file_not_exists "$raw_x86"
-
-printf 'x86 guest\n' >"$raw_x86"
-(cd "$state_dir" && sha256sum "$(basename "$raw_x86")" >"$(basename "$raw_x86").sha256")
-printf 'arm guest\n' >"$raw_arm"
-(cd "$state_dir" && sha256sum "$(basename "$raw_arm")" >"$(basename "$raw_arm").sha256")
-
-begin "verify: a matching cache removes obsolete releases for its architecture"
-reset_logs
-run_recipe review GH_READY=1 TEST_UNAME_M=x86_64
-assert_file_not_exists "$stale_raw"
-assert_file_exists "$raw_arm"
-
-# ══ 6/7. Local QEMU: overlay boot, arch selection, firmware detection ═════
-if kvm_usable; then
-  begin "local QEMU (x86_64): boots a per-run overlay, never the master image"
-  reset_logs
-  run_recipe review GH_READY=1 TEST_UNAME_M=x86_64
-  assert_nonzero_status "$STATUS" "the fake qemu always exits non-zero"
-  assert_contains "booting local review VM" "$OUT"
-  assert_file_contains "qemu-system-x86_64" "$qemu_log"
-  assert_file_contains "-machine q35" "$qemu_log"
-  assert_file_contains "-device virtio-serial-pci" "$qemu_log"
-  assert_file_contains "-nographic" "$qemu_log"
-  assert_file_contains "org.projectbluefin.review.bootstrap" "$qemu_log"
-
-  # The verified master image is copy-on-write backing only. Booting it
-  # directly mutates it and breaks its checksum.
-  assert_file_contains "create -q -f qcow2 -F raw -b $raw_x86" "$qemu_img_log"
-  assert_file_contains "overlay.qcow2,format=qcow2,if=virtio" "$qemu_log"
-  assert_file_not_contains "file=${raw_x86}" "$qemu_log"
-
-  # Split pflash firmware: read-only CODE at unit 0, writable VARS at unit 1.
-  assert_file_contains "-name edk2-x86_64-code.fd" "$find_log"
-  assert_file_contains "if=pflash,format=raw,unit=0,readonly=on,file=${firmware_dir}/edk2-x86_64-code.fd" "$qemu_log"
-  assert_file_contains "if=pflash,format=raw,unit=1,file=" "$qemu_log"
-  assert_file_contains "efivars.fd" "$qemu_log"
-  assert_file_not_contains "-bios" "$qemu_log"
-
-  begin "local QEMU (aarch64): arch-specific machine, device and firmware"
-  reset_logs
-  run_recipe review GH_READY=1 TEST_UNAME_M=aarch64
-  assert_nonzero_status "$STATUS" "the fake qemu always exits non-zero"
-  assert_file_contains "qemu-system-aarch64" "$qemu_log"
-  assert_file_contains "-machine virt" "$qemu_log"
-  assert_file_contains "-device virtio-serial-device" "$qemu_log"
-  assert_file_contains "-name edk2-aarch64-code.fd" "$find_log"
-  assert_file_contains "if=pflash,format=raw,unit=0,readonly=on,file=${firmware_dir}/edk2-aarch64-code.fd" "$qemu_log"
-  assert_file_contains "create -q -f qcow2 -F raw -b $raw_arm" "$qemu_img_log"
-  assert_file_not_contains "file=${raw_arm}" "$qemu_log"
-
-  begin "local QEMU: single-blob firmware falls back to -bios"
-  reset_logs
-  run_recipe review GH_READY=1 \
-    TEST_UNAME_M=x86_64 FAKE_FIRMWARE_MODE=bios
-  assert_nonzero_status "$STATUS" "the fake qemu always exits non-zero"
-  assert_file_contains "-name edk2-x86_64-code.fd" "$find_log"
-  assert_file_contains "-name OVMF.fd" "$find_log"
-  assert_file_contains "-bios ${firmware_dir}/OVMF.fd" "$qemu_log"
-  assert_file_not_contains "if=pflash" "$qemu_log"
-
-  begin "local QEMU: no firmware anywhere is an actionable error"
-  reset_logs
-  run_recipe review GH_READY=1 \
-    TEST_UNAME_M=x86_64 FAKE_FIRMWARE_MODE=none
-  assert_nonzero_status "$STATUS" "missing firmware must fail the launch"
-  assert_contains "matching UEFI firmware for x86_64 was not found" "$OUT"
-  assert_contains "brew install qemu" "$OUT"
-  assert_eq "$(wc -c <"$qemu_log")" 0 "qemu must not be invoked without firmware"
-else
-  begin "local QEMU: SKIPPED (/dev/kvm is not usable by this user)"
-fi
+run_recipe review-doctor GH_READY=1 \
+  FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'repo', 'read:org'" \
+  FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
+assert_zero_status "$STATUS" "a fully provisioned doctor run must exit 0"
+assert_contains "a GitHub token is available for the container-only agent" "$OUT"
+assert_contains "a Copilot credential is available" "$OUT"
+assert_contains "0 failed." "$OUT"
 
 # ══ 4. Container recipe ═══════════════════════════════════════════════════
 begin "review-container: exactly one foreground podman run, hive mounts only"
@@ -923,7 +491,7 @@ assert_file_not_contains ":/config" "$runner_log"
 assert_file_not_contains "/workspace" "$runner_log"
 assert_file_not_contains "qemu" "$runner_log"
 assert_file_not_contains "super-secret-registration-token" "$runner_log"
-assert_eq "$(wc -c <"$qemu_log")" 0 "the container recipe must not start a VM"
+
 # A moving tag must be refreshed on every launch, or a contributor silently
 # keeps running whatever copy they first pulled.
 assert_file_contains "pull ghcr.io/projectbluefin/review:stable" "$image_log"
@@ -1223,43 +791,31 @@ assert_eq "$(wc -c <"$runner_log")" 0 "a live session must never be replaced"
 # ══ Doctor is read-only ═══════════════════════════════════════════════════
 begin "review-doctor: read-only, Goose-only diagnostics"
 reset_logs
-run_recipe review-doctor GH_READY=1 TEST_UNAME_M=x86_64
+run_recipe review-doctor GH_READY=1
 assert_contains "Agent backend (Goose only)" "$OUT"
 assert_not_contains "claude" "$OUT"
 assert_not_contains "codex" "$OUT"
-assert_eq "$(wc -c <"$qemu_log")" 0 "doctor must not start a VM"
+
 assert_file_not_contains "run --rm" "$runner_log"
 
 begin "review-doctor: rejects an unsupported provider"
 reset_logs
-run_recipe review-doctor GH_READY=1 TEST_UNAME_M=x86_64 GOOSE_PROVIDER=ollama
+run_recipe review-doctor GH_READY=1 GOOSE_PROVIDER=ollama
 assert_nonzero_status "$STATUS" "an unsupported provider must fail doctor"
 assert_contains "GOOSE_PROVIDER=ollama is not supported" "$OUT"
-
-begin "review-doctor: names an unavailable aarch64 raw release before launch"
-reset_logs
-run_recipe review-doctor GH_READY=1 TEST_UNAME_M=aarch64 \
-  TEST_CURL_MODE=release-missing
-assert_nonzero_status "$STATUS" "an unavailable aarch64 raw asset must fail doctor"
-assert_contains "aarch64 VM release artifact is unavailable" "$OUT"
-assert_contains "Use review-container until the aarch64 raw asset is released" "$OUT"
-assert_file_contains "donate-clanker-vm-25.08.15-aarch64.raw.zst" "$curl_log"
-assert_eq "$(wc -c <"$qemu_log")" 0 "doctor must not start a VM"
-assert_file_not_contains "run --rm" "$runner_log"
-
 begin "review-doctor: reports a usable Copilot credential without printing it"
 reset_logs
-run_recipe review-doctor GH_READY=1 TEST_UNAME_M=x86_64 \
+run_recipe review-doctor GH_READY=1 \
   FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
 assert_contains "Copilot credential" "$OUT"
 assert_contains "a Copilot credential is available" "$OUT"
 assert_not_contains "ghu-keyring-token" "$OUT"
-assert_eq "$(wc -c <"$qemu_log")" 0 "doctor must not start a VM"
+
 assert_file_not_contains "run --rm" "$runner_log"
 
 begin "review-doctor: a missing Copilot credential is a failed check with the fix"
 reset_logs
-run_recipe review-doctor GH_READY=1 TEST_UNAME_M=x86_64
+run_recipe review-doctor GH_READY=1
 assert_nonzero_status "$STATUS" "a missing Copilot credential must fail the doctor"
 assert_contains "no Copilot credential is available" "$OUT"
 assert_contains "gh auth token' is NOT a substitute" "$OUT"
@@ -1272,7 +828,7 @@ reset_logs
 backend_backup="$scratch/contributor.env.bak"
 cp "$home/.config/hive/contributor.env" "$backend_backup"
 sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=copilot/' "$home/.config/hive/contributor.env"
-run_recipe review-doctor GH_READY=1 TEST_UNAME_M=x86_64 \
+run_recipe review-doctor GH_READY=1 \
   FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
 assert_contains "AGENT_BACKEND=copilot" "$OUT"
 assert_contains "will not touch it" "$OUT"
@@ -1281,32 +837,29 @@ cp "$backend_backup" "$home/.config/hive/contributor.env"
 
 begin "review-doctor: a matching AGENT_BACKEND raises no warning"
 reset_logs
-run_recipe review-doctor GH_READY=1 TEST_UNAME_M=x86_64 \
+run_recipe review-doctor GH_READY=1 \
   FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
 assert_not_contains "but review always launches goose" "$OUT"
 
 begin "review-doctor: reports the agent's GitHub token and its scopes, not its value"
 reset_logs
-run_recipe review-doctor GH_READY=1 TEST_UNAME_M=x86_64 \
+run_recipe review-doctor GH_READY=1 \
   FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'admin:org', 'repo'"
 assert_contains "a GitHub token is available for the container-only agent" "$OUT"
-assert_contains "VM GitHub identity is blocked" "$OUT"
-assert_contains "host gh login or REVIEW_GH_TOKEN cannot satisfy this VM prerequisite" "$OUT"
 assert_contains "admin:org" "$OUT"
 assert_not_contains "gho-test-token" "$OUT"
-assert_eq "$(wc -c <"$qemu_log")" 0 "doctor must not start a VM"
+
 assert_file_not_contains "run --rm" "$runner_log"
 
 begin "review-doctor: a missing GitHub token is a failed check with the fix"
 reset_logs
-run_recipe review-doctor GH_READY=1 TEST_UNAME_M=x86_64
+run_recipe review-doctor GH_READY=1
 assert_nonzero_status "$STATUS" "a missing GitHub token must fail the doctor"
 assert_contains "no GitHub token is available for the container-only agent" "$OUT"
 assert_contains "REVIEW_GH_TOKEN" "$OUT"
-assert_contains "VM GitHub identity is blocked" "$OUT"
 
 # ══ 5/6. Static guarantees read straight off the justfile ════════════════
-begin "static: the launcher can never background a VM or a container"
+begin "static: an interactive launch can never background the container"
 # Comments in this file legitimately discuss --detach/nohup/setsid, so they
 # are stripped before any of these greps run.
 # Only whole-line comments are stripped, deliberately. A trailing '# --detach'
@@ -1323,7 +876,7 @@ if grep -nE 'podman run.*(^| )(-d|--detach)( |$)' "$code"; then
   fail "podman run must never detach"
 fi
 # A lone trailing '&' backgrounds the launch; '&&' and '2>&1' must not match.
-if grep -nE '(podman run|qemu-system-).*[^&>]&[[:space:]]*$' "$code"; then
+if grep -nE '(podman run).*[^&>]&[[:space:]]*$' "$code"; then
   fail "a launch line must never end in a background '&'"
 fi
 if grep -nE '(^|[^[:alnum:]_])(nohup|setsid)([^[:alnum:]_]|$)' "$code"; then
@@ -1348,14 +901,13 @@ begin "static: a launch cannot detach through an option form or a second line"
 joined="$scratch/justfile-code-joined"
 sed -e :a -e '/\\$/N; s/\\\n//; ta' "$code" >"$joined"
 # Everything that contributes arguments to a real launch: both podman
-# argument arrays (opened as CONTAINER_ARGS=( and appended to with +=), any
-# bare 'podman run'/'podman create', and the qemu invocation.
+# argument arrays (opened as CONTAINER_ARGS=( and appended to with +=), and
+# any bare 'podman run'/'podman create'.
 launch_args="$scratch/justfile-launch-args"
 awk '
   /CONTAINER_ARGS\+?=\(/           { inargs = 1 }
   inargs                           { print; if ($0 ~ /\)[[:space:]]*$/) inargs = 0; next }
-  /podman[[:space:]]+(run|create)/ { print; next }
-  /qemu-system-/                   { print }
+  /podman[[:space:]]+(run|create)/ { print }
 ' "$joined" >"$launch_args"
 # 'podman run --detach-keys' is a foreground detach *sequence*, not
 # backgrounding, so the character after '--detach' has to be checked.
@@ -1367,14 +919,10 @@ if grep -nE -- '(^|[[:space:]])-d([[:space:]=]|$)' "$launch_args"; then
 fi
 # '-itd' and '-dit' bundle the detach flag into the short-flag cluster the
 # foreground launches already use. Only clusters built from podman's own
-# bundleable short flags are matched, so qemu's '-drive'/'-device' and the
-# shell's '-rf'/'-euo' cannot trip this.
+# bundleable short flags are matched, so the shell's '-rf'/'-euo' cannot
+# trip this.
 if grep -nE -- '(^|[[:space:]])-([aditq]+d[aditq]*|d[aditq]+)([[:space:]]|$)' "$launch_args"; then
   fail "no launch argument may bundle the detach flag into a short-flag cluster"
-fi
-# qemu daemonizes with its own flag, which shares nothing with podman's.
-if grep -nE -- '(^|[[:space:]])-{1,2}daemonize([[:space:]]|$)' "$launch_args"; then
-  fail "the qemu invocation must never daemonize"
 fi
 # A background '&' anywhere in the launch region, not only at end of line:
 # 'podman run ... & wait' backgrounds the launch just as effectively while
@@ -1417,39 +965,6 @@ tracked_units="$(git -C "$repo_root" ls-files \
 if grep -nE '(quadlet|containers/systemd|systemctl|systemd-analyze)' "$joined"; then
   fail "the launcher must never install, generate or drive a systemd unit"
 fi
-
-begin "static: the verified master image is never booted directly"
-# shellcheck disable=SC2016 # the launcher source is matched literally, not expanded
-grep -q 'qemu-img create -q -f qcow2 -F raw -b "\$VM_RAW"' "$code" ||
-  fail "the launcher must create a qcow2 overlay backed by \$VM_RAW"
-# shellcheck disable=SC2016 # the launcher source is matched literally, not expanded
-grep -q 'VM_DISK_ARGS=(-drive "file=\${VM_OVERLAY},format=qcow2,if=virtio")' "$code" ||
-  fail "the launcher must boot the per-run overlay"
-# shellcheck disable=SC2016 # the launcher source is matched literally, not expanded
-if grep -n 'file=\${VM_RAW},format=raw' "$code"; then
-  fail "the qemu invocation must never attach the master raw image"
-fi
-
-begin "static: bootstrap timeout starts only after the exact VM cache is ready"
-# A stale raw glob can silently boot a different release. The only cache
-# lookup must name the requested version and architecture, and the server
-# invocation for local QEMU must follow overlay preparation.
-# shellcheck disable=SC2016 # the launcher source is matched literally
-if grep -n 'LOCAL_VM_CANDIDATES\|"\${STATE_DIR}"/\*-"' "$code"; then
-  fail "VM cache selection must not glob across versions"
-fi
-# shellcheck disable=SC2016 # the launcher source is matched literally
-grep -q 'cached_vm_raw "\$STATE_DIR" "{{vm_version}}" "\$VM_ARCH"' "$code" ||
-  fail "VM cache lookup must use the requested version and architecture"
-# shellcheck disable=SC2016 # the launcher source is matched literally
-grep -q 'cleanup_obsolete_vm_cache "\$state_dir" "\$version" "\$arch"' "$code" ||
-  fail "verified VM cache entries must clean obsolete releases for their architecture"
-# shellcheck disable=SC2016 # the launcher source is matched literally
-overlay_line="$(grep -n 'qemu-img create -q -f qcow2 -F raw -b "\$VM_RAW"' "$code" | head -n1 | cut -d: -f1)"
-bootstrap_line="$(grep -n '^      start_bootstrap_server$' "$code" | head -n1 | cut -d: -f1)"
-[[ -n "$overlay_line" && -n "$bootstrap_line" && "$bootstrap_line" -gt "$overlay_line" ]] ||
-  fail "bootstrap server must start after local VM overlay preparation"
-
 begin "static: the container never defaults to an unpublished ':latest' tag"
 # publish-compat-image.yml only pushes sha-<commit>, the version tags and
 # 'stable', so a ':latest' default is guaranteed 'manifest unknown'.
@@ -1469,10 +984,10 @@ fi
 if grep -n 'just review-stop' "$code"; then
   fail "nothing may point a user at a stop command that must not exist"
 fi
-# The recipe list is exactly: launch the VM, launch the container, diagnose,
+# The recipe list is exactly: launch the container, diagnose,
 # walk the PR queue.
-assert_eq "$(grep -cE '^review[a-z-]*[ :]' "$code")" 4 \
-  "expected exactly four recipes (review, -container, -doctor, -queue)"
+assert_eq "$(grep -cE '^review[a-z-]*[ :]' "$code")" 3 \
+  "expected exactly three recipes (review-container, -doctor, -queue)"
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private
@@ -1489,32 +1004,6 @@ fi
 # The pin itself stays load-bearing: no branch name may be executed.
 grep -q 'must be a full 40-character commit SHA' "$code" ||
   fail "the Hive checkout must remain pinned to a full commit SHA"
-
-begin "static: the VM URL builder names the asset the release actually publishes"
-# projectbluefin/fsdk-containers never renamed its assets after this repository
-# became 'review', so 'review-vm-<version>-<arch>.raw.zst' 404s on every
-# release. Doctor and the fetch path must build the identical URL, or doctor
-# can pass while 'just review' 404s.
-grep -q "releases/download/v%s/donate-clanker-vm-%s-%s.raw.zst" "$code" ||
-  fail "the VM release URL must use the published donate-clanker-vm asset name"
-if grep -n 'releases/download/v%s/review-vm-' "$code"; then
-  fail "no release URL may use the unpublished review-vm asset name"
-fi
-assert_eq "$(grep -c 'releases/download/' "$code")" 1 \
-  "the release URL must be built in exactly one place"
-# shellcheck disable=SC2016 # the launcher source is matched literally
-grep -q 'VM_RELEASE_URL="$(vm_release_url "{{vm_version}}" "$VM_ARCH")"' "$code" ||
-  fail "doctor must report the same URL the fetch path builds"
-# shellcheck disable=SC2016 # the launcher source is matched literally
-grep -q 'vm_release_asset_available "{{vm_version}}" "$VM_ARCH"' "$code" ||
-  fail "doctor must probe the same version and architecture it reports"
-# Checksum verification stays mandatory whatever the asset is called.
-grep -q 'sha256sum -c' "$code" ||
-  fail "the VM raw disk must always be checksum-verified"
-# shellcheck disable=SC2016 # the launcher source is matched literally
-grep -q '\[\[ -f "$raw" && -f "${raw}.sha256" \]\] || return 1' "$code" ||
-  fail "verification must require the checksum sidecar"
-
 begin "static: no legacy backends survive in the launcher"
 for legacy in copilot_live_models 'Multiple AI CLIs' LAST_TOOL AGENT_MODEL=; do
   if grep -Fn -- "$legacy" "$code"; then

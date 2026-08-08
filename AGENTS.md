@@ -1,7 +1,10 @@
 # review — Agent Operating Contract
 
-`review` is a thin, foreground launcher for a QEMU VM or contributor
-container running Goose. It owns VM boot, credential handoff, and review
+`review` is the Bluefin review appliance: one OCI contributor image and a
+launcher with two operational modes. `review-container` runs the Hive queue
+worker — it receives Hive-assigned tasks and donates inference through the
+contributor's credentials. `review-queue` is the interactive maintainer
+review surface. `review` owns the image, credential handoff, and review
 context. Hive owns the WebSocket contributor protocol, task selection, the
 `contributor` tmux session, prompt injection, and output capture.
 
@@ -14,24 +17,24 @@ context. Hive owns the WebSocket contributor protocol, task selection, the
 
 ## Boundaries
 
-Keep this repository small. Do not add a daemon, service, background
-lifecycle, persistent state beyond launcher configuration, task-selection
-logic, or a second implementation of the launcher.
+Keep this repository focused: it ships the review appliance and nothing
+beside it. Persistent state stays limited to launcher configuration.
 
-The public launcher is foreground-only. Every launch path must end in a
-process that is `exec`'d, or is the last foreground command whose exit status
-propagates verbatim: no `nohup`, `--detach`, systemd unit, or `podman run -d`,
-and no background job that outlives the run. Ctrl-C is the stop mechanism.
+The interactive recipes run in the foreground of the terminal that launched
+them, and Ctrl-C stops them: a maintainer steers `review-queue`, and
+`review-container` stays attended until the planned detached worker mode
+ships with its own explicit lifecycle verb. Until that verb exists, no
+launch path may background a run implicitly — no `nohup`, no accidental
+`podman run -d`, no job that silently outlives the terminal. Cleanup remains
+a startup concern: a launch reclaims whatever a previous run left behind.
 
-That rule scopes how the launcher starts the VM or container; it is not a ban
+That rule scopes how the launcher starts the container; it is not a ban
 on `&` anywhere in the repository. Backgrounding is required where it is what
-preserves the guarantee. Bash defers a trap handler while it waits on a
-foreground child, so `image/entrypoint.sh` runs the contributor agent and
+preserves signal responsiveness. Bash defers a trap handler while it waits on
+a foreground child, so `image/entrypoint.sh` runs the contributor agent and
 `tmux attach-session` as background jobs it `wait`s on, keeping PID 1
 signal-responsive; a foreground attach swallowed SIGTERM for the whole session
-and forced podman's ten-second SIGKILL. The `justfile`'s one-shot bootstrap
-socket server is likewise a background job, reaped by an `EXIT/INT/TERM` trap.
-Do not "fix" either one.
+and forced podman's ten-second SIGKILL. Do not "fix" that.
 
 `podman run --rm -it` does not bind a container's lifetime to its client:
 `conmon` supervises the container, survives the client, and reparents to the
@@ -41,15 +44,18 @@ unreachable container rather than merely a name. Each launch therefore stamps
 only when that PID is alive, in the same boot, and still names the container in
 `/proc`. Anything else is an orphan and is reclaimed silently with `--replace`.
 
-Do not filter, skip, reorder, prioritize, or decline Hive assignments. Hive is
-the sole authority for task selection.
+Hive is the sole authority for selecting and assigning contributor tasks: do
+not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
+one sanctioned filter is own-work exclusion on the maintainer-facing queue
+view — a reviewer never receives their own authored pull requests to review.
 
-This is a toil-reduction factory for under-maintained projects, not a feature
-factory. Repair what is broken and finish what a project already decided to
-do; do not add features, dependencies, configuration surfaces, or
-architecture, and size every change to be reviewable by a tired maintainer.
-When a task can only be completed by out-of-scope work, an evidenced written
-finding is the deliverable. See
+The work the appliance produces for other repositories is toil reduction for
+under-maintained projects, not feature work: agents repair what is broken and
+finish what a project already decided to do, and size every change to be
+reviewable by a tired maintainer. When a task can only be completed by
+out-of-scope work, an evidenced written finding is the deliverable. That
+scope rule governs agent output; this repository itself is a product and
+evolves deliberately — see the README for its roadmap. See
 [`docs/skills/contribution-culture.md`](docs/skills/contribution-culture.md).
 
 Grandfathering is an antipattern here. Do not record a known-wrong thing as an
@@ -87,7 +93,7 @@ labels. Never add a local workaround for an accepted upstream gap. See
 ## Repository layout
 
 - `justfile` is the only shipped launcher artifact. Its
-  four public recipes and private helpers intentionally live together.
+  three public recipes and private helpers intentionally live together.
 - `image/` builds the FSDK-derived contributor image and its layered runtime
   configuration.
 - `package.json` and `package-lock.json` at the root pin only the contributor
@@ -168,6 +174,6 @@ container; CI invokes it explicitly.
   `kubestellar/hive` (default branch `v2`; no contributing guide or issue
   templates, DCO sign-off required on pull requests).
 - Organization skills and factory rules: `projectbluefin/common`.
-- External API details: Context7 documentation. Context7 is a Hive hub
-  capability delivered through Hive's knowledge export; never configure it in
-  this repository's image.
+- External API details: Context7 documentation. Context7 reaches agents both
+  through Hive's hub-side knowledge export and, as the appliance's context
+  pipeline lands, through image-level configuration.

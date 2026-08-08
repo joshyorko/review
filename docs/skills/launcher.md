@@ -1,17 +1,17 @@
 ---
 name: launcher
-version: "2.7"
+version: "3.0"
 last_updated: 2026-08-08
 id: launcher
-one_line_purpose: Change review just recipes without breaking foreground.
+one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
 category: ci-ops
 mcp_compliance_level: partial
 optimization_status: draft
 status: active
 dependencies: []
-tags: [just, launcher, qemu, podman, foreground]
-description: "Maintains the four foreground review recipes, VM and container-only launch paths, and credential boundaries. Use when editing justfile."
+tags: [just, launcher, podman, container]
+description: "Maintains the three container-only review recipes and their credential boundaries. Use when editing justfile."
 metadata:
   type: runbook
   context7-sources: [/websites/podman_io_en]
@@ -21,8 +21,8 @@ metadata:
 
 ## When to Use
 
-Load this before editing `justfile` or changing VM,
-container-only, foreground, or credential-passthrough behavior.
+Load this before editing `justfile` or changing container launch,
+lifecycle, or credential-passthrough behavior.
 
 ## When Not to Use
 
@@ -32,33 +32,27 @@ Goose, or image build skill documents.
 
 ## Core Process
 
-1. Keep exactly four public recipes:
+1. Keep exactly three public recipes:
 
    | Recipe | Purpose |
    |---|---|
-   | `review` | Run the disposable QEMU VM in the foreground. |
-   | `review-container` | Run the contributor container directly for fast local iteration. |
+   | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. |
    | `review-doctor` | Perform read-only preflight checks. |
-   | `review-queue` | Walk the static PR queue in the container; no Hive registration, no VM. |
+   | `review-queue` | Walk the static PR queue in the container; no Hive registration. |
 
    `just` reads only the current directory's justfile, so these recipes fail
    with `justfile does not contain recipe` from any other checkout. That is
    `just`'s behavior, not a launcher bug: fix it outside the repository with a
-   `~/.local/bin` shim that forwards these four names to this justfile, and
+   `~/.local/bin` shim that forwards these three names to this justfile, and
    do not add a wrapper recipe here to compensate.
 
-2. Keep both launch paths foreground. No detached Podman, background service,
-   lifecycle command, or persistent launcher state is allowed beyond the
-   verified caches and pinned Hive checkout under `~/.local/state/review/`.
+2. Keep the interactive launch paths foreground. Until the detached worker
+   mode ships with its own explicit lifecycle verb, no launch may background
+   a run implicitly, and no persistent launcher state is allowed beyond the
+   pinned Hive checkout under `~/.local/state/review/`.
    Ctrl-C is the stop mechanism; `--replace` only reclaims a container name
    when a new launch starts.
-3. Keep VM isolation narrow. The guest receives per-run control data and
-   clones assigned work itself; it does not receive a host workspace or home.
-   VM disks are verified and use a disposable overlay. There is exactly one
-   VM launch path — the verified raw disk booted by `qemu-system-*` in the
-   foreground — and when no disk can be resolved the recipe fails with an
-   actionable `ERROR:` line rather than falling through to a second mode.
-4. Keep the container path narrow too. It mounts only the read-only Hive
+3. Keep the container path narrow. It mounts only the read-only Hive
    contributor configuration and runs the image entrypoint, which attaches to
    Hive's `contributor` session.
    `review-queue` is the exception that proves the rule: it mounts nothing at
@@ -80,7 +74,7 @@ Goose, or image build skill documents.
    registration is never clobbered. Every launch prints the hub it will
    talk to; a silent default is how a contributor ends up watching one
    hub's dashboard while their agent asks another for work.
-5. Keep Goose Copilot-only. The launcher resolves a Copilot credential for the
+4. Keep Goose Copilot-only. The launcher resolves a Copilot credential for the
    provider secret and recomputes the provider and model from the environment
    at every launch. Nothing is persisted: not a secret, not a provider, not a
    model. There is no last-selection file, and `tests/just-onboarding.sh`
@@ -92,7 +86,7 @@ Goose, or image build skill documents.
    a preflight that knows only one key strands a configured host.
    `review-container` must set its own thinking-effort default before forming
    the Podman environment, while still honoring `GOOSE_THINKING_EFFORT` from
-   the caller. Do not apply that container default to the VM or replace the
+   the caller. Do not replace the
    image's direct-invocation fallback.
    That default comes from the model profile: `review-container [profile]
    [effort]` resolves `luna` to `gpt-5.6-luna` at `max` with the provider's
@@ -108,38 +102,15 @@ Goose, or image build skill documents.
    caller-supplied `GOOSE_MODEL` is passed through unvalidated by design. Form
    the environment and let Goose surface a model the provider will not serve.
    Do not add a catalog check to the launcher.
-6. For container-only mode, pass Copilot and GitHub credentials by inherited
+5. For container-only mode, pass Copilot and GitHub credentials by inherited
    environment (`--env NAME`), not command-line values or host configuration
    mounts. Resolve the GitHub token from `REVIEW_GH_TOKEN`, existing
    `GH_TOKEN`, then `gh auth token`.
-7. When renaming launcher-facing product identifiers, do a tracked-file sweep
+6. When renaming launcher-facing product identifiers, do a tracked-file sweep
    for both active names and legacy spellings in code, comments, workflow
    assertions, fixture image names, and environment variables. Keep only the
    live `review` / `REVIEW_*` surface; do not leave compatibility aliases
    behind.
-
-## Mode Capabilities Are Not Symmetric
-
-The two run modes are separate products, and the difference is user-visible:
-
-| | `review` (VM) | `review-container` |
-|---|---|---|
-| Credential channel | one-shot `0600` AF_UNIX JSON bootstrap | inherited `--env NAME` |
-| Copilot `provider_secret` | yes | yes |
-| `GH_TOKEN` identity | no | yes |
-| Fork, push, open a pull request | no | yes |
-| Host mounts | none | `~/.config/hive`, read-only |
-| Host requirements | qemu, qemu-img, UEFI firmware, python3, curl, zstd, `/dev/kvm` | podman |
-
-The VM can carry the Copilot provider secret, but the current guest has no
-compatible bootstrap mapping for a host `GH_TOKEN`; the launcher reports that
-block unconditionally, in the same words on the launch path and in the doctor,
-because nothing about the host changes the answer. Hive's task prompt is unconditional
-and tells the agent to fork, push, and open a pull request with `GH_TOKEN`, so
-VM mode can be assigned work it cannot complete. Document that honestly; do not
-filter assignments to route around it. Use `review-container` when the task
-needs GitHub fork, push, or pull-request access. Do not attempt to fix this by
-mounting GitHub configuration or adding an unconsumed bootstrap field.
 
 ## Container Ownership
 
@@ -227,25 +198,25 @@ want to be certain which launcher you are invoking.
 
 ## Red Flags
 
-- A fifth public recipe or any start, stop, restart, kill, clean, or daemon
-  command.
-- A launch path whose final process is neither `exec`'d nor the last foreground
-  command whose status propagates: `nohup`, `setsid`, `podman run -d`,
-  `--detach`, a service unit, or a background job that outlives the run.
+- An undocumented public recipe, or an implicit background launch with no
+  matching lifecycle verb.
+- An interactive launch path whose final process is neither `exec`'d nor the
+  last foreground command whose status propagates: `nohup`, `setsid`, a
+  stray `podman run -d`, or a background job that silently outlives the run.
   A background job the shell `wait`s on and reaps by trap is not this, and
   removing one can break signal handling.
-- A host directory mount beyond the per-run VM control path or read-only Hive
-  configuration for container-only mode.
+- A host directory mount beyond the read-only Hive
+  configuration for the contributor container.
 - A token in output, files, Podman arguments, or any persisted launcher file.
 - Ownership inferred from `pgrep` rather than a label plus a live, same-boot,
   still-naming PID.
 - A user-supplied container name reaching `podman run` or an ownership probe
   unvalidated, or a hint that names the default container instead of the one
   the caller asked for.
-- A second implementation of launcher behavior in another language.
 - A model-catalog or model-ID validity check in the launcher; only the profile
   name is a closed set.
-- Task-selection policy outside Hive.
+- Contributor task-selection policy outside Hive (own-work exclusion on the
+  maintainer queue view is the one sanctioned filter).
 
 ## Verification
 
@@ -256,8 +227,8 @@ bash tests/just-onboarding.sh
 git diff --check
 ```
 
-The recipe list must contain only the four public commands. Doctor must not
-start a VM or container.
+The recipe list must contain only the three public commands. Doctor must not
+start a container.
 
 ## Sources
 
