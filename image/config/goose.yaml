@@ -17,9 +17,10 @@ GOOSE_MODE: auto
 
 # Goose CLI uses bat themes for markdown and code syntax. Keep the regular
 # terminal colors under the user's terminal emulator, but make agent output
-# Catppuccin Mocha without requiring per-user configuration.
+# Dracula — deep cyan, slate blue, and neon magenta accents — without
+# requiring per-user configuration.
 GOOSE_CLI_THEME: dark
-GOOSE_CLI_DARK_THEME: "Catppuccin Mocha"
+GOOSE_CLI_DARK_THEME: "Dracula"
 
 # Goose asks an interactive yes/no telemetry question on first run. Hive drives
 # the CLI by simulated keystrokes, so that prompt blocks the agent forever

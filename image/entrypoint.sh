@@ -9,6 +9,29 @@ set -euo pipefail
 
 note() { printf 'review: %s\n' "$1" >&2; }
 
+# Startup banner. Deep cyan, slate blue, and neon magenta, colors only when
+# stderr is a terminal so captured logs stay plain text.
+banner() {
+  local mode="$1" c1='' c2='' c3='' r=''
+  if [ -t 2 ]; then
+    c1=$'\033[1;36m' c2=$'\033[38;5;68m' c3=$'\033[1;95m' r=$'\033[0m'
+  fi
+  {
+    printf '%s' "$c1"
+    cat <<'BANNER'
+ ____  _____ _   _ ___ _____ _    _
+|  _ \| ____| | | |_ _| ____| |  | |
+| |_) |  _| | | | || ||  _| | |/\| |
+|  _ <| |___| |_| || || |___|  /\  |
+|_| \_\_____|\___/|___|_____|_/  \_|
+BANNER
+    printf '%s      %sBLUEFIN REVIEW APPLIANCE%s\n' "$r" "$c3" "$r"
+    printf '%s%s | model %s | effort %s%s\n' \
+      "$c2" "$mode" "${GOOSE_MODEL:-provider default}" \
+      "${GOOSE_THINKING_EFFORT:-provider default}" "$r"
+  } >&2
+}
+
 # Validate the caller's requested provider before any other startup work so an
 # unsupported setting always gets the same actionable answer.
 if [ -n "${GOOSE_PROVIDER:-}" ] && [ "$GOOSE_PROVIDER" != github_copilot ]; then
@@ -61,6 +84,12 @@ fi
 export GOOSE_MODEL
 
 export GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-high}"
+
+if [ "$queue_walk" = true ]; then
+  banner 'PR queue walk (no Hive)'
+else
+  banner 'Hive contributor'
+fi
 
 # No desktop keyring exists in a container; without this Goose fails to store or
 # read provider secrets and falls back inconsistently.

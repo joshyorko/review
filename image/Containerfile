@@ -25,6 +25,10 @@ ARG GOOSE_CHANNEL=canary
 # inputs; these defaults keep a local build pinned to a known attested asset.
 ARG GOOSE_X86_64_SHA256=db1ae20729ac87ebff0e55d161ec88515d92e580ddd1b0b4371a162f16d05180
 ARG GOOSE_AARCH64_SHA256=187e0564d735cd99678f471c303546df64eafab6db851421781c96b8700e9792
+ARG UV_VERSION=0.12.3
+ARG UV_X86_64_SHA256=0643b9fb8c9fb27458e709ce6ff939695013c41975ff7b02d3f3b138d8d4bdb3
+ARG UV_AARCH64_SHA256=fa513fca1eb2913334c944fe9adbdd410274a1cbe8dd05d03699a9eb85311d4e
+ARG TEXTUAL_VERSION=8.2.8
 ARG SKILLS_COMMIT=b6f5c370cca19398fbbbe43a0182dca6783a80cb
 
 FROM ${FSDK_RUNNER_IMAGE}
@@ -120,6 +124,42 @@ RUN set -eu; \
     corepack --version; \
     gh --version; \
     tmux -V
+
+# The maintainer TUI runtime: uv (pinned, checksum-verified) creates a
+# self-contained virtual environment on the base's own CPython and installs
+# Textual from the hash-locked requirements file. uv stays installed at
+# /usr/local/bin/uv; the venv lives under /opt/bluefin/tui and is never on
+# PATH, so nothing here shadows base tools.
+ARG UV_VERSION
+ARG UV_X86_64_SHA256
+ARG UV_AARCH64_SHA256
+ARG TEXTUAL_VERSION
+COPY image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
+RUN set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) uv_arch=x86_64-unknown-linux-musl; uv_sha="${UV_X86_64_SHA256}" ;; \
+      aarch64|arm64) uv_arch=aarch64-unknown-linux-musl; uv_sha="${UV_AARCH64_SHA256}" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    trap 'rm -rf "$workdir"' EXIT; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}.tar.gz" \
+      -o "$workdir/uv.tar.gz"; \
+    printf '%s  %s\n' "$uv_sha" "$workdir/uv.tar.gz" | sha256sum -c -; \
+    python3 -m gzip -d < "$workdir/uv.tar.gz" > "$workdir/uv.tar"; \
+    tar -xOf "$workdir/uv.tar" --wildcards --occurrence=1 '*/uv' > /usr/local/bin/uv; \
+    chmod 0755 /usr/local/bin/uv; \
+    uv --version; \
+    grep -q "^textual==${TEXTUAL_VERSION}" /opt/bluefin/tui/requirements.lock; \
+    UV_CACHE_DIR="$workdir/uv-cache" uv venv --python "$(command -v python3)" /opt/bluefin/tui/.venv; \
+    UV_CACHE_DIR="$workdir/uv-cache" uv pip install \
+      --python /opt/bluefin/tui/.venv/bin/python \
+      --require-hashes --no-deps \
+      -r /opt/bluefin/tui/requirements.lock; \
+    /opt/bluefin/tui/.venv/bin/python -c "import textual; print(textual.__version__)"; \
+    test ! -e /root/.cache/uv
 
 ARG GOOSE_CHANNEL
 ARG GOOSE_X86_64_SHA256
