@@ -95,12 +95,21 @@ in its instructions.
 
 ## Review Context Is Not Session Context
 
-`goose review` does **not** read `~/.agents/skills`. It discovers its own
-context from `.agents/REVIEW.md` and `.agents/checks/*.md` inside the
-repository being reviewed. Verified with `goose review --dry-run`: a check
-placed at the reviewed repository's root is reported as
+`goose review` does **not** read `~/.agents/skills`. Without `--check-scope`
+it discovers its own context from `.agents/REVIEW.md` and `.agents/checks/*.md`
+inside the repository being reviewed. Verified with `goose review --dry-run`:
+a check placed at the reviewed repository's root is reported as
 `discovered ... (scope: <root>)`, while the same file under
-`$HOME/.agents/checks` is ignored entirely.
+`$HOME/.agents/checks` is ignored — unless a `--check-scope <DIR>` names an
+out-of-tree directory, in which case that directory's `.agents/` REPLACES
+repo-root discovery entirely. This image ships such an overlay at
+`/opt/bluefin/review-scope/.agents/`, and `bluefin-review` copies it into a
+per-run scratch scope (adding a per-stop `cluster-resolution` check when a
+duplicate cluster exists) before every review. A reviewed repository's own
+`.agents/checks/` is therefore suppressed under the overlay; Bluefin
+repositories keep their checks in the shared overlay instead, and the
+additive-flag gap is filed upstream as
+[aaif-goose/goose#11060](https://github.com/aaif-goose/goose/issues/11060).
 
 Two consequences:
 

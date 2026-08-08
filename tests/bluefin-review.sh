@@ -254,6 +254,70 @@ malformed_status=$?
 set -e
 ((malformed_status != 0))
 
+# --- the image review scope replaces the --instructions pointer ---------------
+# With the overlay present, goose review runs with --check-scope on a scratch
+# copy carrying the static doctrine plus, when a cluster exists, a per-stop
+# cluster-resolution check. The scratch scope is deleted after the run, so the
+# stub records its contents at invocation time.
+mkdir -p "$scratch/overlay/.agents/checks"
+printf 'SCOPED REVIEW PROMPT\n' >"$scratch/overlay/.agents/REVIEW.md"
+printf -- '---\nname: bluefin-doctrine\n---\nDOCTRINE CHECK\n' \
+  >"$scratch/overlay/.agents/checks/bluefin-doctrine.md"
+
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\0' "$@" >"${GOOSE_ARGV:?}"
+scope=""
+while (($#)); do
+  case "$1" in
+    --check-scope) scope="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "$scope" ]]; then
+  find "$scope" -type f | sed "s|^$scope/||" | sort >"${SCOPE_LISTING:?}"
+  cat "$scope/.agents/checks/cluster-resolution.md" >"${SCOPE_CLUSTER:?}" 2>/dev/null || : >"${SCOPE_CLUSTER:?}"
+fi
+EOF
+chmod +x "$scratch/bin/goose"
+
+BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+  PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-scope" \
+  SCOPE_LISTING="$scratch/scope-listing" SCOPE_CLUSTER="$scratch/scope-cluster" \
+  "$review" main...HEAD >/dev/null
+
+argv_scope="$(tr '\0' '\n' <"$scratch/argv-scope")"
+[[ "$(sed -n 1p <<<"$argv_scope")" == 'review' ]]
+[[ "$(sed -n 2p <<<"$argv_scope")" == '--check-scope' ]]
+[[ "$argv_scope" != *'--instructions'* ]]
+grep -q '^\.agents/REVIEW\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing"
+# No cluster on a plain review: the scratch scope carries no resolution check.
+if grep -q 'cluster-resolution' "$scratch/scope-listing"; then
+  echo "plain review must not carry a cluster-resolution check" >&2
+  exit 1
+fi
+# The overlay itself is never written to; the scratch copy is.
+[[ "$argv_scope" != *"$scratch/overlay"* ]]
+
+# A duplicate cluster adds the per-stop resolution check to the scratch scope.
+BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+  BLUEFIN_REVIEW_RELATED='These pull requests are the SAME work: #7' \
+  PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-scope2" \
+  SCOPE_LISTING="$scratch/scope-listing2" SCOPE_CLUSTER="$scratch/scope-cluster2" \
+  "$review" main...HEAD >/dev/null
+grep -q '^\.agents/checks/cluster-resolution\.md$' "$scratch/scope-listing2"
+grep -q '#7' "$scratch/scope-cluster2"
+grep -q 'name: cluster-resolution' "$scratch/scope-cluster2"
+
+# restore the exit-code stub for any later assertions
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
+exit 23
+EOF
+chmod +x "$scratch/bin/goose"
+
 # --- maintainer actions stay gated and scoped ---------------------------------
 # The walk gained explicit maintainer action keys (m/M), so the old "never
 # merges" grep became these inverted invariants: the powers stay narrow, and

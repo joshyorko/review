@@ -34,6 +34,14 @@ CONTEXT_SKILLS="${BLUEFIN_REVIEW_CONTEXT_SKILLS:-pr-review queue-feed hive-revie
 # subprocess does not inherit those context files.
 KNOWLEDGE_FILE="${BLUEFIN_REVIEW_KNOWLEDGE_FILE:-${HOME}/agent.md}"
 
+# The image-owned review scope. `goose review --check-scope <DIR>` loads
+# .agents/REVIEW.md and .agents/checks/*.md from an out-of-tree directory, so
+# Bluefin's review doctrine reaches every review without writing into the
+# repository under review and without paying the --instructions text once per
+# check subprocess. When the overlay is absent (running outside the image),
+# reviews fall back to the --instructions pointer below.
+SCOPE_ROOT="${BLUEFIN_REVIEW_SCOPE_ROOT:-/opt/bluefin/review-scope}"
+
 # Open pull requests fetched per repository for duplicate detection. The busiest
 # factory repository sits well under this; the analyzer says so explicitly when
 # a pull request falls outside the page, so the limit can never be mistaken for
@@ -76,8 +84,30 @@ recommendation as one."
   fi
 }
 
-# Every review goes through here so both modes carry the same context.
+# Every review goes through here so both modes carry the same context. With
+# the image overlay present, context travels as a check scope: --check-scope
+# REPLACES repo-root discovery, so the scratch scope always carries the full
+# static overlay plus the per-stop cluster-resolution check when a duplicate
+# cluster exists. Without the overlay, the --instructions pointer carries the
+# same doctrine.
 goose_review() {
+  if [[ -d "${SCOPE_ROOT}/.agents" ]]; then
+    local scope status=0
+    scope="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review-scope.XXXXXX")"
+    mkdir -p "${scope}/.agents/checks"
+    cp "${SCOPE_ROOT}/.agents/REVIEW.md" "${scope}/.agents/REVIEW.md"
+    cp "${SCOPE_ROOT}/.agents/checks/"*.md "${scope}/.agents/checks/"
+    if [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]]; then
+      {
+        printf -- '---\nname: cluster-resolution\n---\n\n'
+        printf '%s\n' "$BLUEFIN_REVIEW_RELATED"
+        printf '\nName explicitly which pull request should merge and which should close as superseded, with evidence from the diffs.\n'
+      } >"${scope}/.agents/checks/cluster-resolution.md"
+    fi
+    goose review --check-scope "$scope" "$@" || status=$?
+    rm -rf "$scope"
+    return "$status"
+  fi
   local instructions
   instructions="$(review_instructions)"
   if [[ -n "$instructions" ]]; then

@@ -295,6 +295,15 @@ RUN mkdir -p /opt/bluefin/goose/config /opt/bluefin/goose/data /opt/bluefin/goos
 COPY --chown=1000:1000 image/config/goose.yaml /opt/bluefin/goose/config/config.yaml
 COPY image/config/local-agent-policy.md /opt/bluefin/local-agent-policy.md
 
+# The image-owned review scope: `goose review --check-scope` loads
+# .agents/REVIEW.md and .agents/checks/*.md from this out-of-tree directory,
+# so Bluefin's review doctrine reaches every review without writing into the
+# repository under review. --check-scope REPLACES repo-root discovery
+# (additive flag filed as aaif-goose/goose#11060), so Bluefin repositories
+# keep their checks in this shared overlay.
+COPY image/review-scope/REVIEW.md /opt/bluefin/review-scope/.agents/REVIEW.md
+COPY image/review-scope/checks/ /opt/bluefin/review-scope/.agents/checks/
+
 # Git hooks, wired via a global core.hooksPath by the entrypoint. Ergonomics
 # only -- `git commit --no-verify` bypasses every one of them.
 COPY --chmod=0755 image/git-hooks/ /opt/bluefin/git-hooks/
