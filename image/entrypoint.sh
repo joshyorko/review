@@ -17,15 +17,28 @@ if [ -n "${GOOSE_PROVIDER:-}" ] && [ "$GOOSE_PROVIDER" != github_copilot ]; then
   exit 1
 fi
 
+# A queue walk is the PR-review launch path: `bluefin-review queue` needs
+# GH_TOKEN and Goose but no Hive registration, so it skips the contributor.env
+# gate and the Hive handover below.
+queue_walk=false
+if [ "${1:-}" = queue ]; then
+  queue_walk=true
+  shift
+fi
+
 hive_config="${HOME}/.config/hive"
-if [ ! -f "${hive_config}/contributor.env" ]; then
+if [ "$queue_walk" = false ] && [ ! -f "${hive_config}/contributor.env" ]; then
   note "missing ${hive_config}/contributor.env"
   note "  mount your Hive config, or run: just contribute-setup goose"
+  note "  walking the PR queue needs no Hive: run the image with 'queue'"
   exit 1
 fi
 
-note 'Bluefin Operations | contributor runtime starting'
-
+if [ "$queue_walk" = true ]; then
+  note 'Bluefin Operations | PR queue walk starting (no Hive)'
+else
+  note 'Bluefin Operations | contributor runtime starting'
+fi
 # --- Goose configuration -----------------------------------------------------
 #
 # GOOSE_PATH_ROOT is the image-owned policy, data, and state seam. The pinned
@@ -71,6 +84,13 @@ if [ -d /opt/bluefin/git-hooks ]; then
   git config --global core.hooksPath /opt/bluefin/git-hooks || true
 fi
 
+# Contributor work forks the assigned repository, so `gh repo fork
+# --remote=true` leaves both `origin` and `upstream` tracking a `main`. Git
+# then refuses `git checkout main` with "matched multiple (2) remote tracking
+# branches" and prints this exact setting as the hint. Name the fork's remote
+# so the first checkout of a freshly forked repository just works.
+git config --global checkout.defaultRemote origin || true
+
 skills_root="${HOME}/.agents/skills"
 if [ -d "$skills_root" ]; then
   shopt -s nullglob
@@ -82,7 +102,7 @@ fi
 # package manager to obtain one (fsdk-containers#89). Naming them at startup
 # stops an agent from discovering it mid-task and reaching for a slow ad-hoc
 # `npx --yes` download.
-validation_tools=(bats shellcheck hadolint systemd-analyze pre-commit just podman)
+validation_tools=(bats shellcheck hadolint systemd-analyze pre-commit just podman actionlint)
 missing_validation_tools=()
 for validation_tool in "${validation_tools[@]}"; do
   if ! command -v "$validation_tool" >/dev/null 2>&1; then
@@ -93,15 +113,20 @@ if ((${#missing_validation_tools[@]})); then
   note "validation tools unavailable: ${missing_validation_tools[*]} (fsdk-containers#89)"
 fi
 
-# Assigned work is usually YAML -- workflows, manifests, skill frontmatter --
-# and the base ships no parser for it (fsdk-containers#88). Report that at
-# startup rather than letting it surface as a mid-task ModuleNotFoundError.
-# yq is a binary; PyYAML is a module, so neither check finds the other.
-missing_parsers=()
-command -v yq >/dev/null 2>&1 || missing_parsers+=(yq)
-python3 -c 'import yaml' >/dev/null 2>&1 || missing_parsers+=(PyYAML)
-if ((${#missing_parsers[@]})); then
-  note "no YAML parser: ${missing_parsers[*]} (fsdk-containers#88); read YAML as text"
+if [ "$queue_walk" = true ]; then
+  # The Hive knowledge base normally reaches the agent through the Hive
+  # runtime's ten-minute refresh. A queue walk has no Hive, so fetch the same
+  # export once, with the walker's own token, onto the path bluefin-review
+  # already names in its review instructions. Best-effort: the hub's auth
+  # redirects an expired token, and a walk without the export still works.
+  if [ -n "${GH_TOKEN:-}" ]; then
+    curl --fail --silent --show-error --max-time 30 \
+      --header "Authorization: Bearer ${GH_TOKEN}" \
+      "https://hosted-projectbluefin-knuckle-gjvq.hive.kubestellar.io/api/v1/knowledge" \
+      -o "${HOME}/agent.md" || rm -f "${HOME}/agent.md"
+  fi
+  note 'Bluefin Operations | PR queue walk (no Hive)'
+  exec bluefin-review queue "$@"
 fi
 
 # --- Hand over to Hive -------------------------------------------------------
@@ -111,10 +136,16 @@ fi
 # Hive's own documented flow. Running it in the foreground is deliberate: the
 # launcher never backgrounds or detaches the agent.
 # The attach client must describe the terminal that actually renders tmux.
-# FSDK includes only the narrow terminfo set compiled in the image, so fall
-# back to xterm when the caller's terminal is not available.
+# The base ships the full terminfo database, so the caller's TERM normally
+# resolves; the fallback covers terminals newer than the base's ncurses
+# (e.g. xterm-ghostty). A truecolor caller (COLORTERM) gets the direct-color
+# fallback; without it tmux downsamples every pane color to 256 and Goose
+# renders the wrong colors.
 tmux_fallback_term=xterm-256color
 if ! infocmp "${TERM:-}" >/dev/null 2>&1; then
+  case "${COLORTERM:-}" in
+  truecolor | 24bit) tmux_fallback_term=xterm-direct ;;
+  esac
   note "TERM=${TERM:-<unset>} has no terminfo; using ${tmux_fallback_term}"
   export TERM="$tmux_fallback_term"
 fi

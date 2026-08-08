@@ -148,10 +148,7 @@ require image/Containerfile \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux;' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/goose.tar.gz" --occurrence=1 ./goose > /usr/local/bin/goose;' \
   'COPY image/tmux.conf /etc/tmux.conf' \
-  'image/terminfo/xterm-256color.src /tmp/xterm-256color.src' \
-  'tic -x -o /usr/share/terminfo /tmp/xterm-256color.src' \
-  'image/terminfo/tmux-256color.src /tmp/tmux-256color.src' \
-  'tic -x -o /usr/share/terminfo /tmp/tmux-256color.src' \
+  'infocmp -x tmux-direct | grep -q' \
   'https://raw.githubusercontent.com/projectbluefin/common/${SKILLS_COMMIT}/docs/skills/index.json' \
   '--raw-base "https://raw.githubusercontent.com/projectbluefin/common/${SKILLS_COMMIT}/"' \
   '--out /home/dev/.agents/skills' \
@@ -425,9 +422,16 @@ require image/config/local-agent-policy.md \
   'it has no package' \
   'Probe with' \
   'are not installed' \
+  'gh run watch' \
   'that is an evidenced finding'
+# The policy tells the agent what the runtime lacks, so a tool the base
+# actually ships must never be named as absent: that steers every task into a
+# hand-rolled substitute. These are present at the pinned base digest.
+# shellcheck disable=SC2016 # Literal policy text, not shell expansion.
 forbid image/config/local-agent-policy.md \
-  'context7'
+  'context7' \
+  '`which`, `awk`' \
+  '`yq` and the PyYAML module'
 
 # GOOSE_PATH_ROOT keeps controlled policy/data/state out of Hive's runtime
 # config. The pinned runtime now links its knowledge export to Goose-native
@@ -445,15 +449,23 @@ require image/entrypoint.sh \
   'GOOSE_MOIM_MESSAGE_FILE' \
   '/opt/bluefin/local-agent-policy.md' \
   'core.hooksPath /opt/bluefin/git-hooks' \
+  'checkout.defaultRemote origin' \
   'shopt -s nullglob' \
-  'validation_tools=(bats shellcheck hadolint systemd-analyze pre-commit just podman)' \
+  'validation_tools=(bats shellcheck hadolint systemd-analyze pre-commit just podman actionlint)' \
   'validation tools unavailable: ${missing_validation_tools[*]} (fsdk-containers#89)' \
-  "python3 -c 'import yaml'" \
-  'no YAML parser: ${missing_parsers[*]} (fsdk-containers#88); read YAML as text' \
   'tmux_fallback_term=xterm-256color' \
   'infocmp "${TERM:-}"' \
+  'truecolor | 24bit) tmux_fallback_term=xterm-direct ;;' \
   'TERM=${TERM:-<unset>} has no terminfo; using ${tmux_fallback_term}' \
   '/usr/local/bin/contributor-agent.sh "$@" &' \
+  'queue_walk=false' \
+  '${1:-}" = queue' \
+  '$queue_walk" = false' \
+  'walking the PR queue needs no Hive' \
+  'PR queue walk starting (no Hive)' \
+  'api/v1/knowledge' \
+  'Authorization: Bearer ${GH_TOKEN}' \
+  'exec bluefin-review queue "$@"' \
   'tmux has-session -t contributor' \
   'tmux readiness diagnostics' \
   'tmux attach-session -t contributor' \
@@ -535,8 +547,10 @@ forbid image/entrypoint.sh \
   'tmux_term=xterm-256color'
 
 require image/tmux.conf \
-  'set -g default-terminal "tmux-256color"' \
-  'set -g mouse on'
+  'set -g default-terminal "tmux-direct"' \
+  'set-environment -g COLORTERM "truecolor"' \
+  'set -g mouse on' \
+  'set -g history-limit 50000'
 
 # This source-backed behavioral check fetches the exact pin and exercises the
 # hosted hook's curl rewrite without reaching the hosted service.

@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "2.5"
-last_updated: 2026-08-07
+version: "2.7"
+last_updated: 2026-08-08
 id: launcher
 one_line_purpose: Change review just recipes without breaking foreground.
 entry_point: docs/skills/launcher.md
@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [just, launcher, qemu, podman, foreground]
-description: "Maintains the three foreground review recipes, VM and container-only launch paths, and credential boundaries. Use when editing justfile."
+description: "Maintains the four foreground review recipes, VM and container-only launch paths, and credential boundaries. Use when editing justfile."
 metadata:
   type: runbook
   context7-sources: [/websites/podman_io_en]
@@ -32,18 +32,19 @@ Goose, or image build skill documents.
 
 ## Core Process
 
-1. Keep exactly three public recipes:
+1. Keep exactly four public recipes:
 
    | Recipe | Purpose |
    |---|---|
    | `review` | Run the disposable QEMU VM in the foreground. |
    | `review-container` | Run the contributor container directly for fast local iteration. |
    | `review-doctor` | Perform read-only preflight checks. |
+   | `review-queue` | Walk the static PR queue in the container; no Hive registration, no VM. |
 
    `just` reads only the current directory's justfile, so these recipes fail
    with `justfile does not contain recipe` from any other checkout. That is
    `just`'s behavior, not a launcher bug: fix it outside the repository with a
-   `~/.local/bin` shim that forwards these three names to this justfile, and
+   `~/.local/bin` shim that forwards these four names to this justfile, and
    do not add a wrapper recipe here to compensate.
 
 2. Keep both launch paths foreground. No detached Podman, background service,
@@ -60,11 +61,35 @@ Goose, or image build skill documents.
 4. Keep the container path narrow too. It mounts only the read-only Hive
    contributor configuration and runs the image entrypoint, which attaches to
    Hive's `contributor` session.
+   `review-queue` is the exception that proves the rule: it mounts nothing at
+   all and starts the image with the `queue` argument, which the entrypoint
+   dispatches to `bluefin-review queue` before the Hive config gate. The walk
+   needs a GitHub token from the first keystroke, so the recipe fails without
+   one rather than warning. Leading non-flag arguments are the model profile
+   and thinking effort — the same closed set `review-container` takes — and
+   everything from the first `-` flag onward forwards verbatim to
+   `bluefin-review queue`. Its instance name is `review-queue`, overridable
+   with `REVIEW_QUEUE_NAME` — the queue walk's analogue of
+   `REVIEW_CONTAINER_NAME`, and likewise the only instance knob it gets.
+   Which hive a launch contributes to is launcher configuration, not task
+   selection: `~/.config/hive/contributor.<name>.env` registrations sit
+   beside the default `contributor.env`, and the launch picks `REVIEW_HIVE`
+   first, then the current repository's directory name, then the default.
+   An explicit `REVIEW_HIVE` with no file yet registers one by running
+   upstream `contribute-setup` with an isolated `config_dir` so the default
+   registration is never clobbered. Every launch prints the hub it will
+   talk to; a silent default is how a contributor ends up watching one
+   hub's dashboard while their agent asks another for work.
 5. Keep Goose Copilot-only. The launcher resolves a Copilot credential for the
    provider secret and recomputes the provider and model from the environment
    at every launch. Nothing is persisted: not a secret, not a provider, not a
    model. There is no last-selection file, and `tests/just-onboarding.sh`
    asserts one is never written.
+   The configured-provider preflight reads Goose's own config and must
+   accept both keys Goose has shipped: current releases record the
+   selection as `active_provider:` beside a `providers:` map, older ones
+   wrote a bare `provider:`. Goose migrates the host file on its own, so
+   a preflight that knows only one key strands a configured host.
    `review-container` must set its own thinking-effort default before forming
    the Podman environment, while still honoring `GOOSE_THINKING_EFFORT` from
    the caller. Do not apply that container default to the VM or replace the
@@ -202,7 +227,7 @@ want to be certain which launcher you are invoking.
 
 ## Red Flags
 
-- A fourth public recipe or any start, stop, restart, kill, clean, or daemon
+- A fifth public recipe or any start, stop, restart, kill, clean, or daemon
   command.
 - A launch path whose final process is neither `exec`'d nor the last foreground
   command whose status propagates: `nohup`, `setsid`, `podman run -d`,
@@ -231,7 +256,7 @@ bash tests/just-onboarding.sh
 git diff --check
 ```
 
-The recipe list must contain only the three public commands. Doctor must not
+The recipe list must contain only the four public commands. Doctor must not
 start a VM or container.
 
 ## Sources

@@ -150,7 +150,8 @@ fix.
    step and must not be an argument or environment layer.
 10. Treat the image as a task runtime, not a general validation distribution.
    At startup, probe the baseline validation commands (`bats`, `shellcheck`,
-   `hadolint`, `systemd-analyze`, `pre-commit`, `just`, and `podman`) and
+   `hadolint`, `systemd-analyze`, `pre-commit`, `just`, `podman`, and
+   `actionlint`) and
    report only the missing ones, naming fsdk-containers#89 so the absence is
    traceable — `just` comes from the FSDK base — without blocking Hive or
    installing them solely to hide the absence.
@@ -178,7 +179,10 @@ fix.
     cold/warm builds, and native amd64/arm64 runtime behavior before and after
     each composition change. Deleting inherited files in a later layer does not
     reclaim the base layer.
-The publish workflow moves `:stable` on main. It also publishes immutable
+The publish workflow moves `:stable` on main and re-runs hourly on a
+schedule so a moved Goose `canary` asset reaches `:stable` without waiting
+for a merge; a scheduled run that resolves the same asset digests the
+published image already carries skips the build. It also publishes immutable
 `sha-<commit>` tags; use an immutable tag or digest when reproducibility is
 required. Do not use `:latest`.
 ## Pin Maintenance
@@ -278,6 +282,12 @@ resolves under `/usr/local/bin` — the shape a reintroduced shim would take.
   cross-distribution closure.
 - A local reimplementation of a standard utility, or a shim surviving a gap the
   FSDK base has since closed.
+- A document, prompt, or policy naming a tool as absent without executing it at
+  the pinned digest first. `local-agent-policy.md` told the agent that `which`,
+  `awk`, `xargs`, `ps`, `tar`, `less`, `file`, `diff` and `patch` were "not
+  installed" while all nine were present in `/usr/sbin`, so every task routed
+  around them into hand-rolled `sed`/`python3` substitutes. A false absence
+  claim costs the same as a missing tool and is invisible in a passing test.
 - A base gap described in a document instead of filed as an issue, or any
   section that exists to explain a known-broken thing.
 
