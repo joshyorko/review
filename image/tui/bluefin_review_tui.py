@@ -260,6 +260,59 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
     return ""
 
 
+# The merge queue's segments, in the order a maintainer drains them, with the
+# same colours the rows use so the bar and the list agree.
+QUEUE_SEGMENTS = [
+    ("queued", "queued", "green"),
+    ("ready", "ready", "bold green"),
+    ("review", "review", "cyan"),
+    ("ci", "CI", "yellow"),
+    ("conflicts", "conflicts", "red"),
+    ("unclear", "unclear", "grey62"),
+]
+
+
+def classify_queue_item(item: dict) -> str:
+    """Which segment of a repository's merge queue this pull request sits in.
+
+    First match wins, and the order is the maintainer's: something already
+    handed to the sweep is queued no matter what else is true of it, and a
+    conflict outranks a failing check because it blocks the check from
+    meaning anything.
+    """
+    if "lgtm" in (item.get("labels") or []):
+        return "queued"
+    if item.get("recommended_action") == "ready-for-human-merge":
+        return "ready"
+    if item.get("mergeable_state") == "dirty":
+        return "conflicts"
+    if item.get("check_state") == "failure":
+        return "ci"
+    if item.get("recommended_action") == "review":
+        return "review"
+    return "unclear"
+
+
+def meter_bar(counts: dict[str, int], width: int = 24) -> str:
+    """A stacked bar of one repository's merge queue.
+
+    Every non-empty segment gets at least one cell: a single pull request
+    waiting on the sweep is exactly the thing a maintainer needs to see, and
+    proportional rounding is what would hide it.
+    """
+    total = sum(counts.values())
+    if not total:
+        return ""
+    cells: list[str] = []
+    for key, _, colour in QUEUE_SEGMENTS:
+        count = counts.get(key, 0)
+        if not count:
+            continue
+        size = max(1, round(count / total * width))
+        cells.append(f"[{colour}]{'█' * size}[/{colour}]")
+    return "".join(cells)
+
+
 @dataclass
 class QueueFilters:
     """Which of the snapshot's items reach the dashboard.
@@ -793,6 +846,7 @@ class ReviewDashboard(App):
         # Keys to re-select after a refresh: a refresh that silently empties
         # the batch you spent a minute building is worse than no refresh.
         self.reselect: set[str] = set()
+        self.all_items: list[dict] = []
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -857,6 +911,17 @@ class ReviewDashboard(App):
         stop = self.current
         if stop:
             self.render_context(stop)
+
+    def repo_queue(self, repository: str) -> tuple[dict[str, int], int]:
+        """This repository's merge queue, by segment, and its total."""
+        counts: dict[str, int] = {}
+        for item in self.all_items:
+            if item.get("repository") != repository:
+                continue
+            counts[classify_queue_item(item)] = (
+                counts.get(classify_queue_item(item), 0) + 1
+            )
+        return counts, sum(counts.values())
 
     def hive_worker_for(self, stop: Stop) -> dict | None:
         """The contributor Hive currently has on this exact pull request."""
@@ -923,9 +988,13 @@ class ReviewDashboard(App):
         self.generated_at = snapshot.get("generated_at", "")
         # Keep the whole snapshot: the action filter is a view over it, so
         # narrowing and widening never needs another fetch.
+        # The unfiltered set: "how busy is this repository" must count the
+        # maintainer's own pull requests too, even though they never appear
+        # as stops to review.
+        self.all_items = snapshot.get("items", [])
         self.snapshot_items = [
             item
-            for item in snapshot.get("items", [])
+            for item in self.all_items
             # Own-work filtering: a maintainer reviews other people's work.
             if not (self.self_login and item.get("author") == self.self_login)
         ]
@@ -1253,6 +1322,18 @@ class ReviewDashboard(App):
             lines.extend(summarise(overlaps, 2))
         if not dupes and not overlaps:
             lines.append("no duplicates or overlaps in the open set")
+        counts, total = self.repo_queue(stop.repository)
+        if total:
+            summary = " · ".join(
+                f"[{colour}]{counts[key]} {label}[/{colour}]"
+                for key, label, colour in QUEUE_SEGMENTS
+                if counts.get(key)
+            )
+            lines.append(
+                f"[b]merge queue[/b] {escape(stop.repository)} — {total} open"
+            )
+            lines.append(f"  {meter_bar(counts)}")
+            lines.append(f"  {summary}")
         lines.append(f"skills   ~/.agents/skills (org inventory)")
         worker = self.hive_worker_for(stop)
         if worker:

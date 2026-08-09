@@ -460,6 +460,32 @@ construction: steering directs attention within a review and can never
 replace the doctrine or license an approval, a merge, or any other state
 change. The steer is recorded with the review's outcome in the trace.
 
+### How busy the repository is
+
+Each stop also shows the merge queue of its own repository, so you can tell a
+repository with one thing left from one with thirty:
+
+```
+ merge queue projectbluefin/bluefin — 5 open
+   ████████████████████████
+   1 review · 1 CI · 1 conflicts · 2 unclear
+```
+
+Segments carry the same colours as the rows, in the order a maintainer drains
+them: `queued` (already labelled `lgtm`, waiting on the sweep), `ready`,
+`review`, `CI`, `conflicts`, `unclear`. First match wins — anything handed to
+the sweep counts as queued whatever else is true of it, and a conflict
+outranks a failing check because the check cannot mean anything until the
+conflict is gone.
+
+Every non-empty segment gets at least one cell. One pull request waiting on
+the sweep behind sixty unclear ones is exactly what you need to see, and
+proportional rounding is what would hide it.
+
+The meter counts **all** open pull requests in that repository, including your
+own — "how busy is this repository" is a different question from "what is left
+for me to review", and only the second one excludes your own work.
+
 ### Duplicates
 
 The queue holds real duplicates, so each stop also reports a pull request's

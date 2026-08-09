@@ -1209,6 +1209,80 @@ async def main() -> int:
     )
     gh_log.write_text("")
 
+    # ── the repository's merge queue, as a meter ─────────────────────────
+    check(
+        tui.classify_queue_item(
+            {"labels": ["lgtm"], "mergeable_state": "dirty", "check_state": "failure"}
+        )
+        == "queued",
+        "anything already handed to the sweep counts as queued",
+    )
+    check(
+        tui.classify_queue_item(
+            {"recommended_action": "ready-for-human-merge", "labels": []}
+        )
+        == "ready",
+        "merge-ready work must be its own segment",
+    )
+    check(
+        tui.classify_queue_item(
+            {"mergeable_state": "dirty", "check_state": "failure", "labels": []}
+        )
+        == "conflicts",
+        "a conflict outranks a failing check — the check cannot mean anything yet",
+    )
+    check(
+        tui.classify_queue_item({"check_state": "failure", "labels": []}) == "ci",
+        "failing checks are their own segment",
+    )
+    check(
+        tui.classify_queue_item({"labels": []}) == "unclear",
+        "anything unclassified must fall to unclear, never vanish",
+    )
+    check(tui.meter_bar({}) == "", "an empty queue draws no bar")
+    lone = tui.meter_bar({"queued": 1, "unclear": 60})
+    check(
+        "[green]" in lone,
+        f"one pull request waiting on the sweep must still be visible, got {lone!r}",
+    )
+
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        # The meter counts the maintainer's own work, which never appears as a
+        # stop: "how busy is this repository" is not "what is left for me".
+        counts, total = app.repo_queue("projectbluefin/review")
+        check(
+            total == 1,
+            f"the meter must count own-authored work too, got {total} for review",
+        )
+        check(
+            not any(s.repository == "projectbluefin/review" for s in app.stops),
+            "own work must still be absent from the stops",
+        )
+        stop = app.stops[0]
+        stop.live = {"isDraft": False}
+        app.render_evidence(stop)
+        for _ in range(200):
+            if "merge queue" in str(app.query_one("#context", tui.Static).render()):
+                break
+            await pilot.pause(0.05)
+        context = str(app.query_one("#context", tui.Static).render())
+        check(
+            "merge queue" in context and "projectbluefin/bluefinctl" in context,
+            f"the context pane must show the repository's queue, got {context!r}",
+        )
+        check(
+            "1 open" in context,
+            f"the meter must state how many are open, got {context!r}",
+        )
+        check("█" in context, "the meter must draw a bar")
+    gh_log.write_text("")
+
     # ── the gate is always escapable ─────────────────────────────────────
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:
