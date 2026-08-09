@@ -78,6 +78,15 @@ Goose, or image build skill documents.
    registration is never clobbered. Every launch prints the hub it will
    talk to; a silent default is how a contributor ends up watching one
    hub's dashboard while their agent asks another for work.
+   Mount the selected registration and nothing else. Bind-mounting
+   `~/.config/hive` and overlaying the selected file on top of it looks
+   equivalent and is not: rootless Podman prepares the nested target through
+   the already-mounted host directory, so a named registration made target
+   creation escape to the host and leave a zero-byte `contributor.env` owned
+   by a subordinate uid, which the container then failed on. Use the shared
+   `:z` relabel, never `:Z` — concurrent named workers may share one
+   registration, and a private MCS category revokes the running container's
+   access when the next one starts.
 4. Keep Goose Copilot-only. The launcher resolves a Copilot credential for the
    provider secret and recomputes the provider and model from the environment
    at every launch. Nothing is persisted: not a secret, not a provider, not a

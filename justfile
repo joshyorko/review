@@ -752,12 +752,23 @@ review-container profile="" effort="":
       # settings and is exactly that. Mapping the host user onto dev's uid
       # instead makes the mount readable without loosening the host mode.
       --userns "keep-id:uid=1000,gid=1000"
-      --volume "${HOME}/.config/hive:/home/dev/.config/hive:ro"
-      # The selected registration lands on the path the relay reads. When a
-      # named registration (contributor.<name>.env) is in play this overlays
-      # it on top of the directory mount; with the default it is the same
-      # file mounted over itself.
-      --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro"
+      # The selected registration, and nothing else from ~/.config/hive.
+      #
+      # This used to also bind-mount the whole directory, with the selected
+      # file overlaid on top. Rootless Podman prepares the nested target
+      # through the already-mounted host directory, so with a named
+      # registration (REVIEW_HIVE=<name>) the target creation escaped back to
+      # the host: it created a zero-byte ~/.config/hive/contributor.env owned
+      # by a subordinate uid, and the container then failed on the file it had
+      # just caused to exist. Nothing in the image reads anything else from
+      # that directory, so one file mount is both the fix and the smaller
+      # exposure -- a named worker can no longer see other registrations.
+      #
+      # ':z' is the shared SELinux relabel. ':Z' would give each container a
+      # private MCS category, and review supports concurrent named workers
+      # sharing one registration: the second launch would revoke the first
+      # live container's access to it.
+      --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro,z"
       --env "AGENT_BACKEND=goose"
       # Podman does not pass COLORTERM through on its own; the entrypoint
       # needs it to pick the direct-color attach fallback for a host TERM
