@@ -463,12 +463,23 @@ change. The steer is recorded with the review's outcome in the trace.
 ### Duplicates
 
 The queue holds real duplicates, so each stop also reports a pull request's
-near-neighbours in the same repository:
+near-neighbours in the same repository — with enough of each to choose
+between them without opening a browser tab per candidate:
 
 ```
- dupe-of  #26 (same dependency actions/checkout)
- overlaps #25, #24, #22
+ dupe-of  2 doing the same work — M resolves the cluster
+   #26 chore(deps): update actions/checkout action to v8
+      by renovate · approved, 4 files, 2026-08-05
+      same dependency (actions/checkout)
+   #24 chore(deps): update actions/checkout action to v7
+      by renovate · draft, conflicting, 2 files, 2026-08-01
+      same dependency (actions/checkout)
+ overlaps 3 touching the same files (ordering hazard, not duplication)
 ```
+
+Which of three duplicates to keep is the whole decision, and a bare list of
+numbers said only that a decision was required. The listing this is built from
+already carries the titles and states, so the summary costs nothing extra.
 
 `dupe-of` means the two are the *same work*: Renovate raises a digest bump and a
 version bump for one dependency, and several agents can close one issue from

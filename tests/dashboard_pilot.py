@@ -604,6 +604,16 @@ async def main() -> int:
         tui.link("a[b]c", "https://x") == '[link="https://x"]a\\[b]c[/link]',
         f"link() must escape its text, got {tui.link('a[b]c', 'https://x')!r}",
     )
+    # Neither rich's nor Textual's escape covers an uppercase tag, but the
+    # renderer eats one all the same: "[WIP] fix" lost its prefix.
+    from textual.content import Content as _Content
+
+    for raw in ("[WIP] fix the thing", "([H] asks again)", "a [review] b", "100% [done]"):
+        check(
+            _Content.from_markup(tui.escape(raw)).plain == raw,
+            f"escape() must survive the markup parser: {raw!r} became "
+            f"{_Content.from_markup(tui.escape(raw)).plain!r}",
+        )
 
     bracket_queue = workdir / "brackets.json"
     bracket_queue.write_text(
@@ -1111,6 +1121,92 @@ async def main() -> int:
             if isinstance(app.screen, tui.ConfirmMutation):
                 await pilot.press("escape")
                 await pilot.pause()
+    gh_log.write_text("")
+
+    # ── duplicates come with enough summary to choose between them ───────
+    # "dupe-of #26, #25, #24" says a decision is required and nothing about
+    # how to make it; which one to keep is the whole question.
+    cluster_gh = write_stub(
+        workdir / "gh",
+        f'printf "%s\\n" "$*" >>"{gh_log}"\n'
+        'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
+        'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr list" ]; then cat <<\'JSON\'\n'
+        '[{"number":31,"title":"chore(deps): update actions/checkout action to v7",'
+        '"files":[{"path":"a.yml"}],"closingIssuesReferences":[],'
+        '"author":{"login":"renovate"},"updatedAt":"2026-08-01T00:00:00Z",'
+        '"isDraft":false,"reviewDecision":"APPROVED","mergeable":"MERGEABLE"},'
+        '{"number":44,"title":"chore(deps): update actions/checkout action to v8",'
+        '"files":[{"path":"a.yml"},{"path":"b.yml"}],"closingIssuesReferences":[],'
+        '"author":{"login":"someone"},"updatedAt":"2026-08-05T00:00:00Z",'
+        '"isDraft":true,"reviewDecision":"","mergeable":"CONFLICTING"}]\n'
+        "JSON\n"
+        "exit 0; fi\n"
+        "exit 0\n",
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+        stop.live = {"isDraft": False}
+        dupes, _ = app.cluster(stop)
+        check(
+            [d["number"] for d in dupes] == [44],
+            f"the duplicate must be found, got {dupes}",
+        )
+        if dupes:
+            near = dupes[0]
+            check(
+                near["title"].startswith("chore(deps): update actions/checkout"),
+                "a duplicate must carry its title",
+            )
+            check(
+                "same dependency" in near["why"],
+                f"a duplicate must say why it is one, got {near['why']!r}",
+            )
+            check(
+                near["author"] == "someone" and near["draft"] is True
+                and near["mergeable"] == "CONFLICTING" and near["files"] == 2,
+                f"a duplicate must carry the state you judge it by, got {near}",
+            )
+        app.render_evidence(stop)
+        for _ in range(200):
+            if "dupe-of" in str(app.query_one("#context", tui.Static).render()):
+                break
+            await pilot.pause(0.05)
+        context = str(app.query_one("#context", tui.Static).render())
+        for expected in (
+            "dupe-of",
+            "#44",
+            "actions/checkout action to v8",
+            "someone",
+            "draft",
+            "conflicting",
+            "2 files",
+            "same dependency",
+        ):
+            check(
+                expected in context,
+                f"the context pane must show {expected!r}, got {context!r}",
+            )
+    write_stub(
+        workdir / "gh",
+        f'printf "%s\\n" "$*" >>"{gh_log}"\n'
+        'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
+        'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr diff" ]; then\n'
+        '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+    )
     gh_log.write_text("")
 
     # ── the gate is always escapable ─────────────────────────────────────

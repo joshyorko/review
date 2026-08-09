@@ -24,7 +24,6 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from rich.markup import escape
 from rich.syntax import Syntax
 from textual import work
 from textual.app import App, ComposeResult
@@ -146,6 +145,20 @@ def reviewer_standing(association: str) -> str:
     one round trip per reviewer per stop.
     """
     return "maintainer" if association in MAINTAINER_ASSOCIATIONS else "community"
+
+
+def escape(text: str) -> str:
+    """Make arbitrary text safe for the markup parser.
+
+    Neither `rich.markup.escape` nor `textual.markup.escape` escapes a tag
+    that starts with an uppercase letter -- their tag patterns only match
+    lowercase -- but Textual's renderer consumes `[H]` and `[WIP]` all the
+    same. So a pull request titled "[WIP] fix the thing" silently lost its
+    prefix, and so did the "[H]" in this dashboard's own hints. Escape every
+    opening bracket instead of trying to predict which ones the parser will
+    claim.
+    """
+    return str(text).replace("\\", "\\\\").replace("[", "\\[")
 
 
 def pr_url(repository: str, number: int) -> str:
@@ -1069,7 +1082,9 @@ class ReviewDashboard(App):
             listing = gh(
                 "pr", "list", "--repo", repo, "--state", "open",
                 "--limit", PULL_FETCH_LIMIT,
-                "--json", "number,title,files,closingIssuesReferences",
+                "--json",
+                "number,title,files,closingIssuesReferences,author,"
+                "updatedAt,isDraft,reviewDecision,mergeable",
             )
             if listing.returncode != 0:
                 return []
@@ -1095,12 +1110,37 @@ class ReviewDashboard(App):
             if other["number"] == stop.number:
                 continue
             if subject and dependency_subject(other["title"]) == subject:
-                dupes.append(other["number"])
+                dupes.append(self.neighbour(other, f"same dependency ({subject})"))
             elif issues(mine) & issues(other):
-                dupes.append(other["number"])
+                shared = ", ".join(f"#{n}" for n in sorted(issues(mine) & issues(other)))
+                dupes.append(self.neighbour(other, f"closes the same issue ({shared})"))
             elif paths(mine) & paths(other):
-                overlaps.append(other["number"])
+                shared = sorted(paths(mine) & paths(other))
+                why = f"{len(shared)} shared file{'s' if len(shared) > 1 else ''}"
+                overlaps.append(self.neighbour(other, f"{why}: {shared[0]}"))
         return dupes, overlaps
+
+    @staticmethod
+    def neighbour(pull: dict, why: str) -> dict:
+        """One near-neighbour, summarised well enough to judge without opening it.
+
+        A bare "dupe-of #26, #25, #24" tells a maintainer that a decision is
+        required and nothing about how to make it — which of the three to keep
+        is the whole question, and answering it meant three browser tabs. The
+        listing this comes from already carries the titles and states, so the
+        summary is free.
+        """
+        return {
+            "number": pull["number"],
+            "title": pull.get("title", ""),
+            "why": why,
+            "author": (pull.get("author") or {}).get("login", "?"),
+            "draft": bool(pull.get("isDraft")),
+            "review": pull.get("reviewDecision") or "",
+            "mergeable": pull.get("mergeable") or "",
+            "files": len(pull.get("files") or []),
+            "updated": (pull.get("updatedAt") or "")[:10],
+        }
 
     def render_evidence(self, stop: Stop) -> None:
         if self.current is not stop:
@@ -1174,15 +1214,43 @@ class ReviewDashboard(App):
     def render_context(self, stop: Stop) -> None:
         dupes, overlaps = self.cluster(stop)
         lines = ["[b]CONTEXT & VERIFICATION[/b]"]
-        linked = lambda numbers: ", ".join(
-            link(f"#{n}", pr_url(stop.repository, n)) for n in numbers
-        )
+
+        def summarise(neighbours: list[dict], limit: int) -> list[str]:
+            out = []
+            for near in neighbours[:limit]:
+                marks = []
+                if near["draft"]:
+                    marks.append("draft")
+                if near["review"]:
+                    marks.append(near["review"].lower())
+                if near["mergeable"] == "CONFLICTING":
+                    marks.append("conflicting")
+                marks.append(f"{near['files']} files")
+                if near["updated"]:
+                    marks.append(near["updated"])
+                out.append(
+                    f"  {link('#' + str(near['number']), pr_url(stop.repository, near['number']))} "
+                    f"{escape(near['title'][:54])}"
+                )
+                out.append(
+                    f"     by {escape(near['author'])} · {escape(', '.join(marks))}"
+                )
+                out.append(f"     {escape(near['why'])}")
+            if len(neighbours) > limit:
+                out.append(f"  … and {len(neighbours) - limit} more")
+            return out
+
         if dupes:
-            lines.append(f"dupe-of  {linked(dupes)} — resolve with M")
+            lines.append(
+                f"[b]dupe-of[/b]  {len(dupes)} doing the same work — M resolves the cluster"
+            )
+            lines.extend(summarise(dupes, 3))
         if overlaps:
             lines.append(
-                f"overlaps {linked(overlaps[:6])} (ordering hazard, not duplication)"
+                f"[b]overlaps[/b] {len(overlaps)} touching the same files "
+                "(ordering hazard, not duplication)"
             )
+            lines.extend(summarise(overlaps, 2))
         if not dupes and not overlaps:
             lines.append("no duplicates or overlaps in the open set")
         lines.append(f"skills   ~/.agents/skills (org inventory)")
@@ -1742,10 +1810,16 @@ class ReviewDashboard(App):
                 lines.append(f"linked issues: {issues}")
         dupes, overlaps = self.cluster(stop)
         if dupes:
-            lines.append(f"duplicates: {', '.join(f'#{n}' for n in dupes)}")
+            lines.append("duplicates:")
+            for near in dupes:
+                lines.append(
+                    f"  #{near['number']} {near['title']} "
+                    f"(by {near['author']}, {near['why']})"
+                )
         if overlaps:
             lines.append(
-                f"overlaps (ordering hazard): {', '.join(f'#{n}' for n in overlaps[:6])}"
+                "overlaps (ordering hazard): "
+                + ", ".join(f"#{near['number']}" for near in overlaps[:6])
             )
         self.copy_to_clipboard("\n".join(lines))
         self.notify(
@@ -1758,7 +1832,7 @@ class ReviewDashboard(App):
             return
         if not self._queueable(stop):
             return
-        dupes, _ = self.cluster(stop)
+        dupes = [near["number"] for near in self.cluster(stop)[0]]
         if not dupes:
             self.notify("no duplicates in the open set; nothing to resolve.")
             return
