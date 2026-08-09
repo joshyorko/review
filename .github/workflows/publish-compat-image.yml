@@ -19,7 +19,17 @@ on:
 # cancelled: 'refs/tags/*' evaluates this to false.
 concurrency:
   group: publish-review-image-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  # A scheduled run must never cancel a push. The schedule exists to catch
+  # Goose's canary tag moving without a commit, and it skips the build when
+  # ':stable' already carries the current asset digests -- so when it cancels
+  # an in-progress push it replaces a run that would have published new source
+  # with one that publishes nothing, and reports success for doing it. That
+  # silently stranded a commit on 'main' with ':stable' still on its parent.
+  # Queueing instead costs the schedule a few minutes and cannot strand
+  # anything: by the time it runs, the push has published.
+  cancel-in-progress: >-
+    ${{ github.event_name != 'schedule'
+        && !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   attestations: write
