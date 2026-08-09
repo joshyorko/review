@@ -24,6 +24,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from rich.markup import escape
 from rich.syntax import Syntax
 from textual import work
 from textual.app import App, ComposeResult
@@ -110,6 +111,30 @@ STOP_GRACE_SECONDS = 5.0
 # work, not silent stubs; the handlers below name the issue.
 GHOST_BUILD_ISSUE = "projectbluefin/review#133"
 DOCS_UPDATE_ISSUE = "projectbluefin/review#134"
+
+
+def pr_url(repository: str, number: int) -> str:
+    return f"https://github.com/{repository}/pull/{number}"
+
+
+def issue_url(repository: str, number: int) -> str:
+    return f"https://github.com/{repository}/issues/{number}"
+
+
+def link(text: str, url: str) -> str:
+    """Markup for a terminal hyperlink (OSC 8), with the text escaped.
+
+    Everything shown here is somebody else's text — pull request titles carry
+    `[skip ci]`, label names carry brackets — and the markup parser reads a
+    bracket as a tag. Unescaped, `[review]` and `[skip ci]` were being
+    silently eaten from the queue rows, so the action tag never appeared and
+    titles quietly lost words. Escape at the point of display, once, in the
+    helper that also makes the link.
+
+    The URL is quoted because Textual's markup value parser stops at the
+    colon in `https:` otherwise.
+    """
+    return f'[link="{url}"]{escape(text)}[/link]'
 
 
 def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
@@ -302,7 +327,8 @@ class DiffScreen(ModalScreen[None]):
             f"across {live.get('changedFiles', '?')} files"
         )
         yield Static(
-            f" {stop.key} — {stop.title[:70]}  ({size})  [escape] closes",
+            f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
+            f"{escape(stop.title[:70])}  ({size})  {escape('[escape]')} closes",
             id="diff-header",
         )
         with ScrollableContainer(id="diff-scroll"):
@@ -369,8 +395,9 @@ class ReviewScreen(Screen):
         stop = self.stop_record
         yield Header(show_clock=True)
         yield Static(
-            f" reviewing {stop.repository}#{stop.number} — starting…"
-            + (f"  steer: {self.steer}" if self.steer else ""),
+            f" reviewing {link(stop.key, pr_url(stop.repository, stop.number))}"
+            " — starting…"
+            + (f"  steer: {escape(self.steer)}" if self.steer else ""),
             id="review-status",
         )
         yield RichLog(highlight=False, markup=False, wrap=True, id="review-log")
@@ -418,7 +445,8 @@ class ReviewScreen(Screen):
     def mark_running(self) -> None:
         stop = self.stop_record
         self.query_one("#review-status", Static).update(
-            f" reviewing {stop.repository}#{stop.number} — running; [x] stops it"
+            f" reviewing {link(stop.key, pr_url(stop.repository, stop.number))}"
+            f" — running; {escape('[x]')} stops it"
         )
 
     def append(self, line: str) -> None:
@@ -451,7 +479,8 @@ class ReviewScreen(Screen):
         status.remove_class("running")
         status.add_class(outcome)
         status.update(
-            f" {stop.repository}#{stop.number} — {state} ({elapsed}s) — [escape] closes"
+            f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
+            f"{escape(state)} ({elapsed}s) — {escape('[escape]')} closes"
         )
         trace(
             {
@@ -649,11 +678,15 @@ class ReviewDashboard(App):
         self.load_hive()
         if not self.hive_workers:
             return
-        lines = [
-            f"{worker['login']}: {worker['task'].get('repo', '?')}"
-            f"#{worker['task'].get('number', '?')}"
-            for worker in self.hive_workers[:6]
-        ]
+        lines = []
+        for worker in self.hive_workers[:6]:
+            task = worker["task"]
+            repo = str(task.get("repo", "?"))
+            number = task.get("number", 0)
+            lines.append(
+                f"{escape(worker['login'])}: "
+                f"{link(f'{repo}#{number}', pr_url(repo, number))}"
+            )
         self.notify("Hive is working on:\n" + "\n".join(lines))
 
     def action_steer(self) -> None:
@@ -723,7 +756,13 @@ class ReviewDashboard(App):
         for stop in stops:
             tag = " (BATCHABLE)" if stop.batchable else ""
             queue.append(
-                ListItem(Label(f"{stop.key}: {stop.title[:60]}{tag} [{stop.action}]"))
+                ListItem(
+                    Label(
+                        f"{link(stop.key, pr_url(stop.repository, stop.number))}: "
+                        f"{escape(stop.title[:60])}{tag} "
+                        f"{escape('[' + stop.action + ']')}"
+                    )
+                )
             )
         self.refresh_status()
         if stops:
@@ -850,14 +889,18 @@ class ReviewDashboard(App):
         bad = sum(1 for o in outcomes if o in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"))
         pending = len(outcomes) - ok - bad
         issues = ", ".join(
-            f"#{r['number']}" for r in (live.get("closingIssuesReferences") or [])
+            link(f"#{r['number']}", issue_url(stop.repository, r["number"]))
+            for r in (live.get("closingIssuesReferences") or [])
         ) or "-"
-        labels = ", ".join(l["name"] for l in (live.get("labels") or [])) or "-"
+        labels = ", ".join(
+            escape(l["name"]) for l in (live.get("labels") or [])
+        ) or "-"
         author = (live.get("author") or {}).get("login", stop.author or "-")
         self.query_one("#details", Static).update(
-            f"[b]{stop.key}[/b]  {stop.title}\n"
-            f"queue says: {stop.action}\n"
-            f"author   {author}\n"
+            f"[b]{link(stop.key, pr_url(stop.repository, stop.number))}[/b]  "
+            f"{escape(stop.title)}\n"
+            f"queue says: {escape(stop.action)}\n"
+            f"author   {link(author, f'https://github.com/{author}')}\n"
             f"state    {live.get('state', '?')}    "
             f"head {str(live.get('headRefOid', ''))[:12] or '?'}\n"
             f"draft    {live.get('isDraft', '?')}    "
@@ -875,13 +918,15 @@ class ReviewDashboard(App):
     def render_context(self, stop: Stop) -> None:
         dupes, overlaps = self.cluster(stop)
         lines = ["[b]CONTEXT & VERIFICATION[/b]"]
+        linked = lambda numbers: ", ".join(
+            link(f"#{n}", pr_url(stop.repository, n)) for n in numbers
+        )
         if dupes:
-            lines.append(
-                f"dupe-of  {', '.join(f'#{n}' for n in dupes)} — resolve with M"
-            )
+            lines.append(f"dupe-of  {linked(dupes)} — resolve with M")
         if overlaps:
-            shown = ", ".join(f"#{n}" for n in overlaps[:6])
-            lines.append(f"overlaps {shown} (ordering hazard, not duplication)")
+            lines.append(
+                f"overlaps {linked(overlaps[:6])} (ordering hazard, not duplication)"
+            )
         if not dupes and not overlaps:
             lines.append("no duplicates or overlaps in the open set")
         lines.append(f"skills   ~/.agents/skills (org inventory)")
@@ -890,12 +935,17 @@ class ReviewDashboard(App):
             # The one thing worth interrupting a review for: an agent is
             # changing this pull request right now, so the diff on screen is
             # about to be stale.
+            login = worker["login"]
+            task_id = str(worker["task"].get("task_id", "?"))
             lines.append(
-                f"hive     {worker['login']} is working on THIS now "
-                f"({worker['task'].get('task_id', '?')})"
+                f"hive     {link(login, 'https://github.com/' + login)} "
+                f"is working on THIS now ({escape(task_id)})"
             )
         elif self.hive_state:
-            lines.append(f"hive     {self.hive_state} — nobody on this one ([H] asks again)")
+            lines.append(
+                f"hive     {escape(self.hive_state)} — nobody on this one "
+                f"{escape('([H] asks again)')}"
+            )
         lines.append(f"trace    {TRACE_PATH}")
         self.call_from_thread(
             self.query_one("#context", Static).update, "\n".join(lines)

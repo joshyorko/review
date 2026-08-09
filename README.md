@@ -300,6 +300,13 @@ decision, mergeability, size, and check totals — read live from GitHub rather
 than from the snapshot, because a stale "clean" reading is the one most likely
 to mislead a reviewer.
 
+Everything that names a pull request, an issue, or a person is a terminal
+hyperlink (OSC 8): queue rows, the evidence header, linked issues, duplicate
+and overlap references, the author, the Hive contributor working on a stop,
+and both screen headers. Ctrl-click or click them in any terminal that
+supports the sequence — the same capability `h` already relies on for the
+clipboard.
+
 Stops that are no longer open on GitHub are refused at the point of action —
 the snapshot can be hours old, and GitHub is the state.
 

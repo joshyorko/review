@@ -588,6 +588,91 @@ async def main() -> int:
         )
     gh_log.write_text("")
 
+    # ── everything identifying a pull request is a hyperlink ─────────────
+    # And the bug found while adding them: Rich reads a bracket as markup, so
+    # the unescaped "[review]" action tag and any title carrying "[skip ci]"
+    # were being silently eaten before they reached the screen.
+    check(
+        tui.pr_url("o/r", 7) == "https://github.com/o/r/pull/7",
+        "pull request links must point at the pull request",
+    )
+    check(
+        tui.issue_url("o/r", 7) == "https://github.com/o/r/issues/7",
+        "issue links must point at the issue, not the pull request",
+    )
+    check(
+        tui.link("a[b]c", "https://x") == '[link="https://x"]a\\[b]c[/link]',
+        f"link() must escape its text, got {tui.link('a[b]c', 'https://x')!r}",
+    )
+
+    bracket_queue = workdir / "brackets.json"
+    bracket_queue.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-08-08T00:00:00Z",
+                "items": [
+                    {
+                        "repository": "projectbluefin/bluefinctl",
+                        "number": 31,
+                        "recommended_action": "review",
+                        "title": "fix: [skip ci] guard the release",
+                        "author": "someone-else",
+                    }
+                ],
+            }
+        )
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters(url=bracket_queue.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        rendered = (
+            app.query_one("#queue", tui.ListView)
+            .children[0]
+            .query_one(tui.Label)
+            .render()
+        )
+        row = str(rendered)
+        row_links = " ".join(str(span.style) for span in rendered.spans)
+        check(
+            "[skip ci]" in row,
+            f"a bracketed title must survive to the screen, got {row!r}",
+        )
+        check(
+            "[review]" in row,
+            f"the action tag must survive to the screen, got {row!r}",
+        )
+        check(
+            "https://github.com/projectbluefin/bluefinctl/pull/31" in row_links,
+            f"each queue row must link to its pull request, got {row_links!r}",
+        )
+        app.stops[0].live = {
+            "isDraft": False,
+            "closingIssuesReferences": [{"number": 12}],
+            "labels": [{"name": "kind/bug"}],
+            "author": {"login": "someone-else"},
+        }
+        app.render_evidence(app.stops[0])
+        await pilot.pause()
+        rendered_details = app.query_one("#details", tui.Static).render()
+        details = " ".join(str(span.style) for span in rendered_details.spans)
+        check(
+            "https://github.com/projectbluefin/bluefinctl/pull/31" in details,
+            "the evidence pane must link the pull request",
+        )
+        check(
+            "https://github.com/projectbluefin/bluefinctl/issues/12" in details,
+            f"a linked issue must be an issue hyperlink, got {details!r}",
+        )
+        check(
+            "https://github.com/someone-else" in details,
+            "the author must link to their GitHub profile",
+        )
+    gh_log.write_text("")
+
     # ── the gate is always escapable ─────────────────────────────────────
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:
