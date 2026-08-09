@@ -282,10 +282,12 @@ require_no_running_instance() {
 }
 image_ref_is_moving() {
   # A digest is immutable and an 'sha-<commit>' tag is minted once per build,
-  # so both always name exactly one image. A locally built image has no
+  # so both always name exactly one image. That makes the tag CI mints the
+  # right name for a local build too: it is honest about which commit is in
+  # the image, and it is never re-pulled over. A locally built image has no
   # registry behind it either, so refreshing it only produces a failed pull
-  # and a misleading "may be out of date" warning; podman stores
-  # 'podman build -t review:dev' as 'localhost/review:dev', so accept the bare
+  # and a misleading "may be out of date" warning; podman stores a bare
+  # 'podman build -t <name>:<tag>' under 'localhost/', so accept the bare
   # name a user is likely to type as well as the stored form. Anything else
   # can be repointed at a newer build under the same name.
   case "$1" in
@@ -330,7 +332,8 @@ ensure_contributor_image() {
   echo "ERROR: cannot obtain the contributor image ${ref}." >&2
   echo "  Published tags are 'stable', the version tags and 'sha-<commit>' — there is no ':latest'." >&2
   echo "  Pick a published tag with REVIEW_CONTRIBUTOR_IMAGE=ghcr.io/projectbluefin/review:stable," >&2
-  echo "  or build it yourself: podman build -f image/Containerfile -t review:dev . && REVIEW_CONTRIBUTOR_IMAGE=review:dev just review-container" >&2
+  echo "  or build the commit you have: ref=ghcr.io/projectbluefin/review:sha-\$(git rev-parse HEAD)" >&2
+  echo "    podman build -f image/Containerfile -t \"\$ref\" . && REVIEW_CONTRIBUTOR_IMAGE=\"\$ref\" just review-container" >&2
   return 1
 }
 resolve_copilot_token() {
@@ -749,10 +752,22 @@ review-container profile="" effort="":
       # settings and is exactly that. Mapping the host user onto dev's uid
       # instead makes the mount readable without loosening the host mode.
       --userns "keep-id:uid=1000,gid=1000"
-      # Mount only the selected registration at the relay's fixed path. A
-      # directory mount followed by this file mount makes rootless Podman
-      # create a missing contributor.env in the host directory while it
-      # prepares the nested target.
+      # The selected registration, and nothing else from ~/.config/hive.
+      #
+      # This used to also bind-mount the whole directory, with the selected
+      # file overlaid on top. Rootless Podman prepares the nested target
+      # through the already-mounted host directory, so with a named
+      # registration (REVIEW_HIVE=<name>) the target creation escaped back to
+      # the host: it created a zero-byte ~/.config/hive/contributor.env owned
+      # by a subordinate uid, and the container then failed on the file it had
+      # just caused to exist. Nothing in the image reads anything else from
+      # that directory, so one file mount is both the fix and the smaller
+      # exposure -- a named worker can no longer see other registrations.
+      #
+      # ':z' is the shared SELinux relabel. ':Z' would give each container a
+      # private MCS category, and review supports concurrent named workers
+      # sharing one registration: the second launch would revoke the first
+      # live container's access to it.
       --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro,z"
       --env "AGENT_BACKEND=goose"
       # Podman does not pass COLORTERM through on its own; the entrypoint

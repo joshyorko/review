@@ -1,6 +1,6 @@
 ---
 name: pr-workflow
-version: "1.8"
+version: "1.9"
 last_updated: 2026-08-09
 id: pr-workflow
 one_line_purpose: Open review pull requests that merge cleanly.
@@ -10,8 +10,8 @@ mcp_compliance_level: partial
 optimization_status: draft
 status: active
 dependencies: []
-tags: [git, pullrequest, conventional, branches, worktree, testing]
-description: "Defines pull request, branch, title, trailer, and validation requirements, how to commit without clobbering uncommitted work, how to reconcile a long-lived branch with squash-merged main, and why a test must drive a feature rather than grep its source."
+tags: [git, pullrequest, branches, labels, testing]
+description: "Defines pull request, branch, title, trailer, and validation requirements, the factory's seven-label contract and this repository's three automation labels, how to reconcile a long-lived branch with squash-merged main, and why a test must run a feature."
 metadata:
   type: policy
   context7-sources: [/pre-commit/pre-commit]
@@ -24,9 +24,25 @@ metadata:
 Load this before creating a branch, preparing a commit, or opening a pull
 request in this repository.
 
+## When Not to Use
+
+Do not use this to decide *what* to change or how large it should be — that is
+[`contribution-culture.md`](contribution-culture.md) — or to satisfy another
+repository's contribution rules, which take precedence in their own tree.
+
 ## Core Process
 
-1. Work on a branch. Hive-assigned work uses `clanker/<task_id>` and includes
+0. Know which of the two workflows you are in. **Hive-assigned contributor
+   work is always a branch and a pull request** — the protocol reports a PR
+   link as the completion artifact, and the contributor has no write access to
+   the target repository anyway. **A maintainer working in their own checkout
+   of this repository is not bound by that**: when @castrojo asks for a change
+   here, commit it and push it to `main`. Do not route his work through a
+   branch and a pull request unless he asks for one, and do not tell him a
+   direct push is forbidden. The gate that matters is the validation suite,
+   which runs the same either way.
+
+1. Work on a branch for Hive-assigned work, named `clanker/<task_id>`, with
    this commit trailer:
 
    ```text
@@ -61,6 +77,40 @@ request in this repository.
    the sole authority for task selection, and relabelling to attract or shed an
    assignment is task selection. See [`upstream-hive.md`](upstream-hive.md) for
    the full rule and for upstream triage boundaries.
+
+## The Factory Label Contract
+
+This repository carries `projectbluefin/common`'s canonical label workflow —
+*workflows own state; humans provide intent* — and adds nothing to it. Seven
+labels exist, and they are the same seven in every factory repository:
+
+| Label | Meaning |
+|---|---|
+| `1-triage` | New work awaiting human triage |
+| `2-discussing` | Work requiring discussion or a clarified design |
+| `3-human-queue` | Work admitted to the human-maintained queue |
+| `3-clanker-queue` | Work admitted to the agent-maintained queue |
+| `4-review` | A pull request awaiting review |
+| `blocked` | Blocked on human input or an external dependency |
+| `hold` | Intentionally paused |
+
+A human selects at most one numbered label to express the intended next step,
+with `blocked` or `hold` as an optional overlay. Everything else — kind, area,
+size, priority, source — is issue-body prose or project-field metadata, never a
+label. Do not invent a priority taxonomy, and do not build a second state
+machine out of comments, slash commands, or local scripts.
+
+Alongside those seven, this repository runs exactly three local automation
+labels, each owned by a named mechanism and applied by it alone: `lgtm`
+(a maintainer's opt-in to Hive's auto-merge sweep — see
+[`review-dashboard.md`](review-dashboard.md)), `hive-protocol-change`
+(`.github/workflows/hive-pin-gate.yml`, when a Hive pin bump touches a consumed
+contributor runtime file), and `dependencies` (Renovate, per `renovate.json`).
+Adding a fourth means adding the mechanism that owns it, in the same change.
+
+The full contract, including the human and agent action lists, lives in
+`projectbluefin/common`'s `docs/skills/label-workflow.md`. Read it there rather
+than restating it here; this section records only what is local.
 
 ## Reconciling A Long-Lived Branch
 
@@ -142,11 +192,37 @@ git cat-file -p <sha>
 
 Prefer not needing that.
 
+## Never Quote A CI-Skip Directive In A Commit Message
+
+GitHub reads its skip directives — `[skip ci]`, `[ci skip]`, `[skip actions]`,
+`[actions skip]` — anywhere in the head commit message, not just the subject.
+A commit that merely *writes about* one skips its own validation and publish,
+lands on `main`, and shows no failed check because nothing ran.
+
+That happened here: the commit teaching the dashboard to escape bracketed
+titles quoted the directive as its example, and the fix sat on `main` while
+`:stable` stayed on the parent commit.
+
+Write "GitHub's CI-skip directive" or `skip-ci` without brackets.
+`scripts/check-commit-message.sh` runs as a `commit-msg` hook and refuses the
+bracketed forms unless `ALLOW_SKIP_CI=1` says the skip is meant. It cannot be
+a CI check: a message that skips CI skips the check that would catch it.
+
+## Common Rationalizations
+
+| Rationalization | Reality |
+|---|---|
+| "The branch is stale but I can resolve the conflicts." | Count them first. Sixteen conflicts to land a one-file change produces a diff nobody can review against the change it claims to make; re-cut from the current base instead. |
+| "It passed CI, so it shipped." | A green workflow has meant "nothing ran" and "nothing published" here. Verify the artifact, not the check. |
+| "Documentation-only work can skip the workflow." | The protected-branch rules do not have a docs exemption, and a stale skill misroutes every agent that reads it. |
+
 ## Red Flags
 
+- Quoting a GitHub CI-skip directive in a commit message.
 - Committing from a working tree that holds someone else's uncommitted work.
 - Staging with `git add -A` or `git add .` rather than by explicit path.
-- Pushing directly to `main`.
+- Routing a maintainer's own change through a branch and pull request when
+  they asked for a push, or calling a direct push to `main` forbidden.
 - A non-Conventional pull request title.
 - Combining unrelated changes in one pull request.
 - Growing a diff because scoping it was harder than writing it.
@@ -155,6 +231,10 @@ Prefer not needing that.
 - Using `--no-verify` to bypass a real failure.
 - Reporting task completion before the required artifact exists.
 - Adding or removing a task-admission label to influence a Hive assignment.
+- A label outside the seven canonical names plus this repository's three
+  documented automation labels.
+- Recording kind, area, size, or priority as a label instead of as issue text
+  or a project field.
 - Rebasing a long-lived branch onto `main` instead of merging `main` into it.
 - Resolving a conflicted file with `--ours` or `--theirs` when both sides
   carry changes worth keeping.
@@ -205,6 +285,9 @@ before pushing a shell change, run the manual stage too.
 ```bash
 pre-commit run shellcheck --hook-stage manual --all-files
 ```
+
+`gh label list -R projectbluefin/review` returns the seven canonical labels and
+the three automation labels above, and nothing else.
 
 A new script must carry the executable bit and match its directory's `shfmt`
 style — two spaces under `scripts/` and `tests/`, tabs under `image/`. Set the

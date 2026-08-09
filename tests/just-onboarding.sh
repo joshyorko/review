@@ -44,7 +44,14 @@ runner_log="$scratch/runner.log"
 image_log="$scratch/image.log"
 credential_log="$scratch/credentials.log"
 
-trap 'rm -rf "$scratch" "$tmp_root"' EXIT
+default_hive_backup=""
+cleanup() {
+  if [[ -n "$default_hive_backup" && -f "$default_hive_backup" ]]; then
+    cp "$default_hive_backup" "$home/.config/hive/contributor.env"
+  fi
+  rm -rf "$scratch" "$tmp_root"
+}
+trap cleanup EXIT
 
 mkdir -p "$fake_bin" "$tmp_root" \
   "$home/.config/goose" "$home/.config/hive" "$cfg_dir" "$state_dir"
@@ -194,9 +201,6 @@ while (($#)); do
           mounted_hive_dir=true
           ;;
         *:/home/dev/.config/hive/contributor.env:*)
-          # Rootless Podman prepares this nested mount target through the
-          # earlier directory bind. If the host-side basename is absent, that
-          # creates it in the mounted host directory before the file overlay.
           if [[ "$mounted_hive_dir" == true && ! -e "${HOME}/.config/hive/contributor.env" ]]; then
             : >"${HOME}/.config/hive/contributor.env"
           fi
@@ -505,8 +509,12 @@ run_recipe review-container GH_READY=1 \
 assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
 assert_eq "$(wc -l <"$runner_log")" 1 "expected exactly one podman invocation"
 assert_file_contains "run --rm --interactive --tty --replace --name review-container" "$runner_log"
+# Only the selected registration is mounted. The directory mount it used to
+# sit on top of made rootless Podman create a bogus host contributor.env when
+# a named registration was selected (#143), and nothing in the image reads
+# anything else from that directory.
+assert_file_not_contains "--volume ${home}/.config/hive:/home/dev/.config/hive" "$runner_log"
 assert_file_contains "--volume ${home}/.config/hive/contributor.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
-assert_file_not_contains "--volume ${home}/.config/hive:/home/dev/.config/hive:ro" "$runner_log"
 assert_file_contains "--env AGENT_BACKEND=goose" "$runner_log"
 assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
 assert_file_contains "--env GOOSE_MODEL=gpt-test" "$runner_log"
@@ -577,28 +585,34 @@ CONTRIBUTOR_USERNAME=test-user
 AGENT_BACKEND=goose
 EOF
 chmod 600 "$home/.config/hive/contributor.review.env"
-named_hive_before="$(sha256sum "$home/.config/hive/contributor.review.env") $(stat -c '%a:%u:%g' "$home/.config/hive/contributor.review.env")"
+named_hive_hash="$(sha256sum "$home/.config/hive/contributor.review.env")"
+named_hive_mode="$(stat -c '%a' "$home/.config/hive/contributor.review.env")"
+named_hive_uid="$(stat -c '%u' "$home/.config/hive/contributor.review.env")"
+named_hive_gid="$(stat -c '%g' "$home/.config/hive/contributor.review.env")"
 # The tests run with the review repository as cwd, so the repo-derived
 # registration name is 'review'.
 run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
 assert_file_contains "--volume ${home}/.config/hive/contributor.review.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$home/.config/hive/contributor.env"
-assert_eq "$(sha256sum "$home/.config/hive/contributor.review.env") $(stat -c '%a:%u:%g' "$home/.config/hive/contributor.review.env")" "$named_hive_before" "selected Hive registration changed during launch construction"
+assert_eq "$(sha256sum "$home/.config/hive/contributor.review.env")" "$named_hive_hash" "selected Hive registration content changed during launch construction"
+assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.review.env")" "$named_hive_mode" "selected Hive registration mode changed during launch construction"
+assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.review.env")" "$named_hive_uid" "selected Hive registration uid changed during launch construction"
+assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.review.env")" "$named_hive_gid" "selected Hive registration gid changed during launch construction"
+# The named launch must not require, create, or mutate the default (#143).
+assert_file_not_contains "--volume ${home}/.config/hive:/home/dev/.config/hive" "$runner_log"
 assert_contains "hive: wss://named-hive.invalid/contribute (registration 'review')" "$OUT"
 assert_not_contains "super-secret-registration-token" "$OUT"
 assert_not_contains "named-secret-token" "$OUT"
 assert_file_not_contains "named-secret-token" "$runner_log"
-# A second worker uses the same selected credential. The shared SELinux label
-# is load-bearing: a private :Z relabel for this launch would revoke the first
-# live container's access when Podman assigns the second container a new MCS
-# category.
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
-  REVIEW_CONTAINER_NAME=review-container-2
+run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test REVIEW_CONTAINER_NAME=review-container-2
 assert_file_contains "--replace --name review-container-2 " "$runner_log"
 assert_file_contains "--volume ${home}/.config/hive/contributor.review.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$home/.config/hive/contributor.env"
-assert_eq "$(sha256sum "$home/.config/hive/contributor.review.env") $(stat -c '%a:%u:%g' "$home/.config/hive/contributor.review.env")" "$named_hive_before" "selected Hive registration changed during concurrent launch construction"
+assert_eq "$(sha256sum "$home/.config/hive/contributor.review.env")" "$named_hive_hash" "selected Hive registration content changed during concurrent launch construction"
+assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.review.env")" "$named_hive_mode" "selected Hive registration mode changed during concurrent launch construction"
+assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.review.env")" "$named_hive_uid" "selected Hive registration uid changed during concurrent launch construction"
+assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.review.env")" "$named_hive_gid" "selected Hive registration gid changed during concurrent launch construction"
 rm -f "$home/.config/hive/contributor.review.env"
 cp "$default_hive_backup" "$home/.config/hive/contributor.env"
 

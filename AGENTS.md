@@ -175,6 +175,12 @@ as native or unavailable, and `--report image-audit-report.md` writes the
 Markdown report to a git-ignored file.
 
 `pre-commit run --all-files` runs the socket-free hygiene checks locally.
+`scripts/check-commit-message.sh` runs as a `commit-msg` hook and refuses a
+message containing one of GitHub's CI-skip directives: GitHub reads those
+anywhere in the head commit message, so a commit that merely writes about one
+lands with no validation and no published image, and no failed check to show
+for it. This cannot be a CI check — the message that skips CI skips the check
+that would catch it.
 ShellCheck is a CI-only manual hook because its upstream hook runs in a
 container; CI invokes it explicitly.
 

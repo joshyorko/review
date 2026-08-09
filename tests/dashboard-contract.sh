@@ -20,11 +20,29 @@ fail() {
 }
 
 # --- absence: powers the dashboard must not have -----------------------------
-# No protection bypass, no branch deletion, no direct merge, no force.
+# No protection bypass, no branch deletion, no force.
 grep -q -- '--admin' "$tui" && fail "the dashboard must never bypass branch protections with --admin"
 grep -q -- '--delete-branch' "$tui" && fail "the dashboard must never delete branches"
-grep -q '"pr", "merge"' "$tui" && fail "the dashboard must never merge directly — Hive's governor sweep merges"
 grep -qE '"push"|git push' "$tui" && fail "the dashboard must never push"
+
+# A maintainer may merge without arming automation: `lgtm` is an opt-in to
+# Hive's sweep, not a toll on merging. That power is exactly one gated call
+# site, it squashes like the sweep does, and it is asked of GitHub — the
+# 'push' permission — rather than assumed from having the dashboard open.
+[[ "$(grep -c '"pr", "merge"' "$tui")" -eq 1 ]] ||
+  fail "exactly one merge site: the maintainer's gated direct merge"
+merge_now="$(sed -n '/def action_merge_now/,/def action_reject/p' "$tui")"
+grep -q -- '"--squash"' <<<"$merge_now" ||
+  fail "the direct merge must squash, like the sweep it stands beside"
+grep -q 'merge_rights\[stop.repository\]' <<<"$merge_now" ||
+  fail "the direct merge must check the maintainer permission before running"
+grep -q 'self.mutate_all' <<<"$merge_now" ||
+  fail "the direct merge must go through the typed-number gate"
+grep -q 'permissions.push' "$tui" ||
+  fail "maintainer permission must be read from GitHub, not assumed"
+# The lgtm path stays what it is: an opt-in, never a precondition for merging.
+grep -q 'isDraft' <<<"$merge_now" ||
+  fail "the direct merge must refuse drafts"
 
 # Every mutating verb must be an argument of self.mutate(), never of the
 # read-only gh() helper.
@@ -54,10 +72,30 @@ grep -qiE '\(y/n\)|yes/no' "$tui" && fail "no y/yes confirmation shortcut"
 # approval inside the gated _queue_automerge helper.
 grep -q 'for Hive auto-merge on green CI.' "$tui" ||
   fail "queueing must post the exact approval the sweep re-verifies"
-grep -q '"--add-label", "lgtm"' "$tui" ||
-  fail "queueing must add the lgtm label the sweep scans for"
-[[ "$(grep -c '"pr", "review"' "$tui")" -eq 1 ]] ||
-  fail "exactly one review-submission site: the Hive queue approval"
+grep -q '"--add-label", QUEUE_LABEL' "$tui" ||
+  fail "queueing must add the label the sweep scans for"
+grep -q 'QUEUE_LABEL = "lgtm"' "$tui" ||
+  fail "the sweep's label must still be lgtm"
+# The label does not exist in every repository, and adding one that was never
+# defined fails after the approval has already been submitted (#141).
+grep -q '"gh", "label", "create", QUEUE_LABEL' "$tui" ||
+  fail "a missing queue label must be created, not discovered mid-sequence"
+# Two review-submission sites, and both gated: the queue approval that arms
+# the sweep, and the maintainer's own review — approve, request changes, or
+# comment — which is neither a merge nor an automation opt-in.
+[[ "$(grep -c '"pr", "review"' "$tui")" -eq 2 ]] ||
+  fail "expected two review sites: the queue approval and the maintainer review"
+leave_review="$(sed -n '/def leave_review/,/def action_leave_review/p' "$tui")"
+grep -q 'self.mutate_all' <<<"$leave_review" ||
+  fail "leaving a review must go through the typed-number gate"
+grep -q '"request-changes"' "$tui" ||
+  fail "a reviewer must be able to request changes, not only approve"
+grep -q 'f"--{verdict}"' "$tui" ||
+  fail "the chosen verdict must be what gh is told to submit"
+grep -q -- '"--add-label"' <<<"$leave_review" &&
+  fail "leaving a review must not apply the lgtm automation opt-in"
+grep -q 'authorAssociation' "$tui" ||
+  fail "reviewer standing must come from GitHub's author association"
 
 # Drafts are refused from live evidence, and every mutation invalidates cache.
 grep -q 'isDraft' "$tui" || fail "merge must refuse drafts from live evidence"
