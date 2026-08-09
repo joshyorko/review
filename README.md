@@ -47,12 +47,14 @@ silently create a second workflow, authority path, or task queue.
    Hive tasks, donates inference, and produces structured pre-review
    feedback. `REVIEW_DETACH=1` runs it detached, with `just review-stop` as
    its lifecycle verb.
-2. **Interactive maintainer TUI** (`review-queue`): high-velocity PR and
-   issue triage with batching, labels, priority, agent-assisted
-   documentation updates, and build dispatch.
+2. **Interactive maintainer TUI** (`review-queue dashboard`): high-velocity
+   PR and issue triage with batching, labels, priority, agent-assisted
+   documentation updates (#134), and Ghost Cluster build dispatch (#133).
 
-The legacy QEMU VM mode has been removed; the contributor container is the
-only runtime.
+The watcher feedback loop — comparing automated pre-reviews with maintainer
+decisions and feeding the lessons back into `projectbluefin/common` — is
+tracked as #135 and projectbluefin/common#972. The legacy QEMU VM mode has
+been removed; the contributor container is the only runtime.
 
 ## Reporting upstream
 
@@ -416,8 +418,11 @@ Use an immutable `sha-<commit>` tag or digest with
 
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
 layers the pinned Hive runtime at `98781c252cefb2f2193832a701abd8d0728ea18b`,
-the current Goose canary snapshot, GitHub CLI, tmux, hooks, and generated
-organization skills. Goose publishes that snapshot from its active `main`
+the current Goose canary snapshot, GitHub CLI, tmux, uv with the Textual
+dashboard runtime, hooks, generated
+organization skills, and the pinned `projectbluefin/lab` skills (projected as
+`lab-<id>` so the Ghost Cluster operating knowledge rides along). Goose
+publishes that snapshot from its active `main`
 branch; each archive is verified against GitHub's signed build provenance
 before installation.
 

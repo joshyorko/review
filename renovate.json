@@ -21,6 +21,20 @@
       "depNameTemplate": "kubestellar/hive",
       "packageNameTemplate": "https://github.com/kubestellar/hive",
       "datasourceTemplate": "git-refs"
+    },
+    {
+      "description": "Track projectbluefin/lab main as the pinned lab-skills checkout projected into the contributor image.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^image\\/Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG LAB_SKILLS_COMMIT=(?<currentDigest>[0-9a-f]{40})"
+      ],
+      "currentValueTemplate": "main",
+      "depNameTemplate": "projectbluefin/lab",
+      "packageNameTemplate": "https://github.com/projectbluefin/lab",
+      "datasourceTemplate": "git-refs"
     }
   ],
   "packageRules": [
