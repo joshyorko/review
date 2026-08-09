@@ -235,6 +235,7 @@ class Stop:
     title: str
     author: str = ""
     selected: bool = False
+    failure: str = ""
     live: dict = field(default_factory=dict)
 
     @property
@@ -304,6 +305,58 @@ class LabelOverlay(ModalScreen[str | None]):
             index = int(event.key) - 1
             if 0 <= index < len(LABEL_CHOICES):
                 self.dismiss(LABEL_CHOICES[index])
+
+
+class MergeRecovery(ModalScreen[str | None]):
+    """A merge that failed, and the ways out of it.
+
+    GitHub refuses a merge for reasons that are mostly fixable — the branch is
+    behind, a required approval is missing, checks have not finished — and the
+    old behaviour was to print the refusal and drop it. In a batch that is
+    worse than useless: the maintainer is several confirmations further on by
+    the time they read it. The failure is offered as a choice instead, and
+    whatever is not fixed now stays selected so it comes back with the batch.
+    """
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "keep it queued")]
+
+    def __init__(self, stop: Stop, message: str) -> None:
+        super().__init__()
+        self.stop_record = stop
+        self.message = message
+        self.choices = self.offers(stop, message)
+
+    @staticmethod
+    def offers(stop: Stop, message: str) -> list[tuple[str, str]]:
+        """What is worth offering, given why GitHub said no."""
+        state = str(stop.live.get("mergeStateStatus", "")).upper()
+        text = message.upper()
+        choices: list[tuple[str, str]] = []
+        if state == "BEHIND" or "NOT UP TO DATE" in text or "BEHIND" in text:
+            choices.append(("update", "update the branch, then merge again"))
+        if state == "BLOCKED" or "REVIEW" in text or "REQUIRED" in text:
+            choices.append(("queue", "approve and queue it for the sweep instead"))
+        if state == "DIRTY" or "CONFLICT" in text:
+            choices.append(("browser", "open it — the conflict needs a human"))
+        choices.append(("retry", "try the merge again"))
+        choices.append(("skip", "leave it queued and move on"))
+        return choices
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label(f"{self.stop_record.key} did not merge:")
+            yield Static(escape(self.message[:300]), classes="confirm-command")
+            yield Label("")
+            for index, (_, description) in enumerate(self.choices, start=1):
+                yield Label(f"  [{index}] {description}")
+            yield Label("")
+            yield Label("esc keeps it in the queue")
+
+    def on_key(self, event) -> None:
+        if event.key.isdigit():
+            index = int(event.key) - 1
+            if 0 <= index < len(self.choices):
+                self.dismiss(self.choices[index][0])
 
 
 class ReviewVerdict(ModalScreen[str | None]):
@@ -817,27 +870,41 @@ class ReviewDashboard(App):
         stops.sort(key=lambda stop: (action_rank(stop.action), stop.repository, stop.number))
         self.populate(stops)
 
+    def row_markup(self, stop: Stop) -> str:
+        tag = " (BATCHABLE)" if stop.batchable else ""
+        # A stop that would not merge says so on its own row, so a failure in
+        # the middle of a batch survives the notification that reported it.
+        failed = " ✗ DID NOT MERGE" if stop.failure else ""
+        return (
+            f"{link(stop.key, pr_url(stop.repository, stop.number))}: "
+            f"{escape(stop.title[:60])}{tag} "
+            f"{escape('[' + stop.action + ']')}{failed}"
+        )
+
     def populate(self, stops: list[Stop]) -> None:
         self.stops = stops
         queue = self.query_one("#queue", ListView)
         queue.clear()
         for stop in stops:
-            tag = " (BATCHABLE)" if stop.batchable else ""
-            queue.append(
-                ListItem(
-                    Label(
-                        f"{link(stop.key, pr_url(stop.repository, stop.number))}: "
-                        f"{escape(stop.title[:60])}{tag} "
-                        f"{escape('[' + stop.action + ']')}"
-                    )
-                )
-            )
+            queue.append(ListItem(Label(self.row_markup(stop))))
         self.refresh_status()
         if stops:
             queue.index = 0
 
+    def refresh_rows(self) -> None:
+        """Repaint the rows in place, keeping the highlight where it was."""
+        queue = self.query_one("#queue", ListView)
+        for stop, item in zip(self.stops, queue.children):
+            labels = item.query(Label)
+            if labels:
+                labels.first().update(self.row_markup(stop))
+            item.set_class(stop.selected, "selected")
+        self.refresh_status()
+
     def refresh_status(self) -> None:
         selected = sum(1 for s in self.stops if s.selected)
+        failed = sum(1 for s in self.stops if s.failure)
+        stuck = f" | {failed} did not merge" if failed else ""
         freshness = self.generated_at or "unknown"
         shown = len(self.stops)
         total = len(self.snapshot_items)
@@ -858,7 +925,7 @@ class ReviewDashboard(App):
         self.query_one("#status-bar", Static).update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| snapshot {freshness} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected} | Hive: {self.hive_state or 'asking…'}"
+            f"| batch: {selected}{stuck} | Hive: {self.hive_state or 'asking…'}"
         )
 
     def action_filter(self) -> None:
@@ -1058,7 +1125,9 @@ class ReviewDashboard(App):
         """Run one gh mutation behind the typed-number confirmation."""
         self.mutate_all(stop, [["gh", *args]], then=then)
 
-    def mutate_all(self, stop: Stop, commands: list[list[str]], then=None) -> None:
+    def mutate_all(
+        self, stop: Stop, commands: list[list[str]], then=None, on_error=None
+    ) -> None:
         """Run a sequence of gh mutations behind one typed-number gate.
 
         The sequence is the unit a maintainer decides on, so it is confirmed
@@ -1073,12 +1142,14 @@ class ReviewDashboard(App):
                 self.notify("aborted; nothing was run.", severity="warning")
                 return
             self.notify(f"running: {' '.join(commands[0][:4])}…")
-            self.run_mutations(stop, commands, then)
+            self.run_mutations(stop, commands, then, on_error)
 
         self.push_screen(ConfirmMutation(commands, str(stop.number)), finish)
 
     @work(thread=True)
-    def run_mutations(self, stop: Stop, commands: list[list[str]], then) -> None:
+    def run_mutations(
+        self, stop: Stop, commands: list[list[str]], then, on_error=None
+    ) -> None:
         """Execute a confirmed sequence off the UI thread. A slow or hung gh
         call must never freeze the dashboard, so each step is bounded by
         MUTATION_TIMEOUT and reports back through call_from_thread."""
@@ -1097,9 +1168,7 @@ class ReviewDashboard(App):
                     }
                 )
                 self.call_from_thread(
-                    self.notify,
-                    f"{' '.join(command[:4])}… did not finish: {error}",
-                    severity="error",
+                    self.mutation_failed, stop, command, str(error), on_error
                 )
                 return
             trace(
@@ -1113,15 +1182,21 @@ class ReviewDashboard(App):
             if result.returncode != 0:
                 message = result.stderr.strip()[:200] or f"exit {result.returncode}"
                 self.call_from_thread(
-                    self.mutation_failed, stop, command, message
+                    self.mutation_failed, stop, command, message, on_error
                 )
                 return
         self.call_from_thread(self.mutations_finished, stop, commands, then)
 
-    def mutation_failed(self, stop: Stop, command: list[str], message: str) -> None:
+    def mutation_failed(
+        self, stop: Stop, command: list[str], message: str, on_error=None
+    ) -> None:
         self.pulls_cache.pop(stop.repository, None)
         self.notify(f"{' '.join(command[:4])}…: {message}", severity="error")
         self.show_evidence(stop)
+        # A failure that only prints is a failure the maintainer has to
+        # remember. Hand it to whoever asked, so they can offer a way out.
+        if on_error:
+            on_error(message)
 
     def mutations_finished(
         self, stop: Stop, commands: list[list[str]], then
@@ -1357,35 +1432,102 @@ class ReviewDashboard(App):
         checks still refuses, and that refusal is reported rather than worked
         around.
         """
-        stop = self.current
-        if not stop:
+        batch = [s for s in self.stops if s.selected]
+        if not batch and self.current:
+            batch = [self.current]
+        queue = [stop for stop in batch if self._mergeable_now(stop)]
+        if not queue:
             return
+
+        def merge_next(index: int = 0) -> None:
+            if index >= len(queue):
+                landed = [stop for stop in queue if not stop.failure]
+                if len(queue) > 1:
+                    self.notify(
+                        f"merged {len(landed)} of {len(queue)}; "
+                        f"{len(queue) - len(landed)} still queued."
+                    )
+                return
+            stop = queue[index]
+            self.merge_one(stop, then=lambda: merge_next(index + 1))
+
+        merge_next()
+
+    def _mergeable_now(self, stop: Stop) -> bool:
+        """Whether this stop can even be attempted, with the reason if not."""
         if not stop.live:
             self.notify(f"{stop.key}: no live evidence yet; select it first.")
-            return
+            return False
         if stop.live.get("isDraft") is True:
             self.notify(f"{stop.key} is a draft; ready it first.", severity="warning")
-            return
+            return False
         if stop.repository not in self.merge_rights:
             self.notify(
                 f"still checking your permission on {stop.repository}; try again.",
                 severity="warning",
             )
-            return
+            return False
         if not self.merge_rights[stop.repository]:
             self.notify(
                 f"merging {stop.repository} directly is a maintainer power and "
                 "you do not have it there; queue it with [a] instead.",
                 severity="error",
             )
+            return False
+        return True
+
+    def merge_one(self, stop: Stop, then=None, extra: list[list[str]] | None = None) -> None:
+        """One squash merge, behind the gate, with a way out when it fails."""
+        commands = list(extra or [])
+        commands.append([
+            "gh", "pr", "merge", str(stop.number),
+            "--repo", stop.repository, "--squash",
+        ])
+
+        def landed() -> None:
+            stop.failure = ""
+            stop.selected = False
+            self.refresh_rows()
+            if then:
+                then()
+
+        def failed(message: str) -> None:
+            # Keep it selected: an unmerged pull request stays in the batch,
+            # so "put it back in the queue" is the default rather than a
+            # thing the maintainer has to remember to redo.
+            stop.failure = message
+            stop.selected = True
+            self.refresh_rows()
+            self.push_screen(
+                MergeRecovery(stop, message),
+                lambda choice: self.recover_merge(stop, choice, then),
+            )
+
+        self.mutate_all(stop, commands, then=landed, on_error=failed)
+
+    def recover_merge(self, stop: Stop, choice: str | None, then=None) -> None:
+        if choice == "update":
+            self.merge_one(
+                stop,
+                then=then,
+                extra=[[
+                    "gh", "pr", "update-branch", str(stop.number),
+                    "--repo", stop.repository,
+                ]],
+            )
             return
-        self.mutate_all(
-            stop,
-            [[
-                "gh", "pr", "merge", str(stop.number),
-                "--repo", stop.repository, "--squash",
-            ]],
-        )
+        if choice == "retry":
+            self.merge_one(stop, then=then)
+            return
+        if choice == "queue":
+            self._queue_automerge(stop, then=then)
+            return
+        if choice == "browser":
+            gh("pr", "view", str(stop.number), "--repo", stop.repository, "--web")
+        # "skip", esc, and the browser hand-off all continue the batch with
+        # the stop still selected and still marked failed.
+        if then:
+            then()
 
     def action_reject(self) -> None:
         stop = self.current

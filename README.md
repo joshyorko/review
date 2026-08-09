@@ -259,7 +259,7 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `v` | view the diff — full screen, coloured, scrollable |
 | `c` | comment |
 | `a` | approve and queue: approval + `lgtm`, opting in to Hive auto-merge; for the batch selection if one exists |
-| `m` | merge now: squash immediately, no `lgtm`, maintainers only |
+| `m` | merge now: squash immediately, no `lgtm`, maintainers only — the batch selection if one exists |
 | `x` | reject: comment, then close |
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
 | `/` | steer: type instructions that ride along with the review you start |
@@ -310,6 +310,39 @@ clipboard.
 
 Stops that are no longer open on GitHub are refused at the point of action —
 the snapshot can be hours old, and GitHub is the state.
+
+### Merging a batch, and when one refuses
+
+`b` selects; `m` merges the whole selection, one typed-number gate per pull
+request. `a` batches the same way.
+
+GitHub refuses merges for reasons that are usually fixable, and a batch that
+stops dead on the first refusal is worse than no batch — you are several
+confirmations past it by the time you read the error. A refusal is offered as
+a choice instead:
+
+```
+ projectbluefin/bluefinctl#31 did not merge:
+ Pull request is not mergeable: the base branch is out of date
+
+   [1] update the branch, then merge again
+   [2] approve and queue it for the sweep instead
+   [3] try the merge again
+   [4] leave it queued and move on
+
+ esc keeps it in the queue
+```
+
+What is offered depends on why GitHub said no — behind the base gets the
+update, blocked on review gets the sweep, a conflict gets handed to a human in
+the browser — and retry and keep-it-queued are always there. Updating the
+branch runs `gh pr update-branch` and the merge behind one gate, so it is one
+decision like every other sequence.
+
+Anything not fixed **stays selected and stays marked**: the row carries
+`✗ DID NOT MERGE`, the status line counts them, and the batch moves on to the
+next pull request rather than stopping. Putting it back in the queue is the
+default, not something you have to remember to redo.
 
 ### Leaving a review
 

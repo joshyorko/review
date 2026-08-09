@@ -807,6 +807,152 @@ async def main() -> int:
         )
     gh_log.write_text("")
 
+    # ── batch merge, and what happens when one refuses ───────────────────
+    # A batch that stops dead on the first refusal is worse than no batch:
+    # the maintainer is several confirmations past it before they read the
+    # error. A refusal becomes a choice, and whatever is not fixed stays
+    # selected so it comes back with the batch.
+    check(
+        [c for c, _ in tui.MergeRecovery.offers(
+            tui.Stop("o/r", 1, "merge", "t", live={"mergeStateStatus": "BEHIND"}), ""
+        )][:1] == ["update"],
+        "a branch that is behind must be offered an update",
+    )
+    check(
+        "queue" in [c for c, _ in tui.MergeRecovery.offers(
+            tui.Stop("o/r", 1, "merge", "t", live={"mergeStateStatus": "BLOCKED"}), ""
+        )],
+        "a blocked merge must be offered the sweep instead",
+    )
+    check(
+        "browser" in [c for c, _ in tui.MergeRecovery.offers(
+            tui.Stop("o/r", 1, "merge", "t", live={"mergeStateStatus": "DIRTY"}), ""
+        )],
+        "a conflicted merge must be handed to a human",
+    )
+    check(
+        [c for c, _ in tui.MergeRecovery.offers(
+            tui.Stop("o/r", 1, "merge", "t", live={}), ""
+        )] == ["retry", "skip"],
+        "every failure must at least offer retry and keep-it-queued",
+    )
+
+    refusing_gh = write_stub(
+        workdir / "gh",
+        f'printf "%s\\n" "$*" >>"{gh_log}"\n'
+        'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
+        'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr merge" ]; then\n'
+        '  echo "Pull request is not mergeable: the base branch is out of date" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n",
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        for stop in app.stops:
+            stop.selected = True
+            stop.live = {"isDraft": False, "mergeStateStatus": "BEHIND"}
+        for _ in range(200):
+            if all(s.repository in app.merge_rights for s in app.stops):
+                break
+            await pilot.pause(0.05)
+        gh_log.write_text("")
+        app.action_merge_now()
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.ConfirmMutation),
+            f"batch merge must gate the first PR, got {type(app.screen).__name__}",
+        )
+        gate = app.screen
+        await pilot.press(*gate.expected)
+        await pilot.press("enter")
+        for _ in range(300):
+            if isinstance(app.screen, tui.MergeRecovery):
+                break
+            await pilot.pause(0.05)
+        check(
+            isinstance(app.screen, tui.MergeRecovery),
+            f"a refused merge must offer a way out, got {type(app.screen).__name__}",
+        )
+        if isinstance(app.screen, tui.MergeRecovery):
+            check(
+                app.stops[0].failure != "",
+                "a refused merge must be recorded on the stop",
+            )
+            check(
+                app.stops[0].selected,
+                "a refused merge must stay in the batch, not be dropped",
+            )
+            row = str(
+                app.query_one("#queue", tui.ListView)
+                .children[0]
+                .query_one(tui.Label)
+                .render()
+            )
+            check(
+                "DID NOT MERGE" in row,
+                f"the row must carry the failure, got {row!r}",
+            )
+            check(
+                "did not merge" in str(
+                    app.query_one("#status-bar", tui.Static).render()
+                ),
+                "the status line must count what did not merge",
+            )
+            # Choosing "update the branch" retries with the update in front.
+            await pilot.press("1")
+            for _ in range(300):
+                if isinstance(app.screen, tui.ConfirmMutation):
+                    break
+                await pilot.pause(0.05)
+            check(
+                isinstance(app.screen, tui.ConfirmMutation),
+                "updating the branch must be gated like any other mutation",
+            )
+            retry = app.screen
+            check(
+                [c[:3] for c in retry.commands]
+                == [["gh", "pr", "update-branch"], ["gh", "pr", "merge"]],
+                f"update must run before the retry, got {retry.commands}",
+            )
+            await pilot.press("escape")
+            await pilot.pause()
+        # The batch continued to the second pull request rather than stopping.
+        for _ in range(300):
+            if gh_log.read_text().count("pr merge") >= 2:
+                break
+            await pilot.pause(0.05)
+        if isinstance(app.screen, tui.ConfirmMutation):
+            await pilot.press(*app.screen.expected)
+            await pilot.press("enter")
+            await pilot.pause()
+        check(
+            gh_log.read_text().count("pr merge") >= 1,
+            "a batch merge must attempt the pull requests it was given",
+        )
+    write_stub(
+        workdir / "gh",
+        f'printf "%s\\n" "$*" >>"{gh_log}"\n'
+        'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
+        'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr diff" ]; then\n'
+        '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+    )
+    gh_log.write_text("")
+
     # ── the gate is always escapable ─────────────────────────────────────
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:
