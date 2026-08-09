@@ -179,12 +179,18 @@ fix.
     cold/warm builds, and native amd64/arm64 runtime behavior before and after
     each composition change. Deleting inherited files in a later layer does not
     reclaim the base layer.
-The publish workflow moves `:stable` on main and re-runs hourly on a
-schedule so a moved Goose `canary` asset reaches `:stable` without waiting
-for a merge; a scheduled run that resolves the same asset digests the
-published image already carries skips the build. It also publishes immutable
-`sha-<commit>` tags; use an immutable tag or digest when reproducibility is
-required. Do not use `:latest`.
+The publish workflow moves `:stable` on every push to main, and can be run by
+hand with `workflow_dispatch`. It also publishes immutable `sha-<commit>`
+tags; use an immutable tag or digest when reproducibility is required. Do not
+use `:latest`.
+
+Goose's `canary` asset moves without a commit here, so `:stable` tracks it
+only as far as the last push. That is deliberate: it was previously chased by
+an hourly scheduled rebuild, which shared a concurrency group with the push
+build and cancelled it, then skipped its own build because the Goose digests
+had not changed — reporting success while leaving a merged commit unpublished.
+A publish that only runs when the source changes cannot do that. Run the
+workflow by hand when a canary refresh is wanted without a commit.
 ## Pin Maintenance
 **An unmaintainable pin is a stale pin.** A pin's strictness is worthless if
 no automation can see past it, and a frozen pin raises no failing check — it
