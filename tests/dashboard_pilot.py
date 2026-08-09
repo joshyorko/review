@@ -673,6 +673,140 @@ async def main() -> int:
         )
     gh_log.write_text("")
 
+    # ── who has reviewed, and whether their word carries write access ────
+    check(
+        tui.reviewer_standing("MEMBER") == "maintainer"
+        and tui.reviewer_standing("OWNER") == "maintainer"
+        and tui.reviewer_standing("COLLABORATOR") == "maintainer"
+        and tui.reviewer_standing("CONTRIBUTOR") == "community"
+        and tui.reviewer_standing("NONE") == "community",
+        "author association must separate maintainers from the community",
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+        stop.live = {
+            "isDraft": False,
+            "reviews": [
+                {
+                    "author": {"login": "hanthor"},
+                    "authorAssociation": "MEMBER",
+                    "state": "APPROVED",
+                },
+                {
+                    "author": {"login": "passerby"},
+                    "authorAssociation": "CONTRIBUTOR",
+                    "state": "CHANGES_REQUESTED",
+                },
+            ],
+        }
+        app.render_evidence(stop)
+        await pilot.pause()
+        details = str(app.query_one("#details", tui.Static).render())
+        for expected in (
+            "reviews  2",
+            "1 maintainer",
+            "1 community",
+            "hanthor",
+            "APPROVED",
+            "passerby",
+            "CHANGES_REQUESTED",
+        ):
+            check(
+                expected in details,
+                f"the evidence must show {expected!r}, got {details!r}",
+            )
+        stop.live["reviews"] = []
+        app.render_evidence(stop)
+        await pilot.pause()
+        check(
+            "reviews  none yet" in str(app.query_one("#details", tui.Static).render()),
+            "an unreviewed pull request must say so plainly",
+        )
+
+    # ── leaving a review: a verdict without a merge ──────────────────────
+    for verdict_key, flag in (("1", "--approve"), ("2", "--request-changes"), ("3", "--comment")):
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            gh_log.write_text("")
+            await pilot.press("L")
+            await pilot.pause()
+            check(
+                isinstance(app.screen, tui.ReviewVerdict),
+                f"[L] must offer a verdict, got {type(app.screen).__name__}",
+            )
+            await pilot.press(verdict_key)
+            await pilot.pause()
+            check(
+                isinstance(app.screen, tui.ReviewBody),
+                f"a verdict must ask for a reason, got {type(app.screen).__name__}",
+            )
+            await pilot.press("n", "o", "p", "e")
+            await pilot.press("enter")
+            await pilot.pause()
+            check(
+                isinstance(app.screen, tui.ConfirmMutation),
+                "leaving a review must reach the typed-number gate",
+            )
+            gate = app.screen
+            check(
+                flag in gate.commands[0] and gate.commands[0][:3] == ["gh", "pr", "review"],
+                f"the review must carry {flag}, got {gate.commands[0]}",
+            )
+            check(
+                "--add-label" not in gate.commands[0],
+                "leaving a review must not apply the lgtm automation opt-in",
+            )
+            await pilot.press(*gate.expected)
+            await pilot.press("enter")
+            for _ in range(200):
+                if "pr review" in gh_log.read_text():
+                    break
+                await pilot.pause(0.05)
+            check(
+                flag in gh_log.read_text(),
+                f"the confirmed review must run with {flag}, got {gh_log.read_text()!r}",
+            )
+            check(
+                "pr merge" not in gh_log.read_text(),
+                "leaving a review must never merge",
+            )
+
+    # A verdict that is not an approval has to say why.
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        gh_log.write_text("")
+        await pilot.press("L")
+        await pilot.pause()
+        await pilot.press("2")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.ConfirmMutation),
+            "an empty request-changes must not reach the gate",
+        )
+        check(
+            "pr review" not in gh_log.read_text(),
+            "an empty request-changes must submit nothing",
+        )
+    gh_log.write_text("")
+
     # ── the gate is always escapable ─────────────────────────────────────
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:

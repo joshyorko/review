@@ -113,6 +113,20 @@ GHOST_BUILD_ISSUE = "projectbluefin/review#133"
 DOCS_UPDATE_ISSUE = "projectbluefin/review#134"
 
 
+MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+
+def reviewer_standing(association: str) -> str:
+    """Maintainer or community, from GitHub's own author association.
+
+    GitHub already decides this per review: OWNER, MEMBER and COLLABORATOR
+    carry write access to the repository, everything else does not. Reading
+    it off the review costs nothing, where asking the permissions API costs
+    one round trip per reviewer per stop.
+    """
+    return "maintainer" if association in MAINTAINER_ASSOCIATIONS else "community"
+
+
 def pr_url(repository: str, number: int) -> str:
     return f"https://github.com/{repository}/pull/{number}"
 
@@ -292,6 +306,53 @@ class LabelOverlay(ModalScreen[str | None]):
                 self.dismiss(LABEL_CHOICES[index])
 
 
+class ReviewVerdict(ModalScreen[str | None]):
+    """Pick what kind of review to leave. One keystroke, Esc aborts."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "close")]
+
+    CHOICES = [
+        ("approve", "approve"),
+        ("request-changes", "request changes"),
+        ("comment", "comment (no verdict)"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="label-box"):
+            yield Label("leave a review:")
+            for index, (_, description) in enumerate(self.CHOICES, start=1):
+                yield Label(f"  [{index}] {description}")
+
+    def on_key(self, event) -> None:
+        if event.key.isdigit():
+            index = int(event.key) - 1
+            if 0 <= index < len(self.CHOICES):
+                self.dismiss(self.CHOICES[index][0])
+
+
+class ReviewBody(ModalScreen[str | None]):
+    """The review body. Required for anything but a bare approval."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "close")]
+
+    def __init__(self, verdict: str) -> None:
+        super().__init__()
+        self.verdict = verdict
+
+    def compose(self) -> ComposeResult:
+        optional = " (empty is allowed for an approval)" if self.verdict == "approve" else ""
+        with Vertical(id="confirm-box"):
+            yield Label(f"{self.verdict} — say why{optional}:")
+            yield Input(id="review-body-input")
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.dismiss(event.value)
+
+
 class DiffScreen(ModalScreen[None]):
     """The diff, in colour, scrollable, and whole.
 
@@ -380,6 +441,7 @@ class ReviewScreen(Screen):
         Binding("escape", "close", "close"),
         Binding("q", "close", "close"),
         Binding("x", "stop", "stop review"),
+        Binding("L", "leave_review", "leave a review"),
     ]
 
     def __init__(self, stop: Stop, steer: str = "") -> None:
@@ -522,6 +584,11 @@ class ReviewScreen(Screen):
             return False
         return True
 
+    def action_leave_review(self) -> None:
+        """Leave a GitHub review from here — the draft is on screen, which is
+        the moment a maintainer actually has an opinion to record."""
+        self.app.leave_review(self.stop_record)
+
     def action_close(self) -> None:
         # A review takes minutes. Closing mid-run would throw that away with a
         # keystroke, so an unfinished review has to be stopped deliberately.
@@ -562,7 +629,8 @@ class ReviewDashboard(App):
     """
 
     BINDINGS = [
-        Binding("r", "review", "review"),
+        Binding("r", "review", "start a review"),
+        Binding("L", "leave_review", "leave a review"),
         Binding("b", "batch", "batch select"),
         Binding("l", "labels", "labels"),
         Binding("p", "priority", "priority"),
@@ -826,7 +894,7 @@ class ReviewDashboard(App):
             "--json",
             "author,state,headRefOid,isDraft,mergeable,mergeStateStatus,"
             "reviewDecision,additions,deletions,changedFiles,updatedAt,"
-            "closingIssuesReferences,statusCheckRollup,labels",
+            "closingIssuesReferences,statusCheckRollup,labels,reviews",
         )
         stop.live = json.loads(live.stdout) if live.returncode == 0 else {}
         if stop.repository not in self.merge_rights:
@@ -896,6 +964,38 @@ class ReviewDashboard(App):
             escape(l["name"]) for l in (live.get("labels") or [])
         ) or "-"
         author = (live.get("author") or {}).get("login", stop.author or "-")
+        # Who has reviewed, and whether their word carries write access.
+        # "approved" means something different from a maintainer than from a
+        # drive-by, and the single reviewDecision field cannot say which it
+        # was — or that three other people also looked.
+        reviews = live.get("reviews") or []
+        by_reviewer: dict[str, dict] = {}
+        for review in reviews:
+            login = (review.get("author") or {}).get("login") or "?"
+            state = review.get("state", "")
+            if state == "COMMENTED" and login in by_reviewer:
+                # A comment never supersedes a verdict already given.
+                continue
+            by_reviewer[login] = review
+        if by_reviewer:
+            maintainers = sum(
+                1
+                for review in by_reviewer.values()
+                if reviewer_standing(review.get("authorAssociation", "")) == "maintainer"
+            )
+            summary = (
+                f"{len(by_reviewer)} "
+                f"({maintainers} maintainer, {len(by_reviewer) - maintainers} community)"
+            )
+            detail = "\n".join(
+                f"         {link(login, f'https://github.com/{login}')} "
+                f"{reviewer_standing(review.get('authorAssociation', ''))} "
+                f"{escape(review.get('state', '?'))}"
+                for login, review in by_reviewer.items()
+            )
+            reviews_block = f"reviews  {summary}\n{detail}"
+        else:
+            reviews_block = "reviews  none yet"
         self.query_one("#details", Static).update(
             f"[b]{link(stop.key, pr_url(stop.repository, stop.number))}[/b]  "
             f"{escape(stop.title)}\n"
@@ -909,6 +1009,7 @@ class ReviewDashboard(App):
             f"size     +{live.get('additions', '?')} -{live.get('deletions', '?')} "
             f"across {live.get('changedFiles', '?')} files\n"
             f"checks   {ok} ok, {bad} failed, {pending} pending\n"
+            f"{reviews_block}\n"
             f"linked   {issues}\n"
             f"labels   {labels}"
         )
@@ -1074,6 +1175,54 @@ class ReviewDashboard(App):
         stop = self.current
         if stop:
             self.push_screen(ReviewScreen(stop))
+
+    def leave_review(self, stop: Stop) -> None:
+        """Submit a review to GitHub: approve, request changes, or comment.
+
+        Seeing a pull request judged is not the same as saying so. A
+        maintainer who has read the agent's draft and the diff can leave their
+        verdict here without merging anything and without arming automation —
+        `a` is the automation opt-in, `m` is the merge, and this is neither.
+        It is the ordinary review a reviewer owes an author, including the one
+        that says no.
+        """
+        def with_verdict(verdict: str | None) -> None:
+            if not verdict:
+                return
+
+            def with_body(body: str | None) -> None:
+                if body is None:
+                    return
+                body = body.strip()
+                if not body and verdict != "approve":
+                    self.notify(
+                        f"{verdict} needs a reason; nothing was submitted.",
+                        severity="warning",
+                    )
+                    return
+                os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
+                body_file = os.path.join(
+                    os.path.dirname(TRACE_PATH), f"review-{stop.number}.md"
+                )
+                with open(body_file, "w", encoding="utf-8") as sink:
+                    sink.write((body or "Reviewed.") + "\n")
+                self.mutate_all(
+                    stop,
+                    [[
+                        "gh", "pr", "review", str(stop.number),
+                        "--repo", stop.repository, f"--{verdict}",
+                        "--body-file", body_file,
+                    ]],
+                )
+
+            self.push_screen(ReviewBody(verdict), with_body)
+
+        self.push_screen(ReviewVerdict(), with_verdict)
+
+    def action_leave_review(self) -> None:
+        stop = self.current
+        if stop:
+            self.leave_review(stop)
 
     def action_docs(self) -> None:
         self.notify(f"docs-update agent task is tracked as {DOCS_UPDATE_ISSUE}")

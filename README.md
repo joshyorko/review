@@ -251,7 +251,8 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `b` | toggle batch selection for the highlighted pull request |
 | `l` | label overlay (`kind/bug`, `area/bootc`, `status/approved`, …) |
 | `p` | cycle priority label (`P0-critical` … `P3-low`) |
-| `r` | **review this pull request with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
+| `r` | **start a review with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
+| `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
 | `g` | Ghost Cluster build dispatch (tracked as #133) |
 | `o` | open in browser |
@@ -309,6 +310,31 @@ clipboard.
 
 Stops that are no longer open on GitHub are refused at the point of action —
 the snapshot can be hours old, and GitHub is the state.
+
+### Leaving a review
+
+`r` starts the agent review so you can see the pull request judged; `v` shows
+the diff. Neither submits anything. When you have an opinion, `L` records it
+on GitHub — approve, request changes, or comment — from the dashboard or from
+the review screen with the draft still on it.
+
+That is deliberately none of the other things: it does not merge, and it does
+not apply `lgtm`, so you can say "this is wrong, here is why" or "this looks
+right to me" without landing the change or arming the sweep. A verdict other
+than an approval must carry a reason; an empty one submits nothing.
+
+The evidence pane shows who has already reviewed and what their word is worth:
+
+```
+ reviews  2 (1 maintainer, 1 community)
+          hanthor maintainer APPROVED
+          passerby community CHANGES_REQUESTED
+```
+
+Maintainer or community comes from GitHub's own author association — `OWNER`,
+`MEMBER` and `COLLABORATOR` carry write access, everything else does not.
+GitHub's single `reviewDecision` field cannot tell you which kind of reviewer
+approved, or that three other people also looked.
 
 ### Asking Hive
 

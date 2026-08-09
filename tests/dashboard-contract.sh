@@ -74,8 +74,22 @@ grep -q 'for Hive auto-merge on green CI.' "$tui" ||
   fail "queueing must post the exact approval the sweep re-verifies"
 grep -q '"--add-label", "lgtm"' "$tui" ||
   fail "queueing must add the lgtm label the sweep scans for"
-[[ "$(grep -c '"pr", "review"' "$tui")" -eq 1 ]] ||
-  fail "exactly one review-submission site: the Hive queue approval"
+# Two review-submission sites, and both gated: the queue approval that arms
+# the sweep, and the maintainer's own review — approve, request changes, or
+# comment — which is neither a merge nor an automation opt-in.
+[[ "$(grep -c '"pr", "review"' "$tui")" -eq 2 ]] ||
+  fail "expected two review sites: the queue approval and the maintainer review"
+leave_review="$(sed -n '/def leave_review/,/def action_leave_review/p' "$tui")"
+grep -q 'self.mutate_all' <<<"$leave_review" ||
+  fail "leaving a review must go through the typed-number gate"
+grep -q '"request-changes"' "$tui" ||
+  fail "a reviewer must be able to request changes, not only approve"
+grep -q 'f"--{verdict}"' "$tui" ||
+  fail "the chosen verdict must be what gh is told to submit"
+grep -q -- '"--add-label"' <<<"$leave_review" &&
+  fail "leaving a review must not apply the lgtm automation opt-in"
+grep -q 'authorAssociation' "$tui" ||
+  fail "reviewer standing must come from GitHub's author association"
 
 # Drafts are refused from live evidence, and every mutation invalidates cache.
 grep -q 'isDraft' "$tui" || fail "merge must refuse drafts from live evidence"
