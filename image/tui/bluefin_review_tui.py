@@ -20,6 +20,7 @@ import signal
 import subprocess
 import time
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -52,6 +53,28 @@ PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 MUTATION_TIMEOUT = 60
 PRIORITIES = ["P0-critical", "P1-high", "P2-medium", "P3-low"]
 LABEL_CHOICES = ["kind/bug", "kind/improvement", "area/bootc", "status/approved"]
+
+# The order a maintainer wants, which is not the order the snapshot is written
+# in. The generator ranks by how stuck a pull request is; a reviewer opening
+# this dashboard wants the ones they can act on now — the merge-ready and the
+# reviewable — above the ones waiting on their author or on better evidence.
+# A queue that buries what you can land under sixty things you cannot is a
+# queue you stop reading.
+MAINTAINER_ORDER = [
+    "ready-for-human-merge",
+    "review",
+    "resolve-conflicts",
+    "fix-ci",
+    "investigate",
+]
+
+
+def action_rank(action: str) -> int:
+    try:
+        return MAINTAINER_ORDER.index(action)
+    except ValueError:
+        return len(MAINTAINER_ORDER)
+
 
 # The review engine. It produces a Review Draft and has no approve, merge,
 # comment, or close path of its own, so running it can never mutate GitHub.
@@ -111,7 +134,7 @@ class QueueFilters:
     bluefin' narrows the queue without a second surface to learn.
     """
 
-    action: str = "review"
+    action: str = ""
     repository: str = ""
     url: str = QUEUE_URL
 
@@ -408,6 +431,7 @@ class ReviewDashboard(App):
         Binding("x", "reject", "reject"),
         Binding("h", "handoff", "handoff"),
         Binding("slash", "steer", "steer review"),
+        Binding("f", "filter", "filter"),
         Binding("M", "resolve_cluster", "resolve dupes", show=False),
         Binding("q", "quit", "quit"),
     ]
@@ -424,6 +448,7 @@ class ReviewDashboard(App):
         # repository rather than assumed from the fact that a dashboard is
         # open. Unknown until asked, and never cached as True by default.
         self.merge_rights: dict[str, bool] = {}
+        self.snapshot_items: list[dict] = []
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -484,6 +509,17 @@ class ReviewDashboard(App):
         with urllib.request.urlopen(self.filters.url, timeout=60) as response:
             snapshot = json.load(response)
         self.generated_at = snapshot.get("generated_at", "")
+        # Keep the whole snapshot: the action filter is a view over it, so
+        # narrowing and widening never needs another fetch.
+        self.snapshot_items = [
+            item
+            for item in snapshot.get("items", [])
+            # Own-work filtering: a maintainer reviews other people's work.
+            if not (self.self_login and item.get("author") == self.self_login)
+        ]
+        self.call_from_thread(self.apply_filters)
+
+    def apply_filters(self) -> None:
         stops = [
             Stop(
                 repository=item["repository"],
@@ -492,12 +528,11 @@ class ReviewDashboard(App):
                 title=item.get("title", ""),
                 author=item.get("author", "") or "",
             )
-            for item in snapshot.get("items", [])
+            for item in self.snapshot_items
             if self.filters.wants(item)
-            # Own-work filtering: a maintainer reviews other people's work.
-            and not (self.self_login and item.get("author") == self.self_login)
         ]
-        self.call_from_thread(self.populate, stops)
+        stops.sort(key=lambda stop: (action_rank(stop.action), stop.repository, stop.number))
+        self.populate(stops)
 
     def populate(self, stops: list[Stop]) -> None:
         self.stops = stops
@@ -515,11 +550,41 @@ class ReviewDashboard(App):
     def refresh_status(self) -> None:
         selected = sum(1 for s in self.stops if s.selected)
         freshness = self.generated_at or "unknown"
-        self.query_one("#status-bar", Static).update(
-            f" Queue: {len(self.stops)} PRs | snapshot {freshness} "
-            f"| as {self.self_login or 'unknown'} | batch: {selected} "
-            f"| Hive: not consulted | Ghost Cluster: {GHOST_BUILD_ISSUE}"
+        shown = len(self.stops)
+        total = len(self.snapshot_items)
+        scope = self.filters.action or "all"
+        # Say how much of the queue is hidden. A filtered view that looks like
+        # the whole queue is how a maintainer concludes there are five open
+        # pull requests when there are a hundred and twenty-one.
+        held_back = f" (of {total}; [f] widens)" if shown != total else ""
+        breakdown = ", ".join(
+            f"{count} {action}"
+            for action, count in sorted(
+                Counter(
+                    item.get("recommended_action", "") for item in self.snapshot_items
+                ).items(),
+                key=lambda pair: action_rank(pair[0]),
+            )
         )
+        self.query_one("#status-bar", Static).update(
+            f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
+            f"| snapshot {freshness} | as {self.self_login or 'unknown'} "
+            f"| batch: {selected} | Ghost Cluster: {GHOST_BUILD_ISSUE}"
+        )
+
+    def action_filter(self) -> None:
+        """Cycle the action filter: every action, then one at a time."""
+        present = [a for a in MAINTAINER_ORDER if any(
+            item.get("recommended_action") == a for item in self.snapshot_items
+        )]
+        scopes = [""] + present
+        try:
+            nxt = scopes[(scopes.index(self.filters.action) + 1) % len(scopes)]
+        except ValueError:
+            nxt = ""
+        self.filters.action = nxt
+        self.apply_filters()
+        self.notify(f"filter: {nxt or 'all actions'} — {len(self.stops)} PRs")
 
     @property
     def current(self) -> Stop | None:
@@ -1040,13 +1105,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--action",
-        default="review",
-        help="only this recommended_action (default: review)",
+        default="",
+        help="only this recommended_action (default: every action)",
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="every action, not just one",
+        help="every action (the default; kept so existing commands still work)",
     )
     parser.add_argument(
         "--repo",

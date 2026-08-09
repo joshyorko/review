@@ -212,11 +212,20 @@ pull-request state) and, for `r`, the same Copilot credential the other launch
 paths pass through. Arguments pass straight through to the dashboard:
 
 ```bash
-just review-queue                      # everything the queue marks 'review'
+just review-queue                      # the whole queue, merge-ready first
 just review-queue kimi high            # pick the model profile and effort
 just review-queue --repo bluefin       # one repository
-just review-queue --all                # every action
+just review-queue --action review      # one recommended action
 ```
+
+The default is the **whole** queue. It used to default to the `review` action
+alone, which is a handful of the hundred-plus open pull requests, so the
+dashboard looked nearly empty and the merge-ready work was not on screen at
+all. Stops are ordered for a maintainer — `ready-for-human-merge` first, then
+`review`, then the ones waiting on their author (`resolve-conflicts`,
+`fix-ci`) and on better evidence (`investigate`). `f` cycles the filter
+through each action and back to everything, and the status bar always shows
+how many stops are hidden and why.
 
 ### The dashboard
 
@@ -253,6 +262,7 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `x` | reject: comment, then close |
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
 | `/` | steer: type instructions that ride along with the review you start |
+| `f` | cycle the action filter (every action → one at a time → back) |
 | `M` | resolve the duplicate cluster |
 | `q` | quit |
 

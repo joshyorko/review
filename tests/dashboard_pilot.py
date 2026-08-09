@@ -115,8 +115,56 @@ async def main() -> int:
 
     import bluefin_review_tui as tui
 
-    # ── the queue loads, filters own work, and honours the action filter ──
+    # ── the default view hides nothing ───────────────────────────────────
+    # The regression this pins: the dashboard defaulted to the 'review'
+    # action, so a 121-pull-request queue rendered as five stops and the
+    # merge-ready work was invisible. Default is now the whole queue, ordered
+    # so what a maintainer can act on comes first.
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        keys = [stop.key for stop in app.stops]
+        check(
+            keys == ["projectbluefin/bluefinctl#31", "projectbluefin/common#7"],
+            f"the default view must show every action, got {keys}",
+        )
+        check(
+            tui.QueueFilters().action == "",
+            "the default action filter must be empty (every action)",
+        )
+        check(
+            tui.action_rank("ready-for-human-merge") < tui.action_rank("review")
+            < tui.action_rank("fix-ci")
+            < tui.action_rank("investigate"),
+            "merge-ready and reviewable work must sort above stuck work",
+        )
+        # [f] narrows to one action at a time and comes back to everything.
+        await pilot.press("f")
+        await pilot.pause()
+        check(
+            app.filters.action == "review"
+            and [s.key for s in app.stops] == ["projectbluefin/bluefinctl#31"],
+            f"[f] must narrow to one action, got {app.filters.action!r} "
+            f"{[s.key for s in app.stops]}",
+        )
+        for _ in range(6):
+            if app.filters.action == "":
+                break
+            await pilot.press("f")
+            await pilot.pause()
+        check(
+            app.filters.action == "" and len(app.stops) == 2,
+            "[f] must cycle back to every action",
+        )
+
+    # ── an explicit action filter still narrows ──────────────────────────
+    app = tui.ReviewDashboard(
+        tui.QueueFilters(action="review", url=queue_file.as_uri())
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
