@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 import tempfile
@@ -228,22 +229,115 @@ async def main() -> int:
                     await pilot.pause(0.05)
                 if not isinstance(app.screen, tui.ConfirmMutation):
                     break
-                expected = app.screen.expected
-                seen.append(expected)
-                app.screen.query_one(tui.Input).value = expected
+                gate = app.screen
+                expected = gate.expected
+                seen.append((expected, tuple(gate.command[:2])))
+                # type the number as a maintainer does; setting .value
+                # directly would hide an unfocused, unusable gate
+                await pilot.press(*expected)
+                check(
+                    gate.query_one(tui.Input).value == expected,
+                    "confirmation gate must accept typed keystrokes",
+                )
                 await pilot.press("enter")
-                await pilot.pause()
+                for _ in range(200):
+                    if app.screen is not gate:
+                        break
+                    await pilot.pause(0.05)
+            numbers = [number for number, _ in seen]
+            commands = [command for _, command in seen]
             check(
                 len(seen) == 4
-                and seen[0] == seen[1]
-                and seen[2] == seen[3]
-                and seen[0] != seen[2],
+                and numbers[0] == numbers[1]
+                and numbers[2] == numbers[3]
+                and numbers[0] != numbers[2]
+                and commands == [("gh", "pr")] * 4,
                 f"batch queueing must gate review and label per PR, got {seen}",
             )
             check(
                 not confirmations(),
                 "batch queueing must return to the dashboard after all gates",
             )
+    gh_log.write_text("")
+
+    # ── the gate is always escapable ─────────────────────────────────────
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        app.stops[0].live = {"isDraft": False}
+        app.action_merge()
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.ConfirmMutation),
+            "queueing a PR must open the confirmation gate",
+        )
+        await pilot.press("escape")
+        for _ in range(200):
+            if not isinstance(app.screen, tui.ConfirmMutation):
+                break
+            await pilot.pause(0.05)
+        check(
+            not isinstance(app.screen, tui.ConfirmMutation),
+            "escape must abort the confirmation gate",
+        )
+    gh_log.write_text("")
+
+    # ── a slow mutation must not freeze the dashboard ────────────────────
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    real_run = subprocess.run
+
+    def slow_run(*args, **kwargs):
+        command = args[0] if args else kwargs.get("args")
+        if (
+            isinstance(command, (list, tuple))
+            and len(command) > 2
+            and command[1] == "pr"
+            and command[2] in {"review", "edit"}
+        ):
+            time.sleep(2)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return real_run(*args, **kwargs)
+
+    subprocess.run = slow_run
+    try:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            app.self_login = "castrojo"
+            app.stops[0].live = {"isDraft": False}
+            app.action_merge()
+            await pilot.pause()
+            expected = app.screen.expected
+            await pilot.press(*expected)
+            loop = asyncio.get_running_loop()
+            start = loop.time()
+            ticks = []
+
+            async def heartbeat():
+                while loop.time() - start < 3:
+                    ticks.append(loop.time() - start)
+                    await asyncio.sleep(0.1)
+
+            beat = asyncio.create_task(heartbeat())
+            await pilot.press("enter")
+            await asyncio.sleep(3)
+            beat.cancel()
+            gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+            check(
+                bool(gaps) and max(gaps) < 1,
+                "a slow gh mutation must run off the UI thread, "
+                f"but the event loop stalled {max(gaps) if gaps else 0:.2f}s",
+            )
+    finally:
+        subprocess.run = real_run
     gh_log.write_text("")
 
     # ── a completed review reports complete ──────────────────────────────

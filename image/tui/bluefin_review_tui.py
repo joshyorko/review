@@ -49,6 +49,7 @@ TRACE_PATH = os.path.join(
     "trace.jsonl",
 )
 PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
+MUTATION_TIMEOUT = 60
 PRIORITIES = ["P0-critical", "P1-high", "P2-medium", "P3-low"]
 LABEL_CHOICES = ["kind/bug", "kind/improvement", "area/bootc", "status/approved"]
 
@@ -145,8 +146,10 @@ class Stop:
 
 class ConfirmMutation(ModalScreen[bool]):
     """The single mutation gate: show the exact command, require the typed
-    pull request number. Empty or wrong aborts; there is no y/yes and no
-    timeout."""
+    pull request number. Empty, wrong, or Esc aborts; there is no y/yes and
+    no timeout."""
+
+    BINDINGS = [Binding("escape", "dismiss(False)", "abort")]
 
     def __init__(self, command: list[str], expected: str) -> None:
         super().__init__()
@@ -158,7 +161,8 @@ class ConfirmMutation(ModalScreen[bool]):
             yield Label("will run:", id="confirm-heading")
             yield Static(" ".join(self.command), id="confirm-command")
             yield Label(
-                f"type the pull request number ({self.expected}) to run it; empty aborts"
+                f"type the pull request number ({self.expected}) to run it; "
+                "empty or Esc aborts"
             )
             yield Input(placeholder=self.expected, id="confirm-input")
 
@@ -574,25 +578,62 @@ class ReviewDashboard(App):
             if not confirmed:
                 self.notify("aborted; nothing was run.", severity="warning")
                 return
-            result = subprocess.run(command, capture_output=True, text=True)
+            self.notify(f"running: {' '.join(command[:4])}…")
+            self.run_mutation(stop, command, then)
+
+        self.push_screen(ConfirmMutation(command, str(stop.number)), finish)
+
+    @work(thread=True)
+    def run_mutation(self, stop: Stop, command: list[str], then) -> None:
+        """Execute a confirmed mutation off the UI thread. A slow or hung gh
+        call must never freeze the dashboard, so this is bounded by
+        MUTATION_TIMEOUT and reports back through call_from_thread."""
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=MUTATION_TIMEOUT
+            )
+        except (subprocess.TimeoutExpired, OSError) as error:
             trace(
                 {
                     "repo": stop.repository,
                     "number": stop.number,
                     "argv": command,
-                    "exit": result.returncode,
+                    "error": str(error),
                 }
             )
-            self.pulls_cache.pop(stop.repository, None)
-            if result.returncode == 0:
-                self.notify(f"done: {' '.join(command[:4])}…")
-                if then:
-                    then()
-                self.show_evidence(stop)
-            else:
-                self.notify(result.stderr.strip()[:200], severity="error")
+            self.call_from_thread(
+                self.notify,
+                f"{' '.join(command[:4])}… did not finish: {error}",
+                severity="error",
+            )
+            return
+        trace(
+            {
+                "repo": stop.repository,
+                "number": stop.number,
+                "argv": command,
+                "exit": result.returncode,
+            }
+        )
+        self.call_from_thread(self.mutation_finished, stop, command, result, then)
 
-        self.push_screen(ConfirmMutation(command, str(stop.number)), finish)
+    def mutation_finished(
+        self,
+        stop: Stop,
+        command: list[str],
+        result: subprocess.CompletedProcess,
+        then,
+    ) -> None:
+        """Apply one finished mutation on the UI thread."""
+        self.pulls_cache.pop(stop.repository, None)
+        if result.returncode != 0:
+            message = result.stderr.strip()[:200] or f"exit {result.returncode}"
+            self.notify(message, severity="error")
+            return
+        self.notify(f"done: {' '.join(command[:4])}…")
+        if then:
+            then()
+        self.show_evidence(stop)
 
     # ── actions ───────────────────────────────────────────────────────────
 

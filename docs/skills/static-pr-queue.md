@@ -1,7 +1,7 @@
 ---
 name: static-pr-queue
-version: "1.8"
-last_updated: 2026-08-09
+version: "1.9"
+last_updated: 2026-08-10
 id: static-pr-queue
 one_line_purpose: Publish a safe, static queue of public pull requests.
 entry_point: docs/skills/static-pr-queue.md
@@ -14,7 +14,7 @@ tags: [github, actions, queue, static, pullrequest]
 description: "Publishes the public static PR queue without creating queue authority. Use when changing queue generation, ranking, artifacts, or refresh automation."
 metadata:
   type: procedure
-  context7-sources: [/websites/github_en_actions, /websites/github_en_rest]
+  context7-sources: [/websites/github_en_actions, /websites/github_en_rest, /textualize/textual]
 ---
 
 # Static PR Queue
@@ -90,6 +90,16 @@ if `gh pr merge`, `--admin`, `--delete-branch`, or a push appears at all.
 Batch mutations reuse that gate serially: finish approval and labeling for one
 pull request before opening the next confirmation, and stop the sequence on an
 abort or failure. Never stack confirmation modals for a batch.
+
+A gate the maintainer cannot leave is a broken gate. Bind Esc to abort every
+confirmation modal, and never run a confirmed `gh` mutation on the UI thread:
+Textual's event loop is single-threaded, so a synchronous `subprocess.run`
+blocks repaints and keystrokes for the call's full duration, and an unbounded
+call strands the maintainer in a frozen modal with no way out. Run mutations in
+a `@work(thread=True)` worker with an explicit `timeout=`, report results back
+through `call_from_thread`, and surface the timeout as an error notification.
+Exercise the gate in tests with real keystrokes; assigning `Input.value`
+directly passes even when the widget never had focus.
 
 The snapshot carries each pull request's `author` so a consumer can skip the
 maintainer's own work. Authorship is the one field that never changes after
