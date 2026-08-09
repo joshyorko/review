@@ -154,6 +154,7 @@ bash tests/image-contract.sh
 bash tests/hive-compatibility.sh
 bash tests/bluefin-review.sh
 bash tests/dashboard-contract.sh
+bash tests/worktree-guard.sh
 bash tests/just-onboarding.sh
 git diff --check
 just --list
@@ -178,5 +179,5 @@ container; CI invokes it explicitly.
   templates, DCO sign-off required on pull requests).
 - Organization skills and factory rules: `projectbluefin/common`.
 - External API details: Context7 documentation. Context7 reaches agents both
-  through Hive's hub-side knowledge export and, as the appliance's context
-  pipeline lands, through image-level configuration.
+  through Hive's hub-side knowledge export and through the image's
+  configured `context7` extension (keyless public endpoint).

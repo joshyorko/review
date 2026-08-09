@@ -26,12 +26,13 @@ assigned contributor session behaves unexpectedly.
 ## Core Process
 
 1. Let Hive own the WebSocket protocol, assignment selection, `contributor`
-   tmux session, prompt injection, result capture, and external documentation
-   lookup. Context7 is Hive's: the hub queries it server-side
-   (`v2/pkg/knowledge/context7.go`) and delivers the result through its
-   knowledge export, so the image must never configure a second path to it.
-   review starts the runtime and attaches to it; it does not reproduce any of
-   those jobs.
+   tmux session, prompt injection, and result capture. Context7 reaches the
+   agent twice: the hub queries it server-side
+   (`v2/pkg/knowledge/context7.go`) and delivers assigned-task context through
+   its knowledge export, and the image's controlled Goose config enables the
+   `context7` extension for on-demand lookups (see `goose-context.md`).
+   review starts the runtime and attaches to it; it does not reproduce Hive's
+   jobs.
 2. Attach only to inspect or deliberately steer a live session:
 
    ```bash

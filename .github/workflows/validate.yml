@@ -101,6 +101,7 @@ jobs:
           bash tests/hive-compatibility.sh
           bash tests/bluefin-review.sh
           bash tests/dashboard-contract.sh
+          bash tests/worktree-guard.sh
 
       - name: Interactive launcher docs and shell stay aligned
         run: |

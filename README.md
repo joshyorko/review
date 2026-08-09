@@ -480,9 +480,17 @@ destroying fresh agent output. Both shims are gone. Use the tools the image
 ships; if one is missing, fix it at the FSDK seam rather than reimplementing
 it here.
 
-Context7 is Hive's, not this image's. The hub queries Context7 server-side and
-delivers the result through its knowledge export, so the image never
-configures a Context7 extension and CI forbids one.
+Context7 serves the agent through two seams: the Hive hub queries it
+server-side and folds the result into its knowledge export, and the image's
+controlled Goose config enables the `context7` extension against the keyless
+public endpoint for on-demand documentation lookups. The agent policy routes
+external API questions through it before memory.
+
+`worktree-guard` (at `/usr/local/bin/worktree-guard`) runs an agent command
+in an ephemeral git worktree and enforces hygiene: a run that leaves the
+tree dirty is reported, purged, and failed, and the agent's own exit code is
+never masked. When bubblewrap is available it adds a read-only-root sandbox
+around the run (fsdk-containers#109 tracks shipping bwrap in the base).
 
 Git hooks at `/opt/bluefin/git-hooks` are ergonomics only; GitHub rulesets and
 required checks enforce repository policy.

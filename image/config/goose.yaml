@@ -39,3 +39,15 @@ GOOSE_NO_CODE_TRUNCATION: true
 # Summarise rather than prompt when the window fills; `goose run` already
 # defaults to this, but interactive sessions otherwise stop and ask.
 GOOSE_CONTEXT_STRATEGY: summarize
+
+# Context7 is the appliance's fresh-documentation seam: the agent policy
+# routes every external API question through it before memory. The remote
+# endpoint is keyless and rate-limited; the Hive hub's knowledge export
+# remains a second, server-side delivery of the same capability.
+extensions:
+  context7:
+    enabled: true
+    name: context7
+    type: streamable_http
+    uri: "https://mcp.context7.com/mcp"
+    timeout: 120

@@ -394,14 +394,16 @@ forbid scripts/generate-skills.py \
   'projectbluefin/common/main/'
 
 # The controlled config exists only because Hive overwrites
-# ~/.config/goose/config.yaml on every start. It must not pin a provider,
-# model, or extension that Hive manages: the launcher passes provider and model
-# through from the contributor's own account.
+# ~/.config/goose/config.yaml on every start. It must not pin a provider or
+# model that Hive manages: the launcher passes provider and model through
+# from the contributor's own account. Context7 is image-owned, not
+# Hive-managed: it is the appliance's fresh-documentation seam and must stay
+# configured, keyless, against the public endpoint.
 require image/config/goose.yaml \
   'GOOSE_MODE: auto' \
-  'GOOSE_MAX_TOOL_RESPONSE_SIZE:'
-forbid image/config/goose.yaml \
-  'context7'
+  'GOOSE_MAX_TOOL_RESPONSE_SIZE:' \
+  'context7' \
+  'uri: "https://mcp.context7.com/mcp"'
 
 # Comments stripped first, so the prose explaining a setting is never mistaken
 # for the setting.
@@ -419,6 +421,7 @@ require image/config/local-agent-policy.md \
   'Use installed global Agent Skills when their descriptions match the task' \
   'docs/skills/index.json' \
   'inspect local repository evidence first' \
+  'context7' \
   'it has no package' \
   'Probe with' \
   'are not installed' \
@@ -429,7 +432,6 @@ require image/config/local-agent-policy.md \
 # hand-rolled substitute. These are present at the pinned base digest.
 # shellcheck disable=SC2016 # Literal policy text, not shell expansion.
 forbid image/config/local-agent-policy.md \
-  'context7' \
   '`which`, `awk`' \
   '`yq` and the PyYAML module'
 

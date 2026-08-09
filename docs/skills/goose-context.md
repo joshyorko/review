@@ -42,15 +42,15 @@ task delivery; use the Hive runtime documentation instead.
 3. Goose follows the upstream `canary` release. Build it with the required
    `github_token` secret so GitHub CLI can verify signed provenance from the
    official `canary.yml` workflow; never put that token in an image layer.
-4. Do not configure Context7 in this image. Hive owns it: the hub queries
-   Context7's API server-side (`v2/pkg/knowledge/context7.go`) and folds the
-   result into its knowledge base, which reaches the agent through Hive's
-   knowledge export and the Goose-native `AGENTS.md` and `.goosehints` links.
-   `tests/image-contract.sh` forbids Context7 strings in the policy, Goose
-   config, and entrypoint so the image never grows a second path to it. When a
-   client separately provides a Context7 extension, use it for current
-   external documentation; otherwise continue from Hive's knowledge and local
-   repository evidence rather than inventing an API or flag.
+4. Context7 is the appliance's fresh-documentation seam and is configured in
+   the image: the controlled Goose config enables the `context7` extension
+   against the keyless public endpoint (`https://mcp.context7.com/mcp`), and
+   the agent policy routes external API, framework, and platform questions
+   through it before memory. Hive's hub still queries Context7 server-side
+   (`v2/pkg/knowledge/context7.go`) and folds the result into the knowledge
+   export — two deliveries of the same capability, one for assigned-task
+   context, one for on-demand lookups. `tests/image-contract.sh` requires the
+   extension in the config and the routing rule in the policy.
 5. Treat generated global skills and repository skills differently. The image
    generates global skills at build time from the pinned
    `projectbluefin/common` catalog. After cloning a repository, read its
@@ -140,9 +140,9 @@ and reject any path separator or traversal segment before joining a path.
 ## Common Rationalizations
 
 - "The policy wording is cosmetic." The image contract validates specific
-  skill-routing strings and forbids any Context7 configuration in the policy,
-  Goose config, and entrypoint; change its assertions with the wording when
-  the intended behavior changes.
+  skill-routing strings, the Context7 extension in the Goose config, and the
+  documentation-first routing rule in the policy; change its assertions with
+  the wording when the intended behavior changes.
 - "A repository skill will load automatically." Native discovery occurs before
   the assigned repository exists, so repository skill routing needs the
   explicit catalog lookup.
@@ -164,7 +164,7 @@ without increasing the bounded tool response size.
 - Setting `GOOSE_MODE` to `approve` or `smart_approve`, or presenting a
   confirmation prompt as the safety control for this image.
 - Treating absent Context7 output as evidence for an unverified external
-  claim. Context7 arrives through Hive's knowledge export, not the image.
+  claim: state what could not be verified instead.
 - Assuming `goose review` sees the skills projected into `~/.agents/skills`,
   or writing `.agents/` files into a repository under review to make it.
 - Inlining skill bodies into `--instructions`, or reaching for `--prompt`

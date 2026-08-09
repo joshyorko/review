@@ -5,6 +5,13 @@ After cloning a task repository, when `docs/skills/index.json` exists, read it
 and open matching active skill entry points before reviewing or making changes;
 inspect local repository evidence first.
 
+For external API, framework, and platform details (bootc, systemd, ostree,
+GitHub Actions, and the like), look them up with the configured context7
+documentation extension before relying on memory: fetch the current
+documentation, then act on what it actually says. The order of work is
+always evidence first — org skill inventory, repository evidence, fresh
+external documentation — then execution.
+
 This runtime is a lean FSDK base, not a distribution, and it has no package
 manager. It does ship ordinary GNU userland: `awk`, `xargs`, `ps`, `tar`,
 `less`, `file`, `diff`, `patch`, `find`, `cmp`, `sed`, `grep`, `python3`,

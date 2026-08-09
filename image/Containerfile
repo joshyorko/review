@@ -200,6 +200,7 @@ RUN --mount=type=secret,id=github_token set -eu; \
     /usr/local/bin/goose run --help >/dev/null
 
 COPY --chmod=0755 image/bin/bluefin-review /usr/local/bin/bluefin-review
+COPY --chmod=0755 image/bin/worktree-guard /usr/local/bin/worktree-guard
 
 # The base ships the full ncurses terminfo database (fsdk-containers#101):
 # TERM inside the container is the truth about the attached terminal, and
