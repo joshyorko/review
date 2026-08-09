@@ -18,10 +18,10 @@ fail() {
   exit 1
 }
 
-# No protection bypass, no branch deletion, no review submission, no force.
+# No protection bypass, no branch deletion, no direct merge, no force.
 grep -q -- '--admin' "$tui" && fail "the dashboard must never bypass branch protections with --admin"
 grep -q -- '--delete-branch' "$tui" && fail "the dashboard must never delete branches"
-grep -qE '"pr", "review"|"review",' "$tui" && fail "the dashboard must never submit a review"
+grep -q '"pr", "merge"' "$tui" && fail "the dashboard must never merge directly — Hive's governor sweep merges"
 grep -qE '"push"|git push' "$tui" && fail "the dashboard must never push"
 
 # Exactly two direct process executions exist: the read-only gh() helper and
@@ -29,7 +29,7 @@ grep -qE '"push"|git push' "$tui" && fail "the dashboard must never push"
 # of self.mutate(), never of gh().
 [[ "$(grep -c 'subprocess.run' "$tui")" -eq 2 ]] ||
   fail "expected exactly two subprocess.run sites (gh() reader and mutate() executor)"
-if grep -nE 'gh\("pr", "(merge|close|comment|edit)"' "$tui"; then
+if grep -nE 'gh\("pr", "(merge|close|comment|edit|review)"' "$tui"; then
   fail "mutating gh verbs must go through self.mutate(), not the gh() reader"
 fi
 
@@ -39,13 +39,15 @@ grep -q 'ConfirmMutation(command, str(stop.number))' "$tui" ||
   fail "mutate() must confirm with the pull request number"
 grep -qiE '\(y/n\)|yes/no' "$tui" && fail "no y/yes confirmation shortcut"
 
-# Every merge arms auto-merge pinned to the reviewed commit.
-merges="$(grep -c '"pr", "merge"' "$tui")"
-pins="$(grep -c -- '"--match-head-commit"' "$tui")"
-[[ "$merges" -eq "$pins" ]] ||
-  fail "every merge must carry --match-head-commit (merges=$merges pins=$pins)"
-[[ "$(grep -c -- '"--squash", "--auto", "--match-head-commit"' "$tui")" -eq "$merges" ]] ||
-  fail "every merge must be --squash --auto --match-head-commit"
+# Queueing goes through Hive's governor sweep: the exact approval body it
+# re-verifies plus the lgtm label, and the only review submission is that
+# approval inside the gated _queue_automerge helper.
+grep -q 'for Hive auto-merge on green CI.' "$tui" ||
+  fail "queueing must post the exact approval the sweep re-verifies"
+grep -q '"--add-label", "lgtm"' "$tui" ||
+  fail "queueing must add the lgtm label the sweep scans for"
+[[ "$(grep -c '"pr", "review"' "$tui")" -eq 1 ]] ||
+  fail "exactly one review-submission site: the Hive queue approval"
 
 # Drafts are refused from live evidence, own work is filtered, and every
 # mutation leaves a trace for the feedback loop and invalidates the cache.

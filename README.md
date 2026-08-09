@@ -236,7 +236,7 @@ walker's GitHub identity; your own pull requests are filtered out.
 | `o` | open in browser |
 | `v` | view the diff |
 | `c` | comment |
-| `a`/`m` | arm auto-merge — for the batch selection if one exists |
+| `a`/`m` | queue for Hive auto-merge — for the batch selection if one exists |
 | `x` | reject: comment, then close |
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
 | `M` | resolve the duplicate cluster |
@@ -244,8 +244,9 @@ walker's GitHub identity; your own pull requests are filtered out.
 
 The dashboard carries the same authority contract as the line-mode walk:
 every mutation prints the exact `gh` command and runs only after you type
-the pull request number, merges are always
-`--squash --auto --match-head-commit`, drafts are refused, and every action
+the pull request number, merges are queued through Hive's governor sweep
+(approval + `lgtm`, never a direct merge), drafts are refused, and every
+action
 is appended as a JSON trace to `~/.local/state/bluefin-review/trace.jsonl`
 inside the container for the review feedback loop.
 `tests/dashboard-contract.sh` pins all of it.
@@ -276,8 +277,8 @@ to mislead a reviewer. Then it offers a menu:
 | `d` | show the diff |
 | `o` | open it in a browser |
 | `c` | leave a comment (typed-number confirmation) |
-| `m` | arm auto-merge for this pull request (typed-number confirmation) |
-| `M` | resolve this duplicate cluster: arm the survivor, comment and close the superseded, recheck orphaned issues |
+| `m` | queue this pull request for Hive auto-merge (typed-number confirmation) |
+| `M` | resolve this duplicate cluster: queue the survivor, comment and close the superseded, recheck orphaned issues |
 | `h` | handoff: copy the stop's identity, live evidence, and cluster verdicts to your clipboard (OSC 52) |
 | `p` | previous pull request |
 | `q` | stop |
@@ -286,11 +287,13 @@ Stops that are no longer open on GitHub are skipped automatically — the
 snapshot can be hours old, and GitHub is the state.
 
 Every state-changing key prints the exact command and runs it only after you
-type the pull request number; empty aborts, and there is no y/yes shortcut. A
-merge is always `--squash --auto --match-head-commit <reviewed sha>`: it arms
-GitHub's own auto-merge pinned to the commit you looked at, and required
-checks and branch protections still gate the actual merge. Drafts are
-refused.
+type the pull request number; empty aborts, and there is no y/yes shortcut.
+Queueing a merge is the factory's real merge path: it posts the exact
+approval Hive's governor sweep re-verifies (`Approved by @<you> for Hive
+auto-merge on green CI.`) and adds the `lgtm` label the sweep scans for. The
+sweep — not this tool — performs the squash merge, and it independently
+enforces the self-merge ban, requires mergeable plus all checks green, and
+ignores drafts. Nothing here merges directly.
 
 `h` is read-only: it copies the handoff text through OSC 52, which reaches
 your system clipboard when the attached terminal supports that sequence

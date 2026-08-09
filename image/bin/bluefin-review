@@ -148,11 +148,12 @@ Pull requests authored by the GH_TOKEN owner are skipped: a walk is for
 reviewing other people's work.
 
 The queue is a recommendation snapshot. GitHub stays authoritative for pull
-request state. The maintainer action keys [m] and [M] arm auto-merge and
-resolve duplicate clusters; every state-changing command is printed first and
-runs only after the maintainer types the pull request number, and a merge is
-always '--auto --match-head-commit', so GitHub's required checks and branch
-protections still gate the actual merge.
+request state. The maintainer action keys [m] and [M] queue a pull request
+for Hive auto-merge and resolve duplicate clusters; every state-changing
+command is printed first and runs only after the maintainer types the pull
+request number. Queueing posts the exact approval Hive's governor sweep
+verifies and adds the lgtm label; the sweep itself enforces the self-merge
+ban, requires green CI, and performs the squash merge.
 EOF
 }
 
@@ -450,25 +451,30 @@ gh_mutate() {
   invalidate_repo_cache "$repo"
 }
 
-# Arm auto-merge for the pull request on screen. --match-head-commit pins the
-# merge to the exact commit the reviewer looked at, and --auto leaves GitHub's
-# own required checks and branch protections as the gate — this never forces a
-# merge past them.
+# Queue the pull request on screen for Hive auto-merge. This is the factory's
+# real merge path: the governor sweep scans managed repos every minute for
+# open, non-draft PRs carrying the lgtm label, re-verifies the queue approval
+# (exact body below), enforces the self-merge ban (queuer != author), requires
+# mergeable + all checks green, then squash-merges. The walk already skips
+# the walker's own PRs, so the self-merge ban never bites here.
 merge_current() {
-  local repo="$1" number="$2"
+  local repo="$1" number="$2" login
   if [[ "${EVIDENCE_IS_DRAFT:-}" == "true" ]]; then
-    printf ' %s#%s is a draft; not merging.\n' "$repo" "$number"
+    printf ' %s#%s is a draft; the sweep ignores drafts. Not queueing.\n' "$repo" "$number"
     return 1
   fi
-  if [[ -z "${EVIDENCE_HEAD_OID:-}" ]]; then
-    printf ' live head commit is unknown; not merging without --match-head-commit.\n'
+  login="$(gh api user --jq .login 2>/dev/null)" || login=""
+  if [[ -z "$login" ]]; then
+    printf ' could not resolve your GitHub login; the queue approval needs it.\n'
     return 1
   fi
-  if gh_mutate "$repo" "$number" \
-    gh pr merge "$number" --repo "$repo" --squash --auto --match-head-commit "$EVIDENCE_HEAD_OID"; then
-    printf ' auto-merge armed for %s#%s at %.12s; GitHub'\''s checks still gate the merge.\n' \
-      "$repo" "$number" "$EVIDENCE_HEAD_OID"
-  fi
+  gh_mutate "$repo" "$number" \
+    gh pr review "$number" --repo "$repo" --approve \
+    --body "Approved by @${login} for Hive auto-merge on green CI." || return 1
+  gh_mutate "$repo" "$number" \
+    gh pr edit "$number" --repo "$repo" --add-label lgtm || return 1
+  printf ' queued %s#%s for Hive auto-merge; the sweep merges it on green CI.\n' \
+    "$repo" "$number"
 }
 
 # Resolve a duplicate cluster around the pull request on screen: arm the
@@ -519,7 +525,7 @@ PY
   local dup note
   for dup in $dup_numbers; do
     note="${CACHE_DIR}/superseded-${dup}.md"
-    printf 'Superseded by #%s, which is armed to merge. Closing as a duplicate; the surviving change lands there.\n' \
+    printf 'Superseded by #%s, which is queued for Hive auto-merge. Closing as a duplicate; the surviving change lands there.\n' \
       "$survivor" >"$note"
     gh_mutate "$repo" "$dup" gh pr comment "$dup" --repo "$repo" --body-file "$note" || return 1
     gh_mutate "$repo" "$dup" gh pr close "$dup" --repo "$repo" || return 1

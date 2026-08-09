@@ -80,11 +80,12 @@ any future consumer: the queue orders the walk, GitHub supplies the evidence.
 A consumer's mutations stay gated and narrow. `ready-for-human-merge` is a
 recommendation to a person; the walk's `m` and `M` keys execute that person's
 decision — never the queue's — through one confirmed call site: the exact
-command is printed, the maintainer types the pull request number, and every
-merge is `--squash --auto --match-head-commit`, so GitHub's required checks
-and branch protections still gate the actual merge. `tests/bluefin-review.sh`
-fails if a mutation appears outside that gate, or if `--admin`,
-`--delete-branch`, a push, or a `gh pr review` submission appears at all.
+command is printed and the maintainer types the pull request number. A merge
+is queued through Hive's governor sweep (the exact approval body it
+re-verifies plus the `lgtm` label), never performed directly: the sweep
+enforces the self-merge ban, requires green CI, and squash-merges.
+`tests/bluefin-review.sh` fails if a mutation appears outside that gate, or
+if `gh pr merge`, `--admin`, `--delete-branch`, or a push appears at all.
 
 The snapshot carries each pull request's `author` so a consumer can skip the
 walker's own work. Authorship is the one field that never changes after

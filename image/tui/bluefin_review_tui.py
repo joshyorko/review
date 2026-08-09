@@ -168,8 +168,8 @@ class ReviewDashboard(App):
         Binding("o", "open_browser", "open"),
         Binding("v", "view_diff", "diff"),
         Binding("c", "comment", "comment"),
-        Binding("a", "merge", "arm merge"),
-        Binding("m", "merge", "arm merge", show=False),
+        Binding("a", "merge", "queue merge"),
+        Binding("m", "merge", "queue merge", show=False),
         Binding("x", "reject", "reject"),
         Binding("h", "handoff", "handoff"),
         Binding("M", "resolve_cluster", "resolve dupes", show=False),
@@ -480,18 +480,35 @@ class ReviewDashboard(App):
 
         self.push_screen(CommentBody(), with_body)
 
-    def _armable(self, stop: Stop) -> str | None:
+    def _queueable(self, stop: Stop) -> bool:
         if stop.live.get("isDraft") is True:
-            self.notify(f"{stop.key} is a draft; not merging.", severity="warning")
-            return None
-        head = stop.live.get("headRefOid") or ""
-        if not head:
             self.notify(
-                "live head commit unknown; not merging without --match-head-commit.",
+                f"{stop.key} is a draft; the sweep ignores drafts.",
                 severity="warning",
             )
-            return None
-        return head
+            return False
+        if not self.self_login:
+            self.notify(
+                "your GitHub login is unknown; the queue approval needs it.",
+                severity="warning",
+            )
+            return False
+        return True
+
+    def _queue_automerge(self, stop: Stop, then=None) -> None:
+        """Queue for Hive auto-merge: post the exact approval the governor
+        sweep re-verifies, then add the lgtm label it scans for. The sweep
+        enforces the self-merge ban, requires green CI, and squash-merges."""
+        body = f"Approved by @{self.self_login} for Hive auto-merge on green CI."
+        self.mutate(
+            stop, "pr", "review", str(stop.number), "--repo", stop.repository,
+            "--approve", "--body", body,
+            then=lambda: self.mutate(
+                stop, "pr", "edit", str(stop.number), "--repo", stop.repository,
+                "--add-label", "lgtm",
+                then=then,
+            ),
+        )
 
     def action_merge(self) -> None:
         batch = [s for s in self.stops if s.selected]
@@ -499,12 +516,8 @@ class ReviewDashboard(App):
             if not stop.live:
                 self.notify(f"{stop.key}: no live evidence yet; select it first.")
                 continue
-            head = self._armable(stop)
-            if head:
-                self.mutate(
-                    stop, "pr", "merge", str(stop.number), "--repo", stop.repository,
-                    "--squash", "--auto", "--match-head-commit", head,
-                )
+            if self._queueable(stop):
+                self._queue_automerge(stop)
 
     def action_reject(self) -> None:
         stop = self.current
@@ -567,8 +580,7 @@ class ReviewDashboard(App):
         stop = self.current
         if not stop:
             return
-        head = self._armable(stop)
-        if not head:
+        if not self._queueable(stop):
             return
         dupes, _ = self.cluster(stop)
         if not dupes:
@@ -583,8 +595,9 @@ class ReviewDashboard(App):
             body_file = os.path.join(os.path.dirname(TRACE_PATH), f"superseded-{dup}.md")
             with open(body_file, "w", encoding="utf-8") as sink:
                 sink.write(
-                    f"Superseded by #{stop.number}, which is armed to merge. "
-                    "Closing as a duplicate; the surviving change lands there.\n"
+                    f"Superseded by #{stop.number}, which is queued for Hive "
+                    "auto-merge. Closing as a duplicate; the surviving change "
+                    "lands there.\n"
                 )
             dup_stop = Stop(stop.repository, dup, "close", "duplicate")
             self.mutate(
@@ -597,11 +610,7 @@ class ReviewDashboard(App):
             )
 
         os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
-        self.mutate(
-            stop, "pr", "merge", str(stop.number), "--repo", stop.repository,
-            "--squash", "--auto", "--match-head-commit", head,
-            then=lambda: close_next(dupes),
-        )
+        self._queue_automerge(stop, then=lambda: close_next(dupes))
 
 
 def main() -> None:

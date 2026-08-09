@@ -323,7 +323,7 @@ chmod +x "$scratch/bin/goose"
 # merges" grep became these inverted invariants: the powers stay narrow, and
 # every mutation runs through exactly one confirmed call site.
 
-# No protection bypass, no branch deletion, no review submission, no push.
+# No protection bypass, no branch deletion, no direct merge, no push.
 if grep -qE -- '--admin' "$review"; then
   echo "bluefin-review must never bypass branch protections with --admin" >&2
   exit 1
@@ -332,8 +332,8 @@ if grep -qE -- '--delete-branch' "$review"; then
   echo "bluefin-review must never delete branches" >&2
   exit 1
 fi
-if grep -qE 'gh pr review' "$review"; then
-  echo "bluefin-review must never submit a review" >&2
+if grep -qE 'gh pr merge' "$review"; then
+  echo "bluefin-review must never merge directly — Hive's governor sweep merges" >&2
   exit 1
 fi
 if grep -qE '(^|[^[:alnum:]_])git +push' "$review"; then
@@ -341,27 +341,36 @@ if grep -qE '(^|[^[:alnum:]_])git +push' "$review"; then
   exit 1
 fi
 
-# Every merge arms auto-merge pinned to the reviewed commit; an immediate or
-# unpinned merge would bypass GitHub's own gate or merge a head the reviewer
-# never saw. Backslash continuations are joined first so a wrapped call is
-# scanned as the one command it becomes.
+# The only review submission is the Hive queue approval: the exact body the
+# governor sweep re-verifies, behind the typed-number gate. Any other
+# 'gh pr review' is a hole.
 review_joined="$scratch/review-joined"
 sed -e :a -e '/\\$/N; s/\\\n//; ta' "$review" >"$review_joined"
 while IFS= read -r line; do
-  [[ "$line" == *'--squash --auto --match-head-commit'* ]] || {
-    echo "every gh pr merge must be --squash --auto --match-head-commit: $line" >&2
+  [[ "$line" == *'gh_mutate '* && "$line" == *'for Hive auto-merge on green CI.'* ]] || {
+    echo "review submission outside the gated Hive queue approval: $line" >&2
     exit 1
   }
-done < <(grep -E 'gh pr merge' "$review_joined" | grep -vE '^[[:space:]]*#')
+done < <(grep -E 'gh pr review' "$review_joined" | grep -vE '^[[:space:]]*#')
+[[ "$(grep -cE 'gh pr review' "$review_joined" | head -1)" -ge 1 ]] || {
+  echo "the m key must queue through the Hive approval" >&2
+  exit 1
+}
+grep -q -- '--add-label lgtm' "$review_joined" || {
+  echo "queueing must add the lgtm label the sweep scans for" >&2
+  exit 1
+}
 
 # Exactly one mutation call site: every state-changing gh invocation is the
 # argument of gh_mutate, whose typed-number confirmation is the gate.
+# Backslash continuations are joined first so a wrapped call is scanned as
+# the one command it becomes.
 while IFS= read -r line; do
   [[ "$line" == *'gh_mutate '* ]] || {
     echo "mutating gh call outside gh_mutate: $line" >&2
     exit 1
   }
-done < <(grep -E 'gh (pr (merge|close|comment)|issue (close|comment|edit|reopen))' "$review_joined" | grep -vE '^[[:space:]]*#')
+done < <(grep -E 'gh (pr (merge|close|comment|edit|review)|issue (close|comment|edit|reopen))' "$review_joined" | grep -vE '^[[:space:]]*#')
 
 # The confirmation is a typed number with no shortcut: no y/yes prompt and no
 # read timeout may gate a mutation.
