@@ -61,14 +61,14 @@ Goose, or image build skill documents.
    Hive's `contributor` session.
    `review-queue` is the exception that proves the rule: it mounts nothing at
    all and starts the image with the `queue` argument, which the entrypoint
-   dispatches to `bluefin-review queue` before the Hive config gate. The walk
-   needs a GitHub token from the first keystroke, so the recipe fails without
-   one rather than warning. Leading non-flag arguments are the model profile
-   and thinking effort — the same closed set `review-container` takes — and
-   everything from the first `-` flag onward forwards verbatim to
-   `bluefin-review queue`. Its instance name is `review-queue`, overridable
-   with `REVIEW_QUEUE_NAME` — the queue walk's analogue of
-   `REVIEW_CONTAINER_NAME`, and likewise the only instance knob it gets.
+   dispatches to the maintainer dashboard before the Hive config gate. The
+   dashboard needs a GitHub token from the first keystroke, so the recipe
+   fails without one rather than warning. Leading non-flag arguments are the
+   model profile and thinking effort — the same closed set `review-container`
+   takes — and everything from the first `-` flag onward forwards verbatim to
+   the dashboard. Its instance name is `review-queue`, overridable with
+   `REVIEW_QUEUE_NAME` — the dashboard's analogue of `REVIEW_CONTAINER_NAME`,
+   and likewise the only instance knob it gets.
    Which hive a launch contributes to is launcher configuration, not task
    selection: `~/.config/hive/contributor.<name>.env` registrations sit
    beside the default `contributor.env`, and the launch picks `REVIEW_HIVE`

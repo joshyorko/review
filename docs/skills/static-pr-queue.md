@@ -71,14 +71,15 @@ GitHub owns pull-request state and merge decisions.
 
 ## Consuming The Queue
 
-`bluefin-review queue` is the one shipped consumer. It reads the snapshot only
-to decide **what to show a human next**, and re-reads every displayed fact from
-GitHub live, because the snapshot can be hours old and a stale "clean" reading
-is the one most likely to mislead a reviewer. Treat that split as the rule for
-any future consumer: the queue orders the walk, GitHub supplies the evidence.
+The maintainer dashboard is the one shipped consumer. It reads the snapshot
+only to decide **what to show a human next**, and re-reads every displayed fact
+from GitHub live, because the snapshot can be hours old and a stale "clean"
+reading is the one most likely to mislead a reviewer. Treat that split as the
+rule for any future consumer: the queue orders the work, GitHub supplies the
+evidence.
 
 A consumer's mutations stay gated and narrow. `ready-for-human-merge` is a
-recommendation to a person; the walk's `m` and `M` keys execute that person's
+recommendation to a person; the dashboard's `m` and `M` keys execute that person's
 decision — never the queue's — through one confirmed call site: the exact
 command is printed and the maintainer types the pull request number. A merge
 is queued through Hive's governor sweep (the exact approval body it
@@ -88,9 +89,9 @@ enforces the self-merge ban, requires green CI, and squash-merges.
 if `gh pr merge`, `--admin`, `--delete-branch`, or a push appears at all.
 
 The snapshot carries each pull request's `author` so a consumer can skip the
-walker's own work. Authorship is the one field that never changes after
+maintainer's own work. Authorship is the one field that never changes after
 creation, so it is safe to trust from the snapshot where state like
-mergeability is not; a walk is for reviewing other people's work.
+mergeability is not; the dashboard is for reviewing other people's work.
 
 ### Duplicates Are Evidence, Overlap Is Not
 
@@ -109,9 +110,9 @@ real duplicate behind noise from one busy workflow file.
 Normalise a Renovate title to the dependency it updates before comparing;
 `update module <path>`, `update dependency <name>`, `<image> docker digest`,
 and `<action> action` are all the same shape wearing different words. Fetch
-each repository's open pull requests once per walk and cache them.
+each repository's open pull requests once per session and cache them.
 
-A duplicate cluster is reviewed once, not walked twice: `bluefin-review`
+A duplicate cluster is reviewed once, not twice: `bluefin-review`
 fetches every duplicate's diff beside the checkout, and the Review Draft must
 name which pull request merges and which close as superseded. Overlaps are
 named in the review as ordering hazards and keep their own stops.

@@ -161,6 +161,12 @@ just --list
 pre-commit run --all-files
 ```
 
+`tests/dashboard-contract.sh` drives the real Textual app through
+`tests/dashboard_pilot.py`, so it builds a hash-locked Textual virtualenv from
+`image/tui/requirements.lock` at `.cache/tui-venv` on first run (`uv` when
+present, `python3 -m venv` otherwise) and reuses it until the lock changes.
+`BLUEFIN_REVIEW_TUI_VENV` points it elsewhere.
+
 `tests/image-audit.sh` needs a container engine and network. It defaults to
 `docker`; on a podman host pass `CONTAINER_ENGINE=podman`. Check the pinned
 FSDK input alone with `--verify-base-evidence`; audit a built or published

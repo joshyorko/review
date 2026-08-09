@@ -411,8 +411,8 @@ assert_eq "$(wc -c <"$gum_log")" 0 "the launcher must never prompt for a model"
 assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 
-# ══ 2b. Queue walk: no Hive, GH_TOKEN required, args pass through ════════
-begin "review-queue: launches the walk with no Hive config at all"
+# ══ 2b. Dashboard: no Hive, GH_TOKEN required, args pass through ═════════
+begin "review-queue: launches the dashboard with no Hive config at all"
 reset_logs
 mv "$home/.config/hive" "$home/.config/hive.saved"
 RECIPE_ARGS=(--repo bluefin)
@@ -425,12 +425,12 @@ assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
 assert_file_not_contains ".config/hive" "$runner_log"
 assert_file_contains "GH_TOKEN:present" "$credential_log"
 assert_not_contains "contributor.env" "$OUT"
-assert_contains "starting the PR queue walk (no Hive)" "$OUT"
+assert_contains "starting the maintainer review dashboard (no Hive)" "$OUT"
 
 begin "review-queue: no GitHub token is one actionable error"
 reset_logs
 run_recipe review-queue GH_READY=1
-assert_nonzero_status "$STATUS" "a queue walk without a token must not launch"
+assert_nonzero_status "$STATUS" "the dashboard without a token must not launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "cannot run without a token" "$OUT"
 assert_eq "$(wc -c <"$runner_log")" 0 "no container may start without a token"

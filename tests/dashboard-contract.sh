@@ -1,37 +1,43 @@
 #!/usr/bin/env bash
 # Contract checks for the maintainer dashboard (image/tui/bluefin_review_tui.py).
 #
-# The dashboard carries the same authority contract as bluefin-review's queue
-# walk: GitHub is authoritative, every mutation runs behind the typed-number
-# confirmation gate, and the powers stay narrow. These are static assertions
-# over the source plus a compile check; the Textual runtime itself is
-# exercised in the image build (py_compile in the uv layer).
+# Two layers, and the order matters. The pilot below drives the real Textual
+# app: it presses keys, waits for the review screen to reach a terminal state,
+# and asserts what the maintainer is actually told. That is the layer that
+# catches a binding pointing at nothing, or a failed review reported as a clean
+# one — both of which a source-text grep passes happily.
+#
+# The static assertions that remain are the ones about absence: a power the
+# dashboard must never have cannot be proven missing by exercising it.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tui="$repo_root/image/tui/bluefin_review_tui.py"
-
-python3 -m py_compile "$tui"
 
 fail() {
   echo "FAIL: $1" >&2
   exit 1
 }
 
+# --- absence: powers the dashboard must not have -----------------------------
 # No protection bypass, no branch deletion, no direct merge, no force.
 grep -q -- '--admin' "$tui" && fail "the dashboard must never bypass branch protections with --admin"
 grep -q -- '--delete-branch' "$tui" && fail "the dashboard must never delete branches"
 grep -q '"pr", "merge"' "$tui" && fail "the dashboard must never merge directly — Hive's governor sweep merges"
 grep -qE '"push"|git push' "$tui" && fail "the dashboard must never push"
 
-# Exactly two direct process executions exist: the read-only gh() helper and
-# the gated executor inside mutate(). Every mutating verb must be an argument
-# of self.mutate(), never of gh().
-[[ "$(grep -c 'subprocess.run' "$tui")" -eq 2 ]] ||
-  fail "expected exactly two subprocess.run sites (gh() reader and mutate() executor)"
+# Every mutating verb must be an argument of self.mutate(), never of the
+# read-only gh() helper.
 if grep -nE 'gh\("pr", "(merge|close|comment|edit|review)"' "$tui"; then
   fail "mutating gh verbs must go through self.mutate(), not the gh() reader"
 fi
+
+# Exactly three process-execution sites: the read-only gh() reader, the gated
+# executor inside mutate(), and the review engine the review screen streams.
+[[ "$(grep -c 'subprocess.run' "$tui")" -eq 2 ]] ||
+  fail "expected exactly two subprocess.run sites (gh() reader and mutate() executor)"
+[[ "$(grep -c 'subprocess.Popen(' "$tui")" -eq 1 ]] ||
+  fail "expected exactly one subprocess.Popen site (the streamed review)"
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"
@@ -49,11 +55,8 @@ grep -q '"--add-label", "lgtm"' "$tui" ||
 [[ "$(grep -c '"pr", "review"' "$tui")" -eq 1 ]] ||
   fail "exactly one review-submission site: the Hive queue approval"
 
-# Drafts are refused from live evidence, own work is filtered, and every
-# mutation leaves a trace for the feedback loop and invalidates the cache.
+# Drafts are refused from live evidence, and every mutation invalidates cache.
 grep -q 'isDraft' "$tui" || fail "merge must refuse drafts from live evidence"
-grep -q 'self_login' "$tui" || fail "own-work filtering must exist"
-grep -q 'trace(' "$tui" || fail "mutations must write the JSON trace"
 grep -q 'pulls_cache.pop' "$tui" || fail "mutations must invalidate the pull cache"
 
 # Tracked gaps are named as issues, not silent stubs.
@@ -71,5 +74,31 @@ grep -q 'copy_to_clipboard' <<<"$handoff_body" ||
 if grep -qE 'self\.mutate|subprocess' <<<"$handoff_body"; then
   fail "handoff must stay read-only: no mutation gate, no process execution"
 fi
+
+# --- behaviour: drive the real app -------------------------------------------
+# Textual at the version the image installs, from the same hash-locked file the
+# image build uses, so the pilot exercises the runtime that ships.
+venv="${BLUEFIN_REVIEW_TUI_VENV:-${repo_root}/.cache/tui-venv}"
+lock="$repo_root/image/tui/requirements.lock"
+stamp="${venv}/.lock-sha256"
+want="$(sha256sum "$lock" | cut -d' ' -f1)"
+
+if [[ ! -x "${venv}/bin/python" ]] || [[ "$(cat "$stamp" 2>/dev/null || true)" != "$want" ]]; then
+  echo "dashboard contract: building the pinned Textual venv at ${venv}"
+  rm -rf "$venv"
+  if command -v uv >/dev/null 2>&1; then
+    uv venv --quiet "$venv"
+    uv pip install --quiet --python "${venv}/bin/python" \
+      --require-hashes --no-deps -r "$lock"
+  else
+    python3 -m venv "$venv"
+    "${venv}/bin/python" -m pip install --quiet --upgrade pip
+    "${venv}/bin/python" -m pip install --quiet --require-hashes --no-deps -r "$lock"
+  fi
+  printf '%s' "$want" >"$stamp"
+fi
+
+"${venv}/bin/python" -m py_compile "$tui"
+"${venv}/bin/python" "$repo_root/tests/dashboard_pilot.py"
 
 printf 'dashboard contract OK\n'

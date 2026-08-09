@@ -20,12 +20,13 @@
 #   review-stop       Stop a detached worker. Refuses attended runs and
 #                     containers this launcher did not start.
 #   review-doctor     Read-only preflight diagnostics. Starts nothing.
-#   review-queue      The interactive maintainer review surface. Walks
-#                     the Bluefin PR queue in the contributor container —
-#                     no Hive registration required. q or Ctrl-C stops.
+#   review-queue      The interactive maintainer review surface: a
+#                     full-screen dashboard over the Bluefin PR queue,
+#                     running in the contributor container — no Hive
+#                     registration required. q or Ctrl-C stops.
 #                     Takes the same model profile and effort as
 #                     review-container, then passes the rest through to
-#                     `bluefin-review queue`, e.g.
+#                     the dashboard, e.g.
 #                     'just review-queue kimi high --repo bluefin'.
 #
 # ─────────────────────────────────────────────────────────────────────────
@@ -682,6 +683,7 @@ read_hive_value() {
 #        missing, register a hive under that name. Without it, the current
 #        repository's directory name is tried, then the default
 #        ~/.config/hive/contributor.env.
+[doc("Run the Hive contributor worker: receive assigned tasks and donate inference.")]
 review-container profile="" effort="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -799,6 +801,7 @@ review-container profile="" effort="":
 # containers started with REVIEW_DETACH=1; it refuses to touch anything this
 # launcher did not start (no review.owner label) and never force-removes.
 # Interactive runs still end with Ctrl-C, not with this.
+[doc("Stop a detached contributor worker. Refuses attended runs and foreign containers.")]
 review-stop name="review-container":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -823,19 +826,20 @@ review-stop name="review-container":
     podman stop "$NAME" >/dev/null
     echo "✓ stopped the detached worker ${NAME}."
 
-# Walk the Bluefin PR queue in the contributor container — no Hive.
-# The container runs `bluefin-review queue` instead of the contributor agent,
-# so no Hive registration is mounted or required. Foreground: q or Ctrl-C
-# stops. Arguments pass straight through to `bluefin-review queue`:
+# The maintainer review dashboard over the Bluefin PR queue — no Hive.
+# The container runs the dashboard instead of the contributor agent, so no
+# Hive registration is mounted or required. Foreground: q or Ctrl-C stops.
+# Arguments pass straight through to the dashboard:
 #
 #   just review-queue                      # everything the queue marks 'review'
 #   just review-queue kimi high            # pick the model profile and effort
 #   just review-queue --repo bluefin       # one repository
-#   just review-queue opus5 --all          # profile, then bluefin-review flags
+#   just review-queue opus5 --all          # profile, then dashboard flags
 #
 # One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
-# for a concurrent second walk, exactly as REVIEW_CONTAINER_NAME does for
+# for a concurrent second dashboard, exactly as REVIEW_CONTAINER_NAME does for
 # review-container.
+[doc("Open the maintainer review dashboard over the Bluefin PR queue (no Hive).")]
 review-queue *queue_args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -860,14 +864,10 @@ review-queue *queue_args:
 
     # Leading non-flag arguments are the model profile and thinking effort,
     # exactly as review-container takes them; everything from the first '-'
-    # flag onward belongs to bluefin-review queue. Word-splitting {{queue_args}}
-    # is the point: it arrives as one string of separate flags.
-    # A leading 'dashboard' selects the maintainer TUI instead of the
-    # line-mode walk; the rest of the launch is identical.
+    # flag onward belongs to the dashboard. Word-splitting {{queue_args}} is
+    # the point: it arrives as one string of separate flags.
     # shellcheck disable=SC2086
     set -- {{queue_args}}
-    IMAGE_MODE=queue
-    if [[ $# -gt 0 && "$1" == dashboard ]]; then IMAGE_MODE=dashboard; shift; fi
     profile="" effort=""
     if [[ $# -gt 0 && "$1" != -* ]]; then profile="$1"; shift; fi
     if [[ $# -gt 0 && "$1" != -* ]]; then effort="$1"; shift; fi
@@ -890,8 +890,8 @@ review-queue *queue_args:
     [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
     [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
     # The Copilot credential is what powers 'r' (the Goose review of a pull
-    # request); the walk itself only reads GitHub, so a missing credential is
-    # a warning, not a stop.
+    # request); the dashboard itself only reads GitHub, so a missing credential
+    # is a warning, not a stop.
     resolve_copilot_token
     if [[ -n "${COPILOT_TOKEN:-}" ]]; then
       export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
@@ -900,27 +900,28 @@ review-queue *queue_args:
     else
       report_missing_copilot_credential
     fi
-    # The walk is a GitHub reader from the first keystroke to the last, so an
-    # identity is load-bearing here, not advisory.
+    # The dashboard is a GitHub reader from the first keystroke to the last, so
+    # an identity is load-bearing here, not advisory.
     resolve_gh_token
     if [[ -z "${GH_TOKEN_VALUE:-}" ]]; then
       report_missing_gh_token
-      echo "ERROR: the queue walk reads live pull-request state from GitHub and cannot run without a token." >&2
+      echo "ERROR: the dashboard reads live pull-request state from GitHub and cannot run without a token." >&2
       exit 1
     fi
     export GH_TOKEN="$GH_TOKEN_VALUE"
     CONTAINER_ARGS+=(--env GH_TOKEN)
     report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
 
-    # Whatever survived the profile/effort shift belongs to bluefin-review.
-    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" "$IMAGE_MODE" "$@")
+    # Whatever survived the profile/effort shift belongs to the dashboard.
+    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue "$@")
 
-    echo "✓ starting the PR queue walk (no Hive)."
-    echo "  q or Ctrl-C stops; the walk is the only thing running."
+    echo "✓ starting the maintainer review dashboard (no Hive)."
+    echo "  q or Ctrl-C stops; the dashboard is the only thing running."
     exec "${CONTAINER_ARGS[@]}"
 
 # Preflight check: is this machine actually ready for 'just review-container'?
 # Never starts the container — read-only diagnostics only.
+[doc("Read-only preflight diagnostics for this machine. Starts nothing.")]
 review-doctor:
     #!/usr/bin/env bash
     set -uo pipefail

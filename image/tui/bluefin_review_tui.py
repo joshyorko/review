@@ -1,19 +1,22 @@
-"""Bluefin Review Dashboard — the maintainer TUI for the PR queue.
+"""Bluefin Review Dashboard — the maintainer surface for the PR queue.
 
-A Textual port of the ``bluefin-review queue`` walk's data layer: the static
-queue snapshot orders the walk, GitHub supplies the live evidence, and every
-state-changing command runs through exactly one confirmation gate that makes
-the maintainer type the pull request number. GitHub stays authoritative for
-pull-request state; Hive is never asked for work here.
+The static queue snapshot orders the work, GitHub supplies the live evidence,
+Goose supplies the review, and every state-changing command runs through
+exactly one confirmation gate that makes the maintainer type the pull request
+number. GitHub stays authoritative for pull-request state; Hive is never asked
+for work here.
 
-Runs inside the review image: ``just review-queue dashboard``.
+This is the only maintainer surface. Runs inside the review image:
+``just review-queue``.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 import urllib.request
@@ -24,8 +27,17 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import (
+    Footer,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    RichLog,
+    Static,
+)
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
@@ -39,6 +51,18 @@ TRACE_PATH = os.path.join(
 PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 PRIORITIES = ["P0-critical", "P1-high", "P2-medium", "P3-low"]
 LABEL_CHOICES = ["kind/bug", "kind/improvement", "area/bootc", "status/approved"]
+
+# The review engine. It produces a Review Draft and has no approve, merge,
+# comment, or close path of its own, so running it can never mutate GitHub.
+REVIEW_COMMAND = os.environ.get("BLUEFIN_REVIEW_COMMAND", "bluefin-review")
+
+# bluefin-review's exit status for a review whose checks did not all return a
+# verdict. 'goose review' exits 0 in that case and still prints a finding
+# count, so the count would otherwise read as a clean review.
+REVIEW_INCOMPLETE = 65
+
+# How long a stopped review has to die politely before it is killed.
+STOP_GRACE_SECONDS = 5.0
 
 # Ghost Cluster build dispatch and the docs-update agent task are tracked
 # work, not silent stubs; the handlers below name the issue.
@@ -76,6 +100,28 @@ def dependency_subject(title: str) -> str | None:
         if found:
             return re.sub(r":[^:/]*$", "", found.group(1).strip())
     return None
+
+
+@dataclass
+class QueueFilters:
+    """Which of the snapshot's items reach the dashboard.
+
+    The launcher passes these straight through, so 'just review-queue --repo
+    bluefin' narrows the queue without a second surface to learn.
+    """
+
+    action: str = "review"
+    repository: str = ""
+    url: str = QUEUE_URL
+
+    def wants(self, item: dict) -> bool:
+        if self.action and item.get("recommended_action", "") != self.action:
+            return False
+        if self.repository:
+            full = item.get("repository", "")
+            if full != self.repository and full.split("/")[-1] != self.repository:
+                return False
+        return True
 
 
 @dataclass
@@ -141,6 +187,157 @@ class LabelOverlay(ModalScreen[str | None]):
                 self.dismiss(LABEL_CHOICES[index])
 
 
+class ReviewScreen(Screen):
+    """One Goose review, streamed live.
+
+    The review is the reason this tool exists, so it gets the whole screen and
+    reports its own outcome. ``bluefin-review`` distinguishes a review that
+    completed from one whose checks never returned a verdict, and that
+    distinction is carried all the way to the status line here: a review that
+    did not finish must never be mistaken for a clean one.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "close"),
+        Binding("q", "close", "close"),
+        Binding("x", "stop", "stop review"),
+    ]
+
+    def __init__(self, stop: Stop) -> None:
+        super().__init__()
+        self.stop_record = stop
+        self.process: subprocess.Popen | None = None
+        self.finished = False
+        self.stop_requested = False
+        self.started = time.monotonic()
+
+    def compose(self) -> ComposeResult:
+        stop = self.stop_record
+        yield Header(show_clock=True)
+        yield Static(
+            f" reviewing {stop.repository}#{stop.number} — starting…",
+            id="review-status",
+        )
+        yield RichLog(highlight=False, markup=False, wrap=True, id="review-log")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#review-status", Static).add_class("running")
+        self.run_review()
+
+    @work(thread=True)
+    def run_review(self) -> None:
+        stop = self.stop_record
+        command = [REVIEW_COMMAND, "pr", stop.repository, str(stop.number)]
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                # Its own process group. A review is a shell that runs Goose,
+                # which runs a subprocess per check: signalling only the shell
+                # leaves those children alive holding the pipe open, and the
+                # read loop below would never end.
+                start_new_session=True,
+            )
+        except OSError as error:
+            self.app.call_from_thread(self.finish, None, str(error))
+            return
+        self.process = process
+        self.app.call_from_thread(self.mark_running)
+        assert process.stdout is not None
+        for line in process.stdout:
+            self.app.call_from_thread(self.append, line.rstrip("\n"))
+        self.app.call_from_thread(self.finish, process.wait(), "")
+
+    def mark_running(self) -> None:
+        stop = self.stop_record
+        self.query_one("#review-status", Static).update(
+            f" reviewing {stop.repository}#{stop.number} — running; [x] stops it"
+        )
+
+    def append(self, line: str) -> None:
+        self.query_one("#review-log", RichLog).write(line)
+
+    def finish(self, code: int | None, error: str) -> None:
+        self.finished = True
+        stop = self.stop_record
+        elapsed = int(time.monotonic() - self.started)
+        if error:
+            outcome, state = "error", f"FAILED to start: {error}"
+        elif self.stop_requested:
+            outcome, state = "stopped", "STOPPED — you cancelled it. Nothing was submitted."
+        elif code == 0:
+            outcome = "complete"
+            state = "COMPLETE — a Review Draft for you to judge. Nothing was submitted."
+        elif code == REVIEW_INCOMPLETE:
+            outcome = "incomplete"
+            state = (
+                "INCOMPLETE — part of this review returned no verdict. "
+                "Its finding count is NOT a clean bill of health."
+            )
+        elif code is not None and code < 0:
+            outcome, state = "stopped", "STOPPED — the review was killed. Nothing was submitted."
+        else:
+            outcome = "failed"
+            state = f"FAILED (exit {code}) — the review did not run. Nothing was submitted."
+
+        status = self.query_one("#review-status", Static)
+        status.remove_class("running")
+        status.add_class(outcome)
+        status.update(
+            f" {stop.repository}#{stop.number} — {state} ({elapsed}s) — [escape] closes"
+        )
+        trace(
+            {
+                "action": "review",
+                "repository": stop.repository,
+                "number": stop.number,
+                "outcome": outcome,
+                "exit_code": code,
+                "seconds": elapsed,
+            }
+        )
+
+    def action_stop(self) -> None:
+        # Signal the whole process group, and mean it. A review that ignores
+        # SIGTERM — or a check subprocess that outlives its parent — gets
+        # SIGKILL after a grace period, because a stop key that leaves the
+        # review running is worse than no stop key.
+        if self.finished or self.stop_requested:
+            return
+        self.stop_requested = True
+        self.query_one("#review-status", Static).update(
+            f" {self.stop_record.repository}#{self.stop_record.number} — stopping…"
+        )
+        if self.signal_group(signal.SIGTERM):
+            self.set_timer(STOP_GRACE_SECONDS, self.escalate_stop)
+
+    def escalate_stop(self) -> None:
+        if not self.finished:
+            self.signal_group(signal.SIGKILL)
+
+    def signal_group(self, number: int) -> bool:
+        process = self.process
+        if process is None or process.poll() is not None:
+            return False
+        try:
+            os.killpg(os.getpgid(process.pid), number)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    def action_close(self) -> None:
+        # A review takes minutes. Closing mid-run would throw that away with a
+        # keystroke, so an unfinished review has to be stopped deliberately.
+        if not self.finished:
+            self.notify("review still running — [x] stops it")
+            return
+        self.dismiss()
+
+
 class ReviewDashboard(App):
     """PROJECT BLUEFIN REVIEW DASHBOARD."""
 
@@ -157,14 +354,23 @@ class ReviewDashboard(App):
     }
     #confirm-command { color: magenta; text-style: bold; }
     ListItem.selected Label { color: magenta; text-style: bold; }
+    #review-status { height: auto; padding: 0 1; background: $panel; }
+    #review-status.running { background: $panel; color: cyan; }
+    #review-status.complete { background: $success; color: $text; text-style: bold; }
+    #review-status.incomplete { background: $warning; color: $text; text-style: bold; }
+    #review-status.failed, #review-status.error, #review-status.stopped {
+        background: $error; color: $text; text-style: bold;
+    }
+    #review-log { border: solid $secondary; }
     """
 
     BINDINGS = [
+        Binding("r", "review", "review"),
         Binding("b", "batch", "batch select"),
         Binding("l", "labels", "labels"),
         Binding("p", "priority", "priority"),
         Binding("d", "docs", "update docs"),
-        Binding("r", "ghost_build", "ghost build"),
+        Binding("g", "ghost_build", "ghost build"),
         Binding("o", "open_browser", "open"),
         Binding("v", "view_diff", "diff"),
         Binding("c", "comment", "comment"),
@@ -176,8 +382,9 @@ class ReviewDashboard(App):
         Binding("q", "quit", "quit"),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, filters: QueueFilters | None = None) -> None:
         super().__init__()
+        self.filters = filters or QueueFilters()
         self.stops: list[Stop] = []
         self.self_login = ""
         self.generated_at = ""
@@ -205,7 +412,7 @@ class ReviewDashboard(App):
     def load_queue(self) -> None:
         who = gh("api", "user", "--jq", ".login")
         self.self_login = who.stdout.strip() if who.returncode == 0 else ""
-        with urllib.request.urlopen(QUEUE_URL, timeout=60) as response:
+        with urllib.request.urlopen(self.filters.url, timeout=60) as response:
             snapshot = json.load(response)
         self.generated_at = snapshot.get("generated_at", "")
         stops = [
@@ -217,8 +424,9 @@ class ReviewDashboard(App):
                 author=item.get("author", "") or "",
             )
             for item in snapshot.get("items", [])
-            # Own-work filtering: a walk reviews other people's work.
-            if not (self.self_login and item.get("author") == self.self_login)
+            if self.filters.wants(item)
+            # Own-work filtering: a maintainer reviews other people's work.
+            and not (self.self_login and item.get("author") == self.self_login)
         ]
         self.call_from_thread(self.populate, stops)
 
@@ -241,7 +449,7 @@ class ReviewDashboard(App):
         self.query_one("#status-bar", Static).update(
             f" Queue: {len(self.stops)} PRs | snapshot {freshness} "
             f"| as {self.self_login or 'unknown'} | batch: {selected} "
-            f"| Hive: walk mode (not consulted) | Ghost Cluster: {GHOST_BUILD_ISSUE}"
+            f"| Hive: not consulted | Ghost Cluster: {GHOST_BUILD_ISSUE}"
         )
 
     @property
@@ -423,6 +631,11 @@ class ReviewDashboard(App):
         for old in have:
             args += ["--remove-label", old]
         self.mutate(stop, *args)
+
+    def action_review(self) -> None:
+        stop = self.current
+        if stop:
+            self.push_screen(ReviewScreen(stop))
 
     def action_docs(self) -> None:
         self.notify(f"docs-update agent task is tracked as {DOCS_UPDATE_ISSUE}")
@@ -614,7 +827,33 @@ class ReviewDashboard(App):
 
 
 def main() -> None:
-    ReviewDashboard().run()
+    parser = argparse.ArgumentParser(
+        prog="review-queue",
+        description="The Bluefin maintainer review dashboard.",
+    )
+    parser.add_argument(
+        "--action",
+        default="review",
+        help="only this recommended_action (default: review)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="every action, not just one",
+    )
+    parser.add_argument(
+        "--repo",
+        default="",
+        help="only this repository (short name or owner/repo)",
+    )
+    parser.add_argument("--url", default=QUEUE_URL, help="read the queue from elsewhere")
+    args = parser.parse_args()
+    filters = QueueFilters(
+        action="" if args.all else args.action,
+        repository=args.repo,
+        url=args.url,
+    )
+    ReviewDashboard(filters).run()
 
 
 if __name__ == "__main__":

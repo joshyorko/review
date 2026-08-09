@@ -1,7 +1,7 @@
 ---
 name: pr-workflow
-version: "1.7"
-last_updated: 2026-08-07
+version: "1.8"
+last_updated: 2026-08-09
 id: pr-workflow
 one_line_purpose: Open review pull requests that merge cleanly.
 entry_point: docs/skills/pr-workflow.md
@@ -10,8 +10,8 @@ mcp_compliance_level: partial
 optimization_status: draft
 status: active
 dependencies: []
-tags: [git, pullrequest, conventional, hooks, branches, worktree]
-description: "Defines protected-branch pull request, branch, title, trailer, and validation requirements, how to commit without clobbering uncommitted work, and how to reconcile a long-lived branch with a squash-merged main. Use before branching or committing."
+tags: [git, pullrequest, conventional, branches, worktree, testing]
+description: "Defines pull request, branch, title, trailer, and validation requirements, how to commit without clobbering uncommitted work, how to reconcile a long-lived branch with squash-merged main, and why a test must drive a feature rather than grep its source."
 metadata:
   type: policy
   context7-sources: [/pre-commit/pre-commit]
@@ -160,6 +160,30 @@ Prefer not needing that.
   carry changes worth keeping.
 - Declaring a reconciliation finished because no conflict markers remain,
   without re-running the suite that covers the resolved files.
+- A test suite that passes while the feature under test is missing.
+- Adding a test without once watching it fail.
+
+## Test A Feature By Running It, Not By Grepping For It
+
+A test that asserts over a file's source text proves the text exists, not that
+the feature works. `tests/dashboard-contract.sh` once consisted entirely of
+`grep`s over `bluefin_review_tui.py` — it passed for as long as the dashboard
+had no way to review a pull request at all, because no assertion ever started
+the app. Prefer, in order:
+
+1. **Drive the real thing.** Textual ships `App.run_test()`; the pilot in
+   `tests/dashboard_pilot.py` presses keys, waits for a terminal state, and
+   asserts what the maintainer is told. A binding pointing at a missing action
+   fails there and nowhere else.
+2. **Assert on observable outcomes**, not on the strings that produce them: the
+   status text and its style class, the process argv, the exit status, the
+   trace record.
+3. **Keep source-text assertions only for absence.** A power a component must
+   never have — `--admin`, `git push`, a direct merge — cannot be proven
+   missing by exercising it, so grep is the right tool for exactly that.
+
+Confirm a new test can fail: break the behaviour it covers, watch it go red,
+then restore. A test never observed failing is an assumption.
 
 ## Verification
 

@@ -47,8 +47,9 @@ silently create a second workflow, authority path, or task queue.
    Hive tasks, donates inference, and produces structured pre-review
    feedback. `REVIEW_DETACH=1` runs it detached, with `just review-stop` as
    its lifecycle verb.
-2. **Interactive maintainer TUI** (`review-queue dashboard`): high-velocity
-   PR and issue triage with batching, labels, priority, agent-assisted
+2. **Interactive maintainer dashboard** (`review-queue`): the review surface.
+   Goose reviews a pull request in place and streams its verdict, alongside
+   high-velocity triage with batching, labels, priority, agent-assisted
    documentation updates (#134), and Ghost Cluster build dispatch (#133).
 
 The watcher feedback loop — comparing automated pre-reviews with maintainer
@@ -203,36 +204,47 @@ PageUp scrolls, tmux search finds text, and `q` returns to the live pane.
 The mouse wheel also enters copy-mode and scrolls long output. Copy-mode only
 changes your view; Hive still owns task and output handling.
 
-### Walking the queue
+### Reviewing the queue
 
-`just review-queue` runs the walk in the contributor container — no Hive
-registration. It needs only a GitHub token (the walk reads live
+`just review-queue` runs the dashboard in the contributor container — no Hive
+registration. It needs only a GitHub token (the dashboard reads live
 pull-request state) and, for `r`, the same Copilot credential the other launch
-paths pass through. Arguments pass straight through to `bluefin-review queue`:
+paths pass through. Arguments pass straight through to the dashboard:
 
 ```bash
 just review-queue                      # everything the queue marks 'review'
 just review-queue kimi high            # pick the model profile and effort
 just review-queue --repo bluefin       # one repository
 just review-queue --all                # every action
-just review-queue dashboard            # the full-screen maintainer dashboard
 ```
 
 ### The dashboard
 
-`just review-queue dashboard` opens the same walk as a full-screen Textual
-TUI: a queue pane (Renovate-style dependency bumps are marked BATCHABLE), a
+`just review-queue` opens the maintainer surface: a full-screen Textual app
+with a queue pane (Renovate-style dependency bumps are marked BATCHABLE), a
 live-evidence details pane, and a context pane carrying the duplicate
-verdicts. The status bar reports queue depth, snapshot freshness, and the
-walker's GitHub identity; your own pull requests are filtered out.
+verdicts. The status bar reports queue depth, snapshot freshness, and your
+GitHub identity; your own pull requests are filtered out.
+
+`r` is the one that matters: it opens a full-screen review that streams
+Goose's output live and then states its own outcome. `x` stops a running
+review — the whole process group, escalating to `SIGKILL`, because a review is
+a shell running Goose running a subprocess per check, and signalling only the
+shell leaves those alive. `escape` closes the screen once it has finished. A review that finished
+reports COMPLETE. A review whose checks returned no verdict — the model
+answered with prose, or an empty response, and `goose review` exited 0 with a
+finding count anyway — reports **INCOMPLETE** and says the count is not a
+clean bill of health. Those two must never look alike, so they are the
+regression `tests/dashboard_pilot.py` drives the real app to prove.
 
 | Key | Action |
 |---|---|
 | `b` | toggle batch selection for the highlighted pull request |
 | `l` | label overlay (`kind/bug`, `area/bootc`, `status/approved`, …) |
 | `p` | cycle priority label (`P0-critical` … `P3-low`) |
+| `r` | **review this pull request with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
 | `d` | docs-update agent task (tracked as #134) |
-| `r` | Ghost Cluster build dispatch (tracked as #133) |
+| `g` | Ghost Cluster build dispatch (tracked as #133) |
 | `o` | open in browser |
 | `v` | view the diff |
 | `c` | comment |
@@ -242,8 +254,8 @@ walker's GitHub identity; your own pull requests are filtered out.
 | `M` | resolve the duplicate cluster |
 | `q` | quit |
 
-The dashboard carries the same authority contract as the line-mode walk:
-every mutation prints the exact `gh` command and runs only after you type
+The dashboard is the only surface that can change anything: every mutation
+prints the exact `gh` command and runs only after you type
 the pull request number, merges are queued through Hive's governor sweep
 (approval + `lgtm`, never a direct merge), drafts are refused, and every
 action
@@ -253,38 +265,29 @@ inside the container for the review feedback loop.
 
 The leading arguments are the same model profiles `review-container` takes
 (`luna`, `opus5`, `kimi` plus an optional effort); everything from the first
-flag onward passes straight through to `bluefin-review queue`. `REVIEW_QUEUE_NAME=review-queue-2 just review-queue`
-runs a second walk beside the first, like `REVIEW_CONTAINER_NAME` does for
+flag onward passes straight through to the dashboard. `REVIEW_QUEUE_NAME=review-queue-2 just review-queue`
+runs a second dashboard beside the first, like `REVIEW_CONTAINER_NAME` does for
 `review-container`.
 
-Pull requests you authored are skipped — a walk is for reviewing other
+Pull requests you authored are skipped — the dashboard is for reviewing other
 people's work. Authorship never changes, so the snapshot's `author` field is
-the one value the filter trusts without a live re-read. The container also
-fetches the Hive knowledge base through Hive's own entrypoint hook chain —
-the same authenticated export and Goose-native `AGENTS.md`/`.goosehints`
-symlinks a Hive session gets — so `r` reviews carry full hub context.
+the one value the filter trusts without a live re-read.
 
-`bluefin-review queue` walks the public PR queue one pull request at a time.
-Each stop prints read-only Review Evidence — author, draft state, review
+The container also fetches the Hive knowledge base through Hive's own
+entrypoint hook chain, and leaves it at `~/agent.md` as a file the agent can
+search. It is deliberately *not* linked to `AGENTS.md`/`.goosehints`: Goose
+loads those into every subprocess it starts, `goose review` starts one per
+check, and the live export is ~417 KB — enough to spend a large fraction of
+each check's context window before the diff is read. The review scope names
+the path instead.
+
+Each selection shows read-only Review Evidence — author, draft state, review
 decision, mergeability, size, and check totals — read live from GitHub rather
 than from the snapshot, because a stale "clean" reading is the one most likely
-to mislead a reviewer. Then it offers a menu:
+to mislead a reviewer.
 
-| Key | Action |
-|---|---|
-| `Enter` | next pull request |
-| `r` | check the pull request out and review it through `goose review` |
-| `d` | show the diff |
-| `o` | open it in a browser |
-| `c` | leave a comment (typed-number confirmation) |
-| `m` | queue this pull request for Hive auto-merge (typed-number confirmation) |
-| `M` | resolve this duplicate cluster: queue the survivor, comment and close the superseded, recheck orphaned issues |
-| `h` | handoff: copy the stop's identity, live evidence, and cluster verdicts to your clipboard (OSC 52) |
-| `p` | previous pull request |
-| `q` | stop |
-
-Stops that are no longer open on GitHub are skipped automatically — the
-snapshot can be hours old, and GitHub is the state.
+Stops that are no longer open on GitHub are refused at the point of action —
+the snapshot can be hours old, and GitHub is the state.
 
 Every state-changing key prints the exact command and runs it only after you
 type the pull request number; empty aborts, and there is no y/yes shortcut.
@@ -297,8 +300,8 @@ ignores drafts. Nothing here merges directly.
 
 `h` is read-only: it copies the handoff text through OSC 52, which reaches
 your system clipboard when the attached terminal supports that sequence
-(modern terminals and tmux's default `set-clipboard` do); otherwise the walk
-prints the handoff so it can be selected by hand.
+(modern terminals and tmux's default `set-clipboard` do); otherwise the
+dashboard reports that it could not reach the clipboard.
 
 ### Duplicates
 
@@ -326,19 +329,25 @@ must name which pull request should merge and which should close as superseded,
 with evidence. Overlaps are listed in the review as merge-ordering hazards but
 keep their own stops.
 
-Detection costs one `gh pr list` per repository, cached for the walk, so
+Detection costs one `gh pr list` per repository, cached for the session, so
 revisiting a repository does not refetch it.
 
 ```bash
-bluefin-review queue                      # everything the queue marks 'review'
-bluefin-review queue --repo common        # one repository
-bluefin-review queue --action fix-ci      # a different recommended action
-bluefin-review queue --all                # every action
+bluefin-review pr projectbluefin/common 42   # review one pull request
+bluefin-review main...HEAD                   # review a local diff
 ```
 
-`r` clones each repository once into `HIVE_WORKSPACE_DIR` (default
-`~/workspace`), checks the pull request out there, and reviews
-`origin/<base>...HEAD`. The result is a Review Draft for you to judge.
+`bluefin-review` is the review engine both the dashboard's `r` key and a
+terminal call go through. It clones each repository once into
+`HIVE_WORKSPACE_DIR` (default `~/workspace`), checks the pull request out
+there, and reviews `origin/<base>...HEAD`. The result is a Review Draft for
+you to judge.
+
+It has no approve, merge, comment, or close path of its own — those belong to
+the dashboard, behind the typed-number gate — so running a review can never
+change anything on GitHub. Its exit status is the review's verdict about
+itself: `0` complete, `65` incomplete (a check returned no verdict, so the
+finding count cannot be read as clean), anything else a failure.
 
 ### Review context
 
@@ -365,7 +374,7 @@ Entries are omitted when their files are absent, so nothing dangles.
 Override with `BLUEFIN_REVIEW_CONTEXT_SKILLS` (space-separated skill ids),
 `BLUEFIN_REVIEW_SKILLS_ROOT`, or `BLUEFIN_REVIEW_KNOWLEDGE_FILE`.
 
-Hive keeps running throughout: the queue walk is an ordinary command inside the
+Hive keeps running throughout: the dashboard is an ordinary command inside the
 contributor container, so the knowledge base, its refresh loop, and the
 `contributor` session are untouched. Run it in a second pane with
 `podman exec -it <container> tmux attach -t contributor`, or in any shell in
@@ -391,7 +400,7 @@ All configuration is read at launch.
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
-| `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot `bluefin-review queue` reads; defaults to the published `queue.json`. |
+| `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot the dashboard reads; defaults to the published `queue.json`. |
 | `BLUEFIN_REVIEW_CONTEXT_SKILLS` | Skill ids named as review context; defaults to `pr-review queue-feed hive-review human-gates`. |
 | `BLUEFIN_REVIEW_SKILLS_ROOT` | Projected org skills root; defaults to `~/.agents/skills`. |
 | `BLUEFIN_REVIEW_KNOWLEDGE_FILE` | Hive knowledge export named as review context; defaults to `~/agent.md`. |
