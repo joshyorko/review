@@ -389,6 +389,22 @@ grep -q 'EVIDENCE_IS_DRAFT' "$review" || {
   exit 1
 }
 
+# The handoff key is read-only: it may write to the terminal and the
+# clipboard, never to GitHub, so it must not touch the mutation gate.
+handoff_body="$(sed -n '/^handoff_stop() {/,/^}/p' "$review")"
+[[ -n "$handoff_body" ]] || {
+  echo "handoff_stop not found" >&2
+  exit 1
+}
+grep -q ']52;c;' <<<"$handoff_body" || {
+  echo "handoff must copy through OSC 52" >&2
+  exit 1
+}
+if grep -qE 'gh_mutate|gh (pr|issue|api)' <<<"$handoff_body"; then
+  echo "handoff must stay read-only: no gh calls, no mutation gate" >&2
+  exit 1
+fi
+
 # Live-state skip and cache invalidation: the walk trusts GitHub, not a local
 # ledger, so stale stops are skipped and mutations invalidate the pull cache.
 grep -q 'state,headRefOid' "$review" || {

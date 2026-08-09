@@ -60,4 +60,14 @@ grep -q 'GHOST_BUILD_ISSUE = "projectbluefin/review#' "$tui" ||
 grep -q 'DOCS_UPDATE_ISSUE = "projectbluefin/review#' "$tui" ||
   fail "the docs-update stub must name its tracking issue"
 
+# The handoff key is read-only: it copies through Textual's clipboard API
+# (OSC 52) and never mutates.
+grep -q 'def action_handoff' "$tui" || fail "the handoff action must exist"
+handoff_body="$(sed -n '/def action_handoff/,/def action_resolve_cluster/p' "$tui")"
+grep -q 'copy_to_clipboard' <<<"$handoff_body" ||
+  fail "handoff must copy through the app clipboard (OSC 52)"
+if grep -qE 'self\.mutate|subprocess' <<<"$handoff_body"; then
+  fail "handoff must stay read-only: no mutation gate, no process execution"
+fi
+
 printf 'dashboard contract OK\n'

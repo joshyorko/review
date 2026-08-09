@@ -171,6 +171,7 @@ class ReviewDashboard(App):
         Binding("a", "merge", "arm merge"),
         Binding("m", "merge", "arm merge", show=False),
         Binding("x", "reject", "reject"),
+        Binding("h", "handoff", "handoff"),
         Binding("M", "resolve_cluster", "resolve dupes", show=False),
         Binding("q", "quit", "quit"),
     ]
@@ -521,6 +522,45 @@ class ReviewDashboard(App):
             then=lambda: self.mutate(
                 stop, "pr", "close", str(stop.number), "--repo", stop.repository
             ),
+        )
+
+    def action_handoff(self) -> None:
+        """Copy the stop's identity, live evidence, and cluster verdicts to
+        the reviewer's clipboard (OSC 52 through the attached terminal), so
+        the review context can be handed to an issue, a chat, or another
+        agent. Read-only."""
+        stop = self.current
+        if not stop:
+            return
+        live = stop.live
+        lines = [
+            f"{stop.key} — {stop.title}",
+            f"https://github.com/{stop.repository}/pull/{stop.number}",
+            f"queue says: {stop.action}",
+        ]
+        if live:
+            lines.append(
+                f"state: {live.get('state', '?')}  "
+                f"head: {str(live.get('headRefOid', ''))[:12]}  "
+                f"draft: {live.get('isDraft', '?')}  "
+                f"review: {live.get('reviewDecision') or '-'}  "
+                f"merge: {live.get('mergeable', '?')}/{live.get('mergeStateStatus', '?')}"
+            )
+            issues = ", ".join(
+                f"#{r['number']}" for r in (live.get("closingIssuesReferences") or [])
+            )
+            if issues:
+                lines.append(f"linked issues: {issues}")
+        dupes, overlaps = self.cluster(stop)
+        if dupes:
+            lines.append(f"duplicates: {', '.join(f'#{n}' for n in dupes)}")
+        if overlaps:
+            lines.append(
+                f"overlaps (ordering hazard): {', '.join(f'#{n}' for n in overlaps[:6])}"
+            )
+        self.copy_to_clipboard("\n".join(lines))
+        self.notify(
+            f"handoff for {stop.key} copied (OSC 52; the terminal must support it)."
         )
 
     def action_resolve_cluster(self) -> None:

@@ -532,8 +532,34 @@ PY
   fi
 }
 
+# Handoff: put the stop's identity, live evidence, and cluster verdicts on
+# the reviewer's clipboard so it can be pasted into an issue, a chat, or
+# another agent. OSC 52 rides the attached terminal, so this works from
+# inside the container without any display server; the terminal (or an
+# intermediate tmux) must support it. Read-only — nothing is sent to GitHub.
+handoff_stop() {
+  local repo="$1" number="$2" action="$3" title="$4"
+  local text related
+  text="${repo}#${number} — ${title}
+https://github.com/${repo}/pull/${number}
+queue says: ${action}"
+  if [[ -n "${EVIDENCE_STATE:-}" ]]; then
+    local head="${EVIDENCE_HEAD_OID:-}"
+    text+="
+state: ${EVIDENCE_STATE}  head: ${head:0:12}  draft: ${EVIDENCE_IS_DRAFT:-}"
+  fi
+  related="$(show_related "$repo" "$number")"
+  [[ -n "$related" ]] && text+="
+${related}"
+  if printf '\033]52;c;%s\a' "$(printf '%s' "$text" | base64 -w0)" >/dev/tty; then
+    printf ' handoff copied to the clipboard (OSC 52; the terminal must support it).\n'
+  else
+    printf ' could not reach the terminal to copy; here is the handoff:\n%s\n' "$text"
+  fi
+}
+
 menu() {
-  printf '\n [Enter] next   [r] review   [d] diff   [o] browser   [c] comment   [m] merge   [M] resolve duplicates   [p] previous   [q] quit\n'
+  printf '\n [Enter] next   [r] review   [d] diff   [o] browser   [c] comment   [m] merge   [M] resolve duplicates   [h] handoff   [p] previous   [q] quit\n'
   printf ' > '
 }
 
@@ -670,6 +696,9 @@ queue_mode() {
         ;;
       M)
         resolve_cluster "$pr_repo" "$pr_number" || true
+        ;;
+      h)
+        handoff_stop "$pr_repo" "$pr_number" "$pr_action" "$pr_title"
         ;;
       p)
         ((index > 0)) && index=$((index - 1))

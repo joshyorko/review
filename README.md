@@ -238,6 +238,7 @@ walker's GitHub identity; your own pull requests are filtered out.
 | `c` | comment |
 | `a`/`m` | arm auto-merge — for the batch selection if one exists |
 | `x` | reject: comment, then close |
+| `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
 | `M` | resolve the duplicate cluster |
 | `q` | quit |
 
@@ -277,6 +278,7 @@ to mislead a reviewer. Then it offers a menu:
 | `c` | leave a comment (typed-number confirmation) |
 | `m` | arm auto-merge for this pull request (typed-number confirmation) |
 | `M` | resolve this duplicate cluster: arm the survivor, comment and close the superseded, recheck orphaned issues |
+| `h` | handoff: copy the stop's identity, live evidence, and cluster verdicts to your clipboard (OSC 52) |
 | `p` | previous pull request |
 | `q` | stop |
 
@@ -289,6 +291,11 @@ merge is always `--squash --auto --match-head-commit <reviewed sha>`: it arms
 GitHub's own auto-merge pinned to the commit you looked at, and required
 checks and branch protections still gate the actual merge. Drafts are
 refused.
+
+`h` is read-only: it copies the handoff text through OSC 52, which reaches
+your system clipboard when the attached terminal supports that sequence
+(modern terminals and tmux's default `set-clipboard` do); otherwise the walk
+prints the handoff so it can be selected by hand.
 
 ### Duplicates
 
