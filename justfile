@@ -862,8 +862,12 @@ review-queue *queue_args:
     # exactly as review-container takes them; everything from the first '-'
     # flag onward belongs to bluefin-review queue. Word-splitting {{queue_args}}
     # is the point: it arrives as one string of separate flags.
+    # A leading 'dashboard' selects the maintainer TUI instead of the
+    # line-mode walk; the rest of the launch is identical.
     # shellcheck disable=SC2086
     set -- {{queue_args}}
+    IMAGE_MODE=queue
+    if [[ $# -gt 0 && "$1" == dashboard ]]; then IMAGE_MODE=dashboard; shift; fi
     profile="" effort=""
     if [[ $# -gt 0 && "$1" != -* ]]; then profile="$1"; shift; fi
     if [[ $# -gt 0 && "$1" != -* ]]; then effort="$1"; shift; fi
@@ -909,7 +913,7 @@ review-queue *queue_args:
     report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
 
     # Whatever survived the profile/effort shift belongs to bluefin-review.
-    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue "$@")
+    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" "$IMAGE_MODE" "$@")
 
     echo "✓ starting the PR queue walk (no Hive)."
     echo "  q or Ctrl-C stops; the walk is the only thing running."

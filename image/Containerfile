@@ -135,6 +135,7 @@ ARG UV_X86_64_SHA256
 ARG UV_AARCH64_SHA256
 ARG TEXTUAL_VERSION
 COPY image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
+COPY image/tui/bluefin_review_tui.py /opt/bluefin/tui/bluefin_review_tui.py
 RUN set -eu; \
     arch="$(uname -m)"; \
     case "$arch" in \
@@ -159,6 +160,7 @@ RUN set -eu; \
       --require-hashes --no-deps \
       -r /opt/bluefin/tui/requirements.lock; \
     /opt/bluefin/tui/.venv/bin/python -c "import textual; print(textual.__version__)"; \
+    /opt/bluefin/tui/.venv/bin/python -m py_compile /opt/bluefin/tui/bluefin_review_tui.py; \
     test ! -e /root/.cache/uv
 
 ARG GOOSE_CHANNEL

@@ -213,7 +213,39 @@ just review-queue                      # everything the queue marks 'review'
 just review-queue kimi high            # pick the model profile and effort
 just review-queue --repo bluefin       # one repository
 just review-queue --all                # every action
+just review-queue dashboard            # the full-screen maintainer dashboard
 ```
+
+### The dashboard
+
+`just review-queue dashboard` opens the same walk as a full-screen Textual
+TUI: a queue pane (Renovate-style dependency bumps are marked BATCHABLE), a
+live-evidence details pane, and a context pane carrying the duplicate
+verdicts. The status bar reports queue depth, snapshot freshness, and the
+walker's GitHub identity; your own pull requests are filtered out.
+
+| Key | Action |
+|---|---|
+| `b` | toggle batch selection for the highlighted pull request |
+| `l` | label overlay (`kind/bug`, `area/bootc`, `status/approved`, …) |
+| `p` | cycle priority label (`P0-critical` … `P3-low`) |
+| `d` | docs-update agent task (tracked as #134) |
+| `r` | Ghost Cluster build dispatch (tracked as #133) |
+| `o` | open in browser |
+| `v` | view the diff |
+| `c` | comment |
+| `a`/`m` | arm auto-merge — for the batch selection if one exists |
+| `x` | reject: comment, then close |
+| `M` | resolve the duplicate cluster |
+| `q` | quit |
+
+The dashboard carries the same authority contract as the line-mode walk:
+every mutation prints the exact `gh` command and runs only after you type
+the pull request number, merges are always
+`--squash --auto --match-head-commit`, drafts are refused, and every action
+is appended as a JSON trace to `~/.local/state/bluefin-review/trace.jsonl`
+inside the container for the review feedback loop.
+`tests/dashboard-contract.sh` pins all of it.
 
 The leading arguments are the same model profiles `review-container` takes
 (`luna`, `opus5`, `kimi` plus an optional effort); everything from the first

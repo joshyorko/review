@@ -110,6 +110,7 @@ bash tests/generate-skills.sh
 bash tests/image-contract.sh
 bash tests/hive-compatibility.sh
 bash tests/bluefin-review.sh
+bash tests/dashboard-contract.sh
 bash tests/just-onboarding.sh
 git diff --check
 just --list

@@ -42,10 +42,16 @@ fi
 
 # A queue walk is the PR-review launch path: `bluefin-review queue` needs
 # GH_TOKEN and Goose but no Hive registration, so it skips the contributor.env
-# gate and the Hive handover below.
+# gate and the Hive handover below. `dashboard` is the same launch path
+# rendered as the maintainer TUI instead of the line-mode walk.
 queue_walk=false
+dashboard=false
 if [ "${1:-}" = queue ]; then
   queue_walk=true
+  shift
+elif [ "${1:-}" = dashboard ]; then
+  queue_walk=true
+  dashboard=true
   shift
 fi
 
@@ -176,6 +182,9 @@ if [ "$queue_walk" = true ]; then
     fi
   fi
   note 'Bluefin Operations | PR queue walk (no Hive)'
+  if [ "$dashboard" = true ]; then
+    exec /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/bluefin_review_tui.py "$@"
+  fi
   exec bluefin-review queue "$@"
 fi
 
