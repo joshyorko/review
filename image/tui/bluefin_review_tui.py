@@ -426,7 +426,7 @@ class ReviewDashboard(App):
         Binding("o", "open_browser", "open"),
         Binding("v", "view_diff", "diff"),
         Binding("c", "comment", "comment"),
-        Binding("a", "merge", "queue merge"),
+        Binding("a", "merge", "approve and queue"),
         Binding("m", "merge_now", "merge now"),
         Binding("x", "reject", "reject"),
         Binding("h", "handoff", "handoff"),

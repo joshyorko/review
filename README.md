@@ -257,7 +257,7 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `o` | open in browser |
 | `v` | view the diff |
 | `c` | comment |
-| `a` | queue for Hive auto-merge — opt in to automation; for the batch selection if one exists |
+| `a` | approve and queue: approval + `lgtm`, opting in to Hive auto-merge; for the batch selection if one exists |
 | `m` | merge now: squash immediately, no `lgtm`, maintainers only |
 | `x` | reject: comment, then close |
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
