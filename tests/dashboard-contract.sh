@@ -41,8 +41,12 @@ fi
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"
-grep -q 'ConfirmMutation(command, str(stop.number))' "$tui" ||
-  fail "mutate() must confirm with the pull request number"
+grep -q 'ConfirmMutation(commands, str(stop.number))' "$tui" ||
+  fail "mutate_all() must confirm with the pull request number"
+# One decision, one gate: a multi-command sequence must never be assembled by
+# chaining gated mutations through their completion callback.
+grep -qE 'then=lambda: self\.mutate' "$tui" &&
+  fail "a mutation sequence must be one gated sequence, not chained gates"
 grep -qiE '\(y/n\)|yes/no' "$tui" && fail "no y/yes confirmation shortcut"
 
 # Queueing goes through Hive's governor sweep: the exact approval body it

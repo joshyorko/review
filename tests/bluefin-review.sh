@@ -349,6 +349,47 @@ grep -q '^\.agents/checks/cluster-resolution\.md$' "$scratch/scope-listing2"
 grep -q '#7' "$scratch/scope-cluster2"
 grep -q 'name: cluster-resolution' "$scratch/scope-cluster2"
 
+# Maintainer steering from the dashboard's steer box reaches the review as an
+# additional check in the scratch scope, never as a replacement for doctrine.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+scope=""
+while (($#)); do
+  case "$1" in
+    --check-scope) scope="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "$scope" ]]; then
+  find "$scope" -type f | sed "s|^$scope/||" | sort >"${SCOPE_LISTING:?}"
+  cat "$scope/.agents/checks/maintainer-steering.md" >"${SCOPE_STEER:?}" 2>/dev/null || : >"${SCOPE_STEER:?}"
+fi
+EOF
+chmod +x "$scratch/bin/goose"
+
+BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+  BLUEFIN_REVIEW_STEER='check the CI permissions block' \
+  PATH="$scratch/bin:$PATH" \
+  SCOPE_LISTING="$scratch/scope-listing3" SCOPE_STEER="$scratch/scope-steer3" \
+  "$review" main...HEAD >/dev/null
+grep -q '^\.agents/checks/maintainer-steering\.md$' "$scratch/scope-listing3"
+grep -q 'name: maintainer-steering' "$scratch/scope-steer3"
+grep -q 'check the CI permissions block' "$scratch/scope-steer3"
+# Steering is additive: the doctrine check is still there, and steering never
+# licenses a state change.
+grep -q '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing3"
+grep -q 'human makes every approval and merge decision' "$scratch/scope-steer3"
+
+# Without a steer, no steering check is written at all.
+BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+  PATH="$scratch/bin:$PATH" \
+  SCOPE_LISTING="$scratch/scope-listing4" SCOPE_STEER="$scratch/scope-steer4" \
+  "$review" main...HEAD >/dev/null
+if grep -q 'maintainer-steering' "$scratch/scope-listing4"; then
+  echo "an unsteered review must carry no maintainer-steering check" >&2
+  exit 1
+fi
+
 # restore the exit-code stub for any later assertions
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash

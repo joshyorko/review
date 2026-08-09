@@ -96,11 +96,13 @@ async def main() -> int:
     os.environ["BLUEFIN_REVIEW_QUEUE_URL"] = queue_file.as_uri()
 
     review_log = workdir / "review.log"
+    steer_log = workdir / "steer.log"
 
     def review_stub(exit_code: int, output: str) -> str:
         return write_stub(
             workdir / "bluefin-review",
             f'printf "%s\\n" "$*" >>"{review_log}"\n'
+            f'printf "%s\\n" "${{BLUEFIN_REVIEW_STEER-}}" >>"{steer_log}"\n'
             f'printf "%s\\n" "{output}"\n'
             f"exit {exit_code}\n",
         )
@@ -193,7 +195,7 @@ async def main() -> int:
             status = screen.query_one("#review-status", tui.Static)
             return str(status.render()), set(status.classes)
 
-    # ── batch queueing must serialize the confirmation gate ─────────────
+    # ── batch queueing must gate each PR once, for the whole sequence ────
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -231,7 +233,9 @@ async def main() -> int:
                     break
                 gate = app.screen
                 expected = gate.expected
-                seen.append((expected, tuple(gate.command[:2])))
+                seen.append(
+                    (expected, tuple(tuple(c[:3]) for c in gate.commands))
+                )
                 # type the number as a maintainer does; setting .value
                 # directly would hide an unfocused, unusable gate
                 await pilot.press(*expected)
@@ -247,16 +251,29 @@ async def main() -> int:
             numbers = [number for number, _ in seen]
             commands = [command for _, command in seen]
             check(
-                len(seen) == 4
-                and numbers[0] == numbers[1]
-                and numbers[2] == numbers[3]
-                and numbers[0] != numbers[2]
-                and commands == [("gh", "pr")] * 4,
-                f"batch queueing must gate review and label per PR, got {seen}",
+                len(seen) == 2
+                and numbers[0] != numbers[1]
+                and commands
+                == [(("gh", "pr", "review"), ("gh", "pr", "edit"))] * 2,
+                "queueing must gate each PR exactly once, for the approval "
+                f"and the lgtm label together, got {seen}",
             )
             check(
                 not confirmations(),
                 "batch queueing must return to the dashboard after all gates",
+            )
+            for _ in range(200):
+                ran = [
+                    tuple(line.split()[:2])
+                    for line in gh_log.read_text().splitlines()
+                    if tuple(line.split()[:2]) in {("pr", "review"), ("pr", "edit")}
+                ]
+                if len(ran) >= 4:
+                    break
+                await pilot.pause(0.05)
+            check(
+                ran == [("pr", "review"), ("pr", "edit")] * 2,
+                f"both queueing commands must run after the one gate, got {ran}",
             )
     gh_log.write_text("")
 
@@ -373,6 +390,52 @@ async def main() -> int:
     check("FAILED" in text, f"a nonzero exit must report FAILED, got {text!r}")
     check("failed" in classes, f"a failed review must carry the failed style, got {classes}")
 
+    # ── the steer box: typed text reaches the review as instructions ─────
+    review_stub(0, "0 findings")
+    steer_log.write_text("")
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        await pilot.press("slash")
+        await pilot.pause()
+        box = app.query_one("#steer", tui.Input)
+        check(app.focused is box, "'/' must focus the steer box")
+        await pilot.press("c", "i")
+        check(box.value == "ci", f"the steer box must take keystrokes, got {box.value!r}")
+        await pilot.press("enter")
+        await pilot.pause()
+        screen = app.screen
+        if not isinstance(screen, tui.ReviewScreen):
+            check(False, f"steering must open a review, got {type(screen).__name__}")
+        else:
+            check(screen.steer == "ci", f"the review must carry the steer, got {screen.steer!r}")
+            for _ in range(400):
+                if screen.finished:
+                    break
+                await pilot.pause(0.05)
+            check(screen.finished, "the steered review never finished")
+            check(
+                steer_log.read_text().splitlines()[-1:] == ["ci"],
+                "the steer must reach the review engine as "
+                f"BLUEFIN_REVIEW_STEER, got {steer_log.read_text()!r}",
+            )
+        check(
+            app.query_one("#steer", tui.Input).value == "",
+            "the steer box must clear after it is submitted",
+        )
+
+    # ── an unsteered review must not inherit a stale steer ───────────────
+    steer_log.write_text("")
+    await run_review(0, "0 findings")
+    check(
+        steer_log.read_text().splitlines()[-1:] == [""],
+        f"an unsteered review must carry no steer, got {steer_log.read_text()!r}",
+    )
+
     # ── [x] actually stops a review ──────────────────────────────────────
     # The engine is a shell that runs Goose, which runs a subprocess per check.
     # Signalling only the shell leaves those children alive holding the pipe
@@ -442,7 +505,9 @@ async def main() -> int:
     )
     outcomes = [r["outcome"] for r in records if r.get("action") == "review"]
     check(
-        outcomes == ["complete", "incomplete", "failed", "stopped"],
+        outcomes == [
+            "complete", "incomplete", "failed", "complete", "complete", "stopped"
+        ],
         f"every review must be traced with its outcome, got {outcomes}",
     )
 

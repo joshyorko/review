@@ -145,21 +145,34 @@ class Stop:
 
 
 class ConfirmMutation(ModalScreen[bool]):
-    """The single mutation gate: show the exact command, require the typed
+    """The single mutation gate: show the exact commands, require the typed
     pull request number. Empty, wrong, or Esc aborts; there is no y/yes and
-    no timeout."""
+    no timeout.
+
+    One decision gates one sequence. Queueing a pull request is an approval
+    plus the lgtm label the sweep scans for, and reject is a comment plus a
+    close: splitting either into two gates asks a maintainer to confirm the
+    same decision twice, which trains them to type the number without reading
+    it. Every command that will run is shown here, before the one gate.
+    """
 
     BINDINGS = [Binding("escape", "dismiss(False)", "abort")]
 
-    def __init__(self, command: list[str], expected: str) -> None:
+    def __init__(self, commands: list[list[str]], expected: str) -> None:
         super().__init__()
-        self.command = command
+        self.commands = [list(command) for command in commands]
         self.expected = expected
+
+    @property
+    def command(self) -> list[str]:
+        return self.commands[0]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
             yield Label("will run:", id="confirm-heading")
-            yield Static(" ".join(self.command), id="confirm-command")
+            for index, command in enumerate(self.commands):
+                yield Static(" ".join(command), classes="confirm-command",
+                             id=f"confirm-command-{index}")
             yield Label(
                 f"type the pull request number ({self.expected}) to run it; "
                 "empty or Esc aborts"
@@ -207,9 +220,10 @@ class ReviewScreen(Screen):
         Binding("x", "stop", "stop review"),
     ]
 
-    def __init__(self, stop: Stop) -> None:
+    def __init__(self, stop: Stop, steer: str = "") -> None:
         super().__init__()
         self.stop_record = stop
+        self.steer = steer
         self.process: subprocess.Popen | None = None
         self.finished = False
         self.stop_requested = False
@@ -219,7 +233,8 @@ class ReviewScreen(Screen):
         stop = self.stop_record
         yield Header(show_clock=True)
         yield Static(
-            f" reviewing {stop.repository}#{stop.number} — starting…",
+            f" reviewing {stop.repository}#{stop.number} — starting…"
+            + (f"  steer: {self.steer}" if self.steer else ""),
             id="review-status",
         )
         yield RichLog(highlight=False, markup=False, wrap=True, id="review-log")
@@ -233,6 +248,13 @@ class ReviewScreen(Screen):
     def run_review(self) -> None:
         stop = self.stop_record
         command = [REVIEW_COMMAND, "pr", stop.repository, str(stop.number)]
+        # Maintainer steering rides the documented additive seam: it is added
+        # to the review's instructions, never a replacement for the doctrine.
+        environment = dict(os.environ)
+        if self.steer:
+            environment["BLUEFIN_REVIEW_STEER"] = self.steer
+        else:
+            environment.pop("BLUEFIN_REVIEW_STEER", None)
         try:
             process = subprocess.Popen(
                 command,
@@ -240,6 +262,7 @@ class ReviewScreen(Screen):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=environment,
                 # Its own process group. A review is a shell that runs Goose,
                 # which runs a subprocess per check: signalling only the shell
                 # leaves those children alive holding the pipe open, and the
@@ -299,6 +322,7 @@ class ReviewScreen(Screen):
                 "action": "review",
                 "repository": stop.repository,
                 "number": stop.number,
+                "steer": self.steer,
                 "outcome": outcome,
                 "exit_code": code,
                 "seconds": elapsed,
@@ -356,7 +380,8 @@ class ReviewDashboard(App):
         border: heavy magenta; background: $surface;
         width: 80%; height: auto; padding: 1 2; margin: 4 4;
     }
-    #confirm-command { color: magenta; text-style: bold; }
+    #confirm-command, .confirm-command { color: magenta; text-style: bold; }
+    #steer { border: solid $secondary; height: 3; }
     ListItem.selected Label { color: magenta; text-style: bold; }
     #review-status { height: auto; padding: 0 1; background: $panel; }
     #review-status.running { background: $panel; color: cyan; }
@@ -382,6 +407,7 @@ class ReviewDashboard(App):
         Binding("m", "merge", "queue merge", show=False),
         Binding("x", "reject", "reject"),
         Binding("h", "handoff", "handoff"),
+        Binding("slash", "steer", "steer review"),
         Binding("M", "resolve_cluster", "resolve dupes", show=False),
         Binding("q", "quit", "quit"),
     ]
@@ -405,10 +431,44 @@ class ReviewDashboard(App):
             with Vertical(id="right-pane"):
                 yield Static("", id="details")
                 yield Static("", id="context")
+        yield Input(
+            placeholder="[/] steer the review of the highlighted PR — "
+            "enter runs it, esc returns to the queue",
+            id="steer",
+        )
         yield Footer()
 
     def on_mount(self) -> None:
+        # The queue keeps the keystrokes. The steer box is entered on purpose
+        # with [/], because a focused Input swallows every single-key binding.
+        self.query_one("#queue", ListView).focus()
         self.load_queue()
+
+    def action_steer(self) -> None:
+        """Focus the steering box: free text that rides along with the next
+        review of the highlighted stop as maintainer instructions."""
+        if not self.current:
+            self.notify("nothing highlighted to steer.", severity="warning")
+            return
+        self.query_one("#steer", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "steer":
+            return
+        event.stop()
+        steer = event.value.strip()
+        field = self.query_one("#steer", Input)
+        field.value = ""
+        self.query_one("#queue", ListView).focus()
+        stop = self.current
+        if not stop or not steer:
+            return
+        self.push_screen(ReviewScreen(stop, steer=steer))
+
+    def on_key(self, event) -> None:
+        if event.key == "escape" and self.focused is self.query_one("#steer", Input):
+            event.stop()
+            self.query_one("#queue", ListView).focus()
 
     # ── data layer (walker parity) ────────────────────────────────────────
 
@@ -572,65 +632,79 @@ class ReviewDashboard(App):
 
     def mutate(self, stop: Stop, *args: str, then=None) -> None:
         """Run one gh mutation behind the typed-number confirmation."""
-        command = ["gh", *args]
+        self.mutate_all(stop, [["gh", *args]], then=then)
+
+    def mutate_all(self, stop: Stop, commands: list[list[str]], then=None) -> None:
+        """Run a sequence of gh mutations behind one typed-number gate.
+
+        The sequence is the unit a maintainer decides on, so it is confirmed
+        once and then runs to completion off the UI thread. A failed step
+        stops the rest: half a queueing is reported, never re-confirmed.
+        """
+        if not commands:
+            return
 
         def finish(confirmed: bool | None) -> None:
             if not confirmed:
                 self.notify("aborted; nothing was run.", severity="warning")
                 return
-            self.notify(f"running: {' '.join(command[:4])}…")
-            self.run_mutation(stop, command, then)
+            self.notify(f"running: {' '.join(commands[0][:4])}…")
+            self.run_mutations(stop, commands, then)
 
-        self.push_screen(ConfirmMutation(command, str(stop.number)), finish)
+        self.push_screen(ConfirmMutation(commands, str(stop.number)), finish)
 
     @work(thread=True)
-    def run_mutation(self, stop: Stop, command: list[str], then) -> None:
-        """Execute a confirmed mutation off the UI thread. A slow or hung gh
-        call must never freeze the dashboard, so this is bounded by
+    def run_mutations(self, stop: Stop, commands: list[list[str]], then) -> None:
+        """Execute a confirmed sequence off the UI thread. A slow or hung gh
+        call must never freeze the dashboard, so each step is bounded by
         MUTATION_TIMEOUT and reports back through call_from_thread."""
-        try:
-            result = subprocess.run(
-                command, capture_output=True, text=True, timeout=MUTATION_TIMEOUT
-            )
-        except (subprocess.TimeoutExpired, OSError) as error:
+        for command in commands:
+            try:
+                result = subprocess.run(
+                    command, capture_output=True, text=True, timeout=MUTATION_TIMEOUT
+                )
+            except (subprocess.TimeoutExpired, OSError) as error:
+                trace(
+                    {
+                        "repo": stop.repository,
+                        "number": stop.number,
+                        "argv": command,
+                        "error": str(error),
+                    }
+                )
+                self.call_from_thread(
+                    self.notify,
+                    f"{' '.join(command[:4])}… did not finish: {error}",
+                    severity="error",
+                )
+                return
             trace(
                 {
                     "repo": stop.repository,
                     "number": stop.number,
                     "argv": command,
-                    "error": str(error),
+                    "exit": result.returncode,
                 }
             )
-            self.call_from_thread(
-                self.notify,
-                f"{' '.join(command[:4])}… did not finish: {error}",
-                severity="error",
-            )
-            return
-        trace(
-            {
-                "repo": stop.repository,
-                "number": stop.number,
-                "argv": command,
-                "exit": result.returncode,
-            }
-        )
-        self.call_from_thread(self.mutation_finished, stop, command, result, then)
+            if result.returncode != 0:
+                message = result.stderr.strip()[:200] or f"exit {result.returncode}"
+                self.call_from_thread(
+                    self.mutation_failed, stop, command, message
+                )
+                return
+        self.call_from_thread(self.mutations_finished, stop, commands, then)
 
-    def mutation_finished(
-        self,
-        stop: Stop,
-        command: list[str],
-        result: subprocess.CompletedProcess,
-        then,
-    ) -> None:
-        """Apply one finished mutation on the UI thread."""
+    def mutation_failed(self, stop: Stop, command: list[str], message: str) -> None:
         self.pulls_cache.pop(stop.repository, None)
-        if result.returncode != 0:
-            message = result.stderr.strip()[:200] or f"exit {result.returncode}"
-            self.notify(message, severity="error")
-            return
-        self.notify(f"done: {' '.join(command[:4])}…")
+        self.notify(f"{' '.join(command[:4])}…: {message}", severity="error")
+        self.show_evidence(stop)
+
+    def mutations_finished(
+        self, stop: Stop, commands: list[list[str]], then
+    ) -> None:
+        """Apply one finished sequence on the UI thread."""
+        self.pulls_cache.pop(stop.repository, None)
+        self.notify(f"done: {' '.join(commands[-1][:4])}…")
         if then:
             then()
         self.show_evidence(stop)
@@ -752,16 +826,24 @@ class ReviewDashboard(App):
     def _queue_automerge(self, stop: Stop, then=None) -> None:
         """Queue for Hive auto-merge: post the exact approval the governor
         sweep re-verifies, then add the lgtm label it scans for. The sweep
-        enforces the self-merge ban, requires green CI, and squash-merges."""
+        enforces the self-merge ban, requires green CI, and squash-merges.
+
+        Both commands are one decision, so they sit behind one gate and then
+        run to completion in the background."""
         body = f"Approved by @{self.self_login} for Hive auto-merge on green CI."
-        self.mutate(
-            stop, "pr", "review", str(stop.number), "--repo", stop.repository,
-            "--approve", "--body", body,
-            then=lambda: self.mutate(
-                stop, "pr", "edit", str(stop.number), "--repo", stop.repository,
-                "--add-label", "lgtm",
-                then=then,
-            ),
+        self.mutate_all(
+            stop,
+            [
+                [
+                    "gh", "pr", "review", str(stop.number),
+                    "--repo", stop.repository, "--approve", "--body", body,
+                ],
+                [
+                    "gh", "pr", "edit", str(stop.number),
+                    "--repo", stop.repository, "--add-label", "lgtm",
+                ],
+            ],
+            then=then,
         )
 
     def action_merge(self) -> None:
@@ -799,12 +881,15 @@ class ReviewDashboard(App):
             sink.write(
                 "Closing after maintainer review; see the review notes above.\n"
             )
-        self.mutate(
-            stop, "pr", "comment", str(stop.number),
-            "--repo", stop.repository, "--body-file", body_file,
-            then=lambda: self.mutate(
-                stop, "pr", "close", str(stop.number), "--repo", stop.repository
-            ),
+        self.mutate_all(
+            stop,
+            [
+                [
+                    "gh", "pr", "comment", str(stop.number),
+                    "--repo", stop.repository, "--body-file", body_file,
+                ],
+                ["gh", "pr", "close", str(stop.number), "--repo", stop.repository],
+            ],
         )
 
     def action_handoff(self) -> None:
@@ -870,13 +955,16 @@ class ReviewDashboard(App):
                     "lands there.\n"
                 )
             dup_stop = Stop(stop.repository, dup, "close", "duplicate")
-            self.mutate(
-                dup_stop, "pr", "comment", str(dup),
-                "--repo", stop.repository, "--body-file", body_file,
-                then=lambda: self.mutate(
-                    dup_stop, "pr", "close", str(dup), "--repo", stop.repository,
-                    then=lambda: close_next(rest),
-                ),
+            self.mutate_all(
+                dup_stop,
+                [
+                    [
+                        "gh", "pr", "comment", str(dup),
+                        "--repo", stop.repository, "--body-file", body_file,
+                    ],
+                    ["gh", "pr", "close", str(dup), "--repo", stop.repository],
+                ],
+                then=lambda: close_next(rest),
             )
 
         os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)

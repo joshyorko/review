@@ -77,8 +77,10 @@ review_instructions() {
     listing+="- hive knowledge base (refreshed from the hub): ${KNOWLEDGE_FILE}"$'\n'
   fi
   if [[ -z "$listing" ]]; then
-    # No doctrine on disk, but a duplicate cluster still needs to reach Goose.
+    # No doctrine on disk, but a duplicate cluster and the maintainer's own
+    # steering still need to reach Goose.
     [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]] && printf '%s' "$BLUEFIN_REVIEW_RELATED"
+    [[ -n "${BLUEFIN_REVIEW_STEER:-}" ]] && printf '%s' "$(steer_instructions)"
     return 0
   fi
 
@@ -93,6 +95,23 @@ recommendation as one."
   if [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]]; then
     printf '\n\n%s' "$BLUEFIN_REVIEW_RELATED"
   fi
+  if [[ -n "${BLUEFIN_REVIEW_STEER:-}" ]]; then
+    printf '\n\n%s' "$(steer_instructions)"
+  fi
+}
+
+# The maintainer's own words for this one review, typed into the dashboard's
+# steering box. Additive: it directs attention within the review, and can
+# never license an approval, a merge, or any other state change.
+steer_instructions() {
+  printf '%s' "The maintainer is steering this review. Give this their explicit
+attention, in addition to — never instead of — the checks above:
+
+${BLUEFIN_REVIEW_STEER}
+
+If the steering cannot be answered from the diff and the evidence available,
+say so plainly rather than guessing. This still produces a Review Draft only:
+a human makes every approval and merge decision."
 }
 
 # Run Goose and hold its output to account. 'goose review' reports a per-check
@@ -146,6 +165,13 @@ goose_review() {
         printf '%s\n' "$BLUEFIN_REVIEW_RELATED"
         printf '\nName explicitly which pull request should merge and which should close as superseded, with evidence from the diffs.\n'
       } >"${scope}/.agents/checks/cluster-resolution.md"
+    fi
+    if [[ -n "${BLUEFIN_REVIEW_STEER:-}" ]]; then
+      {
+        printf -- '---\nname: maintainer-steering\n---\n\n'
+        steer_instructions
+        printf '\n'
+      } >"${scope}/.agents/checks/maintainer-steering.md"
     fi
     argv+=(--check-scope "$scope")
   else

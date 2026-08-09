@@ -251,6 +251,7 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `a`/`m` | queue for Hive auto-merge — for the batch selection if one exists |
 | `x` | reject: comment, then close |
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
+| `/` | steer: type instructions that ride along with the review you start |
 | `M` | resolve the duplicate cluster |
 | `q` | quit |
 
@@ -289,8 +290,13 @@ to mislead a reviewer.
 Stops that are no longer open on GitHub are refused at the point of action —
 the snapshot can be hours old, and GitHub is the state.
 
-Every state-changing key prints the exact command and runs it only after you
-type the pull request number; empty aborts, and there is no y/yes shortcut.
+Every state-changing key prints the exact commands and runs them only after you
+type the pull request number; empty aborts, and there is no y/yes shortcut. One
+decision is one gate: an action that takes several `gh` calls — queueing
+(approval + `lgtm`), rejecting (comment + close), resolving a cluster — shows
+every command it will run in that one gate and then runs the whole sequence in
+the background. You are never asked to confirm the same decision twice, and a
+failed step stops the rest instead of asking again.
 Queueing a merge is the factory's real merge path: it posts the exact
 approval Hive's governor sweep re-verifies (`Approved by @<you> for Hive
 auto-merge on green CI.`) and adds the `lgtm` label the sweep scans for. The
@@ -302,6 +308,18 @@ ignores drafts. Nothing here merges directly.
 your system clipboard when the attached terminal supports that sequence
 (modern terminals and tmux's default `set-clipboard` do); otherwise the
 dashboard reports that it could not reach the clipboard.
+
+### Steering a review
+
+The box along the bottom steers the next review of the highlighted pull
+request. `/` focuses it, Esc returns to the queue — the queue keeps the
+single-key bindings, because a focused input would swallow them. Enter starts
+the review with what you typed carried as `BLUEFIN_REVIEW_STEER`, which
+`bluefin-review` adds to the review as one more check
+(`maintainer-steering`) alongside the Bluefin doctrine. It is additive by
+construction: steering directs attention within a review and can never
+replace the doctrine or license an approval, a merge, or any other state
+change. The steer is recorded with the review's outcome in the trace.
 
 ### Duplicates
 
