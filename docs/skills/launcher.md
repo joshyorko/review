@@ -174,9 +174,12 @@ maps onto `dev`. Never answer this by loosening the host file's mode; it holds
 Hive credentials.
 
 A locally built image has no registry behind it and is not a moving tag.
-`podman build -t review:dev` stores `localhost/review:dev`, and refreshing
-that emits pull retries and an always-false "may be out of date" warning.
-Detect the local build before deciding a ref is refreshable.
+`podman build -t <name>:<tag>` stores the result under `localhost/`, and
+refreshing that emits pull retries and an always-false "may be out of date"
+warning. Detect the local build before deciding a ref is refreshable. Build
+local images under the `sha-<commit>` tag CI mints for that commit: it names
+exactly one build, so it is never re-pulled over, and it says which commit is
+in the image.
 
 The same reasoning governs the missing case. `localhost/` is podman's local
 storage namespace, never a registry host, so pulling a `localhost/` ref that

@@ -26,7 +26,17 @@ request in this repository.
 
 ## Core Process
 
-1. Work on a branch. Hive-assigned work uses `clanker/<task_id>` and includes
+0. Know which of the two workflows you are in. **Hive-assigned contributor
+   work is always a branch and a pull request** — the protocol reports a PR
+   link as the completion artifact, and the contributor has no write access to
+   the target repository anyway. **A maintainer working in their own checkout
+   of this repository is not bound by that**: when @castrojo asks for a change
+   here, commit it and push it to `main`. Do not route his work through a
+   branch and a pull request unless he asks for one, and do not tell him a
+   direct push is forbidden. The gate that matters is the validation suite,
+   which runs the same either way.
+
+1. Work on a branch for Hive-assigned work, named `clanker/<task_id>`, with
    this commit trailer:
 
    ```text
@@ -146,7 +156,8 @@ Prefer not needing that.
 
 - Committing from a working tree that holds someone else's uncommitted work.
 - Staging with `git add -A` or `git add .` rather than by explicit path.
-- Pushing directly to `main`.
+- Routing a maintainer's own change through a branch and pull request when
+  they asked for a push, or calling a direct push to `main` forbidden.
 - A non-Conventional pull request title.
 - Combining unrelated changes in one pull request.
 - Growing a diff because scoping it was harder than writing it.

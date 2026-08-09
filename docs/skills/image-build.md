@@ -299,13 +299,14 @@ bash tests/hive-compatibility.sh
 bash tests/generate-skills.sh
 bash tests/image-audit.sh --verify-base-evidence
 grep -Fq "$(sed -n 's/^hive_commit := "\(.*\)"$/\1/p' justfile)" README.md
+ref="ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
 GH_TOKEN="$(gh auth token)" podman build \
   --secret id=github_token,env=GH_TOKEN \
   --build-arg GOOSE_REFRESH="$(date +%s)" \
-  -f image/Containerfile -t review:dev .
-bash tests/image-audit.sh --derived review:dev
+  -f image/Containerfile -t "$ref" .
+bash tests/image-audit.sh --derived "$ref"
 # Optional: keep the Markdown report (generated output, git-ignored).
-bash tests/image-audit.sh --derived review:dev --report image-audit-report.md
+bash tests/image-audit.sh --derived "$ref" --report image-audit-report.md
 git diff --check
 ```
 

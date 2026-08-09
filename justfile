@@ -282,10 +282,12 @@ require_no_running_instance() {
 }
 image_ref_is_moving() {
   # A digest is immutable and an 'sha-<commit>' tag is minted once per build,
-  # so both always name exactly one image. A locally built image has no
+  # so both always name exactly one image. That makes the tag CI mints the
+  # right name for a local build too: it is honest about which commit is in
+  # the image, and it is never re-pulled over. A locally built image has no
   # registry behind it either, so refreshing it only produces a failed pull
-  # and a misleading "may be out of date" warning; podman stores
-  # 'podman build -t review:dev' as 'localhost/review:dev', so accept the bare
+  # and a misleading "may be out of date" warning; podman stores a bare
+  # 'podman build -t <name>:<tag>' under 'localhost/', so accept the bare
   # name a user is likely to type as well as the stored form. Anything else
   # can be repointed at a newer build under the same name.
   case "$1" in
@@ -330,7 +332,8 @@ ensure_contributor_image() {
   echo "ERROR: cannot obtain the contributor image ${ref}." >&2
   echo "  Published tags are 'stable', the version tags and 'sha-<commit>' — there is no ':latest'." >&2
   echo "  Pick a published tag with REVIEW_CONTRIBUTOR_IMAGE=ghcr.io/projectbluefin/review:stable," >&2
-  echo "  or build it yourself: podman build -f image/Containerfile -t review:dev . && REVIEW_CONTRIBUTOR_IMAGE=review:dev just review-container" >&2
+  echo "  or build the commit you have: ref=ghcr.io/projectbluefin/review:sha-\$(git rev-parse HEAD)" >&2
+  echo "    podman build -f image/Containerfile -t \"\$ref\" . && REVIEW_CONTRIBUTOR_IMAGE=\"\$ref\" just review-container" >&2
   return 1
 }
 resolve_copilot_token() {

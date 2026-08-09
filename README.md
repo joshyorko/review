@@ -541,26 +541,29 @@ required checks enforce repository policy.
 
 ### Iterating on the contributor image
 
-Prototype image-owned behavior in this checkout, then build a local tag:
+Prototype image-owned behavior in this checkout, then build the commit you
+have under the same immutable tag CI mints for it:
 
 ```bash
+ref="ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
 GH_TOKEN="$(gh auth token)" podman build \
   --secret id=github_token,env=GH_TOKEN \
   --build-arg GOOSE_REFRESH="$(date +%s)" \
-  -f image/Containerfile -t localhost/review:dev .
+  -f image/Containerfile -t "$ref" .
 ```
 
 Use that tag for a container-only trial without publishing it:
 
 ```bash
-REVIEW_CONTRIBUTOR_IMAGE=localhost/review:dev \
-  just review-container
+REVIEW_CONTRIBUTOR_IMAGE="$ref" just review-container
 ```
 
-The launcher prefers a fresh copy of moving tags, but falls back to an already
-present local image when no registry copy is available. After the change is
-ready, commit it and use the normal publish workflow; CI publishes immutable
-`sha-<commit>` and version tags and advances `:stable` from `main`.
+An `sha-<commit>` tag names exactly one build, so the launcher never re-pulls
+over it and the local copy is the one that runs. It also says which commit is
+in the image, which a made-up local name cannot.
+After the change is ready, commit it and use the normal publish workflow; CI
+publishes immutable `sha-<commit>` and version tags and advances `:stable`
+from `main`.
 The build secret exists only while GitHub CLI verifies Goose's signed
 provenance and is never included in an image layer. The checked-in checksums
 make this local command use the known canary snapshot; to refresh it, resolve
@@ -589,7 +592,8 @@ each platform's runtime evidence as native or unavailable — never QEMU —
 and `--report image-audit-report.md` writes it to a git-ignored file:
 
 ```bash
-CONTAINER_ENGINE=podman bash tests/image-audit.sh --derived localhost/review:dev
+CONTAINER_ENGINE=podman bash tests/image-audit.sh \
+  --derived "ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
 ```
 
 `pre-commit run --all-files` runs socket-free hygiene checks locally.
