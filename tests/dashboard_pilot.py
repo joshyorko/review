@@ -83,10 +83,13 @@ async def main() -> int:
     # gh is read-only here: the pilot never lets a mutation reach a real
     # network, and any attempt to run one is recorded for the assertions.
     gh_log = workdir / "gh.log"
+    perm_file = workdir / "permissions.push"
+    perm_file.write_text("true\n")
     gh_stub = write_stub(
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
         "exit 0\n",
@@ -275,6 +278,80 @@ async def main() -> int:
                 ran == [("pr", "review"), ("pr", "edit")] * 2,
                 f"both queueing commands must run after the one gate, got {ran}",
             )
+    gh_log.write_text("")
+
+    # ── merging without lgtm is a maintainer power ───────────────────────
+    # lgtm is an opt-in to Hive's automation, not a toll on merging: a
+    # maintainer can land a pull request directly. Someone without the push
+    # permission cannot, and must be told so rather than shown a gate.
+    for allowed in (False, True):
+        perm_file.write_text("true\n" if allowed else "false\n")
+        app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            stop = app.stops[0]
+            for _ in range(200):
+                if stop.repository in app.merge_rights:
+                    break
+                await pilot.pause(0.05)
+            check(
+                app.merge_rights.get(stop.repository) is allowed,
+                "the merge permission must be read from GitHub, got "
+                f"{app.merge_rights.get(stop.repository)!r} for push={allowed}",
+            )
+            stop.live = {"isDraft": False}
+            gh_log.write_text("")
+            await pilot.press("m")
+            await pilot.pause()
+            gated = isinstance(app.screen, tui.ConfirmMutation)
+            check(
+                gated is allowed,
+                "merging directly must be gated for a maintainer and refused "
+                f"otherwise; push={allowed} produced gate={gated}",
+            )
+            if not allowed:
+                check(
+                    "pr merge" not in gh_log.read_text(),
+                    "a non-maintainer must not reach 'gh pr merge'",
+                )
+                continue
+            gate = app.screen
+            check(
+                [c[:3] for c in gate.commands] == [["gh", "pr", "merge"]],
+                f"[m] must merge directly, got {gate.commands}",
+            )
+            check(
+                "--squash" in gate.commands[0],
+                f"the direct merge must squash, got {gate.commands[0]}",
+            )
+            check(
+                "--admin" not in gate.commands[0]
+                and "--delete-branch" not in gate.commands[0],
+                f"the direct merge must not bypass or delete, got {gate.commands[0]}",
+            )
+            await pilot.press(*gate.expected)
+            await pilot.press("enter")
+            for _ in range(200):
+                if "pr merge" in gh_log.read_text():
+                    break
+                await pilot.pause(0.05)
+            merged = [
+                line for line in gh_log.read_text().splitlines()
+                if line.startswith("pr merge")
+            ]
+            check(
+                len(merged) == 1 and "--squash" in merged[0],
+                f"the confirmed merge must run exactly once, got {merged}",
+            )
+            check(
+                "--add-label lgtm" not in gh_log.read_text(),
+                "merging directly must not apply the lgtm automation opt-in",
+            )
+    perm_file.write_text("true\n")
     gh_log.write_text("")
 
     # ── the gate is always escapable ─────────────────────────────────────

@@ -248,7 +248,8 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `o` | open in browser |
 | `v` | view the diff |
 | `c` | comment |
-| `a`/`m` | queue for Hive auto-merge — for the batch selection if one exists |
+| `a` | queue for Hive auto-merge — opt in to automation; for the batch selection if one exists |
+| `m` | merge now: squash immediately, no `lgtm`, maintainers only |
 | `x` | reject: comment, then close |
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
 | `/` | steer: type instructions that ride along with the review you start |
@@ -257,8 +258,9 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 
 The dashboard is the only surface that can change anything: every mutation
 prints the exact `gh` command and runs only after you type
-the pull request number, merges are queued through Hive's governor sweep
-(approval + `lgtm`, never a direct merge), drafts are refused, and every
+the pull request number, a maintainer can merge directly with `m` or hand the
+pull request to Hive's governor sweep with `a` (approval + `lgtm`), drafts are
+refused, and every
 action
 is appended as a JSON trace to `~/.local/state/bluefin-review/trace.jsonl`
 inside the container for the review feedback loop.
@@ -297,12 +299,22 @@ decision is one gate: an action that takes several `gh` calls — queueing
 every command it will run in that one gate and then runs the whole sequence in
 the background. You are never asked to confirm the same decision twice, and a
 failed step stops the rest instead of asking again.
-Queueing a merge is the factory's real merge path: it posts the exact
-approval Hive's governor sweep re-verifies (`Approved by @<you> for Hive
+Queueing a merge with `a` is the factory's automated merge path: it posts the
+exact approval Hive's governor sweep re-verifies (`Approved by @<you> for Hive
 auto-merge on green CI.`) and adds the `lgtm` label the sweep scans for. The
 sweep — not this tool — performs the squash merge, and it independently
 enforces the self-merge ban, requires mergeable plus all checks green, and
-ignores drafts. Nothing here merges directly.
+ignores drafts.
+
+`lgtm` is an **opt-in to that automation, not a toll on merging**. When you
+have read the diff and simply want the change in, `m` merges it now: the same
+typed-number gate, the same squash the sweep would perform, no label, and no
+robot armed. That is a maintainer power — the dashboard asks GitHub whether
+you hold the `push` permission on that repository and refuses if you do not,
+which is why it can never become a contributor agent's path (agents work from
+forks and have no such permission). It never overrides branch protection:
+there is no bypass flag, so a repository that requires review or green checks
+still refuses, and you are told why.
 
 `h` is read-only: it copies the handoff text through OSC 52, which reaches
 your system clipboard when the attached terminal supports that sequence

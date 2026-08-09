@@ -20,11 +20,29 @@ fail() {
 }
 
 # --- absence: powers the dashboard must not have -----------------------------
-# No protection bypass, no branch deletion, no direct merge, no force.
+# No protection bypass, no branch deletion, no force.
 grep -q -- '--admin' "$tui" && fail "the dashboard must never bypass branch protections with --admin"
 grep -q -- '--delete-branch' "$tui" && fail "the dashboard must never delete branches"
-grep -q '"pr", "merge"' "$tui" && fail "the dashboard must never merge directly — Hive's governor sweep merges"
 grep -qE '"push"|git push' "$tui" && fail "the dashboard must never push"
+
+# A maintainer may merge without arming automation: `lgtm` is an opt-in to
+# Hive's sweep, not a toll on merging. That power is exactly one gated call
+# site, it squashes like the sweep does, and it is asked of GitHub — the
+# 'push' permission — rather than assumed from having the dashboard open.
+[[ "$(grep -c '"pr", "merge"' "$tui")" -eq 1 ]] ||
+  fail "exactly one merge site: the maintainer's gated direct merge"
+merge_now="$(sed -n '/def action_merge_now/,/def action_reject/p' "$tui")"
+grep -q -- '"--squash"' <<<"$merge_now" ||
+  fail "the direct merge must squash, like the sweep it stands beside"
+grep -q 'merge_rights\[stop.repository\]' <<<"$merge_now" ||
+  fail "the direct merge must check the maintainer permission before running"
+grep -q 'self.mutate_all' <<<"$merge_now" ||
+  fail "the direct merge must go through the typed-number gate"
+grep -q 'permissions.push' "$tui" ||
+  fail "maintainer permission must be read from GitHub, not assumed"
+# The lgtm path stays what it is: an opt-in, never a precondition for merging.
+grep -q 'isDraft' <<<"$merge_now" ||
+  fail "the direct merge must refuse drafts"
 
 # Every mutating verb must be an argument of self.mutate(), never of the
 # read-only gh() helper.

@@ -404,7 +404,7 @@ class ReviewDashboard(App):
         Binding("v", "view_diff", "diff"),
         Binding("c", "comment", "comment"),
         Binding("a", "merge", "queue merge"),
-        Binding("m", "merge", "queue merge", show=False),
+        Binding("m", "merge_now", "merge now"),
         Binding("x", "reject", "reject"),
         Binding("h", "handoff", "handoff"),
         Binding("slash", "steer", "steer review"),
@@ -419,6 +419,11 @@ class ReviewDashboard(App):
         self.self_login = ""
         self.generated_at = ""
         self.pulls_cache: dict[str, list[dict]] = {}
+        # Repository -> whether this login may merge there. Merging without
+        # the lgtm opt-in is a maintainer power, so it is asked of GitHub per
+        # repository rather than assumed from the fact that a dashboard is
+        # open. Unknown until asked, and never cached as True by default.
+        self.merge_rights: dict[str, bool] = {}
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -538,6 +543,16 @@ class ReviewDashboard(App):
             "closingIssuesReferences,statusCheckRollup,labels",
         )
         stop.live = json.loads(live.stdout) if live.returncode == 0 else {}
+        if stop.repository not in self.merge_rights:
+            # 'push' is exactly the power to merge on GitHub: a contributor
+            # agent works from a fork and has none, which is why the direct
+            # merge key can never be its path.
+            rights = gh(
+                "api", f"repos/{stop.repository}", "--jq", ".permissions.push"
+            )
+            self.merge_rights[stop.repository] = (
+                rights.returncode == 0 and rights.stdout.strip() == "true"
+            )
         self.call_from_thread(self.render_evidence, stop)
 
     def repo_pulls(self, repo: str) -> list[dict]:
@@ -870,6 +885,53 @@ class ReviewDashboard(App):
             )
 
         queue_next()
+
+    def action_merge_now(self) -> None:
+        """Merge this pull request now, as a maintainer, without `lgtm`.
+
+        `lgtm` is an explicit opt-in to automation: it hands the pull request
+        to Hive's governor sweep, which re-verifies and merges on green CI.
+        Not every merge wants that, and a maintainer who has read the diff
+        should not have to label a pull request to arm a robot in order to
+        land it. This is the direct path — same typed-number gate, the same
+        squash the sweep performs, and no label.
+
+        It is a maintainer power. GitHub's `push` permission on the repository
+        is exactly that power, so it is asked of GitHub rather than assumed.
+        Branch protections are never bypassed: nothing here passes the flag
+        that would override them, so a repository requiring review or green
+        checks still refuses, and that refusal is reported rather than worked
+        around.
+        """
+        stop = self.current
+        if not stop:
+            return
+        if not stop.live:
+            self.notify(f"{stop.key}: no live evidence yet; select it first.")
+            return
+        if stop.live.get("isDraft") is True:
+            self.notify(f"{stop.key} is a draft; ready it first.", severity="warning")
+            return
+        if stop.repository not in self.merge_rights:
+            self.notify(
+                f"still checking your permission on {stop.repository}; try again.",
+                severity="warning",
+            )
+            return
+        if not self.merge_rights[stop.repository]:
+            self.notify(
+                f"merging {stop.repository} directly is a maintainer power and "
+                "you do not have it there; queue it with [a] instead.",
+                severity="error",
+            )
+            return
+        self.mutate_all(
+            stop,
+            [[
+                "gh", "pr", "merge", str(stop.number),
+                "--repo", stop.repository, "--squash",
+            ]],
+        )
 
     def action_reject(self) -> None:
         stop = self.current
