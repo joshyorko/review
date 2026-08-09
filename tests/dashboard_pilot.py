@@ -1016,6 +1016,103 @@ async def main() -> int:
             await pilot.pause()
     gh_log.write_text("")
 
+    # ── two key lines, colour by state, refresh, and update-branch ───────
+    check(
+        tui.stop_style("review", "dirty", "success", "approved") == "red",
+        "a conflicted pull request must be red whatever else is true of it",
+    )
+    check(
+        tui.stop_style("review", "clean", "failure", "unknown") == "yellow",
+        "failing checks must be yellow",
+    )
+    check(
+        tui.stop_style("ready-for-human-merge", "clean", "success", "approved")
+        == "bold green",
+        "merge-ready work must stand out",
+    )
+    check(
+        tui.stop_style("investigate", "unknown", "unknown", "unknown") == "grey62",
+        "work nobody can act on must recede",
+    )
+    for key in ("r", "v", "o", "h", "/", "f", "b", "H", "R", "q"):
+        check(
+            f"[b]{key}[/b]" in tui.KEYS_READING,
+            f"the reading key line must document {key!r}",
+        )
+    for key in ("L", "a", "m", "u", "x", "l", "p", "M"):
+        check(
+            f"[b]{key}[/b]" in tui.KEYS_ACTING,
+            f"the acting key line must document {key!r}",
+        )
+
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        check(
+            bool(app.query("#keys-reading")) and bool(app.query("#keys-acting")),
+            "the key map must be two lines at the bottom",
+        )
+        # Colour reaches the row, from the snapshot's own state fields.
+        app.stops[0].mergeable_state = "dirty"
+        app.refresh_rows()
+        await pilot.pause()
+        row = str(
+            app.query_one("#queue", tui.ListView)
+            .children[0]
+            .query_one(tui.Label)
+            .render()
+        )
+        check(
+            "CONFLICTS" in row,
+            f"a conflicted stop must say so on its row, got {row!r}",
+        )
+
+        # [R] refreshes without losing the batch selection.
+        app.stops[0].selected = True
+        app.stops[1].selected = True
+        await pilot.press("R")
+        for _ in range(200):
+            if app.stops and all(s.selected for s in app.stops):
+                break
+            await pilot.pause(0.05)
+        check(
+            len(app.stops) == 2 and all(s.selected for s in app.stops),
+            "a refresh must keep the batch it was holding",
+        )
+
+        # [u] updates the branch, for the batch, behind the gate.
+        gh_log.write_text("")
+        await pilot.press("u")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.ConfirmMutation),
+            f"[u] must be gated, got {type(app.screen).__name__}",
+        )
+        if isinstance(app.screen, tui.ConfirmMutation):
+            check(
+                [c[:3] for c in app.screen.commands]
+                == [["gh", "pr", "update-branch"]],
+                f"[u] must update the branch, got {app.screen.commands}",
+            )
+            await pilot.press(*app.screen.expected)
+            await pilot.press("enter")
+            for _ in range(200):
+                if "pr update-branch" in gh_log.read_text():
+                    break
+                await pilot.pause(0.05)
+            check(
+                gh_log.read_text().count("pr update-branch") >= 1,
+                "the confirmed update must actually run",
+            )
+            if isinstance(app.screen, tui.ConfirmMutation):
+                await pilot.press("escape")
+                await pilot.pause()
+    gh_log.write_text("")
+
     # ── the gate is always escapable ─────────────────────────────────────
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:

@@ -264,6 +264,8 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
 | `/` | steer: type instructions that ride along with the review you start |
 | `f` | cycle the action filter (every action → one at a time → back) |
+| `R` | refresh the queue snapshot and re-ask Hive (keeps your batch) |
+| `u` | update the branch from its base — the batch selection if one exists |
 | `H` | ask Hive: hub state, and who is working on what right now |
 | `M` | resolve the duplicate cluster |
 | `q` | quit |
@@ -310,6 +312,31 @@ clipboard.
 
 Stops that are no longer open on GitHub are refused at the point of action —
 the snapshot can be hours old, and GitHub is the state.
+
+### Reading the queue at a glance
+
+Rows are coloured from the state the snapshot already carries, so a hundred
+stops are scannable instead of linear:
+
+| colour | meaning | what it usually needs |
+|---|---|---|
+| **bold green** | merge-ready | `m`, or `a` to let the sweep do it |
+| cyan | reviewable, or already approved | `r` then `L` |
+| red | conflicting | a human — `u` cannot fix a real conflict |
+| yellow | checks failing | its author, or `u` if it is merely stale |
+| grey | evidence incomplete | `investigate` — nobody can act yet |
+
+Rows also carry `⚑ CONFLICTS`, `✗ CI` and `✓ approved` markers, so the state
+survives a terminal without colour.
+
+The key map is two lines at the bottom: reading actions on the first, the ones
+that change something on the second. Fourteen bindings do not fit on one row
+of an 80-column terminal, and a truncated key map teaches half the tool.
+
+`R` re-reads the snapshot and re-asks Hive without losing your batch selection
+— the snapshot regenerates every 15 minutes and any merge invalidates it at
+once. `u` runs `gh pr update-branch`, which is the button GitHub shows on a
+pull request that is behind its base, for the whole batch if one is selected.
 
 ### Merging a batch, and when one refuses
 

@@ -62,6 +62,20 @@ QUEUE_LABEL = "lgtm"
 QUEUE_LABEL_COLOUR = "238636"
 QUEUE_LABEL_DESCRIPTION = "This PR has been approved by a maintainer"
 
+# The key map, split by what a key costs you. Nothing on the first line
+# changes anything on GitHub; everything on the second goes through the
+# typed-number gate.
+KEYS_READING = (
+    " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
+    " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]H[/b] hive"
+    " [b]R[/b] refresh [b]q[/b] quit"
+)
+KEYS_ACTING = (
+    " [b]L[/b] leave review [b]a[/b] approve+queue [b]m[/b] merge"
+    " [b]u[/b] update [b]x[/b] reject [b]l[/b] label [b]p[/b] prio"
+    " [b]M[/b] dupes"
+)
+
 
 def hive_api_base() -> str:
     """The hub's HTTP root, derived from the WebSocket URL the image owns.
@@ -212,6 +226,27 @@ def dependency_subject(title: str) -> str | None:
     return None
 
 
+def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
+    """The colour a row is worth, from the snapshot's own state fields.
+
+    A hundred rows of identical grey is a queue you read linearly. These
+    states are already in every snapshot item, so colour costs nothing and
+    turns the list into something scannable: what is ready, what is merely
+    stuck behind its own branch, and what nobody can act on yet.
+    """
+    if mergeable == "dirty":
+        return "red"
+    if checks == "failure":
+        return "yellow"
+    if action == "ready-for-human-merge":
+        return "bold green"
+    if action == "review" or review == "approved":
+        return "cyan"
+    if action == "investigate" or checks == "unknown":
+        return "grey62"
+    return ""
+
+
 @dataclass
 class QueueFilters:
     """Which of the snapshot's items reach the dashboard.
@@ -241,6 +276,9 @@ class Stop:
     action: str
     title: str
     author: str = ""
+    mergeable_state: str = ""
+    check_state: str = ""
+    review_state: str = ""
     selected: bool = False
     failure: str = ""
     live: dict = field(default_factory=dict)
@@ -674,6 +712,9 @@ class ReviewDashboard(App):
     }
     #confirm-command, .confirm-command { color: magenta; text-style: bold; }
     #steer { border: solid $secondary; height: 3; }
+    #keys-reading, #keys-acting { height: 1; background: $panel; }
+    #keys-reading { color: $text; }
+    #keys-acting { color: magenta; }
     #diff-header { height: 1; background: $panel; color: cyan; text-style: bold; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
@@ -706,6 +747,9 @@ class ReviewDashboard(App):
         Binding("slash", "steer", "steer review"),
         Binding("f", "filter", "filter"),
         Binding("H", "hive", "ask hive"),
+        Binding("R", "refresh", "refresh"),
+        Binding("f5", "refresh", "refresh", show=False),
+        Binding("u", "update_branch", "update branch"),
         Binding("M", "resolve_cluster", "resolve dupes", show=False),
         Binding("q", "quit", "quit"),
     ]
@@ -733,6 +777,9 @@ class ReviewDashboard(App):
         # not exist in most repositories, and `gh pr edit --add-label` fails
         # on a label that was never defined.
         self.queue_label_exists: dict[str, bool] = {}
+        # Keys to re-select after a refresh: a refresh that silently empties
+        # the batch you spent a minute building is worse than no refresh.
+        self.reselect: set[str] = set()
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -750,7 +797,12 @@ class ReviewDashboard(App):
             "enter runs it, esc returns to the queue",
             id="steer",
         )
-        yield Footer()
+        # Two lines, not Textual's one-line Footer. Fourteen bindings do not
+        # fit on one row of an 80-column terminal, and a key map that is
+        # truncated is a key map that teaches the wrong half of the tool.
+        # Reading actions first, then the ones that change something.
+        yield Static(KEYS_READING, id="keys-reading")
+        yield Static(KEYS_ACTING, id="keys-acting")
 
     def on_mount(self) -> None:
         # The queue keeps the keystrokes. The steer box is entered on purpose
@@ -874,11 +926,18 @@ class ReviewDashboard(App):
                 action=item.get("recommended_action", ""),
                 title=item.get("title", ""),
                 author=item.get("author", "") or "",
+                mergeable_state=item.get("mergeable_state", "") or "",
+                check_state=item.get("check_state", "") or "",
+                review_state=item.get("review_state", "") or "",
             )
             for item in self.snapshot_items
             if self.filters.wants(item)
         ]
         stops.sort(key=lambda stop: (action_rank(stop.action), stop.repository, stop.number))
+        if self.reselect:
+            for stop in stops:
+                stop.selected = stop.key in self.reselect
+            self.reselect = set()
         self.populate(stops)
 
     def row_markup(self, stop: Stop) -> str:
@@ -886,18 +945,31 @@ class ReviewDashboard(App):
         # A stop that would not merge says so on its own row, so a failure in
         # the middle of a batch survives the notification that reported it.
         failed = " ✗ DID NOT MERGE" if stop.failure else ""
-        return (
+        marks = ""
+        if stop.mergeable_state == "dirty":
+            marks += " ⚑ CONFLICTS"
+        if stop.check_state == "failure":
+            marks += " ✗ CI"
+        if stop.review_state == "approved":
+            marks += " ✓ approved"
+        body = (
             f"{link(stop.key, pr_url(stop.repository, stop.number))}: "
             f"{escape(stop.title[:60])}{tag} "
-            f"{escape('[' + stop.action + ']')}{failed}"
+            f"{escape('[' + stop.action + ']')}{marks}{failed}"
         )
+        style = stop_style(
+            stop.action, stop.mergeable_state, stop.check_state, stop.review_state
+        )
+        return f"[{style}]{body}[/{style}]" if style else body
 
     def populate(self, stops: list[Stop]) -> None:
         self.stops = stops
         queue = self.query_one("#queue", ListView)
         queue.clear()
         for stop in stops:
-            queue.append(ListItem(Label(self.row_markup(stop))))
+            item = ListItem(Label(self.row_markup(stop)))
+            item.set_class(stop.selected, "selected")
+            queue.append(item)
         self.refresh_status()
         if stops:
             queue.index = 0
@@ -1309,6 +1381,57 @@ class ReviewDashboard(App):
             self.push_screen(ReviewBody(verdict), with_body)
 
         self.push_screen(ReviewVerdict(), with_verdict)
+
+    def action_refresh(self) -> None:
+        """Re-read the queue snapshot and ask Hive again.
+
+        The snapshot is regenerated every 15 minutes and a session outlives
+        that easily; merging or updating a branch invalidates it immediately.
+        Relaunching the dashboard to see current state is not a workflow.
+        """
+        self.reselect = {stop.key for stop in self.stops if stop.selected}
+        self.notify("refreshing the queue…")
+        self.load_queue()
+        self.load_hive()
+
+    def action_update_branch(self) -> None:
+        """Bring the branch up to date with its base — the batch, if set.
+
+        Nineteen of the queue's stops are conflicted and many more are merely
+        behind, and each of those is a maintainer opening GitHub to press one
+        button. `gh pr update-branch` merges the base in exactly as that
+        button does, so a batch of stale-but-clean pull requests comes current
+        in one pass. A real conflict still cannot be resolved this way, and
+        GitHub says so rather than pretending otherwise.
+        """
+        batch = [s for s in self.stops if s.selected]
+        if not batch and self.current:
+            batch = [self.current]
+        if not batch:
+            return
+
+        def update_next(index: int = 0) -> None:
+            if index >= len(batch):
+                if len(batch) > 1:
+                    self.notify(f"asked GitHub to update {len(batch)} branches.")
+                return
+            stop = batch[index]
+
+            def failed(message: str) -> None:
+                stop.failure = message
+                self.refresh_rows()
+
+            self.mutate_all(
+                stop,
+                [[
+                    "gh", "pr", "update-branch", str(stop.number),
+                    "--repo", stop.repository,
+                ]],
+                then=lambda: update_next(index + 1),
+                on_error=failed,
+            )
+
+        update_next()
 
     def action_leave_review(self) -> None:
         stop = self.current
