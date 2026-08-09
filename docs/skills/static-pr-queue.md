@@ -1,7 +1,7 @@
 ---
 name: static-pr-queue
-version: "1.7"
-last_updated: 2026-08-08
+version: "1.8"
+last_updated: 2026-08-09
 id: static-pr-queue
 one_line_purpose: Publish a safe, static queue of public pull requests.
 entry_point: docs/skills/static-pr-queue.md
@@ -87,6 +87,9 @@ re-verifies plus the `lgtm` label), never performed directly: the sweep
 enforces the self-merge ban, requires green CI, and squash-merges.
 `tests/bluefin-review.sh` fails if a mutation appears outside that gate, or
 if `gh pr merge`, `--admin`, `--delete-branch`, or a push appears at all.
+Batch mutations reuse that gate serially: finish approval and labeling for one
+pull request before opening the next confirmation, and stop the sequence on an
+abort or failure. Never stack confirmation modals for a batch.
 
 The snapshot carries each pull request's `author` so a consumer can skip the
 maintainer's own work. Authorship is the one field that never changes after
