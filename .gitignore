@@ -12,3 +12,4 @@ public/queue.md
 # tests/image-audit.sh --report writes generated audit reports; they are
 # per-run evidence, never source.
 image-audit-report.md
+__pycache__/
