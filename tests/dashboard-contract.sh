@@ -72,8 +72,14 @@ grep -qiE '\(y/n\)|yes/no' "$tui" && fail "no y/yes confirmation shortcut"
 # approval inside the gated _queue_automerge helper.
 grep -q 'for Hive auto-merge on green CI.' "$tui" ||
   fail "queueing must post the exact approval the sweep re-verifies"
-grep -q '"--add-label", "lgtm"' "$tui" ||
-  fail "queueing must add the lgtm label the sweep scans for"
+grep -q '"--add-label", QUEUE_LABEL' "$tui" ||
+  fail "queueing must add the label the sweep scans for"
+grep -q 'QUEUE_LABEL = "lgtm"' "$tui" ||
+  fail "the sweep's label must still be lgtm"
+# The label does not exist in every repository, and adding one that was never
+# defined fails after the approval has already been submitted (#141).
+grep -q '"gh", "label", "create", QUEUE_LABEL' "$tui" ||
+  fail "a missing queue label must be created, not discovered mid-sequence"
 # Two review-submission sites, and both gated: the queue approval that arms
 # the sweep, and the maintainer's own review — approve, request changes, or
 # comment — which is neither a merge nor an automation opt-in.

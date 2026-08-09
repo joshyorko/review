@@ -54,6 +54,13 @@ TRACE_PATH = os.path.join(
 PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
+# The label Hive's governor sweep scans for. It is not defined in most
+# repositories, and adding a label that does not exist fails.
+QUEUE_LABEL = "lgtm"
+# Match the label the factory repositories that already have it use, rather
+# than minting a second look for the same thing.
+QUEUE_LABEL_COLOUR = "238636"
+QUEUE_LABEL_DESCRIPTION = "This PR has been approved by a maintainer"
 
 
 def hive_api_base() -> str:
@@ -722,6 +729,10 @@ class ReviewDashboard(App):
         # old permanent "Hive: not consulted" amounted to.
         self.hive_state = ""
         self.hive_workers: list[dict] = []
+        # Repository -> whether the sweep's `lgtm` label exists there. It does
+        # not exist in most repositories, and `gh pr edit --add-label` fails
+        # on a label that was never defined.
+        self.queue_label_exists: dict[str, bool] = {}
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -974,6 +985,11 @@ class ReviewDashboard(App):
             self.merge_rights[stop.repository] = (
                 rights.returncode == 0 and rights.stdout.strip() == "true"
             )
+        if stop.repository not in self.queue_label_exists:
+            probe = gh(
+                "api", f"repos/{stop.repository}/labels/{QUEUE_LABEL}", "--jq", ".name"
+            )
+            self.queue_label_exists[stop.repository] = probe.returncode == 0
         self.call_from_thread(self.render_evidence, stop)
 
     def repo_pulls(self, repo: str) -> list[dict]:
@@ -1369,26 +1385,50 @@ class ReviewDashboard(App):
 
     def _queue_automerge(self, stop: Stop, then=None) -> None:
         """Queue for Hive auto-merge: post the exact approval the governor
-        sweep re-verifies, then add the lgtm label it scans for. The sweep
-        enforces the self-merge ban, requires green CI, and squash-merges.
+        sweep re-verifies, then add the label it scans for. The sweep enforces
+        the self-merge ban, requires green CI, and squash-merges.
 
-        Both commands are one decision, so they sit behind one gate and then
-        run to completion in the background."""
+        The label does not exist in most repositories, and adding one that was
+        never defined fails — which used to leave the pull request formally
+        approved for an auto-merge that could never be picked up, because the
+        approval had already been submitted by then. The label is created
+        first when it is missing, so the sequence cannot end half-applied, and
+        the whole thing is one decision behind one gate.
+        """
         body = f"Approved by @{self.self_login} for Hive auto-merge on green CI."
-        self.mutate_all(
-            stop,
-            [
-                [
-                    "gh", "pr", "review", str(stop.number),
-                    "--repo", stop.repository, "--approve", "--body", body,
-                ],
-                [
-                    "gh", "pr", "edit", str(stop.number),
-                    "--repo", stop.repository, "--add-label", "lgtm",
-                ],
-            ],
-            then=then,
-        )
+        commands: list[list[str]] = []
+        if not self.queue_label_exists.get(stop.repository, True):
+            commands.append([
+                "gh", "label", "create", QUEUE_LABEL,
+                "--repo", stop.repository,
+                "--color", QUEUE_LABEL_COLOUR,
+                "--description", QUEUE_LABEL_DESCRIPTION,
+            ])
+        commands.append([
+            "gh", "pr", "review", str(stop.number),
+            "--repo", stop.repository, "--approve", "--body", body,
+        ])
+        commands.append([
+            "gh", "pr", "edit", str(stop.number),
+            "--repo", stop.repository, "--add-label", QUEUE_LABEL,
+        ])
+
+        def queued() -> None:
+            stop.failure = ""
+            self.queue_label_exists[stop.repository] = True
+            self.refresh_rows()
+            if then:
+                then()
+
+        def failed(message: str) -> None:
+            # A half-queued pull request is the failure this issue was filed
+            # for: it must be visible on the row, not only in a notification
+            # that a batch has already scrolled past.
+            stop.failure = message
+            stop.selected = True
+            self.refresh_rows()
+
+        self.mutate_all(stop, commands, then=queued, on_error=failed)
 
     def action_merge(self) -> None:
         batch = [s for s in self.stops if s.selected]

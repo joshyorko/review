@@ -953,6 +953,69 @@ async def main() -> int:
     )
     gh_log.write_text("")
 
+    # ── queueing must not half-apply when the label is missing (#141) ────
+    # Reported from the field: the approval landed, `gh pr edit --add-label
+    # lgtm` failed with "'lgtm' not found", and the pull request was left
+    # formally approved for an auto-merge that could never be picked up.
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        stop = app.stops[0]
+        stop.live = {"isDraft": False}
+        app.queue_label_exists[stop.repository] = False
+        gh_log.write_text("")
+        app.action_merge()
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.ConfirmMutation),
+            "queueing must still gate when the label is missing",
+        )
+        if isinstance(app.screen, tui.ConfirmMutation):
+            verbs = [tuple(c[:3]) for c in app.screen.commands]
+            check(
+                verbs
+                == [
+                    ("gh", "label", "create"),
+                    ("gh", "pr", "review"),
+                    ("gh", "pr", "edit"),
+                ],
+                f"a missing label must be created before the approval, got {verbs}",
+            )
+            check(
+                tui.QUEUE_LABEL_COLOUR == "238636",
+                "the created label must match the one the factory already uses",
+            )
+            await pilot.press(*app.screen.expected)
+            await pilot.press("enter")
+            for _ in range(200):
+                if "pr edit" in gh_log.read_text():
+                    break
+                await pilot.pause(0.05)
+            ran = gh_log.read_text()
+            check(
+                ran.index("label create") < ran.index("pr review"),
+                "the label must exist before the approval is submitted",
+            )
+        # With the label present, nothing extra is run.
+        app.queue_label_exists[stop.repository] = True
+        gh_log.write_text("")
+        app.action_merge()
+        await pilot.pause()
+        if isinstance(app.screen, tui.ConfirmMutation):
+            check(
+                [tuple(c[:3]) for c in app.screen.commands]
+                == [("gh", "pr", "review"), ("gh", "pr", "edit")],
+                "an existing label must not be created again",
+            )
+            await pilot.press("escape")
+            await pilot.pause()
+    gh_log.write_text("")
+
     # ── the gate is always escapable ─────────────────────────────────────
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:
