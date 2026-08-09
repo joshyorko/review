@@ -402,6 +402,131 @@ async def main() -> int:
     perm_file.write_text("true\n")
     gh_log.write_text("")
 
+    # ── asking Hive is easy, read-only, and never fatal ──────────────────
+    # The status line used to say "Hive: not consulted" permanently, which is
+    # a dashboard that never asked. It asks now, and a stop Hive is actively
+    # working on says so — the diff on screen is about to be stale.
+    hive_calls = workdir / "hive.log"
+
+    class FakeHive:
+        def __init__(self, status, contributors):
+            self.status = status
+            self.contributors = contributors
+
+        def __call__(self, path):
+            with open(hive_calls, "a") as sink:
+                sink.write(path + "\n")
+            return self.status if path.endswith("status") else self.contributors
+
+    real_hive_get = tui.hive_get
+    real_base = tui.hive_api_base
+    tui.hive_api_base = lambda: "https://hub.example"
+    tui.hive_get = FakeHive(
+        {"hub": "online", "actionable_items": 185},
+        {
+            "contributors": [
+                {
+                    "github_username": "someone-else",
+                    "current_task": {
+                        "task_id": "ct-1",
+                        "repo": "projectbluefin/bluefinctl",
+                        "number": 31,
+                    },
+                },
+                {"github_username": "idle", "current_task": None},
+            ]
+        },
+    )
+    try:
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.hive_state and app.stops:
+                    break
+                await pilot.pause(0.05)
+            check(
+                "online" in app.hive_state and "185 actionable" in app.hive_state,
+                f"the status line must report what Hive said, got {app.hive_state!r}",
+            )
+            check(
+                "not consulted" not in str(
+                    app.query_one("#status-bar", tui.Static).render()
+                ),
+                "the dashboard must not claim Hive is unconsulted after asking",
+            )
+            check(
+                len(app.hive_workers) == 1,
+                f"only in-flight tasks count as working, got {app.hive_workers}",
+            )
+            stop = app.stops[0]
+            worker = app.hive_worker_for(stop)
+            check(
+                worker is not None and worker["login"] == "someone-else",
+                f"a stop Hive is working on must be identified, got {worker}",
+            )
+            check(
+                app.hive_worker_for(app.stops[1]) is None,
+                "a stop nobody is working on must not claim a worker",
+            )
+            for _ in range(200):
+                if "is working on THIS" in str(
+                    app.query_one("#context", tui.Static).render()
+                ):
+                    break
+                await pilot.pause(0.05)
+            check(
+                "is working on THIS" in str(
+                    app.query_one("#context", tui.Static).render()
+                ),
+                "the context pane must warn that Hive is changing this PR now",
+            )
+            check(
+                {"/api/v1/status", "/api/v1/contributors"}
+                <= set(hive_calls.read_text().split()),
+                f"asking Hive must read status and contributors, got "
+                f"{hive_calls.read_text().split()}",
+            )
+            # Read-only: consulting Hive must never mutate GitHub or Hive.
+            check(
+                "pr merge" not in gh_log.read_text()
+                and "pr review" not in gh_log.read_text(),
+                "consulting Hive must not mutate anything",
+            )
+
+        # An unreachable hub degrades to a plain statement, never a crash.
+        tui.hive_get = lambda path: {}
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.hive_state:
+                    break
+                await pilot.pause(0.05)
+            check(
+                app.hive_state == "unreachable",
+                f"an unreachable hub must say so, got {app.hive_state!r}",
+            )
+            check(app.stops, "an unreachable hub must not empty the queue")
+
+        # No hub configured at all is its own honest answer.
+        tui.hive_api_base = lambda: ""
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.hive_state:
+                    break
+                await pilot.pause(0.05)
+            check(
+                app.hive_state == "not configured",
+                f"no hub must read as not configured, got {app.hive_state!r}",
+            )
+    finally:
+        tui.hive_get = real_hive_get
+        tui.hive_api_base = real_base
+    gh_log.write_text("")
+
     # ── the gate is always escapable ─────────────────────────────────────
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:

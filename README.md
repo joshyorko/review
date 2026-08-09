@@ -263,6 +263,7 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
 | `/` | steer: type instructions that ride along with the review you start |
 | `f` | cycle the action filter (every action → one at a time → back) |
+| `H` | ask Hive: hub state, and who is working on what right now |
 | `M` | resolve the duplicate cluster |
 | `q` | quit |
 
@@ -301,6 +302,29 @@ to mislead a reviewer.
 
 Stops that are no longer open on GitHub are refused at the point of action —
 the snapshot can be hours old, and GitHub is the state.
+
+### Asking Hive
+
+The status line used to read `Hive: not consulted`, permanently — a dashboard
+that never asked. It asks now, on startup and again on `H`, and reports what
+the hub said: `online · 185 actionable · 2 working`, or plainly `unreachable`
+or `not configured`. The hub URL is not written down here; it comes from
+`HIVE_HUB`, which the image's Hive entrypoint hook owns and exports.
+
+The part worth having is per-stop. When a contributor's *current* task is the
+pull request you are looking at, the context pane says so:
+
+```
+ hive     joshyorko is working on THIS now (ct-projectbluefin/bluefin-981-…)
+```
+
+That is the one thing worth interrupting a review for — the diff on screen is
+about to be stale. Otherwise it tells you nobody is on it.
+
+Consulting Hive is strictly read-only and never fatal: an unreachable or
+unauthenticated hub is reported as unreachable, not raised, and the queue
+still works. Hive remains the sole authority for selecting and assigning
+contributor tasks; nothing here claims, reorders, or declines one.
 
 Every state-changing key prints the exact commands and runs them only after you
 type the pull request number; empty aborts, and there is no y/yes shortcut. One

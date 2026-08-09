@@ -51,6 +51,23 @@ TRACE_PATH = os.path.join(
 )
 PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 MUTATION_TIMEOUT = 60
+HIVE_TIMEOUT = 15
+
+
+def hive_api_base() -> str:
+    """The hub's HTTP root, derived from the WebSocket URL the image owns.
+
+    The hub URL is defined once, in the image's Hive entrypoint hook, which
+    exports `HIVE_HUB` before this runs. It is never written down here: a
+    second copy is how a deployment ends up consulting someone else's hub.
+    """
+    hub = os.environ.get("HIVE_HUB", "")
+    if not hub.startswith(("wss://", "ws://", "https://", "http://")):
+        return ""
+    http = hub.replace("wss://", "https://").replace("ws://", "http://")
+    return http[: -len("/contribute")] if http.endswith("/contribute") else http
+
+
 PRIORITIES = ["P0-critical", "P1-high", "P2-medium", "P3-low"]
 LABEL_CHOICES = ["kind/bug", "kind/improvement", "area/bootc", "status/approved"]
 
@@ -98,6 +115,28 @@ def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["gh", *args], capture_output=True, text=True, timeout=timeout
     )
+
+
+def hive_get(path: str) -> dict:
+    """Read one hub endpoint. Read-only, and never fatal.
+
+    Consulting Hive must not be able to break the dashboard: an unreachable
+    or unauthenticated hub is reported as unreachable, not raised. Hive
+    remains the sole authority for assigning contributor tasks — nothing here
+    claims, reorders, or declines any of them.
+    """
+    base = hive_api_base()
+    token = os.environ.get("GH_TOKEN", "")
+    if not base or not token:
+        return {}
+    request = urllib.request.Request(
+        f"{base}{path}", headers={"Authorization": f"Bearer {token}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=HIVE_TIMEOUT) as response:
+            return json.load(response)
+    except Exception:
+        return {}
 
 
 def trace(record: dict) -> None:
@@ -432,6 +471,7 @@ class ReviewDashboard(App):
         Binding("h", "handoff", "handoff"),
         Binding("slash", "steer", "steer review"),
         Binding("f", "filter", "filter"),
+        Binding("H", "hive", "ask hive"),
         Binding("M", "resolve_cluster", "resolve dupes", show=False),
         Binding("q", "quit", "quit"),
     ]
@@ -449,6 +489,12 @@ class ReviewDashboard(App):
         # open. Unknown until asked, and never cached as True by default.
         self.merge_rights: dict[str, bool] = {}
         self.snapshot_items: list[dict] = []
+        # What Hive says, when it has been asked. "" means not asked yet, so
+        # the status line can tell "we have not looked" apart from "the hub is
+        # down" — the first is a dashboard that never tried, which is what the
+        # old permanent "Hive: not consulted" amounted to.
+        self.hive_state = ""
+        self.hive_workers: list[dict] = []
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -473,6 +519,65 @@ class ReviewDashboard(App):
         # with [/], because a focused Input swallows every single-key binding.
         self.query_one("#queue", ListView).focus()
         self.load_queue()
+        self.load_hive()
+
+    @work(thread=True)
+    def load_hive(self) -> None:
+        """Ask Hive what it is doing. Read-only, and never blocking."""
+        if not hive_api_base():
+            self.call_from_thread(self.hive_loaded, "not configured", [])
+            return
+        status = hive_get("/api/v1/status")
+        if not status:
+            self.call_from_thread(self.hive_loaded, "unreachable", [])
+            return
+        contributors = hive_get("/api/v1/contributors").get("contributors", [])
+        workers = [
+            {
+                "login": contributor.get("github_username", "?"),
+                "task": contributor.get("current_task") or {},
+            }
+            for contributor in contributors
+            if contributor.get("current_task")
+        ]
+        state = (
+            f"{status.get('hub', 'online')} · "
+            f"{status.get('actionable_items', '?')} actionable · "
+            f"{len(workers)} working"
+        )
+        self.call_from_thread(self.hive_loaded, state, workers)
+
+    def hive_loaded(self, state: str, workers: list[dict]) -> None:
+        self.hive_state = state
+        self.hive_workers = workers
+        self.refresh_status()
+        stop = self.current
+        if stop:
+            self.render_context(stop)
+
+    def hive_worker_for(self, stop: Stop) -> dict | None:
+        """The contributor Hive currently has on this exact pull request."""
+        for worker in self.hive_workers:
+            task = worker["task"]
+            if (
+                task.get("repo") == stop.repository
+                and task.get("number") == stop.number
+            ):
+                return worker
+        return None
+
+    def action_hive(self) -> None:
+        """Ask Hive again, and say what it is working on right now."""
+        self.notify("asking Hive…")
+        self.load_hive()
+        if not self.hive_workers:
+            return
+        lines = [
+            f"{worker['login']}: {worker['task'].get('repo', '?')}"
+            f"#{worker['task'].get('number', '?')}"
+            for worker in self.hive_workers[:6]
+        ]
+        self.notify("Hive is working on:\n" + "\n".join(lines))
 
     def action_steer(self) -> None:
         """Focus the steering box: free text that rides along with the next
@@ -569,7 +674,7 @@ class ReviewDashboard(App):
         self.query_one("#status-bar", Static).update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| snapshot {freshness} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected} | Ghost Cluster: {GHOST_BUILD_ISSUE}"
+            f"| batch: {selected} | Hive: {self.hive_state or 'asking…'}"
         )
 
     def action_filter(self) -> None:
@@ -703,6 +808,17 @@ class ReviewDashboard(App):
         if not dupes and not overlaps:
             lines.append("no duplicates or overlaps in the open set")
         lines.append(f"skills   ~/.agents/skills (org inventory)")
+        worker = self.hive_worker_for(stop)
+        if worker:
+            # The one thing worth interrupting a review for: an agent is
+            # changing this pull request right now, so the diff on screen is
+            # about to be stale.
+            lines.append(
+                f"hive     {worker['login']} is working on THIS now "
+                f"({worker['task'].get('task_id', '?')})"
+            )
+        elif self.hive_state:
+            lines.append(f"hive     {self.hive_state} — nobody on this one ([H] asks again)")
         lines.append(f"trace    {TRACE_PATH}")
         self.call_from_thread(
             self.query_one("#context", Static).update, "\n".join(lines)
