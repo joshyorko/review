@@ -24,10 +24,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from rich.syntax import Syntax
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Footer,
@@ -266,6 +267,79 @@ class LabelOverlay(ModalScreen[str | None]):
                 self.dismiss(LABEL_CHOICES[index])
 
 
+class DiffScreen(ModalScreen[None]):
+    """The diff, in colour, scrollable, and whole.
+
+    The old viewer pasted `gh pr diff` into the evidence pane as plain text,
+    cut at 20 000 characters with no indication it had been cut. On a real
+    pull request that is a wall of grey in which `+` and `-` are one character
+    of difference, and the part you needed was as likely to be past the cut as
+    not. Reading the diff is the review, so it gets the screen, Pygments'
+    diff lexer, and every byte GitHub returned.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "close"),
+        Binding("q", "dismiss", "close"),
+    ]
+
+    # Rich renders the whole diff before Textual paints it, so an enormous
+    # one is a visible stall. Cut with the size named, never silently.
+    MAX_CHARS = 400_000
+
+    def __init__(self, stop: Stop) -> None:
+        super().__init__()
+        self.stop_record = stop
+        # What is on screen right now, so the rendering can be inspected
+        # without reaching through Textual's internal wrapping.
+        self.rendered: Syntax | None = None
+
+    def compose(self) -> ComposeResult:
+        stop = self.stop_record
+        live = stop.live or {}
+        size = (
+            f"+{live.get('additions', '?')} -{live.get('deletions', '?')} "
+            f"across {live.get('changedFiles', '?')} files"
+        )
+        yield Static(
+            f" {stop.key} — {stop.title[:70]}  ({size})  [escape] closes",
+            id="diff-header",
+        )
+        with ScrollableContainer(id="diff-scroll"):
+            yield Static("loading diff…", id="diff-body")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.load_diff()
+
+    @work(thread=True)
+    def load_diff(self) -> None:
+        stop = self.stop_record
+        result = gh("pr", "diff", str(stop.number), "--repo", stop.repository)
+        text = result.stdout if result.returncode == 0 else result.stderr
+        self.app.call_from_thread(self.render_diff, text)
+
+    def render_diff(self, text: str) -> None:
+        body = self.query_one("#diff-body", Static)
+        if not text.strip():
+            body.update("(empty diff)")
+            return
+        note = ""
+        if len(text) > self.MAX_CHARS:
+            note = (
+                f"\n… truncated at {self.MAX_CHARS:,} of {len(text):,} characters; "
+                "open it in the browser with [o] to read the rest.\n"
+            )
+            text = text[: self.MAX_CHARS]
+        # 'ansi_dark' resolves to the terminal's own palette, so the diff
+        # stays legible in whatever theme the maintainer actually uses
+        # instead of assuming a dark background.
+        self.rendered = Syntax(
+            text + note, "diff", theme="ansi_dark", word_wrap=False
+        )
+        body.update(self.rendered)
+
+
 class ReviewScreen(Screen):
     """One Goose review, streamed live.
 
@@ -444,6 +518,9 @@ class ReviewDashboard(App):
     }
     #confirm-command, .confirm-command { color: magenta; text-style: bold; }
     #steer { border: solid $secondary; height: 3; }
+    #diff-header { height: 1; background: $panel; color: cyan; text-style: bold; }
+    #diff-scroll { border: solid $secondary; background: $surface; }
+    #diff-body { padding: 0 1; width: auto; }
     ListItem.selected Label { color: magenta; text-style: bold; }
     #review-status { height: auto; padding: 0 1; background: $panel; }
     #review-status.running { background: $panel; color: cyan; }
@@ -961,11 +1038,8 @@ class ReviewDashboard(App):
 
     def action_view_diff(self) -> None:
         stop = self.current
-        if not stop:
-            return
-        diff = gh("pr", "diff", str(stop.number), "--repo", stop.repository)
-        body = diff.stdout if diff.returncode == 0 else diff.stderr
-        self.query_one("#details", Static).update(body[:20000] or "(empty diff)")
+        if stop:
+            self.push_screen(DiffScreen(stop))
 
     def action_comment(self) -> None:
         stop = self.current

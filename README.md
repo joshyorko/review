@@ -255,7 +255,7 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `d` | docs-update agent task (tracked as #134) |
 | `g` | Ghost Cluster build dispatch (tracked as #133) |
 | `o` | open in browser |
-| `v` | view the diff |
+| `v` | view the diff — full screen, coloured, scrollable |
 | `c` | comment |
 | `a` | approve and queue: approval + `lgtm`, opting in to Hive auto-merge; for the batch selection if one exists |
 | `m` | merge now: squash immediately, no `lgtm`, maintainers only |

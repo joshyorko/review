@@ -91,6 +91,10 @@ async def main() -> int:
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr diff" ]; then\n'
+        '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
+        "  exit 0\n"
+        "fi\n"
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
         "exit 0\n",
     )
@@ -525,6 +529,63 @@ async def main() -> int:
     finally:
         tui.hive_get = real_hive_get
         tui.hive_api_base = real_base
+    gh_log.write_text("")
+
+    # ── the diff is coloured, scrollable, and whole ──────────────────────
+    # It used to be plain text pasted into the evidence pane and cut at 20 000
+    # characters with no sign it had been cut.
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        await pilot.press("v")
+        await pilot.pause()
+        screen = app.screen
+        check(
+            isinstance(screen, tui.DiffScreen),
+            f"'v' must open the diff screen, got {type(screen).__name__}",
+        )
+        if isinstance(screen, tui.DiffScreen):
+            for _ in range(200):
+                if screen.rendered is not None:
+                    break
+                await pilot.pause(0.05)
+            check(
+                isinstance(screen.rendered, tui.Syntax),
+                f"the diff must be syntax-highlighted, got {type(screen.rendered)}",
+            )
+            check(
+                getattr(getattr(screen.rendered, "lexer", None), "name", "") == "Diff",
+                "the diff must use Pygments' diff lexer, so +/- are coloured",
+            )
+            check(
+                "+new" in getattr(screen.rendered, "code", ""),
+                "the diff screen must show the diff it fetched",
+            )
+            check(
+                screen.query("#diff-scroll"),
+                "the diff must live in a scrollable container",
+            )
+            # Truncation, when it happens, must say so.
+            screen.render_diff("x" * (tui.DiffScreen.MAX_CHARS + 10))
+            await pilot.pause()
+            check(
+                "truncated at" in getattr(screen.rendered, "code", ""),
+                "a cut diff must say it was cut, and how big it really is",
+            )
+            await pilot.press("escape")
+            await pilot.pause()
+            check(
+                not isinstance(app.screen, tui.DiffScreen),
+                "escape must close the diff screen",
+            )
+        check(
+            "pr diff" in gh_log.read_text(),
+            "the diff screen must actually fetch the diff",
+        )
     gh_log.write_text("")
 
     # ── the gate is always escapable ─────────────────────────────────────
