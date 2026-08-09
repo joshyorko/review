@@ -725,12 +725,28 @@ class ReviewDashboard(App):
 
     def action_merge(self) -> None:
         batch = [s for s in self.stops if s.selected]
-        for stop in batch or ([self.current] if self.current else []):
+        if not batch and self.current:
+            batch = [self.current]
+
+        queue: list[Stop] = []
+        for stop in batch:
             if not stop.live:
                 self.notify(f"{stop.key}: no live evidence yet; select it first.")
                 continue
             if self._queueable(stop):
-                self._queue_automerge(stop)
+                queue.append(stop)
+
+        def queue_next(index: int = 0) -> None:
+            if index >= len(queue):
+                if len(queue) > 1:
+                    self.notify(f"batch queued: {len(queue)} PRs.")
+                return
+            self._queue_automerge(
+                queue[index],
+                then=lambda next_index=index + 1: queue_next(next_index),
+            )
+
+        queue_next()
 
     def action_reject(self) -> None:
         stop = self.current

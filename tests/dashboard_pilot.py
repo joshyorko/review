@@ -192,6 +192,60 @@ async def main() -> int:
             status = screen.query_one("#review-status", tui.Static)
             return str(status.render()), set(status.classes)
 
+    # ── batch queueing must serialize the confirmation gate ─────────────
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        for stop in app.stops:
+            stop.selected = True
+            stop.live = {"isDraft": False}
+        app.action_merge()
+        await pilot.pause()
+
+        def confirmations():
+            return [
+                screen
+                for screen in app.screen_stack
+                if isinstance(screen, tui.ConfirmMutation)
+            ]
+
+        gates = confirmations()
+        check(
+            len(gates) == 1,
+            f"batch queueing must show one confirmation at a time, got {len(gates)}",
+        )
+        if len(gates) == 1:
+            seen = []
+            for _ in range(4):
+                for _ in range(200):
+                    if isinstance(app.screen, tui.ConfirmMutation):
+                        break
+                    await pilot.pause(0.05)
+                if not isinstance(app.screen, tui.ConfirmMutation):
+                    break
+                expected = app.screen.expected
+                seen.append(expected)
+                app.screen.query_one(tui.Input).value = expected
+                await pilot.press("enter")
+                await pilot.pause()
+            check(
+                len(seen) == 4
+                and seen[0] == seen[1]
+                and seen[2] == seen[3]
+                and seen[0] != seen[2],
+                f"batch queueing must gate review and label per PR, got {seen}",
+            )
+            check(
+                not confirmations(),
+                "batch queueing must return to the dashboard after all gates",
+            )
+    gh_log.write_text("")
+
     # ── a completed review reports complete ──────────────────────────────
     text, classes = await run_review(0, "0 findings")
     check("COMPLETE" in text, f"exit 0 must report COMPLETE, got {text!r}")
