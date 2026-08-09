@@ -56,9 +56,16 @@ Goose, or image build skill documents.
    allowed beyond the pinned Hive checkout under `~/.local/state/review/`.
    Ctrl-C stops an interactive run; `--replace` only reclaims a container
    name when a new launch starts.
-3. Keep the container path narrow. It mounts only the read-only Hive
-   contributor configuration and runs the image entrypoint, which attaches to
-   Hive's `contributor` session.
+3. Keep the container path narrow. It mounts only the selected read-only Hive
+   contributor registration file at the relay's fixed
+   `/home/dev/.config/hive/contributor.env` path and runs the image entrypoint,
+   which attaches to Hive's `contributor` session. Do not also mount the host
+   Hive configuration directory: preparing the nested file mount through that
+   directory makes rootless Podman create a missing host `contributor.env` for
+   a named registration. Keep the selected file shared-relabeled for rootless
+   Podman on SELinux hosts because concurrent workers use the same
+   registration; keep-id provides the container user access without loosening
+   its mode 0600.
    `review-queue` is the exception that proves the rule: it mounts nothing at
    all and starts the image with the `queue` argument, which the entrypoint
    dispatches to the maintainer dashboard before the Hive config gate. The

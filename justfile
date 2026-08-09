@@ -749,12 +749,11 @@ review-container profile="" effort="":
       # settings and is exactly that. Mapping the host user onto dev's uid
       # instead makes the mount readable without loosening the host mode.
       --userns "keep-id:uid=1000,gid=1000"
-      --volume "${HOME}/.config/hive:/home/dev/.config/hive:ro"
-      # The selected registration lands on the path the relay reads. When a
-      # named registration (contributor.<name>.env) is in play this overlays
-      # it on top of the directory mount; with the default it is the same
-      # file mounted over itself.
-      --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro"
+      # Mount only the selected registration at the relay's fixed path. A
+      # directory mount followed by this file mount makes rootless Podman
+      # create a missing contributor.env in the host directory while it
+      # prepares the nested target.
+      --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro,z"
       --env "AGENT_BACKEND=goose"
       # Podman does not pass COLORTERM through on its own; the entrypoint
       # needs it to pick the direct-color attach fallback for a host TERM
