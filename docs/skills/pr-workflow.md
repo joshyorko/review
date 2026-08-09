@@ -1,6 +1,6 @@
 ---
 name: pr-workflow
-version: "1.8"
+version: "1.9"
 last_updated: 2026-08-09
 id: pr-workflow
 one_line_purpose: Open review pull requests that merge cleanly.
@@ -10,8 +10,8 @@ mcp_compliance_level: partial
 optimization_status: draft
 status: active
 dependencies: []
-tags: [git, pullrequest, conventional, branches, worktree, testing]
-description: "Defines pull request, branch, title, trailer, and validation requirements, how to commit without clobbering uncommitted work, how to reconcile a long-lived branch with squash-merged main, and why a test must drive a feature rather than grep its source."
+tags: [git, pullrequest, branches, labels, testing]
+description: "Defines pull request, branch, title, trailer, and validation requirements, the factory's seven-label contract and this repository's three automation labels, how to reconcile a long-lived branch with squash-merged main, and why a test must run a feature."
 metadata:
   type: policy
   context7-sources: [/pre-commit/pre-commit]
@@ -77,6 +77,40 @@ repository's contribution rules, which take precedence in their own tree.
    the sole authority for task selection, and relabelling to attract or shed an
    assignment is task selection. See [`upstream-hive.md`](upstream-hive.md) for
    the full rule and for upstream triage boundaries.
+
+## The Factory Label Contract
+
+This repository carries `projectbluefin/common`'s canonical label workflow —
+*workflows own state; humans provide intent* — and adds nothing to it. Seven
+labels exist, and they are the same seven in every factory repository:
+
+| Label | Meaning |
+|---|---|
+| `1-triage` | New work awaiting human triage |
+| `2-discussing` | Work requiring discussion or a clarified design |
+| `3-human-queue` | Work admitted to the human-maintained queue |
+| `3-clanker-queue` | Work admitted to the agent-maintained queue |
+| `4-review` | A pull request awaiting review |
+| `blocked` | Blocked on human input or an external dependency |
+| `hold` | Intentionally paused |
+
+A human selects at most one numbered label to express the intended next step,
+with `blocked` or `hold` as an optional overlay. Everything else — kind, area,
+size, priority, source — is issue-body prose or project-field metadata, never a
+label. Do not invent a priority taxonomy, and do not build a second state
+machine out of comments, slash commands, or local scripts.
+
+Alongside those seven, this repository runs exactly three local automation
+labels, each owned by a named mechanism and applied by it alone: `lgtm`
+(a maintainer's opt-in to Hive's auto-merge sweep — see
+[`review-dashboard.md`](review-dashboard.md)), `hive-protocol-change`
+(`.github/workflows/hive-pin-gate.yml`, when a Hive pin bump touches a consumed
+contributor runtime file), and `dependencies` (Renovate, per `renovate.json`).
+Adding a fourth means adding the mechanism that owns it, in the same change.
+
+The full contract, including the human and agent action lists, lives in
+`projectbluefin/common`'s `docs/skills/label-workflow.md`. Read it there rather
+than restating it here; this section records only what is local.
 
 ## Reconciling A Long-Lived Branch
 
@@ -197,6 +231,10 @@ a CI check: a message that skips CI skips the check that would catch it.
 - Using `--no-verify` to bypass a real failure.
 - Reporting task completion before the required artifact exists.
 - Adding or removing a task-admission label to influence a Hive assignment.
+- A label outside the seven canonical names plus this repository's three
+  documented automation labels.
+- Recording kind, area, size, or priority as a label instead of as issue text
+  or a project field.
 - Rebasing a long-lived branch onto `main` instead of merging `main` into it.
 - Resolving a conflicted file with `--ours` or `--theirs` when both sides
   carry changes worth keeping.
@@ -247,6 +285,9 @@ before pushing a shell change, run the manual stage too.
 ```bash
 pre-commit run shellcheck --hook-stage manual --all-files
 ```
+
+`gh label list -R projectbluefin/review` returns the seven canonical labels and
+the three automation labels above, and nothing else.
 
 A new script must carry the executable bit and match its directory's `shfmt`
 style — two spaces under `scripts/` and `tests/`, tabs under `image/`. Set the
