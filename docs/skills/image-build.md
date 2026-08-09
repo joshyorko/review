@@ -191,6 +191,22 @@ build and cancelled it, then skipped its own build because the Goose digests
 had not changed — reporting success while leaving a merged commit unpublished.
 A publish that only runs when the source changes cannot do that. Run the
 workflow by hand when a canary refresh is wanted without a commit.
+
+Two rules follow, and both are about trusting the wrong signal:
+
+- **A scheduled run must never share `cancel-in-progress` with a push.** The
+  schedule's whole purpose is a condition the push does not know about, so
+  when it cancels a push it substitutes a run that cannot publish the source.
+- **Verify the published image, never the green check.** After any change that
+  must reach users, read the revision back:
+
+  ```bash
+  skopeo inspect docker://ghcr.io/projectbluefin/review:stable \
+    | jq -r '.Labels["org.opencontainers.image.revision"]'
+  ```
+
+  A green publish workflow has meant "nothing was published" twice — once from
+  the cancelled schedule, once from a commit message that skipped CI entirely.
 ## Pin Maintenance
 **An unmaintainable pin is a stale pin.** A pin's strictness is worthless if
 no automation can see past it, and a frozen pin raises no failing check — it

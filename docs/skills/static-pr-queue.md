@@ -79,17 +79,25 @@ rule for any future consumer: the queue orders the work, GitHub supplies the
 evidence.
 
 A consumer's mutations stay gated and narrow. `ready-for-human-merge` is a
-recommendation to a person; the dashboard's `m` and `M` keys execute that person's
-decision — never the queue's — through one confirmed call site: the exact
-command is printed and the maintainer types the pull request number. A merge
-is queued through Hive's governor sweep (the exact approval body it
-re-verifies plus the `lgtm` label), never performed directly: the sweep
-enforces the self-merge ban, requires green CI, and squash-merges.
-`tests/bluefin-review.sh` fails if a mutation appears outside that gate, or
-if `gh pr merge`, `--admin`, `--delete-branch`, or a push appears at all.
-Batch mutations reuse that gate serially: finish approval and labeling for one
-pull request before opening the next confirmation, and stop the sequence on an
-abort or failure. Never stack confirmation modals for a batch.
+recommendation to a person; the dashboard's keys execute that person's
+decision — never the queue's — through confirmed call sites: the exact
+commands are printed and the maintainer types the pull request number. There
+are three distinct paths, and conflating them is the error to avoid: `a`
+approves and applies `lgtm`, an opt-in to Hive's governor sweep, which
+enforces the self-merge ban and requires green CI; `m` squashes directly and
+is gated on GitHub's `push` permission read per repository; `L` leaves an
+ordinary review and merges nothing. The review engine has no mutation path at
+all, and `tests/bluefin-review.sh` fails if one appears there.
+
+Batch mutations reuse that gate one pull request at a time — never stack
+confirmation modals — but every command belonging to a single decision goes
+into one gate. Splitting them asks the maintainer to confirm the same decision
+twice and can leave the action half-applied.
+
+The snapshot's own state fields are the consumer's cheapest signal:
+`mergeable_state`, `check_state`, `review_state` and `labels` arrive for every
+item, so a consumer can colour, group and meter a queue of any size without a
+single extra request. Live re-reads remain for the stop being acted on.
 
 A gate the maintainer cannot leave is a broken gate. Bind Esc to abort every
 confirmation modal, and never run a confirmed `gh` mutation on the UI thread:

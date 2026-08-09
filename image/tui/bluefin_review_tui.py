@@ -1160,6 +1160,9 @@ class ReviewDashboard(App):
             self.pulls_cache[repo] = json.loads(listing.stdout)
         return self.pulls_cache[repo]
 
+    def paint_context(self, text: str) -> None:
+        self.query_one("#context", Static).update(text)
+
     def cluster(self, stop: Stop) -> tuple[list[int], list[int]]:
         """Duplicates and overlaps, exactly as the walker computes them."""
         pulls = self.repo_pulls(stop.repository)
@@ -1352,9 +1355,12 @@ class ReviewDashboard(App):
                 f"{escape('([H] asks again)')}"
             )
         lines.append(f"trace    {TRACE_PATH}")
-        self.call_from_thread(
-            self.query_one("#context", Static).update, "\n".join(lines)
-        )
+        # The whole DOM touch goes to the main thread, query included. Textual
+        # is not thread-safe, and resolving the widget here would race the
+        # repaint that populate()/refresh_rows() can be doing at the same
+        # moment. Upstream: "avoid calling methods on your UI directly from a
+        # threaded worker" (textual.textualize.io/guide/workers).
+        self.call_from_thread(self.paint_context, "\n".join(lines))
 
     # ── the mutation gate ─────────────────────────────────────────────────
 

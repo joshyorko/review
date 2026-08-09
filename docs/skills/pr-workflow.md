@@ -24,6 +24,12 @@ metadata:
 Load this before creating a branch, preparing a commit, or opening a pull
 request in this repository.
 
+## When Not to Use
+
+Do not use this to decide *what* to change or how large it should be — that is
+[`contribution-culture.md`](contribution-culture.md) — or to satisfy another
+repository's contribution rules, which take precedence in their own tree.
+
 ## Core Process
 
 0. Know which of the two workflows you are in. **Hive-assigned contributor
@@ -152,8 +158,33 @@ git cat-file -p <sha>
 
 Prefer not needing that.
 
+## Never Quote A CI-Skip Directive In A Commit Message
+
+GitHub reads its skip directives — `[skip ci]`, `[ci skip]`, `[skip actions]`,
+`[actions skip]` — anywhere in the head commit message, not just the subject.
+A commit that merely *writes about* one skips its own validation and publish,
+lands on `main`, and shows no failed check because nothing ran.
+
+That happened here: the commit teaching the dashboard to escape bracketed
+titles quoted the directive as its example, and the fix sat on `main` while
+`:stable` stayed on the parent commit.
+
+Write "GitHub's CI-skip directive" or `skip-ci` without brackets.
+`scripts/check-commit-message.sh` runs as a `commit-msg` hook and refuses the
+bracketed forms unless `ALLOW_SKIP_CI=1` says the skip is meant. It cannot be
+a CI check: a message that skips CI skips the check that would catch it.
+
+## Common Rationalizations
+
+| Rationalization | Reality |
+|---|---|
+| "The branch is stale but I can resolve the conflicts." | Count them first. Sixteen conflicts to land a one-file change produces a diff nobody can review against the change it claims to make; re-cut from the current base instead. |
+| "It passed CI, so it shipped." | A green workflow has meant "nothing ran" and "nothing published" here. Verify the artifact, not the check. |
+| "Documentation-only work can skip the workflow." | The protected-branch rules do not have a docs exemption, and a stale skill misroutes every agent that reads it. |
+
 ## Red Flags
 
+- Quoting a GitHub CI-skip directive in a commit message.
 - Committing from a working tree that holds someone else's uncommitted work.
 - Staging with `git add -A` or `git add .` rather than by explicit path.
 - Routing a maintainer's own change through a branch and pull request when
