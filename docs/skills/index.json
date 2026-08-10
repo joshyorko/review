@@ -113,8 +113,8 @@
         "container"
       ],
       "description": "Maintains the three container-only review recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.0",
-      "last_updated": "2026-08-08",
+      "version": "3.1",
+      "last_updated": "2026-08-10",
       "doc_type": "runbook"
     },
     {

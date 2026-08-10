@@ -659,6 +659,22 @@ report_hive_selection() {
     fi
   fi
 }
+configure_local_hive_network() {
+  LOCAL_HIVE_NETWORK=()
+  [[ "${REVIEW_HIVE_LOCAL:-0}" == 1 ]] || return 0
+  local hub
+  hub="$(read_hive_value HIVE_HUB)"
+  case "$hub" in
+    ws://127.0.0.1:*|wss://127.0.0.1:*|ws://localhost:*|wss://localhost:*) ;;
+    *)
+      echo "ERROR: REVIEW_HIVE_LOCAL=1 requires a loopback HIVE_HUB registration." >&2
+      echo "  Register it with HIVE_HUB=ws://127.0.0.1:<port>/contribute." >&2
+      return 1
+      ;;
+  esac
+  LOCAL_HIVE_NETWORK=(--network host)
+  echo "✓ local loopback Hive through Podman host networking."
+}
 read_hive_value() {
   local key="$1"
   awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$HIVE_CONTRIBUTOR_ENV"
@@ -686,6 +702,8 @@ read_hive_value() {
 #        missing, register a hive under that name. Without it, the current
 #        repository's directory name is tried, then the default
 #        ~/.config/hive/contributor.env.
+#        REVIEW_HIVE_LOCAL=1  use host networking for a selected loopback Hive;
+#        rejected unless HIVE_HUB names 127.0.0.1 or localhost.
 [doc("Run the Hive contributor worker: receive assigned tasks and donate inference.")]
 review-container profile="" effort="":
     #!/usr/bin/env bash
@@ -723,6 +741,7 @@ review-container profile="" effort="":
     REVIEW_RECIPE=review-container
     ensure_hive_contributor_env
     report_hive_selection
+    configure_local_hive_network
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
@@ -746,6 +765,7 @@ review-container profile="" effort="":
       )
     fi
     CONTAINER_ARGS+=(
+      "${LOCAL_HIVE_NETWORK[@]}"
       # Rootless podman maps the host user to container root by default, so a
       # 0600 host file bind-mounts in as root-owned and the 'dev' user the
       # image runs as cannot read it -- contributor.env holds Hive's own

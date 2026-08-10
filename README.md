@@ -592,6 +592,7 @@ All configuration is read at launch.
 |---|---|
 | `REVIEW_CONTRIBUTOR_IMAGE` | Contributor image; defaults to `ghcr.io/projectbluefin/review:stable`. |
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
+| `REVIEW_HIVE_LOCAL` | Set to `1` when the selected Hive registration uses a loopback `HIVE_HUB`; the contributor then uses Podman host networking. Remote registrations are rejected in this mode. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
 | `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot the dashboard reads; defaults to the published `queue.json`. |

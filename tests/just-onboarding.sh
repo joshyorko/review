@@ -254,6 +254,7 @@ run_recipe() {
       -u GOOSE_THINKING_EFFORT -u GOOSE_CONTEXT_LIMIT \
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
+      -u REVIEW_HIVE_LOCAL \
       -u REVIEW_QUEUE_NAME \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
@@ -569,6 +570,25 @@ assert_contains "hive: wss://named-hive.invalid/contribute (registration 'review
 assert_not_contains "super-secret-registration-token" "$OUT"
 assert_not_contains "named-secret-token" "$OUT"
 assert_file_not_contains "named-secret-token" "$runner_log"
+
+begin "hive selection: an explicit local registration uses host networking"
+reset_logs
+sed -i 's|wss://named-hive.invalid/contribute|ws://127.0.0.1:3001/contribute|' \
+  "$home/.config/hive/contributor.review.env"
+run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
+  REVIEW_HIVE=review REVIEW_HIVE_LOCAL=1
+assert_file_contains "--network host" "$runner_log"
+assert_contains "local loopback Hive through Podman host networking" "$OUT"
+
+begin "hive selection: local mode rejects a non-loopback registration"
+reset_logs
+sed -i 's|ws://127.0.0.1:3001/contribute|wss://named-hive.invalid/contribute|' \
+  "$home/.config/hive/contributor.review.env"
+run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
+  REVIEW_HIVE=review REVIEW_HIVE_LOCAL=1
+assert_nonzero_status "$STATUS" "local mode must not widen a remote Hive launch"
+assert_contains "REVIEW_HIVE_LOCAL=1 requires a loopback HIVE_HUB" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "invalid local mode must not start Podman"
 rm -f "$home/.config/hive/contributor.review.env"
 
 begin "hive selection: no repo registration falls back to the default and says so"
