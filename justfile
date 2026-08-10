@@ -75,8 +75,8 @@
 tool_env := env("TOOL", "")
 hive_repo_url := "https://github.com/kubestellar/hive"
 # origin/v2 via `git ls-remote --heads https://github.com/kubestellar/hive v2`
-# on 2026-08-04.
-hive_commit := "98781c252cefb2f2193832a701abd8d0728ea18b"
+# on 2026-08-10.
+hive_commit := "7eede498ff3b24acbca9f70f0a3ba6eae315c5b4"
 copilot_default_model := "gpt-5.6-luna"
 # Contributor runs are automated in practice — Hive keeps feeding the session —
 # so a large window is money spent on context nobody reads. Opus and Kimi are

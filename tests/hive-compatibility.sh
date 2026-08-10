@@ -12,6 +12,10 @@ pin="$(sed -n 's/^ARG HIVE_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' image/Containerfile)
   echo "::error file=image/Containerfile::HIVE_COMMIT must be a full SHA" >&2
   exit 1
 }
+[[ "$pin" == 7eede498ff3b24acbca9f70f0a3ba6eae315c5b4 ]] || {
+  echo "::error::review is not pinned to the Hive v2 commit inspected for the local integration lab" >&2
+  exit 1
+}
 
 hive_source() {
   curl --fail --location --silent --show-error \
