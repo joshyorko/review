@@ -88,6 +88,7 @@ class HarnessContract(unittest.TestCase):
                 "--config", "mcp_servers={}", "--json",
             ],
         )
+        self.assertEqual(command.count("--skip-git-repo-check"), 1)
         self.assertIn("--model", command)
         self.assertIn("gpt-5.6-luna", command)
         self.assertIn("model_reasoning_effort=low", command)

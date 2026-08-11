@@ -59,7 +59,7 @@ class CodexHarness:
             f"base={binding.base_sha} head={binding.head_sha}"
         )
         return [self.executable, "exec", "--ignore-user-config", "--disable", "apps",
-                "--config", "mcp_servers={}", "--json",
+                "--config", "mcp_servers={}", "--json", "--skip-git-repo-check",
                 "--model", selected_model,
                 "--config", f"model_reasoning_effort={selected_effort}",
                 f"Review exact binding {context}. {prompt}"
