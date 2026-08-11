@@ -349,7 +349,7 @@ begin "TOOL=claude is rejected with a Goose-only error"
 run_recipe review-container GH_READY=1 TOOL=claude
 assert_nonzero_status "$STATUS" "a non-Goose TOOL must be a hard error"
 assert_contains "TOOL=claude is not supported" "$OUT"
-assert_contains "review runs Goose only" "$OUT"
+assert_contains "review supports Goose and Pi" "$OUT"
 assert_not_contains "auto-detected" "$OUT"
 assert_not_contains "Multiple AI CLIs" "$OUT"
 
@@ -367,6 +367,13 @@ assert_not_contains "is not supported" "$OUT"
 assert_file_contains "--env AGENT_BACKEND=pi" "$runner_log"
 assert_file_contains "--env ANTHROPIC_API_KEY" "$runner_log"
 assert_file_not_contains "pi-test-key" "$runner_log"
+
+begin "TOOL=pi without its credential is rejected before container launch"
+reset_logs
+run_recipe review-container GH_READY=1 TOOL=pi
+assert_nonzero_status "$STATUS" "Pi without a credential must fail preflight"
+assert_contains "Pi requires PI_API_KEY" "$OUT"
+assert_file_not_contains "run --rm" "$runner_log"
 
 begin "selection: default Copilot model is noninteractive"
 reset_logs
@@ -901,10 +908,19 @@ assert_eq "$(wc -c <"$runner_log")" 0 "a live session must never be replaced"
 begin "review-doctor: read-only, Goose-only diagnostics"
 reset_logs
 run_recipe review-doctor GH_READY=1
-assert_contains "Agent backend (Goose only)" "$OUT"
+assert_contains "Agent backend (Goose)" "$OUT"
 assert_not_contains "claude" "$OUT"
 assert_not_contains "codex" "$OUT"
 
+assert_file_not_contains "run --rm" "$runner_log"
+
+begin "review-doctor: Pi diagnostics appear only when Pi is selected"
+reset_logs
+run_recipe review-doctor GH_READY=1 TOOL=pi PI_API_KEY=pi-test-key
+assert_contains "Agent backend (Pi)" "$OUT"
+assert_contains "pi: selected" "$OUT"
+assert_not_contains "Copilot credential" "$OUT"
+assert_not_contains "Agent backend (Goose)" "$OUT"
 assert_file_not_contains "run --rm" "$runner_log"
 
 begin "review-doctor: rejects an unsupported provider"
