@@ -374,7 +374,10 @@ argv_scope="$(tr '\0' '\n' <"$scratch/argv-scope")"
 [[ "$argv_scope" != *'--instructions'* ]]
 grep -q '^\.agents/REVIEW\.md$' "$scratch/scope-listing"
 grep -q '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing"
-grep -q '^\.agents/checks/repository-context\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/00-repository-context\.md$' "$scratch/scope-listing"
+repository_context_line="$(grep -n '^\.agents/checks/00-repository-context\.md$' "$scratch/scope-listing" | cut -d: -f1)"
+bluefin_doctrine_line="$(grep -n '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing" | cut -d: -f1)"
+((repository_context_line < bluefin_doctrine_line))
 # No cluster on a plain review: the scratch scope carries no resolution check.
 if grep -q 'cluster-resolution' "$scratch/scope-listing"; then
   echo "plain review must not carry a cluster-resolution check" >&2

@@ -218,7 +218,7 @@ goose_review() {
     {
       printf -- '---\nname: repository-context\n---\n\n'
       repository_context_instructions
-    } >"${scope}/.agents/checks/repository-context.md"
+    } >"${scope}/.agents/checks/00-repository-context.md"
     if [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]]; then
       {
         printf -- '---\nname: cluster-resolution\n---\n\n'
