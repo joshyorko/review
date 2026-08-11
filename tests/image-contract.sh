@@ -550,6 +550,32 @@ require .github/workflows/publish-compat-image.yml \
   '--require-github-attestation' \
   '--attestation-repository "${GITHUB_REPOSITORY}"'
 
+# Native arm64 runtime evidence is the gate for the same-revision stable
+# publication. The workflow must prove the host, engine, and built container
+# architecture before the existing audit accepts any runtime evidence.
+# shellcheck disable=SC2016 # Literal workflow text, not shell expansion.
+require .github/workflows/publish-compat-image.yml \
+  'resolve-goose:' \
+  'arm64-runtime:' \
+  'needs: [resolve-goose]' \
+  'runs-on: ubuntu-24.04-arm' \
+  'host_arch="$(uname -m)"' \
+  'engine_arch="$(docker info --format' \
+  'platforms: linux/arm64' \
+  'GOOSE_X86_64_SHA256=${{ needs.resolve-goose.outputs.x86_64_sha256 }}' \
+  'GOOSE_AARCH64_SHA256=${{ needs.resolve-goose.outputs.aarch64_sha256 }}' \
+  'docker image inspect "$DERIVED_IMAGE"' \
+  'docker run --rm --entrypoint /usr/bin/uname "$DERIVED_IMAGE" -m' \
+  'bash tests/image-audit.sh --verify-base-evidence' \
+  'bash tests/image-audit.sh --derived "$DERIVED_IMAGE"' \
+  '--report "$RUNNER_TEMP/review-image-audit-arm64.md"' \
+  'needs: [arm64-runtime, resolve-goose]'
+
+forbid .github/workflows/publish-compat-image.yml \
+  'docker/setup-qemu-action' \
+  '--privileged' \
+  'docker run --privileged'
+
 # ':-/config}' and ':-/workspace}' are mount points Hive never used.
 forbid image/entrypoint.sh \
   '/var/run/docker.sock' \
