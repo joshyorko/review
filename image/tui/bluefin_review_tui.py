@@ -1160,7 +1160,9 @@ class ReviewDashboard(App):
         return self.pulls_cache[repo]
 
     def paint_context(self, text: str) -> None:
-        self.query_one("#context", Static).update(text)
+        context = self.query("#context")
+        if context:
+            context.first().update(text)
 
     def cluster(self, stop: Stop) -> tuple[list[int], list[int]]:
         """Duplicates and overlaps, exactly as the walker computes them."""
