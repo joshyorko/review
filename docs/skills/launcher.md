@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.0"
-last_updated: 2026-08-08
+version: "3.1"
+last_updated: 2026-08-10
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -78,6 +78,11 @@ Goose, or image build skill documents.
    registration is never clobbered. Every launch prints the hub it will
    talk to; a silent default is how a contributor ends up watching one
    hub's dashboard while their agent asks another for work.
+   A local controller registered with a loopback `HIVE_HUB` needs
+   `REVIEW_HIVE_LOCAL=1`, which adds Podman host networking so the container
+   reaches the same loopback endpoint that registration used on the host.
+   Reject that mode unless the selected registration names `127.0.0.1` or
+   `localhost`; it must never widen a remote Hive launch.
    Mount the selected registration and nothing else. Bind-mounting
    `~/.config/hive` and overlaying the selected file on top of it looks
    equivalent and is not: rootless Podman prepares the nested target through

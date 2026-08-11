@@ -592,6 +592,7 @@ All configuration is read at launch.
 |---|---|
 | `REVIEW_CONTRIBUTOR_IMAGE` | Contributor image; defaults to `ghcr.io/projectbluefin/review:stable`. |
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
+| `REVIEW_HIVE_LOCAL` | Set to `1` when the selected Hive registration uses a loopback `HIVE_HUB`; the contributor then uses Podman host networking. Remote registrations are rejected in this mode. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
 | `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot the dashboard reads; defaults to the published `queue.json`. |
@@ -630,7 +631,7 @@ Use an immutable `sha-<commit>` tag or digest with
 ## Image and context
 
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
-layers the pinned Hive runtime at `98781c252cefb2f2193832a701abd8d0728ea18b`,
+layers the pinned Hive runtime at `7eede498ff3b24acbca9f70f0a3ba6eae315c5b4`,
 the current Goose canary snapshot, GitHub CLI, tmux, uv with the Textual
 dashboard runtime, hooks, generated
 organization skills, and the pinned `projectbluefin/lab` skills (projected as
