@@ -58,6 +58,9 @@ Do not use this for the launcher that starts the container
    app through `run_test()`. The static greps in
    `tests/dashboard-contract.sh` are for proving *absence* — a power the
    dashboard must not have. Presence is proven by pressing the key.
+7. **Keep the acting surface explicit.** The shipped keys cover review,
+   merge, branch updates, rejection, handoff, docs, Ghost Cluster, and dupe
+   cleanup; label and priority mutation are not part of the dashboard.
 
 ## Textual Patterns
 

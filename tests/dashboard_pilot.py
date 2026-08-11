@@ -220,11 +220,20 @@ async def main() -> int:
                 hasattr(app, name) or hasattr(tui.App, name),
                 f"binding {binding.key!r} points at missing {name}",
             )
+        binding_keys = {binding.key for binding in tui.ReviewDashboard.BINDINGS}
+        check(
+            "l" not in binding_keys and "p" not in binding_keys,
+            f"label and priority bindings must be absent, got {sorted(binding_keys)}",
+        )
         review = [b for b in tui.ReviewDashboard.BINDINGS if b.action == "review"]
         check(len(review) == 1, f"exactly one binding must run a review, got {len(review)}")
         check(
             bool(review) and review[0].key == "r",
             f"review must be on 'r', got {[b.key for b in review]}",
+        )
+        check(
+            "[b]l[/b]" not in tui.KEYS_ACTING and "[b]p[/b]" not in tui.KEYS_ACTING,
+            f"the acting key line must not advertise label or priority, got {tui.KEYS_ACTING!r}",
         )
 
     async def run_review(exit_code: int, output: str):
@@ -1049,10 +1058,15 @@ async def main() -> int:
             f"[b]{key}[/b]" in tui.KEYS_READING,
             f"the reading key line must document {key!r}",
         )
-    for key in ("L", "a", "m", "u", "x", "l", "p", "M"):
+    for key in ("L", "a", "m", "u", "x", "M"):
         check(
             f"[b]{key}[/b]" in tui.KEYS_ACTING,
             f"the acting key line must document {key!r}",
+        )
+    for key in ("l", "p"):
+        check(
+            f"[b]{key}[/b]" not in tui.KEYS_ACTING,
+            f"the acting key line must not advertise {key!r}",
         )
 
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))

@@ -71,8 +71,7 @@ KEYS_READING = (
 )
 KEYS_ACTING = (
     " [b]L[/b] leave review [b]a[/b] approve+queue [b]m[/b] merge"
-    " [b]u[/b] update [b]x[/b] reject [b]l[/b] label [b]p[/b] prio"
-    " [b]M[/b] dupes"
+    " [b]u[/b] update [b]x[/b] reject [b]M[/b] dupes"
 )
 
 
@@ -89,9 +88,6 @@ def hive_api_base() -> str:
     http = hub.replace("wss://", "https://").replace("ws://", "http://")
     return http[: -len("/contribute")] if http.endswith("/contribute") else http
 
-
-PRIORITIES = ["P0-critical", "P1-high", "P2-medium", "P3-low"]
-LABEL_CHOICES = ["kind/bug", "kind/improvement", "area/bootc", "status/approved"]
 
 # The order a maintainer wants, which is not the order the snapshot is written
 # in. The generator ranks by how stuck a pull request is; a reviewer opening
@@ -398,24 +394,6 @@ class ConfirmMutation(ModalScreen[bool]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self.dismiss(event.value.strip() == self.expected)
-
-
-class LabelOverlay(ModalScreen[str | None]):
-    """Fast label picker: one keystroke per label, Esc closes."""
-
-    BINDINGS = [Binding("escape", "dismiss(None)", "close")]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="label-box"):
-            yield Label("toggle label:")
-            for index, label in enumerate(LABEL_CHOICES, start=1):
-                yield Label(f"  [{index}] {label}")
-
-    def on_key(self, event) -> None:
-        if event.key.isdigit():
-            index = int(event.key) - 1
-            if 0 <= index < len(LABEL_CHOICES):
-                self.dismiss(LABEL_CHOICES[index])
 
 
 class MergeRecovery(ModalScreen[str | None]):
@@ -772,7 +750,7 @@ class ReviewDashboard(App):
     #right-pane { width: 55%; }
     #details { height: 60%; border: solid $secondary; padding: 0 1; }
     #context { height: 40%; border: solid $secondary; padding: 0 1; }
-    #confirm-box, #label-box {
+    #confirm-box {
         border: heavy magenta; background: $surface;
         width: 80%; height: auto; padding: 1 2; margin: 4 4;
     }
@@ -799,8 +777,6 @@ class ReviewDashboard(App):
         Binding("r", "review", "start a review"),
         Binding("L", "leave_review", "leave a review"),
         Binding("b", "batch", "batch select"),
-        Binding("l", "labels", "labels"),
-        Binding("p", "priority", "priority"),
         Binding("d", "docs", "update docs"),
         Binding("g", "ghost_build", "ghost build"),
         Binding("o", "open_browser", "open"),
@@ -1462,32 +1438,6 @@ class ReviewDashboard(App):
         if item:
             item.set_class(stop.selected, "selected")
         self.refresh_status()
-
-    def action_labels(self) -> None:
-        stop = self.current
-        if not stop:
-            return
-
-        def apply(label: str | None) -> None:
-            if label:
-                self.mutate(
-                    stop, "pr", "edit", str(stop.number),
-                    "--repo", stop.repository, "--add-label", label,
-                )
-
-        self.push_screen(LabelOverlay(), apply)
-
-    def action_priority(self) -> None:
-        stop = self.current
-        if not stop:
-            return
-        current = {l["name"] for l in (stop.live.get("labels") or [])}
-        have = [p for p in PRIORITIES if p in current]
-        nxt = PRIORITIES[(PRIORITIES.index(have[0]) + 1) % len(PRIORITIES)] if have else PRIORITIES[0]
-        args = ["pr", "edit", str(stop.number), "--repo", stop.repository, "--add-label", nxt]
-        for old in have:
-            args += ["--remove-label", old]
-        self.mutate(stop, *args)
 
     def action_review(self) -> None:
         stop = self.current
