@@ -127,7 +127,7 @@ func TestFromMapDoesNotMutateInput(t *testing.T) {
 			},
 		},
 		"overlap": map[string]any{
-			"duplicates":   []any{json.Number("12")},
+			"duplicates":   []any{json.Number("-0")},
 			"shared_files": []any{"review.go"},
 		},
 		"state":   "findings",
