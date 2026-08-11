@@ -14,7 +14,23 @@
     },
     "expected": {
       "is_clean": true,
-      "state": "complete"
+      "state": "complete",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [],
+        "state": "complete",
+        "verification": [],
+        "version": 1
+      }
     }
   },
   {
@@ -46,7 +62,37 @@
     },
     "expected": {
       "is_clean": false,
-      "state": "findings"
+      "state": "findings",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 1,
+          "low": 0,
+          "medium": 1
+        },
+        "findings": [
+          {
+            "evidence": "high finding",
+            "file": "image/entrypoint.sh",
+            "line": 87,
+            "severity": "high",
+            "title": "signal path"
+          },
+          {
+            "file": "tests/image-contract.sh",
+            "line": 401,
+            "severity": "medium",
+            "title": "missing coverage"
+          }
+        ],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [],
+        "state": "findings",
+        "verification": [],
+        "version": 1
+      }
     }
   },
   {
@@ -71,7 +117,30 @@
     },
     "expected": {
       "is_clean": false,
-      "state": "findings"
+      "state": "findings",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 1,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [
+          {
+            "file": "review.go",
+            "line": 1,
+            "severity": "high",
+            "title": "example"
+          }
+        ],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [],
+        "state": "findings",
+        "verification": [],
+        "version": 1
+      }
     }
   },
   {
@@ -85,18 +154,40 @@
       },
       "findings": [],
       "state": "complete",
+      "version": 1,
       "verification": [
         {
           "evidence": "the check did not return a verdict",
           "name": "unit",
           "state": "unverified"
         }
-      ],
-      "version": 1
+      ]
     },
     "expected": {
       "is_clean": false,
-      "state": "incomplete"
+      "state": "incomplete",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [],
+        "state": "incomplete",
+        "verification": [
+          {
+            "evidence": "the check did not return a verdict",
+            "name": "unit",
+            "state": "unverified"
+          }
+        ],
+        "version": 1
+      }
     }
   },
   {
@@ -114,7 +205,23 @@
     },
     "expected": {
       "is_clean": false,
-      "state": "failed"
+      "state": "failed",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [],
+        "state": "failed",
+        "verification": [],
+        "version": 1
+      }
     }
   },
   {
@@ -139,7 +246,25 @@
     },
     "expected": {
       "is_clean": false,
-      "state": "unparsable"
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[{\"file\":\"review.go\",\"line\":1,\"severity\":\"high\",\"title\":\"example\"}],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
     }
   },
   {
@@ -164,7 +289,25 @@
     },
     "expected": {
       "is_clean": false,
-      "state": "unparsable"
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":1,\"low\":0,\"medium\":0},\"findings\":[{\"file\":\"review.go\",\"line\":\"1\",\"severity\":\"high\",\"title\":\"example\"}],\"state\":\"findings\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
     }
   },
   {
@@ -177,15 +320,33 @@
         "medium": 0
       },
       "findings": [],
+      "state": "complete",
+      "version": 1,
       "provenance": {
         "backend": "goose"
-      },
-      "state": "complete",
-      "version": 1
+      }
     },
     "expected": {
       "is_clean": false,
-      "state": "unparsable"
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"provenance\":{\"backend\":\"goose\"},\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
     }
   },
   {
@@ -193,7 +354,956 @@
     "payload": "not json",
     "expected": {
       "is_clean": false,
-      "state": "unparsable"
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "not json"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "full-canonical-fields",
+    "payload": {
+      "counts": {
+        "critical": 1,
+        "high": 1,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [
+        {
+          "end_line": 9,
+          "extra": {
+            "nested": true,
+            "number": 9007199254740993
+          },
+          "file": "unicode/é.go",
+          "line": 7,
+          "severity": "critical",
+          "title": "危険"
+        },
+        {
+          "file": "x.go",
+          "line": 10,
+          "severity": "high",
+          "title": "title",
+          "tags": [
+            "safe",
+            "✓"
+          ]
+        }
+      ],
+      "state": "findings",
+      "version": 1,
+      "verification": [
+        {
+          "evidence": "go test ./...",
+          "name": "unit",
+          "state": "verified",
+          "steps": [
+            "compile",
+            "test"
+          ]
+        },
+        {
+          "evidence": "not configured",
+          "name": "integration",
+          "state": "skipped"
+        }
+      ],
+      "provenance": {
+        "backend": "goose",
+        "engine": "shadow",
+        "metadata": {
+          "commit": "6748294e476cc7ba836771b92565f0b09082a33e"
+        },
+        "model": "gpt-5.6-luna"
+      },
+      "overlap": {
+        "duplicates": [
+          2,
+          9007199254740993
+        ],
+        "shared_files": [
+          "x.go",
+          "unicode/é.go"
+        ]
+      },
+      "live": {
+        "checks": {
+          "count": 2
+        },
+        "ci": "success",
+        "mergeable": "MERGEABLE"
+      },
+      "raw_evidence": "α\r\nβ γ\n"
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "findings",
+      "result": {
+        "counts": {
+          "critical": 1,
+          "high": 1,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [
+          {
+            "end_line": 9,
+            "extra": {
+              "nested": true,
+              "number": 9007199254740993
+            },
+            "file": "unicode/é.go",
+            "line": 7,
+            "severity": "critical",
+            "title": "危険"
+          },
+          {
+            "file": "x.go",
+            "line": 10,
+            "severity": "high",
+            "tags": [
+              "safe",
+              "✓"
+            ],
+            "title": "title"
+          }
+        ],
+        "live": {
+          "checks": {
+            "count": 2
+          },
+          "ci": "success",
+          "mergeable": "MERGEABLE"
+        },
+        "overlap": {
+          "duplicates": [
+            2,
+            9007199254740993
+          ],
+          "shared_files": [
+            "x.go",
+            "unicode/é.go"
+          ]
+        },
+        "provenance": {
+          "backend": "goose",
+          "engine": "shadow",
+          "metadata": {
+            "commit": "6748294e476cc7ba836771b92565f0b09082a33e"
+          },
+          "model": "gpt-5.6-luna"
+        },
+        "raw_evidence": [
+          "α",
+          "β",
+          "γ"
+        ],
+        "state": "findings",
+        "verification": [
+          {
+            "evidence": "go test ./...",
+            "name": "unit",
+            "state": "verified",
+            "steps": [
+              "compile",
+              "test"
+            ]
+          },
+          {
+            "evidence": "not configured",
+            "name": "integration",
+            "state": "skipped"
+          }
+        ],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "explicit-empty-optional-fields",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1,
+      "live": {},
+      "overlap": {
+        "duplicates": [],
+        "shared_files": []
+      },
+      "provenance": {},
+      "raw_evidence": [],
+      "verification": []
+    },
+    "expected": {
+      "is_clean": true,
+      "state": "complete",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {
+          "duplicates": [],
+          "shared_files": []
+        },
+        "provenance": {},
+        "raw_evidence": [],
+        "state": "complete",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "malformed-verification-type",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1,
+      "verification": {}
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"verification\":{},\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "malformed-verification-item",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1,
+      "verification": [
+        {
+          "evidence": "x",
+          "name": "unit",
+          "state": "maybe"
+        }
+      ]
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"verification\":[{\"evidence\":\"x\",\"name\":\"unit\",\"state\":\"maybe\"}],\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "malformed-provenance-type",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1,
+      "provenance": []
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"provenance\":[],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "malformed-overlap-type",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1,
+      "overlap": []
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"overlap\":[],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "malformed-overlap-shape",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1,
+      "overlap": {
+        "duplicates": []
+      }
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"overlap\":{\"duplicates\":[]},\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "malformed-live-type",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1,
+      "live": []
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"live\":[],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "malformed-raw-evidence-type",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1,
+      "raw_evidence": {
+        "line": 1
+      }
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"raw_evidence\":{\"line\":1},\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "float-count",
+    "payload": "{\"counts\":{\"critical\":0.0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0.0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "exponent-count",
+    "payload": "{\"counts\":{\"critical\":0,\"high\":1e0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":1e0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "negative-count",
+    "payload": "{\"counts\":{\"critical\":0,\"high\":-1,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":-1,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "boolean-count",
+    "payload": "{\"counts\":{\"critical\":false,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":false,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "null-count",
+    "payload": "{\"counts\":{\"critical\":null,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":null,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "string-version",
+    "payload": "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":\"1\"}",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":\"1\"}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "trailing-json",
+    "payload": "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1} {}",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1} {}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "huge-count-mismatch",
+    "payload": "{\"counts\":{\"critical\":0,\"high\":9223372036854775808,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "{\"counts\":{\"critical\":0,\"high\":9223372036854775808,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "huge-finding-line",
+    "payload": "{\"counts\":{\"critical\":0,\"high\":1,\"low\":0,\"medium\":0},\"findings\":[{\"file\":\"review.go\",\"line\":9223372036854775808,\"severity\":\"high\",\"title\":\"large line\"}],\"state\":\"findings\",\"version\":1}",
+    "expected": {
+      "is_clean": false,
+      "state": "findings",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 1,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [
+          {
+            "file": "review.go",
+            "line": 9223372036854775808,
+            "severity": "high",
+            "title": "large line"
+          }
+        ],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [],
+        "state": "findings",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "negative-zero-count",
+    "payload": "{\"counts\":{\"critical\":-0,\"high\":0,\"low\":0,\"medium\":0},\"findings\":[],\"state\":\"complete\",\"version\":1}",
+    "expected": {
+      "is_clean": true,
+      "state": "complete",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [],
+        "state": "complete",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "deep-json",
+    "payload": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+        ],
+        "state": "unparsable",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "unicode-line-splitting",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1,
+      "raw_evidence": "zero\r\none\r\ntwo\nthree\u000bfour\ffivesix seven eight\u001cnine\u001dten\u0011eleven\u001etwelve\n"
+    },
+    "expected": {
+      "is_clean": true,
+      "state": "complete",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [],
+        "live": {},
+        "overlap": {},
+        "provenance": {},
+        "raw_evidence": [
+          "zero",
+          "one",
+          "two",
+          "three",
+          "four",
+          "five",
+          "six",
+          "seven",
+          "eight",
+          "nine",
+          "ten\u0011eleven",
+          "twelve"
+        ],
+        "state": "complete",
+        "verification": [],
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "round-trip-extra-fields",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 1,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [
+        {
+          "file": "review.go",
+          "line": 7,
+          "severity": "high",
+          "title": "unsafe path",
+          "extra": {
+            "bool": true,
+            "null": null,
+            "unicode": "λ"
+          }
+        }
+      ],
+      "state": "findings",
+      "version": 1,
+      "verification": [
+        {
+          "evidence": "pytest",
+          "name": "unit",
+          "state": "verified",
+          "extra": {
+            "attempts": 2
+          }
+        }
+      ],
+      "provenance": {
+        "backend": "goose",
+        "model": "gpt-5.6-luna",
+        "extra": {
+          "region": "🌎"
+        }
+      },
+      "overlap": {
+        "duplicates": [
+          12
+        ],
+        "shared_files": [
+          "review.go"
+        ]
+      },
+      "live": {
+        "ci": "failure",
+        "mergeable": "MERGEABLE"
+      },
+      "raw_evidence": [
+        "check output",
+        "second line"
+      ]
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "findings",
+      "result": {
+        "counts": {
+          "critical": 0,
+          "high": 1,
+          "low": 0,
+          "medium": 0
+        },
+        "findings": [
+          {
+            "extra": {
+              "bool": true,
+              "null": null,
+              "unicode": "λ"
+            },
+            "file": "review.go",
+            "line": 7,
+            "severity": "high",
+            "title": "unsafe path"
+          }
+        ],
+        "live": {
+          "ci": "failure",
+          "mergeable": "MERGEABLE"
+        },
+        "overlap": {
+          "duplicates": [
+            12
+          ],
+          "shared_files": [
+            "review.go"
+          ]
+        },
+        "provenance": {
+          "backend": "goose",
+          "extra": {
+            "region": "🌎"
+          },
+          "model": "gpt-5.6-luna"
+        },
+        "raw_evidence": [
+          "check output",
+          "second line"
+        ],
+        "state": "findings",
+        "verification": [
+          {
+            "evidence": "pytest",
+            "extra": {
+              "attempts": 2
+            },
+            "name": "unit",
+            "state": "verified"
+          }
+        ],
+        "version": 1
+      }
     }
   }
 ]

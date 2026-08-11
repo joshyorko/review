@@ -1,0 +1,31 @@
+name: shadow-go-review
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Go ReviewResult contract
+        run: |
+          set -euo pipefail
+          cd shadow/go-review
+          go test ./...
+
+      - name: Python baseline parity
+        run: |
+          set -euo pipefail
+          python3 shadow/go-review/parity.py
+
+      - name: Diff check
+        run: |
+          set -euo pipefail
+          git diff --check

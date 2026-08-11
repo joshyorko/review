@@ -16,12 +16,24 @@ The contract sources at that baseline are:
 - `tests/review_result_contract.py`
 
 Both implementations consume
-`testdata/review-result-cases.json`. The shared cases cover every result state,
-the clean decision predicate, state transitions, malformed nested evidence,
-inconsistent counts, provenance validation, and malformed JSON. Run the
-fixture parity checks with:
+`testdata/review-result-cases.json`. Each case records the complete canonical
+serialized result, including counts, findings, verification, provenance,
+overlap, live data, and bounded raw evidence. The cases cover every result
+state, state transitions, malformed optional fields, numeric and Unicode
+boundaries, deep and trailing JSON, and round-trip preservation.
+
+The shadow-owned Python runner imports the baseline implementation from
+`image/tui/review_result.py`; the official upstream-oriented contract test is
+not part of this experiment. Run the parity checks with:
 
 ```bash
 go test ./...
-python3 ../../tests/review_result_contract.py
+python3 parity.py
 ```
+
+The fork-local required workflow is
+`.github/workflows/shadow-go-review.yml`. Its third step runs `git diff --check`
+after the Go and Python contract checks.
+
+See `PARITY_REPORT.md` for the baseline, branch, command, fixture, fuzz, and
+semantic-deviation evidence for this M1 checkpoint.

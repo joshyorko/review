@@ -34,7 +34,7 @@ var verificationStates = map[string]struct{}{
 type ReviewResult struct {
 	Version      int
 	State        State
-	Counts       map[string]int
+	Counts       map[string]any
 	Findings     []map[string]any
 	Verification []map[string]any
 	Provenance   map[string]any
@@ -57,8 +57,8 @@ func emptyResult(state State) ReviewResult {
 	}
 }
 
-func zeroCounts() map[string]int {
-	counts := make(map[string]int, len(severityNames))
+func zeroCounts() map[string]any {
+	counts := make(map[string]any, len(severityNames))
 	for _, severity := range severityNames {
 		counts[severity] = 0
 	}
@@ -99,11 +99,11 @@ func FromMap(data map[string]any) ReviewResult {
 		if !present {
 			return emptyResult(StateUnparsable)
 		}
-		count, valid := nonNegativeInt(value)
-		if !valid {
+		parsed, valid := integerValue(value)
+		if !valid || parsed.Sign() < 0 {
 			return emptyResult(StateUnparsable)
 		}
-		counts[severity] = count
+		counts[severity] = canonicalIntegerValue(value, parsed)
 	}
 
 	rawFindings, ok := anySlice(data["findings"])
@@ -117,9 +117,15 @@ func FromMap(data map[string]any) ReviewResult {
 		if !valid || !validFinding(finding) {
 			return emptyResult(StateUnparsable)
 		}
+		line, _ := integerValue(finding["line"])
+		finding["line"] = canonicalIntegerValue(finding["line"], line)
+		if endLine, present := finding["end_line"]; present {
+			parsedEndLine, _ := integerValue(endLine)
+			finding["end_line"] = canonicalIntegerValue(endLine, parsedEndLine)
+		}
 		findings[index] = finding
 		severity := finding["severity"].(string)
-		observed[severity]++
+		observed[severity] = observed[severity].(int) + 1
 	}
 	if !sameCounts(counts, observed) {
 		state = StateUnparsable
@@ -221,7 +227,8 @@ func (r ReviewResult) IsClean() bool {
 		return false
 	}
 	for _, severity := range severityNames {
-		if r.Counts[severity] != 0 {
+		count, ok := integerValue(r.Counts[severity])
+		if !ok || count.Sign() != 0 {
 			return false
 		}
 	}
@@ -299,10 +306,12 @@ func validOverlap(overlap map[string]any) bool {
 	if !duplicatesOK || !sharedFilesOK || !duplicatesSliceOK || !sharedFilesSliceOK {
 		return false
 	}
-	for _, duplicate := range duplicates {
-		if _, ok := integerValue(duplicate); !ok {
+	for index, duplicate := range duplicates {
+		parsed, ok := integerValue(duplicate)
+		if !ok {
 			return false
 		}
+		duplicates[index] = canonicalIntegerValue(duplicate, parsed)
 	}
 	for _, sharedFile := range sharedFiles {
 		if !nonEmptyText(sharedFile) {
@@ -409,16 +418,13 @@ func integerValue(value any) (*big.Int, bool) {
 	}
 }
 
-func nonNegativeInt(value any) (int, bool) {
-	parsed, ok := integerValue(value)
-	if !ok || parsed.Sign() < 0 || !parsed.IsInt64() {
-		return 0, false
+func canonicalIntegerValue(value any, parsed *big.Int) any {
+	switch value.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return value
+	default:
+		return json.Number(parsed.String())
 	}
-	converted := parsed.Int64()
-	if int64(int(converted)) != converted {
-		return 0, false
-	}
-	return int(converted), true
 }
 
 func nonEmptyText(value any) bool {
@@ -426,9 +432,11 @@ func nonEmptyText(value any) bool {
 	return ok && strings.TrimSpace(text) != ""
 }
 
-func sameCounts(left, right map[string]int) bool {
+func sameCounts(left, right map[string]any) bool {
 	for _, severity := range severityNames {
-		if left[severity] != right[severity] {
+		leftValue, leftOK := integerValue(left[severity])
+		rightValue, rightOK := integerValue(right[severity])
+		if !leftOK || !rightOK || leftValue.Cmp(rightValue) != 0 {
 			return false
 		}
 	}
