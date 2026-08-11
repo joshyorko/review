@@ -22,6 +22,8 @@ ARG TMUX_VERSION=3.7b
 ARG CODEX_VERSION=0.147.0
 ARG CODEX_X86_64_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36
 ARG CODEX_AARCH64_SHA256=eb677c80f666b1ab8b4b1d083b66e8d614b1281d960bb6f9fd8ca98f58b38b90
+ARG CODEX_CODE_MODE_HOST_X86_64_SHA256=0146adfaac8363ec9fcdb5895f7624db5b2e8617a283887938b7fb97a1dd4356
+ARG CODEX_CODE_MODE_HOST_AARCH64_SHA256=dfd4ff98ea4db30ed078af9c31b6f86e3da4836d0573aa87e225e5a5b54d3c7c
 ARG GOOSE_CHANNEL=canary
 ARG PI_VERSION=0.73.1
 ARG PI_SHA512=817421dd26999964df54c738028e7e2c66d578abf3c8eeeda25a24d272ec660abd9c68d9c7f10453734cf02faa52707836fb36aecc06e6a39580bcd092ad1f1d
@@ -46,6 +48,8 @@ ARG TMUX_VERSION
 ARG CODEX_VERSION
 ARG CODEX_X86_64_SHA256
 ARG CODEX_AARCH64_SHA256
+ARG CODEX_CODE_MODE_HOST_X86_64_SHA256
+ARG CODEX_CODE_MODE_HOST_AARCH64_SHA256
 
 ENV PATH=/opt/node/bin:${PATH}
 ENV NODE_PATH=/opt/hive/node_modules
@@ -80,6 +84,7 @@ RUN set -eu; \
         tmux_sha='f85e6c1c412750a774eb3f370f33bad05fc726fb8b6a0b174ad6f0b6d954df58'; \
         codex_arch=x86_64; \
         codex_sha="${CODEX_X86_64_SHA256}"; \
+        codex_code_mode_host_sha="${CODEX_CODE_MODE_HOST_X86_64_SHA256}"; \
         loader_dir=/lib64; \
         loader_target=/usr/lib64/ld-linux-x86-64.so.2; \
         loader_name=ld-linux-x86-64.so.2 ;; \
@@ -92,6 +97,7 @@ RUN set -eu; \
         tmux_sha='b2955782695283fbc3682a2f77d65616f53b986ee3cf3d80618d3b1cb95b91a6'; \
         codex_arch=aarch64; \
         codex_sha="${CODEX_AARCH64_SHA256}"; \
+        codex_code_mode_host_sha="${CODEX_CODE_MODE_HOST_AARCH64_SHA256}"; \
         loader_dir=/lib; \
         loader_target=/usr/lib/ld-linux-aarch64.so.1; \
         loader_name=ld-linux-aarch64.so.1 ;; \
@@ -128,6 +134,13 @@ RUN set -eu; \
     tar -I 'python3 -m gzip' -xOf "$workdir/codex.tar.gz" --occurrence=1 \
       "codex-${codex_arch}-unknown-linux-musl" > /usr/local/bin/codex; \
     chmod 0755 /usr/local/bin/codex; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-code-mode-host-${codex_arch}-unknown-linux-musl.tar.gz" \
+      -o "$workdir/codex-code-mode-host.tar.gz"; \
+    printf '%s  %s\n' "$codex_code_mode_host_sha" "$workdir/codex-code-mode-host.tar.gz" | sha256sum -c -; \
+    tar -I 'python3 -m gzip' -xOf "$workdir/codex-code-mode-host.tar.gz" --occurrence=1 \
+      "codex-code-mode-host-${codex_arch}-unknown-linux-musl" > /usr/local/bin/codex-code-mode-host; \
+    chmod 0755 /usr/local/bin/codex-code-mode-host; \
     npm --prefix /opt/hive ci --omit=dev --ignore-scripts; \
     npm_cache="$(npm config get cache)"; \
     npm cache clean --force; \
@@ -143,7 +156,8 @@ RUN set -eu; \
     corepack --version; \
     gh --version; \
     tmux -V; \
-    codex --version
+    codex --version; \
+    codex-code-mode-host --help >/dev/null
 
 # The maintainer TUI runtime: uv (pinned, checksum-verified) creates a
 # self-contained virtual environment on the base's own CPython and installs

@@ -180,6 +180,9 @@ jobs:
             --entrypoint /usr/local/bin/codex \
             review:test --version
           docker run --rm \
+            --entrypoint /usr/local/bin/codex-code-mode-host \
+            review:test --help
+          docker run --rm \
             --entrypoint /opt/bluefin/tui/.venv/bin/python \
             review:test \
             -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"

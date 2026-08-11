@@ -116,6 +116,8 @@ require image/Containerfile \
   'ARG CODEX_VERSION=0.147.0' \
   'ARG CODEX_X86_64_SHA256=' \
   'ARG CODEX_AARCH64_SHA256=' \
+  'ARG CODEX_CODE_MODE_HOST_X86_64_SHA256=0146adfaac8363ec9fcdb5895f7624db5b2e8617a283887938b7fb97a1dd4356' \
+  'ARG CODEX_CODE_MODE_HOST_AARCH64_SHA256=dfd4ff98ea4db30ed078af9c31b6f86e3da4836d0573aa87e225e5a5b54d3c7c' \
   'ARG GOOSE_X86_64_SHA256=' \
   'ARG GOOSE_AARCH64_SHA256=' \
   'io.projectbluefin.review.goose.channel="${GOOSE_CHANNEL}"' \
@@ -128,6 +130,9 @@ require image/Containerfile \
   'https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz' \
   'https://github.com/tmux/tmux-builds/releases/download/v${TMUX_VERSION}/tmux-${TMUX_VERSION}-linux-${tmux_arch}.tar.gz' \
   'https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz' \
+  'https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-code-mode-host-${codex_arch}-unknown-linux-musl.tar.gz' \
+  'codex_code_mode_host_sha="${CODEX_CODE_MODE_HOST_X86_64_SHA256}";' \
+  'codex_code_mode_host_sha="${CODEX_CODE_MODE_HOST_AARCH64_SHA256}";' \
   'https://github.com/aaif-goose/goose/releases/download/${GOOSE_CHANNEL}/goose-${goose_arch}-unknown-linux-musl.tar.gz' \
   'https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${PI_VERSION}.tgz' \
   'printf '\''%s  %s\n'\'' "$PI_SHA512" "$workdir/pi.tgz" | sha512sum -c -;' \
@@ -146,6 +151,7 @@ require image/Containerfile \
   'test ! -e /opt/node/share/doc;' \
   'corepack --version;' \
   'codex --version' \
+  'codex-code-mode-host --help >/dev/null' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/config/backends.conf' \
@@ -161,6 +167,7 @@ require image/Containerfile \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/gh.tar.gz" --wildcards --occurrence=1 '\''*/bin/gh'\'' > /usr/local/bin/gh;' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux;' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/codex.tar.gz" --occurrence=1' \
+  'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/codex-code-mode-host.tar.gz" --occurrence=1' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/goose.tar.gz" --occurrence=1 ./goose > /usr/local/bin/goose;' \
   'COPY image/tmux.conf /etc/tmux.conf' \
   'infocmp -x tmux-direct | grep -q' \
@@ -226,6 +233,7 @@ for name, archive in (
     ("gh", "gh.tar.gz"),
     ("tmux", "tmux.tar.gz"),
     ("codex", "codex.tar.gz"),
+    ("codex code mode host", "codex-code-mode-host.tar.gz"),
     ("goose", "goose.tar.gz"),
 ):
     verify = container.find(f'"$workdir/{archive}" | sha256sum -c -')
@@ -545,6 +553,7 @@ require .github/workflows/validate.yml \
   '["/usr/local/bin/review-entrypoint"]' \
   'Import shipped TUI module set as runtime user' \
   '--entrypoint /usr/local/bin/codex' \
+  '--entrypoint /usr/local/bin/codex-code-mode-host' \
   '--entrypoint /opt/bluefin/tui/.venv/bin/python' \
   "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui" \
   'bash tests/image-audit.sh --derived review:test'
