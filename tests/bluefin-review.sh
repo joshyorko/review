@@ -360,7 +360,7 @@ if [[ -n "$scope" ]]; then
   while IFS= read -r check; do
     filename="${check##*/}"
     expected="${filename%.md}"
-    actual="$(sed -n 's/^name: //p' "$scope/$check" | head -n 1)"
+    actual="$(sed -n 's/^name: //p' "$scope/.agents/checks/$check" | head -n 1)"
     [[ "$actual" == "$expected" ]] || {
       printf "name '%s' must match filename '%s'\n" "$actual" "$expected" >&2
       exit 1
