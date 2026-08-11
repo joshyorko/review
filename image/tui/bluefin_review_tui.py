@@ -256,6 +256,29 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
     return ""
 
 
+def ci_marker(checks: str) -> str:
+    """Carry the snapshot's CI state as text, not colour alone."""
+    return {
+        "success": "✓ CI GREEN",
+        "failure": "✗ CI FAILED",
+        "pending": "… CI PENDING",
+        "unknown": "? CI UNKNOWN",
+    }.get(checks, "? CI UNKNOWN")
+
+
+def effective_check_state(snapshot: str, live: dict) -> str:
+    """Prefer fetched check evidence, retaining the snapshot when absent."""
+    checks = live.get("statusCheckRollup") or []
+    if not checks:
+        return snapshot or "unknown"
+    outcomes = [check.get("conclusion") or check.get("state") or "PENDING" for check in checks]
+    if any(outcome in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED") for outcome in outcomes):
+        return "failure"
+    if any(outcome not in ("SUCCESS", "NEUTRAL", "SKIPPED") for outcome in outcomes):
+        return "pending"
+    return "success"
+
+
 # The merge queue's segments, in the order a maintainer drains them, with the
 # same colours the rows use so the bar and the list agree.
 QUEUE_SEGMENTS = [
@@ -276,14 +299,14 @@ def classify_queue_item(item: dict) -> str:
     conflict outranks a failing check because it blocks the check from
     meaning anything.
     """
-    if "lgtm" in (item.get("labels") or []):
-        return "queued"
-    if item.get("recommended_action") == "ready-for-human-merge":
-        return "ready"
     if item.get("mergeable_state") == "dirty":
         return "conflicts"
     if item.get("check_state") == "failure":
         return "ci"
+    if "lgtm" in (item.get("labels") or []):
+        return "queued"
+    if item.get("recommended_action") == "ready-for-human-merge":
+        return "ready"
     if item.get("recommended_action") == "review":
         return "review"
     return "unclear"
@@ -1003,20 +1026,20 @@ class ReviewDashboard(App):
         # A stop that would not merge says so on its own row, so a failure in
         # the middle of a batch survives the notification that reported it.
         failed = " ✗ DID NOT MERGE" if stop.failure else ""
+        checks = effective_check_state(stop.check_state, stop.live)
         marks = ""
         if stop.mergeable_state == "dirty":
             marks += " ⚑ CONFLICTS"
-        if stop.check_state == "failure":
-            marks += " ✗ CI"
+        marks += f" {ci_marker(checks)}"
         if stop.review_state == "approved":
             marks += " ✓ approved"
         body = (
             f"{link(stop.key, pr_url(stop.repository, stop.number))}: "
             f"{escape(stop.title[:60])}{tag} "
-            f"{escape('[' + stop.action + ']')}{marks}{failed}"
+            f"{marks} {escape('[' + stop.action + ']')}{failed}"
         )
         style = stop_style(
-            stop.action, stop.mergeable_state, stop.check_state, stop.review_state
+            stop.action, stop.mergeable_state, checks, stop.review_state
         )
         return f"[{style}]{body}[/{style}]" if style else body
 
@@ -1137,7 +1160,9 @@ class ReviewDashboard(App):
         return self.pulls_cache[repo]
 
     def paint_context(self, text: str) -> None:
-        self.query_one("#context", Static).update(text)
+        context = self.query("#context")
+        if context:
+            context.first().update(text)
 
     def cluster(self, stop: Stop) -> tuple[list[int], list[int]]:
         """Duplicates and overlaps, exactly as the walker computes them."""
@@ -1194,6 +1219,7 @@ class ReviewDashboard(App):
         if self.current is not stop:
             return
         live = stop.live
+        self.refresh_rows()
         checks = live.get("statusCheckRollup") or []
         outcomes = [c.get("conclusion") or c.get("state") or "PENDING" for c in checks]
         ok = sum(1 for o in outcomes if o in ("SUCCESS", "NEUTRAL", "SKIPPED"))
@@ -1739,6 +1765,14 @@ class ReviewDashboard(App):
             self.notify(
                 f"merging {stop.repository} directly is a maintainer power and "
                 "you do not have it there; queue it with [a] instead.",
+                severity="error",
+            )
+            return False
+        checks = effective_check_state(stop.check_state, stop.live)
+        if checks in {"failure", "pending"}:
+            state = "failed" if checks == "failure" else "pending"
+            self.notify(
+                f"{stop.key}: direct merge refused; CI is known {state}.",
                 severity="error",
             )
             return False
