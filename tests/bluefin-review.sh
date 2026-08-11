@@ -20,6 +20,7 @@ expected_banner=$'+------------------------+\n| BLUEFIN REVIEW         |\n| HUMA
 # baseline assertions below do not depend on whether this host happens to have
 # the projected org skills. The context test further down opts back in.
 export BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/absent"
+export BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/absent"
 
 # --- default mode: banner, then hand the range to goose review ---------------
 # 'main...HEAD' is a real 'goose review' argument. An earlier version of this
@@ -228,6 +229,47 @@ BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/absent" \
   "$review" main...HEAD >/dev/null
 [[ "$(tr '\0' '\n' <"$scratch/argv-bare")" == $'review\nmain...HEAD' ]]
 
+# --- repository-owned context is named before shared doctrine -----------------
+mkdir -p "$scratch/repository/docs/skills"
+printf 'REPOSITORY AGENTS\n' >"$scratch/repository/AGENTS.md"
+printf '# Repository skill router\n' >"$scratch/repository/docs/SKILL.md"
+cat >"$scratch/repository/docs/skills/index.json" <<'EOF'
+{"skills":[{"id":"repo-skill","description":"Repository review guidance","entry_point":"docs/skills/repo-skill.md","status":"active"}]}
+EOF
+printf '# Repository skill\n' >"$scratch/repository/docs/skills/repo-skill.md"
+
+BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/repository" \
+  BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/skills" \
+  PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-repository" \
+  "$review" main...HEAD >/dev/null
+repository_argv="$(tr '\0' '\n' <"$scratch/argv-repository")"
+[[ "$repository_argv" == *"repository-owned context"* ]]
+[[ "$repository_argv" == *"$scratch/repository/AGENTS.md"* ]]
+[[ "$repository_argv" == *"$scratch/repository/docs/SKILL.md"* ]]
+[[ "$repository_argv" == *"$scratch/repository/docs/skills/repo-skill.md"* ]]
+[[ "$repository_argv" == *"before shared Bluefin doctrine"* ]]
+[[ "$repository_argv" != *'Repository skill router'* ]]
+
+# Invalid optional catalog entries are degraded and never named as trusted.
+mkdir -p "$scratch/invalid/docs/skills"
+cat >"$scratch/invalid/docs/skills/index.json" <<'EOF'
+{"skills":[
+  {"id":"duplicate","description":"one","entry_point":"docs/skills/one.md","status":"active"},
+  {"id":"duplicate","description":"two","entry_point":"docs/skills/two.md","status":"active"},
+  {"id":"inactive","description":"no","entry_point":"docs/skills/inactive.md","status":"inactive"},
+  {"id":"absolute","description":"no","entry_point":"/tmp/absolute.md","status":"active"},
+  {"id":"traversal","description":"no","entry_point":"../outside.md","status":"active"}
+]}
+EOF
+BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/invalid" \
+  BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/absent" \
+  PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-invalid" \
+  "$review" main...HEAD >/dev/null
+invalid_argv="$(tr '\0' '\n' <"$scratch/argv-invalid")"
+[[ "$invalid_argv" == *'catalog unavailable'* ]]
+[[ "$invalid_argv" != *'one.md'* && "$invalid_argv" != *'inactive.md'* ]]
+[[ "$invalid_argv" != *'absolute.md'* && "$invalid_argv" != *'outside.md'* ]]
+
 # restore the exit-code stub for any later assertions
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
@@ -329,6 +371,7 @@ EOF
 chmod +x "$scratch/bin/goose"
 
 BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+  BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/repository" \
   PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-scope" \
   SCOPE_LISTING="$scratch/scope-listing" SCOPE_CLUSTER="$scratch/scope-cluster" \
   "$review" main...HEAD >/dev/null
@@ -339,6 +382,10 @@ argv_scope="$(tr '\0' '\n' <"$scratch/argv-scope")"
 [[ "$argv_scope" != *'--instructions'* ]]
 grep -q '^\.agents/REVIEW\.md$' "$scratch/scope-listing"
 grep -q '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/00-repository-context\.md$' "$scratch/scope-listing"
+repository_context_line="$(grep -n '^\.agents/checks/00-repository-context\.md$' "$scratch/scope-listing" | cut -d: -f1)"
+bluefin_doctrine_line="$(grep -n '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing" | cut -d: -f1)"
+((repository_context_line < bluefin_doctrine_line))
 # No cluster on a plain review: the scratch scope carries no resolution check.
 if grep -q 'cluster-resolution' "$scratch/scope-listing"; then
   echo "plain review must not carry a cluster-resolution check" >&2

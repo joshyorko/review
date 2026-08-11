@@ -1,7 +1,7 @@
 ---
 name: goose-context
-version: "2.1"
-last_updated: 2026-08-08
+version: "2.2"
+last_updated: 2026-08-11
 id: goose-context
 one_line_purpose: Keep Goose config and skill routing working in the container.
 entry_point: docs/skills/goose-context.md
@@ -54,8 +54,12 @@ task delivery; use the Hive runtime documentation instead.
    extension in the config and the routing rule in the policy.
 5. Treat generated global skills and repository skills differently. The image
    generates global skills at build time from the pinned
-   `projectbluefin/common` catalog. After cloning a repository, read its
-   `docs/skills/index.json` and load the matching entry point.
+   `projectbluefin/common` catalog. After cloning a repository, `bluefin-review`
+   names the target's `AGENTS.md`, optional `docs/SKILL.md`, and only active,
+   described, unique catalog entries whose repository-relative entry points
+   exist inside that checkout. It passes paths and provenance, never skill
+   bodies; invalid optional context is named as unavailable and does not stop
+   the review.
 6. Keep `GOOSE_MODE: auto` in the controlled configuration. The agent runs its
    tools with no per-tool confirmation prompt, and that is required rather than
    convenient: Hive drives the CLI by simulated keystrokes, so a confirmation
