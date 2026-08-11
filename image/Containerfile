@@ -20,6 +20,8 @@ ARG NODE_VERSION=24.18.1
 ARG GH_VERSION=2.97.0
 ARG TMUX_VERSION=3.7b
 ARG GOOSE_CHANNEL=canary
+ARG PI_VERSION=0.73.1
+ARG PI_SHA512=817421dd26999964df54c738028e7e2c66d578abf3c8eeeda25a24d272ec660abd9c68d9c7f10453734cf02faa52707836fb36aecc06e6a39580bcd092ad1f1d
 # `canary` is a mutable release tag, not an artifact identity. CI resolves
 # these from the release asset API for every build and passes them as build
 # inputs; these defaults keep a local build pinned to a known attested asset.
@@ -167,6 +169,8 @@ ARG GOOSE_CHANNEL
 ARG GOOSE_X86_64_SHA256
 ARG GOOSE_AARCH64_SHA256
 ARG HIVE_COMMIT
+ARG PI_VERSION
+ARG PI_SHA512
 # Preserve both architecture-specific asset identities in the image
 # configuration. Build provenance records the resolved build arguments too.
 LABEL io.projectbluefin.review.goose.channel="${GOOSE_CHANNEL}" \
@@ -198,6 +202,20 @@ RUN --mount=type=secret,id=github_token set -eu; \
     chmod 0755 /usr/local/bin/goose; \
     /usr/local/bin/goose --version; \
     /usr/local/bin/goose run --help >/dev/null
+
+# Pi is the only additional backend in this image. Download the exact npm
+# tarball and verify its registry integrity before npm installs it; no mutable
+# package tag or unverified executable is allowed into the contributor image.
+RUN set -eu; \
+    workdir="$(mktemp -d)"; \
+    trap 'rm -rf "$workdir"' EXIT; \
+    curl --fail --location --show-error --silent \
+      "https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${PI_VERSION}.tgz" \
+      -o "$workdir/pi.tgz"; \
+    printf '%s  %s\n' "$PI_SHA512" "$workdir/pi.tgz" | sha512sum -c -; \
+    npm install --global --ignore-scripts --no-audit --no-fund "$workdir/pi.tgz"; \
+    command -v pi; \
+    pi --version
 
 COPY --chmod=0755 image/bin/bluefin-review /usr/local/bin/bluefin-review
 COPY --chmod=0755 image/bin/worktree-guard /usr/local/bin/worktree-guard

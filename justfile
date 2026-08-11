@@ -64,9 +64,9 @@
 # from the repository root. Persistent state is limited to launcher
 # configuration; the container receives credentials by environment and the
 # read-only ~/.config/hive mount, never a workspace or host home mount.
-# Goose is the only agent backend. There is no local inference, no model
-# profile catalogue, and no multi-CLI auto-detection: one backend means one
-# readiness check and one fix-it message when it fails.
+# Goose is the default agent backend; Pi is the explicitly selected executable
+# backend. Hive remains the sole assignment authority and there is no local
+# inference, model catalogue, or multi-CLI auto-detection.
 #
 # TOOL is read from the environment so 'TOOL=goose just review-container'
 # works as documented — 'just' recipe parameters are positional, not
@@ -144,30 +144,37 @@ require_copilot_provider() {
   return 1
 }
 require_goose_backend() {
-  # TOOL exists only for compatibility with the documented invocation; the
-  # single supported value is the single supported backend.
   local requested="${1:-}"
-  [[ -z "$requested" || "$requested" == "goose" ]] && return 0
-  echo "ERROR: TOOL=${requested} is not supported — review runs Goose only." >&2
-  echo "  Unset TOOL, or pass TOOL=goose." >&2
+  [[ -z "$requested" || "$requested" == goose || "$requested" == pi ]] && return 0
+  echo "ERROR: TOOL=${requested} is not supported — review supports Goose and Pi." >&2
+  echo "  Unset TOOL, or pass TOOL=goose or TOOL=pi." >&2
   return 1
 }
 preflight_agent() {
+  local backend="${1:-goose}"
   # Exactly one ERROR line per failure, each with the command that fixes it.
-  require_copilot_provider || return 1
-  command -v goose &>/dev/null || {
-    echo "ERROR: goose is not installed." >&2
-    echo "  ${GOOSE_INSTALL_HINT}" >&2
-    return 1
-  }
+  if [[ "$backend" == pi ]]; then
+    [[ -n "${PI_API_KEY:-}" ]] || {
+      echo "ERROR: Pi requires PI_API_KEY for the selected Anthropic provider." >&2
+      echo "  Export PI_API_KEY before running TOOL=pi just review-container." >&2
+      return 1
+    }
+  else
+    require_copilot_provider || return 1
+    command -v goose &>/dev/null || {
+      echo "ERROR: goose is not installed." >&2
+      echo "  ${GOOSE_INSTALL_HINT}" >&2
+      return 1
+    }
+    goose_configured || {
+      echo "ERROR: Goose has no usable provider configuration." >&2
+      echo "  ${GOOSE_FIXIT_HINT}" >&2
+      return 1
+    }
+  fi
   github_auth_ready || {
     echo "ERROR: GitHub CLI is not authenticated against github.com." >&2
     echo "  Run: ${GITHUB_LOGIN_COMMAND}" >&2
-    return 1
-  }
-  goose_configured || {
-    echo "ERROR: Goose has no usable provider configuration." >&2
-    echo "  ${GOOSE_FIXIT_HINT}" >&2
     return 1
   }
 }
@@ -706,7 +713,8 @@ review-container profile="" effort="":
     mkdir -p "${STATE_DIR}"
 
     require_goose_backend "$TOOL"
-    preflight_agent
+    BACKEND="${TOOL:-goose}"
+    preflight_agent "$BACKEND"
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
       echo "  Install Podman, then re-run review-container." >&2
@@ -719,7 +727,11 @@ review-container profile="" effort="":
     require_valid_container_name "$CONTAINER_NAME"
 
     resolve_model_profile "{{profile}}" "{{effort}}"
-    resolve_goose_selection
+    if [[ "$BACKEND" == pi ]]; then
+      export ANTHROPIC_API_KEY="$PI_API_KEY"
+    else
+      resolve_goose_selection
+    fi
     REVIEW_RECIPE=review-container
     ensure_hive_contributor_env
     report_hive_selection
@@ -769,16 +781,18 @@ review-container profile="" effort="":
       # sharing one registration: the second launch would revoke the first
       # live container's access to it.
       --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro,z"
-      --env "AGENT_BACKEND=goose"
+      --env "AGENT_BACKEND=${BACKEND}"
       # Podman does not pass COLORTERM through on its own; the entrypoint
       # needs it to pick the direct-color attach fallback for a host TERM
       # the image's narrow terminfo set does not know (e.g. xterm-ghostty).
       --env COLORTERM
     )
-    [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
-    [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
-    [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
-    [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
+    [[ "$BACKEND" == goose && -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
+    if [[ "$BACKEND" == goose ]]; then
+      [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
+      [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
+      [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
+    fi
     if [[ "${GOOSE_PROVIDER:-}" == "github_copilot" ]]; then
       resolve_copilot_token
       if [[ -n "${COPILOT_TOKEN:-}" ]]; then
@@ -788,6 +802,10 @@ review-container profile="" effort="":
       else
         report_missing_copilot_credential
       fi
+    fi
+    if [[ "$BACKEND" == pi ]]; then
+      CONTAINER_ARGS+=(--env ANTHROPIC_API_KEY)
+      echo "✓ Pi credential passed to the agent (value not shown)."
     fi
     resolve_gh_token
     if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then
@@ -979,36 +997,50 @@ review-doctor:
     unset GH_TOKEN_VALUE
     echo ""
 
-    echo "=== Agent backend (Goose only) ==="
-    if ! require_copilot_provider; then
-      fail=$((fail+1))
-    elif command -v goose &>/dev/null; then
-      if goose_configured; then
-        echo "  ✓ goose: installed + configured"
+    BACKEND="${TOOL:-goose}"
+    require_goose_backend "$BACKEND" || fail=$((fail+1))
+    if [[ "$BACKEND" == pi ]]; then
+      echo "=== Agent backend (Pi) ==="
+      if [[ -n "${PI_API_KEY:-}" ]]; then
+        echo "  ✓ pi: selected; image verifies the installed binary and the credential is available (not shown)"
         pass=$((pass+1))
       else
-        echo "  ✗ goose: installed, NOT configured — ${GOOSE_FIXIT_HINT}"
+        echo "  ✗ pi: selected, but PI_API_KEY is missing"
+        echo "    Export PI_API_KEY before running TOOL=pi just review-container."
         fail=$((fail+1))
       fi
     else
-      echo "  ✗ goose: not installed — ${GOOSE_INSTALL_HINT}"
-      fail=$((fail+1))
-    fi
-    echo ""
+      echo "=== Agent backend (Goose) ==="
+      if ! require_copilot_provider; then
+        fail=$((fail+1))
+      elif command -v goose &>/dev/null; then
+        if goose_configured; then
+          echo "  ✓ goose: installed + configured"
+          pass=$((pass+1))
+        else
+          echo "  ✗ goose: installed, NOT configured — ${GOOSE_FIXIT_HINT}"
+          fail=$((fail+1))
+        fi
+      else
+        echo "  ✗ goose: not installed — ${GOOSE_INSTALL_HINT}"
+        fail=$((fail+1))
+      fi
+      echo ""
 
-    echo "=== Copilot credential ==="
-    resolve_copilot_token
-    if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-      echo "  ✓ a Copilot credential is available (not shown)"
-      pass=$((pass+1))
-    else
-      echo "  ✗ no Copilot credential is available"
-      echo "    The agent will stop at 'enter code XXXX-XXXX' and wait for a human."
-      echo "    A 'gh auth token' is NOT a substitute — Copilot inference rejects it."
-      echo "    Run: goose configure (pick GitHub Copilot), or export GITHUB_COPILOT_TOKEN."
-      fail=$((fail+1))
+      echo "=== Copilot credential ==="
+      resolve_copilot_token
+      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
+        echo "  ✓ a Copilot credential is available (not shown)"
+        pass=$((pass+1))
+      else
+        echo "  ✗ no Copilot credential is available"
+        echo "    The agent will stop at 'enter code XXXX-XXXX' and wait for a human."
+        echo "    A 'gh auth token' is NOT a substitute — Copilot inference rejects it."
+        echo "    Run: goose configure (pick GitHub Copilot), or export GITHUB_COPILOT_TOKEN."
+        fail=$((fail+1))
+      fi
+      unset COPILOT_TOKEN
     fi
-    unset COPILOT_TOKEN
     echo ""
 
     echo "=== Contributor image ==="
@@ -1035,10 +1067,10 @@ review-doctor:
       echo "  ✓ ${HIVE_CONTRIBUTOR_ENV} exists"
       pass=$((pass+1))
       DOCTOR_BACKEND="$(hive_contributor_backend "$HIVE_CONTRIBUTOR_ENV")"
-      if [[ -n "$DOCTOR_BACKEND" && "$DOCTOR_BACKEND" != "goose" ]]; then
-        echo "  ! ${HIVE_CONTRIBUTOR_ENV} says AGENT_BACKEND=${DOCTOR_BACKEND}, but review always launches goose."
-        echo "    Harmless — the launcher passes AGENT_BACKEND=goose itself — but stale."
-        echo "    Edit that line yourself if you want the file to match; review will not touch it."
+      if [[ -n "$DOCTOR_BACKEND" && "$DOCTOR_BACKEND" != "$BACKEND" ]]; then
+        echo "  ! ${HIVE_CONTRIBUTOR_ENV} says AGENT_BACKEND=${DOCTOR_BACKEND}, but the selected backend is ${BACKEND}."
+        echo "    The launcher will not rewrite Hive's saved backend selection."
+        echo "    Edit that line yourself if you want the file to match."
       fi
     else
       echo "  ✗ ${HIVE_CONTRIBUTOR_ENV} is missing"
