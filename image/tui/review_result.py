@@ -30,6 +30,7 @@ class ReviewResult:
     verification: list[dict[str, Any]] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
     overlap: dict[str, Any] = field(default_factory=dict)
+    live: dict[str, Any] = field(default_factory=dict)
     raw_evidence: list[str] = field(default_factory=list)
 
     @classmethod
@@ -44,7 +45,7 @@ class ReviewResult:
             state = "findings"
         return cls(version, state, counts, findings, list(data.get("verification") or []),
                    dict(data.get("provenance") or {}), dict(data.get("overlap") or {}),
-                   _raw(data.get("raw_evidence")))
+                   dict(data.get("live") or {}), _raw(data.get("raw_evidence")))
 
     @property
     def is_clean(self) -> bool:
@@ -54,6 +55,7 @@ class ReviewResult:
         return {"version": self.version, "state": self.state, "counts": self.counts,
                 "findings": self.findings, "verification": self.verification,
                 "provenance": self.provenance, "overlap": self.overlap,
+                "live": self.live,
                 "raw_evidence": self.raw_evidence}
 
     def to_json(self) -> str:
@@ -73,24 +75,87 @@ def parse_review_result(payload: str, raw_evidence: str | list[str] | None = Non
         return ReviewResult(1, "unparsable", raw_evidence=_raw(raw_evidence or payload))
 
 
-def adapt_current_engine(output: str, exit_code: int | None, provenance: dict[str, Any] | None = None) -> ReviewResult:
-    """Adapt the current line-oriented engine without pretending prose is JSON."""
+def adapt_current_engine(
+    output: str,
+    exit_code: int | None,
+    provenance: dict[str, Any] | None = None,
+    *,
+    verification: list[dict[str, Any]] | None = None,
+    overlap: dict[str, Any] | None = None,
+    live: dict[str, Any] | None = None,
+) -> ReviewResult:
+    """Adapt Goose's JSONL findings and line-oriented progress records."""
     raw = _raw(output)
     base = dict(provenance or {})
     base.setdefault("engine", "bluefin-review")
-    if exit_code not in (0, None) and exit_code != 65:
-        return ReviewResult(1, "failed", provenance=base, raw_evidence=raw)
-    if exit_code == 65 or any("INCOMPLETE" in line.upper() for line in raw):
-        return ReviewResult(1, "incomplete", provenance=base, raw_evidence=raw)
     findings: list[dict[str, Any]] = []
     counts = {s: 0 for s in SEVERITIES}
-    pattern = re.compile(r"\b(CRITICAL|HIGH|MEDIUM|LOW)\b\s+(\S+):(\d+)\s*(.*)", re.I)
+    checks = list(verification or [])
+    check_pattern = re.compile(
+        r"^goose review: check '([^']+)' (completed|failed):\s*(.*)$"
+    )
+    summary_pattern = re.compile(
+        r"^goose review: orchestrator emitted (\d+) finding\(s\) from (\d+) "
+        r"check\(s\) \(main: (ran|skipped), (\d+) finding\(s\)(?:;[^)]*)?\)$"
+    )
+    summary: re.Match[str] | None = None
     for line in raw:
-        match = pattern.search(line)
-        if not match:
+        check = check_pattern.match(line)
+        if check:
+            checks.append({
+                "name": check.group(1),
+                "state": "verified" if check.group(2) == "completed" else "unverified",
+                "evidence": check.group(3),
+                "source": "engine",
+            })
             continue
-        severity = match.group(1).lower()
+        matched_summary = summary_pattern.match(line)
+        if matched_summary:
+            summary = matched_summary
+            checks.append({
+                "name": "main",
+                "state": "verified" if matched_summary.group(3) == "ran" else "skipped",
+                "evidence": f"{matched_summary.group(4)} finding(s)",
+                "source": "engine",
+            })
+            continue
+        try:
+            item = json.loads(line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(item, dict) or not {
+            "severity", "path", "line_start", "summary", "check"
+        }.issubset(item):
+            continue
+        severity = str(item["severity"]).lower()
+        if severity not in SEVERITIES:
+            severity = "medium"
         counts[severity] += 1
-        findings.append({"severity": severity, "file": match.group(2), "line": int(match.group(3)), "title": match.group(4).strip()})
+        findings.append({
+            "severity": severity,
+            "file": str(item["path"]),
+            "line": int(item["line_start"]),
+            "end_line": int(item.get("line_end", item["line_start"])),
+            "title": str(item["summary"]),
+            "check": str(item["check"]),
+            "evidence": line,
+        })
+
+    context = {
+        "verification": checks,
+        "provenance": base,
+        "overlap": dict(overlap or {}),
+        "live": dict(live or {}),
+        "raw_evidence": raw,
+    }
+    if exit_code not in (0, None, 65):
+        return ReviewResult(1, "failed", **context)
+    if exit_code == 65 or any("INCOMPLETE" in line.upper() for line in raw) or any(
+        item.get("state") == "unverified" and item.get("source", "engine") == "engine"
+        for item in checks
+    ):
+        return ReviewResult(1, "incomplete", counts=counts, findings=findings, **context)
+    if summary is None or int(summary.group(1)) != len(findings):
+        return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
     return ReviewResult(1, "findings" if findings else "complete", counts=counts,
-                        findings=findings, provenance=base, raw_evidence=raw)
+                        findings=findings, **context)

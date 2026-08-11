@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "1.0"
-last_updated: 2026-08-09
+version: "1.1"
+last_updated: 2026-08-11
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -58,6 +58,11 @@ Do not use this for the launcher that starts the container
    app through `run_test()`. The static greps in
    `tests/dashboard-contract.sh` are for proving *absence* — a power the
    dashboard must not have. Presence is proven by pressing the key.
+7. **Completed reviews cross the `ReviewResult` contract.** The current Goose
+   adapter accepts its JSONL findings and orchestrator progress records. An
+   exit-zero transcript without that structure is `unparsable`, never clean.
+   Keep the decision card concise and keep bounded raw evidence reachable with
+   `e`; backend prose does not belong in Textual rendering code.
 
 ## Textual Patterns
 
@@ -121,6 +126,14 @@ background colour.
   opt-in to Hive's sweep. `m` squashes now and is gated on GitHub's `push`
   permission, read per repository. `L` leaves a review and merges nothing.
   A review that can only be given by also queueing or merging is not a review.
+- **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
+  the queue's existing handlers, so permissions, live-head checks, exact
+  commands, and typed-number confirmation remain the authority boundary.
+- **Show evidence state, not a verdict invented from prose.** The card carries
+  exact severity counts, cited file/line findings, engine and live-CI
+  verification, duplicate/overlap context, mergeability, head, and
+  backend/model provenance. Incomplete, failed, and unparsable results direct
+  the reviewer to raw evidence and never display a clean conclusion.
 - **Never bypass branch protection.** No `--admin`, no `--delete-branch`, no
   push.
 
@@ -146,6 +159,7 @@ background colour.
 
 ```bash
 bash tests/dashboard-contract.sh     # static contract + the Textual pilot
+python3 tests/review_result_contract.py
 bash tests/image-contract.sh
 pre-commit run --all-files
 ```
