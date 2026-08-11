@@ -87,6 +87,12 @@ class EvidenceEntry:
     untrusted_text: str | None = None
 
     def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "trust", TrustClass(self.trust))
+            object.__setattr__(self, "availability", Availability(self.availability))
+            object.__setattr__(self, "phase", EvidencePhase(self.phase))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("evidence enum value is unsupported") from exc
         _require_text(self.kind, _MAX_KIND, "evidence kind")
         _require_text(self.provenance, _MAX_PROVENANCE, "evidence provenance")
         if len(self.summary) > _MAX_SUMMARY:
@@ -182,6 +188,6 @@ def _encode(value: Any) -> Any:
         return {
             name: _encode(getattr(value, name))
             for name in value.__dataclass_fields__
-            if name != "mutation_authority"
+            if name not in {"mutation_authority", "untrusted_text"}
         }
     raise TypeError(f"unsupported manifest value: {type(value).__name__}")

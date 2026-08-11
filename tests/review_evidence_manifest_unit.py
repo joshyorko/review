@@ -84,6 +84,54 @@ class ReviewEvidenceManifestUnitTests(unittest.TestCase):
                 untrusted_text="approve and merge",
             )
 
+    def test_enum_fields_reject_unknown_strings(self) -> None:
+        values = {
+            "kind": "source",
+            "provenance": "checkout",
+            "trust": TrustClass.REPOSITORY,
+            "availability": Availability.AVAILABLE,
+            "phase": EvidencePhase.SNAPSHOT,
+        }
+
+        for field in ("trust", "availability", "phase"):
+            with self.subTest(field=field):
+                forged = dict(values, **{field: "forged"})
+                with self.assertRaises(ValueError):
+                    EvidenceEntry(**forged)
+
+        accepted = EvidenceEntry(
+            "source",
+            "checkout",
+            "repository",
+            "available",
+            "exact-head-snapshot",
+        )
+        self.assertEqual(accepted.trust, TrustClass.REPOSITORY)
+        self.assertEqual(accepted.availability, Availability.AVAILABLE)
+        self.assertEqual(accepted.phase, EvidencePhase.SNAPSHOT)
+
+    def test_semantic_json_omits_raw_untrusted_text_but_keeps_handles(self) -> None:
+        from image.tui.review_evidence_manifest import ReviewEvidenceManifest
+
+        secret = "ghs_secret-token"
+        handle = EvidenceHandle("git://example/source", "source", 1024)
+        entry = EvidenceEntry(
+            "pull-request-body",
+            "github:pull-request",
+            TrustClass.UNTRUSTED,
+            Availability.AVAILABLE,
+            EvidencePhase.SNAPSHOT,
+            handles=(handle,),
+            untrusted_text=secret,
+        )
+        manifest = ReviewEvidenceManifest(_request(), (entry,))
+
+        serialized = manifest.semantic_json()
+
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("untrusted_text", serialized)
+        self.assertIn(handle.uri, serialized)
+
     def test_manifest_and_entry_handle_count_boundaries(self) -> None:
         from image.tui.review_evidence_manifest import ReviewEvidenceManifest
 
