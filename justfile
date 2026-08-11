@@ -172,6 +172,9 @@ preflight_agent() {
       return 1
     }
   fi
+  preflight_github
+}
+preflight_github() {
   github_auth_ready || {
     echo "ERROR: GitHub CLI is not authenticated against github.com." >&2
     echo "  Run: ${GITHUB_LOGIN_COMMAND}" >&2
@@ -928,7 +931,11 @@ review-queue *queue_args:
 
     resolve_review_backend
     require_goose_backend "$TOOL"
-    preflight_agent
+    if [[ "$REVIEW_BACKEND" == codex ]]; then
+      preflight_github
+    else
+      preflight_agent
+    fi
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
       echo "  Install Podman, then re-run review-queue." >&2
@@ -948,7 +955,7 @@ review-queue *queue_args:
     if [[ $# -gt 0 && "$1" != -* ]]; then profile="$1"; shift; fi
     if [[ $# -gt 0 && "$1" != -* ]]; then effort="$1"; shift; fi
     resolve_model_profile "$profile" "$effort"
-    resolve_goose_selection
+    [[ "$REVIEW_BACKEND" == codex ]] || resolve_goose_selection
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
@@ -961,10 +968,12 @@ review-queue *queue_args:
       # Podman does not pass COLORTERM through on its own.
       --env COLORTERM
     )
-    [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
-    [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
-    [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
-    [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
+    if [[ "$REVIEW_BACKEND" != codex ]]; then
+      [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
+      [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
+      [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
+      [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
+    fi
     if [[ -n "$REVIEW_BACKEND" ]]; then
       CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_BACKEND=${REVIEW_BACKEND}")
       echo "✓ review backend preselected: ${REVIEW_BACKEND}; Start still requires confirmation."
@@ -972,13 +981,15 @@ review-queue *queue_args:
     # The Copilot credential is what powers 'r' (the Goose review of a pull
     # request); the dashboard itself only reads GitHub, so a missing credential
     # is a warning, not a stop.
-    resolve_copilot_token
-    if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-      export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
-      CONTAINER_ARGS+=(--env GITHUB_COPILOT_TOKEN)
-      echo "✓ Copilot credential passed to the agent."
-    else
-      report_missing_copilot_credential
+    if [[ "$REVIEW_BACKEND" != codex ]]; then
+      resolve_copilot_token
+      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
+        export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
+        CONTAINER_ARGS+=(--env GITHUB_COPILOT_TOKEN)
+        echo "✓ Copilot credential passed to the agent."
+      else
+        report_missing_copilot_credential
+      fi
     fi
     # Codex subscription OAuth is staged into one private file, not mounted
     # from the host login or configuration directory. The official CLI may

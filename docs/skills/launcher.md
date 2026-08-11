@@ -134,8 +134,9 @@ Goose, or image build skill documents.
    copy at `/home/dev/.codex/auth.json`, and remove it when the foreground run
    exits. The official CLI may refresh the staged copy; it must never receive
    the host Codex configuration directory or mutate the host login cache.
-   Missing auth remains a visible `NEEDS SIGN-IN` state and never selects a
-   fallback harness.
+   An explicitly selected Codex review requires no host Goose installation,
+   configuration, or Copilot credential. Missing auth remains a visible
+   `NEEDS SIGN-IN` state and never selects a fallback harness.
 6. When renaming launcher-facing product identifiers, do a tracked-file sweep
    for both active names and legacy spellings in code, comments, workflow
    assertions, fixture image names, and environment variables. Keep only the

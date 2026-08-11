@@ -135,7 +135,8 @@ an operations task outside this repository automation.
 - Goose configured for GitHub Copilot, or `GITHUB_COPILOT_TOKEN`, for
   contributor work and Goose reviews.
 - `codex login` with file credential storage completed on the host for Codex
-  subscription reviews. The image already contains the pinned official CLI.
+  subscription reviews. The image already contains the pinned official CLI;
+  explicitly selected Codex reviews do not require host Goose or Copilot.
 - For contributor Git operations, a separate GitHub token via
   `REVIEW_GH_TOKEN`.
 

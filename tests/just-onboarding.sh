@@ -489,9 +489,16 @@ assert_contains "starting the maintainer review dashboard (no Hive)" "$OUT"
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
 reset_logs
+mv "$home/.config/goose/config.yaml" "$home/.config/goose/config.yaml.saved"
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   BLUEFIN_REVIEW_BACKEND=codex
+mv "$home/.config/goose/config.yaml.saved" "$home/.config/goose/config.yaml"
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--env BLUEFIN_REVIEW_BACKEND=codex" "$runner_log"
+assert_file_not_contains "GOOSE_PROVIDER" "$runner_log"
+assert_file_not_contains "GITHUB_COPILOT_TOKEN" "$runner_log"
+assert_not_contains "Goose has no usable provider configuration" "$OUT"
+assert_not_contains "Copilot credential" "$OUT"
 
 begin "review-queue: an invalid review backend starts nothing"
 reset_logs
@@ -972,7 +979,7 @@ reset_logs
 run_recipe review-doctor GH_READY=1
 assert_contains "Agent backend (Goose)" "$OUT"
 assert_not_contains "claude" "$OUT"
-assert_not_contains "codex" "$OUT"
+assert_not_contains "Agent backend (Codex)" "$OUT"
 
 assert_file_not_contains "run --rm" "$runner_log"
 
