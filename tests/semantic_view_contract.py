@@ -182,6 +182,22 @@ class SemanticViewContractTests(unittest.TestCase):
             ),
         )
 
+    def test_queue_row_requires_full_equal_heads_for_current_freshness(self):
+        reviewed_full = "0123456789ab" + "c" * 28
+        current_full = "0123456789ab" + "d" * 28
+        row = build_queue_row({
+            "repository": "projectbluefin/review",
+            "number": 196,
+            "title": "semantic foundation",
+            "author": "raptor",
+            "head_sha": current_full,
+            "reviewed_head_sha": reviewed_full[:12],
+            "freshness": "current",
+        })
+        self.assertEqual(row.exact_head, current_full)
+        self.assertIsNone(row.reviewed_head)
+        self.assertNotEqual(row.freshness.value, "current")
+
     def test_decision_card_binds_codex_provenance_full_head(self):
         result = ReviewResult.from_dict({
             "version": 1,
@@ -299,22 +315,24 @@ class SemanticViewContractTests(unittest.TestCase):
     def test_decision_card_fails_closed_for_disagreeing_goose_live_head(self):
         reviewed_full = "0123456789ab" + "c" * 28
         current_full = "0123456789ab" + "d" * 28
-        result = ReviewResult.from_dict({
-            "version": 1,
-            "state": "complete",
-            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-            "findings": [],
-            "provenance": {
-                "backend": "goose",
-                "model": "gpt-5.6-luna",
-                "repository": "projectbluefin/review",
-                "pull_request": 196,
-            },
-            "live": {"head": reviewed_full[:12]},
-        })
-        card = build_decision_card(result, exact_head=current_full)
-        self.assertEqual(card.state, DecisionState.STALE)
-        self.assertIsNone(card.exact_head)
+        for live_head in (reviewed_full[:12], reviewed_full):
+            with self.subTest(live_head=live_head):
+                result = ReviewResult.from_dict({
+                    "version": 1,
+                    "state": "complete",
+                    "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+                    "findings": [],
+                    "provenance": {
+                        "backend": "goose",
+                        "model": "gpt-5.6-luna",
+                        "repository": "projectbluefin/review",
+                        "pull_request": 196,
+                    },
+                    "live": {"head": live_head},
+                })
+                card = build_decision_card(result, exact_head=current_full)
+                self.assertEqual(card.state, DecisionState.STALE)
+                self.assertIsNone(card.exact_head)
 
     def test_decision_card_fails_closed_when_head_sources_disagree(self):
         result = ReviewResult.from_dict({

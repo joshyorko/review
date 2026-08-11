@@ -342,8 +342,6 @@ def _head_freshness(
         return _STALE_FRESHNESS
     if reviewed_head and current_head and _heads_agree(reviewed_head, current_head):
         return _CURRENT_FRESHNESS
-    if _key(declared) in {"current", "fresh"}:
-        return _CURRENT_FRESHNESS
     if _key(declared) == "stale":
         return _STALE_FRESHNESS
     return _UNKNOWN_FRESHNESS
