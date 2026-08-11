@@ -111,10 +111,10 @@ class ReviewResult:
             state = "unparsable"
         if state == "complete" and findings:
             state = "findings"
-        verification = data.get("verification") or []
-        provenance = data.get("provenance") or {}
-        overlap = data.get("overlap") or {}
-        live = data.get("live") or {}
+        verification = data["verification"] if "verification" in data else []
+        provenance = data["provenance"] if "provenance" in data else {}
+        overlap = data["overlap"] if "overlap" in data else {}
+        live = data["live"] if "live" in data else {}
         if (
             not isinstance(verification, list)
             or not isinstance(provenance, dict)
@@ -130,6 +130,8 @@ class ReviewResult:
             for item in verification
         ):
             return cls(1, "unparsable")
+        if state == "complete" and any(item["state"] == "unverified" for item in verification):
+            state = "incomplete"
         if provenance and (
             not _text(provenance.get("backend")) or not _text(provenance.get("model"))
         ):
@@ -179,6 +181,8 @@ class ReviewResult:
 
 
 def parse_review_result(payload: str, raw_evidence: str | list[str] | None = None) -> ReviewResult:
+    if not isinstance(payload, str) or len(payload) > MAX_RAW_CHARS:
+        return _unparsable(raw_evidence, payload)
     try:
         value = json.loads(payload)
         if not isinstance(value, dict):
@@ -187,7 +191,7 @@ def parse_review_result(payload: str, raw_evidence: str | list[str] | None = Non
         if result.state == "unparsable":
             return _unparsable(raw_evidence, payload)
         return result
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
         return _unparsable(raw_evidence, payload)
 
 
@@ -219,9 +223,19 @@ def adapt_current_engine(
     )
     summary: re.Match[str] | None = None
     malformed = False
+    parsed_main_count = 0
+    reported_main_count: int | None = None
+    check_count_pattern = re.compile(r"^(\d+) finding\(s\)$")
     for line in raw:
         check = check_pattern.match(line)
         if check:
+            if check.group(1) == "main":
+                reported = check_count_pattern.match(check.group(3))
+                if reported:
+                    try:
+                        reported_main_count = int(reported.group(1))
+                    except (TypeError, ValueError, OverflowError):
+                        malformed = True
             checks.append({
                 "name": check.group(1),
                 "state": "verified" if check.group(2) == "completed" else "unverified",
@@ -281,6 +295,8 @@ def adapt_current_engine(
             "check": str(item["check"]),
             "evidence": line,
         })
+        if item["check"] == "main":
+            parsed_main_count += 1
 
     context = {
         "verification": checks,
@@ -307,7 +323,12 @@ def adapt_current_engine(
         main_count = int(summary.group(4))
     except (TypeError, ValueError, OverflowError):
         return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
-    if summary_count != len(findings) or main_count > summary_count:
+    if (
+        summary_count != len(findings)
+        or main_count > summary_count
+        or main_count != parsed_main_count
+        or (reported_main_count is not None and reported_main_count != main_count)
+    ):
         return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
     return ReviewResult(1, "findings" if findings else "complete", counts=counts,
                         findings=findings, **context)

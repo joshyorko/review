@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "image" / "tui"))
 
-from review_result import ReviewResult, adapt_current_engine, parse_review_result
+from review_result import MAX_RAW_CHARS, ReviewResult, adapt_current_engine, parse_review_result
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -124,6 +124,40 @@ class ReviewResultContractTests(unittest.TestCase):
         output = "goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 99 finding(s))"
         result = adapt_current_engine(output, 0)
         self.assertEqual(result.state, "unparsable")
+
+    def test_present_falsey_optional_fields_are_not_defaults(self):
+        payload = {
+            "version": 1,
+            "state": "complete",
+            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "findings": [],
+        }
+        for field, value in (("verification", {}), ("provenance", []), ("overlap", [])):
+            self.assertEqual(ReviewResult.from_dict({**payload, field: value}).state, "unparsable")
+
+    def test_complete_with_unverified_check_is_not_clean(self):
+        result = ReviewResult.from_dict({
+            "version": 1,
+            "state": "complete",
+            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "findings": [],
+            "verification": [{"name": "unit", "state": "unverified", "evidence": "failed"}],
+        })
+        self.assertEqual(result.state, "incomplete")
+        self.assertFalse(result.is_clean)
+
+    def test_oversized_and_deep_structured_payloads_are_unparsable(self):
+        oversized = json.dumps({"version": 1, "state": "complete", "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}, "findings": [], "raw_evidence": ["x" * MAX_RAW_CHARS]})
+        self.assertEqual(parse_review_result(oversized).state, "unparsable")
+        deep = "[" * 2000 + "]" * 2000
+        self.assertEqual(parse_review_result(deep).state, "unparsable")
+
+    def test_main_count_matches_parsed_main_findings_and_progress(self):
+        finding = '{"severity":"medium","path":"x.py","line_start":4,"summary":"main finding","check":"main"}'
+        contradictory = "\n".join([finding, "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 0 finding(s))"])
+        self.assertEqual(adapt_current_engine(contradictory, 0).state, "unparsable")
+        progress_contradiction = "\n".join(["goose review: check 'main' completed: 0 finding(s)", finding, "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))"])
+        self.assertEqual(adapt_current_engine(progress_contradiction, 0).state, "unparsable")
 
     def test_incomplete_and_unparsable_never_become_clean(self):
         for state in ("incomplete", "unparsable", "failed"):
