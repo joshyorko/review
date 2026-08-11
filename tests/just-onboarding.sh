@@ -124,6 +124,13 @@ cat >"$fake_bin/goose" <<'EOF'
 [[ "${GOOSE_INSTALLED:-1}" == "1" ]] || exit 127
 exit 0
 EOF
+cat >"$fake_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+[[ "${CODEX_INSTALLED:-1}" == "1" ]] || exit 127
+[[ "${CODEX_AUTH_READY:-1}" == "1" ]] || exit 1
+[[ "${1:-}" == "--version" ]] && exit 0
+exit 0
+EOF
 cat >"$fake_bin/gum" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -249,6 +256,9 @@ AGENT_BACKEND=goose
 EOF
 write_goose_config
 
+mkdir -p "$home/.codex"
+printf '%s\n' '{"tokens":{"id_token":"fixture"}}' >"$home/.codex/auth.json"
+
 reset_logs() {
   : >"$gum_log"
   : >"$runner_log"
@@ -343,6 +353,15 @@ assert_nonzero_status "$STATUS" "an unsupported provider must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "GOOSE_PROVIDER=openai is not supported" "$OUT"
 assert_contains "GOOSE_PROVIDER=github_copilot" "$OUT"
+
+begin "Hive-selected Codex backend is passed with a read-only auth handoff"
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=codex/' "$home/.config/hive/contributor.env"
+run_recipe review-container GH_READY=1 CODEX_HOME="$home/.codex"
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
+assert_file_contains "--env AGENT_BACKEND=codex" "$runner_log"
+assert_file_contains "$home/.codex:/home/dev/.codex:ro" "$runner_log"
+assert_file_not_contains "$home:/home/dev" "$runner_log"
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=goose/' "$home/.config/hive/contributor.env"
 
 # ══ 2. TOOL handling: Goose only ══════════════════════════════════════════
 begin "TOOL=claude is rejected with a Goose-only error"
