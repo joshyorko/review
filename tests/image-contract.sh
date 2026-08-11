@@ -544,8 +544,8 @@ require .github/workflows/publish-compat-image.yml \
   'secrets: |' \
   "github_token=\${{ secrets.GITHUB_TOKEN }}" \
   'Resolve official Goose canary asset identities' \
-  "GOOSE_X86_64_SHA256=\${{ steps.goose.outputs.x86_64_sha256 }}" \
-  "GOOSE_AARCH64_SHA256=\${{ steps.goose.outputs.aarch64_sha256 }}" \
+  "GOOSE_X86_64_SHA256=\${{ needs.resolve-goose.outputs.x86_64_sha256 }}" \
+  "GOOSE_AARCH64_SHA256=\${{ needs.resolve-goose.outputs.aarch64_sha256 }}" \
   'org.opencontainers.image.title=Bluefin review contributor' \
   'org.opencontainers.image.description=Foreground contributor runtime for projectbluefin/review.' \
   'org.opencontainers.image.base.name=${{ steps.metadata.outputs.base_name }}' \
@@ -570,13 +570,17 @@ require .github/workflows/publish-compat-image.yml \
   'arm64-runtime:' \
   'needs: [resolve-goose]' \
   'runs-on: ubuntu-24.04-arm' \
+  'Prove native arm64 host and engine' \
   'host_arch="$(uname -m)"' \
   'engine_arch="$(docker info --format' \
+  'Build native arm64 smoke image' \
   'platforms: linux/arm64' \
+  'push: true' \
   'GOOSE_X86_64_SHA256=${{ needs.resolve-goose.outputs.x86_64_sha256 }}' \
   'GOOSE_AARCH64_SHA256=${{ needs.resolve-goose.outputs.aarch64_sha256 }}' \
   'docker image inspect "$DERIVED_IMAGE"' \
   'docker run --rm --entrypoint /usr/bin/uname "$DERIVED_IMAGE" -m' \
+  'cat "$RUNNER_TEMP/review-image-audit-arm64.md" >> "$GITHUB_STEP_SUMMARY"' \
   'bash tests/image-audit.sh --verify-base-evidence' \
   'bash tests/image-audit.sh --derived "$DERIVED_IMAGE"' \
   '--report "$RUNNER_TEMP/review-image-audit-arm64.md"' \
