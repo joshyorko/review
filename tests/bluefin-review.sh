@@ -357,6 +357,15 @@ while (($#)); do
 done
 if [[ -n "$scope" ]]; then
   find "$scope" -type f | sed "s|^$scope/||" | sort >"${SCOPE_LISTING:?}"
+  while IFS= read -r check; do
+    filename="${check##*/}"
+    expected="${filename%.md}"
+    actual="$(sed -n 's/^name: //p' "$scope/.agents/checks/$check" | head -n 1)"
+    [[ "$actual" == "$expected" ]] || {
+      printf "name '%s' must match filename '%s'\n" "$actual" "$expected" >&2
+      exit 1
+    }
+  done < <(find "$scope/.agents/checks" -type f -name '*.md' -printf '%P\n')
   cat "$scope/.agents/checks/cluster-resolution.md" >"${SCOPE_CLUSTER:?}" 2>/dev/null || : >"${SCOPE_CLUSTER:?}"
 fi
 EOF
