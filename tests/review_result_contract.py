@@ -49,6 +49,39 @@ class ReviewResultContractTests(unittest.TestCase):
         })
         self.assertEqual(inconsistent.state, "unparsable")
 
+    def test_malformed_nested_evidence_is_unparsable(self):
+        base = {
+            "version": 1,
+            "state": "findings",
+            "counts": {"critical": 0, "high": 1, "medium": 0, "low": 0},
+            "findings": [{"severity": "high", "title": "x", "file": "x.py", "line": 7}],
+            "verification": [{"name": "unit", "state": "verified", "evidence": "pytest"}],
+            "provenance": {"backend": "goose", "model": "m"},
+            "overlap": {"duplicates": [], "shared_files": []},
+        }
+        for finding in (
+            {"severity": "high", "title": "x", "line": 7},
+            {"severity": "high", "title": "x", "file": "x.py", "line": "7"},
+        ):
+            payload = {**base, "findings": [finding]}
+            self.assertEqual(ReviewResult.from_dict(payload).state, "unparsable")
+        invalid_verification = {**base, "verification": [{"name": "unit", "state": "maybe", "evidence": "x"}]}
+        self.assertEqual(ReviewResult.from_dict(invalid_verification).state, "unparsable")
+        incomplete_provenance = {**base, "provenance": {"backend": "goose"}}
+        self.assertEqual(ReviewResult.from_dict(incomplete_provenance).state, "unparsable")
+        incomplete_overlap = {**base, "overlap": {"duplicates": []}}
+        self.assertEqual(ReviewResult.from_dict(incomplete_overlap).state, "unparsable")
+
+    def test_malformed_jsonl_finding_is_unparsable_with_raw_evidence(self):
+        output = "\n".join([
+            "goose review: check 'unit' completed: pytest",
+            '{"severity":"high","path":"x.py","line_start":"nope","summary":"x","check":"unit"}',
+            "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+        ])
+        result = adapt_current_engine(output, 0, {"backend": "goose", "model": "m"})
+        self.assertEqual(result.state, "unparsable")
+        self.assertEqual(result.raw_evidence, output.splitlines())
+
     def test_incomplete_and_unparsable_never_become_clean(self):
         for state in ("incomplete", "unparsable", "failed"):
             result = ReviewResult.from_dict({"version": 1, "state": state})

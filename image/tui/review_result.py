@@ -11,6 +11,7 @@ SEVERITIES = ("critical", "high", "medium", "low")
 STATES = ("complete", "findings", "incomplete", "failed", "unparsable")
 MAX_RAW_LINES = 400
 MAX_RAW_CHARS = 120_000
+VERIFICATION_STATES = ("verified", "unverified", "skipped")
 
 
 def _raw(value: str | list[str] | None) -> list[str]:
@@ -19,6 +20,14 @@ def _raw(value: str | list[str] | None) -> list[str]:
     lines = value if isinstance(value, list) else value.splitlines()
     text = "\n".join(str(line) for line in lines)
     return text[:MAX_RAW_CHARS].splitlines()[:MAX_RAW_LINES]
+
+
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 @dataclass(frozen=True)
@@ -36,10 +45,12 @@ class ReviewResult:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewResult":
         try:
-            version = int(data.get("version", 0))
-        except (TypeError, ValueError):
+            version = data["version"]
+        except (KeyError, TypeError):
             return cls(1, "unparsable")
-        state = str(data.get("state", "unparsable"))
+        state = data.get("state")
+        if not _integer(version) or not isinstance(state, str):
+            return cls(1, "unparsable")
         if version != 1 or state not in STATES:
             state = "unparsable"
         raw_counts = data.get("counts") or {}
@@ -47,16 +58,25 @@ class ReviewResult:
         if not isinstance(raw_counts, dict) or not isinstance(raw_findings, list):
             return cls(1, "unparsable")
         try:
-            counts = {
-                severity: max(0, int(raw_counts.get(severity, 0)))
-                for severity in SEVERITIES
-            }
+            counts = {severity: raw_counts.get(severity, 0) for severity in SEVERITIES}
         except (TypeError, ValueError):
+            return cls(1, "unparsable")
+        if any(not _integer(value) or value < 0 for value in counts.values()):
             return cls(1, "unparsable")
         findings = list(raw_findings)
         observed = {severity: 0 for severity in SEVERITIES}
         for finding in findings:
-            if not isinstance(finding, dict) or finding.get("severity") not in SEVERITIES:
+            if (
+                not isinstance(finding, dict)
+                or finding.get("severity") not in SEVERITIES
+                or not _text(finding.get("file"))
+                or not _integer(finding.get("line"))
+                or finding["line"] < 1
+                or not _text(finding.get("title"))
+                or ("end_line" in finding and (
+                    not _integer(finding["end_line"]) or finding["end_line"] < finding["line"]
+                ))
+            ):
                 return cls(1, "unparsable")
             observed[finding["severity"]] += 1
         if counts != observed:
@@ -72,6 +92,25 @@ class ReviewResult:
             or not isinstance(provenance, dict)
             or not isinstance(overlap, dict)
             or not isinstance(live, dict)
+        ):
+            return cls(1, "unparsable")
+        if any(
+            not isinstance(item, dict)
+            or not _text(item.get("name"))
+            or item.get("state") not in VERIFICATION_STATES
+            or not _text(item.get("evidence"))
+            for item in verification
+        ):
+            return cls(1, "unparsable")
+        if provenance and (
+            not _text(provenance.get("backend")) or not _text(provenance.get("model"))
+        ):
+            return cls(1, "unparsable")
+        if overlap and (
+            not isinstance(overlap.get("duplicates"), list)
+            or not isinstance(overlap.get("shared_files"), list)
+            or any(not _integer(item) for item in overlap["duplicates"])
+            or any(not _text(item) for item in overlap["shared_files"])
         ):
             return cls(1, "unparsable")
         return cls(
@@ -144,6 +183,7 @@ def adapt_current_engine(
         r"check\(s\) \(main: (ran|skipped), (\d+) finding\(s\)(?:;[^)]*)?\)$"
     )
     summary: re.Match[str] | None = None
+    malformed = False
     for line in raw:
         check = check_pattern.match(line)
         if check:
@@ -168,19 +208,40 @@ def adapt_current_engine(
             item = json.loads(line)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
-        if not isinstance(item, dict) or not {
-            "severity", "path", "line_start", "summary", "check"
-        }.issubset(item):
+        if not isinstance(item, dict):
+            continue
+        finding_keys = {"severity", "path", "line_start", "summary", "check"}
+        if not finding_keys.intersection(item):
+            continue
+        if not finding_keys.issubset(item):
+            malformed = True
             continue
         severity = str(item["severity"]).lower()
         if severity not in SEVERITIES:
-            severity = "medium"
+            malformed = True
+            continue
+        try:
+            start_line = item["line_start"]
+            end_line = item.get("line_end", start_line)
+            if (
+                not _text(item["path"])
+                or not _text(item["summary"])
+                or not _text(item["check"])
+                or not _integer(start_line)
+                or not _integer(end_line)
+                or start_line < 1
+                or end_line < start_line
+            ):
+                raise ValueError("invalid finding line evidence")
+        except (TypeError, ValueError):
+            malformed = True
+            continue
         counts[severity] += 1
         findings.append({
             "severity": severity,
             "file": str(item["path"]),
-            "line": int(item["line_start"]),
-            "end_line": int(item.get("line_end", item["line_start"])),
+            "line": start_line,
+            "end_line": end_line,
             "title": str(item["summary"]),
             "check": str(item["check"]),
             "evidence": line,
@@ -195,6 +256,8 @@ def adapt_current_engine(
     }
     if exit_code not in (0, None, 65):
         return ReviewResult(1, "failed", **context)
+    if malformed:
+        return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
     if exit_code == 65 or any("INCOMPLETE" in line.upper() for line in raw) or any(
         item.get("state") == "unverified" and item.get("source", "engine") == "engine"
         for item in checks
