@@ -13,6 +13,17 @@ _SHA = re.compile(r"^[0-9a-f]{40}$")
 _MAX_SUMMARY = 4096
 _MAX_TEXT = 4096
 _MAX_HANDLE = 2048
+_MAX_IDENTITY = 256
+_MAX_GENERATED_AT = 128
+_MAX_KIND = 256
+_MAX_PROVENANCE = 256
+_MAX_MANIFEST_ENTRIES = 128
+_MAX_ENTRY_HANDLES = 32
+
+
+def _require_text(value: str, limit: int, label: str) -> None:
+    if not value or len(value) > limit:
+        raise ValueError(f"{label} is empty or too long")
 
 
 class TrustClass(str, Enum):
@@ -41,8 +52,10 @@ class ReviewScope:
     installation: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.actor or not self.tenant:
-            raise ValueError("actor and tenant are required")
+        _require_text(self.actor, _MAX_IDENTITY, "actor")
+        _require_text(self.tenant, _MAX_IDENTITY, "tenant")
+        if self.installation is not None:
+            _require_text(self.installation, _MAX_IDENTITY, "installation")
 
 
 @dataclass(frozen=True)
@@ -74,10 +87,12 @@ class EvidenceEntry:
     untrusted_text: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.kind or not self.provenance:
-            raise ValueError("evidence kind and provenance are required")
+        _require_text(self.kind, _MAX_KIND, "evidence kind")
+        _require_text(self.provenance, _MAX_PROVENANCE, "evidence provenance")
         if len(self.summary) > _MAX_SUMMARY:
             raise ValueError("evidence summary exceeds the bounded limit")
+        if len(self.handles) > _MAX_ENTRY_HANDLES:
+            raise ValueError("evidence handle count exceeds the bounded limit")
         if self.untrusted_text is not None and len(self.untrusted_text) > _MAX_TEXT:
             raise ValueError("untrusted text exceeds the bounded limit")
         if self.untrusted_text is not None and self.trust is not TrustClass.UNTRUSTED:
@@ -100,14 +115,17 @@ class ReviewRequest:
     version: int = 1
 
     def __post_init__(self) -> None:
-        if not self.owner or not self.repository:
-            raise ValueError("owner and repository are required")
+        _require_text(self.owner, _MAX_IDENTITY, "owner")
+        _require_text(self.repository, _MAX_IDENTITY, "repository")
         if self.pull_request_number < 1:
             raise ValueError("pull request number must be positive")
         if not _SHA.fullmatch(self.base_sha) or not _SHA.fullmatch(self.head_sha):
             raise ValueError("base_sha and head_sha must be full lowercase SHA-1 values")
-        if not self.actor or not self.tenant or not self.generated_at:
-            raise ValueError("actor, tenant, and generated_at are required")
+        _require_text(self.actor, _MAX_IDENTITY, "actor")
+        _require_text(self.tenant, _MAX_IDENTITY, "tenant")
+        _require_text(self.generated_at, _MAX_GENERATED_AT, "generated_at")
+        if self.installation is not None:
+            _require_text(self.installation, _MAX_IDENTITY, "installation")
         if self.version != 1:
             raise ValueError("unsupported review request version")
         if len(self.focus) > _MAX_TEXT or len(self.steering) > _MAX_TEXT:
@@ -133,6 +151,8 @@ class ReviewEvidenceManifest:
     def __post_init__(self) -> None:
         if self.version != 1:
             raise ValueError("unsupported evidence manifest version")
+        if len(self.entries) + (self.organization_policy is not None) > _MAX_MANIFEST_ENTRIES:
+            raise ValueError("manifest entry count exceeds the bounded limit")
         if self.organization_policy is not None and self.organization_policy.kind != "organization-policy":
             raise ValueError("organization policy must use its declared evidence kind")
 
@@ -140,9 +160,8 @@ class ReviewEvidenceManifest:
         if self.request.scope != scope:
             raise PermissionError("manifest scope does not match the requesting harness")
 
-    def deliver_to(self, harness: ManifestHarness, scope: ReviewScope | None = None) -> None:
-        if scope is not None:
-            self.require_scope(scope)
+    def deliver_to(self, harness: ManifestHarness, scope: ReviewScope) -> None:
+        self.require_scope(scope)
         harness.receive(self)
 
     def semantic_dict(self) -> dict[str, Any]:

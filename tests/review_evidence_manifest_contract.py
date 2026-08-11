@@ -101,6 +101,24 @@ class ReviewRequestContractTests(unittest.TestCase):
 
         self.assertEqual(received[0], received[1])
 
+    def test_delivery_requires_matching_scope_before_harness_call(self) -> None:
+        request = ReviewRequest("octo", "sample", 17, "0" * 40, "1" * 40, "a", "tenant-a", "i", "now")
+        manifest = ReviewEvidenceManifest(request)
+        received: list[ReviewEvidenceManifest] = []
+
+        class FakeHarness:
+            def receive(self, value: ReviewEvidenceManifest) -> None:
+                received.append(value)
+
+        harness = FakeHarness()
+        with self.assertRaises(TypeError):
+            manifest.deliver_to(harness)  # type: ignore[call-arg]
+        with self.assertRaises(PermissionError):
+            manifest.deliver_to(harness, ReviewScope("a", "tenant-b", "i"))
+        manifest.deliver_to(harness, request.scope)
+
+        self.assertEqual(received, [manifest])
+
     def test_cross_tenant_delivery_is_rejected(self) -> None:
         request = ReviewRequest("octo", "sample", 17, "0" * 40, "1" * 40, "a", "tenant-a", generated_at="now")
         manifest = ReviewEvidenceManifest(request)
