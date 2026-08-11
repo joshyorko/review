@@ -150,6 +150,8 @@ fi
 
 "${venv}/bin/python" -m py_compile "$tui"
 "${venv}/bin/python" "$repo_root/tests/review_result_contract.py"
+"${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_contract.py"
+"${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_unit.py"
 "${venv}/bin/python" "$repo_root/tests/dashboard_pilot.py"
 
 printf 'dashboard contract OK\n'
