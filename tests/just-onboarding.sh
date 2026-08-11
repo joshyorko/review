@@ -338,6 +338,16 @@ assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_not_contains "is not supported" "$OUT"
 assert_not_contains "Unset TOOL" "$OUT"
 
+begin "selection: forwards Hive's selected backend to the contributor"
+backend_backup="$scratch/contributor.env.backend-selection.bak"
+cp "$home/.config/hive/contributor.env" "$backend_backup"
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=claude/' "$home/.config/hive/contributor.env"
+reset_logs
+run_recipe review-container GH_READY=1
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
+assert_file_contains "--env AGENT_BACKEND=claude" "$runner_log"
+cp "$backend_backup" "$home/.config/hive/contributor.env"
+
 begin "selection: default Copilot model is noninteractive"
 reset_logs
 run_recipe review-container GH_READY=1
