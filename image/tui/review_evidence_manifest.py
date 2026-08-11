@@ -1,0 +1,168 @@
+"""Bounded, read-only review input contracts shared by review harnesses."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+import json
+import re
+from typing import Any, Protocol
+
+
+_SHA = re.compile(r"^[0-9a-f]{40}$")
+_MAX_SUMMARY = 4096
+_MAX_TEXT = 4096
+_MAX_HANDLE = 2048
+
+
+class TrustClass(str, Enum):
+    VERIFIED = "verified"
+    REPOSITORY = "repository"
+    UNTRUSTED = "untrusted"
+
+
+class Availability(str, Enum):
+    AVAILABLE = "available"
+    INVALID = "invalid"
+    TRUNCATED = "truncated"
+    STALE = "stale"
+    OMITTED = "omitted"
+
+
+class EvidencePhase(str, Enum):
+    SNAPSHOT = "exact-head-snapshot"
+    LIVE = "live-revalidate"
+
+
+@dataclass(frozen=True)
+class ReviewScope:
+    actor: str
+    tenant: str
+    installation: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.actor or not self.tenant:
+            raise ValueError("actor and tenant are required")
+
+
+@dataclass(frozen=True)
+class EvidenceHandle:
+    """A bounded pointer to evidence; it never embeds the evidence itself."""
+
+    uri: str
+    label: str
+    max_bytes: int = 4096
+
+    def __post_init__(self) -> None:
+        if not self.uri or len(self.uri) > _MAX_HANDLE:
+            raise ValueError("evidence handle URI is empty or too long")
+        if not self.label or len(self.label) > 256:
+            raise ValueError("evidence handle label is empty or too long")
+        if not 1 <= self.max_bytes <= 1024 * 1024:
+            raise ValueError("evidence handle bound is invalid")
+
+
+@dataclass(frozen=True)
+class EvidenceEntry:
+    kind: str
+    provenance: str
+    trust: TrustClass
+    availability: Availability
+    phase: EvidencePhase
+    summary: str = ""
+    handles: tuple[EvidenceHandle, ...] = ()
+    untrusted_text: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.kind or not self.provenance:
+            raise ValueError("evidence kind and provenance are required")
+        if len(self.summary) > _MAX_SUMMARY:
+            raise ValueError("evidence summary exceeds the bounded limit")
+        if self.untrusted_text is not None and len(self.untrusted_text) > _MAX_TEXT:
+            raise ValueError("untrusted text exceeds the bounded limit")
+        if self.untrusted_text is not None and self.trust is not TrustClass.UNTRUSTED:
+            raise ValueError("text supplied by a review object must be untrusted")
+
+
+@dataclass(frozen=True)
+class ReviewRequest:
+    owner: str
+    repository: str
+    pull_request_number: int
+    base_sha: str
+    head_sha: str
+    actor: str
+    tenant: str
+    installation: str | None = None
+    generated_at: str = ""
+    focus: str = ""
+    steering: str = ""
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.owner or not self.repository:
+            raise ValueError("owner and repository are required")
+        if self.pull_request_number < 1:
+            raise ValueError("pull request number must be positive")
+        if not _SHA.fullmatch(self.base_sha) or not _SHA.fullmatch(self.head_sha):
+            raise ValueError("base_sha and head_sha must be full lowercase SHA-1 values")
+        if not self.actor or not self.tenant or not self.generated_at:
+            raise ValueError("actor, tenant, and generated_at are required")
+        if self.version != 1:
+            raise ValueError("unsupported review request version")
+        if len(self.focus) > _MAX_TEXT or len(self.steering) > _MAX_TEXT:
+            raise ValueError("maintainer steering exceeds the bounded limit")
+
+    @property
+    def scope(self) -> ReviewScope:
+        return ReviewScope(self.actor, self.tenant, self.installation)
+
+
+class ManifestHarness(Protocol):
+    def receive(self, manifest: "ReviewEvidenceManifest") -> None: ...
+
+
+@dataclass(frozen=True)
+class ReviewEvidenceManifest:
+    request: ReviewRequest
+    entries: tuple[EvidenceEntry, ...] = ()
+    organization_policy: EvidenceEntry | None = None
+    version: int = 1
+    mutation_authority: None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("unsupported evidence manifest version")
+        if self.organization_policy is not None and self.organization_policy.kind != "organization-policy":
+            raise ValueError("organization policy must use its declared evidence kind")
+
+    def require_scope(self, scope: ReviewScope) -> None:
+        if self.request.scope != scope:
+            raise PermissionError("manifest scope does not match the requesting harness")
+
+    def deliver_to(self, harness: ManifestHarness, scope: ReviewScope | None = None) -> None:
+        if scope is not None:
+            self.require_scope(scope)
+        harness.receive(self)
+
+    def semantic_dict(self) -> dict[str, Any]:
+        return _encode(self)
+
+    def semantic_json(self) -> str:
+        return json.dumps(self.semantic_dict(), sort_keys=True, separators=(",", ":"))
+
+
+def _encode(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (str, int)) or value is None:
+        return value
+    if isinstance(value, tuple):
+        return [_encode(item) for item in value]
+    if hasattr(value, "__dataclass_fields__"):
+        return {
+            name: _encode(getattr(value, name))
+            for name in value.__dataclass_fields__
+            if name != "mutation_authority"
+        }
+    raise TypeError(f"unsupported manifest value: {type(value).__name__}")
