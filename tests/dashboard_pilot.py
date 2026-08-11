@@ -1056,7 +1056,10 @@ async def main() -> int:
     text_states = {
         "success": tui.Stop("o/r", 1, "ready-for-human-merge", "green", check_state="success"),
         "failure": tui.Stop("o/r", 2, "review", "failed", check_state="failure"),
-        "pending": tui.Stop("o/r", 3, "review", "pending", check_state="pending"),
+        "pending": tui.Stop(
+            "o/r", 3, "review", "pending", check_state="unknown",
+            live={"statusCheckRollup": [{"state": "IN_PROGRESS"}]},
+        ),
         "unknown": tui.Stop("o/r", 4, "investigate", "unknown", check_state="unknown"),
         "conflict": tui.Stop("o/r", 5, "review", "conflict", mergeable_state="dirty"),
     }
@@ -1107,9 +1110,15 @@ async def main() -> int:
         )
         # Direct merge must refuse snapshot-known red and pending checks before
         # presenting a confirmation gate or attempting the GitHub mutation.
-        for known_state in ("failure", "pending"):
-            app.stops[0].check_state = known_state
-            app.stops[0].live = {"isDraft": False}
+        for known_state, live_checks in (
+            ("failure", [{"conclusion": "FAILURE"}]),
+            ("pending", [{"state": "IN_PROGRESS"}]),
+        ):
+            app.stops[0].check_state = "unknown"
+            app.stops[0].live = {
+                "isDraft": False,
+                "statusCheckRollup": live_checks,
+            }
             app.merge_rights[app.stops[0].repository] = True
             gh_log.write_text("")
             app.action_merge_now()
@@ -1122,6 +1131,9 @@ async def main() -> int:
                 "pr merge" not in gh_log.read_text(),
                 f"direct merge must not attempt known-{known_state} CI",
             )
+            if isinstance(app.screen, tui.ConfirmMutation):
+                await pilot.press("escape")
+                await pilot.pause()
         # Colour reaches the row, from the snapshot's own state fields.
         app.stops[0].mergeable_state = "dirty"
         app.refresh_rows()

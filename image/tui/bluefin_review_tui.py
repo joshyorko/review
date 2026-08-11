@@ -266,6 +266,19 @@ def ci_marker(checks: str) -> str:
     }.get(checks, "? CI UNKNOWN")
 
 
+def effective_check_state(snapshot: str, live: dict) -> str:
+    """Prefer fetched check evidence, retaining the snapshot when absent."""
+    checks = live.get("statusCheckRollup") or []
+    if not checks:
+        return snapshot or "unknown"
+    outcomes = [check.get("conclusion") or check.get("state") or "PENDING" for check in checks]
+    if any(outcome in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED") for outcome in outcomes):
+        return "failure"
+    if any(outcome not in ("SUCCESS", "NEUTRAL", "SKIPPED") for outcome in outcomes):
+        return "pending"
+    return "success"
+
+
 # The merge queue's segments, in the order a maintainer drains them, with the
 # same colours the rows use so the bar and the list agree.
 QUEUE_SEGMENTS = [
@@ -1013,10 +1026,11 @@ class ReviewDashboard(App):
         # A stop that would not merge says so on its own row, so a failure in
         # the middle of a batch survives the notification that reported it.
         failed = " ✗ DID NOT MERGE" if stop.failure else ""
+        checks = effective_check_state(stop.check_state, stop.live)
         marks = ""
         if stop.mergeable_state == "dirty":
             marks += " ⚑ CONFLICTS"
-        marks += f" {ci_marker(stop.check_state)}"
+        marks += f" {ci_marker(checks)}"
         if stop.review_state == "approved":
             marks += " ✓ approved"
         body = (
@@ -1025,7 +1039,7 @@ class ReviewDashboard(App):
             f"{marks} {escape('[' + stop.action + ']')}{failed}"
         )
         style = stop_style(
-            stop.action, stop.mergeable_state, stop.check_state, stop.review_state
+            stop.action, stop.mergeable_state, checks, stop.review_state
         )
         return f"[{style}]{body}[/{style}]" if style else body
 
@@ -1203,6 +1217,7 @@ class ReviewDashboard(App):
         if self.current is not stop:
             return
         live = stop.live
+        self.refresh_rows()
         checks = live.get("statusCheckRollup") or []
         outcomes = [c.get("conclusion") or c.get("state") or "PENDING" for c in checks]
         ok = sum(1 for o in outcomes if o in ("SUCCESS", "NEUTRAL", "SKIPPED"))
@@ -1751,8 +1766,9 @@ class ReviewDashboard(App):
                 severity="error",
             )
             return False
-        if stop.check_state in {"failure", "pending"}:
-            state = "failed" if stop.check_state == "failure" else "pending"
+        checks = effective_check_state(stop.check_state, stop.live)
+        if checks in {"failure", "pending"}:
+            state = "failed" if checks == "failure" else "pending"
             self.notify(
                 f"{stop.key}: direct merge refused; CI is known {state}.",
                 severity="error",

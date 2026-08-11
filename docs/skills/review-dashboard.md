@@ -118,8 +118,8 @@ background colour.
   carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
   `? CI UNKNOWN`, as applicable.
 - **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
-  request whose snapshot already says CI failed or is pending; GitHub branch
-  protection remains an additional gate.
+  request whose snapshot or fetched live evidence says CI failed or is
+  pending; GitHub branch protection remains an additional gate.
 - **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
