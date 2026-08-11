@@ -220,6 +220,27 @@ BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/absent" \
   "$review" main...HEAD >/dev/null
 [[ "$(tr '\0' '\n' <"$scratch/argv-bare")" == $'review\nmain...HEAD' ]]
 
+# --- repository-owned context is named before shared doctrine -----------------
+mkdir -p "$scratch/repository/docs/skills"
+printf 'REPOSITORY AGENTS\n' >"$scratch/repository/AGENTS.md"
+printf '# Repository skill router\n' >"$scratch/repository/docs/SKILL.md"
+cat >"$scratch/repository/docs/skills/index.json" <<'EOF'
+{"skills":[{"id":"repo-skill","description":"Repository review guidance","entry_point":"docs/skills/repo-skill.md","status":"active"}]}
+EOF
+printf '# Repository skill\n' >"$scratch/repository/docs/skills/repo-skill.md"
+
+BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/repository" \
+  BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/skills" \
+  PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-repository" \
+  "$review" main...HEAD >/dev/null
+repository_argv="$(tr '\0' '\n' <"$scratch/argv-repository")"
+[[ "$repository_argv" == *"repository-owned context"* ]]
+[[ "$repository_argv" == *"$scratch/repository/AGENTS.md"* ]]
+[[ "$repository_argv" == *"$scratch/repository/docs/SKILL.md"* ]]
+[[ "$repository_argv" == *"$scratch/repository/docs/skills/repo-skill.md"* ]]
+[[ "$repository_argv" == *"before shared Bluefin doctrine"* ]]
+[[ "$repository_argv" != *'Repository skill router'* ]]
+
 # restore the exit-code stub for any later assertions
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
