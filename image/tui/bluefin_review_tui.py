@@ -72,8 +72,7 @@ KEYS_READING = (
 )
 KEYS_ACTING = (
     " [b]L[/b] leave review [b]a[/b] approve+queue [b]m[/b] merge"
-    " [b]u[/b] update [b]x[/b] reject [b]l[/b] label [b]p[/b] prio"
-    " [b]M[/b] dupes"
+    " [b]u[/b] update [b]x[/b] reject [b]M[/b] dupes"
 )
 
 
@@ -90,9 +89,6 @@ def hive_api_base() -> str:
     http = hub.replace("wss://", "https://").replace("ws://", "http://")
     return http[: -len("/contribute")] if http.endswith("/contribute") else http
 
-
-PRIORITIES = ["P0-critical", "P1-high", "P2-medium", "P3-low"]
-LABEL_CHOICES = ["kind/bug", "kind/improvement", "area/bootc", "status/approved"]
 
 # The order a maintainer wants, which is not the order the snapshot is written
 # in. The generator ranks by how stuck a pull request is; a reviewer opening
@@ -261,6 +257,29 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
     return ""
 
 
+def ci_marker(checks: str) -> str:
+    """Carry the snapshot's CI state as text, not colour alone."""
+    return {
+        "success": "✓ CI GREEN",
+        "failure": "✗ CI FAILED",
+        "pending": "… CI PENDING",
+        "unknown": "? CI UNKNOWN",
+    }.get(checks, "? CI UNKNOWN")
+
+
+def effective_check_state(snapshot: str, live: dict) -> str:
+    """Prefer fetched check evidence, retaining the snapshot when absent."""
+    checks = live.get("statusCheckRollup") or []
+    if not checks:
+        return snapshot or "unknown"
+    outcomes = [check.get("conclusion") or check.get("state") or "PENDING" for check in checks]
+    if any(outcome in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED") for outcome in outcomes):
+        return "failure"
+    if any(outcome not in ("SUCCESS", "NEUTRAL", "SKIPPED") for outcome in outcomes):
+        return "pending"
+    return "success"
+
+
 # The merge queue's segments, in the order a maintainer drains them, with the
 # same colours the rows use so the bar and the list agree.
 QUEUE_SEGMENTS = [
@@ -281,14 +300,14 @@ def classify_queue_item(item: dict) -> str:
     conflict outranks a failing check because it blocks the check from
     meaning anything.
     """
-    if "lgtm" in (item.get("labels") or []):
-        return "queued"
-    if item.get("recommended_action") == "ready-for-human-merge":
-        return "ready"
     if item.get("mergeable_state") == "dirty":
         return "conflicts"
     if item.get("check_state") == "failure":
         return "ci"
+    if "lgtm" in (item.get("labels") or []):
+        return "queued"
+    if item.get("recommended_action") == "ready-for-human-merge":
+        return "ready"
     if item.get("recommended_action") == "review":
         return "review"
     return "unclear"
@@ -451,24 +470,6 @@ class ConfirmMutation(ModalScreen[bool]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self.dismiss(event.value.strip() == self.expected)
-
-
-class LabelOverlay(ModalScreen[str | None]):
-    """Fast label picker: one keystroke per label, Esc closes."""
-
-    BINDINGS = [Binding("escape", "dismiss(None)", "close")]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="label-box"):
-            yield Label("toggle label:")
-            for index, label in enumerate(LABEL_CHOICES, start=1):
-                yield Label(f"  [{index}] {label}")
-
-    def on_key(self, event) -> None:
-        if event.key.isdigit():
-            index = int(event.key) - 1
-            if 0 <= index < len(LABEL_CHOICES):
-                self.dismiss(LABEL_CHOICES[index])
 
 
 class MergeRecovery(ModalScreen[str | None]):
@@ -912,7 +913,7 @@ class ReviewDashboard(App):
     #right-pane { width: 55%; }
     #details { height: 60%; border: solid $secondary; padding: 0 1; }
     #context { height: 40%; border: solid $secondary; padding: 0 1; }
-    #confirm-box, #label-box {
+    #confirm-box {
         border: heavy magenta; background: $surface;
         width: 80%; height: auto; padding: 1 2; margin: 4 4;
     }
@@ -941,8 +942,6 @@ class ReviewDashboard(App):
         Binding("r", "review", "start a review"),
         Binding("L", "leave_review", "leave a review"),
         Binding("b", "batch", "batch select"),
-        Binding("l", "labels", "labels"),
-        Binding("p", "priority", "priority"),
         Binding("d", "docs", "update docs"),
         Binding("g", "ghost_build", "ghost build"),
         Binding("o", "open_browser", "open"),
@@ -1169,20 +1168,20 @@ class ReviewDashboard(App):
         # A stop that would not merge says so on its own row, so a failure in
         # the middle of a batch survives the notification that reported it.
         failed = " ✗ DID NOT MERGE" if stop.failure else ""
+        checks = effective_check_state(stop.check_state, stop.live)
         marks = ""
         if stop.mergeable_state == "dirty":
             marks += " ⚑ CONFLICTS"
-        if stop.check_state == "failure":
-            marks += " ✗ CI"
+        marks += f" {ci_marker(checks)}"
         if stop.review_state == "approved":
             marks += " ✓ approved"
         body = (
             f"{link(stop.key, pr_url(stop.repository, stop.number))}: "
             f"{escape(stop.title[:60])}{tag} "
-            f"{escape('[' + stop.action + ']')}{marks}{failed}"
+            f"{marks} {escape('[' + stop.action + ']')}{failed}"
         )
         style = stop_style(
-            stop.action, stop.mergeable_state, stop.check_state, stop.review_state
+            stop.action, stop.mergeable_state, checks, stop.review_state
         )
         return f"[{style}]{body}[/{style}]" if style else body
 
@@ -1309,7 +1308,9 @@ class ReviewDashboard(App):
             "duplicates": [item["number"] for item in dupes],
             "overlaps": [item["number"] for item in overlaps],
         }
-        self.query_one("#context", Static).update(text)
+        context = self.query("#context")
+        if context:
+            context.first().update(text)
 
     def cluster(self, stop: Stop) -> tuple[list[int], list[int]]:
         """Duplicates and overlaps, exactly as the walker computes them."""
@@ -1366,6 +1367,7 @@ class ReviewDashboard(App):
         if self.current is not stop:
             return
         live = stop.live
+        self.refresh_rows()
         checks = live.get("statusCheckRollup") or []
         outcomes = [c.get("conclusion") or c.get("state") or "PENDING" for c in checks]
         ok = sum(1 for o in outcomes if o in ("SUCCESS", "NEUTRAL", "SKIPPED"))
@@ -1612,32 +1614,6 @@ class ReviewDashboard(App):
         if item:
             item.set_class(stop.selected, "selected")
         self.refresh_status()
-
-    def action_labels(self) -> None:
-        stop = self.current
-        if not stop:
-            return
-
-        def apply(label: str | None) -> None:
-            if label:
-                self.mutate(
-                    stop, "pr", "edit", str(stop.number),
-                    "--repo", stop.repository, "--add-label", label,
-                )
-
-        self.push_screen(LabelOverlay(), apply)
-
-    def action_priority(self) -> None:
-        stop = self.current
-        if not stop:
-            return
-        current = {l["name"] for l in (stop.live.get("labels") or [])}
-        have = [p for p in PRIORITIES if p in current]
-        nxt = PRIORITIES[(PRIORITIES.index(have[0]) + 1) % len(PRIORITIES)] if have else PRIORITIES[0]
-        args = ["pr", "edit", str(stop.number), "--repo", stop.repository, "--add-label", nxt]
-        for old in have:
-            args += ["--remove-label", old]
-        self.mutate(stop, *args)
 
     def action_review(self) -> None:
         stop = self.current
@@ -1939,6 +1915,14 @@ class ReviewDashboard(App):
             self.notify(
                 f"merging {stop.repository} directly is a maintainer power and "
                 "you do not have it there; queue it with [a] instead.",
+                severity="error",
+            )
+            return False
+        checks = effective_check_state(stop.check_state, stop.live)
+        if checks in {"failure", "pending"}:
+            state = "failed" if checks == "failure" else "pending"
+            self.notify(
+                f"{stop.key}: direct merge refused; CI is known {state}.",
                 severity="error",
             )
             return False

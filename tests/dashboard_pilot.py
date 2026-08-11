@@ -223,11 +223,20 @@ async def main() -> int:
                 hasattr(app, name) or hasattr(tui.App, name),
                 f"binding {binding.key!r} points at missing {name}",
             )
+        binding_keys = {binding.key for binding in tui.ReviewDashboard.BINDINGS}
+        check(
+            "l" not in binding_keys and "p" not in binding_keys,
+            f"label and priority bindings must be absent, got {sorted(binding_keys)}",
+        )
         review = [b for b in tui.ReviewDashboard.BINDINGS if b.action == "review"]
         check(len(review) == 1, f"exactly one binding must run a review, got {len(review)}")
         check(
             bool(review) and review[0].key == "r",
             f"review must be on 'r', got {[b.key for b in review]}",
+        )
+        check(
+            "[b]l[/b]" not in tui.KEYS_ACTING and "[b]p[/b]" not in tui.KEYS_ACTING,
+            f"the acting key line must not advertise label or priority, got {tui.KEYS_ACTING!r}",
         )
 
     async def run_review(exit_code: int, output: str):
@@ -1067,15 +1076,48 @@ async def main() -> int:
         tui.stop_style("investigate", "unknown", "unknown", "unknown") == "grey62",
         "work nobody can act on must recede",
     )
+    text_states = {
+        "success": tui.Stop("o/r", 1, "ready-for-human-merge", "green", check_state="success"),
+        "failure": tui.Stop("o/r", 2, "review", "failed", check_state="failure"),
+        "pending": tui.Stop(
+            "o/r", 3, "review", "pending", check_state="unknown",
+            live={"statusCheckRollup": [{"state": "IN_PROGRESS"}]},
+        ),
+        "unknown": tui.Stop("o/r", 4, "investigate", "unknown", check_state="unknown"),
+        "conflict": tui.Stop("o/r", 5, "review", "conflict", mergeable_state="dirty"),
+    }
+    text_rows = {state: app.row_markup(stop) for state, stop in text_states.items()}
+    for state, marker in {
+        "success": "✓ CI GREEN",
+        "failure": "✗ CI FAILED",
+        "pending": "… CI PENDING",
+        "unknown": "? CI UNKNOWN",
+        "conflict": "⚑ CONFLICTS",
+    }.items():
+        check(marker in text_rows[state], f"{state} CI must be explicit on its row")
+    check(
+        text_rows["conflict"].index("⚑ CONFLICTS") < text_rows["conflict"].index("[review]"),
+        "conflict text must outrank the healthy queue presentation",
+    )
+    check(
+        text_rows["failure"].index("✗ CI FAILED") < text_rows["failure"].index("[review]"),
+        "failure text must outrank the healthy queue presentation",
+    )
+
     for key in ("r", "v", "o", "h", "/", "f", "b", "H", "R", "q"):
         check(
             f"[b]{key}[/b]" in tui.KEYS_READING,
             f"the reading key line must document {key!r}",
         )
-    for key in ("L", "a", "m", "u", "x", "l", "p", "M"):
+    for key in ("L", "a", "m", "u", "x", "M"):
         check(
             f"[b]{key}[/b]" in tui.KEYS_ACTING,
             f"the acting key line must document {key!r}",
+        )
+    for key in ("l", "p"):
+        check(
+            f"[b]{key}[/b]" not in tui.KEYS_ACTING,
+            f"the acting key line must not advertise {key!r}",
         )
 
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
@@ -1089,6 +1131,32 @@ async def main() -> int:
             bool(app.query("#keys-reading")) and bool(app.query("#keys-acting")),
             "the key map must be two lines at the bottom",
         )
+        # Direct merge must refuse snapshot-known red and pending checks before
+        # presenting a confirmation gate or attempting the GitHub mutation.
+        for known_state, live_checks in (
+            ("failure", [{"conclusion": "FAILURE"}]),
+            ("pending", [{"state": "IN_PROGRESS"}]),
+        ):
+            app.stops[0].check_state = "unknown"
+            app.stops[0].live = {
+                "isDraft": False,
+                "statusCheckRollup": live_checks,
+            }
+            app.merge_rights[app.stops[0].repository] = True
+            gh_log.write_text("")
+            app.action_merge_now()
+            await pilot.pause()
+            check(
+                not isinstance(app.screen, tui.ConfirmMutation),
+                f"direct merge must refuse known-{known_state} CI before confirmation",
+            )
+            check(
+                "pr merge" not in gh_log.read_text(),
+                f"direct merge must not attempt known-{known_state} CI",
+            )
+            if isinstance(app.screen, tui.ConfirmMutation):
+                await pilot.press("escape")
+                await pilot.pause()
         # Colour reaches the row, from the snapshot's own state fields.
         app.stops[0].mergeable_state = "dirty"
         app.refresh_rows()
@@ -1237,8 +1305,8 @@ async def main() -> int:
         tui.classify_queue_item(
             {"labels": ["lgtm"], "mergeable_state": "dirty", "check_state": "failure"}
         )
-        == "queued",
-        "anything already handed to the sweep counts as queued",
+        == "conflicts",
+        "conflicts outrank an already queued presentation",
     )
     check(
         tui.classify_queue_item(

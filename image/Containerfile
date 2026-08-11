@@ -12,7 +12,7 @@
 # was never once offered an update and silently froze. A pin no tool can track
 # is not a stricter pin, it is a stale one. The reference below is the only
 # source of truth for which base this is; do not restate its value here.
-ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:25.08@sha256:780b703c438281a017942ef86ccf3c65ee51cf6b721e063888c8ee46c1f49a44
+ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:25.08@sha256:7c4b1e518bd1bffe2e506474e6196e9c18fb727bbd48a3c5f7ddbd3446ea5846
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
 ARG HIVE_COMMIT=98781c252cefb2f2193832a701abd8d0728ea18b
@@ -304,8 +304,9 @@ COPY image/config/local-agent-policy.md /opt/bluefin/local-agent-policy.md
 # repository under review. --check-scope REPLACES repo-root discovery
 # (additive flag filed as aaif-goose/goose#11060), so Bluefin repositories
 # keep their checks in this shared overlay.
-COPY image/review-scope/REVIEW.md /opt/bluefin/review-scope/.agents/REVIEW.md
-COPY image/review-scope/checks/ /opt/bluefin/review-scope/.agents/checks/
+COPY --chmod=0644 image/review-scope/REVIEW.md /opt/bluefin/review-scope/.agents/REVIEW.md
+COPY --chmod=0644 image/review-scope/checks/ /opt/bluefin/review-scope/.agents/checks/
+RUN chmod 0755 /opt/bluefin/review-scope /opt/bluefin/review-scope/.agents /opt/bluefin/review-scope/.agents/checks
 
 # Git hooks, wired via a global core.hooksPath by the entrypoint. Ergonomics
 # only -- `git commit --no-verify` bypasses every one of them.
@@ -337,7 +338,7 @@ RUN set -eu; \
 # this is a pinned checkout projected into the discovery root — one seam,
 # no second generator. These carry the Ghost Cluster operating knowledge the
 # dashboard's build dispatch (#133) depends on.
-ARG LAB_SKILLS_COMMIT=6e0f7135f829f67c3aafb10cb1be0095773c907b
+ARG LAB_SKILLS_COMMIT=8f94042f0572f897a22c00ad0bbda75bdd068c78
 RUN set -eu; \
     workdir="$(mktemp -d)"; \
     trap 'rm -rf "$workdir"' EXIT; \

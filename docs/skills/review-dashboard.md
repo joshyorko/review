@@ -63,6 +63,9 @@ Do not use this for the launcher that starts the container
    exit-zero transcript without that structure is `unparsable`, never clean.
    Keep the decision card concise and keep bounded raw evidence reachable with
    `e`; backend prose does not belong in Textual rendering code.
+8. **Keep the acting surface explicit.** The shipped keys cover review,
+   merge, branch updates, rejection, handoff, docs, Ghost Cluster, and dupe
+   cleanup; label and priority mutation are not part of the dashboard.
 
 ## Textual Patterns
 
@@ -117,7 +120,11 @@ background colour.
   merge-ready pull request. When a view is filtered, the status line says how
   many stops are hidden.
 - **Colour is never the only carrier of a fact.** Rows colour by state *and*
-  carry `⚑ CONFLICTS` / `✗ CI` / `✓ approved`.
+  carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
+  `? CI UNKNOWN`, as applicable.
+- **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
+  request whose snapshot or fetched live evidence says CI failed or is
+  pending; GitHub branch protection remains an additional gate.
 - **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
