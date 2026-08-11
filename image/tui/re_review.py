@@ -104,6 +104,11 @@ class DeltaInput:
         for name in ("reviewed_head_sha", "current_head_sha", "reviewed_merge_base_sha", "current_merge_base_sha"):
             if not _SHA.fullmatch(getattr(self, name)):
                 raise ValueError(f"{name} must be a full lowercase SHA-1 value")
+        request = self.current_h1_manifest.request
+        if request.head_sha != self.current_head_sha:
+            raise ValueError("current H1 manifest head does not match current_head_sha")
+        if request.base_sha != self.current_merge_base_sha:
+            raise ValueError("current H1 manifest base does not match current_merge_base_sha")
 
 
 @dataclass(frozen=True)
@@ -149,7 +154,7 @@ def _evidence_for(finding: PriorFinding, evidence: tuple[FindingEvidence, ...]) 
     if finding.evidence is None:
         return None
     target = finding.evidence.region()
-    return next((item for item in evidence if item.region() == target), finding.evidence)
+    return next((item for item in evidence if item.region() == target), None)
 
 
 def classify_head_delta(value: DeltaInput) -> ReReviewResult:

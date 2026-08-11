@@ -29,13 +29,44 @@ H1 = "1" * 40
 BASE = "2" * 40
 
 
-def manifest() -> ReviewEvidenceManifest:
+def manifest(*, base_sha: str = BASE, head_sha: str = H1) -> ReviewEvidenceManifest:
     return ReviewEvidenceManifest(
-        ReviewRequest("octo", "sample", 17, BASE, H1, "actor", "tenant", generated_at="now")
+        ReviewRequest("octo", "sample", 17, base_sha, head_sha, "actor", "tenant", generated_at="now")
     )
 
 
 class ReReviewContractTests(unittest.TestCase):
+    def test_current_h1_manifest_must_bind_both_exact_heads(self) -> None:
+        for kwargs in (
+            {"head_sha": "3" * 40},
+            {"base_sha": "4" * 40},
+        ):
+            with self.subTest(kwargs):
+                with self.assertRaises(ValueError):
+                    classify_head_delta(
+                        DeltaInput(
+                            reviewed_head_sha=H0,
+                            current_head_sha=H1,
+                            reviewed_merge_base_sha=BASE,
+                            current_merge_base_sha=BASE,
+                            current_h1_manifest=manifest(**kwargs),
+                        )
+                    )
+
+    def test_omitted_current_evidence_is_unmappable(self) -> None:
+        result = classify_head_delta(
+            DeltaInput(
+                reviewed_head_sha=H0,
+                current_head_sha=H1,
+                reviewed_merge_base_sha=BASE,
+                current_merge_base_sha=BASE,
+                prior_findings=(PriorFinding("old", FindingEvidence("old.py", 7, 7)),),
+                current_h1_manifest=manifest(),
+            )
+        )
+
+        self.assertEqual(result.findings[0].disposition, FindingDisposition.INVALIDATED_UNMAPPABLE)
+
     def test_delta_binds_exact_heads_and_classifies_explicit_evidence(self) -> None:
         current = manifest()
         result = classify_head_delta(
@@ -92,6 +123,10 @@ class ReReviewContractTests(unittest.TestCase):
                     current_h1_manifest=manifest(),
                 )
                 values.update(changes)
+                if "current_merge_base_sha" in changes:
+                    values["current_h1_manifest"] = manifest(
+                        base_sha=changes["current_merge_base_sha"]
+                    )
                 result = classify_head_delta(DeltaInput(**values))
                 self.assertTrue(result.full_review_required)
                 self.assertIn(reason, result.fallback_reasons)
