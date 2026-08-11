@@ -40,6 +40,7 @@ from textual.widgets import (
     RichLog,
     Static,
 )
+from review_result import adapt_current_engine
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
@@ -606,6 +607,7 @@ class ReviewScreen(Screen):
         Binding("q", "close", "close"),
         Binding("x", "stop", "stop review"),
         Binding("L", "leave_review", "leave a review"),
+        Binding("e", "toggle_evidence", "raw evidence"),
     ]
 
     def __init__(self, stop: Stop, steer: str = "") -> None:
@@ -616,6 +618,7 @@ class ReviewScreen(Screen):
         self.finished = False
         self.stop_requested = False
         self.started = time.monotonic()
+        self.output: list[str] = []
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -626,6 +629,7 @@ class ReviewScreen(Screen):
             + (f"  steer: {escape(self.steer)}" if self.steer else ""),
             id="review-status",
         )
+        yield Static("building decision card…", id="review-card")
         yield RichLog(highlight=False, markup=False, wrap=True, id="review-log")
         yield Footer()
 
@@ -676,6 +680,7 @@ class ReviewScreen(Screen):
         )
 
     def append(self, line: str) -> None:
+        self.output.append(line)
         self.query_one("#review-log", RichLog).write(line)
 
     def finish(self, code: int | None, error: str) -> None:
@@ -708,6 +713,24 @@ class ReviewScreen(Screen):
             f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
             f"{escape(state)} ({elapsed}s) — {escape('[escape]')} closes"
         )
+        result = adapt_current_engine(
+            "\n".join(self.output), code,
+            {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
+             "model": os.environ.get("GOOSE_MODEL", "gpt-5.6-luna"),
+             "repository": stop.repository, "pull_request": stop.number},
+        )
+        lines = [f"{result.state.upper()}  {stop.key}",
+                 "severity  " + "  ".join(f"{key}:{result.counts[key]}" for key in ("critical", "high", "medium", "low"))]
+        for finding in result.findings[:5]:
+            lines.append(f"{finding['severity'].upper()}  {finding.get('file','?')}:{finding.get('line','?')}  {finding.get('title','')}")
+        if not result.findings and result.state == "complete":
+            lines.append("No evidenced findings.")
+        verified = sum(1 for item in result.verification if item.get("state") == "verified")
+        lines.append(f"checks  {verified} verified / {len(result.verification)} reported")
+        lines.append(f"source  {result.provenance.get('backend','?')} / {result.provenance.get('model','?')}")
+        lines.append("actions  [L] leave review  [e] raw evidence  [escape] back to queue")
+        self.query_one("#review-card", Static).update("\n".join(lines))
+        self.query_one("#review-log", RichLog).add_class("hidden")
         trace(
             {
                 "action": "review",
@@ -753,6 +776,9 @@ class ReviewScreen(Screen):
         the moment a maintainer actually has an opinion to record."""
         self.app.leave_review(self.stop_record)
 
+    def action_toggle_evidence(self) -> None:
+        self.query_one("#review-log", RichLog).toggle_class("hidden")
+
     def action_close(self) -> None:
         # A review takes minutes. Closing mid-run would throw that away with a
         # keystroke, so an unfinished review has to be stopped deliberately.
@@ -782,6 +808,8 @@ class ReviewDashboard(App):
     #keys-reading { color: $text; }
     #keys-acting { color: magenta; }
     #diff-header { height: 1; background: $panel; color: cyan; text-style: bold; }
+    #review-card { border: solid $success; padding: 1 2; height: auto; color: $text; }
+    #review-log.hidden { display: none; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
     ListItem.selected Label { color: magenta; text-style: bold; }

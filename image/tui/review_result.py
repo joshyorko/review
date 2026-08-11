@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -70,3 +71,26 @@ def parse_review_result(payload: str, raw_evidence: str | list[str] | None = Non
         return result
     except (TypeError, ValueError, json.JSONDecodeError):
         return ReviewResult(1, "unparsable", raw_evidence=_raw(raw_evidence or payload))
+
+
+def adapt_current_engine(output: str, exit_code: int | None, provenance: dict[str, Any] | None = None) -> ReviewResult:
+    """Adapt the current line-oriented engine without pretending prose is JSON."""
+    raw = _raw(output)
+    base = dict(provenance or {})
+    base.setdefault("engine", "bluefin-review")
+    if exit_code not in (0, None) and exit_code != 65:
+        return ReviewResult(1, "failed", provenance=base, raw_evidence=raw)
+    if exit_code == 65 or any("INCOMPLETE" in line.upper() for line in raw):
+        return ReviewResult(1, "incomplete", provenance=base, raw_evidence=raw)
+    findings: list[dict[str, Any]] = []
+    counts = {s: 0 for s in SEVERITIES}
+    pattern = re.compile(r"\b(CRITICAL|HIGH|MEDIUM|LOW)\b\s+(\S+):(\d+)\s*(.*)", re.I)
+    for line in raw:
+        match = pattern.search(line)
+        if not match:
+            continue
+        severity = match.group(1).lower()
+        counts[severity] += 1
+        findings.append({"severity": severity, "file": match.group(2), "line": int(match.group(3)), "title": match.group(4).strip()})
+    return ReviewResult(1, "findings" if findings else "complete", counts=counts,
+                        findings=findings, provenance=base, raw_evidence=raw)
