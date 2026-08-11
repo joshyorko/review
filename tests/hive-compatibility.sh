@@ -48,23 +48,6 @@ grep -qF 'KNOWN_BACKENDS="claude copilot goose codex agy bob pi aider litellm"' 
   echo "::error::pinned Hive backend interface changed" >&2
   exit 1
 }
-# The launcher may forward a selected backend but must not reimplement Hive's
-# precedence, binary lookup, or auth decision. The pinned entrypoint keeps the
-# docker environment override, sources contributor.env, then owns readiness.
-# shellcheck disable=SC2016 # Exact pinned-source fragments, not shell syntax.
-for contract in \
-  '_DOCKER_BACKEND="${AGENT_BACKEND:-}"' \
-  'source "$CONFIG_FILE"' \
-  'export AGENT_BACKEND="${_DOCKER_BACKEND:-${AGENT_BACKEND:-claude}}"' \
-  'export HIVE_CONTRIBUTOR_CLI="$AGENT_BACKEND"' \
-  'STATUS=$(detect_cli "$AGENT_BACKEND")' \
-  'NOT_INSTALLED)' \
-  'NOT_AUTHED)'; do
-  grep -qF "$contract" <<<"$agent" || {
-    echo "::error::pinned Hive backend readiness contract changed: $contract" >&2
-    exit 1
-  }
-done
 
 # Exercise the hook with an inert command after it has installed its wrapper.
 # The exact hosted URL is rewritten and receives a Bearer token; unrelated

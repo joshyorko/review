@@ -64,10 +64,14 @@
 # from the repository root. Persistent state is limited to launcher
 # configuration; the container receives credentials by environment and the
 # read-only ~/.config/hive mount, never a workspace or host home mount.
-# Hive owns contributor backend selection through AGENT_BACKEND in its
-# contributor registration. The launcher reads that value only to select the
-# matching host-side readiness check and passes the same value into the image.
-# There is no local backend registry or task-selection logic.
+# Goose is the only agent backend. There is no local inference, no model
+# profile catalogue, and no multi-CLI auto-detection: one backend means one
+# readiness check and one fix-it message when it fails.
+#
+# TOOL is read from the environment so 'TOOL=goose just review-container'
+# works as documented — 'just' recipe parameters are positional, not
+# KEY=VALUE, so it cannot be a plain recipe parameter. Any value other than
+# 'goose' is a hard error rather than a silent fallback.
 tool_env := env("TOOL", "")
 hive_repo_url := "https://github.com/kubestellar/hive"
 # origin/v2 via `git ls-remote --heads https://github.com/kubestellar/hive v2`
@@ -150,10 +154,6 @@ require_goose_backend() {
 }
 preflight_agent() {
   # Exactly one ERROR line per failure, each with the command that fixes it.
-  local backend="${1:-goose}"
-  if [[ "$backend" != "goose" ]]; then
-    return 0
-  fi
   require_copilot_provider || return 1
   command -v goose &>/dev/null || {
     echo "ERROR: goose is not installed." >&2
@@ -705,6 +705,8 @@ review-container profile="" effort="":
     HIVE_COMMIT="${HIVE_COMMIT,,}"
     mkdir -p "${STATE_DIR}"
 
+    require_goose_backend "$TOOL"
+    preflight_agent
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
       echo "  Install Podman, then re-run review-container." >&2
@@ -717,11 +719,9 @@ review-container profile="" effort="":
     require_valid_container_name "$CONTAINER_NAME"
 
     resolve_model_profile "{{profile}}" "{{effort}}"
+    resolve_goose_selection
     REVIEW_RECIPE=review-container
     ensure_hive_contributor_env
-    AGENT_BACKEND="$(hive_contributor_backend "$HIVE_CONTRIBUTOR_ENV")"
-    AGENT_BACKEND="${AGENT_BACKEND:-goose}"
-    preflight_agent "$AGENT_BACKEND"
     report_hive_selection
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
@@ -769,20 +769,17 @@ review-container profile="" effort="":
       # sharing one registration: the second launch would revoke the first
       # live container's access to it.
       --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro,z"
-      --env "AGENT_BACKEND=${AGENT_BACKEND}"
+      --env "AGENT_BACKEND=goose"
       # Podman does not pass COLORTERM through on its own; the entrypoint
       # needs it to pick the direct-color attach fallback for a host TERM
       # the image's narrow terminfo set does not know (e.g. xterm-ghostty).
       --env COLORTERM
     )
-    if [[ "$AGENT_BACKEND" == "goose" ]]; then
-      resolve_goose_selection
-    fi
-    [[ -n "${GOOSE_PROVIDER:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
+    [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
     [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
     [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
     [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
-    if [[ "$AGENT_BACKEND" == "goose" && "${GOOSE_PROVIDER:-}" == "github_copilot" ]]; then
+    if [[ "${GOOSE_PROVIDER:-}" == "github_copilot" ]]; then
       resolve_copilot_token
       if [[ -n "${COPILOT_TOKEN:-}" ]]; then
         export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
@@ -982,48 +979,36 @@ review-doctor:
     unset GH_TOKEN_VALUE
     echo ""
 
-    hive_registration_name || true
-    HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.env"
-    if [[ -n "${HIVE_REGISTRATION_NAME:-}" ]] &&
-      [[ -f "${HOME}/.config/hive/contributor.${HIVE_REGISTRATION_NAME}.env" ]]; then
-      HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.${HIVE_REGISTRATION_NAME}.env"
-    fi
-    DOCTOR_BACKEND="$(hive_contributor_backend "$HIVE_CONTRIBUTOR_ENV")"
-    DOCTOR_BACKEND="${DOCTOR_BACKEND:-goose}"
-    echo "=== Agent backend (${DOCTOR_BACKEND}) ==="
-    if [[ "$DOCTOR_BACKEND" == goose ]]; then
-      if ! require_copilot_provider; then
-        fail=$((fail+1))
-      elif command -v goose &>/dev/null; then
-        if goose_configured; then
-          echo "  ✓ goose: installed + configured"
-          pass=$((pass+1))
-        else
-          echo "  ✗ goose: installed, NOT configured — ${GOOSE_FIXIT_HINT}"
-          fail=$((fail+1))
-        fi
-      else
-        echo "  ✗ goose: not installed — ${GOOSE_INSTALL_HINT}"
-        fail=$((fail+1))
-      fi
-      echo ""
-      echo "=== Copilot credential ==="
-      resolve_copilot_token
-      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-        echo "  ✓ a Copilot credential is available (not shown)"
+    echo "=== Agent backend (Goose only) ==="
+    if ! require_copilot_provider; then
+      fail=$((fail+1))
+    elif command -v goose &>/dev/null; then
+      if goose_configured; then
+        echo "  ✓ goose: installed + configured"
         pass=$((pass+1))
       else
-        echo "  ✗ no Copilot credential is available"
-        echo "    The agent will stop at 'enter code XXXX-XXXX' and wait for a human."
-        echo "    A 'gh auth token' is NOT a substitute — Copilot inference rejects it."
-        echo "    Run: goose configure (pick GitHub Copilot), or export GITHUB_COPILOT_TOKEN."
+        echo "  ✗ goose: installed, NOT configured — ${GOOSE_FIXIT_HINT}"
         fail=$((fail+1))
       fi
-      unset COPILOT_TOKEN
     else
-      echo "  ✓ ${DOCTOR_BACKEND}: binary and auth readiness are checked by the pinned Hive runtime in the image"
-      pass=$((pass+1))
+      echo "  ✗ goose: not installed — ${GOOSE_INSTALL_HINT}"
+      fail=$((fail+1))
     fi
+    echo ""
+
+    echo "=== Copilot credential ==="
+    resolve_copilot_token
+    if [[ -n "${COPILOT_TOKEN:-}" ]]; then
+      echo "  ✓ a Copilot credential is available (not shown)"
+      pass=$((pass+1))
+    else
+      echo "  ✗ no Copilot credential is available"
+      echo "    The agent will stop at 'enter code XXXX-XXXX' and wait for a human."
+      echo "    A 'gh auth token' is NOT a substitute — Copilot inference rejects it."
+      echo "    Run: goose configure (pick GitHub Copilot), or export GITHUB_COPILOT_TOKEN."
+      fail=$((fail+1))
+    fi
+    unset COPILOT_TOKEN
     echo ""
 
     echo "=== Contributor image ==="
@@ -1049,6 +1034,12 @@ review-doctor:
     if [[ -f "$HIVE_CONTRIBUTOR_ENV" ]]; then
       echo "  ✓ ${HIVE_CONTRIBUTOR_ENV} exists"
       pass=$((pass+1))
+      DOCTOR_BACKEND="$(hive_contributor_backend "$HIVE_CONTRIBUTOR_ENV")"
+      if [[ -n "$DOCTOR_BACKEND" && "$DOCTOR_BACKEND" != "goose" ]]; then
+        echo "  ! ${HIVE_CONTRIBUTOR_ENV} says AGENT_BACKEND=${DOCTOR_BACKEND}, but review always launches goose."
+        echo "    Harmless — the launcher passes AGENT_BACKEND=goose itself — but stale."
+        echo "    Edit that line yourself if you want the file to match; review will not touch it."
+      fi
     else
       echo "  ✗ ${HIVE_CONTRIBUTOR_ENV} is missing"
       echo "    review runs upstream 'just contribute-setup goose' from"

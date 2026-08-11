@@ -134,11 +134,11 @@ an operations task outside this repository automation.
 - For contributor Git operations, a separate GitHub token via
   `REVIEW_GH_TOKEN`.
 
-Hive selects the contributor backend through `AGENT_BACKEND` in the selected
-registration. The launcher passes that selection through and performs
-Goose/Copilot checks only when Goose is selected; Hive's pinned runtime checks
-the selected CLI inside the image. `GOOSE_MODEL` and
-`GOOSE_THINKING_EFFORT` remain the Goose defaults and overrides. A `gh auth
+Goose is the only agent backend and GitHub Copilot is the only supported
+provider. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
+optionally overrides the `gpt-5.6-luna` default, and
+`GOOSE_THINKING_EFFORT` optionally overrides the default `max` reasoning
+effort. A `gh auth
 token` does not authenticate Copilot inference.
 
 `review-container` takes two optional positional arguments, a model profile

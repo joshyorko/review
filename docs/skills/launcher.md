@@ -87,12 +87,11 @@ Goose, or image build skill documents.
    `:z` relabel, never `:Z` — concurrent named workers may share one
    registration, and a private MCS category revokes the running container's
    access when the next one starts.
-4. Let Hive select the contributor backend through `AGENT_BACKEND` in the
-   selected registration. The launcher reads that value for the matching
-   readiness check and passes it unchanged into the image. Goose/Copilot
-   credentials are resolved only when Goose is selected. Nothing is persisted:
-   not a secret, not a provider, not a model. There is no last-selection file,
-   and `tests/just-onboarding.sh` asserts one is never written.
+4. Keep Goose Copilot-only. The launcher resolves a Copilot credential for the
+   provider secret and recomputes the provider and model from the environment
+   at every launch. Nothing is persisted: not a secret, not a provider, not a
+   model. There is no last-selection file, and `tests/just-onboarding.sh`
+   asserts one is never written.
    The configured-provider preflight reads Goose's own config and must
    accept both keys Goose has shipped: current releases record the
    selection as `active_provider:` beside a `providers:` map, older ones

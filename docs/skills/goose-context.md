@@ -36,9 +36,8 @@ task delivery; use the Hive runtime documentation instead.
    `GOOSE_PATH_ROOT=/opt/bluefin/goose`. The pinned Hive runtime preserves an
    existing `~/.config/goose/config.yaml`; the controlled root still separates
    image policy, data, and state from that runtime-owned file.
-2. Keep Goose configuration scoped to Goose. The contributor entrypoint leaves
-   non-Goose backend selection to Hive; dashboard mode supplies
-   `GOOSE_PROVIDER=github_copilot`, `gpt-5.6-luna`, and
+2. Keep the image Copilot-only. `GOOSE_PROVIDER` may be unset or
+   `github_copilot`; the entrypoint supplies `gpt-5.6-luna` and
    `GOOSE_THINKING_EFFORT=high` when callers do not override them.
 3. Goose follows the upstream `canary` release. Build it with the required
    `github_token` secret so GitHub CLI can verify signed provenance from the
