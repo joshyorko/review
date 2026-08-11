@@ -14,12 +14,25 @@ MAX_RAW_CHARS = 120_000
 VERIFICATION_STATES = ("verified", "unverified", "skipped")
 
 
-def _raw(value: str | list[str] | None) -> list[str]:
+def _raw_lines(value: str | list[str] | None) -> list[str]:
     if value is None:
         return []
-    lines = value if isinstance(value, list) else value.splitlines()
+    if isinstance(value, str):
+        return value.splitlines()
+    if not isinstance(value, list) or any(not isinstance(line, str) for line in value):
+        raise ValueError("raw evidence must be text or a list of text lines")
+    return value
+
+
+def _raw(value: str | list[str] | None) -> list[str]:
+    lines = _raw_lines(value)
     text = "\n".join(str(line) for line in lines)
     return text[:MAX_RAW_CHARS].splitlines()[:MAX_RAW_LINES]
+
+
+def _raw_truncated(value: str | list[str] | None) -> bool:
+    lines = _raw_lines(value)
+    return len(lines) > MAX_RAW_LINES or len("\n".join(lines)) > MAX_RAW_CHARS
 
 
 def _text(value: Any) -> bool:
@@ -28,6 +41,17 @@ def _text(value: Any) -> bool:
 
 def _integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _unparsable(raw_evidence: Any, payload: Any) -> "ReviewResult":
+    try:
+        evidence = _raw(raw_evidence if raw_evidence is not None else payload)
+    except (TypeError, ValueError):
+        try:
+            evidence = _raw(payload)
+        except (TypeError, ValueError):
+            evidence = []
+    return ReviewResult(1, "unparsable", raw_evidence=evidence)
 
 
 @dataclass(frozen=True)
@@ -44,6 +68,8 @@ class ReviewResult:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewResult":
+        if not isinstance(data, dict) or "counts" not in data or "findings" not in data:
+            return cls(1, "unparsable")
         try:
             version = data["version"]
         except (KeyError, TypeError):
@@ -53,9 +79,11 @@ class ReviewResult:
             return cls(1, "unparsable")
         if version != 1 or state not in STATES:
             state = "unparsable"
-        raw_counts = data.get("counts") or {}
-        raw_findings = data.get("findings") or []
+        raw_counts = data["counts"]
+        raw_findings = data["findings"]
         if not isinstance(raw_counts, dict) or not isinstance(raw_findings, list):
+            return cls(1, "unparsable")
+        if set(raw_counts) != set(SEVERITIES):
             return cls(1, "unparsable")
         try:
             counts = {severity: raw_counts.get(severity, 0) for severity in SEVERITIES}
@@ -113,6 +141,10 @@ class ReviewResult:
             or any(not _text(item) for item in overlap["shared_files"])
         ):
             return cls(1, "unparsable")
+        try:
+            raw_evidence = _raw(data.get("raw_evidence"))
+        except (TypeError, ValueError):
+            return cls(1, "unparsable")
         return cls(
             version,
             state,
@@ -122,7 +154,7 @@ class ReviewResult:
             dict(provenance),
             dict(overlap),
             dict(live),
-            _raw(data.get("raw_evidence")),
+            raw_evidence,
         )
 
     @property
@@ -153,10 +185,10 @@ def parse_review_result(payload: str, raw_evidence: str | list[str] | None = Non
             raise ValueError("result is not an object")
         result = ReviewResult.from_dict(value)
         if result.state == "unparsable":
-            return ReviewResult(1, "unparsable", raw_evidence=_raw(raw_evidence or payload))
+            return _unparsable(raw_evidence, payload)
         return result
     except (TypeError, ValueError, json.JSONDecodeError):
-        return ReviewResult(1, "unparsable", raw_evidence=_raw(raw_evidence or payload))
+        return _unparsable(raw_evidence, payload)
 
 
 def adapt_current_engine(
@@ -170,7 +202,10 @@ def adapt_current_engine(
 ) -> ReviewResult:
     """Adapt Goose's JSONL findings and line-oriented progress records."""
     raw = _raw(output)
+    truncated = _raw_truncated(output)
     base = dict(provenance or {})
+    base.setdefault("backend", "goose")
+    base.setdefault("model", "unknown")
     base.setdefault("engine", "bluefin-review")
     findings: list[dict[str, Any]] = []
     counts = {s: 0 for s in SEVERITIES}
@@ -254,6 +289,8 @@ def adapt_current_engine(
         "live": dict(live or {}),
         "raw_evidence": raw,
     }
+    if truncated:
+        return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
     if exit_code not in (0, None, 65):
         return ReviewResult(1, "failed", **context)
     if malformed:
@@ -263,7 +300,13 @@ def adapt_current_engine(
         for item in checks
     ):
         return ReviewResult(1, "incomplete", counts=counts, findings=findings, **context)
-    if summary is None or int(summary.group(1)) != len(findings):
+    if summary is None:
+        return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
+    try:
+        summary_count = int(summary.group(1))
+    except (TypeError, ValueError, OverflowError):
+        return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
+    if summary_count != len(findings):
         return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
     return ReviewResult(1, "findings" if findings else "complete", counts=counts,
                         findings=findings, **context)

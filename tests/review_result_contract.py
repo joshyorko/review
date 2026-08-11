@@ -82,6 +82,44 @@ class ReviewResultContractTests(unittest.TestCase):
         self.assertEqual(result.state, "unparsable")
         self.assertEqual(result.raw_evidence, output.splitlines())
 
+    def test_counts_and_findings_are_required_typed_fields(self):
+        for field in ("counts", "findings"):
+            for value in (None, False):
+                payload = {"version": 1, "state": "complete", "counts": {}, "findings": []}
+                payload[field] = value
+                self.assertEqual(ReviewResult.from_dict(payload).state, "unparsable")
+            payload = {"version": 1, "state": "complete", "counts": {}, "findings": []}
+            payload.pop(field)
+            self.assertEqual(ReviewResult.from_dict(payload).state, "unparsable")
+
+    def test_malformed_raw_evidence_is_unparsable(self):
+        payload = {
+            "version": 1,
+            "state": "complete",
+            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "findings": [],
+        }
+        for value in ({"line": 1}, 7, ["ok", {"line": 1}]):
+            self.assertEqual(ReviewResult.from_dict({**payload, "raw_evidence": value}).state, "unparsable")
+            self.assertEqual(parse_review_result(json.dumps({**payload, "raw_evidence": value})).state, "unparsable")
+        self.assertEqual(parse_review_result("not json", raw_evidence={"line": 1}).state, "unparsable")
+
+    def test_truncated_output_never_becomes_clean(self):
+        output = "\n".join(["goose review: orchestrator emitted 0 finding(s) from 0 check(s) (main: ran, 0 finding(s))"] + ["noise"] * 400)
+        result = adapt_current_engine(output, 0)
+        self.assertEqual(result.state, "unparsable")
+        self.assertEqual(len(result.raw_evidence), 400)
+
+    def test_default_adapter_provenance_round_trips(self):
+        result = adapt_current_engine(fixture("goose-review-clean.txt"), 0)
+        self.assertEqual(parse_review_result(result.to_json()).state, "complete")
+        self.assertEqual(result.provenance["backend"], "goose")
+
+    def test_huge_summary_count_is_unparsable(self):
+        output = "goose review: orchestrator emitted " + ("9" * 10000) + " finding(s) from 0 check(s) (main: ran, 0 finding(s))"
+        result = adapt_current_engine(output, 0)
+        self.assertEqual(result.state, "unparsable")
+
     def test_incomplete_and_unparsable_never_become_clean(self):
         for state in ("incomplete", "unparsable", "failed"):
             result = ReviewResult.from_dict({"version": 1, "state": state})
