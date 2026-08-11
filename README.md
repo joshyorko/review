@@ -133,9 +133,13 @@ an operations task outside this repository automation.
 - Goose configured for GitHub Copilot, or `GITHUB_COPILOT_TOKEN`.
 - For contributor Git operations, a separate GitHub token via
   `REVIEW_GH_TOKEN`.
+- For a Hive-selected Codex contributor, the official `codex` image binary and
+  a subscription/OAuth `CODEX_HOME/auth.json` on the host.
 
-Goose is the only agent backend and GitHub Copilot is the only supported
-provider. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
+Goose remains the default backend; Hive's `AGENT_BACKEND` selects Codex or Pi
+when configured. Codex receives only a read-only `auth.json` mount, with no
+silent fallback. GitHub Copilot remains Goose's only supported provider.
+`GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
 optionally overrides the `gpt-5.6-luna` default, and
 `GOOSE_THINKING_EFFORT` optionally overrides the default `max` reasoning
 effort. A `gh auth
@@ -600,7 +604,8 @@ All configuration is read at launch.
 | `GOOSE_MODEL` | Optional GitHub Copilot model override. |
 | `GOOSE_THINKING_EFFORT` | Optional Copilot reasoning-effort override. |
 | `GITHUB_COPILOT_TOKEN` | Optional Copilot credential override. |
-| `TOOL` | Agent backend selector; only `goose` is accepted. |
+| `TOOL` | Compatibility selector for `goose`, `codex`, or `pi` when Hive has no backend value. |
+| `CODEX_HOME` | Host Codex home used only to read and mount `auth.json` read-only. |
 
 `~/.config/review/last-selections.env` stores launcher configuration
 state such as the last Goose/provider selection between runs.

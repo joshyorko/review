@@ -87,13 +87,20 @@ Goose, or image build skill documents.
    `:z` relabel, never `:Z` — concurrent named workers may share one
    registration, and a private MCS category revokes the running container's
    access when the next one starts.
-4. Keep Goose as the default backend and Pi as the explicitly selected
-   executable backend. `TOOL=goose` preserves the Copilot provider path;
+4. Keep Goose as the default backend, with Codex and Pi available only when
+   Hive's read-only `AGENT_BACKEND` selection names them. `TOOL=goose` preserves
+   the Copilot provider path;
    `TOOL=pi` requires `PI_API_KEY`, passes it as the selected Pi process's
    `ANTHROPIC_API_KEY`, and lets the image entrypoint prove `pi --version`
    before Hive starts. Nothing is persisted: not a secret, not a provider, not
    a model. There is no last-selection file, and `tests/just-onboarding.sh`
    asserts one is never written. Hive remains the sole assignment authority.
+   Codex requires the official `codex` binary and a host
+   `CODEX_HOME/auth.json`; the launcher mounts that single OAuth file
+   read-only at `/home/dev/.codex/auth.json` and never mounts the host home or
+   copies or logs its contents. Missing binary and missing auth are separate
+   startup errors. Hive #3471 owns reasoning-effort transport and approval /
+   sandbox semantics; this launcher does not infer or override them.
    The configured-provider preflight reads Goose's own config and must
    accept both keys Goose has shipped: current releases record the
    selection as `active_provider:` beside a `providers:` map, older ones

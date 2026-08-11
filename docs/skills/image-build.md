@@ -72,7 +72,7 @@ fix.
    source, image labels, and SBOM package records can disagree with the
    filesystem; command execution and file inspection against the pinned digest
    define the base interface.
-3. Add only the contributor delta: Goose, tmux, GitHub CLI, Node with `ws`, the
+3. Add only the contributor delta: Goose, the official Codex CLI, tmux, GitHub CLI, Node with `ws`, the
    pinned Hive runtime, controlled policy/configuration, and approved agent
    tools. Do not duplicate a capability already present in the verified base.
    Do not turn the image into a general-purpose distribution.

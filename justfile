@@ -64,14 +64,14 @@
 # from the repository root. Persistent state is limited to launcher
 # configuration; the container receives credentials by environment and the
 # read-only ~/.config/hive mount, never a workspace or host home mount.
-# Goose is the default agent backend; Pi is the explicitly selected executable
-# backend. Hive remains the sole assignment authority and there is no local
-# inference, model catalogue, or multi-CLI auto-detection.
+# Goose is the default agent backend; Hive may select Codex or Pi through
+# AGENT_BACKEND. Hive remains the sole assignment authority and there is no
+# local inference, model catalogue, or multi-CLI auto-detection.
 #
 # TOOL is read from the environment so 'TOOL=goose just review-container'
 # works as documented — 'just' recipe parameters are positional, not
-# KEY=VALUE, so it cannot be a plain recipe parameter. Any value other than
-# 'goose' is a hard error rather than a silent fallback.
+# KEY=VALUE, so it cannot be a plain recipe parameter. Unsupported values are
+# hard errors rather than silent fallbacks.
 tool_env := env("TOOL", "")
 hive_repo_url := "https://github.com/kubestellar/hive"
 # origin/v2 via `git ls-remote --heads https://github.com/kubestellar/hive v2`
@@ -145,10 +145,14 @@ require_copilot_provider() {
 }
 require_goose_backend() {
   local requested="${1:-}"
-  [[ -z "$requested" || "$requested" == goose || "$requested" == pi ]] && return 0
-  echo "ERROR: TOOL=${requested} is not supported — review supports Goose and Pi." >&2
-  echo "  Unset TOOL, or pass TOOL=goose or TOOL=pi." >&2
+  [[ -z "$requested" || "$requested" == goose || "$requested" == pi || "$requested" == codex ]] && return 0
+  echo "ERROR: TOOL=${requested} is not supported — review supports Goose, Codex, and Pi." >&2
+  echo "  Unset TOOL, or pass TOOL=goose, TOOL=codex, or TOOL=pi." >&2
   return 1
+}
+codex_auth_file() {
+  local root="${CODEX_HOME:-${HOME}/.codex}"
+  printf '%s/auth.json\n' "${root%/}"
 }
 preflight_agent() {
   local backend="${1:-goose}"
@@ -157,6 +161,12 @@ preflight_agent() {
     [[ -n "${PI_API_KEY:-}" ]] || {
       echo "ERROR: Pi requires PI_API_KEY for the selected Anthropic provider." >&2
       echo "  Export PI_API_KEY before running TOOL=pi just review-container." >&2
+      return 1
+    }
+  elif [[ "$backend" == codex ]]; then
+    [[ -s "$(codex_auth_file)" ]] || {
+      echo "ERROR: Codex subscription/OAuth auth is missing." >&2
+      echo "  Run: codex login --device-auth, then retry without mounting the whole home directory." >&2
       return 1
     }
   else
@@ -713,8 +723,6 @@ review-container profile="" effort="":
     mkdir -p "${STATE_DIR}"
 
     require_goose_backend "$TOOL"
-    BACKEND="${TOOL:-goose}"
-    preflight_agent "$BACKEND"
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
       echo "  Install Podman, then re-run review-container." >&2
@@ -726,16 +734,19 @@ review-container profile="" effort="":
     CONTAINER_NAME="${REVIEW_CONTAINER_NAME:-review-container}"
     require_valid_container_name "$CONTAINER_NAME"
 
-    resolve_model_profile "{{profile}}" "{{effort}}"
-    if [[ "$BACKEND" == pi ]]; then
-      export ANTHROPIC_API_KEY="$PI_API_KEY"
-    else
-      resolve_goose_selection
-    fi
     REVIEW_RECIPE=review-container
     ensure_hive_contributor_env
     report_hive_selection
-
+    HIVE_BACKEND="$(hive_contributor_backend "$HIVE_CONTRIBUTOR_ENV")"
+    BACKEND="${HIVE_BACKEND:-${TOOL:-goose}}"
+    require_goose_backend "$BACKEND"
+    preflight_agent "$BACKEND"
+    resolve_model_profile "{{profile}}" "{{effort}}"
+    if [[ "$BACKEND" == pi ]]; then
+      export ANTHROPIC_API_KEY="$PI_API_KEY"
+    elif [[ "$BACKEND" == goose ]]; then
+      resolve_goose_selection
+    fi
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
@@ -806,6 +817,11 @@ review-container profile="" effort="":
     if [[ "$BACKEND" == pi ]]; then
       CONTAINER_ARGS+=(--env ANTHROPIC_API_KEY)
       echo "✓ Pi credential passed to the agent (value not shown)."
+    fi
+    if [[ "$BACKEND" == codex ]]; then
+      CODEX_AUTH_FILE="$(codex_auth_file)"
+      CONTAINER_ARGS+=(--volume "${CODEX_AUTH_FILE}:/home/dev/.codex/auth.json:ro,z" --env CODEX_HOME=/home/dev/.codex)
+      echo "✓ Codex subscription/OAuth credential passed read-only (value not shown)."
     fi
     resolve_gh_token
     if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then

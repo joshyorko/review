@@ -63,18 +63,19 @@ lock = json.loads(Path("package-lock.json").read_text())
 expected_manifest = {
     "name": "review-relay-runtime",
     "private": True,
-    "dependencies": {"ws": "8.21.1"},
+    "dependencies": {"@openai/codex": "0.147.0", "ws": "8.21.1"},
 }
 if manifest != expected_manifest:
-    errors.append("package.json must declare only the exact ws relay dependency")
+    errors.append("package.json must declare only the pinned Codex CLI and ws relay dependencies")
 if lock.get("lockfileVersion") != 3:
     errors.append("package-lock.json must use lockfileVersion 3")
-if set(lock.get("packages", {})) != {"", "node_modules/ws"}:
-    errors.append("package-lock.json must lock only ws")
 root = lock.get("packages", {}).get("", {})
+codex = lock.get("packages", {}).get("node_modules/@openai/codex", {})
 ws = lock.get("packages", {}).get("node_modules/ws", {})
-if root.get("dependencies") != {"ws": "8.21.1"} or ws.get("version") != "8.21.1":
-    errors.append("package-lock.json must lock ws at 8.21.1")
+if root.get("dependencies") != expected_manifest["dependencies"] or codex.get("version") != "0.147.0" or ws.get("version") != "8.21.1":
+    errors.append("package-lock.json must lock Codex at 0.147.0 and ws at 8.21.1")
+if not codex.get("resolved") or not codex.get("integrity"):
+    errors.append("package-lock.json must record Codex resolution and integrity")
 if not ws.get("resolved") or not ws.get("integrity"):
     errors.append("package-lock.json must record ws resolution and integrity")
 
@@ -109,6 +110,9 @@ fi
 
 # SC2016: every argument here is a literal to grep for, never an expansion.
 # shellcheck disable=SC2016
+require package.json \
+  '"@openai/codex": "0.147.0"'
+
 require image/Containerfile \
   'ARG GOOSE_CHANNEL=canary' \
   'ARG PI_VERSION=0.73.1' \
@@ -135,12 +139,14 @@ require image/Containerfile \
   'gh attestation verify "$workdir/goose.tar.gz" --repo aaif-goose/goose --signer-workflow aaif-goose/goose/.github/workflows/canary.yml' \
   'COPY package.json package-lock.json /opt/hive/' \
   'npm --prefix /opt/hive ci --omit=dev --ignore-scripts;' \
+  'ln -s /opt/hive/node_modules/.bin/codex /usr/local/bin/codex;' \
   'npm cache clean --force;' \
   'test ! -e /root/.npm;' \
   'rm -rf /opt/node/include /opt/node/share/doc;' \
   'test ! -e /opt/node/include;' \
   'test ! -e /opt/node/share/doc;' \
   'corepack --version;' \
+  'codex --version' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/config/backends.conf' \
@@ -449,6 +455,9 @@ forbid image/config/local-agent-policy.md \
 # AGENTS.md and .goosehints itself, so no filename compatibility override stays.
 # shellcheck disable=SC2016 # Literal source assertions, not shell expansions.
 require image/entrypoint.sh \
+  'command -v codex >/dev/null 2>&1' \
+  'Codex subscription/OAuth authentication is missing.' \
+  'CODEX_HOME' \
   'selected_backend="${AGENT_BACKEND:-goose}"' \
   'command -v pi >/dev/null 2>&1' \
   'pi --version >/dev/null 2>&1' \

@@ -308,7 +308,6 @@ assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "gh auth login" "$OUT"
 assert_not_contains "claude" "$OUT"
 assert_not_contains "copilot" "$OUT"
-assert_not_contains "codex" "$OUT"
 
 begin "preflight: missing Goose provider configuration yields one actionable error"
 rm -f "$home/.config/goose/config.yaml"
@@ -317,7 +316,6 @@ assert_nonzero_status "$STATUS" "an unconfigured goose must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "goose configure" "$OUT"
 assert_not_contains "claude" "$OUT"
-assert_not_contains "codex" "$OUT"
 write_goose_config
 
 begin "preflight: an invalid Goose config (no provider) is treated as unconfigured"
@@ -359,8 +357,19 @@ sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=codex/' "$home/.config/hive/contributo
 run_recipe review-container GH_READY=1 CODEX_HOME="$home/.codex"
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--env AGENT_BACKEND=codex" "$runner_log"
-assert_file_contains "$home/.codex:/home/dev/.codex:ro" "$runner_log"
+assert_file_contains "$home/.codex/auth.json:/home/dev/.codex/auth.json:ro" "$runner_log"
 assert_file_not_contains "$home:/home/dev" "$runner_log"
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=goose/' "$home/.config/hive/contributor.env"
+
+begin "Hive-selected Codex backend reports missing subscription auth distinctly"
+reset_logs
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=codex/' "$home/.config/hive/contributor.env"
+mv -- "$home/.codex/auth.json" "$home/.codex/auth.json.missing"
+run_recipe review-container GH_READY=1 CODEX_HOME="$home/.codex"
+assert_nonzero_status "$STATUS" "Codex without auth must fail preflight"
+assert_contains "Codex subscription/OAuth auth is missing" "$OUT"
+assert_file_not_contains "run --rm" "$runner_log"
+mv -- "$home/.codex/auth.json.missing" "$home/.codex/auth.json"
 sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=goose/' "$home/.config/hive/contributor.env"
 
 # ══ 2. TOOL handling: Goose only ══════════════════════════════════════════
@@ -368,7 +377,7 @@ begin "TOOL=claude is rejected with a Goose-only error"
 run_recipe review-container GH_READY=1 TOOL=claude
 assert_nonzero_status "$STATUS" "a non-Goose TOOL must be a hard error"
 assert_contains "TOOL=claude is not supported" "$OUT"
-assert_contains "review supports Goose and Pi" "$OUT"
+assert_contains "review supports Goose, Codex, and Pi" "$OUT"
 assert_not_contains "auto-detected" "$OUT"
 assert_not_contains "Multiple AI CLIs" "$OUT"
 
@@ -381,20 +390,24 @@ assert_not_contains "Unset TOOL" "$OUT"
 
 begin "TOOL=pi is accepted only with its executable backend credential"
 rm -f "$home/.config/goose/config.yaml"
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=pi/' "$home/.config/hive/contributor.env"
 run_recipe review-container GH_READY=1 TOOL=pi PI_API_KEY=pi-test-key
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_not_contains "is not supported" "$OUT"
 assert_file_contains "--env AGENT_BACKEND=pi" "$runner_log"
 assert_file_contains "--env ANTHROPIC_API_KEY" "$runner_log"
 assert_file_not_contains "pi-test-key" "$runner_log"
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=goose/' "$home/.config/hive/contributor.env"
 write_goose_config
 
 begin "TOOL=pi without its credential is rejected before container launch"
 reset_logs
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=pi/' "$home/.config/hive/contributor.env"
 run_recipe review-container GH_READY=1 TOOL=pi
 assert_nonzero_status "$STATUS" "Pi without a credential must fail preflight"
 assert_contains "Pi requires PI_API_KEY" "$OUT"
 assert_file_not_contains "run --rm" "$runner_log"
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=goose/' "$home/.config/hive/contributor.env"
 
 begin "selection: default Copilot model is noninteractive"
 reset_logs

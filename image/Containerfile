@@ -112,6 +112,7 @@ RUN set -eu; \
     tar -I 'python3 -m gzip' -xOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux; \
     chmod 0755 /usr/local/bin/tmux; \
     npm --prefix /opt/hive ci --omit=dev --ignore-scripts; \
+    ln -s /opt/hive/node_modules/.bin/codex /usr/local/bin/codex; \
     npm_cache="$(npm config get cache)"; \
     npm cache clean --force; \
     test ! -e "$npm_cache/_cacache"; \
@@ -125,7 +126,8 @@ RUN set -eu; \
     npm --version; \
     corepack --version; \
     gh --version; \
-    tmux -V
+    tmux -V; \
+    codex --version
 
 # The maintainer TUI runtime: uv (pinned, checksum-verified) creates a
 # self-contained virtual environment on the base's own CPython and installs

@@ -43,6 +43,18 @@ goose)
     exit 1
   fi
   ;;
+codex)
+  command -v codex >/dev/null 2>&1 || {
+    note 'ERROR: Codex CLI is not installed in the contributor image.'
+    exit 1
+  }
+  export CODEX_HOME="${CODEX_HOME:-${HOME}/.codex}"
+  [ -s "${CODEX_HOME}/auth.json" ] || {
+    note 'ERROR: Codex subscription/OAuth authentication is missing.'
+    note '  Run: codex login --device-auth, then retry.'
+    exit 1
+  }
+  ;;
 pi)
   command -v pi >/dev/null 2>&1 || {
     note 'ERROR: Pi backend selected but pi is not installed.'
@@ -86,6 +98,8 @@ if [ "$review_dashboard" = true ]; then
 else
   note 'Bluefin Operations | contributor runtime starting'
 fi
+
+agent_backend="$selected_backend"
 # --- Goose configuration -----------------------------------------------------
 #
 # GOOSE_PATH_ROOT is the image-owned policy, data, and state seam. The pinned
@@ -96,19 +110,23 @@ export GOOSE_PATH_ROOT="${REVIEW_GOOSE_ROOT:-/opt/bluefin/goose}"
 # Goose resolves environment before file, so the launcher's passthrough wins
 # over anything in the controlled config. Goose is Copilot-only; Pi gets its
 # own selected provider credential below.
-if [ "$selected_backend" = goose ]; then
+if [ "$agent_backend" = goose ]; then
   export GOOSE_PROVIDER=github_copilot
 fi
 
 # Goose refuses to start without a model. Keep the direct-image fallback in
 # sync with the launcher's default for users who invoke this image directly.
-if [ -z "${GOOSE_MODEL:-}" ]; then
+if [ "$agent_backend" = goose ] && [ -z "${GOOSE_MODEL:-}" ]; then
   GOOSE_MODEL="gpt-5.6-luna"
   note "GOOSE_MODEL not set; defaulting to ${GOOSE_MODEL} for GitHub Copilot"
 fi
-export GOOSE_MODEL
+if [ "$agent_backend" = goose ]; then
+  export GOOSE_MODEL
+fi
 
-export GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-high}"
+if [ "$agent_backend" = goose ]; then
+  export GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-high}"
+fi
 
 if [ "$review_dashboard" = true ]; then
   banner 'PR queue dashboard (no Hive)'
