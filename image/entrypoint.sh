@@ -32,13 +32,37 @@ BANNER
   } >&2
 }
 
-# Validate the caller's requested provider before any other startup work so an
-# unsupported setting always gets the same actionable answer.
-if [ -n "${GOOSE_PROVIDER:-}" ] && [ "$GOOSE_PROVIDER" != github_copilot ]; then
-  note "ERROR: GOOSE_PROVIDER=${GOOSE_PROVIDER} is not supported — review supports GitHub Copilot only."
-  note "  Unset GOOSE_PROVIDER or set GOOSE_PROVIDER=github_copilot."
+# Validate the selected backend before startup. Hive remains responsible for
+# assignment selection; this only proves the selected CLI can run here.
+selected_backend="${AGENT_BACKEND:-goose}"
+case "$selected_backend" in
+goose)
+  if [ -n "${GOOSE_PROVIDER:-}" ] && [ "$GOOSE_PROVIDER" != github_copilot ]; then
+    note "ERROR: GOOSE_PROVIDER=${GOOSE_PROVIDER} is not supported — review supports GitHub Copilot only."
+    note "  Unset GOOSE_PROVIDER or set GOOSE_PROVIDER=github_copilot."
+    exit 1
+  fi
+  ;;
+pi)
+  command -v pi >/dev/null 2>&1 || {
+    note 'ERROR: Pi backend selected but pi is not installed.'
+    exit 1
+  }
+  pi --version >/dev/null 2>&1 || {
+    note 'ERROR: Pi backend selected but pi is not executable.'
+    exit 1
+  }
+  [ -n "${ANTHROPIC_API_KEY:-}" ] || {
+    note 'ERROR: Pi backend selected but its Anthropic credential is missing.'
+    exit 1
+  }
+  export PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
+  ;;
+*)
+  note "ERROR: unsupported Hive agent backend: ${selected_backend}."
   exit 1
-fi
+  ;;
+esac
 
 # The maintainer review surface is the PR-review launch path: the dashboard
 # needs GH_TOKEN and Goose but no Hive registration, so it skips the
@@ -70,10 +94,11 @@ fi
 export GOOSE_PATH_ROOT="${REVIEW_GOOSE_ROOT:-/opt/bluefin/goose}"
 
 # Goose resolves environment before file, so the launcher's passthrough wins
-# over anything in the controlled config. This image is intentionally
-# Copilot-only; accepting another value would leave Hive to start a provider
-# whose credential path this launcher does not support.
-export GOOSE_PROVIDER=github_copilot
+# over anything in the controlled config. Goose is Copilot-only; Pi gets its
+# own selected provider credential below.
+if [ "$selected_backend" = goose ]; then
+  export GOOSE_PROVIDER=github_copilot
+fi
 
 # Goose refuses to start without a model. Keep the direct-image fallback in
 # sync with the launcher's default for users who invoke this image directly.
