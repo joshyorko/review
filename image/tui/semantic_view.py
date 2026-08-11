@@ -12,7 +12,7 @@ from review_result import ReviewResult
 
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
-_HEAD_EVIDENCE = re.compile(r"^[0-9a-f]{12,40}$")
+_HEAD_EVIDENCE = _SHA
 
 
 class ActionID(str, Enum):
@@ -318,7 +318,7 @@ def _available_actions(value: Any) -> tuple[ActionID, ...]:
 
 
 def _heads_agree(first: str, second: str) -> bool:
-    return first == second or first.startswith(second) or second.startswith(first)
+    return first == second
 
 
 def _result_head_evidence(result: ReviewResult) -> tuple[str | None, bool]:

@@ -61,13 +61,16 @@ actions that require explicit human consent.
 
 `QueueRow` and `DecisionCard` carry the pull-request identity, TL;DR, current
 and reviewed heads, freshness, CI, mergeability, provenance, verification,
-findings, and available human actions. A full current head is bound to
-Codex-style `provenance.head_sha` or the landed Goose `live.head` evidence,
-which may be a 12–40 character hexadecimal prefix. Missing evidence or any
-disagreement produces `STALE` and withholds the current exact head; it cannot
-produce a clean card. `effort` is preferred while `reasoning_effort` remains
-accepted for existing adapters. `ReviewStateView` owns the lifecycle states
-`READY`, `RUNNING`, `STALE`, and `CANCELLED`.
+findings, and available human actions. A full current head is bound only when
+Codex-style `provenance.head_sha` or the landed Goose `live.head` evidence is
+the exact 40-character SHA. An abbreviated Goose head is insufficient: it
+produces `STALE` and withholds the current exact head. If an adapter receives
+an abbreviated Goose head, repository-backed unique expansion belongs before
+this pure builder; the builder performs no repository lookup. Missing evidence
+or any disagreement also produces `STALE` and cannot produce a clean card.
+`effort` is preferred while `reasoning_effort` remains accepted for existing
+adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
+`STALE`, and `CANCELLED`.
 
 ## Core Process
 

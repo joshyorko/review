@@ -182,7 +182,7 @@ class SemanticViewContractTests(unittest.TestCase):
             ),
         )
 
-    def test_decision_card_preserves_exact_head_and_result_evidence(self):
+    def test_decision_card_binds_codex_provenance_full_head(self):
         result = ReviewResult.from_dict({
             "version": 1,
             "state": "findings",
@@ -207,6 +207,8 @@ class SemanticViewContractTests(unittest.TestCase):
         card = build_decision_card(result, exact_head="b" * 40)
         self.assertEqual(card.state, DecisionState.FINDINGS)
         self.assertEqual(card.exact_head, "b" * 40)
+        self.assertEqual(card.reviewed_head, "b" * 40)
+        self.assertEqual(card.freshness.value, "current")
         self.assertEqual(card.provenance.backend, "codex")
         self.assertEqual(card.provenance.model, "gpt-5.6-luna")
         self.assertEqual(card.findings[0].title, "unsafe mutation")
@@ -265,7 +267,7 @@ class SemanticViewContractTests(unittest.TestCase):
             ),
         )
 
-    def test_decision_card_binds_landed_goose_live_head_prefix(self):
+    def test_decision_card_binds_landed_goose_live_full_head(self):
         result = ReviewResult.from_dict({
             "version": 1,
             "state": "complete",
@@ -281,13 +283,13 @@ class SemanticViewContractTests(unittest.TestCase):
                 "ci": "success",
                 "mergeable": "MERGEABLE",
                 "merge_state": "CLEAN",
-                "head": "b" * 12,
+                "head": "b" * 40,
             },
         })
         card = build_decision_card(result, exact_head="b" * 40)
         self.assertEqual(card.state, DecisionState.CLEAN)
         self.assertEqual(card.exact_head, "b" * 40)
-        self.assertEqual(card.reviewed_head, "b" * 12)
+        self.assertEqual(card.reviewed_head, "b" * 40)
         self.assertEqual(card.freshness.value, "current")
         self.assertEqual(card.repository, "projectbluefin/review")
         self.assertEqual(card.number, 196)
@@ -295,6 +297,8 @@ class SemanticViewContractTests(unittest.TestCase):
         self.assertEqual(card.mergeability.label, "MERGEABLE")
 
     def test_decision_card_fails_closed_for_disagreeing_goose_live_head(self):
+        reviewed_full = "0123456789ab" + "c" * 28
+        current_full = "0123456789ab" + "d" * 28
         result = ReviewResult.from_dict({
             "version": 1,
             "state": "complete",
@@ -306,12 +310,11 @@ class SemanticViewContractTests(unittest.TestCase):
                 "repository": "projectbluefin/review",
                 "pull_request": 196,
             },
-            "live": {"head": "a" * 12},
+            "live": {"head": reviewed_full[:12]},
         })
-        card = build_decision_card(result, exact_head="b" * 40)
+        card = build_decision_card(result, exact_head=current_full)
         self.assertEqual(card.state, DecisionState.STALE)
         self.assertIsNone(card.exact_head)
-        self.assertEqual(getattr(getattr(card, "freshness", None), "value", None), "stale")
 
     def test_decision_card_fails_closed_when_head_sources_disagree(self):
         result = ReviewResult.from_dict({
