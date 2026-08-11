@@ -360,6 +360,14 @@ assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_not_contains "is not supported" "$OUT"
 assert_not_contains "Unset TOOL" "$OUT"
 
+begin "TOOL=pi is accepted only with its executable backend credential"
+run_recipe review-container GH_READY=1 TOOL=pi PI_API_KEY=pi-test-key
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
+assert_not_contains "is not supported" "$OUT"
+assert_file_contains "--env AGENT_BACKEND=pi" "$runner_log"
+assert_file_contains "--env ANTHROPIC_API_KEY" "$runner_log"
+assert_file_not_contains "pi-test-key" "$runner_log"
+
 begin "selection: default Copilot model is noninteractive"
 reset_logs
 run_recipe review-container GH_READY=1
