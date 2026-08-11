@@ -1078,23 +1078,6 @@ async def main() -> int:
         "failure text must outrank the healthy queue presentation",
     )
 
-    # Direct merge must refuse snapshot-known red and pending checks before
-    # presenting a confirmation gate or attempting the GitHub mutation.
-    for known_state in ("failure", "pending"):
-        app.stops[0].check_state = known_state
-        app.stops[0].live = {"isDraft": False}
-        app.merge_rights[app.stops[0].repository] = True
-        gh_log.write_text("")
-        app.action_merge_now()
-        await pilot.pause()
-        check(
-            not isinstance(app.screen, tui.ConfirmMutation),
-            f"direct merge must refuse known-{known_state} CI before confirmation",
-        )
-        check(
-            "pr merge" not in gh_log.read_text(),
-            f"direct merge must not attempt known-{known_state} CI",
-        )
     for key in ("r", "v", "o", "h", "/", "f", "b", "H", "R", "q"):
         check(
             f"[b]{key}[/b]" in tui.KEYS_READING,
@@ -1122,6 +1105,23 @@ async def main() -> int:
             bool(app.query("#keys-reading")) and bool(app.query("#keys-acting")),
             "the key map must be two lines at the bottom",
         )
+        # Direct merge must refuse snapshot-known red and pending checks before
+        # presenting a confirmation gate or attempting the GitHub mutation.
+        for known_state in ("failure", "pending"):
+            app.stops[0].check_state = known_state
+            app.stops[0].live = {"isDraft": False}
+            app.merge_rights[app.stops[0].repository] = True
+            gh_log.write_text("")
+            app.action_merge_now()
+            await pilot.pause()
+            check(
+                not isinstance(app.screen, tui.ConfirmMutation),
+                f"direct merge must refuse known-{known_state} CI before confirmation",
+            )
+            check(
+                "pr merge" not in gh_log.read_text(),
+                f"direct merge must not attempt known-{known_state} CI",
+            )
         # Colour reaches the row, from the snapshot's own state fields.
         app.stops[0].mergeable_state = "dirty"
         app.refresh_rows()
@@ -1270,8 +1270,8 @@ async def main() -> int:
         tui.classify_queue_item(
             {"labels": ["lgtm"], "mergeable_state": "dirty", "check_state": "failure"}
         )
-        == "queued",
-        "anything already handed to the sweep counts as queued",
+        == "conflicts",
+        "conflicts outrank an already queued presentation",
     )
     check(
         tui.classify_queue_item(

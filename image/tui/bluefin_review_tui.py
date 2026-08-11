@@ -256,6 +256,16 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
     return ""
 
 
+def ci_marker(checks: str) -> str:
+    """Carry the snapshot's CI state as text, not colour alone."""
+    return {
+        "success": "✓ CI GREEN",
+        "failure": "✗ CI FAILED",
+        "pending": "… CI PENDING",
+        "unknown": "? CI UNKNOWN",
+    }.get(checks, "? CI UNKNOWN")
+
+
 # The merge queue's segments, in the order a maintainer drains them, with the
 # same colours the rows use so the bar and the list agree.
 QUEUE_SEGMENTS = [
@@ -276,14 +286,14 @@ def classify_queue_item(item: dict) -> str:
     conflict outranks a failing check because it blocks the check from
     meaning anything.
     """
-    if "lgtm" in (item.get("labels") or []):
-        return "queued"
-    if item.get("recommended_action") == "ready-for-human-merge":
-        return "ready"
     if item.get("mergeable_state") == "dirty":
         return "conflicts"
     if item.get("check_state") == "failure":
         return "ci"
+    if "lgtm" in (item.get("labels") or []):
+        return "queued"
+    if item.get("recommended_action") == "ready-for-human-merge":
+        return "ready"
     if item.get("recommended_action") == "review":
         return "review"
     return "unclear"
@@ -1006,14 +1016,13 @@ class ReviewDashboard(App):
         marks = ""
         if stop.mergeable_state == "dirty":
             marks += " ⚑ CONFLICTS"
-        if stop.check_state == "failure":
-            marks += " ✗ CI"
+        marks += f" {ci_marker(stop.check_state)}"
         if stop.review_state == "approved":
             marks += " ✓ approved"
         body = (
             f"{link(stop.key, pr_url(stop.repository, stop.number))}: "
             f"{escape(stop.title[:60])}{tag} "
-            f"{escape('[' + stop.action + ']')}{marks}{failed}"
+            f"{marks} {escape('[' + stop.action + ']')}{failed}"
         )
         style = stop_style(
             stop.action, stop.mergeable_state, stop.check_state, stop.review_state
@@ -1739,6 +1748,13 @@ class ReviewDashboard(App):
             self.notify(
                 f"merging {stop.repository} directly is a maintainer power and "
                 "you do not have it there; queue it with [a] instead.",
+                severity="error",
+            )
+            return False
+        if stop.check_state in {"failure", "pending"}:
+            state = "failed" if stop.check_state == "failure" else "pending"
+            self.notify(
+                f"{stop.key}: direct merge refused; CI is known {state}.",
                 severity="error",
             )
             return False
