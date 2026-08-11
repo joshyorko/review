@@ -132,6 +132,32 @@ class ReviewEvidenceManifestUnitTests(unittest.TestCase):
         self.assertNotIn("untrusted_text", serialized)
         self.assertIn(handle.uri, serialized)
 
+    def test_untrusted_summary_is_omitted_but_trusted_summary_is_kept(self) -> None:
+        from image.tui.review_evidence_manifest import ReviewEvidenceManifest
+
+        secret = "ghs_summary-secret"
+        untrusted = EvidenceEntry(
+            "pull-request-body",
+            "github:pull-request",
+            TrustClass.UNTRUSTED,
+            Availability.AVAILABLE,
+            EvidencePhase.SNAPSHOT,
+            summary=secret,
+        )
+        trusted = EvidenceEntry(
+            "changed-files",
+            "github:pull-request",
+            TrustClass.VERIFIED,
+            Availability.AVAILABLE,
+            EvidencePhase.SNAPSHOT,
+            summary="safe changed-file summary",
+        )
+
+        serialized = ReviewEvidenceManifest(_request(), (untrusted, trusted)).semantic_json()
+
+        self.assertNotIn(secret, serialized)
+        self.assertIn("safe changed-file summary", serialized)
+
     def test_manifest_and_entry_handle_count_boundaries(self) -> None:
         from image.tui.review_evidence_manifest import ReviewEvidenceManifest
 

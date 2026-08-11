@@ -184,6 +184,15 @@ def _encode(value: Any) -> Any:
         return value
     if isinstance(value, tuple):
         return [_encode(item) for item in value]
+    if isinstance(value, EvidenceEntry):
+        omitted = {"untrusted_text", "mutation_authority"}
+        if value.trust is TrustClass.UNTRUSTED:
+            omitted.add("summary")
+        return {
+            name: _encode(getattr(value, name))
+            for name in value.__dataclass_fields__
+            if name not in omitted
+        }
     if hasattr(value, "__dataclass_fields__"):
         return {
             name: _encode(getattr(value, name))
