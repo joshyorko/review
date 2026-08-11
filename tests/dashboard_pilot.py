@@ -1053,6 +1053,48 @@ async def main() -> int:
         tui.stop_style("investigate", "unknown", "unknown", "unknown") == "grey62",
         "work nobody can act on must recede",
     )
+    text_states = {
+        "success": tui.Stop("o/r", 1, "ready-for-human-merge", "green", check_state="success"),
+        "failure": tui.Stop("o/r", 2, "review", "failed", check_state="failure"),
+        "pending": tui.Stop("o/r", 3, "review", "pending", check_state="pending"),
+        "unknown": tui.Stop("o/r", 4, "investigate", "unknown", check_state="unknown"),
+        "conflict": tui.Stop("o/r", 5, "review", "conflict", mergeable_state="dirty"),
+    }
+    text_rows = {state: app.row_markup(stop) for state, stop in text_states.items()}
+    for state, marker in {
+        "success": "✓ CI GREEN",
+        "failure": "✗ CI FAILED",
+        "pending": "… CI PENDING",
+        "unknown": "? CI UNKNOWN",
+        "conflict": "⚑ CONFLICTS",
+    }.items():
+        check(marker in text_rows[state], f"{state} CI must be explicit on its row")
+    check(
+        text_rows["conflict"].index("⚑ CONFLICTS") < text_rows["conflict"].index("[review]"),
+        "conflict text must outrank the healthy queue presentation",
+    )
+    check(
+        text_rows["failure"].index("✗ CI FAILED") < text_rows["failure"].index("[review]"),
+        "failure text must outrank the healthy queue presentation",
+    )
+
+    # Direct merge must refuse snapshot-known red and pending checks before
+    # presenting a confirmation gate or attempting the GitHub mutation.
+    for known_state in ("failure", "pending"):
+        app.stops[0].check_state = known_state
+        app.stops[0].live = {"isDraft": False}
+        app.merge_rights[app.stops[0].repository] = True
+        gh_log.write_text("")
+        app.action_merge_now()
+        await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.ConfirmMutation),
+            f"direct merge must refuse known-{known_state} CI before confirmation",
+        )
+        check(
+            "pr merge" not in gh_log.read_text(),
+            f"direct merge must not attempt known-{known_state} CI",
+        )
     for key in ("r", "v", "o", "h", "/", "f", "b", "H", "R", "q"):
         check(
             f"[b]{key}[/b]" in tui.KEYS_READING,
