@@ -33,6 +33,45 @@ Do not use this for the launcher that starts the container
 ([`static-pr-queue.md`](static-pr-queue.md)), or Hive's contributor protocol
 ([`hive-runtime.md`](hive-runtime.md)).
 
+## Semantic Foundation
+
+`image/tui/semantic_view.py` is the pure semantic contract for the dashboard.
+Its builders consume queue snapshots and validated `ReviewResult` values; they
+do not call Textual, GitHub, Hive, a harness, or a mutation gate.
+
+`ActionID` is a stable shared registry. Verdict selection and submission are
+separate intents: `CHOOSE_REVIEW_VERDICT`, `APPROVE_REVIEW`,
+`REQUEST_CHANGES`, `COMMENT_REVIEW`, and `SUBMIT_REVIEW`. Pull-request
+mutation intents are explicit (`APPROVE_AND_QUEUE`, `MERGE_NOW`,
+`UPDATE_BRANCH`, `CLOSE_PULL_REQUEST`, `ADD_PULL_REQUEST_COMMENT`, and
+`RESOLVE_DUPLICATES`); `COPY_REVIEW_CONTEXT` is read-only. Navigation owns
+`NAVIGATE_UP`, `NAVIGATE_DOWN`, `NAVIGATE_FIRST`, `NAVIGATE_LAST`,
+`NAVIGATE_PAGE_UP`, `NAVIGATE_PAGE_DOWN`, `PANE_NEXT`, `PANE_PREVIOUS`,
+`BACK`, `HELP`, and `OPEN_COMMAND_PALETTE`. Harness preparation owns
+`SWITCH_HARNESS`, `PREPARE_HARNESS`, `SIGN_IN_HARNESS`, `INSTALL_HARNESS`,
+`RETRY_HARNESS_DETECTION`, `HARNESS_DIAGNOSTICS`, and `START_REVIEW`.
+Review-body intent is `GENERATE_BODY`, `EDIT_BODY`, `PREVIEW_BODY`, and
+`SUBMIT_REVIEW`. The registry must not reintroduce ambiguous `REJECT`,
+`LEAVE_REVIEW`, `COMMENT`, or `HANDOFF` identifiers.
+
+`ActionSpec.suspended_in_editor` marks navigation and pane intents that must
+be suppressed while a text editor owns focus. `mutating` identifies a
+GitHub-side mutation; `confirmation_required` also records local preparation
+actions that require explicit human consent.
+
+`QueueRow` and `DecisionCard` carry the pull-request identity, TL;DR, current
+and reviewed heads, freshness, CI, mergeability, provenance, verification,
+findings, and available human actions. A full current head is bound only when
+Codex-style `provenance.head_sha` or the landed Goose `live.head` evidence is
+the exact 40-character SHA. An abbreviated Goose head is insufficient: it
+produces `STALE` and withholds the current exact head. If an adapter receives
+an abbreviated Goose head, repository-backed unique expansion belongs before
+this pure builder; the builder performs no repository lookup. Missing evidence
+or any disagreement also produces `STALE` and cannot produce a clean card.
+`effort` is preferred while `reasoning_effort` remains accepted for existing
+adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
+`STALE`, and `CANCELLED`.
+
 ## Core Process
 
 1. **Every mutation goes through `mutate_all()`.** It shows the exact `gh`
