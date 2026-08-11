@@ -120,6 +120,11 @@ class ReviewResultContractTests(unittest.TestCase):
         result = adapt_current_engine(output, 0)
         self.assertEqual(result.state, "unparsable")
 
+    def test_disagreeing_total_and_main_counts_are_unparsable(self):
+        output = "goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 99 finding(s))"
+        result = adapt_current_engine(output, 0)
+        self.assertEqual(result.state, "unparsable")
+
     def test_incomplete_and_unparsable_never_become_clean(self):
         for state in ("incomplete", "unparsable", "failed"):
             result = ReviewResult.from_dict({"version": 1, "state": state})

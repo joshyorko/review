@@ -304,9 +304,10 @@ def adapt_current_engine(
         return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
     try:
         summary_count = int(summary.group(1))
+        main_count = int(summary.group(4))
     except (TypeError, ValueError, OverflowError):
         return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
-    if summary_count != len(findings):
+    if summary_count != len(findings) or main_count > summary_count:
         return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
     return ReviewResult(1, "findings" if findings else "complete", counts=counts,
                         findings=findings, **context)
