@@ -20,7 +20,11 @@ class ReviewResultContractTests(unittest.TestCase):
             "version": 1,
             "state": "findings",
             "counts": {"critical": 0, "high": 1, "medium": 2, "low": 0},
-            "findings": [{"severity": "high", "title": "unsafe path", "file": "x.py", "line": 7}],
+            "findings": [
+                {"severity": "high", "title": "unsafe path", "file": "x.py", "line": 7},
+                {"severity": "medium", "title": "missing test", "file": "test_x.py", "line": 9},
+                {"severity": "medium", "title": "weak assertion", "file": "test_x.py", "line": 12},
+            ],
             "verification": [{"name": "unit", "state": "verified", "evidence": "pytest"}],
             "provenance": {"backend": "goose", "model": "gpt-5.6-luna"},
             "overlap": {"duplicates": [12], "shared_files": ["x.py"]},
@@ -33,6 +37,17 @@ class ReviewResultContractTests(unittest.TestCase):
         self.assertEqual(encoded["findings"][0]["file"], "x.py")
         self.assertEqual(encoded["live"]["ci"], "failure")
         self.assertEqual(parse_review_result(result.to_json()).state, "findings")
+
+    def test_malformed_or_inconsistent_contract_is_unparsable(self):
+        malformed = ReviewResult.from_dict({"version": "not-a-version", "state": "complete"})
+        self.assertEqual(malformed.state, "unparsable")
+        inconsistent = ReviewResult.from_dict({
+            "version": 1,
+            "state": "findings",
+            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "findings": [{"severity": "high", "file": "x.py", "line": 7, "title": "x"}],
+        })
+        self.assertEqual(inconsistent.state, "unparsable")
 
     def test_incomplete_and_unparsable_never_become_clean(self):
         for state in ("incomplete", "unparsable", "failed"):

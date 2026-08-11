@@ -35,28 +35,73 @@ class ReviewResult:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewResult":
-        version = int(data.get("version", 0))
+        try:
+            version = int(data.get("version", 0))
+        except (TypeError, ValueError):
+            return cls(1, "unparsable")
         state = str(data.get("state", "unparsable"))
         if version != 1 or state not in STATES:
             state = "unparsable"
-        counts = {s: max(0, int((data.get("counts") or {}).get(s, 0))) for s in SEVERITIES}
-        findings = list(data.get("findings") or [])
+        raw_counts = data.get("counts") or {}
+        raw_findings = data.get("findings") or []
+        if not isinstance(raw_counts, dict) or not isinstance(raw_findings, list):
+            return cls(1, "unparsable")
+        try:
+            counts = {
+                severity: max(0, int(raw_counts.get(severity, 0)))
+                for severity in SEVERITIES
+            }
+        except (TypeError, ValueError):
+            return cls(1, "unparsable")
+        findings = list(raw_findings)
+        observed = {severity: 0 for severity in SEVERITIES}
+        for finding in findings:
+            if not isinstance(finding, dict) or finding.get("severity") not in SEVERITIES:
+                return cls(1, "unparsable")
+            observed[finding["severity"]] += 1
+        if counts != observed:
+            state = "unparsable"
         if state == "complete" and findings:
             state = "findings"
-        return cls(version, state, counts, findings, list(data.get("verification") or []),
-                   dict(data.get("provenance") or {}), dict(data.get("overlap") or {}),
-                   dict(data.get("live") or {}), _raw(data.get("raw_evidence")))
+        verification = data.get("verification") or []
+        provenance = data.get("provenance") or {}
+        overlap = data.get("overlap") or {}
+        live = data.get("live") or {}
+        if (
+            not isinstance(verification, list)
+            or not isinstance(provenance, dict)
+            or not isinstance(overlap, dict)
+            or not isinstance(live, dict)
+        ):
+            return cls(1, "unparsable")
+        return cls(
+            version,
+            state,
+            counts,
+            findings,
+            list(verification),
+            dict(provenance),
+            dict(overlap),
+            dict(live),
+            _raw(data.get("raw_evidence")),
+        )
 
     @property
     def is_clean(self) -> bool:
         return self.state == "complete" and not any(self.counts.values()) and not self.findings
 
     def to_dict(self) -> dict[str, Any]:
-        return {"version": self.version, "state": self.state, "counts": self.counts,
-                "findings": self.findings, "verification": self.verification,
-                "provenance": self.provenance, "overlap": self.overlap,
-                "live": self.live,
-                "raw_evidence": self.raw_evidence}
+        return {
+            "version": self.version,
+            "state": self.state,
+            "counts": self.counts,
+            "findings": self.findings,
+            "verification": self.verification,
+            "provenance": self.provenance,
+            "overlap": self.overlap,
+            "live": self.live,
+            "raw_evidence": self.raw_evidence,
+        }
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
