@@ -115,7 +115,11 @@ background colour.
   merge-ready pull request. When a view is filtered, the status line says how
   many stops are hidden.
 - **Colour is never the only carrier of a fact.** Rows colour by state *and*
-  carry `⚑ CONFLICTS` / `✗ CI` / `✓ approved`.
+  carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
+  `? CI UNKNOWN`, as applicable.
+- **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
+  request whose snapshot already says CI failed or is pending; GitHub branch
+  protection remains an additional gate.
 - **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
