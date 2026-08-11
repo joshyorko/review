@@ -67,6 +67,14 @@ exit 0
 EOF
 chmod +x "$scratch/bin/gh"
 
+# PR mode checks jq before it touches the mocked GitHub response. Keep this
+# contract hermetic: duplicate analysis itself is exercised through Python.
+cat >"$scratch/bin/jq" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$scratch/bin/jq"
+
 set +e
 pr_out="$(PATH="$scratch/bin:$PATH" GH_CALLS="$scratch/gh-calls-pr" \
   GOOSE_ARGS="$scratch/goose-args-pr" HIVE_WORKSPACE_DIR="$scratch/workspace" \

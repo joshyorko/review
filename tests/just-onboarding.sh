@@ -327,9 +327,11 @@ backend_backup="$scratch/contributor.env.backend-selection.bak"
 cp "$home/.config/hive/contributor.env" "$backend_backup"
 sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=claude/' "$home/.config/hive/contributor.env"
 reset_logs
-run_recipe review-container GH_READY=1
+run_recipe review-container GH_READY=1 FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--env AGENT_BACKEND=claude" "$runner_log"
+assert_file_not_contains "--env GOOSE_PROVIDER=" "$runner_log"
+assert_file_not_contains "--env GITHUB_COPILOT_TOKEN" "$runner_log"
 cp "$backend_backup" "$home/.config/hive/contributor.env"
 
 begin "selection: TOOL cannot override Hive's selected backend"
