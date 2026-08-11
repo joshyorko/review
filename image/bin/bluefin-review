@@ -216,7 +216,7 @@ goose_review() {
     cp "${SCOPE_ROOT}/.agents/REVIEW.md" "${scope}/.agents/REVIEW.md"
     cp "${SCOPE_ROOT}/.agents/checks/"*.md "${scope}/.agents/checks/"
     {
-      printf -- '---\nname: repository-context\n---\n\n'
+      printf -- '---\nname: 00-repository-context\n---\n\n'
       repository_context_instructions
     } >"${scope}/.agents/checks/00-repository-context.md"
     if [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]]; then
