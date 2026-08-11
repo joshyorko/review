@@ -251,7 +251,12 @@ require tests/image-audit.sh \
   'projectbluefin/fsdk-containers' \
   'must contain exactly linux/amd64 and linux/arm64 manifests' \
   '--require-github-attestation' \
-  'org.opencontainers.image.base.digest'
+  'org.opencontainers.image.base.digest' \
+  'native arm64 runtime measurement is tracked by #77'
+
+forbid tests/image-audit.sh \
+  'native arm64 runtime measurement is #87' \
+  'slot+=" — #87"'
 
 # Host setup and the image relay exchange the same contributor protocol, so
 # their pinned Hive revisions must remain exactly aligned.
