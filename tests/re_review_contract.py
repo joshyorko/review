@@ -75,13 +75,13 @@ class ReReviewContractTests(unittest.TestCase):
         self.assertEqual(result.newly_supported[0].finding_id, "new-proof")
 
     def test_uncertainty_and_sensitive_surfaces_require_explicit_full_review(self) -> None:
-        for changes in (
-            {"mapping_uncertain": True},
-            {"sensitive_surfaces_changed": True},
-            {"prior_review_complete": False},
-            {"bounded_risk_exceeded": True},
-            {"capability_available": False},
-            {"reviewed_merge_base_sha": "3" * 40},
+        for changes, reason in (
+            ({"mapping_uncertain": True}, FallbackReason.MAPPING_UNCERTAIN),
+            ({"sensitive_surfaces_changed": True}, FallbackReason.SENSITIVE_SURFACE),
+            ({"prior_review_complete": False}, FallbackReason.PRIOR_REVIEW_INCOMPLETE),
+            ({"bounded_risk_exceeded": True}, FallbackReason.RISK_BOUND_EXCEEDED),
+            ({"capability_available": False}, FallbackReason.CAPABILITY_ABSENT),
+            ({"current_merge_base_sha": "3" * 40}, FallbackReason.MERGE_BASE_CHANGED),
         ):
             with self.subTest(changes):
                 values = dict(
@@ -94,7 +94,7 @@ class ReReviewContractTests(unittest.TestCase):
                 values.update(changes)
                 result = classify_head_delta(DeltaInput(**values))
                 self.assertTrue(result.full_review_required)
-                self.assertIn(FallbackReason.FULL_REVIEW, result.fallback_reasons)
+                self.assertIn(reason, result.fallback_reasons)
 
     def test_h0_authority_never_appears_in_h1_contract(self) -> None:
         result = classify_head_delta(
