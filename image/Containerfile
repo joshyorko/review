@@ -21,7 +21,7 @@ ARG GH_VERSION=2.97.0
 ARG TMUX_VERSION=3.7b
 ARG GOOSE_CHANNEL=canary
 ARG PI_VERSION=0.73.1
-ARG PI_INTEGRITY=gXQh3SaZmWTfVMc4Ao5+LGbVeKvzyO7tolok0nLsZgq9nGjZx/EEU3NM8C+qUnB4Nvs2rswG5qOVgLzQkq0fHQ==
+ARG PI_SHA512=817421dd26999964df54c738028e7e2c66d578abf3c8eeeda25a24d272ec660abd9c68d9c7f10453734cf02faa52707836fb36aecc06e6a39580bcd092ad1f1d
 # `canary` is a mutable release tag, not an artifact identity. CI resolves
 # these from the release asset API for every build and passes them as build
 # inputs; these defaults keep a local build pinned to a known attested asset.
@@ -170,7 +170,7 @@ ARG GOOSE_X86_64_SHA256
 ARG GOOSE_AARCH64_SHA256
 ARG HIVE_COMMIT
 ARG PI_VERSION
-ARG PI_INTEGRITY
+ARG PI_SHA512
 # Preserve both architecture-specific asset identities in the image
 # configuration. Build provenance records the resolved build arguments too.
 LABEL io.projectbluefin.review.goose.channel="${GOOSE_CHANNEL}" \
@@ -212,8 +212,7 @@ RUN set -eu; \
     curl --fail --location --show-error --silent \
       "https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${PI_VERSION}.tgz" \
       -o "$workdir/pi.tgz"; \
-    actual="$(openssl dgst -sha512 -binary "$workdir/pi.tgz" | base64 | tr -d '\\n')"; \
-    test "$actual" = "$PI_INTEGRITY"; \
+    printf '%s  %s\n' "$PI_SHA512" "$workdir/pi.tgz" | sha512sum -c -; \
     npm install --global --ignore-scripts --no-audit --no-fund "$workdir/pi.tgz"; \
     command -v pi; \
     pi --version

@@ -112,7 +112,7 @@ fi
 require image/Containerfile \
   'ARG GOOSE_CHANNEL=canary' \
   'ARG PI_VERSION=0.73.1' \
-  'ARG PI_INTEGRITY=' \
+  'ARG PI_SHA512=' \
   'ARG GOOSE_X86_64_SHA256=' \
   'ARG GOOSE_AARCH64_SHA256=' \
   'io.projectbluefin.review.goose.channel="${GOOSE_CHANNEL}"' \
@@ -126,8 +126,7 @@ require image/Containerfile \
   'https://github.com/tmux/tmux-builds/releases/download/v${TMUX_VERSION}/tmux-${TMUX_VERSION}-linux-${tmux_arch}.tar.gz' \
   'https://github.com/aaif-goose/goose/releases/download/${GOOSE_CHANNEL}/goose-${goose_arch}-unknown-linux-musl.tar.gz' \
   'https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${PI_VERSION}.tgz' \
-  'actual="$(openssl dgst -sha512 -binary "$workdir/pi.tgz" | base64 | tr -d '\''\\n'\'')"' \
-  'test "$actual" = "$PI_INTEGRITY"' \
+  'printf '\''%s  %s\n'\'' "$PI_SHA512" "$workdir/pi.tgz" | sha512sum -c -;' \
   'npm install --global --ignore-scripts --no-audit --no-fund "$workdir/pi.tgz"' \
   'pi --version' \
   'printf '\''%s  %s\n'\'' "$goose_sha" "$workdir/goose.tar.gz" | sha256sum -c -;' \
