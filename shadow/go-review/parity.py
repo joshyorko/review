@@ -26,8 +26,9 @@ def canonical_result(result: Any) -> dict[str, Any]:
     return json.loads(result.to_json())
 
 
-def check_fixtures() -> int:
+def check_fixtures() -> tuple[int, int]:
     cases = json.loads(FIXTURES.read_text())
+    round_trip_count = 0
     for case in cases:
         result = parse_review_result(fixture_payload(case["payload"]))
         expected = case["expected"]
@@ -46,21 +47,54 @@ def check_fixtures() -> int:
                 f"actual={json.dumps(actual_shape, sort_keys=True)}\n"
                 f'expected={json.dumps(expected["result"], sort_keys=True)}'
             )
-    return len(cases)
+        if result.state != "unparsable":
+            round_trip = parse_review_result(result.to_json())
+            if canonical_result(round_trip) != actual_shape:
+                raise AssertionError(f'{case["name"]}: round-trip result differs')
+            round_trip_count += 1
+    return len(cases), round_trip_count
 
 
-def check_oversized_payload() -> None:
-    result = parse_review_result("x" * (MAX_RAW_CHARS + 1))
-    if result.state != "unparsable" or result.is_clean:
-        raise AssertionError("oversized input was accepted as clean")
-    if len(result.raw_evidence) != 1 or len(result.raw_evidence[0]) != MAX_RAW_CHARS:
+def check_boundary_payloads() -> tuple[int, int]:
+    clean_payload = json.dumps(
+        {
+            "counts": {"critical": 0, "high": 0, "low": 0, "medium": 0},
+            "findings": [],
+            "state": "complete",
+            "version": 1,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    cases = {
+        "deep JSON": "[" * 2_000 + "]" * 2_000,
+        "oversized JSON": "x" * (MAX_RAW_CHARS + 1),
+        "trailing JSON": clean_payload + " {}",
+    }
+    for name, payload in cases.items():
+        result = parse_review_result(payload)
+        if result.state != "unparsable" or result.is_clean:
+            raise AssertionError(f"{name} was accepted as clean")
+    oversized = parse_review_result(cases["oversized JSON"])
+    if len(oversized.raw_evidence) != 1 or len(oversized.raw_evidence[0]) != MAX_RAW_CHARS:
         raise AssertionError("oversized input did not retain bounded raw evidence")
+
+    truncated_prefixes = 0
+    for end in range(len(clean_payload)):
+        if parse_review_result(clean_payload[:end]).is_clean:
+            raise AssertionError(f"truncated clean payload became clean at byte {end}")
+        truncated_prefixes += 1
+    return len(cases), truncated_prefixes
 
 
 def main() -> None:
-    count = check_fixtures()
-    check_oversized_payload()
-    print(f"Python ReviewResult parity: {count} fixture cases and 1 boundary case passed")
+    fixture_count, round_trip_count = check_fixtures()
+    boundary_count, truncated_count = check_boundary_payloads()
+    print(
+        "Python ReviewResult parity: "
+        f"{fixture_count} fixture cases, {round_trip_count} round-trip cases, "
+        f"{boundary_count} boundary cases, and {truncated_count} truncated prefixes passed"
+    )
 
 
 if __name__ == "__main__":

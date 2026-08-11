@@ -45,6 +45,15 @@ func TestSharedFixturesMatchReviewResultContract(t *testing.T) {
 			if !bytes.Equal(got, want) {
 				t.Fatalf("serialized result = %s, want %s", got, want)
 			}
+			if result.State != StateUnparsable {
+				roundTrip := ParseReviewResult(result.ToJSON())
+				if roundTrip.State != result.State {
+					t.Fatalf("round-trip state = %q, want %q", roundTrip.State, result.State)
+				}
+				if gotRoundTrip := canonicalJSON(t, []byte(roundTrip.ToJSON())); !bytes.Equal(got, gotRoundTrip) {
+					t.Fatalf("round-trip result = %s, want %s", gotRoundTrip, got)
+				}
+			}
 		})
 	}
 }
@@ -101,6 +110,45 @@ func TestRoundTripPreservesValidatedFields(t *testing.T) {
 	}
 }
 
+func TestFromMapDoesNotMutateInput(t *testing.T) {
+	data := map[string]any{
+		"counts": map[string]any{
+			"critical": json.Number("0"),
+			"high":     json.Number("1"),
+			"low":      json.Number("0"),
+			"medium":   json.Number("0"),
+		},
+		"findings": []any{
+			map[string]any{
+				"file":     "review.go",
+				"line":     json.Number("7"),
+				"severity": "high",
+				"title":    "unsafe path",
+			},
+		},
+		"overlap": map[string]any{
+			"duplicates":   []any{json.Number("12")},
+			"shared_files": []any{"review.go"},
+		},
+		"state":   "findings",
+		"version": json.Number("1"),
+	}
+	before, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := FromMap(data); result.State != StateFindings {
+		t.Fatalf("state = %q, want findings", result.State)
+	}
+	after, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("FromMap mutated input: before %s, after %s", before, after)
+	}
+}
+
 func TestMalformedNestedFieldsFailClosed(t *testing.T) {
 	base := `{"counts":{"critical":0,"high":1,"low":0,"medium":0},"findings":[{"file":"review.go","line":7,"severity":"high","title":"x"}],"state":"findings","version":1}`
 	for _, malformed := range []string{
@@ -142,6 +190,9 @@ func FuzzParseReviewResultBounded(f *testing.F) {
 		`{"counts":{"critical":0,"high":0,"low":0,"medium":0},"findings":[],"state":"complete","version":1}`,
 		`{"counts":{"critical":0,"high":1,"low":0,"medium":0},"findings":[{"file":"x.go","line":1,"severity":"high","title":"x"}],"state":"findings","version":1}`,
 		`{"counts":{"critical":0.0,"high":0,"low":0,"medium":0},"findings":[],"state":"complete","version":1}`,
+		`{"counts":{"critical":0,"high":0,"low":0,"medium":0},"findings":[],"raw_evidence":"α\r\nβ γ","state":"complete","version":1}`,
+		`{"counts":{"critical":0,"high":0,"low":0,"medium":0},"findings":[],"state":"complete","version":1} {}`,
+		`{"counts":{"critical":0,"high":0,"low":0,"medium":0},"findings":[],"live":{"nested":{"value":1}},"state":"complete","version":1}`,
 	} {
 		f.Add(seed)
 	}

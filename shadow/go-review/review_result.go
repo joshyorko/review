@@ -117,6 +117,7 @@ func FromMap(data map[string]any) ReviewResult {
 		if !valid || !validFinding(finding) {
 			return emptyResult(StateUnparsable)
 		}
+		finding = cloneMap(finding)
 		line, _ := integerValue(finding["line"])
 		finding["line"] = canonicalIntegerValue(finding["line"], line)
 		if endLine, present := finding["end_line"]; present {
@@ -159,6 +160,7 @@ func FromMap(data map[string]any) ReviewResult {
 	if len(overlap) > 0 && !validOverlap(overlap) {
 		return emptyResult(StateUnparsable)
 	}
+	overlap = normalizedOverlap(overlap)
 
 	live, ok := optionalMap(data, "live")
 	if !ok {
@@ -306,12 +308,11 @@ func validOverlap(overlap map[string]any) bool {
 	if !duplicatesOK || !sharedFilesOK || !duplicatesSliceOK || !sharedFilesSliceOK {
 		return false
 	}
-	for index, duplicate := range duplicates {
-		parsed, ok := integerValue(duplicate)
+	for _, duplicate := range duplicates {
+		_, ok := integerValue(duplicate)
 		if !ok {
 			return false
 		}
-		duplicates[index] = canonicalIntegerValue(duplicate, parsed)
 	}
 	for _, sharedFile := range sharedFiles {
 		if !nonEmptyText(sharedFile) {
@@ -360,6 +361,31 @@ func optionalRawEvidence(data map[string]any, key string) ([]string, bool) {
 func stringMap(value any) (map[string]any, bool) {
 	converted, ok := value.(map[string]any)
 	return converted, ok
+}
+
+func cloneMap(value map[string]any) map[string]any {
+	cloned := make(map[string]any, len(value))
+	for key, item := range value {
+		cloned[key] = item
+	}
+	return cloned
+}
+
+func normalizedOverlap(overlap map[string]any) map[string]any {
+	normalized := cloneMap(overlap)
+	duplicates, ok := anySlice(normalized["duplicates"])
+	if !ok {
+		return normalized
+	}
+	copiedDuplicates := append([]any{}, duplicates...)
+	for index, duplicate := range copiedDuplicates {
+		parsed, valid := integerValue(duplicate)
+		if valid {
+			copiedDuplicates[index] = canonicalIntegerValue(duplicate, parsed)
+		}
+	}
+	normalized["duplicates"] = copiedDuplicates
+	return normalized
 }
 
 func anySlice(value any) ([]any, bool) {

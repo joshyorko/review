@@ -24,7 +24,8 @@ jobs:
       - name: Python baseline parity
         run: |
           set -euo pipefail
-          python3 shadow/go-review/parity.py
+          cd shadow/go-review
+          python3 parity.py
 
       - name: Diff check
         run: |
