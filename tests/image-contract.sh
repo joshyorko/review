@@ -111,6 +111,8 @@ fi
 # shellcheck disable=SC2016
 require image/Containerfile \
   'ARG GOOSE_CHANNEL=canary' \
+  'ARG PI_VERSION=0.73.1' \
+  'ARG PI_SHA512=' \
   'ARG GOOSE_X86_64_SHA256=' \
   'ARG GOOSE_AARCH64_SHA256=' \
   'io.projectbluefin.review.goose.channel="${GOOSE_CHANNEL}"' \
@@ -123,6 +125,10 @@ require image/Containerfile \
   'https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz' \
   'https://github.com/tmux/tmux-builds/releases/download/v${TMUX_VERSION}/tmux-${TMUX_VERSION}-linux-${tmux_arch}.tar.gz' \
   'https://github.com/aaif-goose/goose/releases/download/${GOOSE_CHANNEL}/goose-${goose_arch}-unknown-linux-musl.tar.gz' \
+  'https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${PI_VERSION}.tgz' \
+  'printf '\''%s  %s\n'\'' "$PI_SHA512" "$workdir/pi.tgz" | sha512sum -c -;' \
+  'npm install --global --ignore-scripts --no-audit --no-fund "$workdir/pi.tgz"' \
+  'pi --version' \
   'printf '\''%s  %s\n'\'' "$goose_sha" "$workdir/goose.tar.gz" | sha256sum -c -;' \
   'RUN --mount=type=secret,id=github_token' \
   'GH_TOKEN="$(cat /run/secrets/github_token)"' \
@@ -443,6 +449,11 @@ forbid image/config/local-agent-policy.md \
 # AGENTS.md and .goosehints itself, so no filename compatibility override stays.
 # shellcheck disable=SC2016 # Literal source assertions, not shell expansions.
 require image/entrypoint.sh \
+  'selected_backend="${AGENT_BACKEND:-goose}"' \
+  'command -v pi >/dev/null 2>&1' \
+  'pi --version >/dev/null 2>&1' \
+  'ANTHROPIC_API_KEY' \
+  'export PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0' \
   'export GOOSE_PATH_ROOT=' \
   "note() { printf 'review: %s\\n' \"\$1\" >&2; }" \
   '[ "$GOOSE_PROVIDER" != github_copilot ]' \
