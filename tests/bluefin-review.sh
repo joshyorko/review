@@ -398,6 +398,18 @@ exit 23
 EOF
 chmod +x "$scratch/bin/goose"
 
+# --- the shipped doctrine states current-model alignment ----------------------
+doctrine="$repo_root/image/review-scope/checks/bluefin-doctrine.md"
+grep -q 'implementation, tests, and applicable durable documentation' "$doctrine"
+grep -q 'mutually consistent' "$doctrine"
+grep -q 'concrete contradictory evidence' "$doctrine"
+grep -q 'file and line' "$doctrine"
+grep -q 'no documentation change is needed' "$doctrine"
+grep -q 'insufficient evidence' "$doctrine"
+grep -q 'uncertainty, not a finding' "$doctrine"
+grep -q 'changed-file patterns' "$doctrine"
+grep -q 'documentation absence alone' "$doctrine"
+
 # --- the engine has no mutation path at all -----------------------------------
 # This used to be a set of "every mutation goes through the one gate" checks,
 # because the walk owned maintainer actions. It no longer does: approve, merge,
