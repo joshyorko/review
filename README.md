@@ -49,7 +49,7 @@ silently create a second workflow, authority path, or task queue.
    its lifecycle verb.
 2. **Interactive maintainer dashboard** (`review-queue`): the review surface.
    Goose reviews a pull request in place and streams its verdict, alongside
-   high-velocity triage with batching, labels, priority, agent-assisted
+   high-velocity triage with batching, agent-assisted
    documentation updates (#134), and Ghost Cluster build dispatch (#133).
 
 The watcher feedback loop — comparing automated pre-reviews with maintainer
@@ -249,8 +249,6 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | Key | Action |
 |---|---|
 | `b` | toggle batch selection for the highlighted pull request |
-| `l` | label overlay (`kind/bug`, `area/bootc`, `status/approved`, …) |
-| `p` | cycle priority label (`P0-critical` … `P3-low`) |
 | `r` | **start a review with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
 | `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
