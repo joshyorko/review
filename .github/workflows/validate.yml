@@ -173,6 +173,17 @@ jobs:
           # Hive's config lives under the image's home.
           test "$(docker inspect review:test --format '{{.Config.WorkingDir}}')" = "/home/dev"
 
+      - name: Import shipped TUI module set as runtime user
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --entrypoint /usr/local/bin/codex \
+            review:test --version
+          docker run --rm \
+            --entrypoint /opt/bluefin/tui/.venv/bin/python \
+            review:test \
+            -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"
+
       - name: Audit exact FSDK and built review image
         run: |
           set -euo pipefail

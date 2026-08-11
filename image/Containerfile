@@ -19,6 +19,9 @@ ARG HIVE_COMMIT=98781c252cefb2f2193832a701abd8d0728ea18b
 ARG NODE_VERSION=24.18.1
 ARG GH_VERSION=2.97.0
 ARG TMUX_VERSION=3.7b
+ARG CODEX_VERSION=0.147.0
+ARG CODEX_X86_64_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36
+ARG CODEX_AARCH64_SHA256=eb677c80f666b1ab8b4b1d083b66e8d614b1281d960bb6f9fd8ca98f58b38b90
 ARG GOOSE_CHANNEL=canary
 ARG PI_VERSION=0.73.1
 ARG PI_SHA512=817421dd26999964df54c738028e7e2c66d578abf3c8eeeda25a24d272ec660abd9c68d9c7f10453734cf02faa52707836fb36aecc06e6a39580bcd092ad1f1d
@@ -40,6 +43,9 @@ USER root
 ARG NODE_VERSION
 ARG GH_VERSION
 ARG TMUX_VERSION
+ARG CODEX_VERSION
+ARG CODEX_X86_64_SHA256
+ARG CODEX_AARCH64_SHA256
 
 ENV PATH=/opt/node/bin:${PATH}
 ENV NODE_PATH=/opt/hive/node_modules
@@ -72,6 +78,8 @@ RUN set -eu; \
         gh_sha='a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112'; \
         tmux_arch=x86_64; \
         tmux_sha='f85e6c1c412750a774eb3f370f33bad05fc726fb8b6a0b174ad6f0b6d954df58'; \
+        codex_arch=x86_64; \
+        codex_sha="${CODEX_X86_64_SHA256}"; \
         loader_dir=/lib64; \
         loader_target=/usr/lib64/ld-linux-x86-64.so.2; \
         loader_name=ld-linux-x86-64.so.2 ;; \
@@ -82,6 +90,8 @@ RUN set -eu; \
         gh_sha='73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5'; \
         tmux_arch=arm64; \
         tmux_sha='b2955782695283fbc3682a2f77d65616f53b986ee3cf3d80618d3b1cb95b91a6'; \
+        codex_arch=aarch64; \
+        codex_sha="${CODEX_AARCH64_SHA256}"; \
         loader_dir=/lib; \
         loader_target=/usr/lib/ld-linux-aarch64.so.1; \
         loader_name=ld-linux-aarch64.so.1 ;; \
@@ -111,6 +121,13 @@ RUN set -eu; \
     printf '%s  %s\n' "$tmux_sha" "$workdir/tmux.tar.gz" | sha256sum -c -; \
     tar -I 'python3 -m gzip' -xOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux; \
     chmod 0755 /usr/local/bin/tmux; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz" \
+      -o "$workdir/codex.tar.gz"; \
+    printf '%s  %s\n' "$codex_sha" "$workdir/codex.tar.gz" | sha256sum -c -; \
+    tar -I 'python3 -m gzip' -xOf "$workdir/codex.tar.gz" --occurrence=1 \
+      "codex-${codex_arch}-unknown-linux-musl" > /usr/local/bin/codex; \
+    chmod 0755 /usr/local/bin/codex; \
     npm --prefix /opt/hive ci --omit=dev --ignore-scripts; \
     npm_cache="$(npm config get cache)"; \
     npm cache clean --force; \
@@ -125,7 +142,8 @@ RUN set -eu; \
     npm --version; \
     corepack --version; \
     gh --version; \
-    tmux -V
+    tmux -V; \
+    codex --version
 
 # The maintainer TUI runtime: uv (pinned, checksum-verified) creates a
 # self-contained virtual environment on the base's own CPython and installs
@@ -138,7 +156,11 @@ ARG UV_AARCH64_SHA256
 ARG TEXTUAL_VERSION
 COPY image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
 COPY image/tui/bluefin_review_tui.py /opt/bluefin/tui/bluefin_review_tui.py
+COPY image/tui/review_result.py image/tui/review_evidence_manifest.py /opt/bluefin/tui/
+COPY image/harness/*.py /opt/bluefin/harness/
 RUN set -eu; \
+    chmod 0755 /opt/bluefin/harness; \
+    chmod 0644 /opt/bluefin/harness/*.py; \
     arch="$(uname -m)"; \
     case "$arch" in \
       x86_64) uv_arch=x86_64-unknown-linux-musl; uv_sha="${UV_X86_64_SHA256}" ;; \
@@ -162,7 +184,7 @@ RUN set -eu; \
       --require-hashes --no-deps \
       -r /opt/bluefin/tui/requirements.lock; \
     /opt/bluefin/tui/.venv/bin/python -c "import textual; print(textual.__version__)"; \
-    /opt/bluefin/tui/.venv/bin/python -m py_compile /opt/bluefin/tui/bluefin_review_tui.py; \
+    /opt/bluefin/tui/.venv/bin/python -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"; \
     test ! -e /root/.cache/uv
 
 ARG GOOSE_CHANNEL
@@ -251,7 +273,7 @@ RUN set -eu; \
 RUN set -eu; \
     grep -q '^dev:' /etc/group || echo 'dev:x:1000:' >> /etc/group; \
     grep -q '^dev:' /etc/passwd || echo 'dev:x:1000:1000:Developer:/home/dev:/usr/bin/bash' >> /etc/passwd; \
-    mkdir -p /run/hive-metrics /home/dev/.config/goose /home/dev/.config/gh /home/dev/.agents; \
+    mkdir -p /run/hive-metrics /home/dev/.config/goose /home/dev/.config/gh /home/dev/.codex /home/dev/.agents; \
     chown -R 1000:1000 /run/hive-metrics /home/dev
 
 # Hive's contributor runtime calls `find` and `cmp` directly: the relay prunes

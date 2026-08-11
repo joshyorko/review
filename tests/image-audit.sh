@@ -575,9 +575,9 @@ base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh 
 # and review must not shadow them. That is asserted directly below rather than
 # approximated by forbidding the base copy.
 package_managers="apt dnf apk"
-review_owned="node npm gh tmux goose"
+review_owned="node npm gh tmux codex goose"
 base_forbidden="${review_owned} ${package_managers}"
-derived_required="bash node npm corepack gh tmux goose find cmp diff infocmp"
+derived_required="bash node npm corepack gh tmux codex goose find cmp diff infocmp"
 derived_forbidden="$package_managers"
 # Base commands Hive's relay calls directly and review must never shim over.
 # image/Containerfile proves their semantics at build time against the real
@@ -649,6 +649,8 @@ NODE
       error "derived runtime cannot establish a local ws connection"
     "$engine" run --rm --entrypoint /usr/local/bin/goose "$image" run --help >/dev/null ||
       error "derived runtime cannot execute goose run --help"
+    "$engine" run --rm --entrypoint /usr/local/bin/codex "$image" --version >/dev/null ||
+      error "derived runtime cannot execute codex --version"
     grep -q '^identity:1000:dev$' <<<"$inventory" ||
       error "derived runtime must execute as uid 1000 (dev)"
   fi

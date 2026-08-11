@@ -5,7 +5,8 @@ enslaving the oppressors since 2026
 
 ![img](https://github.com/user-attachments/assets/6b8425b8-dedf-4dc9-aa54-60fa9e6cfd91)
 
-`review` comes with goose prebundled and will passthrough client creds. PRs accepted for other clients, the design supports doing local side containers - but we don't want to ship a huge container either.
+`review` comes with Goose and the official Codex CLI prebundled and passes
+through only the credential each selected client needs.
 
 **These are NOT anonymous "donations"** - it's tied to the person's github account, reputation in the queue is based on your real life reputation in the project. The cream will rise to the top.
 
@@ -48,7 +49,8 @@ silently create a second workflow, authority path, or task queue.
    feedback. `REVIEW_DETACH=1` runs it detached, with `just review-stop` as
    its lifecycle verb.
 2. **Interactive maintainer dashboard** (`review-queue`): the review surface.
-   Goose reviews a pull request in place and streams its verdict, alongside
+   Goose or an explicitly selected Codex harness reviews a pull request in
+   place and streams its verdict, alongside
    high-velocity triage with batching, agent-assisted
    documentation updates (#134), and Ghost Cluster build dispatch (#133).
 
@@ -130,12 +132,17 @@ an operations task outside this repository automation.
 - `gh auth login --web --hostname github.com --scopes repo,read:org` is a hard
   prerequisite for every recipe.
 - `podman`.
-- Goose configured for GitHub Copilot, or `GITHUB_COPILOT_TOKEN`.
+- Goose configured for GitHub Copilot, or `GITHUB_COPILOT_TOKEN`, for
+  contributor work and Goose reviews.
+- `codex login` with file credential storage completed on the host for Codex
+  subscription reviews. The image already contains the pinned official CLI.
 - For contributor Git operations, a separate GitHub token via
   `REVIEW_GH_TOKEN`.
 
-Goose is the only agent backend and GitHub Copilot is the only supported
-provider. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
+Goose is the default Hive contributor backend and GitHub Copilot is its only
+supported provider. Maintainer-side `review-queue` may explicitly preselect
+Codex with `BLUEFIN_REVIEW_BACKEND=codex`; that choice never changes Hive's
+backend. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
 optionally overrides the `gpt-5.6-luna` default, and
 `GOOSE_THINKING_EFFORT` optionally overrides the default `max` reasoning
 effort. A `gh auth
@@ -207,15 +214,19 @@ changes your view; Hive still owns task and output handling.
 ### Reviewing the queue
 
 `just review-queue` runs the dashboard in the contributor container — no Hive
-registration. It needs only a GitHub token (the dashboard reads live
-pull-request state) and, for `r`, the same Copilot credential the other launch
-paths pass through. Arguments pass straight through to the dashboard:
+registration. It needs a GitHub token because the dashboard reads live
+pull-request state. Goose reviews use the Copilot credential; Codex reviews
+use the host's official subscription login through one private staged
+`auth.json` copy. The host file and Codex configuration directory are never
+mounted, and the staged copy is removed when the foreground run exits.
+Arguments pass straight through to the dashboard:
 
 ```bash
 just review-queue                      # the whole queue, merge-ready first
 just review-queue kimi high            # pick the model profile and effort
 just review-queue --repo bluefin       # one repository
 just review-queue --action review      # one recommended action
+BLUEFIN_REVIEW_BACKEND=codex just review-queue luna low --repo projectbluefin/review
 ```
 
 The default is the **whole** queue. It used to default to the `review` action
@@ -592,6 +603,8 @@ All configuration is read at launch.
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
+| `BLUEFIN_REVIEW_BACKEND` | Optional `review-queue` preselection: `goose` or `codex`; unset preserves the current default. Never affects `review-container`. |
+| `CODEX_HOME` | Optional host Codex state root used only to locate `auth.json`; no configuration directory is mounted. |
 | `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot the dashboard reads; defaults to the published `queue.json`. |
 | `BLUEFIN_REVIEW_CONTEXT_SKILLS` | Skill ids named as review context; defaults to `pr-review queue-feed hive-review human-gates`. |
 | `BLUEFIN_REVIEW_SKILLS_ROOT` | Projected org skills root; defaults to `~/.agents/skills`. |
@@ -629,7 +642,8 @@ Use an immutable `sha-<commit>` tag or digest with
 
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
 layers the pinned Hive runtime at `98781c252cefb2f2193832a701abd8d0728ea18b`,
-the current Goose canary snapshot, GitHub CLI, tmux, uv with the Textual
+the current Goose canary snapshot, the pinned official Codex CLI, GitHub CLI,
+tmux, uv with the Textual
 dashboard runtime, hooks, generated
 organization skills, and the pinned `projectbluefin/lab` skills (projected as
 `lab-<id>` so the Ghost Cluster operating knowledge rides along). Goose

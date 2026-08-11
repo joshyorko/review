@@ -113,6 +113,9 @@ require image/Containerfile \
   'ARG GOOSE_CHANNEL=canary' \
   'ARG PI_VERSION=0.73.1' \
   'ARG PI_SHA512=' \
+  'ARG CODEX_VERSION=0.147.0' \
+  'ARG CODEX_X86_64_SHA256=' \
+  'ARG CODEX_AARCH64_SHA256=' \
   'ARG GOOSE_X86_64_SHA256=' \
   'ARG GOOSE_AARCH64_SHA256=' \
   'io.projectbluefin.review.goose.channel="${GOOSE_CHANNEL}"' \
@@ -124,6 +127,7 @@ require image/Containerfile \
   'https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz' \
   'https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz' \
   'https://github.com/tmux/tmux-builds/releases/download/v${TMUX_VERSION}/tmux-${TMUX_VERSION}-linux-${tmux_arch}.tar.gz' \
+  'https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz' \
   'https://github.com/aaif-goose/goose/releases/download/${GOOSE_CHANNEL}/goose-${goose_arch}-unknown-linux-musl.tar.gz' \
   'https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${PI_VERSION}.tgz' \
   'printf '\''%s  %s\n'\'' "$PI_SHA512" "$workdir/pi.tgz" | sha512sum -c -;' \
@@ -141,6 +145,7 @@ require image/Containerfile \
   'test ! -e /opt/node/include;' \
   'test ! -e /opt/node/share/doc;' \
   'corepack --version;' \
+  'codex --version' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/config/backends.conf' \
@@ -155,6 +160,7 @@ require image/Containerfile \
   'tar --no-same-owner -xf "$workdir/node.tar.xz" -C /opt/node --strip-components=1;' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/gh.tar.gz" --wildcards --occurrence=1 '\''*/bin/gh'\'' > /usr/local/bin/gh;' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux;' \
+  'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/codex.tar.gz" --occurrence=1' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/goose.tar.gz" --occurrence=1 ./goose > /usr/local/bin/goose;' \
   'COPY image/tmux.conf /etc/tmux.conf' \
   'infocmp -x tmux-direct | grep -q' \
@@ -195,8 +201,8 @@ if [[ -z "$probe_user_layer" || -z "$probe_layer" || "$probe_layer" -lt "$probe_
   fail=1
 fi
 
-# The four release archives are unpacked by the base's own GNU tar, not by
-# hand-rolled Python. `python3 -c` is how all four previously reimplemented
+# The release archives are unpacked by the base's own GNU tar, not by
+# hand-rolled Python. `python3 -c` is how these previously reimplemented
 # member selection; `python3 -m gzip` is the stdlib decompressor CLI standing
 # in for the gzip binary the FSDK base does not ship, and is not the same
 # thing. Guard the reimplementation, allow the codec.
@@ -219,6 +225,7 @@ for name, archive in (
     ("node", "node.tar.xz"),
     ("gh", "gh.tar.gz"),
     ("tmux", "tmux.tar.gz"),
+    ("codex", "codex.tar.gz"),
     ("goose", "goose.tar.gz"),
 ):
     verify = container.find(f'"$workdir/{archive}" | sha256sum -c -')
@@ -536,6 +543,10 @@ require .github/workflows/validate.yml \
   '--secret id=github_token,env=GITHUB_TOKEN' \
   '-f image/Containerfile -t review:test .' \
   '["/usr/local/bin/review-entrypoint"]' \
+  'Import shipped TUI module set as runtime user' \
+  '--entrypoint /usr/local/bin/codex' \
+  '--entrypoint /opt/bluefin/tui/.venv/bin/python' \
+  "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui" \
   'bash tests/image-audit.sh --derived review:test'
 
 # shellcheck disable=SC2016 # Literal workflow text, not shell expansion.
