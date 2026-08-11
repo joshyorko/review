@@ -20,6 +20,7 @@ expected_banner=$'+------------------------+\n| BLUEFIN REVIEW         |\n| HUMA
 # baseline assertions below do not depend on whether this host happens to have
 # the projected org skills. The context test further down opts back in.
 export BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/absent"
+export BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/absent"
 
 # --- default mode: banner, then hand the range to goose review ---------------
 # 'main...HEAD' is a real 'goose review' argument. An earlier version of this
@@ -315,6 +316,7 @@ while (($#)); do
 done
 if [[ -n "$scope" ]]; then
   find "$scope" -type f | sed "s|^$scope/||" | sort >"${SCOPE_LISTING:?}"
+  sed -n 's/^name: //p' "$scope/.agents/checks/00-repository-context.md" >"${SCOPE_CONTEXT_NAME:?}"
   cat "$scope/.agents/checks/cluster-resolution.md" >"${SCOPE_CLUSTER:?}" 2>/dev/null || : >"${SCOPE_CLUSTER:?}"
 fi
 EOF
@@ -322,7 +324,8 @@ chmod +x "$scratch/bin/goose"
 
 BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
   PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-scope" \
-  SCOPE_LISTING="$scratch/scope-listing" SCOPE_CLUSTER="$scratch/scope-cluster" \
+  SCOPE_LISTING="$scratch/scope-listing" SCOPE_CONTEXT_NAME="$scratch/scope-context-name" \
+  SCOPE_CLUSTER="$scratch/scope-cluster" \
   "$review" main...HEAD >/dev/null
 
 argv_scope="$(tr '\0' '\n' <"$scratch/argv-scope")"
@@ -331,6 +334,8 @@ argv_scope="$(tr '\0' '\n' <"$scratch/argv-scope")"
 [[ "$argv_scope" != *'--instructions'* ]]
 grep -q '^\.agents/REVIEW\.md$' "$scratch/scope-listing"
 grep -q '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/00-repository-context\.md$' "$scratch/scope-listing"
+[[ "$(cat "$scratch/scope-context-name")" == '00-repository-context' ]]
 # No cluster on a plain review: the scratch scope carries no resolution check.
 if grep -q 'cluster-resolution' "$scratch/scope-listing"; then
   echo "plain review must not carry a cluster-resolution check" >&2
