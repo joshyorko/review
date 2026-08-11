@@ -23,6 +23,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/projectbluefin/review
+  ARM64_IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   resolve-goose:
@@ -93,7 +94,7 @@ jobs:
           file: image/Containerfile
           platforms: linux/arm64
           push: true
-          tags: ${{ env.IMAGE }}:arm64-smoke-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          tags: ${{ env.ARM64_IMAGE }}:arm64-smoke-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           build-args: |
             GOOSE_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
             GOOSE_X86_64_SHA256=${{ needs.resolve-goose.outputs.x86_64_sha256 }}
@@ -108,7 +109,7 @@ jobs:
       - name: Prove native arm64 container
         shell: bash
         env:
-          DERIVED_IMAGE: ${{ env.IMAGE }}@${{ steps.arm64_build.outputs.digest }}
+          DERIVED_IMAGE: ${{ env.ARM64_IMAGE }}@${{ steps.arm64_build.outputs.digest }}
         run: |
           set -euo pipefail
           test -n "${DERIVED_IMAGE#*@}"
@@ -138,7 +139,7 @@ jobs:
       - name: Audit native arm64 image and record evidence
         shell: bash
         env:
-          DERIVED_IMAGE: ${{ env.IMAGE }}@${{ steps.arm64_build.outputs.digest }}
+          DERIVED_IMAGE: ${{ env.ARM64_IMAGE }}@${{ steps.arm64_build.outputs.digest }}
         run: |
           set -euo pipefail
           bash tests/image-audit.sh --derived "$DERIVED_IMAGE" \

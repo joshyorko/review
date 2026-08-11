@@ -543,6 +543,7 @@ require .github/workflows/publish-compat-image.yml \
   'attestations: write' \
   'id-token: write' \
   'IMAGE: ghcr.io/projectbluefin/review' \
+  'ARM64_IMAGE: ghcr.io/${{ github.repository }}' \
   'Derive review image metadata' \
   'tags: review:smoke' \
   '["/usr/local/bin/review-entrypoint"]' \
@@ -581,6 +582,8 @@ require .github/workflows/publish-compat-image.yml \
   'Build native arm64 smoke image' \
   'platforms: linux/arm64' \
   'push: true' \
+  'tags: ${{ env.ARM64_IMAGE }}:arm64-smoke-' \
+  'DERIVED_IMAGE: ${{ env.ARM64_IMAGE }}@${{ steps.arm64_build.outputs.digest }}' \
   'GOOSE_X86_64_SHA256=${{ needs.resolve-goose.outputs.x86_64_sha256 }}' \
   'GOOSE_AARCH64_SHA256=${{ needs.resolve-goose.outputs.aarch64_sha256 }}' \
   'docker image inspect "$DERIVED_IMAGE"' \
