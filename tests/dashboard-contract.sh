@@ -66,6 +66,14 @@ grep -q 'ConfirmMutation(commands, str(stop.number))' "$tui" ||
 grep -qE 'then=lambda: self\.mutate' "$tui" &&
   fail "a mutation sequence must be one gated sequence, not chained gates"
 grep -qiE '\(y/n\)|yes/no' "$tui" && fail "no y/yes confirmation shortcut"
+grep -q 'Binding("l", "labels"' "$tui" &&
+  fail "the dashboard must not bind a label overlay"
+grep -q 'Binding("p", "priority"' "$tui" &&
+  fail "the dashboard must not bind priority cycling"
+grep -q '\[b\]l\[/b\]' "$tui" &&
+  fail "the acting key line must not advertise label mutation"
+grep -q '\[b\]p\[/b\]' "$tui" &&
+  fail "the acting key line must not advertise priority mutation"
 
 # Queueing goes through Hive's governor sweep: the exact approval body it
 # re-verifies plus the lgtm label, and the only review submission is that
