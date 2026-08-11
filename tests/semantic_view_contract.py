@@ -90,7 +90,11 @@ class SemanticViewContractTests(unittest.TestCase):
                 "state": "verified",
                 "evidence": "python3 tests/example.py",
             }],
-            "provenance": {"backend": "codex", "model": "gpt-5.6-luna"},
+            "provenance": {
+                "backend": "codex",
+                "model": "gpt-5.6-luna",
+                "head_sha": "b" * 40,
+            },
         })
         card = build_decision_card(result, exact_head="b" * 40)
         self.assertEqual(card.state, DecisionState.FINDINGS)
@@ -100,6 +104,49 @@ class SemanticViewContractTests(unittest.TestCase):
         self.assertEqual(card.findings[0].title, "unsafe mutation")
         self.assertEqual(card.verification[0].state, "verified")
         self.assertFalse(card.clean)
+
+    def test_decision_card_fails_closed_for_unbound_or_stale_evidence(self):
+        for provenance in (
+            {"backend": "codex", "model": "gpt-5.6-luna"},
+            {
+                "backend": "codex",
+                "model": "gpt-5.6-luna",
+                "head_sha": "a" * 40,
+            },
+        ):
+            with self.subTest(provenance=provenance):
+                result = ReviewResult.from_dict({
+                    "version": 1,
+                    "state": "complete",
+                    "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+                    "findings": [],
+                    "provenance": provenance,
+                })
+                card = build_decision_card(result, exact_head="b" * 40)
+                self.assertEqual(card.state, DecisionState.STALE)
+                self.assertIsNone(card.exact_head)
+                self.assertFalse(card.clean)
+
+    def test_decision_card_preserves_both_effort_provenance_keys(self):
+        for provenance, expected in (
+            ({"effort": "medium"}, "medium"),
+            ({"reasoning_effort": "high"}, "high"),
+        ):
+            with self.subTest(provenance=provenance):
+                result = ReviewResult.from_dict({
+                    "version": 1,
+                    "state": "findings",
+                    "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+                    "findings": [],
+                    "provenance": {
+                        "backend": "codex",
+                        "model": "gpt-5.6-luna",
+                        **provenance,
+                        "head_sha": "b" * 40,
+                    },
+                })
+                card = build_decision_card(result, exact_head="b" * 40)
+                self.assertEqual(card.provenance.effort, expected)
 
     def test_decision_card_never_promotes_nonterminal_or_invalid_results(self):
         expected = {

@@ -185,6 +185,12 @@ def _exact_head(value: Any) -> str | None:
     return value if isinstance(value, str) and _SHA.fullmatch(value) else None
 
 
+def _bound_head(result: ReviewResult, exact_head: Any) -> str | None:
+    current_head = _exact_head(exact_head)
+    evidence_head = _exact_head(result.provenance.get("head_sha"))
+    return current_head if current_head == evidence_head else None
+
+
 def build_queue_row(snapshot: Mapping[str, Any]) -> QueueRow:
     """Build immutable queue meaning from an existing queue snapshot."""
 
@@ -226,6 +232,9 @@ def build_decision_card(result: ReviewResult, *, exact_head: str) -> DecisionCar
     """Build terminal decision meaning without adding mutation authority."""
 
     state = _DECISION_STATES.get(result.state, DecisionState.UNPARSABLE)
+    bound_head = _bound_head(result, exact_head)
+    if state in (DecisionState.CLEAN, DecisionState.FINDINGS) and bound_head is None:
+        state = DecisionState.STALE
     findings = tuple(
         FindingView(
             item["severity"],
@@ -244,11 +253,11 @@ def build_decision_card(result: ReviewResult, *, exact_head: str) -> DecisionCar
         str(result.provenance.get("backend", "")),
         str(result.provenance.get("model", "")),
         str(result.provenance.get("provider", "")),
-        str(result.provenance.get("effort", "")),
+        str(result.provenance.get("effort") or result.provenance.get("reasoning_effort") or ""),
     )
     return DecisionCard(
         state,
-        _exact_head(exact_head),
+        bound_head,
         MappingProxyType(dict(result.counts)),
         findings,
         verification,
