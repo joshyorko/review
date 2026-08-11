@@ -147,6 +147,7 @@ jobs:
           cat "$RUNNER_TEMP/review-image-audit-arm64.md" >> "$GITHUB_STEP_SUMMARY"
 
   publish:
+    if: github.repository == 'projectbluefin/review'
     needs: [arm64-runtime, resolve-goose]
     runs-on: ubuntu-latest
     steps:

@@ -592,6 +592,7 @@ require .github/workflows/publish-compat-image.yml \
   'bash tests/image-audit.sh --verify-base-evidence' \
   'bash tests/image-audit.sh --derived "$DERIVED_IMAGE"' \
   '--report "$RUNNER_TEMP/review-image-audit-arm64.md"' \
+  "if: github.repository == 'projectbluefin/review'" \
   'needs: [arm64-runtime, resolve-goose]'
 
 forbid .github/workflows/publish-compat-image.yml \
