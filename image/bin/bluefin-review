@@ -59,8 +59,64 @@ SCOPE_ROOT="${BLUEFIN_REVIEW_SCOPE_ROOT:-/opt/bluefin/review-scope}"
 # a clean result.
 PULL_FETCH_LIMIT="${BLUEFIN_REVIEW_PULL_LIMIT:-200}"
 
+repository_context_instructions() {
+  local root="${BLUEFIN_REVIEW_REPOSITORY_ROOT:-$PWD}"
+  python3 - "$root" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+sources = []
+for name in ("AGENTS.md", "docs/SKILL.md"):
+    path = root / name
+    if path.is_file():
+        sources.append(str(path))
+
+catalog = root / "docs/skills/index.json"
+trusted = []
+degraded = False
+if not sources and not catalog.exists():
+    raise SystemExit(0)
+if catalog.is_file():
+    try:
+        data = json.loads(catalog.read_text())
+        skills = data["skills"]
+        ids = [item["id"] for item in skills]
+        if not isinstance(skills, list) or len(ids) != len(set(ids)):
+            raise ValueError
+        for item in skills:
+            if item.get("status") != "active" or not item.get("description"):
+                continue
+            entry = item.get("entry_point")
+            if not isinstance(entry, str) or os.path.isabs(entry):
+                continue
+            candidate = (root / entry).resolve()
+            if ".." in Path(entry).parts or root not in candidate.parents or not candidate.is_file():
+                continue
+            trusted.append(str(candidate))
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        degraded = True
+
+print("repository-owned context (target checkout) must be read before shared Bluefin doctrine:")
+for path in sources:
+    print(f"- repository source: {path}")
+for path in trusted:
+    print(f"- repository skill entry point: {path}")
+if not sources and not trusted:
+    print("- repository context unavailable: no trusted repository-owned sources were found")
+if degraded:
+    print("- repository skill catalog unavailable: invalid optional context was not trusted")
+PY
+}
+
 review_instructions() {
-  local id skill listing=""
+  local id skill listing="" repository_context
+  repository_context="$(repository_context_instructions)"
+  if [[ -n "$repository_context" ]]; then
+    listing+="${repository_context}"$'\n'
+  fi
   for id in $CONTEXT_SKILLS; do
     skill="${SKILLS_ROOT}/${id}/SKILL.md"
     [[ -f "$skill" ]] || continue
@@ -159,6 +215,10 @@ goose_review() {
     mkdir -p "${scope}/.agents/checks"
     cp "${SCOPE_ROOT}/.agents/REVIEW.md" "${scope}/.agents/REVIEW.md"
     cp "${SCOPE_ROOT}/.agents/checks/"*.md "${scope}/.agents/checks/"
+    {
+      printf -- '---\nname: repository-context\n---\n\n'
+      repository_context_instructions
+    } >"${scope}/.agents/checks/repository-context.md"
     if [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]]; then
       {
         printf -- '---\nname: cluster-resolution\n---\n\n'
