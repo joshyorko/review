@@ -166,15 +166,15 @@ preflight_agent() {
       echo "  ${GOOSE_INSTALL_HINT}" >&2
       return 1
     }
+    goose_configured || {
+      echo "ERROR: Goose has no usable provider configuration." >&2
+      echo "  ${GOOSE_FIXIT_HINT}" >&2
+      return 1
+    }
   fi
   github_auth_ready || {
     echo "ERROR: GitHub CLI is not authenticated against github.com." >&2
     echo "  Run: ${GITHUB_LOGIN_COMMAND}" >&2
-    return 1
-  }
-  goose_configured || {
-    echo "ERROR: Goose has no usable provider configuration." >&2
-    echo "  ${GOOSE_FIXIT_HINT}" >&2
     return 1
   }
 }
@@ -1067,10 +1067,10 @@ review-doctor:
       echo "  ✓ ${HIVE_CONTRIBUTOR_ENV} exists"
       pass=$((pass+1))
       DOCTOR_BACKEND="$(hive_contributor_backend "$HIVE_CONTRIBUTOR_ENV")"
-      if [[ -n "$DOCTOR_BACKEND" && "$DOCTOR_BACKEND" != "goose" ]]; then
-        echo "  ! ${HIVE_CONTRIBUTOR_ENV} says AGENT_BACKEND=${DOCTOR_BACKEND}, but review always launches goose."
-        echo "    Harmless — the launcher passes AGENT_BACKEND=goose itself — but stale."
-        echo "    Edit that line yourself if you want the file to match; review will not touch it."
+      if [[ -n "$DOCTOR_BACKEND" && "$DOCTOR_BACKEND" != "$BACKEND" ]]; then
+        echo "  ! ${HIVE_CONTRIBUTOR_ENV} says AGENT_BACKEND=${DOCTOR_BACKEND}, but the selected backend is ${BACKEND}."
+        echo "    The launcher will not rewrite Hive's saved backend selection."
+        echo "    Edit that line yourself if you want the file to match."
       fi
     else
       echo "  ✗ ${HIVE_CONTRIBUTOR_ENV} is missing"
