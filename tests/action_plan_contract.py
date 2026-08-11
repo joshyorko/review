@@ -108,6 +108,21 @@ def current_state(
     )
 
 
+class TestReceiptLedger:
+    def __init__(self):
+        self.claimed = set()
+        self.receipts = []
+
+    def claim(self, idempotency_key):
+        if idempotency_key in self.claimed:
+            return False
+        self.claimed.add(idempotency_key)
+        return True
+
+    def record(self, receipt):
+        self.receipts.append(receipt)
+
+
 class ActionPlanContractTests(unittest.TestCase):
     def require_contract(self):
         if contract is None:
@@ -360,7 +375,13 @@ class ActionPlanContractTests(unittest.TestCase):
             seen.append(operation_record.argv)
             return module.OperationResult(return_code=0)
 
-        receipt = plan.execute(eligibility, current_state(body=body), executor, now=NOW)
+        receipt = plan.execute(
+            eligibility,
+            current_state(body=body),
+            executor,
+            ledger=TestReceiptLedger(),
+            now=NOW,
+        )
         self.assertEqual(receipt.status, "succeeded")
         self.assertEqual(receipt.attempted_operations, 3)
         self.assertEqual(tuple(seen), tuple(op.argv for op in plan.operations))
@@ -387,9 +408,53 @@ class ActionPlanContractTests(unittest.TestCase):
                 eligibility,
                 current_state(head_sha="b" * 40),
                 lambda op: calls.append(op),
+                ledger=TestReceiptLedger(),
                 now=NOW,
             )
         self.assertEqual(calls, [])
+
+    def test_execution_claims_idempotency_key_before_runner_and_rejects_replay(self) -> None:
+        module = self.require_contract()
+        plan = make_plan()
+        preview = plan.preview()
+        confirmation = plan.confirm_human(
+            preview=preview,
+            actor=ACTOR,
+            tenant=TENANT,
+            typed_pull_request=PULL_REQUEST,
+            now=NOW,
+        )
+        eligibility = plan.execution_eligibility(
+            confirmation,
+            current_state(),
+            now=NOW,
+        )
+
+        ledger = TestReceiptLedger()
+        calls = []
+
+        def executor(operation_record):
+            calls.append(operation_record)
+            return module.OperationResult(return_code=0)
+
+        first = plan.execute(
+            eligibility,
+            current_state(),
+            executor,
+            ledger=ledger,
+            now=NOW,
+        )
+        self.assertEqual(first.status, "succeeded")
+        with self.assertRaises(module.ExecutionNotEligible):
+            plan.execute(
+                eligibility,
+                current_state(),
+                executor,
+                ledger=ledger,
+                now=NOW,
+            )
+        self.assertEqual(len(calls), len(plan.operations))
+        self.assertEqual(ledger.receipts, [first])
 
     def test_failed_sequence_stops_and_receipt_is_bounded(self) -> None:
         module = self.require_contract()
@@ -440,7 +505,13 @@ class ActionPlanContractTests(unittest.TestCase):
                 detail="x" * 10_000,
             )
 
-        receipt = plan.execute(eligibility, current_state(), executor, now=NOW)
+        receipt = plan.execute(
+            eligibility,
+            current_state(),
+            executor,
+            ledger=TestReceiptLedger(),
+            now=NOW,
+        )
         self.assertEqual(receipt.status, "failed")
         self.assertEqual(receipt.attempted_operations, 1)
         self.assertEqual(len(calls), 1)

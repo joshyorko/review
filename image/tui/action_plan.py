@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import FrozenInstanceError, dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import Any
+from typing import Any, Protocol
 
 
 DEFAULT_PLAN_TTL = timedelta(minutes=10)
@@ -430,6 +430,16 @@ class ActionReceipt:
         object.__setattr__(self, "detail", _bounded_detail(self.detail))
 
 
+class ReceiptLedger(Protocol):
+    """Caller-owned atomic claim and bounded receipt storage contract."""
+
+    def claim(self, idempotency_key: str) -> bool:
+        """Atomically claim a key, returning false when already claimed."""
+
+    def record(self, receipt: ActionReceipt) -> None:
+        """Persist the bounded receipt for a claimed key."""
+
+
 def _coerce_operation(value: GitHubOperation | Sequence[str]) -> GitHubOperation:
     if isinstance(value, GitHubOperation):
         return value
@@ -760,6 +770,7 @@ class ActionPlan:
         current: CurrentState,
         executor: Callable[[GitHubOperation], OperationResult | int],
         *,
+        ledger: ReceiptLedger,
         now: datetime | None = None,
     ) -> ActionReceipt:
         if not isinstance(eligibility, ExecutionEligibility):
@@ -776,6 +787,12 @@ class ActionPlan:
         self.revalidate(current, now=started_at)
         if not callable(executor):
             raise ExecutionNotEligible("an operation executor is required")
+        if not callable(getattr(ledger, "claim", None)) or not callable(
+            getattr(ledger, "record", None)
+        ):
+            raise ExecutionNotEligible("a caller-owned receipt ledger is required")
+        if not ledger.claim(self.idempotency_key):
+            raise ExecutionNotEligible("execution idempotency key was already claimed")
 
         for index, operation in enumerate(self.operations):
             try:
@@ -787,7 +804,7 @@ class ActionPlan:
                 if not isinstance(result, OperationResult):
                     raise TypeError("executor returned an invalid operation result")
             except Exception as error:
-                return ActionReceipt(
+                receipt = ActionReceipt(
                     plan_identity=self.identity,
                     idempotency_key=self.idempotency_key,
                     status="failed",
@@ -798,8 +815,10 @@ class ActionPlan:
                     finished_at=started_at,
                     detail=_bounded_detail(error),
                 )
+                ledger.record(receipt)
+                return receipt
             if result.return_code != 0:
-                return ActionReceipt(
+                receipt = ActionReceipt(
                     plan_identity=self.identity,
                     idempotency_key=self.idempotency_key,
                     status="failed",
@@ -810,8 +829,10 @@ class ActionPlan:
                     finished_at=started_at,
                     detail=result.detail,
                 )
+                ledger.record(receipt)
+                return receipt
 
-        return ActionReceipt(
+        receipt = ActionReceipt(
             plan_identity=self.identity,
             idempotency_key=self.idempotency_key,
             status="succeeded",
@@ -821,6 +842,8 @@ class ActionPlan:
             started_at=started_at,
             finished_at=started_at,
         )
+        ledger.record(receipt)
+        return receipt
 
 
 def build_action_plan(**kwargs: Any) -> ActionPlan:
@@ -847,5 +870,6 @@ __all__ = [
     "PlanDriftError",
     "PlanExpiredError",
     "Prerequisites",
+    "ReceiptLedger",
     "build_action_plan",
 ]
