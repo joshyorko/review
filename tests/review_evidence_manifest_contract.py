@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Contract tests for the versioned review evidence manifest."""
 
 from __future__ import annotations

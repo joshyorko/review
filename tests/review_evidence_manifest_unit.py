@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Focused validation tests for the review evidence manifest primitives."""
 
 from __future__ import annotations
