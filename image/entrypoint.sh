@@ -32,14 +32,6 @@ BANNER
   } >&2
 }
 
-# Validate the caller's requested provider before any other startup work so an
-# unsupported setting always gets the same actionable answer.
-if [ -n "${GOOSE_PROVIDER:-}" ] && [ "$GOOSE_PROVIDER" != github_copilot ]; then
-  note "ERROR: GOOSE_PROVIDER=${GOOSE_PROVIDER} is not supported — review supports GitHub Copilot only."
-  note "  Unset GOOSE_PROVIDER or set GOOSE_PROVIDER=github_copilot."
-  exit 1
-fi
-
 # The maintainer review surface is the PR-review launch path: the dashboard
 # needs GH_TOKEN and Goose but no Hive registration, so it skips the
 # contributor.env gate and the Hive handover below.
@@ -70,14 +62,15 @@ fi
 export GOOSE_PATH_ROOT="${REVIEW_GOOSE_ROOT:-/opt/bluefin/goose}"
 
 # Goose resolves environment before file, so the launcher's passthrough wins
-# over anything in the controlled config. This image is intentionally
-# Copilot-only; accepting another value would leave Hive to start a provider
-# whose credential path this launcher does not support.
-export GOOSE_PROVIDER=github_copilot
+# over anything in the controlled config. The dashboard is Goose-backed; the
+# contributor path leaves backend selection to Hive's pinned runtime.
+if [ "$review_dashboard" = true ]; then
+  export GOOSE_PROVIDER=github_copilot
+fi
 
 # Goose refuses to start without a model. Keep the direct-image fallback in
 # sync with the launcher's default for users who invoke this image directly.
-if [ -z "${GOOSE_MODEL:-}" ]; then
+if [ "$review_dashboard" = true ] && [ -z "${GOOSE_MODEL:-}" ]; then
   GOOSE_MODEL="gpt-5.6-luna"
   note "GOOSE_MODEL not set; defaulting to ${GOOSE_MODEL} for GitHub Copilot"
 fi

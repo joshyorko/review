@@ -6,8 +6,8 @@
 # never starts a real container, and never
 # depends on what happens to be installed on the developer's machine.
 #
-# The launcher under test is Goose-only: there is no claude/copilot/codex
-# detection and no multi-CLI picker. Assertions here reflect that.
+# Hive owns backend selection; this harness only asserts the launcher's
+# forwarding and selected-backend preflight seam.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -322,22 +322,6 @@ assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "GOOSE_PROVIDER=openai is not supported" "$OUT"
 assert_contains "GOOSE_PROVIDER=github_copilot" "$OUT"
 
-# ══ 2. TOOL handling: Goose only ══════════════════════════════════════════
-begin "TOOL=claude is rejected with a Goose-only error"
-run_recipe review-container GH_READY=1 TOOL=claude
-assert_nonzero_status "$STATUS" "a non-Goose TOOL must be a hard error"
-assert_contains "TOOL=claude is not supported" "$OUT"
-assert_contains "review runs Goose only" "$OUT"
-assert_not_contains "auto-detected" "$OUT"
-assert_not_contains "Multiple AI CLIs" "$OUT"
-
-begin "TOOL=goose is accepted"
-# A passing TOOL check reaches the fake runner, which always exits non-zero.
-run_recipe review-container GH_READY=1 TOOL=goose
-assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
-assert_not_contains "is not supported" "$OUT"
-assert_not_contains "Unset TOOL" "$OUT"
-
 begin "selection: forwards Hive's selected backend to the contributor"
 backend_backup="$scratch/contributor.env.backend-selection.bak"
 cp "$home/.config/hive/contributor.env" "$backend_backup"
@@ -346,6 +330,15 @@ reset_logs
 run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--env AGENT_BACKEND=claude" "$runner_log"
+cp "$backend_backup" "$home/.config/hive/contributor.env"
+
+begin "selection: TOOL cannot override Hive's selected backend"
+sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=claude/' "$home/.config/hive/contributor.env"
+reset_logs
+run_recipe review-container GH_READY=1 TOOL=goose
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
+assert_file_contains "--env AGENT_BACKEND=claude" "$runner_log"
+assert_file_not_contains "--env AGENT_BACKEND=goose" "$runner_log"
 cp "$backend_backup" "$home/.config/hive/contributor.env"
 
 begin "selection: default Copilot model is noninteractive"
@@ -855,12 +848,12 @@ assert_contains "pid ${named_owner_pid}" "$OUT"
 assert_eq "$(wc -c <"$runner_log")" 0 "a live session must never be replaced"
 
 # ══ Doctor is read-only ═══════════════════════════════════════════════════
-begin "review-doctor: read-only, Goose-only diagnostics"
+begin "review-doctor: read-only, selected-backend diagnostics"
 reset_logs
 run_recipe review-doctor GH_READY=1
-assert_contains "Agent backend (Goose only)" "$OUT"
-assert_not_contains "claude" "$OUT"
-assert_not_contains "codex" "$OUT"
+assert_contains "Agent backend (goose)" "$OUT"
+assert_not_contains "Agent backend (claude)" "$OUT"
+assert_not_contains "Agent backend (codex)" "$OUT"
 
 assert_file_not_contains "run --rm" "$runner_log"
 
@@ -887,17 +880,14 @@ assert_contains "no Copilot credential is available" "$OUT"
 assert_contains "gh auth token' is NOT a substitute" "$OUT"
 assert_contains "goose configure" "$OUT"
 
-begin "review-doctor: a stale AGENT_BACKEND is a warning, and the file is left alone"
-# Harmless (the launcher passes AGENT_BACKEND=goose itself) but misleading to
-# anyone who reads contributor.env, so it is reported, never rewritten.
+begin "review-doctor: reports the selected backend and leaves the file alone"
 reset_logs
 backend_backup="$scratch/contributor.env.bak"
 cp "$home/.config/hive/contributor.env" "$backend_backup"
 sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=copilot/' "$home/.config/hive/contributor.env"
 run_recipe review-doctor GH_READY=1 \
   FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
-assert_contains "AGENT_BACKEND=copilot" "$OUT"
-assert_contains "will not touch it" "$OUT"
+assert_contains "Agent backend (copilot)" "$OUT"
 assert_file_contains "AGENT_BACKEND=copilot" "$home/.config/hive/contributor.env"
 cp "$backend_backup" "$home/.config/hive/contributor.env"
 

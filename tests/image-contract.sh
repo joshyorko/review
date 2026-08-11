@@ -442,8 +442,7 @@ forbid image/config/local-agent-policy.md \
 require image/entrypoint.sh \
   'export GOOSE_PATH_ROOT=' \
   "note() { printf 'review: %s\\n' \"\$1\" >&2; }" \
-  '[ "$GOOSE_PROVIDER" != github_copilot ]' \
-  'review supports GitHub Copilot only.' \
+  'if [ "$review_dashboard" = true ]; then' \
   'export GOOSE_PROVIDER=github_copilot' \
   'GOOSE_MODEL="gpt-5.6-luna"' \
   'GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-high}"' \
