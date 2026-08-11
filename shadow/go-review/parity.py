@@ -2,14 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).parents[2]
-sys.path.insert(0, str(ROOT / "image" / "tui"))
+BASELINE_COMMIT = "6748294e476cc7ba836771b92565f0b09082a33e"
+BASELINE_SOURCE = ROOT / "image" / "tui" / "review_result.py"
+BASELINE_SOURCE_BLOB = "fe5574a3b6a6d14bedc37febc8d68a27cbc50b86"
 
+
+def verify_baseline_source() -> None:
+    source = BASELINE_SOURCE.read_bytes()
+    blob = f"blob {len(source)}\0".encode() + source
+    actual = hashlib.sha1(blob, usedforsecurity=False).hexdigest()
+    if actual != BASELINE_SOURCE_BLOB:
+        raise RuntimeError(
+            f"baseline source changed: {BASELINE_SOURCE} has {actual}, "
+            f"want {BASELINE_SOURCE_BLOB} from {BASELINE_COMMIT}"
+        )
+
+
+verify_baseline_source()
+sys.path.insert(0, str(BASELINE_SOURCE.parent))
 from review_result import MAX_RAW_CHARS, parse_review_result  # noqa: E402
 
 
@@ -92,6 +109,7 @@ def main() -> None:
     boundary_count, truncated_count = check_boundary_payloads()
     print(
         "Python ReviewResult parity: "
+        f"baseline {BASELINE_COMMIT}, "
         f"{fixture_count} fixture cases, {round_trip_count} round-trip cases, "
         f"{boundary_count} boundary cases, and {truncated_count} truncated prefixes passed"
     )

@@ -73,6 +73,11 @@ func TestBoundaryPayloadsFailClosed(t *testing.T) {
 			if result.State != StateUnparsable || result.IsClean() {
 				t.Fatalf("result = %#v, want an unparsable non-clean result", result)
 			}
+			if testCase.name == "oversized JSON" {
+				if len(result.RawEvidence) != 1 || len([]rune(result.RawEvidence[0])) != MaxRawChars {
+					t.Fatalf("oversized raw evidence = %#v, want one %d-character line", result.RawEvidence, MaxRawChars)
+				}
+			}
 		})
 	}
 }
@@ -202,6 +207,9 @@ func FuzzParseReviewResultBounded(f *testing.F) {
 			t.Skip()
 		}
 		result := ParseReviewResult(payload)
+		if !json.Valid([]byte(payload)) && result.IsClean() {
+			t.Fatal("malformed input became clean")
+		}
 		if result.State == StateUnparsable && result.IsClean() {
 			t.Fatal("unparsable input became clean")
 		}
@@ -216,6 +224,23 @@ func FuzzParseReviewResultBounded(f *testing.F) {
 			if !json.Valid([]byte(truncated)) && ParseReviewResult(truncated).IsClean() {
 				t.Fatal("malformed or truncated input became clean")
 			}
+		}
+	})
+}
+
+func FuzzTruncatedCleanPayloadNeverBecomesClean(f *testing.F) {
+	clean := `{"counts":{"critical":0,"high":0,"low":0,"medium":0},"findings":[],"state":"complete","version":1}`
+	for _, end := range []int{0, 1, len(clean) / 2, len(clean) - 1} {
+		f.Add(end)
+	}
+
+	f.Fuzz(func(t *testing.T, end int) {
+		end %= len(clean)
+		if end < 0 {
+			end = -end
+		}
+		if result := ParseReviewResult(clean[:end]); result.IsClean() {
+			t.Fatalf("truncated clean payload at byte %d became clean", end)
 		}
 	})
 }

@@ -22,9 +22,10 @@ overlap, live data, and bounded raw evidence. The cases cover every result
 state, state transitions, malformed optional fields, numeric and Unicode
 boundaries, deep and trailing JSON, and round-trip preservation.
 
-The shadow-owned Python runner imports the baseline implementation from
-`image/tui/review_result.py`; the official upstream-oriented contract test is
-not part of this experiment. Run the parity checks with:
+The shadow-owned Python runner imports `image/tui/review_result.py` only after
+verifying its recorded Git blob against the baseline. The official
+upstream-oriented contract test is not part of this experiment. Run the parity
+checks with:
 
 ```bash
 go test ./...
