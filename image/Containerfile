@@ -304,8 +304,9 @@ COPY image/config/local-agent-policy.md /opt/bluefin/local-agent-policy.md
 # repository under review. --check-scope REPLACES repo-root discovery
 # (additive flag filed as aaif-goose/goose#11060), so Bluefin repositories
 # keep their checks in this shared overlay.
-COPY image/review-scope/REVIEW.md /opt/bluefin/review-scope/.agents/REVIEW.md
-COPY image/review-scope/checks/ /opt/bluefin/review-scope/.agents/checks/
+COPY --chmod=0644 image/review-scope/REVIEW.md /opt/bluefin/review-scope/.agents/REVIEW.md
+COPY --chmod=0644 image/review-scope/checks/ /opt/bluefin/review-scope/.agents/checks/
+RUN chmod 0755 /opt/bluefin/review-scope /opt/bluefin/review-scope/.agents /opt/bluefin/review-scope/.agents/checks
 
 # Git hooks, wired via a global core.hooksPath by the entrypoint. Ergonomics
 # only -- `git commit --no-verify` bypasses every one of them.

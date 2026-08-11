@@ -350,8 +350,8 @@ analyzer_out() {
 # stub records its contents at invocation time.
 mkdir -p "$scratch/overlay/.agents/checks"
 printf 'SCOPED REVIEW PROMPT\n' >"$scratch/overlay/.agents/REVIEW.md"
-printf -- '---\nname: bluefin-doctrine\n---\nDOCTRINE CHECK\n' \
-  >"$scratch/overlay/.agents/checks/bluefin-doctrine.md"
+cp "$repo_root/image/review-scope/checks/bluefin-doctrine.md" \
+  "$scratch/overlay/.agents/checks/bluefin-doctrine.md"
 
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
@@ -365,6 +365,7 @@ while (($#)); do
 done
 if [[ -n "$scope" ]]; then
   find "$scope" -type f | sed "s|^$scope/||" | sort >"${SCOPE_LISTING:?}"
+  cat "$scope/.agents/checks/bluefin-doctrine.md" >"${SCOPE_DOCTRINE:?}"
   while IFS= read -r check; do
     filename="${check##*/}"
     expected="${filename%.md}"
@@ -382,7 +383,8 @@ chmod +x "$scratch/bin/goose"
 BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
   BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/repository" \
   PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-scope" \
-  SCOPE_LISTING="$scratch/scope-listing" SCOPE_CLUSTER="$scratch/scope-cluster" \
+  SCOPE_LISTING="$scratch/scope-listing" SCOPE_DOCTRINE="$scratch/scope-doctrine" \
+  SCOPE_CLUSTER="$scratch/scope-cluster" \
   "$review" main...HEAD >/dev/null
 
 argv_scope="$(tr '\0' '\n' <"$scratch/argv-scope")"
@@ -461,6 +463,19 @@ printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
 exit 23
 EOF
 chmod +x "$scratch/bin/goose"
+
+# --- the shipped doctrine states current-model alignment ----------------------
+doctrine="$scratch/scope-doctrine"
+grep -q 'implementation, tests, and applicable durable documentation remain' "$doctrine"
+grep -q 'mutually consistent' "$doctrine"
+grep -q 'concrete contradictory evidence' "$doctrine"
+grep -q 'file and line' "$doctrine"
+grep -q 'no documentation change is needed' "$doctrine"
+grep -q 'insufficient evidence' "$doctrine"
+grep -q 'uncertainty, not a finding' "$doctrine"
+grep -q 'changed-file patterns' "$doctrine"
+grep -q 'documentation absence' "$doctrine"
+grep -q 'alone are not proof' "$doctrine"
 
 # --- the engine has no mutation path at all -----------------------------------
 # This used to be a set of "every mutation goes through the one gate" checks,

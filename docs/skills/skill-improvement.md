@@ -38,6 +38,9 @@ that work.
 2. Treat the documentation, launcher, image, MCP app, and tests as one model.
    Repair any contradiction at the nearest authoritative source; never leave
    a legacy document to describe a second workflow or authority path.
+   This model-alignment judgment belongs in every normal implementation and
+   review loop. Explicit or periodic harvesting and gardening are secondary
+   maintenance work, not substitutes for checking the current change.
 3. Use `projectbluefin/common` as the pinned shared factory sidecar. It
    supplements local guidance; it does not override local repository
    boundaries or assign work.
