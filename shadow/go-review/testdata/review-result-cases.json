@@ -1,0 +1,199 @@
+[
+  {
+    "name": "clean",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "version": 1
+    },
+    "expected": {
+      "is_clean": true,
+      "state": "complete"
+    }
+  },
+  {
+    "name": "findings",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 1,
+        "low": 0,
+        "medium": 1
+      },
+      "findings": [
+        {
+          "evidence": "high finding",
+          "file": "image/entrypoint.sh",
+          "line": 87,
+          "severity": "high",
+          "title": "signal path"
+        },
+        {
+          "file": "tests/image-contract.sh",
+          "line": 401,
+          "severity": "medium",
+          "title": "missing coverage"
+        }
+      ],
+      "state": "findings",
+      "version": 1
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "findings"
+    }
+  },
+  {
+    "name": "complete-state-with-findings",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 1,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [
+        {
+          "file": "review.go",
+          "line": 1,
+          "severity": "high",
+          "title": "example"
+        }
+      ],
+      "state": "complete",
+      "version": 1
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "findings"
+    }
+  },
+  {
+    "name": "unverified-check",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "complete",
+      "verification": [
+        {
+          "evidence": "the check did not return a verdict",
+          "name": "unit",
+          "state": "unverified"
+        }
+      ],
+      "version": 1
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "incomplete"
+    }
+  },
+  {
+    "name": "failed",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "state": "failed",
+      "version": 1
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "failed"
+    }
+  },
+  {
+    "name": "count-mismatch",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [
+        {
+          "file": "review.go",
+          "line": 1,
+          "severity": "high",
+          "title": "example"
+        }
+      ],
+      "state": "complete",
+      "version": 1
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable"
+    }
+  },
+  {
+    "name": "invalid-finding-line",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 1,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [
+        {
+          "file": "review.go",
+          "line": "1",
+          "severity": "high",
+          "title": "example"
+        }
+      ],
+      "state": "findings",
+      "version": 1
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable"
+    }
+  },
+  {
+    "name": "incomplete-provenance",
+    "payload": {
+      "counts": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "findings": [],
+      "provenance": {
+        "backend": "goose"
+      },
+      "state": "complete",
+      "version": 1
+    },
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable"
+    }
+  },
+  {
+    "name": "invalid-json",
+    "payload": "not json",
+    "expected": {
+      "is_clean": false,
+      "state": "unparsable"
+    }
+  }
+]

@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "image" / "tui"))
 from review_result import MAX_RAW_CHARS, ReviewResult, adapt_current_engine, parse_review_result
 
 FIXTURES = Path(__file__).parent / "fixtures"
+SHADOW_FIXTURES = Path(__file__).parents[1] / "shadow" / "go-review" / "testdata" / "review-result-cases.json"
 
 
 def fixture(name):
@@ -188,6 +189,17 @@ class ReviewResultContractTests(unittest.TestCase):
         result = adapt_current_engine("0 findings", 0)
         self.assertEqual(result.state, "unparsable")
         self.assertFalse(result.is_clean)
+
+    def test_shared_go_shadow_fixtures_match_python_contract(self):
+        cases = json.loads(SHADOW_FIXTURES.read_text())
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                payload = case["payload"]
+                if not isinstance(payload, str):
+                    payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                result = parse_review_result(payload)
+                self.assertEqual(result.state, case["expected"]["state"])
+                self.assertEqual(result.is_clean, case["expected"]["is_clean"])
 
     def test_current_engine_adapter_keeps_failed_check_incomplete(self):
         result = adapt_current_engine(fixture("goose-review-incomplete.txt"), 65)
