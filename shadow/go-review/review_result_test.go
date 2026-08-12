@@ -318,14 +318,28 @@ func FuzzTruncatedCleanPayloadNeverBecomesClean(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, end int) {
-		end %= len(clean)
-		if end < 0 {
-			end = -end
-		}
+		end = boundedIndex(end, len(clean))
 		if result := ParseReviewResult(clean[:end]); result.IsClean() {
 			t.Fatalf("truncated clean payload at byte %d became clean", end)
 		}
 	})
+}
+
+func boundedIndex(value, length int) int {
+	if length <= 0 {
+		return 0
+	}
+	if value == int(^uint(0)>>1) {
+		return length - 1
+	}
+	if value == -int(^uint(0)>>1)-1 {
+		return 0
+	}
+	value %= length
+	if value < 0 {
+		value += length
+	}
+	return value
 }
 
 func fixturePayload(t *testing.T, raw json.RawMessage) string {
