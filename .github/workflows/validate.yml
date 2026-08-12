@@ -56,6 +56,12 @@ jobs:
           set -euo pipefail
           bash tests/generate-skills.sh
 
+      - name: Harness registry and adapter contracts
+        run: |
+          set -euo pipefail
+          python3 tests/harness-contract.py
+          python3 tests/autopilot-contract.py
+
       - name: PR queue generator contract
         run: |
           set -euo pipefail
@@ -166,6 +172,20 @@ jobs:
           # the agent clones what it needs inside the disposable container, and
           # Hive's config lives under the image's home.
           test "$(docker inspect review:test --format '{{.Config.WorkingDir}}')" = "/home/dev"
+
+      - name: Import shipped TUI module set as runtime user
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --entrypoint /usr/local/bin/codex \
+            review:test --version
+          docker run --rm \
+            --entrypoint /usr/local/bin/codex-code-mode-host \
+            review:test --help
+          docker run --rm \
+            --entrypoint /opt/bluefin/tui/.venv/bin/python \
+            review:test \
+            -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"
 
       - name: Audit exact FSDK and built review image
         run: |

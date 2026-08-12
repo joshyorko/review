@@ -1,7 +1,7 @@
 ---
 name: image-build
-version: "2.17"
-last_updated: 2026-08-11
+version: "2.20"
+last_updated: 2026-08-12
 id: image-build
 one_line_purpose: Derive and pin the review contributor image safely.
 entry_point: docs/skills/image-build.md
@@ -72,9 +72,15 @@ fix.
    source, image labels, and SBOM package records can disagree with the
    filesystem; command execution and file inspection against the pinned digest
    define the base interface.
-3. Add only the contributor delta: Goose, tmux, GitHub CLI, Node with `ws`, the
-   pinned Hive runtime, controlled policy/configuration, and approved agent
-   tools. Do not duplicate a capability already present in the verified base.
+3. Add only the contributor delta: Goose, the pinned official Codex CLI,
+   tmux, GitHub CLI, Node with `ws`, the pinned Hive runtime, controlled
+   policy/configuration, and approved agent tools. Do not duplicate a
+   capability already present in the verified base.
+   Give copied runtime files explicit image modes; never inherit readability
+   from the checkout's umask or filesystem defaults.
+   Create `/home/dev/Downloads` for Textual's built-in SVG screenshot
+   delivery; a runtime home without that standard destination makes the
+   authentic command-palette capture fail.
    Do not turn the image into a general-purpose distribution.
 4. Preserve canonical command semantics. Never shadow `grep`, `find`, `cat`, or
    `ls` — with a modern alternative or with a hand-written one. If a modern
@@ -115,7 +121,10 @@ fix.
    `tests/image-audit.sh` checks provenance in the built runtime.
    `tests/find-semantics.sh` is deleted -- the shim it read no longer exists,
    and the build is now the gate.
-6. Pin Node, GitHub CLI, and tmux versions and verify their checksums. For
+6. Pin Node, GitHub CLI, tmux, and Codex CLI versions and verify their
+   checksums. Codex comes only from OpenAI's official architecture-specific
+   Linux release assets, installs as the upstream binary without repacking,
+   and is executable in the final runtime as `codex`. For
    mutable Goose `canary`, CI resolves official `unknown-linux-musl` asset
    digests before each build, passes them as build inputs, and records them in
    image configuration and provenance. The build verifies the selected archive
@@ -124,7 +133,7 @@ fix.
    changing an image. Extract safely; never compile, strip, repack, or fork
    Goose; preserve glibc loader links for dynamic Node and GitHub CLI. Lock
    `ws` in root `package-lock.json` with `npm ci --omit=dev --ignore-scripts`;
-   keep fixed Node/gh/tmux/ws ahead of mutable Goose. Unpack with the base's
+   keep fixed Node/gh/tmux/Codex/ws ahead of mutable Goose. Unpack with the base's
    own GNU tar, never a hand-rolled extractor — `tar -xO ... --occurrence=1`
    for a single binary, `--strip-components=1` for Node's versioned tree — and
    keep each `sha256sum -c -` ahead of its extraction. A missing member then
@@ -147,7 +156,9 @@ fix.
 9. Keep credentials, workspaces, and host configuration out of image layers.
    Supply the GitHub token used for canary provenance verification as the
    required `github_token` build secret; it is available only to that `RUN`
-   step and must not be an argument or environment layer.
+   step and must not be an argument or environment layer. Codex subscription
+   OAuth is likewise runtime-only: the image carries the CLI and an empty
+   `/home/dev/.codex`, never an auth cache or provider configuration.
 10. Treat the image as a task runtime, not a general validation distribution.
    At startup, probe the baseline validation commands (`bats`, `shellcheck`,
    `hadolint`, `systemd-analyze`, `pre-commit`, `just`, `podman`, and
@@ -282,9 +293,9 @@ Do not use this runbook to change Hive assignment, checkout, or contributor prot
 `tests/image-audit.sh` keeps two rules apart that are easy to conflate. A
 **package manager** (`apt`, `dnf`, `apk`) is forbidden in both images always:
 content comes from BST elements, so a self-mutating runtime is a defect.
-**Anything review installs itself** (`node`, `npm`, `gh`, `tmux`, `goose`) is
-forbidden in the base only, because a second copy means two versions and no
-way to know which an agent ran.
+**Anything review installs itself** (`node`, `npm`, `gh`, `tmux`, `codex`,
+`goose`) is forbidden in the base only, because a second copy means two
+versions and no way to know which an agent ran.
 
 **Ordinary userland is forbidden nowhere.** `find`, `cmp`, `diff`, `rg`, `fd`,
 `yq` and ShellCheck belong in the base when a contributor needs them; their
