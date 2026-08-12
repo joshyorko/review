@@ -110,6 +110,8 @@ class CodexHarness:
         invalid = CodexHarness._unparsable(lines)
         events: list[dict] = []
         for line in lines:
+            if not line.strip():
+                continue
             try:
                 event = json.loads(line)
             except (TypeError, ValueError, json.JSONDecodeError):

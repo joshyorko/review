@@ -129,6 +129,13 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(result.provenance["reasoning_effort"], "low")
         self.assertEqual(result.provenance["repository"], "project/review")
 
+    def test_codex_accepts_blank_jsonl_framing_lines(self):
+        stream = self.terminal_stream().replace("\n", "\n \n")
+        result = CodexHarness(availability=Availability.READY).convert(
+            stream, self.binding
+        )
+        self.assertEqual(result.state, "complete")
+
     def test_codex_stream_keeps_stderr_out_of_official_jsonl(self):
         class Process:
             stdout = iter((self.terminal_stream() + "\n").splitlines(keepends=True))
