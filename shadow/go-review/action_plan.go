@@ -564,7 +564,7 @@ func (plan ActionPlan) Execute(eligibility ExecutionEligibility, current Current
 		return ActionReceipt{}, executionNotEligible("an operation executor is required")
 	}
 	if !executorSupported(executor) {
-		return ActionReceipt{}, executionNotEligible("an operation executor is required")
+		return ActionReceipt{}, executionNotEligible("executor type is not supported")
 	}
 	snapshot := eligibility.planSnapshot
 	snapshotIdentity := snapshot.Identity()
@@ -585,7 +585,7 @@ func (plan ActionPlan) Execute(eligibility ExecutionEligibility, current Current
 	if err := snapshot.Revalidate(current, now); err != nil {
 		return ActionReceipt{}, err
 	}
-	if !ledger.Claim(plan.IdempotencyKey) {
+	if !ledger.Claim(snapshot.IdempotencyKey) {
 		return ActionReceipt{}, executionNotEligible("execution idempotency key was already claimed")
 	}
 	for index, operation := range snapshot.Operations {

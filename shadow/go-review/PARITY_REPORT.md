@@ -36,7 +36,7 @@ checked. The official upstream-oriented Python tests remain unchanged.
 ## Fork isolation and provenance
 
 - Fork: `joshyorko/review`
-- Tested fork SHA: `4ef0d366ac6ead136e15d5fad675478edc0f3608`
+- Tested fork SHA: `f4db6c7950b72c5bba060ca4bedbf6d1b2835985`
 - Working branch: `copilot/experiment-build-go-bubble-tea-cockpit`
 - Preferred issue experiment line: `experiment/go-review-shadow`
 - Branch deviation: the Copilot-managed head branch differs from the preferred
@@ -44,9 +44,11 @@ checked. The official upstream-oriented Python tests remain unchanged.
 - Work location: fork PR #14 only; no upstream PR was opened or prepared.
 - Issue relation: `Progresses #13`; this checkpoint does not close the
   multi-milestone experiment.
-- Requested runtime model: `gpt-5.6-luna`, reasoning `max`.
-- Actual runtime provenance: the available SWE-agent runtime exposed no model,
-  provider, or reasoning fields, so no Luna/max execution claim is made.
+- Requested implementation runtime: `gpt-5.6-luna`, reasoning `max`.
+- Parent implementation runtime provenance: provider, backend, model, and
+  reasoning fields were not exposed, so no Luna/max execution claim is made.
+- Dedicated static review invocation: model `gpt-5.6-luna`; provider/backend
+  and reasoning fields were not exposed; it ran no tests and made no edits.
 
 ## Coverage
 
@@ -87,19 +89,19 @@ Python ReviewResult parity: baseline 6748294e476cc7ba836771b92565f0b09082a33e, 3
 Python M1 contract parity: 2 EvidenceManifest fixtures, 4 malformed EvidenceManifest cases, 2 ActionPlan fixtures, 2 exact-head revalidation cases, and 5 malformed ActionPlan cases passed
 
 $ cd shadow/go-review && go test -fuzz=FuzzParseReviewResultBounded -fuzztime=1s
-fuzz: elapsed: 1s, execs: 9855 (9117/sec), new interesting: 13 (total: 17)
+fuzz: elapsed: 1s, execs: 11376 (10267/sec), new interesting: 0 (total: 17)
 PASS
 
 $ cd shadow/go-review && go test -fuzz=FuzzTruncatedCleanPayloadNeverBecomesClean -fuzztime=1s
-fuzz: elapsed: 2s, execs: 6921 (3443/sec), new interesting: 14 (total: 22)
+fuzz: elapsed: 2s, execs: 6251 (3094/sec), new interesting: 35 (total: 57)
 PASS
 
 $ cd shadow/go-review && go test -fuzz=FuzzEvidenceManifestValidationDoesNotPanic -fuzztime=1s
-fuzz: elapsed: 2s, execs: 3243 (1617/sec), new interesting: 15 (total: 19)
+fuzz: elapsed: 2s, execs: 4866 (2426/sec), new interesting: 14 (total: 33)
 PASS
 
 $ cd shadow/go-review && go test -fuzz=FuzzActionPlanValidationDoesNotPanic -fuzztime=1s
-fuzz: elapsed: 2s, execs: 4458 (2222/sec), new interesting: 28 (total: 32)
+fuzz: elapsed: 2s, execs: 10854 (5421/sec), new interesting: 19 (total: 51)
 PASS
 
 $ git diff --check
@@ -111,8 +113,8 @@ exit 0; no output
 Required workflow: `.github/workflows/shadow-go-review.yml`
 
 - Repository: `joshyorko/review`
-- Latest run for the tested head: run `31557108526`
-- Head SHA reported by the run: `4ef0d366ac6ead136e15d5fad675478edc0f3608`
+- Latest run for the tested head: run `31557534358`
+- Head SHA reported by the run: `f4db6c7950b72c5bba060ca4bedbf6d1b2835985`
 - Event: `pull_request`
 - Conclusion: `action_required`
 - Jobs: `0`

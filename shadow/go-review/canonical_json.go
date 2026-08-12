@@ -52,16 +52,11 @@ func canonicalJSONValue(value any) any {
 		}
 		return typed
 	case map[string]any:
-		normalized := make(map[string]any, len(typed))
-		for key, item := range typed {
-			normalized[key] = canonicalJSONValue(item)
-		}
-		return normalized
+		return canonicalStringMap(typed)
 	case map[string]map[string]any:
 		normalized := make(map[string]map[string]any, len(typed))
 		for key, item := range typed {
-			value := canonicalJSONValue(item)
-			normalized[key] = value.(map[string]any)
+			normalized[key] = canonicalStringMap(item)
 		}
 		return normalized
 	case []any:
@@ -79,4 +74,12 @@ func canonicalJSONValue(value any) any {
 	default:
 		return value
 	}
+}
+
+func canonicalStringMap(value map[string]any) map[string]any {
+	normalized := make(map[string]any, len(value))
+	for key, item := range value {
+		normalized[key] = canonicalJSONValue(item)
+	}
+	return normalized
 }
