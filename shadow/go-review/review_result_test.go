@@ -154,6 +154,31 @@ func TestFromMapDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestFromMapRejectsNonCanonicalIntegerNumbers(t *testing.T) {
+	base := map[string]any{
+		"counts": map[string]any{
+			"critical": json.Number("0"),
+			"high":     json.Number("0"),
+			"low":      json.Number("0"),
+			"medium":   json.Number("0"),
+		},
+		"findings": []any{},
+		"state":    "complete",
+		"version":  json.Number("1"),
+	}
+	for _, value := range []json.Number{"+1", "01", "-01", "1e0", "0.0"} {
+		t.Run(string(value), func(t *testing.T) {
+			data := cloneMap(base)
+			counts := cloneMap(base["counts"].(map[string]any))
+			counts["critical"] = value
+			data["counts"] = counts
+			if result := FromMap(data); result.State != StateUnparsable {
+				t.Fatalf("state = %q, want unparsable for %q", result.State, value)
+			}
+		})
+	}
+}
+
 func TestMalformedNestedFieldsFailClosed(t *testing.T) {
 	base := `{"counts":{"critical":0,"high":1,"low":0,"medium":0},"findings":[{"file":"review.go","line":7,"severity":"high","title":"x"}],"state":"findings","version":1}`
 	for _, malformed := range []string{

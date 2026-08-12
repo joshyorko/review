@@ -434,7 +434,11 @@ func integerValue(value any) (*big.Int, bool) {
 	case uint64:
 		return new(big.Int).SetUint64(typed), true
 	case json.Number:
-		parsed, ok := new(big.Int).SetString(string(typed), 10)
+		text := string(typed)
+		if !isJSONInteger(text) {
+			return nil, false
+		}
+		parsed, ok := new(big.Int).SetString(text, 10)
 		if !ok {
 			return nil, false
 		}
@@ -442,6 +446,31 @@ func integerValue(value any) (*big.Int, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func isJSONInteger(value string) bool {
+	if value == "" {
+		return false
+	}
+	start := 0
+	if value[0] == '-' {
+		start++
+		if start == len(value) {
+			return false
+		}
+	}
+	if value[start] == '0' {
+		return start+1 == len(value)
+	}
+	if value[start] < '1' || value[start] > '9' {
+		return false
+	}
+	for index := start + 1; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalIntegerValue(value any, parsed *big.Int) any {
