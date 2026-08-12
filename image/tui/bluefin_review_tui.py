@@ -813,7 +813,7 @@ class ReviewScreen(Screen):
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
                 env=environment,

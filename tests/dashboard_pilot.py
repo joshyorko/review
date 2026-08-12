@@ -1663,8 +1663,67 @@ async def main() -> int:
     tui.ACTIVE_BACKEND = "codex"
     real_probe = tui.CodexHarness.probe
     tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
+    real_popen = tui.subprocess.Popen
     review_log.write_text("")
     try:
+        codex_calls = []
+        codex_output = "\n".join(
+            (
+                '{"type":"thread.started","thread_id":"thread_1"}',
+                '{"type":"turn.started"}',
+                '{"type":"item.completed","item":{"id":"item_1",'
+                '"type":"agent_message","text":"{\\"version\\":1,'
+                '\\"state\\":\\"complete\\",\\"counts\\":{\\"critical\\":0,'
+                '\\"high\\":0,\\"medium\\":0,\\"low\\":0},\\"findings\\":[]}"}}',
+                '{"type":"turn.completed","usage":{}}',
+            )
+        ) + "\n"
+
+        class CodexProcess:
+            stdout = iter(codex_output.splitlines(keepends=True))
+            returncode = 0
+
+            @staticmethod
+            def wait():
+                return 0
+
+        def codex_popen(*args, **kwargs):
+            command = args[0] if args else kwargs.get("args")
+            if isinstance(command, (list, tuple)) and command[:2] == ["codex", "exec"]:
+                codex_calls.append(kwargs)
+                return CodexProcess()
+            return real_popen(*args, **kwargs)
+
+        tui.subprocess.Popen = codex_popen
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            app.stops[0].live = {
+                "isDraft": False,
+                "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+                "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+            }
+            await pilot.press("r")
+            await pilot.press("tab", "enter")
+            for _ in range(200):
+                if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
+                    break
+                await pilot.pause(0.05)
+            status = app.screen.query_one("#review-status", tui.Static)
+            check(
+                "COMPLETE" in str(status.render()),
+                "valid Codex stdout JSONL must produce a completed decision card",
+            )
+            check(
+                codex_calls[-1]["stderr"] is subprocess.DEVNULL,
+                "Codex stderr must stay outside the official stdout JSONL lifecycle",
+            )
+
+        tui.subprocess.Popen = real_popen
         app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -1688,6 +1747,7 @@ async def main() -> int:
                 "invalid live refs must not invoke Codex",
             )
     finally:
+        tui.subprocess.Popen = real_popen
         tui.CodexHarness.probe = real_probe
     tui.ACTIVE_BACKEND = "goose"
 
@@ -1714,7 +1774,7 @@ async def main() -> int:
     check(
         outcomes == [
             "complete", "complete", "incomplete", "incomplete", "failed",
-            "complete", "incomplete", "complete", "stopped", "error",
+            "complete", "incomplete", "complete", "stopped", "complete", "error",
         ],
         f"every review must be traced with its outcome, got {outcomes}",
     )
