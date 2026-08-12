@@ -5,32 +5,57 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).parents[2]
 BASELINE_COMMIT = "6748294e476cc7ba836771b92565f0b09082a33e"
-BASELINE_SOURCE = ROOT / "image" / "tui" / "review_result.py"
-BASELINE_SOURCE_BLOB = "fe5574a3b6a6d14bedc37febc8d68a27cbc50b86"
+BASELINE_SOURCES = {
+    ROOT / "image" / "tui" / "review_result.py": "fe5574a3b6a6d14bedc37febc8d68a27cbc50b86",
+    ROOT
+    / "image"
+    / "tui"
+    / "review_evidence_manifest.py": "e7c334309a4456ddca208c75d2d2289f58e66f58",
+    ROOT / "image" / "tui" / "action_plan.py": "13f8884c00af62233add5e4bcf1604919f9dd065",
+}
 
 
 def verify_baseline_source() -> None:
-    source = BASELINE_SOURCE.read_bytes()
-    blob = f"blob {len(source)}\0".encode() + source
-    actual = hashlib.sha1(blob, usedforsecurity=False).hexdigest()
-    if actual != BASELINE_SOURCE_BLOB:
-        raise RuntimeError(
-            f"baseline source changed: {BASELINE_SOURCE} has {actual}, "
-            f"want {BASELINE_SOURCE_BLOB} from {BASELINE_COMMIT}"
-        )
+    for source_path, expected_blob in BASELINE_SOURCES.items():
+        source = source_path.read_bytes()
+        blob = f"blob {len(source)}\0".encode() + source
+        actual = hashlib.sha1(blob, usedforsecurity=False).hexdigest()
+        if actual != expected_blob:
+            raise RuntimeError(
+                f"baseline source changed: {source_path} has {actual}, "
+                f"want {expected_blob} from {BASELINE_COMMIT}"
+            )
 
 
 verify_baseline_source()
-sys.path.insert(0, str(BASELINE_SOURCE.parent))
+sys.path.insert(0, str((ROOT / "image" / "tui")))
 from review_result import MAX_RAW_CHARS, parse_review_result  # noqa: E402
+from action_plan import (  # noqa: E402
+    ActionPlan,
+    CurrentState,
+    GitHubOperation,
+    Prerequisites,
+)
+from review_evidence_manifest import (  # noqa: E402
+    Availability,
+    EvidenceEntry,
+    EvidenceHandle,
+    EvidencePhase,
+    ReviewEvidenceManifest,
+    ReviewRequest,
+    TrustClass,
+)
 
 
 FIXTURES = Path(__file__).parent / "testdata" / "review-result-cases.json"
+EVIDENCE_FIXTURES = Path(__file__).parent / "testdata" / "evidence-manifest-cases.json"
+ACTION_FIXTURES = Path(__file__).parent / "testdata" / "action-plan-cases.json"
 CANONICAL_FIELDS = {
     "counts",
     "findings",
@@ -196,12 +221,289 @@ def check_malformed_optional_fields() -> int:
     return len(malformed)
 
 
+def evidence_entry(value: dict[str, Any]) -> EvidenceEntry:
+    return EvidenceEntry(
+        kind=value["kind"],
+        provenance=value["provenance"],
+        trust=TrustClass(value["trust"]),
+        availability=Availability(value["availability"]),
+        phase=EvidencePhase(value["phase"]),
+        summary=value.get("summary", ""),
+        handles=tuple(
+            EvidenceHandle(
+                uri=handle["uri"],
+                label=handle["label"],
+                max_bytes=handle["max_bytes"],
+            )
+            for handle in value.get("handles", ())
+        ),
+        untrusted_text=value.get("untrusted_text"),
+    )
+
+
+def evidence_manifest(case: dict[str, Any]) -> ReviewEvidenceManifest:
+    request_value = case["request"]
+    request = ReviewRequest(
+        owner=request_value["owner"],
+        repository=request_value["repository"],
+        pull_request_number=request_value["pull_request_number"],
+        base_sha=request_value["base_sha"],
+        head_sha=request_value["head_sha"],
+        actor=request_value["actor"],
+        tenant=request_value["tenant"],
+        installation=request_value.get("installation"),
+        generated_at=request_value["generated_at"],
+        focus=request_value.get("focus", ""),
+        steering=request_value.get("steering", ""),
+        version=request_value.get("version", 1),
+    )
+    entries = tuple(evidence_entry(value) for value in case.get("entries", ()))
+    policy_value = case.get("organization_policy")
+    policy = evidence_entry(policy_value) if policy_value is not None else None
+    return ReviewEvidenceManifest(request, entries, policy)
+
+
+def check_evidence_fixtures() -> int:
+    cases = json.loads(EVIDENCE_FIXTURES.read_text())
+    for case in cases:
+        actual = json.loads(evidence_manifest(case).semantic_json())
+        if actual != case["expected"]:
+            raise AssertionError(
+                f'{case["name"]}: EvidenceManifest differs\n'
+                f"actual={json.dumps(actual, sort_keys=True)}\n"
+                f'expected={json.dumps(case["expected"], sort_keys=True)}'
+            )
+    return len(cases)
+
+
+def check_evidence_malformed_cases() -> int:
+    case = json.loads(EVIDENCE_FIXTURES.read_text())[0]
+    request = evidence_manifest(case).request
+    valid_entry = EvidenceEntry(
+        kind="source",
+        provenance="checkout",
+        trust=TrustClass.REPOSITORY,
+        availability=Availability.AVAILABLE,
+        phase=EvidencePhase.SNAPSHOT,
+    )
+    malformed = (
+        (
+            "trusted review text",
+            lambda: EvidenceEntry(
+                kind=valid_entry.kind,
+                provenance=valid_entry.provenance,
+                trust=valid_entry.trust,
+                availability=valid_entry.availability,
+                phase=valid_entry.phase,
+                untrusted_text="review text",
+            ),
+        ),
+        (
+            "oversized summary",
+            lambda: EvidenceEntry(
+                kind=valid_entry.kind,
+                provenance=valid_entry.provenance,
+                trust=valid_entry.trust,
+                availability=valid_entry.availability,
+                phase=valid_entry.phase,
+                summary="x" * 4097,
+            ),
+        ),
+        (
+            "wrong policy kind",
+            lambda: ReviewEvidenceManifest(
+                request,
+                organization_policy=valid_entry,
+            ),
+        ),
+        (
+            "oversized manifest",
+            lambda: ReviewEvidenceManifest(request, (valid_entry,) * 129),
+        ),
+    )
+    for name, build in malformed:
+        try:
+            build()
+        except Exception:
+            continue
+        raise AssertionError(f"{name} was accepted")
+    return len(malformed)
+
+
+def action_plan(case: dict[str, Any]) -> ActionPlan:
+    value = case["plan"]
+    operations = tuple(
+        GitHubOperation.from_argv(operation["argv"], body=operation.get("body"))
+        for operation in value["operations"]
+    )
+    prerequisites = Prerequisites.from_mappings(**value["prerequisites"])
+    return ActionPlan.build(
+        actor=value["actor"],
+        tenant=value["tenant"],
+        repository=value["repository"],
+        pull_request=value["pull_request"],
+        head_sha=value["head_sha"],
+        action_kind=value["action_kind"],
+        body=value.get("body"),
+        operations=operations,
+        prerequisites=prerequisites,
+        created_at=datetime.fromisoformat(value["created_at"]),
+        expires_at=datetime.fromisoformat(value["expires_at"]),
+        idempotency_key=value["idempotency_key"],
+    )
+
+
+def current_state(case: dict[str, Any]) -> CurrentState:
+    value = case["current"]
+    return CurrentState(
+        actor=value["actor"],
+        tenant=value["tenant"],
+        repository=value["repository"],
+        pull_request=value["pull_request"],
+        head_sha=value["head_sha"],
+        body=value.get("body"),
+        prerequisites=Prerequisites.from_mappings(**value["prerequisites"]),
+    )
+
+
+def check_action_plan_fixtures() -> tuple[int, int]:
+    cases = json.loads(ACTION_FIXTURES.read_text())
+    exact_head_count = 0
+    for case in cases:
+        plan = action_plan(case)
+        if plan.identity != case["expected"]["identity"]:
+            raise AssertionError(
+                f'{case["name"]}: identity={plan.identity!r}, '
+                f'expected={case["expected"]["identity"]!r}'
+            )
+        actual_payload = {
+            "action_kind": plan.action_kind,
+            "actor": plan.actor,
+            "body": plan.body,
+            "created_at": plan.created_at.isoformat(),
+            "expires_at": plan.expires_at.isoformat(),
+            "head_sha": plan.head_sha,
+            "idempotency_key": plan.idempotency_key,
+            "operations": [
+                {"argv": list(operation.argv), "body": operation.body}
+                for operation in plan.operations
+            ],
+            "prerequisites": plan.prerequisites.payload(),
+            "pull_request": plan.pull_request,
+            "repository": plan.repository,
+            "tenant": plan.tenant,
+        }
+        if actual_payload != case["expected"]["payload"]:
+            raise AssertionError(
+                f'{case["name"]}: canonical payload differs\n'
+                f"actual={json.dumps(actual_payload, sort_keys=True)}\n"
+                f'expected={json.dumps(case["expected"]["payload"], sort_keys=True)}'
+            )
+        if plan.preview().plan_identity != plan.identity:
+            raise AssertionError(f'{case["name"]}: preview identity differs')
+        plan.revalidate(
+            current_state(case),
+            now=plan.created_at + timedelta(minutes=1),
+        )
+        exact_head_count += 1
+        drifted = dict(case["current"])
+        drifted["head_sha"] = "0" * 40
+        drifted_case = dict(case)
+        drifted_case["current"] = drifted
+        try:
+            plan.revalidate(
+                current_state(drifted_case),
+                now=plan.created_at + timedelta(minutes=1),
+            )
+        except Exception:
+            pass
+        else:
+            raise AssertionError(f'{case["name"]}: head drift was accepted')
+    return len(cases), exact_head_count
+
+
+def check_action_plan_malformed_cases() -> int:
+    case = json.loads(ACTION_FIXTURES.read_text())[0]
+    value = case["plan"]
+
+    def build(**overrides: Any) -> ActionPlan:
+        payload = dict(value)
+        payload.update(overrides)
+        operations = tuple(
+            GitHubOperation.from_argv(operation["argv"], body=operation.get("body"))
+            for operation in payload["operations"]
+        )
+        return ActionPlan.build(
+            actor=payload["actor"],
+            tenant=payload["tenant"],
+            repository=payload["repository"],
+            pull_request=payload["pull_request"],
+            head_sha=payload["head_sha"],
+            action_kind=payload["action_kind"],
+            body=payload.get("body"),
+            operations=operations,
+            prerequisites=Prerequisites.from_mappings(**payload["prerequisites"]),
+            created_at=datetime.fromisoformat(payload["created_at"]),
+            expires_at=datetime.fromisoformat(payload["expires_at"]),
+            idempotency_key=payload["idempotency_key"],
+        )
+
+    malformed = (
+        (
+            "non-string operation body",
+            lambda: GitHubOperation.from_argv(value["operations"][0]["argv"], body=7),
+        ),
+        (
+            "body-bearing operation without plan body",
+            lambda: build(body=None),
+        ),
+        (
+            "operation body not represented by argv",
+            lambda: build(
+                body=None,
+                operations=(
+                    {
+                        "argv": [
+                            "gh",
+                            "pr",
+                            "review",
+                            "17",
+                            "--repo",
+                            "octo/sample",
+                        ],
+                        "body": "orphaned",
+                    },
+                ),
+            ),
+        ),
+        (
+            "non-scalar prerequisite",
+            lambda: build(prerequisites={"permissions": {"push": []}, "checks": {}}),
+        ),
+        (
+            "boolean pull request",
+            lambda: build(pull_request=True),
+        ),
+    )
+    for name, attempt in malformed:
+        try:
+            attempt()
+        except Exception:
+            continue
+        raise AssertionError(f"{name} was accepted")
+    return len(malformed)
+
+
 def main() -> None:
     fixture_count, round_trip_count = check_fixtures()
     boundary_count, truncated_count = check_boundary_payloads()
     numeric_count = check_numeric_edges()
     unicode_count = check_unicode_line_splitting()
     malformed_count = check_malformed_optional_fields()
+    evidence_fixture_count = check_evidence_fixtures()
+    evidence_malformed_count = check_evidence_malformed_cases()
+    action_fixture_count, exact_head_count = check_action_plan_fixtures()
+    action_malformed_count = check_action_plan_malformed_cases()
     print(
         "Python ReviewResult parity: "
         f"baseline {BASELINE_COMMIT}, "
@@ -209,6 +511,14 @@ def main() -> None:
         f"{boundary_count} boundary cases, {truncated_count} truncated prefixes, "
         f"{numeric_count} numeric edge cases, {unicode_count} Unicode line boundaries, "
         f"and {malformed_count} malformed optional cases passed"
+    )
+    print(
+        "Python M1 contract parity: "
+        f"{evidence_fixture_count} EvidenceManifest fixtures, "
+        f"{evidence_malformed_count} malformed EvidenceManifest cases, "
+        f"{action_fixture_count} ActionPlan fixtures, "
+        f"{exact_head_count} exact-head revalidation cases, and "
+        f"{action_malformed_count} malformed ActionPlan cases passed"
     )
 
 

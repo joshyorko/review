@@ -16,7 +16,8 @@ type actionPlanFixture struct {
 	Plan     actionPlanInput   `json:"plan"`
 	Current  currentStateInput `json:"current"`
 	Expected struct {
-		Identity string `json:"identity"`
+		Identity string          `json:"identity"`
+		Payload  json.RawMessage `json:"payload"`
 	} `json:"expected"`
 }
 
@@ -72,6 +73,13 @@ func TestActionPlanFixturesMatchCanonicalIdentity(t *testing.T) {
 			}
 			if got := plan.Identity(); got != fixture.Expected.Identity {
 				t.Fatalf("identity = %q, want %q", got, fixture.Expected.Identity)
+			}
+			encoded, err := json.Marshal(planPayload(plan))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := canonicalJSON(t, encoded), canonicalJSON(t, fixture.Expected.Payload); !bytes.Equal(got, want) {
+				t.Fatalf("canonical payload = %s, want %s", got, want)
 			}
 			current := fixtureCurrentState(t, fixture.Current)
 			if err := plan.Revalidate(current, plan.CreatedAt.Add(time.Minute)); err != nil {

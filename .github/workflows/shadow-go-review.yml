@@ -15,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Go ReviewResult contract
+      - name: Go M1 contract suite
         run: |
           set -euo pipefail
           cd shadow/go-review
@@ -31,7 +31,14 @@ jobs:
         run: |
           set -euo pipefail
           cd shadow/go-review
-          go test -fuzz=FuzzParseReviewResultBounded -fuzztime=1s
+          for target in \
+            FuzzParseReviewResultBounded \
+            FuzzTruncatedCleanPayloadNeverBecomesClean \
+            FuzzEvidenceManifestValidationDoesNotPanic \
+            FuzzActionPlanValidationDoesNotPanic
+          do
+            go test -fuzz="$target" -fuzztime=1s
+          done
 
       - name: Diff check
         run: |
