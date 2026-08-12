@@ -129,6 +129,53 @@ func TestActionPlanRequiresTypedHumanConfirmationAndExactRevalidation(t *testing
 	}
 }
 
+func TestActionPlanExecutionRejectsMutationAfterConfirmation(t *testing.T) {
+	plan := testPlan(t)
+	current := testCurrentState(t)
+	confirmation, err := plan.ConfirmHuman(plan.Preview(), "maintainer", "octo-tenant", 17, plan.CreatedAt.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eligibility, err := plan.ExecutionEligibility(confirmation, current, plan.CreatedAt.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Operations[0].Args[len(plan.Operations[0].Args)-1] = "forged"
+	eligibility.PlanIdentity = plan.Identity()
+	eligibility.IdempotencyKey = plan.IdempotencyKey
+	ledger := &actionTestLedger{}
+	if _, err := plan.Execute(
+		eligibility, current,
+		func(GitHubOperation) OperationResult { return OperationResult{} },
+		ledger, plan.CreatedAt.Add(3*time.Minute),
+	); err == nil {
+		t.Fatal("mutated plan was executable after confirmation")
+	}
+	if len(ledger.Claimed) != 0 {
+		t.Fatal("mutated plan consumed an idempotency claim")
+	}
+}
+
+func TestActionPlanRejectsUnsupportedExecutorBeforeLedgerClaim(t *testing.T) {
+	plan := testPlan(t)
+	current := testCurrentState(t)
+	confirmation, err := plan.ConfirmHuman(plan.Preview(), "maintainer", "octo-tenant", 17, plan.CreatedAt.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eligibility, err := plan.ExecutionEligibility(confirmation, current, plan.CreatedAt.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := &actionTestLedger{}
+	if _, err := plan.Execute(eligibility, current, struct{}{}, ledger, plan.CreatedAt.Add(3*time.Minute)); err == nil {
+		t.Fatal("unsupported executor was accepted")
+	}
+	if len(ledger.Claimed) != 0 {
+		t.Fatal("unsupported executor consumed an idempotency claim")
+	}
+}
+
 func TestActionPlanExecutionIsDryRunBoundedAndIdempotent(t *testing.T) {
 	plan := testPlan(t)
 	current := testCurrentState(t)
@@ -229,6 +276,14 @@ func TestActionPlanRejectsUnsafeOrMismatchedOperations(t *testing.T) {
 				t.Fatal("unsafe operation was accepted")
 			}
 		})
+	}
+}
+
+func TestActionPlanRejectsUnicodeWhitespaceRepository(t *testing.T) {
+	input := testPlanInput()
+	input.Repository = "octo/\u2003sample"
+	if _, err := fixturePlan(t, input); err == nil {
+		t.Fatal("Unicode whitespace repository was accepted")
 	}
 }
 
@@ -450,5 +505,37 @@ func TestActionPlanIdentityIsStableAcrossMapOrder(t *testing.T) {
 	}
 	if bytes.Equal([]byte(one.Identity()), []byte("")) {
 		t.Fatal("plan identity is empty")
+	}
+}
+
+func TestActionPlanIdentityMatchesPythonFloatEncoding(t *testing.T) {
+	body := "body"
+	operation, err := NewGitHubOperation(
+		[]string{"gh", "pr", "comment", "17", "--repo", "octo/sample", "--body", body},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prerequisites, err := NewPrerequisites(
+		map[string]any{"threshold": 1.0},
+		map[string]any{"ci": "success"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BuildActionPlan(
+		"a", "t", "octo/sample", 17, strings.Repeat("a", 40), "comment",
+		&body, []GitHubOperation{operation}, prerequisites,
+		time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 8, 11, 12, 10, 0, 0, time.UTC),
+		"float",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const expectedIdentity = "e5b14e430be573c711861d4289df758fa41bb5ccd617bdfa3f5de145bcc97ecc"
+	if plan.Identity() != expectedIdentity {
+		t.Fatalf("identity = %s, want Python baseline identity %s", plan.Identity(), expectedIdentity)
 	}
 }

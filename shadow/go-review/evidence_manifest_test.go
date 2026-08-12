@@ -93,6 +93,34 @@ func TestEvidenceManifestScopeDeliveryIsExact(t *testing.T) {
 	}
 }
 
+func TestEvidenceManifestDeliveryValidatesBeforeHandoff(t *testing.T) {
+	request := NewReviewRequest(
+		"octo", "sample", 17,
+		"0123456789abcdef0123456789abcdef01234567",
+		"89abcdef0123456789abcdef0123456789abcdef",
+		"actor", "tenant", "now",
+	)
+	manifest := ReviewEvidenceManifest{
+		Request: request,
+		Entries: []EvidenceEntry{{
+			Kind: "source", Provenance: "checkout", Trust: TrustClass("forged"),
+			Availability: AvailabilityAvailable, Phase: EvidenceSnapshot,
+		}},
+		Version: 1,
+	}
+	received := false
+	harness := manifestHarnessFunc(func(ReviewEvidenceManifest) error {
+		received = true
+		return nil
+	})
+	if err := manifest.DeliverTo(harness, request.Scope()); err == nil {
+		t.Fatal("invalid manifest was delivered")
+	}
+	if received {
+		t.Fatal("invalid manifest reached the harness")
+	}
+}
+
 func TestEvidenceManifestRejectsMalformedAndOversizedValues(t *testing.T) {
 	valid := NewReviewRequest(
 		"octo", "sample", 17,

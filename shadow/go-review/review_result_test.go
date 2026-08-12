@@ -84,6 +84,15 @@ func TestBoundaryPayloadsFailClosed(t *testing.T) {
 	}
 }
 
+func TestInvalidUTF8PayloadNeverBecomesClean(t *testing.T) {
+	clean := `{"counts":{"critical":0,"high":0,"low":0,"medium":0},"findings":[],"state":"complete","version":1}`
+	payload := append([]byte(clean[:len(clean)-1]), 0xff, '}')
+	result := ParseReviewResult(payload)
+	if result.State != StateUnparsable || result.IsClean() {
+		t.Fatalf("invalid UTF-8 payload = %#v, want an unparsable non-clean result", result)
+	}
+}
+
 func TestTruncatedCleanPayloadsNeverBecomeClean(t *testing.T) {
 	clean := `{"counts":{"critical":0,"high":0,"low":0,"medium":0},"findings":[],"state":"complete","version":1}`
 	for end := 0; end < len(clean); end++ {

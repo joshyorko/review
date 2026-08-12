@@ -263,6 +263,9 @@ func (manifest ReviewEvidenceManifest) DeliverTo(harness ManifestHarness, scope 
 	if harness == nil {
 		return fmt.Errorf("manifest harness is required")
 	}
+	if err := manifest.Validate(); err != nil {
+		return err
+	}
 	if err := manifest.RequireScope(scope); err != nil {
 		return err
 	}

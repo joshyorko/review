@@ -196,7 +196,14 @@ func FromDict(data map[string]any) ReviewResult {
 func ParseReviewResult(payload any, rawEvidence ...any) ReviewResult {
 	text, ok := payloadText(payload)
 	if !ok {
-		return unparsableWithEvidence("", rawEvidence)
+		fallback := ""
+		switch typed := payload.(type) {
+		case string:
+			fallback = typed
+		case []byte:
+			fallback = string(typed)
+		}
+		return unparsableWithEvidence(fallback, rawEvidence)
 	}
 	if utf8.RuneCountInString(text) > MaxRawChars {
 		return unparsableWithEvidence(text, rawEvidence)
@@ -528,8 +535,14 @@ func unparsableWithEvidence(payload string, rawEvidence []any) ReviewResult {
 func payloadText(value any) (string, bool) {
 	switch typed := value.(type) {
 	case string:
+		if !utf8.ValidString(typed) {
+			return "", false
+		}
 		return typed, true
 	case []byte:
+		if !utf8.Valid(typed) {
+			return "", false
+		}
 		return string(typed), true
 	default:
 		return "", false

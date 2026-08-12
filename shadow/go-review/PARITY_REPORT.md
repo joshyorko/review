@@ -1,70 +1,106 @@
 # M1-A ReviewResult parity report
 
-This report records the current M1-A contract-lab evidence. The lab remains
+This report records the fork-local M1-A contract checkpoint. The lab remains
 pure parsing, validation, bounded evidence, state transitions, and
-serialization; it does not include UI, network, process, mutation, launcher,
-image, or live-adapter paths. EvidenceManifest, exact-head re-review, and
-ActionPlan are outside this checkpoint.
+serialization. It has no UI, network, filesystem, subprocess, mutation,
+launcher, image, live-adapter, Codex, MCP, or Hive path.
 
-## Recorded baseline
+## Baseline and sources
 
 - Upstream repository: `projectbluefin/review`
-- Upstream baseline SHA: `6748294e476cc7ba836771b92565f0b09082a33e`
-- Contract source: `image/tui/review_result.py`
-- Contract test source: `tests/review_result_contract.py`
-- Fork-owned parity runner: `shadow/go-review/parity.py`
-- Shared canonical fixtures: `shadow/go-review/testdata/review-result-cases.json`
+- Recorded upstream baseline: `6748294e476cc7ba836771b92565f0b09082a33e`
+- Implementation sources:
+  - `image/tui/review_result.py`
+    - blob `fe5574a3b6a6d14bedc37febc8d68a27cbc50b86`
+  - `image/tui/review_evidence_manifest.py`
+    - blob `e7c334309a4456ddca208c75d2d2289f58e66f58`
+  - `image/tui/action_plan.py`
+    - blob `13f8884c00af62233add5e4bcf1604919f9dd065`
+- Contract test sources, verified but not imported:
+  - `tests/review_result_contract.py`
+    - blob `c0b7247fab31c2ff8c6010976b64befce64c224b`
+  - `tests/review_evidence_manifest_contract.py`
+    - blob `e064581649cc95dbae5be947c86f00f7a5d7b51d`
+  - `tests/action_plan_contract.py`
+    - blob `3b8033c96881e55cea285d311b55d873c5fa1208`
+- Fork-owned runner: `shadow/go-review/parity.py`
+- Shared ReviewResult fixtures:
+  `shadow/go-review/testdata/review-result-cases.json`
 
-The Python runner imports the baseline implementation from the contract source
-path. The official upstream-oriented contract test was not changed.
+The runner verifies every implementation and test blob before importing the
+three implementation modules. It compares complete serialized ReviewResult
+objects rather than only state and cleanliness: version, counts, findings,
+verification, provenance, overlap, live data, raw evidence, and state are all
+checked. The official upstream-oriented Python tests remain unchanged.
 
-## Fork isolation
+## Fork isolation and provenance
 
 - Fork: `joshyorko/review`
-- Tested fork SHA: `50a1853218b95764eafd89c663ff66e3f3abe3df`
+- Tested fork SHA: `4ef0d366ac6ead136e15d5fad675478edc0f3608`
 - Working branch: `copilot/experiment-build-go-bubble-tea-cockpit`
 - Preferred issue experiment line: `experiment/go-review-shadow`
-- Branch deviation: the Copilot-managed branch name differs from the preferred
+- Branch deviation: the Copilot-managed head branch differs from the preferred
   experiment line; no replacement branch was created.
-- The work is confined to fork PR [#14](https://github.com/joshyorko/review/pull/14).
-  No upstream pull request was opened or prepared.
-- Issue tracking uses `Progresses #13`; this M1 checkpoint does not close the
+- Work location: fork PR #14 only; no upstream PR was opened or prepared.
+- Issue relation: `Progresses #13`; this checkpoint does not close the
   multi-milestone experiment.
+- Requested runtime model: `gpt-5.6-luna`, reasoning `max`.
+- Actual runtime provenance: the available SWE-agent runtime exposed no model,
+  provider, or reasoning fields, so no Luna/max execution claim is made.
 
-## Coverage counts
+## Coverage
 
-- Shared fixture cases: 31
-- Valid fixture round-trip cases in the Python runner: 11
-- Explicit boundary cases: 3 (deep, oversized, and trailing JSON)
-- Clean-payload truncated prefixes: 98
-- Go fuzz target: `FuzzParseReviewResultBounded`
-- Go fuzz seed inputs: 8
-- Bounded fuzz campaign: 24,289 executions, 27 new interesting inputs
-- Raw evidence bounds: 400 lines and 120,000 Unicode characters
+- ReviewResult shared fixtures: 31
+- ReviewResult round trips: 11
+- Deep, oversized, and trailing-JSON boundary cases: 3
+- Truncated clean-payload prefixes: 98
+- Numeric edge cases: 6
+- Unicode line-boundary cases: 11
+- Malformed optional-field cases: 7
+- EvidenceManifest fixtures: 2
+- Malformed EvidenceManifest cases: 4
+- ActionPlan fixtures: 2
+- Exact-head revalidation cases: 2
+- Malformed ActionPlan cases: 5
+- Go fuzz seeds:
+  - `FuzzParseReviewResultBounded`: 8
+  - `FuzzTruncatedCleanPayloadNeverBecomesClean`: 4
+  - `FuzzEvidenceManifestValidationDoesNotPanic`: 4
+  - `FuzzActionPlanValidationDoesNotPanic`: 4
+- Go fuzz campaigns: all four passed for one second; the exact execution
+  counts are recorded below.
+- Bounds: 400 raw-evidence lines, 120,000 Unicode characters, 128 manifest
+  entries, 32 action operations, and 256 receipt-detail characters.
 
-The Go parser copies maps before numeric normalization; the input immutability
-test confirms that validation does not mutate caller-owned data. The shared
-cases exercise counts, findings, verification, provenance, overlap, live data,
-bounded raw evidence, malformed optional fields, numeric edges, Unicode line
-splitting, deep and oversized JSON, trailing JSON, and preservation of
-round-trip fields.
+The fuzz properties include panic resistance, raw-evidence bounds,
+serialization round trips for clean results, and the invariant that malformed
+or truncated input never becomes clean.
 
-## Commands and results
-
-The following commands were run at tested fork SHA
-`50a1853218b95764eafd89c663ff66e3f3abe3df`.
+## Commands and results at the tested fork SHA
 
 ```text
 $ cd shadow/go-review && go test ./...
-ok  	github.com/joshyorko/review/shadow/go-review	(cached)
+ok  	github.com/joshyorko/review/shadow/go-review	0.013s
 
 $ cd shadow/go-review && python3 parity.py
 Python ReviewResult parity: baseline 6748294e476cc7ba836771b92565f0b09082a33e, 31 fixture cases, 11 round-trip cases, 3 boundary cases, 98 truncated prefixes, 6 numeric edge cases, 11 Unicode line boundaries, and 7 malformed optional cases passed
+Python M1 contract parity: 2 EvidenceManifest fixtures, 4 malformed EvidenceManifest cases, 2 ActionPlan fixtures, 2 exact-head revalidation cases, and 5 malformed ActionPlan cases passed
 
 $ cd shadow/go-review && go test -fuzz=FuzzParseReviewResultBounded -fuzztime=1s
-fuzz: elapsed: 1s, execs: 24289 (17424/sec), new interesting: 27 (total: 35)
+fuzz: elapsed: 1s, execs: 9855 (9117/sec), new interesting: 13 (total: 17)
 PASS
-ok  	github.com/joshyorko/review/shadow/go-review	1.416s
+
+$ cd shadow/go-review && go test -fuzz=FuzzTruncatedCleanPayloadNeverBecomesClean -fuzztime=1s
+fuzz: elapsed: 2s, execs: 6921 (3443/sec), new interesting: 14 (total: 22)
+PASS
+
+$ cd shadow/go-review && go test -fuzz=FuzzEvidenceManifestValidationDoesNotPanic -fuzztime=1s
+fuzz: elapsed: 2s, execs: 3243 (1617/sec), new interesting: 15 (total: 19)
+PASS
+
+$ cd shadow/go-review && go test -fuzz=FuzzActionPlanValidationDoesNotPanic -fuzztime=1s
+fuzz: elapsed: 2s, execs: 4458 (2222/sec), new interesting: 28 (total: 32)
+PASS
 
 $ git diff --check
 exit 0; no output
@@ -75,30 +111,44 @@ exit 0; no output
 Required workflow: `.github/workflows/shadow-go-review.yml`
 
 - Repository: `joshyorko/review`
-- Run: [31551270882](https://github.com/joshyorko/review/actions/runs/31551270882)
-- Head SHA: `50a1853218b95764eafd89c663ff66e3f3abe3df`
+- Latest run for the tested head: run `31557108526`
+- Head SHA reported by the run: `4ef0d366ac6ead136e15d5fad675478edc0f3608`
 - Event: `pull_request`
-- Conclusion: `success`
-- Job: `contract` (run attempt 2)
-- Required steps: Go contract, Python baseline parity, and `git diff --check`;
-  each completed successfully.
+- Conclusion: `action_required`
+- Jobs: `0`
+- Failed-job log query: no failed jobs; approval is required before a job is
+  provisioned.
 
-The earlier `action_required` run 31549226019 had zero jobs because fork
-approval was pending. Run 31551270882 at this exact tested head completed the
-same workflow on its second attempt.
+The workflow definition executes the Go suite, Python baseline parity, all
+four bounded fuzz targets, and `git diff --check`. Local execution above is
+the complete evidence for this tested head; hosted fork approval remains an
+external gate and is not represented as green.
 
 ## Semantic deviations
 
-No validated-field deviations were observed across the standard JSON contract
-cases and bounded property coverage.
+No validated-field deviation was observed across the canonical fixtures,
+malformed cases, round trips, or bounded property campaigns.
 
-The following boundary behaviors are recorded explicitly:
+The following language/runtime boundaries are explicit:
 
-1. Python's standard-library decoder accepts non-standard `NaN` and infinity
-   tokens by default; Go's `encoding/json` rejects them. These tokens are not
+1. Python's standard `json.loads` accepts non-standard `NaN` and infinity
+   tokens by default. Go's `encoding/json` rejects them. Those tokens are not
    standard JSON contract inputs.
-2. Go and Python JSON encoders can choose different escaping or lexical
-   spellings for equivalent JSON values. Parity compares the decoded canonical
-   `ReviewResult` shape, and no field-value difference was observed.
-3. The Go entry point also accepts `[]byte` payloads; the baseline entry point
-   accepts text. String payloads produce the same validated shape.
+2. Go validates that manually constructed manifest strings are valid UTF-8;
+   Python strings are Unicode by construction. JSON payloads cannot carry an
+   invalid UTF-8 string through either contract.
+3. Go exposes ordinary maps and slices, while the Python dataclasses freeze
+   their outer value shape. Contract serialization and validation are
+   equivalent; callers must not mutate a Go value after validation.
+4. Go supports typed executor functions returning `(OperationResult, error)`,
+   `OperationResult`, or `int`; Python accepts a callable returning
+   `OperationResult` or `int`. This is an adapter convenience and does not
+   widen the validated plan or bypass confirmation, revalidation, or the
+   receipt ledger.
+
+## Next gate
+
+The deliberate contemporary rebaseline against upstream `main` must happen
+once upstream PR #192 lands. M2 remains gated on that single rebaseline and a
+fresh run of every differential test. No M2 cockpit, M3 live vertical, M4
+executor, or M5 MCP surface is claimed by this report.

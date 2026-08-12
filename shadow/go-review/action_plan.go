@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -173,7 +174,7 @@ func (state CurrentState) Validate() error {
 	if err := planText(state.Repository, "repository"); err != nil {
 		return err
 	}
-	if strings.Count(state.Repository, "/") != 1 || strings.ContainsAny(state.Repository, " \t\r\n") {
+	if strings.Count(state.Repository, "/") != 1 || strings.IndexFunc(state.Repository, unicode.IsSpace) >= 0 {
 		return invalidPlan("repository must be owner/name")
 	}
 	if err := positivePullRequest(state.PullRequest); err != nil {
@@ -245,6 +246,7 @@ type ExecutionEligibility struct {
 	Tenant         string
 	EligibleAt     time.Time
 	capability     *executionCapability
+	planSnapshot   ActionPlan
 }
 
 type OperationResult struct {
@@ -357,7 +359,7 @@ func (plan ActionPlan) Validate() error {
 	if err := planText(plan.Repository, "repository"); err != nil {
 		return err
 	}
-	if strings.Count(plan.Repository, "/") != 1 || strings.ContainsAny(plan.Repository, " \t\r\n") {
+	if strings.Count(plan.Repository, "/") != 1 || strings.IndexFunc(plan.Repository, unicode.IsSpace) >= 0 {
 		return invalidPlan("repository must be owner/name")
 	}
 	if err := positivePullRequest(plan.PullRequest); err != nil {
@@ -442,6 +444,9 @@ func (plan ActionPlan) Preview() ActionPreview {
 }
 
 func (plan ActionPlan) ConfirmHuman(preview ActionPreview, actor, tenant string, typedPullRequest int, now time.Time) (HumanConfirmation, error) {
+	if err := plan.Validate(); err != nil {
+		return HumanConfirmation{}, err
+	}
 	if preview.PlanIdentity != plan.Identity() {
 		return HumanConfirmation{}, confirmationRequired("preview belongs to another plan")
 	}
@@ -468,6 +473,9 @@ func (plan ActionPlan) ConfirmHuman(preview ActionPreview, actor, tenant string,
 }
 
 func (plan ActionPlan) Revalidate(current CurrentState, now time.Time) error {
+	if err := plan.Validate(); err != nil {
+		return err
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -500,6 +508,9 @@ func (plan ActionPlan) Revalidate(current CurrentState, now time.Time) error {
 }
 
 func (plan ActionPlan) ExecutionEligibility(confirmation HumanConfirmation, current CurrentState, now time.Time) (ExecutionEligibility, error) {
+	if err := plan.Validate(); err != nil {
+		return ExecutionEligibility{}, err
+	}
 	if confirmation.capability == nil {
 		return ExecutionEligibility{}, confirmationRequired("a preview or model-only confirmation cannot authorize execution")
 	}
@@ -525,10 +536,11 @@ func (plan ActionPlan) ExecutionEligibility(confirmation HumanConfirmation, curr
 	if err := plan.Revalidate(current, now); err != nil {
 		return ExecutionEligibility{}, err
 	}
+	snapshot := cloneActionPlan(plan)
 	return ExecutionEligibility{
 		PlanIdentity: plan.Identity(), IdempotencyKey: plan.IdempotencyKey,
 		Actor: confirmation.Actor, Tenant: confirmation.Tenant, EligibleAt: now,
-		capability: &executionCapability{},
+		capability: &executionCapability{}, planSnapshot: snapshot,
 	}, nil
 }
 
@@ -551,33 +563,48 @@ func (plan ActionPlan) Execute(eligibility ExecutionEligibility, current Current
 	if executor == nil {
 		return ActionReceipt{}, executionNotEligible("an operation executor is required")
 	}
+	if !executorSupported(executor) {
+		return ActionReceipt{}, executionNotEligible("an operation executor is required")
+	}
+	snapshot := eligibility.planSnapshot
+	snapshotIdentity := snapshot.Identity()
+	if snapshotIdentity == "" || snapshotIdentity != plan.Identity() ||
+		eligibility.PlanIdentity != snapshotIdentity ||
+		eligibility.IdempotencyKey != snapshot.IdempotencyKey ||
+		eligibility.Actor != snapshot.Actor ||
+		eligibility.Tenant != snapshot.Tenant {
+		return ActionReceipt{}, executionNotEligible("the ActionPlan changed after confirmation")
+	}
+	if err := snapshot.Validate(); err != nil {
+		return ActionReceipt{}, executionNotEligible("the confirmed ActionPlan is invalid")
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	now = now.UTC().Truncate(time.Microsecond)
-	if err := plan.Revalidate(current, now); err != nil {
+	if err := snapshot.Revalidate(current, now); err != nil {
 		return ActionReceipt{}, err
 	}
 	if !ledger.Claim(plan.IdempotencyKey) {
 		return ActionReceipt{}, executionNotEligible("execution idempotency key was already claimed")
 	}
-	for index, operation := range plan.Operations {
+	for index, operation := range snapshot.Operations {
 		result, err := invokeExecutor(executor, operation)
 		if err != nil {
-			receipt := plan.failedReceipt(now, index+1, index, err.Error())
+			receipt := snapshot.failedReceipt(now, index+1, index, err.Error())
 			ledger.Record(receipt)
 			return receipt, nil
 		}
 		if result.ReturnCode != 0 {
-			receipt := plan.failedReceipt(now, index+1, index, result.Detail)
+			receipt := snapshot.failedReceipt(now, index+1, index, result.Detail)
 			ledger.Record(receipt)
 			return receipt, nil
 		}
 	}
 	receipt := ActionReceipt{
-		PlanIdentity: plan.Identity(), IdempotencyKey: plan.IdempotencyKey, Status: "succeeded",
-		TotalOperations: len(plan.Operations), AttemptedOperations: len(plan.Operations),
-		CompletedOperations: len(plan.Operations), StartedAt: now, FinishedAt: now,
+		PlanIdentity: snapshot.Identity(), IdempotencyKey: snapshot.IdempotencyKey, Status: "succeeded",
+		TotalOperations: len(snapshot.Operations), AttemptedOperations: len(snapshot.Operations),
+		CompletedOperations: len(snapshot.Operations), StartedAt: now, FinishedAt: now,
 	}
 	ledger.Record(receipt)
 	return receipt, nil
@@ -678,15 +705,31 @@ func invokeExecutor(executor any, operation GitHubOperation) (result OperationRe
 	}()
 	switch typed := executor.(type) {
 	case OperationExecutor:
-		return typed(operation)
+		result, err = typed(operation)
 	case func(GitHubOperation) (OperationResult, error):
-		return typed(operation)
+		result, err = typed(operation)
 	case func(GitHubOperation) OperationResult:
-		return typed(operation), nil
+		result = typed(operation)
 	case func(GitHubOperation) int:
-		return OperationResult{ReturnCode: typed(operation)}, nil
+		result = OperationResult{ReturnCode: typed(operation)}
 	default:
-		return OperationResult{}, executionNotEligible("an operation executor is required")
+		err = executionNotEligible("an operation executor is required")
+	}
+	if err == nil {
+		err = result.Validate()
+	}
+	return result, err
+}
+
+func executorSupported(executor any) bool {
+	switch executor.(type) {
+	case OperationExecutor,
+		func(GitHubOperation) (OperationResult, error),
+		func(GitHubOperation) OperationResult,
+		func(GitHubOperation) int:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -797,6 +840,24 @@ func cloneString(value *string) *string {
 	}
 	copied := *value
 	return &copied
+}
+
+func cloneActionPlan(plan ActionPlan) ActionPlan {
+	operations := make([]GitHubOperation, len(plan.Operations))
+	for index, operation := range plan.Operations {
+		operations[index] = operation.Copy()
+	}
+	return ActionPlan{
+		Actor: plan.Actor, Tenant: plan.Tenant, Repository: plan.Repository,
+		PullRequest: plan.PullRequest, HeadSHA: plan.HeadSHA, ActionKind: plan.ActionKind,
+		Body: cloneString(plan.Body), Operations: operations,
+		Prerequisites: Prerequisites{
+			Permissions: clonePlanMap(plan.Prerequisites.Permissions),
+			Checks:      clonePlanMap(plan.Prerequisites.Checks),
+		},
+		CreatedAt: plan.CreatedAt, ExpiresAt: plan.ExpiresAt,
+		IdempotencyKey: plan.IdempotencyKey,
+	}
 }
 
 func stringPointerValue(value *string) any {
