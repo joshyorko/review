@@ -287,7 +287,7 @@ RUN set -eu; \
 RUN set -eu; \
     grep -q '^dev:' /etc/group || echo 'dev:x:1000:' >> /etc/group; \
     grep -q '^dev:' /etc/passwd || echo 'dev:x:1000:1000:Developer:/home/dev:/usr/bin/bash' >> /etc/passwd; \
-    mkdir -p /run/hive-metrics /home/dev/.config/goose /home/dev/.config/gh /home/dev/.codex /home/dev/.agents; \
+    mkdir -p /run/hive-metrics /home/dev/Downloads /home/dev/.config/goose /home/dev/.config/gh /home/dev/.codex /home/dev/.agents; \
     chown -R 1000:1000 /run/hive-metrics /home/dev
 
 # Hive's contributor runtime calls `find` and `cmp` directly: the relay prunes

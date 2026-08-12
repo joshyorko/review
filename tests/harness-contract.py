@@ -94,6 +94,15 @@ class HarnessContract(unittest.TestCase):
         self.assertIn("model_reasoning_effort=low", command)
         self.assertIn("project/review#166 base=" + "a" * 40 + " head=" + "b" * 40, command[-1])
 
+    def test_codex_command_uses_packaged_code_mode_host_without_shell_sandbox(self):
+        command = CodexHarness(availability=Availability.READY).command(
+            self.binding, prompt="inspect", effort="low"
+        )
+        enabled = [command[index + 1] for index, value in enumerate(command) if value == "--enable"]
+        self.assertEqual(enabled, ["code_mode_only", "code_mode_host"])
+        self.assertIn("features.code_mode_host.disable_in_process_fallback=true", command)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
+
     def test_codex_invoke_arguments_reach_cli_command(self):
         adapter = CodexHarness(availability=Availability.READY)
         command = adapter.command(

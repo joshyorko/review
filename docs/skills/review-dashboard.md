@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "1.2"
+version: "1.3"
 last_updated: 2026-08-11
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -105,6 +105,9 @@ adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
    immediately following successful `turn.completed`. Bare results,
    ambiguous result messages, and malformed, failed, cancelled, out-of-order,
    or trailing terminal events are `unparsable` with bounded raw evidence.
+   It enables code-mode-only and the bundled official code-mode host, disables
+   direct-tool fallback, and uses the review container as the shell isolation
+   boundary so the CLI never depends on a nested bubblewrap sandbox.
    Keep the decision card concise and keep bounded raw evidence reachable with
    `e`; backend prose does not belong in Textual rendering code.
 8. **Keep the acting surface explicit.** The shipped keys cover review,

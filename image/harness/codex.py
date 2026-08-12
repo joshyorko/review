@@ -59,7 +59,11 @@ class CodexHarness:
             f"base={binding.base_sha} head={binding.head_sha}"
         )
         return [self.executable, "exec", "--ignore-user-config", "--disable", "apps",
-                "--config", "mcp_servers={}", "--json", "--skip-git-repo-check",
+                "--config", "mcp_servers={}", "--json",
+                "--enable", "code_mode_only", "--enable", "code_mode_host",
+                "--config", "features.code_mode_host.disable_in_process_fallback=true",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
                 "--model", selected_model,
                 "--config", f"model_reasoning_effort={selected_effort}",
                 f"Review exact binding {context}. {prompt}"

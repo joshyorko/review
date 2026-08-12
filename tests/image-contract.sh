@@ -181,6 +181,7 @@ require image/Containerfile \
   'rm -f /usr/local/libexec/review-generate-skills;' \
   'test ! -e /usr/local/libexec/review-generate-skills' \
   'COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint' \
+  '/home/dev/Downloads' \
   'USER dev' \
   'WORKDIR /home/dev' \
   'ENTRYPOINT ["/usr/local/bin/review-entrypoint"]'

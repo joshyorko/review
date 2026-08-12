@@ -1,6 +1,6 @@
 ---
 name: image-build
-version: "2.19"
+version: "2.20"
 last_updated: 2026-08-12
 id: image-build
 one_line_purpose: Derive and pin the review contributor image safely.
@@ -78,6 +78,9 @@ fix.
    capability already present in the verified base.
    Give copied runtime files explicit image modes; never inherit readability
    from the checkout's umask or filesystem defaults.
+   Create `/home/dev/Downloads` for Textual's built-in SVG screenshot
+   delivery; a runtime home without that standard destination makes the
+   authentic command-palette capture fail.
    Do not turn the image into a general-purpose distribution.
 4. Preserve canonical command semantics. Never shadow `grep`, `find`, `cat`, or
    `ls` — with a modern alternative or with a hand-written one. If a modern

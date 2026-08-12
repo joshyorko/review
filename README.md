@@ -219,7 +219,10 @@ registration. It needs a GitHub token because the dashboard reads live
 pull-request state. Goose reviews use the Copilot credential; Codex reviews
 use the host's official subscription login through one private staged
 `auth.json` copy. The host file and Codex configuration directory are never
-mounted, and the staged copy is removed when the foreground run exits.
+mounted, and the staged copy is removed when the foreground run exits. Codex
+reviews run code-mode-only through the bundled official code-mode host and
+fail closed instead of falling back to direct shell tools; the review
+container is the command-execution isolation boundary.
 Arguments pass straight through to the dashboard:
 
 ```bash
