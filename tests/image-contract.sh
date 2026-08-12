@@ -143,6 +143,9 @@ require image/Containerfile \
   'GH_TOKEN="$(cat /run/secrets/github_token)"' \
   'gh attestation verify "$workdir/goose.tar.gz" --repo aaif-goose/goose --signer-workflow aaif-goose/goose/.github/workflows/canary.yml' \
   'COPY package.json package-lock.json /opt/hive/' \
+  'COPY --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock' \
+  'COPY --chmod=0644 image/tui/bluefin_review_tui.py /opt/bluefin/tui/bluefin_review_tui.py' \
+  'COPY --chmod=0644 image/tui/review_result.py image/tui/review_evidence_manifest.py /opt/bluefin/tui/' \
   'npm --prefix /opt/hive ci --omit=dev --ignore-scripts;' \
   'npm cache clean --force;' \
   'test ! -e /root/.npm;' \

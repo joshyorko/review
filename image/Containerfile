@@ -168,9 +168,9 @@ ARG UV_VERSION
 ARG UV_X86_64_SHA256
 ARG UV_AARCH64_SHA256
 ARG TEXTUAL_VERSION
-COPY image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
-COPY image/tui/bluefin_review_tui.py /opt/bluefin/tui/bluefin_review_tui.py
-COPY image/tui/review_result.py image/tui/review_evidence_manifest.py /opt/bluefin/tui/
+COPY --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
+COPY --chmod=0644 image/tui/bluefin_review_tui.py /opt/bluefin/tui/bluefin_review_tui.py
+COPY --chmod=0644 image/tui/review_result.py image/tui/review_evidence_manifest.py /opt/bluefin/tui/
 COPY image/harness/*.py /opt/bluefin/harness/
 RUN set -eu; \
     chmod 0755 /opt/bluefin/harness; \
