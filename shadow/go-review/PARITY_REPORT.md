@@ -1,9 +1,10 @@
-# M1 ReviewResult parity report
+# M1-A ReviewResult parity report
 
-This report records the completed M1 contract-lab evidence. The lab remains
+This report records the current M1-A contract-lab evidence. The lab remains
 pure parsing, validation, bounded evidence, state transitions, and
 serialization; it does not include UI, network, process, mutation, launcher,
-image, or live-adapter paths.
+image, or live-adapter paths. EvidenceManifest, exact-head re-review, and
+ActionPlan are outside this checkpoint.
 
 ## Recorded baseline
 
@@ -20,7 +21,7 @@ path. The official upstream-oriented contract test was not changed.
 ## Fork isolation
 
 - Fork: `joshyorko/review`
-- Tested fork SHA: `4a46284b738ec553bdba9bad5616a47ffe74835a`
+- Tested fork SHA: `50a1853218b95764eafd89c663ff66e3f3abe3df`
 - Working branch: `copilot/experiment-build-go-bubble-tea-cockpit`
 - Preferred issue experiment line: `experiment/go-review-shadow`
 - Branch deviation: the Copilot-managed branch name differs from the preferred
@@ -38,7 +39,7 @@ path. The official upstream-oriented contract test was not changed.
 - Clean-payload truncated prefixes: 98
 - Go fuzz target: `FuzzParseReviewResultBounded`
 - Go fuzz seed inputs: 8
-- Bounded fuzz campaign: 52,467 executions, 120 new interesting inputs
+- Bounded fuzz campaign: 24,289 executions, 27 new interesting inputs
 - Raw evidence bounds: 400 lines and 120,000 Unicode characters
 
 The Go parser copies maps before numeric normalization; the input immutability
@@ -51,22 +52,19 @@ round-trip fields.
 ## Commands and results
 
 The following commands were run at tested fork SHA
-`4a46284b738ec553bdba9bad5616a47ffe74835a`.
+`50a1853218b95764eafd89c663ff66e3f3abe3df`.
 
 ```text
 $ cd shadow/go-review && go test ./...
-ok  github.com/joshyorko/review/shadow/go-review  (cached)
+ok  	github.com/joshyorko/review/shadow/go-review	(cached)
 
 $ cd shadow/go-review && python3 parity.py
-Python ReviewResult parity: 31 fixture cases, 11 round-trip cases, 3 boundary cases, and 98 truncated prefixes passed
+Python ReviewResult parity: baseline 6748294e476cc7ba836771b92565f0b09082a33e, 31 fixture cases, 11 round-trip cases, 3 boundary cases, 98 truncated prefixes, 6 numeric edge cases, 11 Unicode line boundaries, and 7 malformed optional cases passed
 
 $ cd shadow/go-review && go test -fuzz=FuzzParseReviewResultBounded -fuzztime=1s
+fuzz: elapsed: 1s, execs: 24289 (17424/sec), new interesting: 27 (total: 35)
 PASS
-ok  github.com/joshyorko/review/shadow/go-review  1.097s
-
-$ python3 -m unittest tests/review_result_contract.py
-Ran 20 tests
-OK
+ok  	github.com/joshyorko/review/shadow/go-review	1.416s
 
 $ git diff --check
 exit 0; no output
@@ -77,13 +75,17 @@ exit 0; no output
 Required workflow: `.github/workflows/shadow-go-review.yml`
 
 - Repository: `joshyorko/review`
-- Run: [31547387907](https://github.com/joshyorko/review/actions/runs/31547387907)
-- Head SHA: `4a46284b738ec553bdba9bad5616a47ffe74835a`
-- Event: `workflow_dispatch`
+- Run: [31551270882](https://github.com/joshyorko/review/actions/runs/31551270882)
+- Head SHA: `50a1853218b95764eafd89c663ff66e3f3abe3df`
+- Event: `pull_request`
 - Conclusion: `success`
-- Job: `contract` (`93962688047`)
+- Job: `contract` (run attempt 2)
 - Required steps: Go contract, Python baseline parity, and `git diff --check`;
   each completed successfully.
+
+The earlier `action_required` run 31549226019 had zero jobs because fork
+approval was pending. Run 31551270882 at this exact tested head completed the
+same workflow on its second attempt.
 
 ## Semantic deviations
 
