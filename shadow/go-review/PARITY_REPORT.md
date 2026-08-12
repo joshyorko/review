@@ -113,8 +113,9 @@ exit 0; no output
 Required workflow: `.github/workflows/shadow-go-review.yml`
 
 - Repository: `joshyorko/review`
-- Latest hosted run before report finalization: run `31557534358`
-- Head SHA reported by that run: `f4db6c7950b72c5bba060ca4bedbf6d1b2835985`
+- Latest hosted run before report finalization: run `31557842715`
+- Head SHA reported by that run:
+  `4758ec01bd40e4ccbc3006592360f8e1a842f1fd`
 - Event: `pull_request`
 - Conclusion: `action_required`
 - Jobs: `0`
