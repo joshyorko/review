@@ -169,9 +169,12 @@ ARG UV_X86_64_SHA256
 ARG UV_AARCH64_SHA256
 ARG TEXTUAL_VERSION
 COPY --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
-COPY --chmod=0644 image/tui/bluefin_review_tui.py /opt/bluefin/tui/bluefin_review_tui.py
-COPY --chmod=0644 image/tui/review_result.py image/tui/review_evidence_manifest.py /opt/bluefin/tui/
-COPY image/harness/*.py /opt/bluefin/harness/
+# Every module, not just the entrypoint: the dashboard imports its siblings
+# (review_result, and theirs in turn) by bare name off sys.path[0]. A glob so
+# a new module ships the moment it exists, rather than the next time someone
+# remembers to extend this line.
+COPY --chmod=0644 image/tui/*.py /opt/bluefin/tui/
+COPY --chmod=0644 image/harness/*.py /opt/bluefin/harness/
 RUN set -eu; \
     chmod 0755 /opt/bluefin/harness; \
     chmod 0644 /opt/bluefin/harness/*.py; \
@@ -198,7 +201,11 @@ RUN set -eu; \
       --require-hashes --no-deps \
       -r /opt/bluefin/tui/requirements.lock; \
     /opt/bluefin/tui/.venv/bin/python -c "import textual; print(textual.__version__)"; \
-    /opt/bluefin/tui/.venv/bin/python -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"; \
+    /opt/bluefin/tui/.venv/bin/python -m compileall -q /opt/bluefin/tui/*.py; \
+    for tui_module in /opt/bluefin/tui/*.py; do \
+      PYTHONPATH=/opt/bluefin/tui /opt/bluefin/tui/.venv/bin/python \
+        -c "import $(basename "$tui_module" .py)"; \
+    done; \
     test ! -e /root/.cache/uv
 
 ARG GOOSE_CHANNEL

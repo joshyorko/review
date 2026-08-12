@@ -144,8 +144,7 @@ require image/Containerfile \
   'gh attestation verify "$workdir/goose.tar.gz" --repo aaif-goose/goose --signer-workflow aaif-goose/goose/.github/workflows/canary.yml' \
   'COPY package.json package-lock.json /opt/hive/' \
   'COPY --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock' \
-  'COPY --chmod=0644 image/tui/bluefin_review_tui.py /opt/bluefin/tui/bluefin_review_tui.py' \
-  'COPY --chmod=0644 image/tui/review_result.py image/tui/review_evidence_manifest.py /opt/bluefin/tui/' \
+  'COPY --chmod=0644 image/tui/*.py /opt/bluefin/tui/' \
   'npm --prefix /opt/hive ci --omit=dev --ignore-scripts;' \
   'npm cache clean --force;' \
   'test ! -e /root/.npm;' \
@@ -661,6 +660,21 @@ require image/git-hooks/post-checkout \
   'info/exclude' \
   '.agents/skills/' \
   'docs/skills/index.json'
+
+# The dashboard imports its siblings by bare name, so shipping only the
+# entrypoint module crashes `just review-queue` at startup with
+# ModuleNotFoundError. py_compile never caught that: compiling a file does not
+# resolve its imports. Assert the glob COPY and the import proof, and that
+# nothing has gone back to naming one module.
+# shellcheck disable=SC2016 # Literal Containerfile text, not an expansion.
+require image/Containerfile \
+  'COPY --chmod=0644 image/tui/*.py /opt/bluefin/tui/' \
+  'for tui_module in /opt/bluefin/tui/*.py; do' \
+  'PYTHONPATH=/opt/bluefin/tui /opt/bluefin/tui/.venv/bin/python'
+
+forbid image/Containerfile \
+  'python -m py_compile' \
+  'COPY image/tui/bluefin_review_tui.py'
 
 [[ "$fail" -eq 0 ]] && echo "✓ image contract holds."
 exit "$fail"
