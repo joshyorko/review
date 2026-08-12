@@ -27,6 +27,12 @@ jobs:
           cd shadow/go-review
           python3 parity.py
 
+      - name: Bounded Go fuzz coverage
+        run: |
+          set -euo pipefail
+          cd shadow/go-review
+          go test -fuzz=FuzzParseReviewResultBounded -fuzztime=1s
+
       - name: Diff check
         run: |
           set -euo pipefail

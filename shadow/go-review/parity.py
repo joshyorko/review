@@ -31,6 +31,17 @@ from review_result import MAX_RAW_CHARS, parse_review_result  # noqa: E402
 
 
 FIXTURES = Path(__file__).parent / "testdata" / "review-result-cases.json"
+CANONICAL_FIELDS = {
+    "counts",
+    "findings",
+    "verification",
+    "provenance",
+    "overlap",
+    "live",
+    "raw_evidence",
+    "state",
+    "version",
+}
 
 
 def fixture_payload(payload: Any) -> str:
@@ -50,6 +61,11 @@ def check_fixtures() -> tuple[int, int]:
         result = parse_review_result(fixture_payload(case["payload"]))
         expected = case["expected"]
         actual_shape = canonical_result(result)
+        if set(actual_shape) != CANONICAL_FIELDS:
+            raise AssertionError(
+                f'{case["name"]}: serialized result fields differ: '
+                f"{sorted(actual_shape)}"
+            )
         if result.state != expected["state"]:
             raise AssertionError(
                 f'{case["name"]}: state={result.state!r}, want {expected["state"]!r}'
@@ -68,6 +84,8 @@ def check_fixtures() -> tuple[int, int]:
             round_trip = parse_review_result(result.to_json())
             if canonical_result(round_trip) != actual_shape:
                 raise AssertionError(f'{case["name"]}: round-trip result differs')
+            if round_trip.is_clean != result.is_clean:
+                raise AssertionError(f'{case["name"]}: round-trip clean state differs')
             round_trip_count += 1
     return len(cases), round_trip_count
 
@@ -104,14 +122,93 @@ def check_boundary_payloads() -> tuple[int, int]:
     return len(cases), truncated_prefixes
 
 
+def check_numeric_edges() -> int:
+    cases = {
+        "-0": "complete",
+        "0.0": "unparsable",
+        "1e0": "unparsable",
+        "-0.0": "unparsable",
+        "+1": "unparsable",
+        "01": "unparsable",
+    }
+    for token, expected_state in cases.items():
+        payload = (
+            '{"counts":{"critical":'
+            + token
+            + ',"high":0,"low":0,"medium":0},"findings":[],"state":"complete","version":1}'
+        )
+        result = parse_review_result(payload)
+        if result.state != expected_state or (
+            expected_state == "unparsable" and result.is_clean
+        ):
+            raise AssertionError(
+                f"numeric edge {token!r}: state={result.state!r}, "
+                f"clean={result.is_clean!r}"
+            )
+    return len(cases)
+
+
+def check_unicode_line_splitting() -> int:
+    separators = (
+        "\r\n",
+        "\n",
+        "\r",
+        "\v",
+        "\f",
+        "\x1c",
+        "\x1d",
+        "\x1e",
+        "\x85",
+        "\u2028",
+        "\u2029",
+    )
+    raw = "".join(
+        f"line{index}{separator}" for index, separator in enumerate(separators)
+    ) + "tail"
+    payload = json.dumps(
+        {
+            "counts": {"critical": 0, "high": 0, "low": 0, "medium": 0},
+            "findings": [],
+            "raw_evidence": raw,
+            "state": "complete",
+            "version": 1,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    result = parse_review_result(payload)
+    expected = [f"line{index}" for index in range(len(separators))] + ["tail"]
+    if result.raw_evidence != expected:
+        raise AssertionError(
+            f"Unicode line splitting = {result.raw_evidence!r}, want {expected!r}"
+        )
+    return len(separators)
+
+
+def check_malformed_optional_fields() -> int:
+    cases = json.loads(FIXTURES.read_text())
+    malformed = [case for case in cases if case["name"].startswith("malformed-")]
+    for case in malformed:
+        result = parse_review_result(fixture_payload(case["payload"]))
+        if result.state != "unparsable" or result.is_clean:
+            raise AssertionError(f'{case["name"]} was accepted as clean')
+    return len(malformed)
+
+
 def main() -> None:
     fixture_count, round_trip_count = check_fixtures()
     boundary_count, truncated_count = check_boundary_payloads()
+    numeric_count = check_numeric_edges()
+    unicode_count = check_unicode_line_splitting()
+    malformed_count = check_malformed_optional_fields()
     print(
         "Python ReviewResult parity: "
         f"baseline {BASELINE_COMMIT}, "
         f"{fixture_count} fixture cases, {round_trip_count} round-trip cases, "
-        f"{boundary_count} boundary cases, and {truncated_count} truncated prefixes passed"
+        f"{boundary_count} boundary cases, {truncated_count} truncated prefixes, "
+        f"{numeric_count} numeric edge cases, {unicode_count} Unicode line boundaries, "
+        f"and {malformed_count} malformed optional cases passed"
     )
 
 

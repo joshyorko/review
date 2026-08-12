@@ -29,6 +29,7 @@ checks with:
 
 ```bash
 go test ./...
+go test -fuzz=FuzzParseReviewResultBounded -fuzztime=1s
 python3 parity.py
 ```
 

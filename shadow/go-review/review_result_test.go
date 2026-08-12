@@ -3,9 +3,11 @@ package review
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -213,6 +215,32 @@ func TestRawEvidenceIsBoundedAndMalformedPayloadRetainsEvidence(t *testing.T) {
 	}
 }
 
+func TestRawEvidenceSplitsContractLineBoundaries(t *testing.T) {
+	separators := []string{"\r\n", "\n", "\r", "\v", "\f", "\u001c", "\u001d", "\u001e", "\u0085", "\u2028", "\u2029"}
+	raw := ""
+	expected := make([]string, 0, len(separators)+1)
+	for index, separator := range separators {
+		raw += fmt.Sprintf("line%d%s", index, separator)
+		expected = append(expected, fmt.Sprintf("line%d", index))
+	}
+	raw += "tail"
+	expected = append(expected, "tail")
+	payload, err := json.Marshal(map[string]any{
+		"counts":       map[string]any{"critical": 0, "high": 0, "low": 0, "medium": 0},
+		"findings":     []any{},
+		"raw_evidence": raw,
+		"state":        "complete",
+		"version":      1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := ParseReviewResult(payload)
+	if result.State != StateComplete || !reflect.DeepEqual(result.RawEvidence, expected) {
+		t.Fatalf("raw evidence = %#v, want %#v", result.RawEvidence, expected)
+	}
+}
+
 func FuzzParseReviewResultBounded(f *testing.F) {
 	for _, seed := range []string{
 		"",
@@ -232,6 +260,12 @@ func FuzzParseReviewResultBounded(f *testing.F) {
 			t.Skip()
 		}
 		result := ParseReviewResult(payload)
+		if len(result.RawEvidence) > MaxRawLines {
+			t.Fatalf("raw evidence has %d lines, want at most %d", len(result.RawEvidence), MaxRawLines)
+		}
+		if len([]rune(strings.Join(result.RawEvidence, "\n"))) > MaxRawChars {
+			t.Fatalf("raw evidence exceeds %d Unicode characters", MaxRawChars)
+		}
 		if !json.Valid([]byte(payload)) && result.IsClean() {
 			t.Fatal("malformed input became clean")
 		}
