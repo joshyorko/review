@@ -799,12 +799,16 @@ class ReviewScreen(Screen):
             command = adapter.command(
                 binding, prompt="Produce the ReviewResult JSON.",
                 model=self.selection.model, effort=self.selection.effort,
+                steer=self.steer,
             )
         else:
             command = [REVIEW_COMMAND, "pr", stop.repository, str(stop.number)]
         # Maintainer steering rides the documented additive seam: it is added
         # to the review's instructions, never a replacement for the doctrine.
         environment = dict(os.environ)
+        if ACTIVE_BACKEND == "codex":
+            environment.pop("GH_TOKEN", None)
+            environment.pop("GITHUB_TOKEN", None)
         if self.steer:
             environment["BLUEFIN_REVIEW_STEER"] = self.steer
         else:
@@ -862,6 +866,11 @@ class ReviewScreen(Screen):
                     ),
                     code or 0,
                     model=self.selection.model, effort=self.selection.effort,
+                )
+                result = ReviewResult(
+                    result.version, result.state, result.counts, result.findings,
+                    live_review_verification(stop.live), result.provenance,
+                    stop.overlap, live_review_context(stop.live), result.raw_evidence,
                 )
         else:
             result = adapt_current_engine(

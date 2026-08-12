@@ -64,6 +64,11 @@ class CodexHarness:
             ' Use state "findings" when findings exist; each finding requires severity, file,'
             ' line, and title, and counts must exactly match the findings. No Markdown.'
         )
+        read_only_contract = (
+            " This is a read-only review. Do not mutate GitHub, push commits,"
+            " submit reviews, add comments, edit or merge pull requests, or change"
+            " repository state."
+        )
         return [self.executable, "exec", "--ignore-user-config", "--disable", "apps",
                 "--config", "mcp_servers={}", "--json",
                 "--enable", "code_mode_only", "--enable", "code_mode_host",
@@ -75,6 +80,7 @@ class CodexHarness:
                 "--config", f"model_reasoning_effort={selected_effort}",
                 f"Review exact binding {context}. {prompt}"
                 + (f" Maintainer steering: {steer}" if steer else "")
+                + read_only_contract
                 + result_contract]
 
     def convert(self, payload: str, binding: ReviewRequest, exit_code: int = 0,

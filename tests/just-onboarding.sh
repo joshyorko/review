@@ -485,6 +485,7 @@ assert_file_not_contains "BLUEFIN_REVIEW_BACKEND" "$runner_log"
 assert_file_not_contains ".config/hive" "$runner_log"
 assert_file_contains "GH_TOKEN:present" "$credential_log"
 assert_not_contains "contributor.env" "$OUT"
+assert_file_not_contains "/home/dev/.codex/auth.json" "$runner_log"
 assert_contains "starting the maintainer review dashboard (no Hive)" "$OUT"
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
@@ -513,7 +514,8 @@ reset_logs
 mkdir -p "$home/.codex"
 printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
 chmod 0400 "$home/.codex/auth.json"
-run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  BLUEFIN_REVIEW_BACKEND=codex
 codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
 assert_contains "${tmp_root}/" "$codex_auth_mount"
 [[ "$codex_auth_mount" != "$home/.codex/auth.json" ]] || fail "host Codex auth must not be mounted directly"
@@ -529,7 +531,8 @@ rmdir "$home/.codex"
 
 begin "review-queue: missing Codex login is explicit and mounts nothing"
 reset_logs
-run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  BLUEFIN_REVIEW_BACKEND=codex
 assert_file_not_contains "/home/dev/.codex" "$runner_log"
 assert_contains "Codex subscription login unavailable" "$OUT"
 

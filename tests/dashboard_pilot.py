@@ -1690,11 +1690,12 @@ async def main() -> int:
         def codex_popen(*args, **kwargs):
             command = args[0] if args else kwargs.get("args")
             if isinstance(command, (list, tuple)) and command[:2] == ["codex", "exec"]:
-                codex_calls.append(kwargs)
+                codex_calls.append((command, kwargs))
                 return CodexProcess()
             return real_popen(*args, **kwargs)
 
         tui.subprocess.Popen = codex_popen
+        os.environ["GH_TOKEN"] = "write-capable-test-token"
         app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -1706,8 +1707,14 @@ async def main() -> int:
                 "isDraft": False,
                 "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
                 "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+                "statusCheckRollup": [
+                    {"name": "validate", "conclusion": "SUCCESS"}
+                ],
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
             }
-            await pilot.press("r")
+            app.stops[0].overlap = {"duplicates": [1], "overlaps": [2]}
+            app.start_review(app.stops[0], "focus on exact-head evidence")
             await pilot.press("tab", "enter")
             for _ in range(200):
                 if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
@@ -1719,11 +1726,27 @@ async def main() -> int:
                 "valid Codex stdout JSONL must produce a completed decision card",
             )
             check(
-                codex_calls[-1]["stderr"] is subprocess.DEVNULL,
+                codex_calls[-1][1]["stderr"] is subprocess.DEVNULL,
                 "Codex stderr must stay outside the official stdout JSONL lifecycle",
+            )
+            check(
+                "GH_TOKEN" not in codex_calls[-1][1]["env"]
+                and "GITHUB_TOKEN" not in codex_calls[-1][1]["env"],
+                "Codex review subprocess must not inherit GitHub mutation credentials",
+            )
+            check(
+                "focus on exact-head evidence" in codex_calls[-1][0][-1],
+                "dashboard steering must reach the Codex invocation prompt",
+            )
+            card = str(app.screen.query_one("#review-card", tui.Static).render())
+            check(
+                "CI success" in card and "MERGEABLE/CLEAN" in card
+                and "1 duplicate / 1 shared-file hazard" in card,
+                f"Codex card must merge trusted live and overlap evidence, got {card!r}",
             )
 
         tui.subprocess.Popen = real_popen
+        os.environ.pop("GH_TOKEN", None)
         app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -1747,6 +1770,7 @@ async def main() -> int:
                 "invalid live refs must not invoke Codex",
             )
     finally:
+        os.environ.pop("GH_TOKEN", None)
         tui.subprocess.Popen = real_popen
         tui.CodexHarness.probe = real_probe
     tui.ACTIVE_BACKEND = "goose"

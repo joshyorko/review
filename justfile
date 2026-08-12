@@ -996,13 +996,15 @@ review-queue *queue_args:
     # refresh only the disposable copy, which is removed when this run exits.
     CODEX_AUTH_STAGING_DIR=""
     trap cleanup_codex_auth_file EXIT
-    stage_codex_auth_file
-    if [[ -n "$CODEX_AUTH_FILE" ]]; then
-      CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
-      echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
-    else
-      echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
-      echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
+    if [[ "$REVIEW_BACKEND" == codex ]]; then
+      stage_codex_auth_file
+      if [[ -n "$CODEX_AUTH_FILE" ]]; then
+        CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
+        echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+      else
+        echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
+        echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
+      fi
     fi
     # The dashboard is a GitHub reader from the first keystroke to the last, so
     # an identity is load-bearing here, not advisory.

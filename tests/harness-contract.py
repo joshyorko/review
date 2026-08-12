@@ -95,6 +95,7 @@ class HarnessContract(unittest.TestCase):
         self.assertIn("gpt-5.6-luna", command)
         self.assertIn("model_reasoning_effort=low", command)
         self.assertIn("project/review#166 base=" + "a" * 40 + " head=" + "b" * 40, command[-1])
+        self.assertIn("Do not mutate GitHub", command[-1])
 
     def test_codex_command_uses_packaged_code_mode_host_without_shell_sandbox(self):
         command = CodexHarness(availability=Availability.READY).command(
