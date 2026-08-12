@@ -101,6 +101,7 @@ class HarnessContract(unittest.TestCase):
         enabled = [command[index + 1] for index, value in enumerate(command) if value == "--enable"]
         self.assertEqual(enabled, ["code_mode_only", "code_mode_host"])
         self.assertIn("features.code_mode_host.disable_in_process_fallback=true", command)
+        self.assertIn("suppress_unstable_features_warning=true", command)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
 
     def test_codex_invoke_arguments_reach_cli_command(self):

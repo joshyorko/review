@@ -62,6 +62,7 @@ class CodexHarness:
                 "--config", "mcp_servers={}", "--json",
                 "--enable", "code_mode_only", "--enable", "code_mode_host",
                 "--config", "features.code_mode_host.disable_in_process_fallback=true",
+                "--config", "suppress_unstable_features_warning=true",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
                 "--model", selected_model,
