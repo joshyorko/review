@@ -1,10 +1,14 @@
 # Go Review shadow
 
-This subtree is the private M1 contract laboratory for the maintainer-side
-Review shadow. The current PR checkpoint is **M1-A / ReviewResult parity**.
-The package is pure Go: it validates, bounds, and serializes contract values
-without terminal, network, filesystem, subprocess, mutation, launcher, image,
-or live-adapter paths.
+This subtree is the fork-local M1–M5 contract laboratory for the
+maintainer-side Review shadow. It contains the ReviewResult parity lab, a
+fixture-driven Bubble Tea cockpit model, bounded read-only runtime adapter
+contracts, dry-run safeguards, and read-only MCP tools.
+
+The package has no terminal program, network listener, filesystem adapter,
+subprocess, Hive, launcher, image, or mutation path. GitHub and Codex are
+injected read-only interfaces with deterministic fakes; the MCP contract is
+tested over the SDK's in-memory transport.
 
 ## Recorded baseline
 
@@ -28,7 +32,9 @@ The corresponding upstream contract tests are:
 implementation modules. It does not modify or import the official
 upstream-oriented test suites. Shared fixtures compare the complete validated
 ReviewResult serialization, and the M1 extension fixtures cover
-EvidenceManifest, exact-head revalidation, and ActionPlan identity.
+EvidenceManifest, exact-head revalidation, and ActionPlan identity. Go tests
+cover the M2 cockpit controls, M3 bounds/provenance/fakes, M4 dry-run
+confirmation gate, and M5 MCP tool surface.
 
 ## Commands
 
@@ -52,6 +58,7 @@ The fork-local required workflow is
 `PARITY_REPORT.md` records the exact tested fork head, fixture and fuzz
 counts, command results, baseline source hashes, and semantic deviations.
 
-The contemporary upstream rebaseline required before the M2 cockpit gate is
-blocked until upstream PR #192 lands. No UI, hosted/local Hive, Codex access,
-GitHub access, or mutation path is part of this checkpoint.
+The fork experiment remains isolated on its Copilot-managed branch and does
+not open or prepare an upstream PR. Runtime adapters expose only injected
+read-only contracts; no credential, network, process, Hive, or mutation
+implementation is claimed by this lab.
