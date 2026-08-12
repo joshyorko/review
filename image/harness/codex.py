@@ -180,7 +180,7 @@ class CodexHarness:
                model: str | None = None, steer: str | None = None) -> ReviewResult:
         process = subprocess.Popen(
             self.command(binding, prompt=prompt, effort=effort, model=model, steer=steer),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             bufsize=1, start_new_session=True,
         )
         lines: list[str] = []

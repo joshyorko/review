@@ -1,9 +1,11 @@
 """Focused contracts for the adapter-first harness seam."""
 
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 
@@ -126,6 +128,22 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(result.provenance["model"], "gpt-5.6-luna")
         self.assertEqual(result.provenance["reasoning_effort"], "low")
         self.assertEqual(result.provenance["repository"], "project/review")
+
+    def test_codex_stream_keeps_stderr_out_of_official_jsonl(self):
+        class Process:
+            stdout = iter((self.terminal_stream() + "\n").splitlines(keepends=True))
+            returncode = 0
+
+            @staticmethod
+            def wait():
+                return 0
+
+        with patch("harness.codex.subprocess.Popen", return_value=Process()) as popen:
+            result = CodexHarness(availability=Availability.READY).stream(
+                self.binding, prompt="inspect", on_line=lambda _line: None
+            )
+        self.assertEqual(result.state, "complete")
+        self.assertIs(popen.call_args.kwargs["stderr"], subprocess.DEVNULL)
 
     def test_codex_converts_terminal_agent_message_envelope(self):
         result = CodexHarness(availability=Availability.READY).convert(
