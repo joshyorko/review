@@ -58,6 +58,12 @@ class CodexHarness:
             f"{binding.owner}/{binding.repository}#{binding.pull_request_number} "
             f"base={binding.base_sha} head={binding.head_sha}"
         )
+        result_contract = (
+            ' Return only one JSON object shaped as {"version":1,"state":"complete",'
+            '"counts":{"critical":0,"high":0,"medium":0,"low":0},"findings":[]}.'
+            ' Use state "findings" when findings exist; each finding requires severity, file,'
+            ' line, and title, and counts must exactly match the findings. No Markdown.'
+        )
         return [self.executable, "exec", "--ignore-user-config", "--disable", "apps",
                 "--config", "mcp_servers={}", "--json",
                 "--enable", "code_mode_only", "--enable", "code_mode_host",
@@ -68,7 +74,8 @@ class CodexHarness:
                 "--model", selected_model,
                 "--config", f"model_reasoning_effort={selected_effort}",
                 f"Review exact binding {context}. {prompt}"
-                + (f" Maintainer steering: {steer}" if steer else "")]
+                + (f" Maintainer steering: {steer}" if steer else "")
+                + result_contract]
 
     def convert(self, payload: str, binding: ReviewRequest, exit_code: int = 0,
                 *, model: str | None = None, effort: str | None = None) -> ReviewResult:

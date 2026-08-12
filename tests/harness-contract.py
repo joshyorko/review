@@ -103,6 +103,8 @@ class HarnessContract(unittest.TestCase):
         self.assertIn("features.code_mode_host.disable_in_process_fallback=true", command)
         self.assertIn("suppress_unstable_features_warning=true", command)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn('"version":1', command[-1])
+        self.assertIn('"critical":0,"high":0,"medium":0,"low":0', command[-1])
 
     def test_codex_invoke_arguments_reach_cli_command(self):
         adapter = CodexHarness(availability=Availability.READY)
