@@ -36,7 +36,7 @@ checked. The official upstream-oriented Python tests remain unchanged.
 ## Fork isolation and provenance
 
 - Fork: `joshyorko/review`
-- Tested fork SHA: `f4db6c7950b72c5bba060ca4bedbf6d1b2835985`
+- Tested fork SHA: `3cda2feb68f78295f345de3ff1905baf77383b9f`
 - Working branch: `copilot/experiment-build-go-bubble-tea-cockpit`
 - Preferred issue experiment line: `experiment/go-review-shadow`
 - Branch deviation: the Copilot-managed head branch differs from the preferred
@@ -89,19 +89,19 @@ Python ReviewResult parity: baseline 6748294e476cc7ba836771b92565f0b09082a33e, 3
 Python M1 contract parity: 2 EvidenceManifest fixtures, 4 malformed EvidenceManifest cases, 2 ActionPlan fixtures, 2 exact-head revalidation cases, and 5 malformed ActionPlan cases passed
 
 $ cd shadow/go-review && go test -fuzz=FuzzParseReviewResultBounded -fuzztime=1s
-fuzz: elapsed: 1s, execs: 11376 (10267/sec), new interesting: 0 (total: 17)
+fuzz: elapsed: 1s, execs: 12319 (11441/sec), new interesting: 0 (total: 17)
 PASS
 
 $ cd shadow/go-review && go test -fuzz=FuzzTruncatedCleanPayloadNeverBecomesClean -fuzztime=1s
-fuzz: elapsed: 2s, execs: 6251 (3094/sec), new interesting: 35 (total: 57)
+fuzz: elapsed: 2s, execs: 7771 (3869/sec), new interesting: 11 (total: 44)
 PASS
 
 $ cd shadow/go-review && go test -fuzz=FuzzEvidenceManifestValidationDoesNotPanic -fuzztime=1s
-fuzz: elapsed: 2s, execs: 4866 (2426/sec), new interesting: 14 (total: 33)
+fuzz: elapsed: 2s, execs: 6025 (2992/sec), new interesting: 9 (total: 60)
 PASS
 
 $ cd shadow/go-review && go test -fuzz=FuzzActionPlanValidationDoesNotPanic -fuzztime=1s
-fuzz: elapsed: 2s, execs: 10854 (5421/sec), new interesting: 19 (total: 51)
+fuzz: elapsed: 2s, execs: 8151 (4067/sec), new interesting: 33 (total: 90)
 PASS
 
 $ git diff --check
@@ -113,8 +113,8 @@ exit 0; no output
 Required workflow: `.github/workflows/shadow-go-review.yml`
 
 - Repository: `joshyorko/review`
-- Latest run for the tested head: run `31557534358`
-- Head SHA reported by the run: `f4db6c7950b72c5bba060ca4bedbf6d1b2835985`
+- Latest hosted run before report finalization: run `31557534358`
+- Head SHA reported by that run: `f4db6c7950b72c5bba060ca4bedbf6d1b2835985`
 - Event: `pull_request`
 - Conclusion: `action_required`
 - Jobs: `0`
@@ -123,8 +123,8 @@ Required workflow: `.github/workflows/shadow-go-review.yml`
 
 The workflow definition executes the Go suite, Python baseline parity, all
 four bounded fuzz targets, and `git diff --check`. Local execution above is
-the complete evidence for this tested head; hosted fork approval remains an
-external gate and is not represented as green.
+the complete evidence for the tested source commit; hosted fork approval
+remains an external gate and is not represented as green.
 
 ## Semantic deviations
 
