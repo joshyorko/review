@@ -3,10 +3,10 @@ package review
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -325,7 +325,7 @@ func BuildActionPlan(
 			Operations: copiedOperations, Prerequisites: prerequisites,
 			CreatedAt: createdAt, ExpiresAt: expiresAt,
 		})
-		encoded, err := json.Marshal(payload)
+		encoded, err := marshalCanonicalJSON(payload)
 		if err != nil {
 			return ActionPlan{}, err
 		}
@@ -406,7 +406,7 @@ func (plan ActionPlan) Validate() error {
 
 func (plan ActionPlan) Identity() string {
 	payload := planPayload(plan)
-	encoded, err := json.Marshal(payload)
+	encoded, err := marshalCanonicalJSON(payload)
 	if err != nil {
 		return ""
 	}
@@ -638,8 +638,8 @@ func validateOperation(operation GitHubOperation, repository string, pullRequest
 		if _, allowed := allowedPROperations[argv[2]]; !allowed {
 			return false, invalidPlan("operation is not an existing pull-request mutation")
 		}
-		var operationPullRequest int
-		if _, err := fmt.Sscanf(argv[3], "%d", &operationPullRequest); err != nil || operationPullRequest != pullRequest || fmt.Sprintf("%d", operationPullRequest) != argv[3] {
+		operationPullRequest, err := strconv.Atoi(strings.TrimSpace(argv[3]))
+		if err != nil || operationPullRequest != pullRequest {
 			return false, invalidPlan("pull-request operation must name its PR number")
 		}
 	} else if !(argv[1] == "label" && argv[2] == "create") {

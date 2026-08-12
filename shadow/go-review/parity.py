@@ -19,10 +19,20 @@ BASELINE_SOURCES = {
     / "review_evidence_manifest.py": "e7c334309a4456ddca208c75d2d2289f58e66f58",
     ROOT / "image" / "tui" / "action_plan.py": "13f8884c00af62233add5e4bcf1604919f9dd065",
 }
+BASELINE_TEST_SOURCES = {
+    ROOT / "tests" / "review_result_contract.py": "c0b7247fab31c2ff8c6010976b64befce64c224b",
+    ROOT
+    / "tests"
+    / "review_evidence_manifest_contract.py": "e064581649cc95dbae5be947c86f00f7a5d7b51d",
+    ROOT / "tests" / "action_plan_contract.py": "3b8033c96881e55cea285d311b55d873c5fa1208",
+}
 
 
-def verify_baseline_source() -> None:
-    for source_path, expected_blob in BASELINE_SOURCES.items():
+def verify_baseline_sources() -> None:
+    for source_path, expected_blob in {
+        **BASELINE_SOURCES,
+        **BASELINE_TEST_SOURCES,
+    }.items():
         source = source_path.read_bytes()
         blob = f"blob {len(source)}\0".encode() + source
         actual = hashlib.sha1(blob, usedforsecurity=False).hexdigest()
@@ -33,7 +43,7 @@ def verify_baseline_source() -> None:
             )
 
 
-verify_baseline_source()
+verify_baseline_sources()
 sys.path.insert(0, str((ROOT / "image" / "tui")))
 from review_result import MAX_RAW_CHARS, parse_review_result  # noqa: E402
 from action_plan import (  # noqa: E402

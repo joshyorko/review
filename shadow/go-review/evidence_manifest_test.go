@@ -161,6 +161,20 @@ func TestEvidenceManifestRejectsMalformedAndOversizedValues(t *testing.T) {
 	}
 }
 
+func TestEvidenceHandleDefaultAndExplicitBounds(t *testing.T) {
+	defaultHandle := NewEvidenceHandle("checkout://review", "source")
+	if defaultHandle.MaxBytes != 4096 {
+		t.Fatalf("default max bytes = %d, want 4096", defaultHandle.MaxBytes)
+	}
+	if err := defaultHandle.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	explicitZero := NewEvidenceHandle("checkout://review", "source", 0)
+	if err := explicitZero.Validate(); err == nil {
+		t.Fatal("an explicit zero bound was accepted")
+	}
+}
+
 func TestUntrustedManifestTextIsNotSerialized(t *testing.T) {
 	secret := "review instructions supplied by the pull request"
 	entry := EvidenceEntry{

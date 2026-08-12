@@ -1,7 +1,6 @@
 package review
 
 import (
-	"encoding/json"
 	"fmt"
 	"unicode/utf8"
 )
@@ -70,11 +69,12 @@ type EvidenceHandle struct {
 	MaxBytes int    `json:"max_bytes"`
 }
 
-func NewEvidenceHandle(uri, label string, maxBytes int) EvidenceHandle {
-	if maxBytes == 0 {
-		maxBytes = 4096
+func NewEvidenceHandle(uri, label string, maxBytes ...int) EvidenceHandle {
+	bound := 4096
+	if len(maxBytes) > 0 {
+		bound = maxBytes[0]
 	}
-	return EvidenceHandle{URI: uri, Label: label, MaxBytes: maxBytes}
+	return EvidenceHandle{URI: uri, Label: label, MaxBytes: bound}
 }
 
 func (handle EvidenceHandle) Validate() error {
@@ -302,7 +302,7 @@ func (manifest ReviewEvidenceManifest) SemanticJSON() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	encoded, err := json.Marshal(value)
+	encoded, err := marshalCanonicalJSON(value)
 	if err != nil {
 		return "", err
 	}

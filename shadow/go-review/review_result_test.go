@@ -117,6 +117,21 @@ func TestRoundTripPreservesValidatedFields(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONMatchesPythonStringEncoding(t *testing.T) {
+	payload := `{"counts":{"critical":0,"high":1,"low":0,"medium":0},"findings":[{"file":"<review>.go","line":7,"severity":"high","title":"é"}],"raw_evidence":"α","state":"findings","version":1}`
+	result := ParseReviewResult(payload)
+	if result.State != StateFindings {
+		t.Fatalf("state = %q, want findings", result.State)
+	}
+	encoded := result.ToJSON()
+	if strings.Contains(encoded, `\u`) || !strings.Contains(encoded, "<review>.go") || !strings.Contains(encoded, "é") {
+		t.Fatalf("canonical JSON escaped non-ASCII or HTML text: %s", encoded)
+	}
+	if roundTrip := ParseReviewResult(encoded); roundTrip.State != StateFindings {
+		t.Fatalf("round-trip state = %q, want findings", roundTrip.State)
+	}
+}
+
 func TestFromMapDoesNotMutateInput(t *testing.T) {
 	data := map[string]any{
 		"counts": map[string]any{

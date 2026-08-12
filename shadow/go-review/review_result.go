@@ -238,7 +238,7 @@ func (r ReviewResult) IsClean() bool {
 }
 
 func (r ReviewResult) ToJSON() string {
-	encoded, err := json.Marshal(r)
+	encoded, err := marshalCanonicalJSON(r.semanticMap())
 	if err != nil {
 		return ""
 	}
@@ -246,7 +246,11 @@ func (r ReviewResult) ToJSON() string {
 }
 
 func (r ReviewResult) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{
+	return marshalCanonicalJSON(r.semanticMap())
+}
+
+func (r ReviewResult) semanticMap() map[string]any {
+	return map[string]any{
 		"counts":       r.Counts,
 		"findings":     r.Findings,
 		"live":         r.Live,
@@ -256,7 +260,7 @@ func (r ReviewResult) MarshalJSON() ([]byte, error) {
 		"state":        r.State,
 		"verification": r.Verification,
 		"version":      r.Version,
-	})
+	}
 }
 
 func knownState(state State) bool {

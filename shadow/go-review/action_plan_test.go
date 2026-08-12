@@ -232,6 +232,40 @@ func TestActionPlanRejectsUnsafeOrMismatchedOperations(t *testing.T) {
 	}
 }
 
+func TestActionPlanMatchesPythonIntegerPRParsing(t *testing.T) {
+	for _, prArgument := range []string{"+17", "017", " 17"} {
+		t.Run(prArgument, func(t *testing.T) {
+			body := "Reviewed exactly.\n"
+			operation, err := NewGitHubOperation(
+				[]string{"gh", "pr", "review", prArgument, "--repo", "octo/sample", "--approve", "--body", body},
+				nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := buildTestPlanWithOperation(t, body, operation); err != nil {
+				t.Fatalf("Python-compatible PR number %q was rejected: %v", prArgument, err)
+			}
+		})
+	}
+}
+
+func TestActionPlanIdentityUsesUnescapedCanonicalText(t *testing.T) {
+	body := "<é> reviewed\n"
+	operation, err := NewGitHubOperation([]string{"gh", "pr", "comment", "17", "--repo", "octo/sample", "--body", body}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := buildTestPlanWithOperation(t, body, operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const expectedIdentity = "be6ab5741ea4658b81866d02fa2c21fc4dcebfeb1304558534f35ad2f3856ca0"
+	if plan.Identity() != expectedIdentity {
+		t.Fatalf("identity = %s, want Python baseline identity %s", plan.Identity(), expectedIdentity)
+	}
+}
+
 func FuzzActionPlanValidationDoesNotPanic(f *testing.F) {
 	for _, seed := range []string{"", "actor", strings.Repeat("x", 257), "é"} {
 		f.Add(seed)
@@ -296,6 +330,21 @@ func buildTestPlan(t *testing.T, body string, operations []GitHubOperation) Acti
 		t.Fatal(err)
 	}
 	return plan
+}
+
+func buildTestPlanWithOperation(t *testing.T, body string, operation GitHubOperation) (ActionPlan, error) {
+	t.Helper()
+	prerequisites, err := NewPrerequisites(map[string]any{"push": true}, map[string]any{"ci": "success"})
+	if err != nil {
+		return ActionPlan{}, err
+	}
+	return BuildActionPlan(
+		"maintainer", "octo-tenant", "octo/sample", 17, strings.Repeat("a", 40),
+		"comment", &body, []GitHubOperation{operation}, prerequisites,
+		time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 8, 11, 12, 10, 0, 0, time.UTC),
+		"test-plan",
+	)
 }
 
 func testCurrentState(t *testing.T) CurrentState {
