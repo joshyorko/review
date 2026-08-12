@@ -813,6 +813,9 @@ class ReviewScreen(Screen):
             environment["BLUEFIN_REVIEW_STEER"] = self.steer
         else:
             environment.pop("BLUEFIN_REVIEW_STEER", None)
+        if self.stop_requested:
+            self.app.call_from_thread(self.finish, None, "")
+            return
         try:
             process = subprocess.Popen(
                 command,
@@ -831,7 +834,14 @@ class ReviewScreen(Screen):
             self.app.call_from_thread(self.finish, None, str(error))
             return
         self.process = process
-        self.app.call_from_thread(self.mark_running)
+        if self.stop_requested:
+            if self.signal_group(signal.SIGTERM):
+                self.app.call_from_thread(self.schedule_stop_escalation)
+            else:
+                self.app.call_from_thread(self.finish, process.poll(), "")
+                return
+        if not self.stop_requested:
+            self.app.call_from_thread(self.mark_running)
         assert process.stdout is not None
         for line in process.stdout:
             self.app.call_from_thread(self.append, line.rstrip("\n"))
@@ -1001,6 +1011,9 @@ class ReviewScreen(Screen):
     def escalate_stop(self) -> None:
         if not self.finished:
             self.signal_group(signal.SIGKILL)
+
+    def schedule_stop_escalation(self) -> None:
+        self.set_timer(STOP_GRACE_SECONDS, self.escalate_stop)
 
     def signal_group(self, number: int) -> bool:
         process = self.process

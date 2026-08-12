@@ -18,6 +18,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 import tempfile
 from pathlib import Path
@@ -1696,6 +1697,51 @@ async def main() -> int:
 
         tui.subprocess.Popen = codex_popen
         os.environ["GH_TOKEN"] = "write-capable-test-token"
+
+        # Cancelling while the availability probe is still running must not
+        # allow Codex to start after the stop request has already landed.
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+
+        def delayed_probe(cls):
+            probe_started.set()
+            release_probe.wait(timeout=10)
+            return tui.Availability.READY
+
+        tui.CodexHarness.probe = classmethod(delayed_probe)
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            app.stops[0].live = {
+                "isDraft": False,
+                "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+                "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+            }
+            app.start_review(app.stops[0])
+            await pilot.press("tab", "enter")
+            for _ in range(200):
+                if probe_started.is_set():
+                    break
+                await pilot.pause(0.05)
+            check(probe_started.is_set(), "the delayed Codex probe must start")
+            screen = app.screen
+            await pilot.press("x")
+            release_probe.set()
+            for _ in range(200):
+                if isinstance(screen, tui.ReviewScreen) and screen.finished:
+                    break
+                await pilot.pause(0.05)
+            check(
+                isinstance(screen, tui.ReviewScreen) and screen.finished,
+                "cancelling during the Codex probe must finish the review",
+            )
+            check(not codex_calls, "Codex must not start after probe-time cancellation")
+
+        tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
         app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -1798,7 +1844,8 @@ async def main() -> int:
     check(
         outcomes == [
             "complete", "complete", "incomplete", "incomplete", "failed",
-            "complete", "incomplete", "complete", "stopped", "complete", "error",
+            "complete", "incomplete", "complete", "stopped", "stopped",
+            "complete", "error",
         ],
         f"every review must be traced with its outcome, got {outcomes}",
     )
