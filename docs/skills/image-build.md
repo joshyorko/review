@@ -1,6 +1,6 @@
 ---
 name: image-build
-version: "2.21"
+version: "2.22"
 last_updated: 2026-08-13
 id: image-build
 one_line_purpose: Derive and pin the review contributor image safely.
@@ -144,10 +144,17 @@ fix.
    keep fixed Node/gh/tmux/Codex/ws ahead of mutable Goose. Unpack with the base's
    own GNU tar, never a hand-rolled extractor — `tar -xO ... --occurrence=1`
    for a single binary, `--strip-components=1` for Node's versioned tree — and
-   keep each `sha256sum -c -` ahead of its extraction. A missing member then
+   keep each `sha256sum -c -` ahead of the archive's first read. A missing
+   member then
    fails the build with `Not found in archive` rather than writing an empty
    binary. The `tar -I 'python3 -m gzip'` filter supplies the one codec the
-   base lacks; see fsdk-containers#87, which deletes it. Remove only Node
+   base lacks; see fsdk-containers#87, which deletes it. Do not combine that
+   filter with `--occurrence=1` on an archive whose wanted member is followed
+   by others: tar stops reading as soon as it has the member, and the Python
+   codec dies on the resulting `BrokenPipeError` where the gzip binary would
+   have exited quietly, so the build fails with `tar: Child returned status 1`.
+   Decompress whole first (`python3 -m gzip -d < x.tar.gz > x.tar`), then
+   select the member from the plain tar. Remove only Node
    headers and verified-unused npm cache; retain `node`, `npm`, and
    `corepack`.
 7. Place controlled Goose configuration under `/opt/bluefin/goose` as the
@@ -344,6 +351,12 @@ the base ever ships it the audit fails and review's layer is deleted.
   claim costs the same as a missing tool and is invisible in a passing test.
 - A base gap described in a document instead of filed as an issue, or any
   section that exists to explain a known-broken thing.
+- An anti-duplication guard that probes only one of PATH or a fixed directory
+  list. Each misses what the other catches: `ENV PATH=/opt/node/bin:${PATH}`
+  puts a directory ahead of `/usr/local/bin` that no standard-directory walk
+  names, while a copy outside the build user's PATH is still a duplicate the
+  runtime user resolves. Probe both, or the guard passes while two copies ship
+  and nothing records which one an agent ran.
 - A multi-file payload copied one named file at a time, or a build proof that
   only compiles it. Compiling resolves no imports, so `py_compile` on the
   dashboard entry point passed while `review_result.py` was never copied, and
@@ -404,10 +417,19 @@ bash tests/generate-skills.sh
 bash tests/image-audit.sh --verify-base-evidence
 grep -Fq "$(sed -n 's/^hive_commit := "\(.*\)"$/\1/p' justfile)" README.md
 ref="ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
+# `canary` is mutable, so the Containerfile's Goose checksum defaults go stale
+# and a local build fails at `sha256sum -c -` even though nothing is wrong.
+# CI resolves these per build; resolve them the same way by hand.
+goose_sha() {
+  curl -fsSL "https://github.com/aaif-goose/goose/releases/download/canary/goose-$1-unknown-linux-musl.tar.gz" |
+    sha256sum | cut -d' ' -f1
+}
 GH_TOKEN="$(gh auth token)" podman build \
   --format oci \
   --secret id=github_token,env=GH_TOKEN \
   --build-arg GOOSE_REFRESH="$(date +%s)" \
+  --build-arg GOOSE_X86_64_SHA256="$(goose_sha x86_64)" \
+  --build-arg GOOSE_AARCH64_SHA256="$(goose_sha aarch64)" \
   -f image/Containerfile -t "$ref" .
 bash tests/image-audit.sh --derived "$ref"
 # Optional: keep the Markdown report (generated output, git-ignored).
