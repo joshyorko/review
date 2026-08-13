@@ -36,6 +36,9 @@ ARG UV_VERSION=0.12.3
 ARG UV_X86_64_SHA256=0643b9fb8c9fb27458e709ce6ff939695013c41975ff7b02d3f3b138d8d4bdb3
 ARG UV_AARCH64_SHA256=fa513fca1eb2913334c944fe9adbdd410274a1cbe8dd05d03699a9eb85311d4e
 ARG TEXTUAL_VERSION=8.2.8
+ARG RIPGREP_VERSION=15.2.0
+ARG RIPGREP_X86_64_SHA256=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ARG RIPGREP_AARCH64_SHA256=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
 ARG SKILLS_COMMIT=b6f5c370cca19398fbbbe43a0182dca6783a80cb
 
 FROM ${FSDK_RUNNER_IMAGE}
@@ -158,6 +161,67 @@ RUN set -eu; \
     tmux -V; \
     codex --version; \
     codex-code-mode-host --help >/dev/null
+
+# The agent tooling delta approved by #75: `rg`, under its own native name.
+# ShellCheck and the other linters stay out; they are fsdk-containers#89.
+#
+# `just` and mikefarah `yq` v4 are absent from this layer because the base
+# ships both, and a second copy here would precede the base's on PATH.
+# Unpacked: 5.4 MB on amd64, 4.5 MB on arm64.
+ARG RIPGREP_VERSION
+ARG RIPGREP_X86_64_SHA256
+ARG RIPGREP_AARCH64_SHA256
+RUN set -eu; \
+    # The anti-duplication contract: if the base ever ships rg, delete this
+    # layer rather than shadow it. Probe PATH *and* a fixed directory list.
+    # Neither alone is enough: PATH here is root's build PATH, which misses a
+    # copy the runtime user would still see, while the directory list misses
+    # PATH entries outside it -- /opt/node/bin above is prepended to PATH, so
+    # an rg there would beat /usr/local/bin/rg at runtime.
+    if command -v rg >/dev/null 2>&1; then \
+      echo "rg is already provided at $(command -v rg); delete this layer instead of shadowing it" >&2; \
+      exit 1; \
+    fi; \
+    for dir in /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin; do \
+      if [ -e "$dir/rg" ]; then \
+        echo "rg is already provided by the base at $dir/rg; delete this layer instead of shadowing it" >&2; \
+        exit 1; \
+      fi; \
+    done; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) \
+        rg_arch=x86_64-unknown-linux-musl; \
+        rg_sha="${RIPGREP_X86_64_SHA256}" ;; \
+      aarch64|arm64) \
+        rg_arch=aarch64-unknown-linux-musl; \
+        rg_sha="${RIPGREP_AARCH64_SHA256}" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    trap 'rm -rf "$workdir"' EXIT; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_arch}.tar.gz" \
+      -o "$workdir/ripgrep.tar.gz"; \
+    printf '%s  %s\n' "$rg_sha" "$workdir/ripgrep.tar.gz" | sha256sum -c -; \
+    # Decompress whole, then select the member. Piping the codec into tar
+    # deadlocks here: `--occurrence=1` stops reading once it has `rg`, and the
+    # `python3 -m gzip` filter dies on the resulting SIGPIPE rather than
+    # exiting quietly the way the gzip binary would. The checksum is verified
+    # above, before either read of the archive.
+    python3 -m gzip -d < "$workdir/ripgrep.tar.gz" > "$workdir/ripgrep.tar"; \
+    tar -xOf "$workdir/ripgrep.tar" --wildcards --occurrence=1 '*/rg' > /usr/local/bin/rg; \
+    chmod 0755 /usr/local/bin/rg; \
+    rg --version; \
+    # Standard command semantics stay the base's. Nothing in this layer may
+    # resolve grep, find, cat, or ls out of /usr/local/bin.
+    for canonical in grep find cat ls; do \
+      case "$(command -v "$canonical")" in \
+        /usr/local/bin/*) echo "$canonical is shadowed from /usr/local/bin" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    printf 'x\ny\n' > "$workdir/probe.txt"; \
+    test "$(rg --count-matches y "$workdir/probe.txt")" = 1
 
 # The maintainer TUI runtime: uv (pinned, checksum-verified) creates a
 # self-contained virtual environment on the base's own CPython and installs

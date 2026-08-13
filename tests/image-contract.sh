@@ -203,6 +203,42 @@ require image/Containerfile \
   "cmp -s \"\$probe/cmp-left\" \"\$probe/cmp-right\"" \
   '! cmp -s "$probe/cmp-left" "$probe/cmp-right"'
 
+# The agent-tooling delta from #75: `rg` under its own name, from a verified
+# official release, plus a build-time guard that deletes the layer's reason to
+# exist the moment the base ships rg. Standard command semantics stay the
+# base's, so nothing may be substituted or shadowed.
+# shellcheck disable=SC2016
+require image/Containerfile \
+  'ARG RIPGREP_VERSION=' \
+  'ARG RIPGREP_X86_64_SHA256=' \
+  'ARG RIPGREP_AARCH64_SHA256=' \
+  'https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_arch}.tar.gz' \
+  'rg_arch=x86_64-unknown-linux-musl;' \
+  'rg_arch=aarch64-unknown-linux-musl;' \
+  'for dir in /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin; do' \
+  'if command -v rg >/dev/null 2>&1; then' \
+  'delete this layer instead of shadowing it' \
+  'for canonical in grep find cat ls; do' \
+  'rg --version;'
+
+# Linters are fsdk-containers#89, not a review layer: installing one here is
+# the local workaround review told upstream it was not adding. `fd`, `bat` and
+# `eza` substitute for canonical commands and stay out too. `just` and
+# mikefarah `yq` v4 come from the base, so a second copy would precede it.
+# shellcheck disable=SC2016
+forbid image/Containerfile \
+  '/usr/local/bin/shellcheck' \
+  '/usr/local/bin/hadolint' \
+  '/usr/local/bin/fd' \
+  '/usr/local/bin/bat' \
+  '/usr/local/bin/eza' \
+  '/usr/local/bin/just' \
+  '/usr/local/bin/yq' \
+  'alias grep=' \
+  'alias find=' \
+  'alias cat=' \
+  'alias ls='
+
 # The probe uses `-user dev`, exactly as Hive's relay does, so it must come
 # after the layer that creates that user or the predicate cannot resolve.
 probe_user_layer="$(grep -n 'dev:x:1000:1000:Developer:' image/Containerfile | head -n 1 | cut -d: -f1)"
@@ -226,7 +262,9 @@ for extractor in image/bin/extract-archive image/bin/find image/bin/cmp; do
   fi
 done
 
-# Every archive's checksum must still be verified before it is extracted.
+# No archive may be read before its checksum is verified. For the two-step
+# form the first read is the decompressor, not tar, so that is what gets
+# ordered: the invariant is checksum-before-first-read.
 if ! python3 - <<'PY'; then
 from pathlib import Path
 
@@ -239,17 +277,23 @@ for name, archive in (
     ("codex", "codex.tar.gz"),
     ("codex code mode host", "codex-code-mode-host.tar.gz"),
     ("goose", "goose.tar.gz"),
+    ("ripgrep", "ripgrep.tar.gz"),
 ):
     verify = container.find(f'"$workdir/{archive}" | sha256sum -c -')
     extract = container.find(f'"$workdir/{archive}" -C')
     if extract < 0:
         extract = container.find(f'-xOf "$workdir/{archive}"')
+    if extract < 0:
+        # Two-step form: decompress the verified archive, then select a member
+        # from the plain tar. Pinned to the decompressor so an unrelated read
+        # of the same archive cannot satisfy this check.
+        extract = container.find(f'python3 -m gzip -d < "$workdir/{archive}"')
     if verify < 0:
         errors.append(f"{name}: no sha256sum verification of {archive}")
     elif extract < 0:
         errors.append(f"{name}: no tar extraction of {archive}")
     elif verify > extract:
-        errors.append(f"{name}: {archive} is extracted before its checksum is verified")
+        errors.append(f"{name}: {archive} is read before its checksum is verified")
 
 for error in errors:
     print(f"::error file=image/Containerfile::{error}")
@@ -460,13 +504,23 @@ require image/config/local-agent-policy.md \
   'are not installed' \
   'gh run watch' \
   'that is an evidenced finding'
+# The policy must state the image's own tooling delta, so the agent knows rg
+# is there to use.
+# shellcheck disable=SC2016 # Literal policy text, not shell expansion.
+require image/config/local-agent-policy.md \
+  'The image adds `rg` on top' \
+  'keep their standard behavior'
 # The policy tells the agent what the runtime lacks, so a tool the base
 # actually ships must never be named as absent: that steers every task into a
 # hand-rolled substitute. These are present at the pinned base digest.
+# The image installs `rg`, so the policy must not send the agent to a
+# substitute for it.
 # shellcheck disable=SC2016 # Literal policy text, not shell expansion.
 forbid image/config/local-agent-policy.md \
   '`which`, `awk`' \
-  '`yq` and the PyYAML module'
+  '`yq` and the PyYAML module' \
+  'use `grep -r` for `rg`' \
+  '`rg` and `fd`'
 
 # GOOSE_PATH_ROOT keeps controlled policy/data/state out of Hive's runtime
 # config. The pinned runtime now links its knowledge export to Goose-native

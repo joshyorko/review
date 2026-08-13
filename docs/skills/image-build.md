@@ -85,7 +85,15 @@ fix.
 4. Preserve canonical command semantics. Never shadow `grep`, `find`, `cat`, or
    `ls` — with a modern alternative or with a hand-written one. If a modern
    tool is added, install it under its own native name (e.g. `rg`) beside the
-   canonical command, never as a replacement; none is installed today.
+   canonical command, never as a replacement. `rg` is the only one installed
+   today, from its official architecture-specific release with a pinned
+   checksum. The layer guards itself: it refuses to build if `rg` is already
+   on PATH or in any standard binary directory, and re-proves after
+   installing that `grep`, `find`, `cat` and `ls` still resolve outside
+   `/usr/local/bin`.
+   `just` and mikefarah `yq` v4 come from the base and must not be installed
+   again. Linters are fsdk-containers#89, not a layer here; `fd`, `bat`,
+   `eza`, editors, pagers and compilers stay out.
 5. The rule, without exceptions: **use the tools already in the image; if a
    common tool is missing, add it at the FSDK seam; never hand-roll a
    reimplementation; and never leave a shim standing once the seam fix
@@ -297,14 +305,20 @@ content comes from BST elements, so a self-mutating runtime is a defect.
 `goose`) is forbidden in the base only, because a second copy means two
 versions and no way to know which an agent ran.
 
-**Ordinary userland is forbidden nowhere.** `find`, `cmp`, `diff`, `rg`, `fd`,
-`yq` and ShellCheck belong in the base when a contributor needs them; their
-absence is what made live agents fail with `command not found`. Add them at
+**Ordinary userland is forbidden nowhere unless review installs it.** `find`,
+`cmp`, `diff`, `fd`, `yq` and ShellCheck belong in the base when a
+contributor needs them; their absence is what made live agents fail with
+`command not found`. Add them at
 the BST seam, never here, and file the ones that are missing rather than
-describing them. For `find`, `cmp` and `diff` the audit checks provenance
-rather than presence: Hive's relay calls `find` and `cmp` directly, the base
-carries real GNU implementations, and the audit fails if any of the three
-resolves under `/usr/local/bin` — the shape a reintroduced shim would take.
+describing them. For `find`, `cmp`, `diff`, `grep`, `cat` and `ls` the audit
+checks provenance as well as presence: Hive's relay calls `find` and `cmp`
+directly, the base carries real GNU implementations, and the audit fails if
+any of those six resolves under `/usr/local/bin` — the shape a
+reintroduced shim would take.
+
+`rg` is the one exempt from that check, because review installs it there
+(#75). It is forbidden in the base and required in the derived image, so if
+the base ever ships it the audit fails and review's layer is deleted.
 
 ## Red Flags
 
