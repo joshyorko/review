@@ -91,14 +91,24 @@ async def main() -> int:
     gh_stub = write_stub(
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
-        'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        'if [ "$1 $2" = "api user" ]; then\n'
+        '  if [ -n "${GH_USER_FAIL-}" ]; then echo "authentication required" >&2; exit 1; fi\n'
+        '  echo castrojo; exit 0;\n'
+        'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr diff" ]; then\n'
         '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
         "  exit 0\n"
         "fi\n"
-        'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
+        'if [ "$1" = "api" ] && [ "$2" = "--paginate" ]; then\n'
+        '  if [ -n "${LIVE_GH_ERROR-}" ]; then printf "%s\\n" "$LIVE_GH_ERROR" >&2; exit 1; fi\n'
+        '  if [ -n "${LIVE_PAGES-}" ]; then cat "$LIVE_QUEUE_FILE"; else printf "[%s]" "$(cat "$LIVE_QUEUE_FILE")"; fi; exit 0\n'
+        'fi\n'
+        'if [ "$1 $2" = "pr list" ]; then\n'
+        '  if [ -n "${LIVE_QUEUE_FILE-}" ]; then cat "$LIVE_QUEUE_FILE"; else echo "[]"; fi\n'
+        '  exit 0\n'
+        'fi\n'
         "exit 0\n",
     )
     os.environ["PATH"] = f"{workdir}:{os.environ['PATH']}"
@@ -123,6 +133,163 @@ async def main() -> int:
     review_stub(0, "a finding")
 
     import bluefin_review_tui as tui
+
+    check(
+        not tui.QueueFilters(repository="acme/widgets").live,
+        "--repo owner/repo must remain a static snapshot filter",
+    )
+    check(
+        tui.QueueFilters(live_repository="acme/widgets").live,
+        "the distinct live repository filter must select the live source",
+    )
+    check(
+        tui.PULL_FETCH_LIMIT == os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200"),
+        "snapshot pull fetch limit must remain configurable",
+    )
+
+    live_file = workdir / "live.json"
+    live_file.write_text(json.dumps([
+        {"number": 42, "title": "review me", "author": {"login": "other"},
+         "state": "OPEN", "isDraft": False, "labels": [],
+         "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+         "statusCheckRollup": []},
+        {"number": 43, "title": "my own live work", "author": {"login": "castrojo"},
+         "state": "OPEN", "isDraft": False, "labels": [],
+         "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+         "statusCheckRollup": []},
+    ]))
+    os.environ["LIVE_QUEUE_FILE"] = str(live_file)
+    live_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+
+    async def wait_for_live_rows(app, pilot, state: str, count: int) -> None:
+        for _ in range(100):
+            if app.source_state == state and len(app.stops) == count:
+                return
+            await pilot.pause(0.05)
+
+    async with live_app.run_test() as pilot:
+        await wait_for_live_rows(live_app, pilot, "ready", 1)
+        check(live_app.source_state == "ready", "live repository source should be ready")
+        check([stop.key for stop in live_app.stops] == ["acme/widgets#42"],
+              "the real app path excludes the authenticated maintainer's own work")
+        check(live_app.stops[0].action == "review",
+              "live PRs retain the existing review action semantics")
+        live_file.write_text("[]")
+        await pilot.press("R")
+        for _ in range(100):
+            if live_app.source_state == "empty":
+                break
+            await pilot.pause(0.05)
+        check(live_app.source_state == "empty" and not live_app.stops,
+              "refresh should reread the active live source and expose empty distinctly")
+
+    # RED regressions for the independent review: identity failure must hold
+    # the live queue, pagination must flatten every page, and malformed
+    # elements must become a source error rather than raising.
+    os.environ["GH_USER_FAIL"] = "1"
+    auth_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    async with auth_app.run_test() as pilot:
+        for _ in range(100):
+            if auth_app.source_state == "auth-failed":
+                break
+            await pilot.pause(0.05)
+        check(auth_app.source_state == "auth-failed" and not auth_app.stops,
+              "live queue must hold rows when viewer identity is unavailable")
+    os.environ.pop("GH_USER_FAIL", None)
+    async def wait_for_state(app, pilot, state: str) -> None:
+        for _ in range(100):
+            if app.source_state == state:
+                return
+            await pilot.pause(0.05)
+
+    async def assert_live_state(error: str, state: str, detail: str) -> None:
+        os.environ["LIVE_GH_ERROR"] = error
+        app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+        async with app.run_test() as pilot:
+            await wait_for_state(app, pilot, state)
+            status = str(app.query_one("#status-bar").render())
+            check(app.source_state == state and not app.stops,
+                  f"real app path must hold rows for {state} source state")
+            check(detail in app.source_message and detail in status,
+                  f"real app path must expose actionable {state} detail")
+            check("\\n" not in app.source_message and "\\x1b" not in app.source_message
+                  and len(app.source_message) <= 240,
+                  f"{state} detail must be bounded and sanitized")
+        os.environ.pop("LIVE_GH_ERROR", None)
+
+    await assert_live_state("HTTP 403: Resource not accessible", "inaccessible", "Resource not accessible")
+    await assert_live_state("HTTP 404: Not Found", "missing", "Not Found")
+    await assert_live_state("network timeout", "error", "network timeout")
+    await assert_live_state("authentication required", "inaccessible", "authentication required")
+
+    malformed_repo = tui.ReviewDashboard(tui.QueueFilters(live_repository="not-a-repo"))
+    async with malformed_repo.run_test() as pilot:
+        await wait_for_state(malformed_repo, pilot, "malformed")
+        status = str(malformed_repo.query_one("#status-bar").render())
+        check(not malformed_repo.stops and "use owner/repo" in status,
+              "real app path must report malformed repositories")
+
+    os.environ["LIVE_PAGES"] = "1"
+    live_file.write_text("{}")
+    malformed_page_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    async with malformed_page_app.run_test() as pilot:
+        await wait_for_state(malformed_page_app, pilot, "malformed")
+        check(not malformed_page_app.stops and "malformed GitHub response" in malformed_page_app.source_message,
+              "real app path must report malformed JSON/pages")
+
+    live_file.write_text(json.dumps([[{"number": 44}], ["not an object"]]))
+    malformed_element_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    async with malformed_element_app.run_test() as pilot:
+        await wait_for_state(malformed_element_app, pilot, "malformed")
+        check(not malformed_element_app.stops and "malformed GitHub response" in malformed_element_app.source_message,
+              "real app path must report malformed elements")
+
+    async def assert_malformed_pull(pull: dict, detail: str) -> None:
+        live_file.write_text(json.dumps([[pull]]))
+        app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+        async with app.run_test() as pilot:
+            await wait_for_state(app, pilot, "malformed")
+            status = str(app.query_one("#status-bar").render())
+            check(app.source_state == "malformed" and not app.stops,
+                  f"invalid {detail} must produce no rows through the real app")
+            check(detail in app.source_message and detail in status,
+                  f"invalid {detail} must expose one actionable malformed detail")
+
+    await assert_malformed_pull(
+        {"number": 44, "title": "hostile author", "user": "not-an-object"},
+        "author",
+    )
+    await assert_malformed_pull(
+        {"title": "missing number", "user": None},
+        "number",
+    )
+    await assert_malformed_pull(
+        {"number": True, "title": "boolean number", "user": None},
+        "number",
+    )
+    await assert_malformed_pull(
+        {"number": 45, "title": "invalid login", "user": {"login": 7}},
+        "login",
+    )
+
+    os.environ.pop("LIVE_PAGES", None)
+    live_file.write_text(json.dumps([[{"number": 44, "title": "page one", "user": {"login": "other"}}], [{"number": 45, "title": "page two", "user": {"login": "other"}}]]))
+    os.environ["LIVE_PAGES"] = "1"
+    paged = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets")).load_live_queue("acme/widgets")
+    check(len(paged["items"]) == 2, "live pagination must flatten every returned page")
+    os.environ.pop("LIVE_PAGES", None)
+    live_file.write_text(json.dumps([
+        [{"number": n, "title": f"PR {n}", "user": {"login": "other"}} for n in range(1, 102)],
+        [{"number": n, "title": f"PR {n}", "user": {"login": "other"}} for n in range(102, 203)],
+    ]))
+    os.environ["LIVE_PAGES"] = "1"
+    large_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    async with large_app.run_test() as pilot:
+        await wait_for_live_rows(large_app, pilot, "ready", 202)
+        check(len(large_app.stops) == 202,
+              "live queue must flatten multiple pages beyond 200 pull requests")
+    os.environ.pop("LIVE_PAGES", None)
+    live_file.write_text(json.dumps([]))
 
     # Semantic navigation contract: bindings, help, and the palette must be
     # projections of one registry rather than independent key lists.
