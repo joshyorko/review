@@ -90,8 +90,10 @@ adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
    the row, count it in the status line, and keep the stop selected so a
    batch carries it forward. A toast is gone before a batch of eight
    finishes.
-5. **Batch every action that a maintainer repeats.** Queueing, merging and
-   updating branches all take the batch selection when one exists, one gate
+5. **Batch every action that a maintainer repeats.** Merging and updating
+   branches take the batch selection when one exists. `a` on a selection is
+   different: the reviewed batch becomes one landing agent's brief behind
+   one proportionate gate (see "Batch landing" below), not one typed gate
    per pull request.
 6. **Add the behaviour to `tests/dashboard_pilot.py`**, which drives the real
    app through `run_test()`. The static greps in
@@ -176,10 +178,42 @@ background colour.
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
   summaries all cost zero extra requests.
-- **Distinguish the three merge paths.** `a` approves and applies `lgtm`, an
-  opt-in to Hive's sweep. `m` squashes now and is gated on GitHub's `push`
-  permission, read per repository. `L` leaves a review and merges nothing.
-  A review that can only be given by also queueing or merging is not a review.
+- **Distinguish the merge paths.** Unselected, `a` approves and applies
+  `lgtm`, an opt-in to Hive's sweep. On a selection, `a` dispatches one
+  landing agent for the whole batch. `m` squashes now and is gated on
+  GitHub's `push` permission, read per repository. `L` leaves a review and
+  merges nothing. A review that can only be given by also queueing or
+  merging is not a review.
+
+## Batch landing
+
+The selection is the review, so the batch gate is proportionate:
+`BatchPlanScreen` shows every selected pull request and the exact agent
+command, Enter dispatches, Esc aborts — no typed count. A typed-number gate
+earns its ceremony on a single irreversible command; on a batch reviewed
+row by row it teaches nothing.
+
+One `LandingTask` (image/tui/landing.py) owns the whole selection. Confirmed
+batches enter `app.landing_queue` and drain FIFO, one agent at a time — a
+batch confirmed while another runs waits behind it, never races it. The
+agent is Goose's documented one-shot (`goose run --no-session -i
+<prompt-file>`, overridable with `BLUEFIN_REVIEW_LANDING_COMMAND`), run in
+its own process group so `[x]` stops it whole.
+
+The agent reports, the screen polls: every per-PR state change is one JSON
+line in the task's status file (`diagnosing|fixing|waiting-ci|merging|
+awaiting-stable|merged|blocked|failed`, then a task-level `done`), and
+`LandingScreen` ([A], auto-pushed on dispatch) renders all batches, per-PR
+state, the agent log tail, and Hive stats. Never scrape agent prose for
+status. When a task finishes, `landing_finished` folds the report onto the
+rows: merged leaves the batch; blocked, failed, and awaiting-stable stays
+selected with the agent's reason — the same rule as every other failure.
+
+**Done is `:stable`, not the merge.** A GitHub merge only starts the
+publish pipeline; the batch item is landed when the image's `:stable` tag
+carries the merged commit (verified via the publish workflow and the
+image's `org.opencontainers.image.revision` label). The agent reports
+`awaiting-stable` at merge and `merged` only once `:stable` has it.
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact
   commands, and typed-number confirmation remain the authority boundary.
