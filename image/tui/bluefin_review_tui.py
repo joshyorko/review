@@ -42,16 +42,18 @@ from textual.widgets import (
     Button,
     Static,
     Select,
+    TextArea,
 )
 from review_result import ReviewResult, adapt_current_engine
 import landing
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
+from harness.goose import GooseHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
 from review_evidence_manifest import ReviewRequest
-from harness.registry import Availability
+from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
@@ -65,6 +67,7 @@ TRACE_PATH = os.path.join(
 )
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
+MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
 # repositories, and adding a label that does not exist fails.
 QUEUE_LABEL = "lgtm"
@@ -568,6 +571,7 @@ class Stop:
     failure: str = ""
     live: dict = field(default_factory=dict)
     overlap: dict = field(default_factory=dict)
+    review_result: ReviewResult | None = None
 
     @property
     def key(self) -> str:
@@ -873,27 +877,165 @@ class ReviewVerdict(ModalScreen[str | None]):
                 self.dismiss(self.CHOICES[index][0])
 
 
-class ReviewBody(ModalScreen[str | None]):
-    """The review body. Required for anything but a bare approval."""
-
+class ReviewBodyPreview(ModalScreen[None]):
     BINDINGS = back_bindings("dismiss(None)")
 
-    def __init__(self, verdict: str) -> None:
+    def __init__(self, body: str, command: list[str]) -> None:
         super().__init__()
+        self.body = body
+        self.command = command
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("exact GitHub Markdown:")
+            yield Static(self.body, markup=False, id="review-body-preview")
+            yield Label("exact command:")
+            yield Static(" ".join(self.command), id="review-command-preview")
+            yield Label("[esc] back to editor")
+
+
+class ReviewBody(ModalScreen[str | None]):
+    """Editable review body; generation is an optional maintainer action."""
+
+    BINDINGS = [
+        Binding("ctrl+g", "generate", "generate"),
+        Binding("ctrl+e", "edit", "edit"),
+        Binding("ctrl+p", "preview", "preview"),
+        Binding("ctrl+shift+k", "clear", "clear", priority=True),
+        Binding("ctrl+s", "submit", "submit"),
+        *back_bindings("cancel"),
+    ]
+
+    def __init__(self, stop: Stop, verdict: str) -> None:
+        super().__init__()
+        self.stop_record = stop
         self.verdict = verdict
+        self.draft_provenance: dict = {}
+        self.body_file: str | None = None
+        self.previewed_body: str | None = None
 
     def compose(self) -> ComposeResult:
         optional = " (empty is allowed for an approval)" if self.verdict == "approve" else ""
         with Vertical(id="confirm-box"):
             yield Label(f"{self.verdict} — say why{optional}:")
-            yield Input(id="review-body-input")
+            yield TextArea(id="review-body-editor")
+            yield Label("[ctrl-g] generate · [ctrl-e] edit · [ctrl-p] preview · [ctrl-shift-k] clear · [ctrl-s] submit")
 
     def on_mount(self) -> None:
-        self.query_one(Input).focus()
+        self.query_one(TextArea).focus()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        event.stop()
-        self.dismiss(event.value)
+    def action_edit(self) -> None:
+        self.query_one(TextArea).focus()
+
+    def action_cancel(self) -> None:
+        self.cleanup()
+        self.dismiss(None)
+
+    def action_clear(self) -> None:
+        self.query_one(TextArea).text = ""
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id == "review-body-editor":
+            self._invalidate_preview()
+
+    def action_generate(self) -> None:
+        result = self.stop_record.review_result
+        if result is None or result.state not in {"complete", "findings"}:
+            self.notify("trustworthy completed review evidence is unavailable", severity="warning")
+            return
+        try:
+            owner, repository = self.stop_record.repository.split("/", 1)
+            request = ReviewRequest(
+                owner, repository, self.stop_record.number,
+                str(self.stop_record.live["baseRefOid"]), str(self.stop_record.live["headRefOid"]),
+                actor="maintainer", tenant="review", generated_at="dashboard",
+            )
+            registry = HarnessRegistry()
+            registry.register(GooseHarness())
+            registry.register(CodexHarness(availability=CodexHarness.probe()))
+            adapter = registry.require_ready(ACTIVE_BACKEND)
+            if not adapter.capabilities.body_drafting:
+                raise RuntimeError(f"{ACTIVE_BACKEND} unavailable: UNSUPPORTED_CAPABILITY")
+            draft = adapter.draft(
+                DraftRequest(request, self.verdict, result, live_review_context(self.stop_record.live))
+            )
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as error:
+            self.notify(f"draft unavailable: {error}", severity="warning")
+            return
+        if draft.state is not DraftState.COMPLETE or not draft.markdown:
+            self.notify("draft unavailable: evidence did not produce review prose", severity="warning")
+            return
+        self.draft_provenance = dict(getattr(draft, "provenance", {}))
+        self.query_one(TextArea).text = draft.markdown
+
+    def _command(self, body_file: str) -> list[str]:
+        return ["gh", "pr", "review", str(self.stop_record.number), "--repo",
+                self.stop_record.repository, f"--{self.verdict}", "--body-file", body_file]
+
+    def action_preview(self) -> None:
+        body = self.query_one(TextArea).text or "Reviewed."
+        if not self._validate_body(body):
+            return
+        path = self._prepare_body_file(body)
+        self.previewed_body = body
+        self.app.push_screen(ReviewBodyPreview(body, self._command(path)))
+
+    def _validate_body(self, body: str) -> bool:
+        if len(body) <= MAX_REVIEW_BODY_CHARS:
+            return True
+        self.notify(
+            f"review body is too long ({len(body)}/{MAX_REVIEW_BODY_CHARS} characters); nothing was submitted",
+            severity="warning",
+        )
+        return False
+
+    def _invalidate_preview(self) -> None:
+        self.previewed_body = None
+        if self.body_file:
+            try:
+                os.unlink(self.body_file)
+            except FileNotFoundError:
+                pass
+            self.body_file = None
+
+    def _prepare_body_file(self, body: str) -> str:
+        import tempfile
+        if self.body_file:
+            try:
+                os.unlink(self.body_file)
+            except FileNotFoundError:
+                pass
+        os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=f"review-{self.stop_record.number}-",
+            suffix=".md", dir=os.path.dirname(TRACE_PATH), delete=False,
+        )
+        with handle:
+            handle.write(body or "Reviewed.")
+        self.body_file = handle.name
+        return handle.name
+
+    def action_submit(self) -> None:
+        raw_body = self.query_one(TextArea).text
+        if not raw_body and self.verdict != "approve":
+            self.notify(f"{self.verdict} needs a reason; nothing was submitted.", severity="warning")
+            return
+        body = raw_body or "Reviewed."
+        if not self._validate_body(body):
+            return
+        if self.previewed_body != body or not self.body_file:
+            self.notify("preview the exact review body before submitting", severity="warning")
+            return
+        self.dismiss((body, self.body_file))
+
+    def cleanup(self) -> None:
+        if self.body_file:
+            try:
+                os.unlink(self.body_file)
+            except FileNotFoundError:
+                pass
+            self.body_file = None
+        self.previewed_body = None
 
 
 class DiffScreen(ModalScreen[None]):
@@ -1233,6 +1375,7 @@ class ReviewScreen(Screen):
         else:
             outcome = "failed"
             state = f"FAILED (exit {code}) — the review did not run. Nothing was submitted."
+        stop.review_result = result
 
         status = self.query_one("#review-status", Static)
         status.remove_class("running")
@@ -2140,7 +2283,8 @@ class ReviewDashboard(App):
         self.mutate_all(stop, [["gh", *args]], then=then)
 
     def mutate_all(
-        self, stop: Stop, commands: list[list[str]], then=None, on_error=None
+        self, stop: Stop, commands: list[list[str]], then=None, on_error=None,
+        on_cancel=None,
     ) -> None:
         """Run a sequence of gh mutations behind one typed-number gate.
 
@@ -2154,6 +2298,8 @@ class ReviewDashboard(App):
         def finish(confirmed: bool | None) -> None:
             if not confirmed:
                 self.notify("aborted; nothing was run.", severity="warning")
+                if on_cancel:
+                    on_cancel()
                 return
             self.notify(f"running: {' '.join(commands[0][:4])}…")
             self.run_mutations(stop, commands, then, on_error)
@@ -2296,22 +2442,34 @@ class ReviewDashboard(App):
             if not verdict:
                 return
 
-            def with_body(body: str | None) -> None:
-                if body is None:
+            review_body = ReviewBody(stop, verdict)
+
+            def with_body(value) -> None:
+                if not isinstance(value, tuple) or len(value) != 2:
                     return
-                body = body.strip()
+                body, body_file = value
+                if not isinstance(body, str) or not isinstance(body_file, str) or not body_file:
+                    return
+                if body != review_body.previewed_body or body_file != review_body.body_file:
+                    return
+                try:
+                    with open(body_file, encoding="utf-8") as source:
+                        if source.read() != body:
+                            return
+                except (OSError, UnicodeError):
+                    return
                 if not body and verdict != "approve":
                     self.notify(
                         f"{verdict} needs a reason; nothing was submitted.",
                         severity="warning",
                     )
                     return
-                os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
-                body_file = os.path.join(
-                    os.path.dirname(TRACE_PATH), f"review-{stop.number}.md"
-                )
-                with open(body_file, "w", encoding="utf-8") as sink:
-                    sink.write((body or "Reviewed.") + "\n")
+                def clean_body_file() -> None:
+                    try:
+                        os.unlink(body_file)
+                    except FileNotFoundError:
+                        pass
+
                 self.mutate_all(
                     stop,
                     [[
@@ -2319,9 +2477,12 @@ class ReviewDashboard(App):
                         "--repo", stop.repository, f"--{verdict}",
                         "--body-file", body_file,
                     ]],
+                    then=clean_body_file,
+                    on_error=lambda _message: clean_body_file(),
+                    on_cancel=clean_body_file,
                 )
 
-            self.push_screen(ReviewBody(verdict), with_body)
+            self.push_screen(review_body, with_body)
 
         self.push_screen(ReviewVerdict(), with_verdict)
 

@@ -134,6 +134,58 @@ async def main() -> int:
 
     import bluefin_review_tui as tui
 
+    # A malformed ReviewBody result is not preview-authorized and must be a
+    # no-op, including no temporary file and no mutation.
+    callback = {}
+    dashboard = tui.ReviewDashboard.__new__(tui.ReviewDashboard)
+    dashboard.push_screen = lambda _screen, handler: callback.update(handler=handler)
+    dashboard.notify = lambda *args, **kwargs: None
+    mutations = []
+    dashboard.mutate_all = lambda *args, **kwargs: mutations.append(args)
+    review_stop = SimpleNamespace(number=31, repository="projectblue/bluefinctl")
+    with tempfile.TemporaryDirectory(prefix="dashboard-body-red-") as body_dir:
+        original_trace = tui.TRACE_PATH
+        tui.TRACE_PATH = str(Path(body_dir) / "trace.jsonl")
+        try:
+            dashboard.leave_review(review_stop)
+            callback["handler"]("approve")
+            callback["handler"]("unpreviewed body")
+            callback["handler"]((123, "not-a-body-file"))
+            check(not mutations and not list(Path(body_dir).rglob("*")),
+                  "malformed ReviewBody results must not create a file or mutate")
+        finally:
+            tui.TRACE_PATH = original_trace
+
+    # A syntactically valid foreign body tuple must not reach mutation or
+    # delete the file it names.
+    async with tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri())).run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if pilot.app.stops:
+                break
+            await pilot.pause(0.05)
+        app = pilot.app
+        captured = {}
+        original_push_screen = app.push_screen
+        app.push_screen = lambda screen, handler=None, *args, **kwargs: (
+            captured.update(handler=handler),
+            original_push_screen(screen, handler, *args, **kwargs),
+        )[1]
+        mutations = []
+        app.mutate_all = lambda *args, **kwargs: mutations.append(args)
+        app.leave_review(app.stops[0])
+        await pilot.pause()
+        await pilot.press("1")
+        await pilot.pause()
+        with tempfile.TemporaryDirectory(prefix="dashboard-foreign-body-") as foreign_dir:
+            foreign_path = Path(foreign_dir) / "foreign.md"
+            foreign_bytes = b"foreign body sentinel\n"
+            foreign_path.write_bytes(foreign_bytes)
+            captured["handler"](("foreign body", str(foreign_path)))
+            check(not mutations, "foreign ReviewBody results must not reach mutation")
+            check(foreign_path.read_bytes() == foreign_bytes,
+                  "foreign ReviewBody results must not delete or change their file")
+
     check(
         not tui.QueueFilters(repository="acme/widgets").live,
         "--repo owner/repo must remain a static snapshot filter",
@@ -525,10 +577,10 @@ async def main() -> int:
         await pilot.pause()
         check(app.screen is root_screen, "typed PR-number confirmation must remain functional")
 
-        app.push_screen(tui.ReviewBody("comment"))
+        app.push_screen(tui.ReviewBody(app.stops[0], "comment"))
         await pilot.pause()
         await pilot.press("q")
-        check(app.screen.query_one(tui.Input).value == "q", "q must type in the review body input")
+        check(app.screen.query_one(tui.TextArea).text == "q", "q must type in the review body editor")
         await pilot.press("escape")
         await pilot.pause()
         check(app.screen is root_screen, "Escape must close ReviewBody")
@@ -1181,7 +1233,13 @@ async def main() -> int:
                 f"a verdict must ask for a reason, got {type(app.screen).__name__}",
             )
             await pilot.press("n", "o", "p", "e")
-            await pilot.press("enter")
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            check(isinstance(app.screen, tui.ReviewBodyPreview),
+                  "a review body must be previewed before submission")
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("ctrl+s")
             await pilot.pause()
             check(
                 isinstance(app.screen, tui.ConfirmMutation),
@@ -1210,6 +1268,209 @@ async def main() -> int:
                 "pr merge" not in gh_log.read_text(),
                 "leaving a review must never merge",
             )
+
+    # ── editable, generated review bodies ───────────────────────────────
+    exact_markdown = "## Résumé\n\n- `literal [text]`\n- Unicode: café ☕\n\n\nfinal"
+    draft_calls = []
+    original_backend = tui.ACTIVE_BACKEND
+    original_draft = tui.CodexHarness.draft
+    original_probe = tui.CodexHarness.probe
+
+    def draft_body(self, request):
+        draft_calls.append(request)
+        return SimpleNamespace(state=tui.DraftState.COMPLETE, markdown="generated blocker", provenance={})
+
+    tui.CodexHarness.draft = draft_body
+    tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
+    tui.ACTIVE_BACKEND = "codex"
+    try:
+        for verdict, generated in (("approve", "accepted"), ("request-changes", "generated blocker"), ("comment", "observation")):
+            app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                for _ in range(200):
+                    if app.stops:
+                        break
+                    await pilot.pause(0.05)
+                stop = app.stops[0]
+                stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
+                stop.review_result = tui.ReviewResult(
+                    1, "complete" if verdict == "approve" else "findings",
+                    findings=() if verdict == "approve" else ({"severity": "high", "title": "blocker"},),
+                    provenance={"repository": "projectbluefin/bluefinctl", "pull_request": 31,
+                                "base_sha": "a" * 40, "head_sha": "b" * 40},
+                )
+                app.leave_review(stop)
+                await pilot.pause()
+                await pilot.press({"approve": "1", "request-changes": "2", "comment": "3"}[verdict])
+                await pilot.pause()
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "generated blocker",
+                      f"{verdict} generation must use the drafting capability")
+                await pilot.press("ctrl+e")
+                editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+                editor.text = exact_markdown
+                await pilot.press("ctrl+p")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBodyPreview), "preview must show before mutation")
+                check(exact_markdown in app.screen.body, "preview must preserve exact Markdown")
+                await pilot.press("escape")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBody), "preview cancel must return to editor")
+                app.screen.action_clear()
+                check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "",
+                      "clear must empty the editor")
+                app.screen.query_one("#review-body-editor", tui.TextArea).text = exact_markdown
+                await pilot.press("ctrl+s")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBody),
+                      "editing after preview must refuse submission")
+                check(any("preview" in notification.message.lower()
+                          for notification in app._notifications),
+                      "editing after preview must explain that re-preview is required")
+                await pilot.press("ctrl+p")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBodyPreview),
+                      "the changed body must be previewed again")
+                await pilot.press("escape")
+                await pilot.pause()
+                await pilot.press("ctrl+s")
+                for _ in range(20):
+                    if isinstance(app.screen, tui.ConfirmMutation):
+                        break
+                    await pilot.pause(0.05)
+                check(isinstance(app.screen, tui.ConfirmMutation), "submit must use the existing gate")
+                command = app.screen.commands[0]
+                check(command[:3] == ["gh", "pr", "review"], "submit must use gh pr review")
+                body_path = Path(command[command.index("--body-file") + 1])
+                check(body_path.read_text(encoding="utf-8") == exact_markdown,
+                      "body file must preserve exact Markdown")
+                await pilot.press(*app.screen.expected)
+                await pilot.press("escape")
+                check(not body_path.exists(), "cancelled mutation must clean the temporary body")
+        check(len(draft_calls) == 3, "all three verdicts must call drafting")
+    finally:
+        tui.ACTIVE_BACKEND = original_backend
+        tui.CodexHarness.draft = original_draft
+        tui.CodexHarness.probe = original_probe
+
+    # Missing Codex must degrade generation without touching manual prose.
+    unavailable_backend = tui.ACTIVE_BACKEND
+    original_unavailable_draft = tui.CodexHarness.draft
+    unavailable_probe_calls = []
+
+    def unavailable_probe(cls):
+        unavailable_probe_calls.append(True)
+        return tui.Availability.UNAVAILABLE_BINARY
+
+    def unavailable_draft(self, request):
+        raise FileNotFoundError("codex")
+
+    tui.CodexHarness.probe = classmethod(unavailable_probe)
+    tui.CodexHarness.draft = unavailable_draft
+    tui.ACTIVE_BACKEND = "codex"
+    try:
+        check(tui.ACTIVE_BACKEND == "codex",
+              "unavailable Codex pilot must explicitly select Codex")
+        app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            stop = app.stops[0]
+            stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
+            stop.review_result = tui.ReviewResult(
+                1, "findings", findings=({"severity": "high", "title": "blocker"},),
+                provenance={"repository": "projectbluefin/bluefinctl", "pull_request": 31,
+                            "base_sha": "a" * 40, "head_sha": "b" * 40},
+            )
+            app.leave_review(stop)
+            await pilot.pause()
+            await pilot.press("2")
+            await pilot.pause()
+            editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+            editor.text = "manual maintainer body"
+            app.screen.action_generate()
+            await pilot.pause()
+            check(editor.text == "manual maintainer body",
+                  "unavailable Codex must preserve the manual review body")
+            check(unavailable_probe_calls,
+                  "unavailable Codex must be reached during generation")
+            check(any("unavailable" in notification.message.lower()
+                      for notification in app._notifications),
+                  "unavailable Codex must show a degraded generation message")
+    finally:
+        tui.CodexHarness.probe = original_probe
+        tui.CodexHarness.draft = original_unavailable_draft
+        tui.ACTIVE_BACKEND = unavailable_backend
+        check(tui.ACTIVE_BACKEND == unavailable_backend,
+              "unavailable Codex pilot must restore the prior backend")
+
+    # Goose is the selected backend by default, but it does not draft bodies.
+    # It must degrade without invoking Codex or changing manual prose.
+    original_backend = tui.ACTIVE_BACKEND
+    original_draft = tui.CodexHarness.draft
+    original_probe = tui.CodexHarness.probe
+    codex_calls = []
+
+    def unexpected_codex(self, request):
+        codex_calls.append(request)
+        raise AssertionError("Goose body drafting must not invoke Codex")
+
+    tui.ACTIVE_BACKEND = "goose"
+    tui.CodexHarness.draft = unexpected_codex
+    tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
+    try:
+        app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            stop = app.stops[0]
+            stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
+            stop.review_result = tui.ReviewResult(
+                1, "findings", findings=({"severity": "high", "title": "blocker"},),
+                provenance={"repository": "projectbluefin/bluefinctl", "pull_request": 31,
+                            "base_sha": "a" * 40, "head_sha": "b" * 40},
+            )
+            app.leave_review(stop)
+            await pilot.pause()
+            await pilot.press("2")
+            await pilot.pause()
+            editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+            editor.text = "manual Goose body"
+            app.screen.action_generate()
+            await pilot.pause()
+            check(editor.text == "manual Goose body",
+                  "unsupported Goose drafting must preserve the manual review body")
+            check(any("unsupported" in notification.message.lower()
+                      for notification in app._notifications),
+                  "unsupported Goose drafting must show a degraded message")
+            check(not codex_calls, "Goose drafting must never invoke Codex")
+            editor.text = "x" * 4096
+            app.screen.action_preview()
+            await pilot.pause()
+            check(isinstance(app.screen, tui.ReviewBodyPreview),
+                  "a 4096-character body must be accepted")
+            await pilot.press("escape")
+            await pilot.pause()
+            editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+            editor.text = "x" * 4097
+            app.screen.action_preview()
+            await pilot.pause()
+            check(isinstance(app.screen, tui.ReviewBody),
+                  "an oversized body must remain editable")
+            check(app.screen.body_file is None,
+                  "an oversized body must not create a temporary file")
+    finally:
+        tui.ACTIVE_BACKEND = original_backend
+        tui.CodexHarness.probe = original_probe
+        tui.CodexHarness.draft = original_draft
 
     # A verdict that is not an approval has to say why.
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
