@@ -313,7 +313,8 @@ RUN --mount=type=secret,id=github_token set -eu; \
       -o "$workdir/goose.tar.gz"; \
     printf '%s  %s\n' "$goose_sha" "$workdir/goose.tar.gz" | sha256sum -c -; \
     gh attestation verify "$workdir/goose.tar.gz" --repo aaif-goose/goose --signer-workflow aaif-goose/goose/.github/workflows/canary.yml; \
-    tar -I 'python3 -m gzip' -xOf "$workdir/goose.tar.gz" --occurrence=1 ./goose > /usr/local/bin/goose; \
+    python3 -m gzip -d < "$workdir/goose.tar.gz" > "$workdir/goose.tar"; \
+    tar -xOf "$workdir/goose.tar" --occurrence=1 ./goose > /usr/local/bin/goose; \
     chmod 0755 /usr/local/bin/goose; \
     /usr/local/bin/goose --version; \
     /usr/local/bin/goose run --help >/dev/null
