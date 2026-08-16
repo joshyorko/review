@@ -70,12 +70,8 @@ MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
 MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
-# repositories, and adding a label that does not exist fails.
+# repositories; Hive's queue endpoint owns creating and applying it.
 QUEUE_LABEL = "lgtm"
-# Match the label the factory repositories that already have it use, rather
-# than minting a second look for the same thing.
-QUEUE_LABEL_COLOUR = "238636"
-QUEUE_LABEL_DESCRIPTION = "This PR has been approved by a maintainer"
 
 # The semantic registry is the source for bindings, help, and the command
 # palette. IDs are stable so clickable surfaces can consume the same contract.
@@ -765,15 +761,15 @@ class LandingScreen(Screen):
 
 
 class ConfirmMutation(ModalScreen[bool]):
-    """The single mutation gate: show the exact commands, require the typed
+    """The single mutation gate: show the exact operations, require the typed
     pull request number. Empty, wrong, or Esc aborts; there is no y/yes and
     no timeout.
 
-    One decision gates one sequence. Queueing a pull request is an approval
-    plus the lgtm label the sweep scans for, and reject is a comment plus a
-    close: splitting either into two gates asks a maintainer to confirm the
-    same decision twice, which trains them to type the number without reading
-    it. Every command that will run is shown here, before the one gate.
+    One decision gates one sequence. Queueing is one authenticated Hive request,
+    and reject is a comment plus a close: splitting either into two gates asks
+    a maintainer to confirm the same decision twice, which trains them to type
+    the number without reading it. Every command that will run is shown here,
+    before the one gate.
     """
 
     BINDINGS = back_bindings("dismiss(False)")
@@ -1634,10 +1630,6 @@ class ReviewDashboard(App):
         # old permanent "Hive: not consulted" amounted to.
         self.hive_state = ""
         self.hive_workers: list[dict] = []
-        # Repository -> whether the sweep's `lgtm` label exists there. It does
-        # not exist in most repositories, and `gh pr edit --add-label` fails
-        # on a label that was never defined.
-        self.queue_label_exists: dict[str, bool] = {}
         # Keys to re-select after a refresh: a refresh that silently empties
         # the batch you spent a minute building is worse than no refresh.
         self.reselect: set[str] = set()
@@ -2101,11 +2093,6 @@ class ReviewDashboard(App):
             self.merge_rights[stop.repository] = (
                 rights.returncode == 0 and rights.stdout.strip() == "true"
             )
-        if stop.repository not in self.queue_label_exists:
-            probe = gh(
-                "api", f"repos/{stop.repository}/labels/{QUEUE_LABEL}", "--jq", ".name"
-            )
-            self.queue_label_exists[stop.repository] = probe.returncode == 0
         self.call_from_thread(self.render_evidence, stop)
 
     def repo_pulls(self, repo: str) -> list[dict]:
@@ -2363,7 +2350,7 @@ class ReviewDashboard(App):
         self, stop: Stop, commands: list[list[str]], then=None, on_error=None,
         on_cancel=None,
     ) -> None:
-        """Run a sequence of gh mutations behind one typed-number gate.
+        """Run a sequence of mutations behind one typed-number gate.
 
         The sequence is the unit a maintainer decides on, so it is confirmed
         once and then runs to completion off the UI thread. A failed step
@@ -2387,8 +2374,8 @@ class ReviewDashboard(App):
     def run_mutations(
         self, stop: Stop, commands: list[list[str]], then, on_error=None
     ) -> None:
-        """Execute a confirmed sequence off the UI thread. A slow or hung gh
-        call must never freeze the dashboard, so each step is bounded by
+        """Execute a confirmed sequence off the UI thread. A slow or hung
+        mutation must never freeze the dashboard, so each step is bounded by
         MUTATION_TIMEOUT and reports back through call_from_thread."""
         for command in commands:
             try:
@@ -2746,38 +2733,33 @@ class ReviewDashboard(App):
         return True
 
     def _queue_automerge(self, stop: Stop, then=None) -> None:
-        """Queue for Hive auto-merge: post the exact approval the governor
-        sweep re-verifies, then add the label it scans for. The sweep enforces
-        the self-merge ban, requires green CI, and squash-merges.
+        """Ask Hive to queue this pull request through its governor contract.
 
-        The label does not exist in most repositories, and adding one that was
-        never defined fails — which used to leave the pull request formally
-        approved for an auto-merge that could never be picked up, because the
-        approval had already been submitted by then. The label is created
-        first when it is missing, so the sequence cannot end half-applied, and
-        the whole thing is one decision behind one gate.
+        The authenticated endpoint verifies merger standing and the self-merge
+        ban, then creates an exact-head approval as the Hive App and applies
+        the queue label. A review submitted by this human process cannot pass
+        Hive's App-authorship check (#247).
         """
-        body = f"Approved by @{self.self_login} for Hive auto-merge on green CI."
-        commands: list[list[str]] = []
-        if not self.queue_label_exists.get(stop.repository, True):
-            commands.append([
-                "gh", "label", "create", QUEUE_LABEL,
-                "--repo", stop.repository,
-                "--color", QUEUE_LABEL_COLOUR,
-                "--description", QUEUE_LABEL_DESCRIPTION,
-            ])
-        commands.append([
-            "gh", "pr", "review", str(stop.number),
-            "--repo", stop.repository, "--approve", "--body", body,
-        ])
-        commands.append([
-            "gh", "pr", "edit", str(stop.number),
-            "--repo", stop.repository, "--add-label", QUEUE_LABEL,
-        ])
+        base = hive_api_base()
+        if not base:
+            self.notify("Hive is unreachable; nothing was queued.", severity="warning")
+            return
+        owner, repository = stop.repository.split("/", 1)
+        endpoint = (
+            f"{base}/api/prs/{owner}/{repository}/{stop.number}/queue-automerge"
+        )
+        command = [
+            "sh",
+            "-c",
+            'exec curl --fail-with-body --location --silent --show-error '
+            '--request POST --header '
+            '"Authorization: Bearer ${GH_TOKEN:?GH_TOKEN is required}" "$1" >&2',
+            "bluefin-review-hive-queue",
+            endpoint,
+        ]
 
         def queued() -> None:
             stop.failure = ""
-            self.queue_label_exists[stop.repository] = True
             self.refresh_rows()
             if then:
                 then()
@@ -2790,7 +2772,7 @@ class ReviewDashboard(App):
             stop.selected = True
             self.refresh_rows()
 
-        self.mutate_all(stop, commands, then=queued, on_error=failed)
+        self.mutate_all(stop, [command], then=queued, on_error=failed)
 
     def action_merge(self) -> None:
         batch = [s for s in self.stops if s.selected]

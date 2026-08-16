@@ -87,6 +87,7 @@ async def main() -> int:
     # gh is read-only here: the pilot never lets a mutation reach a real
     # network, and any attempt to run one is recorded for the assertions.
     gh_log = workdir / "gh.log"
+    curl_log = workdir / "curl.log"
     diff_events = workdir / "diff-events.log"
     old_request_started = workdir / f"old-request-start-{workdir.name}"
     perm_file = workdir / "permissions.push"
@@ -115,7 +116,7 @@ async def main() -> int:
         '  if [ -n "${LIVE_PAGES-}" ]; then cat "$LIVE_QUEUE_FILE"; else printf "[%s]" "$(cat "$LIVE_QUEUE_FILE")"; fi; exit 0\n'
         'fi\n'
         'if [ "$1 $2" = "pr list" ]; then\n'
-        '  if [ -n "${LIVE_QUEUE_FILE-}" ]; then cat "$LIVE_QUEUE_FILE"; else echo "[]"; fi\n'
+        '  echo "[]"\n'
         '  exit 0\n'
         'fi\n'
         "exit 0\n",
@@ -123,6 +124,15 @@ async def main() -> int:
     os.environ["PATH"] = f"{workdir}:{os.environ['PATH']}"
     os.environ["XDG_STATE_HOME"] = str(workdir / "state")
     os.environ["BLUEFIN_REVIEW_QUEUE_URL"] = queue_file.as_uri()
+    os.environ["HIVE_HUB"] = "wss://hive.example.test/contribute"
+    os.environ["GH_TOKEN"] = "dashboard-pilot-token"
+    write_stub(
+        workdir / "curl",
+        f'printf "%s\\n" "$*" >>"{curl_log}"\n'
+        'if [ -n "${CURL_FAIL-}" ]; then '
+        'printf "Hive queue failed %s\\n" "$(printf "e%.0s" {1..300})" >&2; exit 1; fi\n'
+        'printf "%s\\n" \'{"status":"queued"}\'\n',
+    )
 
     review_log = workdir / "review.log"
     steer_log = workdir / "steer.log"
@@ -142,6 +152,45 @@ async def main() -> int:
     review_stub(0, "a finding")
 
     import bluefin_review_tui as tui
+
+    # Queueing belongs to Hive: its authenticated endpoint records the human
+    # actor, enforces merger standing and self-merge protection, then creates
+    # the exact-head approval as the Hive App. A human-authored `gh pr review`
+    # can never satisfy that governor contract (#247).
+    original_hive_hub = os.environ.get("HIVE_HUB")
+    os.environ["HIVE_HUB"] = "wss://hive.example.test/contribute"
+    try:
+        dashboard = tui.ReviewDashboard.__new__(tui.ReviewDashboard)
+        dashboard.self_login = "castrojo"
+        captured_queue = []
+        dashboard.mutate_all = lambda *args, **kwargs: captured_queue.append(args)
+        queue_stop = SimpleNamespace(
+            number=31,
+            repository="projectbluefin/bluefinctl",
+            live={"isDraft": False},
+        )
+        dashboard._queue_automerge(queue_stop)
+        queue_commands = captured_queue[0][1] if captured_queue else []
+        check(
+            len(queue_commands) == 1
+            and queue_commands[0][:2] == ["sh", "-c"]
+            and queue_commands[0][-1]
+            == "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge",
+            f"queueing must call Hive's App-authored queue endpoint once, got {queue_commands}",
+        )
+        check(
+            not any(command[:3] == ["gh", "pr", "review"] for command in queue_commands),
+            f"queueing must not create a human-authored approval, got {queue_commands}",
+        )
+        check(
+            "dashboard-pilot-token" not in shlex.join(queue_commands[0]),
+            "the confirmation and trace command must not contain the GitHub token",
+        )
+    finally:
+        if original_hive_hub is None:
+            os.environ.pop("HIVE_HUB", None)
+        else:
+            os.environ["HIVE_HUB"] = original_hive_hub
 
     # A malformed ReviewBody result is not preview-authorized and must be a
     # no-op, including no temporary file and no mutation.
@@ -345,6 +394,11 @@ async def main() -> int:
     ]))
     os.environ["LIVE_PAGES"] = "1"
     large_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    check(
+        large_app.cluster(tui.Stop("acme/widgets", 1, "review", "PR 1", "other"))
+        == ([], []),
+        "paginated live fixtures must remain valid for async overlap evidence",
+    )
     async with large_app.run_test() as pilot:
         await wait_for_live_rows(large_app, pilot, "ready", 202)
         check(len(large_app.stops) == 202,
@@ -1779,7 +1833,7 @@ async def main() -> int:
             "statusCheckRollup": [{"conclusion": "SUCCESS"}],
         }
         app.self_login = "castrojo"
-        app.queue_label_exists[stop.repository] = True
+        os.environ["CURL_FAIL"] = "1"
         app._queue_automerge(stop)
         await pilot.pause()
         check(isinstance(app.screen, tui.ConfirmMutation), "approve/queue must use the mutation gate")
@@ -1794,11 +1848,14 @@ async def main() -> int:
             details = str(app.query_one("#details", tui.Static).render())
             check(
                 len(stop.failure) > 200
-                and "--body 'Approved by @castrojo for Hive auto-merge on green CI.'" in stop.failure_command
+                and stop.failure_command.endswith(
+                    "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
+                )
                 and "LAST MUTATION FAILURE" in details
                 and stop.failure in details,
                 "failed approve/queue must durably show complete stderr and quoted argv",
             )
+            os.environ.pop("CURL_FAIL", None)
             stop.failure = ""
             app.mutate_all(
                 stop,
@@ -1835,10 +1892,7 @@ async def main() -> int:
     )
     gh_log.write_text("")
 
-    # ── queueing must not half-apply when the label is missing (#141) ────
-    # Reported from the field: the approval landed, `gh pr edit --add-label
-    # lgtm` failed with "'lgtm' not found", and the pull request was left
-    # formally approved for an auto-merge that could never be picked up.
+    # ── Hive owns the App approval and queue label atomically (#247) ──────
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1849,8 +1903,8 @@ async def main() -> int:
         app.self_login = "castrojo"
         stop = app.stops[0]
         stop.live = {"isDraft": False}
-        app.queue_label_exists[stop.repository] = False
         gh_log.write_text("")
+        curl_log.write_text("")
         app.action_merge()
         await pilot.pause()
         check(
@@ -1858,44 +1912,26 @@ async def main() -> int:
             "queueing must still gate when the label is missing",
         )
         if isinstance(app.screen, tui.ConfirmMutation):
-            verbs = [tuple(c[:3]) for c in app.screen.commands]
             check(
-                verbs
-                == [
-                    ("gh", "label", "create"),
-                    ("gh", "pr", "review"),
-                    ("gh", "pr", "edit"),
-                ],
-                f"a missing label must be created before the approval, got {verbs}",
-            )
-            check(
-                tui.QUEUE_LABEL_COLOUR == "238636",
-                "the created label must match the one the factory already uses",
+                len(app.screen.commands) == 1
+                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][-1].endswith(
+                    "/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
+                ),
+                f"queueing must show one Hive request, got {app.screen.commands}",
             )
             await pilot.press(*app.screen.expected)
             await pilot.press("enter")
             for _ in range(200):
-                if "pr edit" in gh_log.read_text():
+                if "queue-automerge" in curl_log.read_text():
                     break
                 await pilot.pause(0.05)
-            ran = gh_log.read_text()
             check(
-                ran.index("label create") < ran.index("pr review"),
-                "the label must exist before the approval is submitted",
+                "queue-automerge" in curl_log.read_text()
+                and "pr review" not in gh_log.read_text()
+                and "pr edit" not in gh_log.read_text(),
+                "Hive must queue without a human review or direct label mutation",
             )
-        # With the label present, nothing extra is run.
-        app.queue_label_exists[stop.repository] = True
-        gh_log.write_text("")
-        app.action_merge()
-        await pilot.pause()
-        if isinstance(app.screen, tui.ConfirmMutation):
-            check(
-                [tuple(c[:3]) for c in app.screen.commands]
-                == [("gh", "pr", "review"), ("gh", "pr", "edit")],
-                "an existing label must not be created again",
-            )
-            await pilot.press("escape")
-            await pilot.pause()
     gh_log.write_text("")
 
     # ── two key lines, colour by state, refresh, and update-branch ───────
@@ -2413,9 +2449,8 @@ async def main() -> int:
         command = args[0] if args else kwargs.get("args")
         if (
             isinstance(command, (list, tuple))
-            and len(command) > 2
-            and command[1] == "pr"
-            and command[2] in {"review", "edit"}
+            and command[:2] == ["sh", "-c"]
+            and str(command[-1]).endswith("/queue-automerge")
         ):
             time.sleep(2)
             return subprocess.CompletedProcess(command, 0, "", "")
@@ -2451,7 +2486,7 @@ async def main() -> int:
             gaps = [b - a for a, b in zip(ticks, ticks[1:])]
             check(
                 bool(gaps) and max(gaps) < 1,
-                "a slow gh mutation must run off the UI thread, "
+                "a slow queue mutation must run off the UI thread, "
                 f"but the event loop stalled {max(gaps) if gaps else 0:.2f}s",
             )
     finally:
@@ -2561,8 +2596,9 @@ async def main() -> int:
         if isinstance(app.screen, tui.ConfirmMutation):
             check(
                 app.screen.expected == "31"
-                and [command[:3] for command in app.screen.commands]
-                == [["gh", "pr", "review"], ["gh", "pr", "edit"]],
+                and len(app.screen.commands) == 1
+                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][-1].endswith("/queue-automerge"),
                 f"the card must preserve the queue action, got {app.screen.commands}",
             )
             await pilot.press("escape")
