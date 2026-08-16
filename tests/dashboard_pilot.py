@@ -116,7 +116,7 @@ async def main() -> int:
         '  if [ -n "${LIVE_PAGES-}" ]; then cat "$LIVE_QUEUE_FILE"; else printf "[%s]" "$(cat "$LIVE_QUEUE_FILE")"; fi; exit 0\n'
         'fi\n'
         'if [ "$1 $2" = "pr list" ]; then\n'
-        '  if [ -n "${LIVE_QUEUE_FILE-}" ]; then cat "$LIVE_QUEUE_FILE"; else echo "[]"; fi\n'
+        '  echo "[]"\n'
         '  exit 0\n'
         'fi\n'
         "exit 0\n",
@@ -394,6 +394,11 @@ async def main() -> int:
     ]))
     os.environ["LIVE_PAGES"] = "1"
     large_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    check(
+        large_app.cluster(tui.Stop("acme/widgets", 1, "review", "PR 1", "other"))
+        == ([], []),
+        "paginated live fixtures must remain valid for async overlap evidence",
+    )
     async with large_app.run_test() as pilot:
         await wait_for_live_rows(large_app, pilot, "ready", 202)
         check(len(large_app.stops) == 202,
