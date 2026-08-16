@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "1.3"
-last_updated: 2026-08-14
+version: "1.4"
+last_updated: 2026-08-16
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -91,8 +91,8 @@ adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
 
 ## Core Process
 
-1. **Every mutation goes through `mutate_all()`.** It shows the exact `gh`
-   commands and runs nothing until the maintainer types the pull request
+1. **Every mutation goes through `mutate_all()`.** It shows the exact command
+   or Hive request and runs nothing until the maintainer types the pull request
    number. The read-only `gh()` helper must never carry a mutating verb.
 2. **One decision is one gate.** An action needing several `gh` calls passes
    them all to a single `mutate_all()` so the whole sequence is confirmed
@@ -213,8 +213,9 @@ distinct states. `[o]` is only an optional browser escape hatch.
   which is duplicate evidence about the subject and says nothing about whether
   the branch can be brought current; `dependency_subject()` survives for
   duplicate detection only.
-- **Distinguish the merge paths.** Unselected, `a` approves and applies
-  `lgtm`, an opt-in to Hive's sweep. On a selection, `a` dispatches one
+- **Distinguish the merge paths.** Unselected, `a` asks Hive to create the
+  App-authored exact-head approval and apply `lgtm`, an opt-in to its sweep.
+  On a selection, `a` dispatches one
   landing agent for the whole batch. `m` squashes now and is gated on
   GitHub's `push` permission, read per repository. `L` leaves a review and
   merges nothing. A review that can only be given by also queueing or
