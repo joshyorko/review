@@ -145,10 +145,15 @@ require_copilot_provider() {
 }
 require_goose_backend() {
   local requested="${1:-}"
-  [[ -z "$requested" || "$requested" == goose || "$requested" == pi ]] && return 0
-  echo "ERROR: TOOL=${requested} is not supported — review supports Goose and Pi." >&2
-  echo "  Unset TOOL, or pass TOOL=goose or TOOL=pi." >&2
+  [[ -z "$requested" || "$requested" == goose || "$requested" == pi || "$requested" == codex ]] && return 0
+  echo "ERROR: TOOL=${requested} is not supported — review supports Goose, Codex, and Pi." >&2
+  echo "  Unset TOOL, or pass TOOL=goose, TOOL=codex, or TOOL=pi." >&2
   return 1
+}
+codex_auth_configured() {
+  local codex_home="${CODEX_HOME:-${HOME}/.codex}"
+  local auth_file="${codex_home%/}/auth.json"
+  [[ -s "$auth_file" && -r "$auth_file" ]]
 }
 preflight_agent() {
   local backend="${1:-goose}"
@@ -157,6 +162,12 @@ preflight_agent() {
     [[ -n "${PI_API_KEY:-}" ]] || {
       echo "ERROR: Pi requires PI_API_KEY for the selected Anthropic provider." >&2
       echo "  Export PI_API_KEY before running TOOL=pi just review-container." >&2
+      return 1
+    }
+  elif [[ "$backend" == codex ]]; then
+    codex_auth_configured || {
+      echo "ERROR: Codex subscription login is unavailable for the selected backend." >&2
+      echo "  Run 'codex login' with file credential storage, then re-run TOOL=codex just review-container." >&2
       return 1
     }
   else
@@ -275,6 +286,7 @@ require_no_running_instance() {
   fi
   owner_pid="$(container_owner_pid "$name")"
   if [[ -z "$owner_pid" ]]; then
+    cleanup_codex_auth_staging_dir "$(podman inspect --format '{{index .Config.Labels "review.codex-auth"}}' "$name" 2>/dev/null || true)"
     echo "✓ reclaiming ${name} from a run whose terminal is gone."
     return 0
   fi
@@ -450,7 +462,7 @@ resolve_codex_auth_file() {
   return 0
 }
 stage_codex_auth_file() {
-  local stage_root="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+  local stage_root=/tmp
   CODEX_AUTH_FILE=""
   CODEX_AUTH_STAGING_DIR=""
   resolve_codex_auth_file
@@ -473,6 +485,21 @@ cleanup_codex_auth_file() {
   CODEX_AUTH_FILE=""
   CODEX_AUTH_STAGING_DIR=""
   return 0
+}
+cleanup_codex_auth_staging_dir() {
+  local staging_dir="${1:-}" invoking_uid
+  local stage_root=/tmp
+  invoking_uid="$(id -u)"
+  [[ "$staging_dir" =~ ^${stage_root%/}/review-codex-auth\.[[:alnum:]]{6}$ ]] || return 0
+  [[ -d "$staging_dir" && ! -L "$staging_dir" ]] || return 0
+  [[ -f "$staging_dir/auth.json" && ! -L "$staging_dir/auth.json" ]] || return 0
+  [[ "$(stat -c %u "$staging_dir")" == "$invoking_uid" ]] || return 0
+  [[ "$(stat -c %a "$staging_dir")" == 700 ]] || return 0
+  [[ "$(stat -c %u "$staging_dir/auth.json")" == "$invoking_uid" ]] || return 0
+  [[ "$(stat -c %a "$staging_dir/auth.json")" == 600 ]] || return 0
+  [[ "$(find "$staging_dir" -mindepth 1 -maxdepth 1 -print | wc -l)" == 1 ]] || return 0
+  rm -f -- "${staging_dir}/auth.json"
+  rmdir -- "$staging_dir" 2>/dev/null || true
 }
 resolve_review_backend() {
   REVIEW_BACKEND="${BLUEFIN_REVIEW_BACKEND:-}"
@@ -775,7 +802,7 @@ review-container profile="" effort="":
     resolve_model_profile "{{profile}}" "{{effort}}"
     if [[ "$BACKEND" == pi ]]; then
       export ANTHROPIC_API_KEY="$PI_API_KEY"
-    else
+    elif [[ "$BACKEND" == goose ]]; then
       resolve_goose_selection
     fi
     REVIEW_RECIPE=review-container
@@ -853,6 +880,16 @@ review-container profile="" effort="":
       CONTAINER_ARGS+=(--env ANTHROPIC_API_KEY)
       echo "✓ Pi credential passed to the agent (value not shown)."
     fi
+    CODEX_AUTH_STAGING_DIR=""
+    trap cleanup_codex_auth_file EXIT
+    if [[ "$BACKEND" == codex ]]; then
+      stage_codex_auth_file
+      if [[ "$DETACH" == 1 ]]; then
+        CONTAINER_ARGS+=(--label "review.codex-auth=${CODEX_AUTH_STAGING_DIR}")
+      fi
+      CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
+      echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+    fi
     resolve_gh_token
     if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then
       export GH_TOKEN="$GH_TOKEN_VALUE"
@@ -873,6 +910,20 @@ review-container profile="" effort="":
       echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
       echo "  Stop any time with Ctrl-C."
     fi
+    if [[ "$BACKEND" == codex ]]; then
+      if "${CONTAINER_ARGS[@]}"; then
+        status=0
+      else
+        status=$?
+        cleanup_codex_auth_file
+      fi
+      if [[ "$DETACH" == 1 && "$status" == 0 ]]; then
+        trap - EXIT
+      else
+        cleanup_codex_auth_file
+      fi
+      exit "$status"
+    fi
     exec "${CONTAINER_ARGS[@]}"
 
 # Stop a detached review worker. This is the explicit lifecycle verb for
@@ -883,6 +934,7 @@ review-container profile="" effort="":
 review-stop name="review-container":
     #!/usr/bin/env bash
     set -euo pipefail
+    {{shared_functions}}
     NAME="{{name}}"
     [[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || {
       echo "ERROR: '${NAME}' is not a valid container name." >&2
@@ -901,7 +953,9 @@ review-stop name="review-container":
       echo "ERROR: ${NAME} is an attended run; press Ctrl-C in its terminal instead." >&2
       exit 1
     fi
+    codex_auth_staging_dir="$(podman inspect --format '{{{{index .Config.Labels "review.codex-auth"}}' "$NAME" 2>/dev/null || true)"
     podman stop "$NAME" >/dev/null
+    cleanup_codex_auth_staging_dir "$codex_auth_staging_dir"
     echo "✓ stopped the detached worker ${NAME}."
 
 # The maintainer review dashboard over the Bluefin PR queue — no Hive.

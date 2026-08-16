@@ -6,8 +6,8 @@
 # never starts a real container, and never
 # depends on what happens to be installed on the developer's machine.
 #
-# Host preflight remains Goose/Pi-specific. Codex discovery runs inside the
-# maintainer image, with only its subscription login cache handed through.
+# Host preflight is backend-specific. Codex contributor runs use only their
+# subscription login cache; Goose configuration and Copilot are not required.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -184,6 +184,10 @@ case "${1:-}" in
         printf '%s\n' "${FAKE_PODMAN_OWNER_LABEL:-}"
         exit 0
         ;;
+      *review.codex-auth*)
+        printf '%s\n' "${FAKE_PODMAN_CODEX_AUTH_LABEL:-}"
+        exit 0
+        ;;
     esac
     [[ "${FAKE_PODMAN_RUNNING:-0}" == 1 ]] || { echo false; exit 1; }
     echo true
@@ -235,9 +239,13 @@ while (($#)); do
       esac
       shift 2
       ;;
+    --detach) detached=true; shift ;;
     *) shift ;;
   esac
 done
+if [[ "${FAKE_PODMAN_DETACH_SUCCESS:-0}" == 1 && "${detached:-false}" == true ]]; then
+  exit 0
+fi
 exit 97
 EOF
 chmod +x "$fake_bin"/*
@@ -289,6 +297,7 @@ run_recipe() {
       -u GOOSE_THINKING_EFFORT -u GOOSE_CONTEXT_LIMIT \
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
+      -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
       -u REVIEW_QUEUE_NAME \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
@@ -358,12 +367,12 @@ assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "GOOSE_PROVIDER=openai is not supported" "$OUT"
 assert_contains "GOOSE_PROVIDER=github_copilot" "$OUT"
 
-# ══ 2. TOOL handling: Goose only ══════════════════════════════════════════
+# ══ 2. TOOL handling: selected backends ════════════════════════════════════
 begin "TOOL=claude is rejected with a Goose-only error"
 run_recipe review-container GH_READY=1 TOOL=claude
 assert_nonzero_status "$STATUS" "a non-Goose TOOL must be a hard error"
 assert_contains "TOOL=claude is not supported" "$OUT"
-assert_contains "review supports Goose and Pi" "$OUT"
+assert_contains "review supports Goose, Codex, and Pi" "$OUT"
 assert_not_contains "auto-detected" "$OUT"
 assert_not_contains "Multiple AI CLIs" "$OUT"
 
@@ -390,6 +399,28 @@ run_recipe review-container GH_READY=1 TOOL=pi
 assert_nonzero_status "$STATUS" "Pi without a credential must fail preflight"
 assert_contains "Pi requires PI_API_KEY" "$OUT"
 assert_file_not_contains "run --rm" "$runner_log"
+
+begin "TOOL=codex uses subscription auth without Goose or Copilot"
+reset_logs
+rm -f "$home/.config/goose/config.yaml"
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-container GH_READY=1 TOOL=codex
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
+assert_not_contains "Goose has no usable provider configuration" "$OUT"
+assert_not_contains "Copilot" "$OUT"
+assert_file_contains "--env AGENT_BACKEND=codex" "$runner_log"
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_contains "/tmp/review-codex-auth." "$codex_auth_mount"
+[[ "$codex_auth_mount" != "$home/.codex/auth.json" ]] || fail "host Codex auth must not be mounted directly"
+assert_file_not_contains "codex-test-secret" "$runner_log"
+assert_file_not_contains "codex-test-secret" "$OUT"
+assert_file_not_exists "$codex_auth_mount"
+assert_file_contains "codex-test-secret" "$home/.codex/auth.json"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
+write_goose_config
 
 begin "selection: default Copilot model is noninteractive"
 reset_logs
@@ -517,7 +548,7 @@ chmod 0400 "$home/.codex/auth.json"
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   BLUEFIN_REVIEW_BACKEND=codex
 codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
-assert_contains "${tmp_root}/" "$codex_auth_mount"
+assert_contains "/tmp/review-codex-auth." "$codex_auth_mount"
 [[ "$codex_auth_mount" != "$home/.codex/auth.json" ]] || fail "host Codex auth must not be mounted directly"
 assert_file_contains "CODEX_AUTH_DIRECT:no" "$credential_log"
 assert_file_not_exists "$codex_auth_mount"
@@ -641,6 +672,111 @@ assert_file_not_contains "--interactive" "$runner_log"
 assert_file_not_contains "--tty" "$runner_log"
 assert_contains "just review-stop review-container" "$OUT"
 assert_contains "podman logs -f review-container" "$OUT"
+
+begin "review-container: detached Codex auth survives until review-stop"
+reset_logs
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1 FAKE_PODMAN_DETACH_SUCCESS=1
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_file_exists "$codex_auth_mount"
+assert_file_contains "--label review.codex-auth=" "$runner_log"
+auth_label="$(sed -n 's/.*--label review.codex-auth=\([^ ]*\).*/\1/p' "$runner_log")"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached \
+  FAKE_PODMAN_CODEX_AUTH_LABEL="$auth_label" XDG_RUNTIME_DIR= TMPDIR=/tmp
+assert_file_not_exists "$codex_auth_mount"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
+
+begin "review-container: stale Codex auth cleanup survives runtime drift"
+reset_logs
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1 \
+  FAKE_PODMAN_DETACH_SUCCESS=1
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_file_exists "$codex_auth_mount"
+auth_label="$(sed -n 's/.*--label review.codex-auth=\([^ ]*\).*/\1/p' "$runner_log")"
+run_recipe review-container GH_READY=1 TOOL=codex FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_CODEX_AUTH_LABEL="$auth_label" XDG_RUNTIME_DIR= TMPDIR=/tmp
+assert_file_not_exists "$codex_auth_mount"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
+
+begin "review-container: failed detached Codex launch removes staged auth"
+reset_logs
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_nonzero_status "$STATUS" "failed detached launch must fail"
+assert_file_not_exists "$codex_auth_mount"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
+
+begin "review-stop: ignores unsafe Codex auth labels"
+reset_logs
+outside_dir="$scratch/outside-review-codex-auth.ABCDEF"
+mkdir -p "$outside_dir"
+printf secret >"$outside_dir/auth.json"
+for unsafe_label in \
+  "$outside_dir" \
+  "/tmp/review-codex-auth.ABCDE" \
+  "/tmp/review-codex-auth.ABCDEFG" \
+  "/tmp/review-codex-auth.ABCDEF/../outside-review-codex-auth.ABCDEF"; do
+  run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+    FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$unsafe_label"
+  assert_zero_status "$STATUS" "unsafe auth label must not make review-stop fail"
+  assert_file_exists "$outside_dir/auth.json"
+done
+symlink_stage="/tmp/review-codex-auth.SYMLNK"
+ln -s "$outside_dir" "$symlink_stage"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$symlink_stage"
+assert_file_exists "$outside_dir/auth.json"
+rm -f "$symlink_stage"
+extra_stage="/tmp/review-codex-auth.EXTRA1"
+mkdir -p "$extra_stage"
+printf secret >"$extra_stage/auth.json"
+printf extra >"$extra_stage/extra"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$extra_stage"
+assert_file_exists "$extra_stage/auth.json"
+rm -f "$extra_stage/auth.json" "$extra_stage/extra"
+rmdir "$extra_stage"
+rm -f "$outside_dir/auth.json"
+rmdir "$outside_dir"
+
+begin "review-stop: valid Codex auth label requires a private exact staging directory"
+reset_logs
+valid_stage="/tmp/review-codex-auth.ABCDEF"
+mkdir -p "$valid_stage"
+printf secret >"$valid_stage/auth.json"
+chmod 0700 "$valid_stage"
+chmod 0600 "$valid_stage/auth.json"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$valid_stage"
+assert_zero_status "$STATUS" "valid auth label cleanup must succeed"
+assert_file_not_exists "$valid_stage"
+
+begin "review-stop: public Codex auth staging remains untouched"
+reset_logs
+public_dir="/tmp/review-codex-auth.ABCDEF"
+mkdir -p "$public_dir"
+printf secret >"$public_dir/auth.json"
+chmod 0755 "$public_dir"
+chmod 0644 "$public_dir/auth.json"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$public_dir"
+assert_zero_status "$STATUS" "public auth staging must not make review-stop fail"
+assert_file_exists "$public_dir/auth.json"
+assert_eq "755" "$(stat -c '%a' "$public_dir")" "public staging directory mode changed"
+assert_eq "644" "$(stat -c '%a' "$public_dir/auth.json")" "public auth file mode changed"
+rm -f "$public_dir/auth.json"
+rmdir "$public_dir"
 
 begin "review-container: a running detached worker is never reclaimed"
 reset_logs
@@ -1261,6 +1397,19 @@ begin "static: ownership is proven from the label, never guessed"
 if grep -n 'pgrep' "$code"; then
   fail "container ownership must come from the owner label, not a pgrep heuristic"
 fi
+
+begin "static: Codex cleanup requires invoking ownership and private modes"
+cleanup_body="$(sed -n '/^cleanup_codex_auth_staging_dir()/,/^}/p' "$code")"
+grep -Fq "stat -c %u \"\$staging_dir\"" <<<"$cleanup_body" ||
+  fail "Codex cleanup must inspect staging-directory ownership"
+grep -Fq "stat -c %a \"\$staging_dir\"" <<<"$cleanup_body" ||
+  fail "Codex cleanup must inspect staging-directory mode"
+grep -Fq "stat -c %u \"\$staging_dir/auth.json\"" <<<"$cleanup_body" ||
+  fail "Codex cleanup must inspect auth-file ownership"
+grep -Fq "stat -c %a \"\$staging_dir/auth.json\"" <<<"$cleanup_body" ||
+  fail "Codex cleanup must inspect auth-file mode"
+grep -Fq 'id -u' <<<"$cleanup_body" ||
+  fail "Codex cleanup must compare ownership with the invoking UID"
 
 begin "static: nothing here filters the work Hive assigns"
 # Hive's selectTask is the sole authority on what gets worked on: the hub's
