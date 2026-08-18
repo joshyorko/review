@@ -97,8 +97,26 @@ def main() -> None:
         network = hive_api.request("http://127.0.0.1:1/status", "secret-token", timeout=0.1)
         check(network.message == "network error", str(network))
 
+        malformed_url = hive_api.request("https://[", "secret-token")
+        check(not malformed_url.ok, "malformed Hive URL must fail")
+        check(malformed_url.category == "configuration", str(malformed_url))
+        check(malformed_url.message == "invalid Hive API URL", str(malformed_url))
+        check("secret-token" not in json.dumps(malformed_url.as_dict()), "URL error leaked token")
+
         env = {**os.environ, "GH_TOKEN": "secret-token"}
         helper = str(ROOT / "image" / "tui" / "hive_api.py")
+        malformed_cli = subprocess.run(
+            [sys.executable, helper, "queue", "https://["],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=5,
+        )
+        check(malformed_cli.returncode != 0, "malformed queue URL must fail")
+        check("invalid Hive API URL" in malformed_cli.stderr, malformed_cli.stderr)
+        check("Traceback" not in malformed_cli.stderr, "URL failure leaked a traceback")
+        check("secret-token" not in malformed_cli.stderr, "URL failure leaked token")
+
         redirected = subprocess.run(
             [sys.executable, helper, "queue", f"{base}/queue-redirect"],
             capture_output=True,

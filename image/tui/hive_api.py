@@ -73,14 +73,17 @@ def request(
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in token):
         return _failure("authentication", "invalid authentication token")
     client = opener or urllib.request.build_opener(NoRedirect())
-    http_request = urllib.request.Request(
-        url,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-        },
-    )
+    try:
+        http_request = urllib.request.Request(
+            url,
+            method=method,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            },
+        )
+    except ValueError:
+        return _failure("configuration", "invalid Hive API URL")
     try:
         with client.open(http_request, timeout=timeout) as response:
             code = response.getcode()
