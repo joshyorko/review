@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "1.4"
-last_updated: 2026-08-16
+version: "1.5"
+last_updated: 2026-08-18
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -197,6 +197,12 @@ distinct states. `[o]` is only an optional browser escape hatch.
 - **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
   request whose snapshot or fetched live evidence says CI failed or is
   pending; GitHub branch protection remains an additional gate.
+- **Roll up checks at the exact current head.** Fetch `headRefOid` and
+  `statusCheckRollup` in the same `gh pr view`, group check runs by workflow
+  and job name (commit statuses by context), and use only the newest run in
+  each stable context. Superseded cancellations do not make a successful
+  rerun fail; authoritative failures, cancellations, pending checks, absent
+  checks, and GitHub's merge state remain separate evidence.
 - **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate

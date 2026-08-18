@@ -2150,6 +2150,67 @@ async def main() -> int:
         tui.mechanical_reason(bot, {}) is None,
         "MECHANICAL must require live evidence, never absence of it",
     )
+
+    # GitHub may return multiple runs for one check context at the exact head.
+    # The current run is authoritative; a cancelled predecessor must not make
+    # clean live evidence look failed or appear twice in review verification.
+    superseded = json.loads(
+        (FIXTURE_DIR / "superseded-check-rollup.json").read_text()
+    )
+    check(
+        tui.effective_check_state("unknown", superseded) == "success",
+        "a successful current run must supersede a cancelled older run",
+    )
+    check(
+        tui.live_review_context(superseded)["ci"] == "success",
+        "review context must agree with the exact-head check rollup",
+    )
+    check(
+        len(tui.live_review_verification(superseded)) == 5,
+        "review verification must contain one authoritative record per stable context",
+    )
+
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+        stop.live = superseded
+        app.render_evidence(stop)
+        details = str(app.query_one("#details", tui.Static).render())
+        check(
+            "checks   5 ok, 0 failed, 0 cancelled, 0 pending" in details
+            and "MERGEABLE / CLEAN" in details,
+            "the dashboard must render exact-head authoritative checks and merge state",
+        )
+        current_states = json.loads(json.dumps(superseded))
+        current_states["mergeStateStatus"] = "BLOCKED"
+        current_states["statusCheckRollup"][2]["conclusion"] = None
+        current_states["statusCheckRollup"][2]["status"] = "IN_PROGRESS"
+        current_states["statusCheckRollup"][5]["conclusion"] = "FAILURE"
+        current_states["statusCheckRollup"][7]["conclusion"] = "CANCELLED"
+        stop.live = current_states
+        app.render_evidence(stop)
+        details = str(app.query_one("#details", tui.Static).render())
+        check(
+            "checks   2 ok, 1 failed, 1 cancelled, 1 pending" in details
+            and "MERGEABLE / BLOCKED" in details,
+            "current failures, cancellations, pending checks, and merge blockers must stay distinct",
+        )
+        missing_required = {
+            "headRefOid": superseded["headRefOid"],
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BLOCKED",
+            "statusCheckRollup": [],
+        }
+        check(
+            tui.live_review_context(missing_required)["ci"] == "unknown"
+            and tui.live_review_context(missing_required)["merge_state"] == "BLOCKED",
+            "missing required contexts must remain unknown beside GitHub's blocked merge state",
+        )
     check(
         tui.mechanical_reason(
             "castrojo", live_shape(author={"login": "castrojo"})
