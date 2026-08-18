@@ -351,6 +351,8 @@ async def main() -> int:
     await assert_live_state("network timeout", "error", "network timeout")
     await assert_live_state("authentication required", "inaccessible", "authentication required")
 
+    os.environ.pop("LIVE_GH_ERROR", None)
+    os.environ.pop("LIVE_PAGES", None)
     malformed_repo = tui.ReviewDashboard(tui.QueueFilters(live_repository="not-a-repo"))
     async with malformed_repo.run_test() as pilot:
         await wait_for_state(malformed_repo, pilot, "malformed")
@@ -1655,8 +1657,9 @@ async def main() -> int:
     def goose_draft(self, request):
         goose_calls.append(request)
         return SimpleNamespace(
-            tui.DraftState.COMPLETE, "generated Goose body",
-            {"backend": "goose", "model": self.model, "effort": self.effort},
+            state=tui.DraftState.COMPLETE,
+            markdown="generated Goose body",
+            provenance={"backend": "goose", "model": self.model, "effort": self.effort},
         )
 
     tui.ACTIVE_BACKEND = "goose"
