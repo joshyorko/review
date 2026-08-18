@@ -46,6 +46,7 @@ from textual.widgets import (
     TextArea,
 )
 from review_result import ReviewResult, adapt_current_engine
+from semantic_view import build_decision_card
 import landing
 import hive_api
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -614,7 +615,7 @@ class Stop:
         return mechanical_reason(self.author, self.live)
 
 
-def live_review_context(live: dict) -> dict:
+def live_review_context(live: dict, *, title: str = "") -> dict:
     checks = authoritative_checks(live)
     outcomes = [
         str(item.get("conclusion") or item.get("state") or "PENDING").upper()
@@ -630,11 +631,14 @@ def live_review_context(live: dict) -> dict:
         ci = "pending"
     else:
         ci = "unknown"
+    head_sha = str(live.get("headRefOid") or "")
     return {
         "ci": ci,
         "mergeable": live.get("mergeable") or "?",
         "merge_state": live.get("mergeStateStatus") or "?",
-        "head": str(live.get("headRefOid") or "?")[:12],
+        "head": (head_sha or "?")[:12],
+        "head_sha": head_sha,
+        "title": title or live.get("title") or "",
         "draft": live.get("isDraft", "?"),
     }
 
@@ -1472,6 +1476,7 @@ class ReviewScreen(Screen):
         self.finished = True
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
+        live_context = live_review_context(stop.live, title=stop.title)
         if ACTIVE_BACKEND == "codex":
             base_sha = str(stop.live.get("baseRefOid") or "")
             head_sha = str(stop.live.get("headRefOid") or "")
@@ -1490,7 +1495,7 @@ class ReviewScreen(Screen):
                 result = ReviewResult(
                     result.version, result.state, result.counts, result.findings,
                     live_review_verification(stop.live), result.provenance,
-                    stop.overlap, live_review_context(stop.live), result.raw_evidence,
+                    stop.overlap, live_context, result.raw_evidence,
                 )
         else:
             result = adapt_current_engine(
@@ -1500,7 +1505,7 @@ class ReviewScreen(Screen):
                  "repository": stop.repository, "pull_request": stop.number},
                 verification=live_review_verification(stop.live),
                 overlap=stop.overlap,
-                live=live_review_context(stop.live),
+                live=live_context,
             )
         if ACTIVE_BACKEND == "codex" and len(str(stop.live.get("baseRefOid") or "")) == 40 and len(str(stop.live.get("headRefOid") or "")) == 40:
             request = ReviewRequest(
@@ -1544,33 +1549,41 @@ class ReviewScreen(Screen):
             f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
             f"{escape(state)} ({elapsed}s) — {escape('[escape]')} closes"
         )
-        finding_total = sum(result.counts.values())
-        headline = (
-            "No evidenced findings."
-            if result.is_clean else
-            f"{finding_total} evidenced finding{'s' if finding_total != 1 else ''}."
-            if result.state == "findings" else
-            "No clean decision: inspect raw evidence."
+        card = build_decision_card(
+            result, exact_head=str(stop.live.get("headRefOid") or "")
         )
+        finding_total = sum(card.counts.values())
         lines = [
-            f"{result.state.upper()}  {escape(stop.key)} — {headline}",
+            f"{card.state.value.upper()}  {escape(stop.key)}",
+            f"what changed  {escape(card.summary.what_changed)}",
+            f"risk/impact  {escape(card.summary.risk_impact)}",
+            f"confidence  {escape(card.summary.ci_merge_state)} · head "
+            f"{escape(card.freshness.label)} "
+            f"{escape((card.exact_head or card.reviewed_head or '?')[:12])}",
+            f"next action  {escape(card.summary.recommended_action)}",
+            (
+                f"findings  {finding_total} evidenced finding"
+                f"{'s' if finding_total != 1 else ''}."
+                if card.findings
+                else "findings  No evidenced findings."
+            ),
             "severity  "
             + "  ".join(
-                f"{key}:{result.counts[key]}"
+                f"{key}:{card.counts[key]}"
                 for key in ("critical", "high", "medium", "low")
             ),
         ]
-        for finding in result.findings[:5]:
+        for finding in card.findings[:5]:
             lines.append(
-                f"{finding['severity'].upper()}  "
-                f"{escape(finding.get('file', '?'))}:{finding.get('line', '?')}  "
-                f"{escape(finding.get('title', ''))}"
+                f"{finding.severity.upper()}  "
+                f"{escape(finding.file)}:{finding.line}  "
+                f"{escape(finding.title)}"
             )
-        verified = sum(1 for item in result.verification if item.get("state") == "verified")
-        unverified = sum(1 for item in result.verification if item.get("state") == "unverified")
+        verified = sum(1 for item in card.verification if item.state == "verified")
+        unverified = sum(1 for item in card.verification if item.state == "unverified")
         lines.append(
             f"checks  {verified} verified / {unverified} unverified / "
-            f"{len(result.verification)} reported"
+            f"{len(card.verification)} reported"
         )
         duplicates = result.overlap.get("duplicates") or []
         overlaps = result.overlap.get("overlaps") or []

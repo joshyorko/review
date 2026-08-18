@@ -386,7 +386,7 @@ async def main() -> int:
 
     await assert_malformed_pull(
         {"number": 44, "title": "hostile author", "user": "not-an-object"},
-        "author",
+        "malformed GitHub response",
     )
     await assert_malformed_pull(
         {"title": "missing number", "user": None},
@@ -2764,7 +2764,10 @@ async def main() -> int:
     text, classes, card = await run_review(0, "0 findings")
     check("UNPARSABLE" in text, f"unstructured exit 0 must be UNPARSABLE, got {text!r}")
     check("incomplete" in classes, f"unparsable output must use warning styling, got {classes}")
-    check("No clean decision" in card, f"unparsable output must direct raw inspection, got {card!r}")
+    check(
+        "next action  Open diagnostics and rerun the review." in card,
+        f"unparsable output must direct diagnostics, got {card!r}",
+    )
 
     # ── the regression that started this: a review whose checks returned no
     # verdict must never read as clean ───────────────────────────────────
