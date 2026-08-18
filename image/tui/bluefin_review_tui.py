@@ -46,6 +46,7 @@ from textual.widgets import (
     TextArea,
 )
 from review_result import ReviewResult, adapt_current_engine
+from semantic_view import DecisionState, build_decision_card
 import landing
 import hive_api
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -614,7 +615,7 @@ class Stop:
         return mechanical_reason(self.author, self.live)
 
 
-def live_review_context(live: dict) -> dict:
+def live_review_context(live: dict, *, title: str = "") -> dict:
     checks = authoritative_checks(live)
     outcomes = [
         str(item.get("conclusion") or item.get("state") or "PENDING").upper()
@@ -630,11 +631,14 @@ def live_review_context(live: dict) -> dict:
         ci = "pending"
     else:
         ci = "unknown"
+    head_sha = str(live.get("headRefOid") or "")
     return {
         "ci": ci,
         "mergeable": live.get("mergeable") or "?",
         "merge_state": live.get("mergeStateStatus") or "?",
-        "head": str(live.get("headRefOid") or "?")[:12],
+        "head": (head_sha or "?")[:12],
+        "head_sha": head_sha,
+        "title": title or live.get("title") or "",
         "draft": live.get("isDraft", "?"),
     }
 
@@ -1472,6 +1476,7 @@ class ReviewScreen(Screen):
         self.finished = True
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
+        live_context = live_review_context(stop.live, title=stop.title)
         if ACTIVE_BACKEND == "codex":
             base_sha = str(stop.live.get("baseRefOid") or "")
             head_sha = str(stop.live.get("headRefOid") or "")
@@ -1490,7 +1495,7 @@ class ReviewScreen(Screen):
                 result = ReviewResult(
                     result.version, result.state, result.counts, result.findings,
                     live_review_verification(stop.live), result.provenance,
-                    stop.overlap, live_review_context(stop.live), result.raw_evidence,
+                    stop.overlap, live_context, result.raw_evidence,
                 )
         else:
             result = adapt_current_engine(
@@ -1500,7 +1505,7 @@ class ReviewScreen(Screen):
                  "repository": stop.repository, "pull_request": stop.number},
                 verification=live_review_verification(stop.live),
                 overlap=stop.overlap,
-                live=live_review_context(stop.live),
+                live=live_context,
             )
         if ACTIVE_BACKEND == "codex" and len(str(stop.live.get("baseRefOid") or "")) == 40 and len(str(stop.live.get("headRefOid") or "")) == 40:
             request = ReviewRequest(
@@ -1514,22 +1519,27 @@ class ReviewScreen(Screen):
                     Preference("codex", result.provenance.get("model", "gpt-5.6-luna"),
                                result.provenance.get("reasoning_effort", "low")),
                 )
+        card = build_decision_card(
+            result, exact_head=str(stop.live.get("headRefOid") or "")
+        )
         if error:
             outcome, state = "error", f"FAILED to start: {error}"
         elif self.stop_requested:
             outcome, state = "stopped", "STOPPED — you cancelled it. Nothing was submitted."
         elif code is not None and code < 0:
             outcome, state = "stopped", "STOPPED — the review was killed. Nothing was submitted."
-        elif result.state in ("complete", "findings"):
+        elif card.state in (DecisionState.CLEAN, DecisionState.FINDINGS):
             outcome = "complete"
             state = "COMPLETE — a Review Draft for you to judge. Nothing was submitted."
-        elif result.state == "incomplete":
+        elif card.state is DecisionState.STALE:
+            outcome, state = "stale", "STALE — the review does not match the current head. Rerun it."
+        elif card.state is DecisionState.INCOMPLETE:
             outcome = "incomplete"
             state = (
                 "INCOMPLETE — part of this review returned no verdict. "
                 "Its finding count is not a clean bill of health."
             )
-        elif result.state == "unparsable":
+        elif card.state is DecisionState.UNPARSABLE:
             outcome = "incomplete"
             state = "UNPARSABLE — the review output is not a clean result."
         else:
@@ -1544,46 +1554,51 @@ class ReviewScreen(Screen):
             f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
             f"{escape(state)} ({elapsed}s) — {escape('[escape]')} closes"
         )
-        finding_total = sum(result.counts.values())
-        headline = (
-            "No evidenced findings."
-            if result.is_clean else
-            f"{finding_total} evidenced finding{'s' if finding_total != 1 else ''}."
-            if result.state == "findings" else
-            "No clean decision: inspect raw evidence."
-        )
+        finding_total = sum(card.counts.values())
         lines = [
-            f"{result.state.upper()}  {escape(stop.key)} — {headline}",
+            f"{card.state.value.upper()}  {escape(stop.key)}",
+            f"what changed  {escape(card.summary.what_changed)}",
+            f"risk/impact  {escape(card.summary.risk_impact)}",
+            f"confidence  {escape(card.summary.ci_merge_state)} · head "
+            f"{escape(card.freshness.label)} "
+            f"{escape((card.exact_head or card.reviewed_head or '?')[:12])}",
+            f"next action  {escape(card.summary.recommended_action)}",
+            (
+                f"findings  {finding_total} evidenced finding"
+                f"{'s' if finding_total != 1 else ''}."
+                if card.findings
+                else "findings  No evidenced findings."
+            ),
             "severity  "
             + "  ".join(
-                f"{key}:{result.counts[key]}"
+                f"{key}:{card.counts[key]}"
                 for key in ("critical", "high", "medium", "low")
             ),
         ]
-        for finding in result.findings[:5]:
+        for finding in card.findings[:5]:
             lines.append(
-                f"{finding['severity'].upper()}  "
-                f"{escape(finding.get('file', '?'))}:{finding.get('line', '?')}  "
-                f"{escape(finding.get('title', ''))}"
+                f"{finding.severity.upper()}  "
+                f"{escape(finding.file)}:{finding.line}  "
+                f"{escape(finding.title)}"
             )
-        verified = sum(1 for item in result.verification if item.get("state") == "verified")
-        unverified = sum(1 for item in result.verification if item.get("state") == "unverified")
+        verified = sum(1 for item in card.verification if item.state == "verified")
+        unverified = sum(1 for item in card.verification if item.state == "unverified")
         lines.append(
             f"checks  {verified} verified / {unverified} unverified / "
-            f"{len(result.verification)} reported"
-        )
-        duplicates = result.overlap.get("duplicates") or []
-        overlaps = result.overlap.get("overlaps") or []
-        lines.append(f"overlap {len(duplicates)} duplicate / {len(overlaps)} shared-file hazard")
-        lines.append(
-            f"live     CI {result.live.get('ci', 'unknown')} · merge "
-            f"{escape(result.live.get('mergeable', '?'))}/"
-            f"{escape(result.live.get('merge_state', '?'))} · "
-            f"head {escape(result.live.get('head', '?'))}"
+            f"{len(card.verification)} reported"
         )
         lines.append(
-            f"source  {escape(result.provenance.get('backend', '?'))} / "
-            f"{escape(result.provenance.get('model', '?'))}"
+            f"overlap {card.duplicate_count} duplicate / "
+            f"{card.shared_file_count} shared-file hazard"
+        )
+        lines.append(
+            f"live     CI {escape(card.ci.value)} · merge "
+            f"{escape(card.mergeability.label)}/{escape(card.merge_state)} · head "
+            f"{escape((card.exact_head or card.reviewed_head or '?')[:12])}"
+        )
+        lines.append(
+            f"source  {escape(card.provenance.backend or '?')} / "
+            f"{escape(card.provenance.model or '?')}"
         )
         lines.append(
             "actions  "
@@ -1719,6 +1734,7 @@ class ReviewDashboard(App):
     #review-status.running { background: $panel; color: cyan; }
     #review-status.complete { background: $success; color: $text; text-style: bold; }
     #review-status.incomplete { background: $warning; color: $text; text-style: bold; }
+    #review-status.stale { background: $warning; color: $text; text-style: bold; }
     #review-status.failed, #review-status.error, #review-status.stopped {
         background: $error; color: $text; text-style: bold;
     }
@@ -2073,8 +2089,8 @@ class ReviewDashboard(App):
                     "review_state": str(pull.get("reviewDecision", "") or "").lower(),
                 })
         except ValueError as error:
-            self.source_state = "malformed"
             self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            self.source_state = "malformed"
             return {"items": []}
         self.source_state = "empty" if not items else "ready"
         self.source_message = ""
