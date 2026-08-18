@@ -416,9 +416,13 @@ approved, or that three other people also looked.
 
 The status line used to read `Hive: not consulted`, permanently — a dashboard
 that never asked. It asks now, on startup and again on `H`, and reports what
-the hub said: `online · 185 actionable · 2 working`, or plainly `unreachable`
-or `not configured`. The hub URL is not written down here; it comes from
-`HIVE_HUB`, which the image's Hive entrypoint hook owns and exports.
+the hub said: `online · 185 actionable · 2 working`, or names the configuration,
+credential, network, routing, response, or server layer that failed. The hub
+URL is not written down here; it comes from
+`HIVE_HUB`, which the image's Hive entrypoint hook owns and exports. Failures
+name the actionable layer: hub configuration, token availability, network,
+authentication, authorization, browser-login routing, malformed API response,
+or Hive server error.
 
 The part worth having is per-stop. When a contributor's *current* task is the
 pull request you are looking at, the context pane says so:
@@ -432,7 +436,9 @@ about to be stale. Otherwise it tells you nobody is on it.
 
 Hive status and worker lookup are read-only and never fatal. Queueing with `a`
 is the one Hive mutation: it stays behind the typed-number gate and fails
-closed when the authenticated hub is unavailable. Hive remains the sole
+closed when the authenticated hub is unavailable. It never follows an HTTP
+redirect and reports success only after Hive returns structured JSON confirming
+the pull request was queued. Hive remains the sole
 authority for selecting and assigning contributor tasks; nothing here claims,
 reorders, or declines one.
 

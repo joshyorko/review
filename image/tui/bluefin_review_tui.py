@@ -47,6 +47,7 @@ from textual.widgets import (
 )
 from review_result import ReviewResult, adapt_current_engine
 import landing
+import hive_api
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
 from harness.goose import GooseHarness
@@ -68,6 +69,7 @@ TRACE_PATH = os.path.join(
 )
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
+HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
 # repositories; Hive's queue endpoint owns creating and applying it.
@@ -83,6 +85,7 @@ class CommandSpec:
     label: str
     mutating: bool = False
     suspended_in_editor: bool = True
+    terminal_dispatched: bool = False
 
 
 COMMANDS = (
@@ -93,7 +96,7 @@ COMMANDS = (
     CommandSpec("navigate_page_down", "ctrl+d", "navigate_page_down", "page down"),
     CommandSpec("navigate_page_up", "ctrl+u", "navigate_page_up", "page up"),
     CommandSpec("pane_previous", "h", "pane_previous", "previous pane"),
-    CommandSpec("pane_next", "l", "pane_next", "next pane"),
+    CommandSpec("pane_next", "l", "pane_next", "next pane", terminal_dispatched=True),
     CommandSpec("activate", "enter", "activate", "inspect highlighted item"),
     CommandSpec("back", "escape", "back", "back"),
     CommandSpec("back_alias", "q", "back", "back"),
@@ -115,7 +118,7 @@ COMMANDS = (
     CommandSpec("agents", "A", "agents", "batch queue"),
     CommandSpec("merge_now", "m", "merge_now", "merge now", mutating=True),
     CommandSpec("reject", "x", "reject", "reject", mutating=True),
-    CommandSpec("update_branch", "u", "update_branch", "update branch", mutating=True),
+    CommandSpec("update_branch", "u", "update_branch", "update clean branch", mutating=True),
     CommandSpec("select_mechanical", "U", "select_mechanical", "select mechanical"),
     CommandSpec("resolve_duplicates", "M", "resolve_cluster", "resolve dupes", mutating=True),
     CommandSpec("filter", "f", "filter", "filter"),
@@ -130,7 +133,7 @@ def command_registry() -> tuple[CommandSpec, ...]:
 
 def bindings_for(_owner) -> list[Binding]:
     return [Binding(command.key, command.action, command.label)
-            for command in COMMANDS if command.key]
+            for command in COMMANDS if command.key and not command.terminal_dispatched]
 
 
 def back_bindings(dismiss_action: str) -> list[Binding]:
@@ -149,7 +152,7 @@ KEYS_READING = (
 )
 KEYS_ACTING = (
     " [b]L[/b] leave review [b]a[/b] approve+queue · land batch [b]m[/b] merge"
-    " [b]u[/b] update [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
+    " [b]u[/b] update clean branch [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
 )
 
 # The bot whose pull requests can be classified as mechanical. The login is
@@ -317,26 +320,18 @@ def hive_token() -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def hive_get(path: str) -> dict:
+def hive_get(path: str) -> hive_api.Result:
     """Read one hub endpoint. Read-only, and never fatal.
 
-    Consulting Hive must not be able to break the dashboard: an unreachable
-    or unauthenticated hub is reported as unreachable, not raised. Hive
-    remains the sole authority for assigning contributor tasks — nothing here
-    claims, reorders, or declines any of them.
+    Consulting Hive must not be able to break the dashboard. The result keeps
+    routing, authentication, authorization, network, malformed-response, and
+    server failures distinct without exposing credentials.
     """
     base = hive_api_base()
     token = hive_token()
-    if not base or not token:
-        return {}
-    request = urllib.request.Request(
-        f"{base}{path}", headers={"Authorization": f"Bearer {token}"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=HIVE_TIMEOUT) as response:
-            return json.load(response)
-    except Exception:
-        return {}
+    if not base:
+        return hive_api.Result(False, "configuration", "not configured", {})
+    return hive_api.request(f"{base}{path}", token, timeout=HIVE_TIMEOUT)
 
 
 def trace(record: dict) -> None:
@@ -416,7 +411,7 @@ def mechanical_reason(author: str, live: dict) -> str | None:
         return None
     if (live.get("mergeStateStatus") or "").upper() != "BEHIND":
         return None
-    checks = live.get("statusCheckRollup") or []
+    checks = authoritative_checks(live)
     if not checks:
         return None
     for check in checks:
@@ -461,9 +456,40 @@ def ci_marker(checks: str) -> str:
     }.get(checks, "? CI UNKNOWN")
 
 
+def authoritative_checks(live: dict) -> list[dict]:
+    """Return the latest run for each stable current-head check context.
+
+    GitHub's pull-request ``statusCheckRollup`` is fetched together with
+    ``headRefOid``, so every entry belongs to that exact current head. Reruns
+    may leave older entries in the rollup; a check-run context is its workflow
+    plus job name, while a commit status context is its context string.
+    """
+    latest: dict[tuple[str, ...], tuple[tuple[str, str, int], dict]] = {}
+    ungrouped: list[dict] = []
+    for index, check in enumerate(live.get("statusCheckRollup") or []):
+        typename = str(check.get("__typename") or "")
+        name = str(check.get("name") or "")
+        context = str(check.get("context") or "")
+        if typename == "CheckRun" or name:
+            key = ("check-run", str(check.get("workflowName") or ""), name)
+        elif typename == "StatusContext" or context:
+            key = ("status-context", context)
+        else:
+            ungrouped.append(check)
+            continue
+        rank = (
+            str(check.get("startedAt") or ""),
+            str(check.get("completedAt") or ""),
+            index,
+        )
+        if key not in latest or rank > latest[key][0]:
+            latest[key] = (rank, check)
+    return [item[1] for item in sorted(latest.values(), key=lambda item: item[0])] + ungrouped
+
+
 def effective_check_state(snapshot: str, live: dict) -> str:
     """Prefer fetched check evidence, retaining the snapshot when absent."""
-    checks = live.get("statusCheckRollup") or []
+    checks = authoritative_checks(live)
     if not checks:
         return snapshot or "unknown"
     outcomes = [check.get("conclusion") or check.get("state") or "PENDING" for check in checks]
@@ -589,7 +615,7 @@ class Stop:
 
 
 def live_review_context(live: dict) -> dict:
-    checks = live.get("statusCheckRollup") or []
+    checks = authoritative_checks(live)
     outcomes = [
         str(item.get("conclusion") or item.get("state") or "PENDING").upper()
         for item in checks
@@ -617,7 +643,7 @@ def live_review_verification(live: dict) -> list[dict]:
     records = []
     passed = {"SUCCESS", "NEUTRAL", "SKIPPED"}
     failed = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
-    for index, item in enumerate(live.get("statusCheckRollup") or [], start=1):
+    for index, item in enumerate(authoritative_checks(live), start=1):
         outcome = str(item.get("conclusion") or item.get("state") or "PENDING").upper()
         state = (
             "verified"
@@ -888,8 +914,11 @@ class ReviewVerdict(ModalScreen[str | None]):
                 self.dismiss(self.CHOICES[index][0])
 
 
-class ReviewBodyPreview(ModalScreen[None]):
-    BINDINGS = back_bindings("dismiss(None)")
+class ReviewBodyPreview(ModalScreen[bool | None]):
+    BINDINGS = [
+        Binding("ctrl+s", "submit", "submit review", priority=True),
+        *back_bindings("dismiss(None)"),
+    ]
 
     def __init__(self, body: str, command: list[str]) -> None:
         super().__init__()
@@ -902,18 +931,54 @@ class ReviewBodyPreview(ModalScreen[None]):
             yield Static(self.body, markup=False, id="review-body-preview")
             yield Label("exact command:")
             yield Static(" ".join(self.command), id="review-command-preview")
-            yield Label("[esc] back to editor")
+            yield Button("Submit review", id="review-preview-submit", variant="primary")
+            yield Static("[ctrl-s] submit · [esc] edit", markup=False)
+
+    def action_submit(self) -> None:
+        self.dismiss(True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "review-preview-submit":
+            self.action_submit()
+
+
+class CommentPreview(ModalScreen[bool | None]):
+    BINDINGS = [
+        Binding("ctrl+s", "submit", "submit comment", priority=True),
+        *back_bindings("dismiss(None)"),
+    ]
+
+    def __init__(self, body: str, command: list[str]) -> None:
+        super().__init__()
+        self.body = body
+        self.command = command
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("exact GitHub Markdown:")
+            yield Static(self.body, markup=False, id="comment-preview-body")
+            yield Label("exact command:")
+            yield Static(" ".join(self.command), id="comment-preview-command")
+            yield Button("Submit comment", id="comment-preview-submit", variant="primary")
+            yield Static("[ctrl-s] submit · [esc] edit", markup=False)
+
+    def action_submit(self) -> None:
+        self.dismiss(True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "comment-preview-submit":
+            self.action_submit()
 
 
 class ReviewBody(ModalScreen[str | None]):
     """Editable review body; generation is an optional maintainer action."""
 
     BINDINGS = [
-        Binding("ctrl+g", "generate", "generate"),
-        Binding("ctrl+e", "edit", "edit"),
-        Binding("ctrl+p", "preview", "preview"),
+        Binding("ctrl+g", "generate", "generate", priority=True),
+        Binding("ctrl+e", "edit", "edit", priority=True),
+        Binding("ctrl+p", "preview", "preview", priority=True),
         Binding("ctrl+shift+k", "clear", "clear", priority=True),
-        Binding("ctrl+s", "submit", "submit"),
+        Binding("ctrl+s", "submit", "submit", priority=True),
         *back_bindings("cancel"),
     ]
 
@@ -930,7 +995,18 @@ class ReviewBody(ModalScreen[str | None]):
         with Vertical(id="confirm-box"):
             yield Label(f"{self.verdict} — say why{optional}:")
             yield TextArea(id="review-body-editor")
-            yield Label("[ctrl-g] generate · [ctrl-e] edit · [ctrl-p] preview · [ctrl-shift-k] clear · [ctrl-s] submit")
+            yield Static(
+                "[ctrl-g] generate · [ctrl-e] edit · [ctrl-p] preview · "
+                "[ctrl-shift-k] clear · [ctrl-s] submit",
+                markup=False,
+                id="review-body-shortcuts",
+            )
+            with Horizontal(id="review-body-actions"):
+                yield Button("Generate", id="review-body-generate")
+                yield Button("Edit", id="review-body-edit")
+                yield Button("Preview", id="review-body-preview")
+                yield Button("Clear", id="review-body-clear")
+                yield Button("Submit", id="review-body-submit", variant="primary")
 
     def on_mount(self) -> None:
         self.query_one(TextArea).focus()
@@ -944,6 +1020,18 @@ class ReviewBody(ModalScreen[str | None]):
 
     def action_clear(self) -> None:
         self.query_one(TextArea).text = ""
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        actions = {
+            "review-body-generate": self.action_generate,
+            "review-body-edit": self.action_edit,
+            "review-body-preview": self.action_preview,
+            "review-body-clear": self.action_clear,
+            "review-body-submit": self.action_submit,
+        }
+        action = actions.get(event.button.id)
+        if action:
+            action()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id == "review-body-editor":
@@ -989,7 +1077,10 @@ class ReviewBody(ModalScreen[str | None]):
             return
         path = self._prepare_body_file(body)
         self.previewed_body = body
-        self.app.push_screen(ReviewBodyPreview(body, self._command(path)))
+        self.app.push_screen(
+            ReviewBodyPreview(body, self._command(path)),
+            lambda submit: self.action_submit() if submit else None,
+        )
 
     def _validate_body(self, body: str) -> bool:
         if len(body) <= MAX_REVIEW_BODY_CHARS:
@@ -1253,8 +1344,9 @@ class ReviewScreen(Screen):
         Binding("L", "leave_review", "leave a review"),
         Binding("a", "queue", "approve and queue"),
         Binding("m", "merge_now", "merge now"),
-        Binding("u", "update_branch", "update branch"),
-        Binding("e", "toggle_evidence", "raw evidence"),
+        Binding("u", "update_branch", "update clean branch"),
+        Binding("e", "toggle_evidence", "evidence"),
+        Binding("r", "toggle_raw_transcript", "raw transcript"),
     ]
 
     def __init__(self, stop: Stop, steer: str = "", selection: Preference | None = None) -> None:
@@ -1278,7 +1370,11 @@ class ReviewScreen(Screen):
             id="review-status",
         )
         yield Static("building decision card…", id="review-card")
-        yield RichLog(highlight=False, markup=False, wrap=True, id="review-log")
+        yield Static("", id="review-evidence", classes="hidden")
+        yield RichLog(
+            highlight=False, markup=False, max_lines=200, wrap=True,
+            id="review-log", classes="hidden",
+        )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1496,7 +1592,25 @@ class ReviewScreen(Screen):
             f"{escape('[e]')} evidence"
         )
         self.query_one("#review-card", Static).update("\n".join(lines))
-        self.query_one("#review-log", RichLog).add_class("hidden")
+        evidence = [
+            "REVIEW EVIDENCE",
+            f"state    {result.state.upper()}",
+            f"findings {finding_total}",
+            f"checks   {verified} verified / {unverified} unverified",
+            f"live     CI {result.live.get('ci', 'unknown')} · "
+            f"{escape(result.live.get('mergeable', '?'))}/"
+            f"{escape(result.live.get('merge_state', '?'))}",
+        ]
+        for finding in result.findings[:12]:
+            evidence.append(
+                f"{finding['severity'].upper()}  "
+                f"{escape(finding.get('file', '?'))}:{finding.get('line', '?')}  "
+                f"{escape(finding.get('title', ''))}"
+            )
+        if len(result.findings) > 12:
+            evidence.append(f"… {len(result.findings) - 12} more findings omitted from this bounded view")
+        evidence.append("[r] raw backend transcript (last 200 lines)")
+        self.query_one("#review-evidence", Static).update("\n".join(evidence))
         trace(
             {
                 "action": "review",
@@ -1546,6 +1660,9 @@ class ReviewScreen(Screen):
         self.app.leave_review(self.stop_record)
 
     def action_toggle_evidence(self) -> None:
+        self.query_one("#review-evidence", Static).toggle_class("hidden")
+
+    def action_toggle_raw_transcript(self) -> None:
         self.query_one("#review-log", RichLog).toggle_class("hidden")
 
     def return_to_queue(self, action) -> None:
@@ -1594,7 +1711,7 @@ class ReviewDashboard(App):
     #keys-acting { color: magenta; }
     #diff-header { height: 1; background: $panel; color: cyan; text-style: bold; }
     #review-card { border: solid $success; padding: 1 2; height: auto; color: $text; }
-    #review-log.hidden { display: none; }
+    #review-evidence.hidden, #review-log.hidden { display: none; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
     ListItem.selected Label { color: magenta; text-style: bold; }
@@ -1704,10 +1821,14 @@ class ReviewDashboard(App):
             self.call_from_thread(self.hive_loaded, "not configured", [])
             return
         status = hive_get("/api/v1/status")
-        if not status:
-            self.call_from_thread(self.hive_loaded, "unreachable", [])
+        if not status.ok:
+            self.call_from_thread(self.hive_loaded, status.message, [])
             return
-        contributors = hive_get("/api/v1/contributors").get("contributors", [])
+        contributor_result = hive_get("/api/v1/contributors")
+        if not contributor_result.ok:
+            self.call_from_thread(self.hive_loaded, contributor_result.message, [])
+            return
+        contributors = contributor_result.data.get("contributors", [])
         workers = [
             {
                 "login": contributor.get("github_username", "?"),
@@ -1717,8 +1838,8 @@ class ReviewDashboard(App):
             if contributor.get("current_task")
         ]
         state = (
-            f"{status.get('hub', 'online')} · "
-            f"{status.get('actionable_items', '?')} actionable · "
+            f"{status.data.get('hub', 'online')} · "
+            f"{status.data.get('actionable_items', '?')} actionable · "
             f"{len(workers)} working"
         )
         self.call_from_thread(self.hive_loaded, state, workers)
@@ -1814,6 +1935,14 @@ class ReviewDashboard(App):
         self.push_screen(ReviewScreen(stop, steer=steer))
 
     def on_key(self, event) -> None:
+        if event.key == "l" and event.character == "L":
+            event.stop()
+            self._dispatch_terminal_action("leave review", self.action_leave_review)
+            return
+        if event.key == "l" and event.character == "l":
+            event.stop()
+            self._dispatch_terminal_action("next pane", self.action_pane_next)
+            return
         if event.key == "q" and not isinstance(self.focused, Input):
             event.stop()
             self.action_back()
@@ -1821,6 +1950,15 @@ class ReviewDashboard(App):
         if event.key == "escape" and self.focused is self.query_one("#steer", Input):
             event.stop()
             self.query_one("#queue", ListView).focus()
+
+    def _dispatch_terminal_action(self, label: str, action) -> None:
+        try:
+            action()
+        except Exception as error:
+            self.notify(
+                bounded_detail(f"{label} unavailable: {error}"),
+                severity="error",
+            )
 
     # ── data layer (walker parity) ────────────────────────────────────────
 
@@ -2176,11 +2314,12 @@ class ReviewDashboard(App):
             return
         live = stop.live
         self.refresh_rows()
-        checks = live.get("statusCheckRollup") or []
+        checks = authoritative_checks(live)
         outcomes = [c.get("conclusion") or c.get("state") or "PENDING" for c in checks]
         ok = sum(1 for o in outcomes if o in ("SUCCESS", "NEUTRAL", "SKIPPED"))
-        bad = sum(1 for o in outcomes if o in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"))
-        pending = len(outcomes) - ok - bad
+        cancelled = sum(1 for o in outcomes if o == "CANCELLED")
+        bad = sum(1 for o in outcomes if o in ("FAILURE", "ERROR", "TIMED_OUT"))
+        pending = len(outcomes) - ok - bad - cancelled
         issues = ", ".join(
             link(f"#{r['number']}", issue_url(stop.repository, r["number"]))
             for r in (live.get("closingIssuesReferences") or [])
@@ -2242,7 +2381,7 @@ class ReviewDashboard(App):
             f"merge    {live.get('mergeable', '?')} / {live.get('mergeStateStatus', '?')}\n"
             f"size     +{live.get('additions', '?')} -{live.get('deletions', '?')} "
             f"across {live.get('changedFiles', '?')} files\n"
-            f"checks   {ok} ok, {bad} failed, {pending} pending\n"
+            f"checks   {ok} ok, {bad} failed, {cancelled} cancelled, {pending} pending\n"
             f"{reviews_block}\n"
             f"linked   {issues}\n"
             f"labels   {labels}{mechanical_block}"
@@ -2466,10 +2605,10 @@ class ReviewDashboard(App):
         queue.index = max(0, queue.index - max(1, queue.size.height - 1))
 
     def action_pane_previous(self) -> None:
-        self.focus_previous()
+        self.screen.focus_previous()
 
     def action_pane_next(self) -> None:
-        self.focus_next()
+        self.screen.focus_next()
 
     def action_activate(self) -> None:
         if self.current:
@@ -2585,6 +2724,20 @@ class ReviewDashboard(App):
             batch = [self.current]
         if not batch:
             return
+        updateable = []
+        for stop in batch:
+            mergeable = str(stop.live.get("mergeable", "")).upper()
+            state = str(stop.live.get("mergeStateStatus", "")).upper()
+            if mergeable == "CONFLICTING" or state == "DIRTY" or stop.mergeable_state == "dirty":
+                self.notify(
+                    f"{stop.key}: conflicts need manual resolution; [u] only updates clean branches.",
+                    severity="warning",
+                )
+                continue
+            updateable.append(stop)
+        if not updateable:
+            return
+        batch = updateable
 
         def update_next(index: int = 0) -> None:
             if index >= len(batch):
@@ -2690,18 +2843,30 @@ class ReviewDashboard(App):
 
         # Reuse the confirm modal's input for the body first.
         class CommentBody(ModalScreen[str | None]):
-            BINDINGS = back_bindings("dismiss(None)")
+            BINDINGS = [
+                Binding("ctrl+s", "submit", "submit comment", priority=True),
+                *back_bindings("dismiss(None)"),
+            ]
 
             def compose(self) -> ComposeResult:
                 with Vertical(id="confirm-box"):
                     yield Label("comment (empty aborts):")
                     yield Input(id="comment-input")
+                    yield Static("[ctrl-s] submit · [esc] cancel", markup=False)
+                    yield Button("Submit comment", id="comment-submit", variant="primary")
 
             def on_mount(self) -> None:
                 self.query_one(Input).focus()
 
             def on_input_submitted(self, event: Input.Submitted) -> None:
-                self.dismiss(event.value or None)
+                self.action_submit()
+
+            def action_submit(self) -> None:
+                self.dismiss(self.query_one(Input).value or None)
+
+            def on_button_pressed(self, event: Button.Pressed) -> None:
+                if event.button.id == "comment-submit":
+                    self.action_submit()
 
         def with_body(body: str | None) -> None:
             if not body:
@@ -2710,10 +2875,21 @@ class ReviewDashboard(App):
             body_file = os.path.join(os.path.dirname(TRACE_PATH), "comment.md")
             with open(body_file, "w", encoding="utf-8") as sink:
                 sink.write(body + "\n")
-            self.mutate(
-                stop, "pr", "comment", str(stop.number),
+            command = [
+                "gh", "pr", "comment", str(stop.number),
                 "--repo", stop.repository, "--body-file", body_file,
-            )
+            ]
+
+            def submitted(confirmed: bool | None) -> None:
+                if confirmed:
+                    self.mutate(stop, *command[1:])
+                else:
+                    try:
+                        os.unlink(body_file)
+                    except FileNotFoundError:
+                        pass
+
+            self.push_screen(CommentPreview(body, command), submitted)
 
         self.push_screen(CommentBody(), with_body)
 
@@ -2749,12 +2925,9 @@ class ReviewDashboard(App):
             f"{base}/api/prs/{owner}/{repository}/{stop.number}/queue-automerge"
         )
         command = [
-            "sh",
-            "-c",
-            'exec curl --fail-with-body --location --silent --show-error '
-            '--request POST --header '
-            '"Authorization: Bearer ${GH_TOKEN:?GH_TOKEN is required}" "$1" >&2',
-            "bluefin-review-hive-queue",
+            sys.executable,
+            HIVE_API_HELPER,
+            "queue",
             endpoint,
         ]
 

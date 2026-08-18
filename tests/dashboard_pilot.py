@@ -25,6 +25,8 @@ import tempfile
 from types import SimpleNamespace
 from pathlib import Path
 
+from textual.events import Key
+
 TUI_DIR = Path(
     os.environ.get(
         "BLUEFIN_REVIEW_TUI_DIR",
@@ -153,6 +155,17 @@ async def main() -> int:
 
     import bluefin_review_tui as tui
 
+    hive_api_stub = workdir / "hive_api_stub.py"
+    hive_api_stub.write_text(
+        "import json, os, sys\n"
+        f"with open({str(curl_log)!r}, 'a') as sink: sink.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if os.environ.get('CURL_FAIL'):\n"
+        "    print('Hive queue failed ' + ('e' * 300), file=sys.stderr)\n"
+        "    raise SystemExit(1)\n"
+        "print(json.dumps({'status': 'queued'}))\n"
+    )
+    tui.HIVE_API_HELPER = str(hive_api_stub)
+
     # Queueing belongs to Hive: its authenticated endpoint records the human
     # actor, enforces merger standing and self-merge protection, then creates
     # the exact-head approval as the Hive App. A human-authored `gh pr review`
@@ -173,10 +186,16 @@ async def main() -> int:
         queue_commands = captured_queue[0][1] if captured_queue else []
         check(
             len(queue_commands) == 1
-            and queue_commands[0][:2] == ["sh", "-c"]
+            and queue_commands[0][1] == tui.HIVE_API_HELPER
+            and queue_commands[0][2] == "queue"
             and queue_commands[0][-1]
             == "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge",
             f"queueing must call Hive's App-authored queue endpoint once, got {queue_commands}",
+        )
+        check(
+            "--location" not in queue_commands[0]
+            and "-L" not in queue_commands[0],
+            f"a mutating Hive request must not follow redirects, got {queue_commands}",
         )
         check(
             not any(command[:3] == ["gh", "pr", "review"] for command in queue_commands),
@@ -568,8 +587,8 @@ async def main() -> int:
             )
         binding_keys = {binding.key for binding in tui.ReviewDashboard.BINDINGS}
         check(
-            "l" in binding_keys and "p" not in binding_keys,
-            f"pane navigation must be present and priority must be absent, got {sorted(binding_keys)}",
+            "l" not in binding_keys and "p" not in binding_keys,
+            f"terminal-dispatched pane navigation must not collide with a binding, got {sorted(binding_keys)}",
         )
         review = [b for b in tui.ReviewDashboard.BINDINGS if b.action == "review"]
         check(len(review) == 1, f"exactly one binding must run a review, got {len(review)}")
@@ -655,6 +674,40 @@ async def main() -> int:
         check(app.screen.query_one(tui.Input).value == "q", "q must type in the comment input")
         await pilot.press("escape")
         await pilot.pause()
+        app.action_comment()
+        await pilot.pause()
+        app.screen.query_one(tui.Input).value = "keyboard comment"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.CommentPreview),
+            "Ctrl-s from the focused comment editor must preview the exact payload",
+        )
+        check("keyboard comment" in app.screen.body, "comment preview must show verbatim Markdown")
+        await pilot.click("#comment-preview-submit")
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "comment preview submit must reach the existing gate")
+        await pilot.press("escape")
+        await pilot.pause()
+        app.action_comment()
+        await pilot.pause()
+        app.screen.query_one(tui.Input).value = "button comment"
+        await pilot.click("#comment-submit")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.CommentPreview),
+            "comment submit button must preview the exact payload",
+        )
+        check("button comment" in app.screen.body, "button comment preview must preserve body")
+        await pilot.click("#comment-preview-submit")
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "comment preview button must reach the gate")
+        check(
+            "pr comment" not in gh_log.read_text(),
+            "comment controls must not mutate before confirmation",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
         await pilot.press("/")
         await pilot.press("q")
         await pilot.pause()
@@ -700,14 +753,21 @@ async def main() -> int:
             check(screen.finished, f"review screen never finished (exit {exit_code})")
             status = screen.query_one("#review-status", tui.Static)
             card = screen.query_one("#review-card", tui.Static)
+            evidence = screen.query_one("#review-evidence", tui.Static)
             raw = screen.query_one("#review-log", tui.RichLog)
-            check("hidden" in raw.classes, "completed raw evidence must start collapsed")
+            check("hidden" in evidence.classes, "completed decision evidence must start collapsed")
+            check("hidden" in raw.classes, "completed raw transcript must start collapsed")
             await pilot.press("e")
             await pilot.pause()
-            check("hidden" not in raw.classes, "[e] must reveal the raw review evidence")
-            await pilot.press("e")
+            check(
+                "hidden" not in evidence.classes
+                and "REVIEW EVIDENCE" in str(evidence.render())
+                and "raw backend transcript" in str(evidence.render()),
+                "[e] must reveal bounded decision evidence and name raw transcript as secondary",
+            )
+            await pilot.press("r")
             await pilot.pause()
-            check("hidden" in raw.classes, "[e] must return to the decision card")
+            check("hidden" not in raw.classes, "[r] must reveal the secondary raw transcript")
             await pilot.press("q")
             await pilot.pause()
             check(app.screen is root_screen, "q must close ReviewScreen")
@@ -954,7 +1014,8 @@ async def main() -> int:
         def __call__(self, path):
             with open(hive_calls, "a") as sink:
                 sink.write(path + "\n")
-            return self.status if path.endswith("status") else self.contributors
+            data = self.status if path.endswith("status") else self.contributors
+            return tui.hive_api.Result(True, "ok", "online", data)
 
     real_hive_get = tui.hive_get
     real_base = tui.hive_api_base
@@ -1033,19 +1094,31 @@ async def main() -> int:
             )
 
         # An unreachable hub degrades to a plain statement, never a crash.
-        tui.hive_get = lambda path: {}
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            for _ in range(200):
-                if app.hive_state:
-                    break
-                await pilot.pause(0.05)
-            check(
-                app.hive_state == "unreachable",
-                f"an unreachable hub must say so, got {app.hive_state!r}",
+        hive_failure_states = {
+            "authentication token missing": "authentication token missing",
+            "network error": "network error",
+            "authentication rejected (401)": "authentication rejected (401)",
+            "authorization rejected (403)": "authorization rejected (403)",
+            "API routing redirected (302)": "API routing redirected (302)",
+            "malformed API response": "malformed API response",
+            "Hive server error (503)": "Hive server error (503)",
+        }
+        for message, expected_state in hive_failure_states.items():
+            tui.hive_get = lambda path, message=message: tui.hive_api.Result(
+                False, "test", message, {}
             )
-            check(app.stops, "an unreachable hub must not empty the queue")
+            app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                for _ in range(200):
+                    if app.hive_state:
+                        break
+                    await pilot.pause(0.05)
+                check(
+                    app.hive_state == expected_state,
+                    f"Hive failure must be actionable, got {app.hive_state!r}",
+                )
+                check(app.stops, "a Hive failure must not empty the queue")
 
         # No hub configured at all is its own honest answer.
         tui.hive_api_base = lambda: ""
@@ -1474,43 +1547,38 @@ async def main() -> int:
                 await pilot.pause()
                 await pilot.press({"approve": "1", "request-changes": "2", "comment": "3"}[verdict])
                 await pilot.pause()
-                await pilot.press("ctrl+g")
+                hints = str(app.screen.query_one("#review-body-shortcuts", tui.Static).render())
+                check(
+                    "[ctrl-g]" in hints and "[ctrl-s]" in hints,
+                    "review body shortcut hints must render literally",
+                )
+                await pilot.click("#review-body-generate")
                 await pilot.pause()
                 check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "generated blocker",
                       f"{verdict} generation must use the drafting capability")
-                await pilot.press("ctrl+e")
+                await pilot.click("#review-body-edit")
                 editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+                check(app.focused is editor, "edit button must focus the review body editor")
+                editor.text = "clear me"
+                await pilot.click("#review-body-clear")
+                check(editor.text == "", "clear button must empty the review body editor")
                 editor.text = exact_markdown
-                await pilot.press("ctrl+p")
+                before_preview = gh_log.read_text()
+                await pilot.click("#review-body-preview")
                 await pilot.pause()
                 check(isinstance(app.screen, tui.ReviewBodyPreview), "preview must show before mutation")
                 check(exact_markdown in app.screen.body, "preview must preserve exact Markdown")
-                await pilot.press("escape")
+                check(
+                    gh_log.read_text() == before_preview,
+                    "preview must not mutate before the typed-number gate",
+                )
+                await pilot.click("#review-preview-submit")
                 await pilot.pause()
-                check(isinstance(app.screen, tui.ReviewBody), "preview cancel must return to editor")
-                app.screen.action_clear()
-                check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "",
-                      "clear must empty the editor")
-                app.screen.query_one("#review-body-editor", tui.TextArea).text = exact_markdown
-                await pilot.press("ctrl+s")
-                await pilot.pause()
-                check(isinstance(app.screen, tui.ReviewBody),
-                      "editing after preview must refuse submission")
-                check(any("preview" in notification.message.lower()
-                          for notification in app._notifications),
-                      "editing after preview must explain that re-preview is required")
-                await pilot.press("ctrl+p")
-                await pilot.pause()
-                check(isinstance(app.screen, tui.ReviewBodyPreview),
-                      "the changed body must be previewed again")
-                await pilot.press("escape")
-                await pilot.pause()
-                await pilot.press("ctrl+s")
                 for _ in range(20):
                     if isinstance(app.screen, tui.ConfirmMutation):
                         break
                     await pilot.pause(0.05)
-                check(isinstance(app.screen, tui.ConfirmMutation), "submit must use the existing gate")
+                check(isinstance(app.screen, tui.ConfirmMutation), "preview submit must use the existing gate")
                 command = app.screen.commands[0]
                 check(command[:3] == ["gh", "pr", "review"], "submit must use gh pr review")
                 body_path = Path(command[command.index("--body-file") + 1])
@@ -1914,7 +1982,8 @@ async def main() -> int:
         if isinstance(app.screen, tui.ConfirmMutation):
             check(
                 len(app.screen.commands) == 1
-                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][1] == str(hive_api_stub)
+                and app.screen.commands[0][2] == "queue"
                 and app.screen.commands[0][-1].endswith(
                     "/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
                 ),
@@ -2007,6 +2076,34 @@ async def main() -> int:
             bool(app.query("#keys-reading")) and bool(app.query("#keys-acting")),
             "the key map must be two lines at the bottom",
         )
+        # A normal terminal may report Shift-L as lower-case key identity with
+        # an upper-case character. Drive that real event shape rather than
+        # Pilot's synthetic ``press("L")`` event (#259).
+        app.post_message(Key("l", "L"))
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.ReviewVerdict),
+            "terminal-normalized Shift-L must open the ordinary review verdict",
+        )
+        if isinstance(app.screen, tui.ReviewVerdict):
+            await pilot.press("escape")
+        app.query_one("#queue", tui.ListView).focus()
+        app.post_message(Key("l", "l"))
+        await pilot.pause()
+        check(
+            app.focused is app.query_one("#steer", tui.Input),
+            "lowercase l must move focus through Textual's screen API",
+        )
+        app.query_one("#queue", tui.ListView).focus()
+        app.action_pane_next = lambda: (_ for _ in ()).throw(RuntimeError("injected pane failure"))
+        app.post_message(Key("l", "l"))
+        await pilot.pause()
+        check(
+            app.screen is not None
+            and any("injected pane failure" in notification.message for notification in app._notifications),
+            "terminal dispatch failures must be bounded notifications without ending the dashboard",
+        )
+        app.query_one("#queue", tui.ListView).focus()
         # Direct merge must refuse snapshot-known red and pending checks before
         # presenting a confirmation gate or attempting the GitHub mutation.
         for known_state, live_checks in (
@@ -2090,6 +2187,36 @@ async def main() -> int:
                 await pilot.pause()
     gh_log.write_text("")
 
+    # A conflicted branch cannot be brought current by GitHub's update API;
+    # show the maintainer the manual-resolution path instead of opening a
+    # gate that is certain to fail (#261).
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+        stop.mergeable_state = "dirty"
+        stop.live = {"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}
+        gh_log.write_text("")
+        await pilot.press("u")
+        await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.ConfirmMutation),
+            "conflicted branches must not offer the update-branch gate",
+        )
+        check(
+            "manual" in " ".join(notification.message.lower() for notification in app._notifications),
+            "conflicted branches must direct maintainers to manual resolution",
+        )
+        check(
+            "pr update-branch" not in gh_log.read_text(),
+            "conflicted branches must not invoke GitHub's update API",
+        )
+    gh_log.write_text("")
+
     # ── MECHANICAL is live evidence, not a dependency-shaped title ───────
     # The old BATCHABLE tag matched titles, which is duplicate evidence: it
     # said nothing about whether the branch could actually be brought current.
@@ -2150,6 +2277,96 @@ async def main() -> int:
         tui.mechanical_reason(bot, {}) is None,
         "MECHANICAL must require live evidence, never absence of it",
     )
+
+    # GitHub may return multiple runs for one check context at the exact head.
+    # The current run is authoritative; a cancelled predecessor must not make
+    # clean live evidence look failed or appear twice in review verification.
+    superseded = json.loads(
+        (FIXTURE_DIR / "superseded-check-rollup.json").read_text()
+    )
+    check(
+        tui.effective_check_state("unknown", superseded) == "success",
+        "a successful current run must supersede a cancelled older run",
+    )
+    check(
+        tui.live_review_context(superseded)["ci"] == "success",
+        "review context must agree with the exact-head check rollup",
+    )
+    verification = tui.live_review_verification(superseded)
+    check(
+        [record["name"] for record in verification]
+        == [
+            "E2E smoke",
+            "validate-release-notes",
+            "Check PR base branch",
+            "validate",
+            "Unit tests",
+        ],
+        "review verification must order one authoritative record per stable context",
+    )
+    status_contexts = {
+        "statusCheckRollup": [
+            {
+                "__typename": "StatusContext",
+                "context": "ci/vendor",
+                "state": "FAILURE",
+                "startedAt": "2026-08-10T00:28:00Z",
+            },
+            {
+                "__typename": "StatusContext",
+                "context": "ci/vendor",
+                "state": "SUCCESS",
+                "startedAt": "2026-08-10T00:29:00Z",
+            },
+        ]
+    }
+    check(
+        tui.effective_check_state("unknown", status_contexts) == "success"
+        and len(tui.authoritative_checks(status_contexts)) == 1,
+        "a newer commit status must supersede the same stable status context",
+    )
+
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+        stop.live = superseded
+        app.render_evidence(stop)
+        details = str(app.query_one("#details", tui.Static).render())
+        check(
+            "checks   5 ok, 0 failed, 0 cancelled, 0 pending" in details
+            and "MERGEABLE / CLEAN" in details,
+            "the dashboard must render exact-head authoritative checks and merge state",
+        )
+        current_states = json.loads(json.dumps(superseded))
+        current_states["mergeStateStatus"] = "BLOCKED"
+        current_states["statusCheckRollup"][2]["conclusion"] = None
+        current_states["statusCheckRollup"][2]["status"] = "IN_PROGRESS"
+        current_states["statusCheckRollup"][5]["conclusion"] = "FAILURE"
+        current_states["statusCheckRollup"][7]["conclusion"] = "CANCELLED"
+        stop.live = current_states
+        app.render_evidence(stop)
+        details = str(app.query_one("#details", tui.Static).render())
+        check(
+            "checks   2 ok, 1 failed, 1 cancelled, 1 pending" in details
+            and "MERGEABLE / BLOCKED" in details,
+            "current failures, cancellations, pending checks, and merge blockers must stay distinct",
+        )
+        missing_required = {
+            "headRefOid": superseded["headRefOid"],
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BLOCKED",
+            "statusCheckRollup": [],
+        }
+        check(
+            tui.live_review_context(missing_required)["ci"] == "unknown"
+            and tui.live_review_context(missing_required)["merge_state"] == "BLOCKED",
+            "missing required contexts must remain unknown beside GitHub's blocked merge state",
+        )
     check(
         tui.mechanical_reason(
             "castrojo", live_shape(author={"login": "castrojo"})
@@ -2606,7 +2823,8 @@ async def main() -> int:
             check(
                 app.screen.expected == "31"
                 and len(app.screen.commands) == 1
-                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][1] == str(hive_api_stub)
+                and app.screen.commands[0][2] == "queue"
                 and app.screen.commands[0][-1].endswith("/queue-automerge"),
                 f"the card must preserve the queue action, got {app.screen.commands}",
             )
