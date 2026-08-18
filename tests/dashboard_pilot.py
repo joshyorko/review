@@ -380,6 +380,11 @@ async def main() -> int:
         app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
         async with app.run_test() as pilot:
             await wait_for_state(app, pilot, "malformed")
+            for _ in range(100):
+                status = str(app.query_one("#status-bar").render())
+                if detail in app.source_message and detail in status:
+                    break
+                await pilot.pause(0.05)
             status = str(app.query_one("#status-bar").render())
             check(app.source_state == "malformed" and not app.stops,
                   f"invalid {detail} must produce no rows through the real app")
