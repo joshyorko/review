@@ -1525,12 +1525,13 @@ async def main() -> int:
                 await pilot.click("#review-body-clear")
                 check(editor.text == "", "clear button must empty the review body editor")
                 editor.text = exact_markdown
+                before_preview = gh_log.read_text()
                 await pilot.click("#review-body-preview")
                 await pilot.pause()
                 check(isinstance(app.screen, tui.ReviewBodyPreview), "preview must show before mutation")
                 check(exact_markdown in app.screen.body, "preview must preserve exact Markdown")
                 check(
-                    "pr review" not in gh_log.read_text(),
+                    gh_log.read_text() == before_preview,
                     "preview must not mutate before the typed-number gate",
                 )
                 await pilot.click("#review-preview-submit")
