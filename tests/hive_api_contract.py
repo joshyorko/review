@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Executable contract for the dashboard's Hive HTTP client."""
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         cases = {
             "/ok": (200, b'{"hub":"online"}', "application/json"),
-            "/auth": (401, b'{"error":"bad token"}', "application/json"),
+            "/auth": (401, b'{"error":"secret-token"}', "application/json"),
             "/forbidden": (403, b'{"error":"no standing"}', "application/json"),
             "/login-edge": (302, b"", "text/html"),
             "/html": (200, b"<html>login</html>", "text/html"),

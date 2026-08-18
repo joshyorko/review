@@ -153,6 +153,17 @@ async def main() -> int:
 
     import bluefin_review_tui as tui
 
+    hive_api_stub = workdir / "hive_api_stub.py"
+    hive_api_stub.write_text(
+        "import json, os, sys\n"
+        f"with open({str(curl_log)!r}, 'a') as sink: sink.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if os.environ.get('CURL_FAIL'):\n"
+        "    print('Hive queue failed ' + ('e' * 300), file=sys.stderr)\n"
+        "    raise SystemExit(1)\n"
+        "print(json.dumps({'status': 'queued'}))\n"
+    )
+    tui.HIVE_API_HELPER = str(hive_api_stub)
+
     # Queueing belongs to Hive: its authenticated endpoint records the human
     # actor, enforces merger standing and self-merge protection, then creates
     # the exact-head approval as the Hive App. A human-authored `gh pr review`
@@ -173,7 +184,7 @@ async def main() -> int:
         queue_commands = captured_queue[0][1] if captured_queue else []
         check(
             len(queue_commands) == 1
-            and queue_commands[0][1].endswith("hive_api.py")
+            and queue_commands[0][1] == tui.HIVE_API_HELPER
             and queue_commands[0][2] == "queue"
             and queue_commands[0][-1]
             == "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge",
@@ -1040,7 +1051,7 @@ async def main() -> int:
             )
 
         # An unreachable hub degrades to a plain statement, never a crash.
-        failures = {
+        hive_failure_states = {
             "authentication token missing": "authentication token missing",
             "network error": "network error",
             "authentication rejected (401)": "authentication rejected (401)",
@@ -1049,7 +1060,7 @@ async def main() -> int:
             "malformed API response": "malformed API response",
             "Hive server error (503)": "Hive server error (503)",
         }
-        for message, expected_state in failures.items():
+        for message, expected_state in hive_failure_states.items():
             tui.hive_get = lambda path, message=message: tui.hive_api.Result(
                 False, "test", message, {}
             )
@@ -1933,7 +1944,8 @@ async def main() -> int:
         if isinstance(app.screen, tui.ConfirmMutation):
             check(
                 len(app.screen.commands) == 1
-                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][1] == str(hive_api_stub)
+                and app.screen.commands[0][2] == "queue"
                 and app.screen.commands[0][-1].endswith(
                     "/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
                 ),
@@ -2616,7 +2628,8 @@ async def main() -> int:
             check(
                 app.screen.expected == "31"
                 and len(app.screen.commands) == 1
-                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][1] == str(hive_api_stub)
+                and app.screen.commands[0][2] == "queue"
                 and app.screen.commands[0][-1].endswith("/queue-automerge"),
                 f"the card must preserve the queue action, got {app.screen.commands}",
             )

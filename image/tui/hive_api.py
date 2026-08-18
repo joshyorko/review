@@ -47,8 +47,8 @@ def _failure(category: str, message: str, detail: object = "") -> Result:
     return Result(False, category, message, {"detail": bounded} if bounded else {})
 
 
-def _http_failure(code: int, body: bytes) -> Result:
-    detail = body[:MAX_BODY].decode("utf-8", "replace")
+def _http_failure(code: int, body: bytes, token: str) -> Result:
+    detail = body[:MAX_BODY].decode("utf-8", "replace").replace(token, "[redacted]")
     if 300 <= code < 400:
         return _failure("routing", f"API routing redirected ({code})")
     if code == 401:
@@ -85,12 +85,12 @@ def request(
             body = response.read(MAX_BODY + 1)
             content_type = response.headers.get_content_type()
     except urllib.error.HTTPError as error:
-        return _http_failure(error.code, error.read(MAX_BODY))
+        return _http_failure(error.code, error.read(MAX_BODY), token)
     except (urllib.error.URLError, TimeoutError, OSError):
         return _failure("network", "network error")
 
     if not 200 <= code < 300:
-        return _http_failure(code, body)
+        return _http_failure(code, body, token)
     if len(body) > MAX_BODY or content_type != "application/json":
         return _failure("malformed", "malformed API response")
     try:

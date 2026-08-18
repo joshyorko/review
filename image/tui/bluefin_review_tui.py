@@ -69,6 +69,7 @@ TRACE_PATH = os.path.join(
 )
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
+HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
 # repositories; Hive's queue endpoint owns creating and applying it.
@@ -2747,7 +2748,7 @@ class ReviewDashboard(App):
         )
         command = [
             sys.executable,
-            os.path.join(os.path.dirname(__file__), "hive_api.py"),
+            HIVE_API_HELPER,
             "queue",
             endpoint,
         ]
