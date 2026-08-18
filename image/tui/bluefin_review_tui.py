@@ -47,6 +47,7 @@ from textual.widgets import (
 )
 from review_result import ReviewResult, adapt_current_engine
 import landing
+import hive_api
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
 from harness.goose import GooseHarness
@@ -68,6 +69,7 @@ TRACE_PATH = os.path.join(
 )
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
+HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
 # repositories; Hive's queue endpoint owns creating and applying it.
@@ -318,26 +320,18 @@ def hive_token() -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def hive_get(path: str) -> dict:
+def hive_get(path: str) -> hive_api.Result:
     """Read one hub endpoint. Read-only, and never fatal.
 
-    Consulting Hive must not be able to break the dashboard: an unreachable
-    or unauthenticated hub is reported as unreachable, not raised. Hive
-    remains the sole authority for assigning contributor tasks — nothing here
-    claims, reorders, or declines any of them.
+    Consulting Hive must not be able to break the dashboard. The result keeps
+    routing, authentication, authorization, network, malformed-response, and
+    server failures distinct without exposing credentials.
     """
     base = hive_api_base()
     token = hive_token()
-    if not base or not token:
-        return {}
-    request = urllib.request.Request(
-        f"{base}{path}", headers={"Authorization": f"Bearer {token}"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=HIVE_TIMEOUT) as response:
-            return json.load(response)
-    except Exception:
-        return {}
+    if not base:
+        return hive_api.Result(False, "configuration", "not configured", {})
+    return hive_api.request(f"{base}{path}", token, timeout=HIVE_TIMEOUT)
 
 
 def trace(record: dict) -> None:
@@ -1827,10 +1821,14 @@ class ReviewDashboard(App):
             self.call_from_thread(self.hive_loaded, "not configured", [])
             return
         status = hive_get("/api/v1/status")
-        if not status:
-            self.call_from_thread(self.hive_loaded, "unreachable", [])
+        if not status.ok:
+            self.call_from_thread(self.hive_loaded, status.message, [])
             return
-        contributors = hive_get("/api/v1/contributors").get("contributors", [])
+        contributor_result = hive_get("/api/v1/contributors")
+        if not contributor_result.ok:
+            self.call_from_thread(self.hive_loaded, contributor_result.message, [])
+            return
+        contributors = contributor_result.data.get("contributors", [])
         workers = [
             {
                 "login": contributor.get("github_username", "?"),
@@ -1840,8 +1838,8 @@ class ReviewDashboard(App):
             if contributor.get("current_task")
         ]
         state = (
-            f"{status.get('hub', 'online')} · "
-            f"{status.get('actionable_items', '?')} actionable · "
+            f"{status.data.get('hub', 'online')} · "
+            f"{status.data.get('actionable_items', '?')} actionable · "
             f"{len(workers)} working"
         )
         self.call_from_thread(self.hive_loaded, state, workers)
@@ -2927,12 +2925,9 @@ class ReviewDashboard(App):
             f"{base}/api/prs/{owner}/{repository}/{stop.number}/queue-automerge"
         )
         command = [
-            "sh",
-            "-c",
-            'exec curl --fail-with-body --location --silent --show-error '
-            '--request POST --header '
-            '"Authorization: Bearer ${GH_TOKEN:?GH_TOKEN is required}" "$1" >&2',
-            "bluefin-review-hive-queue",
+            sys.executable,
+            HIVE_API_HELPER,
+            "queue",
             endpoint,
         ]
 

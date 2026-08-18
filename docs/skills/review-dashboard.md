@@ -237,6 +237,13 @@ distinct states. `[o]` is only an optional browser escape hatch.
   GitHub's `push` permission, read per repository. `L` leaves a review and
   merges nothing. A review that can only be given by also queueing or
   merging is not a review.
+- **Treat the Hive API as JSON, not a browser.** The read-only status probe
+  reports missing hub configuration, missing credentials, network failure,
+  authentication, authorization, edge/login redirects, malformed responses,
+  and server failure as separate concise states. The queue POST never follows
+  a redirect and succeeds only when a bounded JSON response explicitly says
+  `queued`; the typed pull-request-number gate remains the authority boundary.
+  Hosted queueing remains blocked by the ingress defect tracked in #258.
 
 ## Batch landing
 
