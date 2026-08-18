@@ -207,6 +207,14 @@ class ProvenanceView:
 
 
 @dataclass(frozen=True)
+class DecisionSummary:
+    what_changed: str
+    risk_impact: str
+    ci_merge_state: str
+    recommended_action: str
+
+
+@dataclass(frozen=True)
 class DecisionCard:
     state: DecisionState
     exact_head: str | None
@@ -214,6 +222,7 @@ class DecisionCard:
     findings: tuple[FindingView, ...]
     verification: tuple[VerificationView, ...]
     provenance: ProvenanceView
+    summary: DecisionSummary
     raw_evidence: tuple[str, ...]
     repository: str = ""
     number: int = 0
@@ -464,6 +473,39 @@ def build_decision_card(result: ReviewResult, *, exact_head: str) -> DecisionCar
         str(raw_provenance.get("provider", "")),
         str(raw_provenance.get("effort") or raw_provenance.get("reasoning_effort") or ""),
     )
+    what_changed = tldr or title or "No change summary was provided."
+    finding_total = sum(result.counts.values())
+    if state is DecisionState.FINDINGS:
+        highest = next((
+            severity for severity in ("critical", "high", "medium", "low")
+            if result.counts.get(severity, 0)
+        ), "unknown")
+        risk_impact = (
+            f"{highest.upper()} risk · {finding_total} actionable "
+            f"finding{'s' if finding_total != 1 else ''}"
+        )
+        recommended_action = (
+            "Request changes or comment on the cited "
+            f"finding{'s' if finding_total != 1 else ''}."
+        )
+    elif state is DecisionState.CLEAN:
+        risk_impact = "No evidenced review risk."
+        if ci.value == "success" and mergeability.value == "clean":
+            recommended_action = "Approve, queue, or merge after human judgment."
+        else:
+            recommended_action = "Review the evidence; wait for green CI before landing."
+    elif state is DecisionState.STALE:
+        risk_impact = "Risk unknown · the reviewed head is stale."
+        recommended_action = "Rerun the review on the current head."
+    else:
+        risk_impact = "Risk unknown · the review did not complete."
+        recommended_action = "Open diagnostics and rerun the review."
+    summary = DecisionSummary(
+        what_changed,
+        risk_impact,
+        f"{ci.label} · {mergeability.label}",
+        recommended_action,
+    )
     return DecisionCard(
         state,
         bound_head,
@@ -471,6 +513,7 @@ def build_decision_card(result: ReviewResult, *, exact_head: str) -> DecisionCar
         findings,
         verification,
         provenance,
+        summary,
         tuple(result.raw_evidence),
         repository=repository,
         number=number,
@@ -490,6 +533,7 @@ __all__ = [
     "ActionID",
     "ActionSpec",
     "DecisionCard",
+    "DecisionSummary",
     "DecisionState",
     "FindingView",
     "ProvenanceView",
