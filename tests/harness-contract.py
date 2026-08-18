@@ -500,8 +500,50 @@ class HarnessContract(unittest.TestCase):
         request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
         command = GooseHarness().draft_command(request, "/tmp/review-draft-prompt")
         self.assertEqual(command, [
-            "goose", "run", "--no-session", "-i", "/tmp/review-draft-prompt",
+            "goose", "run", "--no-session", "--quiet", "--model",
+            "gpt-5.6-luna", "-i", "/tmp/review-draft-prompt",
         ])
+
+    def test_goose_draft_uses_goose_model_and_removes_prompt_and_github_tokens(self):
+        request = DraftRequest(self.binding, "comment", self._evidence(), {"title": "A PR"})
+        captured = {}
+
+        class Process:
+            stdout = "Reviewed."
+            stderr = ""
+            returncode = 0
+
+        def run(command, **kwargs):
+            prompt_path = command[-1]
+            captured.update(command=command, prompt_path=prompt_path,
+                            prompt=Path(prompt_path).read_text(), **kwargs)
+            return Process()
+
+        adapter = GooseHarness(
+            availability=Availability.READY, model="gpt-goose", effort="max"
+        )
+        with patch.dict(os.environ, {
+            "GH_TOKEN": "secret", "GITHUB_TOKEN": "secret",
+            "REVIEW_GH_TOKEN": "secret",
+        }), patch("harness.goose.subprocess.run", side_effect=run):
+            result = adapter.draft(request)
+        self.assertEqual(result.state, DraftState.COMPLETE)
+        self.assertEqual(result.markdown, "Reviewed.")
+        self.assertEqual(result.provenance["backend"], "goose")
+        self.assertEqual(result.provenance["model"], "gpt-goose")
+        self.assertEqual(result.provenance["effort"], "max")
+        self.assertEqual(captured["command"][:7], [
+            "goose", "run", "--no-session", "--quiet", "--model",
+            "gpt-goose", "-i",
+        ])
+        self.assertIn("verdict comment", captured["prompt"])
+        self.assertIn("Do not perform another code review", captured["prompt"])
+        self.assertNotIn("GH_TOKEN", captured["env"])
+        self.assertNotIn("GITHUB_TOKEN", captured["env"])
+        self.assertNotIn("REVIEW_GH_TOKEN", captured["env"])
+        self.assertEqual(captured["env"]["GOOSE_MODEL"], "gpt-goose")
+        self.assertEqual(captured["env"]["GOOSE_THINKING_EFFORT"], "max")
+        self.assertFalse(Path(captured["prompt_path"]).exists())
 
     def test_codex_draft_strips_github_tokens_from_subprocess_environment(self):
         request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
