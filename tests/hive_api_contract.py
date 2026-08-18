@@ -111,6 +111,20 @@ def main() -> None:
         check(Handler.login_posts == 0, "mutating POST was replayed against login")
         check("secret-token" not in redirected.stderr, "CLI leaked token")
 
+        control_token = "dummy-line-one\ndummy-line-two"
+        invalid_header = subprocess.run(
+            [sys.executable, helper, "queue", f"{base}/queue-ok"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GH_TOKEN": control_token},
+            timeout=5,
+        )
+        check(invalid_header.returncode != 0, "control characters must reject the token")
+        check("invalid authentication token" in invalid_header.stderr, invalid_header.stderr)
+        check("Traceback" not in invalid_header.stderr, "header failure leaked a traceback")
+        for fragment in control_token.splitlines():
+            check(fragment not in invalid_header.stderr, "header failure leaked token data")
+
         false_success = subprocess.run(
             [sys.executable, helper, "queue", f"{base}/queue-false-success"],
             capture_output=True,

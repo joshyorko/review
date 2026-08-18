@@ -70,6 +70,8 @@ def request(
 ) -> Result:
     if not token.strip():
         return _failure("authentication", "authentication token missing")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in token):
+        return _failure("authentication", "invalid authentication token")
     client = opener or urllib.request.build_opener(NoRedirect())
     http_request = urllib.request.Request(
         url,
@@ -86,6 +88,8 @@ def request(
             content_type = response.headers.get_content_type()
     except urllib.error.HTTPError as error:
         return _http_failure(error.code, error.read(MAX_BODY), token)
+    except ValueError:
+        return _failure("authentication", "invalid authentication token")
     except (urllib.error.URLError, TimeoutError, OSError):
         return _failure("network", "network error")
 
