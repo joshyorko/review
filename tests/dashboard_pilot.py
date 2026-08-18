@@ -449,8 +449,8 @@ async def main() -> int:
         "Escape and q must project the same semantic back action",
     )
     check(
-        [command.key for command in registry if command.action == "quit"] == ["ctrl+q"],
-        "Ctrl-q must be the sole global quit binding",
+        {command.key for command in registry if command.action == "quit"} == {"ctrl+c", "ctrl+q"},
+        "Ctrl-C and Ctrl-q must be global quit bindings",
     )
     palette_commands = [command for command in registry if command.id.startswith("open_command_palette")]
     check(
