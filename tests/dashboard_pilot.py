@@ -2165,9 +2165,38 @@ async def main() -> int:
         tui.live_review_context(superseded)["ci"] == "success",
         "review context must agree with the exact-head check rollup",
     )
+    verification = tui.live_review_verification(superseded)
     check(
-        len(tui.live_review_verification(superseded)) == 5,
-        "review verification must contain one authoritative record per stable context",
+        [record["name"] for record in verification]
+        == [
+            "E2E smoke",
+            "validate-release-notes",
+            "Check PR base branch",
+            "validate",
+            "Unit tests",
+        ],
+        "review verification must order one authoritative record per stable context",
+    )
+    status_contexts = {
+        "statusCheckRollup": [
+            {
+                "__typename": "StatusContext",
+                "context": "ci/vendor",
+                "state": "FAILURE",
+                "startedAt": "2026-08-10T00:28:00Z",
+            },
+            {
+                "__typename": "StatusContext",
+                "context": "ci/vendor",
+                "state": "SUCCESS",
+                "startedAt": "2026-08-10T00:29:00Z",
+            },
+        ]
+    }
+    check(
+        tui.effective_check_state("unknown", status_contexts) == "success"
+        and len(tui.authoritative_checks(status_contexts)) == 1,
+        "a newer commit status must supersede the same stable status context",
     )
 
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))

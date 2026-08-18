@@ -489,7 +489,7 @@ def authoritative_checks(live: dict) -> list[dict]:
         )
         if key not in latest or rank > latest[key][0]:
             latest[key] = (rank, check)
-    return [item[1] for item in latest.values()] + ungrouped
+    return [item[1] for item in sorted(latest.values(), key=lambda item: item[0])] + ungrouped
 
 
 def effective_check_state(snapshot: str, live: dict) -> str:
