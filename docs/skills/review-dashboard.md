@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "1.4"
-last_updated: 2026-08-16
+version: "1.5"
+last_updated: 2026-08-18
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -88,6 +88,17 @@ or any disagreement also produces `STALE` and cannot produce a clean card.
 `effort` is preferred while `reasoning_effort` remains accepted for existing
 adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
 `STALE`, and `CANCELLED`.
+
+Terminal-normalized Shift-L may arrive as lowercase key identity plus uppercase
+character. The dashboard dispatches that event to ordinary review and keeps
+lowercase `l` pane movement on the active `Screen` focus API. Review and
+comment editor shortcuts are priority bindings, with literal hints and buttons
+that call the same actions. Review submission remains exact-body preview then
+the typed-number gate; comments use the same preview-before-gate sequence.
+Terminal dispatch failures become bounded visible errors instead of ending the
+dashboard. `e` opens bounded decision evidence; `r` opens the
+explicitly secondary raw backend transcript. `[u]` updates only clean branches;
+conflicts direct the maintainer to manual resolution before a gate.
 
 ## Core Process
 
@@ -197,6 +208,12 @@ distinct states. `[o]` is only an optional browser escape hatch.
 - **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
   request whose snapshot or fetched live evidence says CI failed or is
   pending; GitHub branch protection remains an additional gate.
+- **Roll up checks at the exact current head.** Fetch `headRefOid` and
+  `statusCheckRollup` in the same `gh pr view`, group check runs by workflow
+  and job name (commit statuses by context), and use only the newest run in
+  each stable context. Superseded cancellations do not make a successful
+  rerun fail; authoritative failures, cancellations, pending checks, absent
+  checks, and GitHub's merge state remain separate evidence.
 - **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
@@ -220,6 +237,13 @@ distinct states. `[o]` is only an optional browser escape hatch.
   GitHub's `push` permission, read per repository. `L` leaves a review and
   merges nothing. A review that can only be given by also queueing or
   merging is not a review.
+- **Treat the Hive API as JSON, not a browser.** The read-only status probe
+  reports missing hub configuration, missing credentials, network failure,
+  authentication, authorization, edge/login redirects, malformed responses,
+  and server failure as separate concise states. The queue POST never follows
+  a redirect and succeeds only when a bounded JSON response explicitly says
+  `queued`; the typed pull-request-number gate remains the authority boundary.
+  Hosted queueing remains blocked by the ingress defect tracked in #258.
 
 ## Batch landing
 
