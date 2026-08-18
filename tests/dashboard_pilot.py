@@ -173,10 +173,16 @@ async def main() -> int:
         queue_commands = captured_queue[0][1] if captured_queue else []
         check(
             len(queue_commands) == 1
-            and queue_commands[0][:2] == ["sh", "-c"]
+            and queue_commands[0][1].endswith("hive_api.py")
+            and queue_commands[0][2] == "queue"
             and queue_commands[0][-1]
             == "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge",
             f"queueing must call Hive's App-authored queue endpoint once, got {queue_commands}",
+        )
+        check(
+            "--location" not in queue_commands[0]
+            and "-L" not in queue_commands[0],
+            f"a mutating Hive request must not follow redirects, got {queue_commands}",
         )
         check(
             not any(command[:3] == ["gh", "pr", "review"] for command in queue_commands),
@@ -954,7 +960,8 @@ async def main() -> int:
         def __call__(self, path):
             with open(hive_calls, "a") as sink:
                 sink.write(path + "\n")
-            return self.status if path.endswith("status") else self.contributors
+            data = self.status if path.endswith("status") else self.contributors
+            return tui.hive_api.Result(True, "ok", "online", data)
 
     real_hive_get = tui.hive_get
     real_base = tui.hive_api_base
@@ -1033,19 +1040,31 @@ async def main() -> int:
             )
 
         # An unreachable hub degrades to a plain statement, never a crash.
-        tui.hive_get = lambda path: {}
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            for _ in range(200):
-                if app.hive_state:
-                    break
-                await pilot.pause(0.05)
-            check(
-                app.hive_state == "unreachable",
-                f"an unreachable hub must say so, got {app.hive_state!r}",
+        failures = {
+            "authentication token missing": "authentication token missing",
+            "network error": "network error",
+            "authentication rejected (401)": "authentication rejected (401)",
+            "authorization rejected (403)": "authorization rejected (403)",
+            "API routing redirected (302)": "API routing redirected (302)",
+            "malformed API response": "malformed API response",
+            "Hive server error (503)": "Hive server error (503)",
+        }
+        for message, expected_state in failures.items():
+            tui.hive_get = lambda path, message=message: tui.hive_api.Result(
+                False, "test", message, {}
             )
-            check(app.stops, "an unreachable hub must not empty the queue")
+            app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                for _ in range(200):
+                    if app.hive_state:
+                        break
+                    await pilot.pause(0.05)
+                check(
+                    app.hive_state == expected_state,
+                    f"Hive failure must be actionable, got {app.hive_state!r}",
+                )
+                check(app.stops, "a Hive failure must not empty the queue")
 
         # No hub configured at all is its own honest answer.
         tui.hive_api_base = lambda: ""

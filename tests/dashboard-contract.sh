@@ -14,6 +14,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tui="$repo_root/image/tui/bluefin_review_tui.py"
 
+python3 "$repo_root/tests/hive_api_contract.py"
+
 fail() {
   echo "FAIL: $1" >&2
   exit 1
