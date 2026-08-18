@@ -259,13 +259,35 @@ class GooseHarness:
             ) as prompt_file:
                 prompt_file.write(self.draft_prompt(request))
                 prompt_path = prompt_file.name
-            process = subprocess.run(
-                self.draft_command(request, prompt_path), capture_output=True,
-                text=True, check=False, env=environment,
-            )
-            payload = process.stdout
-            if process.returncode != 0 and process.stderr:
-                payload = f"{payload}\n{process.stderr}".strip()
+            try:
+                process = subprocess.Popen(
+                    self.draft_command(request, prompt_path),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, env=environment, start_new_session=True,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return self.convert_draft(str(exc), request, 1)
+            self._process = process
+            previous = {}
+
+            def stop(_signum, _frame):
+                self.cancel(process)
+
+            try:
+                previous = {
+                    signal.SIGTERM: signal.signal(signal.SIGTERM, stop),
+                    signal.SIGINT: signal.signal(signal.SIGINT, stop),
+                }
+                stdout, stderr = process.communicate()
+            except (OSError, subprocess.SubprocessError) as exc:
+                return self.convert_draft(str(exc), request, 1)
+            finally:
+                for signum, handler in previous.items():
+                    signal.signal(signum, handler)
+                self._process = None
+            payload = stdout
+            if process.returncode != 0 and stderr:
+                payload = f"{payload}\n{stderr}".strip()
             return self.convert_draft(payload, request, process.returncode)
         finally:
             if prompt_path:
