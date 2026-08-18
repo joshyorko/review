@@ -2088,8 +2088,8 @@ class ReviewDashboard(App):
                     "review_state": str(pull.get("reviewDecision", "") or "").lower(),
                 })
         except ValueError as error:
-            self.source_state = "malformed"
             self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            self.source_state = "malformed"
             return {"items": []}
         self.source_state = "empty" if not items else "ready"
         self.source_message = ""
