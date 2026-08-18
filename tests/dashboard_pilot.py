@@ -351,6 +351,8 @@ async def main() -> int:
     await assert_live_state("network timeout", "error", "network timeout")
     await assert_live_state("authentication required", "inaccessible", "authentication required")
 
+    os.environ.pop("LIVE_GH_ERROR", None)
+    os.environ.pop("LIVE_PAGES", None)
     malformed_repo = tui.ReviewDashboard(tui.QueueFilters(live_repository="not-a-repo"))
     async with malformed_repo.run_test() as pilot:
         await wait_for_state(malformed_repo, pilot, "malformed")
@@ -378,6 +380,11 @@ async def main() -> int:
         app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
         async with app.run_test() as pilot:
             await wait_for_state(app, pilot, "malformed")
+            for _ in range(100):
+                status = str(app.query_one("#status-bar").render())
+                if detail in app.source_message and detail in status:
+                    break
+                await pilot.pause(0.05)
             status = str(app.query_one("#status-bar").render())
             check(app.source_state == "malformed" and not app.stops,
                   f"invalid {detail} must produce no rows through the real app")
@@ -1661,20 +1668,21 @@ async def main() -> int:
         check(tui.ACTIVE_BACKEND == unavailable_backend,
               "unavailable Codex pilot must restore the prior backend")
 
-    # Goose is the selected backend by default, but it does not draft bodies.
-    # It must degrade without invoking Codex or changing manual prose.
+    # Goose is the selected backend by default and drafts bodies directly.
     original_backend = tui.ACTIVE_BACKEND
-    original_draft = tui.CodexHarness.draft
-    original_probe = tui.CodexHarness.probe
-    codex_calls = []
+    original_goose_draft = tui.GooseHarness.draft
+    goose_calls = []
 
-    def unexpected_codex(self, request):
-        codex_calls.append(request)
-        raise AssertionError("Goose body drafting must not invoke Codex")
+    def goose_draft(self, request):
+        goose_calls.append(request)
+        return SimpleNamespace(
+            state=tui.DraftState.COMPLETE,
+            markdown="generated Goose body",
+            provenance={"backend": "goose", "model": self.model, "effort": self.effort},
+        )
 
     tui.ACTIVE_BACKEND = "goose"
-    tui.CodexHarness.draft = unexpected_codex
-    tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
+    tui.GooseHarness.draft = goose_draft
     try:
         app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
         async with app.run_test() as pilot:
@@ -1698,12 +1706,9 @@ async def main() -> int:
             editor.text = "manual Goose body"
             app.screen.action_generate()
             await pilot.pause()
-            check(editor.text == "manual Goose body",
-                  "unsupported Goose drafting must preserve the manual review body")
-            check(any("unsupported" in notification.message.lower()
-                      for notification in app._notifications),
-                  "unsupported Goose drafting must show a degraded message")
-            check(not codex_calls, "Goose drafting must never invoke Codex")
+            check(editor.text == "generated Goose body",
+                  "Goose drafting must use the selected drafting capability")
+            check(len(goose_calls) == 1, "Goose drafting must be invoked directly")
             editor.text = "x" * 4096
             app.screen.action_preview()
             await pilot.pause()
@@ -1721,8 +1726,7 @@ async def main() -> int:
                   "an oversized body must not create a temporary file")
     finally:
         tui.ACTIVE_BACKEND = original_backend
-        tui.CodexHarness.probe = original_probe
-        tui.CodexHarness.draft = original_draft
+        tui.GooseHarness.draft = original_goose_draft
 
     # A verdict that is not an approval has to say why.
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
