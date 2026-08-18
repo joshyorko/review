@@ -484,6 +484,14 @@ async def main() -> int:
     # action, so a 121-pull-request queue rendered as five stops and the
     # merge-ready work was invisible. Default is now the whole queue, ordered
     # so what a maintainer can act on comes first.
+    for key, label in (("q", "q"), ("ctrl+c", "Ctrl-C")):
+        quit_app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with quit_app.run_test() as quit_pilot:
+            await quit_pilot.pause()
+            await quit_pilot.press(key)
+            await quit_pilot.pause()
+            check(quit_app._exit, f"{label} must exit the root dashboard")
+
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -608,9 +616,6 @@ async def main() -> int:
             f"the acting key line must not advertise label or priority, got {tui.KEYS_ACTING!r}",
         )
         root_screen = app.screen
-        await pilot.press("q")
-        await pilot.pause()
-        check(app.screen is root_screen, "q must be safe on the root screen")
         await pilot.press("ctrl+p")
         await pilot.pause()
         check(type(app.screen).__name__ == "CommandPalette", "Ctrl-p must open Textual's command palette")
