@@ -2510,6 +2510,11 @@ async def main() -> int:
         f"the review must call 'pr <repo> <number>', got {invocations[-1:]}",
     )
     for expected in (
+        "what changed  fix: ci.yml add permissions block",
+        "risk/impact  No evidenced review risk.",
+        "confidence  CI FAILED · MERGEABLE · head CURRENT 0123456789ab",
+        "findings  No evidenced findings.",
+        "next action  Review the evidence; wait for green CI before landing.",
         "No evidenced findings",
         "checks  4 verified / 1 unverified",
         "overlap 1 duplicate / 2 shared-file hazard",
@@ -2527,6 +2532,10 @@ async def main() -> int:
     check("COMPLETE" in text, f"a structured findings run must complete, got {text!r}")
     for expected in (
         "FINDINGS",
+        "what changed  fix: ci.yml add permissions block",
+        "risk/impact  HIGH risk · 2 actionable findings",
+        "confidence  CI FAILED · MERGEABLE · head CURRENT 0123456789ab",
+        "next action  Request changes or comment on the cited findings.",
         "critical:0  high:1  medium:1  low:0",
         "image/entrypoint.sh:87",
         "SIGTERM [signal] no longer reaches",
