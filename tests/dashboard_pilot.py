@@ -25,6 +25,8 @@ import tempfile
 from types import SimpleNamespace
 from pathlib import Path
 
+from textual.events import Key
+
 TUI_DIR = Path(
     os.environ.get(
         "BLUEFIN_REVIEW_TUI_DIR",
@@ -2007,6 +2009,25 @@ async def main() -> int:
             bool(app.query("#keys-reading")) and bool(app.query("#keys-acting")),
             "the key map must be two lines at the bottom",
         )
+        # A normal terminal may report Shift-L as lower-case key identity with
+        # an upper-case character. Drive that real event shape rather than
+        # Pilot's synthetic ``press("L")`` event (#259).
+        app.post_message(Key("l", "L"))
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.ReviewVerdict),
+            "terminal-normalized Shift-L must open the ordinary review verdict",
+        )
+        if isinstance(app.screen, tui.ReviewVerdict):
+            await pilot.press("escape")
+        app.query_one("#queue", tui.ListView).focus()
+        app.post_message(Key("l", "l"))
+        await pilot.pause()
+        check(
+            app.focused is app.query_one("#steer", tui.Input),
+            "lowercase l must move focus through Textual's screen API",
+        )
+        app.query_one("#queue", tui.ListView).focus()
         # Direct merge must refuse snapshot-known red and pending checks before
         # presenting a confirmation gate or attempting the GitHub mutation.
         for known_state, live_checks in (
