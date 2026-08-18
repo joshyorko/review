@@ -234,6 +234,9 @@ class DecisionCard:
     mergeability: SemanticStatus = _UNKNOWN_MERGEABILITY
     review: SemanticStatus = _UNKNOWN_REVIEW
     available_actions: tuple[ActionID, ...] = ()
+    duplicate_count: int = 0
+    shared_file_count: int = 0
+    merge_state: str = "?"
 
     @property
     def clean(self) -> bool:
@@ -506,6 +509,8 @@ def build_decision_card(result: ReviewResult, *, exact_head: str) -> DecisionCar
         f"{ci.label} · {mergeability.label}",
         recommended_action,
     )
+    duplicates = result.overlap.get("duplicates") or []
+    shared_files = result.overlap.get("shared_files") or result.overlap.get("overlaps") or []
     return DecisionCard(
         state,
         bound_head,
@@ -525,6 +530,9 @@ def build_decision_card(result: ReviewResult, *, exact_head: str) -> DecisionCar
         mergeability=mergeability,
         review=review,
         available_actions=_available_actions(live.get("available_actions")),
+        duplicate_count=len(duplicates),
+        shared_file_count=len(shared_files),
+        merge_state=_text(live.get("merge_state") or live.get("mergeStateStatus")) or "?",
     )
 
 

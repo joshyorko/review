@@ -46,7 +46,7 @@ from textual.widgets import (
     TextArea,
 )
 from review_result import ReviewResult, adapt_current_engine
-from semantic_view import build_decision_card
+from semantic_view import DecisionState, build_decision_card
 import landing
 import hive_api
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -1519,22 +1519,27 @@ class ReviewScreen(Screen):
                     Preference("codex", result.provenance.get("model", "gpt-5.6-luna"),
                                result.provenance.get("reasoning_effort", "low")),
                 )
+        card = build_decision_card(
+            result, exact_head=str(stop.live.get("headRefOid") or "")
+        )
         if error:
             outcome, state = "error", f"FAILED to start: {error}"
         elif self.stop_requested:
             outcome, state = "stopped", "STOPPED — you cancelled it. Nothing was submitted."
         elif code is not None and code < 0:
             outcome, state = "stopped", "STOPPED — the review was killed. Nothing was submitted."
-        elif result.state in ("complete", "findings"):
+        elif card.state in (DecisionState.CLEAN, DecisionState.FINDINGS):
             outcome = "complete"
             state = "COMPLETE — a Review Draft for you to judge. Nothing was submitted."
-        elif result.state == "incomplete":
+        elif card.state is DecisionState.STALE:
+            outcome, state = "stale", "STALE — the review does not match the current head. Rerun it."
+        elif card.state is DecisionState.INCOMPLETE:
             outcome = "incomplete"
             state = (
                 "INCOMPLETE — part of this review returned no verdict. "
                 "Its finding count is not a clean bill of health."
             )
-        elif result.state == "unparsable":
+        elif card.state is DecisionState.UNPARSABLE:
             outcome = "incomplete"
             state = "UNPARSABLE — the review output is not a clean result."
         else:
@@ -1548,9 +1553,6 @@ class ReviewScreen(Screen):
         status.update(
             f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
             f"{escape(state)} ({elapsed}s) — {escape('[escape]')} closes"
-        )
-        card = build_decision_card(
-            result, exact_head=str(stop.live.get("headRefOid") or "")
         )
         finding_total = sum(card.counts.values())
         lines = [
@@ -1585,18 +1587,18 @@ class ReviewScreen(Screen):
             f"checks  {verified} verified / {unverified} unverified / "
             f"{len(card.verification)} reported"
         )
-        duplicates = result.overlap.get("duplicates") or []
-        overlaps = result.overlap.get("overlaps") or []
-        lines.append(f"overlap {len(duplicates)} duplicate / {len(overlaps)} shared-file hazard")
         lines.append(
-            f"live     CI {result.live.get('ci', 'unknown')} · merge "
-            f"{escape(result.live.get('mergeable', '?'))}/"
-            f"{escape(result.live.get('merge_state', '?'))} · "
-            f"head {escape(result.live.get('head', '?'))}"
+            f"overlap {card.duplicate_count} duplicate / "
+            f"{card.shared_file_count} shared-file hazard"
         )
         lines.append(
-            f"source  {escape(result.provenance.get('backend', '?'))} / "
-            f"{escape(result.provenance.get('model', '?'))}"
+            f"live     CI {escape(card.ci.value)} · merge "
+            f"{escape(card.mergeability.label)}/{escape(card.merge_state)} · head "
+            f"{escape((card.exact_head or card.reviewed_head or '?')[:12])}"
+        )
+        lines.append(
+            f"source  {escape(card.provenance.backend or '?')} / "
+            f"{escape(card.provenance.model or '?')}"
         )
         lines.append(
             "actions  "

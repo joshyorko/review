@@ -718,7 +718,13 @@ async def main() -> int:
             "Ctrl-q must remain the quit binding",
         )
 
-    async def run_review(exit_code: int, output: str):
+    async def run_review(
+        exit_code: int,
+        output: str,
+        *,
+        head_sha: str = "0123456789abcdef0123456789abcdef01234567",
+        reviewed_head: str = "",
+    ):
         review_stub(exit_code, output)
         app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
         async with app.run_test() as pilot:
@@ -729,7 +735,7 @@ async def main() -> int:
                 await pilot.pause(0.05)
             app.stops[0].live = {
                 "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
-                "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+                "headRefOid": head_sha,
                 "isDraft": False,
                 "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN",
@@ -740,6 +746,13 @@ async def main() -> int:
             }
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
             root_screen = app.screen
+            original_adapter = tui.adapt_current_engine
+            if reviewed_head:
+                def stale_adapter(*args, **kwargs):
+                    result = original_adapter(*args, **kwargs)
+                    result.provenance["head_sha"] = reviewed_head
+                    return result
+                tui.adapt_current_engine = stale_adapter
             await pilot.press("r")
             await pilot.pause()
             screen = app.screen
@@ -770,6 +783,7 @@ async def main() -> int:
             check("hidden" not in raw.classes, "[r] must reveal the secondary raw transcript")
             await pilot.press("q")
             await pilot.pause()
+            tui.adapt_current_engine = original_adapter
             check(app.screen is root_screen, "q must close ReviewScreen")
             return str(status.render()), set(status.classes), str(card.render())
 
@@ -2769,6 +2783,16 @@ async def main() -> int:
         f"unparsable output must direct diagnostics, got {card!r}",
     )
 
+    text, classes, card = await run_review(
+        0, clean_output, reviewed_head="a" * 40
+    )
+    check("STALE" in text, f"a mismatched reviewed head must report STALE, got {text!r}")
+    check("stale" in classes, f"a stale review must carry stale styling, got {classes}")
+    check(
+        "next action  Rerun the review on the current head." in card,
+        f"a stale review must direct a rerun, got {card!r}",
+    )
+
     # ── the regression that started this: a review whose checks returned no
     # verdict must never read as clean ───────────────────────────────────
     text, classes, card = await run_review(65, incomplete_output)
@@ -3111,7 +3135,7 @@ async def main() -> int:
     outcomes = [r["outcome"] for r in records if r.get("action") == "review"]
     check(
         outcomes == [
-            "complete", "complete", "incomplete", "incomplete", "failed",
+            "complete", "complete", "incomplete", "stale", "incomplete", "failed",
             "complete", "incomplete", "complete", "stopped", "stopped",
             "complete", "error",
         ],
