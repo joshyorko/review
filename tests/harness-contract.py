@@ -500,8 +500,7 @@ class HarnessContract(unittest.TestCase):
         request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
         command = GooseHarness().draft_command(request, "/tmp/review-draft-prompt")
         self.assertEqual(command, [
-            "goose", "run", "--no-session", "--quiet", "--model",
-            "gpt-5.6-luna", "-i", "/tmp/review-draft-prompt",
+            "goose", "run", "--no-session", "-i", "/tmp/review-draft-prompt",
         ])
 
     def test_goose_draft_uses_goose_model_and_removes_prompt_and_github_tokens(self):
@@ -532,9 +531,8 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(result.provenance["backend"], "goose")
         self.assertEqual(result.provenance["model"], "gpt-goose")
         self.assertEqual(result.provenance["effort"], "max")
-        self.assertEqual(captured["command"][:7], [
-            "goose", "run", "--no-session", "--quiet", "--model",
-            "gpt-goose", "-i",
+        self.assertEqual(captured["command"][:4], [
+            "goose", "run", "--no-session", "-i",
         ])
         self.assertIn("verdict comment", captured["prompt"])
         self.assertIn("Do not perform another code review", captured["prompt"])

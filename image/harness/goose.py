@@ -210,10 +210,7 @@ class GooseHarness:
 
     def draft_command(self, request: DraftRequest, prompt_path: str) -> list[str]:
         self.validate_draft(request)
-        return [
-            self.executable, "run", "--no-session", "--quiet", "--model", self.model,
-            "-i", prompt_path,
-        ]
+        return [self.executable, "run", "--no-session", "-i", prompt_path]
 
     def convert_draft(self, payload: str, request: DraftRequest,
                       exit_code: int = 0) -> DraftResult:
