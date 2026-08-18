@@ -494,13 +494,14 @@ class HarnessContract(unittest.TestCase):
         adapter = CodexHarness(availability=Availability.READY)
         self.assertTrue(adapter.process_group_cancellation)
 
-    def test_drafting_is_explicit_and_goose_does_not_fallback(self):
+    def test_drafting_is_explicit_for_each_selected_harness(self):
         self.assertTrue(CodexHarness().capabilities.body_drafting)
-        self.assertFalse(GooseHarness().capabilities.body_drafting)
+        self.assertTrue(GooseHarness().capabilities.body_drafting)
         request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
-        with self.assertRaises(RuntimeError) as error:
-            GooseHarness().draft(request)
-        self.assertIn("UNSUPPORTED_CAPABILITY", str(error.exception))
+        command = GooseHarness().draft_command(request, "/tmp/review-draft-prompt")
+        self.assertEqual(command, [
+            "goose", "run", "--no-session", "-i", "/tmp/review-draft-prompt",
+        ])
 
     def test_codex_draft_strips_github_tokens_from_subprocess_environment(self):
         request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
