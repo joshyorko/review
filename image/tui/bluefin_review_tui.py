@@ -1734,6 +1734,7 @@ class ReviewDashboard(App):
     #review-status.running { background: $panel; color: cyan; }
     #review-status.complete { background: $success; color: $text; text-style: bold; }
     #review-status.incomplete { background: $warning; color: $text; text-style: bold; }
+    #review-status.stale { background: $warning; color: $text; text-style: bold; }
     #review-status.failed, #review-status.error, #review-status.stopped {
         background: $error; color: $text; text-style: bold;
     }

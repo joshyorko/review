@@ -2791,7 +2791,10 @@ async def main() -> int:
         0, clean_output, reviewed_head="a" * 40
     )
     check("STALE" in text, f"a mismatched reviewed head must report STALE, got {text!r}")
-    check("stale" in classes, f"a stale review must carry stale styling, got {classes}")
+    check(
+        "stale" in classes and "#review-status.stale" in tui.ReviewDashboard.CSS,
+        f"a stale review must apply its warning style rule, got {classes}",
+    )
     check(
         "next action  Rerun the review on the current head." in card,
         f"a stale review must direct a rerun, got {card!r}",
