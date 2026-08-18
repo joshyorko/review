@@ -417,7 +417,7 @@ def mechanical_reason(author: str, live: dict) -> str | None:
         return None
     if (live.get("mergeStateStatus") or "").upper() != "BEHIND":
         return None
-    checks = live.get("statusCheckRollup") or []
+    checks = authoritative_checks(live)
     if not checks:
         return None
     for check in checks:
@@ -462,9 +462,40 @@ def ci_marker(checks: str) -> str:
     }.get(checks, "? CI UNKNOWN")
 
 
+def authoritative_checks(live: dict) -> list[dict]:
+    """Return the latest run for each stable current-head check context.
+
+    GitHub's pull-request ``statusCheckRollup`` is fetched together with
+    ``headRefOid``, so every entry belongs to that exact current head. Reruns
+    may leave older entries in the rollup; a check-run context is its workflow
+    plus job name, while a commit status context is its context string.
+    """
+    latest: dict[tuple[str, ...], tuple[tuple[str, str, int], dict]] = {}
+    ungrouped: list[dict] = []
+    for index, check in enumerate(live.get("statusCheckRollup") or []):
+        typename = str(check.get("__typename") or "")
+        name = str(check.get("name") or "")
+        context = str(check.get("context") or "")
+        if typename == "CheckRun" or name:
+            key = ("check-run", str(check.get("workflowName") or ""), name)
+        elif typename == "StatusContext" or context:
+            key = ("status-context", context)
+        else:
+            ungrouped.append(check)
+            continue
+        rank = (
+            str(check.get("startedAt") or ""),
+            str(check.get("completedAt") or ""),
+            index,
+        )
+        if key not in latest or rank > latest[key][0]:
+            latest[key] = (rank, check)
+    return [item[1] for item in sorted(latest.values(), key=lambda item: item[0])] + ungrouped
+
+
 def effective_check_state(snapshot: str, live: dict) -> str:
     """Prefer fetched check evidence, retaining the snapshot when absent."""
-    checks = live.get("statusCheckRollup") or []
+    checks = authoritative_checks(live)
     if not checks:
         return snapshot or "unknown"
     outcomes = [check.get("conclusion") or check.get("state") or "PENDING" for check in checks]
@@ -590,7 +621,7 @@ class Stop:
 
 
 def live_review_context(live: dict) -> dict:
-    checks = live.get("statusCheckRollup") or []
+    checks = authoritative_checks(live)
     outcomes = [
         str(item.get("conclusion") or item.get("state") or "PENDING").upper()
         for item in checks
@@ -618,7 +649,7 @@ def live_review_verification(live: dict) -> list[dict]:
     records = []
     passed = {"SUCCESS", "NEUTRAL", "SKIPPED"}
     failed = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
-    for index, item in enumerate(live.get("statusCheckRollup") or [], start=1):
+    for index, item in enumerate(authoritative_checks(live), start=1):
         outcome = str(item.get("conclusion") or item.get("state") or "PENDING").upper()
         state = (
             "verified"
@@ -2285,11 +2316,12 @@ class ReviewDashboard(App):
             return
         live = stop.live
         self.refresh_rows()
-        checks = live.get("statusCheckRollup") or []
+        checks = authoritative_checks(live)
         outcomes = [c.get("conclusion") or c.get("state") or "PENDING" for c in checks]
         ok = sum(1 for o in outcomes if o in ("SUCCESS", "NEUTRAL", "SKIPPED"))
-        bad = sum(1 for o in outcomes if o in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"))
-        pending = len(outcomes) - ok - bad
+        cancelled = sum(1 for o in outcomes if o == "CANCELLED")
+        bad = sum(1 for o in outcomes if o in ("FAILURE", "ERROR", "TIMED_OUT"))
+        pending = len(outcomes) - ok - bad - cancelled
         issues = ", ".join(
             link(f"#{r['number']}", issue_url(stop.repository, r["number"]))
             for r in (live.get("closingIssuesReferences") or [])
@@ -2351,7 +2383,7 @@ class ReviewDashboard(App):
             f"merge    {live.get('mergeable', '?')} / {live.get('mergeStateStatus', '?')}\n"
             f"size     +{live.get('additions', '?')} -{live.get('deletions', '?')} "
             f"across {live.get('changedFiles', '?')} files\n"
-            f"checks   {ok} ok, {bad} failed, {pending} pending\n"
+            f"checks   {ok} ok, {bad} failed, {cancelled} cancelled, {pending} pending\n"
             f"{reviews_block}\n"
             f"linked   {issues}\n"
             f"labels   {labels}{mechanical_block}"
