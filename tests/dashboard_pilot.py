@@ -663,9 +663,13 @@ async def main() -> int:
         await pilot.press("ctrl+s")
         await pilot.pause()
         check(
-            isinstance(app.screen, tui.ConfirmMutation),
-            "Ctrl-s from the focused comment editor must reach the existing gate",
+            isinstance(app.screen, tui.CommentPreview),
+            "Ctrl-s from the focused comment editor must preview the exact payload",
         )
+        check("keyboard comment" in app.screen.body, "comment preview must show verbatim Markdown")
+        await pilot.click("#comment-preview-submit")
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "comment preview submit must reach the existing gate")
         await pilot.press("escape")
         await pilot.pause()
         app.action_comment()
@@ -674,9 +678,13 @@ async def main() -> int:
         await pilot.click("#comment-submit")
         await pilot.pause()
         check(
-            isinstance(app.screen, tui.ConfirmMutation),
-            "comment submit button must reach the existing gate",
+            isinstance(app.screen, tui.CommentPreview),
+            "comment submit button must preview the exact payload",
         )
+        check("button comment" in app.screen.body, "button comment preview must preserve body")
+        await pilot.click("#comment-preview-submit")
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "comment preview button must reach the gate")
         check(
             "pr comment" not in gh_log.read_text(),
             "comment controls must not mutate before confirmation",
@@ -2054,6 +2062,15 @@ async def main() -> int:
         check(
             app.focused is app.query_one("#steer", tui.Input),
             "lowercase l must move focus through Textual's screen API",
+        )
+        app.query_one("#queue", tui.ListView).focus()
+        app.action_pane_next = lambda: (_ for _ in ()).throw(RuntimeError("injected pane failure"))
+        app.post_message(Key("l", "l"))
+        await pilot.pause()
+        check(
+            app.screen is not None
+            and any("injected pane failure" in notification.message for notification in app._notifications),
+            "terminal dispatch failures must be bounded notifications without ending the dashboard",
         )
         app.query_one("#queue", tui.ListView).focus()
         # Direct merge must refuse snapshot-known red and pending checks before

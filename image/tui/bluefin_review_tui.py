@@ -917,6 +917,34 @@ class ReviewBodyPreview(ModalScreen[bool | None]):
             self.action_submit()
 
 
+class CommentPreview(ModalScreen[bool | None]):
+    BINDINGS = [
+        Binding("ctrl+s", "submit", "submit comment", priority=True),
+        *back_bindings("dismiss(None)"),
+    ]
+
+    def __init__(self, body: str, command: list[str]) -> None:
+        super().__init__()
+        self.body = body
+        self.command = command
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("exact GitHub Markdown:")
+            yield Static(self.body, markup=False, id="comment-preview-body")
+            yield Label("exact command:")
+            yield Static(" ".join(self.command), id="comment-preview-command")
+            yield Button("Submit comment", id="comment-preview-submit", variant="primary")
+            yield Static("[ctrl-s] submit · [esc] edit", markup=False)
+
+    def action_submit(self) -> None:
+        self.dismiss(True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "comment-preview-submit":
+            self.action_submit()
+
+
 class ReviewBody(ModalScreen[str | None]):
     """Editable review body; generation is an optional maintainer action."""
 
@@ -1555,7 +1583,7 @@ class ReviewScreen(Screen):
                 f"{escape(finding.get('title', ''))}"
             )
         if len(result.findings) > 12:
-            evidence.append(f"… {len(result.findings) - 12} more findings on the decision card")
+            evidence.append(f"… {len(result.findings) - 12} more findings omitted from this bounded view")
         evidence.append("[r] raw backend transcript (last 200 lines)")
         self.query_one("#review-evidence", Static).update("\n".join(evidence))
         trace(
@@ -1880,11 +1908,11 @@ class ReviewDashboard(App):
     def on_key(self, event) -> None:
         if event.key == "l" and event.character == "L":
             event.stop()
-            self.action_leave_review()
+            self._dispatch_terminal_action("leave review", self.action_leave_review)
             return
         if event.key == "l" and event.character == "l":
             event.stop()
-            self.action_pane_next()
+            self._dispatch_terminal_action("next pane", self.action_pane_next)
             return
         if event.key == "q" and not isinstance(self.focused, Input):
             event.stop()
@@ -1893,6 +1921,15 @@ class ReviewDashboard(App):
         if event.key == "escape" and self.focused is self.query_one("#steer", Input):
             event.stop()
             self.query_one("#queue", ListView).focus()
+
+    def _dispatch_terminal_action(self, label: str, action) -> None:
+        try:
+            action()
+        except Exception as error:
+            self.notify(
+                bounded_detail(f"{label} unavailable: {error}"),
+                severity="error",
+            )
 
     # ── data layer (walker parity) ────────────────────────────────────────
 
@@ -2808,10 +2845,21 @@ class ReviewDashboard(App):
             body_file = os.path.join(os.path.dirname(TRACE_PATH), "comment.md")
             with open(body_file, "w", encoding="utf-8") as sink:
                 sink.write(body + "\n")
-            self.mutate(
-                stop, "pr", "comment", str(stop.number),
+            command = [
+                "gh", "pr", "comment", str(stop.number),
                 "--repo", stop.repository, "--body-file", body_file,
-            )
+            ]
+
+            def submitted(confirmed: bool | None) -> None:
+                if confirmed:
+                    self.mutate(stop, *command[1:])
+                else:
+                    try:
+                        os.unlink(body_file)
+                    except FileNotFoundError:
+                        pass
+
+            self.push_screen(CommentPreview(body, command), submitted)
 
         self.push_screen(CommentBody(), with_body)
 
