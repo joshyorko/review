@@ -2932,6 +2932,11 @@ class ReviewDashboard(App):
         ban, then creates an exact-head approval as the Hive App and applies
         the queue label. A review submitted by this human process cannot pass
         Hive's App-authorship check (#247).
+
+        The versioned `/api/v1` route is the only one a GitHub bearer token
+        may use: kubestellar/hive#4052 gave it a hosted ingress without the
+        browser-login intercept, while the session-only `/api/prs` route still
+        belongs to the dashboard's browser clients (#258).
         """
         base = hive_api_base()
         if not base:
@@ -2939,7 +2944,7 @@ class ReviewDashboard(App):
             return
         owner, repository = stop.repository.split("/", 1)
         endpoint = (
-            f"{base}/api/prs/{owner}/{repository}/{stop.number}/queue-automerge"
+            f"{base}/api/v1/prs/{owner}/{repository}/{stop.number}/queue-automerge"
         )
         command = [
             sys.executable,

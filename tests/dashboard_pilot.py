@@ -189,7 +189,7 @@ async def main() -> int:
             and queue_commands[0][1] == tui.HIVE_API_HELPER
             and queue_commands[0][2] == "queue"
             and queue_commands[0][-1]
-            == "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge",
+            == "https://hive.example.test/api/v1/prs/projectbluefin/bluefinctl/31/queue-automerge",
             f"queueing must call Hive's App-authored queue endpoint once, got {queue_commands}",
         )
         check(
@@ -2021,7 +2021,7 @@ async def main() -> int:
             check(
                 len(stop.failure) > 200
                 and stop.failure_command.endswith(
-                    "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
+                    "https://hive.example.test/api/v1/prs/projectbluefin/bluefinctl/31/queue-automerge"
                 )
                 and "LAST MUTATION FAILURE" in details
                 and stop.failure in details,
@@ -2089,7 +2089,7 @@ async def main() -> int:
                 and app.screen.commands[0][1] == str(hive_api_stub)
                 and app.screen.commands[0][2] == "queue"
                 and app.screen.commands[0][-1].endswith(
-                    "/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
+                    "/api/v1/prs/projectbluefin/bluefinctl/31/queue-automerge"
                 ),
                 f"queueing must show one Hive request, got {app.screen.commands}",
             )

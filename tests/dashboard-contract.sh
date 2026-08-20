@@ -125,7 +125,7 @@ grep -q '\[b\]p\[/b\]' "$tui" &&
 # Queueing goes through Hive's authenticated mutation endpoint. Hive owns the
 # App-authored exact-head approval and queue label; a human gh review cannot
 # satisfy the governor's authorship contract (#247).
-grep -q '/api/prs/{owner}/{repository}/{stop.number}/queue-automerge' "$tui" ||
+grep -q '/api/v1/prs/{owner}/{repository}/{stop.number}/queue-automerge' "$tui" ||
   fail "queueing must call Hive's queue-automerge endpoint"
 grep -q 'QUEUE_LABEL = "lgtm"' "$tui" ||
   fail "the sweep's label must still be lgtm"
