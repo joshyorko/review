@@ -968,6 +968,10 @@ async def main() -> int:
             rows = str(rows_widget.render())
             for expected in (
                 f"batch {colour_task.task_id} — running",
+                # A running batch names its heartbeat: the age of the last
+                # report, so a stale wait is visible next to a healthy one
+                # (#291).
+                "last report",
                 "✓ merged",
                 "✗ failed",
                 "◆ awaiting-stable",

@@ -239,6 +239,21 @@ def landing_command(task: LandingTask) -> list[str]:
     ]
 
 
+def report_age(path: str) -> str:
+    """How long since the agent last appended to its report. The status
+    file's mtime is the heartbeat: every reported event rewrites it, so a
+    stale mtime is the only difference a healthy 20-minute CI wait and a
+    dead agent have (#291)."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return "no report yet"
+    seconds = max(0, int(time.time() - mtime))
+    if seconds < 90:
+        return f"last report {seconds}s ago"
+    return f"last report {seconds // 60}m ago"
+
+
 def parse_status(path: str) -> dict[str, dict]:
     """The latest event per pull request, plus the task-level "done" event
     under the "" key. A half-written final line is skipped, not fatal."""

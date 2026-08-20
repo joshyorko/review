@@ -300,7 +300,10 @@ round `$secondary` borders with titles) over a title bar. Each batch header
 is a full-width state bar (`batch_bar_style`: running is `$text-primary on
 $primary-muted`, queued `$text-warning on $warning-muted`, exited 0
 `$text-success on $success-muted`, anything else `$text-error on
-$error-muted`), and each pull request carries its state three ways at once:
+$error-muted`). A running batch's header also names its heartbeat — the
+age of the status file's last append (`last report 3m ago`) — so a healthy
+long wait is distinguishable from a dead agent (#291), and each pull
+request carries its state three ways at once:
 the printed word, a shape-distinct glyph, and a colour from
 `LANDING_STATE_STYLES` — `◌` waiting, `◐` diagnosing/fixing, `◔`
 waiting-ci, `▶` merging, `◆` awaiting-stable, `✓` merged, `■` blocked, `✗`

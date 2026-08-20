@@ -805,6 +805,11 @@ class LandingScreen(Screen):
             else:
                 state = f"exited {task.returncode}"
             header = f" batch {task.task_id} — {state}"
+            if task.running:
+                # A wait that names its target is still invisible if the
+                # row cannot say how long the agent has been silent: the
+                # report file's mtime is the heartbeat (#291).
+                header += f" · {landing.report_age(task.status_path)}"
             # ljust(0) is a no-op, so the first pre-layout poll renders a
             # text-wide bar and the next tick paints it to the panel's edge.
             lines.append(f"[{batch_bar_style(state)}]{header.ljust(width)}[/]")
