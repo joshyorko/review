@@ -147,7 +147,12 @@ For each pull request, in order:
    `gh pr review --approve --body "Approved by @{task.login} for Hive auto-merge on green CI."`
    then squash-merge: `gh pr merge --squash`. If GitHub refuses (branch
    protection, review requirements), do not force anything — add the `lgtm`
-   label instead and move on.
+   label instead and move on. GitHub computes mergeability asynchronously,
+   so `mergeable: UNKNOWN` is a cache-warming placeholder, never a verdict:
+   re-query with backoff (about every 10 seconds for up to a minute, and
+   name the wait in your note) until GitHub commits to an answer, and only
+   act on the computed state. Never report `blocked` on UNKNOWN alone —
+   a maintainer can act on a computed state, not on a placeholder.
 5. Done depends on whether this repository publishes an image, so check
    BEFORE merging — never discover it after. Treat the repository as
    publishing an image unless BOTH signals are absent: no workflow under

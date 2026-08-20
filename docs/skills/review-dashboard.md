@@ -351,7 +351,11 @@ On a merge-queue repository, `gh pr merge` answering "accepted by merge
 queue" means the merge completes later: poll `gh pr view` until MERGED and
 verify the merge commit's push-event publish run; never `gh run watch` a
 merge_group gate run post-merge (#291). Every wait-state note names its
-target and timeout.
+target and timeout. GitHub computes mergeability asynchronously, so a
+`mergeable: UNKNOWN` answer is a cache-warming placeholder: the brief has
+the agent re-query with backoff for up to a minute and act only on the
+computed state — `blocked` on UNKNOWN alone reports nothing a maintainer
+can act on (#294).
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact
   commands, and typed-number confirmation remain the authority boundary.
