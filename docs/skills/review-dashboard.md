@@ -284,7 +284,8 @@ batches from one dashboard get a numeric suffix.
 **Done is `:stable`, not the merge.** A GitHub merge only starts the
 publish pipeline; the batch item is landed when the image's `:stable` tag
 carries the merged commit (verified via the publish workflow and the
-image's `org.opencontainers.image.revision` label). The agent reports
+anonymous ghcr registry: a tag containing the commit must resolve to
+`:stable`'s digest or one of its index children). The agent reports
 `awaiting-stable` at merge and `merged` only once `:stable` has it.
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact
