@@ -276,12 +276,54 @@ def parse_status(path: str) -> dict[str, dict]:
     return latest
 
 
+# The record is durable, so it is also bounded: batch files older than
+# this are pruned on read, or the state directory grows without bound
+# (#290). A week covers a review queue's memory — a pull request older
+# than that has left the snapshot anyway.
+LANDING_RETENTION_SECONDS = 7 * 24 * 60 * 60
+
+
+def prune_landings(root: str, now: float | None = None) -> None:
+    """Delete batch files past the retention window. Best-effort: a file
+    that cannot be stat'd or removed is left for the next pass."""
+    cutoff = (time.time() if now is None else now) - LANDING_RETENTION_SECONDS
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(root, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.unlink(path)
+        except OSError:
+            continue
+
+
+def record_event(key: str, state: str, note: str) -> None:
+    """Supersede a persisted outcome from outside a batch. A manual
+    success — a re-queue, a direct merge — clears the row's marking in
+    memory only; unless the record says so too, the next refresh folds
+    the stale failure back onto it (#290). One appended line in a file
+    whose mtime is now wins the fold. Best-effort: a state-directory
+    problem must not break the mutation that just succeeded."""
+    try:
+        path = os.path.join(landing_state_dir(), "manual.jsonl")
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps({"pr": key, "state": state, "note": note}) + "\n"
+            )
+    except OSError:
+        pass
+
+
 def persisted_events(directory: str | None = None) -> dict[str, dict]:
     """The latest event per pull request across every recorded batch, so a
     relaunched dashboard can fold a previous run's outcomes back onto the
     rows (#281). Files fold oldest first by mtime, so newer batches win;
     the task-level "" key is not a pull request and is dropped."""
     root = directory or landing_state_dir()
+    prune_landings(root)
     try:
         paths = [
             os.path.join(root, name)

@@ -319,7 +319,13 @@ the host, and `restore_landing_marks` folds the newest persisted outcome
 (`landing.persisted_events`, oldest file first) back onto matching rows
 whenever the queue (re)builds them — a relaunch shows the failure marking
 again instead of reverting to un-reviewed (#281). Only the marking is
-restored; rebuilding a batch selection stays the maintainer's. Each task id
+restored; rebuilding a batch selection stays the maintainer's. A manual
+success — a re-queue, a direct merge — clears the row in memory, so it
+also writes a superseding event (`landing.record_event`, appended to
+`manual.jsonl` with a fresh mtime, which wins the fold) or the next
+refresh would fold the stale failure back onto the row (#290). The record
+is durable, so it is bounded: batch files older than seven days are pruned
+when the record is read. Each task id
 carries the instance name (`BLUEFIN_REVIEW_INSTANCE`, set by the launcher
 from the container name) because named dashboards share the one state
 directory — a bare one-second stamp would let two of them overwrite each

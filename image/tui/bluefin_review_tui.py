@@ -3055,6 +3055,9 @@ class ReviewDashboard(App):
 
         def queued() -> None:
             stop.failure = ""
+            # Supersede any persisted failure, or the next refresh folds
+            # it back onto a row the maintainer just re-queued (#290).
+            landing.record_event(stop.key, "queued", f"re-queued by @{self.self_login or 'maintainer'}")
             self.refresh_rows()
             if then:
                 then()
@@ -3357,6 +3360,9 @@ class ReviewDashboard(App):
             stop.failure_checks = ""
             stop.failure_branch = ""
             stop.selected = False
+            # Supersede any persisted failure, or the next refresh folds
+            # it back onto a row the maintainer just merged (#290).
+            landing.record_event(stop.key, "merged", f"merged directly by @{self.self_login or 'maintainer'}")
             self.refresh_rows()
             if then:
                 then()
