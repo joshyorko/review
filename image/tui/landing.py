@@ -243,6 +243,26 @@ For each pull request, in order:
    `--admin` or any flag that bypasses branch protection, never force-push.
    A pull request the rules cannot land is reported, not forced.
 
+A blocked verdict can be repository-level. A required check that fails on
+the toolchain or the base branch — a pinned compiler with known
+standard-library vulnerabilities, a workflow misconfiguration — blocks
+every pull request in that repository identically, whatever its diff does.
+Diagnose that once: when you report `blocked` for such a condition, check
+whether the remaining pull requests from the same repository list the same
+failing check and, when it fails the same way, report the shared verdict
+for all of them in one pass — each note naming the one root cause — rather
+than re-diagnosing them one at a time, and do not attempt repairs or CI
+waits on pull requests the shared verdict already covers. Never fix a
+repository-level blocker inside one pull request's branch — that rewrites
+its purpose. When the root cause has a mechanical fix (a toolchain pin
+bump, a workflow configuration repair), make the fix at the root: its own
+branch and pull request, named in every covered note and in the done
+note. A pull request you opened was not in the maintainer's confirmed
+selection, so do not merge it — the covered pull requests stay blocked
+behind it, each note naming the fixing pull request. A root cause with no
+mechanical fix is a written finding in the done note, never work inside a
+queued pull request's branch.
+
 Report every state change by appending exactly one JSON line to
 {task.status_path} (create it; one object per line, no other output there):
 {{"pr": "org/repo#N", "state": "diagnosing|fixing|waiting-ci|merging|awaiting-stable|merged|blocked|failed", "note": "short reason"}}

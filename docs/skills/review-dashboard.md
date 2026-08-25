@@ -303,6 +303,18 @@ report with `done` and `agent died mid-batch` when it never did — each
 with the last reported state, both distinguishable from every state the
 agent can report.
 
+The brief teaches the agent to batch a repository-level blocker: a required
+check that fails on the toolchain or the base branch blocks every pull
+request in that repository identically, so the first such `blocked` verdict
+is diagnosed once and applied to the remaining same-repository rows in one
+pass — each note naming the one root cause — instead of re-diagnosing them
+one at a time. The fix never goes inside one pull request's branch: a
+mechanical root cause (a toolchain pin bump, a workflow repair) is fixed at
+the root as its own branch and pull request, named in each covered note;
+since it was not in the maintainer's confirmed selection the agent reports
+it rather than merging it. A root cause with no mechanical fix is a written
+finding in the done note.
+
 The screen is a cabinet of framed panels (`BATCHES`, `HIVE`, `AGENT LOG`,
 round `$secondary` borders with titles) over a title bar. Each batch header
 is a full-width state bar (`batch_bar_style`: running is `$text-primary on
