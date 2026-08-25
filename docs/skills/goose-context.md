@@ -19,6 +19,9 @@ metadata:
 
 # Goose Context
 
+> The published image currently contains no Goose runtime; these procedures
+> apply after the restoration tracked in review#173.
+
 Maintainer reviews use Goose as the `goose` entry in the shared harness
 registry. The adapter owns readiness, exact-head invocation, streaming,
 cancellation, redacted evidence, and structured `ReviewResult` conversion;
@@ -205,5 +208,4 @@ python3 -c "import json; json.load(open('docs/skills/index.json'))"
 wc -l AGENTS.md docs/skills/*.md        # each under 200
 bash scripts/check-skill-frontmatter.sh
 bash tests/image-contract.sh
-bash tests/hive-compatibility.sh
 ```

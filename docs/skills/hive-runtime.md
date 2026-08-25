@@ -18,6 +18,9 @@ metadata:
 
 # Hive Runtime
 
+> The published image currently contains no Hive runtime; these procedures
+> apply after the restoration tracked in review#173.
+
 ## When to Use
 
 Load this before changing code near a Hive session boundary or when an
@@ -36,7 +39,7 @@ credential handling ([`launcher.md`](launcher.md)).
 |---|---|
 | "A local shim will unblock this now." | It outlives the gap it was written for and shadows the real tool once upstream lands the fix. Report it and wait. |
 | "Upstream is slow; we can patch our copy." | A patched copy of a pinned upstream file silently diverges at the next bump, and nothing fails to say so. |
-| "The pin is close enough to upstream." | `tests/hive-compatibility.sh` compares the consumed files; run it rather than assuming. |
+| "The pin is close enough to upstream." | Hive compatibility is part of runtime restoration tracked in review#173; do not add Hive files to the direct-copy image. |
 
 ## Core Process
 

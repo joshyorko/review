@@ -19,6 +19,10 @@ metadata:
 
 # Launcher
 
+> The published image is currently a direct lab-runner fork; launch recipes
+> fail fast until the runtime-restoration work in review#173 lands. The
+> procedures below describe the restored launcher contract.
+
 ## When to Use
 
 Load this before editing `justfile` or changing container launch,
