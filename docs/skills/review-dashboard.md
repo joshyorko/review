@@ -380,7 +380,10 @@ can act on (#294).
   exact severity counts, cited file/line findings, engine and live-CI
   verification, duplicate/overlap context, mergeability, head, and
   backend/model provenance. Incomplete, failed, and unparsable results direct
-  the reviewer to raw evidence and never display a clean conclusion.
+  the reviewer to raw evidence and never display a clean conclusion. The card
+  is a point-in-time record: `ReviewScreen` pins the live and overlap
+  evidence at review start, because the queue's background workers keep
+  rewriting `stop.live`/`stop.overlap` while the review runs (#339).
 - **Never bypass branch protection.** No `--admin`, no `--delete-branch`, no
   push.
 

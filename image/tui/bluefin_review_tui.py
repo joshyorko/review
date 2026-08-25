@@ -13,6 +13,7 @@ This is the only maintainer surface. Runs inside the review image:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -1447,6 +1448,13 @@ class ReviewScreen(Screen):
         self.stop_requested = False
         self.started = time.monotonic()
         self.output: list[str] = []
+        # The card is a point-in-time record of the evidence the maintainer
+        # saw when the review started. The dashboard's background workers
+        # keep rewriting stop.live/stop.overlap while the review runs, so
+        # reading them at finish would mix a fresh fetch into a completed
+        # transcript (#339).
+        self.live_snapshot = copy.deepcopy(stop.live)
+        self.overlap_snapshot = copy.deepcopy(stop.overlap)
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -1473,8 +1481,8 @@ class ReviewScreen(Screen):
     def run_review(self) -> None:
         stop = self.stop_record
         if ACTIVE_BACKEND == "codex":
-            base_sha = str(stop.live.get("baseRefOid") or "")
-            head_sha = str(stop.live.get("headRefOid") or "")
+            base_sha = str(self.live_snapshot.get("baseRefOid") or "")
+            head_sha = str(self.live_snapshot.get("headRefOid") or "")
             if (len(base_sha) != 40 or len(head_sha) != 40 or
                     any(char not in "0123456789abcdef" for char in (base_sha + head_sha).lower())):
                 self.app.call_from_thread(
@@ -1560,10 +1568,10 @@ class ReviewScreen(Screen):
         self.finished = True
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
-        live_context = live_review_context(stop.live, title=stop.title)
+        live_context = live_review_context(self.live_snapshot, title=stop.title)
         if ACTIVE_BACKEND == "codex":
-            base_sha = str(stop.live.get("baseRefOid") or "")
-            head_sha = str(stop.live.get("headRefOid") or "")
+            base_sha = str(self.live_snapshot.get("baseRefOid") or "")
+            head_sha = str(self.live_snapshot.get("headRefOid") or "")
             if len(base_sha) != 40 or len(head_sha) != 40:
                 result = ReviewResult(1, "failed", provenance={"backend": "codex"})
             else:
@@ -1578,8 +1586,8 @@ class ReviewScreen(Screen):
                 )
                 result = ReviewResult(
                     result.version, result.state, result.counts, result.findings,
-                    live_review_verification(stop.live), result.provenance,
-                    stop.overlap, live_context, result.raw_evidence,
+                    live_review_verification(self.live_snapshot), result.provenance,
+                    self.overlap_snapshot, live_context, result.raw_evidence,
                 )
         else:
             result = adapt_current_engine(
@@ -1587,14 +1595,14 @@ class ReviewScreen(Screen):
                 {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
                  "model": os.environ.get("GOOSE_MODEL", "gpt-5.6-luna"),
                  "repository": stop.repository, "pull_request": stop.number},
-                verification=live_review_verification(stop.live),
-                overlap=stop.overlap,
+                verification=live_review_verification(self.live_snapshot),
+                overlap=self.overlap_snapshot,
                 live=live_context,
             )
-        if ACTIVE_BACKEND == "codex" and len(str(stop.live.get("baseRefOid") or "")) == 40 and len(str(stop.live.get("headRefOid") or "")) == 40:
+        if ACTIVE_BACKEND == "codex" and len(str(self.live_snapshot.get("baseRefOid") or "")) == 40 and len(str(self.live_snapshot.get("headRefOid") or "")) == 40:
             request = ReviewRequest(
                 *stop.repository.split("/", 1), stop.number,
-                stop.live["baseRefOid"], stop.live["headRefOid"],
+                self.live_snapshot["baseRefOid"], self.live_snapshot["headRefOid"],
                 actor="maintainer", tenant="review", generated_at="dashboard",
             )
             if can_remember(result, request):
@@ -1604,7 +1612,7 @@ class ReviewScreen(Screen):
                                result.provenance.get("reasoning_effort", "low")),
                 )
         card = build_decision_card(
-            result, exact_head=str(stop.live.get("headRefOid") or "")
+            result, exact_head=str(self.live_snapshot.get("headRefOid") or "")
         )
         if error:
             outcome, state = "error", f"FAILED to start: {error}"
