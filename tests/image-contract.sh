@@ -565,7 +565,11 @@ require image/entrypoint.sh \
   'for hook in /etc/hive/entrypoint.d/*.sh; do' \
   'export HIVE_HUB="$hosted_hub"' \
   'api/knowledge/export' \
-  'exec /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/bluefin_review_tui.py "$@"' \
+  '/opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/bluefin_review_tui.py "$@" <&3 &' \
+  'tui_pid=$!' \
+  'kill -TERM "$tui_pid"' \
+  'wait "$tui_pid"' \
+  'exit "$tui_status"' \
   'tmux has-session -t contributor' \
   'tmux readiness diagnostics' \
   'tmux attach-session -t contributor' \
@@ -587,6 +591,12 @@ forbid image/entrypoint.sh \
   'CONTEXT_FILE_NAMES' \
   'ln -sf agent.md' \
   'bluefin-review queue'
+# The dashboard must never be exec'd again (#338): an exec'd Python PID 1
+# reaps nothing it did not spawn, so goose tool-call grandchildren reparented
+# to PID 1 accumulated as zombies all session. The shell stays PID 1, runs
+# the TUI as a background job it waits on, and reaps the adoptees.
+forbid image/entrypoint.sh \
+  'exec /opt/bluefin/tui/.venv/bin/python'
 
 require README.md \
   'Goose canary snapshot' \

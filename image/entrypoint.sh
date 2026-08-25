@@ -215,7 +215,28 @@ if [ "$review_dashboard" = true ]; then
     fi
   fi
   note 'Bluefin Operations | maintainer review dashboard (no Hive)'
-  exec /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/bluefin_review_tui.py "$@"
+  # The dashboard runs as a background job this shell waits on; it must NOT be
+  # exec'd. PID 1 owes the container one duty the Textual process does not
+  # perform: reaping adopted children. Goose review tool calls leave orphaned
+  # grandchildren (defunct git/gh) whose intermediate shell exited first, and
+  # reparented to an exec'd Python PID 1 — which never waitpid()s a process it
+  # did not spawn — they accumulated as zombies for the whole session (#338).
+  # Kept alive, this shell reaps them, `wait` stays interruptible so the trap
+  # keeps PID 1 signal-responsive, and the status still propagates — the same
+  # handover shape as the contributor path below, for the same reason.
+  #
+  # The explicit `<&3` matters as it does for the tmux attach below: with job
+  # control off, bash redirects an asynchronous command's stdin from /dev/null
+  # unless the command carries a redirection of its own, and the dashboard
+  # dies the moment it loses the tty.
+  exec 3<&0
+  /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/bluefin_review_tui.py "$@" <&3 &
+  tui_pid=$!
+  exec 3<&-
+  trap 'kill -TERM "$tui_pid" 2>/dev/null || true' HUP INT TERM
+  tui_status=0
+  wait "$tui_pid" || tui_status=$?
+  exit "$tui_status"
 fi
 
 # --- Hand over to Hive -------------------------------------------------------
