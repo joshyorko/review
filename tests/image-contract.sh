@@ -34,6 +34,7 @@ grep -qE '^ARG FSDK_RUNNER_IMAGE=ghcr\.io/projectbluefin/lab-runner(:[^@[:space:
     echo "::error file=image/Containerfile::FSDK_RUNNER_IMAGE must be digest-pinned"
     fail=1
   }
+# shellcheck disable=SC2016
 require image/Containerfile \
   'FROM ${FSDK_RUNNER_IMAGE}' \
   'ARG HIVE_COMMIT=' \
