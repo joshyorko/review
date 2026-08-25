@@ -20,6 +20,7 @@ expected_prefix='ghcr.io/projectbluefin/lab-runner:25.08@sha256:'
   error "Containerfile must declare exactly one FSDK_RUNNER_IMAGE argument"
 [[ "$(grep -c '^FROM ' image/Containerfile)" -eq 1 ]] ||
   error "Containerfile must contain exactly one FROM instruction"
+# shellcheck disable=SC2016
 grep -qFx 'FROM ${FSDK_RUNNER_IMAGE}' image/Containerfile ||
   error "Containerfile must derive directly from FSDK_RUNNER_IMAGE"
 
