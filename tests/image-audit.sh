@@ -14,6 +14,7 @@ report_file=""
 require_oci=false
 require_attestations=false
 require_github_attestation=false
+direct_copy=false
 verify_base_evidence=false
 attestation_repository=""
 expected_source=""
@@ -43,6 +44,8 @@ Options:
                            provenance bundles, verified by signature.
   --require-github-attestation
                            Verify GitHub artifact provenance for the digest.
+  --direct-copy            Require the derived image to preserve the exact
+                           base layers and runtime contract.
   --attestation-repository OWNER/REPO
                            Repository expected to have created the artifact attestation.
   --expected-source URL    Require matching OCI source and URL values.
@@ -74,6 +77,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --require-github-attestation)
     require_github_attestation=true
+    shift
+    ;;
+  --direct-copy)
+    direct_copy=true
     shift
     ;;
   --attestation-repository)
@@ -495,20 +502,19 @@ if "$require_attestations"; then
   while IFS=$'\t' read -r platform digest; do
     [[ -n "$platform" ]] || continue
     platform_verified=true
-    # An attached SBOM is not coverage: the document must also name the
-    # archive-installed components review owns (#78), on every platform, or
-    # publication fails here.
     if verify_predicate "${derived_repository}@${digest}" "$spdx_predicate"; then
-      checks_before="$fail"
-      if spdx_document="$(fetch_spdx_predicate "${derived_repository}@${digest}")"; then
-        platform_labels="$(skopeo inspect --config "docker://${derived_repository}@${digest}" |
-          jq -r '.config.Labels // {} | to_entries[] | "\(.key)=\(.value)"')"
-        check_sbom_components "$spdx_document" "published linux/${platform} SPDX SBOM" "$platform" \
-          "$(goose_label_digest "$platform" "$platform_labels")"
-      else
-        error "published linux/${platform} SPDX SBOM predicate could not be read"
+      if ! "$direct_copy"; then
+        checks_before="$fail"
+        if spdx_document="$(fetch_spdx_predicate "${derived_repository}@${digest}")"; then
+          platform_labels="$(skopeo inspect --config "docker://${derived_repository}@${digest}" |
+            jq -r '.config.Labels // {} | to_entries[] | "\(.key)=\(.value)"')"
+          check_sbom_components "$spdx_document" "published linux/${platform} SPDX SBOM" "$platform" \
+            "$(goose_label_digest "$platform" "$platform_labels")"
+        else
+          error "published linux/${platform} SPDX SBOM predicate could not be read"
+        fi
+        [[ "$fail" == "$checks_before" ]] || platform_verified=false
       fi
-      [[ "$fail" == "$checks_before" ]] || platform_verified=false
     else
       error "published linux/${platform} image is missing a verifiable SPDX SBOM attestation"
       platform_verified=false
@@ -594,15 +600,29 @@ append "- Local unpacked delta (derived - base): $(($(jq -r '.[0].Size' <<<"$der
 
 mapfile -t base_layers < <(jq -r '.[0].RootFS.Layers[]' <<<"$base_inspect")
 mapfile -t derived_layers < <(jq -r '.[0].RootFS.Layers[]' <<<"$derived_inspect")
-if [[ "${#derived_layers[@]}" -le "${#base_layers[@]}" ]]; then
-  error "derived image does not add layers to the exact base image"
-else
+if "$direct_copy"; then
+  if [[ "${#derived_layers[@]}" -ne "${#base_layers[@]}" ]]; then
+    error "direct-copy image changed the base layer count"
+  fi
   for index in "${!base_layers[@]}"; do
-    [[ "${base_layers[$index]}" == "${derived_layers[$index]}" ]] ||
-      error "derived rootfs layer ${index} does not preserve the exact base layer"
+    [[ "${derived_layers[$index]:-}" == "${base_layers[$index]}" ]] ||
+      error "direct-copy image changed base layer ${index}"
   done
+else
+  if [[ "${#derived_layers[@]}" -le "${#base_layers[@]}" ]]; then
+    error "derived image does not add layers to the exact base image"
+  else
+    for index in "${!base_layers[@]}"; do
+      [[ "${base_layers[$index]}" == "${derived_layers[$index]}" ]] ||
+        error "derived rootfs layer ${index} does not preserve the exact base layer"
+    done
+  fi
 fi
-append "- Composition: derived rootfs preserves ${#base_layers[@]} base layer(s) and adds $((${#derived_layers[@]} - ${#base_layers[@]})) layer(s)."
+if "$direct_copy"; then
+  append "- Composition: direct copy preserves all ${#base_layers[@]} base layer(s) with no filesystem delta."
+else
+  append "- Composition: derived rootfs preserves ${#base_layers[@]} base layer(s) and adds $((${#derived_layers[@]} - ${#base_layers[@]})) layer(s)."
+fi
 
 base_labels="$(jq -r '.[0].Config.Labels // {} | to_entries[] | "\(.key)=\(.value)"' <<<"$base_inspect")"
 derived_labels="$(jq -r '.[0].Config.Labels // {} | to_entries[] | "\(.key)=\(.value)"' <<<"$derived_inspect")"
@@ -631,8 +651,20 @@ if "$require_oci"; then
 
   expected_oci_value() {
     case "$1" in
-    org.opencontainers.image.title) printf '%s' 'Bluefin review contributor' ;;
-    org.opencontainers.image.description) printf '%s' 'Foreground contributor runtime for projectbluefin/review.' ;;
+    org.opencontainers.image.title)
+      if "$direct_copy"; then
+        printf '%s' 'Bluefin review lab-runner fork'
+      else
+        printf '%s' 'Bluefin review contributor'
+      fi
+      ;;
+    org.opencontainers.image.description)
+      if "$direct_copy"; then
+        printf '%s' 'Direct fork of the Project Bluefin lab-runner image.'
+      else
+        printf '%s' 'Foreground contributor runtime for projectbluefin/review.'
+      fi
+      ;;
     org.opencontainers.image.url | org.opencontainers.image.source) printf '%s' "$expected_source" ;;
     org.opencontainers.image.revision) printf '%s' "$expected_revision" ;;
     org.opencontainers.image.version) printf '%s' "$expected_version" ;;
@@ -772,6 +804,12 @@ for image_kind in base derived; do
     required="$base_required"
     forbidden="$base_forbidden"
     terms="xterm-256color tmux-256color"
+  elif "$direct_copy"; then
+    image="$derived_image"
+    arch="$derived_arch"
+    required="$base_required"
+    forbidden="$base_forbidden"
+    terms="xterm-256color tmux-256color"
   else
     image="$derived_image"
     arch="$derived_arch"
@@ -792,7 +830,7 @@ for image_kind in base derived; do
   for command in $forbidden; do
     forbid_line "$inventory" forbidden "$command"
   done
-  if [[ "$image_kind" == derived ]]; then
+  if [[ "$image_kind" == derived && ! "$direct_copy" ]]; then
     for command in $derived_unshadowed; do
       unshadowed_path_line "$inventory" "$command"
     done
