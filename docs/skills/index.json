@@ -101,7 +101,7 @@
     {
       "id": "image-build",
       "name": "image-build",
-      "one_line_purpose": "Derive and pin the review contributor image safely.",
+      "one_line_purpose": "Build and publish the direct review image fork safely.",
       "entry_point": "docs/skills/image-build.md",
       "category": "ci-ops",
       "status": "active",
@@ -113,7 +113,7 @@
         "build",
         "audit"
       ],
-      "description": "Use when maintaining the pinned FSDK-derived contributor image, audit, Goose canary assets, Hive runtime, or publishing path.",
+      "description": "Use when maintaining the digest-pinned lab-runner fork, direct-copy audit, or review-image publication path.",
       "version": "2.24",
       "last_updated": "2026-08-25",
       "doc_type": "procedure"

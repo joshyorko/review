@@ -11,23 +11,13 @@
 # standalone scripts they might stumble into and run directly out of context.
 #
 # Public commands:
-#   review-container  Run the contributor container: the Hive queue
-#                     worker that receives assigned tasks and donates
-#                     inference. Takes an optional model profile and
-#                     thinking effort, e.g. 'just review-container opus5
-#                     high'. Foreground when attended; REVIEW_DETACH=1
-#                     runs it as a labeled detached worker.
+#   review-container  Refuse to launch the direct lab-runner fork until #173
+#                     restores the contributor runtime.
 #   review-stop       Stop a detached worker. Refuses attended runs and
 #                     containers this launcher did not start.
-#   review-doctor     Read-only preflight diagnostics. Starts nothing.
-#   review-queue      The interactive maintainer review surface: a
-#                     full-screen dashboard over the Bluefin PR queue,
-#                     running in the contributor container — no Hive
-#                     registration required. q or Ctrl-C stops.
-#                     Takes the same model profile and effort as
-#                     review-container, then passes the rest through to
-#                     the dashboard, e.g.
-#                     'just review-queue kimi high --repo bluefin'.
+#   review-doctor     Report the direct-copy transition. Starts nothing.
+#   review-queue      Refuse to launch the dashboard until #173 restores the
+#                     review runtime.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # LIFECYCLE
@@ -38,7 +28,7 @@
 # whatever a previous run left behind, so there is no lifecycle verb for
 # them.
 #
-# The detached worker is the one sanctioned background launch. REVIEW_DETACH=1
+# The detached worker is the one permitted background launch. REVIEW_DETACH=1
 # stamps the container with the 'review.owner=detached' label; a later launch
 # refuses to reclaim it, and 'just review-stop' — a polite podman stop, never
 # a force flag — is its only lifecycle verb.
@@ -60,13 +50,9 @@
 # the image still means baking this launcher into a custom image build (out of
 # scope here — see README "Scope").
 #
-# In this checkout, run 'just review-container' (or another recipe below)
-# from the repository root. Persistent state is limited to launcher
-# configuration; the container receives credentials by environment and the
-# read-only ~/.config/hive mount, never a workspace or host home mount.
-# Goose is the default agent backend; Pi is the explicitly selected executable
-# backend. Hive remains the sole assignment authority and there is no local
-# inference, model catalogue, or multi-CLI auto-detection.
+# In this checkout, the launch recipes are paused behind the direct-copy guard
+# until #173 restores the runtime. Persistent state and credential behavior
+# below remain dormant source for that follow-up; no recipe reaches it today.
 #
 # TOOL is read from the environment so 'TOOL=goose just review-container'
 # works as documented — 'just' recipe parameters are positional, not
@@ -109,6 +95,12 @@ contributor_image := env("REVIEW_CONTRIBUTOR_IMAGE", "ghcr.io/projectbluefin/rev
 # concession to DRY here — it never leaves the Justfile as a file of its own.
 shared_functions := '''
 GITHUB_LOGIN_COMMAND="gh auth login --web --hostname github.com --scopes repo,read:org"
+
+require_review_runtime() {
+  echo "ERROR: review:stable is currently the direct lab-runner fork; the Goose/Hive runtime is not installed in this image (see #173)." >&2
+  echo "  Run the image directly with: podman run --rm -it --entrypoint /usr/bin/bash ghcr.io/projectbluefin/review:stable" >&2
+  return 1
+}
 
 github_auth_ready() {
   command -v gh &>/dev/null && gh auth status --hostname github.com &>/dev/null
@@ -766,11 +758,12 @@ read_hive_value() {
 #        missing, register a hive under that name. Without it, the current
 #        repository's directory name is tried, then the default
 #        ~/.config/hive/contributor.env.
-[doc("Run the Hive contributor worker: receive assigned tasks and donate inference.")]
+[doc("Refuse to launch the contributor worker while review is a direct lab-runner fork.")]
 review-container profile="" effort="":
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}
+    require_review_runtime
     TOOL="{{tool_env}}"
     COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
     OPUS_MODEL="{{opus_model}}"
@@ -972,11 +965,12 @@ review-stop name="review-container":
 # One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
 # for a concurrent second dashboard, exactly as REVIEW_CONTAINER_NAME does for
 # review-container.
-[doc("Open the maintainer review dashboard over the Bluefin PR queue (no Hive).")]
+[doc("Refuse to launch the dashboard while review is a direct lab-runner fork.")]
 review-queue *queue_args:
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}
+    require_review_runtime
     TOOL="{{tool_env}}"
     COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
     OPUS_MODEL="{{opus_model}}"
@@ -1099,13 +1093,16 @@ review-queue *queue_args:
     echo "  q or Ctrl-C stops; the dashboard is the only thing running."
     "${CONTAINER_ARGS[@]}"
 
-# Preflight check: is this machine actually ready for 'just review-container'?
-# Never starts the container — read-only diagnostics only.
-[doc("Read-only preflight diagnostics for this machine. Starts nothing.")]
+# Report the direct-copy transition. Never starts a container.
+[doc("Report the direct-copy transition without starting a container.")]
 review-doctor:
     #!/usr/bin/env bash
     set -uo pipefail
     {{shared_functions}}
+    echo "=== Review runtime ==="
+    echo "  ✗ review:stable is currently the direct lab-runner fork; Goose/Hive runtime restoration is tracked in #173."
+    echo "    Run the image directly with: podman run --rm -it --entrypoint /usr/bin/bash ghcr.io/projectbluefin/review:stable"
+    exit 1
     COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
     HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
     HIVE_COMMIT="${HIVE_COMMIT,,}"
