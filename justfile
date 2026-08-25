@@ -232,15 +232,10 @@ review-stop name="review-container":
 #   just review-queue
 # REVIEW_QUEUE_NAME overrides the container name.
 [doc("Run the direct lab-runner fork as the interactive review container.")]
-review-queue *queue_args:
+review-queue:
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}
-    if [[ -n "{{queue_args}}" ]]; then
-      echo "ERROR: the direct lab-runner fork accepts no review dashboard arguments." >&2
-      echo "  Run 'just review-queue' without arguments to open the image shell." >&2
-      exit 2
-    fi
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     CONTAINER_NAME="${REVIEW_QUEUE_NAME:-review-queue}"
     require_valid_container_name "$CONTAINER_NAME"
