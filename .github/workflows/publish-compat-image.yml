@@ -239,7 +239,7 @@ jobs:
           podman run --rm --entrypoint /usr/bin/bash review:smoke \
             -lc 'TERM=xterm-256color infocmp xterm-256color >/dev/null; infocmp tmux-direct >/dev/null; TERM=xterm-256color tmux new-session -d -s terminfo-smoke "sleep 30"; tmux has-session -t terminfo-smoke; test "$(tmux show -gv default-terminal)" = tmux-direct; tmux kill-session -t terminfo-smoke'
 
-      - name: Prove the shipped runtime on this architecture
+      - name: Execute the shipped review runtime on this architecture
         shell: bash
         env:
           EXPECTED_UNAME: ${{ matrix.uname }}
@@ -247,10 +247,20 @@ jobs:
           set -euo pipefail
           container_arch="$(podman run --rm --entrypoint /usr/bin/uname review:smoke -m)"
           test "$container_arch" = "$EXPECTED_UNAME"
+          podman run --rm --entrypoint /usr/local/bin/bluefin-review review:smoke --help
+          podman run --rm --entrypoint /usr/local/bin/goose review:smoke --version
           podman run --rm --entrypoint /usr/local/bin/codex review:smoke --version
           podman run --rm --entrypoint /usr/local/bin/codex-code-mode-host review:smoke --help
           podman run --rm --entrypoint /opt/bluefin/tui/.venv/bin/python review:smoke \
             -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"
+          podman run --rm --entrypoint /usr/bin/bash review:smoke -lc '
+            set -eu
+            node --version >/dev/null
+            gh --version >/dev/null
+            tmux -V >/dev/null
+            pi --version >/dev/null
+            test -x /usr/local/bin/review-entrypoint
+          '
           echo "Native container: ${container_arch}"
 
       - name: Log in to GHCR

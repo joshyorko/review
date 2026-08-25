@@ -179,9 +179,15 @@ jobs:
           # OCI, not Docker schema 2: the shipped format is what publish emits.
           test "$(podman image inspect review:test --format '{{.ManifestType}}')" = "application/vnd.oci.image.manifest.v1+json"
 
-      - name: Import shipped TUI module set as runtime user
+      - name: Execute shipped review runtime
         run: |
           set -euo pipefail
+          podman run --rm \
+            --entrypoint /usr/local/bin/bluefin-review \
+            review:test --help
+          podman run --rm \
+            --entrypoint /usr/local/bin/goose \
+            review:test --version
           podman run --rm \
             --entrypoint /usr/local/bin/codex \
             review:test --version
@@ -192,6 +198,14 @@ jobs:
             --entrypoint /opt/bluefin/tui/.venv/bin/python \
             review:test \
             -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"
+          podman run --rm --entrypoint /usr/bin/bash review:test -lc '
+            set -eu
+            node --version >/dev/null
+            gh --version >/dev/null
+            tmux -V >/dev/null
+            pi --version >/dev/null
+            test -x /usr/local/bin/review-entrypoint
+          '
 
       - name: Audit exact FSDK and built review image
         run: |
