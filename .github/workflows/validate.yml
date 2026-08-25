@@ -60,6 +60,11 @@ jobs:
           set -euo pipefail
           bash tests/generate-skills.sh
 
+      - name: SBOM manifest generator contract
+        run: |
+          set -euo pipefail
+          bash tests/sbom-manifest.sh
+
       - name: Harness registry and adapter contracts
         run: |
           set -euo pipefail
@@ -100,10 +105,15 @@ jobs:
           bash -n recipe_bodies.sh
           rm -f recipe_bodies.sh
 
-      - name: Image and source contracts
+      - name: Image contract — Containerfile, config, entrypoint, shims, hooks
+        env:
+          # Lets the contract's upstream Hive drift check reach the API. It
+          # degrades to a notice without this, so the step never depends on it.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           bash tests/image-contract.sh
+          bash tests/hive-compatibility.sh
           bash tests/bluefin-review.sh
           bash tests/worktree-guard.sh
 
@@ -115,37 +125,78 @@ jobs:
           set -euo pipefail
           bash tests/dashboard-contract.sh
 
-      - name: Launcher docs and shell stay aligned
+      - name: Interactive launcher docs and shell stay aligned
         run: |
           set -euo pipefail
           grep -Fq 'review-container' justfile
           grep -Fq 'review-queue' justfile
-          grep -Fq 'review-doctor' justfile
           grep -Fq 'ghcr.io/projectbluefin/review:stable' justfile
+          grep -Fq 'review-entrypoint' image/Containerfile
           grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
 
-      - name: Direct-copy image contract and build
+      - name: Resolve official Goose canary asset identities
+        id: goose
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
-          bash tests/image-contract.sh
-          base_ref="$(sed -n 's/^ARG FSDK_RUNNER_IMAGE=\(.*\)$/\1/p' image/Containerfile)"
-          podman pull "$base_ref"
-          podman build --format oci --file image/Containerfile --tag review:test .
+          release="$(gh api repos/aaif-goose/goose/releases/tags/canary)"
+          asset_digest() {
+            jq -er --arg name "$1" \
+              '.assets[] | select(.name == $name) | .digest |
+               select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")' \
+              <<<"$release"
+          }
+          {
+            echo "x86_64_sha256=$(asset_digest goose-x86_64-unknown-linux-musl.tar.gz)"
+            echo "aarch64_sha256=$(asset_digest goose-aarch64-unknown-linux-musl.tar.gz)"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Compatibility image contract and build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The runner's podman predates '--secret id=NAME,env=VAR', so the
+          # token reaches the build as a file only this job can read.
+          secret_file="$(mktemp)"
+          trap 'rm -f "$secret_file"' EXIT
+          chmod 0600 "$secret_file"
+          printf '%s' "$GITHUB_TOKEN" > "$secret_file"
+          podman build \
+            --format oci \
+            --build-arg GOOSE_X86_64_SHA256="${{ steps.goose.outputs.x86_64_sha256 }}" \
+            --build-arg GOOSE_AARCH64_SHA256="${{ steps.goose.outputs.aarch64_sha256 }}" \
+            --secret id=github_token,src="$secret_file" \
+            -f image/Containerfile -t review:test .
+          test "$(podman image inspect review:test --format '{{.Config.User}}')" = "dev"
+          test "$(podman image inspect review:test --format '{{json .Config.Entrypoint}}')" = '["/usr/local/bin/review-entrypoint"]'
+          # /home/dev, not /workspace: there is no workspace mount any more —
+          # the agent clones what it needs inside the disposable container, and
+          # Hive's config lives under the image's home.
+          test "$(podman image inspect review:test --format '{{.Config.WorkingDir}}')" = "/home/dev"
+          # OCI, not Docker schema 2: the shipped format is what publish emits.
           test "$(podman image inspect review:test --format '{{.ManifestType}}')" = "application/vnd.oci.image.manifest.v1+json"
-          test "$(podman image inspect review:test --format '{{json .RootFS.Layers}}')" = \
-            "$(podman image inspect "$base_ref" --format '{{json .RootFS.Layers}}')"
-          podman run --rm --entrypoint /usr/bin/bash review:test -lc '
-            set -eu
-            for tool in bash curl git jq python3 kubectl argo just which xargs awk ps tar diff patch less file; do
-              command -v "$tool" >/dev/null
-            done
-            test ! -e /usr/local/bin/review-entrypoint
-          '
+
+      - name: Import shipped TUI module set as runtime user
+        run: |
+          set -euo pipefail
+          podman run --rm \
+            --entrypoint /usr/local/bin/codex \
+            review:test --version
+          podman run --rm \
+            --entrypoint /usr/local/bin/codex-code-mode-host \
+            review:test --help
+          podman run --rm \
+            --entrypoint /opt/bluefin/tui/.venv/bin/python \
+            review:test \
+            -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"
 
       - name: Audit exact FSDK and built review image
         run: |
           set -euo pipefail
-          bash tests/image-audit.sh --derived review:test --direct-copy
+          bash tests/image-audit.sh --derived review:test
 
       # The launcher is interactive by design. CI validates image metadata and
       # the native build-host runtime. Cross-platform runtime evidence is

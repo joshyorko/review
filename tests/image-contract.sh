@@ -1,54 +1,95 @@
 #!/usr/bin/env bash
-# Static contract for the first image slice: review is an exact lab-runner fork.
+# Static contract for the image-owned review runtime.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 fail=0
-error() {
-  echo "::error::$1" >&2
-  fail=1
+require() {
+  local file="$1" want
+  shift
+  for want in "$@"; do
+    grep -qF -- "$want" "$file" || {
+      echo "::error file=${file}::missing required: ${want}"
+      fail=1
+    }
+  done
 }
 
-base_ref="$(sed -n 's/^ARG FSDK_RUNNER_IMAGE=\(.*\)$/\1/p' image/Containerfile)"
-expected_prefix='ghcr.io/projectbluefin/lab-runner:25.08@sha256:'
-[[ "$base_ref" == "${expected_prefix}"???????????????????????????????????????????????????????????????? ]] ||
-  error "FSDK_RUNNER_IMAGE must be the tag-plus-digest lab-runner source"
+forbid() {
+  local file="$1" unwanted
+  shift
+  for unwanted in "$@"; do
+    grep -qF -- "$unwanted" "$file" && {
+      echo "::error file=${file}::must not contain: ${unwanted}"
+      fail=1
+    }
+  done
+  return 0
+}
 
-[[ "$(grep -c '^ARG FSDK_RUNNER_IMAGE=' image/Containerfile)" -eq 1 ]] ||
-  error "Containerfile must declare exactly one FSDK_RUNNER_IMAGE argument"
-[[ "$(grep -c '^FROM ' image/Containerfile)" -eq 1 ]] ||
-  error "Containerfile must contain exactly one FROM instruction"
-# shellcheck disable=SC2016
-grep -qFx 'FROM ${FSDK_RUNNER_IMAGE}' image/Containerfile ||
-  error "Containerfile must derive directly from FSDK_RUNNER_IMAGE"
+grep -qE '^ARG FSDK_RUNNER_IMAGE=ghcr\.io/projectbluefin/lab-runner(:[^@[:space:]]+)?@sha256:[0-9a-f]{64}$' image/Containerfile ||
+  {
+    echo "::error file=image/Containerfile::FSDK_RUNNER_IMAGE must be digest-pinned"
+    fail=1
+  }
+require image/Containerfile \
+  'FROM ${FSDK_RUNNER_IMAGE}' \
+  'ARG HIVE_COMMIT=' \
+  'ARG NODE_VERSION=' \
+  'ARG GH_VERSION=' \
+  'ARG TMUX_VERSION=' \
+  'ARG CODEX_VERSION=' \
+  'ARG GOOSE_CHANNEL=canary' \
+  'ARG PI_VERSION=' \
+  'COPY package.json package-lock.json /opt/hive/' \
+  'COPY --chmod=0755 image/bin/bluefin-review /usr/local/bin/bluefin-review' \
+  'COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint' \
+  'COPY image/tmux.conf /etc/tmux.conf' \
+  'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
+  'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
+  'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/config/backends.conf' \
+  '/usr/local/bin/goose --version' \
+  'tmux -V' \
+  'codex --version' \
+  'pi --version' \
+  'USER dev' \
+  'WORKDIR /home/dev' \
+  'ENTRYPOINT ["/usr/local/bin/review-entrypoint"]'
 
-if grep -qE '^(RUN|COPY|ADD|USER|WORKDIR|ENTRYPOINT|CMD|ENV|LABEL|VOLUME|EXPOSE|ONBUILD|STOPSIGNAL|HEALTHCHECK|SHELL) ' image/Containerfile; then
-  error "direct-copy Containerfile must not add layers or runtime configuration"
-fi
-
-for forbidden in \
+forbid image/Containerfile \
   'LAB_SKILLS_COMMIT' \
   'projectbluefin/lab/' \
-  'review-entrypoint' \
-  'GOOSE_CHANNEL' \
-  'CODEX_VERSION' \
-  'PI_VERSION' \
-  'SKILLS_COMMIT'; do
-  grep -qF -- "$forbidden" image/Containerfile &&
-    error "direct-copy Containerfile must not contain ${forbidden}"
+  'apt-get' \
+  'dnf install' \
+  'apk add'
+
+for path in \
+  image/entrypoint.sh \
+  image/bin/bluefin-review \
+  image/config/goose.yaml \
+  image/tmux.conf \
+  image/tui/bluefin_review_tui.py \
+  image/harness/goose.py \
+  package.json \
+  package-lock.json; do
+  [[ -e "$path" ]] || {
+    echo "::error file=${path}::required review runtime input is missing"
+    fail=1
+  }
 done
 
-grep -qxF '*' .dockerignore ||
-  error ".dockerignore must ignore the complete build context"
-grep -qxF '!image/' .dockerignore ||
-  error ".dockerignore must retain the image directory"
-grep -qxF '!image/Containerfile' .dockerignore ||
-  error ".dockerignore must retain image/Containerfile"
-if grep -Eq '^!(package|scripts|docs|tests|README|justfile)' .dockerignore; then
-  error ".dockerignore must not retain unused review build inputs"
-fi
+grep -qF '!package.json' .dockerignore ||
+  {
+    echo "::error file=.dockerignore::package.json is not allowed into the build context"
+    fail=1
+  }
+grep -qF '!package-lock.json' .dockerignore ||
+  {
+    echo "::error file=.dockerignore::package-lock.json is not allowed into the build context"
+    fail=1
+  }
 
-[[ "$fail" -eq 0 ]] && echo "✓ direct lab-runner copy contract holds."
+[[ "$fail" -eq 0 ]] && echo "✓ review runtime image contract holds."
 exit "$fail"

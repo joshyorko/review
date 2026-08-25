@@ -37,6 +37,31 @@ env:
   BUILDAH_IMAGE: quay.io/buildah/stable:v1.43@sha256:ca4edbaabf71ca330ec9b2714bf8e06c726a6e85ae215cfb1474d2e2c832aacb
 
 jobs:
+  resolve-goose:
+    runs-on: ubuntu-latest
+    outputs:
+      x86_64_sha256: ${{ steps.goose.outputs.x86_64_sha256 }}
+      aarch64_sha256: ${{ steps.goose.outputs.aarch64_sha256 }}
+    steps:
+      - name: Resolve official Goose canary asset identities
+        id: goose
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="$(gh api repos/aaif-goose/goose/releases/tags/canary)"
+          asset_digest() {
+            jq -er --arg name "$1" \
+              '.assets[] | select(.name == $name) | .digest |
+               select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")' \
+              <<<"$release"
+          }
+          {
+            echo "x86_64_sha256=$(asset_digest goose-x86_64-unknown-linux-musl.tar.gz)"
+            echo "aarch64_sha256=$(asset_digest goose-aarch64-unknown-linux-musl.tar.gz)"
+          } >>"$GITHUB_OUTPUT"
+
   # One source of truth for every OCI value in this run. The native builds
   # stamp these as config labels and the index carries the identical set as
   # annotations, so 'created' has to be decided once, before either.
@@ -122,7 +147,7 @@ jobs:
   # is cross-built: the runner's own CPU produces the layers, runs the smoke
   # checks, and the audit measures a container it can actually execute.
   build:
-    needs: metadata
+    needs: [resolve-goose, metadata]
     strategy:
       fail-fast: false
       matrix:
@@ -161,16 +186,31 @@ jobs:
       - name: Build the review image
         shell: bash
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOSE_X86_64_SHA256: ${{ needs.resolve-goose.outputs.x86_64_sha256 }}
+          GOOSE_AARCH64_SHA256: ${{ needs.resolve-goose.outputs.aarch64_sha256 }}
           CREATED: ${{ needs.metadata.outputs.created }}
           BASE_NAME: ${{ needs.metadata.outputs.base_name }}
           BASE_DIGEST: ${{ needs.metadata.outputs.base_digest }}
           OCI_VERSION: ${{ needs.metadata.outputs.oci_version }}
         run: |
           set -euo pipefail
+          # The runner's podman predates '--secret id=NAME,env=VAR', so the
+          # token reaches the build as a file only this job can read. It is
+          # never a build-arg and never lands in a layer.
+          secret_file="$(mktemp)"
+          trap 'rm -f "$secret_file"' EXIT
+          chmod 0600 "$secret_file"
+          printf '%s' "$GITHUB_TOKEN" > "$secret_file"
           podman build \
             --format oci \
-            --label "org.opencontainers.image.title=Bluefin review lab-runner fork" \
-            --label "org.opencontainers.image.description=Direct fork of the Project Bluefin lab-runner image." \
+            --build-arg GOOSE_REFRESH="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --build-arg GOOSE_X86_64_SHA256="$GOOSE_X86_64_SHA256" \
+            --build-arg GOOSE_AARCH64_SHA256="$GOOSE_AARCH64_SHA256" \
+            --build-arg REVIEW_REVISION="${GITHUB_SHA}" \
+            --secret id=github_token,src="$secret_file" \
+            --label "org.opencontainers.image.title=Bluefin review contributor" \
+            --label "org.opencontainers.image.description=Foreground contributor runtime for projectbluefin/review." \
             --label "org.opencontainers.image.url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
@@ -187,11 +227,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "$(podman image inspect review:smoke --format '{{.Config.User}}')" = dev
+          test "$(podman image inspect review:smoke --format '{{json .Config.Entrypoint}}')" = '["/usr/local/bin/review-entrypoint"]'
+          # /home/dev, not /workspace: there is no workspace mount any more.
+          test "$(podman image inspect review:smoke --format '{{.Config.WorkingDir}}')" = /home/dev
+          # OCI, not Docker schema 2. The launcher, the registry and the audit
+          # all treat OCI as the shipped format.
           test "$(podman image inspect review:smoke --format '{{.ManifestType}}')" = application/vnd.oci.image.manifest.v1+json
-          base_ref="$(sed -n 's/^ARG FSDK_RUNNER_IMAGE=\(.*\)$/\1/p' image/Containerfile)"
-          podman pull "$base_ref"
-          test "$(podman image inspect review:smoke --format '{{json .RootFS.Layers}}')" = \
-            "$(podman image inspect "$base_ref" --format '{{json .RootFS.Layers}}')"
+          # The lean FSDK base has no terminal database. The entrypoint needs
+          # the 256color attach entry and panes run the direct-color entry.
+          podman run --rm --entrypoint /usr/bin/bash review:smoke \
+            -lc 'TERM=xterm-256color infocmp xterm-256color >/dev/null; infocmp tmux-direct >/dev/null; TERM=xterm-256color tmux new-session -d -s terminfo-smoke "sleep 30"; tmux has-session -t terminfo-smoke; test "$(tmux show -gv default-terminal)" = tmux-direct; tmux kill-session -t terminfo-smoke'
 
       - name: Prove the shipped runtime on this architecture
         shell: bash
@@ -201,13 +247,10 @@ jobs:
           set -euo pipefail
           container_arch="$(podman run --rm --entrypoint /usr/bin/uname review:smoke -m)"
           test "$container_arch" = "$EXPECTED_UNAME"
-          podman run --rm --entrypoint /usr/bin/bash review:smoke -lc '
-            set -eu
-            for tool in bash curl git jq python3 kubectl argo just which xargs awk ps tar diff patch less file; do
-              command -v "$tool" >/dev/null
-            done
-            test ! -e /usr/local/bin/review-entrypoint
-          '
+          podman run --rm --entrypoint /usr/local/bin/codex review:smoke --version
+          podman run --rm --entrypoint /usr/local/bin/codex-code-mode-host review:smoke --help
+          podman run --rm --entrypoint /opt/bluefin/tui/.venv/bin/python review:smoke \
+            -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"
           echo "Native container: ${container_arch}"
 
       - name: Log in to GHCR
@@ -269,6 +312,12 @@ jobs:
       # platform's inventory and attach it to an artifact claiming both.
       - name: Generate the SPDX SBOM for this architecture
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        env:
+          # Off by default: ingest the image's own SPDX manifest of
+          # archive-installed components (#78), baked in at build time from
+          # the resolved pins. Without this cataloger the SBOM describes only
+          # what package-manager metadata exposes.
+          SYFT_SELECT_CATALOGERS: "+sbom-cataloger"
         with:
           image: ${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}
           registry-username: ${{ github.actor }}
@@ -308,7 +357,6 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/image-audit.sh --derived "$DERIVED_IMAGE" \
-            --direct-copy \
             --report "$RUNNER_TEMP/review-image-audit-${ARCH}.md"
           cat "$RUNNER_TEMP/review-image-audit-${ARCH}.md" >> "$GITHUB_STEP_SUMMARY"
 
@@ -363,8 +411,8 @@ jobs:
           BASE_NAME: ${{ needs.metadata.outputs.base_name }}
           BASE_DIGEST: ${{ needs.metadata.outputs.base_digest }}
           OCI_VERSION: ${{ needs.metadata.outputs.oci_version }}
-          TITLE: Bluefin review lab-runner fork
-          DESCRIPTION: Direct fork of the Project Bluefin lab-runner image.
+          TITLE: Bluefin review contributor
+          DESCRIPTION: Foreground contributor runtime for projectbluefin/review.
         run: |
           set -euo pipefail
           AMD64_DIGEST="$(cat "${RUNNER_TEMP}/digests/digest-amd64.txt")"
@@ -456,7 +504,6 @@ jobs:
           set -euo pipefail
           bash tests/image-audit.sh \
             --derived "$DERIVED_IMAGE" \
-            --direct-copy \
             --require-oci \
             --require-attestations \
             --require-github-attestation \
