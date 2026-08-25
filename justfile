@@ -729,7 +729,7 @@ read_hive_value() {
 
 # Run the direct lab-runner fork. REVIEW_DETACH=1 runs it detached.
 [doc("Run the direct lab-runner fork as the contributor container.")]
-review-container profile="" effort="":
+review-container:
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}

@@ -90,7 +90,7 @@ four public recipes:
 
 | Command | Purpose |
 |---|---|
-| `just review-container [profile] [effort]` | Run the direct lab-runner fork in the foreground; the restored worker is tracked in #173. |
+| `just review-container` | Run the direct lab-runner fork in the foreground; the restored worker is tracked in #173. |
 | `just review-stop [name]` | Stop a detached worker. Refuses attended runs and containers this launcher did not start. |
 | `just review-queue` | Run the direct lab-runner fork in the foreground; the restored dashboard is tracked in #173. |
 | `just review-doctor` | Check that the direct lab-runner fork is resolvable and runnable. |
