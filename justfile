@@ -3,21 +3,19 @@
 # The system image install path is still out of scope here; this root justfile
 # is the launcher a checkout exposes directly.
 #
-# This is the ONLY file that ships/installs. Everything review needs
-# (host preflight, Goose selection, container lifecycle) is
+# This is the ONLY file that ships/installs. The direct image launch and
+# container lifecycle are
 # embedded below as private ('_'-prefixed variables and shared shell
 # functions) on purpose: a user browsing the image or this repo should find
 # one just-recipe file and the commands it exposes, not a scattered bin/ of
 # standalone scripts they might stumble into and run directly out of context.
 #
 # Public commands:
-#   review-container  Refuse to launch the direct lab-runner fork until #173
-#                     restores the contributor runtime.
+#   review-container  Run the direct lab-runner fork as a container.
 #   review-stop       Stop a detached worker. Refuses attended runs and
 #                     containers this launcher did not start.
-#   review-doctor     Report the direct-copy transition. Starts nothing.
-#   review-queue      Refuse to launch the dashboard until #173 restores the
-#                     review runtime.
+#   review-doctor     Check that the direct lab-runner fork is runnable.
+#   review-queue      Run the direct lab-runner fork as a container.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # LIFECYCLE
@@ -50,14 +48,12 @@
 # the image still means baking this launcher into a custom image build (out of
 # scope here — see README "Scope").
 #
-# In this checkout, the launch recipes are paused behind the direct-copy guard
-# until #173 restores the runtime. Persistent state and credential behavior
-# below remain dormant source for that follow-up; no recipe reaches it today.
+# In this checkout, launch recipes run the direct lab-runner fork. The older
+# credential and runtime helpers below remain source for the #173 restoration
+# and are not part of the direct-copy path.
 #
-# TOOL is read from the environment so 'TOOL=goose just review-container'
-# works as documented — 'just' recipe parameters are positional, not
-# KEY=VALUE, so it cannot be a plain recipe parameter. Any value other than
-# 'goose' is a hard error rather than a silent fallback.
+# The old provider/runtime helpers remain below for the #173 restoration and
+# are not reached by the direct-copy recipes.
 tool_env := env("TOOL", "")
 hive_repo_url := "https://github.com/kubestellar/hive"
 # origin/v2 via `git ls-remote --heads https://github.com/kubestellar/hive v2`
@@ -95,12 +91,6 @@ contributor_image := env("REVIEW_CONTRIBUTOR_IMAGE", "ghcr.io/projectbluefin/rev
 # concession to DRY here — it never leaves the Justfile as a file of its own.
 shared_functions := '''
 GITHUB_LOGIN_COMMAND="gh auth login --web --hostname github.com --scopes repo,read:org"
-
-require_review_runtime() {
-  echo "ERROR: review:stable is currently the direct lab-runner fork; the Goose/Hive runtime is not installed in this image (see #173)." >&2
-  echo "  Run the image directly with: podman run --rm -it --entrypoint /usr/bin/bash ghcr.io/projectbluefin/review:stable" >&2
-  return 1
-}
 
 github_auth_ready() {
   command -v gh &>/dev/null && gh auth status --hostname github.com &>/dev/null
@@ -737,187 +727,30 @@ read_hive_value() {
 }
 '''
 
-# Run the contributor container: the Hive queue worker.
-# Receives Hive-assigned tasks and donates inference through the
-# maintainer's credentials.
-#
-#   just review-container              # luna: gpt-5.6-luna at max effort
-#   just review-container luna         # the same, named explicitly
-#   just review-container opus5 high   # claude-opus-5, high effort, 264k context
-#   just review-container kimi         # kimi-k3, max effort, 264k context
-#
-# One instance owns the 'review-container' name, so a second concurrent agent
-# needs a name of its own:
-#
-#   REVIEW_CONTAINER_NAME=review-container-2 just review-container opus5 high
-#
-# Usage: just review-container [luna|opus5|kimi] [low|medium|high|max]
-# Env:   REVIEW_CONTAINER_NAME=<name>  run a concurrent second instance
-#        (default 'review-container'; must match [a-zA-Z0-9][a-zA-Z0-9_.-]*)
-#        REVIEW_HIVE=<name>  use ~/.config/hive/contributor.<name>.env; when
-#        missing, register a hive under that name. Without it, the current
-#        repository's directory name is tried, then the default
-#        ~/.config/hive/contributor.env.
-[doc("Refuse to launch the contributor worker while review is a direct lab-runner fork.")]
+# Run the direct lab-runner fork. REVIEW_DETACH=1 runs it detached.
+[doc("Run the direct lab-runner fork as the contributor container.")]
 review-container profile="" effort="":
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}
-    require_review_runtime
-    TOOL="{{tool_env}}"
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
-    OPUS_MODEL="{{opus_model}}"
-    OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
-    KIMI_MODEL="{{kimi_model}}"
-    KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
-
-    STATE_DIR="${HOME}/.local/state/review"
-    HIVE_SRC_DIR="${STATE_DIR}/hive-src"
-    HIVE_REPO_URL="{{hive_repo_url}}"
-    HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
-    HIVE_COMMIT="${HIVE_COMMIT,,}"
-    mkdir -p "${STATE_DIR}"
-
-    require_goose_backend "$TOOL"
-    BACKEND="${TOOL:-goose}"
-    preflight_agent "$BACKEND"
-    command -v podman &>/dev/null || {
-      echo "ERROR: Podman is required to run the contributor container." >&2
-      echo "  Install Podman, then re-run review-container." >&2
-      exit 1
-    }
-
-    # Resolved before anything interactive so a typo fails immediately rather
-    # than after the model picker and the Hive setup.
+    CONTRIBUTOR_IMAGE="{{contributor_image}}"
     CONTAINER_NAME="${REVIEW_CONTAINER_NAME:-review-container}"
     require_valid_container_name "$CONTAINER_NAME"
-
-    resolve_model_profile "{{profile}}" "{{effort}}"
-    if [[ "$BACKEND" == pi ]]; then
-      export ANTHROPIC_API_KEY="$PI_API_KEY"
-    elif [[ "$BACKEND" == goose ]]; then
-      resolve_goose_selection
-    fi
-    REVIEW_RECIPE=review-container
-    ensure_hive_contributor_env
-    report_hive_selection
-
-    CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
 
-    # REVIEW_DETACH=1 runs the worker as a deliberate background container:
-    # no terminal, entrypoint follows the agent without attaching, logs
-    # through podman, and 'just review-stop' is the explicit lifecycle verb.
-    # The 'detached' owner label is what separates this from an orphan, so a
-    # later launch refuses to reclaim it silently.
-    DETACH="${REVIEW_DETACH:-0}"
-    if [[ "$DETACH" == 1 ]]; then
-      CONTAINER_ARGS=(
-        podman run --rm --detach --replace --name "$CONTAINER_NAME"
-        --label "review.owner=detached"
-      )
-    else
-      CONTAINER_ARGS=(
-        podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
-        --label "$(owner_run_label)"
-      )
-    fi
-    CONTAINER_ARGS+=(
-      # Rootless podman maps the host user to container root by default, so a
-      # 0600 host file bind-mounts in as root-owned and the 'dev' user the
-      # image runs as cannot read it -- contributor.env holds Hive's own
-      # settings and is exactly that. Mapping the host user onto dev's uid
-      # instead makes the mount readable without loosening the host mode.
-      --userns "keep-id:uid=1000,gid=1000"
-      # The selected registration, and nothing else from ~/.config/hive.
-      #
-      # This used to also bind-mount the whole directory, with the selected
-      # file overlaid on top. Rootless Podman prepares the nested target
-      # through the already-mounted host directory, so with a named
-      # registration (REVIEW_HIVE=<name>) the target creation escaped back to
-      # the host: it created a zero-byte ~/.config/hive/contributor.env owned
-      # by a subordinate uid, and the container then failed on the file it had
-      # just caused to exist. Nothing in the image reads anything else from
-      # that directory, so one file mount is both the fix and the smaller
-      # exposure -- a named worker can no longer see other registrations.
-      #
-      # ':z' is the shared SELinux relabel. ':Z' would give each container a
-      # private MCS category, and review supports concurrent named workers
-      # sharing one registration: the second launch would revoke the first
-      # live container's access to it.
-      --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro,z"
-      --env "AGENT_BACKEND=${BACKEND}"
-      # Podman does not pass COLORTERM through on its own; the entrypoint
-      # needs it to pick the direct-color attach fallback for a host TERM
-      # the image's narrow terminfo set does not know (e.g. xterm-ghostty).
-      --env COLORTERM
-    )
-    [[ "$BACKEND" == goose && -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
-    if [[ "$BACKEND" == goose ]]; then
-      [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
-      [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
-      [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
-    fi
-    if [[ "${GOOSE_PROVIDER:-}" == "github_copilot" ]]; then
-      resolve_copilot_token
-      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-        export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
-        CONTAINER_ARGS+=(--env GITHUB_COPILOT_TOKEN)
-        echo "✓ Copilot credential passed to the agent."
-      else
-        report_missing_copilot_credential
-      fi
-    fi
-    if [[ "$BACKEND" == pi ]]; then
-      CONTAINER_ARGS+=(--env ANTHROPIC_API_KEY)
-      echo "✓ Pi credential passed to the agent (value not shown)."
-    fi
-    CODEX_AUTH_STAGING_DIR=""
-    trap cleanup_codex_auth_file EXIT
-    if [[ "$BACKEND" == codex ]]; then
-      stage_codex_auth_file
-      if [[ "$DETACH" == 1 ]]; then
-        CONTAINER_ARGS+=(--label "review.codex-auth=${CODEX_AUTH_STAGING_DIR}")
-      fi
-      CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
-      echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
-    fi
-    resolve_gh_token
-    if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then
-      export GH_TOKEN="$GH_TOKEN_VALUE"
-      CONTAINER_ARGS+=(--env GH_TOKEN)
-      report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
-    else
-      report_missing_gh_token
-    fi
-    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE")
-
-    if [[ "$DETACH" == 1 ]]; then
-      echo "✓ starting the review contributor worker (detached)."
+    if [[ "${REVIEW_DETACH:-0}" == 1 ]]; then
+      echo "✓ starting ${CONTRIBUTOR_IMAGE} as a detached container."
       echo "  Follow it:  podman logs -f ${CONTAINER_NAME}"
       echo "  Stop it:    just review-stop ${CONTAINER_NAME}"
-    else
-      echo "✓ starting the review contributor container."
-      echo "  The entrypoint attaches to the 'contributor' tmux session for you."
-      echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
-      echo "  Stop any time with Ctrl-C."
+      exec podman run --rm --detach --replace --name "$CONTAINER_NAME" \
+        --label "review.owner=detached" "$CONTRIBUTOR_IMAGE"
     fi
-    if [[ "$BACKEND" == codex ]]; then
-      if "${CONTAINER_ARGS[@]}"; then
-        status=0
-      else
-        status=$?
-        cleanup_codex_auth_file
-      fi
-      if [[ "$DETACH" == 1 && "$status" == 0 ]]; then
-        trap - EXIT
-      else
-        cleanup_codex_auth_file
-      fi
-      exit "$status"
-    fi
-    exec "${CONTAINER_ARGS[@]}"
+
+    echo "✓ starting ${CONTRIBUTOR_IMAGE} in the foreground."
+    echo "  Stop any time with Ctrl-C."
+    exec podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME" \
+      --label "$(owner_run_label)" "$CONTRIBUTOR_IMAGE"
 
 # Stop a detached review worker. This is the explicit lifecycle verb for
 # containers started with REVIEW_DETACH=1; it refuses to touch anything this
@@ -951,284 +784,51 @@ review-stop name="review-container":
     cleanup_codex_auth_staging_dir "$codex_auth_staging_dir"
     echo "✓ stopped the detached worker ${NAME}."
 
-# The maintainer review dashboard over the Bluefin PR queue — no Hive.
-# The container runs the dashboard instead of the contributor agent, so no
-# Hive registration is mounted or required. Foreground: q or Ctrl-C stops.
-# Arguments pass straight through to the dashboard:
+# Run the direct lab-runner fork as the interactive review container.
+# The first image slice has no dashboard entrypoint, so no queue arguments are
+# accepted. Foreground: Ctrl-C stops.
 #
-#   just review-queue                      # everything the queue marks 'review'
-#   just review-queue kimi high            # pick the model profile and effort
-#   just review-queue owner/repo            # live open PRs for one repository
-#   just review-queue --repo bluefin       # static snapshot filter (legacy form)
-#   just review-queue opus5 --all          # profile, then dashboard flags
-#
-# One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
-# for a concurrent second dashboard, exactly as REVIEW_CONTAINER_NAME does for
-# review-container.
-[doc("Refuse to launch the dashboard while review is a direct lab-runner fork.")]
+#   just review-queue
+# REVIEW_QUEUE_NAME overrides the container name.
+[doc("Run the direct lab-runner fork as the interactive review container.")]
 review-queue *queue_args:
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}
-    require_review_runtime
-    TOOL="{{tool_env}}"
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
-    OPUS_MODEL="{{opus_model}}"
-    OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
-    KIMI_MODEL="{{kimi_model}}"
-    KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
-
-    resolve_review_backend
-    require_goose_backend "$TOOL"
-    if [[ "$REVIEW_BACKEND" == codex ]]; then
-      preflight_github
-    else
-      preflight_agent
+    if [[ -n "{{queue_args}}" ]]; then
+      echo "ERROR: the direct lab-runner fork accepts no review dashboard arguments." >&2
+      echo "  Run 'just review-queue' without arguments to open the image shell." >&2
+      exit 2
     fi
-    command -v podman &>/dev/null || {
-      echo "ERROR: Podman is required to run the contributor container." >&2
-      echo "  Install Podman, then re-run review-queue." >&2
-      exit 1
-    }
-
+    CONTRIBUTOR_IMAGE="{{contributor_image}}"
     CONTAINER_NAME="${REVIEW_QUEUE_NAME:-review-queue}"
     require_valid_container_name "$CONTAINER_NAME"
-
-    # Leading non-flag arguments are the model profile and thinking effort,
-    # exactly as review-container takes them; everything from the first '-'
-    # flag onward belongs to the dashboard. Word-splitting {{queue_args}} is
-    # the point: it arrives as one string of separate flags.
-    # shellcheck disable=SC2086
-    set -- {{queue_args}}
-    profile="" effort=""
-    if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then profile="$1"; shift; fi
-    if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then effort="$1"; shift; fi
-    resolve_model_profile "$profile" "$effort"
-    # The unambiguous repository form follows the existing profile/effort
-    # pair. Keep all flag forms byte-for-byte available to the dashboard.
-    if [[ $# -gt 0 && "$1" != -* ]]; then
-      set -- --live-repo "$1" "${@:2}"
-    fi
-    [[ "$REVIEW_BACKEND" == codex ]] || resolve_goose_selection
-
-    CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    echo "✓ starting ${CONTRIBUTOR_IMAGE} in the foreground."
+    echo "  Stop any time with Ctrl-C."
+    exec podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME" \
+      --label "$(owner_run_label)" "$CONTRIBUTOR_IMAGE"
 
-    CONTAINER_ARGS=(
-      podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
-      --label "$(owner_run_label)"
-      --userns "keep-id:uid=1000,gid=1000"
-      # Podman does not pass COLORTERM through on its own.
-      --env COLORTERM
-    )
-    # The dashboard's record — dispatched landing batches, their failure
-    # reasons, the action trace — lives under the container's XDG state
-    # directory, and a reclaim-by-replace relaunch must not lose it (#281).
-    # One shared host directory under the host XDG state root: the queue it
-    # records is the same whichever instance name runs, and :z keeps it
-    # writable for concurrent named dashboards.
-    QUEUE_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
-    mkdir -p "$QUEUE_STATE_DIR"
-    CONTAINER_ARGS+=(--volume "${QUEUE_STATE_DIR}:/home/dev/.local/state/bluefin-review:rw,z")
-    # The instance name qualifies each landing batch id: two named dashboards
-    # share the state directory, and a bare timestamp id would let their
-    # batches overwrite each other's prompt, status, and log.
-    export BLUEFIN_REVIEW_INSTANCE="$CONTAINER_NAME"
-    CONTAINER_ARGS+=(--env BLUEFIN_REVIEW_INSTANCE)
-    if [[ "$REVIEW_BACKEND" != codex ]]; then
-      [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
-      [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
-      [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
-      [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
-    fi
-    if [[ -n "$REVIEW_BACKEND" ]]; then
-      CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_BACKEND=${REVIEW_BACKEND}")
-      echo "✓ review backend preselected: ${REVIEW_BACKEND}; Start still requires confirmation."
-    fi
-    # The Copilot credential is what powers 'r' (the Goose review of a pull
-    # request); the dashboard itself only reads GitHub, so a missing credential
-    # is a warning, not a stop.
-    if [[ "$REVIEW_BACKEND" != codex ]]; then
-      resolve_copilot_token
-      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-        export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
-        CONTAINER_ARGS+=(--env GITHUB_COPILOT_TOKEN)
-        echo "✓ Copilot credential passed to the agent."
-      else
-        report_missing_copilot_credential
-      fi
-    fi
-    # Codex subscription OAuth is staged into one private file, not mounted
-    # from the host login or configuration directory. The official CLI may
-    # refresh only the disposable copy, which is removed when this run exits.
-    CODEX_AUTH_STAGING_DIR=""
-    trap cleanup_codex_auth_file EXIT
-    if [[ "$REVIEW_BACKEND" == codex ]]; then
-      stage_codex_auth_file
-      if [[ -n "$CODEX_AUTH_FILE" ]]; then
-        CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
-        echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
-      else
-        echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
-        echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
-      fi
-    fi
-    # The dashboard is a GitHub reader from the first keystroke to the last, so
-    # an identity is load-bearing here, not advisory.
-    resolve_gh_token
-    if [[ -z "${GH_TOKEN_VALUE:-}" ]]; then
-      report_missing_gh_token
-      echo "ERROR: the dashboard reads live pull-request state from GitHub and cannot run without a token." >&2
-      exit 1
-    fi
-    export GH_TOKEN="$GH_TOKEN_VALUE"
-    CONTAINER_ARGS+=(--env GH_TOKEN)
-    report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
-
-    # Whatever survived the profile/effort shift belongs to the dashboard.
-    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue "$@")
-
-    echo "✓ starting the maintainer review dashboard (no Hive)."
-    echo "  q or Ctrl-C stops; the dashboard is the only thing running."
-    "${CONTAINER_ARGS[@]}"
-
-# Report the direct-copy transition. Never starts a container.
-[doc("Report the direct-copy transition without starting a container.")]
+[doc("Check that the direct lab-runner fork is runnable.")]
 review-doctor:
     #!/usr/bin/env bash
-    set -uo pipefail
+    set -euo pipefail
     {{shared_functions}}
-    echo "=== Review runtime ==="
-    echo "  ✗ review:stable is currently the direct lab-runner fork; Goose/Hive runtime restoration is tracked in #173."
-    echo "    Run the image directly with: podman run --rm -it --entrypoint /usr/bin/bash ghcr.io/projectbluefin/review:stable"
-    exit 1
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
-    HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
-    HIVE_COMMIT="${HIVE_COMMIT,,}"
-    pass=0; fail=0
-    check() {
-      local label="$1"; shift
-      if "$@" &>/dev/null; then echo "  ✓ ${label}"; pass=$((pass+1));
-      else echo "  ✗ ${label}"; fail=$((fail+1)); fi
+    CONTRIBUTOR_IMAGE="{{contributor_image}}"
+    command -v podman &>/dev/null || {
+      echo "ERROR: Podman is required to inspect the review image." >&2
+      exit 1
     }
-
-    echo "=== Host ==="
-    check "Podman installed" command -v podman
-    echo ""
-
-    echo "=== GitHub ==="
-    if github_auth_ready; then
-      echo "  ✓ gh is authenticated against github.com"
-      pass=$((pass+1))
-    else
-      echo "  ✗ gh is not authenticated against github.com"
-      echo "    Run: ${GITHUB_LOGIN_COMMAND}"
-      fail=$((fail+1))
-    fi
-    resolve_gh_token
-    if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then
-      echo "  ✓ a GitHub token is available for the container-only agent (from ${GH_TOKEN_SOURCE}; not shown)"
-      DOCTOR_GH_SCOPES="$(gh_token_scopes)"
-      [[ -n "$DOCTOR_GH_SCOPES" ]] && echo "    The agent will be able to do anything this token can: ${DOCTOR_GH_SCOPES}"
-      echo "    Narrow that with REVIEW_GH_TOKEN=<scoped PAT> if that is wider than you want."
-      pass=$((pass+1))
-    else
-      echo "  ✗ no GitHub token is available for the container-only agent"
-      echo "    It could not fork, push, or open a pull request, and would stop at 'gh auth login'."
-      echo "    For container-only mode, run: ${GITHUB_LOGIN_COMMAND}, or export REVIEW_GH_TOKEN."
-      fail=$((fail+1))
-    fi
-    unset GH_TOKEN_VALUE
-    echo ""
-
-    BACKEND="${TOOL:-goose}"
-    require_goose_backend "$BACKEND" || fail=$((fail+1))
-    if [[ "$BACKEND" == pi ]]; then
-      echo "=== Agent backend (Pi) ==="
-      if [[ -n "${PI_API_KEY:-}" ]]; then
-        echo "  ✓ pi: selected; image verifies the installed binary and the credential is available (not shown)"
-        pass=$((pass+1))
-      else
-        echo "  ✗ pi: selected, but PI_API_KEY is missing"
-        echo "    Export PI_API_KEY before running TOOL=pi just review-container."
-        fail=$((fail+1))
-      fi
-    else
-      echo "=== Agent backend (Goose) ==="
-      if ! require_copilot_provider; then
-        fail=$((fail+1))
-      elif command -v goose &>/dev/null; then
-        if goose_configured; then
-          echo "  ✓ goose: installed + configured"
-          pass=$((pass+1))
-        else
-          echo "  ✗ goose: installed, NOT configured — ${GOOSE_FIXIT_HINT}"
-          fail=$((fail+1))
-        fi
-      else
-        echo "  ✗ goose: not installed — ${GOOSE_INSTALL_HINT}"
-        fail=$((fail+1))
-      fi
-      echo ""
-
-      echo "=== Copilot credential ==="
-      resolve_copilot_token
-      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-        echo "  ✓ a Copilot credential is available (not shown)"
-        pass=$((pass+1))
-      else
-        echo "  ✗ no Copilot credential is available"
-        echo "    The agent will stop at 'enter code XXXX-XXXX' and wait for a human."
-        echo "    A 'gh auth token' is NOT a substitute — Copilot inference rejects it."
-        echo "    Run: goose configure (pick GitHub Copilot), or export GITHUB_COPILOT_TOKEN."
-        fail=$((fail+1))
-      fi
-      unset COPILOT_TOKEN
-    fi
-    echo ""
-
-    echo "=== Contributor image ==="
-    DOCTOR_CONTRIBUTOR_IMAGE="{{contributor_image}}"
-    if contributor_image_available "$DOCTOR_CONTRIBUTOR_IMAGE"; then
-      echo "  ✓ ${DOCTOR_CONTRIBUTOR_IMAGE} is resolvable"
-      pass=$((pass+1))
-    else
-      echo "  ✗ ${DOCTOR_CONTRIBUTOR_IMAGE} cannot be resolved"
-      echo "    Published tags are 'stable', the version tags and 'sha-<commit>'; ':latest' does not exist."
-      echo "    Override with REVIEW_CONTRIBUTOR_IMAGE (a 'sha-' tag or digest pins a build), or build image/Containerfile locally."
-      fail=$((fail+1))
-    fi
-    echo ""
-
-    echo "=== Hive contributor setup ==="
-    hive_registration_name || true
-    HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.env"
-    if [[ -n "${HIVE_REGISTRATION_NAME:-}" ]] &&
-      [[ -f "${HOME}/.config/hive/contributor.${HIVE_REGISTRATION_NAME}.env" ]]; then
-      HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.${HIVE_REGISTRATION_NAME}.env"
-    fi
-    if [[ -f "$HIVE_CONTRIBUTOR_ENV" ]]; then
-      echo "  ✓ ${HIVE_CONTRIBUTOR_ENV} exists"
-      pass=$((pass+1))
-      DOCTOR_BACKEND="$(hive_contributor_backend "$HIVE_CONTRIBUTOR_ENV")"
-      if [[ -n "$DOCTOR_BACKEND" && "$DOCTOR_BACKEND" != "$BACKEND" ]]; then
-        echo "  ! ${HIVE_CONTRIBUTOR_ENV} says AGENT_BACKEND=${DOCTOR_BACKEND}, but the selected backend is ${BACKEND}."
-        echo "    The launcher will not rewrite Hive's saved backend selection."
-        echo "    Edit that line yourself if you want the file to match."
-      fi
-    else
-      echo "  ✗ ${HIVE_CONTRIBUTOR_ENV} is missing"
-      echo "    review runs upstream 'just contribute-setup goose' from"
-      echo "    kubestellar/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
-      echo "    That runs with upstream's documented HIVE_SKIP_VERSION_CHECK=true,"
-      echo "    because the pinned checkout is detached and cannot match origin/v2."
-      fail=$((fail+1))
-    fi
-    echo ""
-
-    echo "=== Workspace model ==="
-    echo "  ✓ assigned repositories are cloned inside the disposable container"
-    echo ""
-    echo "${pass} checks passed, ${fail} failed."
-    [[ "$fail" -eq 0 ]] || exit 1
+    contributor_image_available "$CONTRIBUTOR_IMAGE" || {
+      echo "ERROR: cannot obtain the contributor image ${CONTRIBUTOR_IMAGE}." >&2
+      exit 1
+    }
+    echo "✓ ${CONTRIBUTOR_IMAGE} is resolvable (direct lab-runner fork)"
+    podman run --rm --entrypoint /usr/bin/bash "$CONTRIBUTOR_IMAGE" -lc '
+      set -eu
+      for tool in bash curl git jq python3 kubectl argo just which xargs awk ps tar diff patch less file; do
+        command -v "$tool" >/dev/null
+      done
+    '
+    echo "✓ direct lab-runner runtime is runnable"

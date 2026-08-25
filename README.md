@@ -47,8 +47,8 @@ The first published `review` image is an exact, digest-pinned fork of
 the Goose/Hive contributor runtime so the image can rev quickly; restoring that
 runtime is tracked in [#173](https://github.com/projectbluefin/review/issues/173).
 
-Until #173 is complete, the three launch recipes fail fast instead of
-pretending the direct copy is a review appliance. Run the image directly:
+Until #173 is complete, the launch recipes run the direct image shell rather
+than the Goose/Hive worker or dashboard:
 
 ```bash
 podman run --rm -it --entrypoint /usr/bin/bash ghcr.io/projectbluefin/review:stable
@@ -67,9 +67,9 @@ downstream workaround becomes upstream's compatibility burden later. See
 
 ## Scope
 
-The root `justfile` remains the public launcher surface for the next runtime
-slice. During the direct-copy transition, `review-container`, `review-queue`,
-and `review-doctor` report #173 and do not start a container.
+The root `justfile` remains the public launcher surface. During the
+direct-copy transition, `review-container` and `review-queue` run the
+published image directly; `review-doctor` checks its basic runtime.
 
 ## Installing this into your own setup
 
@@ -90,10 +90,10 @@ four public recipes:
 
 | Command | Purpose |
 |---|---|
-| `just review-container [profile] [effort]` | Fails fast during the direct-copy transition; runtime restoration is tracked in #173. |
+| `just review-container [profile] [effort]` | Run the direct lab-runner fork in the foreground; the restored worker is tracked in #173. |
 | `just review-stop [name]` | Stop a detached worker. Refuses attended runs and containers this launcher did not start. |
-| `just review-queue [profile] [effort] [flags…]` | Fails fast during the direct-copy transition; runtime restoration is tracked in #173. |
-| `just review-doctor` | Reports the direct-copy transition without starting a container. |
+| `just review-queue` | Run the direct lab-runner fork in the foreground; the restored dashboard is tracked in #173. |
+| `just review-doctor` | Check that the direct lab-runner fork is resolvable and runnable. |
 
 Interactive runs remain attached to their originating terminal, and Ctrl-C or
 closing that terminal stops them. A detached worker (`REVIEW_DETACH=1`) is
@@ -150,9 +150,8 @@ remains authoritative for contributor coordination after #173 is complete.
 
 The launcher keeps its existing configuration surface for the runtime
 restoration tracked in #173. During the direct-copy phase, the launch recipes
-fail before reading credentials or starting Podman. `REVIEW_CONTRIBUTOR_IMAGE`
-continues to name the image that the restored launcher will use and defaults
-to `ghcr.io/projectbluefin/review:stable`.
+do not read AI credentials; `REVIEW_CONTRIBUTOR_IMAGE` names the image to run
+and defaults to `ghcr.io/projectbluefin/review:stable`.
 
 ## Image and context
 

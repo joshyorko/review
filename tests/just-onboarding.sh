@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contract for the direct-copy transition: review recipes fail before launch.
+# Contract for launching the direct lab-runner fork through just.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,8 +13,27 @@ podman_log="$scratch/podman.log"
 mkdir -p "$fake_bin"
 cat >"$fake_bin/podman" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
-exit 99
+case "${1:-}" in
+  image)
+    exit 1
+    ;;
+  manifest)
+    exit 0
+    ;;
+  pull)
+    exit 0
+    ;;
+  inspect)
+    printf 'false\n'
+    exit 1
+    ;;
+  run)
+    exit 0
+    ;;
+esac
+exit 0
 EOF
 chmod 0755 "$fake_bin/podman"
 
@@ -25,26 +44,44 @@ fail() {
 
 run_recipe() {
   local recipe="$1"
+  shift
   set +e
   output="$(
-    PATH="$fake_bin:$PATH" PODMAN_LOG="$podman_log" \
+    env PATH="$fake_bin:$PATH" PODMAN_LOG="$podman_log" "$@" \
       "$real_just" --justfile "$justfile" "$recipe" 2>&1
   )"
   status=$?
   set -e
 }
 
-for recipe in review-container review-queue review-doctor; do
-  run_recipe "$recipe"
-  [[ "$status" -ne 0 ]] || fail "${recipe} must refuse the direct-copy image"
-  grep -q 'direct lab-runner fork' <<<"$output" ||
-    fail "${recipe} must explain the direct-copy transition"
-  grep -q '#173' <<<"$output" ||
-    fail "${recipe} must name the runtime-restoration issue"
-done
+: >"$podman_log"
+run_recipe review-queue
+[[ "$status" -eq 0 ]] || fail "review-queue must launch the direct image"
+grep -q -- 'run --rm --interactive --tty --replace --name review-queue' "$podman_log" ||
+  fail "review-queue must run an interactive container"
+grep -q -- 'ghcr.io/projectbluefin/review:stable$' "$podman_log" ||
+  fail "review-queue must pass the direct image without an obsolete queue command"
 
-[[ ! -s "$podman_log" ]] ||
-  fail "direct-copy launch guards must not invoke Podman"
+: >"$podman_log"
+run_recipe review-container
+[[ "$status" -eq 0 ]] || fail "review-container must launch the direct image"
+grep -q -- 'run --rm --interactive --tty --replace --name review-container' "$podman_log" ||
+  fail "review-container must run an interactive container"
+grep -q -- 'ghcr.io/projectbluefin/review:stable$' "$podman_log" ||
+  fail "review-container must pass the direct image without an obsolete command"
+
+: >"$podman_log"
+run_recipe review-container REVIEW_DETACH=1
+[[ "$status" -eq 0 ]] || fail "detached review-container must launch the direct image"
+grep -q -- 'run --rm --detach --replace --name review-container' "$podman_log" ||
+  fail "detached review-container must use Podman's detached mode"
+grep -q -- 'review.owner=detached' "$podman_log" ||
+  fail "detached review-container must retain its ownership label"
+
+run_recipe review-doctor
+[[ "$status" -eq 0 ]] || fail "review-doctor must report direct image readiness"
+grep -q 'direct lab-runner fork' <<<"$output" ||
+  fail "review-doctor must identify the direct image"
 
 list="$("$real_just" --justfile "$justfile" --list)"
 for recipe in review-container review-stop review-doctor review-queue; do
@@ -55,8 +92,11 @@ done
   fail "just --list must expose exactly four review recipes"
 
 code="$(cat "$justfile")"
-grep -q 'require_review_runtime' <<<"$code" ||
-  fail "the launcher must define the direct-copy guard"
+grep -q 'ghcr.io/projectbluefin/review:stable' <<<"$code" ||
+  fail "the launcher must use the published review image"
+if grep -q 'require_review_runtime' <<<"$code"; then
+  fail "the launcher must not block the direct image with a compatibility guard"
+fi
 stop_body="$(sed -n '/^review-stop/,/^[a-z]/p' "$justfile")"
 grep -q 'review.owner' <<<"$stop_body" ||
   fail "review-stop must remain scoped to launcher-owned detached workers"

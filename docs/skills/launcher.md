@@ -20,8 +20,8 @@ metadata:
 # Launcher
 
 > The published image is currently a direct lab-runner fork; launch recipes
-> fail fast until the runtime-restoration work in review#173 lands. The
-> procedures below describe the restored launcher contract.
+> run its shell directly. The worker/dashboard procedures below describe the
+> runtime restoration tracked in review#173.
 
 ## When to Use
 
