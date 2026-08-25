@@ -45,9 +45,9 @@ silently create a second workflow, authority path, or task queue.
 The first published `review` image is an exact, digest-pinned fork of
 `ghcr.io/projectbluefin/lab-runner`. It is intentionally published without
 the Goose/Hive contributor runtime so the image can rev quickly; restoring that
-runtime is tracked in [#173](https://github.com/projectbluefin/review/issues/173).
+runtime is tracked in [#346](https://github.com/projectbluefin/review/issues/346).
 
-Until #173 is complete, the launch recipes run the direct image shell rather
+Until #346 is complete, the launch recipes run the direct image shell rather
 than the Goose/Hive worker or dashboard:
 
 ```bash
@@ -90,9 +90,9 @@ four public recipes:
 
 | Command | Purpose |
 |---|---|
-| `just review-container` | Run the direct lab-runner fork in the foreground; the restored worker is tracked in #173. |
+| `just review-container` | Run the direct lab-runner fork in the foreground; the restored worker is tracked in #346. |
 | `just review-stop [name]` | Stop a detached worker. Refuses attended runs and containers this launcher did not start. |
-| `just review-queue` | Run the direct lab-runner fork in the foreground; the restored dashboard is tracked in #173. |
+| `just review-queue` | Run the direct lab-runner fork in the foreground; the restored dashboard is tracked in #346. |
 | `just review-doctor` | Check that the direct lab-runner fork is resolvable and runnable. |
 
 Interactive runs remain attached to their originating terminal, and Ctrl-C or
@@ -137,19 +137,19 @@ of installing local replacements.
 
 ## Reviewing
 
-Review execution is intentionally paused while #173 restores the
+Review execution is intentionally paused while #346 restores the
 Goose/Hive entrypoint and dashboard layers. The direct-copy image is still a
 runnable shell image, so it can be inspected with the command shown above;
-`just review-container` and `just review-queue` refuse to launch it.
+`just review-container` and `just review-queue` launch that shell directly.
 
 The generated public PR queue remains read-only guidance. GitHub is
 authoritative for pull requests, checks, reviews, and merge state, while Hive
-remains authoritative for contributor coordination after #173 is complete.
+remains authoritative for contributor coordination after #346 is complete.
 
 ## Configuration
 
 The launcher keeps its existing configuration surface for the runtime
-restoration tracked in #173. During the direct-copy phase, the launch recipes
+restoration tracked in #346. During the direct-copy phase, the launch recipes
 do not read AI credentials; `REVIEW_CONTRIBUTOR_IMAGE` names the image to run
 and defaults to `ghcr.io/projectbluefin/review:stable`.
 
@@ -173,7 +173,7 @@ The source image is `ghcr.io/projectbluefin/lab-runner`, built by
 `projectbluefin/lab` repository consumes that image for its GitOps test suite;
 it is not copied into the image build context.
 
-Use the published image directly while #173 is open:
+Use the published image directly while #346 is open:
 
 ```bash
 podman run --rm -it --entrypoint /usr/bin/bash \

@@ -26,8 +26,22 @@ case "${1:-}" in
     exit 0
     ;;
   inspect)
+    if [[ "$*" == *'review.owner'* ]]; then
+      printf '%s\n' "${PODMAN_OWNER_LABEL:-}"
+      exit 0
+    fi
+    if [[ "$*" == *'review.codex-auth'* ]]; then
+      printf '%s\n' "${PODMAN_CODEX_AUTH_LABEL:-}"
+      exit 0
+    fi
     printf 'false\n'
     exit 1
+    ;;
+  container)
+    [[ "${PODMAN_CONTAINER_EXISTS:-0}" == 1 ]]
+    ;;
+  stop)
+    exit 0
     ;;
   run)
     exit 0
@@ -77,6 +91,28 @@ grep -q -- 'run --rm --detach --replace --name review-container' "$podman_log" |
   fail "detached review-container must use Podman's detached mode"
 grep -q -- 'review.owner=detached' "$podman_log" ||
   fail "detached review-container must retain its ownership label"
+
+: >"$podman_log"
+run_recipe review-stop PODMAN_CONTAINER_EXISTS=1
+[[ "$status" -ne 0 ]] || fail "review-stop must refuse an unlabelled container"
+grep -q 'not started by this launcher' <<<"$output" ||
+  fail "review-stop must explain an unlabelled container"
+! grep -q '^stop ' "$podman_log" ||
+  fail "review-stop must not stop an unlabelled container"
+
+: >"$podman_log"
+run_recipe review-stop PODMAN_CONTAINER_EXISTS=1 PODMAN_OWNER_LABEL=detached
+[[ "$status" -eq 0 ]] || fail "review-stop must stop a detached worker"
+grep -q '^stop ' "$podman_log" ||
+  fail "review-stop must stop a detached worker politely"
+
+: >"$podman_log"
+run_recipe review-stop PODMAN_CONTAINER_EXISTS=1 PODMAN_OWNER_LABEL=attended
+[[ "$status" -ne 0 ]] || fail "review-stop must refuse an attended run"
+grep -q 'attended run' <<<"$output" ||
+  fail "review-stop must direct attended runs back to their terminal"
+! grep -q '^stop ' "$podman_log" ||
+  fail "review-stop must not stop an attended run"
 
 run_recipe review-doctor
 [[ "$status" -eq 0 ]] || fail "review-doctor must report direct image readiness"

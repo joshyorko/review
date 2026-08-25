@@ -75,7 +75,7 @@ uses `--direct-copy` to require exact base-layer equality and verifies that
 `projectbluefin/lab` consumes lab-runner for its GitOps test suite; its
 workflows and skills are not copied into the review image. The review runtime
 and launcher restoration is tracked in
-[#173](https://github.com/projectbluefin/review/issues/173).
+[#346](https://github.com/projectbluefin/review/issues/346).
 
 ## Verification
 

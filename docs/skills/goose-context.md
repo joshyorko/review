@@ -20,7 +20,7 @@ metadata:
 # Goose Context
 
 > The published image currently contains no Goose runtime; these procedures
-> apply after the restoration tracked in review#173.
+> apply after the restoration tracked in review#346.
 
 Maintainer reviews use Goose as the `goose` entry in the shared harness
 registry. The adapter owns readiness, exact-head invocation, streaming,

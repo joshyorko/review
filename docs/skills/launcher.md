@@ -21,7 +21,7 @@ metadata:
 
 > The published image is currently a direct lab-runner fork; launch recipes
 > run its shell directly. The worker/dashboard procedures below describe the
-> runtime restoration tracked in review#173.
+> runtime restoration tracked in review#346.
 
 ## When to Use
 
