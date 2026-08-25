@@ -14,6 +14,7 @@ tags: [containerfile, image, digest, pinning, build, audit]
 description: "Use when maintaining the digest-pinned lab-runner fork, direct-copy audit, or review-image publication path."
 metadata:
   type: procedure
+  context7-sources: [/websites/podman_io_en, /websites/github_en_actions]
 ---
 # Image Build
 
