@@ -58,6 +58,8 @@ reimplement it in this repository.
 The full lab-runner catalog is informative, not a gate for this fork. The
 first slice records catalog/runtime mismatches and does not add ShellCheck,
 Hadolint, Actionlint, gzip, bubblewrap, Skopeo, or any other package locally.
+The current mismatch is tracked in
+[`fsdk-containers#205`](https://github.com/projectbluefin/fsdk-containers/issues/205).
 
 ## Publication
 
@@ -89,4 +91,19 @@ git diff --check
 ```
 
 Use the native matrix in `.github/workflows/publish-compat-image.yml` for
-multi-architecture acceptance. Generated audit reports stay out of git.
+multi-architecture acceptance. Verify the published pointer with:
+
+```bash
+token="$(curl -fsSL 'https://ghcr.io/token?scope=repository:projectbluefin/review:pull' | jq -r .token)"
+manifest_digest() {
+  curl -fsSI \
+    -H "Authorization: Bearer ${token}" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json' \
+    "https://ghcr.io/v2/projectbluefin/review/manifests/$1" |
+    awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}' |
+    tr -d '\r'
+}
+test "$(manifest_digest stable)" = "$(manifest_digest "sha-$(git rev-parse HEAD)")"
+```
+
+Generated audit reports stay out of git.

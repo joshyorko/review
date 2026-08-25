@@ -1,12 +1,11 @@
 # review — Agent Operating Contract
 
-`review` is the Bluefin review appliance: one OCI contributor image and a
-launcher with two operational modes. `review-container` runs the Hive queue
-worker — it receives Hive-assigned tasks and donates inference through the
-contributor's credentials. `review-queue` is the interactive maintainer
-review surface. `review` owns the image, credential handoff, and review
-context. Hive owns the WebSocket contributor protocol, task selection, the
-`contributor` tmux session, prompt injection, and output capture.
+`review` is the Bluefin review appliance: one OCI image fork and a launcher.
+The current `review-container` and `review-queue` recipes run the direct
+lab-runner shell; review#346 restores the Goose/Hive worker and dashboard.
+Review owns the image and publication; Hive owns its contributor protocol,
+task selection, tmux session, prompt injection, and output capture after
+runtime restoration.
 
 ## Read order
 
@@ -21,9 +20,8 @@ Keep this repository focused: it ships the review appliance and nothing
 beside it. Persistent state stays limited to launcher configuration and the
 review-queue landing record the launcher mounts for the dashboard.
 
-The interactive recipes run in the foreground of the terminal that launched
-them, and Ctrl-C stops them: a maintainer steers `review-queue`, and an
-attended `review-container` stays under its terminal. The one sanctioned
+The interactive recipes run the direct lab-runner shell in the foreground of
+the terminal that launched them, and Ctrl-C stops them. The one permitted
 background path is the detached worker: `REVIEW_DETACH=1` labels the
 container `review.owner=detached`, a later launch refuses to reclaim it, and
 `just review-stop` is its explicit lifecycle verb. No launch path may

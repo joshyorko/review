@@ -1,4 +1,4 @@
 # Direct first slice: publish the verified lab-runner image under review's name.
-# Runtime-specific Goose/Hive layers return in the follow-up restoration change.
+# Runtime-specific Goose/Hive layers return in review#346.
 ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:25.08@sha256:7c4b1e518bd1bffe2e506474e6196e9c18fb727bbd48a3c5f7ddbd3446ea5846
 FROM ${FSDK_RUNNER_IMAGE}

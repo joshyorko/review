@@ -30,10 +30,6 @@ case "${1:-}" in
       printf '%s\n' "${PODMAN_OWNER_LABEL:-}"
       exit 0
     fi
-    if [[ "$*" == *'review.codex-auth'* ]]; then
-      printf '%s\n' "${PODMAN_CODEX_AUTH_LABEL:-}"
-      exit 0
-    fi
     printf 'false\n'
     exit 1
     ;;

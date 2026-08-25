@@ -5,6 +5,10 @@ This document is the canonical local model for `review`. It adapts
 repository's two-mode review appliance. Read it after
 `AGENTS.md` and before task-specific skills.
 
+The published first slice is a direct lab-runner image fork; its shell is
+active while the Goose/Hive worker and dashboard restoration is tracked in
+review#346.
+
 The model is documentation: the launcher, image, tests, skills, and
 user-facing instructions must describe the same roles and authority
 boundaries. When source evidence changes the model, update this document and

@@ -1,20 +1,14 @@
 # review
 enslaving the oppressors since 2026
 
-**TLDR**: Automated review-appliance container designed to put the clankers to work. They're not going away, let's put them to work. Powered by [Kubestellar Hive's Contributor Relay](https://hive.kubestellar.io/) (ClankR). We did not make that up, real dads made these jokes.
+**TLDR**: Direct OCI fork of Project Bluefin's `lab-runner`, published as
+`ghcr.io/projectbluefin/review` for rapid iteration. Goose/Hive runtime
+restoration is tracked in [#346](https://github.com/projectbluefin/review/issues/346).
 
 ![img](https://github.com/user-attachments/assets/6b8425b8-dedf-4dc9-aa54-60fa9e6cfd91)
 
-`review` comes with Goose and the official Codex CLI prebundled and passes
-through only the credential each selected client needs.
-
-**These are NOT anonymous "donations"** - it's tied to the person's github account, reputation in the queue is based on your real life reputation in the project. The cream will rise to the top.
-
-The Bluefin Hive will send these agents work and coordinate - which will dole out work based on your standing in the project. New contributors will be given easier tasks until they level up, and maintainers are given more important tasks. Everything in here is `clanker-queue` only, the `human-queue` is not managed here.
-
-It owns the contributor image, credential handoff, and review context. Hive
-owns the contributor protocol, task selection, the `contributor` tmux
-session, prompt injection, and output capture.
+The current image contains the published lab-runner shell and its declared
+utility set. It does not contain Goose, Codex, Pi, Hive, or a review dashboard.
 
 ## What this is for
 
@@ -132,8 +126,10 @@ Goose, Codex, Pi, Hive, or a package manager.
 The published lab-runner inventory currently includes `bash`, `curl`, `git`,
 `jq`, `python3`, `kubectl`, `argo`, `just`, `which`, `xargs`, `awk`, `ps`,
 `tar`, `diff`, `patch`, `less`, and `file`. The fork verifies those commands
-against the exact digest and reports catalog additions that are absent instead
-of installing local replacements.
+against the exact digest. The catalog/runtime mismatch for ShellCheck,
+Hadolint, Actionlint, gzip, bubblewrap, and Skopeo is tracked upstream in
+[fsdk-containers#205](https://github.com/projectbluefin/fsdk-containers/issues/205);
+the fork does not install local replacements.
 
 ## Reviewing
 
@@ -211,6 +207,20 @@ git diff --check
 The native publication workflow is the acceptance path for the multi-arch
 artifact. It builds on `ubuntu-24.04` and `ubuntu-24.04-arm`, then verifies the
 published `stable` and immutable SHA references resolve to the same OCI index.
+You can verify that pointer directly:
+
+```bash
+token="$(curl -fsSL 'https://ghcr.io/token?scope=repository:projectbluefin/review:pull' | jq -r .token)"
+manifest_digest() {
+  curl -fsSI \
+    -H "Authorization: Bearer ${token}" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json' \
+    "https://ghcr.io/v2/projectbluefin/review/manifests/$1" |
+    awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}' |
+    tr -d '\r'
+}
+test "$(manifest_digest stable)" = "$(manifest_digest "sha-$(git rev-parse HEAD)")"
+```
 
 ### Validation
 

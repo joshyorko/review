@@ -48,12 +48,8 @@
 # the image still means baking this launcher into a custom image build (out of
 # scope here — see README "Scope").
 #
-# In this checkout, launch recipes run the direct lab-runner fork. The older
-# credential and runtime helpers below remain source for the #346 restoration
-# and are not part of the direct-copy path.
-#
-# The old provider/runtime helpers remain below for the #346 restoration and
-# are not reached by the direct-copy recipes.
+# In this checkout, launch recipes run the direct lab-runner fork using only
+# the minimal image lifecycle helpers below.
 # The fsdk-derived contributor image, used by every recipe that starts a
 # container.
 #
@@ -117,21 +113,6 @@ owner_run_label() {
   printf 'review.owner=%s:%s\n' "$(launcher_boot_id)" "$$"
 }
 
-cleanup_codex_auth_staging_dir() {
-  local staging_dir="${1:-}"
-  local invoking_uid="$(id -u)"
-  [[ "$staging_dir" =~ ^/tmp/review-codex-auth\.[[:alnum:]]{6}$ ]] || return 0
-  [[ -d "$staging_dir" && ! -L "$staging_dir" ]] || return 0
-  [[ -f "$staging_dir/auth.json" && ! -L "$staging_dir/auth.json" ]] || return 0
-  [[ "$(stat -c %u "$staging_dir")" == "$invoking_uid" ]] || return 0
-  [[ "$(stat -c %a "$staging_dir")" == 700 ]] || return 0
-  [[ "$(stat -c %u "$staging_dir/auth.json")" == "$invoking_uid" ]] || return 0
-  [[ "$(stat -c %a "$staging_dir/auth.json")" == 600 ]] || return 0
-  [[ "$(find "$staging_dir" -mindepth 1 -maxdepth 1 -print | wc -l)" == 1 ]] || return 0
-  rm -f -- "$staging_dir/auth.json"
-  rmdir -- "$staging_dir" 2>/dev/null || true
-}
-
 require_no_running_instance() {
   local name="$1" marker owner_pid owner_tty
   [[ "$(podman inspect --format '{{.State.Running}}' "$name" 2>/dev/null || echo false)" == true ]] || return 0
@@ -144,7 +125,6 @@ require_no_running_instance() {
   fi
   owner_pid="$(container_owner_pid "$name")"
   if [[ -z "$owner_pid" ]]; then
-    cleanup_codex_auth_staging_dir "$(podman inspect --format '{{index .Config.Labels "review.codex-auth"}}' "$name" 2>/dev/null || true)"
     echo "✓ reclaiming ${name} from a run whose terminal is gone."
     return 0
   fi
@@ -242,9 +222,7 @@ review-stop name="review-container":
       echo "ERROR: ${NAME} is an attended run; press Ctrl-C in its terminal instead." >&2
       exit 1
     fi
-    codex_auth_staging_dir="$(podman inspect --format '{{{{index .Config.Labels "review.codex-auth"}}' "$NAME" 2>/dev/null || true)"
     podman stop "$NAME" >/dev/null
-    cleanup_codex_auth_staging_dir "$codex_auth_staging_dir"
     echo "✓ stopped the detached worker ${NAME}."
 
 # Run the direct lab-runner fork as the interactive review container.
