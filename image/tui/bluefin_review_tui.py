@@ -843,7 +843,7 @@ class LandingScreen(Screen):
                 )
         rows.update("\n".join(lines))
         self.query_one("#landing-hive", Static).update(
-            f" Hive: {self.dashboard.hive_state or 'asking…'}"
+            f" Hive: {escape(self.dashboard.hive_state or 'asking…')}"
         )
         task = self.dashboard.landing_queue[-1]
         try:
@@ -2305,7 +2305,7 @@ class ReviewDashboard(App):
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
             f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected}{stuck}{agents}{landed} | Hive: {self.hive_state or 'asking…'}"
+            f"| batch: {selected}{stuck}{agents}{landed} | Hive: {escape(self.hive_state or 'asking…')}"
         )
 
     def action_filter(self) -> None:
@@ -2657,6 +2657,21 @@ class ReviewDashboard(App):
                     self.mutation_failed, stop, command, str(error), on_error
                 )
                 return
+            if result.returncode != 0:
+                message = result.stderr.strip() or f"exit {result.returncode}"
+                trace(
+                    {
+                        "repo": stop.repository,
+                        "number": stop.number,
+                        "argv": command,
+                        "exit": result.returncode,
+                        "error": bounded_detail(message),
+                    }
+                )
+                self.call_from_thread(
+                    self.mutation_failed, stop, command, message, on_error
+                )
+                return
             trace(
                 {
                     "repo": stop.repository,
@@ -2665,12 +2680,6 @@ class ReviewDashboard(App):
                     "exit": result.returncode,
                 }
             )
-            if result.returncode != 0:
-                message = result.stderr.strip() or f"exit {result.returncode}"
-                self.call_from_thread(
-                    self.mutation_failed, stop, command, message, on_error
-                )
-                return
         self.call_from_thread(self.mutations_finished, stop, commands, then)
 
     def mutation_failed(
@@ -2685,7 +2694,7 @@ class ReviewDashboard(App):
         stop.failure_branch = f"{context['mergeable']}/{context['merge_state']}"
         stop.selected = True
         self.refresh_rows()
-        self.notify(f"{shlex.join(command[:4])}…: {message[:200]}", severity="error")
+        self.notify(f"{shlex.join(command[:4])}…: {escape(message[:200])}", severity="error")
         self.show_evidence(stop)
         # A failure that only prints is a failure the maintainer has to
         # remember. Hand it to whoever asked, so they can offer a way out.
