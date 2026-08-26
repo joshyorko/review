@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from hashlib import sha256
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from tui.review_run import (  # noqa: E402
     ReviewRunError,
     ReviewRunState,
     RunCheckpoint,
+    CheckpointStore,
     StepAction,
 )
 from harness.registry import HarnessCapabilities  # noqa: E402
@@ -45,6 +47,13 @@ class FakeHarness:
     capabilities = HarnessCapabilities(
         invocation=True, streaming=True, cancellation=True,
         resumable=False, checkpoint=False, yieldable=False,
+    )
+
+
+class ReentrantHarness(FakeHarness):
+    capabilities = HarnessCapabilities(
+        invocation=True, streaming=True, cancellation=True,
+        resumable=True, checkpoint=True, yieldable=True,
     )
 
 
@@ -88,7 +97,7 @@ def states() -> None:
 
 def start_transition() -> None:
     """PENDING -> RUNNING is the only valid start."""
-    controller = ReviewRunController(run=make_run(), harness=FakeHarness(), registry=FakeRegistry())
+    controller = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry())
     result = controller.start()
     check(controller.state is ReviewRunState.RUNNING,
           f"start must produce RUNNING, got {controller.state.value}")
@@ -147,7 +156,7 @@ def cancel_transition() -> None:
 
 def stale_transition() -> None:
     """YIELDED/RESUMABLE -> STALE is the head-changed path."""
-    controller = ReviewRunController(run=make_run(), harness=FakeHarness(), registry=FakeRegistry())
+    controller = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry())
     controller.start()
     controller.mark_yielded()
     step = controller.stale()
@@ -165,21 +174,44 @@ def stale_transition() -> None:
 
 def yield_then_checkpoint() -> None:
     """YIELDED -> RESUMABLE with checkpoint is the yield-then-resume path."""
-    controller = ReviewRunController(run=make_run(), harness=FakeHarness(), registry=FakeRegistry())
-    controller.start()
-    step = controller.mark_yielded("rate limit hit")
-    check(controller.state is ReviewRunState.YIELDED,
+    with tempfile.TemporaryDirectory() as root:
+        controller = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry(), checkpoint_store=CheckpointStore(root))
+        controller.start()
+        step = controller.mark_yielded("rate limit hit")
+        check(controller.state is ReviewRunState.YIELDED,
           f"yield must transition to YIELDED, got {controller.state.value}")
-    check(step.yield_reason == "rate limit hit", "yield reason must be preserved")
-    cp = RunCheckpoint('{"step": 3, "files": ["a.py"]}')
-    step = controller.checkpoint_ready(cp)
-    check(controller.state is ReviewRunState.RESUMABLE,
+        check(step.yield_reason == "rate limit hit", "yield reason must be preserved")
+        cp = RunCheckpoint('{"step": 3, "files": ["a.py"]}')
+        step = controller.checkpoint_ready(cp)
+        check(controller.state is ReviewRunState.RESUMABLE,
           f"checkpoint must transition to RESUMABLE, got {controller.state.value}")
-    check(step.checkpoint is cp, "checkpoint must be preserved")
-    step = controller.resume(cp)
-    check(controller.state is ReviewRunState.RUNNING,
+        check(step.checkpoint is cp, "checkpoint must be preserved")
+        restored = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry(), checkpoint_store=CheckpointStore(root), state=ReviewRunState.RESUMABLE)
+        step = restored.resume(RunCheckpoint("attacker-selected"))
+        check(step.checkpoint is not None and step.checkpoint.data == cp.data, "resume must use the persisted checkpoint")
+        check(restored.state is ReviewRunState.RUNNING,
           f"resume must transition to RUNNING, got {controller.state.value}")
     print("  YIELDED -> RESUMABLE -> RUNNING: OK")
+
+
+def invalid_checkpoint_does_not_persist() -> None:
+    """A checkpoint is only durable for a yielded run."""
+    with tempfile.TemporaryDirectory() as root:
+        store = CheckpointStore(root)
+        controller = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry(), checkpoint_store=store)
+        controller.start()
+        try:
+            controller.checkpoint_ready(RunCheckpoint("invalid"))
+            check(False, "checkpoint_ready from RUNNING must reject")
+        except ReviewRunError:
+            pass
+        restored = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry(), checkpoint_store=store, state=ReviewRunState.RESUMABLE)
+        try:
+            restored.resume()
+            check(False, "invalid checkpoint_ready must not persist a resumable checkpoint")
+        except ReviewRunError:
+            pass
+    print("  invalid checkpoint is not persisted: OK")
 
 
 def waiting_external() -> None:
@@ -228,6 +260,25 @@ def checkpoint_encoding() -> None:
     print("  checkpoint encode/decode: OK")
 
 
+def capability_rejection() -> None:
+    """One-shot adapters cannot enter or claim re-entry states."""
+    controller = ReviewRunController(run=make_run(), harness=FakeHarness(), registry=FakeRegistry())
+    controller.start()
+    for action, call in (("yield", controller.mark_yielded), ("checkpoint", lambda: controller.checkpoint_ready(RunCheckpoint("x")))):
+        try:
+            call()
+            check(False, f"{action} must reject an unsupported harness")
+        except ReviewRunError as error:
+            check("capability" in str(error), f"{action} error must name capability")
+    resumable = ReviewRunController(run=make_run(), harness=FakeHarness(), registry=FakeRegistry(), state=ReviewRunState.RESUMABLE)
+    try:
+        resumable.resume()
+        check(False, "resume must reject an unsupported harness")
+    except ReviewRunError as error:
+        check("capability" in str(error), "resume error must name capability")
+    print("  unsupported re-entry rejected: OK")
+
+
 def main() -> int:
     print("review_run contract: RUNNING")
     identity()
@@ -238,9 +289,11 @@ def main() -> int:
     cancel_transition()
     stale_transition()
     yield_then_checkpoint()
+    invalid_checkpoint_does_not_persist()
     waiting_external()
     invalid_transitions()
     checkpoint_encoding()
+    capability_rejection()
     if FAILURES:
         print(f"\nFAILURES ({len(FAILURES)}):")
         for f in FAILURES:

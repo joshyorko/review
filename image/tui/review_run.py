@@ -35,10 +35,12 @@ run always reaches a terminal state on the first step.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
 from typing import Any
+from pathlib import Path
 
 try:
     from harness.registry import Harness, HarnessRegistry
@@ -179,6 +181,30 @@ class ReviewRunError(Exception):
     """Raised when the run state machine rejects a transition."""
 
 
+class CheckpointStore:
+    """Small durable store for opaque checkpoints, keyed by run identity."""
+
+    def __init__(self, root: str | os.PathLike[str] | None = None) -> None:
+        if root is None:
+            state_root = os.environ.get("XDG_STATE_HOME", "~/.local/state")
+            root = os.path.join(state_root, "bluefin-review", "runs")
+        self.root = Path(root).expanduser()
+
+    def put(self, identity: str, checkpoint: RunCheckpoint) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        temporary = self.root / f".{identity}.tmp"
+        temporary.write_text(checkpoint.encode(), encoding="utf-8")
+        temporary.replace(self.root / f"{identity}.checkpoint")
+
+    def get(self, identity: str) -> RunCheckpoint | None:
+        try:
+            return RunCheckpoint.decode(
+                (self.root / f"{identity}.checkpoint").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError):
+            return None
+
+
 _STALE_HELP = (
     "The pull request head has changed since this review was started. "
     "Start a new review instead of resuming (#185)."
@@ -228,6 +254,7 @@ class ReviewRunController:
     registry: HarnessRegistry
     state: ReviewRunState = ReviewRunState.PENDING
     _terminal_result: ReviewResult | None = field(default=None, repr=False)
+    checkpoint_store: CheckpointStore = field(default_factory=CheckpointStore)
 
     def can_resume(self) -> bool:
         return self.state is ReviewRunState.RESUMABLE
@@ -274,6 +301,13 @@ class ReviewRunController:
 
     def checkpoint_ready(self, checkpoint: RunCheckpoint) -> StepResult:
         """The harness has saved a checkpoint; the run is now RESUMABLE."""
+        if not self.harness.capabilities.checkpoint:
+            raise ReviewRunError("checkpoint capability is not advertised by this harness")
+        if self.state is not ReviewRunState.YIELDED:
+            raise ReviewRunError(
+                f"cannot checkpoint from {self.state.value}: only YIELDED runs can checkpoint"
+            )
+        self.checkpoint_store.put(self.run.identity, checkpoint)
         self._transition(ReviewRunState.RESUMABLE)
         return StepResult(
             state=ReviewRunState.RESUMABLE,
@@ -291,21 +325,28 @@ class ReviewRunController:
 
     def resume(self, checkpoint: RunCheckpoint | None = None) -> StepResult:
         """Resume from a checkpoint. The harness continues where it yielded."""
+        if not self.harness.capabilities.resumable:
+            raise ReviewRunError("resumable capability is not advertised by this harness")
         if self.state is ReviewRunState.STALE:
             raise ReviewRunError(_STALE_HELP)
         if self.state is not ReviewRunState.RESUMABLE:
             raise ReviewRunError(
                 f"cannot resume from {self.state.value}: only RESUMABLE runs can resume"
             )
+        stored = self.checkpoint_store.get(self.run.identity)
+        if stored is None:
+            raise ReviewRunError("no persisted checkpoint exists for this run")
         self._transition(ReviewRunState.RUNNING)
         return StepResult(
             state=ReviewRunState.RUNNING,
-            checkpoint=checkpoint,
+            checkpoint=stored,
             next_action=StepAction.WAIT.value,
         )
 
     def mark_yielded(self, reason: str = "") -> StepResult:
         """The harness voluntarily yielded."""
+        if not self.harness.capabilities.yieldable:
+            raise ReviewRunError("yieldable capability is not advertised by this harness")
         self._transition(ReviewRunState.YIELDED)
         return StepResult(
             state=ReviewRunState.YIELDED,
@@ -373,6 +414,7 @@ __all__ = [
     "ReviewRunError",
     "ReviewRunState",
     "RunCheckpoint",
+    "CheckpointStore",
     "StepAction",
     "StepResult",
 ]
