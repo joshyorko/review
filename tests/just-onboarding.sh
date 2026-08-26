@@ -15,7 +15,13 @@ cat >"$fake_bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
+if [[ "${1:-}" == --runtime=runsc ]]; then
+  shift
+fi
 case "${1:-}" in
+  info)
+    printf 'true\n'
+    ;;
   image)
     exit 1
     ;;
@@ -26,6 +32,19 @@ case "${1:-}" in
     exit 0
     ;;
   inspect)
+    if [[ "$*" == *'review.probe'* ]]; then
+      target="${*: -1}"
+      cat "${PODMAN_LOG%/*}/${target}.label"
+      exit 0
+    fi
+    if [[ "$*" == *'.OCIRuntime'* ]]; then
+      if [[ "$*" == *'.State.Running'* ]]; then
+        printf 'true runsc\n'
+      else
+        printf 'runsc\n'
+      fi
+      exit 0
+    fi
     if [[ "$*" == *'review.owner'* ]]; then
       printf '%s\n' "${PODMAN_OWNER_LABEL:-}"
       exit 0
@@ -34,18 +53,51 @@ case "${1:-}" in
     exit 1
     ;;
   container)
+    if [[ "${3:-}" == probe-id-* && -f "${PODMAN_LOG%/*}/${3}.exists" ]]; then
+      exit 0
+    fi
     [[ "${PODMAN_CONTAINER_EXISTS:-0}" == 1 ]]
     ;;
   stop)
     exit 0
     ;;
   run)
+    if [[ "$*" == *'--name review-runtime-probe-'* ]]; then
+      cidfile=
+      probe_label=
+      while (($#)); do
+        case "$1" in
+        --cidfile)
+          cidfile="$2"
+          shift 2
+          ;;
+        --label)
+          case "$2" in review.probe=*) probe_label="${2#review.probe=}" ;; esac
+          shift 2
+          ;;
+        *) shift ;;
+        esac
+      done
+      probe_id="probe-id-${probe_label}"
+      printf '%s\n' "$probe_id" >"$cidfile"
+      printf '%s\n' "$probe_label" >"${PODMAN_LOG%/*}/${probe_id}.label"
+      : >"${PODMAN_LOG%/*}/${probe_id}.exists"
+    fi
     exit 0
+    ;;
+  rm)
+    target="${*: -1}"
+    rm -f "${PODMAN_LOG%/*}/${target}.label" "${PODMAN_LOG%/*}/${target}.exists"
     ;;
 esac
 exit 0
 EOF
 chmod 0755 "$fake_bin/podman"
+cat >"$fake_bin/runsc" <<'EOF'
+#!/usr/bin/env bash
+printf 'runsc version test\n'
+EOF
+chmod 0755 "$fake_bin/runsc"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -137,3 +189,5 @@ if grep -qE 'podman (rm|kill)|--force|stop -f' <<<"$stop_body"; then
 fi
 
 printf 'direct-copy launcher contract OK\n'
+
+bash "$repo_root/tests/runsc-isolation.sh"
