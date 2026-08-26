@@ -30,17 +30,21 @@ States and their transitions::
 Checkpoints are opaque to Review. A harness either supports checkpoints and
 advertises ``HarnessCapabilities.checkpoint``, or it stays one-shot and its
 run always reaches a terminal state on the first step.
+
+An external wait receives and persists its checkpoint before the event can
+make the run resumable.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 try:
     from harness.registry import Harness, HarnessRegistry
@@ -192,9 +196,18 @@ class CheckpointStore:
 
     def put(self, identity: str, checkpoint: RunCheckpoint) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        temporary = self.root / f".{identity}.tmp"
-        temporary.write_text(checkpoint.encode(), encoding="utf-8")
-        temporary.replace(self.root / f"{identity}.checkpoint")
+        descriptor, temporary_path = tempfile.mkstemp(
+            dir=self.root,
+            prefix=f".{identity}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_path)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(checkpoint.encode())
+            temporary.replace(self.root / f"{identity}.checkpoint")
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def get(self, identity: str) -> RunCheckpoint | None:
         try:
@@ -317,6 +330,14 @@ class ReviewRunController:
 
     def external_event_received(self) -> StepResult:
         """An external event arrived (e.g. CI finished, build completed)."""
+        if self.state is not ReviewRunState.WAITING_EXTERNAL:
+            raise ReviewRunError(
+                f"cannot receive an external event from {self.state.value}"
+            )
+        if self.checkpoint_store.get(self.run.identity) is None:
+            raise ReviewRunError(
+                "no persisted checkpoint exists for this external wait"
+            )
         self._transition(ReviewRunState.RESUMABLE)
         return StepResult(
             state=ReviewRunState.RESUMABLE,
@@ -354,11 +375,21 @@ class ReviewRunController:
             next_action=StepAction.WAIT_FOR_CHECKPOINT.value,
         )
 
-    def mark_waiting_external(self) -> StepResult:
-        """Waiting for an external event (e.g. build, CI, human response)."""
+    def mark_waiting_external(self, checkpoint: RunCheckpoint) -> StepResult:
+        """Persist a continuation before waiting for an external event."""
+        if not self.harness.capabilities.resumable:
+            raise ReviewRunError("resumable capability is not advertised by this harness")
+        if not self.harness.capabilities.checkpoint:
+            raise ReviewRunError("checkpoint capability is not advertised by this harness")
+        if self.state is not ReviewRunState.RUNNING:
+            raise ReviewRunError(
+                f"cannot wait for an external event from {self.state.value}"
+            )
+        self.checkpoint_store.put(self.run.identity, checkpoint)
         self._transition(ReviewRunState.WAITING_EXTERNAL)
         return StepResult(
             state=ReviewRunState.WAITING_EXTERNAL,
+            checkpoint=checkpoint,
             next_action=StepAction.WAIT_FOR_EVENT.value,
         )
 

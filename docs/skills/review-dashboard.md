@@ -143,7 +143,9 @@ conflicts direct the maintainer to manual resolution before a gate.
    or trailing terminal events are `unparsable` with bounded raw evidence.
    It enables code-mode-only and the bundled official code-mode host, disables
    direct-tool fallback, and uses the review container as the shell isolation
-   boundary so the CLI never depends on a nested bubblewrap sandbox.
+   boundary so the CLI never depends on a nested bubblewrap sandbox. A
+   re-entrant harness persists its opaque continuation before waiting for an
+   external event; only that durable continuation may make the run resumable.
    Keep the decision card concise and keep bounded raw evidence reachable with
    `e`; backend prose does not belong in Textual rendering code.
 8. **Keep the acting surface explicit.** The shipped keys cover review,

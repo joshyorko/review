@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 from hashlib import sha256
 from pathlib import Path
+from unittest.mock import patch
 
 # The harness and tui modules expect `image/` on the path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "image"))
@@ -214,19 +216,80 @@ def invalid_checkpoint_does_not_persist() -> None:
     print("  invalid checkpoint is not persisted: OK")
 
 
-def waiting_external() -> None:
-    """RUNNING -> WAITING_EXTERNAL -> RESUMABLE is the external-event path."""
-    controller = ReviewRunController(run=make_run(), harness=FakeHarness(), registry=FakeRegistry())
-    controller.start()
-    step = controller.mark_waiting_external()
-    check(controller.state is ReviewRunState.WAITING_EXTERNAL,
-          f"must transition to WAITING_EXTERNAL, got {controller.state.value}")
-    check(step.next_action == StepAction.WAIT_FOR_EVENT.value,
-          "must suggest WAIT_FOR_EVENT")
-    step = controller.external_event_received()
-    check(controller.state is ReviewRunState.RESUMABLE,
-          f"event received must transition to RESUMABLE, got {controller.state.value}")
-    print("  WAITING_EXTERNAL -> RESUMABLE: OK")
+def waiting_external_can_resume() -> None:
+    """An external wait persists its continuation before the event arrives."""
+    with tempfile.TemporaryDirectory() as root:
+        checkpoint = RunCheckpoint('{"waiting_for": "ci"}')
+        controller = ReviewRunController(
+            run=make_run(),
+            harness=ReentrantHarness(),
+            registry=FakeRegistry(),
+            checkpoint_store=CheckpointStore(root),
+        )
+        controller.start()
+        step = controller.mark_waiting_external(checkpoint)
+        check(controller.state is ReviewRunState.WAITING_EXTERNAL,
+              f"must transition to WAITING_EXTERNAL, got {controller.state.value}")
+        check(step.next_action == StepAction.WAIT_FOR_EVENT.value,
+              "must suggest WAIT_FOR_EVENT")
+        persisted = CheckpointStore(root).get(controller.run.identity)
+        check(persisted is not None and persisted.data == checkpoint.data,
+              "external waits must persist their continuation before the event")
+        step = controller.external_event_received()
+        check(controller.state is ReviewRunState.RESUMABLE,
+              f"event received must transition to RESUMABLE, got {controller.state.value}")
+        check(step.next_action == StepAction.RESUME.value,
+              "an external event must suggest resume")
+        restored = ReviewRunController(
+            run=make_run(),
+            harness=ReentrantHarness(),
+            registry=FakeRegistry(),
+            checkpoint_store=CheckpointStore(root),
+            state=ReviewRunState.RESUMABLE,
+        )
+        resumed = restored.resume()
+        check(resumed.checkpoint is not None and resumed.checkpoint.data == checkpoint.data,
+              "resuming after an external wait must restore its persisted continuation")
+    print("  WAITING_EXTERNAL -> RESUMABLE -> RUNNING: OK")
+
+
+def concurrent_checkpoint_writes() -> None:
+    """Concurrent writers stage checkpoints independently before replacing the target."""
+    with tempfile.TemporaryDirectory() as root:
+        identity = make_run().identity
+        barrier = threading.Barrier(2)
+        original_replace = Path.replace
+        errors: list[Exception] = []
+
+        def synchronized_replace(source: Path, target: str | Path) -> Path:
+            if Path(target).name == f"{identity}.checkpoint":
+                barrier.wait(timeout=5)
+            return original_replace(source, target)
+
+        def write_checkpoint(data: str) -> None:
+            try:
+                CheckpointStore(root).put(identity, RunCheckpoint(data))
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(Path, "replace", synchronized_replace):
+            writers = [
+                threading.Thread(target=write_checkpoint, args=(data,))
+                for data in ("first", "second")
+            ]
+            for writer in writers:
+                writer.start()
+            for writer in writers:
+                writer.join(timeout=5)
+
+        check(not any(writer.is_alive() for writer in writers),
+              "concurrent checkpoint writers must finish")
+        check(not errors,
+              f"concurrent checkpoint writers must not fail: {errors!r}")
+        persisted = CheckpointStore(root).get(identity)
+        check(persisted is not None and persisted.data in {"first", "second"},
+              "a concurrent checkpoint write must leave one complete checkpoint")
+    print("  concurrent checkpoint writes: OK")
 
 
 def invalid_transitions() -> None:
@@ -290,7 +353,8 @@ def main() -> int:
     stale_transition()
     yield_then_checkpoint()
     invalid_checkpoint_does_not_persist()
-    waiting_external()
+    waiting_external_can_resume()
+    concurrent_checkpoint_writes()
     invalid_transitions()
     checkpoint_encoding()
     capability_rejection()
