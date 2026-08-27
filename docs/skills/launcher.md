@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [just, launcher, podman, container]
-description: "Maintains the three container-only review recipes and their credential boundaries. Use when editing justfile."
+description: "Maintains the four container-only review recipes and their credential boundaries. Use when editing justfile."
 metadata:
   type: runbook
   context7-sources: [/websites/podman_io_en]
@@ -19,9 +19,9 @@ metadata:
 
 # Launcher
 
-> The published image is currently a direct lab-runner fork; launch recipes
-> run its shell directly. The worker/dashboard procedures below describe the
-> runtime restoration tracked in review#346.
+> The published image derives from the pinned lab-runner base and includes the
+> contributor worker and maintainer dashboard. These procedures describe the
+> launcher handoff and lifecycle for both modes.
 
 ## When to Use
 
@@ -52,7 +52,7 @@ Goose, or image build skill documents.
    do not add a wrapper recipe here to compensate.
 
 2. Keep the interactive launch paths foreground, and the detached worker
-   explicit. `REVIEW_DETACH=1` is the one sanctioned background launch: it
+   explicit. `REVIEW_DETACH=1` is the one permitted background launch: it
    stamps `review.owner=detached`, a later launch refuses to reclaim it, and
    `review-stop` is its only lifecycle verb — polite `podman stop`, never a
    force flag, and it refuses attended runs and containers it did not label.
@@ -304,7 +304,7 @@ want to be certain which launcher you are invoking.
 - A model-catalog or model-ID validity check in the launcher; only the profile
   name is a closed set.
 - Contributor task-selection policy outside Hive (own-work exclusion on the
-  maintainer queue view is the one sanctioned filter).
+  maintainer queue view is the one permitted filter).
 
 ## Verification
 

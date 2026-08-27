@@ -13,9 +13,46 @@ system_bin="$scratch/system-bin"
 state_dir="$scratch/podman-state"
 podman_log="$scratch/podman.log"
 mkdir -p "$fake_bin" "$system_bin" "$state_dir"
-for system_tool in bash basename cat grep mktemp ps rm rmdir sleep tr; do
+for system_tool in bash basename cat grep mktemp ps rm rmdir sleep tr \
+  mkdir dirname awk sed head tail sort wc cut env chmod touch ln date id uname; do
   ln -s "$(command -v "$system_tool")" "$system_bin/$system_tool"
 done
+
+# The launcher this contract exercises is the restored review runtime, which
+# performs a backend preflight and a Hive registration lookup before it
+# launches. Those are not what this suite is testing, so they are satisfied by
+# a sandboxed HOME and stub commands -- never by the developer's real login,
+# real Goose configuration, or real Hive registration.
+fake_home="$scratch/home"
+mkdir -p "$fake_home/.config/goose" "$fake_home/.config/hive"
+cat >"$fake_home/.config/goose/config.yaml" <<'EOF'
+active_provider: github_copilot
+providers:
+  github_copilot: {}
+EOF
+cat >"$fake_home/.config/hive/contributor.env" <<'EOF'
+HIVE_HUB=wss://hive.example.invalid/contribute
+AGENT_BACKEND=goose
+EOF
+chmod 600 "$fake_home/.config/hive/contributor.env"
+cat >"$fake_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "auth status") exit 0 ;;
+  "auth token") printf 'gho_isolation_contract_token\n' ;;
+esac
+exit 0
+EOF
+cat >"$fake_bin/goose" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$fake_bin/git" <<'EOF'
+#!/usr/bin/env bash
+# The pinned Hive checkout is pre-seeded, so nothing here should clone.
+exit 0
+EOF
+chmod 0755 "$fake_bin/gh" "$fake_bin/goose" "$fake_bin/git"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -176,7 +213,11 @@ run_recipe() {
   set +e
   output="$(
     env PATH="$fake_bin:$system_bin" PODMAN_LOG="$podman_log" \
-      PODMAN_STATE_DIR="$state_dir" "$@" \
+      PODMAN_STATE_DIR="$state_dir" \
+      HOME="$fake_home" \
+      GITHUB_COPILOT_TOKEN=isolation-contract-copilot-token \
+      REVIEW_GH_TOKEN=isolation-contract-gh-token \
+      "$@" \
       "$real_just" --justfile "$justfile" "$recipe" 2>&1
   )"
   status=$?
