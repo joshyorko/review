@@ -5,6 +5,104 @@ enslaving the oppressors since 2026
 
 ![img](https://github.com/user-attachments/assets/6b8425b8-dedf-4dc9-aa54-60fa9e6cfd91)
 
+## Start here
+
+Review has two operational modes. Pick the one that matches what you want to
+do:
+
+| Goal | Mode | Start with |
+| --- | --- | --- |
+| Review pull requests as a maintainer | Maintainer dashboard | `just review-queue` |
+| Donate an agent to Hive | Contributor worker | `just review-container` |
+| Check whether this machine is ready | Diagnostics | `just review-doctor` |
+| Stop a detached worker | Lifecycle | `just review-stop` |
+
+### One-time base setup
+
+Run the launcher from the root of this checkout; `just` reads the current
+directory's justfile. Install `just` and rootless Podman if your host does not
+already provide them, then prepare the shared GitHub and isolation prerequisites:
+
+```bash
+git clone https://github.com/projectbluefin/review.git
+cd review
+gh auth login --web --hostname github.com --scopes repo,read:org
+just review-doctor
+```
+
+The agent-capable modes also require an executable host-side gVisor `runsc`
+runtime. The doctor runs the same credential-free rootless Podman probe that a
+launch uses. If it fails, Review refuses to start an agent or mount a
+credential; follow the detailed [gVisor setup and remediation](#requirements-and-credentials)
+below, then run the doctor again. The doctor defaults to the Goose worker
+checks; for a Pi worker, export `PI_API_KEY` first, then use
+`TOOL=pi just review-doctor`.
+
+GitHub authentication is separate from model-provider authentication. `gh auth
+login` supplies the GitHub identity used for repository work; it does not
+authenticate GitHub Copilot inference.
+
+### Current clients and backends
+
+Every row also needs the base setup above. These are the combinations Review
+supports today:
+
+| Surface | Client/backend | One-time setup | Exact launch |
+| --- | --- | --- | --- |
+| Maintainer / `review-queue` | Goose + GitHub Copilot (default) | Install Goose, run `goose configure`, choose GitHub Copilot, and finish its device flow. Keep the Copilot credential in Goose's keyring or provide `GITHUB_COPILOT_TOKEN`. | `just review-queue` |
+| Maintainer / `review-queue` | Codex subscription | Run `codex login` with file credential storage so the current launcher can read `${CODEX_HOME:-$HOME/.codex}/auth.json`. | `BLUEFIN_REVIEW_BACKEND=codex just review-queue` |
+| Contributor / `review-container` | Goose + GitHub Copilot (default, `TOOL=goose`) | The same Goose/Copilot setup as above. A separate GitHub token is still needed for contributor Git operations. | `just review-container` |
+| Contributor / `review-container` | Codex subscription (`TOOL=codex`) | The same file-auth `auth.json` from `codex login`; explicitly selecting Codex does not require host Goose or Copilot. | `TOOL=codex just review-container` |
+| Contributor / `review-container` | Pi (`TOOL=pi`) | Set `PI_API_KEY`; the launcher passes it to the selected Pi process as its Anthropic credential. | `TOOL=pi just review-container` |
+
+Goose is fixed to GitHub Copilot here: `GOOSE_PROVIDER` may be unset or
+`github_copilot`. Contributor model profiles are defaults from the justfile:
+`luna` (or no profile) uses `gpt-5.6-luna` at `max`, `opus5` uses
+`claude-opus-5` at `high` with a `264000` context limit, and `kimi` uses
+`kimi-k3` at `max` with the same clamp. Environment values still override
+those defaults.
+
+### Copy/paste examples
+
+```bash
+# Default maintainer review: Goose + GitHub Copilot.
+just review-queue
+
+# Maintainer review with the bundled Codex harness.
+BLUEFIN_REVIEW_BACKEND=codex just review-queue
+
+# Default Hive contributor worker: Goose + GitHub Copilot.
+just review-container
+
+# Hive contributor worker with Codex.
+TOOL=codex just review-container
+
+# Hive contributor worker with Pi, after PI_API_KEY is set in the shell.
+TOOL=pi just review-container
+
+# Optional Goose profile and effort.
+just review-container opus5 high
+
+# Deliberately detached contributor worker.
+REVIEW_DETACH=1 just review-container
+
+# Stop the default detached worker.
+just review-stop
+
+# Walk one repository's live open pull requests instead of the static queue.
+just review-queue projectbluefin/review
+```
+
+### How Review is split
+
+Review is the human review experience plus a Hive contributor appliance:
+
+- `review-queue` is the maintainer dashboard and does not register with Hive.
+- `review-container` contributes compute through Hive's contributor worker.
+- Hive owns task selection and assignment.
+- `BLUEFIN_REVIEW_BACKEND=codex` preselects Codex for a maintainer review; it
+  never changes the worker backend. Use `TOOL=codex` or `TOOL=pi` for workers.
+
 `review` comes with Goose, the official Codex CLI, and Pi prebundled and
 passes through only the credential each selected client needs.
 
@@ -179,8 +277,9 @@ an operations task outside this repository automation.
 
   Verify with `just review-doctor`; the isolation check must report
   `ready; rootless Podman probe passed`.
-- Goose configured for GitHub Copilot, or `GITHUB_COPILOT_TOKEN`, for
-  contributor work and Goose reviews.
+- Goose configured for GitHub Copilot (`goose configure`), or
+  `GITHUB_COPILOT_TOKEN`, for contributor work and Goose reviews. The
+  `GOOSE_PROVIDER` value must be unset or `github_copilot`.
 - `codex login` with file credential storage completed on the host for Codex
   subscription reviews. The image already contains the pinned official CLI;
   explicitly selected Codex reviews do not require host Goose or Copilot.
@@ -681,10 +780,13 @@ All configuration is read at launch.
 | `GOOSE_MODEL` | Optional GitHub Copilot model override. |
 | `GOOSE_THINKING_EFFORT` | Optional Copilot reasoning-effort override. |
 | `GITHUB_COPILOT_TOKEN` | Optional Copilot credential override. |
-| `TOOL` | Agent backend selector; only `goose` is accepted. |
+| `TOOL` | Contributor agent backend selector: `goose` (default), `codex`, or `pi`. It does not select the maintainer dashboard backend. |
 
-`~/.config/review/last-selections.env` stores launcher configuration
-state such as the last Goose/provider selection between runs.
+The maintainer dashboard may remember non-secret harness preferences at
+`~/.config/bluefin-review/harness.json` (or the equivalent
+`XDG_CONFIG_HOME` path). Contributor backend and provider selection are read
+from the environment for each launch; no secret or provider selection is
+stored by the launcher.
 
 `~/.local/state/review/` stores the pinned Hive checkout.
 It is the only state this launcher owns. Goose and provider
