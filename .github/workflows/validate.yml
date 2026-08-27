@@ -128,6 +128,7 @@ jobs:
       - name: Interactive launcher docs and shell stay aligned
         run: |
           set -euo pipefail
+          bash tests/readme-quickstart.sh
           grep -Fq 'review-container' justfile
           grep -Fq 'review-queue' justfile
           grep -Fq 'ghcr.io/projectbluefin/review:stable' justfile
