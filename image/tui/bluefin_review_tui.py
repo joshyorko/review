@@ -32,6 +32,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Footer,
@@ -56,7 +57,9 @@ from harness.goose import GooseHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
-from review_evidence_manifest import ReviewRequest
+from review_evidence_manifest import ReviewRequest, ReviewEvidenceManifest
+from re_review import (DeltaInput, FindingEvidence, H1Evidence, PriorFinding,
+                       Region, classify_head_delta)
 from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry
 
 QUEUE_URL = os.environ.get(
@@ -76,6 +79,12 @@ MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
 # repositories; Hive's queue endpoint owns creating and applying it.
 QUEUE_LABEL = "lgtm"
+MAX_RE_REVIEW_FILES = 128
+MAX_RE_REVIEW_HUNKS = 512
+MAX_RE_REVIEW_RESPONSE_CHARS = 1_000_000
+MAX_RE_REVIEW_FINDINGS = 12
+MAX_RE_REVIEW_NEW_EVIDENCE = 8
+SENSITIVE_RE_REVIEW_PATHS = (".github/workflows/",)
 
 # The semantic registry is the source for bindings, help, and the command
 # palette. IDs are stable so clickable surfaces can consume the same contract.
@@ -300,6 +309,136 @@ def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["gh", *args], capture_output=True, text=True, timeout=timeout
     )
+
+
+@dataclass(frozen=True)
+class CompareEvidence:
+    """Bounded read-only H0..H1 compare evidence for a re-review."""
+
+    regions: tuple[Region, ...] = ()
+    mapping_uncertain: bool = False
+    sensitive_surfaces_changed: bool = False
+    bounded_risk_exceeded: bool = False
+    capability_available: bool = True
+
+
+def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> CompareEvidence:
+    """Read the GitHub compare boundary without treating partial data as proof."""
+    if not (re.fullmatch(r"[0-9a-f]{40}", old_head) and re.fullmatch(r"[0-9a-f]{40}", new_head)):
+        return CompareEvidence(mapping_uncertain=True, capability_available=False)
+    try:
+        response = gh(
+            "api", f"repos/{repository}/compare/{old_head}...{new_head}",
+            "--method", "GET", "--field", f"per_page={MAX_RE_REVIEW_FILES}",
+            "--field", "page=1", timeout=30,
+        )
+        if response.returncode != 0 or len(response.stdout) > MAX_RE_REVIEW_RESPONSE_CHARS:
+            return CompareEvidence(mapping_uncertain=True, capability_available=False)
+        payload = json.loads(response.stdout)
+        files = payload.get("files") if isinstance(payload, dict) else None
+        total_files = payload.get("total_files") if isinstance(payload, dict) else None
+        if not isinstance(files, list):
+            return CompareEvidence(mapping_uncertain=True)
+        if len(files) > MAX_RE_REVIEW_FILES:
+            return CompareEvidence(mapping_uncertain=True, bounded_risk_exceeded=True)
+        if total_files is not None:
+            if (type(total_files) is not int or total_files < 0 or
+                    total_files < len(files)):
+                return CompareEvidence(mapping_uncertain=True)
+            if total_files > len(files):
+                return CompareEvidence(
+                    mapping_uncertain=True,
+                    bounded_risk_exceeded=True,
+                )
+        elif len(files) >= MAX_RE_REVIEW_FILES:
+            return CompareEvidence(
+                mapping_uncertain=True,
+                bounded_risk_exceeded=True,
+            )
+        regions: list[Region] = []
+        sensitive = False
+        uncertain = False
+        for item in files:
+            if (not isinstance(item, dict) or
+                    not isinstance(item.get("filename"), str) or
+                    not item["filename"]):
+                return CompareEvidence(mapping_uncertain=True)
+            filename = item["filename"]
+            sensitive = sensitive or filename.startswith(SENSITIVE_RE_REVIEW_PATHS)
+            patch = item.get("patch")
+            if not isinstance(patch, str):
+                uncertain = True
+                continue
+            hunk_header = re.compile(
+                r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*$"
+            )
+            current_hunk: tuple[int, int, int, int, int, int] | None = None
+            patch_uncertain = False
+            last_body_line = False
+            for line in patch.splitlines():
+                match = hunk_header.fullmatch(line)
+                if match:
+                    if current_hunk is not None:
+                        old_seen, new_seen = current_hunk[4:6]
+                        if (old_seen != current_hunk[1] or
+                                new_seen != current_hunk[3]):
+                            patch_uncertain = True
+                    old_start = int(match.group(1))
+                    old_count = int(match.group(2) or 1)
+                    new_start = int(match.group(3))
+                    new_count = int(match.group(4) or 1)
+                    invalid_hunk = (
+                        (old_count == 0 and new_count == 0) or
+                        (old_start == 0 and old_count != 0) or
+                        (new_start == 0 and new_count != 0)
+                    )
+                    patch_uncertain = patch_uncertain or invalid_hunk or (
+                        old_count > 0 and new_count == 0
+                    )
+                    current_hunk = (old_start, old_count, new_start, new_count, 0, 0)
+                    last_body_line = False
+                    if new_count and new_start > 0:
+                        regions.append(Region(filename, new_start, new_start + new_count - 1))
+                    if len(regions) >= MAX_RE_REVIEW_HUNKS:
+                        return CompareEvidence(
+                            tuple(regions), True, sensitive, True,
+                        )
+                    continue
+                if current_hunk is None:
+                    patch_uncertain = True
+                    continue
+                if line == r"\ No newline at end of file":
+                    if not last_body_line:
+                        patch_uncertain = True
+                    last_body_line = False
+                    continue
+                if not line or line[0] not in " +-":
+                    patch_uncertain = True
+                    continue
+                old_seen, new_seen = current_hunk[4:6]
+                if line[0] == " ":
+                    old_seen += 1
+                    new_seen += 1
+                elif line[0] == "-":
+                    old_seen += 1
+                else:
+                    new_seen += 1
+                current_hunk = (*current_hunk[:4], old_seen, new_seen)
+                last_body_line = True
+                if (old_seen > current_hunk[1] or new_seen > current_hunk[3]):
+                    patch_uncertain = True
+            if current_hunk is None:
+                patch_uncertain = True
+            else:
+                old_seen, new_seen = current_hunk[4:6]
+                patch_uncertain = patch_uncertain or (
+                    old_seen != current_hunk[1] or new_seen != current_hunk[3]
+                )
+            if patch_uncertain:
+                uncertain = True
+        return CompareEvidence(tuple(regions), uncertain, sensitive)
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, json.JSONDecodeError):
+        return CompareEvidence(mapping_uncertain=True, capability_available=False)
 
 
 def bounded_detail(detail: str) -> str:
@@ -1453,6 +1592,8 @@ class ReviewScreen(Screen):
         # transcript (#339).
         self.live_snapshot = copy.deepcopy(stop.live)
         self.overlap_snapshot = copy.deepcopy(stop.overlap)
+        self.prior_result = copy.deepcopy(stop.review_result)
+        self.compare_evidence = CompareEvidence()
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -1478,6 +1619,12 @@ class ReviewScreen(Screen):
     @work(thread=True)
     def run_review(self) -> None:
         stop = self.stop_record
+        prior_head = str((self.prior_result.provenance if self.prior_result else {}).get("head_sha") or "")
+        current_head = str(self.live_snapshot.get("headRefOid") or "")
+        if self.prior_result is not None and prior_head and prior_head != current_head:
+            self.compare_evidence = compare_hunk_regions(
+                stop.repository, prior_head, current_head
+            )
         if ACTIVE_BACKEND == "codex":
             base_sha = str(self.live_snapshot.get("baseRefOid") or "")
             head_sha = str(self.live_snapshot.get("headRefOid") or "")
@@ -1597,6 +1744,8 @@ class ReviewScreen(Screen):
                 overlap=self.overlap_snapshot,
                 live=live_context,
             )
+        result.provenance.setdefault("base_sha", str(self.live_snapshot.get("baseRefOid") or ""))
+        result.provenance.setdefault("head_sha", str(self.live_snapshot.get("headRefOid") or ""))
         if ACTIVE_BACKEND == "codex" and len(str(self.live_snapshot.get("baseRefOid") or "")) == 40 and len(str(self.live_snapshot.get("headRefOid") or "")) == 40:
             request = ReviewRequest(
                 *stop.repository.split("/", 1), stop.number,
@@ -1637,6 +1786,8 @@ class ReviewScreen(Screen):
             state = f"FAILED (exit {code}) — the review did not run. Nothing was submitted."
         stop.review_result = result
 
+        delta_card = self._re_review_card(result)
+
         status = self.query_one("#review-status", Static)
         status.remove_class("running")
         status.add_class(outcome)
@@ -1665,6 +1816,8 @@ class ReviewScreen(Screen):
                 for key in ("critical", "high", "medium", "low")
             ),
         ]
+        if delta_card:
+            lines.extend(delta_card)
         for finding in card.findings[:5]:
             lines.append(
                 f"{finding.severity.upper()}  "
@@ -1727,6 +1880,110 @@ class ReviewScreen(Screen):
                 "seconds": elapsed,
             }
         )
+
+    def _re_review_card(self, result: ReviewResult) -> list[str]:
+        """Project explicit exact-head delta evidence into bounded card lines."""
+        prior = self.prior_result
+        if prior is None:
+            return []
+        reviewed = str(prior.provenance.get("head_sha") or "")
+        current = str(self.live_snapshot.get("headRefOid") or "")
+        base = str(self.live_snapshot.get("baseRefOid") or "")
+        if reviewed == current and re.fullmatch(r"[0-9a-f]{40}", current):
+            return []
+        if not all(re.fullmatch(r"[0-9a-f]{40}", value or "") for value in (reviewed, current, base)):
+            return self._re_review_fallback(
+                reviewed, current, "exact H0/H1 identity or current H1 base unavailable"
+            )
+        historical_base = str(prior.provenance.get("base_sha") or "")
+        if not re.fullmatch(r"[0-9a-f]{40}", historical_base):
+            return self._re_review_fallback(reviewed, current, "historical H0 merge base unavailable")
+
+        def findings(value: ReviewResult) -> tuple[tuple[PriorFinding, ...], bool, bool]:
+            mapped: list[PriorFinding] = []
+            malformed = False
+            for item in value.findings[:MAX_RE_REVIEW_FINDINGS + 1]:
+                if (not isinstance(item, dict) or not isinstance(item.get("file"), str) or
+                        not isinstance(item.get("line"), int) or
+                        not isinstance(item.get("end_line", item.get("line")), int)):
+                    malformed = True
+                    continue
+                path = item["file"]
+                start = item["line"]
+                end = item.get("end_line", start)
+                if not path or len(path) > 512 or start < 1 or end < start:
+                    malformed = True
+                    continue
+                try:
+                    mapped.append(PriorFinding(
+                        f"{path}:{start}", FindingEvidence(path, start, end)
+                    ))
+                except ValueError:
+                    malformed = True
+            return tuple(mapped[:MAX_RE_REVIEW_FINDINGS]), malformed, len(value.findings) > MAX_RE_REVIEW_FINDINGS
+
+        prior_findings, prior_malformed, prior_risk = findings(prior)
+        current_findings, current_malformed, current_risk = findings(result)
+        h1_stale = (
+            result.state not in {"complete", "findings"}
+            or self.compare_evidence.mapping_uncertain
+        )
+        evidence = tuple(
+            FindingEvidence(item.evidence.path, item.evidence.start_line,
+                            item.evidence.end_line, h1_stale)
+            for item in current_findings if item.evidence is not None
+        )
+        prior_ids = {item.finding_id for item in prior_findings}
+        new = tuple(
+            H1Evidence(item.finding_id, item.evidence.path, item.evidence.start_line)
+            for item in current_findings
+            if item.evidence is not None and item.finding_id not in prior_ids
+        )
+        try:
+            request = ReviewRequest(*self.stop_record.repository.split("/", 1), self.stop_record.number, base, current, "maintainer", "review", generated_at="dashboard")
+            delta = classify_head_delta(DeltaInput(
+                reviewed, current, historical_base, base, ReviewEvidenceManifest(request),
+                self.compare_evidence.regions, prior_findings, evidence, new,
+                self.compare_evidence.mapping_uncertain or prior_malformed or current_malformed,
+                self.compare_evidence.sensitive_surfaces_changed,
+                prior.state in {"complete", "findings"},
+                self.compare_evidence.bounded_risk_exceeded or prior_risk or current_risk,
+                self.compare_evidence.capability_available,
+            ))
+        except (TypeError, ValueError, KeyError):
+            return self._re_review_fallback(reviewed, current, "malformed re-review evidence")
+        lines = [
+            "", "RE-REVIEW  exact-head delta",
+            f"reviewed {escape(reviewed)}  current {escape(current)}",
+            f"H1 manifest  base {escape(base)}  head {escape(delta.current_h1_manifest.request.head_sha)}  result {escape(result.state)}",
+        ]
+        lines.append(
+            "dispositions  " + ", ".join(
+                f"{escape(item.finding_id)}={escape(item.disposition.value)}"
+                for item in delta.findings[:MAX_RE_REVIEW_FINDINGS]
+            ) if delta.findings else "dispositions  none"
+        )
+        if delta.newly_supported:
+            lines.append("new H1 evidence  " + ", ".join(
+                f"{escape(item.finding_id)} ({escape(item.path)}:{item.line})"
+                for item in delta.newly_supported[:MAX_RE_REVIEW_NEW_EVIDENCE]
+            ))
+        lines.append("No authority carried from H0.")
+        if delta.full_review_required:
+            lines.append("FULL REVIEW REQUIRED — " + ", ".join(
+                escape(item.value) for item in delta.fallback_reasons
+            ) + ".")
+        return lines
+
+    @staticmethod
+    def _re_review_fallback(reviewed: str, current: str, reason: str) -> list[str]:
+        """Keep malformed historic evidence visible and fail closed."""
+        return [
+            "", "RE-REVIEW  FULL REVIEW REQUIRED",
+            f"reviewed {escape(reviewed or '?')}  current {escape(current or '?')}",
+            f"reason  {escape(reason)}.",
+            "No authority carried from H0.",
+        ]
 
     def action_stop(self) -> None:
         # Signal the whole process group, and mean it. A review that ignores
@@ -1922,7 +2179,13 @@ class ReviewDashboard(App):
         self.harness_options = options
         result = next((option.discovery for option in options if option.harness.branding.harness_id == ACTIVE_BACKEND), options[0].discovery)
         self.harness_state = result.availability.value
-        label = self.query_one("#harness-status", Static)
+        try:
+            label = self.query_one("#harness-status", Static)
+        except NoMatches:
+            # The asynchronous probe can finish after Textual has torn down
+            # this dashboard. State remains useful for a live screen, but an
+            # unmounted screen has nowhere safe to render it.
+            return
         if result.availability is Availability.READY:
             label.update(
                 "Harness Autopilot — READY · Codex / gpt-5.6-luna · "
