@@ -1,0 +1,44 @@
+name: shadow-go-review
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Go M1 ReviewResult contract suite
+        run: |
+          set -euo pipefail
+          cd shadow/go-review
+          go test ./...
+
+      - name: Python baseline parity
+        run: |
+          set -euo pipefail
+          cd shadow/go-review
+          python3 parity.py
+
+      - name: Bounded Go fuzz coverage
+        run: |
+          set -euo pipefail
+          cd shadow/go-review
+          for target in \
+            FuzzParseReviewResultBounded \
+            FuzzTruncatedCleanPayloadNeverBecomesClean
+          do
+            go test -fuzz="$target" -fuzztime=1s
+          done
+
+      - name: Diff check
+        run: |
+          set -euo pipefail
+          git diff --check
