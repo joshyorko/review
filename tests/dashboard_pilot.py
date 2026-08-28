@@ -1957,6 +1957,28 @@ async def main() -> int:
 
     real_hive_get = tui.hive_get
     real_base = tui.hive_api_base
+    original_hive_hub = os.environ.get("HIVE_HUB")
+    os.environ["HIVE_HUB"] = "wss://hub.example/contribute"
+    check(
+        tui.hive_api_base() == "https://hub.example",
+        "a secure contributor URL must become the Hive HTTPS API root",
+    )
+    for unsafe_hub in (
+        "ws://hub.example/contribute",
+        "http://hub.example",
+        "https://user@hub.example",
+        "https://[",
+        "wss://one.example/contribute,wss://two.example/contribute",
+    ):
+        os.environ["HIVE_HUB"] = unsafe_hub
+        check(
+            tui.hive_api_base() == "",
+            f"unsafe Hive URL must be rejected before token use: {unsafe_hub}",
+        )
+    if original_hive_hub is None:
+        os.environ.pop("HIVE_HUB", None)
+    else:
+        os.environ["HIVE_HUB"] = original_hive_hub
     tui.hive_api_base = lambda: "https://hub.example"
     tui.hive_get = FakeHive(
         {"hub": "online", "actionable_items": 185},

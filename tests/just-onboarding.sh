@@ -576,8 +576,8 @@ run_recipe review-container GH_READY=1 BLUEFIN_REVIEW_BACKEND=codex
 assert_file_contains "--env AGENT_BACKEND=goose" "$runner_log"
 assert_file_not_contains "BLUEFIN_REVIEW_BACKEND" "$runner_log"
 
-# ══ 2b. Dashboard: no Hive, GH_TOKEN required, args pass through ═════════
-begin "review-queue: launches the dashboard with no Hive config at all"
+# ══ 2b. Dashboard: optional Hive URL, GH_TOKEN required, args pass through ═
+begin "review-queue: launches the dashboard without Hive when none is configured"
 reset_logs
 mv "$home/.config/hive" "$home/.config/hive.saved"
 RECIPE_ARGS=(--repo bluefin)
@@ -589,10 +589,64 @@ assert_file_contains "queue --repo bluefin" "$runner_log"
 assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
 assert_file_not_contains "BLUEFIN_REVIEW_BACKEND" "$runner_log"
 assert_file_not_contains ".config/hive" "$runner_log"
+assert_file_not_contains "HIVE_HUB" "$runner_log"
 assert_file_contains "GH_TOKEN:present" "$credential_log"
 assert_not_contains "contributor.env" "$OUT"
 assert_file_not_contains "/home/dev/.codex/auth.json" "$runner_log"
-assert_contains "starting the maintainer review dashboard (no Hive)" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive not configured)" "$OUT"
+
+begin "review-queue: passes the default Hive URL without mounting its registration"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_file_contains "--env HIVE_HUB=wss://example.invalid/contribute" "$runner_log"
+assert_file_not_contains ".config/hive" "$runner_log"
+assert_file_not_contains "super-secret-registration-token" "$runner_log"
+assert_contains "hive: wss://example.invalid/contribute (default registration)" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive configured)" "$OUT"
+
+begin "review-queue: REVIEW_HIVE selects another hosted Hive"
+reset_logs
+cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.endusers.env"
+sed -i 's|^HIVE_HUB=.*|export HIVE_HUB="wss://endusers.invalid/contribute"|' \
+  "$home/.config/hive/contributor.endusers.env"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_HIVE=endusers
+assert_file_contains "--env HIVE_HUB=wss://endusers.invalid/contribute" "$runner_log"
+assert_file_not_contains ".config/hive" "$runner_log"
+assert_file_not_contains "super-secret-registration-token" "$runner_log"
+assert_contains "hive: wss://endusers.invalid/contribute (registration 'endusers')" "$OUT"
+rm -f "$home/.config/hive/contributor.endusers.env"
+
+begin "review-queue: an unusable Hive file does not block GitHub review"
+reset_logs
+cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.broken.env"
+sed -i '/^HIVE_HUB=/d' "$home/.config/hive/contributor.broken.env"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_HIVE=broken
+assert_file_not_contains "HIVE_HUB" "$runner_log"
+assert_contains "has no usable HIVE_HUB; the dashboard will continue without Hive" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive not configured)" "$OUT"
+rm -f "$home/.config/hive/contributor.broken.env"
+
+begin "review-queue: a plaintext Hive cannot receive the maintainer token"
+reset_logs
+cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.plaintext.env"
+sed -i 's|^HIVE_HUB=.*|HIVE_HUB=ws://plaintext.invalid/contribute|' \
+  "$home/.config/hive/contributor.plaintext.env"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_HIVE=plaintext
+assert_file_not_contains "HIVE_HUB" "$runner_log"
+assert_contains "has an unsupported HIVE_HUB; the dashboard requires one wss:// or https:// URL" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive not configured)" "$OUT"
+rm -f "$home/.config/hive/contributor.plaintext.env"
+
+begin "review-queue: a multi-hub worker registration is not an API target"
+reset_logs
+cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.multi.env"
+sed -i 's|^HIVE_HUB=.*|HIVE_HUB=wss://one.invalid/contribute,wss://two.invalid/contribute|' \
+  "$home/.config/hive/contributor.multi.env"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_HIVE=multi
+assert_file_not_contains "HIVE_HUB" "$runner_log"
+assert_contains "has an unsupported HIVE_HUB; the dashboard requires one wss:// or https:// URL" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive not configured)" "$OUT"
+rm -f "$home/.config/hive/contributor.multi.env"
 
 begin "review-queue: the dashboard state directory persists on the host"
 reset_logs

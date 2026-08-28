@@ -264,12 +264,23 @@ changes your view; Hive still owns task and output handling.
 
 ### Reviewing the queue
 
-`just review-queue` runs the dashboard in the contributor container — no Hive
-registration. It needs a GitHub token because the dashboard reads live
-pull-request state. Goose reviews use the Copilot credential; Codex reviews
-use the host's official subscription login through one private staged
-`auth.json` copy. The host file and Codex configuration directory are never
-mounted, and the staged copy is removed when the foreground run exits. Codex
+`just review-queue` runs the dashboard in the contributor container. It mounts
+no Hive registration, but when a registration exists it passes that file's
+`HIVE_HUB` URL so the dashboard can consult the selected deployment. Use
+`REVIEW_HIVE=<name>` to select
+`~/.config/hive/contributor.<name>.env`; without it, the current checkout name
+is tried before the default `contributor.env`. Only the URL crosses the
+container boundary—the Hive registration token does not. Because the dashboard
+sends its GitHub token to Hive's authenticated API, only one `wss://` or
+`https://` hub URL is accepted; worker registrations containing multiple hubs
+remain valid for `review-container` but are not used as a dashboard API target.
+If that Hive's knowledge export is unavailable, startup says so and reviews
+continue without `~/agent.md`. The dashboard needs a GitHub token because it
+reads live pull-request state. Goose reviews use the Copilot credential; Codex
+reviews use the host's official subscription login
+through one private staged `auth.json` copy. The host file and Codex
+configuration directory are never mounted, and the staged copy is removed when
+the foreground run exits. Codex
 reviews run code-mode-only through the bundled official code-mode host and
 fail closed instead of falling back to direct shell tools; the review
 container is the command-execution isolation boundary.
@@ -280,6 +291,7 @@ just review-queue                      # the whole queue, merge-ready first
 just review-queue kimi high            # pick the model profile and effort
 just review-queue --repo bluefin       # one repository
 just review-queue --action review      # one recommended action
+REVIEW_HIVE=endusers just review-queue # consult another registered hosted Hive
 BLUEFIN_REVIEW_BACKEND=codex just review-queue luna low --repo projectbluefin/review
 ```
 
@@ -670,6 +682,7 @@ All configuration is read at launch.
 | `REVIEW_CONTRIBUTOR_IMAGE` | Contributor image; defaults to `ghcr.io/projectbluefin/review:stable`. |
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
+| `REVIEW_HIVE` | Named Hive registration used by `review-container` and consulted by `review-queue`, for example `endusers` selects `~/.config/hive/contributor.endusers.env`. The dashboard receives only its TLS `HIVE_HUB` URL. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
 | `BLUEFIN_REVIEW_BACKEND` | Optional `review-queue` preselection: `goose` or `codex`; unset preserves the current default. Never affects `review-container`. |
 | `CODEX_HOME` | Optional host Codex state root used only to locate `auth.json`; no configuration directory is mounted. |

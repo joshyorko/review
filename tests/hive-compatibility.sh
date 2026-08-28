@@ -75,6 +75,24 @@ if HIVE_HUB='wss://other.hive.example/contribute' GH_TOKEN='compatibility-test-t
   exit 1
 fi
 
+selected_hub="$(
+  HIVE_HUB='wss://other.hive.example/contribute' GH_TOKEN='compatibility-test-token' \
+    bash -c 'source image/hive-entrypoint.d/hosted-knowledge.sh; printf "%s\n" "$HIVE_HUB"'
+)"
+if [[ "$selected_hub" != 'wss://other.hive.example/contribute' ]]; then
+  echo "::error::hosted knowledge hook overwrote the launcher-selected Hive" >&2
+  exit 1
+fi
+
+unset_hub="$(
+  env -u HIVE_HUB GH_TOKEN='compatibility-test-token' \
+    bash -c 'source image/hive-entrypoint.d/hosted-knowledge.sh; printf "%s\n" "${HIVE_HUB:-}"'
+)"
+if [[ -n "$unset_hub" ]]; then
+  echo "::error::hosted knowledge hook silently selected a Hive for queue mode" >&2
+  exit 1
+fi
+
 grep -qF 'export GOOSE_PATH_ROOT=' image/entrypoint.sh
 if grep -qF 'CONTEXT_FILE_NAMES' image/entrypoint.sh; then
   echo "::error::entrypoint retains an obsolete context filename override" >&2

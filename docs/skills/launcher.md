@@ -43,7 +43,7 @@ Goose, or image build skill documents.
    | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. `REVIEW_DETACH=1` runs it detached. |
    | `review-stop` | Stop a detached worker; refuses attended runs and unlabeled containers. |
    | `review-doctor` | Run a disposable non-persistent isolation probe and image checks. |
-   | `review-queue` | Walk the static PR queue in the container; no Hive registration. |
+   | `review-queue` | Walk the static PR queue in the container; no Hive registration is mounted, but the selected hub URL is passed when configured. |
 
    `just` reads only the current directory's justfile, so these recipes fail
    with `justfile does not contain recipe` from any other checkout. That is
@@ -74,11 +74,18 @@ Goose, or image build skill documents.
 3. Keep the container path narrow. It mounts only the read-only Hive
    contributor configuration and runs the image entrypoint, which attaches to
    Hive's `contributor` session.
-   `review-queue owner/repo` is the read-only live-repository form; it mounts no Hive or
-   host configuration directory and starts the image with the `queue`
+   `review-queue owner/repo` is the read-only live-repository form; it mounts no
+   Hive or host configuration directory and starts the image with the `queue`
    argument (the launcher maps it to the dashboard's distinct `--live-repo`
    option; `--repo` remains a static snapshot filter), which the entrypoint dispatches to the maintainer dashboard
-   before the Hive config gate. The
+   before the Hive config gate. When a selected registration exists, the
+   launcher reads only its `HIVE_HUB` value and passes that URL so the dashboard
+   consults the same hosted deployment; the registration token never crosses
+   the container boundary. Since the dashboard sends the maintainer's GitHub
+   token to that deployment, only one `wss://` or `https://` URL is accepted;
+   multi-hub worker registrations are not dashboard API targets. A failed
+   knowledge export is reported and removes `~/agent.md`; it never silently
+   leaves stale context behind. The
    dashboard needs a GitHub token from the first keystroke, so the recipe
    fails without one rather than warning. Leading non-flag arguments are the
    model profile and thinking effort — the same closed set `review-container`
@@ -105,9 +112,9 @@ Goose, or image build skill documents.
    starts inference without Enter/click confirmation. Invalid values fail
    before a container starts, and this selector never reaches
    `review-container` or changes Hive's backend.
-   Which hive a launch contributes to is launcher configuration, not task
-   selection: `~/.config/hive/contributor.<name>.env` registrations sit
-   beside the default `contributor.env`, and the launch picks `REVIEW_HIVE`
+   Which hive a launch contributes to or consults is launcher configuration,
+   not task selection: `~/.config/hive/contributor.<name>.env` registrations
+   sit beside the default `contributor.env`, and the launch picks `REVIEW_HIVE`
    first, then the current repository's directory name, then the default.
    An explicit `REVIEW_HIVE` with no file yet registers one by running
    upstream `contribute-setup` with an isolated `config_dir` so the default
