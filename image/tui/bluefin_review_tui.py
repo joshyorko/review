@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import urlsplit
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -198,16 +199,28 @@ MECHANICAL_FIELDS = (
 
 
 def hive_api_base() -> str:
-    """The hub's HTTP root, derived from the WebSocket URL the image owns.
+    """The selected hub's HTTPS root.
 
-    The hub URL is defined once, in the image's Hive entrypoint hook, which
-    exports `HIVE_HUB` before this runs. It is never written down here: a
-    second copy is how a deployment ends up consulting someone else's hub.
+    The launcher may select a registered deployment, and the image hook
+    supplies the default. Token-bearing dashboard requests never use plaintext
+    transport or URLs containing user information.
     """
     hub = os.environ.get("HIVE_HUB", "")
-    if not hub.startswith(("wss://", "ws://", "https://", "http://")):
+    if "," in hub:
         return ""
-    http = hub.replace("wss://", "https://").replace("ws://", "http://")
+    if hub.startswith("wss://"):
+        http = "https://" + hub[len("wss://") :]
+    elif hub.startswith("https://"):
+        http = hub
+    else:
+        return ""
+    try:
+        parsed = urlsplit(http)
+        if not parsed.hostname or parsed.username or parsed.password:
+            return ""
+        parsed.port
+    except ValueError:
+        return ""
     return http[: -len("/contribute")] if http.endswith("/contribute") else http
 
 

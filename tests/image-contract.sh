@@ -82,6 +82,13 @@ for path in \
   }
 done
 
+require image/entrypoint.sh \
+  'Hive knowledge export unavailable from ${hub_http%/contribute}; reviews continue without it.' \
+  "banner 'PR queue dashboard (Hive configured)'" \
+  "banner 'PR queue dashboard (Hive not configured)'" \
+  "note 'Bluefin Operations | maintainer review dashboard (Hive configured)'" \
+  "note 'Bluefin Operations | maintainer review dashboard (Hive not configured)'"
+
 grep -qF '!package.json' .dockerignore ||
   {
     echo "::error file=.dockerignore::package.json is not allowed into the build context"

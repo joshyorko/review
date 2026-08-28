@@ -891,7 +891,22 @@ report_hive_selection() {
 }
 read_hive_value() {
   local key="$1"
-  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$HIVE_CONTRIBUTOR_ENV"
+  awk -F= -v wanted="$key" '
+    {
+      name = $1
+      sub(/^[[:space:]]*export[[:space:]]+/, "", name)
+      gsub(/[[:space:]]/, "", name)
+      if (name != wanted) next
+      sub(/^[^=]*=/, "")
+      sub(/^[[:space:]]+/, "")
+      sub(/[[:space:]]+$/, "")
+      if (($0 ~ /^".*"$/) || ($0 ~ /^\047.*\047$/)) {
+        $0 = substr($0, 2, length($0) - 2)
+      }
+      print
+      exit
+    }
+  ' "$HIVE_CONTRIBUTOR_ENV"
 }
 '''
 
@@ -1116,9 +1131,11 @@ review-stop name="review-container":
     cleanup_codex_auth_staging_dir "$codex_auth_staging_dir"
     echo "✓ stopped the detached worker ${NAME}."
 
-# The maintainer review dashboard over the Bluefin PR queue — no Hive.
+# The maintainer review dashboard over the Bluefin PR queue.
 # The container runs the dashboard instead of the contributor agent, so no
-# Hive registration is mounted or required. Foreground: q or Ctrl-C stops.
+# Hive registration is mounted or required. When one exists, only its HIVE_HUB
+# URL is passed so the dashboard can consult the selected deployment.
+# Foreground: q or Ctrl-C stops.
 # Arguments pass straight through to the dashboard:
 #
 #   just review-queue                      # everything the queue marks 'review'
@@ -1130,7 +1147,7 @@ review-stop name="review-container":
 # One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
 # for a concurrent second dashboard, exactly as REVIEW_CONTAINER_NAME does for
 # review-container.
-[doc("Open the maintainer review dashboard over the Bluefin PR queue (no Hive).")]
+[doc("Open the maintainer review dashboard over the Bluefin PR queue.")]
 review-queue *queue_args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1179,6 +1196,33 @@ review-queue *queue_args:
     fi
     [[ "$REVIEW_BACKEND" == codex ]] || resolve_goose_selection
 
+    # The dashboard needs only the selected hub URL. Resolve the same named
+    # registration as review-container, but never mount contributor.env or pass
+    # its registration token into the maintainer surface.
+    HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.env"
+    hive_registration_name
+    if [[ -n "$HIVE_REGISTRATION_NAME" ]]; then
+      named_hive_env="${HOME}/.config/hive/contributor.${HIVE_REGISTRATION_NAME}.env"
+      if [[ -f "$named_hive_env" ]]; then
+        HIVE_CONTRIBUTOR_ENV="$named_hive_env"
+      elif [[ -n "${REVIEW_HIVE:-}" ]]; then
+        echo "ERROR: no hive registration named '${HIVE_REGISTRATION_NAME}' at ${named_hive_env}." >&2
+        echo "  Register it first: REVIEW_HIVE=${HIVE_REGISTRATION_NAME} just review-container" >&2
+        exit 1
+      fi
+    fi
+    DASHBOARD_HIVE_HUB=""
+    if [[ -f "$HIVE_CONTRIBUTOR_ENV" ]]; then
+      DASHBOARD_HIVE_HUB="$(read_hive_value HIVE_HUB)"
+      if [[ -z "$DASHBOARD_HIVE_HUB" ]]; then
+        echo "! ${HIVE_CONTRIBUTOR_ENV} has no usable HIVE_HUB; the dashboard will continue without Hive." >&2
+      elif [[ "$DASHBOARD_HIVE_HUB" == *,* ]] ||
+        [[ ! "$DASHBOARD_HIVE_HUB" =~ ^(wss|https)://[^/@?\#[:space:]]+([/?\#][^[:space:]]*)?$ ]]; then
+        echo "! ${HIVE_CONTRIBUTOR_ENV} has an unsupported HIVE_HUB; the dashboard requires one wss:// or https:// URL and will continue without Hive." >&2
+        DASHBOARD_HIVE_HUB=""
+      fi
+    fi
+
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
@@ -1206,6 +1250,10 @@ review-queue *queue_args:
     # batches overwrite each other's prompt, status, and log.
     export BLUEFIN_REVIEW_INSTANCE="$CONTAINER_NAME"
     CONTAINER_ARGS+=(--env BLUEFIN_REVIEW_INSTANCE)
+    if [[ -n "$DASHBOARD_HIVE_HUB" ]]; then
+      CONTAINER_ARGS+=(--env "HIVE_HUB=${DASHBOARD_HIVE_HUB}")
+      report_hive_selection
+    fi
     if [[ "$REVIEW_BACKEND" != codex ]]; then
       [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
       [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
@@ -1259,7 +1307,11 @@ review-queue *queue_args:
     # Whatever survived the profile/effort shift belongs to the dashboard.
     CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue "$@")
 
-    echo "✓ starting the maintainer review dashboard (no Hive)."
+    if [[ -n "$DASHBOARD_HIVE_HUB" ]]; then
+      echo "✓ starting the maintainer review dashboard (Hive configured)."
+    else
+      echo "✓ starting the maintainer review dashboard (Hive not configured)."
+    fi
     echo "  q or Ctrl-C stops; the dashboard is the only thing running."
     "${CONTAINER_ARGS[@]}"
 
