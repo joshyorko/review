@@ -253,8 +253,17 @@ assert_failure_copy() {
     fail "isolation failure must report classification: ${classification}"
   grep -Fq 'did not start an agent or mount credentials' <<<"$output" ||
     fail "isolation failure must confirm credentials were not mounted"
-  grep -Fq 'projectbluefin/bluefin/issues/1139' <<<"$output" ||
-    fail "isolation failure must link the Bluefin provisioning issue"
+  grep -Fq 'projectbluefin/review/issues/348' <<<"$output" ||
+    fail "isolation failure must link the local provisioning contract"
+  # The guidance stops at the issue reference: an embedded installer is
+  # unsupported guidance, so neither a mutable release/latest download nor
+  # an --ignore-cgroups wrapper may appear in failure output.
+  if grep -Fq 'release/latest' <<<"$output"; then
+    fail "isolation failure must not embed a mutable release/latest download"
+  fi
+  if grep -Fq -- '--ignore-cgroups' <<<"$output"; then
+    fail "isolation failure must not recommend an --ignore-cgroups wrapper"
+  fi
   assert_no_agent_launch
   assert_probe_absent
 }

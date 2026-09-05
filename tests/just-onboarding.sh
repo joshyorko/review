@@ -1375,6 +1375,16 @@ fi
 # pins that no new launch site appears unnoticed.
 assert_eq "$(grep -cE 'podman --runtime=runsc run' "$code")" 4 \
   "every agent-capable launch must select the runsc runtime explicitly"
+# Isolation failure guidance names the tracked provisioning contract and
+# stops there: an embedded installer is unsupported guidance. A mutable
+# release/latest download is not a pin, and an --ignore-cgroups wrapper is
+# not provisioning, so neither may appear anywhere in the launcher.
+if grep -n 'release/latest' "$code"; then
+  fail "launcher guidance must not embed a mutable release/latest download"
+fi
+if grep -n -- '--ignore-cgroups' "$code"; then
+  fail "launcher guidance must not recommend an --ignore-cgroups wrapper"
+fi
 
 begin "static: a launch cannot detach through an option form or a second line"
 # The greps above read one physical line at a time and only recognise a

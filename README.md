@@ -237,45 +237,10 @@ an operations task outside this repository automation.
   [bluefin#1139](https://github.com/projectbluefin/bluefin/issues/1139) and the
   Review contract is [#348](https://github.com/projectbluefin/review/issues/348);
   the launcher never downloads a runtime or falls back to Podman's default.
-
-  Until the base ships it, install it user-local (no root):
-
-  ```bash
-  arch=$(uname -m)
-  url=https://storage.googleapis.com/gvisor/releases/release/latest/${arch}
-  curl -fsSLO ${url}/runsc -O ${url}/runsc.sha512
-  sha512sum -c runsc.sha512
-  install -m 0755 runsc ~/.local/bin/runsc && rm runsc runsc.sha512
-  ```
-
-  Rootless containers cannot delegate cgroup setup to systemd, so Podman needs
-  a shim that passes `--ignore-cgroups`. The real binary stays on `PATH` under
-  its own name for the launcher's version check:
-
-  ```bash
-  printf '#!/usr/bin/env bash\nexec %s/.local/bin/runsc --ignore-cgroups "$@"\n' \
-    "$HOME" > ~/.local/bin/runsc-podman
-  chmod 0755 ~/.local/bin/runsc-podman
-  ```
-
-  Then register it with Podman. Do not blindly append the table: a second
-  `[engine.runtimes]` is a TOML duplicate-key error and Podman refuses to read
-  the file at all, which breaks every container on the machine. This handles an
-  absent file, an existing file without the table, and one that already has it:
-
-  ```bash
-  conf=~/.config/containers/containers.conf
-  mkdir -p ~/.config/containers
-  if grep -q 'runsc-podman' "$conf" 2>/dev/null; then
-    echo "runsc already registered"
-  elif grep -q '^\[engine.runtimes\]' "$conf" 2>/dev/null; then
-    sed -i "/^\[engine.runtimes\]/a runsc = [\"$HOME/.local/bin/runsc-podman\"]" "$conf"
-  else
-    printf '[engine.runtimes]\nrunsc = ["%s/.local/bin/runsc-podman"]\n' "$HOME" >> "$conf"
-  fi
-  ```
-
-  Verify with `just review-doctor`; the isolation check must report
+  There is no supported manual installation recipe: a mutable
+  `release/latest` download and an `--ignore-cgroups` wrapper are not
+  provisioning. This change remains held until #348 provides one. On a
+  provisioned host, `just review-doctor` reports the isolation check as
   `ready; rootless Podman probe passed`.
 - Goose configured for GitHub Copilot (`goose configure`), or
   `GITHUB_COPILOT_TOKEN`, for contributor work and Goose reviews. The

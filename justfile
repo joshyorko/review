@@ -372,17 +372,8 @@ isolation_runtime_failure() {
   echo "ERROR: isolation runtime: gVisor/runsc (${classification})" >&2
   echo "  ${detail}" >&2
   echo "  Review did not start an agent or mount credentials." >&2
-  # Every other failure in this launcher names the command that fixes it;
-  # isolation named only a tracking issue, which left the whole appliance
-  # unusable with no way forward. Until the base provisions runsc, this is it.
-  echo "  Install it (user-local, no root):" >&2
-  echo "    arch=\$(uname -m); url=https://storage.googleapis.com/gvisor/releases/release/latest/\${arch}" >&2
-  echo "    curl -fsSLO \${url}/runsc -O \${url}/runsc.sha512 && sha512sum -c runsc.sha512" >&2
-  echo "    install -m 0755 runsc ~/.local/bin/runsc" >&2
-  echo "  Rootless Podman also needs a shim that passes --ignore-cgroups, and the" >&2
-  echo "  registration must not duplicate an existing [engine.runtimes] table." >&2
-  echo "  Both steps: see 'Requirements and credentials' in README.md" >&2
-  echo "  Bluefin provisioning: https://github.com/projectbluefin/bluefin/issues/1139" >&2
+  # Provisioning is #348; there is no supported manual install recipe.
+  echo "  Supported provisioning: https://github.com/projectbluefin/review/issues/348" >&2
   return 1
 }
 
@@ -1375,7 +1366,7 @@ review-doctor:
     if ! require_runsc_host 2>/dev/null; then
       echo "  ✗ runsc is not usable on this host"
       echo "    review refuses to start an agent or mount credentials without it."
-      echo "    Install: see 'Requirements and credentials' in README.md"
+      echo "    Provisioning: see 'Requirements and credentials' in README.md"
       echo "    Bluefin provisioning: https://github.com/projectbluefin/bluefin/issues/1139"
       fail=$((fail+1))
     elif ! ensure_contributor_image "$DOCTOR_CONTRIBUTOR_IMAGE" >/dev/null 2>&1; then
