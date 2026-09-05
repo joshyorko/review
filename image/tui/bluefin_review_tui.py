@@ -51,6 +51,7 @@ from textual.widgets import (
 from review_result import ReviewResult, adapt_current_engine
 from semantic_view import DecisionState, build_decision_card
 import landing
+import lab_client
 import hive_api
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
@@ -129,6 +130,7 @@ COMMANDS = (
     CommandSpec("approve_or_land", "a", "merge", "approve+queue", mutating=True),
     CommandSpec("land_batch", "A", "land_batch", "land batch", mutating=True),
     CommandSpec("agents", "w", "agents", "watch batches"),
+    CommandSpec("review_policy", "P", "review_policy", "final review policy"),
     CommandSpec("merge_now", "m", "merge_now", "merge now", mutating=True),
     CommandSpec("reject", "x", "reject", "reject", mutating=True),
     CommandSpec("update_branch", "u", "update_branch", "update clean branch", mutating=True),
@@ -160,7 +162,8 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # typed-number gate.
 KEYS_READING = (
     " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
-    " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]w[/b] watch batches [b]H[/b] hive"
+    " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]w[/b] watch batches"
+    " [b]P[/b] review policy [b]H[/b] hive"
     " [b]R[/b] refresh [b]q[/b]/Esc back"
 )
 KEYS_ACTING = (
@@ -860,6 +863,52 @@ class BatchPlanScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
+class FinalPolicyScreen(ModalScreen[str]):
+    """The one setup gate for a dashboard session's final review (#378).
+
+    Asked once, before the first batch is dispatched, and remembered for the
+    session. What it grants is narrow and is stated on the screen: a review
+    round may commit only on the pull-request branches the maintainer
+    already selected, it never widens that selection, and it never bypasses
+    branch protection. Changing it later is `[p]` on the queue.
+    """
+
+    BINDINGS = [
+        Binding("1", "choose('automatic')", "automatic"),
+        Binding("2", "choose('opus')", "always Opus 5"),
+        Binding("3", "choose('kimi')", "always Kimi K3"),
+        *back_bindings("dismiss('automatic')"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("final review for this dashboard session:", id="confirm-heading")
+            yield Static(
+                "  [1] automatic — Opus 5 reviews normal and mixed batches, "
+                "Kimi K3 reviews dependency/chore-only batches",
+                classes="confirm-command",
+            )
+            yield Static(
+                "  [2] always Opus 5 — Opus reviews every batch, Kimi K3 fixes",
+                classes="confirm-command",
+            )
+            yield Static(
+                "  [3] always Kimi K3 — fresh K3 review and fix rounds",
+                classes="confirm-command",
+            )
+            yield Static(
+                "Review rounds commit only on the batch's own already-selected "
+                "branches. They never add pull requests, never bypass branch "
+                "protection, and stop after "
+                f"{landing.FINAL_ROUND_LIMIT} rounds with the findings intact.",
+                classes="confirm-command",
+            )
+            yield Label("[1/2/3] choose · [esc] keep automatic")
+
+    def action_choose(self, policy: str) -> None:
+        self.dismiss(policy)
+
+
 # Per-state presentation for the batch queue. The printed state word stays
 # the primary carrier of the fact; the glyph adds a distinct *shape* and the
 # style adds colour on top, so no fact exists only as colour (the design
@@ -880,6 +929,13 @@ LANDING_STATE_STYLES: dict[str, tuple[str, str]] = {
     "merged": ("✓", "bold $text-success on $success-muted"),
     "blocked": ("■", "$text-warning on $warning-muted"),
     "failed": ("✗", "bold $text-error on $error-muted"),
+    # The final review-and-fix phases share the row vocabulary (#378): the
+    # word is the fact, the glyph is its shape, the colour is decoration.
+    "final-review": ("◇", "$text-accent"),
+    "re-review": ("◇", "$text-accent"),
+    "cleanup": ("◌", "cyan"),
+    "final-review-clean": ("✓", "bold $text-success on $success-muted"),
+    "review-blocked": ("■", "bold $text-warning on $warning-muted"),
 }
 
 
@@ -952,6 +1008,11 @@ class LandingScreen(Screen):
         width = rows.content_region.width
         lines: list[str] = []
         for task in self.dashboard.landing_queue:
+            if task.phase:
+                # Final review-and-fix rounds (#378) belong to the batch that
+                # produced them, not beside it: the final-review line below
+                # carries their phase, round, and model.
+                continue
             if task.returncode is None:
                 state = "running" if task.running else "queued"
             else:
@@ -990,6 +1051,49 @@ class LandingScreen(Screen):
                 note = escape(str(done.get("note", "")))
                 lines.append(
                     "  [bold $text-success]✔ done[/]"
+                    + (f" — {note}" if note else "")
+                )
+            # The final review-and-fix phase (#378): which round, which
+            # model, which heads it bound to, and what it found. The batch
+            # is not finished until this line reads clean or blocked.
+            final = events.get(landing.FINAL_KEY, {})
+            running_round = next(
+                (
+                    round_task
+                    for round_task in self.dashboard.landing_queue
+                    if round_task.phase
+                    and round_task.status_path == task.status_path
+                    and round_task.returncode is None
+                ),
+                None,
+            )
+            if final or running_round:
+                mark = str(final.get("phase", final.get("state", "")))
+                if running_round:
+                    # A dispatched round is a fact the record does not hold
+                    # yet: the row says what is running, not only what was
+                    # last reported.
+                    mark = f"{running_round.phase} running"
+                glyph, style = LANDING_STATE_STYLES.get(
+                    mark.replace(" running", ""), ("?", "")
+                )
+                badge = (
+                    f"[{style}]{glyph} {escape(mark)}[/]" if style
+                    else f"{glyph} {escape(mark)}"
+                )
+                heads = " ".join(
+                    f"{label} {escape(str(final.get(key)))[:7]}"
+                    for key, label in (("input_head", "from"), ("output_head", "to"))
+                    if final.get(key)
+                )
+                number = running_round.round if running_round else final.get("round", "?")
+                model = running_round.model if running_round else final.get("model", "")
+                note = escape(str(final.get("note", "")))
+                lines.append(
+                    f"  final review  {badge}"
+                    f"  round {number}/{landing.FINAL_ROUND_LIMIT}"
+                    f"  {escape(str(model))}"
+                    + (f"  {heads}" if heads else "")
                     + (f" — {note}" if note else "")
                 )
         rows.update("\n".join(lines))
@@ -2137,10 +2241,22 @@ class ReviewDashboard(App):
         # a batch confirmed while another runs waits behind it — a proper
         # queue, not a pile of concurrent agents mutating the same queue.
         self.landing_queue: list[landing.LandingTask] = []
+        # One drainer runs the lane. A final-review round is enqueued from a
+        # finished task's callback, so this flag is what keeps a second
+        # drainer from racing the first for the same task (#378).
+        self.landing_draining = False
         # The last finished batch's outcome, kept on the status line until
         # the next dispatch or refresh: a toast is gone in seconds and a
         # maintainer looks up late.
         self.last_landing_outcome = ""
+        # The session's final-review policy (#378): asked once before the
+        # first dispatch, kept in memory only, changed with [p]. None means
+        # the session has not been asked yet.
+        self.final_policy: str | None = None
+        # The optional lab (#379): OFF until a status answer says otherwise.
+        # The dashboard never blocks on it and never depends on it.
+        self.lab_state = lab_client.LAB_OFF
+        self.lab_detail = ""
         self.source_state = "loading"
         self.source_message = ""
 
@@ -2183,6 +2299,38 @@ class ReviewDashboard(App):
         self.load_queue()
         self.load_hive()
         self.discover_harness()
+        # The lab is polled coarsely and off the UI thread (#379): 30 seconds
+        # is fast enough for a status word and slow enough that a wedged
+        # broker cannot become the dashboard's pace.
+        if lab_client.lab_configured():
+            self.poll_lab()
+            self.set_interval(30.0, self.poll_lab)
+
+    @work(thread=True, group="lab", exclusive=True)
+    def poll_lab(self) -> None:
+        """Ask the broker what the lab is doing. Never blocking, never fatal."""
+        answer = lab_client.status()
+        state = lab_client.lab_state(answer)
+        detail = str(answer.get("detail") or answer.get("error") or "")
+        self.call_from_thread(self.lab_polled, state, detail)
+
+    def lab_polled(self, state: str, detail: str) -> None:
+        self.lab_state = state
+        self.lab_detail = detail
+        try:
+            self.refresh_status()
+        except NoMatches:
+            # The poll can land after Textual tore the dashboard down.
+            return
+
+    def action_review_policy(self) -> None:
+        """Change the session's final-review policy (#378)."""
+        def chosen(policy: str | None) -> None:
+            self.final_policy = policy or "automatic"
+            self.notify(f"final review policy: {self.final_policy}")
+            self.refresh_status()
+
+        self.push_screen(FinalPolicyScreen(), chosen)
 
     @work(thread=True)
     def discover_harness(self) -> None:
@@ -2604,11 +2752,20 @@ class ReviewDashboard(App):
                 else ""
             )
             hive = f"unavailable — {hive}{retained}"
+        # The lab is a word first (#379). The lightning bolt is decoration on
+        # top of ACTIVE and never the only carrier: a maintainer reading the
+        # word alone learns the same fact.
+        lab = f"LAB {self.lab_state}"
+        if self.lab_state == lab_client.LAB_ACTIVE:
+            lab = "LAB ⚡ ACTIVE"
+        policy = (
+            f" | review: {self.final_policy}" if self.final_policy else ""
+        )
         self.query_one("#status-bar", Static).update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
             f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected}{stuck}{agents}{landed} | Hive: {hive}"
+            f"| batch: {selected}{stuck}{agents}{landed}{policy} | {lab} | Hive: {hive}"
         )
 
     def action_filter(self) -> None:
@@ -3451,7 +3608,19 @@ class ReviewDashboard(App):
                 severity="warning",
             )
             return
+        # The final-review policy is a session decision, asked once before
+        # the first batch of the session is dispatched (#378) and kept only
+        # in memory. Every later batch reuses it; [p] changes it.
+        if self.final_policy is None:
+            def chosen(policy: str | None) -> None:
+                self.final_policy = policy or "automatic"
+                self.refresh_status()
+                self.plan_landing(batch)
+
+            self.push_screen(FinalPolicyScreen(), chosen)
+            return
         task = landing.new_task(batch, self.self_login)
+        task.policy = self.final_policy
 
         def finish(confirmed: bool | None) -> None:
             if not confirmed:
@@ -3464,17 +3633,26 @@ class ReviewDashboard(App):
 
     def enqueue_landing(self, task: "landing.LandingTask") -> None:
         self.landing_queue.append(task)
-        # A new dispatch supersedes the previous batch's outcome line.
-        self.last_landing_outcome = ""
+        if not task.phase:
+            # A new dispatch supersedes the previous batch's outcome line.
+            # A final-review round belongs to the batch already on that
+            # line, so it must not wipe the outcome it is reviewing (#378).
+            self.last_landing_outcome = ""
         self.refresh_status()
-        if not any(t.running for t in self.landing_queue):
+        if not self.landing_draining:
+            self.landing_draining = True
             self.drain_landings()
 
     @work(thread=True)
     def drain_landings(self) -> None:
-        """Run the landing queue FIFO, one agent at a time."""
-        while True:
-            task = next(
+        """Run the landing queue FIFO, one agent at a time.
+
+        One drainer, always: a final-review round is enqueued from inside a
+        finished task's callback, so a second drainer started there would
+        race this one for the same task and run it twice.
+        """
+        def pending():
+            return next(
                 (
                     t
                     for t in self.landing_queue
@@ -3482,8 +3660,17 @@ class ReviewDashboard(App):
                 ),
                 None,
             )
+
+        while True:
+            task = pending()
             if task is None:
-                return
+                self.landing_draining = False
+                # Re-check once: a task enqueued while the flag was still
+                # set would otherwise wait for the next dispatch.
+                task = pending()
+                if task is None:
+                    return
+                self.landing_draining = True
             self.run_landing_task(task)
 
     def run_landing_task(self, task: "landing.LandingTask") -> None:
@@ -3504,6 +3691,13 @@ class ReviewDashboard(App):
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
+                    # A final-review round runs with the model its phase
+                    # chose, passed explicitly (#378): the launch-time
+                    # GOOSE_MODEL is whatever the maintainer picked for the
+                    # dashboard, so inheriting it silently reviews with the
+                    # wrong model. A landing task carries no overlay and
+                    # inherits the environment exactly as it always did.
+                    env={**os.environ, **task.env} if task.env else None,
                 )
             except OSError as error:
                 task.returncode = 1
@@ -3520,6 +3714,12 @@ class ReviewDashboard(App):
         work leaves the batch; blocked, failed, and unfinished work stays
         selected with its reason. The notification announces the outcome —
         the row marking is what survives it."""
+        if task.phase:
+            # A final review-and-fix round (#378) is not a landing: the pull
+            # requests already have their outcomes, so re-folding them would
+            # re-announce a batch that already finished. What a round
+            # reports is its phase.
+            return self.final_round_finished(task)
         events = landing.parse_status(task.status_path)
         # parse_status files every pr-less line under "" — a malformed tail
         # line included — so only the exact done event closes a report.
@@ -3588,6 +3788,107 @@ class ReviewDashboard(App):
         self.last_landing_outcome = message
         self.refresh_rows()
         self.notify(message, severity=severity)
+        self.advance_final_review(task)
+
+    def final_round_finished(self, task: "landing.LandingTask") -> None:
+        """Announce one finished final-review round and start the next."""
+        recorded = landing.final_phase(task.status_path)
+        phase = str(recorded.get("phase", "")) or "no result"
+        message = (
+            f"batch {task.task_id.split(' · ')[0]} final review "
+            f"round {task.round}/{landing.FINAL_ROUND_LIMIT} "
+            f"({task.model}): {phase}"
+        )
+        note = str(recorded.get("note", ""))
+        if note:
+            message = f"{message} — {note}"
+        severity = (
+            "information" if phase == "final-review-clean"
+            else "error" if phase in ("review-blocked", "no result")
+            else "warning"
+        )
+        self.notify(message, severity=severity)
+        self.advance_final_review(task)
+        self.refresh_status()
+
+    def advance_final_review(self, task: "landing.LandingTask") -> None:
+        """Drive the final review-and-fix rounds for a finished batch (#378).
+
+        Every round is a fresh process in the SAME lane: this appends the
+        next round to the landing queue and returns. What decides the next
+        round is the durable record, not memory, so a round that reported
+        `final-review-clean` or `review-blocked` ends the phase whatever
+        this process believes, and a dashboard restart reads the same
+        answer. A landing that never reached terminal outcomes gets no
+        final review at all — there is nothing settled to review.
+        """
+        policy = task.policy or self.final_policy or "automatic"
+        events = landing.parse_status(task.status_path)
+        terminal = all(
+            events.get(stop.key, {}).get("state") in landing.TERMINAL_PR_STATES
+            for stop in task.stops
+        )
+        if not task.stops or not terminal:
+            return
+        recorded = landing.final_phase(task.status_path)
+        phase = str(recorded.get("phase", ""))
+        if phase in landing.FINAL_TERMINAL_PHASES:
+            return
+        if task.phase and len(landing.final_rounds(task.status_path)) <= task.rounds_seen:
+            # The round just run wrote nothing to the record. Dispatching the
+            # same phase again would loop forever on a broken agent, so the
+            # batch stops here with whatever the record does hold.
+            landing.report_final(
+                task.status_path,
+                min(task.round or 1, landing.FINAL_ROUND_LIMIT),
+                "review-blocked",
+                task.model or "",
+                f"{task.phase} round {task.round} reported nothing",
+            )
+            self.notify(
+                f"batch {task.task_id} reported no {task.phase} result; "
+                "the batch is review-blocked.",
+                severity="error",
+            )
+            self.refresh_status()
+            return
+        round_number = int(recorded.get("round") or 0)
+        findings = str(recorded.get("note", ""))
+        if not phase:
+            nxt, number = "final-review", 1
+        elif phase in ("final-review", "re-review"):
+            # A review that found something hands its findings to a fresh
+            # fixer; the reviewer never fixes what it reviewed.
+            nxt, number = "fixing", round_number
+        elif phase == "fixing":
+            nxt, number = "re-review", round_number + 1
+        else:
+            nxt, number = "cleanup", round_number
+        if number > landing.FINAL_ROUND_LIMIT:
+            # The breaker: the record refuses a sixth round, and the batch
+            # stays visibly blocked with its findings rather than looping.
+            landing.report_final(
+                task.status_path,
+                landing.FINAL_ROUND_LIMIT,
+                "review-blocked",
+                task.model or "",
+                f"{landing.FINAL_ROUND_LIMIT} rounds did not clear the findings",
+            )
+            self.notify(
+                f"batch {task.task_id} is review-blocked after "
+                f"{landing.FINAL_ROUND_LIMIT} rounds; findings are kept.",
+                severity="error",
+            )
+            self.refresh_status()
+            return
+        try:
+            round_task = landing.new_final_round(
+                task, nxt, number, policy, findings, ACTIVE_BACKEND
+            )
+        except OSError as error:
+            self.notify(f"final review: {error}", severity="error")
+            return
+        self.enqueue_landing(round_task)
 
     def restore_landing_marks(self, stops: list[Stop]) -> None:
         """Fold a previous run's landing outcomes back onto matching rows.

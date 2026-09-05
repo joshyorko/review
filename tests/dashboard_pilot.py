@@ -13,8 +13,10 @@ engine is replaced by a stub script whose exit status the test chooses.
 from __future__ import annotations
 
 import asyncio
+import http.server
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -175,6 +177,18 @@ async def main() -> int:
     review_stub(0, "a finding")
 
     import bluefin_review_tui as tui
+
+    # Every batch flow below would meet the #378 final-review policy gate,
+    # which is asked once per dashboard process. It gets its own coverage
+    # further down; here the session answer is pre-set so the unrelated
+    # flows still exercise what they were written to exercise.
+    _dashboard_init = tui.ReviewDashboard.__init__
+
+    def _dashboard_with_policy(self, *args, **kwargs):
+        _dashboard_init(self, *args, **kwargs)
+        self.final_policy = "automatic"
+
+    tui.ReviewDashboard.__init__ = _dashboard_with_policy
 
     hive_api_stub = workdir / "hive_api_stub.py"
     hive_api_stub.write_text(
@@ -854,6 +868,11 @@ async def main() -> int:
     # whole plan and the exact command on one screen, Enter to dispatch —
     # not a typed count. One agent owns all selected pull requests, reports
     # per-PR state to its status file, and the queue screen polls that file.
+    # This stub reports through the module's report CLI exactly as the brief
+    # instructs, so the happy path proves the shipped reporter end to end.
+    # The stubs below keep writing raw JSONL on purpose: the dashboard must
+    # still survive the malformed or partial records the CLI refuses.
+    landing_py = TUI_DIR / "landing.py"
     landing_log = workdir / "landing-argv.log"
     landing_stub = write_stub(
         workdir / "stub-landing",
@@ -861,10 +880,13 @@ async def main() -> int:
         'prompt=""\n'
         'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
         'status="${prompt%.prompt.md}.jsonl"\n'
-        'grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | while read -r pr; do\n'
-        '  printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"merged\\", \\"note\\": \\"green\\"}\\n" "$pr" >>"$status"\n'
+        'prs=$(grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u)\n'
+        'for pr in $prs; do\n'
+        f'  "{sys.executable}" "{landing_py}" report --status "$status" '
+        'event --pr "$pr" --state merged --note green\n'
         'done\n'
-        'printf "{\\"state\\": \\"done\\", \\"note\\": \\"all landed\\"}\\n" >>"$status"\n'
+        f'"{sys.executable}" "{landing_py}" report --status "$status" '
+        'done --expect $prs --note "all landed"\n'
         'echo "agent log line"\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{landing_stub} @PROMPT"
@@ -921,10 +943,28 @@ async def main() -> int:
                 task.returncode == 0,
                 f"the landing agent must exit 0, got {task.returncode}",
             )
+            # One agent lands the whole batch — never one per pull request —
+            # and the final review-and-fix rounds (#378) follow it in the
+            # same lane.
+            for _ in range(400):
+                if len(landing_log.read_text().splitlines()) > 1:
+                    break
+                await pilot.pause(0.05)
             invocations = landing_log.read_text().splitlines()
             check(
-                len(invocations) == 1,
-                f"one agent must run for the whole batch, got {invocations}",
+                len(invocations) == 2
+                and invocations[0].endswith(".prompt.md")
+                and "final-" not in invocations[0]
+                and "final-1-final-review.prompt.md" in invocations[1],
+                f"one landing agent then exactly one final review round, got "
+                f"{invocations}",
+            )
+            rounds = [t for t in app.landing_queue if t.phase]
+            check(
+                [t.phase for t in rounds] == ["final-review"]
+                and rounds[0].status_path == task.status_path,
+                f"the round must run in the same lane and record, got "
+                f"{[(t.phase, t.status_path) for t in rounds]}",
             )
             prompt_text = Path(task.prompt_path).read_text()
             check(
@@ -1882,6 +1922,986 @@ async def main() -> int:
         "the brief must accept the publish it can prove and fail only "
         "when none can be evidenced",
     )
+
+    # ── the brief routes every status write through the report CLI ─────
+    # #377: a bulk terminal-state write died on shell quoting mid-batch, its
+    # retry duplicated terminal events, and no done event ever landed — the
+    # durable record disagreed with GitHub after irreversible merges. The
+    # brief must have the agent report each transition immediately through
+    # the image's reporter and forbid direct status-file writes outright.
+    check(
+        "report --status" in brief and " event --pr " in brief,
+        "the brief must report per-PR events through the module's report CLI",
+    )
+    check(
+        " done --expect " in brief,
+        "the brief must close the batch through done --expect, naming the "
+        "whole selection",
+    )
+    check(
+        "flock" in brief,
+        "the brief must state the reporter serializes writers under flock",
+    )
+    check(
+        "no printf" in brief and "no heredoc" in brief,
+        "the brief must forbid direct status-file writes",
+    )
+    check(
+        "bulk terminal-state write" in brief,
+        "the brief must forbid saving terminal states up for one bulk write",
+    )
+    check(
+        "written once" in brief
+        and "identical retry is a no-op" in brief
+        and "the latest event wins" in brief,
+        "the brief must define a terminal state as written once — identical "
+        "retries no-op — and a wrong terminal verdict correctable, never "
+        "final by accident",
+    )
+    check(
+        "lacks a terminal state" in brief,
+        "done must refuse to close while an expected pull request lacks a "
+        "terminal state",
+    )
+
+    # #375: the denied mint must survive in code, not in a shell pipeline
+    # the agent assembles: the brief delegates the whole registry flow to
+    # the reporter's probe, and no curl-into-jq pipeline may survive in the
+    # brief text.
+    check(
+        not re.search(r"curl[^\n|]*\|\s*jq", Path(probe.prompt_path).read_text()),
+        "the token mint must not pipe curl into jq — jq's exit status masks "
+        "a denied mint (#375)",
+    )
+    check(
+        " probe --package " in brief,
+        "the brief must probe the registry through the reporter's probe "
+        "command, which preserves a denied mint in code (#375)",
+    )
+    check(
+        "never evidence of absence" in brief,
+        "a probe that cannot answer must never read as a missing package",
+    )
+
+    # #376: projectbluefin/actions mentions ghcr.io throughout its reusable
+    # workflows without publishing an image itself, and the broad signal
+    # stalled a batch for the full ten-minute timeout. The publish signal
+    # must be an on.push publication path targeting the repository's own
+    # package, and the wait must end when terminal runs answer first.
+    check(
+        "on.push" in brief,
+        "the publish signal must be an on.push publication path, not any "
+        "ghcr.io mention",
+    )
+    check(
+        "workflow_call" in brief and "workflow_dispatch" in brief,
+        "reusable and manual-only workflows must be named as non-signals",
+    )
+    check(
+        "references to other" in brief,
+        "references to other repositories' images must not count as a "
+        "publication path",
+    )
+    check(
+        "stop polling" in brief and "terminal runs prove" in brief,
+        "the brief must stop the publish wait once terminal runs prove no "
+        "publication is owed",
+    )
+    check(
+        " publish-verdict " in brief and "workflow_run" in brief and "release" in brief,
+        "the brief must route the wait/stop decision through the "
+        "publish-verdict command, covering push, workflow_run, and release "
+        "triggers",
+    )
+    check(
+        "an empty run list is never evidence" in brief,
+        "an empty gh run list must never read as 'no publication' — runs "
+        "can lag the merge",
+    )
+
+    # ── the landing reporter enforces the record ───────────────────────
+    # #377: terminal events are idempotent and correctable — an identical
+    # retry no-ops, a terminal verdict later proven wrong is corrected by
+    # the new terminal state (the latest event wins), only a post-terminal
+    # NON-terminal write fails — and done refuses to close while any
+    # selected pull request lacks a terminal outcome. The dashboard reads
+    # what the reporter writes, so parse_status must fold the reporter's
+    # lines exactly.
+    cli_status = workdir / "cli.jsonl"
+
+    def report(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(landing_py),
+                "report",
+                "--status",
+                str(cli_status),
+                *args,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def cli_lines() -> list[str]:
+        return (
+            cli_status.read_text().splitlines() if cli_status.exists() else []
+        )
+
+    result = report(
+        "event", "--pr", "org/repo#1", "--state", "fixing", "--note", "retrying CI"
+    )
+    check(
+        result.returncode == 0,
+        f"a first event must be accepted, got {result.returncode}: {result.stderr}",
+    )
+    result = report(
+        "event", "--pr", "org/repo#1", "--state", "merged", "--note", "green"
+    )
+    check(
+        result.returncode == 0,
+        f"a terminal event must be accepted, got {result.returncode}: {result.stderr}",
+    )
+    check(
+        len(cli_lines()) == 2,
+        f"two accepted events must be two lines, got {cli_lines()}",
+    )
+    result = report(
+        "event", "--pr", "org/repo#1", "--state", "merged", "--note", "green"
+    )
+    check(
+        result.returncode == 0 and len(cli_lines()) == 2,
+        "an identical terminal retry must be an accepted no-op, got "
+        f"{result.returncode} and {cli_lines()}",
+    )
+    result = report(
+        "event", "--pr", "org/repo#1", "--state", "failed", "--note", "publish lost"
+    )
+    check(
+        result.returncode == 0 and len(cli_lines()) == 3,
+        "a terminal verdict proven wrong must be correctable by the new "
+        "terminal state — a premature merged is never uncorrectable, got "
+        f"{result.returncode} and {cli_lines()}",
+    )
+    folded = tui.landing.parse_status(str(cli_status))
+    check(
+        folded.get("org/repo#1", {}).get("state") == "failed",
+        f"the correction must win the fold, got {folded}",
+    )
+    result = report(
+        "event", "--pr", "org/repo#1", "--state", "waiting-ci", "--note", "late poll"
+    )
+    check(
+        result.returncode != 0 and len(cli_lines()) == 3,
+        "a non-terminal write after a terminal state must fail, got "
+        f"{result.returncode} and {cli_lines()}",
+    )
+    result = report(
+        "done", "--expect", "org/repo#1", "org/repo#2", "--note", "closing early"
+    )
+    check(
+        result.returncode != 0 and not any('"done"' in l for l in cli_lines()),
+        "done must refuse while an expected pull request lacks a terminal "
+        f"state, got {result.returncode} and {cli_lines()}",
+    )
+    result = report(
+        "event", "--pr", "org/repo#2", "--state", "blocked", "--note", "draft"
+    )
+    check(
+        result.returncode == 0,
+        f"a second terminal event must be accepted, got {result.returncode}",
+    )
+    result = report(
+        "done",
+        "--expect",
+        "org/repo#1",
+        "org/repo#2",
+        "--note",
+        "one corrected, one blocked",
+    )
+    check(
+        result.returncode == 0,
+        f"done must close once every expected pull request is terminal, got "
+        f"{result.returncode}: {result.stderr}",
+    )
+    check(
+        len(cli_lines()) == 5,
+        f"done must append exactly one line, got {cli_lines()}",
+    )
+    result = report(
+        "done",
+        "--expect",
+        "org/repo#1",
+        "org/repo#2",
+        "--note",
+        "one corrected, one blocked",
+    )
+    check(
+        result.returncode == 0 and len(cli_lines()) == 5,
+        "an identical done retry must be an accepted no-op, got "
+        f"{result.returncode} and {cli_lines()}",
+    )
+    result = report(
+        "done", "--expect", "org/repo#1", "org/repo#2", "--note", "different summary"
+    )
+    check(
+        result.returncode != 0 and len(cli_lines()) == 5,
+        "a conflicting done must fail, got "
+        f"{result.returncode} and {cli_lines()}",
+    )
+    result = report(
+        "event", "--pr", "org/repo#3", "--state", "merged", "--note", "late"
+    )
+    check(
+        result.returncode != 0 and len(cli_lines()) == 5,
+        "an event after the batch is done must fail, got "
+        f"{result.returncode} and {cli_lines()}",
+    )
+    result = report(
+        "event", "--pr", "org/repo#4", "--state", "launched", "--note", "bogus"
+    )
+    check(
+        result.returncode != 0,
+        f"a state outside the vocabulary must be rejected, got {result.returncode}",
+    )
+    folded = tui.landing.parse_status(str(cli_status))
+    check(
+        folded.get("org/repo#1", {}).get("state") == "failed"
+        and folded.get("org/repo#2", {}).get("state") == "blocked"
+        and folded.get("", {}).get("state") == "done",
+        f"parse_status must fold the reporter's file exactly, got {folded}",
+    )
+    check(
+        all(
+            isinstance(json.loads(line), dict) and len(line.splitlines()) == 1
+            for line in cli_lines()
+        ),
+        "every reporter line must be one JSON object on one physical line",
+    )
+    check(
+        all(isinstance(json.loads(line).get("ts"), int) for line in cli_lines()),
+        "every reporter-written line must carry a ts timestamp, so "
+        "immediate-write evidence is verifiable",
+    )
+    newline_status = workdir / "cli-newline.jsonl"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(landing_py),
+            "report",
+            "--status",
+            str(newline_status),
+            "event",
+            "--pr",
+            "org/repo#9",
+            "--state",
+            "blocked",
+            "--note",
+            "first line\nsecond line",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    check(
+        result.returncode == 0
+        and newline_status.exists()
+        and len(newline_status.read_text().splitlines()) == 1,
+        "a note carrying a newline must stay one physical JSONL line, got "
+        f"{result.returncode} and "
+        f"{newline_status.read_text().splitlines() if newline_status.exists() else []}",
+    )
+
+    # The batch record opens with the maintainer's confirmed selection, so
+    # done gates on what was dispatched — an agent that under-names its
+    # batch in --expect cannot close it with a hole (#377).
+    seeded_header = json.loads(Path(probe.status_path).read_text().splitlines()[0])
+    check(
+        seeded_header.get("expect") == [stop.key for stop in probe.stops]
+        and isinstance(seeded_header.get("ts"), int),
+        "new_task must seed the status file with the confirmed selection "
+        "and a dispatch timestamp",
+    )
+    seeded_status = workdir / "cli-seeded.jsonl"
+    seeded_status.write_text(
+        json.dumps({"expect": ["org/repo#a", "org/repo#b"]}, separators=(",", ":"))
+        + "\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable, str(landing_py), "report", "--status",
+            str(seeded_status), "event", "--pr", "org/repo#a",
+            "--state", "merged", "--note", "green",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    check(result.returncode == 0, f"seeded event failed: {result.stderr}")
+    result = subprocess.run(
+        [
+            sys.executable, str(landing_py), "report", "--status",
+            str(seeded_status), "done", "--expect", "org/repo#a",
+            "--note", "subset",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    check(
+        result.returncode != 0 and "org/repo#b" in result.stderr,
+        "done must refuse to close when a seeded selection member lacks a "
+        f"terminal state even if --expect under-names it, got "
+        f"{result.returncode}: {result.stderr}",
+    )
+    folded = tui.landing.parse_status(str(seeded_status))
+    check(
+        "" not in folded and folded.get("org/repo#a", {}).get("state") == "merged",
+        f"parse_status must skip the selection header, got {folded}",
+    )
+
+    # A writer that died mid-line must not take the next event down with
+    # it: the reporter truncates the unparseable partial tail rather than
+    # gluing a new line onto it.
+    broken_status = workdir / "cli-broken.jsonl"
+    broken_status.write_text(
+        '{"pr":"org/repo#1","state":"merged","note":"ok"}\n'
+        '{"pr":"org/repo#2","sta'
+    )
+    result = subprocess.run(
+        [
+            sys.executable, str(landing_py), "report", "--status",
+            str(broken_status), "event", "--pr", "org/repo#3",
+            "--state", "blocked", "--note", "draft",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    broken_lines = broken_status.read_text().splitlines()
+    check(
+        result.returncode == 0
+        and len(broken_lines) == 2
+        and all(isinstance(json.loads(line), dict) for line in broken_lines),
+        "an appended event must start a fresh physical line even after a "
+        f"truncated tail, got {result.returncode} and {broken_lines}",
+    )
+    folded = tui.landing.parse_status(str(broken_status))
+    check(
+        folded.get("org/repo#3", {}).get("state") == "blocked",
+        f"the appended event must survive in the record, got {folded}",
+    )
+
+    # A complete final line that only lacks its newline IS a record:
+    # parse_status counts it, so the gates must count it and the appender
+    # must preserve it — only a torn tail is truncated.
+    tailonly_status = workdir / "cli-tailonly.jsonl"
+    tailonly_status.write_text(
+        '{"expect":["org/repo#1","org/repo#2"],"ts":1}\n'
+        '{"pr":"org/repo#1","state":"merged","note":"a","ts":2}\n'
+        '{"pr":"org/repo#2","state":"merged","note":"b","ts":3}'  # no trailing newline
+    )
+
+    def tailonly_report(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                sys.executable, str(landing_py), "report", "--status",
+                str(tailonly_status), *args,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    result = tailonly_report(
+        "done", "--expect", "org/repo#1", "org/repo#2", "--note", "all"
+    )
+    check(
+        result.returncode == 0,
+        "a complete final line missing only its newline must count toward "
+        f"the done gate, got {result.returncode}: {result.stderr}",
+    )
+    tailonly_lines = tailonly_status.read_text().splitlines()
+    check(
+        len(tailonly_lines) == 4
+        and sum('"pr":"org/repo#2"' in line for line in tailonly_lines) == 1
+        and all(isinstance(json.loads(line), dict) for line in tailonly_lines),
+        "the appender must terminate and preserve a valid unterminated "
+        f"final line, got {tailonly_lines}",
+    )
+    check(
+        tui.landing.parse_status(str(tailonly_status))
+        .get("org/repo#2", {})
+        .get("state")
+        == "merged",
+        "the preserved final line must keep its fold",
+    )
+
+    # ── the ghcr probe preserves a denied mint in code (#375) ──────────
+    # The probe owns the mint, so a 403 from the token endpoint is the
+    # negative signal itself — executable proof that no shell pipeline can
+    # mask it. A stub server plays ghcr; BLUEFIN_REVIEW_GHCR_BASE points
+    # the probe at it.
+    class StubGhcr(http.server.BaseHTTPRequestHandler):
+        routes: dict = {}
+        hits: list = []
+
+        def do_GET(self):
+            self.hits.append(self.path)
+            for prefix, (status, body, extra) in self.routes.items():
+                if self.path.startswith(prefix):
+                    payload = json.dumps(body).encode()
+                    self.send_response(status)
+                    for key, value in extra.items():
+                        self.send_header(key, value)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    ghcr_stub = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StubGhcr)
+    threading.Thread(target=ghcr_stub.serve_forever, daemon=True).start()
+    ghcr_base = f"http://127.0.0.1:{ghcr_stub.server_address[1]}"
+
+    def ghcr_probe(*args: str) -> tuple[int, dict]:
+        result = subprocess.run(
+            [sys.executable, str(landing_py), "probe", *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "BLUEFIN_REVIEW_GHCR_BASE": ghcr_base},
+        )
+        try:
+            return result.returncode, json.loads(result.stdout)
+        except ValueError:
+            return result.returncode, {}
+
+    StubGhcr.routes = {"/token": (403, {}, {})}
+    code, answer = ghcr_probe("--package", "org/missing")
+    check(
+        code == 0 and answer.get("readable") is False,
+        "a denied token mint is the definitive negative signal, not an "
+        f"error and never masked as success, got {code} and {answer}",
+    )
+    check(
+        "denied" in answer.get("signal", ""),
+        f"the negative signal must name the denied mint, got {answer}",
+    )
+    StubGhcr.routes = {
+        "/token": (200, {"token": "t"}, {}),
+        "/v2/org/repo/tags/list": (200, {"tags": ["stable", "sha-abc"]}, {}),
+    }
+    code, answer = ghcr_probe("--package", "org/repo")
+    check(
+        code == 0 and answer.get("readable") is True
+        and answer.get("tags") == ["stable", "sha-abc"],
+        f"a public package answers its tags, got {code} and {answer}",
+    )
+    StubGhcr.routes = {
+        "/token": (200, {"token": "t"}, {}),
+        "/v2/org/repo/tags/list": (401, {}, {}),
+    }
+    code, answer = ghcr_probe("--package", "org/repo")
+    check(
+        code == 0 and answer.get("readable") is False,
+        f"a 401/403 from tags/list is also the negative signal, got {answer}",
+    )
+    StubGhcr.routes = {
+        "/token": (200, {"token": "t"}, {}),
+        "/v2/org/paged/tags/list?": (
+            200,
+            {"tags": ["b"]},
+            {},
+        ),
+        "/v2/org/paged/tags/list": (
+            200,
+            {"tags": ["a"]},
+            {"Link": f'<{ghcr_base}/v2/org/paged/tags/list?last=a>; rel="next"'},
+        ),
+    }
+    code, answer = ghcr_probe("--package", "org/paged")
+    check(
+        code == 0 and answer.get("tags") == ["a", "b"],
+        f"the probe must follow the tags/list pagination cursor, got {answer}",
+    )
+    StubGhcr.routes = {
+        "/token": (200, {"token": "t"}, {}),
+        "/v2/org/repo/tags/list": (200, {"tags": ["stable"]}, {}),
+        "/v2/org/repo/manifests/stable": (
+            200,
+            {"manifests": [{"digest": "sha256:1"}, {"digest": "sha256:2"}]},
+            {"docker-content-digest": "sha256:0"},
+        ),
+        "/v2/org/repo/manifests/missing": (404, {}, {}),
+    }
+    code, answer = ghcr_probe("--package", "org/repo", "--manifest", "stable")
+    check(
+        code == 0
+        and answer.get("digest") == "sha256:0"
+        and answer.get("children") == ["sha256:1", "sha256:2"],
+        f"the probe must resolve a manifest digest and an index's children, "
+        f"got {answer}",
+    )
+    code, answer = ghcr_probe("--package", "org/repo", "--manifest", "missing")
+    check(
+        code == 0 and answer.get("present") is False,
+        f"a missing ref answers absent, got {answer}",
+    )
+    # Registry paths are lowercase: a mixed-case package argument must be
+    # normalized, or ghcr answers 400 and the probe can never resolve.
+    StubGhcr.hits = []
+    StubGhcr.routes = {
+        "/token": (200, {"token": "t"}, {}),
+        "/v2/org/repo/tags/list": (200, {"tags": ["stable"]}, {}),
+    }
+    code, answer = ghcr_probe("--package", "Org/Repo")
+    check(
+        code == 0 and answer.get("readable") is True,
+        f"a mixed-case package must be lowercased before probing, got "
+        f"{code} and {answer}",
+    )
+    check(
+        StubGhcr.hits
+        and "scope=repository:org/repo:pull" in StubGhcr.hits[0]
+        and any(hit.startswith("/v2/org/repo/") for hit in StubGhcr.hits),
+        f"the probe must send lowercase registry paths, got {StubGhcr.hits}",
+    )
+    dead = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StubGhcr)
+    dead_port = dead.server_address[1]
+    dead.server_close()
+    result = subprocess.run(
+        [sys.executable, str(landing_py), "probe", "--package", "org/repo"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "BLUEFIN_REVIEW_GHCR_BASE": f"http://127.0.0.1:{dead_port}"},
+    )
+    check(
+        result.returncode != 0 and json.loads(result.stdout).get("readable") is None,
+        "an unreachable registry is a probe error, never evidence of "
+        f"absence, got {result.returncode} and {result.stdout}",
+    )
+    ghcr_stub.shutdown()
+
+    # ── the publish wait verdict: an empty run list is not evidence ─────
+    # #376's stall, generalized: the wait decision is executable, keyed to
+    # the identified publish workflow and its trigger, and only all-terminal
+    # runs may end the wait without registry evidence.
+    runs_path = workdir / "runs.json"
+
+    def verdict_cli(trigger: str, workflow: str, runs) -> tuple[int, dict]:
+        runs_path.write_text(json.dumps(runs))
+        result = subprocess.run(
+            [
+                sys.executable, str(landing_py), "publish-verdict",
+                "--trigger", trigger, "--workflow", workflow,
+                "--runs", str(runs_path),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        try:
+            return result.returncode, json.loads(result.stdout)
+        except ValueError:
+            return result.returncode, {}
+
+    code, answer = verdict_cli("push", "publish", [])
+    check(
+        code == 0 and answer.get("verdict") == "wait",
+        "an empty run list must answer wait — never 'no publication' — "
+        f"got {answer}",
+    )
+    code, answer = verdict_cli(
+        "push", "publish",
+        [{"workflowName": "ci", "status": "in_progress", "conclusion": None}],
+    )
+    check(
+        code == 0 and answer.get("verdict") == "wait",
+        f"a non-terminal run must answer wait, got {answer}",
+    )
+    code, answer = verdict_cli(
+        "push", "publish",
+        [{"workflowName": "ci", "status": "completed", "conclusion": "success"}],
+    )
+    check(
+        code == 0 and answer.get("verdict") == "no-publication-run",
+        "all-terminal runs without the publish workflow must end the wait, "
+        f"got {answer}",
+    )
+    code, answer = verdict_cli(
+        "push", "publish",
+        [
+            {"workflowName": "ci", "status": "completed", "conclusion": "success"},
+            {"workflowName": "publish", "status": "completed", "conclusion": "success"},
+        ],
+    )
+    check(
+        code == 0 and answer.get("verdict") == "verify-registry",
+        f"a green publish run must route to registry evidence, got {answer}",
+    )
+    code, answer = verdict_cli(
+        "push", "publish",
+        [{"workflowName": "publish", "status": "completed", "conclusion": "failure"}],
+    )
+    check(
+        code == 0 and answer.get("verdict") == "publish-failed",
+        f"a red publish run must be named, got {answer}",
+    )
+    for soft in ("skipped", "cancelled", "neutral"):
+        code, answer = verdict_cli(
+            "push", "publish",
+            [{"workflowName": "publish", "status": "completed", "conclusion": soft}],
+        )
+        check(
+            code == 0 and answer.get("verdict") == "publish-skipped",
+            f"a {soft} publish run published nothing and failed at nothing — "
+            f"it must not read as a red run, got {answer}",
+        )
+    code, answer = verdict_cli(
+        "push", "publish",
+        [
+            {"workflowName": "publish", "status": "completed", "conclusion": "skipped"},
+            {"workflowName": "publish", "status": "completed", "conclusion": "success"},
+        ],
+    )
+    check(
+        code == 0 and answer.get("verdict") == "verify-registry",
+        f"one green publish run wins over a skipped sibling, got {answer}",
+    )
+    code, answer = verdict_cli(
+        "workflow_run", "publish",
+        [{"workflowName": "publish", "status": "completed", "conclusion": "success"}],
+    )
+    check(
+        code == 0 and answer.get("verdict") == "verify-registry",
+        f"a workflow_run publish must be evaluated like a push one, got {answer}",
+    )
+    code, answer = verdict_cli("release", "publish", [])
+    check(
+        code == 0 and answer.get("verdict") == "not-owed",
+        f"a release-triggered publish owes nothing for a merge, got {answer}",
+    )
+    runs_path.write_text("not json")
+    result = subprocess.run(
+        [
+            sys.executable, str(landing_py), "publish-verdict",
+            "--trigger", "push", "--workflow", "publish", "--runs", str(runs_path),
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    check(
+        result.returncode != 0,
+        f"a malformed runs file must fail the verdict, got {result.returncode}",
+    )
+
+    # ── concurrent reporters serialize under flock ─────────────────────
+    race_status = workdir / "cli-race.jsonl"
+    race_status.write_text('{"expect":[],"ts":1}\n')
+    racers = [
+        subprocess.Popen(
+            [
+                sys.executable, str(landing_py), "report", "--status",
+                str(race_status), "event", "--pr", f"org/repo#{i}",
+                "--state", "blocked", "--note", "race",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        for i in range(16)
+    ]
+    codes = [racer.wait(timeout=60) for racer in racers]
+    race_lines = race_status.read_text().splitlines()
+    check(
+        all(code == 0 for code in codes) and len(race_lines) == 17,
+        f"16 concurrent reporters must all land exactly one line, got "
+        f"{codes} and {len(race_lines)} lines",
+    )
+    check(
+        all(isinstance(json.loads(line), dict) for line in race_lines),
+        "no concurrent write may interleave — every line must parse",
+    )
+    raced = tui.landing.parse_status(str(race_status))
+    check(
+        sum(1 for key in raced if key.startswith("org/repo#")) == 16,
+        f"every concurrent event must survive the fold, got {len(raced)}",
+    )
+
+    # ── the final review-and-fix rounds (#378) ─────────────────────────
+    # The policy is a session decision asked once, the classification picks
+    # a model and nothing else, every round is its own process with its own
+    # explicit model environment, and five rounds is the end of the line.
+    dep_stops = [
+        SimpleNamespace(key="o/r#1", title="chore(deps): bump x", labels=[]),
+        SimpleNamespace(key="o/r#2", title="build(deps-dev): bump y", labels=[]),
+        SimpleNamespace(key="o/r#3", title="anything at all", labels=["dependencies"]),
+    ]
+    mixed_stops = dep_stops + [
+        SimpleNamespace(key="o/r#4", title="feat: a new thing", labels=[])
+    ]
+    check(
+        tui.landing.classify_batch(dep_stops) == "dependency",
+        "a chore/deps-only batch must classify as dependency",
+    )
+    check(
+        tui.landing.classify_batch(mixed_stops) == "mixed",
+        "one feature makes the batch mixed",
+    )
+    check(
+        tui.landing.classify_batch(
+            [SimpleNamespace(key="o/r#9", title="unreadable", labels=[])]
+        )
+        == "mixed",
+        "an unknown title must fall back to the thorough reviewer, not the "
+        "cheap one",
+    )
+    check(
+        tui.landing.classify_batch([]) == "mixed",
+        "an empty batch must not classify as dependency",
+    )
+    check(
+        tui.landing.final_triple("automatic", "mixed", "final-review")[1]
+        == "claude-opus-5"
+        and tui.landing.final_triple("automatic", "dependency", "final-review")[1]
+        == "kimi-k3"
+        and tui.landing.final_triple("opus", "dependency", "final-review")[1]
+        == "claude-opus-5"
+        and tui.landing.final_triple("kimi", "mixed", "final-review")[1] == "kimi-k3"
+        and tui.landing.final_triple("opus", "mixed", "fixing")[1] == "kimi-k3",
+        "the policy/classification table must pick the documented models",
+    )
+    goose_env = tui.landing.final_environment(tui.landing.OPUS_TRIPLE, "goose")
+    codex_env = tui.landing.final_environment(tui.landing.OPUS_TRIPLE, "codex")
+    check(
+        goose_env.get("GOOSE_MODEL") == "claude-opus-5"
+        and goose_env.get("GOOSE_THINKING_EFFORT") == "high",
+        f"a Goose round must carry its model explicitly, got {goose_env}",
+    )
+    check(
+        "GOOSE_MODEL" not in codex_env
+        and codex_env.get("BLUEFIN_REVIEW_BACKEND") == "codex",
+        "a Codex round must not be handed Goose variables that do nothing, "
+        f"got {codex_env}",
+    )
+    override = os.environ.pop("BLUEFIN_REVIEW_LANDING_COMMAND", "")
+    codex_argv = tui.landing.final_command(
+        "/tmp/round.md", tui.landing.OPUS_TRIPLE, "codex"
+    )
+    goose_argv = tui.landing.final_command(
+        "/tmp/round.md", tui.landing.OPUS_TRIPLE, "goose"
+    )
+    if override:
+        os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = override
+    check(
+        "--model" in codex_argv and "claude-opus-5" in codex_argv,
+        f"a Codex round must take its model on the command line, got {codex_argv}",
+    )
+    check(
+        goose_argv[:1] == ["goose"] and "--model" not in goose_argv,
+        f"a Goose round takes its model from the environment, got {goose_argv}",
+    )
+
+    final_status = workdir / "final.jsonl"
+    final_status.write_text("")
+
+    def final_report(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                sys.executable, str(landing_py), "report", "--status",
+                str(final_status), "final", *args,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    head = "b" * 40
+    result = final_report(
+        "--round", "1", "--phase", "final-review", "--model", "claude-opus-5",
+        "--input-head", head, "--note", "one finding",
+    )
+    check(result.returncode == 0, f"a first round must record: {result.stderr}")
+    check(
+        tui.landing.final_phase(str(final_status)).get("phase") == "final-review",
+        "the record must carry the round's phase",
+    )
+    result = final_report(
+        "--round", "2", "--phase", "fixing", "--model", "kimi-k3",
+        "--input-head", "abc", "--note", "bad head",
+    )
+    check(
+        result.returncode != 0 and "40-character" in result.stderr,
+        f"a short head must fail closed before any write, got {result}",
+    )
+    result = final_report(
+        "--round", str(tui.landing.FINAL_ROUND_LIMIT + 1), "--phase", "re-review",
+        "--model", "kimi-k3", "--note", "one more",
+    )
+    check(
+        result.returncode != 0,
+        "the breaker must refuse a round past the limit in the record itself",
+    )
+    final_report(
+        "--round", "5", "--phase", "review-blocked", "--model", "kimi-k3",
+        "--note", "two findings remain",
+    )
+    result = final_report(
+        "--round", "5", "--phase", "cleanup", "--model", "kimi-k3", "--note", "late",
+    )
+    check(
+        result.returncode != 0 and "already review-blocked" in result.stderr,
+        f"a blocked batch must not be quietly walked back, got {result}",
+    )
+    blocked = tui.landing.final_phase(str(final_status))
+    check(
+        blocked.get("phase") == "review-blocked"
+        and blocked.get("note") == "two findings remain",
+        f"the blocked verdict must keep its findings, got {blocked}",
+    )
+
+    # The gate: one prompt per dashboard session, before the first dispatch,
+    # and changeable afterwards with [P].
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app.final_policy = None
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.FinalPolicyScreen),
+            f"the first batch must ask the policy once, got "
+            f"{type(app.screen).__name__}",
+        )
+        gate_text = " ".join(
+            str(node.render())
+            for node in app.screen.query(tui.Static)
+        )
+        check(
+            "never" in gate_text and "branch protection" in gate_text,
+            f"the gate must state what a review round may not do, got {gate_text!r}",
+        )
+        await pilot.press("3")
+        await pilot.pause()
+        check(
+            app.final_policy == "kimi",
+            f"the chosen policy must be the session's, got {app.final_policy!r}",
+        )
+        check(
+            isinstance(app.screen, tui.BatchPlanScreen),
+            f"choosing must continue to the batch plan, got "
+            f"{type(app.screen).__name__}",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
+        app.action_land_batch()
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.BatchPlanScreen),
+            "a second batch must not ask the policy again",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "review: kimi" in status,
+            f"the status bar must show the session policy, got {status!r}",
+        )
+        app.action_review_policy()
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.FinalPolicyScreen),
+            "[P] must reopen the policy gate",
+        )
+        await pilot.press("1")
+        await pilot.pause()
+        check(app.final_policy == "automatic", "the policy must be changeable")
+
+    # ── the lab is optional, coarse, and never load-bearing (#379) ──────
+    check(
+        tui.lab_client.lab_state({}) == "OFF"
+        and tui.lab_client.lab_state({"ok": False, "error": "unreachable"})
+        == "DEGRADED"
+        and tui.lab_client.lab_state({"ok": True, "state": "READY"}) == "READY",
+        "an unreachable broker must degrade, never look like a clean answer",
+    )
+    fresh = {"ghost": "up", "exo-0": "up", "fresh": True}
+    check(
+        tui.lab_client.lab_state(
+            {"ok": True, "state": "READY", "active": True, "usb4": fresh}
+        )
+        == "ACTIVE",
+        "a Review-bound workflow with both links fresh and up is ACTIVE",
+    )
+    for name, usb4 in (
+        ("stale", {"ghost": "up", "exo-0": "up", "fresh": False}),
+        ("one link down", {"ghost": "up", "exo-0": "down", "fresh": True}),
+        ("unknown link", {"ghost": "unknown", "exo-0": "up", "fresh": True}),
+        ("malformed", {}),
+    ):
+        check(
+            tui.lab_client.lab_state(
+                {"ok": True, "state": "READY", "active": True, "usb4": usb4}
+            )
+            == "READY",
+            f"{name} must drop the bolt back to READY",
+        )
+    check(
+        tui.lab_client.lab_state(
+            {"ok": True, "state": "READY", "active": False, "usb4": fresh}
+        )
+        == "READY",
+        "idle work must drop the bolt even with both links fresh",
+    )
+    check(
+        tui.lab_client.lab_state({"ok": True, "state": "DEGRADED"}) == "DEGRADED",
+        "a degraded broker stays degraded",
+    )
+    os.environ.pop("BLUEFIN_REVIEW_LAB_SOCKET", None)
+    check(
+        not tui.lab_client.lab_configured()
+        and tui.lab_client.status().get("state") == "OFF",
+        "no socket means OFF, and asking anyway must not raise",
+    )
+    os.environ["BLUEFIN_REVIEW_LAB_SOCKET"] = str(workdir / "not-a-socket")
+    check(
+        not tui.lab_client.lab_configured(),
+        "a socket path that does not exist must not advertise a lab",
+    )
+    (workdir / "not-a-socket").write_text("")
+    degraded = tui.lab_client.status()
+    check(
+        degraded.get("ok") is False and degraded.get("state") == "DEGRADED",
+        f"a dead socket must degrade rather than answer, got {degraded}",
+    )
+    os.environ.pop("BLUEFIN_REVIEW_LAB_SOCKET", None)
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "LAB OFF" in status,
+            f"a dashboard with no lab must say LAB OFF, got {status!r}",
+        )
+        app.lab_polled("ACTIVE", "workflow running")
+        await pilot.pause()
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "LAB ⚡ ACTIVE" in status and "ACTIVE" in status,
+            f"the bolt must decorate the word, never replace it, got {status!r}",
+        )
+        app.lab_polled("DEGRADED", "broker timeout")
+        await pilot.pause()
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "LAB DEGRADED" in status and "⚡" not in status,
+            f"a coarse poll must be able to remove the bolt, got {status!r}",
+        )
 
     # ── merging without lgtm is a maintainer power ───────────────────────
     # lgtm is an opt-in to Hive's automation, not a toll on merging: a

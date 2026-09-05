@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-25",
+  "generated_at": "2026-09-05",
   "schema_version": "1.0",
   "skills": [
     {
@@ -38,6 +38,26 @@
       "description": "Defines repository-neutral continuation, capacity, ownership, and evidence rules for bounded factory work.",
       "version": "1.3",
       "last_updated": "2026-08-14",
+      "doc_type": "policy"
+    },
+    {
+      "id": "final-review",
+      "name": "final-review",
+      "one_line_purpose": "Run bounded fresh-context review and fix rounds after a batch lands.",
+      "entry_point": "docs/skills/final-review.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "review",
+        "batch",
+        "rounds",
+        "models",
+        "breaker",
+        "cleanup"
+      ],
+      "description": "Defines the dashboard's final review-and-fix phase: one session policy, batch classification, fresh-context rounds with explicit models, a five-round breaker, and the cleanup gate.",
+      "version": "1.0",
+      "last_updated": "2026-09-05",
       "doc_type": "policy"
     },
     {
@@ -170,8 +190,8 @@
         "maintainer"
       ],
       "description": "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests.",
-      "version": "2.0",
-      "last_updated": "2026-08-25",
+      "version": "2.2",
+      "last_updated": "2026-09-05",
       "doc_type": "runbook"
     },
     {

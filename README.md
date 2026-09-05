@@ -504,6 +504,58 @@ Anything not fixed **stays selected and stays marked**: the row carries
 next pull request rather than stopping. Putting it back in the queue is the
 default, not something you have to remember to redo.
 
+### Final review after a batch lands
+
+Landing a batch is not the end of it. Once every selected pull request has an
+outcome, the same lane runs a final review of the whole batch, hands any
+findings to a fresh fixer, and reviews again — up to five rounds, then the
+batch is left visibly `review-blocked` with its findings rather than looping.
+
+The first batch of a session asks which reviewer to use, once:
+
+```
+ final review for this dashboard session:
+
+   [1] automatic — Opus 5 reviews normal and mixed batches,
+       Kimi K3 reviews dependency/chore-only batches
+   [2] always Opus 5 — Opus reviews every batch, Kimi K3 fixes
+   [3] always Kimi K3 — fresh K3 review and fix rounds
+```
+
+`P` changes it later. A review round may commit only on the branches your
+batch already selected; it never adds pull requests, never removes a hold, and
+never bypasses branch protection. The batch queue (`w`) shows the phase, the
+round, the model, and the heads each round bound to.
+
+### Using your own lab for a session
+
+If your machine can reach a Kubernetes cluster, `just review-queue` asks once
+whether to use it for that session:
+
+```
+?  Kubernetes context ghost-lab is reachable. Use it for this session only? [y/N]
+```
+
+Say yes and the launcher starts a small broker **on the host** and passes the
+container one private socket. Your kubeconfig, your credentials, your home
+directory, and the Podman socket stay out of the container; the review agent
+can ask for cluster health, run an allowlisted QA workflow pinned to the exact
+pull-request head, and nothing else. Your own lab skills (`lab-test`,
+`k3s-cluster-ops`, `kubernetes-specialist`, `live-dev-common`) are mounted
+read-only when you have them.
+
+The status line then reads `LAB READY`, `LAB DEGRADED`, or `LAB ⚡ ACTIVE` —
+the bolt only while a Review-bound workflow is actually running and both lab
+nodes report a fresh Thunderbolt link. `REVIEW_LAB=1` or `REVIEW_LAB=0`
+answers the question up front for an unattended launch.
+
+Say no — or have no cluster, no `kubectl`, or a lab that is down — and
+everything works exactly as before: the status line reads `LAB OFF` and
+reviews verify published images from the registry. The broker and its socket
+are removed when the session ends, `review-container` never gets any of this,
+and stable verified lab findings are filed automatically to
+`projectbluefin/lab` or `projectbluefin/server` without asking you.
+
 ### Leaving a review
 
 `r` starts the agent review so you can see the pull request judged; `v` shows
@@ -924,6 +976,7 @@ bash tests/generate-skills.sh
 bash tests/image-contract.sh
 bash tests/hive-compatibility.sh
 bash tests/bluefin-review.sh
+python3 tests/lab-broker-contract.py
 bash tests/just-onboarding.sh
 git diff --check
 just --list
