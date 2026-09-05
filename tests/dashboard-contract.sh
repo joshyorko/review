@@ -184,6 +184,59 @@ grep -q '\[b\]l\[/b\]' "$tui" &&
 grep -q '\[b\]p\[/b\]' "$tui" &&
   fail "the acting key line must not advertise priority mutation"
 
+# ── the optional lab is optional, and holds no credential (#379) ─────────
+# The container half must never reach for a cluster directly: it has no
+# kubeconfig, no kubectl, and no argo, by design.
+lab_client="$repo_root/image/tui/lab_client.py"
+broker="$repo_root/scripts/review-lab-broker.py"
+grep -qE '\b(kubectl|kubeconfig|argo|k8sgpt)\b' "$lab_client" &&
+  fail "the container-side lab client must not name a host cluster tool"
+grep -qE '\bsubprocess\b|\bos\.system\b' "$lab_client" &&
+  fail "the lab client speaks the socket protocol, never a local command"
+grep -q 'LAB_DEGRADED' "$lab_client" ||
+  fail "an unreachable broker must degrade rather than answer cleanly"
+grep -q "usb4-link-observed-at" "$broker" ||
+  fail "the USB4 predicate must read the observation timestamp"
+grep -q '45' "$broker" ||
+  fail "the USB4 freshness window must be the documented 45 seconds"
+# The dashboard renders the word; the bolt is decoration on top of it.
+grep -q 'LAB ⚡ ACTIVE' "$tui" ||
+  fail "the status area must carry the lab state as text plus the glyph"
+grep -qE 'lab_client\.(status|lab_state)' "$tui" ||
+  fail "the dashboard must read lab state through the client"
+grep -q 'set_interval(30.0, self.poll_lab)' "$tui" ||
+  fail "the lab must be polled coarsely, not on the dashboard's own pace"
+# Filing is a narrow machine authority with fixed destinations.
+grep -q 'projectbluefin/lab' "$broker" ||
+  fail "cluster-platform findings must route to projectbluefin/lab"
+grep -q 'projectbluefin/server' "$broker" ||
+  fail "server-product findings must route to projectbluefin/server"
+grep -q 'unroutable' "$broker" ||
+  fail "an ambiguous finding must file nothing"
+
+# ── the final review runs in the existing lane (#378) ───────────────────
+grep -q 'class FinalPolicyScreen' "$tui" ||
+  fail "the session's final-review policy must be one explicit gate"
+grep -q 'landing_draining' "$tui" ||
+  fail "one drainer must own the landing lane, or a round runs twice"
+grep -qE 'self\.[a-z_]*queue: list\[landing\.LandingTask\]' "$tui" ||
+  fail "the final review must reuse the landing queue, not add a second one"
+grep -cE '^\s+self\.[a-z_]+_queue: list' "$tui" | grep -qx 1 ||
+  fail "the dashboard must own exactly one agent queue"
+grep -q 'FINAL_ROUND_LIMIT = 5' "$landing_py" ||
+  fail "the five-round breaker must be a constant in the record's writer"
+grep -q 'is outside 1\.\.' "$landing_py" ||
+  fail "the record itself must refuse a round past the limit"
+grep -q 'already review-blocked\|already {rounds\[-1\]' "$landing_py" ||
+  fail "nothing may be written after the final phase closes"
+grep -q 'GOOSE_MODEL' "$landing_py" ||
+  fail "a Goose round must carry its model explicitly"
+grep -q 'BLUEFIN_REVIEW_FINAL_MODEL' "$landing_py" ||
+  fail "a Codex round must not be handed Goose variables that do nothing"
+# shellcheck disable=SC2016 # single quotes are intentional for literal markdown backticks
+grep -q 'never force-push, never remove a hold' "$landing_py" ||
+  fail "a fix round must be told never to bypass branch protection"
+
 # Queueing goes through Hive's authenticated mutation endpoint. Hive owns the
 # App-authored exact-head approval and queue label; a human gh review cannot
 # satisfy the governor's authorship contract (#247).

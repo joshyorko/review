@@ -47,63 +47,52 @@ Do not use this for the launcher that starts the container
 Its builders consume queue snapshots and validated `ReviewResult` values; they
 do not call Textual, GitHub, Hive, a harness, or a mutation gate.
 
-`ActionID` is a stable shared registry. Verdict selection and submission are
-separate intents: `CHOOSE_REVIEW_VERDICT`, `APPROVE_REVIEW`,
-`REQUEST_CHANGES`, `COMMENT_REVIEW`, and `SUBMIT_REVIEW`. Pull-request
-mutation intents are explicit (`APPROVE_AND_QUEUE`, `MERGE_NOW`,
-`UPDATE_BRANCH`, `CLOSE_PULL_REQUEST`, `ADD_PULL_REQUEST_COMMENT`, and
-`RESOLVE_DUPLICATES`); `COPY_REVIEW_CONTEXT` is read-only. Navigation owns
-`NAVIGATE_UP`, `NAVIGATE_DOWN`, `NAVIGATE_FIRST`, `NAVIGATE_LAST`,
-`NAVIGATE_PAGE_UP`, `NAVIGATE_PAGE_DOWN`, `PANE_NEXT`, `PANE_PREVIOUS`,
-`BACK`, `HELP`, and `OPEN_COMMAND_PALETTE`. Harness preparation owns
-`SWITCH_HARNESS`, `PREPARE_HARNESS`, `SIGN_IN_HARNESS`, `INSTALL_HARNESS`,
-`RETRY_HARNESS_DETECTION`, `HARNESS_DIAGNOSTICS`, and `START_REVIEW`.
-Review-body intent is `GENERATE_BODY`, `EDIT_BODY`, `PREVIEW_BODY`, and
-`SUBMIT_REVIEW`. The registry must not reintroduce ambiguous `REJECT`,
+`ActionID` is a stable shared registry, and every intent is explicit: verdict
+selection and submission are separate (`CHOOSE_REVIEW_VERDICT`,
+`APPROVE_REVIEW`, `REQUEST_CHANGES`, `COMMENT_REVIEW`, `SUBMIT_REVIEW`), as
+are pull-request mutations (`APPROVE_AND_QUEUE`, `MERGE_NOW`, `UPDATE_BRANCH`,
+`CLOSE_PULL_REQUEST`, `ADD_PULL_REQUEST_COMMENT`, `RESOLVE_DUPLICATES`),
+read-only `COPY_REVIEW_CONTEXT`, navigation, harness preparation, and
+review-body intents. The registry must not reintroduce ambiguous `REJECT`,
 `LEAVE_REVIEW`, `COMMENT`, or `HANDOFF` identifiers.
 
-`ActionSpec.suspended_in_editor` marks navigation and pane intents that must
-be suppressed while a text editor owns focus. `mutating` identifies a
-GitHub-side mutation; `confirmation_required` also records local preparation
-actions that require explicit human consent.
+`ActionSpec.suspended_in_editor` marks navigation and pane intents suppressed
+while a text editor owns focus; `mutating` identifies a GitHub-side mutation,
+and `confirmation_required` also covers local preparation needing consent.
 
 The live TUI exposes one `command_registry()` from
-`image/tui/bluefin_review_tui.py`. Bindings and help/palette entries are
-projections of that registry, including `j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`,
-Enter, Escape, `q`, `Ctrl-C`, `Ctrl-q`, `/`, `r`, `y`, `Ctrl-p`, `:`, and `?`.
-On the root dashboard, `q` and Ctrl-C quit; on pushed screens, `q` and Escape
-go back. Textual editor and confirmation focus remains authoritative: suspended commands do
-not consume typed prose or PR numbers. `u` remains the gated branch update;
-`U` selects live-evidence mechanical Renovate rows; `a` is approve+queue
-only and never touches a selection; `A` is the only batch-landing key (it
-does nothing without a selection) and `w` opens the read-only batch queue.
+`image/tui/bluefin_review_tui.py`, and bindings and help/palette entries are
+projections of it (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter, Escape, `q`,
+`Ctrl-C`, `Ctrl-q`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`). On the root dashboard
+`q` and Ctrl-C quit; on pushed screens `q` and Escape go back. Editor and
+confirmation focus stays authoritative: suspended commands never consume typed
+prose or PR numbers. `u` is the gated branch update, `U` selects
+live-evidence mechanical Renovate rows, `a` is approve+queue only, `A` is the
+only batch-landing key, `w` opens the read-only batch queue, and `P` sets the
+session's final-review policy.
 
 `QueueRow` and `DecisionCard` carry the pull-request identity, TL;DR, current
 and reviewed heads, freshness, CI, mergeability, provenance, verification,
 findings, and available human actions. A full current head is bound only when
 Codex-style `provenance.head_sha` or the landed Goose `live.head` evidence is
-the exact 40-character SHA. An abbreviated Goose head is insufficient: it
-produces `STALE` and withholds the current exact head. If an adapter receives
-an abbreviated Goose head, repository-backed unique expansion belongs before
-this pure builder; the builder performs no repository lookup. Missing evidence
-or any disagreement also produces `STALE` and cannot produce a clean card.
-`effort` is preferred while `reasoning_effort` remains accepted for existing
-adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
-`STALE`, and `CANCELLED`.
+the exact 40-character SHA; an abbreviated Goose head produces `STALE` and
+withholds the current head, and repository-backed expansion belongs before
+this pure builder, which performs no lookup. Missing evidence or any
+disagreement also produces `STALE` and cannot produce a clean card. `effort`
+is preferred while `reasoning_effort` remains accepted. `ReviewStateView`
+owns `READY`, `RUNNING`, `STALE`, and `CANCELLED`.
 
 Terminal-normalized Shift-L may arrive as lowercase key identity plus uppercase
-character. The dashboard dispatches that event to ordinary review and keeps
-lowercase `l` pane movement on the active `Screen` focus API. The two
-right-hand evidence panes are focusable `ScrollableContainer`s wrapping the
-`#details`/`#context` Statics, so `h`/`l` reach them and evidence taller
-than the pane scrolls instead of clipping. Review and
-comment editor shortcuts are priority bindings, with literal hints and buttons
-that call the same actions. Review submission remains exact-body preview then
-the typed-number gate; comments use the same preview-before-gate sequence.
-Terminal dispatch failures become bounded visible errors instead of ending the
-dashboard. `e` opens bounded decision evidence; `r` opens the
-explicitly secondary raw backend transcript. `[u]` updates only clean branches;
-conflicts direct the maintainer to manual resolution before a gate.
+character: the dashboard dispatches it to ordinary review and keeps lowercase
+`l` pane movement on the active `Screen` focus API. The two right-hand
+evidence panes are focusable `ScrollableContainer`s wrapping the
+`#details`/`#context` Statics, so `h`/`l` reach them and tall evidence scrolls
+instead of clipping. Editor shortcuts are priority bindings with literal hints
+and buttons calling the same actions; review and comment submission both run
+exact-body preview then the typed-number gate. Terminal dispatch failures
+become bounded visible errors instead of ending the dashboard. `e` opens
+bounded decision evidence, `r` the explicitly secondary raw transcript, and
+`[u]` updates only clean branches — conflicts go to manual resolution.
 
 ## Core Process
 
@@ -133,21 +122,20 @@ conflicts direct the maintainer to manual resolution before a gate.
    app through `run_test()`. The static greps in
    `tests/dashboard-contract.sh` are for proving *absence* — a power the
    dashboard must not have. Presence is proven by pressing the key.
-7. **Completed reviews cross the `ReviewResult` contract.** The current Goose
-   adapter accepts its JSONL findings and orchestrator progress records. An
-   exit-zero transcript without that structure is `unparsable`, never clean.
-   The Codex adapter accepts one complete official JSONL run: one thread and
-   turn start, one final result-bearing `item.completed` agent message, and an
-   immediately following successful `turn.completed`. Bare results,
-   ambiguous result messages, and malformed, failed, cancelled, out-of-order,
-   or trailing terminal events are `unparsable` with bounded raw evidence.
-   It enables code-mode-only and the bundled official code-mode host, disables
-   direct-tool fallback, and uses the review container as the shell isolation
-   boundary so the CLI never depends on a nested bubblewrap sandbox. A
-   re-entrant harness persists its opaque continuation before waiting for an
-   external event; only that durable continuation may make the run resumable.
-   Keep the decision card concise and keep bounded raw evidence reachable with
-   `e`; backend prose does not belong in Textual rendering code.
+7. **Completed reviews cross the `ReviewResult` contract.** The Goose adapter
+   accepts its JSONL findings and orchestrator progress records; an exit-zero
+   transcript without that structure is `unparsable`, never clean. The Codex
+   adapter accepts one complete official JSONL run: one thread and turn start,
+   one final result-bearing `item.completed` agent message, and an immediately
+   following successful `turn.completed`. Bare or ambiguous results and
+   malformed, failed, cancelled, out-of-order, or trailing terminal events are
+   `unparsable` with bounded raw evidence. It enables code-mode-only with the
+   bundled official host, disables direct-tool fallback, and uses the review
+   container as the shell isolation boundary rather than a nested bubblewrap
+   sandbox. A re-entrant harness persists its opaque continuation before
+   waiting on an external event; only that durable continuation makes a run
+   resumable. Keep the decision card concise, keep bounded raw evidence on
+   `e`, and keep backend prose out of Textual rendering code.
 8. **Keep the acting surface explicit.** The shipped keys cover review,
    merge, branch updates, rejection, handoff, docs, and dupe
    cleanup; label and priority mutation are not part of the dashboard.
@@ -168,12 +156,9 @@ def escape(text: str) -> str:
     return str(text).replace("\\", "\\\\").replace("[", "\\[")
 ```
 
-Upstream's own recommendation for mixing variables into markup is template
-substitution, which sidesteps the question entirely:
-
-```python
-Content.from_markup("hello [bold]$name[/bold]!", name=name)
-```
+Upstream's recommendation for mixing variables into markup — template
+substitution, `Content.from_markup("hello [bold]$name[/bold]!", name=name)` —
+sidesteps the question entirely.
 
 **Links need a quoted URL.** `[link=https://…]` fails the markup value parser
 at the colon; `[link="https://…"]` is correct, and reaches the terminal as
@@ -215,8 +200,8 @@ distinct states. `[o]` is only an optional browser escape hatch.
   many stops are hidden.
 - **Keep mutation failures inspectable.** The selected stop and recovery screen
   retain the exact command, GitHub error, checks, and branch state after the
-  notification disappears. Update, retry, queue, and skip are explicit; a
-  true conflict offers exceptional manual handoff without a bypass.
+  notification disappears. Update, retry, queue, and skip are explicit; a true
+  conflict offers manual handoff without a bypass.
 - **Colour is never the only carrier of a fact.** Rows colour by state *and*
   carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
   `? CI UNKNOWN`, as applicable. The batch queue applies the same rule three
@@ -228,11 +213,11 @@ distinct states. `[o]` is only an optional browser escape hatch.
   request whose snapshot or fetched live evidence says CI failed or is
   pending; GitHub branch protection remains an additional gate.
 - **Roll up checks at the exact current head.** Fetch `headRefOid` and
-  `statusCheckRollup` in the same `gh pr view`, group check runs by workflow
-  and job name (commit statuses by context), and use only the newest run in
-  each stable context. Superseded cancellations do not make a successful
-  rerun fail; authoritative failures, cancellations, pending checks, absent
-  checks, and GitHub's merge state remain separate evidence.
+  `statusCheckRollup` in one `gh pr view`, group check runs by workflow and job
+  name (commit statuses by context), and use only the newest run per stable
+  context, so a superseded cancellation cannot fail a successful rerun.
+  Authoritative failures, cancellations, pending and absent checks, and
+  GitHub's merge state remain separate evidence.
 - **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
@@ -245,21 +230,18 @@ distinct states. `[o]` is only an optional browser escape hatch.
   an open non-draft pull request, `MERGEABLE` + `BEHIND`, and every reported
   check complete and green. `[U]` selects exactly those stops for the existing
   gated `[u]`. **`MECHANICAL` describes updateability, not approval and not
-  merge safety.** The earlier `BATCHABLE` tag matched dependency-shaped titles,
-  which is duplicate evidence about the subject and says nothing about whether
-  the branch can be brought current; `dependency_subject()` survives for
+  merge safety.** The earlier `BATCHABLE` tag matched dependency-shaped
+  titles — duplicate evidence about the subject, silent about whether the
+  branch can be brought current; `dependency_subject()` survives for
   duplicate detection only.
-- **Distinguish the merge paths.** `a` asks Hive to create the
-  App-authored exact-head approval and apply `lgtm` to the highlighted
-  pull request, an opt-in to its sweep.
-  On a selection, `A` dispatches one
-  landing agent for the whole batch; without a selection `A` does nothing.
-  `a` never touches a selection — it is approve+queue only.
-  `w` opens the read-only batch queue.
-  `m` squashes now and is gated on
-  GitHub's `push` permission, read per repository. `L` leaves a review and
-  merges nothing. A review that can only be given by also queueing or
-  merging is not a review.
+- **Distinguish the merge paths.** `a` asks Hive to create the App-authored
+  exact-head approval and apply `lgtm` to the highlighted pull request, an
+  opt-in to its sweep; it never touches a selection. On a selection, `A`
+  dispatches one landing agent for the whole batch; without a selection `A`
+  does nothing. `w` opens the read-only batch queue. `m` squashes now and is
+  gated on GitHub's `push` permission, read per repository. `L` leaves a
+  review and merges nothing: a review that can only be given by also queueing
+  or merging is not a review.
 - **Treat the Hive API as JSON, not a browser.** The read-only status probe
   reports missing hub configuration, missing credentials, network failure,
   authentication, authorization, edge/login redirects, malformed responses,
@@ -269,12 +251,12 @@ distinct states. `[o]` is only an optional browser escape hatch.
   page reads differently from invalid JSON or a JSON array. The queue POST
   never follows a redirect and succeeds only when a bounded JSON response
   explicitly says `queued`; the typed pull-request-number gate remains the
-  authority boundary. A failed Hive probe leaves the queue and review
-  evidence visible, marks any retained worker assignments as last-known
-  rather than current, and reports that current assignment state is unknown.
-  Hive probes run only at startup or after an explicit maintainer refresh;
-  direct GitHub review and merge actions remain available while Hive is down.
-  Hosted queueing remains blocked by the ingress defect tracked in #258.
+  authority boundary. A failed probe leaves the queue and review evidence
+  visible, marks retained worker assignments as last-known rather than
+  current, and says current assignment state is unknown. Probes run only at
+  startup or after an explicit maintainer refresh; direct GitHub review and
+  merge stay available while Hive is down. Hosted queueing remains blocked by
+  the ingress defect tracked in #258.
 
 ## Batch landing
 
@@ -316,49 +298,42 @@ The brief teaches the agent to batch a repository-level blocker: a required
 check that fails on the toolchain or the base branch blocks every pull
 request in that repository identically, so the first such `blocked` verdict
 is diagnosed once and applied to the remaining same-repository rows in one
-pass — each note naming the one root cause — instead of re-diagnosing them
-one at a time. The fix never goes inside one pull request's branch: a
-mechanical root cause (a toolchain pin bump, a workflow repair) is fixed at
-the root as its own branch and pull request, named in each covered note;
-since it was not in the maintainer's confirmed selection the agent reports
-it rather than merging it. A root cause with no mechanical fix is a written
-finding in the done note.
+pass — each note naming the one root cause. The fix never goes inside one
+pull request's branch: a mechanical root cause (a toolchain pin bump, a
+workflow repair) is fixed at the root as its own branch and pull request,
+named in each covered note, and reported rather than merged because it was
+not in the maintainer's confirmed selection. A root cause with no mechanical
+fix is a written finding in the done note.
 
 The screen is a cabinet of framed panels (`BATCHES`, `HIVE`, `AGENT LOG`,
-round `$secondary` borders with titles) over a title bar. Each batch
-header is a full-width state bar (`batch_bar_style`: running is
-`$text-primary on $primary-muted`, queued `$text-warning on
-$warning-muted`, exited 0 `$text-success on $success-muted`, anything else
-`$text-error on $error-muted`). A running batch's header also names its
-heartbeat — the age of the status file's last append (`last report 3m
-ago`) — so a healthy long wait is distinguishable from a dead agent
-(#291), and each pull request carries its state three ways at once: the
-printed word, a shape-distinct glyph, and a colour from
-`LANDING_STATE_STYLES` — `◌` waiting, `◐` diagnosing/fixing, `◔`
-waiting-ci, `▶` merging, `◆` awaiting-stable, `✓` merged, `■` blocked, `✗`
-failed, `✔` for the task-level done. Colour is additive: terminal states
-also read bold on a muted fill, so hue is never the only difference
-between two states. Verified against the pinned Textual: markup spans
-resolve `$`-theme variables via the active app's stylesheet, and padding
-in a span keeps its background — that makes the header bar full-width.
+round `$secondary` borders with titles) over a title bar. Each batch header
+is a full-width state bar (`batch_bar_style`) that also names its heartbeat
+— the age of the status file's last append (`last report 3m ago`) — so a
+healthy long wait is distinguishable from a dead agent (#291). Each pull
+request carries its state three ways at once: the printed word, a
+shape-distinct glyph, and a colour from `LANDING_STATE_STYLES` — `◌`
+waiting, `◐` diagnosing/fixing, `◔` waiting-ci, `▶` merging, `◆`
+awaiting-stable, `✓` merged, `■` blocked, `✗` failed, `✔` task-level done,
+`◇` a final review round. Colour is additive: terminal states also read bold
+on a muted fill, so hue is never the only difference. Verified against the
+pinned Textual: markup spans resolve `$`-theme variables via the active
+app's stylesheet, and padding in a span keeps its background.
 
-The record outlives the run: the launcher mounts the state directory from
-the host, and `restore_landing_marks` folds the newest persisted outcome
+The record outlives the run: the launcher mounts the state directory from the
+host, and `restore_landing_marks` folds the newest persisted outcome
 (`landing.persisted_events`, oldest file first) back onto matching rows
-whenever the queue (re)builds them — a relaunch shows the failure marking
+whenever the queue (re)builds them, so a relaunch shows the failure marking
 again instead of reverting to un-reviewed (#281). Only the marking is
 restored; rebuilding a batch selection stays the maintainer's. A manual
-success — a re-queue, a direct merge — clears the row in memory, so it
-also writes a superseding event (`landing.record_event`, appended to
-`manual.jsonl` with a fresh mtime, which wins the fold) or the next
-refresh would fold the stale failure back onto the row (#290). The record
-is durable, so it is bounded: batch files older than seven days are pruned
-when the record is read. Each task id
-carries the instance name (`BLUEFIN_REVIEW_INSTANCE`, set by the launcher
-from the container name) because named dashboards share the one state
-directory — a bare one-second stamp would let two of them overwrite each
-other's files, and the name makes the record attributable. Same-second
-batches from one dashboard get a numeric suffix.
+success — a re-queue, a direct merge — clears the row in memory and also
+writes a superseding event (`landing.record_event`, appended to
+`manual.jsonl`, fresh mtime, wins the fold), or the next refresh folds the
+stale failure back onto the row (#290). The record is durable, so it is
+bounded: batch files older than seven days are pruned as the record is read.
+Each task id carries the instance name (`BLUEFIN_REVIEW_INSTANCE`, set by the
+launcher to the container name) because named dashboards share one state
+directory, and a bare one-second stamp let two overwrite each other's files;
+same-second batches from one dashboard get a numeric suffix.
 
 **Done is the release tag, not the merge — where an image is published.**
 A GitHub merge only starts the publish pipeline; the batch item is landed
@@ -436,16 +411,35 @@ branch protection.** No `--admin`, no `--delete-branch`, no push.
 
 `L` keeps the existing verdict picker, then opens a multiline `TextArea` for
 approve, request-changes, or comment. `Ctrl-g` asks the active drafting
-capability for bounded prose from the stored completed `ReviewResult` and
-live PR facts; failed, incomplete, or untrusted evidence refuses generation,
-while manual text remains available. `Ctrl-e` returns focus to editing,
-`Ctrl-p` previews the exact Markdown and command, `Ctrl-Shift-k` clears the
-body, and `Ctrl-s` submits through the existing typed PR-number gate.
+capability for bounded prose from the stored completed `ReviewResult` and live
+PR facts; failed, incomplete, or untrusted evidence refuses generation while
+manual text remains available. `Ctrl-e` returns focus to editing, `Ctrl-p`
+previews the exact Markdown and command, `Ctrl-Shift-k` clears the body, and
+`Ctrl-s` submits through the typed PR-number gate. The final Markdown is
+written verbatim to a bounded temporary body file for `gh pr review
+--body-file` only, removed after success, failure, or cancellation; no draft
+action selects a verdict, discovers findings, or mutates GitHub.
 
-The final Markdown is written verbatim to a bounded temporary body file for
-`gh pr review --body-file` only. The file is removed after success, failure,
-or cancellation; no draft action selects a verdict, discovers findings, or
-mutates GitHub.
+## The optional lab in the UI
+
+A landed batch is not a reviewed batch: the final review-and-fix rounds
+(#378) run in this same lane once every selected pull request holds a
+terminal outcome. Their policy gate, classification, per-round models,
+five-round breaker, and cleanup gate are in [`final-review.md`](final-review.md).
+
+The launcher owns the lab decision, the broker, and its lifetime; see
+[`launcher.md`](launcher.md). The dashboard receives a socket
+path, a session id, and read-only personal lab skills; never a credential.
+`lab_client` is the whole container-side surface (`status`, `health`,
+`submit`), returning `DEGRADED` envelopes on failure.
+
+The status area carries `LAB OFF`, `LAB READY`, `LAB DEGRADED`, or
+`LAB ⚡ ACTIVE`. `ACTIVE` requires a Review-bound workflow for this exact
+session/repository/PR/head running **and** both `ghost` and `exo-0` reporting
+`lab.projectbluefin.io/usb4-link=up` with valid `usb4-link-observed-at`
+timestamps under 45 seconds old. Coarse 30-second off-thread polling ensures a
+wedged broker never slows the UI. Lab evidence supplements a review and never
+gates one.
 
 ## Common Rationalizations
 

@@ -764,6 +764,140 @@ read_hive_value() {
     }
   ' "$HIVE_CONTRIBUTOR_ENV"
 }
+
+# ── the optional lab (#379) ────────────────────────────────────────────────
+# This appliance owns no lab and depends on none, and none of that changes
+# here: what follows is a capability a maintainer can hand ONE dashboard
+# session, on their own machine, with their own cluster. Nothing requires it,
+# nothing waits for it, and nothing about a pull request's verdict may need
+# it — a missing lab only means the deliverable is verified from published
+# registry evidence instead.
+#
+# What crosses into the container is one Unix socket. Not the kubeconfig, not
+# a Kubernetes credential, not the host home, not host networking, not the
+# Podman socket, not a host binary. The broker on the other end holds all of
+# that and answers exactly three typed questions.
+REVIEW_LAB_SKILLS=(lab-test k3s-cluster-ops kubernetes-specialist live-dev-common)
+
+lab_broker_script() {
+  printf '%s' "${REVIEW_LAB_BROKER:-${PWD}/scripts/review-lab-broker.py}"
+}
+
+lab_probe_context() {
+  # Host capability, decided before anything is offered and without printing
+  # a credential, a kubeconfig path, or a server URL: the probe answers with
+  # the current context's NAME and whether nodes can be listed at all.
+  LAB_CONTEXT=""
+  local broker probe_json
+  broker="$(lab_broker_script)"
+  [[ -f "$broker" ]] || return 1
+  command -v python3 &>/dev/null || return 1
+  command -v kubectl &>/dev/null || return 1
+  probe_json="$(python3 "$broker" probe 2>/dev/null)" || return 1
+  LAB_CONTEXT="$(printf '%s' "$probe_json" | sed -n 's/.*"context":"\([^"]*\)".*/\1/p')"
+  [[ -n "$LAB_CONTEXT" ]]
+}
+
+lab_runtime_flags() {
+  # gVisor blocks host Unix domain sockets by default, so the one socket this
+  # session mounts needs runsc's host-uds=open — and ONLY under runsc: crun
+  # and runc reject the flag outright, so probing the configured runtime is
+  # what keeps the flag from breaking every other machine. review-container
+  # never reaches this function: it receives no lab capability at all.
+  local runtime
+  runtime="$(podman info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null || true)"
+  if [[ "$runtime" == runsc ]]; then
+    printf '%s' "--runtime-flag=host-uds=open"
+  fi
+  return 0
+}
+
+start_lab_broker() {
+  # The broker lives exactly as long as this foreground session: it is
+  # started here, killed by the EXIT trap, and its socket directory removed
+  # with it. Nothing survives the terminal that launched it.
+  local broker runtime_dir waited
+  broker="$(lab_broker_script)"
+  runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [[ ! -d "$runtime_dir" || ! -w "$runtime_dir" ]]; then
+    echo "! no writable XDG_RUNTIME_DIR; the dashboard starts without the lab." >&2
+    return 1
+  fi
+  LAB_SESSION="$(python3 -c 'import secrets; print(secrets.token_hex(8))')" || return 1
+  LAB_SOCKET_DIR="$(mktemp -d "${runtime_dir}/bluefin-review-lab.XXXXXX")" || return 1
+  chmod 700 "$LAB_SOCKET_DIR"
+  LAB_SOCKET="${LAB_SOCKET_DIR}/broker.sock"
+  python3 "$broker" serve --socket "$LAB_SOCKET" --session "$LAB_SESSION" \
+    >"${LAB_SOCKET_DIR}/broker.log" 2>&1 &
+  LAB_BROKER_PID=$!
+  for waited in $(seq 1 50); do
+    [[ -S "$LAB_SOCKET" ]] && break
+    kill -0 "$LAB_BROKER_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [[ ! -S "$LAB_SOCKET" ]]; then
+    echo "! the lab broker did not come up; the dashboard starts without the lab." >&2
+    cleanup_lab_broker
+    return 1
+  fi
+  return 0
+}
+
+cleanup_lab_broker() {
+  if [[ -n "${LAB_BROKER_PID:-}" ]]; then
+    kill "$LAB_BROKER_PID" 2>/dev/null || true
+    wait "$LAB_BROKER_PID" 2>/dev/null || true
+    LAB_BROKER_PID=""
+  fi
+  if [[ -n "${LAB_SOCKET_DIR:-}" && -d "$LAB_SOCKET_DIR" ]]; then
+    rm -rf "$LAB_SOCKET_DIR"
+    LAB_SOCKET_DIR=""
+  fi
+  LAB_SOCKET=""
+}
+
+offer_lab_session() {
+  # Asked once, per dashboard process, on the terminal that launched it.
+  # REVIEW_LAB=1/0 answers it without a prompt for an unattended launch;
+  # anything else, including no terminal at all, leaves the lab off.
+  LAB_SOCKET="" LAB_SESSION="" LAB_SOCKET_DIR="" LAB_BROKER_PID=""
+  local answer=""
+  [[ "${REVIEW_LAB:-}" == "0" ]] && return 0
+  lab_probe_context || return 0
+  if [[ "${REVIEW_LAB:-}" == "1" ]]; then
+    answer="y"
+  elif [[ -r /dev/tty && -w /dev/tty ]]; then
+    printf '?  Kubernetes context %s is reachable. Use it for this session only? [y/N] ' \
+      "$LAB_CONTEXT" >/dev/tty
+    read -r answer </dev/tty || answer=""
+  else
+    return 0
+  fi
+  [[ "$answer" == [Yy]* ]] || return 0
+  start_lab_broker || return 0
+  echo "✓ lab enabled for this session (context ${LAB_CONTEXT}); one socket, no credentials."
+}
+
+add_lab_container_args() {
+  # Only the socket directory and two non-secret strings. The personal lab
+  # skills are read-only documents the review agent already knows how to
+  # read; common owns the shared lab skill, so only the maintainer's own
+  # ids are mounted here, never a second copy of the org inventory.
+  [[ -n "${LAB_SOCKET:-}" ]] || return 0
+  local flag skill_root skill
+  flag="$(lab_runtime_flags)"
+  if [[ -n "$flag" ]]; then
+    CONTAINER_ARGS+=("$flag")
+  fi
+  CONTAINER_ARGS+=(--volume "${LAB_SOCKET_DIR}:/run/bluefin-review-lab:rw,z")
+  CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_LAB_SOCKET=/run/bluefin-review-lab/broker.sock")
+  CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_LAB_SESSION=${LAB_SESSION}")
+  skill_root="${REVIEW_PERSONAL_SKILLS:-${HOME}/.copilot/skills}"
+  for skill in "${REVIEW_LAB_SKILLS[@]}"; do
+    [[ -d "${skill_root}/${skill}" ]] || continue
+    CONTAINER_ARGS+=(--volume "${skill_root}/${skill}:/home/dev/.agents/skills/${skill}:ro,z")
+  done
+}
 '''
 
 # Run the contributor container: the Hive queue worker.
@@ -1073,6 +1207,11 @@ review-queue *queue_args:
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
 
+    # The lab offer happens before anything starts and answers in one
+    # question. Declining, no terminal, no kubectl, or an unreachable
+    # cluster all leave LAB_SOCKET empty and the dashboard fully usable.
+    offer_lab_session
+
     CONTAINER_ARGS=(
       podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
       --label "$(owner_run_label)"
@@ -1080,6 +1219,7 @@ review-queue *queue_args:
       # Podman does not pass COLORTERM through on its own.
       --env COLORTERM
     )
+    add_lab_container_args
     # The dashboard's record — dispatched landing batches, their failure
     # reasons, the action trace — lives under the container's XDG state
     # directory, and a reclaim-by-replace relaunch must not lose it (#281).
@@ -1125,7 +1265,9 @@ review-queue *queue_args:
     # from the host login or configuration directory. The official CLI may
     # refresh only the disposable copy, which is removed when this run exits.
     CODEX_AUTH_STAGING_DIR=""
-    trap cleanup_codex_auth_file EXIT
+    # One trap owns this session's teardown: the staged Codex credential and
+    # the lab broker both die with the terminal that launched the dashboard.
+    trap 'cleanup_codex_auth_file; cleanup_lab_broker' EXIT
     if [[ "$REVIEW_BACKEND" == codex ]]; then
       stage_codex_auth_file
       if [[ -n "$CODEX_AUTH_FILE" ]]; then

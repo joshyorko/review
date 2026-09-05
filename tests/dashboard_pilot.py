@@ -178,6 +178,18 @@ async def main() -> int:
 
     import bluefin_review_tui as tui
 
+    # Every batch flow below would meet the #378 final-review policy gate,
+    # which is asked once per dashboard process. It gets its own coverage
+    # further down; here the session answer is pre-set so the unrelated
+    # flows still exercise what they were written to exercise.
+    _dashboard_init = tui.ReviewDashboard.__init__
+
+    def _dashboard_with_policy(self, *args, **kwargs):
+        _dashboard_init(self, *args, **kwargs)
+        self.final_policy = "automatic"
+
+    tui.ReviewDashboard.__init__ = _dashboard_with_policy
+
     hive_api_stub = workdir / "hive_api_stub.py"
     hive_api_stub.write_text(
         "import json, os, sys\n"
@@ -931,10 +943,28 @@ async def main() -> int:
                 task.returncode == 0,
                 f"the landing agent must exit 0, got {task.returncode}",
             )
+            # One agent lands the whole batch — never one per pull request —
+            # and the final review-and-fix rounds (#378) follow it in the
+            # same lane.
+            for _ in range(400):
+                if len(landing_log.read_text().splitlines()) > 1:
+                    break
+                await pilot.pause(0.05)
             invocations = landing_log.read_text().splitlines()
             check(
-                len(invocations) == 1,
-                f"one agent must run for the whole batch, got {invocations}",
+                len(invocations) == 2
+                and invocations[0].endswith(".prompt.md")
+                and "final-" not in invocations[0]
+                and "final-1-final-review.prompt.md" in invocations[1],
+                f"one landing agent then exactly one final review round, got "
+                f"{invocations}",
+            )
+            rounds = [t for t in app.landing_queue if t.phase]
+            check(
+                [t.phase for t in rounds] == ["final-review"]
+                and rounds[0].status_path == task.status_path,
+                f"the round must run in the same lane and record, got "
+                f"{[(t.phase, t.status_path) for t in rounds]}",
             )
             prompt_text = Path(task.prompt_path).read_text()
             check(
@@ -2593,6 +2623,285 @@ async def main() -> int:
         sum(1 for key in raced if key.startswith("org/repo#")) == 16,
         f"every concurrent event must survive the fold, got {len(raced)}",
     )
+
+    # ── the final review-and-fix rounds (#378) ─────────────────────────
+    # The policy is a session decision asked once, the classification picks
+    # a model and nothing else, every round is its own process with its own
+    # explicit model environment, and five rounds is the end of the line.
+    dep_stops = [
+        SimpleNamespace(key="o/r#1", title="chore(deps): bump x", labels=[]),
+        SimpleNamespace(key="o/r#2", title="build(deps-dev): bump y", labels=[]),
+        SimpleNamespace(key="o/r#3", title="anything at all", labels=["dependencies"]),
+    ]
+    mixed_stops = dep_stops + [
+        SimpleNamespace(key="o/r#4", title="feat: a new thing", labels=[])
+    ]
+    check(
+        tui.landing.classify_batch(dep_stops) == "dependency",
+        "a chore/deps-only batch must classify as dependency",
+    )
+    check(
+        tui.landing.classify_batch(mixed_stops) == "mixed",
+        "one feature makes the batch mixed",
+    )
+    check(
+        tui.landing.classify_batch(
+            [SimpleNamespace(key="o/r#9", title="unreadable", labels=[])]
+        )
+        == "mixed",
+        "an unknown title must fall back to the thorough reviewer, not the "
+        "cheap one",
+    )
+    check(
+        tui.landing.classify_batch([]) == "mixed",
+        "an empty batch must not classify as dependency",
+    )
+    check(
+        tui.landing.final_triple("automatic", "mixed", "final-review")[1]
+        == "claude-opus-5"
+        and tui.landing.final_triple("automatic", "dependency", "final-review")[1]
+        == "kimi-k3"
+        and tui.landing.final_triple("opus", "dependency", "final-review")[1]
+        == "claude-opus-5"
+        and tui.landing.final_triple("kimi", "mixed", "final-review")[1] == "kimi-k3"
+        and tui.landing.final_triple("opus", "mixed", "fixing")[1] == "kimi-k3",
+        "the policy/classification table must pick the documented models",
+    )
+    goose_env = tui.landing.final_environment(tui.landing.OPUS_TRIPLE, "goose")
+    codex_env = tui.landing.final_environment(tui.landing.OPUS_TRIPLE, "codex")
+    check(
+        goose_env.get("GOOSE_MODEL") == "claude-opus-5"
+        and goose_env.get("GOOSE_THINKING_EFFORT") == "high",
+        f"a Goose round must carry its model explicitly, got {goose_env}",
+    )
+    check(
+        "GOOSE_MODEL" not in codex_env
+        and codex_env.get("BLUEFIN_REVIEW_BACKEND") == "codex",
+        "a Codex round must not be handed Goose variables that do nothing, "
+        f"got {codex_env}",
+    )
+    override = os.environ.pop("BLUEFIN_REVIEW_LANDING_COMMAND", "")
+    codex_argv = tui.landing.final_command(
+        "/tmp/round.md", tui.landing.OPUS_TRIPLE, "codex"
+    )
+    goose_argv = tui.landing.final_command(
+        "/tmp/round.md", tui.landing.OPUS_TRIPLE, "goose"
+    )
+    if override:
+        os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = override
+    check(
+        "--model" in codex_argv and "claude-opus-5" in codex_argv,
+        f"a Codex round must take its model on the command line, got {codex_argv}",
+    )
+    check(
+        goose_argv[:1] == ["goose"] and "--model" not in goose_argv,
+        f"a Goose round takes its model from the environment, got {goose_argv}",
+    )
+
+    final_status = workdir / "final.jsonl"
+    final_status.write_text("")
+
+    def final_report(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                sys.executable, str(landing_py), "report", "--status",
+                str(final_status), "final", *args,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    head = "b" * 40
+    result = final_report(
+        "--round", "1", "--phase", "final-review", "--model", "claude-opus-5",
+        "--input-head", head, "--note", "one finding",
+    )
+    check(result.returncode == 0, f"a first round must record: {result.stderr}")
+    check(
+        tui.landing.final_phase(str(final_status)).get("phase") == "final-review",
+        "the record must carry the round's phase",
+    )
+    result = final_report(
+        "--round", "2", "--phase", "fixing", "--model", "kimi-k3",
+        "--input-head", "abc", "--note", "bad head",
+    )
+    check(
+        result.returncode != 0 and "40-character" in result.stderr,
+        f"a short head must fail closed before any write, got {result}",
+    )
+    result = final_report(
+        "--round", str(tui.landing.FINAL_ROUND_LIMIT + 1), "--phase", "re-review",
+        "--model", "kimi-k3", "--note", "one more",
+    )
+    check(
+        result.returncode != 0,
+        "the breaker must refuse a round past the limit in the record itself",
+    )
+    final_report(
+        "--round", "5", "--phase", "review-blocked", "--model", "kimi-k3",
+        "--note", "two findings remain",
+    )
+    result = final_report(
+        "--round", "5", "--phase", "cleanup", "--model", "kimi-k3", "--note", "late",
+    )
+    check(
+        result.returncode != 0 and "already review-blocked" in result.stderr,
+        f"a blocked batch must not be quietly walked back, got {result}",
+    )
+    blocked = tui.landing.final_phase(str(final_status))
+    check(
+        blocked.get("phase") == "review-blocked"
+        and blocked.get("note") == "two findings remain",
+        f"the blocked verdict must keep its findings, got {blocked}",
+    )
+
+    # The gate: one prompt per dashboard session, before the first dispatch,
+    # and changeable afterwards with [P].
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app.final_policy = None
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.FinalPolicyScreen),
+            f"the first batch must ask the policy once, got "
+            f"{type(app.screen).__name__}",
+        )
+        gate_text = " ".join(
+            str(node.render())
+            for node in app.screen.query(tui.Static)
+        )
+        check(
+            "never" in gate_text and "branch protection" in gate_text,
+            f"the gate must state what a review round may not do, got {gate_text!r}",
+        )
+        await pilot.press("3")
+        await pilot.pause()
+        check(
+            app.final_policy == "kimi",
+            f"the chosen policy must be the session's, got {app.final_policy!r}",
+        )
+        check(
+            isinstance(app.screen, tui.BatchPlanScreen),
+            f"choosing must continue to the batch plan, got "
+            f"{type(app.screen).__name__}",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
+        app.action_land_batch()
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.BatchPlanScreen),
+            "a second batch must not ask the policy again",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "review: kimi" in status,
+            f"the status bar must show the session policy, got {status!r}",
+        )
+        app.action_review_policy()
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.FinalPolicyScreen),
+            "[P] must reopen the policy gate",
+        )
+        await pilot.press("1")
+        await pilot.pause()
+        check(app.final_policy == "automatic", "the policy must be changeable")
+
+    # ── the lab is optional, coarse, and never load-bearing (#379) ──────
+    check(
+        tui.lab_client.lab_state({}) == "OFF"
+        and tui.lab_client.lab_state({"ok": False, "error": "unreachable"})
+        == "DEGRADED"
+        and tui.lab_client.lab_state({"ok": True, "state": "READY"}) == "READY",
+        "an unreachable broker must degrade, never look like a clean answer",
+    )
+    fresh = {"ghost": "up", "exo-0": "up", "fresh": True}
+    check(
+        tui.lab_client.lab_state(
+            {"ok": True, "state": "READY", "active": True, "usb4": fresh}
+        )
+        == "ACTIVE",
+        "a Review-bound workflow with both links fresh and up is ACTIVE",
+    )
+    for name, usb4 in (
+        ("stale", {"ghost": "up", "exo-0": "up", "fresh": False}),
+        ("one link down", {"ghost": "up", "exo-0": "down", "fresh": True}),
+        ("unknown link", {"ghost": "unknown", "exo-0": "up", "fresh": True}),
+        ("malformed", {}),
+    ):
+        check(
+            tui.lab_client.lab_state(
+                {"ok": True, "state": "READY", "active": True, "usb4": usb4}
+            )
+            == "READY",
+            f"{name} must drop the bolt back to READY",
+        )
+    check(
+        tui.lab_client.lab_state(
+            {"ok": True, "state": "READY", "active": False, "usb4": fresh}
+        )
+        == "READY",
+        "idle work must drop the bolt even with both links fresh",
+    )
+    check(
+        tui.lab_client.lab_state({"ok": True, "state": "DEGRADED"}) == "DEGRADED",
+        "a degraded broker stays degraded",
+    )
+    os.environ.pop("BLUEFIN_REVIEW_LAB_SOCKET", None)
+    check(
+        not tui.lab_client.lab_configured()
+        and tui.lab_client.status().get("state") == "OFF",
+        "no socket means OFF, and asking anyway must not raise",
+    )
+    os.environ["BLUEFIN_REVIEW_LAB_SOCKET"] = str(workdir / "not-a-socket")
+    check(
+        not tui.lab_client.lab_configured(),
+        "a socket path that does not exist must not advertise a lab",
+    )
+    (workdir / "not-a-socket").write_text("")
+    degraded = tui.lab_client.status()
+    check(
+        degraded.get("ok") is False and degraded.get("state") == "DEGRADED",
+        f"a dead socket must degrade rather than answer, got {degraded}",
+    )
+    os.environ.pop("BLUEFIN_REVIEW_LAB_SOCKET", None)
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "LAB OFF" in status,
+            f"a dashboard with no lab must say LAB OFF, got {status!r}",
+        )
+        app.lab_polled("ACTIVE", "workflow running")
+        await pilot.pause()
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "LAB ⚡ ACTIVE" in status and "ACTIVE" in status,
+            f"the bolt must decorate the word, never replace it, got {status!r}",
+        )
+        app.lab_polled("DEGRADED", "broker timeout")
+        await pilot.pause()
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "LAB DEGRADED" in status and "⚡" not in status,
+            f"a coarse poll must be able to remove the bolt, got {status!r}",
+        )
 
     # ── merging without lgtm is a maintainer power ───────────────────────
     # lgtm is an opt-in to Hive's automation, not a toll on merging: a

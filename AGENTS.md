@@ -57,6 +57,25 @@ the deliverable it would have validated is verified from published registry
 evidence instead, and the absence of that evidence is reported as a
 finding, never as a blocked pull request.
 
+A maintainer may nonetheless lend one dashboard session their own cluster.
+`just review-queue` detects a usable host Kubernetes context, asks once on
+`/dev/tty`, and — only on yes — starts a host-side broker whose private
+Unix socket is the single thing the container receives. No kubeconfig, no
+Kubernetes credential, no host home, no host networking, no Podman socket,
+and no host binary crosses that boundary; gVisor blocks host sockets by
+default, so `review-queue` alone passes `--runtime-flag=host-uds=open`, and
+only when podman reports the `runsc` runtime. The broker answers three typed
+requests — `status`, `health`, `submit` — bound to session, repository, pull
+request, and exact 40-character head, dispatches only an explicit map of
+QA/test WorkflowTemplates, and files stable verified findings automatically
+to `projectbluefin/lab` (cluster platform) or `projectbluefin/server`
+(server product) behind a versioned fingerprint, a host lock, and a
+duplicate search. `review-container` receives no lab capability at all. The
+capability is optional, session-scoped, and non-blocking: declining it, an
+unreachable cluster, a dead broker, or a failed workflow all leave Review
+fully functional on the registry-evidence path above. See
+[`docs/skills/launcher.md`](docs/skills/launcher.md).
+
 Latest upstream, everywhere. Every dependency — base image, runtimes,
 tools, protocols — tracks the newest upstream version, and Renovate moves
 every pin automatically. A pin is a checkpoint the automation advances,
@@ -115,7 +134,9 @@ labels. Never add a local workaround for an accepted upstream gap. See
   relay's `ws` dependency for the image build. This repository is not a Node
   project.
 - `queue/` generates the static PR queue published from `public/`.
-- `scripts/` contains build-time skill generation and documentation checks.
+- `scripts/` contains build-time skill generation, documentation checks, and
+  the host-side lab broker `review-lab-broker.py` the launcher starts for an
+  opted-in `review-queue` session.
 - `tests/` contains launcher and image contracts.
 - `docs/` contains the skill router and catalog.
 
@@ -167,6 +188,7 @@ bash tests/sbom-manifest.sh
 bash tests/image-contract.sh
 bash tests/bluefin-review.sh
 bash tests/dashboard-contract.sh
+python3 tests/lab-broker-contract.py
 bash tests/worktree-guard.sh
 bash tests/just-onboarding.sh
 git diff --check

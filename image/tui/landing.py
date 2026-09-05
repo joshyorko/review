@@ -90,6 +90,19 @@ class LandingTask:
     process: object | None = None
     returncode: int | None = None
     started: float = 0.0
+    # The final review-and-fix rounds (#378) ride in this same structure so
+    # they drain through the one landing lane. A landing task leaves them
+    # empty; a round names its phase, its number, the policy that chose its
+    # model, and the environment overlay that model actually needs.
+    phase: str = ""
+    round: int = 0
+    policy: str = ""
+    model: str = ""
+    env: dict = field(default_factory=dict)
+    # How many final-round events the record already held when this round
+    # was dispatched. A round that adds none reported nothing, and the queue
+    # must stop rather than dispatch the same phase forever.
+    rounds_seen: int = 0
 
     @property
     def keys(self) -> list[str]:
@@ -757,6 +770,13 @@ def main(argv: list[str] | None = None) -> int:
         help="every selected pull request key",
     )
     done.add_argument("--note", required=True)
+    final = kinds.add_parser("final", help="report one final review-and-fix round")
+    final.add_argument("--round", required=True, type=int)
+    final.add_argument("--phase", required=True, choices=FINAL_PHASES)
+    final.add_argument("--model", required=True)
+    final.add_argument("--input-head", default="", metavar="SHA")
+    final.add_argument("--output-head", default="", metavar="SHA")
+    final.add_argument("--note", required=True)
     probe = commands.add_parser("probe", help="probe a ghcr package anonymously")
     probe.add_argument("--package", required=True, help="owner/image")
     probe.add_argument("--manifest", default="", help="also resolve this ref's digest")
@@ -779,7 +799,381 @@ def main(argv: list[str] | None = None) -> int:
         return status
     if args.kind == "event":
         return report_event(args.status, args.pr, args.state, args.note)
+    if args.kind == "final":
+        return report_final(
+            args.status,
+            args.round,
+            args.phase,
+            args.model,
+            args.note,
+            args.input_head,
+            args.output_head,
+        )
     return report_done(args.status, args.expect, args.note)
+
+
+# ── the final review-and-fix rounds (#378) ───────────────────────────────
+# A landed batch is not a reviewed batch. What follows runs after every
+# selected pull request has a terminal outcome: a final reviewer reads the
+# whole batch, a fixer repairs what it found, and a fresh reviewer looks
+# again — each round in its own process, because asking one long-lived agent
+# to review the work it just wrote is how a review becomes a rubber stamp.
+#
+# This is the SAME queue: rounds are LandingTasks with a phase, drained FIFO
+# by the one lane that already exists, cancelled by the same [x], and
+# recorded in the same status file. There is no second scheduler and no
+# second selection authority — the maintainer's confirmed batch is still the
+# only scope grant.
+
+FINAL_POLICIES = ("automatic", "opus", "kimi")
+
+# The phases a round may report. `final-review-clean` and `review-blocked`
+# close the phase: nothing may be written after either.
+FINAL_PHASES = (
+    "final-review",
+    "fixing",
+    "re-review",
+    "cleanup",
+    "final-review-clean",
+    "review-blocked",
+)
+FINAL_TERMINAL_PHASES = ("final-review-clean", "review-blocked")
+
+# Five rounds, then the batch is visibly blocked with its findings intact.
+# A loop that never stops is not a quality gate; it is a way to burn a
+# maintainer's afternoon and their inference budget.
+FINAL_ROUND_LIMIT = 5
+
+# The reserved record key for final-round events. Real keys are
+# `owner/repo#N`, so this can never collide with a pull request, and the
+# batch's own `done` event keeps the "" key it always had.
+FINAL_KEY = "final"
+
+# Reviewing is the expensive judgement; fixing is mechanical. Opus reviews,
+# K3 fixes, and a dependency-only batch is small enough that K3 does both.
+OPUS_TRIPLE = ("goose", "claude-opus-5", "high")
+KIMI_TRIPLE = ("goose", "kimi-k3", "high")
+
+# A dependency batch is one whose every pull request is a dependency or
+# chore change. Conventional Commit types decide it, plus GitHub's own
+# `dependencies` label, and anything unrecognized makes the batch mixed —
+# an unknown title must never talk the queue into the cheaper reviewer.
+DEPENDENCY_TITLE = re.compile(
+    r"^\s*(chore|build)\s*(\((deps|deps-dev)\))?\s*!?\s*:", re.IGNORECASE
+)
+
+
+def classify_batch(stops: list) -> str:
+    """`dependency` when every selected pull request is a dependency or
+    chore change, `mixed` otherwise. Classification picks a reviewer; it
+    grants no merge authority and changes no scope."""
+    if not stops:
+        return "mixed"
+    for stop in stops:
+        labels = [
+            str(label).lower()
+            for label in (getattr(stop, "labels", None) or [])
+        ]
+        if "dependencies" in labels:
+            continue
+        if DEPENDENCY_TITLE.match(str(getattr(stop, "title", "") or "")):
+            continue
+        return "mixed"
+    return "dependency"
+
+
+def final_triple(policy: str, classification: str, phase: str) -> tuple:
+    """The (backend, model, effort) a round runs with.
+
+    Explicit, per round, and never inherited: the launcher's GOOSE_MODEL is
+    whatever the maintainer picked for the dashboard, so a round that relies
+    on the ambient environment silently reviews with the wrong model.
+    """
+    if phase in ("fixing", "cleanup"):
+        # Fixing is K3's job under every policy except an all-Opus one,
+        # where the maintainer asked for Opus review with K3 fixes anyway.
+        return KIMI_TRIPLE
+    if policy == "opus":
+        return OPUS_TRIPLE
+    if policy == "kimi":
+        return KIMI_TRIPLE
+    return KIMI_TRIPLE if classification == "dependency" else OPUS_TRIPLE
+
+
+def final_environment(triple: tuple, backend: str = "") -> dict:
+    """The environment overlay one round runs with.
+
+    Goose reads its model from GOOSE_MODEL/GOOSE_THINKING_EFFORT, so those
+    are set explicitly. Codex takes its model on the command line instead —
+    setting Goose variables for a Codex round would silently do nothing —
+    so a Codex session gets its selection through the command and the
+    environment carries only the backend marker.
+    """
+    kind, model, effort = triple
+    active = backend or os.environ.get("BLUEFIN_REVIEW_BACKEND", kind)
+    overlay = {"BLUEFIN_REVIEW_BACKEND": active}
+    if active == "codex":
+        overlay["BLUEFIN_REVIEW_FINAL_MODEL"] = model
+        overlay["BLUEFIN_REVIEW_FINAL_EFFORT"] = effort
+        return overlay
+    overlay["GOOSE_MODEL"] = model
+    overlay["GOOSE_THINKING_EFFORT"] = effort
+    return overlay
+
+
+def final_command(prompt_path: str, triple: tuple, backend: str = "") -> list[str]:
+    """The argv for one round. Goose reads the prompt from a file exactly as
+    the landing agent does; Codex takes the model and effort as flags,
+    because its model does not come from the environment."""
+    template = os.environ.get(
+        "BLUEFIN_REVIEW_LANDING_COMMAND", DEFAULT_LANDING_COMMAND
+    )
+    argv = [arg.replace("@PROMPT", prompt_path) for arg in shlex.split(template)]
+    _, model, effort = triple
+    active = backend or os.environ.get("BLUEFIN_REVIEW_BACKEND", triple[0])
+    if active == "codex" and template == DEFAULT_LANDING_COMMAND:
+        return [
+            "codex", "exec", "--ignore-user-config", "--model", model,
+            "--config", f"model_reasoning_effort={effort}",
+            "-", prompt_path,
+        ]
+    return argv
+
+
+def final_rounds(status_path: str) -> list[dict]:
+    """Every final-round event recorded for a batch, in order."""
+    rounds: list[dict] = []
+    try:
+        with open(status_path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("pr") == FINAL_KEY:
+                    rounds.append(event)
+    except OSError:
+        pass
+    return rounds
+
+
+def final_phase(status_path: str) -> dict:
+    """The batch's current final-review phase, or {} before one starts."""
+    rounds = final_rounds(status_path)
+    return rounds[-1] if rounds else {}
+
+
+def report_final(
+    status_path: str,
+    round_number: int,
+    phase: str,
+    model: str,
+    note: str,
+    input_head: str = "",
+    output_head: str = "",
+) -> int:
+    """Append one final-round event.
+
+    The breaker lives here rather than in the prompt: a sixth round is
+    refused by the record itself, so an agent that talks itself into one
+    more pass cannot have it. Writing after the phase closed is refused for
+    the same reason — `review-blocked` is a result a maintainer acts on, not
+    a state an agent may quietly walk back.
+    """
+    if round_number < 1 or round_number > FINAL_ROUND_LIMIT:
+        print(
+            f"error: round {round_number} is outside 1..{FINAL_ROUND_LIMIT}; "
+            "the batch is review-blocked and needs a maintainer",
+            file=sys.stderr,
+        )
+        return 1
+    for head, label in ((input_head, "--input-head"), (output_head, "--output-head")):
+        if head and not re.fullmatch(r"[0-9a-f]{40}", head):
+            print(
+                f"error: {label} must be a 40-character head sha, got {head!r}",
+                file=sys.stderr,
+            )
+            return 1
+    with _locked_status(status_path) as (handle, events):
+        rounds = [event for event in events if event.get("pr") == FINAL_KEY]
+        if rounds and rounds[-1].get("phase") in FINAL_TERMINAL_PHASES:
+            print(
+                f"error: the final review is already {rounds[-1].get('phase')}; "
+                f"refusing {phase}",
+                file=sys.stderr,
+            )
+            return 1
+        event = {
+            "pr": FINAL_KEY,
+            "state": phase,
+            "phase": phase,
+            "round": round_number,
+            "model": model,
+            "note": note,
+        }
+        if input_head:
+            event["input_head"] = input_head
+        if output_head:
+            event["output_head"] = output_head
+        line = _append_event(handle, _stamp(event))
+    print(line)
+    return 0
+
+
+def final_prompt(
+    task: "LandingTask",
+    round_number: int,
+    phase: str,
+    triple: tuple,
+    findings: str = "",
+) -> str:
+    """One round's brief: review, fix, or close.
+
+    Every round is a new process reading this file, so the brief carries the
+    whole context a round needs. It never widens scope: the pull requests
+    below are the maintainer's confirmed selection and the only branches a
+    round may write to.
+    """
+    reporter = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))}"
+    status = shlex.quote(task.status_path)
+    rows = "\n".join(f"- {stop.key} — {stop.title}" for stop in task.stops)
+    _, model, _effort = triple
+    reporting = (
+        f"{reporter} report --status {status} final --round {round_number} "
+        f"--phase <phase> --model {model} --input-head <40-char sha> "
+        f"--output-head <40-char sha> --note \"one line\""
+    )
+    if phase == "cleanup":
+        return f"""You are the Bluefin batch cleanup pass, round {round_number} of
+{FINAL_ROUND_LIMIT}, running as {model}.
+
+{rows}
+
+The final review came back clean. Remove the transient material this batch
+created and nothing else:
+
+- plan-owned workspaces, task briefs, review packages, temporary worktrees,
+  and scratch reports this batch made;
+- never a broad recursive delete, never a wildcard, never a path this batch
+  did not create.
+
+Never commit implementation plans, session diaries, append-only status
+notes, or generated `.agents/skills/` content. What survives is git history,
+the issue and pull-request receipts, and any durable source-backed lesson
+recorded in the closest `docs/skills/` document — and a skill edit runs
+`bash scripts/check-skill-frontmatter.sh --write` and commits the generated
+`docs/skills/index.json` with it. Do not manufacture documentation when no
+durable contract changed.
+
+Report the result, naming what you removed:
+
+{reporting}
+
+Use phase `cleanup` for the receipt and then `final-review-clean` to close
+the batch. If you cannot remove something this batch owns, say so in the
+note and close with `review-blocked` instead — an incomplete cleanup is an
+incomplete batch.
+"""
+    if phase == "fixing":
+        return f"""You are the Bluefin batch fixer, round {round_number} of
+{FINAL_ROUND_LIMIT}, running as {model}. A review of this batch found the
+problems below. Fix them; do not review.
+
+{rows}
+
+Findings to repair:
+
+{findings or "(none recorded — stop and report review-blocked)"}
+
+Rules, in order of importance:
+
+1. Fix the SMALLEST in-scope defect that answers each finding. You may
+   commit only on the pull-request branches listed above — branches the
+   maintainer already authorized. Never open new work, never widen the
+   batch, never touch a repository outside it.
+2. Re-read GitHub before every write. If a head moved since the review, the
+   findings describe code that no longer exists: stop, report the new head
+   in `--output-head`, and let the next round review the current state.
+   Never write against a head you did not read.
+3. Run the focused validation the change deserves and name it in your note.
+4. Never `--admin`, never force-push, never remove a hold or block label,
+   never bypass a required check, never merge.
+
+Report the round with the head you started from and the head you left:
+
+{reporting}
+
+Use phase `fixing`. Then stop — a fresh reviewer reads your work, not you.
+"""
+    return f"""You are the Bluefin final batch reviewer, round {round_number} of
+{FINAL_ROUND_LIMIT}, running as {model}. This batch has landed; your job is
+to decide whether it is actually good.
+
+{rows}
+
+Review the batch as a whole against the repository's own contracts:
+`AGENTS.md`, `docs/SKILL.md`, and the canonical skill catalog are
+authoritative; client instruction files stay pointers to them rather than
+copies of policy; no generated `.agents/skills/` content is committed.
+Report a finding when a change contradicts one of those, not when it merely
+differs from your taste.
+
+Bind every observation to the exact head you read: repository, pull request,
+40-character head sha, file, and the evidence. A finding without those is
+not actionable and must not be reported as one.
+
+Report the round:
+
+{reporting}
+
+Use phase `final-review` (or `re-review` when a fixer has already run). When
+the batch is clean, say so in the note and use phase `final-review-clean` —
+the cleanup pass follows. When findings remain, list them in the note; the
+queue dispatches a fresh fixer, and you never fix what you reviewed.
+
+Round {FINAL_ROUND_LIMIT} is the last one. If findings remain after it, the
+batch is `review-blocked` and belongs to a maintainer: report that phase
+with the remaining findings in the note rather than starting another round.
+"""
+
+
+def new_final_round(
+    task: "LandingTask",
+    phase: str,
+    round_number: int,
+    policy: str,
+    findings: str = "",
+    backend: str = "",
+) -> "LandingTask":
+    """One round, as a task the existing landing lane already knows how to
+    run: same status file, same log, its own prompt and process."""
+    triple = final_triple(policy, classify_batch(task.stops), phase)
+    directory = landing_state_dir()
+    prompt_path = os.path.join(
+        directory, f"{task.task_id}.final-{round_number}-{phase}.prompt.md"
+    )
+    round_task = LandingTask(
+        task_id=f"{task.task_id} · {phase} {round_number}/{FINAL_ROUND_LIMIT}",
+        stops=list(task.stops),
+        login=task.login,
+        prompt_path=prompt_path,
+        status_path=task.status_path,
+        log_path=task.log_path,
+        started=time.monotonic(),
+    )
+    round_task.phase = phase
+    round_task.round = round_number
+    round_task.policy = policy
+    round_task.model = triple[1]
+    round_task.env = final_environment(triple, backend)
+    round_task.rounds_seen = len(final_rounds(task.status_path))
+    with open(prompt_path, "w", encoding="utf-8") as handle:
+        handle.write(final_prompt(task, round_number, phase, triple, findings))
+    round_task.command = final_command(prompt_path, triple, backend)
+    return round_task
 
 
 # The record is durable, so it is also bounded: batch files older than

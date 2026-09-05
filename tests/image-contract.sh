@@ -122,6 +122,7 @@ for path in \
   }
 done
 
+# shellcheck disable=SC2016 # single quotes are intentional: matching literal string
 require image/entrypoint.sh \
   'Hive knowledge export unavailable from ${hub_http%/contribute}; reviews continue without it.' \
   "banner 'PR queue dashboard (Hive configured)'" \

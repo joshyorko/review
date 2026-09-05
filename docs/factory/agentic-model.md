@@ -108,6 +108,44 @@ local reimplementation is not a neutral stopgap — it shadows the real tool on
 `PATH` and silently substitutes its own semantics for the ones every caller
 assumes.
 
+## Optional lab authority
+
+The appliance owns no lab and depends on none. A Maintainer Reviewer may
+nonetheless lend one dashboard session their own cluster: the Launcher asks
+once, on the terminal that started the session, and on yes runs a host-side
+Lab Broker whose private Unix socket is the only thing agent-controlled work
+receives. The broker is the authority boundary — it holds the Kubernetes and
+issue-writing credentials, accepts three typed requests bound to session,
+repository, pull request, and exact head, and dispatches only an explicit map
+of QA and verification workflows. No agent may ask it for a command, a
+manifest, a namespace, or a template outside that map, and the Factory Worker
+receives no lab capability at all.
+
+Automatic issue filing is the one machine authority in this model, and it is
+deliberately narrow: only a verified finding, corroborated across samples,
+classified into a fixed class, routed to a fixed repository
+(`projectbluefin/lab` for cluster platform, `projectbluefin/server` for server
+product), deduplicated by a versioned fingerprint against an existing open
+issue, with bounded redacted evidence. Anything ambiguous is `unroutable` and
+files nothing, and a filing failure is reported rather than swallowed. It
+grants no approval, queueing, merge, or task-selection authority.
+
+Lab evidence supplements a review and never gates one. An unavailable lab, a
+degraded broker, or a failed workflow moves verification back to published
+registry evidence — the same path a session with no lab always takes — and
+never produces a blocked pull request.
+
+## Final review authority
+
+A landed batch gets a bounded final review-and-fix phase. It runs in the
+existing landing lane under the maintainer's original confirmed selection: it
+may commit only on branches that selection already authorized, it may not
+widen scope, and it may not remove a hold, force-push, use `--admin`, or
+bypass a required check. Its model is a session policy the Maintainer Reviewer
+chooses once and may change; the reviewer of a round is never the fixer of
+that round, and after five unsuccessful rounds the batch is visibly blocked
+for a human rather than looped again.
+
 ## Documentation discipline
 
 Keep the model executable and compact:

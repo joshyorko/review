@@ -250,6 +250,67 @@ dropped for the published default.
 run `just review-container` from this checkout, or pass `--justfile`, when you
 want to be certain which launcher you are invoking.
 
+## The optional lab
+
+A maintainer may lend one `review-queue` session their own Kubernetes cluster
+(#379). Nothing in this repository depends on that: declining, no `kubectl`,
+no reachable cluster, no writable `XDG_RUNTIME_DIR`, or a broker that fails to
+come up all leave a fully usable dashboard on the registry-evidence path.
+
+`offer_lab_session` runs before anything starts. `lab_probe_context` requires
+host `python3`, host `kubectl`, and a broker probe that can list nodes; the
+probe prints the current context's NAME and nothing else — never a kubeconfig
+path, a server URL, or a credential. The question is asked once, on
+`/dev/tty`, so it belongs to the terminal that launched the session rather
+than to a pipe. `REVIEW_LAB=1` or `REVIEW_LAB=0` answers it without a prompt
+for an unattended launch; no terminal and no `REVIEW_LAB` means no lab.
+
+On yes, `start_lab_broker` mints a random session id, creates a `0700`
+directory under `XDG_RUNTIME_DIR`, and runs `scripts/review-lab-broker.py
+serve` as a background job. That backgrounding is the point, not an
+exception: the broker must outlive the launcher's next statement and die with
+the session, so it is started here and killed by the single EXIT trap that
+also removes the staged Codex credential. Nothing survives the terminal.
+
+What crosses into the container is one socket directory, one socket path, and
+one session id:
+
+```
+--volume <runtime-dir>:/run/bluefin-review-lab:rw,z
+--env BLUEFIN_REVIEW_LAB_SOCKET=/run/bluefin-review-lab/broker.sock
+--env BLUEFIN_REVIEW_LAB_SESSION=<session>
+```
+
+No kubeconfig, no Kubernetes credential, no host home, no host networking, no
+Podman or Docker socket, and no host binary. gVisor refuses host Unix domain
+sockets by default, so `review-queue` adds `--runtime-flag=host-uds=open` —
+and only when `podman info` reports the `runsc` runtime, because `crun` and
+`runc` reject the flag outright. `review-container` never calls any of this:
+the contributor worker receives no lab capability.
+
+The maintainer's own lab skills ride read-only when they exist:
+`lab-test`, `k3s-cluster-ops`, `kubernetes-specialist`, and `live-dev-common`
+from `REVIEW_PERSONAL_SKILLS` (default `~/.copilot/skills`), mounted at
+`/home/dev/.agents/skills/<id>`. The org inventory is not duplicated here —
+the image already generates every `projectbluefin/common` skill, `lab-testing`
+included — so this mounts only ids common does not publish.
+
+The broker itself is the authority boundary. It answers three typed requests
+(`status`, `health`, `submit`) bound to session, repository, pull request, and
+exact 40-character head; dispatches only an explicit map of QA/test
+WorkflowTemplates, with `bluefin-qa-pipeline` resolving the head's `sha-<head>`
+tag to a pinned digest before submitting and answering `not-applicable` rather
+than substituting a moving tag; reaches Prometheus only through the Kubernetes
+API service proxy with allowlisted queries; and runs k8sgpt only through the
+`k8sgpt-on-demand` WorkflowTemplate, never with an AI credential from Review.
+Verified stable findings are filed automatically — `cluster-platform` to
+`projectbluefin/lab`, `server-product` to `projectbluefin/server`, anything
+else `unroutable` and unfiled — behind a versioned fingerprint marker, a
+GitHub duplicate search, and a fixed host lock at
+`${XDG_STATE_HOME:-$HOME/.local/state}/bluefin-review/lab-findings.lock` so two
+dashboards on one host serialize. A filing failure is visible, never silent,
+and never fatal.
+
 ## Common Rationalizations
 
 - "It's only a comment or test fixture." Workflow assertions, onboarding

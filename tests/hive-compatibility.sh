@@ -85,6 +85,7 @@ if [[ "$selected_hub" != 'wss://other.hive.example/contribute' ]]; then
 fi
 
 unset_hub="$(
+  # shellcheck disable=SC2016 # single quotes are intentional for bash -c script
   env -u HIVE_HUB GH_TOKEN='compatibility-test-token' \
     bash -c 'source image/hive-entrypoint.d/hosted-knowledge.sh; printf "%s\n" "${HIVE_HUB:-}"'
 )"

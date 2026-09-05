@@ -41,6 +41,26 @@
       "doc_type": "policy"
     },
     {
+      "id": "final-review",
+      "name": "final-review",
+      "one_line_purpose": "Run bounded fresh-context review and fix rounds after a batch lands.",
+      "entry_point": "docs/skills/final-review.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "review",
+        "batch",
+        "rounds",
+        "models",
+        "breaker",
+        "cleanup"
+      ],
+      "description": "Defines the dashboard's final review-and-fix phase: one session policy, batch classification, fresh-context rounds with explicit models, a five-round breaker, and the cleanup gate.",
+      "version": "1.0",
+      "last_updated": "2026-09-05",
+      "doc_type": "policy"
+    },
+    {
       "id": "goose-context",
       "name": "goose-context",
       "one_line_purpose": "Keep Goose config and skill routing working in the container.",

@@ -164,6 +164,12 @@ set -euo pipefail
 # so the 'exactly one foreground run' assertions stay meaningful, and it
 # fails on demand so the missing-tag path can be exercised.
 case "${1:-}" in
+  info)
+    # The launcher asks which OCI runtime podman is configured with, because
+    # runsc is the only one that takes --runtime-flag=host-uds=open.
+    printf '%s\n' "${FAKE_PODMAN_RUNTIME:-crun}"
+    exit 0
+    ;;
   image | manifest | pull)
     printf '%s\n' "$*" >>"${IMAGE_LOG:?}"
     [[ "${FAKE_PODMAN_IMAGE_MISSING:-0}" == 1 ]] && exit 1
@@ -307,6 +313,7 @@ run_recipe() {
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
       -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
       -u REVIEW_QUEUE_NAME -u XDG_STATE_HOME -u FAKE_GIT_TOPLEVEL \
+      -u REVIEW_LAB -u REVIEW_LAB_BROKER -u REVIEW_PERSONAL_SKILLS \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
@@ -599,6 +606,110 @@ run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   XDG_STATE_HOME="$scratch/xdg"
 assert_file_contains "--volume ${scratch}/xdg/bluefin-review:/home/dev/.local/state/bluefin-review:rw,z" "$runner_log"
 assert_file_exists "${scratch}/xdg/bluefin-review"
+
+# ══ 2c. The optional lab: one socket, one session, nothing else (#379) ════
+# The launcher offers the lab only when the host can actually reach a
+# cluster, asks once, and hands the container exactly one Unix socket. None
+# of it may become a dependency: every negative path here still launches a
+# fully usable dashboard.
+lab_broker="$repo_root/scripts/review-lab-broker.py"
+lab_skills="$scratch/personal-skills"
+mkdir -p "$lab_skills/lab-test" "$lab_skills/k3s-cluster-ops"
+printf 'personal lab skill\n' >"$lab_skills/lab-test/SKILL.md"
+printf 'personal lab skill\n' >"$lab_skills/k3s-cluster-ops/SKILL.md"
+
+install_fake_kubectl() {
+  cat >"$fake_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "config current-context") printf 'ghost-lab\n' ;;
+  "get nodes -o name") printf 'node/ghost\nnode/exo-0\n' ;;
+  *) printf '{"items":[]}\n' ;;
+esac
+exit 0
+EOF
+  chmod +x "$fake_bin/kubectl"
+}
+remove_fake_kubectl() { rm -f "$fake_bin/kubectl"; }
+
+assert_no_lab_handoff() {
+  assert_file_not_contains "/run/bluefin-review-lab" "$runner_log"
+  assert_file_not_contains "BLUEFIN_REVIEW_LAB_SOCKET" "$runner_log"
+  assert_file_not_contains "BLUEFIN_REVIEW_LAB_SESSION" "$runner_log"
+  assert_file_not_contains "host-uds" "$runner_log"
+}
+
+begin "review-queue: no host kubectl means no lab and no prompt"
+reset_logs
+remove_fake_kubectl
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_no_lab_handoff
+assert_not_contains "Use it for this session only?" "$OUT"
+assert_contains "starting the maintainer review dashboard" "$OUT"
+
+begin "review-queue: a declined lab starts no broker and mounts nothing"
+reset_logs
+install_fake_kubectl
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=0 REVIEW_LAB_BROKER="$lab_broker"
+assert_no_lab_handoff
+assert_not_contains "lab enabled for this session" "$OUT"
+
+begin "review-queue: an accepted lab hands over one socket and nothing else"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" REVIEW_PERSONAL_SKILLS="$lab_skills"
+assert_contains "lab enabled for this session (context ghost-lab)" "$OUT"
+assert_file_contains ":/run/bluefin-review-lab:rw,z" "$runner_log"
+assert_file_contains "--env BLUEFIN_REVIEW_LAB_SOCKET=/run/bluefin-review-lab/broker.sock" "$runner_log"
+assert_file_contains "--env BLUEFIN_REVIEW_LAB_SESSION=" "$runner_log"
+# The credential boundary: the container gets the socket, never the cluster.
+assert_file_not_contains "kubeconfig" "$runner_log"
+assert_file_not_contains ".kube" "$runner_log"
+assert_file_not_contains "--network host" "$runner_log"
+assert_file_not_contains "podman.sock" "$runner_log"
+assert_file_not_contains "docker.sock" "$runner_log"
+assert_file_not_contains "/var/run" "$runner_log"
+assert_file_not_contains "$(command -v kubectl 2>/dev/null || echo /nonexistent-kubectl)" "$runner_log"
+# Exactly one host socket crosses the boundary, and it is the broker's.
+lab_socket_mounts="$(tr ' ' '\n' <"$runner_log" | grep -c '/run/bluefin-review-lab' || true)"
+assert_eq "$lab_socket_mounts" 2 "expected exactly the socket mount and its env"
+# Personal lab skills ride read-only, and only the ones that exist.
+assert_file_contains "${lab_skills}/lab-test:/home/dev/.agents/skills/lab-test:ro,z" "$runner_log"
+assert_file_contains "${lab_skills}/k3s-cluster-ops:/home/dev/.agents/skills/k3s-cluster-ops:ro,z" "$runner_log"
+assert_file_not_contains "kubernetes-specialist" "$runner_log"
+assert_file_not_contains "lab-testing" "$runner_log"
+
+begin "review-queue: the broker and its socket die with the session"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" REVIEW_PERSONAL_SKILLS="$lab_skills"
+socket_dir="$(tr ' ' '\n' <"$runner_log" | sed -n 's|^\(.*bluefin-review-lab\.[^:]*\):/run/bluefin-review-lab:rw,z$|\1|p' | head -1)"
+[[ -n "$socket_dir" ]] || fail "the accepted lab must name its socket directory"
+assert_file_not_exists "$socket_dir"
+pgrep -f "review-lab-broker.py serve --socket ${socket_dir}" >/dev/null 2>&1 &&
+  fail "the broker must not outlive the foreground session"
+
+begin "review-queue: gVisor gets host-uds=open, other runtimes never do"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" FAKE_PODMAN_RUNTIME=runsc
+assert_file_contains "--runtime-flag=host-uds=open" "$runner_log"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" FAKE_PODMAN_RUNTIME=crun
+assert_file_contains "/run/bluefin-review-lab" "$runner_log"
+assert_file_not_contains "host-uds" "$runner_log"
+
+begin "review-container: the contributor worker receives no lab capability"
+reset_logs
+run_recipe review-container GH_READY=1 \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" REVIEW_PERSONAL_SKILLS="$lab_skills"
+assert_no_lab_handoff
+assert_file_not_contains "/home/dev/.agents/skills/lab-test" "$runner_log"
+assert_not_contains "lab enabled for this session" "$OUT"
+remove_fake_kubectl
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
 reset_logs
