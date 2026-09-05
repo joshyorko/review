@@ -53,12 +53,12 @@ grep -qF 'KNOWN_BACKENDS="claude copilot goose codex agy bob pi aider litellm"' 
 # The exact hosted URL is rewritten and receives a Bearer token; unrelated
 # curl calls retain their original arguments.
 hook_output="$(
-  HIVE_HUB='wss://hosted-projectbluefin-knuckle-gjvq.hive.kubestellar.io/contribute' \
+  HIVE_HUB='wss://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev/contribute' \
     GH_TOKEN='compatibility-test-token' \
     bash -c '
       source image/hive-entrypoint.d/hosted-knowledge.sh
       curl_binary=/bin/echo
-      curl -sf "https://hosted-projectbluefin-knuckle-gjvq.hive.kubestellar.io/api/knowledge/export" -o /dev/null
+      curl -sf "https://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev/api/knowledge/export" -o /dev/null
     '
 )"
 [[ "$hook_output" == *'--header Authorization: Bearer compatibility-test-token'* ]] &&
