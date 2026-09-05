@@ -238,7 +238,7 @@ an operations task outside this repository automation.
   Review contract is [#348](https://github.com/projectbluefin/review/issues/348);
   the launcher never downloads a runtime or falls back to Podman's default.
   There is no supported manual installation recipe: a mutable
-  `release/latest` download and an `--ignore-cgroups` wrapper are not
+  latest-release download and a cgroup-suppressing wrapper are not
   provisioning. This change remains held until #348 provides one. On a
   provisioned host, `just review-doctor` reports the isolation check as
   `ready; rootless Podman probe passed`.
