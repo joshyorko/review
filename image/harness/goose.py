@@ -29,7 +29,7 @@ class GooseHarness:
     branding: HarnessBranding = HarnessBranding(
         "goose", "Goose", "GS", "Goose", "aaif-goose/goose", None
     )
-    model: str = "gpt-5.6-luna"
+    model: str = "gemini-3.8-flash"
     effort: str = "high"
     availability: Availability = Availability.READY
     executable: str = "goose"

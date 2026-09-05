@@ -471,6 +471,14 @@ assert_file_contains "--env GOOSE_MODEL=kimi-k3" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
 assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
 
+begin "review-container: the gemini profile is high effort with provider context"
+reset_logs
+RECIPE_ARGS=(gemini)
+run_recipe review-container GH_READY=1
+assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
+assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
+
 begin "review-container: an effort argument overrides the profile default"reset_logs
 RECIPE_ARGS=(opus5 max)
 run_recipe review-container GH_READY=1
@@ -695,11 +703,20 @@ assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "unknown model profile 'gpt-9'" "$OUT"
 assert_eq "$(wc -c <"$runner_log")" 0 "no container may start on a bad profile"
 
-begin "review-queue: flags first means no profile, everything passes through"
+begin "review-queue: flags first means no profile, defaults to gemini at high effort"
 reset_logs
 RECIPE_ARGS=(--all)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
+assert_file_contains "queue --all" "$runner_log"
+
+begin "review-queue: explicit luna profile still selects luna"
+reset_logs
+RECIPE_ARGS=(luna --all)
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
 assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
 assert_file_contains "queue --all" "$runner_log"
 
 # ══ 3. Doctor: no failure on a fully provisioned host ═════════════════════

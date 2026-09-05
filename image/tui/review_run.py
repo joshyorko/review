@@ -132,7 +132,7 @@ class ReviewRun:
         request: ReviewRequest,
         *,
         backend: str = "goose",
-        model: str = "gpt-5.6-luna",
+        model: str = "gemini-3.8-flash",
         effort: str = "high",
     ) -> ReviewRun:
         return cls(

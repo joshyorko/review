@@ -90,7 +90,7 @@ def discover() -> Discovery:
         "missing" if availability is Availability.UNAVAILABLE_BINARY else "failed"
     )
     capability = "ready" if availability is Availability.READY else "unavailable"
-    model = "gpt-5.6-luna"
+    model = "gemini-3.8-flash"
     reasoning = "low, medium, high, max"
     return Discovery("codex", installed, auth, capability, model, reasoning, availability)
 
@@ -100,7 +100,7 @@ def discover_all() -> list[HarnessOption]:
     goose = GooseHarness()
     return [
         HarnessOption(goose, Discovery(
-            "goose", "ready", "ready", "ready", "gpt-5.6-luna", "low", goose.availability,
+            "goose", "ready", "ready", "ready", "gemini-3.8-flash", "high", goose.availability,
         )),
         HarnessOption(CodexHarness(), discover()),
     ]
@@ -110,7 +110,7 @@ def choose_option(repository: str, preferences: dict[str, Preference],
                   options: list[HarnessOption], configured: Preference | None = None) -> HarnessOption | None:
     by_id = {option.harness.branding.harness_id: option for option in options}
     candidates = [preferences.get(repository), preferences.get("*"), configured,
-                  Preference("codex", "gpt-5.6-luna", "low")]
+                  Preference("codex", "gemini-3.8-flash", "high")]
     for candidate in candidates[:2]:
         option = by_id.get(candidate.harness_id) if candidate else None
         if option:
@@ -127,7 +127,7 @@ def choose_option(repository: str, preferences: dict[str, Preference],
 def choose(repository: str, preferences: dict[str, Preference], discovery: Discovery,
            configured: Preference | None = None) -> Preference | None:
     candidates = [preferences.get(repository), preferences.get("*"), configured,
-                  Preference("codex", "gpt-5.6-luna", "low")]
+                  Preference("codex", "gemini-3.8-flash", "high")]
     for candidate in candidates:
         if candidate and candidate.harness_id == discovery.backend and discovery.availability is Availability.READY:
             return candidate

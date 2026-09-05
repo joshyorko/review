@@ -24,8 +24,8 @@ class CodexHarness:
     branding: HarnessBranding = HarnessBranding(
         "codex", "Codex CLI", "CX", "OpenAI Codex CLI", "openai/codex", None
     )
-    model: str = "gpt-5.6-luna"
-    effort: str = "low"
+    model: str = "gemini-3.8-flash"
+    effort: str = "high"
     availability: Availability = Availability.UNAVAILABLE_BINARY
     executable: str = "codex"
     capabilities: HarnessCapabilities = HarnessCapabilities(

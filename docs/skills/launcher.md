@@ -141,11 +141,12 @@ Goose, or image build skill documents.
    the caller. Do not replace the
    image's direct-invocation fallback.
    That default comes from the model profile: `review-container [profile]
-   [effort]` resolves `luna` to `gpt-5.6-luna` at `max` with the provider's
-   own context window, `opus5` to `claude-opus-5` at `high` with
-   `GOOSE_CONTEXT_LIMIT=264000`, and `kimi` to `kimi-k3` at `max` with the
-   same clamp. An empty profile is `luna`; a short fixed profile list does
-   not warrant a picker, so every launch is noninteractive whether or not a
+   [effort]` resolves `gemini` to `gemini-3.8-flash` at `high`, `luna` to
+   `gpt-5.6-luna` at `max` with the provider's own context window, `opus5` to
+   `claude-opus-5` at `high` with `GOOSE_CONTEXT_LIMIT=264000`, and `kimi` to
+   `kimi-k3` at `max` with the same clamp. An empty profile is `luna` for
+   `review-container` and `gemini` for `review-queue`; a short fixed profile list
+   does not warrant a picker, so every launch is noninteractive whether or not a
    terminal is attached. Profiles are defaults, never overrides:
    `GOOSE_MODEL`, `GOOSE_THINKING_EFFORT`, and `GOOSE_CONTEXT_LIMIT` from the
    environment always win.

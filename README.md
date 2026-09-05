@@ -53,10 +53,11 @@ supports today:
 
 Goose is fixed to GitHub Copilot here: `GOOSE_PROVIDER` may be unset or
 `github_copilot`. Contributor model profiles are defaults from the justfile:
-`luna` (or no profile) uses `gpt-5.6-luna` at `max`, `opus5` uses
-`claude-opus-5` at `high` with a `264000` context limit, and `kimi` uses
-`kimi-k3` at `max` with the same clamp. Environment values still override
-those defaults.
+`gemini` uses `gemini-3.8-flash` at `high` (the default for `review-queue`),
+`luna` (or no profile in `review-container`) uses `gpt-5.6-luna` at `max`,
+`opus5` uses `claude-opus-5` at `high` with a `264000` context limit, and
+`kimi` uses `kimi-k3` at `max` with the same clamp. Environment values still
+override those defaults.
 
 ### Copy/paste examples
 
@@ -254,6 +255,7 @@ and a thinking effort:
 |---|---|---|---|
 | `just review-container` | `gpt-5.6-luna` | `max` | provider default |
 | `just review-container luna` | `gpt-5.6-luna` | `max` | provider default |
+| `just review-container gemini` | `gemini-3.8-flash` | `high` | provider default |
 | `just review-container opus5 high` | `claude-opus-5` | `high` | `264000` |
 | `just review-container kimi` | `kimi-k3` | `max` | `264000` |
 
@@ -410,8 +412,8 @@ it starts: a failed batch's row keeps its failure marking instead of
 reverting to un-reviewed.
 `tests/dashboard-contract.sh` pins all of it.
 
-The leading arguments are the same model profiles `review-container` takes
-(`luna`, `opus5`, `kimi` plus an optional effort); everything from the first
+The leading arguments are the model profiles `review-container` takes
+(`gemini` default, `luna`, `opus5`, `kimi` plus an optional effort); everything from the first
 flag onward passes straight through to the dashboard. `REVIEW_QUEUE_NAME=review-queue-2 just review-queue`
 runs a second dashboard beside the first, like `REVIEW_CONTAINER_NAME` does for
 `review-container`.

@@ -40,7 +40,7 @@ def make_request(owner="projectbluefin", repository="bluefin", number=42,
 
 def make_run(request=None) -> ReviewRun:
     request = request or make_request()
-    return ReviewRun.from_request(request, backend="goose", model="gpt-5.6-luna", effort="high")
+    return ReviewRun.from_request(request, backend="goose", model="gemini-3.8-flash", effort="high")
 
 
 class FakeHarness:

@@ -88,6 +88,7 @@ opus_context_limit := "264000"
 # Kimi K3's default window is ~1M tokens, so the same clamp applies.
 kimi_model := "kimi-k3"
 kimi_context_limit := "264000"
+gemini_model := "gemini-3.8-flash"
 # The fsdk-derived contributor image, used by every recipe that starts a
 # container.
 #
@@ -546,9 +547,14 @@ resolve_model_profile() {
       PROFILE_EFFORT="max"
       PROFILE_CONTEXT_LIMIT="${KIMI_CONTEXT_LIMIT}"
       ;;
+    gemini|gemini-3.8|gemini38)
+      PROFILE_MODEL="${GEMINI_MODEL}"
+      PROFILE_EFFORT="high"
+      PROFILE_CONTEXT_LIMIT=""
+      ;;
     *)
       echo "ERROR: unknown model profile '${profile}'." >&2
-      echo "  Known profiles: luna (${COPILOT_DEFAULT_MODEL}), opus5 (${OPUS_MODEL}), kimi (${KIMI_MODEL})." >&2
+      echo "  Known profiles: gemini (${GEMINI_MODEL}), luna (${COPILOT_DEFAULT_MODEL}), opus5 (${OPUS_MODEL}), kimi (${KIMI_MODEL})." >&2
       return 1
       ;;
   esac
@@ -772,6 +778,7 @@ read_hive_value() {
 #
 #   just review-container              # luna: gpt-5.6-luna at max effort
 #   just review-container luna         # the same, named explicitly
+#   just review-container gemini       # gemini-3.8-flash, high effort
 #   just review-container opus5 high   # claude-opus-5, high effort, 264k context
 #   just review-container kimi         # kimi-k3, max effort, 264k context
 #
@@ -780,7 +787,7 @@ read_hive_value() {
 #
 #   REVIEW_CONTAINER_NAME=review-container-2 just review-container opus5 high
 #
-# Usage: just review-container [luna|opus5|kimi] [low|medium|high|max]
+# Usage: just review-container [gemini|luna|opus5|kimi] [low|medium|high|max]
 # Env:   REVIEW_CONTAINER_NAME=<name>  run a concurrent second instance
 #        (default 'review-container'; must match [a-zA-Z0-9][a-zA-Z0-9_.-]*)
 #        REVIEW_HIVE=<name>  use ~/.config/hive/contributor.<name>.env; when
@@ -798,6 +805,7 @@ review-container profile="" effort="":
     OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
     KIMI_MODEL="{{kimi_model}}"
     KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
+    GEMINI_MODEL="{{gemini_model}}"
 
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
@@ -987,7 +995,8 @@ review-stop name="review-container":
 # Foreground: q or Ctrl-C stops.
 # Arguments pass straight through to the dashboard:
 #
-#   just review-queue                      # everything the queue marks 'review'
+#   just review-queue                      # gemini: gemini-3.8-flash at high effort
+#   just review-queue luna                 # gpt-5.6-luna at max effort
 #   just review-queue kimi high            # pick the model profile and effort
 #   just review-queue owner/repo            # live open PRs for one repository
 #   just review-queue --repo bluefin       # static snapshot filter (legacy form)
@@ -1007,6 +1016,7 @@ review-queue *queue_args:
     OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
     KIMI_MODEL="{{kimi_model}}"
     KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
+    GEMINI_MODEL="{{gemini_model}}"
 
     resolve_review_backend
     command -v podman &>/dev/null || {
@@ -1034,7 +1044,7 @@ review-queue *queue_args:
     profile="" effort=""
     if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then profile="$1"; shift; fi
     if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then effort="$1"; shift; fi
-    resolve_model_profile "$profile" "$effort"
+    resolve_model_profile "${profile:-gemini}" "$effort"
     # The unambiguous repository form follows the existing profile/effort
     # pair. Keep all flag forms byte-for-byte available to the dashboard.
     if [[ $# -gt 0 && "$1" != -* ]]; then

@@ -1592,7 +1592,7 @@ class ReviewScreen(Screen):
         super().__init__()
         self.stop_record = stop
         self.steer = steer
-        self.selection = selection or Preference(ACTIVE_BACKEND, "gpt-5.6-luna", "low")
+        self.selection = selection or Preference(ACTIVE_BACKEND, "gemini-3.8-flash", "high")
         self.process: subprocess.Popen | None = None
         self.finished = False
         self.stop_requested = False
@@ -1751,7 +1751,7 @@ class ReviewScreen(Screen):
             result = adapt_current_engine(
                 "\n".join(self.output), code,
                 {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
-                 "model": os.environ.get("GOOSE_MODEL", "gpt-5.6-luna"),
+                 "model": os.environ.get("GOOSE_MODEL", "gemini-3.8-flash"),
                  "repository": stop.repository, "pull_request": stop.number},
                 verification=live_review_verification(self.live_snapshot),
                 overlap=self.overlap_snapshot,
@@ -1768,8 +1768,8 @@ class ReviewScreen(Screen):
             if can_remember(result, request):
                 remember_success(
                     load_preferences(), stop.repository,
-                    Preference("codex", result.provenance.get("model", "gpt-5.6-luna"),
-                               result.provenance.get("reasoning_effort", "low")),
+                    Preference("codex", result.provenance.get("model", "gemini-3.8-flash"),
+                               result.provenance.get("reasoning_effort", "high")),
                 )
         card = build_decision_card(
             result, exact_head=str(self.live_snapshot.get("headRefOid") or "")
@@ -2203,8 +2203,8 @@ class ReviewDashboard(App):
             return
         if result.availability is Availability.READY:
             label.update(
-                "Harness Autopilot — READY · Codex / gpt-5.6-luna · "
-                "reason: low · Start requires Enter/click"
+                "Harness Autopilot — READY · Codex / gemini-3.8-flash · "
+                "reason: high · Start requires Enter/click"
             )
         else:
             label.update(

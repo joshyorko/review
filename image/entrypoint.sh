@@ -118,7 +118,7 @@ fi
 # Goose refuses to start without a model. Keep the direct-image fallback in
 # sync with the launcher's default for users who invoke this image directly.
 if [ -z "${GOOSE_MODEL:-}" ]; then
-  GOOSE_MODEL="gpt-5.6-luna"
+  GOOSE_MODEL="gemini-3.8-flash"
   note "GOOSE_MODEL not set; defaulting to ${GOOSE_MODEL} for GitHub Copilot"
 fi
 export GOOSE_MODEL
