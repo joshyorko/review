@@ -104,8 +104,10 @@ credential handling ([`launcher.md`](launcher.md)).
 
 ### Hive runtime contract
 
-At Hive `0b78dc0`, the public `/api/contribute` prefix exposes read-only
-status, queue, events, activity, fleet, limits, and triage projections. Prefix
+Hosted deployments serve under `hivecommons.dev` (with the Project Bluefin spoke
+at `https://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev`). At Hive
+`0b78dc0`, the public `/api/contribute` prefix exposes read-only status, queue,
+events, activity, fleet, limits, and triage projections. Prefix
 publicity does not make mutation handlers unauthenticated; those handlers
 still enforce their own write requirements. Review may display these
 authoritative projections, but Hive owns contributor admission and ordered

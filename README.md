@@ -1,7 +1,7 @@
 # review
 enslaving the oppressors since 2026
 
-**TLDR**: Automated review-appliance container designed to put the clankers to work. They're not going away, let's put them to work. Powered by [Kubestellar Hive's Contributor Relay](https://hive.kubestellar.io/) (ClankR). We did not make that up, real dads made these jokes.
+**TLDR**: Automated review-appliance container designed to put the clankers to work. They're not going away, let's put them to work. Powered by [Kubestellar Hive's Contributor Relay](https://hive.hivecommons.dev/) (ClankR). We did not make that up, real dads made these jokes.
 
 ![img](https://github.com/user-attachments/assets/6b8425b8-dedf-4dc9-aa54-60fa9e6cfd91)
 
