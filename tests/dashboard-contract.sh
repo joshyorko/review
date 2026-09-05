@@ -99,10 +99,15 @@ for doc in "$landing_py" \
   grep -q 'skopeo inspect' "$doc" &&
     fail "$(basename "$doc") must not instruct skopeo; the image does not ship it (fsdk-containers#164)"
 done
-# The brief's verification is the anonymous ghcr flow: no token scope, no
-# org/user endpoint split, index children count as carrying a tag.
-grep -q 'ghcr.io/token' "$landing_py" ||
-  fail "the landing brief must verify :stable through the anonymous ghcr token flow"
+# The brief's verification is the anonymous ghcr flow through the module's
+# probe command: the mint, pagination, and content negotiation live in code
+# so a denied token mint can never be masked by a shell pipeline (#375).
+grep -q 'def probe_package' "$landing_py" ||
+  fail "the landing module must ship the anonymous ghcr probe"
+grep -q '/token?scope=repository:' "$landing_py" ||
+  fail "the probe must use the anonymous ghcr token flow"
+grep -q 'probe --package' "$landing_py" ||
+  fail "the landing brief must instruct the probe command"
 # This appliance owns no lab: the brief must treat an unreachable external
 # check service as infrastructure unavailability and substitute ghcr
 # evidence — never a blocked pull request.
@@ -122,6 +127,44 @@ grep -q 'path-filtered' "$landing_py" ||
   fail "the landing brief must cover conditional publish workflows"
 grep -q 'no publication of it exists' "$landing_py" ||
   fail "the landing brief must not fail a merge that owes no publication"
+
+# The status record has exactly one writer: the landing module's report CLI.
+# It serializes under flock, writes a terminal state once, and closes the
+# batch only when every selected pull request has a terminal outcome (#377).
+grep -q 'fcntl.flock' "$landing_py" ||
+  fail "the landing reporter must serialize status writes under flock"
+grep -q 'add_parser("report"' "$landing_py" ||
+  fail "the landing module must ship the report CLI the brief instructs"
+grep -q 'report --status' "$landing_py" ||
+  fail "the landing brief must route status writes through the report CLI"
+grep -q 'no printf' "$landing_py" ||
+  fail "the landing brief must forbid direct status-file writes"
+grep -q 'written once' "$landing_py" ||
+  fail "the landing brief must define a terminal state as written once"
+# The token probe must not pipe curl into jq: without pipefail the pipeline
+# reports jq's status, and a denied mint reads as a successful one (#375).
+grep -qE 'curl[^|]*\| *jq' "$landing_py" &&
+  fail "the token mint must not pipe curl into jq — jq masks a denied mint (#375)"
+grep -q 'never evidence of absence' "$landing_py" ||
+  fail "a probe that cannot answer must never read as a missing package"
+# A ghcr.io mention is not a publish signal: the brief must require a real
+# publication path targeting the repository's own package, the wait must end
+# when the identified workflow's runs are terminal, and an empty run list is
+# never evidence — runs can lag the merge (#376).
+grep -q 'on.push' "$landing_py" ||
+  fail "the publish signal must be an on.push publication path"
+grep -q 'workflow_call' "$landing_py" ||
+  fail "reusable workflows must not count as a publication path"
+grep -q 'workflow_run' "$landing_py" ||
+  fail "workflow_run-triggered publishes must be covered"
+grep -q 'release' "$landing_py" ||
+  fail "release-triggered publishes must be covered"
+grep -q 'an empty run list is never evidence' "$landing_py" ||
+  fail "an empty run list must not read as 'no publication'"
+grep -q 'publish-verdict' "$landing_py" ||
+  fail "the wait/stop decision must route through the publish-verdict command"
+grep -q 'stop polling' "$landing_py" ||
+  fail "the publish wait must stop once terminal runs prove no publication is owed"
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"

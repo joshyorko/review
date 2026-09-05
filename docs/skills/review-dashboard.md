@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "2.0"
-last_updated: 2026-08-25
+version: "2.2"
+last_updated: 2026-09-05
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -291,23 +291,26 @@ agent is Goose's documented one-shot (`goose run --no-session -i
 <prompt-file>`, overridable with `BLUEFIN_REVIEW_LANDING_COMMAND`), run in
 its own process group so `[x]` stops it whole.
 
-The agent reports, the screen polls: every per-PR state change is one JSON
-line in the task's status file (`diagnosing|fixing|waiting-ci|merging|
-awaiting-stable|merged|blocked|failed`, then a task-level `done`), and
-`LandingScreen` ([w], auto-pushed on dispatch) renders all batches, per-PR
-state, the agent log tail, and Hive stats. Never scrape agent prose for
-status. When a task finishes, `landing_finished` folds the report onto the
-rows and notifies the maintainer: the toast carries the batch id and the
-per-state counts, at error severity when anything failed or the agent
-exited without the task-level `done` event, and the same text persists on
-the status line (`last batch …`) until the next dispatch or refresh. The
-rows keep what the toast cannot outlive: merged leaves the batch; blocked,
-failed, and awaiting-stable stays selected with the agent's reason — the
-same rule as every other failure. A pull request the agent never carried
-to an outcome is marked `no outcome reported` when the agent closed its
-report with `done` and `agent died mid-batch` when it never did — each
-with the last reported state, both distinguishable from every state the
-agent can report.
+The agent reports, the screen polls — and the agent never writes the
+status file directly: every state change goes via the module's report
+CLI, one JSON line per call under flock, stamped `ts`. A terminal state is
+written once: identical retries no-op, a wrong terminal verdict corrects
+to a later terminal event (latest wins), a post-terminal non-terminal
+write fails, and `done` is refused while any pull request in the seeded
+selection lacks a terminal state (#377). `LandingScreen` ([w], auto-pushed
+on dispatch) renders all batches, per-PR state, the agent log tail, and
+Hive stats. Never scrape agent prose for status. When a task finishes,
+`landing_finished` folds the report onto the rows and notifies the
+maintainer: the toast carries the batch id and the per-state counts, at
+error severity when anything failed or the agent exited without the
+task-level `done` event, and persists on the status line (`last batch …`)
+until the next dispatch or refresh. The rows keep what
+the toast cannot outlive: merged leaves the batch; blocked, failed, and
+awaiting-stable stays selected with the agent's reason — the same rule as
+every other failure. A pull request the agent never carried to an outcome
+is marked `no outcome reported` when the agent closed its report with
+`done` and `agent died mid-batch` when it never did — each with the last
+reported state, both distinguishable from every reportable state.
 
 The brief teaches the agent to batch a repository-level blocker: a required
 check that fails on the toolchain or the base branch blocks every pull
@@ -322,23 +325,22 @@ it rather than merging it. A root cause with no mechanical fix is a written
 finding in the done note.
 
 The screen is a cabinet of framed panels (`BATCHES`, `HIVE`, `AGENT LOG`,
-round `$secondary` borders with titles) over a title bar. Each batch header
-is a full-width state bar (`batch_bar_style`: running is `$text-primary on
-$primary-muted`, queued `$text-warning on $warning-muted`, exited 0
-`$text-success on $success-muted`, anything else `$text-error on
-$error-muted`). A running batch's header also names its heartbeat — the
-age of the status file's last append (`last report 3m ago`) — so a healthy
-long wait is distinguishable from a dead agent (#291), and each pull
-request carries its state three ways at once:
-the printed word, a shape-distinct glyph, and a colour from
+round `$secondary` borders with titles) over a title bar. Each batch
+header is a full-width state bar (`batch_bar_style`: running is
+`$text-primary on $primary-muted`, queued `$text-warning on
+$warning-muted`, exited 0 `$text-success on $success-muted`, anything else
+`$text-error on $error-muted`). A running batch's header also names its
+heartbeat — the age of the status file's last append (`last report 3m
+ago`) — so a healthy long wait is distinguishable from a dead agent
+(#291), and each pull request carries its state three ways at once: the
+printed word, a shape-distinct glyph, and a colour from
 `LANDING_STATE_STYLES` — `◌` waiting, `◐` diagnosing/fixing, `◔`
 waiting-ci, `▶` merging, `◆` awaiting-stable, `✓` merged, `■` blocked, `✗`
 failed, `✔` for the task-level done. Colour is additive: terminal states
-also read bold on a muted fill, so hue is never the only difference between
-two states. Verified against the pinned Textual: markup spans resolve
-`$`-theme variables through the active app's stylesheet, and padding spaces
-inside a span keep its background — that is what makes the header bar
-full-width.
+also read bold on a muted fill, so hue is never the only difference
+between two states. Verified against the pinned Textual: markup spans
+resolve `$`-theme variables via the active app's stylesheet, and padding
+in a span keeps its background — that makes the header bar full-width.
 
 The record outlives the run: the launcher mounts the state directory from
 the host, and `restore_landing_marks` folds the newest persisted outcome
@@ -359,69 +361,76 @@ other's files, and the name makes the record attributable. Same-second
 batches from one dashboard get a numeric suffix.
 
 **Done is the release tag, not the merge — where an image is published.**
-A GitHub merge only starts the
-publish pipeline; the batch item is landed when the repository's release
-tag carries the merged commit. The tag is the repository's fact, never an
-assumption: the brief has the agent list the package's tags through the
-anonymous ghcr flow and accept the publish it can prove — the convention
-is `:stable`, a repository publishing only `:latest` proves it there
-(common#1008 was reported blocked on a successful `latest` publish), and
-a commit-tagged image with no moving release tag is itself a proven
-publish. `failed`/`blocked` is only for a merge commit no publication can
-evidence. The agent reports
-`awaiting-stable` at merge and `merged` only once the tag has it.
-A repository with no publish workflow and no image package — a
-config/quadlets repository — can never publish, so the brief has
-the agent detect that *before* merging and define done as the GitHub merge
-itself, reported as `merged` with a note that no image pipeline exists.
-The detection never uses the packages API (the shipped token lacks
+A GitHub merge only starts the publish pipeline; the batch item is landed
+when the repository's release tag carries the merged commit. The tag is
+the repository's fact, never an assumption: the brief has the agent list
+the package's tags through the anonymous ghcr flow and accept the publish
+it can prove — the convention is `:stable`, a repository publishing only
+`:latest` proves it there (common#1008 was reported blocked on a
+successful `latest` publish), and a commit-tagged image with no moving
+release tag is itself a proven publish. `failed`/`blocked` is only for a
+merge commit no publication can evidence. The agent reports
+`awaiting-stable` at merge and `merged` only once the tag has it. A
+repository with no publish workflow and no image package — a
+config/quadlets repository — can never publish, so the brief has the agent
+detect that *before* merging and define done as the GitHub merge itself,
+reported as `merged` with a note that no image pipeline exists. The
+detection never uses the packages API (the shipped token lacks
 `read:packages`, and the orgs endpoint 404s on user-owned repositories —
 both read as a false "no package"): a repository counts as publishing
-unless both signals are absent — no workflow's YAML names `ghcr.io`, and
-the package is not anonymously readable: ghcr never 404s a missing
-package, so the signal is a denied anonymous token mint (403 DENIED) or
-`/tags/list` answering 401/403. A 403 alone is ambiguous with a private
-package; the mandatory workflow conjunction covers that case.
-On a merge-queue repository, `gh pr merge` answering "accepted by merge
-queue" means the merge completes later: poll `gh pr view` until MERGED and
-verify the merge commit's push-event publish run; never `gh run watch` a
-merge_group gate run post-merge (#291). Every wait-state note names its
-target and timeout. GitHub computes mergeability asynchronously, so a
-`mergeable: UNKNOWN` answer is a cache-warming placeholder: the brief has
-the agent re-query with backoff for up to a minute and act only on the
-computed state — `blocked` on UNKNOWN alone reports nothing a maintainer
-can act on (#294). Publish detection also has a change-level edge: a
-publish workflow can be path-filtered, scheduled, or manual, so a merge
-that touches none of its triggers owes no publication — the brief has
-the agent prove the filter from the workflow YAML and the merge commit's
-file list and report the merge itself as the deliverable, never `failed`
-for a publication the repository never promised. Above all of these
-stands one policy: this appliance owns no lab and depends on none — no
-pull request may ever report `blocked` because a maintainer-local
-service is missing; its absence or failure only moves the
-verification to ghcr evidence. The same holds for a required check that
-fails without
-testing the pull request: when the external service the check drives — a
-lab endpoint, a runner pool — is unreachable, that is infrastructure
-unavailability, not a defect, and never `blocked` on its own. The brief
-has the agent prove the distinction in the check's logs, verify the
-check's deliverable in ghcr instead (the head's `sha-<head>` image is the
-substitute evidence), and continue the normal path — approve and merge,
-or the `lgtm` label with the evidence named when branch protection
-refuses with the check still red. Merging around it stays forbidden.
-- **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
-  the queue's existing handlers, so permissions, live-head checks, exact
-  commands, and typed-number confirmation remain the authority boundary.
-- **Show evidence state, not a verdict invented from prose.** The card carries
-  exact severity counts, cited file/line findings, engine and live-CI
-  verification, duplicate/overlap context, mergeability, head, and
-  backend/model provenance. Incomplete, failed, and unparsable results direct
-  the reviewer to raw evidence and never display a clean conclusion. The card
-  is a point-in-time record: `ReviewScreen` pins the live and overlap
-  evidence at review start, because the queue's background workers keep
-  rewriting `stop.live`/`stop.overlap` while the review runs (#339).
-- **Never bypass branch protection.** No `--admin`, no `--delete-branch`, no
-  push.
+unless both signals are absent — no workflow has an `on.push` or
+`on.workflow_run` path pushing the repository's own
+`ghcr.io/<owner>/<repo>` package (reusable `workflow_call`, manual-only
+`workflow_dispatch`, release-only, examples, and references to other
+images never count — #376), and the package is not anonymously readable:
+ghcr never 404s a missing package, so the signal is a denied anonymous
+token mint (403 DENIED) or `/tags/list` answering 401/403 — probed through
+the module's probe CLI so the denial survives in code, never a shell
+pipeline (#375); a probe that cannot answer is not evidence of absence. A
+403 alone is ambiguous with a private package; the workflow conjunction
+covers that case. On a merge-queue repository, `gh pr merge` answering
+"accepted by merge queue" means the merge completes later: poll `gh pr
+view` until MERGED and verify the merge commit's publish run — never `gh
+run watch` a merge_group gate run (#291). The wait watches the publish
+workflow's own trigger (push runs, or `workflow_run` runs once upstream CI
+completes; a release-only path owes nothing until a release) and ends
+through the module's `publish-verdict` CLI: an empty run list is never
+evidence, only all-terminal runs prove no publication is owed (#376).
+Every wait-state note names its target and timeout. GitHub computes
+mergeability asynchronously, so a `mergeable: UNKNOWN` answer is a
+cache-warming placeholder: the brief has the agent re-query with backoff
+for up to a minute and act only on the computed state — `blocked` on
+UNKNOWN alone reports nothing a maintainer can act on (#294). Publish
+detection also has a change-level edge: a publish workflow can be
+path-filtered, scheduled, or manual, so a merge that touches none of its
+triggers owes no publication — the brief has the agent prove the filter
+from the workflow YAML and the merge commit's file list and report the
+merge itself as the deliverable, never `failed` for a publication the
+repository never promised. Above all of these stands one policy: this
+appliance owns no lab and depends on none — no pull request may ever
+report `blocked` because a maintainer-local service is missing; its
+absence or failure only moves the verification to ghcr evidence. The same
+holds for a required check that fails without testing the pull request:
+when the external service the check drives — a lab endpoint, a runner pool
+— is unreachable, that is infrastructure unavailability, not a defect, and
+never `blocked` on its own. The brief has the agent prove the distinction
+in the check's logs, verify the check's deliverable in ghcr instead (the
+head's `sha-<head>` image is the substitute evidence), and continue the
+normal path — approve and merge, or the `lgtm` label with the evidence
+named when branch protection refuses with the check still red. Merging
+around it stays forbidden. - **The completed card reuses those paths.**
+`L`, `a`, `m`, and `u` return to the queue's existing handlers, so
+permissions, live-head checks, exact commands, and typed-number
+confirmation remain the authority boundary. - **Show evidence state, not a
+verdict invented from prose.** The card carries exact severity counts,
+cited file/line findings, engine and live-CI verification,
+duplicate/overlap context, mergeability, head, and backend/model
+provenance. Incomplete, failed, and unparsable results direct the reviewer
+to raw evidence and never display a clean conclusion. The card is a
+point-in-time record: `ReviewScreen` pins the live and overlap evidence at
+review start, because the queue's background workers keep rewriting
+`stop.live`/`stop.overlap` while the review runs (#339). - **Never bypass
+branch protection.** No `--admin`, no `--delete-branch`, no push.
 
 ### Review bodies
 
