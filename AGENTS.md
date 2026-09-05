@@ -176,6 +176,7 @@ bash tests/image-contract.sh
 bash tests/bluefin-review.sh
 bash tests/dashboard-contract.sh
 bash tests/worktree-guard.sh
+bash tests/runsc-isolation.sh
 bash tests/just-onboarding.sh
 git diff --check
 just --list
