@@ -210,6 +210,7 @@ run_recipe() {
   shift
   : >"$podman_log"
   rm -f "$state_dir"/*
+  rm -rf "$fake_home/.local/state/review"
   set +e
   output="$(
     env PATH="$fake_bin:$system_bin" PODMAN_LOG="$podman_log" \
@@ -266,6 +267,8 @@ assert_failure_copy() {
   fi
   assert_no_agent_launch
   assert_probe_absent
+  [[ ! -e "$fake_home/.local/state/review" ]] ||
+    fail "isolation failure must happen before review state is staged"
 }
 
 case_missing() {
@@ -296,6 +299,19 @@ case_podman_rejects() {
   write_fake_runsc ready
   run_recipe review-container PODMAN_PROBE_BEHAVIOR=reject
   assert_failure_copy 'incompatible with this host/Podman configuration'
+}
+
+case_probe_before_hive_setup() {
+  write_fake_runsc ready
+  mv "$fake_home/.config/hive/contributor.env" \
+    "$fake_home/.config/hive/contributor.env.saved"
+  run_recipe review-container \
+    PODMAN_PROBE_BEHAVIOR=reject REVIEW_NON_INTERACTIVE=true
+  mv "$fake_home/.config/hive/contributor.env.saved" \
+    "$fake_home/.config/hive/contributor.env"
+  assert_failure_copy 'incompatible with this host/Podman configuration'
+  ! grep -Fq 'missing Hive setup' <<<"$output" ||
+    fail "the runsc proof must fail before Hive registration is attempted"
 }
 
 case_probe_nonzero() {
@@ -422,12 +438,48 @@ case_doctor() {
     fail "review-doctor must execute the rootless runsc probe"
 }
 
+assert_doctor_failure() {
+  local classification="$1"
+  [[ "$status" -ne 0 ]] || fail "review-doctor must fail when runsc is not ready"
+  grep -Fq "isolation runtime: gVisor/runsc (${classification})" <<<"$output" ||
+    fail "review-doctor must preserve runsc classification: ${classification}"
+  grep -Fq 'projectbluefin/review/issues/348' <<<"$output" ||
+    fail "review-doctor must link the local isolation contract"
+  assert_no_agent_launch
+  assert_probe_absent
+}
+
+case_doctor_missing() {
+  write_fake_runsc missing
+  run_recipe review-doctor
+  assert_doctor_failure missing
+}
+
+case_doctor_unusable() {
+  write_fake_runsc ready
+  run_recipe review-doctor RUNSC_BEHAVIOR=unusable
+  assert_doctor_failure 'installed but unusable'
+}
+
+case_doctor_rootful() {
+  write_fake_runsc ready
+  run_recipe review-doctor PODMAN_ROOTLESS=false
+  assert_doctor_failure 'incompatible with this host/Podman configuration'
+}
+
+case_doctor_incompatible() {
+  write_fake_runsc ready
+  run_recipe review-doctor PODMAN_PROBE_RUNTIME=crun
+  assert_doctor_failure 'incompatible with this host/Podman configuration'
+}
+
 run_case() {
   case "$1" in
   missing) case_missing ;;
   nonexecutable) case_nonexecutable ;;
   unusable) case_unusable ;;
   podman-rejects) case_podman_rejects ;;
+  probe-before-hive-setup) case_probe_before_hive_setup ;;
   probe-nonzero) case_probe_nonzero ;;
   false-positive) case_false_positive ;;
   probe-stopped) case_probe_stopped ;;
@@ -441,6 +493,10 @@ run_case() {
   detached) case_detached ;;
   queue) case_queue ;;
   doctor) case_doctor ;;
+  doctor-missing) case_doctor_missing ;;
+  doctor-unusable) case_doctor_unusable ;;
+  doctor-rootful) case_doctor_rootful ;;
+  doctor-incompatible) case_doctor_incompatible ;;
   *) fail "unknown runsc contract case: $1" ;;
   esac
 }
@@ -451,10 +507,12 @@ if (($#)); then
   done
 else
   for requested_case in \
-    missing nonexecutable unusable podman-rejects probe-nonzero false-positive \
+    missing nonexecutable unusable podman-rejects probe-before-hive-setup \
+    probe-nonzero false-positive \
     probe-stopped probe-timeout probe-interrupt name-collision cleanup-failure \
     cleanup-timeout rootful \
-    attended detached queue doctor; do
+    attended detached queue doctor doctor-missing doctor-unusable \
+    doctor-rootful doctor-incompatible; do
     run_case "$requested_case"
   done
 fi

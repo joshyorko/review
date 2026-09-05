@@ -919,16 +919,21 @@ review-container profile="" effort="":
     KIMI_MODEL="{{kimi_model}}"
     KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
 
-    # Isolation is a security boundary, so it is proven before this recipe
-    # takes any action at all: before a state directory is created, a
-    # credential is resolved, an image is fetched, or a Hive registration is
-    # made. A host that cannot isolate must never be asked for a token.
+    # Isolation is a security boundary. The host check runs before image
+    # retrieval, then the credential-free disposable proof runs as soon as
+    # the contributor image is available. No state, credential, model setup,
+    # or Hive registration may happen before both checks pass.
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
       echo "  Install Podman, then re-run review-container." >&2
       exit 1
     }
     require_runsc_host
+
+    CONTRIBUTOR_IMAGE="{{contributor_image}}"
+    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    require_runsc_runtime "$CONTRIBUTOR_IMAGE"
+    echo "✓ isolation runtime: gVisor/runsc"
 
     STATE_DIR="${HOME}/.local/state/review"
     HIVE_SRC_DIR="${STATE_DIR}/hive-src"
@@ -956,11 +961,7 @@ review-container profile="" effort="":
     ensure_hive_contributor_env
     report_hive_selection
 
-    CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
-    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
-    require_runsc_runtime "$CONTRIBUTOR_IMAGE"
-    echo "✓ isolation runtime: gVisor/runsc"
 
     # REVIEW_DETACH=1 runs the worker as a deliberate background container:
     # no terminal, entrypoint follows the agent without attaching, logs
@@ -1363,11 +1364,7 @@ review-doctor:
     # way. The probe is disposable, credential-free and agent-free: it is the
     # only thing this recipe starts.
     echo "=== Isolation runtime (gVisor/runsc) ==="
-    if ! require_runsc_host 2>/dev/null; then
-      echo "  ✗ runsc is not usable on this host"
-      echo "    review refuses to start an agent or mount credentials without it."
-      echo "    Provisioning: see 'Requirements and credentials' in README.md"
-      echo "    Bluefin provisioning: https://github.com/projectbluefin/bluefin/issues/1139"
+    if ! require_runsc_host; then
       fail=$((fail+1))
     elif ! ensure_contributor_image "$DOCTOR_CONTRIBUTOR_IMAGE" >/dev/null 2>&1; then
       # The probe runs with --pull=never, so it needs the image in local
@@ -1375,14 +1372,11 @@ review-doctor:
       echo "  ✗ isolation could not be verified: ${DOCTOR_CONTRIBUTOR_IMAGE} is not available locally"
       echo "    The disposable probe never pulls; resolve the contributor image check above first."
       fail=$((fail+1))
-    elif require_runsc_runtime "$DOCTOR_CONTRIBUTOR_IMAGE" 2>/dev/null; then
+    elif require_runsc_runtime "$DOCTOR_CONTRIBUTOR_IMAGE"; then
       echo "  ✓ isolation runtime: gVisor/runsc (ready; rootless Podman probe passed)"
       echo "  ✓ disposable credential-free agent-free probe removed"
       pass=$((pass+2))
     else
-      echo "  ✗ the disposable runsc probe did not complete"
-      echo "    review refuses to start an agent or mount credentials without it."
-      echo "    Bluefin provisioning: https://github.com/projectbluefin/bluefin/issues/1139"
       fail=$((fail+1))
     fi
     echo ""
