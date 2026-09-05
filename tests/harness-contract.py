@@ -7,14 +7,24 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 
 from harness.codex import CodexHarness  # noqa: E402
 from harness.goose import GooseHarness  # noqa: E402
 from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry  # noqa: E402
+from tui.headroom import (  # noqa: E402
+    CAVEMAN_INSTRUCTIONS,
+    HeadroomClient,
+    HeadroomError,
+    HeadroomSession,
+    HeadroomStats,
+    apply_caveman,
+)
 from tui.review_evidence_manifest import ReviewRequest  # noqa: E402
 
 
@@ -707,6 +717,309 @@ class HarnessContract(unittest.TestCase):
         result = CodexHarness().convert_draft("x" * 5000, request, exit_code=1)
         self.assertEqual(result.state, DraftState.FAILED)
         self.assertLessEqual(len(result.raw_evidence), 400)
+
+
+class _FakeResponse:
+    """Minimal urlopen response double with bounded-read inspection."""
+
+    def __init__(self, body, status=200):
+        self.body = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.status = status
+        self.read_sizes = []
+
+    def read(self, size=-1):
+        self.read_sizes.append(size)
+        if size is None or size < 0:
+            return self.body
+        return self.body[:size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def _fake_urlopen(routes, calls):
+    """Build an urlopen double serving `routes` (path -> outcome list).
+
+    Each call records (path, timeout) in `calls`; when a path's list holds
+    more than one outcome the head is popped, so the last queued outcome
+    repeats. An exception outcome is raised instead of returned.
+    """
+
+    def fake(request, timeout=None):
+        parts = urlsplit(request.full_url)
+        path = parts.path + (f"?{parts.query}" if parts.query else "")
+        calls.append((path, timeout))
+        outcomes = routes[path]
+        outcome = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    return fake
+
+
+class HeadroomContract(unittest.TestCase):
+    STATS_PAYLOAD = {
+        "requests": {"total": 7},
+        "tokens": {
+            "saved": 1200,
+            "output_saved": 80,
+            "output_reduction": {
+                "available": True,
+                "method": "estimated",
+                "reduction_percent": 12.5,
+            },
+        },
+    }
+
+    ENV = {"BLUEFIN_REVIEW_HEADROOM_URL": "http://127.0.0.1:8787"}
+
+    def _stats(self, payload):
+        calls = []
+        response = _FakeResponse(payload)
+        with patch("urllib.request.urlopen", _fake_urlopen({"/stats?cached=1": [response]}, calls)):
+            stats = HeadroomClient("http://127.0.0.1:8787").stats()
+        return stats, calls, response
+
+    def test_ready_probe_is_bounded_and_subsecond(self):
+        calls = []
+        response = _FakeResponse(b"ok")
+        with patch("urllib.request.urlopen", _fake_urlopen({"/readyz": [response]}, calls)):
+            client = HeadroomClient("http://127.0.0.1:8787")
+            self.assertTrue(client.ready())
+            self.assertEqual(client.requested_paths, ["/readyz"])
+        self.assertEqual(calls, [("/readyz", 0.5)])
+        self.assertLess(calls[0][1], 1)
+        self.assertEqual(response.read_sizes, [65_537])
+
+    def test_stats_parse_delta_and_bounds(self):
+        stats, calls, response = self._stats(self.STATS_PAYLOAD)
+        self.assertEqual(stats.requests, 7)
+        self.assertEqual(stats.tokens_saved, 1200)
+        self.assertEqual(stats.output_tokens_saved, 80)
+        self.assertEqual(stats.output_reduction_percent, 12.5)
+        self.assertEqual(stats.output_reduction_method, "estimated")
+        self.assertEqual(calls, [("/stats?cached=1", 0.5)])
+        self.assertEqual(response.read_sizes, [65_537])
+        baseline = HeadroomStats(5, 900, 60, None, None)
+        self.assertEqual(stats.delta_from(baseline).requests, 2)
+        self.assertEqual(stats.delta_from(baseline).tokens_saved, 300)
+        self.assertEqual(stats.delta_from(baseline).output_tokens_saved, 20)
+
+    def test_requested_paths_track_probe_order(self):
+        calls = []
+        routes = {
+            "/readyz": [_FakeResponse(b"ok")],
+            "/stats?cached=1": [_FakeResponse(self.STATS_PAYLOAD)],
+        }
+        with patch("urllib.request.urlopen", _fake_urlopen(routes, calls)):
+            client = HeadroomClient("http://127.0.0.1:8787")
+            self.assertTrue(client.ready())
+            client.stats()
+            self.assertEqual(client.requested_paths, ["/readyz", "/stats?cached=1"])
+
+    def test_output_reduction_absent_or_unavailable_is_none(self):
+        for payload in (
+            {"requests": {"total": 1}, "tokens": {"saved": 2, "output_saved": 3}},
+            {
+                "requests": {"total": 1},
+                "tokens": {"saved": 2, "output_saved": 3, "output_reduction": {"available": False}},
+            },
+        ):
+            with self.subTest(payload=payload):
+                stats, _, _ = self._stats(payload)
+                self.assertIsNone(stats.output_reduction_percent)
+                self.assertIsNone(stats.output_reduction_method)
+
+    def test_all_documented_reduction_methods_are_accepted(self):
+        for method in ("measured", "estimated", "modelled"):
+            with self.subTest(method=method):
+                payload = {
+                    "requests": {"total": 1},
+                    "tokens": {
+                        "saved": 2,
+                        "output_saved": 3,
+                        "output_reduction": {
+                            "available": True,
+                            "method": method,
+                            "reduction_percent": 0,
+                        },
+                    },
+                }
+                stats, _, _ = self._stats(payload)
+                self.assertEqual(stats.output_reduction_method, method)
+                self.assertEqual(stats.output_reduction_percent, 0.0)
+
+    def test_malformed_stats_payloads_are_rejected(self):
+        def with_reduction(reduction):
+            return {
+                "requests": {"total": 1},
+                "tokens": {"saved": 2, "output_saved": 3, "output_reduction": reduction},
+            }
+
+        payloads = {
+            "not json": b"not json",
+            "json array": [1, 2],
+            "missing requests section": {"tokens": {"saved": 2, "output_saved": 3}},
+            "requests not an object": {"requests": [7], "tokens": {"saved": 2, "output_saved": 3}},
+            "missing total": {"requests": {}, "tokens": {"saved": 2, "output_saved": 3}},
+            "boolean counter": {"requests": {"total": True}, "tokens": {"saved": 2, "output_saved": 3}},
+            "float counter": {"requests": {"total": 1.5}, "tokens": {"saved": 2, "output_saved": 3}},
+            "negative counter": {"requests": {"total": -1}, "tokens": {"saved": 2, "output_saved": 3}},
+            "unknown method": with_reduction(
+                {"available": True, "method": "guessed", "reduction_percent": 1.0}
+            ),
+            "non-numeric percent": with_reduction(
+                {"available": True, "method": "measured", "reduction_percent": "12.5"}
+            ),
+            "boolean percent": with_reduction(
+                {"available": True, "method": "measured", "reduction_percent": True}
+            ),
+            "negative percent": with_reduction(
+                {"available": True, "method": "measured", "reduction_percent": -1.0}
+            ),
+            "non-boolean available": with_reduction({"available": "yes"}),
+            "nan percent": (
+                b'{"requests":{"total":1},"tokens":{"saved":2,"output_saved":3,'
+                b'"output_reduction":{"available":true,"method":"measured",'
+                b'"reduction_percent":NaN}}'
+            ),
+            "deeply nested": b'{"a":' * 32 + b"1" + b"}" * 32,
+            "oversized": (
+                b'{"requests":{"total":1},"tokens":{"saved":2,"output_saved":3},'
+                b'"pad":"' + b"x" * 65_536 + b'"}'
+            ),
+        }
+        for name, payload in payloads.items():
+            with self.subTest(name=name), self.assertRaises(HeadroomError):
+                self._stats(payload)
+
+    def test_delta_rejects_counter_decreases(self):
+        baseline = HeadroomStats(7, 1200, 80, None, None)
+        for current in (
+            HeadroomStats(6, 1300, 90, None, None),
+            HeadroomStats(8, 1100, 90, None, None),
+            HeadroomStats(8, 1300, 70, None, None),
+        ):
+            with self.subTest(current=current), self.assertRaises(HeadroomError):
+                current.delta_from(baseline)
+
+    def test_client_normalizes_only_launcher_loopback(self):
+        self.assertEqual(HeadroomClient("http://127.0.0.1:8787/").base_url, "http://127.0.0.1:8787")
+        self.assertEqual(HeadroomClient("http://127.0.0.1:1").base_url, "http://127.0.0.1:1")
+        for url in (
+            "https://127.0.0.1:8787",
+            "http://localhost:8787",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:65536",
+            "http://user@127.0.0.1:8787",
+            "http://127.0.0.1:8787/path",
+            "http://127.0.0.1:8787?x=1",
+            "http://127.0.0.1:8787#frag",
+            "127.0.0.1:8787",
+        ):
+            with self.subTest(url=url), self.assertRaises(HeadroomError):
+                HeadroomClient(url)
+
+    def test_session_routing_and_status(self):
+        calls = []
+        routes = {
+            "/readyz": [_FakeResponse(b"ok")],
+            "/stats?cached=1": [_FakeResponse(self.STATS_PAYLOAD)],
+        }
+        with patch("urllib.request.urlopen", _fake_urlopen(routes, calls)):
+            session = HeadroomSession.from_environment(self.ENV)
+            self.assertEqual(session.refresh("goose").state, "DIRECT")
+            self.assertEqual(calls, [])
+            self.assertIn("Goose/GitHub Copilot", session.status_line("goose", False))
+            self.assertEqual(session.refresh("codex").state, "ACTIVE")
+            self.assertEqual(session.route_for_call("codex").base_url, "http://127.0.0.1:8787")
+
+    def test_unavailable_proxy_is_degraded_and_absent_url_is_direct(self):
+        calls = []
+        routes = {"/readyz": [urllib.error.URLError("refused")]}
+        with patch("urllib.request.urlopen", _fake_urlopen(routes, calls)):
+            session = HeadroomSession.from_environment(self.ENV)
+            route = session.refresh("codex")
+            self.assertEqual(route.state, "DEGRADED")
+            self.assertIsNone(route.base_url)
+            self.assertIsNone(session.route_for_call("codex").base_url)
+            self.assertIn("degraded", session.status_line("codex", False))
+
+        calls = []
+        with patch("urllib.request.urlopen", _fake_urlopen({}, calls)):
+            session = HeadroomSession.from_environment({})
+            route = session.refresh("codex")
+            self.assertEqual(route.state, "DIRECT")
+            self.assertIsNone(route.base_url)
+            self.assertIsNone(session.route_for_call("codex").base_url)
+        self.assertEqual(calls, [])
+
+    def test_stats_failure_preserves_route_and_marks_statistics_degraded(self):
+        routes = {
+            "/readyz": [_FakeResponse(b"ok")],
+            "/stats?cached=1": [_FakeResponse(b"not json")],
+        }
+        with patch("urllib.request.urlopen", _fake_urlopen(routes, [])):
+            session = HeadroomSession.from_environment(self.ENV)
+            route = session.refresh("codex")
+            self.assertEqual(route.state, "ACTIVE")
+            self.assertEqual(route.base_url, "http://127.0.0.1:8787")
+            self.assertIn("degraded", session.status_line("codex", False))
+
+    def test_counter_decrease_keeps_route_and_degrades_statistics(self):
+        first = {"requests": {"total": 9}, "tokens": {"saved": 100, "output_saved": 10}}
+        reset = {"requests": {"total": 1}, "tokens": {"saved": 5, "output_saved": 1}}
+        routes = {
+            "/readyz": [_FakeResponse(b"ok")],
+            "/stats?cached=1": [_FakeResponse(first), _FakeResponse(reset)],
+        }
+        with patch("urllib.request.urlopen", _fake_urlopen(routes, [])):
+            session = HeadroomSession.from_environment(self.ENV)
+            self.assertEqual(session.refresh("codex").state, "ACTIVE")
+            self.assertIn("proxy delta", session.status_line("codex", False))
+            self.assertEqual(session.refresh("codex").state, "ACTIVE")
+            self.assertIn("degraded", session.status_line("codex", False))
+
+    def test_status_line_labels_numbers_as_proxy_delta(self):
+        first = {"requests": {"total": 5}, "tokens": {"saved": 900, "output_saved": 60}}
+        routes = {
+            "/readyz": [_FakeResponse(b"ok")],
+            "/stats?cached=1": [_FakeResponse(first), _FakeResponse(self.STATS_PAYLOAD)],
+        }
+        with patch("urllib.request.urlopen", _fake_urlopen(routes, [])):
+            session = HeadroomSession.from_environment(self.ENV)
+            session.refresh("codex")
+            session.refresh("codex")
+            line = session.status_line("codex", False)
+            self.assertIn("proxy delta", line)
+            self.assertIn("2 requests", line)
+            self.assertIn("300", line)
+            self.assertIn("20", line)
+            self.assertNotIn("per-review", line)
+            self.assertEqual(line.count("\n"), 0)
+
+    def test_apply_caveman_appends_policy_exactly_once(self):
+        policy = (
+            "Minimum tokens. Fragments fine. No preamble, no postamble, no restating "
+            "context, no rationale. Answer, smallest-possible edits, nothing else. "
+            "Never drop anything the turn or task needs to be correct, including "
+            "negations (not, never, no, only, except). Use full prose for destructive "
+            "or irreversible actions, security warnings, and any multi-step sequence "
+            "where brevity would create ambiguity."
+        )
+        self.assertEqual(CAVEMAN_INSTRUCTIONS, policy)
+        enabled = apply_caveman("review contract", True)
+        self.assertTrue(enabled.startswith("review contract"))
+        self.assertTrue(enabled.endswith(policy))
+        self.assertEqual(enabled.count(policy), 1)
+        self.assertEqual(apply_caveman(enabled, True), enabled)
+        self.assertEqual(apply_caveman("review contract", False), "review contract")
+        self.assertNotIn(policy, apply_caveman("review contract", False))
 
 
 if __name__ == "__main__":
