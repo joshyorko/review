@@ -318,6 +318,16 @@ For each pull request, in order:
 6. Never merge a draft, never merge with failing required checks, never pass
    `--admin` or any flag that bypasses branch protection, never force-push.
    A pull request the rules cannot land is reported, not forced.
+7. When `BLUEFIN_REVIEW_LAB_SOCKET` is set, this session was lent a lab.
+   Ask `/opt/bluefin/tui/lab_client.py` for a bounded health snapshot for
+   each pull request you handle, and submit an allowlisted profile only for
+   its exact 40-character head; `not-applicable` means there is no lab work
+   for it, which is not a finding. Never call `kubectl` or `argo` — this
+   container has neither. Lab evidence is supplementary: a degraded broker,
+   a timeout, or a failed workflow means the lab told you nothing. Say so in
+   the note and verify the deliverable from published registry evidence
+   exactly as a session with no lab does. A pull request is never blocked
+   because a lab was unavailable.
 
 A blocked verdict can be repository-level. A required check that fails on
 the toolchain or the base branch — a pinned compiler with known
