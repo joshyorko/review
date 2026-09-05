@@ -1,8 +1,8 @@
 # Specification: Review Release Consolidation
 
-**Date:** 2026-09-05  
-**Topic:** Consolidating in-flight work and releasing projectbluefin/review  
-**Status:** Approved  
+**Date:** 2026-09-05
+**Topic:** Consolidating in-flight work and releasing projectbluefin/review
+**Status:** Approved
 
 ## 1. Context and Motivation
 

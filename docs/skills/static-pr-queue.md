@@ -30,6 +30,11 @@ Do not use the queue to select Hive work, assign agents, claim pull requests,
 merge changes, or expose private repository data. Hive owns task selection;
 GitHub owns pull-request state and merge decisions.
 
+Static `queue.json` is vestigial. Never inspect `queue.json` or query static
+queue JSON files to understand pull-request status or review state. We either
+get pull-request state from Hive live or directly inside the active review
+container, or not at all.
+
 ## Core Process
 
 1. Keep queue generation dependency-free and test it with fixture-backed

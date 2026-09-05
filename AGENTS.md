@@ -49,6 +49,13 @@ not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
 one permitted filter is own-work exclusion on the maintainer-facing queue
 view — a reviewer never receives their own authored pull requests to review.
 
+Static queue snapshots are vestigial: never inspect `queue.json` or query static
+queue JSON files to understand pull-request status, queues, or review state. We
+either get pull-request state from Hive live or directly inside the active review
+container (`podman exec`, container inspection, and
+`${XDG_STATE_HOME:-~/.local/state}/bluefin-review/landings/` logs), or not at
+all. Never rely on or fetch static JSON artifacts.
+
 This appliance owns no lab and depends on none. Nothing in this repository
 may require, integrate with, or gate on maintainer-local infrastructure: a
 review decision that needs someone's private endpoint to be reachable is

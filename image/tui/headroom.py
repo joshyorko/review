@@ -46,6 +46,28 @@ class HeadroomError(Exception):
     """A Headroom read, parse, or validation failure."""
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse HTTP redirects so loopback requests never escape loopback."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, f"HTTP 301", headers, fp)
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, f"HTTP 302", headers, fp)
+
+    http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+_LOOPBACK_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _NoRedirectHandler(),
+)
+_ORIGINAL_URLOPEN = urllib.request.urlopen
+
+
 @dataclass(frozen=True)
 class HeadroomDelta:
     requests: int
@@ -129,7 +151,11 @@ class HeadroomClient:
         self.requested_paths.append(path)
         request = urllib.request.Request(self.base_url + path)
         try:
-            with urllib.request.urlopen(request, timeout=HEADROOM_TIMEOUT_SECONDS) as response:
+            if urllib.request.urlopen is not _ORIGINAL_URLOPEN:
+                open_fn = urllib.request.urlopen
+            else:
+                open_fn = _LOOPBACK_OPENER.open
+            with open_fn(request, timeout=HEADROOM_TIMEOUT_SECONDS) as response:
                 status = getattr(response, "status", None) or response.getcode()
                 body = response.read(HEADROOM_MAX_RESPONSE_BYTES + 1)
         except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as error:
@@ -206,10 +232,17 @@ class HeadroomSession:
     """Per-process routing and telemetry state for the dashboard."""
 
     def __init__(self, base_url: str | None):
-        self._client = HeadroomClient(base_url) if base_url else None
+        self._config_error: str | None = None
+        self._client: HeadroomClient | None = None
+        if base_url:
+            try:
+                self._client = HeadroomClient(base_url)
+            except HeadroomError as error:
+                self._config_error = str(error)
         self._routes: dict[str, HeadroomRoute] = {}
         self._baseline: HeadroomStats | None = None
         self._delta: HeadroomDelta | None = None
+        self._last_stats: HeadroomStats | None = None
         self._stats_degraded = False
 
     @classmethod
@@ -232,8 +265,10 @@ class HeadroomSession:
     def status_line(self, backend: str, caveman: bool) -> str:
         name = _BACKEND_NAMES.get(backend, backend)
         route = self._routes.get(backend) or self._default_route(backend)
+        state_tag = f"[{route.state}]"
+        caveman_tag = f"Caveman {'ON' if caveman else 'OFF'} [C]"
         if route.state == "ACTIVE":
-            line = f"{name}: via Headroom at {route.base_url}"
+            line = f"{state_tag} {name}: via Headroom at {route.base_url}"
             if self._stats_degraded:
                 line += " - statistics degraded"
             elif self._delta is not None:
@@ -242,15 +277,26 @@ class HeadroomSession:
                     f"{self._delta.tokens_saved} tokens saved, "
                     f"{self._delta.output_tokens_saved} output tokens saved"
                 )
+                if (
+                    self._last_stats is not None
+                    and self._last_stats.output_reduction_percent is not None
+                    and self._last_stats.output_reduction_method is not None
+                ):
+                    line += (
+                        f" (proxy-wide {self._last_stats.output_reduction_percent:g}% "
+                        f"reduction {self._last_stats.output_reduction_method})"
+                    )
         elif route.state == "DEGRADED":
-            line = f"{name}: direct - Headroom degraded ({route.reason})"
+            line = f"{state_tag} {name}: direct - Headroom degraded ({route.reason})"
         else:
-            line = f"{name}: direct - {route.reason}"
-        return f"{line}; caveman {'on' if caveman else 'off'}"
+            line = f"{state_tag} {name}: direct - {route.reason}"
+        return f"{line}; {caveman_tag}"
 
     def _direct_route(self, backend: str) -> HeadroomRoute | None:
         if backend != "codex":
             return HeadroomRoute("DIRECT", backend, None, "Headroom proxies Codex only")
+        if self._config_error is not None:
+            return None
         if self._client is None:
             return HeadroomRoute("DIRECT", backend, None, f"{HEADROOM_ENV} is not set")
         return None
@@ -259,16 +305,24 @@ class HeadroomSession:
         direct = self._direct_route(backend)
         if direct is not None:
             return direct
+        if self._config_error is not None:
+            return HeadroomRoute("DEGRADED", backend, None, f"invalid {HEADROOM_ENV}: {self._config_error}")
         if not self._client.ready():
             return HeadroomRoute("DEGRADED", backend, None, "readiness probe failed")
         return HeadroomRoute("ACTIVE", backend, self._client.base_url, "ready")
 
     def _default_route(self, backend: str) -> HeadroomRoute:
-        return self._direct_route(backend) or HeadroomRoute("DEGRADED", backend, None, "not probed yet")
+        direct = self._direct_route(backend)
+        if direct is not None:
+            return direct
+        if self._config_error is not None:
+            return HeadroomRoute("DEGRADED", backend, None, f"invalid {HEADROOM_ENV}: {self._config_error}")
+        return HeadroomRoute("DEGRADED", backend, None, "not probed yet")
 
     def _sample(self) -> None:
         try:
             stats = self._client.stats()
+            self._last_stats = stats
             if self._baseline is None:
                 self._baseline = stats
                 self._delta = HeadroomDelta(0, 0, 0)

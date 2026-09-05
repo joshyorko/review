@@ -1,11 +1,13 @@
 """Focused contracts for the adapter-first harness seam."""
 
+import http.server
 import json
 import os
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 from pathlib import Path
@@ -83,8 +85,8 @@ class HarnessContract(unittest.TestCase):
 
     def test_codex_defaults_and_provenance_capability(self):
         adapter = CodexHarness()
-        self.assertEqual(adapter.model, "gpt-5.6-luna")
-        self.assertEqual(adapter.effort, "low")
+        self.assertEqual(adapter.model, "gemini-3.8-flash")
+        self.assertEqual(adapter.effort, "high")
         self.assertTrue(adapter.capabilities.exact_binding)
         self.assertTrue(adapter.capabilities.provenance)
 
@@ -241,7 +243,7 @@ class HarnessContract(unittest.TestCase):
         )
         self.assertEqual(command.count("--skip-git-repo-check"), 1)
         self.assertIn("--model", command)
-        self.assertIn("gpt-5.6-luna", command)
+        self.assertIn("gemini-3.8-flash", command)
         self.assertIn("model_reasoning_effort=low", command)
         self.assertIn("project/review#166 base=" + "a" * 40 + " head=" + "b" * 40, command[-1])
         self.assertIn("Do not mutate GitHub", command[-1])
@@ -275,8 +277,8 @@ class HarnessContract(unittest.TestCase):
         )
         self.assertEqual(result.state, "complete")
         self.assertEqual(result.provenance["backend"], "codex")
-        self.assertEqual(result.provenance["model"], "gpt-5.6-luna")
-        self.assertEqual(result.provenance["reasoning_effort"], "low")
+        self.assertEqual(result.provenance["model"], "gemini-3.8-flash")
+        self.assertEqual(result.provenance["reasoning_effort"], "high")
         self.assertEqual(result.provenance["repository"], "project/review")
 
     def test_codex_accepts_blank_jsonl_framing_lines(self):
@@ -761,6 +763,41 @@ def _fake_urlopen(routes, calls):
     return fake
 
 
+class _OkHandler(http.server.BaseHTTPRequestHandler):
+    """Serve 200 for any GET and record the request path on the server."""
+
+    def do_GET(self):
+        self.server.hits.append(self.path)
+        body = b"ok"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class _RedirectHandler(_OkHandler):
+    """Answer every GET with a 302 to the server's `location` target."""
+
+    def do_GET(self):
+        self.server.hits.append(self.path)
+        self.send_response(302)
+        self.send_header("Location", self.server.location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+def _serve(handler):
+    """Run a loopback HTTP server on an ephemeral port; caller shuts it down."""
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.hits = []
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
 class HeadroomContract(unittest.TestCase):
     STATS_PAYLOAD = {
         "requests": {"total": 7},
@@ -885,7 +922,17 @@ class HeadroomContract(unittest.TestCase):
             "nan percent": (
                 b'{"requests":{"total":1},"tokens":{"saved":2,"output_saved":3,'
                 b'"output_reduction":{"available":true,"method":"measured",'
-                b'"reduction_percent":NaN}}'
+                b'"reduction_percent":NaN}}}'
+            ),
+            "infinity percent": (
+                b'{"requests":{"total":1},"tokens":{"saved":2,"output_saved":3,'
+                b'"output_reduction":{"available":true,"method":"measured",'
+                b'"reduction_percent":Infinity}}}'
+            ),
+            "negative infinity percent": (
+                b'{"requests":{"total":1},"tokens":{"saved":2,"output_saved":3,'
+                b'"output_reduction":{"available":true,"method":"measured",'
+                b'"reduction_percent":-Infinity}}}'
             ),
             "deeply nested": b'{"a":' * 32 + b"1" + b"}" * 32,
             "oversized": (
@@ -896,6 +943,18 @@ class HeadroomContract(unittest.TestCase):
         for name, payload in payloads.items():
             with self.subTest(name=name), self.assertRaises(HeadroomError):
                 self._stats(payload)
+
+    def test_non_finite_reduction_percent_fails_numeric_validation(self):
+        for token in (b"NaN", b"Infinity", b"-Infinity"):
+            payload = (
+                b'{"requests":{"total":1},"tokens":{"saved":2,"output_saved":3,'
+                b'"output_reduction":{"available":true,"method":"measured",'
+                b'"reduction_percent":' + token + b"}}}"
+            )
+            with self.subTest(token=token):
+                with self.assertRaises(HeadroomError) as caught:
+                    self._stats(payload)
+                self.assertIn("finite", str(caught.exception))
 
     def test_delta_rejects_counter_decreases(self):
         baseline = HeadroomStats(7, 1200, 80, None, None)
@@ -925,6 +984,39 @@ class HeadroomContract(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(HeadroomError):
                 HeadroomClient(url)
 
+    def test_redirect_is_rejected_and_never_followed(self):
+        target = _serve(_OkHandler)
+        redirector = _serve(_RedirectHandler)
+        self.addCleanup(target.shutdown)
+        self.addCleanup(target.server_close)
+        self.addCleanup(redirector.shutdown)
+        self.addCleanup(redirector.server_close)
+        redirector.location = f"http://127.0.0.1:{target.server_port}/readyz"
+        client = HeadroomClient(f"http://127.0.0.1:{redirector.server_port}")
+        self.assertFalse(client.ready())
+        with self.assertRaises(HeadroomError) as caught:
+            client.stats()
+        self.assertIn("HTTP 302", str(caught.exception))
+        self.assertEqual(target.hits, [])
+        self.assertEqual(redirector.hits, ["/readyz", "/stats?cached=1"])
+
+    def test_http_proxy_environment_is_ignored(self):
+        proxy = _serve(_OkHandler)
+        origin = _serve(_OkHandler)
+        self.addCleanup(proxy.shutdown)
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(origin.shutdown)
+        self.addCleanup(origin.server_close)
+        proxy_env = {
+            "http_proxy": f"http://127.0.0.1:{proxy.server_port}",
+            "HTTP_PROXY": f"http://127.0.0.1:{proxy.server_port}",
+        }
+        with patch.dict(os.environ, proxy_env):
+            client = HeadroomClient(f"http://127.0.0.1:{origin.server_port}")
+            self.assertTrue(client.ready())
+        self.assertEqual(proxy.hits, [])
+        self.assertEqual(origin.hits, ["/readyz"])
+
     def test_session_routing_and_status(self):
         calls = []
         routes = {
@@ -938,6 +1030,23 @@ class HeadroomContract(unittest.TestCase):
             self.assertIn("Goose/GitHub Copilot", session.status_line("goose", False))
             self.assertEqual(session.refresh("codex").state, "ACTIVE")
             self.assertEqual(session.route_for_call("codex").base_url, "http://127.0.0.1:8787")
+
+    def test_invalid_configured_url_is_degraded_not_fatal(self):
+        calls = []
+        with patch("urllib.request.urlopen", _fake_urlopen({}, calls)):
+            session = HeadroomSession.from_environment(
+                {"BLUEFIN_REVIEW_HEADROOM_URL": "https://headroom.invalid:8787"}
+            )
+            self.assertIn("DEGRADED", session.status_line("codex", False))
+            route = session.refresh("codex")
+            self.assertEqual(route.state, "DEGRADED")
+            self.assertIsNone(route.base_url)
+            self.assertIsNone(session.route_for_call("codex").base_url)
+            line = session.status_line("codex", False)
+            self.assertIn("DEGRADED", line)
+            self.assertIn("degraded", line)
+            self.assertEqual(session.refresh("goose").state, "DIRECT")
+        self.assertEqual(calls, [])
 
     def test_unavailable_proxy_is_degraded_and_absent_url_is_direct(self):
         calls = []
