@@ -55,7 +55,9 @@ ReviewDashboard (container)
   │     │                           full-repo + head SHA — no shared checkout
   │     ├── LocalExecutor           per-PR review subprocess through the
   │     │                           existing harness/ReviewRun abstractions,
-  │     │                           slots granted by HeadroomGovernor
+  │     │                           slots granted by CapacityGovernor;
+  │     │                           every run routed through the existing
+  │     │                           Headroom session (token reduction)
   │     ├── BrokerExecutor          typed submit/status/logs requests over a
   │     │                           private UDS to the host-side review-exec
   │     │                           broker, which owns kubectl + credentials
@@ -96,7 +98,11 @@ Host (launcher)
 ### Executor seam
 
 - `LocalExecutor` (default): spawns review subprocesses; asks the
-  `HeadroomGovernor` for a slot before each spawn.
+  `CapacityGovernor` for a slot before each spawn. Each run resolves its
+  route through the existing `HeadroomSession` (`image/tui/headroom.py`)
+  exactly as single reviews do, so Headroom token reduction applies to the
+  swarm; headroom state and route are recorded in result provenance and the
+  batch UI surfaces the session status line.
 - `BrokerExecutor` (optional): the dashboard container holds no kubeconfig,
   Kubernetes credential, or `kubectl` — that boundary stays. Instead the
   launcher (which owns them) starts a host-side **review-exec broker**
@@ -113,8 +119,10 @@ Host (launcher)
 - Doctrine holds: the appliance depends on no cluster; declining, absence,
   or failure of the broker path leaves everything working locally.
 
-### HeadroomGovernor
+### CapacityGovernor
 
+- Lives in `image/tui/capacity.py`. (Named to avoid collision with the
+  existing Headroom token-reduction subsystem in `image/tui/headroom.py`.)
 - Runnable local slots = `min(floor((MemAvailable - reserve) /
   per_review_budget), cores // 2, BLUEFIN_REVIEW_CONCURRENT_REVIEWS)`,
   floored at **zero** — exhausted headroom yields no slot and queued work
@@ -182,8 +190,9 @@ Host (launcher)
 
 ## Caveman + skills integration
 
-- Check prompts gain a compact-output contract: structured verdict, bounded
-  finding list, no prose padding; cached transcripts are size-capped.
+- Check prompts gain a compact-output contract reusing the existing
+  `CAVEMAN_INSTRUCTIONS` from `image/tui/headroom.py`: structured verdict,
+  bounded finding list, no prose padding; cached transcripts are size-capped.
 - The five review-scope check subagents and build-time skill generation are
   untouched (protected). Skills continue to serve interactive contributor
   sessions only; they do not become review checks automatically.
