@@ -829,13 +829,12 @@ def main(argv: list[str] | None = None) -> int:
 # again — each round in its own process, because asking one long-lived agent
 # to review the work it just wrote is how a review becomes a rubber stamp.
 #
-# This is the SAME queue: rounds are LandingTasks with a phase, drained FIFO
-# by the one lane that already exists, cancelled by the same [x], and
-# recorded in the same status file. There is no second scheduler and no
-# second selection authority — the maintainer's confirmed batch is still the
-# only scope grant.
+# This is the SAME queue: rounds are LandingTasks with a phase, dispatched by
+# the repository-aware scheduler, cancelled by the same [x], and recorded in
+# the same status file. There is no second scheduler and no second selection
+# authority — the maintainer's confirmed batch is still the only scope grant.
 
-FINAL_POLICIES = ("automatic", "opus", "kimi")
+FINAL_POLICIES = ("automatic", "gemini", "opus", "sol", "kimi")
 
 # The phases a round may report. `final-review-clean` and `review-blocked`
 # close the phase: nothing may be written after either.
@@ -859,10 +858,12 @@ FINAL_ROUND_LIMIT = 5
 # batch's own `done` event keeps the "" key it always had.
 FINAL_KEY = "final"
 
-# Reviewing is the expensive judgement; fixing is mechanical. Opus reviews,
-# K3 fixes, and a dependency-only batch is small enough that K3 does both.
+# Reviewing is the expensive judgement; fixing is mechanical. Gemini is the
+# automatic default, while K3 fixes every policy's findings.
+GEMINI_TRIPLE = ("goose", "gemini-3.8-flash", "high")
+SOL_TRIPLE = ("goose", "gpt-5.6-sol", "medium")
 OPUS_TRIPLE = ("goose", "claude-opus-5", "high")
-KIMI_TRIPLE = ("goose", "kimi-k3", "high")
+KIMI_TRIPLE = ("goose", "kimi-k3", "high")  # alias K3
 
 # A dependency batch is one whose every pull request is a dependency or
 # chore change. Conventional Commit types decide it, plus GitHub's own
@@ -900,14 +901,18 @@ def final_triple(policy: str, classification: str, phase: str) -> tuple:
     on the ambient environment silently reviews with the wrong model.
     """
     if phase in ("fixing", "cleanup"):
-        # Fixing is K3's job under every policy except an all-Opus one,
-        # where the maintainer asked for Opus review with K3 fixes anyway.
         return KIMI_TRIPLE
+    if policy == "gemini":
+        return GEMINI_TRIPLE
     if policy == "opus":
         return OPUS_TRIPLE
-    if policy == "kimi":
+    if policy in ("sol", "gpt-sol"):
+        return SOL_TRIPLE
+    if policy in ("k3", "kimi"):
         return KIMI_TRIPLE
-    return KIMI_TRIPLE if classification == "dependency" else OPUS_TRIPLE
+    if policy == "automatic":
+        return KIMI_TRIPLE if classification == "dependency" else GEMINI_TRIPLE
+    return GEMINI_TRIPLE
 
 
 def final_environment(triple: tuple, backend: str = "") -> dict:

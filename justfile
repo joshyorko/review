@@ -14,8 +14,8 @@
 #   review-container  Run the contributor container: the Hive queue
 #                     worker that receives assigned tasks and donates
 #                     inference. Takes an optional model profile and
-#                     thinking effort, e.g. 'just review-container opus5
-#                     high'. Foreground when attended; REVIEW_DETACH=1
+#                     thinking effort, e.g. 'just review-container sol
+#                     medium'. Foreground when attended; REVIEW_DETACH=1
 #                     runs it as a labeled detached worker.
 #   review-stop       Stop a detached worker. Refuses attended runs and
 #                     containers this launcher did not start.
@@ -28,7 +28,7 @@
 #                     Takes the same model profile and effort as
 #                     review-container, then passes the rest through to
 #                     the dashboard, e.g.
-#                     'just review-queue kimi high --repo bluefin'.
+#                     'just review-queue k3 high --repo bluefin'.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # LIFECYCLE
@@ -78,17 +78,17 @@ hive_repo_url := "https://github.com/kubestellar/hive"
 # origin/v2 via `git ls-remote --heads https://github.com/kubestellar/hive v2`
 # on 2026-08-04.
 hive_commit := "8ac1994a4994ec3454f83c2ed5a989abd430e1af"
-copilot_default_model := "gpt-5.6-luna"
+gemini_model := "gemini-3.8-flash"
 # Contributor runs are automated in practice — Hive keeps feeding the session —
 # so a large window is money spent on context nobody reads. Opus and Kimi are
-# the models whose default windows are worth clamping; luna keeps the provider
-# default because it is already the cheap path.
+# the models whose default windows are worth clamping.
 opus_model := "claude-opus-5"
 opus_context_limit := "264000"
 # Kimi K3's default window is ~1M tokens, so the same clamp applies.
-kimi_model := "kimi-k3"
-kimi_context_limit := "264000"
-gemini_model := "gemini-3.8-flash"
+sol_model := "gpt-5.6-sol"
+k3_model := "kimi-k3"
+k3_context_limit := "264000"
+default_profile := "gemini"
 # The fsdk-derived contributor image, used by every recipe that starts a
 # container.
 #
@@ -522,19 +522,19 @@ resolve_goose_selection() {
   # Goose is fixed to GitHub Copilot. The model stays noninteractive and the
   # environment still overrides it for automation.
   GOOSE_PROVIDER="github_copilot"
-  GOOSE_MODEL="${GOOSE_MODEL:-${COPILOT_DEFAULT_MODEL}}"
+  GOOSE_MODEL="${GOOSE_MODEL:-${GEMINI_MODEL}}"
   return 0
 }
-# Turn a short profile name ('luna', 'opus5') plus an optional thinking effort
-# into GOOSE_MODEL / GOOSE_THINKING_EFFORT / GOOSE_CONTEXT_LIMIT. Two profiles,
-# no picker: an empty profile is the default one. Profiles are defaults, never
-# overrides — an explicit GOOSE_* value in the environment still wins.
+# Turn a short profile name plus an optional thinking effort into GOOSE_MODEL /
+# GOOSE_THINKING_EFFORT / GOOSE_CONTEXT_LIMIT. Four profiles, no picker:
+# an empty profile is the default one. Profiles are defaults, never overrides —
+# an explicit GOOSE_* value in the environment still wins.
 resolve_model_profile() {
   local profile="${1:-}" effort="${2:-}"
   case "${profile,,}" in
-    ""|luna)
-      PROFILE_MODEL="${COPILOT_DEFAULT_MODEL}"
-      PROFILE_EFFORT="max"
+    ""|gemini|gemini-3.8|gemini38)
+      PROFILE_MODEL="${GEMINI_MODEL}"
+      PROFILE_EFFORT="high"
       PROFILE_CONTEXT_LIMIT=""
       ;;
     opus5)
@@ -542,19 +542,19 @@ resolve_model_profile() {
       PROFILE_EFFORT="high"
       PROFILE_CONTEXT_LIMIT="${OPUS_CONTEXT_LIMIT}"
       ;;
-    kimi)
-      PROFILE_MODEL="${KIMI_MODEL}"
-      PROFILE_EFFORT="max"
-      PROFILE_CONTEXT_LIMIT="${KIMI_CONTEXT_LIMIT}"
-      ;;
-    gemini|gemini-3.8|gemini38)
-      PROFILE_MODEL="${GEMINI_MODEL}"
-      PROFILE_EFFORT="high"
+    sol|gpt-sol|gptsol)
+      PROFILE_MODEL="${SOL_MODEL}"
+      PROFILE_EFFORT="medium"
       PROFILE_CONTEXT_LIMIT=""
+      ;;
+    k3|kimi)
+      PROFILE_MODEL="${K3_MODEL}"
+      PROFILE_EFFORT="max"
+      PROFILE_CONTEXT_LIMIT="${K3_CONTEXT_LIMIT}"
       ;;
     *)
       echo "ERROR: unknown model profile '${profile}'." >&2
-      echo "  Known profiles: gemini (${GEMINI_MODEL}), luna (${COPILOT_DEFAULT_MODEL}), opus5 (${OPUS_MODEL}), kimi (${KIMI_MODEL})." >&2
+      echo "  Known profiles: gemini (${GEMINI_MODEL}), sol (${SOL_MODEL}), opus5 (${OPUS_MODEL}), k3 (${K3_MODEL})." >&2
       return 1
       ;;
   esac
@@ -910,18 +910,18 @@ add_lab_container_args() {
 # Receives Hive-assigned tasks and donates inference through the
 # maintainer's credentials.
 #
-#   just review-container              # luna: gpt-5.6-luna at max effort
-#   just review-container luna         # the same, named explicitly
-#   just review-container gemini       # gemini-3.8-flash, high effort
+#   just review-container              # gemini: gemini-3.8-flash at high effort
+#   just review-container gemini       # the same, named explicitly
+#   just review-container sol          # gpt-5.6-sol, medium effort
 #   just review-container opus5 high   # claude-opus-5, high effort, 264k context
-#   just review-container kimi         # kimi-k3, max effort, 264k context
+#   just review-container k3           # kimi-k3, max effort, 264k context
 #
 # One instance owns the 'review-container' name, so a second concurrent agent
 # needs a name of its own:
 #
 #   REVIEW_CONTAINER_NAME=review-container-2 just review-container opus5 high
 #
-# Usage: just review-container [gemini|luna|opus5|kimi] [low|medium|high|max]
+# Usage: just review-container [gemini|sol|gpt-sol|opus5|k3|kimi] [low|medium|high|max]
 # Env:   REVIEW_CONTAINER_NAME=<name>  run a concurrent second instance
 #        (default 'review-container'; must match [a-zA-Z0-9][a-zA-Z0-9_.-]*)
 #        REVIEW_HIVE=<name>  use ~/.config/hive/contributor.<name>.env; when
@@ -934,12 +934,12 @@ review-container profile="" effort="":
     set -euo pipefail
     {{shared_functions}}
     TOOL="{{tool_env}}"
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
+    GEMINI_MODEL="{{gemini_model}}"
     OPUS_MODEL="{{opus_model}}"
     OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
-    KIMI_MODEL="{{kimi_model}}"
-    KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
-    GEMINI_MODEL="{{gemini_model}}"
+    SOL_MODEL="{{sol_model}}"
+    K3_MODEL="{{k3_model}}"
+    K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
@@ -1130,10 +1130,10 @@ review-stop name="review-container":
 # Arguments pass straight through to the dashboard:
 #
 #   just review-queue                      # gemini: gemini-3.8-flash at high effort
-#   just review-queue luna                 # gpt-5.6-luna at max effort
-#   just review-queue kimi high            # pick the model profile and effort
+#   just review-queue sol                  # gpt-5.6-sol at medium effort
+#   just review-queue k3 high              # pick the model profile and effort
 #   just review-queue owner/repo            # live open PRs for one repository
-#   just review-queue --repo bluefin       # static snapshot filter (legacy form)
+#   just review-queue --repo bluefin       # narrow the org queue to one repository
 #   just review-queue opus5 --all          # profile, then dashboard flags
 #
 # One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
@@ -1145,12 +1145,12 @@ review-queue *queue_args:
     set -euo pipefail
     {{shared_functions}}
     TOOL="{{tool_env}}"
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
+    GEMINI_MODEL="{{gemini_model}}"
     OPUS_MODEL="{{opus_model}}"
     OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
-    KIMI_MODEL="{{kimi_model}}"
-    KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
-    GEMINI_MODEL="{{gemini_model}}"
+    SOL_MODEL="{{sol_model}}"
+    K3_MODEL="{{k3_model}}"
+    K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
     resolve_review_backend
     command -v podman &>/dev/null || {
@@ -1318,7 +1318,6 @@ review-doctor:
     #!/usr/bin/env bash
     set -uo pipefail
     {{shared_functions}}
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
     HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
     HIVE_COMMIT="${HIVE_COMMIT,,}"
     pass=0; fail=0

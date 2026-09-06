@@ -153,7 +153,7 @@
       ],
       "description": "Maintains the four container-only review recipes and their credential boundaries. Use when editing justfile.",
       "version": "3.3",
-      "last_updated": "2026-08-20",
+      "last_updated": "2026-09-05",
       "doc_type": "runbook"
     },
     {
@@ -211,25 +211,6 @@
       "version": "1.1",
       "last_updated": "2026-08-14",
       "doc_type": "reference"
-    },
-    {
-      "id": "static-pr-queue",
-      "name": "static-pr-queue",
-      "one_line_purpose": "Publish a safe, static queue of public pull requests.",
-      "entry_point": "docs/skills/static-pr-queue.md",
-      "category": "ci-ops",
-      "status": "active",
-      "tags": [
-        "github",
-        "actions",
-        "queue",
-        "static",
-        "pullrequest"
-      ],
-      "description": "Publishes the public static PR queue without creating queue authority. Use when changing queue generation, ranking, artifacts, or refresh automation.",
-      "version": "1.10",
-      "last_updated": "2026-08-16",
-      "doc_type": "procedure"
     },
     {
       "id": "upstream-hive",

@@ -6,8 +6,9 @@ outcome is misreported are all failures here. The previous contract was a set
 of greps over this file's source text, which passed while the dashboard had no
 way to review anything at all.
 
-No network and no GitHub: the queue is served from a temp file and the review
-engine is replaced by a stub script whose exit status the test chooses.
+No network and no GitHub: the queue is served by a stubbed ``gh`` on PATH and
+the review engine is replaced by a stub script whose exit status the test
+chooses.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import sys
 import threading
 import time
 import tempfile
+import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -40,7 +42,6 @@ FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 sys.path.insert(0, str(TUI_DIR))
 
 SNAPSHOT = {
-    "generated_at": "2026-08-08T00:00:00Z",
     "items": [
         {
             "repository": "projectbluefin/bluefinctl",
@@ -52,7 +53,7 @@ SNAPSHOT = {
         {
             "repository": "projectbluefin/common",
             "number": 7,
-            "recommended_action": "merge",
+            "recommended_action": "investigate",
             "title": "chore: bump digest",
             "author": "someone-else",
         },
@@ -65,6 +66,46 @@ SNAPSHOT = {
         },
     ],
 }
+
+# Fixture recommended_action → the GraphQL search evidence that the
+# dashboard's classifier maps back to exactly that action.
+ORG_EVIDENCE = {
+    "review": ("REVIEW_REQUIRED", "MERGEABLE", "SUCCESS"),
+    "ready-for-human-merge": ("APPROVED", "MERGEABLE", "SUCCESS"),
+    "fix-ci": ("REVIEW_REQUIRED", "MERGEABLE", "FAILURE"),
+    "resolve-conflicts": ("REVIEW_REQUIRED", "CONFLICTING", "SUCCESS"),
+    "investigate": ("REVIEW_REQUIRED", "UNKNOWN", "SUCCESS"),
+}
+
+
+def org_search_pages(items: list[dict]) -> str:
+    """GraphQL search pages, as `gh api graphql --paginate --slurp` emits."""
+    nodes = []
+    for item in items:
+        review, mergeable, rollup = ORG_EVIDENCE[
+            item.get("recommended_action", "review")
+        ]
+        nodes.append({
+            "number": item["number"],
+            "title": item["title"],
+            "updatedAt": item.get("updated_at", "2026-08-08T00:00:00Z"),
+            "author": {"login": item.get("author", "")},
+            "repository": {"nameWithOwner": item["repository"]},
+            "labels": {"nodes": [{"name": name} for name in item.get("labels", [])]},
+            "reviewDecision": review,
+            "mergeable": mergeable,
+            "commits": {
+                "nodes": [{"commit": {"statusCheckRollup": {"state": rollup}}}]
+            },
+        })
+    return json.dumps([{
+        "data": {
+            "search": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": nodes,
+            }
+        }
+    }])
 
 failures: list[str] = []
 checks = 0
@@ -101,8 +142,14 @@ def write_stub(path: Path, body: str) -> str:
 async def main() -> int:
     workdir = Path(tempfile.mkdtemp(prefix="dashboard-pilot."))
 
-    queue_file = workdir / "queue.json"
-    queue_file.write_text(json.dumps(SNAPSHOT))
+    # The org queue: what the stubbed `gh api graphql` search returns. The
+    # dashboard has no static snapshot path; this is its only default source.
+    org_queue_file = workdir / "org-queue.json"
+
+    def set_org_queue(items: list[dict]) -> None:
+        org_queue_file.write_text(org_search_pages(items))
+
+    set_org_queue(SNAPSHOT["items"])
 
     # gh is read-only here: the pilot never lets a mutation reach a real
     # network, and any attempt to run one is recorded for the assertions.
@@ -112,6 +159,12 @@ async def main() -> int:
     old_request_started = workdir / f"old-request-start-{workdir.name}"
     perm_file = workdir / "permissions.push"
     perm_file.write_text("true\n")
+    org_queue_branch = (
+        'if [ "$1 $2" = "api graphql" ]; then\n'
+        '  if [ -n "${ORG_GH_ERROR-}" ]; then printf "%s\\n" "$ORG_GH_ERROR" >&2; exit 1; fi\n'
+        f'  cat "{org_queue_file}"; exit 0\n'
+        'fi\n'
+    )
     gh_stub = write_stub(
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
@@ -119,6 +172,7 @@ async def main() -> int:
         '  if [ -n "${GH_USER_FAIL-}" ]; then echo "authentication required" >&2; exit 1; fi\n'
         '  echo castrojo; exit 0;\n'
         'fi\n'
+        + org_queue_branch +
         'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
         '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
         f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
@@ -148,7 +202,6 @@ async def main() -> int:
     )
     os.environ["PATH"] = f"{workdir}:{os.environ['PATH']}"
     os.environ["XDG_STATE_HOME"] = str(workdir / "state")
-    os.environ["BLUEFIN_REVIEW_QUEUE_URL"] = queue_file.as_uri()
     os.environ["HIVE_HUB"] = "wss://hive.example.test/contribute"
     os.environ["GH_TOKEN"] = "dashboard-pilot-token"
     write_stub(
@@ -270,7 +323,7 @@ async def main() -> int:
 
     # A syntactically valid foreign body tuple must not reach mutation or
     # delete the file it names.
-    async with tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri())).run_test() as pilot:
+    async with tui.ReviewDashboard(tui.QueueFilters()).run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
             if pilot.app.stops:
@@ -300,7 +353,7 @@ async def main() -> int:
 
     check(
         not tui.QueueFilters(repository="acme/widgets").live,
-        "--repo owner/repo must remain a static snapshot filter",
+        "--repo owner/repo must remain an org queue filter, not the live source",
     )
     check(
         tui.QueueFilters(live_repository="acme/widgets").live,
@@ -308,8 +361,43 @@ async def main() -> int:
     )
     check(
         tui.PULL_FETCH_LIMIT == os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200"),
-        "snapshot pull fetch limit must remain configurable",
+        "the pull fetch limit must remain configurable",
     )
+
+    # The default org-wide source is live too: a gh failure, a malformed
+    # response, and an empty search each become one honest source state.
+    os.environ["ORG_GH_ERROR"] = "HTTP 502: GitHub search is unavailable"
+    org_error_app = tui.ReviewDashboard(tui.QueueFilters())
+    async with org_error_app.run_test() as pilot:
+        for _ in range(600):
+            if org_error_app.source_state == "error":
+                break
+            await pilot.pause(0.05)
+        check(org_error_app.source_state == "error" and not org_error_app.stops,
+              "an org queue failure must hold rows and report an error source")
+        check("GitHub search is unavailable" in org_error_app.source_message,
+              "an org queue failure must carry the gh detail")
+    os.environ.pop("ORG_GH_ERROR", None)
+
+    org_queue_file.write_text("{}")
+    org_malformed_app = tui.ReviewDashboard(tui.QueueFilters())
+    async with org_malformed_app.run_test() as pilot:
+        for _ in range(600):
+            if org_malformed_app.source_state == "malformed":
+                break
+            await pilot.pause(0.05)
+        check(org_malformed_app.source_state == "malformed" and not org_malformed_app.stops,
+              "a malformed org search response must become a malformed source state")
+    set_org_queue([])
+    org_empty_app = tui.ReviewDashboard(tui.QueueFilters())
+    async with org_empty_app.run_test() as pilot:
+        for _ in range(600):
+            if org_empty_app.source_state == "empty":
+                break
+            await pilot.pause(0.05)
+        check(org_empty_app.source_state == "empty" and not org_empty_app.stops,
+              "an empty org queue must read as empty, not as an error")
+    set_org_queue(SNAPSHOT["items"])
 
     live_file = workdir / "live.json"
     live_file.write_text(json.dumps([
@@ -534,14 +622,14 @@ async def main() -> int:
     # merge-ready work was invisible. Default is now the whole queue, ordered
     # so what a maintainer can act on comes first.
     for key, label in (("q", "q"), ("ctrl+c", "Ctrl-C")):
-        quit_app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        quit_app = tui.ReviewDashboard(tui.QueueFilters())
         async with quit_app.run_test() as quit_pilot:
             await quit_pilot.pause()
             await quit_pilot.press(key)
             await quit_pilot.pause()
             check(quit_app._exit, f"{label} must exit the root dashboard")
 
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -596,7 +684,7 @@ async def main() -> int:
 
     # ── an explicit action filter still narrows ──────────────────────────
     app = tui.ReviewDashboard(
-        tui.QueueFilters(action="review", url=queue_file.as_uri())
+        tui.QueueFilters(action="review")
     )
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -611,7 +699,7 @@ async def main() -> int:
         )
 
     # --all keeps every action; own work stays filtered out regardless.
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -626,7 +714,7 @@ async def main() -> int:
 
     # --repo narrows to one repository.
     app = tui.ReviewDashboard(
-        tui.QueueFilters(action="", repository="common", url=queue_file.as_uri())
+        tui.QueueFilters(action="", repository="common")
     )
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -640,7 +728,7 @@ async def main() -> int:
         )
 
     # ── every binding resolves to a real action ──────────────────────────
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for binding in tui.ReviewDashboard.BINDINGS:
@@ -790,7 +878,7 @@ async def main() -> int:
         compare_fail: bool = False,
     ):
         review_stub(exit_code, output)
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters())
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -891,7 +979,7 @@ async def main() -> int:
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{landing_stub} @PROMPT"
     os.environ["BLUEFIN_REVIEW_INSTANCE"] = "review-queue-pilot"
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -1020,6 +1108,115 @@ async def main() -> int:
             await pilot.pause()
             check(not isinstance(app.screen, tui.LandingScreen), "q must return from LandingScreen")
     del os.environ["BLUEFIN_REVIEW_INSTANCE"]
+
+    # ── landing batches share repository lanes, not one global FIFO ─────
+    # Independent repositories may use the two safe worker slots together;
+    # batches touching the same repository must wait for the first process.
+    concurrency_script = workdir / "blocking-landing.py"
+    concurrency_script.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "import time\n"
+        "\n"
+        "started, release = map(Path, sys.argv[1:])\n"
+        "started.write_text('started\\n')\n"
+        "while not release.exists():\n"
+        "    time.sleep(0.01)\n"
+    )
+
+    def blocking_task(
+        repository: str,
+        number: int,
+        started: Path,
+        release: Path,
+    ):
+        task = tui.landing.new_task(
+            [tui.Stop(repository, number, "review", f"PR {number}")],
+            "tester",
+        )
+        task.command = [
+            sys.executable,
+            str(concurrency_script),
+            str(started),
+            str(release),
+        ]
+        return task
+
+    async def wait_until(predicate, pilot, rounds: int = 400) -> bool:
+        for _ in range(rounds):
+            if predicate():
+                return True
+            await pilot.pause(0.01)
+        return predicate()
+
+    os.environ["BLUEFIN_REVIEW_INSTANCE"] = "pilot-concurrency"
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        started_a = workdir / "disjoint-a.started"
+        started_b = workdir / "disjoint-b.started"
+        release_a = workdir / "disjoint-a.release"
+        release_b = workdir / "disjoint-b.release"
+        task_a = blocking_task("acme/widgets", 1, started_a, release_a)
+        task_b = blocking_task("acme/gadgets", 2, started_b, release_b)
+        app.landing_queue.extend([task_a, task_b])
+        app.drain_landings()
+        disjoint_running = await wait_until(
+            lambda: task_a.running and task_b.running,
+            pilot,
+        )
+        check(
+            disjoint_running,
+            "batches on disjoint repositories must run concurrently",
+        )
+        check(
+            task_a.process is not None and task_b.process is not None,
+            "disjoint batches must each expose an active process",
+        )
+        release_a.touch()
+        release_b.touch()
+        both_finished = await wait_until(
+            lambda: task_a.returncode is not None and task_b.returncode is not None,
+            pilot,
+        )
+        check(both_finished, "disjoint landing workers must finish cleanly")
+
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        started_first = workdir / "same-first.started"
+        started_second = workdir / "same-second.started"
+        release_first = workdir / "same-first.release"
+        release_second = workdir / "same-second.release"
+        first = blocking_task("acme/widgets", 3, started_first, release_first)
+        second = blocking_task("acme/widgets", 4, started_second, release_second)
+        app.landing_queue.extend([first, second])
+        app.drain_landings()
+        first_running = await wait_until(lambda: first.running, pilot)
+        check(first_running, "the first same-repository batch must start")
+        check(
+            not second.running
+            and second.process is None
+            and second.returncode is None
+            and not started_second.exists(),
+            "the second same-repository batch must wait for the first",
+        )
+        release_first.touch()
+        second_running = await wait_until(
+            lambda: first.returncode is not None and second.running,
+            pilot,
+        )
+        check(
+            second_running,
+            "the second same-repository batch must start after the first finishes",
+        )
+        release_second.touch()
+        both_finished = await wait_until(
+            lambda: first.returncode is not None and second.returncode is not None,
+            pilot,
+        )
+        check(both_finished, "serialized landing workers must finish cleanly")
+    del os.environ["BLUEFIN_REVIEW_INSTANCE"]
     gh_log.write_text("")
 
     # ── the batch queue paints every state, and never by colour alone ────
@@ -1046,7 +1243,7 @@ async def main() -> int:
         '{"state": "done", "note": "two landed, one failed"}\n'
     )
     colour_task.process = object()  # a live handle: the header reads running
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         app.landing_queue.append(colour_task)
         await app.push_screen(tui.LandingScreen(app))
@@ -1168,7 +1365,7 @@ async def main() -> int:
         "tester",
     )
     del os.environ["BLUEFIN_REVIEW_INSTANCE"]
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         app.landing_queue.append(hostile_task)
         await app.push_screen(tui.LandingScreen(app))
@@ -1226,7 +1423,7 @@ async def main() -> int:
     now = time.time()
     os.utime(older, (now - 200, now - 200))
     os.utime(newer, (now - 100, now - 100))
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -1332,7 +1529,7 @@ async def main() -> int:
 
     # ── aborting the plan gate dispatches nothing ────────────────────────
     landing_log.write_text("")
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -1366,7 +1563,7 @@ async def main() -> int:
     # Colour is never the only carrier of a fact: a selected row carries a
     # ● marker in its text AND a full-row background, so the batch the
     # maintainer is building is visible without reading the status line.
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -1419,7 +1616,7 @@ async def main() -> int:
     # All". The stronger keystroke does the strong thing: A opens the batch
     # plan gate. The read-only batch queue viewer lives on w.
     landing_log.write_text("")
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -1484,7 +1681,7 @@ async def main() -> int:
         'printf "{\\"state\\": \\"done\\", \\"note\\": \\"one landed, one refused\\"}\\n" >>"$status"\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{mixed_stub} @PROMPT"
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -1575,7 +1772,7 @@ async def main() -> int:
         'exit 1\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{died_stub} @PROMPT"
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -1654,7 +1851,7 @@ async def main() -> int:
         'printf "{\\"state\\": \\"done\\", \\"note\\": \\"landed what I saw\\"}\\n" >>"$status"\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{gap_stub} @PROMPT"
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -1738,7 +1935,7 @@ async def main() -> int:
         'printf "{\\"note\\": \\"unstructured tail\\"}\\n" >>"$status"\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{tail_stub} @PROMPT"
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -1798,7 +1995,7 @@ async def main() -> int:
         'printf "{\\"state\\": \\"done\\", \\"note\\": \\"all blocked\\"}\\n" >>"$status"\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{blocked_stub} @PROMPT"
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -2649,8 +2846,8 @@ async def main() -> int:
             [SimpleNamespace(key="o/r#9", title="unreadable", labels=[])]
         )
         == "mixed",
-        "an unknown title must fall back to the thorough reviewer, not the "
-        "cheap one",
+        "an unknown title must fall back to mixed classification, not "
+        "dependency",
     )
     check(
         tui.landing.classify_batch([]) == "mixed",
@@ -2658,12 +2855,19 @@ async def main() -> int:
     )
     check(
         tui.landing.final_triple("automatic", "mixed", "final-review")[1]
-        == "claude-opus-5"
+        == "gemini-3.8-flash"
         and tui.landing.final_triple("automatic", "dependency", "final-review")[1]
         == "kimi-k3"
+        and tui.landing.final_triple("gemini", "mixed", "final-review")[1]
+        == "gemini-3.8-flash"
         and tui.landing.final_triple("opus", "dependency", "final-review")[1]
         == "claude-opus-5"
+        and tui.landing.final_triple("sol", "mixed", "final-review")[1]
+        == "gpt-5.6-sol"
+        and tui.landing.final_triple("gpt-sol", "mixed", "final-review")[1]
+        == "gpt-5.6-sol"
         and tui.landing.final_triple("kimi", "mixed", "final-review")[1] == "kimi-k3"
+        and tui.landing.final_triple("k3", "mixed", "final-review")[1] == "kimi-k3"
         and tui.landing.final_triple("opus", "mixed", "fixing")[1] == "kimi-k3",
         "the policy/classification table must pick the documented models",
     )
@@ -2756,7 +2960,7 @@ async def main() -> int:
 
     # The gate: one prompt per dashboard session, before the first dispatch,
     # and changeable afterwards with [P].
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     app.final_policy = None
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -2782,7 +2986,7 @@ async def main() -> int:
             "never" in gate_text and "branch protection" in gate_text,
             f"the gate must state what a review round may not do, got {gate_text!r}",
         )
-        await pilot.press("3")
+        await pilot.press("5")
         await pilot.pause()
         check(
             app.final_policy == "kimi",
@@ -2876,7 +3080,7 @@ async def main() -> int:
         f"a dead socket must degrade rather than answer, got {degraded}",
     )
     os.environ.pop("BLUEFIN_REVIEW_LAB_SOCKET", None)
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -2909,7 +3113,7 @@ async def main() -> int:
     # permission cannot, and must be told so rather than shown a gate.
     for allowed in (False, True):
         perm_file.write_text("true\n" if allowed else "false\n")
-        app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters(action=""))
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -3062,7 +3266,7 @@ async def main() -> int:
         },
     )
     try:
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters())
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -3123,7 +3327,7 @@ async def main() -> int:
         # state is unknown, and leave direct GitHub merge actions available.
         flapping_hive = FlappingHive()
         tui.hive_get = flapping_hive
-        stale_app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        stale_app = tui.ReviewDashboard(tui.QueueFilters())
         async with stale_app.run_test() as pilot:
             for _ in range(200):
                 if stale_app.hive_state and stale_app.stops:
@@ -3204,7 +3408,7 @@ async def main() -> int:
             tui.hive_get = lambda path, message=message: tui.hive_api.Result(
                 False, "test", message, {}
             )
-            app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+            app = tui.ReviewDashboard(tui.QueueFilters())
             async with app.run_test() as pilot:
                 await pilot.pause()
                 for _ in range(200):
@@ -3219,7 +3423,7 @@ async def main() -> int:
 
         # No hub configured at all is its own honest answer.
         tui.hive_api_base = lambda: ""
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters())
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -3238,7 +3442,7 @@ async def main() -> int:
     # ── the diff is coloured, scrollable, and whole ──────────────────────
     # It used to be plain text pasted into the evidence pane and cut at 20 000
     # characters with no sign it had been cut.
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -3426,24 +3630,16 @@ async def main() -> int:
             f"{_Content.from_markup(tui.escape(raw)).plain!r}",
         )
 
-    bracket_queue = workdir / "brackets.json"
-    bracket_queue.write_text(
-        json.dumps(
-            {
-                "generated_at": "2026-08-08T00:00:00Z",
-                "items": [
-                    {
-                        "repository": "projectbluefin/bluefinctl",
-                        "number": 31,
-                        "recommended_action": "review",
-                        "title": "fix: [skip ci] guard the release",
-                        "author": "someone-else",
-                    }
-                ],
-            }
-        )
-    )
-    app = tui.ReviewDashboard(tui.QueueFilters(url=bracket_queue.as_uri()))
+    set_org_queue([
+        {
+            "repository": "projectbluefin/bluefinctl",
+            "number": 31,
+            "recommended_action": "review",
+            "title": "fix: [skip ci] guard the release",
+            "author": "someone-else",
+        }
+    ])
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -3493,6 +3689,7 @@ async def main() -> int:
             "the author must link to their GitHub profile",
         )
     gh_log.write_text("")
+    set_org_queue(SNAPSHOT["items"])
 
     # ── who has reviewed, and whether their word carries write access ────
     check(
@@ -3503,7 +3700,7 @@ async def main() -> int:
         and tui.reviewer_standing("NONE") == "community",
         "author association must separate maintainers from the community",
     )
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -3552,7 +3749,7 @@ async def main() -> int:
 
     # ── leaving a review: a verdict without a merge ──────────────────────
     for verdict_key, flag in (("1", "--approve"), ("2", "--request-changes"), ("3", "--comment")):
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters())
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -3625,7 +3822,7 @@ async def main() -> int:
     tui.ACTIVE_BACKEND = "codex"
     try:
         for verdict, generated in (("approve", "accepted"), ("request-changes", "generated blocker"), ("comment", "observation")):
-            app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+            app = tui.ReviewDashboard(tui.QueueFilters(action=""))
             async with app.run_test() as pilot:
                 await pilot.pause()
                 for _ in range(200):
@@ -3708,7 +3905,7 @@ async def main() -> int:
     try:
         check(tui.ACTIVE_BACKEND == "codex",
               "unavailable Codex pilot must explicitly select Codex")
-        app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters(action=""))
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -3760,7 +3957,7 @@ async def main() -> int:
     tui.ACTIVE_BACKEND = "goose"
     tui.GooseHarness.draft = goose_draft
     try:
-        app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters(action=""))
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -3805,7 +4002,7 @@ async def main() -> int:
         tui.GooseHarness.draft = original_goose_draft
 
     # A verdict that is not an approval has to say why.
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -3863,6 +4060,7 @@ async def main() -> int:
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        + org_queue_branch +
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
@@ -3875,7 +4073,7 @@ async def main() -> int:
         'if [ "$1 $2" = "pr update-branch" ]; then printf "update failed %s\\n" "$(printf "e%.0s" {1..300})" >&2; exit 1; fi\n'
         "exit 0\n",
     )
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -3980,7 +4178,7 @@ async def main() -> int:
             gh_log.read_text().count("pr merge") >= 1,
             "a batch merge must attempt the pull requests it was given",
         )
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -4043,6 +4241,7 @@ async def main() -> int:
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        + org_queue_branch +
         'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
         '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
         f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
@@ -4060,7 +4259,7 @@ async def main() -> int:
     gh_log.write_text("")
 
     # ── Hive owns the App approval and queue label atomically (#247) ──────
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -4164,7 +4363,7 @@ async def main() -> int:
             f"the acting key line must not advertise {key!r}",
         )
 
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -4324,7 +4523,7 @@ async def main() -> int:
     # A conflicted branch cannot be brought current by GitHub's update API;
     # show the maintainer the manual-resolution path instead of opening a
     # gate that is certain to fail (#261).
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -4460,7 +4659,7 @@ async def main() -> int:
         "a newer commit status must supersede the same stable status context",
     )
 
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -4531,21 +4730,17 @@ async def main() -> int:
 
     # [U] over a live queue: two qualifying Renovate branches and one that is
     # conflicted, exactly the shapes #152 names.
-    mech_queue = workdir / "mechanical.json"
-    mech_queue.write_text(json.dumps({
-        "generated_at": "2026-08-08T00:00:00Z",
-        "items": [
-            {"repository": "o/r", "number": 101, "recommended_action": "review",
-             "title": "chore(deps): update dependency alpha", "author": bot},
-            {"repository": "o/r", "number": 142, "recommended_action": "review",
-             "title": "chore(deps): update dependency beta", "author": bot},
-            {"repository": "o/r", "number": 117, "recommended_action": "review",
-             "title": "chore(deps): update dependency gamma", "author": bot},
-            {"repository": "o/r", "number": 9, "recommended_action": "review",
-             "title": "chore(deps): update dependency delta by hand",
-             "author": "someone-else"},
-        ],
-    }))
+    set_org_queue([
+        {"repository": "o/r", "number": 101, "recommended_action": "review",
+         "title": "chore(deps): update dependency alpha", "author": bot},
+        {"repository": "o/r", "number": 142, "recommended_action": "review",
+         "title": "chore(deps): update dependency beta", "author": bot},
+        {"repository": "o/r", "number": 117, "recommended_action": "review",
+         "title": "chore(deps): update dependency gamma", "author": bot},
+        {"repository": "o/r", "number": 9, "recommended_action": "review",
+         "title": "chore(deps): update dependency delta by hand",
+         "author": "someone-else"},
+    ])
     ok_json = workdir / "mech-ok.json"
     ok_json.write_text(json.dumps(live_shape()))
     bad_json = workdir / "mech-bad.json"
@@ -4554,6 +4749,7 @@ async def main() -> int:
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        + org_queue_branch +
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then\n'
         '  case "$3" in\n'
@@ -4566,7 +4762,7 @@ async def main() -> int:
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
         "exit 0\n",
     )
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=mech_queue.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -4604,6 +4800,7 @@ async def main() -> int:
             await pilot.press("escape")
             await pilot.pause()
     gh_log.write_text("")
+    set_org_queue(SNAPSHOT["items"])
 
     # ── duplicates come with enough summary to choose between them ───────
     # "dupe-of #26, #25, #24" says a decision is required and nothing about
@@ -4612,6 +4809,7 @@ async def main() -> int:
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        + org_queue_branch +
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then cat <<\'JSON\'\n'
@@ -4627,7 +4825,7 @@ async def main() -> int:
         "exit 0; fi\n"
         "exit 0\n",
     )
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -4680,6 +4878,7 @@ async def main() -> int:
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        + org_queue_branch +
         'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
         '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
         f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
@@ -4733,7 +4932,7 @@ async def main() -> int:
         f"one pull request waiting on the sweep must still be visible, got {lone!r}",
     )
 
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -4771,7 +4970,7 @@ async def main() -> int:
     gh_log.write_text("")
 
     # ── the gate is always escapable ─────────────────────────────────────
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -4798,7 +4997,7 @@ async def main() -> int:
     gh_log.write_text("")
 
     # ── a slow mutation must not freeze the dashboard ────────────────────
-    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     real_run = subprocess.run
 
     def slow_run(*args, **kwargs):
@@ -5256,7 +5455,7 @@ async def main() -> int:
     # Harness discovery is asynchronous and can report after the dashboard's
     # widgets have been torn down. Exercise the actual app lifecycle and prove
     # the late callback is harmless rather than only grepping NoMatches.
-    late_app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    late_app = tui.ReviewDashboard(tui.QueueFilters())
     late_options = []
     async with late_app.run_test() as pilot:
         for _ in range(200):
@@ -5293,7 +5492,7 @@ async def main() -> int:
 
     # ── completed-card actions return through the existing mutation gate ─
     review_stub(0, clean_output)
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -5339,7 +5538,7 @@ async def main() -> int:
     # ── the steer box: typed text reaches the review as instructions ─────
     review_stub(0, "0 findings")
     steer_log.write_text("")
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -5396,7 +5595,7 @@ async def main() -> int:
         'trap "" TERM\n'
         "wait\n",
     )
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    app = tui.ReviewDashboard(tui.QueueFilters())
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -5480,7 +5679,7 @@ async def main() -> int:
             return tui.Availability.READY
 
         tui.CodexHarness.probe = classmethod(delayed_probe)
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters())
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -5513,7 +5712,7 @@ async def main() -> int:
             check(not codex_calls, "Codex must not start after probe-time cancellation")
 
         tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters())
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -5572,7 +5771,7 @@ async def main() -> int:
 
         tui.subprocess.Popen = real_popen
         os.environ.pop("GH_TOKEN", None)
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        app = tui.ReviewDashboard(tui.QueueFilters())
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
@@ -5637,6 +5836,11 @@ async def main() -> int:
         print(f"FAIL: {failure}", file=sys.stderr)
     print(f"dashboard pilot: {checks - len(failures)}/{checks} checks passed")
     return 1 if failures else 0
+
+
+class DashboardPilotTest(unittest.TestCase):
+    def test_dashboard_pilot(self) -> None:
+        self.assertEqual(asyncio.run(main()), 0)
 
 
 if __name__ == "__main__":

@@ -437,13 +437,13 @@ rm -f "$home/.codex/auth.json"
 rmdir "$home/.codex"
 write_goose_config
 
-begin "selection: default Copilot model is noninteractive"
+begin "selection: default Gemini model is noninteractive"
 reset_logs
 run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 assert_file_not_exists "$cfg_dir/last-selections.env"
 assert_file_not_exists "$cfg_dir/secrets.env"
 assert_eq "$(wc -c <"$gum_log")" 0 "gum must not be invoked"
@@ -454,11 +454,11 @@ run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
   GOOSE_THINKING_EFFORT=medium
 assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 
-begin "review-container: no profile is luna at max with the provider's own context"
+begin "review-container: no profile is gemini at high with the provider's own context"
 reset_logs
 run_recipe review-container GH_READY=1
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
 assert_eq "$(wc -c <"$gum_log")" 0 "a headless run must not invoke gum"
 
@@ -470,20 +470,20 @@ assert_file_contains "--env GOOSE_MODEL=claude-opus-5" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
 
-begin "review-container: the kimi profile is max effort with a clamped context"
+begin "review-container: the k3 profile is max effort with a clamped context"
 reset_logs
-RECIPE_ARGS=(kimi)
+RECIPE_ARGS=(k3)
 run_recipe review-container GH_READY=1
 assert_file_contains "--env GOOSE_MODEL=kimi-k3" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
 assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
 
-begin "review-container: the gemini profile is high effort with provider context"
+begin "review-container: the sol profile is medium effort with provider context"
 reset_logs
-RECIPE_ARGS=(gemini)
+RECIPE_ARGS=(gpt-sol)
 run_recipe review-container GH_READY=1
-assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
 
 begin "review-container: an effort argument overrides the profile default"reset_logs
@@ -498,10 +498,11 @@ run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "an unknown profile must not launch anything"
 assert_contains "unknown model profile 'gpt-9'" "$OUT"
 assert_contains "Known profiles" "$OUT"
+assert_contains "gemini (gemini-3.8-flash), sol (gpt-5.6-sol), opus5 (claude-opus-5), k3 (kimi-k3)" "$OUT"
 
 begin "review-container: an unknown thinking effort is one actionable error"
 reset_logs
-RECIPE_ARGS=(luna ludicrous)
+RECIPE_ARGS=(gemini ludicrous)
 run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "an unknown effort must not launch anything"
 assert_contains "unknown thinking effort 'ludicrous'" "$OUT"
@@ -515,7 +516,7 @@ RECIPE_ARGS=("" high)
 run_recipe review-container GH_READY=1 \
   GUM_CHOOSE_RESPONSE=opus5
 assert_eq "$(wc -c <"$gum_log")" 0 "the launcher must never prompt for a model"
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 
 begin "review-container: maintainer backend choice never changes Hive selection"
@@ -784,7 +785,7 @@ assert_file_not_contains "--name review-queue " "$runner_log"
 
 begin "review-queue: a leading profile and effort set the model, flags pass through"
 reset_logs
-RECIPE_ARGS=(kimi high --repo bluefin)
+RECIPE_ARGS=(k3 high --repo bluefin)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
 assert_file_contains "--env GOOSE_MODEL=kimi-k3" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
@@ -800,10 +801,10 @@ assert_file_contains "queue --live-repo acme/widgets" "$runner_log"
 
 begin "review-queue: profile effort owner/repo preserves live grammar"
 reset_logs
-RECIPE_ARGS=(luna max acme/widgets)
+RECIPE_ARGS=(gpt-sol medium acme/widgets)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
 assert_file_contains "queue --live-repo acme/widgets" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 
 begin "review-queue: an unknown profile is one actionable error, nothing launches"
 reset_logs
@@ -822,12 +823,12 @@ assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 assert_file_contains "queue --all" "$runner_log"
 
-begin "review-queue: explicit luna profile still selects luna"
+begin "review-queue: explicit sol profile selects structured triage"
 reset_logs
-RECIPE_ARGS=(luna --all)
+RECIPE_ARGS=(sol --all)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 assert_file_contains "queue --all" "$runner_log"
 
 # ══ 3. Doctor: no failure on a fully provisioned host ═════════════════════

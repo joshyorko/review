@@ -14,18 +14,20 @@ tags: [textual, tui, dashboard, review, maintainer]
 description: "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests."
 metadata:
   type: runbook
-  context7-sources: [/websites/textual_textualize_io]
+  context7-sources: [/websites/textual_textualize_io, /textualize/textual]
 ---
 
 # Review Dashboard
 
-`just review-queue` reads the generated Bluefin queue snapshot. `just
-review-queue owner/repo` reads that repository's open pull requests through
-the shipped GitHub CLI and normalizes them into the same repository-qualified
+`just review-queue` reads the organization's open pull requests live: one
+paginated GraphQL search through the shipped GitHub CLI, carrying the review,
+mergeability, and CI-rollup evidence each recommended action is classified
+from. `just review-queue owner/repo` reads that repository's open pull
+requests the same way and normalizes them into the same repository-qualified
 queue rows. The authenticated maintainer's own pull requests remain hidden.
 The dashboard distinguishes ready, empty, missing, inaccessible, malformed,
 and failed sources; `R` rereads whichever source is active. The flag form
-`--repo` remains the existing snapshot filter.
+`--repo` narrows the org-wide queue to one repository.
 
 ## When to Use
 
@@ -37,14 +39,13 @@ surface `just review-queue` opens.
 
 Do not use this for the launcher that starts the container
 ([`launcher.md`](launcher.md)), the image it runs in
-([`image-build.md`](image-build.md)), the snapshot generator
-([`static-pr-queue.md`](static-pr-queue.md)), or Hive's contributor protocol
+([`image-build.md`](image-build.md)), or Hive's contributor protocol
 ([`hive-runtime.md`](hive-runtime.md)).
 
 ## Semantic Foundation
 
 `image/tui/semantic_view.py` is the pure semantic contract for the dashboard.
-Its builders consume queue snapshots and validated `ReviewResult` values; they
+Its builders consume queue items and validated `ReviewResult` values; they
 do not call Textual, GitHub, Hive, a harness, or a mutation gate.
 
 `ActionID` is a stable shared registry, and every intent is explicit: verdict
@@ -210,7 +211,7 @@ distinct states. `[o]` is only an optional browser escape hatch.
   loses nothing (see "Batch landing"). Selection is not colour-only either:
   a selected row leads with a `●` marker and carries a full-row background.
 - **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
-  request whose snapshot or fetched live evidence says CI failed or is
+  request whose queue evidence or fetched live evidence says CI failed or is
   pending; GitHub branch protection remains an additional gate.
 - **Roll up checks at the exact current head.** Fetch `headRefOid` and
   `statusCheckRollup` in one `gh pr view`, group check runs by workflow and job
@@ -218,7 +219,7 @@ distinct states. `[o]` is only an optional browser escape hatch.
   context, so a superseded cancellation cannot fail a successful rerun.
   Authoritative failures, cancellations, pending and absent checks, and
   GitHub's merge state remain separate evidence.
-- **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
+- **Prefer the queue evidence already in memory.** `mergeable_state`, `check_state`,
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
   summaries all cost zero extra requests.
@@ -267,9 +268,9 @@ earns its ceremony on a single irreversible command; on a batch reviewed
 row by row it teaches nothing.
 
 One `LandingTask` (image/tui/landing.py) owns the whole selection. Confirmed
-batches enter `app.landing_queue` and drain FIFO, one agent at a time — a
-batch confirmed while another runs waits behind it, never races it. The
-agent is Goose's documented one-shot (`goose run --no-session -i
+batches enter `app.landing_queue`; the repository-aware dispatcher admits up
+to two agents whose repository sets are disjoint, while a batch touching a
+running repository waits. The agent is Goose's documented one-shot (`goose run --no-session -i
 <prompt-file>`, overridable with `BLUEFIN_REVIEW_LANDING_COMMAND`), run in
 its own process group so `[x]` stops it whole.
 

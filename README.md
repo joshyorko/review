@@ -53,10 +53,10 @@ supports today:
 
 Goose is fixed to GitHub Copilot here: `GOOSE_PROVIDER` may be unset or
 `github_copilot`. Contributor model profiles are defaults from the justfile:
-`gemini` uses `gemini-3.8-flash` at `high` (the default for `review-queue`),
-`luna` (or no profile in `review-container`) uses `gpt-5.6-luna` at `max`,
-`opus5` uses `claude-opus-5` at `high` with a `264000` context limit, and
-`kimi` uses `kimi-k3` at `max` with the same clamp. Environment values still
+`gemini` uses `gemini-3.8-flash` at `high` and is the default for both
+recipes, `sol` (also `gpt-sol`) uses `gpt-5.6-sol` at `medium`, `opus5` uses
+`claude-opus-5` at `high` with a `264000` context limit, and `k3` (also
+`kimi`) uses `kimi-k3` at `max` with the same clamp. Environment values still
 override those defaults.
 
 ### Copy/paste examples
@@ -86,7 +86,7 @@ REVIEW_DETACH=1 just review-container
 # Stop the default detached worker.
 just review-stop
 
-# Walk one repository's live open pull requests instead of the static queue.
+# Walk one repository's live open pull requests instead of the whole org.
 just review-queue projectbluefin/review
 ```
 
@@ -203,24 +203,18 @@ stops only through `just review-stop`.
 Detaching tmux (`prefix`, then `d`) detaches the view only—the originating
 terminal remains responsible for the run.
 
-## Public PR queue
+## The live PR queue
 
-The generated public PR queue is a small, static review backlog:
-
-- `/` serves the Markdown overview;
-- `/queue.md` serves the Markdown artifact;
-- `/queue.json` serves the machine-readable artifact.
-
-Every artifact carries `generated_at`. Treat it as a recommendation snapshot:
-check its freshness and verify the selected pull request directly in GitHub
-before acting. The queue's actions are `fix-ci`, `resolve-conflicts`, `review`,
+The dashboard's queue is live: one paginated GraphQL search over the
+organization's open pull requests, carrying the review, mergeability, and CI
+evidence each recommended action is classified from. There is no static
+snapshot — verify the selected pull request directly in GitHub before acting.
+The queue's actions are `fix-ci`, `resolve-conflicts`, `review`,
 `investigate`, and `ready-for-human-merge`; it never authorizes a merge.
 
 GitHub remains authoritative for pull requests, reviews, checks, and merge
 state, while Hive remains authoritative for agent coordination. The queue does
-not claim work, assign agents, mutate labels, include private repositories, or
-run a service. The `queue.projectbluefin.io` custom-domain and DNS mapping are
-an operations task outside this repository automation.
+not claim work, assign agents, mutate labels, or run a service.
 
 ## Requirements and credentials
 
@@ -243,8 +237,8 @@ Goose is the default Hive contributor backend and GitHub Copilot is its only
 supported provider. Maintainer-side `review-queue` may explicitly preselect
 Codex with `BLUEFIN_REVIEW_BACKEND=codex`; that choice never changes Hive's
 backend. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
-optionally overrides the `gpt-5.6-luna` default, and
-`GOOSE_THINKING_EFFORT` optionally overrides the default `max` reasoning
+optionally overrides the `gemini-3.8-flash` default, and
+`GOOSE_THINKING_EFFORT` optionally overrides the default `high` reasoning
 effort. A `gh auth
 token` does not authenticate Copilot inference.
 
@@ -253,15 +247,14 @@ and a thinking effort:
 
 | Invocation | Model | Effort | Context |
 |---|---|---|---|
-| `just review-container` | `gpt-5.6-luna` | `max` | provider default |
-| `just review-container luna` | `gpt-5.6-luna` | `max` | provider default |
-| `just review-container gemini` | `gemini-3.8-flash` | `high` | provider default |
+| `just review-container` or `just review-container gemini` | `gemini-3.8-flash` | `high` | provider default |
+| `just review-container sol` or `just review-container gpt-sol` | `gpt-5.6-sol` | `medium` | provider default |
 | `just review-container opus5 high` | `claude-opus-5` | `high` | `264000` |
-| `just review-container kimi` | `kimi-k3` | `max` | `264000` |
+| `just review-container k3` or `kimi` | `kimi-k3` | `max` | `264000` |
 
 Run it with no arguments and it launches the default profile.
 Efforts are `low`, `medium`, `high`, and `max`. Contributor runs are
-automated once Hive starts feeding them work, so `opus5` and `kimi` clamp
+automated once Hive starts feeding them work, so `opus5` and `k3` clamp
 `GOOSE_CONTEXT_LIMIT` rather than paying for a window nobody reads.
 `GOOSE_MODEL`, `GOOSE_THINKING_EFFORT`, and `GOOSE_CONTEXT_LIMIT` from the
 environment still win over any profile.
@@ -338,11 +331,11 @@ Arguments pass straight through to the dashboard:
 
 ```bash
 just review-queue                      # the whole queue, merge-ready first
-just review-queue kimi high            # pick the model profile and effort
+just review-queue k3 high              # pick the model profile and effort
 just review-queue --repo bluefin       # one repository
 just review-queue --action review      # one recommended action
 REVIEW_HIVE=endusers just review-queue # consult another registered hosted Hive
-BLUEFIN_REVIEW_BACKEND=codex just review-queue luna low --repo projectbluefin/review
+BLUEFIN_REVIEW_BACKEND=codex just review-queue sol low --repo projectbluefin/review
 ```
 
 The default is the **whole** queue. It used to default to the `review` action
@@ -361,7 +354,7 @@ with a queue pane (Renovate branches that are green, mergeable and merely
 behind their base are marked MECHANICAL, and `U` selects exactly those for the
 gated `u` branch update — MECHANICAL means updateable, never approved or
 merge-safe), a live-evidence details pane, and a context pane carrying the
-duplicate verdicts. The status bar reports queue depth, snapshot freshness, and
+duplicate verdicts. The status bar reports queue depth, the queue source, and
 your GitHub identity; your own pull requests are filtered out.
 
 `r` is the one that matters: it opens a full-screen review that streams
@@ -390,7 +383,7 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
 | `/` | steer: type instructions that ride along with the review you start |
 | `f` | cycle the action filter (every action → one at a time → back) |
-| `R` | refresh the queue snapshot and re-ask Hive (keeps your batch) |
+| `R` | re-read the live queue and re-ask Hive (keeps your batch) |
 | `u` | update the branch from its base — the batch selection if one exists |
 | `H` | ask Hive: hub state, and who is working on what right now |
 | `M` | resolve the duplicate cluster |
@@ -413,13 +406,13 @@ reverting to un-reviewed.
 `tests/dashboard-contract.sh` pins all of it.
 
 The leading arguments are the model profiles `review-container` takes
-(`gemini` default, `luna`, `opus5`, `kimi` plus an optional effort); everything from the first
+(`gemini` default, `sol`/`gpt-sol`, `opus5`, `k3`/`kimi` plus an optional effort); everything from the first
 flag onward passes straight through to the dashboard. `REVIEW_QUEUE_NAME=review-queue-2 just review-queue`
 runs a second dashboard beside the first, like `REVIEW_CONTAINER_NAME` does for
 `review-container`.
 
 Pull requests you authored are skipped — the dashboard is for reviewing other
-people's work. Authorship never changes, so the snapshot's `author` field is
+people's work. Authorship never changes, so the queue's `author` field is
 the one value the filter trusts without a live re-read.
 
 The container also fetches the Hive knowledge base through Hive's own
@@ -432,7 +425,7 @@ the path instead.
 
 Each selection shows read-only Review Evidence — author, draft state, review
 decision, mergeability, size, and check totals — read live from GitHub rather
-than from the snapshot, because a stale "clean" reading is the one most likely
+than from the queue row, because a stale "clean" reading is the one most likely
 to mislead a reviewer.
 
 Everything that names a pull request, an issue, or a person is a terminal
@@ -443,11 +436,11 @@ supports the sequence — the same capability `h` already relies on for the
 clipboard.
 
 Stops that are no longer open on GitHub are refused at the point of action —
-the snapshot can be hours old, and GitHub is the state.
+the queue read ages the moment it lands, and GitHub is the state.
 
 ### Reading the queue at a glance
 
-Rows are coloured from the state the snapshot already carries, so a hundred
+Rows are coloured from the state the queue row already carries, so a hundred
 stops are scannable instead of linear:
 
 | colour | meaning | what it usually needs |
@@ -465,9 +458,8 @@ The key map is two lines at the bottom: reading actions on the first, the ones
 that change something on the second. Fourteen bindings do not fit on one row
 of an 80-column terminal, and a truncated key map teaches half the tool.
 
-`R` re-reads the snapshot and re-asks Hive without losing your batch selection
-— the snapshot regenerates every 15 minutes and any merge invalidates it at
-once. `u` runs `gh pr update-branch`, which is the button GitHub shows on a
+`R` re-reads the live queue and re-asks Hive without losing your batch
+selection — any merge invalidates the last read at once. `u` runs `gh pr update-branch`, which is the button GitHub shows on a
 pull request that is behind its base, for the whole batch if one is selected.
 
 ### Merging a batch, and when one refuses
@@ -516,10 +508,11 @@ The first batch of a session asks which reviewer to use, once:
 ```
  final review for this dashboard session:
 
-   [1] automatic — Opus 5 reviews normal and mixed batches,
-       Kimi K3 reviews dependency/chore-only batches
-   [2] always Opus 5 — Opus reviews every batch, Kimi K3 fixes
-   [3] always Kimi K3 — fresh K3 review and fix rounds
+   [1] automatic — Gemini Flash default review with K3 fixes
+   [2] always Gemini Flash — fast review loop across all batches
+   [3] always Opus 5 — deep reasoning review
+   [4] always GPT Sol — structured diagnosis review
+   [5] always K3 — Kimi K3 review and fix rounds
 ```
 
 `P` changes it later. A review round may commit only on the branches your
@@ -788,7 +781,6 @@ All configuration is read at launch.
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
 | `BLUEFIN_REVIEW_BACKEND` | Optional `review-queue` preselection: `goose` or `codex`; unset preserves the current default. Never affects `review-container`. |
 | `CODEX_HOME` | Optional host Codex state root used only to locate `auth.json`; no configuration directory is mounted. |
-| `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot the dashboard reads; defaults to the published `queue.json`. |
 | `BLUEFIN_REVIEW_CONTEXT_SKILLS` | Skill ids named as review context; defaults to `pr-review queue-feed hive-review human-gates`. |
 | `BLUEFIN_REVIEW_SKILLS_ROOT` | Projected org skills root; defaults to `~/.agents/skills`. |
 | `BLUEFIN_REVIEW_KNOWLEDGE_FILE` | Hive knowledge export named as review context; defaults to `~/agent.md`. |

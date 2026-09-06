@@ -1,6 +1,7 @@
 """Bluefin Review Dashboard — the maintainer surface for the PR queue.
 
-The static queue snapshot orders the work, GitHub supplies the live evidence,
+GitHub supplies the queue and the live evidence — one paginated GraphQL
+search over the organization's open pull requests, never a static snapshot.
 Goose supplies the review, and every state-changing command runs through
 exactly one confirmation gate that makes the maintainer type the pull request
 number. GitHub stays authoritative for pull-request state; Hive is never asked
@@ -21,8 +22,8 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
-import urllib.request
 from urllib.parse import urlsplit
 from collections import Counter
 from dataclasses import dataclass, field
@@ -64,10 +65,30 @@ from re_review import (DeltaInput, FindingEvidence, H1Evidence, PriorFinding,
                        Region, classify_head_delta)
 from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry
 
-QUEUE_URL = os.environ.get(
-    "BLUEFIN_REVIEW_QUEUE_URL",
-    "https://projectbluefin.github.io/review/queue.json",
-)
+GITHUB_ORG = "projectbluefin"
+# The queue is one paginated GraphQL search: every open pull request in the
+# organization, with the review, mergeability, and CI-rollup evidence the
+# recommended action is classified from. There is no static snapshot.
+ORG_QUEUE_QUERY = """\
+query($endCursor: String) {
+  search(query: "org:projectbluefin is:pr is:open archived:false", type: ISSUE, first: 100, after: $endCursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        updatedAt
+        author { login }
+        repository { nameWithOwner }
+        labels(first: 100) { nodes { name } }
+        reviewDecision
+        mergeable
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+    }
+  }
+}
+"""
 PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 TRACE_PATH = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
@@ -76,6 +97,7 @@ TRACE_PATH = os.path.join(
 )
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
+MAX_CONCURRENT_LANDINGS = 2
 HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
@@ -227,9 +249,9 @@ def hive_api_base() -> str:
     return http[: -len("/contribute")] if http.endswith("/contribute") else http
 
 
-# The order a maintainer wants, which is not the order the snapshot is written
-# in. The generator ranks by how stuck a pull request is; a reviewer opening
-# this dashboard wants the ones they can act on now — the merge-ready and the
+# The order a maintainer wants, which is not the order GitHub returns. The
+# classifier ranks by how stuck a pull request is; a reviewer opening this
+# dashboard wants the ones they can act on now — the merge-ready and the
 # reviewable — above the ones waiting on their author or on better evidence.
 # A queue that buries what you can land under sixty things you cannot is a
 # queue you stop reading.
@@ -669,6 +691,81 @@ QUEUE_SEGMENTS = [
 ]
 
 
+def classify_action(check_state: str, mergeable_state: str, review_state: str) -> str:
+    """The queue's recommended action, classified from live GitHub evidence.
+
+    First match wins: a failing check is actionable before a conflict is,
+    incomplete evidence is a task of its own, and only a fully green,
+    approved pull request is ready for a human merge.
+    """
+    if check_state == "failure":
+        return "fix-ci"
+    if mergeable_state == "dirty":
+        return "resolve-conflicts"
+    if "unknown" in (check_state, mergeable_state, review_state):
+        return "investigate"
+    if review_state == "approved":
+        return "ready-for-human-merge"
+    return "review"
+
+
+def org_queue_item(node: dict) -> dict:
+    """One queue item from one GraphQL search node, validated field by field.
+
+    Raises ValueError on any shape GitHub should never send, so a malformed
+    response becomes one honest source state instead of a wrong queue.
+    """
+    number = node.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise ValueError("a pull request has an invalid number")
+    repository = (node.get("repository") or {}).get("nameWithOwner")
+    if not isinstance(repository, str) or not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
+        raise ValueError(f"pull request {number} has an invalid repository")
+    if not isinstance(node.get("title"), str):
+        raise ValueError(f"{repository}#{number} has an invalid title")
+    author_node = node.get("author")
+    if author_node is not None and not isinstance(author_node, dict):
+        raise ValueError(f"{repository}#{number} has an invalid author")
+    author = ""
+    if author_node and "login" in author_node:
+        if not isinstance(author_node["login"], str):
+            raise ValueError(f"{repository}#{number} has an invalid login")
+        author = author_node["login"]
+    label_nodes = (node.get("labels") or {}).get("nodes") or []
+    if not isinstance(label_nodes, list):
+        raise ValueError(f"{repository}#{number} has malformed labels")
+    labels = []
+    for label in label_nodes:
+        name = label.get("name") if isinstance(label, dict) else None
+        if not isinstance(name, str):
+            raise ValueError(f"{repository}#{number} has a malformed label")
+        labels.append(name)
+    commits = (node.get("commits") or {}).get("nodes") or []
+    rollup = None
+    if commits and isinstance(commits[0], dict):
+        rollup = ((commits[0].get("commit") or {}).get("statusCheckRollup") or {}).get("state")
+    if rollup is None:
+        # No checks at all: nothing is red and nothing is pending, which is
+        # the same verdict the per-check evidence path reaches.
+        check_state = "success"
+    else:
+        check_state = {"SUCCESS": "success", "FAILURE": "failure", "ERROR": "failure"}.get(rollup, "unknown")
+    mergeable_state = {"MERGEABLE": "clean", "CONFLICTING": "dirty"}.get(node.get("mergeable"), "unknown")
+    review_state = "approved" if node.get("reviewDecision") == "APPROVED" else "review_required"
+    return {
+        "repository": repository,
+        "number": number,
+        "title": node["title"],
+        "author": author,
+        "updated_at": node.get("updatedAt", ""),
+        "labels": labels,
+        "review_state": review_state,
+        "mergeable_state": mergeable_state,
+        "check_state": check_state,
+        "recommended_action": classify_action(check_state, mergeable_state, review_state),
+    }
+
+
 def classify_queue_item(item: dict) -> str:
     """Which segment of a repository's merge queue this pull request sits in.
 
@@ -712,7 +809,7 @@ def meter_bar(counts: dict[str, int], width: int = 24) -> str:
 
 @dataclass
 class QueueFilters:
-    """Which of the snapshot's items reach the dashboard.
+    """Which of the queue's items reach the dashboard.
 
     The launcher passes these straight through, so 'just review-queue --repo
     bluefin' narrows the queue without a second surface to learn.
@@ -721,7 +818,6 @@ class QueueFilters:
     action: str = ""
     repository: str = ""
     live_repository: str = ""
-    url: str = QUEUE_URL
 
     @property
     def live(self) -> bool:
@@ -875,8 +971,10 @@ class FinalPolicyScreen(ModalScreen[str]):
 
     BINDINGS = [
         Binding("1", "choose('automatic')", "automatic"),
-        Binding("2", "choose('opus')", "always Opus 5"),
-        Binding("3", "choose('kimi')", "always Kimi K3"),
+        Binding("2", "choose('gemini')", "always Gemini Flash"),
+        Binding("3", "choose('opus')", "always Opus 5"),
+        Binding("4", "choose('sol')", "always GPT Sol"),
+        Binding("5", "choose('kimi')", "always K3"),
         *back_bindings("dismiss('automatic')"),
     ]
 
@@ -884,16 +982,23 @@ class FinalPolicyScreen(ModalScreen[str]):
         with Vertical(id="confirm-box"):
             yield Label("final review for this dashboard session:", id="confirm-heading")
             yield Static(
-                "  [1] automatic — Opus 5 reviews normal and mixed batches, "
-                "Kimi K3 reviews dependency/chore-only batches",
+                "  [1] automatic — Gemini Flash default review with K3 fixes",
                 classes="confirm-command",
             )
             yield Static(
-                "  [2] always Opus 5 — Opus reviews every batch, Kimi K3 fixes",
+                "  [2] always Gemini Flash — fast review loop across all batches",
                 classes="confirm-command",
             )
             yield Static(
-                "  [3] always Kimi K3 — fresh K3 review and fix rounds",
+                "  [3] always Opus 5 — deep reasoning review",
+                classes="confirm-command",
+            )
+            yield Static(
+                "  [4] always GPT Sol — structured diagnosis review",
+                classes="confirm-command",
+            )
+            yield Static(
+                "  [5] always K3 — Kimi K3 review and fix rounds",
                 classes="confirm-command",
             )
             yield Static(
@@ -903,7 +1008,7 @@ class FinalPolicyScreen(ModalScreen[str]):
                 f"{landing.FINAL_ROUND_LIMIT} rounds with the findings intact.",
                 classes="confirm-command",
             )
-            yield Label("[1/2/3] choose · [esc] keep automatic")
+            yield Label("[1/2/3/4/5] choose · [esc] keep automatic")
 
     def action_choose(self, policy: str) -> None:
         self.dismiss(policy)
@@ -1014,11 +1119,15 @@ class LandingScreen(Screen):
                 # carries their phase, round, and model.
                 continue
             if task.returncode is None:
-                state = "running" if task.running else "queued"
+                state = (
+                    "running"
+                    if self.dashboard._landing_task_active(task)
+                    else "queued"
+                )
             else:
                 state = f"exited {task.returncode}"
             header = f" batch {task.task_id} — {state}"
-            if task.running:
+            if self.dashboard._landing_task_active(task):
                 # A wait that names its target is still invisible if the
                 # row cannot say how long the agent has been silent: the
                 # report file's mtime is the heartbeat (#291).
@@ -1110,7 +1219,11 @@ class LandingScreen(Screen):
         log.clear()
         for line in tail:
             log.write(line.rstrip("\n"))
-        running = sum(1 for t in self.dashboard.landing_queue if t.running)
+        running = sum(
+            1
+            for t in self.dashboard.landing_queue
+            if self.dashboard._landing_task_active(t)
+        )
         self.query_one("#landing-status", Static).update(
             f" batch queue: {len(self.dashboard.landing_queue)} batches, "
             f"{running} running · [x] stop · [esc] back"
@@ -2215,14 +2328,13 @@ class ReviewDashboard(App):
         self.filters = filters or QueueFilters()
         self.stops: list[Stop] = []
         self.self_login = ""
-        self.generated_at = ""
         self.pulls_cache: dict[str, list[dict]] = {}
         # Repository -> whether this login may merge there. Merging without
         # the lgtm opt-in is a maintainer power, so it is asked of GitHub per
         # repository rather than assumed from the fact that a dashboard is
         # open. Unknown until asked, and never cached as True by default.
         self.merge_rights: dict[str, bool] = {}
-        self.snapshot_items: list[dict] = []
+        self.queue_items: list[dict] = []
         # What Hive says, when it has been asked. "" means not asked yet, so
         # the status line can tell "we have not looked" apart from "the hub is
         # down" — the first is a dashboard that never tried, which is what the
@@ -2237,13 +2349,14 @@ class ReviewDashboard(App):
         self.all_items: list[dict] = []
         self.harness_state = "CHECKING"
         self.harness_options: list[HarnessOption] = []
-        # Dispatched landing batches, oldest first. One agent runs at a time;
-        # a batch confirmed while another runs waits behind it — a proper
-        # queue, not a pile of concurrent agents mutating the same queue.
+        # Dispatched landing batches, oldest first. Independent repositories
+        # may use separate lanes while batches touching one repository wait.
         self.landing_queue: list[landing.LandingTask] = []
-        # One drainer runs the lane. A final-review round is enqueued from a
-        # finished task's callback, so this flag is what keeps a second
-        # drainer from racing the first for the same task (#378).
+        self._landing_active: set[int] = set()
+        self._landing_condition = threading.Condition()
+        # One dispatcher owns scheduling. A final-review round is enqueued
+        # from a finished task's callback, so this flag keeps a second
+        # dispatcher from racing the first for the same task (#378).
         self.landing_draining = False
         # The last finished batch's outcome, kept on the status line until
         # the next dispatch or refresh: a toast is gone in seconds and a
@@ -2528,39 +2641,80 @@ class ReviewDashboard(App):
             who = None
             identity_detail = str(error)
         self.self_login = who.stdout.strip() if who and who.returncode == 0 else ""
+        if not self.self_login:
+            self.source_state = "auth-failed"
+            self.source_message = bounded_detail(identity_detail or "GitHub identity is unavailable; sign in and retry")
+            self.all_items = self.queue_items = []
+            self.call_from_thread(self.apply_filters)
+            return
         if self.filters.live:
-            if not self.self_login:
-                self.source_state = "auth-failed"
-                self.source_message = bounded_detail(identity_detail or "GitHub identity is unavailable; sign in and retry")
-                self.all_items = self.snapshot_items = []
-                self.call_from_thread(self.apply_filters)
-                return
             snapshot = self.load_live_queue(self.filters.live_repository)
         else:
-            try:
-                with urllib.request.urlopen(self.filters.url, timeout=60) as response:
-                    snapshot = json.load(response)
-                self.source_state = "ready"
-                self.source_message = ""
-            except Exception as error:
-                self.source_state = "error"
-                self.source_message = f"static queue unavailable: {error}"
-                self.call_from_thread(self.apply_filters)
-                return
-        self.generated_at = snapshot.get("generated_at", "")
-        # Keep the whole snapshot: the action filter is a view over it, so
+            snapshot = self.load_org_queue()
+        # Keep the whole queue: the action filter is a view over it, so
         # narrowing and widening never needs another fetch.
         # The unfiltered set: "how busy is this repository" must count the
         # maintainer's own pull requests too, even though they never appear
         # as stops to review.
         self.all_items = snapshot.get("items", [])
-        self.snapshot_items = [
+        self.queue_items = [
             item
             for item in self.all_items
             # Own-work filtering: a maintainer reviews other people's work.
             if not (self.self_login and item.get("author") == self.self_login)
         ]
         self.call_from_thread(self.apply_filters)
+
+    def load_org_queue(self) -> dict:
+        """Every open pull request in the organization, live from GitHub.
+
+        One paginated GraphQL search carries the evidence the recommended
+        action is classified from; there is no static snapshot behind this.
+        """
+        try:
+            result = gh(
+                "api", "graphql", "--paginate", "--slurp",
+                "-f", f"query={ORG_QUEUE_QUERY}",
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.source_state = "error"
+            self.source_message = bounded_detail(
+                f"GitHub could not list the {GITHUB_ORG} queue: {error}"
+            )
+            return {"items": []}
+        if result.returncode:
+            detail = bounded_detail((result.stderr or result.stdout).strip())
+            lowered = detail.lower()
+            if ("authentication" in lowered or "login" in lowered
+                    or "permission" in lowered or "forbidden" in lowered
+                    or "not accessible" in lowered):
+                self.source_state = "inaccessible"
+            else:
+                self.source_state = "error"
+            self.source_message = detail or f"GitHub could not list the {GITHUB_ORG} queue"
+            return {"items": []}
+        try:
+            pages = json.loads(result.stdout)
+            if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
+                raise ValueError("GitHub returned malformed search pages")
+            items = []
+            for page in pages:
+                nodes = ((page.get("data") or {}).get("search") or {}).get("nodes")
+                if not isinstance(nodes, list):
+                    raise ValueError("GitHub returned a page without search nodes")
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        raise ValueError("GitHub returned a malformed pull-request node")
+                    if not node:
+                        continue
+                    items.append(org_queue_item(node))
+        except (json.JSONDecodeError, ValueError) as error:
+            self.source_state = "malformed"
+            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            return {"items": []}
+        self.source_state = "empty" if not items else "ready"
+        self.source_message = ""
+        return {"items": items}
 
     def load_live_queue(self, repository: str) -> dict:
         if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
@@ -2635,7 +2789,7 @@ class ReviewDashboard(App):
             return {"items": []}
         self.source_state = "empty" if not items else "ready"
         self.source_message = ""
-        return {"generated_at": datetime.now(timezone.utc).isoformat(), "items": items}
+        return {"items": items}
 
     def apply_filters(self) -> None:
         stops = [
@@ -2649,7 +2803,7 @@ class ReviewDashboard(App):
                 check_state=item.get("check_state", "") or "",
                 review_state=item.get("review_state", "") or "",
             )
-            for item in self.snapshot_items
+            for item in self.queue_items
             if self.filters.wants(item)
         ]
         stops.sort(key=lambda stop: (action_rank(stop.action), stop.repository, stop.number))
@@ -2713,18 +2867,23 @@ class ReviewDashboard(App):
         selected = sum(1 for s in self.stops if s.selected)
         failed = sum(1 for s in self.stops if s.failure)
         stuck = f" | {failed} did not merge" if failed else ""
-        running = sum(1 for t in self.landing_queue if t.running)
+        running = sum(
+            1 for t in self.landing_queue if self._landing_task_active(t)
+        )
         queued = sum(
-            1 for t in self.landing_queue if t.process is None and t.returncode is None
+            1
+            for t in self.landing_queue
+            if not self._landing_task_active(t)
+            and t.process is None
+            and t.returncode is None
         )
         agents = (
             f" | agents: {running} running, {queued} queued [w]"
             if self.landing_queue
             else ""
         )
-        freshness = self.generated_at or "unknown"
         shown = len(self.stops)
-        total = len(self.snapshot_items)
+        total = len(self.queue_items)
         scope = self.filters.action or "all"
         # Say how much of the queue is hidden. A filtered view that looks like
         # the whole queue is how a maintainer concludes there are five open
@@ -2739,7 +2898,7 @@ class ReviewDashboard(App):
             f"{count} {action}"
             for action, count in sorted(
                 Counter(
-                    item.get("recommended_action", "") for item in self.snapshot_items
+                    item.get("recommended_action", "") for item in self.queue_items
                 ).items(),
                 key=lambda pair: action_rank(pair[0]),
             )
@@ -2764,14 +2923,14 @@ class ReviewDashboard(App):
         self.query_one("#status-bar", Static).update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
-            f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
+            f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
             f"| batch: {selected}{stuck}{agents}{landed}{policy} | {lab} | Hive: {hive}"
         )
 
     def action_filter(self) -> None:
         """Cycle the action filter: every action, then one at a time."""
         present = [a for a in MAINTAINER_ORDER if any(
-            item.get("recommended_action") == a for item in self.snapshot_items
+            item.get("recommended_action") == a for item in self.queue_items
         )]
         scopes = [""] + present
         try:
@@ -3631,83 +3790,174 @@ class ReviewDashboard(App):
 
         self.push_screen(BatchPlanScreen(task), finish)
 
+    def _landing_repositories(self, task: "landing.LandingTask") -> set[str]:
+        repositories: set[str] = set()
+        for stop in getattr(task, "stops", ()):
+            repository = (
+                getattr(stop, "repository", "")
+                or getattr(stop, "repo", "")
+            )
+            if repository:
+                repositories.add(str(repository))
+        if repositories:
+            return repositories
+        repositories = {
+            str(key).rsplit("#", 1)[0]
+            for key in getattr(task, "keys", ())
+            if "#" in str(key) and str(key).rsplit("#", 1)[0]
+        }
+        if repositories:
+            return repositories
+        return {str(getattr(task, "repo", "") or "")}
+
+    def _landing_task_active(self, task: "landing.LandingTask") -> bool:
+        return (
+            id(task) in self._landing_active
+            or bool(getattr(task, "running", False))
+            or (
+                getattr(task, "process", None) is not None
+                and getattr(task, "returncode", None) is None
+            )
+        )
+
     def enqueue_landing(self, task: "landing.LandingTask") -> None:
-        self.landing_queue.append(task)
-        if not task.phase:
-            # A new dispatch supersedes the previous batch's outcome line.
-            # A final-review round belongs to the batch already on that
-            # line, so it must not wipe the outcome it is reviewing (#378).
-            self.last_landing_outcome = ""
+        with self._landing_condition:
+            self.landing_queue.append(task)
+            if not task.phase:
+                # A new dispatch supersedes the previous batch's outcome line.
+                # A final-review round belongs to the batch already on that
+                # line, so it must not wipe the outcome it is reviewing (#378).
+                self.last_landing_outcome = ""
+            self._landing_condition.notify_all()
         self.refresh_status()
-        if not self.landing_draining:
-            self.landing_draining = True
-            self.drain_landings()
+        self.drain_landings()
 
     @work(thread=True)
     def drain_landings(self) -> None:
-        """Run the landing queue FIFO, one agent at a time.
-
-        One drainer, always: a final-review round is enqueued from inside a
-        finished task's callback, so a second drainer started there would
-        race this one for the same task and run it twice.
-        """
-        def pending():
-            return next(
-                (
-                    t
-                    for t in self.landing_queue
-                    if t.process is None and t.returncode is None
-                ),
-                None,
+        """Dispatch eligible landing tasks without crossing repository lanes."""
+        def pending() -> bool:
+            return any(
+                task.process is None
+                and task.returncode is None
+                and id(task) not in self._landing_active
+                for task in self.landing_queue
             )
 
-        while True:
-            task = pending()
-            if task is None:
+        with self._landing_condition:
+            if self.landing_draining:
+                self._landing_condition.notify_all()
+                return
+            self.landing_draining = True
+        try:
+            while True:
+                with self._landing_condition:
+                    active = [
+                        task
+                        for task in self.landing_queue
+                        if self._landing_task_active(task)
+                    ]
+                    running_repos: set[str] = set()
+                    for task in active:
+                        running_repos.update(self._landing_repositories(task))
+                    slots = MAX_CONCURRENT_LANDINGS - len(active)
+                    for task in self.landing_queue:
+                        if slots <= 0:
+                            break
+                        if (
+                            task.process is not None
+                            or task.returncode is not None
+                            or id(task) in self._landing_active
+                        ):
+                            continue
+                        task_repos = self._landing_repositories(task)
+                        if not task_repos.isdisjoint(running_repos):
+                            continue
+                        self._landing_active.add(id(task))
+                        active.append(task)
+                        running_repos.update(task_repos)
+                        slots -= 1
+                        worker = threading.Thread(
+                            target=self.run_landing_task,
+                            args=(task,),
+                            name=f"landing-{task.task_id}",
+                            daemon=True,
+                        )
+                        try:
+                            worker.start()
+                        except RuntimeError as error:
+                            self._landing_active.discard(id(task))
+                            active.remove(task)
+                            running_repos = set()
+                            for running in active:
+                                running_repos.update(
+                                    self._landing_repositories(running)
+                                )
+                            slots += 1
+                            task.returncode = 1
+                            self.call_from_thread(
+                                self.notify,
+                                f"landing worker: {error}",
+                                severity="error",
+                            )
+                            self.call_from_thread(self.landing_finished, task)
+                    if not pending() and not active:
+                        return
+                    self._landing_condition.wait()
+        finally:
+            with self._landing_condition:
                 self.landing_draining = False
-                # Re-check once: a task enqueued while the flag was still
-                # set would otherwise wait for the next dispatch.
-                task = pending()
-                if task is None:
-                    return
-                self.landing_draining = True
-            self.run_landing_task(task)
+                restart = pending()
+            if restart:
+                self.drain_landings()
 
     def run_landing_task(self, task: "landing.LandingTask") -> None:
         """One batch agent, off the UI thread, its own process group so
         [x] stops the agent and everything it spawned together."""
         try:
-            log = open(task.log_path, "a", encoding="utf-8")
-        except OSError as error:
-            task.returncode = 1
-            self.call_from_thread(
-                self.notify, f"landing log: {error}", severity="error"
-            )
-            return
-        with log:
             try:
-                process = subprocess.Popen(
-                    task.command,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    # A final-review round runs with the model its phase
-                    # chose, passed explicitly (#378): the launch-time
-                    # GOOSE_MODEL is whatever the maintainer picked for the
-                    # dashboard, so inheriting it silently reviews with the
-                    # wrong model. A landing task carries no overlay and
-                    # inherits the environment exactly as it always did.
-                    env={**os.environ, **task.env} if task.env else None,
-                )
+                log = open(task.log_path, "a", encoding="utf-8")
             except OSError as error:
                 task.returncode = 1
                 self.call_from_thread(
-                    self.notify, f"landing agent: {error}", severity="error"
+                    self.notify, f"landing log: {error}", severity="error"
                 )
-                return
-            task.process = process
-            task.returncode = process.wait()
-        self.call_from_thread(self.landing_finished, task)
+            else:
+                with log:
+                    try:
+                        process = subprocess.Popen(
+                            task.command,
+                            stdout=log,
+                            stderr=subprocess.STDOUT,
+                            start_new_session=True,
+                            # A final-review round runs with the model its phase
+                            # chose, passed explicitly (#378): the launch-time
+                            # GOOSE_MODEL is whatever the maintainer picked
+                            # for the dashboard, so inheriting it silently
+                            # reviews with the wrong model. A landing task
+                            # carries no overlay and inherits the environment
+                            # exactly as it always did.
+                            env={**os.environ, **task.env} if task.env else None,
+                        )
+                    except OSError as error:
+                        task.returncode = 1
+                        self.call_from_thread(
+                            self.notify,
+                            f"landing agent: {error}",
+                            severity="error",
+                        )
+                    else:
+                        task.process = process
+                        task.returncode = process.wait()
+        finally:
+            with self._landing_condition:
+                self._landing_active.discard(id(task))
+                self._landing_condition.notify_all()
+            self.call_from_thread(self.landing_finished, task)
+
+    def _wake_landing_dispatch(self) -> None:
+        with self._landing_condition:
+            self._landing_condition.notify_all()
+        self.drain_landings()
 
     def landing_finished(self, task: "landing.LandingTask") -> None:
         """Fold the agent's report back onto the rows and say so: landed
@@ -3719,7 +3969,9 @@ class ReviewDashboard(App):
             # requests already have their outcomes, so re-folding them would
             # re-announce a batch that already finished. What a round
             # reports is its phase.
-            return self.final_round_finished(task)
+            self.final_round_finished(task)
+            self._wake_landing_dispatch()
+            return
         events = landing.parse_status(task.status_path)
         # parse_status files every pr-less line under "" — a malformed tail
         # line included — so only the exact done event closes a report.
@@ -3789,6 +4041,7 @@ class ReviewDashboard(App):
         self.refresh_rows()
         self.notify(message, severity=severity)
         self.advance_final_review(task)
+        self._wake_landing_dispatch()
 
     def final_round_finished(self, task: "landing.LandingTask") -> None:
         """Announce one finished final-review round and start the next."""
@@ -4171,13 +4424,11 @@ def main() -> None:
         help="only this repository (short name or owner/repo)",
     )
     parser.add_argument("--live-repo", default="", help="read open pull requests from owner/repo")
-    parser.add_argument("--url", default=QUEUE_URL, help="read the queue from elsewhere")
     args = parser.parse_args()
     filters = QueueFilters(
         action="" if args.all else args.action,
         repository=args.repo,
         live_repository=args.live_repo,
-        url=args.url,
     )
     ReviewDashboard(filters).run()
 

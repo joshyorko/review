@@ -49,11 +49,11 @@ not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
 one permitted filter is own-work exclusion on the maintainer-facing queue
 view — a reviewer never receives their own authored pull requests to review.
 
-Static queue snapshots are vestigial: never inspect `queue.json` or query static
-queue JSON files to understand pull-request status, queues, or review state. We
-either get pull-request state from Hive live or directly inside the active review
-container (`podman exec`, container inspection, and
-`${XDG_STATE_HOME:-~/.local/state}/bluefin-review/landings/` logs), or not at
+Static queue snapshots are an antipattern: never create or consume a static
+queue artifact to understand pull-request status, queues, or review state. We
+either get pull-request state live — the dashboard's org-wide GitHub search,
+Hive, or the active review container (`podman exec`, container inspection, and
+`${XDG_STATE_HOME:-~/.local/state}/bluefin-review/landings/` logs) — or not at
 all. Never rely on or fetch static JSON artifacts.
 
 This appliance owns no lab and depends on none. Nothing in this repository
@@ -140,7 +140,6 @@ labels. Never add a local workaround for an accepted upstream gap. See
 - `package.json` and `package-lock.json` at the root pin only the contributor
   relay's `ws` dependency for the image build. This repository is not a Node
   project.
-- `queue/` generates the static PR queue published from `public/`.
 - `scripts/` contains build-time skill generation, documentation checks, and
   the host-side lab broker `review-lab-broker.py` the launcher starts for an
   opted-in `review-queue` session.
@@ -153,14 +152,12 @@ the Hive-managed path.
 
 ## Permitted changes
 
-Agents may change `justfile`, `image/`, `queue/`, `scripts/`,
+Agents may change `justfile`, `image/`, `scripts/`,
 `tests/`, `docs/`, `README.md`, `AGENTS.md`, and `.github/workflows/`.
 
 Do not modify `ublue-os/*`, or commit generated `.agents/skills/` content.
 The generator is the artifact; `projectbluefin/common`'s
-`docs/skills/index.json` is the organization-skill source. `public/` is
-likewise generated: `update-pr-queue.yml` runs `queue/generate.mjs` and
-deploys the result, so change the generator, not its output.
+`docs/skills/index.json` is the organization-skill source.
 
 When behavior changes, update the matching user documentation. Treat the
 launcher, image, and tests as the sources of truth for this repository's

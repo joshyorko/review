@@ -1,7 +1,7 @@
 ---
 name: launcher
 version: "3.3"
-last_updated: 2026-08-20
+last_updated: 2026-09-05
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -14,7 +14,7 @@ tags: [just, launcher, podman, container]
 description: "Maintains the four container-only review recipes and their credential boundaries. Use when editing justfile."
 metadata:
   type: runbook
-  context7-sources: [/websites/podman_io_en]
+  context7-sources: [/websites/podman_io_en, /websites/kubernetes_io]
 ---
 
 # Launcher
@@ -43,7 +43,7 @@ Goose, or image build skill documents.
    | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. `REVIEW_DETACH=1` runs it detached. |
    | `review-stop` | Stop a detached worker; refuses attended runs and unlabeled containers. |
    | `review-doctor` | Perform read-only preflight checks. |
-   | `review-queue` | Walk the static PR queue in the container; no Hive registration is mounted, but the selected hub URL is passed when configured. |
+   | `review-queue` | Walk the live PR queue in the container; no Hive registration is mounted, but the selected hub URL is passed when configured. |
 
    `just` reads only the current directory's justfile, so these recipes fail
    with `justfile does not contain recipe` from any other checkout. That is
@@ -68,7 +68,7 @@ Goose, or image build skill documents.
    `review-queue owner/repo` is the read-only live-repository form; it mounts no
    Hive or host configuration directory and starts the image with the `queue`
    argument (the launcher maps it to the dashboard's distinct `--live-repo`
-   option; `--repo` remains a static snapshot filter), which the entrypoint dispatches to the maintainer dashboard
+   option; `--repo` narrows the org-wide queue), which the entrypoint dispatches to the maintainer dashboard
    before the Hive config gate. When a selected registration exists, the
    launcher reads only its `HIVE_HUB` value and passes that URL so the dashboard
    consults the same hosted deployment; the registration token never crosses
@@ -141,12 +141,13 @@ Goose, or image build skill documents.
    the caller. Do not replace the
    image's direct-invocation fallback.
    That default comes from the model profile: `review-container [profile]
-   [effort]` resolves `gemini` to `gemini-3.8-flash` at `high`, `luna` to
-   `gpt-5.6-luna` at `max` with the provider's own context window, `opus5` to
-   `claude-opus-5` at `high` with `GOOSE_CONTEXT_LIMIT=264000`, and `kimi` to
-   `kimi-k3` at `max` with the same clamp. An empty profile is `luna` for
-   `review-container` and `gemini` for `review-queue`; a short fixed profile list
-   does not warrant a picker, so every launch is noninteractive whether or not a
+   [effort]` resolves an empty profile or `gemini` to
+   `gemini-3.8-flash` at `high`, `sol` (also `gpt-sol`) to `gpt-5.6-sol` at
+   `medium`, `opus5` to `claude-opus-5` at `high` with
+   `GOOSE_CONTEXT_LIMIT=264000`, and `k3` (also `kimi`) to `kimi-k3` at `max`
+   with the same clamp. An empty profile is `gemini` for both
+   `review-container` and `review-queue`; a short fixed profile list does not
+   warrant a picker, so every launch is noninteractive whether or not a
    terminal is attached. Profiles are defaults, never overrides:
    `GOOSE_MODEL`, `GOOSE_THINKING_EFFORT`, and `GOOSE_CONTEXT_LIMIT` from the
    environment always win.
@@ -220,6 +221,30 @@ attach to the first one's session.
 
 Hive selects every task. The launcher must not filter, skip, rank, or decline
 assignments by repository, label, title, author, or issue.
+
+## Cluster Contributor Scale-Out
+
+For unattended cluster workers, replace the placeholder in
+`deploy/contributor-secret.example.yaml` with a real Hive contributor token,
+then apply the Secret and Deployment:
+
+```bash
+kubectl apply -n bluefin-system -f deploy/contributor-secret.example.yaml
+kubectl apply -n bluefin-system -f deploy/review-contributor.yaml
+kubectl rollout status deployment/review-contributor -n bluefin-system
+```
+
+The Deployment starts two workers by default. Each pod keeps its own Hive
+WebSocket, so Hive independently assigns tasks to every pod without draining
+local CPU or battery. `gemini-3.8-flash` is the default model for rapid task
+turnarounds. Scale the worker pool as cluster capacity allows:
+
+```bash
+kubectl scale deployment/review-contributor -n bluefin-system --replicas=4
+```
+
+Do not commit the populated Secret manifest; the example contains only a
+placeholder token.
 
 ## Rootless Podman And Mounted Host Files
 

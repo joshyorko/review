@@ -71,7 +71,7 @@ grep -q 'landing.new_task(batch, self.self_login)' "$tui" ||
 grep -q 'self.enqueue_landing(task)' "$tui" ||
   fail "a confirmed batch must enter the landing queue"
 grep -q 'def drain_landings' "$tui" ||
-  fail "the landing queue must drain one agent at a time"
+  fail "the landing queue must have a repository-aware dispatcher"
 
 # The landing agent's brief keeps the mutation rules: no drafts, no failing
 # required checks, no branch-protection bypass, per-PR JSONL status the
