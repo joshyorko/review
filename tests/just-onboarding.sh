@@ -1730,9 +1730,11 @@ if grep -nE '^review-(start|restart|kill|clean|down|up)[ :]' "$code"; then
   fail "no resurrection or force verbs: stop is the only lifecycle command"
 fi
 # The recipe list is exactly: launch the container, stop a detached worker,
-# diagnose, walk the PR queue.
-assert_eq "$(grep -cE '^review[a-z-]*[ :]' "$code")" 4 \
-  "expected exactly four recipes (review-container, -stop, -doctor, -queue)"
+# diagnose, walk the PR queue, and scale workers before opening that queue.
+grep -qE '^turbo-review[ :]' "$code" ||
+  fail "turbo-review must exist as the worker scale-out plus dashboard recipe"
+assert_eq "$(grep -cE '^(review[a-z-]*|turbo-review)[ :]' "$code")" 5 \
+  "expected exactly five recipes (review-container, -stop, -doctor, -queue, turbo-review)"
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private

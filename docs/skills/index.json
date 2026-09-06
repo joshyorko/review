@@ -75,8 +75,8 @@
         "config"
       ],
       "description": "Keeps Goose configuration and global and repository skill routing available in the container, and records how Context7 reaches agents today. Use when Goose loses its config or misses a skill.",
-      "version": "2.4",
-      "last_updated": "2026-09-06",
+      "version": "2.3",
+      "last_updated": "2026-08-25",
       "doc_type": "reference"
     },
     {

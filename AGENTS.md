@@ -52,18 +52,15 @@ view — a reviewer never receives their own authored pull requests to review.
 
 Keep review checks and interactive skills as separate layers. `goose review`
 does not consume `~/.agents/skills/`; `bluefin-review` supplies the image-owned
-`/opt/bluefin/review-scope/.agents/` overlay through `--check-scope`. The five
-definitions in `image/review-scope/checks/` are `bluefin-doctrine`, `security`,
-`correctness`, `test-coverage`, and `simplicity`. Goose's native review
-orchestrator runs up to four checks concurrently. Skills generated from the
-Bluefin catalog, or installed from `skills.sh` and other compatible open
-catalogs, belong under `~/.agents/skills/` for interactive contributor sessions
-and do not become review checks automatically.
+`/opt/bluefin/review-scope/.agents/` overlay through `--check-scope`. Skills
+generated from the Bluefin catalog, or installed from `skills.sh` and other
+compatible open catalogs, belong under `~/.agents/skills/` for interactive
+contributor sessions and do not become review checks automatically.
 
-`just turbo-review` combines those parallel review checks with cluster
-scale-out: it requests three Hive contributor workers by default, then runs the
-maintainer dashboard in the foreground. The cluster workers process their own
-Hive assignments; they do not replace, select, or submit the human's review.
+`just turbo-review` requests three Hive contributor workers by default, then
+runs the maintainer dashboard in the foreground. The cluster workers process
+their own Hive assignments; they do not replace, select, or submit the human's
+review.
 `just turbo-review *args` forwards the same profile, effort, repository, and
 dashboard arguments accepted by `review-queue`:
 

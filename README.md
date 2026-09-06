@@ -765,22 +765,13 @@ Review uses two deliberately separate skill layers:
 
 Installing a community skill changes interactive contributor sessions; it does
 not add a `goose review` check. Review techniques must be explicit check
-subagents in the image-owned overlay. The five shipped checks are:
+subagents in the image-owned overlay. The `bluefin-doctrine` check covers
+scope, repository conventions, maintainability, and consistency among
+implementation, tests, and durable documentation.
 
-| Check | Review responsibility |
-|---|---|
-| `bluefin-doctrine` | Scope, repository conventions, maintainability, and consistency among implementation, tests, and durable documentation. |
-| `security` | High-confidence exploitable vulnerabilities, unsafe operations, credential handling, and privilege boundaries. |
-| `correctness` | Functional defects, broken invariants, boundary errors, concurrency hazards, and resource leaks. |
-| `test-coverage` | Missing regression, negative, boundary, fidelity, or isolation coverage for changed behavior. |
-| `simplicity` | Premature abstraction, dead or redundant code, hand-rolled platform behavior, and unrelated diff growth. |
-
-Goose's native review orchestrator dispatches these checks as parallel
-subagents, with up to four checks running concurrently. Review time is
-therefore governed by concurrent waves instead of the sum of five serial
-passes. `just turbo-review` combines that per-review concurrency with three
-cluster contributor workers by default, so contributor work and maintainer
-review analysis advance in parallel; `REVIEW_SCALE` changes the worker count.
+`just turbo-review` requests three cluster contributor workers by default,
+then forwards the same profile, effort, repository, and dashboard arguments
+to the foreground `review-queue`; `REVIEW_SCALE` changes the worker count.
 
 `bluefin-review` also passes `--instructions` (additive) rather than `--prompt`
 (which would replace Goose's default prompt), naming the doctrine on disk

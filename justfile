@@ -29,6 +29,9 @@
 #                     review-container, then passes the rest through to
 #                     the dashboard, e.g.
 #                     'just review-queue k3 high --repo bluefin'.
+#   turbo-review      Scale three cluster contributor workers, then launch
+#                     review-queue in the foreground with all arguments
+#                     forwarded.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # LIFECYCLE
