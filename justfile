@@ -944,12 +944,19 @@ scale_cluster_contributors() {
     --from-literal=GH_TOKEN="${GH_TOKEN_VALUE:-}" \
     --from-literal=GITHUB_COPILOT_TOKEN="${COPILOT_TOKEN:-}" \
     --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null
-  if kubectl get secret review-contributor-secret -n bluefin-system -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' 2>/dev/null | grep -q .; then
-    kubectl annotate secret review-contributor-secret -n bluefin-system \
-      kubectl.kubernetes.io/last-applied-configuration- >/dev/null || {
-        echo "ERROR: failed to remove legacy plaintext secret annotation." >&2
-        return 1
-      }
+  if kubectl get secret review-contributor-secret -n bluefin-system &>/dev/null; then
+    local legacy_annot
+    legacy_annot="$(kubectl get secret review-contributor-secret -n bluefin-system -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}')" || {
+      echo "ERROR: failed to read secret annotations." >&2
+      return 1
+    }
+    if [[ -n "$legacy_annot" ]]; then
+      kubectl annotate secret review-contributor-secret -n bluefin-system \
+        kubectl.kubernetes.io/last-applied-configuration- >/dev/null || {
+          echo "ERROR: failed to remove legacy plaintext secret annotation." >&2
+          return 1
+        }
+    fi
   fi
 
   local deploy_file="deploy/review-contributor.yaml"

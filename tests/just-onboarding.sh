@@ -640,6 +640,7 @@ case "$*" in
   "get nodes -o name") printf 'node/ghost\nnode/exo-0\n' ;;
   "apply -f -" | "apply --server-side --force-conflicts -f -") cat >/dev/null ;;
   "get secret review-contributor-secret -n bluefin-system -o jsonpath={.metadata.annotations.kubectl\\.kubernetes\\.io/last-applied-configuration}")
+    [[ "${FAKE_KUBECTL_ANNOTATION_GET_FAIL:-0}" == 1 ]] && exit 43
     [[ "${FAKE_KUBECTL_HAS_LAST_APPLIED:-0}" == 1 ]] &&
       printf 'legacy-configuration\n'
     ;;
@@ -739,6 +740,17 @@ run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
 assert_zero_status "$STATUS" "cluster scale-out must succeed without the legacy annotation"
 assert_file_contains "get secret review-contributor-secret -n bluefin-system" "$kubectl_log"
 assert_file_not_contains "annotate secret review-contributor-secret" "$kubectl_log"
+
+begin "review-container cluster: annotation read errors stop deployment"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token \
+  FAKE_KUBECTL_ANNOTATION_GET_FAIL=1
+assert_nonzero_status "$STATUS" "a failed annotation read must fail cluster scale-out"
+assert_contains "ERROR: failed to read secret annotations." "$OUT"
+assert_file_contains "get secret review-contributor-secret -n bluefin-system -o jsonpath=" "$kubectl_log"
+assert_file_not_contains "apply -f deploy/review-contributor.yaml" "$kubectl_log"
 
 begin "review-container cluster: annotation removal errors stop deployment"
 reset_logs
