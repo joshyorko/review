@@ -252,6 +252,14 @@ class ReceiptContractTests(unittest.TestCase):
                 self.assertEqual(receipt.identity.backend, backend)
                 self.assertEqual(exit_code, 0)
                 self.assertEqual(receipt.transcript, (f"{backend} output",))
+                self.assertIn(
+                    f"{self.request.base_sha}...{self.request.head_sha}",
+                    mock_registry.get(backend).streamed_args["extra_args"],
+                )
+                self.assertIn(
+                    f"git diff {self.request.base_sha}...{self.request.head_sha}",
+                    mock_registry.get(backend).streamed_args["prompt"],
+                )
 
 
 if __name__ == "__main__":

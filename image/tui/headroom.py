@@ -292,6 +292,32 @@ class HeadroomSession:
             line = f"{state_tag} {name}: direct - {route.reason}"
         return f"{line}; {caveman_tag}"
 
+    def telemetry(self, backend: str) -> dict[str, object]:
+        route = self._routes.get(backend) or self._default_route(backend)
+        delta = self._delta
+        last = self._last_stats
+        return {
+            "state": route.state,
+            "route": route.base_url or "",
+            "status_line": self.status_line(backend, True),
+            "requests": delta.requests if delta is not None else 0,
+            "tokens_saved": delta.tokens_saved if delta is not None else 0,
+            "output_tokens_saved": (
+                delta.output_tokens_saved if delta is not None else 0
+            ),
+            "output_reduction_percent": (
+                last.output_reduction_percent
+                if last is not None and not self._stats_degraded
+                else None
+            ),
+            "output_reduction_method": (
+                last.output_reduction_method
+                if last is not None and not self._stats_degraded
+                else None
+            ),
+            "statistics_degraded": self._stats_degraded,
+        }
+
     def _direct_route(self, backend: str) -> HeadroomRoute | None:
         if backend != "codex":
             return HeadroomRoute("DIRECT", backend, None, "Headroom proxies Codex only")

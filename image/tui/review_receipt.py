@@ -379,13 +379,15 @@ def run_receipt(
 
     headroom = HeadroomSession.from_environment()
     route = headroom.route_for_call(backend)
+    diff_range = f"{base_sha}...{head_sha}"
     prompt = apply_caveman(
-        "Review the exact binding. Return only the backend's structured ReviewResult; "
+        f"Review the exact binding by inspecting git diff {diff_range}. "
+        "Return only the backend's structured ReviewResult; "
         "use compact findings with file and line evidence and no prose padding.",
         True,
     )
     transcript: list[str] = []
-    extra_args = _check_scope_args(check_scope)
+    extra_args = _check_scope_args(check_scope) + (diff_range,)
     result = adapter.stream(
         request,
         prompt=prompt,

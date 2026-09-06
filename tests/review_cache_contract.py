@@ -154,6 +154,17 @@ class ReviewCacheTests(unittest.TestCase):
             cache_digest(run.identity, "scope-v7"),
         )
 
+    def test_receipt_path_helper_matches_run_identity_path(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = ReviewCache(root)
+            run = make_run()
+            receipt = make_receipt(run)
+            self.assertEqual(
+                cache.path_for_receipt(receipt),
+                cache.path_for(run, "scope-v7"),
+            )
+            self.assertEqual(cache.put(receipt), cache.path_for_receipt(receipt))
+
     def test_prune_matches_landing_retention(self):
         with tempfile.TemporaryDirectory() as root:
             cache = ReviewCache(root)

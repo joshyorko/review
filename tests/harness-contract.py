@@ -1031,6 +1031,38 @@ class HeadroomContract(unittest.TestCase):
             self.assertEqual(session.refresh("codex").state, "ACTIVE")
             self.assertEqual(session.route_for_call("codex").base_url, "http://127.0.0.1:8787")
 
+    def test_telemetry_exposes_route_and_aggregate_output_reduction(self):
+        calls = []
+        routes = {
+            "/readyz": [_FakeResponse(b"ok")],
+            "/stats?cached=1": [_FakeResponse(self.STATS_PAYLOAD)],
+        }
+        with patch("urllib.request.urlopen", _fake_urlopen(routes, calls)):
+            session = HeadroomSession.from_environment(self.ENV)
+            self.assertEqual(session.refresh("codex").state, "ACTIVE")
+            self.assertEqual(
+                session.route_for_call("codex").base_url,
+                "http://127.0.0.1:8787",
+            )
+            telemetry = session.telemetry("codex")
+        self.assertEqual(telemetry["state"], "ACTIVE")
+        self.assertEqual(telemetry["route"], "http://127.0.0.1:8787")
+        self.assertEqual(telemetry["requests"], 0)
+        self.assertEqual(telemetry["tokens_saved"], 0)
+        self.assertEqual(telemetry["output_tokens_saved"], 0)
+        self.assertEqual(
+            telemetry["output_reduction_percent"],
+            self.STATS_PAYLOAD["tokens"]["output_reduction"][
+                "reduction_percent"
+            ],
+        )
+        self.assertEqual(
+            telemetry["output_reduction_method"],
+            self.STATS_PAYLOAD["tokens"]["output_reduction"]["method"],
+        )
+        self.assertFalse(telemetry["statistics_degraded"])
+        self.assertIn("proxy delta", telemetry["status_line"])
+
     def test_invalid_configured_url_is_degraded_not_fatal(self):
         calls = []
         with patch("urllib.request.urlopen", _fake_urlopen({}, calls)):

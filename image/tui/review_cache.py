@@ -1,10 +1,13 @@
 # image/tui/review_cache.py
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import tempfile
 import time
 from pathlib import Path
+from typing import Iterator
 
 from tui.review_receipt import ReviewReceipt, cache_digest
 from tui.review_run import ReviewRun
@@ -33,6 +36,41 @@ class ReviewCache:
             f"{self.prefix(run)}-{self._digest(run, check_scope_version)}.json"
         )
 
+    @staticmethod
+    def run_for_receipt(receipt: ReviewReceipt) -> ReviewRun:
+        identity = receipt.identity
+        return ReviewRun(
+            identity.repository,
+            identity.pull_request,
+            identity.base_sha,
+            identity.head_sha,
+            identity.base_sha[:12] + identity.head_sha[:12],
+            identity.backend,
+            identity.model,
+            identity.effort,
+        )
+
+    def path_for_receipt(self, receipt: ReviewReceipt) -> Path:
+        return self.path_for(
+            self.run_for_receipt(receipt),
+            receipt.identity.check_scope_version,
+        )
+
+    @contextlib.contextmanager
+    def _locked_root(self) -> Iterator[None]:
+        self.root.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(
+            self.root / ".cache.lock",
+            os.O_RDWR | os.O_CREAT,
+            0o600,
+        )
+        with os.fdopen(descriptor) as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
     def get(self, run: ReviewRun, check_scope_version: str) -> ReviewReceipt | None:
         path = self.path_for(run, check_scope_version)
         try:
@@ -44,34 +82,33 @@ class ReviewCache:
             return None
 
     def put(self, receipt: ReviewReceipt) -> Path:
-        path = self.path_for(
-            ReviewRun(
-                receipt.identity.repository,
-                receipt.identity.pull_request,
-                receipt.identity.base_sha,
-                receipt.identity.head_sha,
-                receipt.identity.base_sha[:12] + receipt.identity.head_sha[:12],
-                receipt.identity.backend,
-                receipt.identity.model,
-                receipt.identity.effort,
-            ),
-            receipt.identity.check_scope_version,
-        )
-        self.root.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=self.root, prefix=".review-", suffix=".tmp"
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(receipt.to_json())
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        path = self.path_for_receipt(receipt)
+        with self._locked_root():
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=self.root, prefix=".review-", suffix=".tmp"
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(receipt.to_json())
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
         return path
+
+    def remove_if_matches(self, receipt: ReviewReceipt) -> bool:
+        path = self.path_for_receipt(receipt)
+        with self._locked_root():
+            try:
+                if path.read_text(encoding="utf-8").strip() != receipt.to_json():
+                    return False
+                path.unlink()
+                return True
+            except (OSError, UnicodeError):
+                return False
 
     def prune(self, now: float | None = None) -> None:
         cutoff = (time.time() if now is None else now) - REVIEW_CACHE_RETENTION_SECONDS
