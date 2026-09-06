@@ -43,6 +43,7 @@ gum_log="$scratch/gum.log"
 runner_log="$scratch/runner.log"
 image_log="$scratch/image.log"
 credential_log="$scratch/credentials.log"
+kubectl_log="$scratch/kubectl.log"
 
 default_hive_backup=""
 cleanup() {
@@ -287,6 +288,7 @@ reset_logs() {
   : >"$runner_log"
   : >"$image_log"
   : >"$credential_log"
+  : >"$kubectl_log"
   RECIPE_ARGS=()
 }
 reset_logs
@@ -319,6 +321,7 @@ run_recipe() {
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
       IMAGE_LOG="$image_log" \
       CREDENTIAL_LOG="$credential_log" \
+      KUBECTL_LOG="$kubectl_log" \
       "$@" \
       "$real_just" --justfile "$justfile" "$recipe" "${RECIPE_ARGS[@]}" 2>&1
   )"
@@ -631,9 +634,18 @@ install_fake_kubectl() {
   cat >"$fake_bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
 case "$*" in
   "config current-context") printf 'ghost-lab\n' ;;
   "get nodes -o name") printf 'node/ghost\nnode/exo-0\n' ;;
+  "apply -f -" | "apply --server-side --force-conflicts -f -") cat >/dev/null ;;
+  "get secret review-contributor-secret -n bluefin-system -o jsonpath={.metadata.annotations.kubectl\\.kubernetes\\.io/last-applied-configuration}")
+    [[ "${FAKE_KUBECTL_HAS_LAST_APPLIED:-0}" == 1 ]] &&
+      printf 'legacy-configuration\n'
+    ;;
+  "annotate secret review-contributor-secret -n bluefin-system kubectl.kubernetes.io/last-applied-configuration-")
+    [[ "${FAKE_KUBECTL_ANNOTATE_FAIL:-0}" == 1 ]] && exit 42
+    ;;
   *) printf '{"items":[]}\n' ;;
 esac
 exit 0
@@ -718,6 +730,26 @@ run_recipe review-container GH_READY=1 \
 assert_no_lab_handoff
 assert_file_not_contains "/home/dev/.agents/skills/lab-test" "$runner_log"
 assert_not_contains "lab enabled for this session" "$OUT"
+
+begin "review-container cluster: absent legacy annotation needs no removal"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token
+assert_zero_status "$STATUS" "cluster scale-out must succeed without the legacy annotation"
+assert_file_contains "get secret review-contributor-secret -n bluefin-system" "$kubectl_log"
+assert_file_not_contains "annotate secret review-contributor-secret" "$kubectl_log"
+
+begin "review-container cluster: annotation removal errors stop deployment"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token \
+  FAKE_KUBECTL_HAS_LAST_APPLIED=1 FAKE_KUBECTL_ANNOTATE_FAIL=1
+assert_nonzero_status "$STATUS" "a failed annotation removal must fail cluster scale-out"
+assert_contains "ERROR: failed to remove legacy plaintext secret annotation." "$OUT"
+assert_file_contains "annotate secret review-contributor-secret -n bluefin-system" "$kubectl_log"
+assert_file_not_contains "apply -f deploy/review-contributor.yaml" "$kubectl_log"
 remove_fake_kubectl
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
