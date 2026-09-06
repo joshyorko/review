@@ -2,7 +2,7 @@
 # Hermetic regression harness for the root justfile.
 #
 # Everything the launcher can shell out to (gh, goose, gum, podman, git,
-# secret-tool) is faked on PATH, so this test never touches the network,
+# secret-tool, kubectl) is faked on PATH, so this test never touches the network,
 # never starts a real container, and never
 # depends on what happens to be installed on the developer's machine.
 #
@@ -36,6 +36,7 @@ for base in "${XDG_RUNTIME_DIR:-}" "/run/user/$(id -u)" "${HOME:-}/.cache"; do
 done
 [[ -n "$tmp_root" ]] || tmp_root="${scratch}/tmp"
 fake_bin="$scratch/bin"
+system_bin="$scratch/system-bin"
 home="$scratch/home"
 cfg_dir="$home/.config/review"
 state_dir="$home/.local/state/review"
@@ -54,8 +55,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$fake_bin" "$tmp_root" \
+mkdir -p "$fake_bin" "$system_bin" "$tmp_root" \
   "$home/.config/goose" "$home/.config/hive" "$cfg_dir" "$state_dir"
+
+# Preserve the launcher's normal system tools without allowing a host kubectl
+# to appear after the fake is removed for missing-command scenarios.
+for executable in /usr/bin/* /bin/*; do
+  [[ -x "$executable" && ! -d "$executable" ]] || continue
+  name="${executable##*/}"
+  [[ "$name" == "kubectl" || -e "$system_bin/$name" || -L "$system_bin/$name" ]] && continue
+  ln -s "$executable" "$system_bin/$name"
+done
 
 # ── failure reporting ─────────────────────────────────────────────────────
 scenario="<startup>"
@@ -318,7 +328,7 @@ run_recipe() {
       -u REVIEW_LAB -u REVIEW_LAB_BROKER -u REVIEW_PERSONAL_SKILLS \
       -u FAKE_KUBECTL_ANNOTATION_GET_FAIL -u FAKE_KUBECTL_ANNOTATE_FAIL \
       -u FAKE_KUBECTL_DEPLOYMENT_GET_FAIL -u FAKE_KUBECTL_HAS_LAST_APPLIED \
-      HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
+      HOME="$home" PATH="$fake_bin:$system_bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
       IMAGE_LOG="$image_log" \
@@ -799,7 +809,7 @@ RECIPE_ARGS=(sol)
 run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
 assert_nonzero_status "$STATUS" "the fake dashboard runner always exits non-zero"
-assert_file_contains "--replicas=3" "$kubectl_log"
+assert_file_contains "scale deployment/review-contributor -n bluefin-system --replicas=3" "$kubectl_log"
 assert_file_contains "GOOSE_MODEL=gpt-5.6-sol" "$kubectl_log"
 assert_file_contains "GOOSE_THINKING_EFFORT=medium" "$kubectl_log"
 assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
