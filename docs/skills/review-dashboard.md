@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "2.4"
+version: "2.5"
 last_updated: 2026-09-06
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -154,6 +154,7 @@ Batch landings partition across independent repository lanes and execute via bac
 The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying local capacity, and trust a receipt only when its full run and check-scope identity matches.
 Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission, broker fallback, and cache publication; a cancelled run cannot publish or delete another session's receipt, and cleanup I/O failures remain visible.
 Headroom establishes one batch baseline, captures each route and telemetry snapshot under one lock, routes every non-cached dispatch, and samples aggregate telemetry after the batch.
+On the dashboard, `B` selects or clears every visible row, `Space` toggles the highlighted row and advances, `n` marks an unseen exact head skipped and moves to the next unseen row, and `r` reviews the selection as a batch while retaining its selection on snapshot failure. Queue rows show running and verdict badges. `Enter` on a reviewed row reloads GitHub evidence before rendering cached analysis; CI, mergeability, reviews, and overlap are never restored from the cache.
 
 ## Common Rationalizations
 
@@ -167,8 +168,7 @@ Headroom establishes one batch baseline, captures each route and telemetry snaps
 ## Red Flags
 
 - `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
-- Interpolating any GitHub- or agent-sourced text into markup without
-  `escape()`. An agent-reported JSONL state is attacker-shaped text too:
+- Interpolating any GitHub- or agent-sourced text into markup without `escape()`. An agent-reported JSONL state is attacker-shaped text too:
   unescaped, `waiting[/][blink]OWNED` raised `MarkupError` in
   `rows.update()` and took the whole batch-queue screen down.
 - `self.query_one(...)` evaluated inside an `@work(thread=True)` body.

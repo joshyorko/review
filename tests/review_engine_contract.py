@@ -342,6 +342,7 @@ class EngineContractTests(unittest.TestCase):
                 governor=governor,
                 local_executor=executor,
             )
+            events = []
             with patch(
                 "tui.review_engine._prepare_worktree",
                 side_effect=self.prepared_worktree,
@@ -354,6 +355,7 @@ class EngineContractTests(unittest.TestCase):
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
+                    on_event=events.append,
                 )
             self.assertEqual(
                 set(result.results),
@@ -367,6 +369,22 @@ class EngineContractTests(unittest.TestCase):
             )
             self.assertEqual(len(executor.calls), 3)
             self.assertEqual(len(set(executor.workdirs)), 3)
+            self.assertTrue(events)
+            self.assertTrue(all(event.batch_id for event in events))
+            self.assertTrue(
+                all(
+                    event.head_sha
+                    == next(
+                        selected.head_sha
+                        for selected in (
+                            item(n, h)
+                            for n, h in enumerate(HEADS, 1)
+                        )
+                        if selected.key == event.key
+                    )
+                    for event in events
+                )
+            )
             status_path = next(Path(root).glob("*.jsonl"))
             status = parse_review_status(str(status_path))
             self.assertEqual(status["projectbluefin/review#1"]["state"], "complete")

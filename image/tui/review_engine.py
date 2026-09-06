@@ -14,7 +14,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, TextIO, cast
 
@@ -46,6 +46,8 @@ class ReviewEvent:
     note: str
     timestamp: int
     receipt: str = ""
+    batch_id: str = ""
+    head_sha: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -56,6 +58,10 @@ class ReviewEvent:
         }
         if self.receipt:
             value["receipt"] = self.receipt
+        if self.batch_id:
+            value["batch_id"] = self.batch_id
+        if self.head_sha:
+            value["head_sha"] = self.head_sha
         return value
 
 
@@ -368,6 +374,7 @@ class ReviewEngine:
         cache: ReviewCache | None = None,
         governor: CapacityGovernor | None = None,
         headroom_session: HeadroomSession | None = None,
+        headroom_lock: threading.Lock | None = None,
         local_executor: ReviewExecutor | None = None,
         broker_executor: ReviewExecutor | None = None,
         worktree_root: str | os.PathLike[str] | None = None,
@@ -386,7 +393,7 @@ class ReviewEngine:
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_runs: dict[str, dict[str, ReviewRun]] = {}
         self._state_lock = threading.Lock()
-        self._headroom_lock = threading.Lock()
+        self._headroom_lock = headroom_lock or threading.Lock()
 
     def _new_batch(
         self,
@@ -505,6 +512,19 @@ class ReviewEngine:
         event: ReviewEvent,
         callback: Callable[[ReviewEvent], None] | None,
     ) -> None:
+        item = next(
+            (candidate for candidate in batch.items if candidate.key == event.key),
+            None,
+        )
+        if item is not None and (
+            event.batch_id != batch.batch_id
+            or event.head_sha != item.head_sha
+        ):
+            event = replace(
+                event,
+                batch_id=batch.batch_id,
+                head_sha=item.head_sha,
+            )
         append_review_event(batch.status_path, event)
         if callback is not None:
             callback(event)

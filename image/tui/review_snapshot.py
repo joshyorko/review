@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import os
 import re
-import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence, TYPE_CHECKING
 
@@ -10,15 +8,6 @@ from tui.review_evidence_manifest import ReviewRequest
 
 if TYPE_CHECKING:
     from tui.bluefin_review_tui import Stop
-
-_TUI_DIR = os.path.dirname(__file__)
-if _TUI_DIR not in sys.path:
-    sys.path.insert(0, _TUI_DIR)
-
-try:
-    from tui.bluefin_review_tui import live_review_verification
-except ImportError:
-    from bluefin_review_tui import live_review_verification
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
 
@@ -70,6 +59,11 @@ def _required_sha(live: Mapping[str, Any], field: str) -> str:
 
 
 def _verification(live: Mapping[str, Any]) -> list[dict[str, Any]]:
+    try:
+        from tui.bluefin_review_tui import live_review_verification
+    except ImportError:
+        from bluefin_review_tui import live_review_verification
+
     return live_review_verification(dict(live))
 
 

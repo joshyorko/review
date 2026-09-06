@@ -60,6 +60,12 @@ fi
 [[ "$(grep -c 'subprocess.Popen(' "$tui")" -eq 2 ]] ||
   fail "expected exactly two subprocess.Popen sites (the streamed review and the landing agent)"
 
+# Batch review is read-only orchestration. It may hydrate live GitHub evidence
+# and dispatch ReviewEngine, but it must not reach any mutation gate.
+batch_review="$(sed -n '/def start_review_batch/,/def on_key/p' "$tui")"
+grep -q 'self\.mutate' <<<"$batch_review" &&
+  fail "batch review must not invoke a GitHub mutation gate"
+
 # The batch path: a selected batch opens the proportionate plan gate (Enter,
 # no typed count) and dispatches one agent for the whole selection.
 grep -q 'class BatchPlanScreen' "$tui" ||

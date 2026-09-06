@@ -93,6 +93,8 @@ def org_search_pages(items: list[dict]) -> str:
             "repository": {"nameWithOwner": item["repository"]},
             "labels": {"nodes": [{"name": name} for name in item.get("labels", [])]},
             "reviewDecision": review,
+            "baseRefOid": item.get("base_sha", "a" * 40),
+            "headRefOid": item.get("head_sha", f"{item['number']:040x}"),
             "mergeable": mergeable,
             "commits": {
                 "nodes": [{"commit": {"statusCheckRollup": {"state": rollup}}}]
@@ -427,6 +429,648 @@ async def main() -> int:
             if app.source_state == state and len(app.stops) == count:
                 return
             await pilot.pause(0.05)
+
+    # ── batch-review selection, triage navigation, and verdict badges ───
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        await pilot.press("B")
+        check(
+            all(stop.selected for stop in app.stops),
+            "B must select every visible row",
+        )
+        await pilot.press("B")
+        check(
+            not any(stop.selected for stop in app.stops),
+            "B must clear every visible selection",
+        )
+        await pilot.press("space")
+        check(
+            app.stops[0].selected and app._queue().index == 1,
+            "Space must toggle the highlighted row and advance",
+        )
+        await pilot.press("n")
+        check(
+            app.stops[1].triage_state == "skipped"
+            and app._queue().index == 0,
+            "n must skip the highlighted row and jump to the next unseen row",
+        )
+        app.stops[0].review_status = "running"
+        app.stops[1].review_status = "cached"
+        app.stops[1].cached_age = "4m"
+        app.stops[1].review_result = tui.ReviewResult(
+            1,
+            "complete",
+            {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        )
+        app.refresh_rows()
+        rendered = [
+            str(child.query(tui.Label).first().render())
+            for child in app._queue().children
+        ]
+        check("⏳" in rendered[0], "running rows must carry the pending badge")
+        check(
+            "✓" in rendered[1] and "4m" in rendered[1],
+            "cached rows must carry verdict and age",
+        )
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "Headroom" in status or "DIRECT" in status,
+            "the batch status must surface the existing Headroom route status",
+        )
+
+    # ── [r] dispatches the selected exact-head snapshot as one batch ─────
+    base_sha = "a" * 40
+    head_sha = "b" * 40
+    os.environ["PR_VIEW_JSON"] = json.dumps(
+        {
+            "author": {"login": "someone-else"},
+            "state": "OPEN",
+            "baseRefOid": base_sha,
+            "headRefOid": head_sha,
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "statusCheckRollup": [
+                {"name": "validate", "conclusion": "SUCCESS"}
+            ],
+        }
+    )
+    set_org_queue(
+        [
+            {**item, "base_sha": base_sha, "head_sha": head_sha}
+            for item in SNAPSHOT["items"]
+        ]
+    )
+
+    class FakeReviewEngine:
+        def __init__(self):
+            self.calls = []
+
+        def start(
+            self,
+            snapshot,
+            backend,
+            model,
+            effort,
+            check_scope_version,
+            check_scope="",
+            on_event=None,
+        ):
+            self.calls.append(
+                (
+                    snapshot,
+                    backend,
+                    model,
+                    effort,
+                    check_scope_version,
+                    check_scope,
+                    on_event,
+                )
+            )
+            return SimpleNamespace(
+                batch_id="pilot-batch",
+                status_path=str(workdir / "pilot-batch.jsonl"),
+                items=snapshot.items,
+                backend=backend,
+                model=model,
+                effort=effort,
+                running=True,
+                headroom_status_line="[ACTIVE] Goose/GitHub Copilot: via Headroom",
+                headroom_output_reduction={
+                    "output_reduction_percent": 37.5,
+                    "output_reduction_method": "measured",
+                },
+            )
+
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        await settle_evidence(app, pilot)
+        fake_engine = FakeReviewEngine()
+        app.review_engine = fake_engine
+        await pilot.press("B")
+        await pilot.press("r")
+        for _ in range(200):
+            if app.review_batches:
+                break
+            await pilot.pause(0.05)
+        check(
+            len(fake_engine.calls) == 1
+            and len(fake_engine.calls[0][0].items) == 2,
+            "r with a selection must dispatch one exact-head batch",
+        )
+        check(
+            not isinstance(app.screen, tui.ReviewScreen)
+            and all(stop.review_status == "running" for stop in app.stops),
+            "batch review must remain on the dashboard and mark every row running",
+        )
+        check(
+            all(
+                stop.triage_state == "reviewed"
+                and app.triage[app.triage_key(stop)] == "reviewed"
+                for stop in app.stops
+            ),
+            "batch dispatch must mark every exact head reviewed",
+        )
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "37.5% measured" in status,
+            f"batch status must include aggregate Headroom telemetry, got {status!r}",
+        )
+        first = app.stops[0]
+        run = tui.ReviewRun(
+            first.repository,
+            first.number,
+            base_sha,
+            head_sha,
+            base_sha[:12] + head_sha[:12],
+            "goose",
+            "gemini-3.8-flash",
+            "high",
+        )
+        receipt = tui.ReviewReceipt.from_result(
+            run,
+            tui.ReviewResult(
+                1,
+                "findings",
+                {"critical": 0, "high": 1, "medium": 0, "low": 0},
+                [
+                    {
+                        "severity": "high",
+                        "file": "image/tui/example.py",
+                        "line": 7,
+                        "title": "event finding",
+                    }
+                ],
+                [],
+                {"backend": "goose", "model": "gemini-3.8-flash"},
+            ),
+            ["bounded transcript"],
+            app.review_scope_version,
+        )
+        receipt_path = app.review_cache.put(receipt)
+        app.review_event(
+            tui.ReviewEvent(
+                first.key,
+                "cached",
+                "exact identity hit",
+                int(time.time()),
+                receipt_path.name,
+            )
+        )
+        await pilot.pause()
+        row = str(
+            app._queue().children[0].query(tui.Label).first().render()
+        )
+        check(
+            first.review_result is not None
+            and first.review_result.live.get("headRefOid") == head_sha
+            and "✗" in row
+            and "cached" in row,
+            "review events must merge receipt analysis with live evidence and repaint the verdict badge",
+        )
+        await pilot.press("r")
+        await pilot.pause()
+        check(
+            len(fake_engine.calls) == 1,
+            "repeated r must not dispatch the same selected heads twice",
+        )
+        first.review_result = receipt.analysis_result(live=first.live)
+        app.review_event(
+            tui.ReviewEvent(
+                first.key,
+                "failed",
+                "provider failed",
+                int(time.time()),
+            )
+        )
+        await pilot.pause()
+        row = str(
+            app._queue().children[0].query(tui.Label).first().render()
+        )
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            first.review_result is None
+            and first.review_failure == "provider failed"
+            and "? failed" in row
+            and "review failed" in status,
+            "failed batch events must replace stale verdicts with a persistent failure",
+        )
+        first.head_sha = "c" * 40
+        first.live["headRefOid"] = first.head_sha
+        first.review_result = receipt.analysis_result(live=first.live)
+        first.review_status = "complete"
+        first.cached_age = "1m"
+        app.review_event(
+            tui.ReviewEvent(
+                first.key,
+                "cached",
+                "late old-head result",
+                int(time.time()),
+                receipt_path.name,
+            )
+        )
+        await pilot.pause()
+        check(
+            first.review_result is None
+            and first.review_status == ""
+            and first.cached_age == "",
+            "a late event from a force-pushed head must not restore stale analysis",
+        )
+        first.review_result = tui.ReviewResult(1, "failed")
+        first.review_status = "failed"
+        first.cached_age = ""
+        app.refresh_rows()
+        row = str(
+            app._queue().children[0].query(tui.Label).first().render()
+        )
+        check(
+            "?" in row,
+            "failed or incomplete review results must carry the investigate badge",
+        )
+
+    # Cache hits and immediate failures may callback before start() returns.
+    class ImmediateEventEngine(FakeReviewEngine):
+        def start(self, *args, **kwargs):
+            snapshot = args[0]
+            batch = super().start(*args, **kwargs)
+            callback = kwargs["on_event"]
+            callback(
+                tui.ReviewEvent(
+                    snapshot.items[0].key,
+                    "failed",
+                    "immediate provider failure",
+                    int(time.time()),
+                    batch_id=batch.batch_id,
+                    head_sha=snapshot.items[0].head_sha,
+                )
+            )
+            return batch
+
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        await settle_evidence(app, pilot)
+        app.review_engine = ImmediateEventEngine()
+        await pilot.press("B")
+        await pilot.press("r")
+        for _ in range(200):
+            if app.review_batches:
+                break
+            await pilot.pause(0.05)
+        check(
+            app.stops[0].review_status == "failed"
+            and app.stops[0].review_failure
+            == "immediate provider failure",
+            "events emitted before start returns must replay after batch registration",
+        )
+
+    # Snapshot hydration fails closed and leaves the maintainer's selection.
+    os.environ["PR_VIEW_JSON"] = "{}"
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        await settle_evidence(app, pilot)
+        fake_engine = FakeReviewEngine()
+        app.review_engine = fake_engine
+        await pilot.press("B")
+        await pilot.press("r")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        check(
+            not fake_engine.calls,
+            "a failed exact-head snapshot must not start the review engine",
+        )
+        check(
+            all(stop.selected for stop in app.stops)
+            and all(stop.failure for stop in app.stops),
+            "snapshot failures must remain selected and visible on every failed row",
+        )
+
+    # A force-pushed head has a fresh triage identity and becomes unseen.
+    os.environ["PR_VIEW_JSON"] = json.dumps(
+        {
+            "author": {"login": "someone-else"},
+            "state": "OPEN",
+            "baseRefOid": base_sha,
+            "headRefOid": "c" * 40,
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "statusCheckRollup": [],
+        }
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        await settle_evidence(app, pilot)
+        stop = app.stops[0]
+        stop.head_sha = head_sha
+        stop.live["headRefOid"] = head_sha
+        stop.triage_state = "reviewed"
+        app.triage[app.triage_key(stop)] = "reviewed"
+        app.show_evidence(stop)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        check(
+            stop.head_identity == "c" * 40 and stop.triage_state == "unseen",
+            "a force-push must reset the exact-head triage state to unseen",
+        )
+        stop.review_result = tui.ReviewResult(
+            1,
+            "complete",
+            provenance={
+                "backend": "goose",
+                "model": "gemini-3.8-flash",
+                "base_sha": base_sha,
+                "head_sha": "c" * 40,
+            },
+        )
+        stop.review_status = "complete"
+        os.environ["PR_VIEW_JSON"] = json.dumps(
+            {
+                "author": {"login": "someone-else"},
+                "state": "OPEN",
+                "baseRefOid": "d" * 40,
+                "headRefOid": "c" * 40,
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "reviewDecision": "REVIEW_REQUIRED",
+                "statusCheckRollup": [],
+            }
+        )
+        app.show_evidence(stop)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        check(
+            stop.review_result is None and stop.review_status == "",
+            "base motion must invalidate a verdict even when the head is unchanged",
+        )
+
+    # Older overlapping evidence reads cannot overwrite a newer head.
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        await settle_evidence(app, pilot)
+        stop = app.stops[0]
+        original_fetch_live_review = tui.fetch_live_review
+        first_started = threading.Event()
+        release_first = threading.Event()
+        release_batch_fetch = threading.Event()
+        fetch_count = 0
+        fetch_lock = threading.Lock()
+
+        def racing_fetch(repository, number):
+            nonlocal fetch_count
+            with fetch_lock:
+                fetch_count += 1
+                call = fetch_count
+            live = {
+                "author": {"login": "someone-else"},
+                "state": "OPEN",
+                "baseRefOid": base_sha,
+                "headRefOid": ("b" if call == 1 else "c") * 40,
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "reviewDecision": "REVIEW_REQUIRED",
+                "statusCheckRollup": [],
+            }
+            if call == 1:
+                first_started.set()
+                release_first.wait(timeout=10)
+            return live
+
+        tui.fetch_live_review = racing_fetch
+        try:
+            app.show_evidence(stop)
+            for _ in range(200):
+                if first_started.is_set():
+                    break
+                await pilot.pause(0.05)
+            app.show_evidence(stop)
+            for _ in range(200):
+                if stop.head_identity == "c" * 40:
+                    break
+                await pilot.pause(0.05)
+            release_first.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            check(
+                stop.head_identity == "c" * 40,
+                "an older evidence response must not overwrite the newer head",
+            )
+
+            batch_fetch_started = threading.Event()
+            def stale_during_batch(repository, number):
+                batch_fetch_started.set()
+                release_batch_fetch.wait(timeout=10)
+                return {
+                    "author": {"login": "someone-else"},
+                    "state": "OPEN",
+                    "baseRefOid": base_sha,
+                    "headRefOid": "b" * 40,
+                    "isDraft": False,
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN",
+                    "reviewDecision": "REVIEW_REQUIRED",
+                    "statusCheckRollup": [],
+                }
+
+            tui.fetch_live_review = stale_during_batch
+            app.show_evidence(stop)
+            for _ in range(200):
+                if batch_fetch_started.is_set():
+                    break
+                await pilot.pause(0.05)
+            fake_engine = FakeReviewEngine()
+            app.review_engine = fake_engine
+            item = tui.BatchReviewItem(
+                stop.key,
+                stop.repository,
+                stop.number,
+                stop.title,
+                base_sha,
+                "c" * 40,
+                {
+                    "baseRefOid": base_sha,
+                    "headRefOid": "c" * 40,
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN",
+                    "statusCheckRollup": [],
+                },
+                [],
+            )
+            app.begin_review_batch(
+                [stop], tui.BatchSnapshot((item,), {})
+            )
+            release_batch_fetch.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            check(
+                stop.head_identity == "c" * 40
+                and stop.review_status == "running",
+                "an old evidence response must not overwrite a committed batch snapshot",
+            )
+        finally:
+            release_first.set()
+            release_batch_fetch.set()
+            tui.fetch_live_review = original_fetch_live_review
+
+    # Enter re-fetches live evidence before showing cached analysis.
+    os.environ["PR_VIEW_JSON"] = json.dumps(
+        {
+            "author": {"login": "someone-else"},
+            "state": "OPEN",
+            "baseRefOid": base_sha,
+            "headRefOid": head_sha,
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "statusCheckRollup": [
+                {"name": "validate", "conclusion": "SUCCESS"}
+            ],
+        }
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        await settle_evidence(app, pilot)
+        stop = app.stops[0]
+        run = tui.ReviewRun(
+            stop.repository,
+            stop.number,
+            base_sha,
+            head_sha,
+            base_sha[:12] + head_sha[:12],
+            "goose",
+            "gemini-3.8-flash",
+            "high",
+        )
+        receipt = tui.ReviewReceipt.from_result(
+            run,
+            tui.ReviewResult(
+                1,
+                "findings",
+                {"critical": 0, "high": 1, "medium": 0, "low": 0},
+                [
+                    {
+                        "severity": "high",
+                        "file": "image/tui/example.py",
+                        "line": 7,
+                        "title": "cached finding",
+                    }
+                ],
+                [],
+                {"backend": "goose", "model": "gemini-3.8-flash"},
+            ),
+            ["bounded transcript"],
+            app.review_scope_version,
+        )
+        cache_path = app.review_cache.put(receipt)
+        os.environ["PR_VIEW_JSON"] = json.dumps(
+            {
+                "author": {"login": "someone-else"},
+                "state": "OPEN",
+                "baseRefOid": base_sha,
+                "headRefOid": head_sha,
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "DIRTY",
+                "reviewDecision": "REVIEW_REQUIRED",
+                "statusCheckRollup": [
+                    {"name": "validate", "conclusion": "FAILURE"}
+                ],
+            }
+        )
+        stop.review_result = None
+        app.show_evidence(stop)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        check(
+            stop.review_status == "cached"
+            and stop.review_result is not None
+            and stop.review_result.live.get("mergeStateStatus") == "DIRTY",
+            "live-head cache lookup must annotate a row without rerunning review",
+        )
+        os.environ["PR_VIEW_JSON"] = json.dumps(
+            {
+                "author": {"login": "someone-else"},
+                "state": "OPEN",
+                "baseRefOid": base_sha,
+                "headRefOid": head_sha,
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "reviewDecision": "REVIEW_REQUIRED",
+                "statusCheckRollup": [
+                    {"name": "validate", "conclusion": "SUCCESS"}
+                ],
+            }
+        )
+        await pilot.press("enter")
+        for _ in range(200):
+            if isinstance(app.screen, tui.ReviewDecisionScreen):
+                break
+            await pilot.pause(0.05)
+        check(
+            isinstance(app.screen, tui.ReviewDecisionScreen),
+            "Enter on a reviewed row must open the cached decision card",
+        )
+        if isinstance(app.screen, tui.ReviewDecisionScreen):
+            card = str(
+                app.screen.query_one("#cached-decision-card", tui.Static).render()
+            )
+            check(
+                "cached finding" in card
+                and "live CI SUCCESS" in card
+                and "merge CLEAN" in card,
+                f"the decision card must merge cached analysis with fresh live evidence, got {card!r}",
+            )
+        check(
+            '"live":{}' in cache_path.read_text()
+            and "CLEAN" not in cache_path.read_text(),
+            "fresh live evidence must never be written into the cached receipt",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
+        stop.review_result = tui.ReviewResult(
+            1,
+            "findings",
+            {"critical": 0, "high": 0, "medium": 1, "low": 0},
+            [
+                {
+                    "severity": "medium",
+                    "file": "image/tui/fresh.py",
+                    "line": 9,
+                    "title": "fresh collected finding",
+                }
+            ],
+            [],
+            {
+                "backend": "goose",
+                "model": "gemini-3.8-flash",
+                "base_sha": base_sha,
+                "head_sha": head_sha,
+            },
+        )
+        stop.review_status = "findings"
+        app.show_evidence(stop)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        check(
+            stop.review_result.findings[0]["title"]
+            == "fresh collected finding"
+            and stop.review_result.live.get("ci") == "success",
+            "fresh in-session analysis must outrank an older cache hit and receive current live evidence",
+        )
+    os.environ.pop("PR_VIEW_JSON", None)
+    set_org_queue(SNAPSHOT["items"])
 
     async with live_app.run_test() as pilot:
         await wait_for_live_rows(live_app, pilot, "ready", 1)
@@ -904,6 +1548,7 @@ async def main() -> int:
                     {"name": "docs", "conclusion": "FAILURE"},
                 ],
             }
+            app.stops[0].head_sha = head_sha
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
             app.stops[0].review_result = prior_result
             root_screen = app.screen
@@ -928,6 +1573,10 @@ async def main() -> int:
             if not isinstance(screen, tui.ReviewScreen):
                 check(False, f"'r' must open the review screen, got {type(screen).__name__}")
                 return "", set()
+            check(
+                screen.headroom_session is app.headroom_session,
+                "single reviews must reuse the dashboard Headroom session",
+            )
             for _ in range(400):
                 if screen.finished:
                     break
@@ -956,6 +1605,16 @@ async def main() -> int:
             os.environ.pop("RE_REVIEW_COMPARE_JSON", None)
             os.environ.pop("RE_REVIEW_COMPARE_FAIL", None)
             check(app.screen is root_screen, "q must close ReviewScreen")
+            if (
+                "COMPLETE" in str(status.render())
+                and "INCOMPLETE" not in str(status.render())
+            ):
+                check(
+                    app.stops[0].triage_state == "reviewed"
+                    and app.triage[app.triage_key(app.stops[0])]
+                    == "reviewed",
+                    "a completed single review must triage its exact head",
+                )
             return str(status.render()), set(status.classes), str(card.render())
 
     # The stubs below keep writing raw JSONL on purpose: the dashboard must
@@ -5099,6 +5758,61 @@ async def main() -> int:
     ):
         check(expected in card, f"the completed card must show {expected!r}, got {card!r}")
 
+    # A single review is bound to its starting base/head, not the mutable row.
+    slow_output = workdir / "slow-review-output.txt"
+    slow_output.write_text(clean_output)
+    write_stub(
+        workdir / "bluefin-review",
+        f'sleep 1\ncat "{slow_output}"\nexit 0\n',
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        await settle_evidence(app, pilot)
+        stop = app.stops[0]
+        stop.live = {
+            "baseRefOid": "a" * 40,
+            "headRefOid": "b" * 40,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [],
+        }
+        stop.head_sha = "b" * 40
+        stop.review_result = None
+        stop.review_status = ""
+        await pilot.press("r")
+        for _ in range(200):
+            if isinstance(app.screen, tui.ReviewScreen):
+                break
+            await pilot.pause(0.05)
+        screen = app.screen
+        check(
+            isinstance(screen, tui.ReviewScreen),
+            "the force-push review regression needs ReviewScreen",
+        )
+        if isinstance(screen, tui.ReviewScreen):
+            stop.live["headRefOid"] = "c" * 40
+            stop.head_sha = "c" * 40
+            for _ in range(400):
+                if screen.finished:
+                    break
+                await pilot.pause(0.05)
+            status = str(
+                screen.query_one("#review-status", tui.Static).render()
+            )
+            check(
+                "STALE" in status
+                and stop.review_result is None
+                and stop.triage_state == "unseen",
+                "a force-push during a single review must not attach or triage the old-head result",
+            )
+            await pilot.press("q")
+            await pilot.pause()
+
     text, classes, card = await run_review(0, findings_output)
     check("COMPLETE" in text, f"a structured findings run must complete, got {text!r}")
     for expected in (
@@ -5852,12 +6566,12 @@ async def main() -> int:
     outcomes = [r["outcome"] for r in records if r.get("action") == "review"]
     check(
         outcomes == [
-            "complete", "complete", "incomplete", "stale", "complete",
+            "complete", "stale", "complete", "incomplete", "stale", "complete",
             "complete", "complete", "complete", "complete", "complete", "complete", "complete", "complete", "complete",
             "complete", "complete", "complete", "complete", "complete", "complete", "complete",
             "incomplete",
             "complete", "complete", "complete", "complete", "complete", "complete", "complete",
-            "incomplete", "failed", "complete", "complete", "incomplete", "complete", "stopped", "stopped",
+            "incomplete", "failed", "complete", "complete", "stale", "complete", "stopped", "stopped",
             "complete", "error",
         ],
         f"every review must be traced with its outcome, got {outcomes}",
