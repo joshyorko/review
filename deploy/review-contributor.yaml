@@ -33,14 +33,26 @@ spec:
       containers:
         - name: contributor
           image: ghcr.io/projectbluefin/review:stable
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           env:
             - name: GOOSE_MODEL
               value: "gemini-3.8-flash"
             - name: GOOSE_THINKING_EFFORT
               value: "high"
             - name: HIVE_HUB
-              value: "https://hosted-projectbluefin-knuckle-gjvq.hivecommons.dev"
+              value: "wss://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev/contribute"
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: review-contributor-secret
+                  key: GH_TOKEN
+                  optional: true
+            - name: GITHUB_COPILOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: review-contributor-secret
+                  key: GITHUB_COPILOT_TOKEN
+                  optional: true
           resources:
             requests:
               cpu: "500m"
