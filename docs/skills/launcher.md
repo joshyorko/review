@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.3"
-last_updated: 2026-09-05
+version: "3.4"
+last_updated: 2026-09-06
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [just, launcher, podman, container]
-description: "Maintains the four container-only review recipes and their credential boundaries. Use when editing justfile."
+description: "Maintains the five review recipes and their credential boundaries. Use when editing justfile."
 metadata:
   type: runbook
   context7-sources: [/websites/podman_io_en, /websites/kubernetes_io]
@@ -36,7 +36,7 @@ Goose, or image build skill documents.
 
 ## Core Process
 
-1. Keep exactly four public recipes:
+1. Keep exactly five public recipes:
 
    | Recipe | Purpose |
    |---|---|
@@ -44,11 +44,12 @@ Goose, or image build skill documents.
    | `review-stop` | Stop a detached worker; refuses attended runs and unlabeled containers. |
    | `review-doctor` | Perform read-only preflight checks. |
    | `review-queue` | Walk the live PR queue in the container; no Hive registration is mounted, but the selected hub URL is passed when configured. |
+   | `turbo-review` | Scale three cluster contributor workers by default, then forward its arguments to the foreground `review-queue` dashboard. |
 
    `just` reads only the current directory's justfile, so these recipes fail
    with `justfile does not contain recipe` from any other checkout. That is
    `just`'s behavior, not a launcher bug: fix it outside the repository with a
-   `~/.local/bin` shim that forwards these four names to this justfile, and
+   `~/.local/bin` shim that forwards these five names to this justfile, and
    do not add a wrapper recipe here to compensate.
 
 2. Keep the interactive launch paths foreground, and the detached worker
@@ -145,8 +146,8 @@ Goose, or image build skill documents.
    `gemini-3.8-flash` at `high`, `sol` (also `gpt-sol`) to `gpt-5.6-sol` at
    `medium`, `opus5` to `claude-opus-5` at `high` with
    `GOOSE_CONTEXT_LIMIT=264000`, and `k3` (also `kimi`) to `kimi-k3` at `max`
-   with the same clamp. An empty profile is `gemini` for both
-   `review-container` and `review-queue`; a short fixed profile list does not
+   with the same clamp. An empty profile is `gemini` for `review-container`,
+   `review-queue`, and `turbo-review`; a short fixed profile list does not
    warrant a picker, so every launch is noninteractive whether or not a
    terminal is attached. Profiles are defaults, never overrides:
    `GOOSE_MODEL`, `GOOSE_THINKING_EFFORT`, and `GOOSE_CONTEXT_LIMIT` from the
@@ -245,6 +246,25 @@ credential-free `wss://` or `https://` Hive hub from the selected registration.
 Secret synchronization uses server-side apply, then removes any
 `kubectl.kubernetes.io/last-applied-configuration` annotation left by
 client-side apply so credentials are not retained in metadata.
+
+`just turbo-review *args` combines that scale-out with the maintainer
+dashboard:
+
+```bash
+just turbo-review
+just turbo-review sol
+just turbo-review projectbluefin/review
+```
+
+It requests three cluster workers by default, or `REVIEW_SCALE` workers when
+set, using the same optional leading model profile and effort that
+`review-queue` accepts. A repository argument containing `/` keeps the default
+cluster profile and becomes the dashboard's live-repository filter. All
+arguments are then forwarded unchanged to `review-queue`, which remains in the
+foreground. A missing Kubernetes context or failed scale operation is reported
+without preventing the local dashboard from starting. Cluster workers remain
+scaled after the dashboard exits and stop explicitly with
+`just review-stop cluster`.
 
 ## Rootless Podman And Mounted Host Files
 
@@ -382,7 +402,7 @@ bash tests/just-onboarding.sh
 git diff --check
 ```
 
-The recipe list must contain only the four public commands. Doctor must not
+The recipe list must contain only the five public commands. Doctor must not
 start a container.
 
 ## Sources

@@ -1,10 +1,11 @@
 # review — Agent Operating Contract
 
 `review` is the Bluefin review appliance: one OCI image fork and a launcher.
-The current `review-container` and `review-queue` recipes run the restored
-Goose/Hive worker and maintainer dashboard. Review owns the image, publication,
-launcher credential handoff, and review context; Hive owns its contributor
-protocol, task selection, tmux session, prompt injection, and output capture.
+The `review-container` and `review-queue` recipes run the restored Goose/Hive
+worker and maintainer dashboard; `turbo-review` scales cluster workers before
+opening that dashboard. Review owns the image, publication, launcher credential
+handoff, and review context; Hive owns its contributor protocol, task
+selection, tmux session, prompt injection, and output capture.
 
 ## Read order
 
@@ -48,6 +49,29 @@ Hive is the sole authority for selecting and assigning contributor tasks: do
 not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
 one permitted filter is own-work exclusion on the maintainer-facing queue
 view — a reviewer never receives their own authored pull requests to review.
+
+Keep review checks and interactive skills as separate layers. `goose review`
+does not consume `~/.agents/skills/`; `bluefin-review` supplies the image-owned
+`/opt/bluefin/review-scope/.agents/` overlay through `--check-scope`. The five
+definitions in `image/review-scope/checks/` are `bluefin-doctrine`, `security`,
+`correctness`, `test-coverage`, and `simplicity`. Goose's native review
+orchestrator runs up to four checks concurrently. Skills generated from the
+Bluefin catalog, or installed from `skills.sh` and other compatible open
+catalogs, belong under `~/.agents/skills/` for interactive contributor sessions
+and do not become review checks automatically.
+
+`just turbo-review` combines those parallel review checks with cluster
+scale-out: it requests three Hive contributor workers by default, then runs the
+maintainer dashboard in the foreground. The cluster workers process their own
+Hive assignments; they do not replace, select, or submit the human's review.
+`just turbo-review *args` forwards the same profile, effort, repository, and
+dashboard arguments accepted by `review-queue`:
+
+```bash
+just turbo-review
+just turbo-review sol
+just turbo-review projectbluefin/review
+```
 
 Static queue snapshots are an antipattern: never create or consume a static
 queue artifact to understand pull-request status, queues, or review state. We
@@ -134,7 +158,7 @@ labels. Never add a local workaround for an accepted upstream gap. See
 ## Repository layout
 
 - `justfile` is the only shipped launcher artifact. Its
-  four public recipes and private helpers intentionally live together.
+  five public recipes and private helpers intentionally live together.
 - `image/` builds the FSDK-derived contributor image and its layered runtime
   configuration.
 - `package.json` and `package-lock.json` at the root pin only the contributor

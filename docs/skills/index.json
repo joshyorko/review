@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-05",
+  "generated_at": "2026-09-06",
   "schema_version": "1.0",
   "skills": [
     {
@@ -75,8 +75,8 @@
         "config"
       ],
       "description": "Keeps Goose configuration and global and repository skill routing available in the container, and records how Context7 reaches agents today. Use when Goose loses its config or misses a skill.",
-      "version": "2.3",
-      "last_updated": "2026-08-25",
+      "version": "2.4",
+      "last_updated": "2026-09-06",
       "doc_type": "reference"
     },
     {
@@ -151,9 +151,9 @@
         "podman",
         "container"
       ],
-      "description": "Maintains the four container-only review recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.3",
-      "last_updated": "2026-09-05",
+      "description": "Maintains the five review recipes and their credential boundaries. Use when editing justfile.",
+      "version": "3.4",
+      "last_updated": "2026-09-06",
       "doc_type": "runbook"
     },
     {

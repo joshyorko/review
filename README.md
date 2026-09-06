@@ -7,12 +7,14 @@ enslaving the oppressors since 2026
 
 ## Start here
 
-Review has two operational modes. Pick the one that matches what you want to
-do:
+Review has two core operational modes. `turbo-review` starts both sides
+together by scaling cluster contributors before opening the maintainer
+dashboard. Pick the launch path that matches what you want to do:
 
 | Goal | Mode | Start with |
 | --- | --- | --- |
 | Review pull requests as a maintainer | Maintainer dashboard | `just review-queue` |
+| Review while scaling contributor throughput | Turbo dashboard + workers | `just turbo-review` |
 | Donate an agent to Hive | Contributor worker | `just review-container` |
 | Check whether this machine is ready | Diagnostics | `just review-doctor` |
 | Stop a detached worker | Lifecycle | `just review-stop` |
@@ -94,6 +96,15 @@ just review-stop cluster
 
 # Walk one repository's live open pull requests instead of the whole org.
 just review-queue projectbluefin/review
+
+# Scale three cluster contributors and open the local review dashboard.
+just turbo-review
+
+# Use the Sol profile for both cluster workers and the review dashboard.
+just turbo-review sol
+
+# Scale contributors and review one repository's live pull requests.
+just turbo-review projectbluefin/review
 ```
 
 ### How Review is split
@@ -102,6 +113,8 @@ Review is the human review experience plus a Hive contributor appliance:
 
 - `review-queue` is the maintainer dashboard and does not register with Hive.
 - `review-container` contributes compute through Hive's contributor worker.
+- `turbo-review` scales cluster contributors, then forwards the same arguments
+  to the foreground `review-queue` dashboard.
 - Hive owns task selection and assignment.
 - `BLUEFIN_REVIEW_BACKEND=codex` preselects Codex for a maintainer review; it
   never changes the worker backend. Use `TOOL=codex` or `TOOL=pi` for workers.
@@ -174,9 +187,10 @@ downstream workaround becomes upstream's compatibility burden later. See
 ## Scope
 
 The root `justfile` is the public launcher surface for this repository.
-Run `just review-container`, `just review-queue`, and `just review-doctor`
-from the repository root. If you ship it in a custom image, keep those same
-recipes available through the installed root Justfile.
+Run `just review-container`, `just review-queue`, `just turbo-review`,
+`just review-doctor`, and `just review-stop` from the repository root. If you
+ship it in a custom image, keep those same recipes available through the
+installed root Justfile.
 
 ## Installing this into your own setup
 
@@ -192,13 +206,14 @@ just review-container
 ## Commands
 
 `justfile` is the installable artifact and exposes exactly
-four public recipes:
+five public recipes:
 
 | Command | Purpose |
 |---|---|
 | `just review-container [profile] [effort]` | Run the Hive queue worker locally in Podman (or `just review-container cluster [N]` to scale out across Kubernetes). |
 | `just review-stop [name]` | Stop a detached worker (`just review-stop cluster` stops cluster workers). |
 | `just review-queue [profile] [effort] [flags…]` | Walk the Bluefin PR queue interactively in the contributor container. |
+| `just turbo-review *args` | Scale three cluster contributor workers by default, then forward the optional profile, effort, repository, and dashboard flags to the foreground `review-queue`. Set `REVIEW_SCALE` to change the worker count. |
 | `just review-doctor` | Check launch readiness. Starts no agent. |
 
 Interactive runs remain attached to their originating terminal, and Ctrl-C or
@@ -741,9 +756,35 @@ reviewed**, so reviewing another project would otherwise get Goose's generic
 prompt with none of Project Bluefin's review doctrine — and writing those files
 into someone else's checkout is not an option.
 
-`bluefin-review` therefore passes `--instructions` (additive) rather than
-`--prompt` (which would replace Goose's default prompt), naming the doctrine on
-disk instead of inlining it:
+Review uses two deliberately separate skill layers:
+
+| Layer | Consumers | Source |
+|---|---|---|
+| Review check subagents | `goose review` | Definitions in `image/review-scope/checks/`, deployed to `/opt/bluefin/review-scope/.agents/checks/` and passed with `--check-scope`. |
+| Interactive contributor skills | Interactive contributor sessions | Agent Skills installed under `~/.agents/skills/`, including generated Bluefin skills and compatible community skills from `skills.sh` or other open catalogs. |
+
+Installing a community skill changes interactive contributor sessions; it does
+not add a `goose review` check. Review techniques must be explicit check
+subagents in the image-owned overlay. The five shipped checks are:
+
+| Check | Review responsibility |
+|---|---|
+| `bluefin-doctrine` | Scope, repository conventions, maintainability, and consistency among implementation, tests, and durable documentation. |
+| `security` | High-confidence exploitable vulnerabilities, unsafe operations, credential handling, and privilege boundaries. |
+| `correctness` | Functional defects, broken invariants, boundary errors, concurrency hazards, and resource leaks. |
+| `test-coverage` | Missing regression, negative, boundary, fidelity, or isolation coverage for changed behavior. |
+| `simplicity` | Premature abstraction, dead or redundant code, hand-rolled platform behavior, and unrelated diff growth. |
+
+Goose's native review orchestrator dispatches these checks as parallel
+subagents, with up to four checks running concurrently. Review time is
+therefore governed by concurrent waves instead of the sum of five serial
+passes. `just turbo-review` combines that per-review concurrency with three
+cluster contributor workers by default, so contributor work and maintainer
+review analysis advance in parallel; `REVIEW_SCALE` changes the worker count.
+
+`bluefin-review` also passes `--instructions` (additive) rather than `--prompt`
+(which would replace Goose's default prompt), naming the doctrine on disk
+instead of inlining it:
 
 | Source | Path |
 |---|---|
@@ -898,8 +939,12 @@ now links its refreshed knowledge export to Goose-native `AGENTS.md` and
 
 Organization skills are generated at image build time from
 `projectbluefin/common`'s `docs/skills/index.json` into Goose's global skill
-directory. Repositories may route agents to their own skill catalog, but
-per-repository skills are not automatically discovered at session startup.
+directory. Compatible community skills installed from `skills.sh` or another
+open catalog use that same `~/.agents/skills/` session layer. Repositories may
+route agents to their own skill catalog, but per-repository skills are not
+automatically discovered at session startup, and no session-layer skill becomes
+a `goose review` check unless it is authored separately in the image-owned
+review scope.
 
 The base image ships the full ncurses terminfo database, so the caller's
 terminal type is the truth inside the container. tmux panes run
