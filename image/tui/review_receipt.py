@@ -13,7 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from harness.codex import CodexHarness
 from harness.goose import GooseHarness
-from harness.registry import Availability
+from harness.registry import Availability, HarnessRegistry
 from tui.headroom import HeadroomSession, apply_caveman
 from tui.review_evidence_manifest import ReviewRequest
 from tui.review_result import ReviewResult
@@ -24,6 +24,22 @@ MAX_TRANSCRIPT_LINES = 200
 MAX_TRANSCRIPT_CHARS = 60_000
 FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
 BACKENDS = frozenset({"goose", "codex"})
+MUTABLE_PROVENANCE_KEYS = frozenset({
+    "ci",
+    "checks",
+    "mergeability",
+    "reviews",
+    "live",
+    "overlap",
+})
+
+
+def _clean_provenance(mapping: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in mapping.items()
+        if key not in MUTABLE_PROVENANCE_KEYS
+    }
 
 
 def _text(value: object, field: str) -> str:
@@ -125,6 +141,9 @@ class ReceiptIdentity:
     def from_dict(cls, data: Mapping[str, object]) -> "ReceiptIdentity":
         if not isinstance(data, Mapping):
             raise ValueError("receipt identity must be an object")
+        backend = _text(data.get("backend"), "backend")
+        if backend not in BACKENDS:
+            raise ValueError(f"unsupported review backend: {backend}")
         number = data.get("pull_request")
         if isinstance(number, bool) or not isinstance(number, int) or number < 1:
             raise ValueError("receipt pull_request must be positive")
@@ -133,7 +152,7 @@ class ReceiptIdentity:
             number,
             _sha(data.get("base_sha"), "base_sha"),
             _sha(data.get("head_sha"), "head_sha"),
-            _text(data.get("backend"), "backend"),
+            backend,
             _text(data.get("model"), "model"),
             _text(data.get("effort"), "effort"),
             _text(data.get("check_scope_version"), "check_scope_version"),
@@ -167,13 +186,13 @@ class ReviewReceipt:
             dict(result.counts),
             [dict(item) for item in result.findings],
             [dict(item) for item in result.verification],
-            dict(result.provenance),
+            _clean_provenance(result.provenance),
             {},
             {},
             [],
         )
         recorded = dict(analysis.provenance)
-        recorded.update(dict(provenance or {}))
+        recorded.update(_clean_provenance(provenance or {}))
         recorded.update({
             "repository": identity.repository,
             "pull_request": identity.pull_request,
@@ -190,7 +209,7 @@ class ReviewReceipt:
             analysis.counts,
             analysis.findings,
             analysis.verification,
-            recorded,
+            dict(recorded),
             {},
             {},
             [],
@@ -200,7 +219,7 @@ class ReviewReceipt:
             identity,
             analysis,
             _bounded_transcript(transcript),
-            recorded,
+            dict(recorded),
             datetime.now(timezone.utc).isoformat(),
         )
 
@@ -242,6 +261,10 @@ class ReviewReceipt:
         }
         if any(provenance.get(key) != value for key, value in expected.items()):
             raise ValueError("receipt provenance does not match its identity")
+        if any(key in provenance for key in MUTABLE_PROVENANCE_KEYS):
+            raise ValueError("receipt provenance must not contain mutable evidence")
+        if any(key in analysis.provenance for key in MUTABLE_PROVENANCE_KEYS):
+            raise ValueError("receipt analysis provenance must not contain mutable evidence")
         if analysis.live or analysis.overlap:
             raise ValueError("receipt must not contain mutable evidence")
         return cls(RECEIPT_VERSION, identity, analysis, transcript, dict(provenance), created_at)
@@ -275,14 +298,14 @@ class ReviewReceipt:
 
     def with_provenance(self, extra: Mapping[str, Any]) -> "ReviewReceipt":
         provenance = dict(self.provenance)
-        provenance.update(dict(extra))
+        provenance.update(_clean_provenance(extra))
         analysis = ReviewResult(
             self.analysis.version,
             self.analysis.state,
             dict(self.analysis.counts),
             [dict(item) for item in self.analysis.findings],
             [dict(item) for item in self.analysis.verification],
-            provenance,
+            dict(provenance),
             {},
             {},
             [],
@@ -295,6 +318,23 @@ class ReviewReceipt:
             provenance,
             self.created_at,
         )
+
+
+def default_harness_registry() -> HarnessRegistry:
+    registry = HarnessRegistry()
+    registry.register(GooseHarness(availability=GooseHarness.probe()))
+    registry.register(CodexHarness(availability=CodexHarness.probe()))
+    return registry
+
+
+def _terminal_status(adapter: Any, result: ReviewResult) -> int:
+    if hasattr(adapter, "terminal_status") and callable(adapter.terminal_status):
+        return int(adapter.terminal_status(result))
+    if result.state in ("complete", "findings"):
+        return 0
+    if result.state == "incomplete":
+        return 65
+    return int(result.live.get("process_exit_code", 1)) or 1
 
 
 def _check_scope_args(check_scope: str) -> tuple[str, ...]:
@@ -313,7 +353,10 @@ def run_receipt(
     check_scope_version: str,
     check_scope: str = "",
     steer: str = "",
+    registry: HarnessRegistry | None = None,
 ) -> tuple[ReviewReceipt, int]:
+    if backend not in BACKENDS:
+        raise ValueError(f"unsupported review backend: {backend}")
     owner, name = repository.split("/", 1)
     request = ReviewRequest(
         owner,
@@ -329,6 +372,11 @@ def run_receipt(
     run = ReviewRun.from_request(request, backend=backend, model=model, effort=effort)
     if workdir:
         os.chdir(workdir)
+
+    if registry is None:
+        registry = default_harness_registry()
+    adapter = registry.require_ready(backend)
+
     headroom = HeadroomSession.from_environment()
     route = headroom.route_for_call(backend)
     prompt = apply_caveman(
@@ -337,31 +385,17 @@ def run_receipt(
         True,
     )
     transcript: list[str] = []
-    if backend == "goose":
-        adapter = GooseHarness(availability=GooseHarness.probe())
-        result = adapter.stream(
-            request,
-            prompt=prompt,
-            on_line=transcript.append,
-            model=model,
-            effort=effort,
-            steer=steer or None,
-            extra_args=_check_scope_args(check_scope),
-        )
-        exit_code = adapter.terminal_status(result)
-    elif backend == "codex":
-        adapter = CodexHarness(availability=CodexHarness.probe())
-        result = adapter.stream(
-            request,
-            prompt=prompt,
-            on_line=transcript.append,
-            model=model,
-            effort=effort,
-            steer=steer or None,
-        )
-        exit_code = 0 if result.state in {"complete", "findings"} else 65 if result.state == "incomplete" else 1
-    else:
-        raise ValueError(f"unsupported review backend: {backend}")
+    extra_args = _check_scope_args(check_scope)
+    result = adapter.stream(
+        request,
+        prompt=prompt,
+        on_line=transcript.append,
+        model=model,
+        effort=effort,
+        steer=steer or None,
+        extra_args=extra_args,
+    )
+    exit_code = _terminal_status(adapter, result)
     receipt = ReviewReceipt.from_result(
         run,
         result,

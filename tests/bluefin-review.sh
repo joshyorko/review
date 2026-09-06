@@ -161,8 +161,8 @@ base_sha="$(printf '%040d' 0)"
 head_sha="0123456789abcdef0123456789abcdef01234567"
 receipt_json="$(
   PATH="$scratch/bin:$PATH" \
-  BLUEFIN_REVIEW_HARNESS_ROOT="$repo_root/image" \
-  "$review" receipt \
+    BLUEFIN_REVIEW_HARNESS_ROOT="$repo_root/image" \
+    "$review" receipt \
     --repository projectbluefin/alpha \
     --pull-request 31 \
     --base-sha "$base_sha" \

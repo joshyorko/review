@@ -240,9 +240,18 @@ class CodexHarness:
             return invalid
         return terminal
 
+    @staticmethod
+    def terminal_status(result: ReviewResult) -> int:
+        if result.state == "incomplete":
+            return 65
+        if result.state in ("complete", "findings"):
+            return 0
+        return int(result.live.get("process_exit_code", 1)) or 1
+
     def stream(self, binding: ReviewRequest, *, prompt: str,
                on_line: Callable[[str], None], effort: str | None = None,
-               model: str | None = None, steer: str | None = None) -> ReviewResult:
+               model: str | None = None, steer: str | None = None,
+               extra_args: tuple[str, ...] = ()) -> ReviewResult:
         process = subprocess.Popen(
             self.command(binding, prompt=prompt, effort=effort, model=model, steer=steer),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
