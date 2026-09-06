@@ -106,6 +106,79 @@ set -e
 ((bad_number != 0))
 ((missing_number != 0))
 
+# --- isolated worktree path contract ------------------------------------------
+worktree_a="$(
+  PATH="$scratch/bin:$PATH" BLUEFIN_REVIEW_WORKTREE_ROOT="$scratch/worktrees" \
+    "$review" --print-worktree projectbluefin/alpha \
+    0123456789abcdef0123456789abcdef01234567
+)"
+worktree_b="$(
+  PATH="$scratch/bin:$PATH" BLUEFIN_REVIEW_WORKTREE_ROOT="$scratch/worktrees" \
+    "$review" --print-worktree projectbluefin/alpha \
+    1123456789abcdef0123456789abcdef01234567
+)"
+[[ "$worktree_a" != "$worktree_b" ]]
+[[ "$worktree_a" == *"projectbluefin__alpha-"* ]]
+[[ "$worktree_b" == *"projectbluefin__alpha-"* ]]
+
+# --- isolated worktree pr mode: review using an explicit isolated workdir -----
+rm -f "$scratch/gh-calls-isolated" "$scratch/goose-args-isolated"
+isolated_dir="$scratch/worktrees/isolated-alpha"
+mkdir -p "$isolated_dir"
+git -C "$isolated_dir" init --quiet
+git -C "$isolated_dir" config user.email t@example.com
+git -C "$isolated_dir" config user.name t
+git -C "$isolated_dir" commit --allow-empty --no-verify -m "test: isolated commit" --quiet
+iso_head="$(git -C "$isolated_dir" rev-parse HEAD)"
+
+rm -rf "$scratch/workspace/alpha"
+
+set +e
+iso_pr_out="$(PATH="$scratch/bin:$PATH" GH_CALLS="$scratch/gh-calls-isolated" \
+  GOOSE_ARGS="$scratch/goose-args-isolated" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  "$review" pr projectbluefin/alpha 31 \
+  --workdir "$isolated_dir" \
+  --base-sha "$iso_head" \
+  --head-sha "$iso_head" 2>&1)"
+iso_pr_status=$?
+set -e
+
+[[ "$iso_pr_status" -eq 23 ]]
+[[ ! -d "$scratch/workspace/alpha" ]]
+if grep -q 'pr checkout' "$scratch/gh-calls-isolated" 2>/dev/null; then
+  echo "isolated mode must not invoke gh pr checkout" >&2
+  exit 1
+fi
+
+# Recreate workspace alpha for subsequent tests
+mkdir -p "$scratch/workspace/alpha"
+git -C "$scratch/workspace/alpha" init --quiet
+git -C "$scratch/workspace/alpha" config user.email t@example.com
+git -C "$scratch/workspace/alpha" config user.name t
+
+# Worktree head drift must be detected and rejected
+set +e
+drift_out="$(
+  cd "$isolated_dir"
+  PATH="$scratch/bin:$PATH" \
+    BLUEFIN_REVIEW_EXPECTED_HEAD_SHA="0000000000000000000000000000000000000001" \
+    "$review" 2>&1
+)"
+drift_status=$?
+set -e
+((drift_status != 0))
+[[ "$drift_out" == *"does not match expected"* ]]
+
+# Input validation on repo format and head SHA
+set +e
+PATH="$scratch/bin:$PATH" "$review" --prepare-worktree not-an-owner-repo 0123456789abcdef0123456789abcdef01234567 >/dev/null 2>&1
+bad_repo_status=$?
+PATH="$scratch/bin:$PATH" "$review" --prepare-worktree projectbluefin/alpha not-a-sha >/dev/null 2>&1
+bad_sha_status=$?
+set -e
+((bad_repo_status != 0))
+((bad_sha_status != 0))
+
 # --- a review whose checks returned no verdict is never reported as clean -----
 # 'goose review' exits 0 when a check answers with prose or an empty response
 # instead of JSON, and still prints a finding count. Reading that as a clean
