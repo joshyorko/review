@@ -80,132 +80,25 @@ repository's contribution rules, which take precedence in their own tree.
 
 ## The Factory Label Contract
 
-This repository carries `projectbluefin/common`'s canonical label workflow —
-*workflows own state; humans provide intent* — and adds nothing to it. Seven
-labels exist, and they are the same seven in every factory repository:
+See [`pr-labels.md`](pr-labels.md) for projectbluefin's canonical seven-label workflow contract and repository automation labels (`lgtm`, `override`, `security-advisory`).
 
-| Label | Meaning |
-|---|---|
-| `1-triage` | New work awaiting human triage |
-| `2-discussing` | Work requiring discussion or a clarified design |
-| `3-human-queue` | Work admitted to the human-maintained queue |
-| `3-clanker-queue` | Work admitted to the agent-maintained queue |
-| `4-review` | A pull request awaiting review |
-| `blocked` | Blocked on human input or an external dependency |
-| `hold` | Intentionally paused |
+## Reconciling Long-Lived Branches
 
-A human selects at most one numbered label to express the intended next step,
-with `blocked` or `hold` as an optional overlay. Everything else — kind, area,
-size, priority, source — is issue-body prose or project-field metadata, never a
-label. Do not invent a priority taxonomy, and do not build a second state
-machine out of comments, slash commands, or local scripts.
+`main` squash-merges, rewriting commit SHAs. Always merge `main` into the feature
+branch; do not rebase. Resolve conflicts hunk by hunk, avoiding `--ours`/`--theirs`
+which overwrite entire files.
 
-Alongside those seven, this repository runs exactly two local automation
-labels, each owned by a named mechanism and applied by it alone: `lgtm`
-(applied by Hive's authenticated queue endpoint after a maintainer opts in — see
-[`review-dashboard.md`](review-dashboard.md)) and `dependencies` (Renovate,
-per `renovate.json`). Adding a third means adding the mechanism that owns
-it, in the same change.
+## Uncommitted Work Safety
 
-The full contract, including the human and agent action lists, lives in
-`projectbluefin/common`'s `docs/skills/label-workflow.md`. Read it there rather
-than restating it here; this section records only what is local.
+Before committing, run `git status --short`. If unrelated changes exist, use a
+throwaway worktree (`git worktree add /tmp/work -b branch origin/main`) to isolate
+edits. Always stage files by explicit path, never `git add .` or `git add -A`.
 
-## Reconciling A Long-Lived Branch
+## CI-Skip Directives
 
-`main` squash-merges, which rewrites commit SHAs. A branch that predates
-several merges therefore looks far more divergent than it is, and the usual
-measurements all mislead:
-
-- `git cherry main <branch>` reports content already on `main` as unmerged,
-  because the squashed commit is a different object.
-- The three-dot range `main...HEAD`, which is what the pull request renders,
-  inflates the change by replaying work `main` already has.
-- The two-dot range `main..HEAD` understates it by hiding what the merge
-  will remove.
-
-Read both ranges before judging the size of a reconciliation, and confirm
-per file rather than trusting either total:
-
-```bash
-git diff --stat main...HEAD   # what the pull request shows
-git diff --stat main..HEAD    # the true net difference
-git log --oneline main --  <path>   # did this land on main already?
-```
-
-Merge `main` into the branch. Do not rebase: features that landed on `main`
-after the merge base exist only on that side, and rebasing replays the stale
-branch on top of them, reintroducing deletions of files the branch never had.
-
-Resolve add/add conflicts hunk by hunk. `git checkout --ours` and
-`--theirs` operate on the whole file and silently discard the hunks Git
-already merged correctly from the other side. Keep the feature that landed on
-`main` **and** the newer behavior from the branch, then confirm both survived
-before committing. A merge can also duplicate an adjacent block that neither
-side duplicated; re-read the resolved file rather than trusting the marker
-count to reach zero.
-
-When a pinned dependency conflicts, resolve by date rather than by side:
-
-```bash
-gh api repos/<owner>/<repo>/commits/<sha> --jq '.commit.committer.date'
-```
-
-## Committing In A Repository That Has Uncommitted Work
-
-A working tree you did not create may hold someone's uncommitted work. Staging
-in it is destructive: `git add -A`, `git add .`, and a bare `git checkout --`
-will sweep up or discard changes that are not yours, and the loss is silent
-because the diff you review afterwards looks correct.
-
-Before committing anywhere, check:
-
-```bash
-git status --short
-```
-
-If that prints anything you did not write, do not commit in place. Create a
-throwaway worktree from the pushed branch point, make the change there, and
-leave the original tree untouched:
-
-```bash
-git fetch origin
-git worktree add /tmp/work -b my-change origin/main
-cd /tmp/work
-```
-
-Commit, push, and open the pull request from `/tmp/work`, then remove it with
-`git worktree remove /tmp/work`. The dirty tree never changes state, so there
-is nothing to restore.
-
-Stage files by name, never by wildcard, even in a clean tree. `git add
-path/to/file` cannot pick up a file you did not intend to touch.
-
-If work is clobbered anyway, `git add` has already written the blob to the
-object database and `git reset` does not remove it. Recover with:
-
-```bash
-git fsck --unreachable --no-reflogs | grep blob
-git cat-file -p <sha>
-```
-
-Prefer not needing that.
-
-## Never Quote A CI-Skip Directive In A Commit Message
-
-GitHub reads its skip directives — `[skip ci]`, `[ci skip]`, `[skip actions]`,
-`[actions skip]` — anywhere in the head commit message, not just the subject.
-A commit that merely *writes about* one skips its own validation and publish,
-lands on `main`, and shows no failed check because nothing ran.
-
-That happened here: the commit teaching the dashboard to escape bracketed
-titles quoted the directive as its example, and the fix sat on `main` while
-`:stable` stayed on the parent commit.
-
-Write "GitHub's CI-skip directive" or `skip-ci` without brackets.
-`scripts/check-commit-message.sh` runs as a `commit-msg` hook and refuses the
-bracketed forms unless `ALLOW_SKIP_CI=1` says the skip is meant. It cannot be
-a CI check: a message that skips CI skips the check that would catch it.
+Never quote GitHub skip directives (`[skip ci]`, `[ci skip]`) in commit messages;
+GitHub parses them anywhere in the message and aborts workflow publication.
+Write `skip-ci` without brackets.
 
 ## Common Rationalizations
 
@@ -242,27 +135,11 @@ a CI check: a message that skips CI skips the check that would catch it.
 - A test suite that passes while the feature under test is missing.
 - Adding a test without once watching it fail.
 
-## Test A Feature By Running It, Not By Grepping For It
+## Test By Running, Not Grepping
 
-A test that asserts over a file's source text proves the text exists, not that
-the feature works. `tests/dashboard-contract.sh` once consisted entirely of
-`grep`s over `bluefin_review_tui.py` — it passed for as long as the dashboard
-had no way to review a pull request at all, because no assertion ever started
-the app. Prefer, in order:
-
-1. **Drive the real thing.** Textual ships `App.run_test()`; the pilot in
-   `tests/dashboard_pilot.py` presses keys, waits for a terminal state, and
-   asserts what the maintainer is told. A binding pointing at a missing action
-   fails there and nowhere else.
-2. **Assert on observable outcomes**, not on the strings that produce them: the
-   status text and its style class, the process argv, the exit status, the
-   trace record.
-3. **Keep source-text assertions only for absence.** A power a component must
-   never have — `--admin`, `git push`, a direct merge — cannot be proven
-   missing by exercising it, so grep is the right tool for exactly that.
-
-Confirm a new test can fail: break the behaviour it covers, watch it go red,
-then restore. A test never observed failing is an assumption.
+Source-text greps prove text exists, not that features work. Drive real execution
+via Textual pilot tests (`App.run_test()`). Reserve grep assertions strictly
+for proving absence of forbidden powers.
 
 ## Verification
 

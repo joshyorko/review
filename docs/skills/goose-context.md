@@ -120,82 +120,27 @@ it. Upstream writes a non-empty "Knowledge base not yet available." placeholder
 on fetch failure, so `bluefin-review` checks content, not just size, before
 naming the export in its instructions.
 
-## Review Context Is Not Session Context
+## Review Context vs Session Context
 
-`goose review` does **not** read `~/.agents/skills`. Without `--check-scope`
-it discovers its own context from `.agents/REVIEW.md` and `.agents/checks/*.md`
-inside the repository being reviewed. Verified with `goose review --dry-run`:
-a check placed at the reviewed repository's root is reported as
-`discovered ... (scope: <root>)`, while the same file under
-`$HOME/.agents/checks` is ignored — unless a `--check-scope <DIR>` names an
-out-of-tree directory, in which case that directory's `.agents/` REPLACES
-repo-root discovery entirely. This image ships such an overlay at
-`/opt/bluefin/review-scope/.agents/`, and `bluefin-review` copies it into a
-per-run scratch scope (adding a per-stop `cluster-resolution` check when a
-duplicate cluster exists) before every review. A reviewed repository's own
-`.agents/checks/` is therefore suppressed under the overlay; Bluefin
-repositories keep their checks in the shared overlay instead, and the
-additive-flag gap is filed upstream as
-[aaif-goose/goose#11060](https://github.com/aaif-goose/goose/issues/11060).
-
-The context model therefore has two layers:
-
-| Layer | Discovery | Purpose |
-|---|---|---|
-| Review checks | `image/review-scope/checks/`, deployed to `/opt/bluefin/review-scope/.agents/checks/` and selected through `--check-scope` | Specialized subagents used only by `goose review`. |
-| Interactive skills | `~/.agents/skills/<id>/SKILL.md` | On-demand guidance for interactive contributor sessions. |
+`goose review` does **not** read `~/.agents/skills`. It discovers context
+from `.agents/REVIEW.md` and `.agents/checks/*.md`. The image ships an overlay
+at `/opt/bluefin/review-scope/.agents/` containing the five review check
+subagents (`bluefin-doctrine`, `security`, `correctness`, `test-coverage`,
+`simplicity`), loaded via `--check-scope`. See [`review-checks.md`](review-checks.md)
+for full details on check subagents and multi-threaded review execution.
 
 The image generates Bluefin's interactive skills from the pinned
-`projectbluefin/common` catalog. Compatible community skills installed through
-`skills.sh` or another open catalog can join the same session layer. Neither
-source changes a review: projecting any skill into `~/.agents/skills/` does
-nothing for `goose review`, and the reviewed repository belongs to someone
-else, so writing `.agents/` files into its checkout is not available as a fix.
-`scripts/generate-skills.py` accepts repeatable `--index` factory manifests
-and `--source` values naming a local manifest, a local `SKILL.md` or standard
-skill directory, or an HTTP(S) URL. Local standard directories retain sibling
-`scripts/`, `references/`, and `assets/` content; projection rejects traversal,
-symlinked content, duplicate ids, and source/output overlap.
+`projectbluefin/common` catalog into `~/.agents/skills/` for interactive
+contributor sessions.
 
-The image instead deploys five specialized review check subagents:
-
-| Check | Responsibility |
-|---|---|
-| `bluefin-doctrine` | Enforce claimed scope, repository conventions, reviewable sizing, and consistency among implementation, tests, and durable documentation. |
-| `security` | Find high-confidence exploitable vulnerabilities, unsafe operations, credential leaks, and privilege-boundary failures. |
-| `correctness` | Find functional defects, masked failures, boundary mistakes, concurrency hazards, and resource leaks. |
-| `test-coverage` | Find changed behavior without deterministic regression, negative, boundary, fidelity, or isolation coverage. |
-| `simplicity` | Find premature abstractions, dead or redundant code, avoidable reimplementations, and unrelated diff growth. |
-
-Goose's native review orchestrator dispatches the checks as parallel
-subprocesses, up to four at once. Five checks therefore complete in concurrent
-waves instead of five serial passes. `just turbo-review` adds worker-level
-parallelism by scaling three cluster contributors by default while the local
-maintainer dashboard remains in the foreground. The cluster workers continue
-to receive independent Hive assignments; the local `goose review` process
-independently uses the parallel check orchestrator. Together these layers
-increase throughput without changing Hive's assignment authority or the
-human's review authority.
-
-Use `--instructions`, which is additive. `--prompt` replaces Goose's embedded
-review prompt wholesale and throws away its correctness and code-quality
-passes. Name the documents on disk rather than inlining them: the projected
-`pr-review` skill plus its references is roughly 33 KB, and Goose dispatches
-one subprocess per check, so an inlined copy is paid on every check of every
-review. `bluefin-review` sends a sub-1 KB pointer covering `pr-review`,
-`queue-feed`, `hive-review`, `human-gates`, and Hive's `~/agent.md` knowledge
-export, and omits any entry whose file is absent.
+Use `--instructions` (additive) rather than `--prompt` (wholesale replacement).
+`bluefin-review` sends a lean pointer covering doctrine and knowledge exports.
 
 ## Skill References Must Be Projected Too
 
 `scripts/generate-skills.py` writes `SKILL.md` from each manifest
-`entry_point` and copies the rest of a local standard skill directory. Remote
-skill bodies also link sibling material as
-`references/<name>.md`, and the manifest does not list those files, so they
-are resolved from the body. Without that, `pr-review` alone shipped four
-dangling links. Reference names come from a fetched body rather than the
-manifest, so treat them as untrusted: accept a plain `<file>.md` sibling only,
-and reject any path separator or traversal segment before joining a path.
+`entry_point` and copies local standard skill directories. Remote skill bodies
+linking `references/<name>.md` are resolved safely, rejecting path traversal.
 
 ## Common Rationalizations
 

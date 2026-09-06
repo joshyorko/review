@@ -3,6 +3,25 @@
   "schema_version": "1.0",
   "skills": [
     {
+      "id": "cluster-workers",
+      "name": "cluster-workers",
+      "one_line_purpose": "Scale out review contributor workers across Kubernetes clusters.",
+      "entry_point": "docs/skills/cluster-workers.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "kubernetes",
+        "cluster",
+        "scale",
+        "workers",
+        "turbo"
+      ],
+      "description": "Manages cluster contributor workers in bluefin-system, secret synchronization, and turbo-review orchestration. Use when scaling workers or operating review-contributor on Kubernetes.",
+      "version": "1.0",
+      "last_updated": "2026-09-06",
+      "doc_type": "procedure"
+    },
+    {
       "id": "contribution-culture",
       "name": "contribution-culture",
       "one_line_purpose": "Do maintainer toil in small changes, never feature development.",
@@ -119,6 +138,25 @@
       "doc_type": "runbook"
     },
     {
+      "id": "image-audit",
+      "name": "image-audit",
+      "one_line_purpose": "Audit FSDK base and review container image attestations and SBOM.",
+      "entry_point": "docs/skills/image-audit.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "audit",
+        "sbom",
+        "slsa",
+        "attestation",
+        "ghcr"
+      ],
+      "description": "Audits base and derived OCI image composition, SPDX SBOM manifests, SLSA provenance attestations, and multi-arch publishing. Use when running tests/image-audit.sh or debugging publish workflows.",
+      "version": "1.0",
+      "last_updated": "2026-09-06",
+      "doc_type": "procedure"
+    },
+    {
       "id": "image-build",
       "name": "image-build",
       "one_line_purpose": "Derive and pin the review contributor image safely.",
@@ -136,6 +174,44 @@
       "description": "Use when maintaining the pinned FSDK-derived contributor image, audit, Goose canary assets, Hive runtime, or publishing path.",
       "version": "2.24",
       "last_updated": "2026-08-25",
+      "doc_type": "procedure"
+    },
+    {
+      "id": "lab-broker",
+      "name": "lab-broker",
+      "one_line_purpose": "Lend host Kubernetes cluster access to the review dashboard safely.",
+      "entry_point": "docs/skills/lab-broker.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "kubernetes",
+        "broker",
+        "lab",
+        "gvisor",
+        "socket"
+      ],
+      "description": "Controls the host-side lab broker, private Unix domain socket handoff, and gVisor host-uds safety for review-queue sessions. Use when debugging lab workflows or broker socket connectivity.",
+      "version": "1.0",
+      "last_updated": "2026-09-06",
+      "doc_type": "procedure"
+    },
+    {
+      "id": "landing-batches",
+      "name": "landing-batches",
+      "one_line_purpose": "Manage multi-PR landing batches and automated fix-and-land agents.",
+      "entry_point": "docs/skills/landing-batches.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "batches",
+        "landing",
+        "tui",
+        "agent",
+        "automerge"
+      ],
+      "description": "Manages batch landings, multi-repo lane partitioning, fix-and-land agents, and landing status persistence. Use when modifying batch execution or landing.py.",
+      "version": "1.0",
+      "last_updated": "2026-09-06",
       "doc_type": "procedure"
     },
     {
@@ -157,6 +233,25 @@
       "doc_type": "runbook"
     },
     {
+      "id": "pr-labels",
+      "name": "pr-labels",
+      "one_line_purpose": "Enforce the canonical factory seven-label and automation label contract.",
+      "entry_point": "docs/skills/pr-labels.md",
+      "category": "meta",
+      "status": "active",
+      "tags": [
+        "labels",
+        "factory",
+        "triage",
+        "automation",
+        "workflow"
+      ],
+      "description": "Defines projectbluefin's canonical seven-label workflow contract and repository automation labels (lgtm, override, security-advisory). Use when managing labels or triage.",
+      "version": "1.0",
+      "last_updated": "2026-09-06",
+      "doc_type": "policy"
+    },
+    {
       "id": "pr-workflow",
       "name": "pr-workflow",
       "one_line_purpose": "Open review pull requests that merge cleanly.",
@@ -174,6 +269,25 @@
       "version": "1.10",
       "last_updated": "2026-08-16",
       "doc_type": "policy"
+    },
+    {
+      "id": "review-checks",
+      "name": "review-checks",
+      "one_line_purpose": "Maintain the five review check subagents and Goose review scope.",
+      "entry_point": "docs/skills/review-checks.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "checks",
+        "review",
+        "goose",
+        "subagents",
+        "doctrine"
+      ],
+      "description": "Maintains the five image-owned review check subagents (bluefin-doctrine, security, correctness, test-coverage, simplicity) and Goose review scope. Use when changing review checks or review thread concurrency.",
+      "version": "1.0",
+      "last_updated": "2026-09-06",
+      "doc_type": "reference"
     },
     {
       "id": "review-dashboard",

@@ -66,115 +66,21 @@ Goose, or image build skill documents.
 3. Keep the container path narrow. It mounts only the read-only Hive
    contributor configuration and runs the image entrypoint, which attaches to
    Hive's `contributor` session.
-   `review-queue owner/repo` is the read-only live-repository form; it mounts no
-   Hive or host configuration directory and starts the image with the `queue`
-   argument (the launcher maps it to the dashboard's distinct `--live-repo`
-   option; `--repo` narrows the org-wide queue), which the entrypoint dispatches to the maintainer dashboard
-   before the Hive config gate. When a selected registration exists, the
-   launcher reads only its `HIVE_HUB` value and passes that URL so the dashboard
-   consults the same hosted deployment; the registration token never crosses
-   the container boundary. Since the dashboard sends the maintainer's GitHub
-   token to that deployment, only one `wss://` or `https://` URL is accepted;
-   multi-hub worker registrations are not dashboard API targets. A failed
-   knowledge export is reported and removes `~/agent.md`; it never silently
-   leaves stale context behind. The
-   dashboard needs a GitHub token from the first keystroke, so the recipe
-   fails without one rather than warning. Leading non-flag arguments are the
-   model profile and thinking effort — the same closed set `review-container`
-   takes — and everything from the first `-` flag onward forwards verbatim to
-   the dashboard. Its instance name is `review-queue`, overridable with
-   `REVIEW_QUEUE_NAME` — the dashboard's analogue of `REVIEW_CONTAINER_NAME`,
-   and likewise the only instance knob it gets.
-   The dashboard's state — landing-batch records, their failure reasons, and
-   the action trace — is the only durable record of what the landing agent
-   did, so the recipe bind-mounts
-   `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` from the host at the
-   container's XDG state path with `rw,z` (#281). One shared directory
-   across instance names: the queue it records is the same whichever name
-   runs, and `:z` keeps it writable for concurrent named dashboards. Sharing
-   it is safe because the recipe also passes the container name in as
-   `BLUEFIN_REVIEW_INSTANCE`, and the dashboard qualifies every batch id
-   with it — two dashboards' batches cannot overwrite each other's files.
-   The dashboard writes the directory; the launcher creates and mounts it,
-   nothing more. `review-container` mounts no state: the worker's record
-   flows through Hive.
-   An explicitly set `BLUEFIN_REVIEW_BACKEND` is validated as `goose` or
-   `codex` and forwarded only to this recipe. Unset preserves the dashboard's
-   default; explicit Codex preselects the existing takeoff panel but never
-   starts inference without Enter/click confirmation. Invalid values fail
-   before a container starts, and this selector never reaches
-   `review-container` or changes Hive's backend.
-   Which hive a launch contributes to or consults is launcher configuration,
-   not task selection: `~/.config/hive/contributor.<name>.env` registrations
-   sit beside the default `contributor.env`, and the launch picks `REVIEW_HIVE`
-   first, then the current repository's directory name, then the default.
-   An explicit `REVIEW_HIVE` with no file yet registers one by running
-   upstream `contribute-setup` with an isolated `config_dir` so the default
-   registration is never clobbered. Every launch prints the hub it will
-   talk to; a silent default is how a contributor ends up watching one
-   hub's dashboard while their agent asks another for work.
-   Mount the selected registration and nothing else. Bind-mounting
-   `~/.config/hive` and overlaying the selected file on top of it looks
-   equivalent and is not: rootless Podman prepares the nested target through
-   the already-mounted host directory, so a named registration made target
-   creation escape to the host and leave a zero-byte `contributor.env` owned
-   by a subordinate uid, which the container then failed on. Use the shared
-   `:z` relabel, never `:Z` — concurrent named workers may share one
-   registration, and a private MCS category revokes the running container's
-   access when the next one starts.
-4. Keep Goose as the default backend, with Codex and Pi as explicitly selected
-   executable backends. `TOOL=goose` preserves the Copilot provider path;
-   `TOOL=codex` requires a readable subscription `auth.json`, stages only a
-   disposable copy for the contributor container, and never requires Goose or
-   Copilot; `TOOL=pi` requires `PI_API_KEY`, passes it as the selected Pi
-   process's `ANTHROPIC_API_KEY`, and lets the image entrypoint prove
-   `pi --version` before Hive starts. Nothing is persisted: not a secret, not a
-   provider, not a model. There is no last-selection file, and
-   `tests/just-onboarding.sh` asserts one is never written. Hive remains the
-   sole assignment authority.
-   The configured-provider preflight reads Goose's own config and must
-   accept both keys Goose has shipped: current releases record the
-   selection as `active_provider:` beside a `providers:` map, older ones
-   wrote a bare `provider:`. Goose migrates the host file on its own, so
-   a preflight that knows only one key strands a configured host.
-   `review-container` must set its own thinking-effort default before forming
-   the Podman environment, while still honoring `GOOSE_THINKING_EFFORT` from
-   the caller. Do not replace the
-   image's direct-invocation fallback.
-   That default comes from the model profile: `review-container [profile]
-   [effort]` resolves an empty profile or `gemini` to
-   `gemini-3.8-flash` at `high`, `sol` (also `gpt-sol`) to `gpt-5.6-sol` at
-   `medium`, `opus5` to `claude-opus-5` at `high` with
-   `GOOSE_CONTEXT_LIMIT=264000`, and `k3` (also `kimi`) to `kimi-k3` at `max`
-   with the same clamp. An empty profile is `gemini` for `review-container`,
-   `review-queue`, and `turbo-review`; a short fixed profile list does not
-   warrant a picker, so every launch is noninteractive whether or not a
-   terminal is attached. Profiles are defaults, never overrides:
-   `GOOSE_MODEL`, `GOOSE_THINKING_EFFORT`, and `GOOSE_CONTEXT_LIMIT` from the
-   environment always win.
-   The *profile name* is validated; the model ID it resolves to is not. The
-   Copilot catalog is provider-side and changes without a release here, and a
-   caller-supplied `GOOSE_MODEL` is passed through unvalidated by design. Form
-   the environment and let Goose surface a model the provider will not serve.
-   Do not add a catalog check to the launcher.
-5. For container-only mode, pass Copilot and GitHub credentials by inherited
-   environment (`--env NAME`), not command-line values or host configuration
-   mounts. Resolve the GitHub token from `REVIEW_GH_TOKEN`, existing
-   `GH_TOKEN`, then `gh auth token`.
-   Codex subscription OAuth is the one file-shaped exception for
-   `review-queue`: locate `${CODEX_HOME:-$HOME/.codex}/auth.json`, copy it with
-   mode `0600` into a private runtime directory, mount only that disposable
-   copy at `/home/dev/.codex/auth.json`, and remove it when the foreground run
-   exits. The official CLI may refresh the staged copy; it must never receive
-   the host Codex configuration directory or mutate the host login cache.
-   An explicitly selected Codex review requires no host Goose installation,
-   configuration, or Copilot credential. Missing auth remains a visible
-   `NEEDS SIGN-IN` state and never selects a fallback harness.
-6. When renaming launcher-facing product identifiers, do a tracked-file sweep
-   for both active names and legacy spellings in code, comments, workflow
-   assertions, fixture image names, and environment variables. Keep only the
-   live `review` / `REVIEW_*` surface; do not leave compatibility aliases
-   behind.
+   `review-queue` runs the dashboard. If a registration exists, pass its
+   `HIVE_HUB` URL (only `wss://` or `https://`). The dashboard binds
+   `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` with `rw,z` for landing
+   records, passing `BLUEFIN_REVIEW_INSTANCE` so batch ids never collide.
+   `REVIEW_HIVE` picks a named registration (`contributor.<name>.env`) before
+   defaulting. Use shared `:z` relabelling (never `:Z`, which revokes access
+   for concurrent workers).
+4. Keep Goose as the default backend (`TOOL=goose`); Codex (`TOOL=codex`) and
+   Pi (`TOOL=pi`) are explicit backends. Profiles set defaults:
+   `gemini` (`gemini-3.8-flash`, high effort), `sol` (`gpt-5.6-sol`, medium),
+   `opus5` (`claude-opus-5`, high, 264k context), `k3` (`kimi-k3`, max, 264k).
+   Environment `GOOSE_*` always wins.
+5. Pass credentials via inherited environment (`--env NAME`), never CLI args.
+   Stage disposable Codex auth (`0600`) at `/home/dev/.codex/auth.json`.
+6. When renaming launcher identifiers, do a full sweep and leave no aliases.
 
 ## Container Ownership
 
@@ -185,16 +91,10 @@ unreachable container — not merely an exited name. Inferring ownership from a
 `pgrep` for the `podman run` command line cannot tell that apart from a live
 session.
 
-Ownership must therefore be proven, not guessed: stamp
-`--label review.owner=<boot-id>:<client-pid>` at launch, and treat a container
-as owned only when all three hold — the PID is alive, the boot id matches, and
-that process still names the container in `/proc/<pid>/cmdline`. Anything else
-— including an unlabelled container, which cannot have been started by this
-launcher in this boot — is an orphan and is reclaimed silently at the next
-launch. There is no `pgrep` fallback, and adding one back would reintroduce
-exactly the guess the label exists to replace. Never answer an
-ownerless container by telling a user to press Ctrl-C in a terminal that no
-longer exists, and never reintroduce a user-facing stop or clean verb.
+Ownership must be proven: stamp `--label review.owner=<boot-id>:<client-pid>`
+at launch. A container is owned only when the PID is alive, the boot matches,
+and the process still names the container. Unlabelled or dead-owner containers
+are orphans reclaimed silently at next launch. There is no `pgrep` fallback.
 
 ## Concurrent Instances
 
@@ -212,66 +112,15 @@ numbering, a multi-instance manager, or any registry of running instances;
 that would be launcher state and task-selection surface this repository does
 not have.
 
-A name supplied by a user reaches `podman run --name` and the ownership
-probe, so validate it against podman's own rule
-(`[a-zA-Z0-9][a-zA-Z0-9_.-]*`) before launch rather than letting podman fail
-late. Validate before the Hive setup so a typo costs nothing. Every
-user-facing message — the refusal, the attach hint, the reclaim line — must
-name the container that was actually requested, or a second agent is told to
-attach to the first one's session.
-
-Hive selects every task. The launcher must not filter, skip, rank, or decline
-assignments by repository, label, title, author, or issue.
+Validate user-supplied names against `[a-zA-Z0-9][a-zA-Z0-9_.-]*` before
+launch. Hive selects tasks; the launcher never filters or skips assignments.
 
 ## Cluster Contributor Scale-Out
 
-For unattended cluster workers, scaling out is built directly into the launcher.
-`just review-container cluster [N]` reads host credentials (`~/.config/hive`,
-GitHub token, and Copilot keychain credential), configures `bluefin-system`,
-and scales out contributor workers across the active Kubernetes cluster:
-
-```bash
-just review-container cluster 2     # scale out 2 cluster workers
-just review-container cluster 4     # scale up to 4 cluster workers
-just review-stop cluster            # stop all cluster workers (scale to 0)
-just review-doctor                  # check local and cluster contributor health
-```
-
-Each pod keeps its own Hive WebSocket, so Hive independently assigns tasks to
-every pod without draining local CPU or battery. `gemini-3.8-flash` at `high`
-thinking effort is the default model for rapid task turnarounds. You can also
-pass an explicit model profile, e.g. `just review-container cluster 4 sol`.
-Before creating or changing cluster resources, the launcher requires one
-credential-free `wss://` or `https://` Hive hub from the selected registration.
-Secret synchronization uses server-side apply, then removes any
-`kubectl.kubernetes.io/last-applied-configuration` annotation left by
-client-side apply so credentials are not retained in metadata. GitHub and
-Copilot tokens enter `kubectl create secret` through stdin rather than command
-arguments, keeping their plaintext values out of the process table.
-
-`just turbo-review *args` combines that scale-out with the maintainer
-dashboard:
-
-```bash
-just turbo-review
-just turbo-review sol
-just turbo-review projectbluefin/review
-```
-
-It requests three cluster workers by default, or `REVIEW_SCALE` workers when
-set, using the same optional leading model profile and effort that
-`review-queue` accepts. A repository argument containing `/` keeps the default
-cluster profile and becomes the dashboard's live-repository filter. All
-arguments are then forwarded unchanged to `review-queue`, which remains in the
-foreground. The resolved cluster hub is exported to that child so both sides
-use the same URL even if the registration file changes during scale-out. A
-missing Kubernetes context or failed scale operation is reported without
-preventing the local dashboard from starting. Rollout observation waits 15
-seconds before warning that workers will continue starting in the background.
-The exit banner always prints `just review-stop cluster` and
-`just review-doctor`, even when cluster status cannot be read. Cluster workers
-remain scaled after the dashboard exits and stop explicitly with
-`just review-stop cluster`.
+For unattended cluster workers, `just review-container cluster [N]` and
+`just turbo-review *args` scale out contributor workers across Kubernetes.
+See [`cluster-workers.md`](cluster-workers.md) for full scale-out details,
+secret synchronization, and `turbo-review` orchestration.
 
 ## Rootless Podman And Mounted Host Files
 
@@ -284,85 +133,21 @@ maps onto `dev`. Never answer this by loosening the host file's mode; it holds
 Hive credentials.
 
 A locally built image has no registry behind it and is not a moving tag.
-`podman build -t <name>:<tag>` stores the result under `localhost/`, and
-refreshing that emits pull retries and an always-false "may be out of date"
-warning. Detect the local build before deciding a ref is refreshable. Build
-local images under the `sha-<commit>` tag CI mints for that commit: it names
-exactly one build, so it is never re-pulled over, and it says which commit is
-in the image.
-
-The same reasoning governs the missing case. `localhost/` is podman's local
-storage namespace, never a registry host, so pulling a `localhost/` ref that
-is absent dials `https://localhost/v2/` and fails three times with a
-connection-refused error that reads like a network fault instead of a missing
-build. Absent from local storage is the final answer for a `localhost/` ref:
-fail immediately and say it must be built, or that the override should be
-dropped for the published default.
+Build local images under the `sha-<commit>` tag CI mints for that commit.
+Absent from local storage is the final answer for a `localhost/` ref:
+fail immediately rather than attempting remote registry dials.
 
 `just --list` in another repository shows only that repository's recipes, so
 run `just review-container` from this checkout, or pass `--justfile`, when you
 want to be certain which launcher you are invoking.
 
-## The optional lab
+## The Optional Lab
 
 A maintainer may lend one `review-queue` session their own Kubernetes cluster
-(#379). Nothing in this repository depends on that: declining, no `kubectl`,
-no reachable cluster, no writable `XDG_RUNTIME_DIR`, or a broker that fails to
-come up all leave a fully usable dashboard on the registry-evidence path.
-
-`offer_lab_session` runs before anything starts. `lab_probe_context` requires
-host `python3`, host `kubectl`, and a broker probe that can list nodes; the
-probe prints the current context's NAME and nothing else — never a kubeconfig
-path, a server URL, or a credential. The question is asked once, on
-`/dev/tty`, so it belongs to the terminal that launched the session rather
-than to a pipe. `REVIEW_LAB=1` or `REVIEW_LAB=0` answers it without a prompt
-for an unattended launch; no terminal and no `REVIEW_LAB` means no lab.
-
-On yes, `start_lab_broker` mints a random session id, creates a `0700`
-directory under `XDG_RUNTIME_DIR`, and runs `scripts/review-lab-broker.py
-serve` as a background job. That backgrounding is the point, not an
-exception: the broker must outlive the launcher's next statement and die with
-the session, so it is started here and killed by the single EXIT trap that
-also removes the staged Codex credential. Nothing survives the terminal.
-
-What crosses into the container is one socket directory, one socket path, and
-one session id:
-
-```
---volume <runtime-dir>:/run/bluefin-review-lab:rw,z
---env BLUEFIN_REVIEW_LAB_SOCKET=/run/bluefin-review-lab/broker.sock
---env BLUEFIN_REVIEW_LAB_SESSION=<session>
-```
-
-No kubeconfig, no Kubernetes credential, no host home, no host networking, no
-Podman or Docker socket, and no host binary. gVisor refuses host Unix domain
-sockets by default, so `review-queue` adds `--runtime-flag=host-uds=open` —
-and only when `podman info` reports the `runsc` runtime, because `crun` and
-`runc` reject the flag outright. `review-container` never calls any of this:
-the contributor worker receives no lab capability.
-
-The maintainer's own lab skills ride read-only when they exist:
-`lab-test`, `k3s-cluster-ops`, `kubernetes-specialist`, and `live-dev-common`
-from `REVIEW_PERSONAL_SKILLS` (default `~/.copilot/skills`), mounted at
-`/home/dev/.agents/skills/<id>`. The org inventory is not duplicated here —
-the image already generates every `projectbluefin/common` skill, `lab-testing`
-included — so this mounts only ids common does not publish.
-
-The broker itself is the authority boundary. It answers three typed requests
-(`status`, `health`, `submit`) bound to session, repository, pull request, and
-exact 40-character head; dispatches only an explicit map of QA/test
-WorkflowTemplates, with `bluefin-qa-pipeline` resolving the head's `sha-<head>`
-tag to a pinned digest before submitting and answering `not-applicable` rather
-than substituting a moving tag; reaches Prometheus only through the Kubernetes
-API service proxy with allowlisted queries; and runs k8sgpt only through the
-`k8sgpt-on-demand` WorkflowTemplate, never with an AI credential from Review.
-Verified stable findings are filed automatically — `cluster-platform` to
-`projectbluefin/lab`, `server-product` to `projectbluefin/server`, anything
-else `unroutable` and unfiled — behind a versioned fingerprint marker, a
-GitHub duplicate search, and a fixed host lock at
-`${XDG_STATE_HOME:-$HOME/.local/state}/bluefin-review/lab-findings.lock` so two
-dashboards on one host serialize. A filing failure is visible, never silent,
-and never fatal.
+(#379). A host broker on `scripts/review-lab-broker.py` provides a private
+Unix socket (`--runtime-flag=host-uds=open` under gVisor `runsc`). No
+kubeconfig or credentials enter the container. See [`lab-broker.md`](lab-broker.md)
+for full broker details.
 
 ## Common Rationalizations
 
@@ -382,10 +167,8 @@ and never fatal.
 - An undocumented public recipe, or an implicit background launch with no
   matching lifecycle verb.
 - An interactive launch path whose final process is neither `exec`'d nor the
-  last foreground command whose status propagates: `nohup`, `setsid`, a
-  stray `podman run -d`, or a background job that silently outlives the run.
-  A background job the shell `wait`s on and reaps by trap is not this, and
-  removing one can break signal handling.
+  last foreground command whose status propagates (`nohup`, `setsid`).
+  Background jobs the shell `wait`s on and reaps by trap are allowed for signal handling.
 - A host directory mount beyond the read-only Hive configuration for the
   contributor container, or a host Codex config/login mount instead of the
   one-run staged auth file.
@@ -409,8 +192,7 @@ bash tests/just-onboarding.sh
 git diff --check
 ```
 
-The recipe list must contain only the five public commands. Doctor must not
-start a container.
+The recipe list must contain only the five public commands. Doctor must not start a container.
 
 ## Sources
 
