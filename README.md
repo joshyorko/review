@@ -86,6 +86,12 @@ REVIEW_DETACH=1 just review-container
 # Stop the default detached worker.
 just review-stop
 
+# Scale out contributor workers across a reachable Kubernetes cluster.
+just review-container cluster 2
+
+# Stop cluster contributor workers.
+just review-stop cluster
+
 # Walk one repository's live open pull requests instead of the whole org.
 just review-queue projectbluefin/review
 ```
@@ -190,8 +196,8 @@ four public recipes:
 
 | Command | Purpose |
 |---|---|
-| `just review-container [profile] [effort]` | Run the Hive queue worker: the contributor container that receives assigned tasks and donates inference. `REVIEW_DETACH=1` runs it as a detached background worker. |
-| `just review-stop [name]` | Stop a detached worker. Refuses attended runs and containers this launcher did not start. |
+| `just review-container [profile] [effort]` | Run the Hive queue worker locally in Podman (or `just review-container cluster [N]` to scale out across Kubernetes). |
+| `just review-stop [name]` | Stop a detached worker (`just review-stop cluster` stops cluster workers). |
 | `just review-queue [profile] [effort] [flags…]` | Walk the Bluefin PR queue interactively in the contributor container. |
 | `just review-doctor` | Check launch readiness. Starts no agent. |
 

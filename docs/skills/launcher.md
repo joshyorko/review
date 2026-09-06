@@ -224,27 +224,22 @@ assignments by repository, label, title, author, or issue.
 
 ## Cluster Contributor Scale-Out
 
-For unattended cluster workers, replace the placeholder in
-`deploy/contributor-secret.example.yaml` with a real Hive contributor token,
-then apply the Secret and Deployment:
+For unattended cluster workers, scaling out is built directly into the launcher.
+`just review-container cluster [N]` reads host credentials (`~/.config/hive`,
+GitHub token, and Copilot keychain credential), configures `bluefin-system`,
+and scales out contributor workers across the active Kubernetes cluster:
 
 ```bash
-kubectl apply -n bluefin-system -f deploy/contributor-secret.example.yaml
-kubectl apply -n bluefin-system -f deploy/review-contributor.yaml
-kubectl rollout status deployment/review-contributor -n bluefin-system
+just review-container cluster 2     # scale out 2 cluster workers
+just review-container cluster 4     # scale up to 4 cluster workers
+just review-stop cluster            # stop all cluster workers (scale to 0)
+just review-doctor                  # check local and cluster contributor health
 ```
 
-The Deployment starts two workers by default. Each pod keeps its own Hive
-WebSocket, so Hive independently assigns tasks to every pod without draining
-local CPU or battery. `gemini-3.8-flash` is the default model for rapid task
-turnarounds. Scale the worker pool as cluster capacity allows:
-
-```bash
-kubectl scale deployment/review-contributor -n bluefin-system --replicas=4
-```
-
-Do not commit the populated Secret manifest; the example contains only a
-placeholder token.
+Each pod keeps its own Hive WebSocket, so Hive independently assigns tasks to
+every pod without draining local CPU or battery. `gemini-3.8-flash` at `high`
+thinking effort is the default model for rapid task turnarounds. You can also
+pass an explicit model profile, e.g. `just review-container cluster 4 sol`.
 
 ## Rootless Podman And Mounted Host Files
 

@@ -904,6 +904,63 @@ add_lab_container_args() {
     CONTAINER_ARGS+=(--volume "${skill_root}/${skill}:/home/dev/.agents/skills/${skill}:ro,z")
   done
 }
+
+scale_cluster_contributors() {
+  local replicas="$1" profile="${2:-gemini}" effort="${3:-high}"
+  command -v kubectl &>/dev/null || {
+    echo "ERROR: kubectl is required for cluster contributor scale-out." >&2
+    return 1
+  }
+  local context
+  context="$(kubectl config current-context 2>/dev/null || true)"
+  if [[ -z "$context" ]]; then
+    echo "ERROR: no active Kubernetes context found." >&2
+    return 1
+  fi
+
+  resolve_model_profile "$profile" "$effort"
+
+  kubectl create namespace bluefin-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  resolve_copilot_token
+  resolve_gh_token
+  ensure_hive_contributor_env
+
+  kubectl create secret generic review-contributor-secret -n bluefin-system \
+    --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
+    --from-literal=GH_TOKEN="${GH_TOKEN_VALUE:-}" \
+    --from-literal=GITHUB_COPILOT_TOKEN="${COPILOT_TOKEN:-}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  local deploy_file="deploy/review-contributor.yaml"
+  if [[ ! -f "$deploy_file" ]]; then
+    echo "ERROR: ${deploy_file} not found." >&2
+    return 1
+  fi
+  kubectl apply -f "$deploy_file" >/dev/null
+  kubectl set env deployment/review-contributor -n bluefin-system \
+    GOOSE_MODEL="$PROFILE_MODEL" \
+    GOOSE_THINKING_EFFORT="$PROFILE_EFFORT" >/dev/null
+  kubectl scale deployment/review-contributor -n bluefin-system --replicas="$replicas" >/dev/null
+  if [[ "$replicas" -gt 0 ]]; then
+    echo "✓ scaled cluster contributor workers to ${replicas} (context ${context}, model ${PROFILE_MODEL} at ${PROFILE_EFFORT} effort)."
+    kubectl rollout status deployment/review-contributor -n bluefin-system --timeout=60s 2>/dev/null || true
+    kubectl get pods -n bluefin-system -o wide
+  else
+    echo "✓ scaled cluster contributor workers to 0."
+  fi
+}
+
+stop_cluster_contributors() {
+  if command -v kubectl &>/dev/null && kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
+    kubectl scale deployment/review-contributor -n bluefin-system --replicas=0 >/dev/null
+    echo "✓ stopped all cluster contributor workers (scaled to 0 in bluefin-system)."
+    return 0
+  else
+    echo "✓ no cluster contributor deployment found."
+    return 0
+  fi
+}
 '''
 
 # Run the contributor container: the Hive queue worker.
@@ -957,6 +1014,27 @@ review-container profile="" effort="":
     require_goose_backend "$TOOL"
     BACKEND="${TOOL:-goose}"
     preflight_agent "$BACKEND"
+
+    raw_profile="{{profile}}"
+    raw_effort="{{effort}}"
+
+    if [[ "$raw_profile" == "cluster" || -n "${REVIEW_SCALE:-}" ]]; then
+      replicas="${REVIEW_SCALE:-2}"
+      model_profile="gemini"
+      model_effort="high"
+      if [[ "$raw_profile" == "cluster" ]]; then
+        if [[ "$raw_effort" =~ ^[0-9]+$ ]]; then
+          replicas="$raw_effort"
+        elif [[ -n "$raw_effort" ]]; then
+          model_profile="$raw_effort"
+        fi
+      elif [[ -n "$raw_profile" ]]; then
+        model_profile="$raw_profile"
+        model_effort="${raw_effort:-high}"
+      fi
+      scale_cluster_contributors "$replicas" "$model_profile" "$model_effort"
+      exit 0
+    fi
 
     # Resolved before anything interactive so a typo fails immediately rather
     # than after the model picker and the Hive setup.
@@ -1100,6 +1178,10 @@ review-stop name="review-container":
     set -euo pipefail
     {{shared_functions}}
     NAME="{{name}}"
+    if [[ "$NAME" == "cluster" ]]; then
+      stop_cluster_contributors
+      exit 0
+    fi
     [[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || {
       echo "ERROR: '${NAME}' is not a valid container name." >&2
       exit 1
@@ -1437,6 +1519,26 @@ review-doctor:
       echo "    That runs with upstream's documented HIVE_SKIP_VERSION_CHECK=true,"
       echo "    because the pinned checkout is detached and cannot match origin/v2."
       fail=$((fail+1))
+    fi
+    echo ""
+
+    echo "=== Cluster scale-out ==="
+    if command -v kubectl &>/dev/null; then
+      k8s_ctx="$(kubectl config current-context 2>/dev/null || true)"
+      if [[ -n "$k8s_ctx" ]]; then
+        echo "  ✓ Kubernetes context: ${k8s_ctx}"
+        if kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
+          ready_rep="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+          spec_rep="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
+          echo "  ✓ review-contributor: ${ready_rep:-0}/${spec_rep:-0} ready replicas in bluefin-system"
+        else
+          echo "  - review-contributor: not deployed (scale with 'just review-container cluster [N]')"
+        fi
+      else
+        echo "  - kubectl installed, no active context"
+      fi
+    else
+      echo "  - kubectl not installed (optional; for cluster scale-out)"
     fi
     echo ""
 
