@@ -205,7 +205,7 @@ fix.
     required component is absent from either platform's attached SPDX
     document. Never call QEMU runtime proof native.
     The publish workflow builds each architecture on a runner of that
-    architecture — `ubuntu-24.04` and `ubuntu-24.04-arm` — with podman, proving
+    architecture — `ubuntu-26.04` and `ubuntu-26.04-arm` — with podman, proving
     the host, podman engine, and container architecture in each job before it
     pushes and audits its own image. Those generated reports in the GitHub
     Actions step summary are the acceptance artifact. The `publish` job
@@ -390,8 +390,8 @@ the base ever ships it the audit fails and review's layer is deleted.
   /opt/bluefin \( -type d ! -perm -o=rx \) ...`), never by a string match on
   the Containerfile.
 
-- Assuming a GitHub runner's tool versions. `ubuntu-24.04` and
-  `ubuntu-24.04-arm` ship podman 4.9.3 and buildah 1.33.7, which predate both
+- Assuming a GitHub runner's tool versions. `ubuntu-26.04` and
+  `ubuntu-26.04-arm` ship newer tooling, but the publish path still verifies
   `--secret id=NAME,env=VAR` and `buildah manifest annotate --index`. The
   publish path therefore passes the token as a `0600` file
   (`--secret id=github_token,src=FILE`) and assembles the index in a

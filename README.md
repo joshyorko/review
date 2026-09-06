@@ -915,8 +915,8 @@ both review attestations, labels, annotations, subject digest, and exactly
 those two platforms.
 
 The image is built with podman and buildah, the same engines that run it, and
-each architecture is built by a runner of that architecture: `ubuntu-24.04`
-for amd64 and `ubuntu-24.04-arm` for arm64. Each build job proves its host,
+each architecture is built by a runner of that architecture: `ubuntu-26.04`
+for amd64 and `ubuntu-26.04-arm` for arm64. Each build job proves its host,
 podman engine, and container architecture, runs the shipped runtime, and audits
 the image it just pushed. The published `:stable` is an OCI index assembled by
 buildah from those two native digests, so no shipped layer is ever produced
