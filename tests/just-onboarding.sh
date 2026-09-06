@@ -799,10 +799,15 @@ RECIPE_ARGS=(sol)
 run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
 assert_nonzero_status "$STATUS" "the fake dashboard runner always exits non-zero"
+assert_file_contains "--replicas=3" "$kubectl_log"
 assert_file_contains "GOOSE_MODEL=gpt-5.6-sol" "$kubectl_log"
 assert_file_contains "GOOSE_THINKING_EFFORT=medium" "$kubectl_log"
+assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
 assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
+assert_file_contains " queue" "$runner_log"
+assert_contains "3/3 cluster contributor workers active in bluefin-system" "$OUT"
+assert_contains "Stop workers: just review-stop cluster" "$OUT"
 
 begin "turbo-review: explicit effort and dashboard flags stay intact"
 reset_logs
@@ -840,12 +845,16 @@ run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   FAKE_KUBECTL_DEPLOYMENT_GET_FAIL=1
 assert_contains "unable to read cluster contributor status in bluefin-system" "$OUT"
 
-begin "turbo-review: missing kubectl is reported by the exit trap"
+begin "turbo-review: missing kubectl warns and still launches the dashboard"
 reset_logs
 remove_fake_kubectl
 RECIPE_ARGS=(--all)
 run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_LAB=0
+assert_nonzero_status "$STATUS" "the fake dashboard runner always exits non-zero"
+assert_contains "no active Kubernetes context found" "$OUT"
 assert_contains "kubectl is unavailable; cluster contributor status was not checked" "$OUT"
+assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
+assert_file_contains "queue --all" "$runner_log"
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
 reset_logs
