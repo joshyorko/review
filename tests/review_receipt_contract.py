@@ -12,6 +12,7 @@ from tui.review_receipt import (
     MUTABLE_PROVENANCE_KEYS,
     ReceiptIdentity,
     ReviewReceipt,
+    cache_digest,
     default_harness_registry,
     run_receipt,
 )
@@ -110,6 +111,17 @@ class ReceiptContractTests(unittest.TestCase):
         payload["identity"]["head_sha"] = "c" * 40
         with self.assertRaises(ValueError):
             ReviewReceipt.from_dict(payload)
+
+    def test_deeply_nested_json_is_rejected_as_invalid(self):
+        deep_json = '{"a":' * 10000 + "1" + "}" * 10000
+        with self.assertRaises(ValueError) as ctx:
+            ReviewReceipt.from_json(deep_json)
+        self.assertIn("receipt JSON is invalid", str(ctx.exception))
+
+    def test_cache_digest_matches_receipt_identity(self):
+        identity = ReceiptIdentity.from_run(self.run, "scope-v7")
+        self.assertEqual(identity.cache_identity, cache_digest(self.run, "scope-v7"))
+        self.assertEqual(identity.cache_identity, cache_digest(self.run.identity, "scope-v7"))
 
     def test_mutable_fields_cannot_appear_in_provenance(self):
         mutable_evidence = {

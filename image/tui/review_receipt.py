@@ -73,6 +73,12 @@ def _bounded_transcript(lines: Sequence[str]) -> tuple[str, ...]:
     return tuple(kept)
 
 
+def cache_digest(run: ReviewRun | str, check_scope_version: str) -> str:
+    run_id = run.identity if isinstance(run, ReviewRun) else run
+    material = f"{run_id}\0{check_scope_version}"
+    return sha256(material.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ReceiptIdentity:
     repository: str
@@ -117,8 +123,7 @@ class ReceiptIdentity:
 
     @property
     def cache_identity(self) -> str:
-        material = f"{self.run_identity}\0{self.check_scope_version}"
-        return sha256(material.encode("utf-8")).hexdigest()
+        return cache_digest(self.run_identity, self.check_scope_version)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -270,9 +275,9 @@ class ReviewReceipt:
             raise ValueError("receipt JSON is missing or too large")
         try:
             value = json.loads(payload)
-        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            return cls.from_dict(value)
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as error:
             raise ValueError("receipt JSON is invalid") from error
-        return cls.from_dict(value)
 
     def analysis_result(
         self,

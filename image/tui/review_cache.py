@@ -4,10 +4,9 @@ from __future__ import annotations
 import os
 import tempfile
 import time
-from hashlib import sha256
 from pathlib import Path
 
-from tui.review_receipt import ReviewReceipt
+from tui.review_receipt import ReviewReceipt, cache_digest
 from tui.review_run import ReviewRun
 
 REVIEW_CACHE_RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -16,7 +15,7 @@ REVIEW_CACHE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 class ReviewCache:
     def __init__(self, root: str | os.PathLike[str] | None = None) -> None:
         if root is None:
-            state_root = os.environ.get("XDG_STATE_HOME", "~/.local/state")
+            state_root = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
             root = os.path.join(state_root, "bluefin-review", "reviews")
         self.root = Path(root).expanduser()
 
@@ -27,8 +26,7 @@ class ReviewCache:
 
     @staticmethod
     def _digest(run: ReviewRun, check_scope_version: str) -> str:
-        material = f"{run.identity}\0{check_scope_version}"
-        return sha256(material.encode("utf-8")).hexdigest()
+        return cache_digest(run, check_scope_version)
 
     def path_for(self, run: ReviewRun, check_scope_version: str) -> Path:
         return self.root / (
@@ -39,11 +37,10 @@ class ReviewCache:
         path = self.path_for(run, check_scope_version)
         try:
             receipt = ReviewReceipt.from_json(path.read_text(encoding="utf-8"))
-            expected = f"{run.identity}\0{check_scope_version}"
-            if receipt.identity.cache_identity != sha256(expected.encode("utf-8")).hexdigest():
+            if receipt.identity.cache_identity != self._digest(run, check_scope_version):
                 return None
             return receipt
-        except (OSError, UnicodeError, TypeError, ValueError):
+        except (OSError, UnicodeError, TypeError, ValueError, RecursionError):
             return None
 
     def put(self, receipt: ReviewReceipt) -> Path:

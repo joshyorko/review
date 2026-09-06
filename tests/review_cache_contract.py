@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 
 from tui.review_cache import REVIEW_CACHE_RETENTION_SECONDS, ReviewCache
 from tui.review_evidence_manifest import ReviewRequest
-from tui.review_receipt import ReviewReceipt
+from tui.review_receipt import ReviewReceipt, cache_digest
 from tui.review_result import ReviewResult
 from tui.review_run import ReviewRun
 
@@ -114,6 +114,45 @@ class ReviewCacheTests(unittest.TestCase):
                     os.environ["XDG_STATE_HOME"] = old
                 else:
                     os.environ.pop("XDG_STATE_HOME", None)
+
+    def test_empty_xdg_state_home_falls_back_to_local_state(self):
+        old = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = ""
+        try:
+            cache = ReviewCache()
+            expected_root = Path(os.path.expanduser("~/.local/state")) / "bluefin-review" / "reviews"
+            self.assertEqual(cache.root, expected_root)
+            self.assertTrue(cache.root.is_absolute())
+        finally:
+            if old is not None:
+                os.environ["XDG_STATE_HOME"] = old
+            else:
+                os.environ.pop("XDG_STATE_HOME", None)
+
+    def test_deeply_nested_json_is_a_miss(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = ReviewCache(root)
+            run = make_run()
+            path = cache.path_for(run, "scope-v7")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"a":' * 10000 + "1" + "}" * 10000, encoding="utf-8")
+            self.assertIsNone(cache.get(run, "scope-v7"))
+
+    def test_cache_digest_formula_shared(self):
+        run = make_run()
+        receipt = make_receipt(run)
+        self.assertEqual(
+            ReviewCache._digest(run, "scope-v7"),
+            receipt.identity.cache_identity,
+        )
+        self.assertEqual(
+            ReviewCache._digest(run, "scope-v7"),
+            cache_digest(run, "scope-v7"),
+        )
+        self.assertEqual(
+            ReviewCache._digest(run, "scope-v7"),
+            cache_digest(run.identity, "scope-v7"),
+        )
 
     def test_prune_matches_landing_retention(self):
         with tempfile.TemporaryDirectory() as root:
