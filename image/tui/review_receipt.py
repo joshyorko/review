@@ -117,13 +117,8 @@ class ReceiptIdentity:
 
     @property
     def cache_identity(self) -> str:
-        material = {
-            "review_run": self.run_identity,
-            "check_scope_version": self.check_scope_version,
-        }
-        return sha256(
-            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        material = f"{self.run_identity}\0{self.check_scope_version}"
+        return sha256(material.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, object]:
         return {
