@@ -1418,6 +1418,50 @@ review-queue *queue_args:
     echo "  q or Ctrl-C stops; the dashboard is the only thing running."
     "${CONTAINER_ARGS[@]}"
 
+# Scale 3 cluster workers and open the maintainer review dashboard in the foreground.
+# Workers continue running in the cluster after the dashboard exits.
+#
+#   just turbo-review                      # default gemini profile, 3 cluster workers
+#   just turbo-review sol                  # sol profile, 3 cluster workers
+#   just turbo-review projectbluefin/review # live review of one repository
+[doc("Scale 3 cluster workers and open the maintainer review dashboard.")]
+turbo-review *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{shared_functions}}
+
+    replicas="${REVIEW_SCALE:-3}"
+    profile="gemini"
+    effort="high"
+
+    echo "=== Launching review turbo ==="
+    if command -v kubectl &>/dev/null && [[ -n "$(kubectl config current-context 2>/dev/null || true)" ]]; then
+      echo "✓ scaling ${replicas} cluster contributor workers in bluefin-system..."
+      scale_cluster_contributors "$replicas" "$profile" "$effort" || {
+        echo "! cluster worker scale-out failed; continuing with local review dashboard." >&2
+      }
+    else
+      echo "! no active Kubernetes context found; continuing with local review dashboard only." >&2
+    fi
+
+    report_cluster_exit_status() {
+      echo ""
+      echo "=== Cluster contributor status ==="
+      if command -v kubectl &>/dev/null && kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
+        ready="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+        total="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
+        echo "✓ ${ready:-0}/${total:-0} cluster contributor workers active in bluefin-system."
+        echo "  Stop workers: just review-stop cluster"
+        echo "  Check health: just review-doctor"
+      fi
+    }
+    trap report_cluster_exit_status EXIT
+
+    echo "✓ starting maintainer review dashboard in foreground..."
+    # Execute review-queue as a child process to isolate environment variables and traps.
+    # shellcheck disable=SC2086
+    just review-queue {{args}}
+
 # Preflight check: is this machine actually ready for 'just review-container'?
 # Starts no agent and mounts no credential.
 [doc("Preflight diagnostics for this machine. Starts no agent.")]
