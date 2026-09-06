@@ -12,6 +12,8 @@ cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
+printf '%s\n' "$(git rev-parse HEAD 2>/dev/null || true)" >"${GOOSE_HEAD:-/dev/null}"
+printf '%s\n' "$PWD" >"${GOOSE_WORKDIR:-/dev/null}"
 printf '%s\n' 'adapter invoked' >"${GOOSE_ADAPTER_CALLED:-/dev/null}"
 exit 23
 EOF
@@ -51,6 +53,7 @@ set -e
 rm -f "$scratch/goose-args-help"
 help_out="$(PATH="$scratch/bin:$PATH" GOOSE_ARGS="$scratch/goose-args-help" "$review" --help)"
 [[ "$help_out" == *'bluefin-review pr'* ]]
+[[ "$help_out" == *'--prepare-worktree'* ]]
 [[ ! -e "$scratch/goose-args-help" ]]
 
 # --- pr mode: check the pull request out and review it against its base -------
@@ -122,23 +125,27 @@ worktree_b="$(
 [[ "$worktree_b" == *"projectbluefin__alpha-"* ]]
 
 # --- isolated worktree pr mode: review using an explicit isolated workdir -----
-rm -f "$scratch/gh-calls-isolated" "$scratch/goose-args-isolated"
+rm -f "$scratch/gh-calls-isolated" "$scratch/goose-args-isolated" "$scratch/goose-head-isolated" "$scratch/goose-workdir-isolated"
 isolated_dir="$scratch/worktrees/isolated-alpha"
 mkdir -p "$isolated_dir"
 git -C "$isolated_dir" init --quiet
 git -C "$isolated_dir" config user.email t@example.com
 git -C "$isolated_dir" config user.name t
-git -C "$isolated_dir" commit --allow-empty --no-verify -m "test: isolated commit" --quiet
+git -C "$isolated_dir" commit --allow-empty --no-verify -m "test: isolated base commit" --quiet
+iso_base="$(git -C "$isolated_dir" rev-parse HEAD)"
+git -C "$isolated_dir" commit --allow-empty --no-verify -m "test: isolated head commit" --quiet
 iso_head="$(git -C "$isolated_dir" rev-parse HEAD)"
+[[ "$iso_base" != "$iso_head" ]]
 
 rm -rf "$scratch/workspace/alpha"
 
 set +e
 iso_pr_out="$(PATH="$scratch/bin:$PATH" GH_CALLS="$scratch/gh-calls-isolated" \
-  GOOSE_ARGS="$scratch/goose-args-isolated" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  GOOSE_ARGS="$scratch/goose-args-isolated" GOOSE_HEAD="$scratch/goose-head-isolated" \
+  GOOSE_WORKDIR="$scratch/goose-workdir-isolated" HIVE_WORKSPACE_DIR="$scratch/workspace" \
   "$review" pr projectbluefin/alpha 31 \
   --workdir "$isolated_dir" \
-  --base-sha "$iso_head" \
+  --base-sha "$iso_base" \
   --head-sha "$iso_head" 2>&1)"
 iso_pr_status=$?
 set -e
@@ -149,6 +156,13 @@ if grep -q 'pr checkout' "$scratch/gh-calls-isolated" 2>/dev/null; then
   echo "isolated mode must not invoke gh pr checkout" >&2
   exit 1
 fi
+if grep -q 'baseRefName' "$scratch/gh-calls-isolated" 2>/dev/null; then
+  echo "isolated mode with --base-sha must not query baseRefName" >&2
+  exit 1
+fi
+[[ "$(cat "$scratch/goose-args-isolated")" == "review ${iso_base}...HEAD" ]]
+[[ "$(cat "$scratch/goose-head-isolated")" == "$iso_head" ]]
+[[ "$(cat "$scratch/goose-workdir-isolated")" == "$isolated_dir" ]]
 
 # Recreate workspace alpha for subsequent tests
 mkdir -p "$scratch/workspace/alpha"

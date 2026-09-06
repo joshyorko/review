@@ -361,6 +361,8 @@ Usage:
   bluefin-review receipt <options>    emit a machine-readable result receipt
   bluefin-review --print-worktree <repo> <head-sha>
                                       print deterministic isolated worktree path
+  bluefin-review --prepare-worktree <repo> <head-sha>
+                                      prepare deterministic isolated worktree
 
 'pr' clones the repository into the workspace, checks the pull request out,
 and reviews it against its base. Pull requests doing the same work are
@@ -512,7 +514,7 @@ run_goose_review() {
     cd "$dir" || exit 1
     if [[ -n "${BLUEFIN_REVIEW_WORKDIR:-}" ]]; then
       if [[ -n "$expected_head" ]]; then
-        git fetch --quiet origin "$expected_head" || true
+        git fetch --quiet origin "$expected_head" 2>/dev/null || true
         git checkout --quiet --detach "$expected_head" || {
           printf 'could not check out exact head %s in %s\n' "$expected_head" "$dir" >&2
           exit 1
@@ -533,20 +535,13 @@ run_goose_review() {
     fi
 
     local diff_range=""
-    if [[ -z "${BLUEFIN_REVIEW_WORKDIR:-}" ]]; then
+    if [[ -n "$expected_base" ]]; then
+      git fetch --quiet origin "$expected_base" 2>/dev/null || true
+      diff_range="${expected_base}...HEAD"
+    else
       base="$(gh pr view "$number" --repo "$repo" --json baseRefName --jq .baseRefName)" || exit 1
       git fetch --quiet origin "$base" || true
       diff_range="origin/${base}...HEAD"
-    else
-      if base="$(gh pr view "$number" --repo "$repo" --json baseRefName --jq .baseRefName 2>/dev/null)" && [[ -n "$base" ]]; then
-        git fetch --quiet origin "$base" || true
-        diff_range="origin/${base}...HEAD"
-      elif [[ -n "$expected_base" ]]; then
-        git fetch --quiet origin "$expected_base" 2>/dev/null || true
-        diff_range="${expected_base}...HEAD"
-      else
-        diff_range="HEAD"
-      fi
     fi
 
     # Duplicates are the same work wearing another number, so one review must
