@@ -8,6 +8,7 @@
 #
 #   bluefin-review [range]           review a local diff through Goose
 #   bluefin-review pr <repo> <num>   review one pull request through Goose
+#   bluefin-review receipt <args>    emit a versioned machine-readable receipt
 #
 # The dashboard shells out to 'pr' for its review key, so both surfaces judge a
 # change through exactly one code path.
@@ -321,6 +322,7 @@ usage() {
 Usage:
   bluefin-review [range]              review a local diff through Goose
   bluefin-review pr <repo> <number>   review one pull request through Goose
+  bluefin-review receipt <options>    emit a machine-readable result receipt
 
 'pr' clones the repository into the workspace, checks the pull request out,
 and reviews it against its base. Pull requests doing the same work are
@@ -533,6 +535,12 @@ pr_mode() {
 }
 
 case "${1-}" in
+  receipt)
+    shift
+    root="${BLUEFIN_REVIEW_HARNESS_ROOT:-/opt/bluefin}"
+    PYTHONPATH="${root}:${root}/tui${PYTHONPATH:+:${PYTHONPATH}}" \
+      exec python3 -m tui.review_receipt "$@"
+    ;;
   pr)
     shift
     pr_mode "$@"

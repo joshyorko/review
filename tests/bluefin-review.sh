@@ -156,6 +156,34 @@ set -e
 [[ "$clean_out" == *'The Review Draft above is for you to judge'* ]]
 [[ "$clean_out" != *'REVIEW INCOMPLETE'* ]]
 
+# --- receipt mode emits a versioned machine-readable result receipt -----------
+base_sha="$(printf '%040d' 0)"
+head_sha="0123456789abcdef0123456789abcdef01234567"
+receipt_json="$(
+  PATH="$scratch/bin:$PATH" \
+  BLUEFIN_REVIEW_HARNESS_ROOT="$repo_root/image" \
+  "$review" receipt \
+    --repository projectbluefin/alpha \
+    --pull-request 31 \
+    --base-sha "$base_sha" \
+    --head-sha "$head_sha" \
+    --backend goose \
+    --model gemini-3.8-flash \
+    --effort high \
+    --check-scope-version scope-v7 \
+    --workdir "$scratch/workspace/alpha"
+)"
+python3 - "$receipt_json" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+assert payload["version"] == 1
+assert payload["identity"]["repository"] == "projectbluefin/alpha"
+assert payload["identity"]["head_sha"] == "0123456789abcdef0123456789abcdef01234567"
+assert "live" not in payload["analysis"] or payload["analysis"]["live"] == {}
+assert "overlap" not in payload["analysis"] or payload["analysis"]["overlap"] == {}
+PY
+
 # A zero-exit malformed stream is still an adapter failure, not a clean draft.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash

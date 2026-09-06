@@ -38,3 +38,12 @@ recommendation as one. This session runs with GOOSE_MODE auto and the
 walker's own credentials, so these instructions are doctrine markers for a
 cooperative reviewer, not a security control — the human confirmation gate
 in the walker is the control.
+
+Every check response follows the compact-output contract by reusing
+`CAVEMAN_INSTRUCTIONS` from `image/tui/headroom.py:33-40` through
+`apply_caveman` at `image/tui/headroom.py:336-339`: return only the structured
+verdict and bounded file/line findings, omit greetings, conclusions, repeated
+context, and rationale padding, and state missing verification in one short
+field. Preserve negations and security/destructive-action warnings in full
+prose. The receipt runner applies that existing policy before dispatch and caps
+the transcript before it reaches durable state.
