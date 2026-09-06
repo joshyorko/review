@@ -1,6 +1,6 @@
 ---
 name: launcher
-version: "3.4"
+version: "3.5"
 last_updated: 2026-09-06
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
@@ -245,7 +245,9 @@ Before creating or changing cluster resources, the launcher requires one
 credential-free `wss://` or `https://` Hive hub from the selected registration.
 Secret synchronization uses server-side apply, then removes any
 `kubectl.kubernetes.io/last-applied-configuration` annotation left by
-client-side apply so credentials are not retained in metadata.
+client-side apply so credentials are not retained in metadata. GitHub and
+Copilot tokens enter `kubectl create secret` through stdin rather than command
+arguments, keeping their plaintext values out of the process table.
 
 `just turbo-review *args` combines that scale-out with the maintainer
 dashboard:
@@ -261,9 +263,14 @@ set, using the same optional leading model profile and effort that
 `review-queue` accepts. A repository argument containing `/` keeps the default
 cluster profile and becomes the dashboard's live-repository filter. All
 arguments are then forwarded unchanged to `review-queue`, which remains in the
-foreground. A missing Kubernetes context or failed scale operation is reported
-without preventing the local dashboard from starting. Cluster workers remain
-scaled after the dashboard exits and stop explicitly with
+foreground. The resolved cluster hub is exported to that child so both sides
+use the same URL even if the registration file changes during scale-out. A
+missing Kubernetes context or failed scale operation is reported without
+preventing the local dashboard from starting. Rollout observation waits 15
+seconds before warning that workers will continue starting in the background.
+The exit banner always prints `just review-stop cluster` and
+`just review-doctor`, even when cluster status cannot be read. Cluster workers
+remain scaled after the dashboard exits and stop explicitly with
 `just review-stop cluster`.
 
 ## Rootless Podman And Mounted Host Files

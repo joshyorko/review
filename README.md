@@ -772,6 +772,8 @@ implementation, tests, and durable documentation.
 `just turbo-review` requests three cluster contributor workers by default,
 then forwards the same profile, effort, repository, and dashboard arguments
 to the foreground `review-queue`; `REVIEW_SCALE` changes the worker count.
+Both sides use the same resolved Hive Hub. Rollout observation stops waiting
+after 15 seconds while workers continue starting in the background.
 
 `bluefin-review` also passes `--instructions` (additive) rather than `--prompt`
 (which would replace Goose's default prompt), naming the doctrine on disk

@@ -743,8 +743,8 @@ report_hive_selection() {
   # Say out loud which hive this launch contributes to. A silent default is
   # how a contributor ends up watching one hub's dashboard while their agent
   # asks another for work. The token is never printed — the hub only.
-  local hub
-  hub="$(read_hive_value HIVE_HUB)"
+  local hub="${1:-}"
+  [[ -n "$hub" ]] || hub="$(read_hive_value HIVE_HUB)"
   if [[ -n "$HIVE_REGISTRATION_NAME" && "$HIVE_CONTRIBUTOR_ENV" == *"contributor.${HIVE_REGISTRATION_NAME}.env" ]]; then
     echo "✓ hive: ${hub:-unknown} (registration '${HIVE_REGISTRATION_NAME}')"
   else
@@ -936,6 +936,7 @@ scale_cluster_contributors() {
     echo "ERROR: HIVE_HUB is not set in ${HIVE_CONTRIBUTOR_ENV}." >&2
     return 1
   fi
+  CLUSTER_HIVE_HUB="$hub"
 
   resolve_gh_token
   if [[ -z "${GH_TOKEN_VALUE:-}" ]]; then
@@ -950,13 +951,17 @@ scale_cluster_contributors() {
     return 1
   fi
 
-  kubectl create namespace bluefin-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl create namespace bluefin-system --dry-run=client -o yaml |
+    kubectl apply -f - >/dev/null || return 1
 
-  kubectl create secret generic review-contributor-secret -n bluefin-system \
+  {
+    printf 'GH_TOKEN=%s\n' "$GH_TOKEN_VALUE"
+    printf 'GITHUB_COPILOT_TOKEN=%s\n' "$COPILOT_TOKEN"
+  } | kubectl create secret generic review-contributor-secret -n bluefin-system \
     --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
-    --from-literal=GH_TOKEN="${GH_TOKEN_VALUE}" \
-    --from-literal=GITHUB_COPILOT_TOKEN="${COPILOT_TOKEN}" \
-    --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null
+    --from-env-file=/dev/stdin \
+    --dry-run=client -o yaml |
+    kubectl apply --server-side --force-conflicts -f - >/dev/null || return 1
   local legacy_annot
   legacy_annot="$(kubectl get secret review-contributor-secret -n bluefin-system -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}')" || {
     echo "ERROR: failed to read secret annotations." >&2
@@ -975,15 +980,17 @@ scale_cluster_contributors() {
     echo "ERROR: ${deploy_file} not found." >&2
     return 1
   fi
-  kubectl apply -f "$deploy_file" >/dev/null
+  kubectl apply -f "$deploy_file" >/dev/null || return 1
   kubectl set env deployment/review-contributor -n bluefin-system \
     GOOSE_MODEL="$PROFILE_MODEL" \
     GOOSE_THINKING_EFFORT="$PROFILE_EFFORT" \
-    HIVE_HUB="$hub" >/dev/null
-  kubectl scale deployment/review-contributor -n bluefin-system --replicas="$replicas" >/dev/null
+    HIVE_HUB="$hub" >/dev/null || return 1
+  kubectl scale deployment/review-contributor -n bluefin-system --replicas="$replicas" >/dev/null || return 1
   if [[ "$replicas" -gt 0 ]]; then
     echo "✓ scaled cluster contributor workers to ${replicas} (context ${context}, model ${PROFILE_MODEL} at ${PROFILE_EFFORT} effort)."
-    kubectl rollout status deployment/review-contributor -n bluefin-system --timeout=60s 2>/dev/null || true
+    if ! kubectl rollout status deployment/review-contributor -n bluefin-system --timeout=15s 2>/dev/null; then
+      echo "! rollout still progressing after 15s; workers will continue pulling/starting in background." >&2
+    fi
     kubectl get pods -n bluefin-system -o wide
   else
     echo "✓ scaled cluster contributor workers to 0."
@@ -1322,8 +1329,13 @@ review-queue *queue_args:
         exit 1
       fi
     fi
-    DASHBOARD_HIVE_HUB=""
-    if [[ -f "$HIVE_CONTRIBUTOR_ENV" ]]; then
+    DASHBOARD_HIVE_HUB="${HIVE_HUB:-}"
+    if [[ -n "$DASHBOARD_HIVE_HUB" ]]; then
+      if ! valid_hive_hub "$DASHBOARD_HIVE_HUB"; then
+        echo "! inherited HIVE_HUB is unsupported; the dashboard requires one wss:// or https:// URL and will continue without Hive." >&2
+        DASHBOARD_HIVE_HUB=""
+      fi
+    elif [[ -f "$HIVE_CONTRIBUTOR_ENV" ]]; then
       DASHBOARD_HIVE_HUB="$(read_hive_value HIVE_HUB)"
       if [[ -z "$DASHBOARD_HIVE_HUB" ]]; then
         echo "! ${HIVE_CONTRIBUTOR_ENV} has no usable HIVE_HUB; the dashboard will continue without Hive." >&2
@@ -1366,7 +1378,7 @@ review-queue *queue_args:
     CONTAINER_ARGS+=(--env BLUEFIN_REVIEW_INSTANCE)
     if [[ -n "$DASHBOARD_HIVE_HUB" ]]; then
       CONTAINER_ARGS+=(--env "HIVE_HUB=${DASHBOARD_HIVE_HUB}")
-      report_hive_selection
+      report_hive_selection "$DASHBOARD_HIVE_HUB"
     fi
     if [[ "$REVIEW_BACKEND" != codex ]]; then
       [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
@@ -1453,6 +1465,7 @@ turbo-review *args:
     replicas="${REVIEW_SCALE:-3}"
     profile="gemini"
     effort=""
+    CLUSTER_HIVE_HUB=""
     # Leading non-flag arguments are the model profile and thinking effort,
     # exactly as review-queue takes them. Keep "$@" intact for the dashboard.
     # shellcheck disable=SC2086
@@ -1468,6 +1481,9 @@ turbo-review *args:
       scale_cluster_contributors "$replicas" "$profile" "$effort" || {
         echo "! cluster worker scale-out failed; continuing with local review dashboard." >&2
       }
+      if [[ -n "$CLUSTER_HIVE_HUB" ]]; then
+        export HIVE_HUB="$CLUSTER_HIVE_HUB"
+      fi
     else
       echo "! no active Kubernetes context found; continuing with local review dashboard only." >&2
     fi
@@ -1477,15 +1493,13 @@ turbo-review *args:
       echo "=== Cluster contributor status ==="
       if ! command -v kubectl &>/dev/null; then
         echo "! kubectl is unavailable; cluster contributor status was not checked."
-        return 0
-      fi
-      if ! kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
+      elif ! kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
         echo "! unable to read cluster contributor status in bluefin-system."
-        return 0
+      else
+        ready="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+        total="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
+        echo "✓ ${ready:-0}/${total:-0} cluster contributor workers active in bluefin-system."
       fi
-      ready="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
-      total="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
-      echo "✓ ${ready:-0}/${total:-0} cluster contributor workers active in bluefin-system."
       echo "  Stop workers: just review-stop cluster"
       echo "  Check health: just review-doctor"
     }

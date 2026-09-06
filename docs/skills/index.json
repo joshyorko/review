@@ -152,7 +152,7 @@
         "container"
       ],
       "description": "Maintains the five review recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.4",
+      "version": "3.5",
       "last_updated": "2026-09-06",
       "doc_type": "runbook"
     },

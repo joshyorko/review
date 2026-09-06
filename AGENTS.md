@@ -173,8 +173,8 @@ the Hive-managed path.
 
 ## Permitted changes
 
-Agents may change `justfile`, `image/`, `scripts/`,
-`tests/`, `docs/`, `README.md`, `AGENTS.md`, and `.github/workflows/`.
+Agents may change `justfile`, `deploy/`, `image/`, `scripts/`, `tests/`,
+`docs/`, `README.md`, `AGENTS.md`, and `.github/workflows/`.
 
 Do not modify `ublue-os/*`, or commit generated `.agents/skills/` content.
 The generator is the artifact; `projectbluefin/common`'s

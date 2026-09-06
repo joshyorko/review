@@ -326,8 +326,13 @@ run_recipe() {
       -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
       -u REVIEW_QUEUE_NAME -u REVIEW_SCALE -u XDG_STATE_HOME -u FAKE_GIT_TOPLEVEL \
       -u REVIEW_LAB -u REVIEW_LAB_BROKER -u REVIEW_PERSONAL_SKILLS \
+      -u HIVE_HUB \
       -u FAKE_KUBECTL_ANNOTATION_GET_FAIL -u FAKE_KUBECTL_ANNOTATE_FAIL \
       -u FAKE_KUBECTL_DEPLOYMENT_GET_FAIL -u FAKE_KUBECTL_HAS_LAST_APPLIED \
+      -u FAKE_KUBECTL_NAMESPACE_APPLY_FAIL -u FAKE_KUBECTL_SECRET_APPLY_FAIL \
+      -u FAKE_KUBECTL_DEPLOY_APPLY_FAIL -u FAKE_KUBECTL_SET_ENV_FAIL \
+      -u FAKE_KUBECTL_SCALE_FAIL -u FAKE_KUBECTL_ROLLOUT_FAIL \
+      -u FAKE_KUBECTL_REWRITE_HIVE_HUB \
       HOME="$home" PATH="$fake_bin:$system_bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
@@ -650,7 +655,30 @@ printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
 case "$*" in
   "config current-context") printf 'ghost-lab\n' ;;
   "get nodes -o name") printf 'node/ghost\nnode/exo-0\n' ;;
-  "apply -f -" | "apply --server-side --force-conflicts -f -") cat >/dev/null ;;
+  "apply -f -")
+    cat >/dev/null
+    [[ "${FAKE_KUBECTL_NAMESPACE_APPLY_FAIL:-0}" == 1 ]] && exit 45
+    ;;
+  "apply --server-side --force-conflicts -f -")
+    cat >/dev/null
+    [[ "${FAKE_KUBECTL_SECRET_APPLY_FAIL:-0}" == 1 ]] && exit 46
+    ;;
+  "apply -f deploy/review-contributor.yaml")
+    [[ "${FAKE_KUBECTL_DEPLOY_APPLY_FAIL:-0}" == 1 ]] && exit 47
+    ;;
+  "set env deployment/review-contributor -n bluefin-system "*)
+    [[ "${FAKE_KUBECTL_SET_ENV_FAIL:-0}" == 1 ]] && exit 48
+    ;;
+  "scale deployment/review-contributor -n bluefin-system --replicas="*)
+    if [[ -n "${FAKE_KUBECTL_REWRITE_HIVE_HUB:-}" ]]; then
+      sed -i "s|^HIVE_HUB=.*|HIVE_HUB=${FAKE_KUBECTL_REWRITE_HIVE_HUB}|" \
+        "$HOME/.config/hive/contributor.env"
+    fi
+    [[ "${FAKE_KUBECTL_SCALE_FAIL:-0}" == 1 ]] && exit 49
+    ;;
+  "rollout status deployment/review-contributor -n bluefin-system --timeout=15s")
+    [[ "${FAKE_KUBECTL_ROLLOUT_FAIL:-0}" == 1 ]] && exit 50
+    ;;
   "get deployment review-contributor -n bluefin-system")
     [[ "${FAKE_KUBECTL_DEPLOYMENT_GET_FAIL:-0}" == 1 ]] && exit 44
     ;;
@@ -761,6 +789,10 @@ run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
 assert_zero_status "$STATUS" "cluster scale-out must succeed without the legacy annotation"
 assert_file_contains "get secret review-contributor-secret -n bluefin-system" "$kubectl_log"
 assert_file_not_contains "annotate secret review-contributor-secret" "$kubectl_log"
+assert_file_contains "--from-env-file=/dev/stdin" "$kubectl_log"
+assert_file_not_contains "--from-literal=" "$kubectl_log"
+assert_file_not_contains "gho-test-token" "$kubectl_log"
+assert_file_not_contains "copilot-test-token" "$kubectl_log"
 
 begin "review-container cluster: missing GitHub token leaves the Secret unchanged"
 reset_logs
@@ -803,6 +835,33 @@ assert_contains "ERROR: failed to remove legacy plaintext secret annotation." "$
 assert_file_contains "annotate secret review-contributor-secret -n bluefin-system" "$kubectl_log"
 assert_file_not_contains "apply -f deploy/review-contributor.yaml" "$kubectl_log"
 
+for failure_spec in \
+  "namespace apply|FAKE_KUBECTL_NAMESPACE_APPLY_FAIL=1|create secret generic review-contributor-secret" \
+  "Secret apply|FAKE_KUBECTL_SECRET_APPLY_FAIL=1|get secret review-contributor-secret" \
+  "deployment apply|FAKE_KUBECTL_DEPLOY_APPLY_FAIL=1|set env deployment/review-contributor" \
+  "deployment env update|FAKE_KUBECTL_SET_ENV_FAIL=1|scale deployment/review-contributor" \
+  "deployment scale|FAKE_KUBECTL_SCALE_FAIL=1|rollout status deployment/review-contributor"; do
+  IFS='|' read -r mutation_label failure_flag blocked_command <<<"$failure_spec"
+  begin "turbo-review: ${mutation_label} failure aborts cluster mutation sequence"
+  reset_logs
+  RECIPE_ARGS=(--all)
+  run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+    FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0 \
+    "$failure_flag"
+  assert_contains "cluster worker scale-out failed; continuing with local review dashboard" "$OUT"
+  assert_file_not_contains "$blocked_command" "$kubectl_log"
+  assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
+done
+
+begin "review-container cluster: rollout timeout warns after 15 seconds"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token FAKE_KUBECTL_ROLLOUT_FAIL=1
+assert_zero_status "$STATUS" "rollout observation timeout must not fail cluster scale-out"
+assert_file_contains "rollout status deployment/review-contributor -n bluefin-system --timeout=15s" "$kubectl_log"
+assert_contains "! rollout still progressing after 15s; workers will continue pulling/starting in background." "$OUT"
+
 begin "turbo-review: a leading profile configures cluster and dashboard"
 reset_logs
 RECIPE_ARGS=(sol)
@@ -818,6 +877,7 @@ assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 assert_file_contains " queue" "$runner_log"
 assert_contains "3/3 cluster contributor workers active in bluefin-system" "$OUT"
 assert_contains "Stop workers: just review-stop cluster" "$OUT"
+assert_contains "Check health: just review-doctor" "$OUT"
 
 begin "turbo-review: explicit effort and dashboard flags stay intact"
 reset_logs
@@ -847,6 +907,18 @@ assert_file_contains "GOOSE_MODEL=gemini-3.8-flash" "$kubectl_log"
 assert_file_contains "GOOSE_THINKING_EFFORT=high" "$kubectl_log"
 assert_file_contains "queue --repo bluefin" "$runner_log"
 
+begin "turbo-review: dashboard inherits the hub resolved for cluster workers"
+reset_logs
+RECIPE_ARGS=(--all)
+run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0 \
+  FAKE_KUBECTL_REWRITE_HIVE_HUB=wss://changed.invalid/contribute
+assert_file_contains "HIVE_HUB=wss://example.invalid/contribute" "$kubectl_log"
+assert_file_contains "--env HIVE_HUB=wss://example.invalid/contribute" "$runner_log"
+assert_file_not_contains "HIVE_HUB=wss://changed.invalid/contribute" "$runner_log"
+sed -i 's|^HIVE_HUB=.*|HIVE_HUB=wss://example.invalid/contribute|' \
+  "$home/.config/hive/contributor.env"
+
 begin "turbo-review: failed exit status check is reported"
 reset_logs
 RECIPE_ARGS=(--all)
@@ -854,6 +926,8 @@ run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0 \
   FAKE_KUBECTL_DEPLOYMENT_GET_FAIL=1
 assert_contains "unable to read cluster contributor status in bluefin-system" "$OUT"
+assert_contains "Stop workers: just review-stop cluster" "$OUT"
+assert_contains "Check health: just review-doctor" "$OUT"
 
 begin "turbo-review: missing kubectl warns and still launches the dashboard"
 reset_logs
@@ -863,6 +937,8 @@ run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_LAB=0
 assert_nonzero_status "$STATUS" "the fake dashboard runner always exits non-zero"
 assert_contains "no active Kubernetes context found" "$OUT"
 assert_contains "kubectl is unavailable; cluster contributor status was not checked" "$OUT"
+assert_contains "Stop workers: just review-stop cluster" "$OUT"
+assert_contains "Check health: just review-doctor" "$OUT"
 assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
 assert_file_contains "queue --all" "$runner_log"
 
@@ -1796,6 +1872,16 @@ grep -Fq 'kubectl annotate secret review-contributor-secret -n bluefin-system' <
   fail "cluster scale-out must remove stale client-side apply metadata from the Secret"
 grep -Fq 'kubectl.kubernetes.io/last-applied-configuration-' <<<"$cluster_body" ||
   fail "cluster scale-out must remove the last-applied-configuration annotation"
+grep -Fq -- '--from-env-file=/dev/stdin' <<<"$cluster_body" ||
+  fail "cluster scale-out must feed token values through stdin"
+if grep -Fq -- '--from-literal=' <<<"$cluster_body"; then
+  fail "cluster scale-out must not place token values in kubectl arguments"
+fi
+grep -Fq -- '--timeout=15s' <<<"$cluster_body" ||
+  fail "cluster scale-out must cap rollout observation at 15 seconds"
+if grep -q '^[[:space:]]*- name: HIVE_HUB$' "$repo_root/deploy/review-contributor.yaml"; then
+  fail "the deployment manifest must leave HIVE_HUB to the launcher"
+fi
 
 begin "static: turbo-review initializes models and forwards arguments through positional parameters"
 turbo_body="$(sed -n '/^turbo-review \*args:/,/^# Preflight check:/p' "$code")"
@@ -1814,6 +1900,8 @@ grep -Fq 'set -- {{args}}' <<<"$turbo_body" ||
   fail "turbo-review must establish positional arguments before parsing"
 grep -Fq 'just review-queue "$@"' <<<"$turbo_body" ||
   fail "turbo-review must forward dashboard arguments through the positional array"
+grep -Fq 'export HIVE_HUB="$CLUSTER_HIVE_HUB"' <<<"$turbo_body" ||
+  fail "turbo-review must export the cluster-resolved Hive hub to review-queue"
 if grep -Fq 'just review-queue {{args}}' <<<"$turbo_body"; then
   fail "turbo-review must not render arguments directly into the review-queue command"
 fi
