@@ -912,7 +912,7 @@ add_lab_container_args() {
 }
 
 scale_cluster_contributors() {
-  local replicas="$1" profile="${2:-gemini}" effort="${3:-high}"
+  local replicas="$1" profile="${2:-gemini}" effort="${3:-}"
   command -v kubectl &>/dev/null || {
     echo "ERROR: kubectl is required for cluster contributor scale-out." >&2
     return 1
@@ -934,15 +934,25 @@ scale_cluster_contributors() {
     return 1
   fi
 
-  resolve_copilot_token
   resolve_gh_token
+  if [[ -z "${GH_TOKEN_VALUE:-}" ]]; then
+    report_missing_gh_token
+    echo "ERROR: refusing to update the cluster Secret without a GitHub token." >&2
+    return 1
+  fi
+  resolve_copilot_token
+  if [[ -z "${COPILOT_TOKEN:-}" ]]; then
+    report_missing_copilot_credential
+    echo "ERROR: refusing to update the cluster Secret without a Copilot credential." >&2
+    return 1
+  fi
 
   kubectl create namespace bluefin-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   kubectl create secret generic review-contributor-secret -n bluefin-system \
     --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
-    --from-literal=GH_TOKEN="${GH_TOKEN_VALUE:-}" \
-    --from-literal=GITHUB_COPILOT_TOKEN="${COPILOT_TOKEN:-}" \
+    --from-literal=GH_TOKEN="${GH_TOKEN_VALUE}" \
+    --from-literal=GITHUB_COPILOT_TOKEN="${COPILOT_TOKEN}" \
     --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null
   local legacy_annot
   legacy_annot="$(kubectl get secret review-contributor-secret -n bluefin-system -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}')" || {
@@ -1429,10 +1439,25 @@ turbo-review *args:
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}
+    TOOL="{{tool_env}}"
+    GEMINI_MODEL="{{gemini_model}}"
+    OPUS_MODEL="{{opus_model}}"
+    OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
+    SOL_MODEL="{{sol_model}}"
+    K3_MODEL="{{k3_model}}"
+    K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
     replicas="${REVIEW_SCALE:-3}"
     profile="gemini"
-    effort="high"
+    effort=""
+    # Leading non-flag arguments are the model profile and thinking effort,
+    # exactly as review-queue takes them. Keep "$@" intact for the dashboard.
+    # shellcheck disable=SC2086
+    set -- {{args}}
+    if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then
+      profile="$1"
+      if [[ $# -gt 1 && "$2" != -* && "$2" != */* ]]; then effort="$2"; fi
+    fi
 
     echo "=== Launching review turbo ==="
     if command -v kubectl &>/dev/null && [[ -n "$(kubectl config current-context 2>/dev/null || true)" ]]; then
@@ -1447,20 +1472,25 @@ turbo-review *args:
     report_cluster_exit_status() {
       echo ""
       echo "=== Cluster contributor status ==="
-      if command -v kubectl &>/dev/null && kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
-        ready="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
-        total="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
-        echo "✓ ${ready:-0}/${total:-0} cluster contributor workers active in bluefin-system."
-        echo "  Stop workers: just review-stop cluster"
-        echo "  Check health: just review-doctor"
+      if ! command -v kubectl &>/dev/null; then
+        echo "! kubectl is unavailable; cluster contributor status was not checked."
+        return 0
       fi
+      if ! kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
+        echo "! unable to read cluster contributor status in bluefin-system."
+        return 0
+      fi
+      ready="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+      total="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
+      echo "✓ ${ready:-0}/${total:-0} cluster contributor workers active in bluefin-system."
+      echo "  Stop workers: just review-stop cluster"
+      echo "  Check health: just review-doctor"
     }
     trap report_cluster_exit_status EXIT
 
     echo "✓ starting maintainer review dashboard in foreground..."
     # Execute review-queue as a child process to isolate environment variables and traps.
-    # shellcheck disable=SC2086
-    just review-queue {{args}}
+    just review-queue "$@"
 
 # Preflight check: is this machine actually ready for 'just review-container'?
 # Starts no agent and mounts no credential.
