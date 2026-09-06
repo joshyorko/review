@@ -594,8 +594,8 @@ analyzer_out() {
 # stub records its contents at invocation time.
 mkdir -p "$scratch/overlay/.agents/checks"
 printf 'SCOPED REVIEW PROMPT\n' >"$scratch/overlay/.agents/REVIEW.md"
-cp "$repo_root/image/review-scope/checks/bluefin-doctrine.md" \
-  "$scratch/overlay/.agents/checks/bluefin-doctrine.md"
+cp "$repo_root/image/review-scope/checks/"*.md \
+  "$scratch/overlay/.agents/checks/"
 
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
@@ -640,6 +640,10 @@ argv_scope="$(tr '\0' '\n' <"$scratch/argv-scope")"
 [[ "$argv_scope" != *'--instructions'* ]]
 grep -q '^\.agents/REVIEW\.md$' "$scratch/scope-listing"
 grep -q '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/security\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/correctness\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/test-coverage\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/simplicity\.md$' "$scratch/scope-listing"
 grep -q '^\.agents/checks/00-repository-context\.md$' "$scratch/scope-listing"
 repository_context_line="$(grep -n '^\.agents/checks/00-repository-context\.md$' "$scratch/scope-listing" | cut -d: -f1)"
 bluefin_doctrine_line="$(grep -n '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing" | cut -d: -f1)"

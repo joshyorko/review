@@ -30,8 +30,8 @@ ARG PI_SHA512=817421dd26999964df54c738028e7e2c66d578abf3c8eeeda25a24d272ec660abd
 # `canary` is a mutable release tag, not an artifact identity. CI resolves
 # these from the release asset API for every build and passes them as build
 # inputs; these defaults keep a local build pinned to a known attested asset.
-ARG GOOSE_X86_64_SHA256=db1ae20729ac87ebff0e55d161ec88515d92e580ddd1b0b4371a162f16d05180
-ARG GOOSE_AARCH64_SHA256=187e0564d735cd99678f471c303546df64eafab6db851421781c96b8700e9792
+ARG GOOSE_X86_64_SHA256=14971bf6f9b48d649379c9df42fbd5038ad17f887ff5724ab89492ff35f52881
+ARG GOOSE_AARCH64_SHA256=7da3f5314514cab65caaf7864dc7b7e694def1a4eee090cf05c0ce2041ffc099
 ARG UV_VERSION=0.12.3
 ARG UV_X86_64_SHA256=0643b9fb8c9fb27458e709ce6ff939695013c41975ff7b02d3f3b138d8d4bdb3
 ARG UV_AARCH64_SHA256=fa513fca1eb2913334c944fe9adbdd410274a1cbe8dd05d03699a9eb85311d4e

@@ -223,41 +223,27 @@ distinct states. `[o]` is only an optional browser escape hatch.
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
   summaries all cost zero extra requests.
-- **Classify from evidence, never from a title.** `MECHANICAL` marks the one
-  low-judgment operation the dashboard can prove is safe: merging the base
-  into a green, mergeable branch that is merely behind. It requires the
-  configured Renovate author (`BLUEFIN_REVIEW_RENOVATE_BOTS`), Renovate's own
-  declared update type (`digest`, `pin`, `patch`, or `minor` — never `major`),
-  an open non-draft pull request, `MERGEABLE` + `BEHIND`, and every reported
-  check complete and green. `[U]` selects exactly those stops for the existing
-  gated `[u]`. **`MECHANICAL` describes updateability, not approval and not
-  merge safety.** The earlier `BATCHABLE` tag matched dependency-shaped
-  titles — duplicate evidence about the subject, silent about whether the
-  branch can be brought current; `dependency_subject()` survives for
-  duplicate detection only.
-- **Distinguish the merge paths.** `a` asks Hive to create the App-authored
-  exact-head approval and apply `lgtm` to the highlighted pull request, an
-  opt-in to its sweep; it never touches a selection. On a selection, `A`
-  dispatches one landing agent for the whole batch; without a selection `A`
-  does nothing. `w` opens the read-only batch queue. `m` squashes now and is
-  gated on GitHub's `push` permission, read per repository. `L` leaves a
-  review and merges nothing: a review that can only be given by also queueing
-  or merging is not a review.
+- **Classify from evidence, never from a title.** `MECHANICAL` marks
+  merging the base into a green, mergeable branch that is merely behind. It
+  requires a Renovate author, update type (`digest`, `pin`, `patch`, `minor`),
+  an open non-draft pull request, `MERGEABLE` + `BEHIND`, and all checks green.
+  `[U]` selects those stops for gated `[u]`.
+- **Distinguish the merge paths.** `a` requests Hive's App-authored approval
+  and applies `lgtm`. On a selection, `A` dispatches one landing agent for the
+  batch; without a selection `A` no-ops. `w` opens the batch queue. `m` squashes
+  now (gated on `push` permission). `L` leaves a review and merges nothing.
+- **Keyboard reference modal on `?`**: `?` opens `HelpScreen`, a modal
+  grouping navigation, review, batching, and mutations with cyan/magenta
+  badges; dismisses cleanly with `?`, `q`, or `Esc`.
 - **Treat the Hive API as JSON, not a browser.** The read-only status probe
   reports missing hub configuration, missing credentials, network failure,
   authentication, authorization, edge/login redirects, malformed responses,
-  and server failure as separate concise states. A malformed response names
-  its own shape — status, content type, byte count, and a bounded redacted
-  body excerpt in the failure state and the trace — so an intercepted SPA
-  page reads differently from invalid JSON or a JSON array. The queue POST
-  never follows a redirect and succeeds only when a bounded JSON response
-  explicitly says `queued`; the typed pull-request-number gate remains the
-  authority boundary. A failed probe leaves the queue and review evidence
-  visible, marks retained worker assignments as last-known rather than
-  current, and says current assignment state is unknown. Probes run only at
-  startup or after an explicit maintainer refresh; direct GitHub review and
-  merge stay available while Hive is down. Hosted queueing remains blocked by
-  the ingress defect tracked in #258.
+  and server failure as separate concise states. The queue POST never follows a
+  redirect and succeeds only when a bounded JSON response explicitly says
+  `queued`; the typed pull-request-number gate remains the authority boundary.
+  A failed probe leaves the queue and review evidence visible and marks
+  retained worker assignments as last-known. Probes run only at startup or
+  after an explicit refresh; direct GitHub review and merge stay available.
 
 ## Batch landing
 
@@ -267,12 +253,22 @@ command, Enter dispatches, Esc aborts — no typed count. A typed-number gate
 earns its ceremony on a single irreversible command; on a batch reviewed
 row by row it teaches nothing.
 
-One `LandingTask` (image/tui/landing.py) owns the whole selection. Confirmed
-batches enter `app.landing_queue`; the repository-aware dispatcher admits up
-to two agents whose repository sets are disjoint, while a batch touching a
-running repository waits. The agent is Goose's documented one-shot (`goose run --no-session -i
+Multi-repository selections partition into independent per-repository
+`LandingTask`s, unlocking parallel execution across separate repository lanes.
+Confirmed batches enter `app.landing_queue`; the repository-aware dispatcher
+admits up to `BLUEFIN_REVIEW_CONCURRENT_LANDINGS` (defaults to 6) concurrent
+agents whose repository sets are disjoint, while a batch touching a running
+repository waits. This enables the maintainer to review the queue concurrently
+in their client dashboard across up to 6 parallel review/landing lanes while
+the 6 cluster worker pods process assigned work on Kubernetes simultaneously.
+The agent is Goose's documented one-shot (`goose run --no-session -i
 <prompt-file>`, overridable with `BLUEFIN_REVIEW_LANDING_COMMAND`), run in
-its own process group so `[x]` stops it whole.
+its own process group so `[x]` stops it whole. On `ReviewScreen`, the decision
+card renders diff footprint, per-check breakdown, and findings with severity
+badges. Pressing `f` enqueues an automated background fix-and-land agent seeded
+with the review findings, returning immediately to the queue so the maintainer
+can pile up background fixes; `F` prompts for guidance before dispatching. Fix
+agents repair defects, verify green CI, re-review, and land.
 
 The agent reports, the screen polls — and the agent never writes the
 status file directly: every state change goes via the module's report

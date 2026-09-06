@@ -1,7 +1,7 @@
 ---
 name: goose-context
-version: "2.3"
-last_updated: 2026-08-25
+version: "2.4"
+last_updated: 2026-09-06
 id: goose-context
 one_line_purpose: Keep Goose config and skill routing working in the container.
 entry_point: docs/skills/goose-context.md
@@ -14,7 +14,7 @@ tags: [goose, context7, skills, mcp, config]
 description: "Keeps Goose configuration and global and repository skill routing available in the container, and records how Context7 reaches agents today. Use when Goose loses its config or misses a skill."
 metadata:
   type: reference
-  context7-sources: [/aaif-goose/goose, /websites/cli_github_manual]
+  context7-sources: [/aaif-goose/goose, /addyosmani/agent-skills, /websites/cli_github_manual]
 ---
 
 # Goose Context
@@ -138,12 +138,44 @@ repositories keep their checks in the shared overlay instead, and the
 additive-flag gap is filed upstream as
 [aaif-goose/goose#11060](https://github.com/aaif-goose/goose/issues/11060).
 
-Two consequences:
+The context model therefore has two layers:
 
-1. Projecting an org skill into `~/.agents/skills` puts it in *session*
-   context only. It does nothing for a review.
-2. The reviewed repository belongs to someone else, so writing `.agents/`
-   files into it is not available as a fix.
+| Layer | Discovery | Purpose |
+|---|---|---|
+| Review checks | `image/review-scope/checks/`, deployed to `/opt/bluefin/review-scope/.agents/checks/` and selected through `--check-scope` | Specialized subagents used only by `goose review`. |
+| Interactive skills | `~/.agents/skills/<id>/SKILL.md` | On-demand guidance for interactive contributor sessions. |
+
+The image generates Bluefin's interactive skills from the pinned
+`projectbluefin/common` catalog. Compatible community skills installed through
+`skills.sh` or another open catalog can join the same session layer. Neither
+source changes a review: projecting any skill into `~/.agents/skills/` does
+nothing for `goose review`, and the reviewed repository belongs to someone
+else, so writing `.agents/` files into its checkout is not available as a fix.
+`scripts/generate-skills.py` accepts repeatable `--index` factory manifests
+and `--source` values naming a local manifest, a local `SKILL.md` or standard
+skill directory, or an HTTP(S) URL. Local standard directories retain sibling
+`scripts/`, `references/`, and `assets/` content; projection rejects traversal,
+symlinked content, duplicate ids, and source/output overlap.
+
+The image instead deploys five specialized review check subagents:
+
+| Check | Responsibility |
+|---|---|
+| `bluefin-doctrine` | Enforce claimed scope, repository conventions, reviewable sizing, and consistency among implementation, tests, and durable documentation. |
+| `security` | Find high-confidence exploitable vulnerabilities, unsafe operations, credential leaks, and privilege-boundary failures. |
+| `correctness` | Find functional defects, masked failures, boundary mistakes, concurrency hazards, and resource leaks. |
+| `test-coverage` | Find changed behavior without deterministic regression, negative, boundary, fidelity, or isolation coverage. |
+| `simplicity` | Find premature abstractions, dead or redundant code, avoidable reimplementations, and unrelated diff growth. |
+
+Goose's native review orchestrator dispatches the checks as parallel
+subprocesses, up to four at once. Five checks therefore complete in concurrent
+waves instead of five serial passes. `just turbo-review` adds worker-level
+parallelism by scaling three cluster contributors by default while the local
+maintainer dashboard remains in the foreground. The cluster workers continue
+to receive independent Hive assignments; the local `goose review` process
+independently uses the parallel check orchestrator. Together these layers
+increase throughput without changing Hive's assignment authority or the
+human's review authority.
 
 Use `--instructions`, which is additive. `--prompt` replaces Goose's embedded
 review prompt wholesale and throws away its correctness and code-quality
@@ -157,7 +189,8 @@ export, and omits any entry whose file is absent.
 ## Skill References Must Be Projected Too
 
 `scripts/generate-skills.py` writes `SKILL.md` from each manifest
-`entry_point`. Skill bodies also link sibling material as
+`entry_point` and copies the rest of a local standard skill directory. Remote
+skill bodies also link sibling material as
 `references/<name>.md`, and the manifest does not list those files, so they
 are resolved from the body. Without that, `pr-review` alone shipped four
 dangling links. Reference names come from a fetched body rather than the

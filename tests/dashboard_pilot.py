@@ -951,13 +951,6 @@ async def main() -> int:
             check(app.screen is root_screen, "q must close ReviewScreen")
             return str(status.render()), set(status.classes), str(card.render())
 
-    # ── a selected batch dispatches one landing agent behind one gate ────
-    # The selection is the review, so the batch gate is proportionate: the
-    # whole plan and the exact command on one screen, Enter to dispatch —
-    # not a typed count. One agent owns all selected pull requests, reports
-    # per-PR state to its status file, and the queue screen polls that file.
-    # This stub reports through the module's report CLI exactly as the brief
-    # instructs, so the happy path proves the shipped reporter end to end.
     # The stubs below keep writing raw JSONL on purpose: the dashboard must
     # still survive the malformed or partial records the CLI refuses.
     landing_py = TUI_DIR / "landing.py"
@@ -979,6 +972,14 @@ async def main() -> int:
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{landing_stub} @PROMPT"
     os.environ["BLUEFIN_REVIEW_INSTANCE"] = "review-queue-pilot"
+
+    # ── a selected batch dispatches one landing agent behind one gate ────
+    # The selection is the review, so the batch gate is proportionate: the
+    # whole plan and the exact command on one screen, Enter to dispatch —
+    # not a typed count. One agent owns all selected pull requests, reports
+    # per-PR state to its status file, and the queue screen polls that file.
+    # This stub reports through the module's report CLI exactly as the brief
+    # instructs, so the happy path proves the shipped reporter end to end.
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -5534,6 +5535,21 @@ async def main() -> int:
                 f"the card must preserve the queue action, got {app.screen.commands}",
             )
             await pilot.press("escape")
+            await pilot.pause()
+
+        # ── [f] on ReviewScreen dispatches an auto-fix & land agent in background ──
+        fix_stop = app.stops[0]
+        fix_stop.review_result = tui.ReviewResult(1, "findings", findings=({"severity": "high", "title": "fix me"},), provenance={})
+        fix_screen = tui.ReviewScreen(fix_stop)
+        fix_screen.finished = True
+        app.push_screen(fix_screen)
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ReviewScreen), "ReviewScreen must be active")
+        await pilot.press("f")
+        await pilot.pause()
+        check(any(t.stops[0].number == fix_stop.number for t in app.landing_queue), "[f] on decision card must enqueue background fix task")
+        check(not isinstance(app.screen, tui.ReviewScreen), "[f] must dismiss ReviewScreen back to queue")
+        app.landing_queue.clear()
 
     # ── the steer box: typed text reaches the review as instructions ─────
     review_stub(0, "0 findings")
@@ -5826,7 +5842,7 @@ async def main() -> int:
             "complete", "complete", "complete", "complete", "complete", "complete", "complete",
             "incomplete",
             "complete", "complete", "complete", "complete", "complete", "complete", "complete",
-            "incomplete", "failed", "complete", "incomplete", "complete", "stopped", "stopped",
+            "incomplete", "failed", "complete", "complete", "incomplete", "complete", "stopped", "stopped",
             "complete", "error",
         ],
         f"every review must be traced with its outcome, got {outcomes}",

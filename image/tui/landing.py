@@ -154,6 +154,119 @@ def new_task(stops: list, login: str) -> LandingTask:
     return task
 
 
+def fix_prompt(task: LandingTask, findings: list[dict], steer: str = "") -> str:
+    stop = task.stops[0]
+    finding_lines = []
+    for f in findings:
+        sev = str(f.get("severity", "medium")).upper()
+        path = f.get("file") or f.get("path") or "?"
+        line = f.get("line") or f.get("line_start") or "?"
+        summary = f.get("summary") or f.get("title") or "unspecified issue"
+        check = f.get("check", "review")
+        finding_lines.append(f"- [{sev}] {path}:{line} ({check}): {summary}")
+    findings_block = (
+        "\n".join(finding_lines)
+        if finding_lines
+        else "- No specific findings; verify general correctness and clean tests."
+    )
+    steer_block = f"\nMaintainer guidance:\n{steer}\n" if steer else ""
+    reporter = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))}"
+    status = shlex.quote(task.status_path)
+
+    return f"""You are the Bluefin review fix-and-land agent. The maintainer reviewed
+pull request {stop.key} and hit [f] to dispatch an automated fix-and-land run.
+Your mission is to repair the evidenced findings, verify that CI and checks are green,
+re-review, and land the pull request.
+
+PR: {stop.key} — {stop.title}
+Repository: {stop.repository}
+PR Number: {stop.number}
+{steer_block}
+Evidenced review findings to repair:
+{findings_block}
+
+Execute the following end-to-end loop:
+
+1. Report diagnosing:
+   {reporter} report --status {status} event --pr "{stop.key}" --state "diagnosing" --note "inspecting PR and findings"
+   Inspect the pull request: `gh pr view {stop.number} --repo "{stop.repository}"` and `gh pr diff {stop.number} --repo "{stop.repository}"`.
+
+2. Check out the PR branch in a dedicated scratch directory and fix each evidenced finding:
+   {reporter} report --status {status} event --pr "{stop.key}" --state "fixing" --note "applying fixes for findings"
+   WORKDIR=$(mktemp -d /tmp/pr-{stop.number}-XXXXXX)
+   gh repo clone "{stop.repository}" "$WORKDIR"
+   cd "$WORKDIR"
+   gh pr checkout {stop.number} --repo "{stop.repository}"
+   Keep changes surgical, minimal (Ponytail doctrine), and scoped strictly to the reported defects.
+   Run existing project tests and linters to verify the fix works and introduces no regressions.
+   Commit and push the fixes to the pull request branch:
+   git push origin HEAD
+   cd / && rm -rf "$WORKDIR"
+
+3. Wait for CI checks to turn green:
+   {reporter} report --status {status} event --pr "{stop.key}" --state "waiting-ci" --note "waiting for CI on pushed fix"
+   Check status: `gh pr checks {stop.number} --repo "{stop.repository}"`.
+   If a check failed and needs rerun, verify the run's status is `completed` before rerunning:
+   `gh run view <id> --repo "{stop.repository}" --json status,conclusion`
+   Only when status is `completed`, rerun with `gh run rerun <id> --failed --repo "{stop.repository}"`.
+   Watch with `gh run watch <id> --repo "{stop.repository}" --exit-status`. If watch times out while run is still in-progress, continue watching rather than treating timeout as failure.
+
+4. Re-review to confirm findings are cleared. When checks are green and the PR is mergeable, land it:
+   {reporter} report --status {status} event --pr "{stop.key}" --state "merging" --note "checks green; approving and merging"
+   Approve it: `gh pr review {stop.number} --repo "{stop.repository}" --approve --body "Approved by @{task.login} after automated fix-and-land run."`
+   Then squash-merge: `gh pr merge {stop.number} --repo "{stop.repository}" --squash`. If branch protection or merge requirements block direct merge,
+   add the `lgtm` label: `gh pr edit {stop.number} --repo "{stop.repository}" --add-label lgtm`.
+
+5. Publication & completion:
+   If this repository publishes an image package (convention :stable or :latest), report `awaiting-stable`
+   and watch for the publication. Once verified, report:
+   {reporter} report --status {status} event --pr "{stop.key}" --state "merged" --note "fixed, verified, and landed"
+   Finally report task done:
+   {reporter} report --status {status} done --note "PR {stop.key} fix-and-land run complete"
+"""
+
+
+def new_fix_task(
+    stop,
+    findings: list[dict],
+    login: str,
+    steer: str = "",
+    root: str = "",
+    command: str = "",
+    backend: str = "goose",
+) -> LandingTask:
+    directory = root or landing_state_dir()
+    instance = re.sub(
+        r"[^A-Za-z0-9_.-]+", "-", os.environ.get("BLUEFIN_REVIEW_INSTANCE", "")
+    ).strip("-.")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = f"{stamp}-{instance}-fix" if instance else f"{stamp}-fix"
+    task_id = base
+    suffix = 2
+    while os.path.exists(os.path.join(directory, f"{task_id}.prompt.md")):
+        task_id = f"{base}-{suffix}"
+        suffix += 1
+    task = LandingTask(
+        task_id=task_id,
+        stops=[stop],
+        login=login,
+        prompt_path=os.path.join(directory, f"{task_id}.prompt.md"),
+        status_path=os.path.join(directory, f"{task_id}.jsonl"),
+        log_path=os.path.join(directory, f"{task_id}.log"),
+        started=time.monotonic(),
+        phase="",
+    )
+    with open(task.prompt_path, "w", encoding="utf-8") as handle:
+        handle.write(fix_prompt(task, findings, steer))
+    with open(task.status_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"expect": task.keys, "ts": int(time.time()), "fix": True}, separators=(",", ":"))
+            + "\n"
+        )
+    task.command = landing_command(task)
+    return task
+
+
 # fsdk-containers#164 ships skopeo in the base; it deletes the anonymous
 # registry check in step 5 below.
 def landing_prompt(task: LandingTask) -> str:
@@ -176,16 +289,23 @@ do not ask for more.
 
 For each pull request, in order:
 
-1. Inspect it: `gh pr view` and `gh pr checks`.
+1. Inspect it with repository-qualified commands: `gh pr view <number> --repo <owner>/<repo>`
+   and `gh pr checks <number> --repo <owner>/<repo>`.
 2. Repair mechanical CI failures only — a stale sha256 after a version bump,
-   a lockfile, formatting. Push the fix to the PR branch when you have
-   permission. Never rewrite the PR's purpose.
-3. Rerun flaky checks with `gh run rerun`; then wait for green.
+   a lockfile, formatting. If applying fixes, operate in a scratch workdir:
+   `WORKDIR=$(mktemp -d /tmp/landing-XXXXXX) && gh repo clone <owner>/<repo> "$WORKDIR" && cd "$WORKDIR" && gh pr checkout <number> --repo <owner>/<repo>`.
+   Push the fix to the PR branch when you have permission: `git push origin HEAD`, then clean up.
+   Never rewrite the PR's purpose.
+3. Rerun flaky checks: before invoking `gh run rerun <id> --failed --repo <owner>/<repo>`,
+   verify that the run status is completed with `gh run view <id> --repo <owner>/<repo> --json status,conclusion`.
+   Never rerun while status is still `in_progress` or `queued`.
+   Wait for completion with `gh run watch <id> --repo <owner>/<repo> --exit-status`. If watch times out
+   while the run is still active, continue watching rather than treating the timeout as failure.
 4. When checks are green and the PR is mergeable, approve it:
-   `gh pr review --approve --body "Approved by @{task.login} for Hive auto-merge on green CI."`
-   then squash-merge: `gh pr merge --squash`. If GitHub refuses (branch
+   `gh pr review <number> --repo <owner>/<repo> --approve --body "Approved by @{task.login} for Hive auto-merge on green CI."`
+   then squash-merge: `gh pr merge <number> --repo <owner>/<repo> --squash`. If GitHub refuses (branch
    protection, review requirements), do not force anything — add the `lgtm`
-   label instead and move on. GitHub computes mergeability asynchronously,
+   label instead: `gh pr edit <number> --repo <owner>/<repo> --add-label lgtm` and move on. GitHub computes mergeability asynchronously,
    so `mergeable: UNKNOWN` is a cache-warming placeholder, never a verdict:
    re-query with backoff (about every 10 seconds for up to a minute, and
    name the wait in your note) until GitHub commits to an answer, and only

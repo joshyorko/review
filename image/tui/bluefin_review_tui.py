@@ -97,7 +97,9 @@ TRACE_PATH = os.path.join(
 )
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
-MAX_CONCURRENT_LANDINGS = 2
+MAX_CONCURRENT_LANDINGS = int(
+    os.environ.get("BLUEFIN_REVIEW_CONCURRENT_LANDINGS", "6")
+)
 HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
@@ -1784,6 +1786,79 @@ class HarnessTakeoff(ModalScreen[str | None]):
                      if option.harness.branding.harness_id == value), None)
 
 
+class HelpScreen(ModalScreen[None]):
+    """A clean, beautifully structured keyboard shortcut reference."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "close"),
+        Binding("q", "dismiss", "close"),
+        Binding("question_mark", "dismiss", "close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-box"):
+            yield Static("PROJECT BLUEFIN REVIEW · KEYBOARD REFERENCE", id="help-title")
+            with Horizontal(id="help-columns"):
+                with Vertical(classes="help-col"):
+                    yield Static("NAVIGATION", classes="help-section-title")
+                    yield Static("[bold cyan]j[/] / [bold cyan]k[/]       Next / previous PR", classes="help-row")
+                    yield Static("[bold cyan]g[/] / [bold cyan]G[/]       First / last PR", classes="help-row")
+                    yield Static("[bold cyan]ctrl+d/u[/]   Page down / up", classes="help-row")
+                    yield Static("[bold cyan]h[/] / [bold cyan]l[/]       Switch panes", classes="help-row")
+                    yield Static("[bold cyan]enter[/]     Inspect diff", classes="help-row")
+                    yield Static("[bold cyan]f[/]         Filter queue", classes="help-row")
+                    yield Static("[bold cyan]R[/]         Refresh queue & Hive", classes="help-row")
+
+                    yield Static("REVIEW & DETAILS", classes="help-section-title")
+                    yield Static("[bold cyan]r[/]         Start automated review", classes="help-row")
+                    yield Static("[bold cyan]f[/] / [bold cyan]F[/]       Auto-fix & land / steer fix", classes="help-row")
+                    yield Static("[bold cyan]/[/]         Steer review with prompt", classes="help-row")
+                    yield Static("[bold cyan]v[/]         View full diff", classes="help-row")
+                    yield Static("[bold cyan]o[/]         Open in browser", classes="help-row")
+                    yield Static("[bold cyan]y[/]         Copy review context", classes="help-row")
+                    yield Static("[bold cyan]c[/]         Comment on PR", classes="help-row")
+
+                with Vertical(classes="help-col"):
+                    yield Static("BATCH & LANDING", classes="help-section-title")
+                    yield Static("[bold cyan]b[/]         Toggle PR batch select", classes="help-row")
+                    yield Static("[bold cyan]A[/]         Land selected batch", classes="help-row")
+                    yield Static("[bold cyan]w[/]         Watch running agents", classes="help-row")
+                    yield Static("[bold cyan]P[/]         Final review policy", classes="help-row")
+                    yield Static("[bold cyan]U[/]         Select mechanical updates", classes="help-row")
+
+                    yield Static("MUTATIONS & DECISIONS", classes="help-section-title")
+                    yield Static("[bold cyan]a[/]         Approve + queue (lgtm)", classes="help-row")
+                    yield Static("[bold cyan]m[/]         Merge now (maintainer)", classes="help-row")
+                    yield Static("[bold cyan]u[/]         Update clean branch", classes="help-row")
+                    yield Static("[bold cyan]M[/]         Resolve duplicates", classes="help-row")
+                    yield Static("[bold cyan]x[/]         Reject and close", classes="help-row")
+                    yield Static("[bold cyan]L[/]         Submit GitHub review", classes="help-row")
+
+            yield Static("[dim]Press [bold]?[/bold], [bold]q[/bold], or [bold]Esc[/bold] to return to the dashboard[/dim]", id="help-footer")
+
+
+class FixSteerModal(ModalScreen[str | None]):
+    """Prompt maintainer for optional guidance before background fix-and-land."""
+
+    BINDINGS = [
+        Binding("ctrl+s", "submit", "submit", priority=True),
+        Binding("enter", "submit", "submit", priority=True),
+        *back_bindings("dismiss(None)"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("guidance for background fix-and-land (empty for default):")
+            yield Input(id="fix-steer-input")
+            yield Static("[enter] dispatch · [esc] cancel", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
+
+
 class ReviewScreen(Screen):
     """One Goose review, streamed live.
 
@@ -1797,6 +1872,8 @@ class ReviewScreen(Screen):
     BINDINGS = [
         *back_bindings("close"),
         Binding("x", "stop", "stop review"),
+        Binding("f", "spawn_fix", "fix & land in background"),
+        Binding("F", "steer_fix", "steer fix & land"),
         Binding("L", "leave_review", "leave a review"),
         Binding("a", "queue", "approve and queue"),
         Binding("m", "merge_now", "merge now"),
@@ -2026,8 +2103,14 @@ class ReviewScreen(Screen):
             f"{escape(state)} ({elapsed}s) — {escape('[escape]')} closes"
         )
         finding_total = sum(card.counts.values())
+        diff_info = (
+            f"+{self.live_snapshot.get('additions', '?')} "
+            f"-{self.live_snapshot.get('deletions', '?')} "
+            f"across {self.live_snapshot.get('changedFiles', '?')} file(s)"
+            + (f" by @{escape(stop.author)}" if stop.author else "")
+        )
         lines = [
-            f"{card.state.value.upper()}  {escape(stop.key)}",
+            f"{card.state.value.upper()}  {escape(stop.key)}  ({diff_info})",
             f"what changed  {escape(card.summary.what_changed)}",
             f"risk/impact  {escape(card.summary.risk_impact)}",
             f"confidence  {escape(card.summary.ci_merge_state)} · head "
@@ -2048,18 +2131,25 @@ class ReviewScreen(Screen):
         ]
         if delta_card:
             lines.extend(delta_card)
-        for finding in card.findings[:5]:
+        for finding in card.findings[:8]:
+            sev = finding.severity.lower()
+            badge = "🔴" if sev == "critical" else "🟠" if sev == "high" else "🟡" if sev == "medium" else "⚪"
             lines.append(
                 f"{finding.severity.upper()}  "
                 f"{escape(finding.file)}:{finding.line}  "
-                f"{escape(finding.title)}"
+                f"{escape(finding.title)}  {badge}"
             )
+        if len(card.findings) > 8:
+            lines.append(f"  … {len(card.findings) - 8} more findings (press [e] for full evidence)")
         verified = sum(1 for item in card.verification if item.state == "verified")
         unverified = sum(1 for item in card.verification if item.state == "unverified")
         lines.append(
             f"checks  {verified} verified / {unverified} unverified / "
             f"{len(card.verification)} reported"
         )
+        check_items = [f"{('✓' if item.state == 'verified' else '✗')} {escape(item.name)}" for item in card.verification]
+        if check_items:
+            lines.append("        " + "  ".join(check_items[:6]))
         lines.append(
             f"overlap {card.duplicate_count} duplicate / "
             f"{card.shared_file_count} shared-file hazard"
@@ -2074,7 +2164,8 @@ class ReviewScreen(Screen):
             f"{escape(card.provenance.model or '?')}"
         )
         lines.append(
-            "actions  "
+            "actions   "
+            f"{escape('[f]')} fix & land  {escape('[F]')} steer fix  "
             f"{escape('[L]')} review  {escape('[a]')} approve+queue  "
             f"{escape('[m]')} merge  {escape('[u]')} update  "
             f"{escape('[e]')} evidence"
@@ -2273,6 +2364,35 @@ class ReviewScreen(Screen):
     def action_update_branch(self) -> None:
         self.return_to_queue(self.app.action_update_branch)
 
+    def action_spawn_fix(self) -> None:
+        """Spawn background fix-and-land subagent for evidenced findings."""
+        if not self.finished:
+            self.notify("review still running — [x] stops it")
+            return
+        self._dispatch_fix(steer="")
+
+    def action_steer_fix(self) -> None:
+        """Prompt for guidance, then spawn background fix-and-land subagent."""
+        if not self.finished:
+            self.notify("review still running — [x] stops it")
+            return
+
+        def with_steer(value: str | None) -> None:
+            if value is not None:
+                self._dispatch_fix(steer=value.strip())
+
+        self.app.push_screen(FixSteerModal(), with_steer)
+
+    def _dispatch_fix(self, steer: str = "") -> None:
+        if not self.app.self_login:
+            self.notify("your GitHub login is unknown; needed for agent fix.", severity="warning")
+            return
+        findings = list(self.stop_record.review_result.findings if self.stop_record.review_result else [])
+        task = landing.new_fix_task(self.stop_record, findings, self.app.self_login, steer=steer)
+        self.app.enqueue_landing(task)
+        self.notify(f"dispatched auto-fix & land for {self.stop_record.key} [w]")
+        self.dismiss()
+
     def action_close(self) -> None:
         # A review takes minutes. Closing mid-run would throw that away with a
         # keystroke, so an unfinished review has to be stopped deliberately.
@@ -2319,6 +2439,16 @@ class ReviewDashboard(App):
     }
     #review-log { border: solid $secondary; }
     #takeoff-box { border: heavy cyan; background: $surface; width: 80%; height: auto; padding: 1 2; margin: 4 4; }
+    #help-box {
+        border: heavy cyan; background: $surface;
+        width: 76; height: auto; padding: 1 2; margin: 2 4;
+    }
+    #help-title { text-align: center; height: 1; margin-bottom: 1; border-bottom: solid $secondary; color: cyan; text-style: bold; }
+    #help-columns { width: 100%; height: auto; }
+    .help-col { width: 50%; height: auto; padding: 0 1; }
+    .help-section-title { margin-top: 1; margin-bottom: 0; color: magenta; text-style: bold; }
+    .help-row { height: 1; }
+    #help-footer { text-align: center; margin-top: 1; color: $text-muted; }
     """
 
     BINDINGS = bindings_for("dashboard")
@@ -2855,7 +2985,10 @@ class ReviewDashboard(App):
 
     def refresh_rows(self) -> None:
         """Repaint the rows in place, keeping the highlight where it was."""
-        queue = self.query_one("#queue", ListView)
+        try:
+            queue = self.query_one("#queue", ListView)
+        except NoMatches:
+            return
         for stop, item in zip(self.stops, queue.children):
             labels = item.query(Label)
             if labels:
@@ -2920,7 +3053,11 @@ class ReviewDashboard(App):
         policy = (
             f" | review: {self.final_policy}" if self.final_policy else ""
         )
-        self.query_one("#status-bar", Static).update(
+        try:
+            status_bar = self.query_one("#status-bar", Static)
+        except NoMatches:
+            return
+        status_bar.update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
             f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
@@ -3388,8 +3525,7 @@ class ReviewDashboard(App):
             self.exit()
 
     def action_help(self) -> None:
-        entries = "  ".join(f"{c.key or '—'} {c.label}" for c in COMMANDS)
-        self.notify(entries, timeout=8)
+        self.push_screen(HelpScreen())
 
     def action_batch(self) -> None:
         stop = self.current
