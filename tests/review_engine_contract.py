@@ -135,6 +135,64 @@ class BlockingRouteHeadroom(FakeHeadroomSession):
         return super().route_for_call(backend)
 
 
+class BlockingFallbackRouteHeadroom(FakeHeadroomSession):
+    def __init__(self):
+        super().__init__()
+        self.fallback_routing = threading.Event()
+        self.release = threading.Event()
+
+    def route_for_call(self, backend):
+        self.route_calls.append(backend)
+        if len(self.route_calls) == 2:
+            self.fallback_routing.set()
+            self.release.wait(timeout=5)
+        return HeadroomRoute(
+            "ACTIVE", backend, "http://127.0.0.1:8787", "ready"
+        )
+
+
+class InterleavingHeadroom(FakeHeadroomSession):
+    def __init__(self):
+        super().__init__()
+        self._state = "DIRECT"
+        self._route = ""
+        self._worker_calls = 0
+        self._worker_lock = threading.Lock()
+        self._first_worker_routing = threading.Event()
+
+    def route_for_call(self, backend):
+        self.route_calls.append(backend)
+        if threading.current_thread() is threading.main_thread():
+            self._state = "DIRECT"
+            self._route = ""
+            return HeadroomRoute("DIRECT", backend, None, "initial")
+        with self._worker_lock:
+            self._worker_calls += 1
+            call = self._worker_calls
+        if call == 1:
+            self._state = "ACTIVE"
+            self._route = "http://127.0.0.1:8787"
+            self._first_worker_routing.set()
+            time.sleep(0.1)
+            return HeadroomRoute(
+                "ACTIVE", backend, "http://127.0.0.1:8787", "ready"
+            )
+        self._first_worker_routing.wait(timeout=1)
+        self._state = "DEGRADED"
+        self._route = ""
+        return HeadroomRoute(
+            "DEGRADED", backend, None, "readiness probe failed"
+        )
+
+    def telemetry(self, backend):
+        return {
+            **super().telemetry(backend),
+            "state": self._state,
+            "route": self._route,
+            "status_line": f"[{self._state}] {backend}",
+        }
+
+
 class ImmediateExecutor:
     def __init__(self, state="complete"):
         self.calls = []
@@ -189,6 +247,35 @@ class UnavailableBroker:
         raise BrokerUnavailable("broker offline")
 
 
+class RecordingExecutor(ImmediateExecutor):
+    def __init__(self):
+        super().__init__()
+        self.snapshots = []
+
+    def run(
+        self,
+        review_item,
+        run,
+        workdir,
+        check_scope_version,
+        check_scope,
+        headroom_route,
+        headroom_telemetry,
+    ):
+        self.snapshots.append(
+            (headroom_route.state, headroom_telemetry["state"])
+        )
+        return super().run(
+            review_item,
+            run,
+            workdir,
+            check_scope_version,
+            check_scope,
+            headroom_route,
+            headroom_telemetry,
+        )
+
+
 class FailingPutCache(ReviewCache):
     def put(self, receipt):
         if receipt.identity.pull_request == 1:
@@ -222,6 +309,11 @@ class ReplacingPutCache(ReviewCache):
         if self.replacement is not None:
             ReviewCache.put(self, self.replacement)
         return path
+
+
+class CleanupFailingCache(BlockingPutCache):
+    def remove_if_matches(self, receipt):
+        raise OSError("cache cleanup denied")
 
 
 class EngineContractTests(unittest.TestCase):
@@ -1292,6 +1384,125 @@ class EngineContractTests(unittest.TestCase):
                 result.results[selected.key].provenance["headroom_state"],
                 "DEGRADED",
             )
+
+    def test_cancel_during_fallback_routing_prevents_local_dispatch(self):
+        with tempfile.TemporaryDirectory() as root:
+            selected = item(1, HEADS[0])
+            local = ImmediateExecutor()
+            headroom = BlockingFallbackRouteHeadroom()
+            engine = ReviewEngine(
+                state_root=root,
+                cache=ReviewCache(Path(root) / "reviews"),
+                governor=CapacityGovernor(
+                    cap=1,
+                    per_review_budget_mb=1,
+                    reserve_mb=1,
+                    mem_available_mb=lambda: 100,
+                    cpu_count=lambda: 2,
+                ),
+                headroom_session=headroom,
+                local_executor=local,
+                broker_executor=UnavailableBroker(),
+            )
+            with patch(
+                "tui.review_engine._prepare_worktree",
+                side_effect=self.prepared_worktree,
+            ):
+                batch = engine.start(
+                    BatchSnapshot((selected,), {}),
+                    "codex",
+                    "gpt-5.6-sol",
+                    "high",
+                    "scope-v7",
+                )
+                self.assertTrue(headroom.fallback_routing.wait(timeout=1))
+                engine.cancel(batch)
+                headroom.release.set()
+                deadline = time.monotonic() + 1
+                while batch.running and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            self.assertFalse(batch.running)
+            self.assertEqual(local.calls, [])
+            self.assertEqual(
+                parse_review_status(batch.status_path)[selected.key]["state"],
+                "cancelled",
+            )
+
+    def test_concurrent_fallbacks_keep_route_and_telemetry_in_one_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            local = RecordingExecutor()
+            engine = ReviewEngine(
+                state_root=root,
+                cache=ReviewCache(Path(root) / "reviews"),
+                governor=CapacityGovernor(
+                    cap=2,
+                    per_review_budget_mb=1,
+                    reserve_mb=1,
+                    mem_available_mb=lambda: 100,
+                    cpu_count=lambda: 4,
+                ),
+                headroom_session=InterleavingHeadroom(),
+                local_executor=local,
+                broker_executor=UnavailableBroker(),
+            )
+            with patch(
+                "tui.review_engine._prepare_worktree",
+                side_effect=self.prepared_worktree,
+            ):
+                result = engine.run_sync(
+                    BatchSnapshot(
+                        (item(1, HEADS[0]), item(2, HEADS[1])), {}
+                    ),
+                    "codex",
+                    "gpt-5.6-sol",
+                    "high",
+                    "scope-v7",
+                )
+            self.assertEqual(len(result.results), 2)
+            self.assertEqual(
+                sorted(local.snapshots),
+                [("ACTIVE", "ACTIVE"), ("DEGRADED", "DEGRADED")],
+            )
+
+    def test_cancelled_cache_cleanup_failure_is_reported(self):
+        with tempfile.TemporaryDirectory() as root:
+            selected = item(1, HEADS[0])
+            cache = CleanupFailingCache(Path(root) / "reviews")
+            events = []
+            engine = ReviewEngine(
+                state_root=root,
+                cache=cache,
+                governor=CapacityGovernor(
+                    cap=1,
+                    per_review_budget_mb=1,
+                    reserve_mb=1,
+                    mem_available_mb=lambda: 100,
+                    cpu_count=lambda: 2,
+                ),
+                headroom_session=FakeHeadroomSession(),
+                local_executor=ImmediateExecutor(),
+            )
+            with patch(
+                "tui.review_engine._prepare_worktree",
+                side_effect=self.prepared_worktree,
+            ):
+                batch = engine.start(
+                    BatchSnapshot((selected,), {}),
+                    "goose",
+                    "gemini-3.8-flash",
+                    "high",
+                    "scope-v7",
+                    on_event=events.append,
+                )
+                self.assertTrue(cache.started.wait(timeout=1))
+                engine.cancel(batch)
+                cache.release.set()
+                deadline = time.monotonic() + 1
+                while batch.running and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            self.assertFalse(batch.running)
+            self.assertEqual(events[-1].state, "failed")
+            self.assertIn("cache cleanup denied", events[-1].note)
 
     def test_batch_status_paths_are_reserved_atomically(self):
         with tempfile.TemporaryDirectory() as root:

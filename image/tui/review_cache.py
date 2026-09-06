@@ -107,20 +107,25 @@ class ReviewCache:
                     return False
                 path.unlink()
                 return True
-            except (OSError, UnicodeError):
+            except FileNotFoundError:
+                return False
+            except UnicodeError:
                 return False
 
     def prune(self, now: float | None = None) -> None:
         cutoff = (time.time() if now is None else now) - REVIEW_CACHE_RETENTION_SECONDS
+        if not self.root.exists():
+            return
         try:
-            names = list(self.root.iterdir())
+            with self._locked_root():
+                names = list(self.root.iterdir())
+                for path in names:
+                    if path.suffix != ".json":
+                        continue
+                    try:
+                        if path.is_file() and path.stat().st_mtime < cutoff:
+                            path.unlink()
+                    except OSError:
+                        continue
         except OSError:
             return
-        for path in names:
-            if path.suffix != ".json":
-                continue
-            try:
-                if path.is_file() and path.stat().st_mtime < cutoff:
-                    path.unlink()
-            except OSError:
-                continue

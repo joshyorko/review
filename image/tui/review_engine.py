@@ -160,6 +160,29 @@ class BrokerUnavailable(RuntimeError):
     pass
 
 
+def _with_headroom_provenance(
+    receipt: ReviewReceipt,
+    route: HeadroomRoute,
+    telemetry: Mapping[str, object],
+) -> ReviewReceipt:
+    return receipt.with_provenance(
+        {
+            "headroom_state": route.state,
+            "headroom_route": route.base_url or "",
+            "headroom_status_line": telemetry["status_line"],
+            "headroom_output_reduction_percent": telemetry[
+                "output_reduction_percent"
+            ],
+            "headroom_output_reduction_method": telemetry[
+                "output_reduction_method"
+            ],
+            "headroom_output_tokens_saved": telemetry[
+                "output_tokens_saved"
+            ],
+        }
+    )
+
+
 class LocalExecutor:
     def __init__(self, command: str | None = None) -> None:
         self.command = command or os.environ.get(
@@ -231,21 +254,8 @@ class LocalExecutor:
             )
             raise RuntimeError(detail[:240])
         receipt = ReviewReceipt.from_json(stdout.strip())
-        return receipt.with_provenance(
-            {
-                "headroom_state": headroom_route.state,
-                "headroom_route": headroom_route.base_url or "",
-                "headroom_status_line": headroom_telemetry["status_line"],
-                "headroom_output_reduction_percent": headroom_telemetry[
-                    "output_reduction_percent"
-                ],
-                "headroom_output_reduction_method": headroom_telemetry[
-                    "output_reduction_method"
-                ],
-                "headroom_output_tokens_saved": headroom_telemetry[
-                    "output_tokens_saved"
-                ],
-            }
+        return _with_headroom_provenance(
+            receipt, headroom_route, headroom_telemetry
         )
 
     def cancel(self, run: ReviewRun) -> None:
@@ -376,6 +386,7 @@ class ReviewEngine:
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_runs: dict[str, dict[str, ReviewRun]] = {}
         self._state_lock = threading.Lock()
+        self._headroom_lock = threading.Lock()
 
     def _new_batch(
         self,
@@ -440,13 +451,13 @@ class ReviewEngine:
         on_event: Callable[[ReviewEvent], None] | None = None,
     ) -> ReviewBatch:
         self._require_ready(snapshot)
-        self.headroom_session.refresh(backend)
+        headroom_telemetry = self._refresh_headroom(backend)
         batch = self._new_batch(
             snapshot,
             backend,
             model,
             effort,
-            self.headroom_session.telemetry(backend),
+            headroom_telemetry,
         )
         self._batches[batch.batch_id] = batch
         with self._state_lock:
@@ -470,13 +481,13 @@ class ReviewEngine:
         on_event: Callable[[ReviewEvent], None] | None = None,
     ) -> ReviewBatchResult:
         self._require_ready(snapshot)
-        self.headroom_session.refresh(backend)
+        headroom_telemetry = self._refresh_headroom(backend)
         batch = self._new_batch(
             snapshot,
             backend,
             model,
             effort,
-            self.headroom_session.telemetry(backend),
+            headroom_telemetry,
         )
         self._batches[batch.batch_id] = batch
         with self._state_lock:
@@ -602,11 +613,8 @@ class ReviewEngine:
                             executor = (
                                 self.broker_executor or self.local_executor
                             )
-                            route = self.headroom_session.route_for_call(
+                            route, telemetry = self._headroom_snapshot(
                                 batch.backend
-                            )
-                            telemetry = dict(
-                                self.headroom_session.telemetry(batch.backend)
                             )
                             controller = ReviewRunController(
                                 run,
@@ -759,7 +767,31 @@ class ReviewEngine:
                                 )
                                 results[current.item.key] = receipt
                         if cancelled_after_cache:
-                            self.cache.remove_if_matches(receipt)
+                            try:
+                                self.cache.remove_if_matches(receipt)
+                            except OSError as error:
+                                failures[current.item.key] = self._error_text(
+                                    RuntimeError(
+                                        "cancelled; cache cleanup failed: "
+                                        f"{error}"
+                                    )
+                                )
+                                current.controller.fail(
+                                    failures[current.item.key]
+                                )
+                                self._release_active(batch, current.run)
+                                self._clear_executor_cancel(current.run)
+                                self._emit(
+                                    batch,
+                                    ReviewEvent(
+                                        current.item.key,
+                                        "failed",
+                                        failures[current.item.key],
+                                        int(time.time()),
+                                    ),
+                                    callback,
+                                )
+                                continue
                             current.controller.cancel()
                             failures[current.item.key] = "cancelled"
                             self._release_active(batch, current.run)
@@ -789,13 +821,9 @@ class ReviewEngine:
         finally:
             with self._state_lock:
                 self._active_runs.pop(batch.batch_id, None)
-            self.headroom_session.refresh(batch.backend)
-            batch.headroom_status_line = self.headroom_session.status_line(
-                batch.backend, True
-            )
-            batch.headroom_output_reduction = (
-                self.headroom_session.telemetry(batch.backend)
-            )
+            telemetry = self._refresh_headroom(batch.backend)
+            batch.headroom_status_line = str(telemetry["status_line"])
+            batch.headroom_output_reduction = telemetry
             batch.running = False
         return ReviewBatchResult(results, failures)
 
@@ -828,8 +856,12 @@ class ReviewEngine:
                 raise
             if cancel_event.is_set():
                 raise RuntimeError("review cancelled")
-            headroom_route = self.headroom_session.route_for_call(run.backend)
-            headroom_telemetry = self.headroom_session.telemetry(run.backend)
+            headroom_route, headroom_telemetry = self._headroom_snapshot(
+                run.backend
+            )
+            with self._state_lock:
+                if cancel_event.is_set():
+                    raise RuntimeError("review cancelled")
             receipt = self.local_executor.run(
                 item,
                 run,
@@ -839,32 +871,24 @@ class ReviewEngine:
                 headroom_route,
                 headroom_telemetry,
             )
-        return receipt.with_provenance(
-            self._headroom_provenance(
-                headroom_route,
-                headroom_telemetry,
-            )
+        return _with_headroom_provenance(
+            receipt,
+            headroom_route,
+            headroom_telemetry,
         )
 
-    @staticmethod
-    def _headroom_provenance(
-        route: HeadroomRoute,
-        telemetry: Mapping[str, object],
-    ) -> dict[str, object]:
-        return {
-            "headroom_state": route.state,
-            "headroom_route": route.base_url or "",
-            "headroom_status_line": telemetry["status_line"],
-            "headroom_output_reduction_percent": telemetry[
-                "output_reduction_percent"
-            ],
-            "headroom_output_reduction_method": telemetry[
-                "output_reduction_method"
-            ],
-            "headroom_output_tokens_saved": telemetry[
-                "output_tokens_saved"
-            ],
-        }
+    def _headroom_snapshot(
+        self, backend: str
+    ) -> tuple[HeadroomRoute, dict[str, object]]:
+        with self._headroom_lock:
+            route = self.headroom_session.route_for_call(backend)
+            telemetry = dict(self.headroom_session.telemetry(backend))
+        return route, telemetry
+
+    def _refresh_headroom(self, backend: str) -> dict[str, object]:
+        with self._headroom_lock:
+            self.headroom_session.refresh(backend)
+            return dict(self.headroom_session.telemetry(backend))
 
     @staticmethod
     def _error_text(error: Exception) -> str:

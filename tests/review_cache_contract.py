@@ -2,6 +2,8 @@
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -101,6 +103,13 @@ class ReviewCacheTests(unittest.TestCase):
         cache = ReviewCache("/nonexistent/directory/for/cache/test")
         cache.prune()
 
+    def test_prune_root_that_is_a_file_is_noop(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache_root = Path(root) / "reviews"
+            cache_root.write_text("not a directory")
+            ReviewCache(cache_root).prune()
+            self.assertEqual(cache_root.read_text(), "not a directory")
+
     def test_default_root_uses_xdg_state_home(self):
         with tempfile.TemporaryDirectory() as temp_home:
             old = os.environ.get("XDG_STATE_HOME")
@@ -178,6 +187,26 @@ class ReviewCacheTests(unittest.TestCase):
             cache.prune(now=os.path.getmtime(path) + REVIEW_CACHE_RETENTION_SECONDS + 2)
             self.assertFalse(path.exists())
             self.assertTrue(non_json.exists())
+
+    def test_prune_waits_for_an_active_cache_writer(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = ReviewCache(root)
+            entered = threading.Event()
+            finished = threading.Event()
+
+            def prune():
+                entered.set()
+                cache.prune()
+                finished.set()
+
+            with cache._locked_root():
+                thread = threading.Thread(target=prune)
+                thread.start()
+                self.assertTrue(entered.wait(timeout=1))
+                time.sleep(0.05)
+                self.assertFalse(finished.is_set())
+            thread.join(timeout=1)
+            self.assertTrue(finished.is_set())
 
 
 if __name__ == "__main__":

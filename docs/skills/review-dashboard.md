@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "2.3"
+version: "2.4"
 last_updated: 2026-09-06
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -152,8 +152,8 @@ distinct states. `[o]` is only an optional browser escape hatch.
 
 Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings enable `[f] fix & land in background`. See [`landing-batches.md`](landing-batches.md) for full batch orchestration, concurrency lanes, state persistence, and reporting.
 The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying local capacity, and trust a receipt only when its full run and check-scope identity matches.
-Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission and cache publication; a cancelled run cannot publish or delete another session's receipt.
-Headroom establishes one batch baseline, routes every non-cached dispatch, and samples aggregate telemetry after the batch.
+Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission, broker fallback, and cache publication; a cancelled run cannot publish or delete another session's receipt, and cleanup I/O failures remain visible.
+Headroom establishes one batch baseline, captures each route and telemetry snapshot under one lock, routes every non-cached dispatch, and samples aggregate telemetry after the batch.
 
 ## Common Rationalizations
 
