@@ -925,12 +925,14 @@ scale_cluster_contributors() {
   resolve_copilot_token
   resolve_gh_token
   ensure_hive_contributor_env
+  local hub
+  hub="$(read_hive_value HIVE_HUB)"
 
   kubectl create secret generic review-contributor-secret -n bluefin-system \
     --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
     --from-literal=GH_TOKEN="${GH_TOKEN_VALUE:-}" \
     --from-literal=GITHUB_COPILOT_TOKEN="${COPILOT_TOKEN:-}" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null
 
   local deploy_file="deploy/review-contributor.yaml"
   if [[ ! -f "$deploy_file" ]]; then
@@ -940,7 +942,8 @@ scale_cluster_contributors() {
   kubectl apply -f "$deploy_file" >/dev/null
   kubectl set env deployment/review-contributor -n bluefin-system \
     GOOSE_MODEL="$PROFILE_MODEL" \
-    GOOSE_THINKING_EFFORT="$PROFILE_EFFORT" >/dev/null
+    GOOSE_THINKING_EFFORT="$PROFILE_EFFORT" \
+    HIVE_HUB="$hub" >/dev/null
   kubectl scale deployment/review-contributor -n bluefin-system --replicas="$replicas" >/dev/null
   if [[ "$replicas" -gt 0 ]]; then
     echo "✓ scaled cluster contributor workers to ${replicas} (context ${context}, model ${PROFILE_MODEL} at ${PROFILE_EFFORT} effort)."

@@ -39,8 +39,6 @@ spec:
               value: "gemini-3.8-flash"
             - name: GOOSE_THINKING_EFFORT
               value: "high"
-            - name: HIVE_HUB
-              value: "wss://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev/contribute"
             - name: GH_TOKEN
               valueFrom:
                 secretKeyRef:
