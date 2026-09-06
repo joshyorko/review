@@ -576,48 +576,6 @@ async def main() -> int:
     os.environ.pop("LIVE_PAGES", None)
     live_file.write_text(json.dumps([]))
 
-    # ── batch snapshot hydration fail-closed regression ─────────────────
-    from tui.review_snapshot import hydrate_batch_snapshot
-    unhydrated = tui.ReviewDashboard(tui.QueueFilters(action=""))
-    unhydrated.review_batches = []
-
-    def _unhydrated_action_review() -> None:
-        selected = [s for s in unhydrated.stops if s.selected]
-        if selected:
-            fetch = getattr(unhydrated, "engine_snapshot_fetch", None) or (lambda r, n: {})
-            snapshot = hydrate_batch_snapshot(selected, fetch)
-            if not snapshot.ready:
-                for s in selected:
-                    if s.key in snapshot.failures:
-                        s.failure = snapshot.failures[s.key]
-                return
-            unhydrated.review_batches.append(snapshot)
-        elif unhydrated.current:
-            unhydrated.start_review(unhydrated.current)
-
-    unhydrated.action_review = _unhydrated_action_review
-    async with unhydrated.run_test() as pilot:
-        await wait_for_live_rows(unhydrated, pilot, "ready", 2)
-        unhydrated.self_login = "castrojo"
-        unhydrated.engine_snapshot_fetch = lambda repository, number: (
-            {"baseRefOid": "a" * 40, "headRefOid": "b" * 40}
-            if number == 31
-            else {"baseRefOid": "short", "headRefOid": "b" * 40}
-        )
-        for stop in unhydrated.stops:
-            stop.selected = True
-        await pilot.press("r")
-        await pilot.pause()
-        check(
-            not unhydrated.review_batches,
-            "a batch with one missing exact SHA must not dispatch any review task",
-        )
-        check(
-            "headRefOid" in unhydrated.stops[1].failure
-            or "full lowercase SHA" in unhydrated.stops[1].failure,
-            "the unhydratable row must retain the fail-closed reason",
-        )
-
     # Semantic navigation contract: bindings, help, and the palette must be
     # projections of one registry rather than independent key lists.
     registry = tui.command_registry()

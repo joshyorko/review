@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence, TYPE_CHECKING
 
@@ -8,6 +10,15 @@ from tui.review_evidence_manifest import ReviewRequest
 
 if TYPE_CHECKING:
     from tui.bluefin_review_tui import Stop
+
+_TUI_DIR = os.path.dirname(__file__)
+if _TUI_DIR not in sys.path:
+    sys.path.insert(0, _TUI_DIR)
+
+try:
+    from tui.bluefin_review_tui import live_review_verification
+except ImportError:
+    from bluefin_review_tui import live_review_verification
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
 
@@ -58,23 +69,8 @@ def _required_sha(live: Mapping[str, Any], field: str) -> str:
     return value
 
 
-def _verification(live: Mapping[str, Any]) -> list[dict[str, str]]:
-    records = []
-    passed = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-    failed = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
-    checks = live.get("statusCheckRollup") or []
-    for index, item in enumerate(checks, start=1):
-        if not isinstance(item, Mapping):
-            continue
-        outcome = str(item.get("conclusion") or item.get("state") or "PENDING").upper()
-        state = "verified" if outcome in passed else "unverified" if outcome in failed else "pending"
-        records.append({
-            "name": str(item.get("name") or item.get("context") or f"CI check {index}"),
-            "state": state,
-            "evidence": outcome,
-            "source": "github",
-        })
-    return records
+def _verification(live: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return live_review_verification(dict(live))
 
 
 def hydrate_batch_snapshot(
@@ -101,6 +97,6 @@ def hydrate_batch_snapshot(
                     _verification(live),
                 )
             )
-        except (BatchSnapshotError, KeyError, TypeError, ValueError, RuntimeError) as error:
-            failures[key] = str(error)
+        except Exception as error:
+            failures[key] = str(error) or f"{type(error).__name__}"
     return BatchSnapshot(tuple(items), failures)

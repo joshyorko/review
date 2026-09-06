@@ -121,6 +121,70 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(req.tenant, "bluefin")
         self.assertEqual(req.generated_at, "batch-snapshot")
 
+    def test_oserror_from_fetch_callable_fails_closed(self):
+        def fetch(repo, number):
+            raise OSError("network down")
+
+        snapshot = hydrate_batch_snapshot([self.stop(1)], fetch)
+        self.assertFalse(snapshot.ready)
+        self.assertEqual(snapshot.failures["projectbluefin/review#1"], "network down")
+
+    def test_called_process_error_from_fetch_callable_fails_closed(self):
+        import subprocess
+
+        def fetch(repo, number):
+            raise subprocess.CalledProcessError(1, ["gh", "pr", "view", "1"])
+
+        snapshot = hydrate_batch_snapshot([self.stop(1)], fetch)
+        self.assertFalse(snapshot.ready)
+        self.assertIn("non-zero exit status 1", snapshot.failures["projectbluefin/review#1"])
+
+    def test_rerun_checks_collapse_to_authoritative_latest(self):
+        snapshot = hydrate_batch_snapshot(
+            [self.stop(1)],
+            lambda repo, number: {
+                "baseRefOid": BASE,
+                "headRefOid": HEAD,
+                "statusCheckRollup": [
+                    {
+                        "__typename": "CheckRun",
+                        "name": "test",
+                        "workflowName": "CI",
+                        "startedAt": "2026-09-06T10:00:00Z",
+                        "completedAt": "2026-09-06T10:05:00Z",
+                        "conclusion": "FAILURE",
+                    },
+                    {
+                        "__typename": "CheckRun",
+                        "name": "test",
+                        "workflowName": "CI",
+                        "startedAt": "2026-09-06T10:10:00Z",
+                        "completedAt": "2026-09-06T10:15:00Z",
+                        "conclusion": "SUCCESS",
+                    },
+                    {
+                        "__typename": "StatusContext",
+                        "context": "coverage",
+                        "state": "PENDING",
+                    },
+                    {
+                        "__typename": "StatusContext",
+                        "context": "coverage",
+                        "state": "SUCCESS",
+                    },
+                ],
+            },
+        )
+        self.assertTrue(snapshot.ready)
+        item = snapshot.items[0]
+        self.assertEqual(len(item.verification), 2)
+        test_check = next(v for v in item.verification if v["name"] == "test")
+        self.assertEqual(test_check["state"], "verified")
+        self.assertEqual(test_check["evidence"], "SUCCESS")
+        cov_check = next(v for v in item.verification if v["name"] == "coverage")
+        self.assertEqual(cov_check["state"], "verified")
+        self.assertEqual(cov_check["evidence"], "SUCCESS")
+
 
 if __name__ == "__main__":
     unittest.main()

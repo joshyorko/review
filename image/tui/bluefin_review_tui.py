@@ -26,6 +26,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -49,6 +50,9 @@ from textual.widgets import (
     Select,
     TextArea,
 )
+_TUI_DIR = os.path.dirname(__file__)
+if _TUI_DIR not in sys.path:
+    sys.path.insert(0, _TUI_DIR)
 from review_result import ReviewResult, adapt_current_engine
 from semantic_view import DecisionState, build_decision_card
 import landing
@@ -695,6 +699,8 @@ def authoritative_checks(live: dict) -> list[dict]:
     latest: dict[tuple[str, ...], tuple[tuple[str, str, int], dict]] = {}
     ungrouped: list[dict] = []
     for index, check in enumerate(live.get("statusCheckRollup") or []):
+        if not isinstance(check, (dict, Mapping)):
+            continue
         typename = str(check.get("__typename") or "")
         name = str(check.get("name") or "")
         context = str(check.get("context") or "")
