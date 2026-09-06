@@ -55,6 +55,23 @@ class CapacityContractTests(unittest.TestCase):
         self.assertEqual(governor.runnable_slots(2), 1)
         self.assertEqual(governor.runnable_slots(3), 0)
 
+    def test_cap_strictly_limits_when_memory_and_cpu_are_higher(self):
+        # memory gives (11000 - 2000) // 1500 = 6 slots
+        # cpu gives 8 // 2 = 4 slots
+        # cap = 2 strictly limits capacity to 2 slots
+        governor = CapacityGovernor(
+            cap=2,
+            per_review_budget_mb=1500,
+            reserve_mb=2000,
+            mem_available_mb=lambda: 11000,
+            cpu_count=lambda: 8,
+        )
+        self.assertEqual(governor.total_slots(), 2)
+        self.assertEqual(governor.runnable_slots(1), 1)
+        self.assertEqual(governor.runnable_slots(2), 0)
+        self.assertTrue(governor.can_start(1))
+        self.assertFalse(governor.can_start(2))
+
     def test_meminfo_reader_error_conditions(self):
         with self.assertRaises(CapacityError):
             read_mem_available_mb("/nonexistent/meminfo")
@@ -131,7 +148,13 @@ class CapacityContractTests(unittest.TestCase):
         with self.assertRaises(CapacityError):
             governor.can_start(-1)
 
-    def test_governor_active_count_alias_and_zero_flooring(self):
+        with self.assertRaises(TypeError):
+            governor.runnable_slots()  # type: ignore[call-arg]
+
+        with self.assertRaises(TypeError):
+            governor.can_start()  # type: ignore[call-arg]
+
+    def test_governor_running_count_and_zero_flooring(self):
         governor = CapacityGovernor(
             cap=4,
             per_review_budget_mb=1000,
@@ -141,13 +164,13 @@ class CapacityContractTests(unittest.TestCase):
         )
         # available = 4000, memory_slots = 4, cpu_slots = 4, cap = 4 => total_slots = 4
         self.assertEqual(governor.total_slots(), 4)
-        self.assertEqual(governor.runnable_slots(active_count=2), 2)
-        self.assertTrue(governor.can_start(active_count=2))
-        self.assertEqual(governor.runnable_slots(active_count=4), 0)
-        self.assertFalse(governor.can_start(active_count=4))
+        self.assertEqual(governor.runnable_slots(2), 2)
+        self.assertTrue(governor.can_start(2))
+        self.assertEqual(governor.runnable_slots(4), 0)
+        self.assertFalse(governor.can_start(4))
         # When running exceeds total slots, floored at 0, running reviews never killed
-        self.assertEqual(governor.runnable_slots(active_count=10), 0)
-        self.assertFalse(governor.can_start(active_count=10))
+        self.assertEqual(governor.runnable_slots(10), 0)
+        self.assertFalse(governor.can_start(10))
 
     def test_cpu_count_none_or_limited(self):
         # cpu_count None -> cpu_slots = 0 -> total_slots = 0

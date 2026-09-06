@@ -106,12 +106,10 @@ class CapacityGovernor:
         cpu_slots = max(0, int(cores or 0) // 2)
         return max(0, min(memory_slots, cpu_slots, self.cap))
 
-    def runnable_slots(self, running: int = 0, *, active_count: int | None = None) -> int:
-        if active_count is not None:
-            running = active_count
+    def runnable_slots(self, running: int) -> int:
         if isinstance(running, bool) or not isinstance(running, int) or running < 0:
             raise CapacityError("running must be a non-negative integer")
         return max(0, self.total_slots() - running)
 
-    def can_start(self, running: int = 0, *, active_count: int | None = None) -> bool:
-        return self.runnable_slots(running, active_count=active_count) > 0
+    def can_start(self, running: int) -> bool:
+        return self.runnable_slots(running) > 0
