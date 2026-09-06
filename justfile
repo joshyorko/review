@@ -770,6 +770,12 @@ read_hive_value() {
     }
   ' "$HIVE_CONTRIBUTOR_ENV"
 }
+valid_hive_hub() {
+  local hub="$1"
+  [[ -n "$hub" ]] &&
+    [[ "$hub" != *,* ]] &&
+    [[ "$hub" =~ ^(wss|https)://[^/@?\#[:space:]]+([/?\#][^[:space:]]*)?$ ]]
+}
 
 # ── the optional lab (#379) ────────────────────────────────────────────────
 # This appliance owns no lab and depends on none, and none of that changes
@@ -920,19 +926,26 @@ scale_cluster_contributors() {
 
   resolve_model_profile "$profile" "$effort"
 
-  kubectl create namespace bluefin-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-
-  resolve_copilot_token
-  resolve_gh_token
   ensure_hive_contributor_env
   local hub
   hub="$(read_hive_value HIVE_HUB)"
+  if ! valid_hive_hub "$hub"; then
+    echo "ERROR: HIVE_HUB is not set in ${HIVE_CONTRIBUTOR_ENV}." >&2
+    return 1
+  fi
+
+  resolve_copilot_token
+  resolve_gh_token
+
+  kubectl create namespace bluefin-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   kubectl create secret generic review-contributor-secret -n bluefin-system \
     --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
     --from-literal=GH_TOKEN="${GH_TOKEN_VALUE:-}" \
     --from-literal=GITHUB_COPILOT_TOKEN="${COPILOT_TOKEN:-}" \
     --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null
+  kubectl annotate secret review-contributor-secret -n bluefin-system \
+    kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 
   local deploy_file="deploy/review-contributor.yaml"
   if [[ ! -f "$deploy_file" ]]; then
@@ -1291,8 +1304,7 @@ review-queue *queue_args:
       DASHBOARD_HIVE_HUB="$(read_hive_value HIVE_HUB)"
       if [[ -z "$DASHBOARD_HIVE_HUB" ]]; then
         echo "! ${HIVE_CONTRIBUTOR_ENV} has no usable HIVE_HUB; the dashboard will continue without Hive." >&2
-      elif [[ "$DASHBOARD_HIVE_HUB" == *,* ]] ||
-        [[ ! "$DASHBOARD_HIVE_HUB" =~ ^(wss|https)://[^/@?\#[:space:]]+([/?\#][^[:space:]]*)?$ ]]; then
+      elif ! valid_hive_hub "$DASHBOARD_HIVE_HUB"; then
         echo "! ${HIVE_CONTRIBUTOR_ENV} has an unsupported HIVE_HUB; the dashboard requires one wss:// or https:// URL and will continue without Hive." >&2
         DASHBOARD_HIVE_HUB=""
       fi

@@ -1635,6 +1635,20 @@ grep -Fq "stat -c %a \"\$staging_dir/auth.json\"" <<<"$cleanup_body" ||
 grep -Fq 'id -u' <<<"$cleanup_body" ||
   fail "Codex cleanup must compare ownership with the invoking UID"
 
+begin "static: cluster scale-out validates Hive before mutation and scrubs secret metadata"
+cluster_body="$(sed -n '/^scale_cluster_contributors()/,/^stop_cluster_contributors()/p' "$code")"
+hub_guard_line="$(grep -nF 'if ! valid_hive_hub "$hub"; then' <<<"$cluster_body" | cut -d: -f1)"
+namespace_line="$(grep -nF 'kubectl create namespace bluefin-system' <<<"$cluster_body" | cut -d: -f1)"
+if [[ -z "$hub_guard_line" || -z "$namespace_line" || "$hub_guard_line" -ge "$namespace_line" ]]; then
+  fail "cluster scale-out must validate HIVE_HUB before its first cluster mutation"
+fi
+grep -Fq 'echo "ERROR: HIVE_HUB is not set in ${HIVE_CONTRIBUTOR_ENV}." >&2' <<<"$cluster_body" ||
+  fail "cluster scale-out must report the selected Hive registration when HIVE_HUB is invalid"
+grep -Fq 'kubectl annotate secret review-contributor-secret -n bluefin-system' <<<"$cluster_body" ||
+  fail "cluster scale-out must remove stale client-side apply metadata from the Secret"
+grep -Fq 'kubectl.kubernetes.io/last-applied-configuration-' <<<"$cluster_body" ||
+  fail "cluster scale-out must remove the last-applied-configuration annotation"
+
 begin "static: nothing here filters the work Hive assigns"
 # Hive's selectTask is the sole authority on what gets worked on: the hub's
 # config decides the repository pool, the deny-lists and the cooldown. Filter

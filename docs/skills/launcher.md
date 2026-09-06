@@ -240,6 +240,11 @@ Each pod keeps its own Hive WebSocket, so Hive independently assigns tasks to
 every pod without draining local CPU or battery. `gemini-3.8-flash` at `high`
 thinking effort is the default model for rapid task turnarounds. You can also
 pass an explicit model profile, e.g. `just review-container cluster 4 sol`.
+Before creating or changing cluster resources, the launcher requires one
+credential-free `wss://` or `https://` Hive hub from the selected registration.
+Secret synchronization uses server-side apply, then removes any
+`kubectl.kubernetes.io/last-applied-configuration` annotation left by
+client-side apply so credentials are not retained in metadata.
 
 ## Rootless Podman And Mounted Host Files
 
