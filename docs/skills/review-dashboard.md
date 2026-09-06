@@ -235,40 +235,16 @@ distinct states. `[o]` is only an optional browser escape hatch.
 - **Keyboard reference modal on `?`**: `?` opens `HelpScreen`, a modal
   grouping navigation, review, batching, and mutations with cyan/magenta
   badges; dismisses cleanly with `?`, `q`, or `Esc`.
-- **Treat the Hive API as JSON, not a browser.** The read-only status probe
-  reports missing hub configuration, missing credentials, network failure,
-  authentication, authorization, edge/login redirects, malformed responses,
-  and server failure as separate concise states. The queue POST never follows a
-  redirect and succeeds only when a bounded JSON response explicitly says
-  `queued`; the typed pull-request-number gate remains the authority boundary.
-  A failed probe leaves the queue and review evidence visible and marks
-  retained worker assignments as last-known. Probes run only at startup or
-  after an explicit refresh; direct GitHub review and merge stay available.
+- **Evidence-first CI failure triage card**: Failing, errored, or timed-out checks surface an immediate `CI FAILURE TRIAGE` section displaying the workflow name, job/check context, failing step, head SHA, execution timestamps, and direct evidence URLs.
+- **Empty queue celebration (`ALL SYSTEMS SLAY`)**: Draining the active review source (repository-scoped, own-work excluded) triggers a one-shot 1.3s retro sequence: Round 8/Fight (400ms) → Bluefin charging `SLAYDOKEN!` (300ms) → `9999!` hit (250ms) → `K.O.` (350ms) → `ALL SYSTEMS SLAY` held frame. Startup with an empty queue skips directly to the held frame. Action-filtered views do not trigger celebration.
+- **Treat the Hive API as JSON, not a browser.** The read-only status probe reports missing hub config, missing credentials, network/auth failure, edge/login redirects, malformed responses, and server failure as separate concise states. The queue POST succeeds only when bounded JSON says `queued`; the typed PR-number gate remains the boundary. Failed probes leave queue/review evidence visible and mark retained assignments as last-known. Direct GitHub review and merge stay available.
 
 ## Batch landing
 
-The selection is the review, so the batch gate is proportionate:
-`BatchPlanScreen` shows every selected pull request and the exact agent
-command, Enter dispatches, Esc aborts — no typed count. A typed-number gate
-earns its ceremony on a single irreversible command; on a batch reviewed
-row by row it teaches nothing.
+The selection is the review, so the batch gate is proportionate: `BatchPlanScreen` shows every selected pull request and the exact agent command; Enter dispatches, Esc aborts — no typed count.
 
-Multi-repository selections partition into independent per-repository
-`LandingTask`s, unlocking parallel execution across separate repository lanes.
-Confirmed batches enter `app.landing_queue`; the repository-aware dispatcher
-admits up to `BLUEFIN_REVIEW_CONCURRENT_LANDINGS` (defaults to 6) concurrent
-agents whose repository sets are disjoint, while a batch touching a running
-repository waits. This enables the maintainer to review the queue concurrently
-in their client dashboard across up to 6 parallel review/landing lanes while
-the 6 cluster worker pods process assigned work on Kubernetes simultaneously.
-The agent is Goose's documented one-shot (`goose run --no-session -i
-<prompt-file>`, overridable with `BLUEFIN_REVIEW_LANDING_COMMAND`), run in
-its own process group so `[x]` stops it whole. On `ReviewScreen`, the decision
-card renders diff footprint, per-check breakdown, and findings with severity
-badges. Pressing `f` enqueues an automated background fix-and-land agent seeded
-with the review findings, returning immediately to the queue so the maintainer
-can pile up background fixes; `F` prompts for guidance before dispatching. Fix
-agents repair defects, verify green CI, re-review, and land.
+Multi-repository selections partition into independent per-repository `LandingTask`s, unlocking parallel execution across separate repository lanes. Confirmed batches enter `app.landing_queue`; the dispatcher admits up to `BLUEFIN_REVIEW_CONCURRENT_LANDINGS` (defaults to 6) concurrent agents whose repository sets are disjoint, while a batch touching a running repository waits. This enables concurrent queue review across up to 6 parallel review/landing lanes while cluster worker pods process work simultaneously.
+The agent is Goose's documented one-shot (`goose run --no-session -i <prompt-file>`, overridable with `BLUEFIN_REVIEW_LANDING_COMMAND`), run in its own process group so `[x]` stops it whole. On `ReviewScreen`, the decision card renders diff footprint, per-check breakdown, and findings with severity badges. `f` enqueues an automated background fix-and-land agent seeded with review findings; `F` prompts for guidance before dispatching. Fix agents repair defects, verify green CI, re-review, and land.
 
 The agent reports, the screen polls — and the agent never writes the
 status file directly: every state change goes via the module's report

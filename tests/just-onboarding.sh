@@ -1815,9 +1815,9 @@ assert_eq "$(grep -cE '^(review[a-z-]*|turbo-review)[ :]' "$code")" 5 \
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private
 # 'check-version' recipe is a prerequisite of 'contribute-setup' and aborts
-# whenever HEAD != origin/v2, telling the user to
+# whenever HEAD != origin/v4, telling the user to
 # "export HIVE_SKIP_VERSION_CHECK=true". Without that flag, first-run
-# onboarding is guaranteed to fail the moment v2 moves past the pin.
+# onboarding is guaranteed to fail the moment v4 moves past the pin.
 # shellcheck disable=SC2016 # the launcher source is matched literally
 grep -q 'HIVE_SKIP_VERSION_CHECK=true just --working-directory "\$HIVE_SRC_DIR"' "$code" ||
   fail "upstream contribute-setup must run with HIVE_SKIP_VERSION_CHECK=true"

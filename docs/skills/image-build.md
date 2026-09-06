@@ -272,7 +272,7 @@ together in one commit:
 CI enforces this: `tests/image-contract.sh` requires the launcher and image
 pins to be equal, and `.github/workflows/validate.yml` requires `README.md` to
 contain the launcher pin. Updating any two of the three fails the build. Hive's
-default branch is `v2`, not `main`. Resolve a candidate SHA from `v2` and use
+default branch is `v4`, not `main`. Resolve a candidate SHA from `v4` and use
 the full 40-character commit; the launcher rejects a branch name.
 
 Hive is a **protocol** dependency, not a library. The image consumes exactly
@@ -462,7 +462,7 @@ The `find` and `cmp` Hive's relay calls come from the FSDK base, so there is
 nothing in the checkout to test: `image/Containerfile` proves them at build
 time against the real base and the build fails if either regresses.
 ## Sources
-- Hive `v2`: `bin/contributor-agent.sh`, `bin/contributor-relay.sh`,
+- Hive `v4`: `bin/contributor-agent.sh`, `bin/contributor-relay.sh`,
   `config/backends.conf`; Goose `canary` assets; Context7 `/npm/cli`,
   `/websites/podman_io_en` (`--secret` forms, authfile lookup order),
   `/podman-container-tools/buildah` (`manifest annotate --index`),

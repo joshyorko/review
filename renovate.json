@@ -5,7 +5,7 @@
   ],
   "customManagers": [
     {
-      "description": "Track kubestellar/hive origin/v2 as a pinned commit SHA. The SHA is duplicated in the launcher, the image, and the README, and tests/image-contract.sh plus validate.yml require all three to agree, so one depName keeps every match in a single Renovate branch and PR.",
+      "description": "Track kubestellar/hive origin/v4 as a pinned commit SHA. The SHA is duplicated in the launcher, the image, and the README, and tests/image-contract.sh plus validate.yml require all three to agree, so one depName keeps every match in a single Renovate branch and PR.",
       "customType": "regex",
       "managerFilePatterns": [
         "/^justfile$/",
@@ -17,7 +17,7 @@
         "ARG HIVE_COMMIT=(?<currentDigest>[0-9a-f]{40})",
         "layers the pinned Hive runtime at `(?<currentDigest>[0-9a-f]{40})`"
       ],
-      "currentValueTemplate": "v2",
+      "currentValueTemplate": "v4",
       "depNameTemplate": "kubestellar/hive",
       "packageNameTemplate": "https://github.com/kubestellar/hive",
       "datasourceTemplate": "git-refs"

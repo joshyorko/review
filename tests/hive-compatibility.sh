@@ -25,8 +25,8 @@ backends="$(hive_source config/backends.conf)"
 # natively, so a downstream CONTEXT_FILE_NAMES extension would be redundant.
 # shellcheck disable=SC2016 # Exact pinned-source fragments, not shell syntax.
 for link in \
-  'ln -sf "$AGENT_MD" "${HOME}/AGENTS.md"' \
-  'ln -sf "$AGENT_MD" "${HOME}/.goosehints"'; do
+  'ln -sf "$agent_md" "${HOME}/AGENTS.md"' \
+  'ln -sf "$agent_md" "${HOME}/.goosehints"'; do
   grep -qF "$link" <<<"$agent" || {
     echo "::error::pinned Hive no longer creates Goose-native knowledge link: $link" >&2
     exit 1
@@ -44,7 +44,7 @@ grep -qF 'source /usr/local/etc/hive/backends.conf' <<<"$agent" || {
   echo "::error::pinned Hive no longer consumes the installed backends.conf" >&2
   exit 1
 }
-grep -qF 'KNOWN_BACKENDS="claude copilot goose codex agy bob pi aider litellm"' <<<"$backends" || {
+grep -qF 'KNOWN_BACKENDS="claude copilot goose codex agy bob pi aider litellm opencode kilo"' <<<"$backends" || {
   echo "::error::pinned Hive backend interface changed" >&2
   exit 1
 }

@@ -397,6 +397,8 @@ async def main() -> int:
             await pilot.pause(0.05)
         check(org_empty_app.source_state == "empty" and not org_empty_app.stops,
               "an empty org queue must read as empty, not as an error")
+        check(org_empty_app.slay_frame == len(tui.SLAY_FRAMES) - 1,
+              "an empty queue on startup must immediately hold the ALL SYSTEMS SLAY frame")
     set_org_queue(SNAPSHOT["items"])
 
     live_file = workdir / "live.json"
@@ -3741,10 +3743,18 @@ async def main() -> int:
                 f"the evidence must show {expected!r}, got {details!r}",
             )
         stop.live["reviews"] = []
+        stop.live["statusCheckRollup"] = [
+            {"workflowName": "ci", "name": "build", "conclusion": "FAILURE", "detailsUrl": "https://github.com/runs/123", "startedAt": "2026-09-06T00:00:00Z", "completedAt": "2026-09-06T00:05:00Z"},
+        ]
         app.render_evidence(stop)
         await pilot.pause()
+        details_with_ci = str(app.query_one("#details", tui.Static).render())
         check(
-            "reviews  none yet" in str(app.query_one("#details", tui.Static).render()),
+            "CI FAILURE TRIAGE" in details_with_ci and "build" in details_with_ci and "https://github.com/runs/123" in details_with_ci,
+            "failing CI must render an evidence-first triage card",
+        )
+        check(
+            "reviews  none yet" in details_with_ci,
             "an unreviewed pull request must say so plainly",
         )
 

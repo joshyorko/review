@@ -46,7 +46,7 @@ credential handling ([`launcher.md`](launcher.md)).
 1. Let Hive own the WebSocket protocol, assignment selection, `contributor`
    tmux session, prompt injection, and result capture. Context7 reaches the
    agent twice: the hub queries it server-side
-   (`v2/pkg/knowledge/context7.go`) and delivers assigned-task context through
+   (`src/pkg/knowledge/context7.go`) and delivers assigned-task context through
    its knowledge export, and the image's controlled Goose config enables the
    `context7` extension for on-demand lookups (see `goose-context.md`).
    review starts the runtime and attaches to it; it does not reproduce Hive's
@@ -78,7 +78,7 @@ credential handling ([`launcher.md`](launcher.md)).
    is Hive's, not ours: when the hub declines to assign work it sends
    `task_unavailable` with a reason, which the relay logs before re-asking
    30 seconds later. The reasons are defined by the *hub*, in
-   `v2/pkg/dashboard/contribute_ws.go`, not by the relay — read them there.
+   `src/pkg/dashboard/contribute_ws.go`, not by the relay — read them there.
    Three are enforced refusals (`token_mint_failed`, `tier_disabled`,
    `concurrency_limit`), two are rate caps (`hourly_limit`, `daily_limit`),
    and three mean the hub simply has nothing to hand over right now
@@ -171,14 +171,14 @@ and no launcher change duplicates Hive lifecycle behavior.
 Cite upstream by pinned permalink, never a branch path.
 
 - Relay message cases, including `task_unavailable`:
-  [`bin/contributor-relay.sh` @ fc3d717](https://github.com/kubestellar/hive/blob/fc3d7179255d13a613632fd1e982691d2d8bc0ae/bin/contributor-relay.sh)
+  [`bin/contributor-relay.sh` @ fe34da5](https://github.com/kubestellar/hive/blob/fe34da51434ad9b0924eee1492047c3c95c705ff/bin/contributor-relay.sh)
 - Workspace preparation and tmux rooting:
-  [`bin/contributor-agent.sh` @ fc3d717](https://github.com/kubestellar/hive/blob/fc3d7179255d13a613632fd1e982691d2d8bc0ae/bin/contributor-agent.sh)
+  [`bin/contributor-agent.sh` @ fe34da5](https://github.com/kubestellar/hive/blob/fe34da51434ad9b0924eee1492047c3c95c705ff/bin/contributor-agent.sh)
 - Task release on disconnect:
-  [`v2/pkg/dashboard/contribute_ws.go#L1057-L1090` @ fc3d717](https://github.com/kubestellar/hive/blob/fc3d7179255d13a613632fd1e982691d2d8bc0ae/v2/pkg/dashboard/contribute_ws.go#L1057-L1090)
+  [`src/pkg/dashboard/contribute_ws.go#L3445-L3470` @ fe34da5](https://github.com/kubestellar/hive/blob/fe34da51434ad9b0924eee1492047c3c95c705ff/src/pkg/dashboard/contribute_ws.go#L3445-L3470)
 - tmux terminal and mouse configuration: Context7 `/tmux/tmux`
-- Public contribute projections and assignment policy @ `0b78dc0`:
+- Public contribute projections and assignment policy @ `fe34da5`:
   [`server.go`, `api_contribute.go`, `contribute_sse.go`, and
-  `contribute_ws.go`](https://github.com/kubestellar/hive/tree/0b78dc096d51ad7af7408fb644f40d269a7e4fc5/v2/pkg/dashboard)
-- PR-link projection @ `0b78dc0`:
-  [`contribute_prlink.go`](https://github.com/kubestellar/hive/blob/0b78dc096d51ad7af7408fb644f40d269a7e4fc5/v2/pkg/dashboard/contribute_prlink.go)
+  `contribute_ws.go`](https://github.com/kubestellar/hive/tree/fe34da51434ad9b0924eee1492047c3c95c705ff/src/pkg/dashboard)
+- PR-link projection @ `fe34da5`:
+  [`contribute_prlink.go`](https://github.com/kubestellar/hive/blob/fe34da51434ad9b0924eee1492047c3c95c705ff/src/pkg/dashboard/contribute_prlink.go)

@@ -112,6 +112,53 @@ MAX_RE_REVIEW_FINDINGS = 12
 MAX_RE_REVIEW_NEW_EVIDENCE = 8
 SENSITIVE_RE_REVIEW_PATHS = (".github/workflows/",)
 
+SLAY_DELAYS = [0.4, 0.3, 0.25, 0.35]
+SLAY_FRAMES = [
+    # Frame 1: Round 8 / Fight (400ms)
+    (
+        "[bold cyan]╔═ BLUEFIN [████████████] 100% ═╗[/]  [bold magenta]╔═ QUEUE HP [████████████] 100% ═╗[/]\n"
+        "   \\   /\n"
+        "  ( •_•)           ROUND 8                     [8 PRs IN QUEUE]\n"
+        "  <)   )╯           FIGHT!                      [■■■■■■■■■■■■■■]\n"
+        "   /   \\                                        READY TO REVIEW"
+    ),
+    # Frame 2: Charge / Combo (300ms)
+    (
+        "[bold cyan]╔═ BLUEFIN [████████████] 100% ═╗[/]  [bold magenta]╔═ QUEUE HP [████████████] 100% ═╗[/]\n"
+        "   \\   /\n"
+        "  ( >_<)⚡ ░▒▓█                           [8 PRs IN QUEUE]\n"
+        "  <)   )⚡ ░▒▓█   ↓ ↘ → + CLAW            [■■■■■■■■■■■■■■]\n"
+        "   /   \\    ⚡    SLAYDOKEN!"
+    ),
+    # Frame 3: Projectile / Critical hit 9999 (250ms)
+    (
+        "[bold cyan]╔═ BLUEFIN [████████████] 100% ═╗[/]  [bold red]╔═ QUEUE HP [            ]   0% ═╗[/]\n"
+        "   \\   /\n"
+        "  ( ✧Д✧) ═══[bold cyan]░▒▓█[/][bold magenta]█████[/][bold pink]█▓▒░[/]═══>     💥 [bold yellow]CRITICAL HIT! 9999![/bold yellow] 💥\n"
+        "  <)   )╯                              [bold red]※※※ QUEUE SHATTERED ※※※[/bold red]\n"
+        "   /   \\"
+    ),
+    # Frame 4: K.O. (350ms)
+    (
+        "[bold yellow]╔═══════════════════════════════════════════════════════════════╗[/]\n"
+        "[bold yellow]║                          ★ K. O. ★                            ║[/]\n"
+        "[bold yellow]║                     QUEUE FIGHTER DOWN                        ║[/]\n"
+        "[bold yellow]╚═══════════════════════════════════════════════════════════════╝[/]\n"
+        "                    [dim]░ ▒ ▓ █  debris clearing  █ ▓ ▒ ░[/dim]"
+    ),
+    # Frame 5: Player 1 Wins / ALL SYSTEMS SLAY (Held)
+    (
+        "[bold cyan]╔═══════════════════════════════════════════════════════════════╗[/]\n"
+        "[bold cyan]║[/]                      [bold yellow]★ K. O. ★[/]                                [bold cyan]║[/]\n"
+        "[bold cyan]║[/]                     [bold green]QUEUE SLAIN[/]                               [bold cyan]║[/]\n"
+        "[bold cyan]║[/]                    [bold white]PLAYER 1 WINS[/]                              [bold cyan]║[/]\n"
+        "[bold cyan]║[/]                                                               [bold cyan]║[/]\n"
+        "[bold cyan]║[/]           [bold magenta]░▒▓█[/] [bold bright_cyan]ALL SYSTEMS SLAY[/] [bold magenta]█▓▒░[/]                          [bold cyan]║[/]\n"
+        "[bold cyan]╚═══════════════════════════════════════════════════════════════╝[/]\n"
+        "              [bold green]✓[/] [dim]Review queue fully drained. All clear.[/dim]"
+    ),
+]
+
 # The semantic registry is the source for bindings, help, and the command
 # palette. IDs are stable so clickable surfaces can consume the same contract.
 @dataclass(frozen=True)
@@ -2502,6 +2549,8 @@ class ReviewDashboard(App):
         self.lab_detail = ""
         self.source_state = "loading"
         self.source_message = ""
+        self.slay_frame = -1
+        self._had_nonempty_queue = False
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -2942,7 +2991,33 @@ class ReviewDashboard(App):
             for stop in stops:
                 stop.selected = stop.key in self.reselect
             self.reselect = set()
+
+        self.stops = stops
+        empty_source = not self.queue_items and self.source_state in ("empty", "ready")
+        if empty_source:
+            if self._had_nonempty_queue and self.slay_frame < 0:
+                self.start_slay_sequence()
+                return
+            elif not self._had_nonempty_queue and self.slay_frame < 0:
+                self.slay_frame = len(SLAY_FRAMES) - 1
+        elif self.queue_items:
+            self._had_nonempty_queue = True
+            self.slay_frame = -1
+
         self.populate(stops)
+
+    def _advance_slay_frame(self) -> None:
+        if 0 <= self.slay_frame < len(SLAY_FRAMES) - 1:
+            self.slay_frame += 1
+            self.populate(self.stops)
+            if self.slay_frame < len(SLAY_FRAMES) - 1:
+                delay = SLAY_DELAYS[self.slay_frame]
+                self.set_timer(delay, self._advance_slay_frame)
+
+    def start_slay_sequence(self) -> None:
+        self.slay_frame = 0
+        self.populate(self.stops)
+        self.set_timer(SLAY_DELAYS[0], self._advance_slay_frame)
 
     def row_markup(self, stop: Stop) -> str:
         # Selection is not colour-only: a ● leads the row and the whole row
@@ -2973,15 +3048,30 @@ class ReviewDashboard(App):
 
     def populate(self, stops: list[Stop]) -> None:
         self.stops = stops
-        queue = self.query_one("#queue", ListView)
+        try:
+            queue = self.query_one("#queue", ListView)
+        except NoMatches:
+            return
         queue.clear()
-        for stop in stops:
-            item = ListItem(Label(self.row_markup(stop)))
-            item.set_class(stop.selected, "selected")
-            queue.append(item)
-        self.refresh_status()
-        if stops:
+        if not stops:
+            empty_source = not self.queue_items and self.source_state in ("empty", "ready")
+            if empty_source and self.slay_frame >= 0:
+                frame_text = SLAY_FRAMES[self.slay_frame]
+                queue.append(ListItem(Static(frame_text)))
+                try:
+                    details = self.query_one("#details", Static)
+                    details.update("[bold cyan]ALL SYSTEMS SLAY[/bold cyan]\n\n[green]★[/green] Review queue fully drained.\nEnjoy the victory.")
+                except NoMatches:
+                    pass
+            elif not stops and self.queue_items:
+                queue.append(ListItem(Static("[dim]No pull requests match the active filter. Press [bold]f[/bold] to widen.[/dim]")))
+        else:
+            for stop in stops:
+                item = ListItem(Label(self.row_markup(stop)))
+                item.set_class(stop.selected, "selected")
+                queue.append(item)
             queue.index = 0
+        self.refresh_status()
 
     def refresh_rows(self) -> None:
         """Repaint the rows in place, keeping the highlight where it was."""
@@ -3248,6 +3338,29 @@ class ReviewDashboard(App):
             if reason
             else ""
         )
+        ci_triage_block = ""
+        if bad > 0:
+            lines_ci = ["\n[b red]CI FAILURE TRIAGE[/b red]"]
+            for check in checks:
+                conc = check.get("conclusion") or check.get("state") or "PENDING"
+                if conc in ("FAILURE", "ERROR", "TIMED_OUT"):
+                    wf = check.get("workflowName") or ""
+                    job_name = check.get("name") or check.get("context") or "check"
+                    step_name = check.get("stepName") or ""
+                    step_info = f" › {escape(step_name)}" if step_name else ""
+                    url = check.get("detailsUrl") or check.get("url") or ""
+                    started = str(check.get("startedAt") or "")[:19]
+                    completed = str(check.get("completedAt") or "")[:19]
+                    time_info = f" ({started} -> {completed})" if started and completed else ""
+                    head_sha = str(live.get("headRefOid") or "")[:12]
+                    sha_info = f" @ {head_sha}" if head_sha else ""
+                    lines_ci.append(
+                        f"  [red]✗ {conc}[/red] {escape(wf + ' / ' if wf else '')}[b]{escape(job_name)}[/b]{step_info}{sha_info}{time_info}"
+                    )
+                    if url:
+                        lines_ci.append(f"    evidence: {link(url, url)}")
+            ci_triage_block = "\n" + "\n".join(lines_ci)
+
         self.query_one("#details", Static).update(
             f"[b]{link(stop.key, pr_url(stop.repository, stop.number))}[/b]  "
             f"{escape(stop.title)}\n"
@@ -3260,7 +3373,8 @@ class ReviewDashboard(App):
             f"merge    {live.get('mergeable', '?')} / {live.get('mergeStateStatus', '?')}\n"
             f"size     +{live.get('additions', '?')} -{live.get('deletions', '?')} "
             f"across {live.get('changedFiles', '?')} files\n"
-            f"checks   {ok} ok, {bad} failed, {cancelled} cancelled, {pending} pending\n"
+            f"checks   {ok} ok, {bad} failed, {cancelled} cancelled, {pending} pending"
+            f"{ci_triage_block}\n"
             f"{reviews_block}\n"
             f"linked   {issues}\n"
             f"labels   {labels}{mechanical_block}"

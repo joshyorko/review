@@ -45,9 +45,9 @@ by which repository is easiest to file in.
 
 ## Upstream Facts
 
-Verified 2026-08-04 against `kubestellar/hive`:
+Verified 2026-09-06 against `kubestellar/hive`:
 
-- The default branch is `v2`. Cite code there, not `main`.
+- The default branch is `v4` (v2 is retired). Cite code there, not `main`.
 - There is no `CONTRIBUTING.md`, `AGENTS.md`, code of conduct, issue template,
   or pull request template. Absent guidance is not permission to invent our
   own process; follow the conventions their repository visibly practices.

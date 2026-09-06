@@ -247,7 +247,7 @@ container; CI invokes it explicitly.
 ## References
 
 - Hive protocol, contributor runtime, and upstream issue reporting:
-  `kubestellar/hive` (default branch `v2`; no contributing guide or issue
+  `kubestellar/hive` (default branch `v4`, v2 is retired; no contributing guide or issue
   templates, DCO sign-off required on pull requests).
 - Organization skills and factory rules: `projectbluefin/common`.
 - External API details: Context7 documentation. Context7 reaches agents both

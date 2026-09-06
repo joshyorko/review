@@ -78,9 +78,9 @@
 # hard errors rather than silent fallbacks.
 tool_env := env("TOOL", "")
 hive_repo_url := "https://github.com/kubestellar/hive"
-# origin/v2 via `git ls-remote --heads https://github.com/kubestellar/hive v2`
-# on 2026-08-04.
-hive_commit := "8ac1994a4994ec3454f83c2ed5a989abd430e1af"
+# origin/v4 via `git ls-remote --heads https://github.com/kubestellar/hive v4`
+# on 2026-09-06.
+hive_commit := "fe34da51434ad9b0924eee1492047c3c95c705ff"
 gemini_model := "gemini-3.8-flash"
 # Contributor runs are automated in practice — Hive keeps feeding the session —
 # so a large window is money spent on context nobody reads. Opus and Kimi are
@@ -726,11 +726,11 @@ ensure_hive_contributor_env() {
   echo "Running upstream pinned setup: just contribute-setup goose"
   # HIVE_SKIP_VERSION_CHECK=true is upstream's own documented opt-out, not a
   # local workaround. Upstream's private 'check-version' recipe — a prerequisite
-  # of 'contribute-setup' — compares HEAD against origin/v2 and aborts when they
+  # of 'contribute-setup' — compares HEAD against origin/v4 and aborts when they
   # differ, printing "Or skip: export HIVE_SKIP_VERSION_CHECK=true". That check
-  # assumes a tracking checkout of v2. We deliberately run a pinned, detached
+  # assumes a tracking checkout of v4. We deliberately run a pinned, detached
   # SHA (see prepare_pinned_hive_checkout), so the comparison can only ever
-  # fail once v2 moves past the pin, and it would abort first-run onboarding on
+  # fail once v4 moves past the pin, and it would abort first-run onboarding on
   # every clean machine. Taking upstream's flag for exactly the case it
   # documents keeps Hive the authority; removing it would break setup without
   # unpinning, and unpinning would mean executing unreviewed upstream code.
@@ -1633,7 +1633,7 @@ review-doctor:
       echo "    review runs upstream 'just contribute-setup goose' from"
       echo "    kubestellar/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
       echo "    That runs with upstream's documented HIVE_SKIP_VERSION_CHECK=true,"
-      echo "    because the pinned checkout is detached and cannot match origin/v2."
+      echo "    because the pinned checkout is detached and cannot match origin/v4."
       fail=$((fail+1))
     fi
     echo ""
