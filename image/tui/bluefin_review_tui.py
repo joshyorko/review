@@ -1032,14 +1032,17 @@ class QueueFilters:
     def live(self) -> bool:
         return bool(self.live_repository)
 
-    def wants(self, item: dict) -> bool:
-        if self.action and item.get("recommended_action", "") != self.action:
-            return False
+    def wants_repo(self, item: dict) -> bool:
         if self.repository:
             full = item.get("repository", "")
             if full != self.repository and full.split("/")[-1] != self.repository:
                 return False
         return True
+
+    def wants(self, item: dict) -> bool:
+        if self.action and item.get("recommended_action", "") != self.action:
+            return False
+        return self.wants_repo(item)
 
 
 TriageState = Literal["unseen", "reviewed", "skipped"]
@@ -3802,7 +3805,7 @@ class ReviewDashboard(App):
         stops = []
         if self.view_mode == "issues":
             for item in self.issues_items:
-                if not self.filters.wants(item):
+                if not self.filters.wants_repo(item):
                     continue
                 stop = Stop(
                     repository=item["repository"],
@@ -3834,7 +3837,15 @@ class ReviewDashboard(App):
                 self.show_evidence(self.current)
             elif not stops:
                 try:
-                    self.query_one("#details", Static).update("[dim]No open issues.[/dim]")
+                    if self.source_state not in ("ready", "empty"):
+                        err = f"Could not load issues ({self.source_state})"
+                        if self.source_message:
+                            err += f": {self.source_message}"
+                        self.query_one("#details", Static).update(f"[bold red]{escape(err)}[/bold red]")
+                    elif self.issues_items:
+                        self.query_one("#details", Static).update("[dim]No open issues match the active filter.[/dim]")
+                    else:
+                        self.query_one("#details", Static).update("[dim]No open issues.[/dim]")
                     self.query_one("#context", Static).update("")
                 except NoMatches:
                     pass
@@ -3908,7 +3919,7 @@ class ReviewDashboard(App):
                     labels_list.append(l["name"])
                 elif isinstance(l, str):
                     labels_list.append(l)
-            labels_str = f" [{', '.join(escape(l) for l in labels_list)}]" if labels_list else ""
+            labels_str = f" {escape('[' + ', '.join(labels_list) + ']')}" if labels_list else ""
             comments_source = stop.live.get("comments")
             if isinstance(comments_source, list):
                 comments_count = len(comments_source)
@@ -3921,7 +3932,7 @@ class ReviewDashboard(App):
             body = (
                 f"{selected}{link(stop.key, issue_url(stop.repository, stop.number))}: "
                 f"{escape(stop.title[:60])}{labels_str} "
-                f"({comments_count} comments) [triage]"
+                f"({comments_count} comments) {escape('[triage]')}"
             )
             style = stop_style(stop.action, "", "", "")
             return f"[{style}]{body}[/{style}]" if style else body
@@ -3976,14 +3987,36 @@ class ReviewDashboard(App):
         if not stops:
             empty_source = not self.queue_items and self.source_state in ("empty", "ready")
             if self.view_mode == "issues":
-                queue.append(ListItem(Static("[dim]No open issues found.[/dim]")))
-                try:
-                    details = self.query_one("#details", Static)
-                    details.update("[dim]No open issues.[/dim]")
-                    context = self.query_one("#context", Static)
-                    context.update("")
-                except NoMatches:
-                    pass
+                if self.source_state not in ("ready", "empty"):
+                    err = f"Could not load issues ({self.source_state})"
+                    if self.source_message:
+                        err += f": {self.source_message}"
+                    queue.append(ListItem(Static(f"[bold red]{escape(err)}[/bold red]")))
+                    try:
+                        details = self.query_one("#details", Static)
+                        details.update(f"[bold red]{escape(err)}[/bold red]")
+                        context = self.query_one("#context", Static)
+                        context.update("")
+                    except NoMatches:
+                        pass
+                elif not stops and self.issues_items:
+                    queue.append(ListItem(Static("[dim]No issues match the active filter. Press [bold]f[/bold] to widen.[/dim]")))
+                    try:
+                        details = self.query_one("#details", Static)
+                        details.update("[dim]No issues match the active filter.[/dim]")
+                        context = self.query_one("#context", Static)
+                        context.update("")
+                    except NoMatches:
+                        pass
+                else:
+                    queue.append(ListItem(Static("[dim]No open issues found.[/dim]")))
+                    try:
+                        details = self.query_one("#details", Static)
+                        details.update("[dim]No open issues.[/dim]")
+                        context = self.query_one("#context", Static)
+                        context.update("")
+                    except NoMatches:
+                        pass
             elif empty_source and self.slay_frame >= 0:
                 frame_text = SLAY_FRAMES[self.slay_frame]
                 queue.append(ListItem(Static(frame_text)))
@@ -4099,11 +4132,11 @@ class ReviewDashboard(App):
             status_bar = self.query_one("#status-bar", Static)
         except NoMatches:
             return
-        view_tag = "[Tab] Issues view | " if self.view_mode == "issues" else "[Tab] PR view | "
+        view_tag = f"{escape('[Tab]')} Issues view | " if self.view_mode == "issues" else f"{escape('[Tab]')} PR view | "
         if self.view_mode == "issues":
             status_bar.update(
                 f" {view_tag}Issues: {shown} open "
-                f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
+                f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}"
                 f" | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
@@ -4111,7 +4144,7 @@ class ReviewDashboard(App):
         else:
             status_bar.update(
                 f" {view_tag}Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
-                f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
+                f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}{stuck}{review_failures}{agents}{landed}{policy}"
                 f" | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
@@ -4785,7 +4818,7 @@ class ReviewDashboard(App):
                 if isinstance(comment, dict):
                     author_obj = comment.get("author")
                     c_author = author_obj.get("login", "?") if isinstance(author_obj, dict) else "?"
-                    c_created = str(comment.get("createdAt", "") or "")[:10]
+                    c_created = escape(str(comment.get("createdAt", "") or "")[:10])
                     c_body = str(comment.get("body", "") or "").strip()
                     first_line = c_body.splitlines()[0] if c_body else ""
                     lines.append(f"• [b]{escape(c_author)}[/b] ({c_created}): {escape(first_line[:80])}")
@@ -4907,7 +4940,10 @@ class ReviewDashboard(App):
         self.notify(f"done: {' '.join(commands[-1][:4])}…")
         if then:
             then()
-        self.show_evidence(stop)
+        if stop in self.stops:
+            self.show_evidence(stop)
+        elif self.current:
+            self.show_evidence(self.current)
 
     # ── actions ───────────────────────────────────────────────────────────
 
@@ -5263,6 +5299,9 @@ class ReviewDashboard(App):
     def action_leave_review(self) -> None:
         stop = self.current
         if stop:
+            if stop.is_issue:
+                self.notify("action applies to pull requests only", severity="warning")
+                return
             self.leave_review(stop)
 
     def action_docs(self) -> None:
@@ -6261,6 +6300,16 @@ class ReviewDashboard(App):
         )
         with open(body_file, "w", encoding="utf-8") as sink:
             sink.write(message)
+        then = None
+        if stop.is_issue:
+            def on_issue_closed() -> None:
+                self.issues_items = [
+                    it for it in self.issues_items
+                    if not (it.get("repository") == stop.repository and it.get("number") == stop.number)
+                ]
+                self.apply_filters()
+            then = on_issue_closed
+
         self.mutate_all(
             stop,
             [
@@ -6270,6 +6319,7 @@ class ReviewDashboard(App):
                 ],
                 ["gh", target, "close", str(stop.number), "--repo", stop.repository],
             ],
+            then=then,
         )
 
     def action_handoff(self) -> None:
