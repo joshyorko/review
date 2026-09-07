@@ -670,7 +670,6 @@ class ReviewEngine:
         if self.broker_executor is None and os.environ.get("BLUEFIN_REVIEW_EXEC_AVAILABLE") == "1":
             self.broker_executor = BrokerExecutor()
         self.worktree_root = str(worktree_root or self.state_root / "worktrees")
-        self._batches: dict[str, ReviewBatch] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_runs: dict[str, dict[str, ReviewRun]] = {}
         self._state_lock = threading.Lock()
@@ -747,7 +746,6 @@ class ReviewEngine:
             effort,
             headroom_telemetry,
         )
-        self._batches[batch.batch_id] = batch
         with self._state_lock:
             self._cancel_events[batch.batch_id] = threading.Event()
         thread = threading.Thread(
@@ -777,7 +775,6 @@ class ReviewEngine:
             effort,
             headroom_telemetry,
         )
-        self._batches[batch.batch_id] = batch
         with self._state_lock:
             self._cancel_events[batch.batch_id] = threading.Event()
         return self._run(batch, check_scope_version, check_scope, on_event)
@@ -1140,6 +1137,7 @@ class ReviewEngine:
         finally:
             with self._state_lock:
                 self._active_runs.pop(batch.batch_id, None)
+                self._cancel_events.pop(batch.batch_id, None)
             telemetry = self._refresh_headroom(batch.backend)
             batch.headroom_status_line = str(telemetry["status_line"])
             batch.headroom_output_reduction = telemetry

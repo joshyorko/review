@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
+import logging.handlers
 import os
 import re
 import shlex
@@ -181,6 +183,18 @@ TRACE_PATH = os.path.join(
     "bluefin-review",
     "trace.jsonl",
 )
+TRACE_MAX_BYTES = int(os.environ.get("BLUEFIN_REVIEW_TRACE_MAX_BYTES", 8 * 1024 * 1024))
+TRACE_BACKUP_COUNT = int(os.environ.get("BLUEFIN_REVIEW_TRACE_BACKUPS", "3"))
+_TRACE_LOGGER: logging.Logger | None = None
+_TRACE_LOGGER_LOCK = threading.Lock()
+# Bounds for in-memory collections that would otherwise grow for the
+# lifetime of an unattended run. Each is a display or scheduling cache;
+# the durable record of a run is RunStateStore, which bounds itself.
+MAX_REVIEW_BATCHES = int(os.environ.get("BLUEFIN_REVIEW_MAX_BATCHES", "50"))
+MAX_TRIAGE_ENTRIES = int(os.environ.get("BLUEFIN_REVIEW_MAX_TRIAGE", "2000"))
+MAX_MERGE_RIGHTS_ENTRIES = int(os.environ.get("BLUEFIN_REVIEW_MAX_MERGE_RIGHTS", "500"))
+MAX_LANDING_QUEUE = int(os.environ.get("BLUEFIN_REVIEW_MAX_LANDING_QUEUE", "200"))
+MAX_REVIEW_OUTPUT_LINES = int(os.environ.get("BLUEFIN_REVIEW_MAX_OUTPUT_LINES", "200000"))
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
 MAX_CONCURRENT_LANDINGS = int(
@@ -699,12 +713,48 @@ def hive_get(path: str) -> hive_api.Result:
     return hive_api.request(f"{base}{path}", token, timeout=HIVE_TIMEOUT)
 
 
+def _bound_map(mapping: dict, limit: int) -> None:
+    """Drop the oldest entries so a per-run cache cannot grow forever.
+
+    Insertion order is eviction order. These maps are display and
+    scheduling caches; the authoritative record is the run store, so an
+    evicted entry is recomputed rather than lost.
+    """
+    while len(mapping) > limit:
+        mapping.pop(next(iter(mapping)))
+
+
+def _trace_logger() -> logging.Logger:
+    """One process-wide, size-capped rotating sink for diagnostics."""
+    global _TRACE_LOGGER
+    with _TRACE_LOGGER_LOCK:
+        if _TRACE_LOGGER is None:
+            os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
+            handler = logging.handlers.RotatingFileHandler(
+                TRACE_PATH,
+                maxBytes=TRACE_MAX_BYTES,
+                backupCount=TRACE_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            logger = logging.getLogger("bluefin_review.trace")
+            logger.setLevel(logging.INFO)
+            logger.propagate = False
+            logger.handlers.clear()
+            logger.addHandler(handler)
+            _TRACE_LOGGER = logger
+        return _TRACE_LOGGER
+
+
 def trace(record: dict) -> None:
-    """Append a JSON trace of a maintainer action for the feedback loop."""
-    os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
+    """Append a JSON trace of a maintainer action for the feedback loop.
+
+    Diagnostics are capped and rotated. Run state lives in the durable
+    run store, never here, so losing an old trace segment costs no
+    decision the appliance still has to make.
+    """
     record = {"ts": datetime.now(timezone.utc).isoformat(), **record}
-    with open(TRACE_PATH, "a", encoding="utf-8") as sink:
-        sink.write(json.dumps(record, separators=(",", ":")) + "\n")
+    _trace_logger().info(json.dumps(record, separators=(",", ":")))
 
 
 def dependency_subject(title: str) -> str | None:
@@ -2275,6 +2325,7 @@ class ReviewScreen(Screen):
         self.stop_requested = False
         self.started = time.monotonic()
         self.output: list[str] = []
+        self.output_overflowed = False
         # The card is a point-in-time record of the evidence the maintainer
         # saw when the review started. The dashboard's background workers
         # keep rewriting stop.live/stop.overlap while the review runs, so
@@ -2408,11 +2459,22 @@ class ReviewScreen(Screen):
         )
 
     def append(self, line: str) -> None:
-        self.output.append(line)
+        if len(self.output) < MAX_REVIEW_OUTPUT_LINES:
+            self.output.append(line)
+        else:
+            self.output_overflowed = True
         self.query_one("#review-log", RichLog).write(line)
 
     def finish(self, code: int | None, error: str) -> None:
         self.finished = True
+        # A transcript we stopped capturing cannot be parsed into a verdict
+        # anyone may act on, so overflow fails closed down the error path
+        # rather than yielding findings extracted from a partial capture.
+        if self.output_overflowed and not error:
+            error = (
+                f"review output exceeded {MAX_REVIEW_OUTPUT_LINES} lines; "
+                "the transcript is incomplete and its verdict is not trustworthy"
+            )
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
         live_context = live_review_context(self.live_snapshot, title=stop.title)
@@ -3473,6 +3535,7 @@ class ReviewDashboard(App):
             stop.cached_age = ""
             stop.triage_state = "reviewed"
             self.triage[self.triage_key(stop)] = "reviewed"
+            _bound_map(self.triage, MAX_TRIAGE_ENTRIES)
             self.active_review_identities[stop.key] = self.run_identity(
                 stop, model=selected_model, effort=selected_effort, head_sha=item.head_sha
             )
@@ -3510,6 +3573,7 @@ class ReviewDashboard(App):
             )
             return
         self.review_batches.append(batch)
+        self.prune_review_batches()
         for item in batch.items:
             self.review_batch_ids[item.key] = batch.batch_id
         pending_events = self.pending_review_events.pop(
@@ -3800,6 +3864,26 @@ class ReviewDashboard(App):
             batch.headroom_output_reduction
         )
         self.refresh_status()
+
+    def prune_review_batches(self) -> None:
+        """Bound the finished-batch history without dropping live work.
+
+        Running batches are never evicted: the watcher and every event
+        route through them. Only finished batches age out, oldest first.
+        """
+        if len(self.review_batches) <= MAX_REVIEW_BATCHES:
+            return
+        running = [batch for batch in self.review_batches if batch.running]
+        finished = [batch for batch in self.review_batches if not batch.running]
+        keep = max(0, MAX_REVIEW_BATCHES - len(running))
+        evicted = {id(batch) for batch in finished[:-keep]} if keep else {
+            id(batch) for batch in finished
+        }
+        if not evicted:
+            return
+        self.review_batches = [
+            batch for batch in self.review_batches if id(batch) not in evicted
+        ]
 
     def watch_review_batch(self, batch: ReviewBatch) -> None:
         self.sync_batch_headroom(batch)
@@ -4740,6 +4824,7 @@ class ReviewDashboard(App):
         stop.head_sha = str(stop.live.get("headRefOid") or "")
         if merge_rights is not None:
             self.merge_rights[stop.repository] = merge_rights
+            _bound_map(self.merge_rights, MAX_MERGE_RIGHTS_ENTRIES)
         current_base = str(stop.live.get("baseRefOid") or "")
         result_base = str(
             (stop.review_result.provenance if stop.review_result else {}).get(
@@ -5695,6 +5780,7 @@ class ReviewDashboard(App):
             if perm_res.returncode == 0 and perm_res.stdout.strip():
                 has_push = perm_res.stdout.strip().lower() == "true"
                 self.merge_rights[stop.repository] = has_push
+                _bound_map(self.merge_rights, MAX_MERGE_RIGHTS_ENTRIES)
                 if not has_push:
                     self.run_store.transition(
                         identity,
@@ -6461,9 +6547,36 @@ class ReviewDashboard(App):
             )
         )
 
+    def _prune_landing_queue(self) -> None:
+        """Bound the landing history. Caller must hold _landing_condition.
+
+        Only finished tasks are evicted, oldest first, so a running or
+        not-yet-started landing is never dropped and the newest task stays
+        last -- the status line reads the queue's tail.
+        """
+        if len(self.landing_queue) <= MAX_LANDING_QUEUE:
+            return
+        surplus = len(self.landing_queue) - MAX_LANDING_QUEUE
+        kept: list["landing.LandingTask"] = []
+        for task in self.landing_queue:
+            finished = (
+                task.returncode is not None
+                and id(task) not in self._landing_active
+            )
+            if surplus > 0 and finished:
+                # id() is reused once the object is freed, so a stale
+                # membership entry would misreport an unrelated later task
+                # as active.
+                self._landing_active.discard(id(task))
+                surplus -= 1
+                continue
+            kept.append(task)
+        self.landing_queue = kept
+
     def enqueue_landing(self, task: "landing.LandingTask") -> None:
         with self._landing_condition:
             self.landing_queue.append(task)
+            self._prune_landing_queue()
             if not task.phase:
                 # A new dispatch supersedes the previous batch's outcome line.
                 # A final-review round belongs to the batch already on that
