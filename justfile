@@ -1055,12 +1055,10 @@ scale_cluster_contributors() {
   kubectl create namespace bluefin-system --dry-run=client -o yaml |
     kubectl apply -f - >/dev/null || return 1
 
-  {
-    printf 'GH_TOKEN=%s\n' "$GH_TOKEN_VALUE"
-    printf 'GITHUB_COPILOT_TOKEN=%s\n' "$COPILOT_TOKEN"
-  } | kubectl create secret generic review-contributor-secret -n bluefin-system \
+  kubectl create secret generic review-contributor-secret -n bluefin-system \
     --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
-    --from-env-file=/dev/stdin \
+    --from-file=GH_TOKEN=<(printf '%s' "$GH_TOKEN_VALUE") \
+    --from-file=GITHUB_COPILOT_TOKEN=<(printf '%s' "$COPILOT_TOKEN") \
     --dry-run=client -o yaml |
     kubectl apply --server-side --force-conflicts -f - >/dev/null || return 1
   local legacy_annot

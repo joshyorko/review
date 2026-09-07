@@ -697,6 +697,13 @@ case "$*" in
   "annotate secret review-contributor-secret -n bluefin-system kubectl.kubernetes.io/last-applied-configuration-")
     [[ "${FAKE_KUBECTL_ANNOTATE_FAIL:-0}" == 1 ]] && exit 42
     ;;
+  "create secret generic "*)
+    if [[ "$*" == *"--from-env-file="* && ("$*" == *"--from-file="* || "$*" == *"--from-literal="*) ]]; then
+      echo "error: from-env-file cannot be combined with from-file or from-literal" >&2
+      exit 1
+    fi
+    printf '{"items":[]}\n'
+    ;;
   *) printf '{"items":[]}\n' ;;
 esac
 exit 0
@@ -790,7 +797,8 @@ run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
 assert_zero_status "$STATUS" "cluster scale-out must succeed without the legacy annotation"
 assert_file_contains "get secret review-contributor-secret -n bluefin-system" "$kubectl_log"
 assert_file_not_contains "annotate secret review-contributor-secret" "$kubectl_log"
-assert_file_contains "--from-env-file=/dev/stdin" "$kubectl_log"
+assert_file_contains "--from-file=GH_TOKEN=" "$kubectl_log"
+assert_file_contains "--from-file=GITHUB_COPILOT_TOKEN=" "$kubectl_log"
 assert_file_not_contains "--from-literal=" "$kubectl_log"
 assert_file_not_contains "gho-test-token" "$kubectl_log"
 assert_file_not_contains "copilot-test-token" "$kubectl_log"
@@ -1873,8 +1881,10 @@ grep -Fq 'kubectl annotate secret review-contributor-secret -n bluefin-system' <
   fail "cluster scale-out must remove stale client-side apply metadata from the Secret"
 grep -Fq 'kubectl.kubernetes.io/last-applied-configuration-' <<<"$cluster_body" ||
   fail "cluster scale-out must remove the last-applied-configuration annotation"
-grep -Fq -- '--from-env-file=/dev/stdin' <<<"$cluster_body" ||
-  fail "cluster scale-out must feed token values through stdin"
+grep -Fq -- '--from-file=GH_TOKEN=' <<<"$cluster_body" ||
+  fail "cluster scale-out must feed token values via file descriptors"
+grep -Fq -- '--from-file=GITHUB_COPILOT_TOKEN=' <<<"$cluster_body" ||
+  fail "cluster scale-out must feed copilot token via file descriptors"
 if grep -Fq -- '--from-literal=' <<<"$cluster_body"; then
   fail "cluster scale-out must not place token values in kubectl arguments"
 fi

@@ -44,7 +44,7 @@ just review-doctor                  # check cluster deployment health
 1. **Namespace & Secret Sync:** `scale_cluster_contributors` ensures
    `bluefin-system` exists and synchronizes `review-contributor-secret`.
 2. **Plaintext Protection:** Token values enter `kubectl create secret`
-   via stdin (`--from-env-file=/dev/stdin`), preventing exposure in `ps` argv.
+   via process substitution file descriptors (`--from-file=KEY=<(...)`), preventing exposure in `ps` argv.
    Server-side apply is used and legacy annotations are stripped.
 3. **Hive Hub Consistency:** The launcher validates `HIVE_HUB` from
    `contributor.env` and sets it on the deployment via `kubectl set env`,
@@ -60,7 +60,7 @@ just review-doctor                  # check cluster deployment health
 
 | Rationalization | Reality |
 |---|---|
-| "Pass tokens via --from-literal." | Command-line arguments are visible in `/proc` and `ps`. Feed tokens via stdin. |
+| "Pass tokens via --from-literal." | Command-line arguments are visible in `/proc` and `ps`. Feed tokens via process substitution file descriptors. |
 | "Abort if cluster is offline." | The appliance owns no lab and depends on none. Cluster failures fall back to local mode. |
 
 ## Red Flags
