@@ -152,10 +152,8 @@ distinct states. `[o]` is only an optional browser escape hatch.
 
 ## Batch Review and Landing
 
-Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings enable `[f] fix & land in background`. See [`landing-batches.md`](landing-batches.md) for full batch orchestration, concurrency lanes, state persistence, and reporting.
-The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying local capacity, and trust a receipt only when its full run and check-scope identity matches.
-Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission, broker fallback, and cache publication; a cancelled run cannot publish or delete another session's receipt, and cleanup I/O failures remain visible.
-Headroom establishes one batch baseline, captures each route and telemetry snapshot under one lock, routes every non-cached dispatch, and samples aggregate telemetry after the batch.
+Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings enable `[f] fix & land in background`. See [`landing-batches.md`](landing-batches.md) for the `[$]` state machine, landing gate, concurrency lanes, and state persistence, and [`review-scheduler.md`](review-scheduler.md) for admission, capacity, and transport reuse.
+The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying capacity, and trust a receipt only when its full run and check-scope identity matches. Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission and cache publication; a cancelled run cannot publish or delete another session's receipt. Local lanes and the Hive fleet are two separate concurrency displays and are never conflated; see [`review-monitoring.md`](review-monitoring.md).
 On the dashboard, `B` selects or clears every visible row, `Space` toggles the highlighted row and advances, `n` marks an unseen exact head skipped and moves to the next unseen row, and `r` reviews the selection as a batch while retaining its selection on snapshot failure. Queue rows show running and verdict badges. `Enter` on a reviewed row reloads GitHub evidence before rendering cached analysis; CI, mergeability, reviews, and overlap are never restored from the cache.
 
 ## Common Rationalizations
@@ -177,6 +175,8 @@ On the dashboard, `B` selects or clears every visible row, `Space` toggles the h
 - A new mutating verb passed to the read-only `gh()` helper.
 - A default view that filters the queue without saying so.
 - A feature added with only a `tests/dashboard-contract.sh` grep behind it.
+- Remote-sourced state rendered without its age.
+- A core-loop path that gates on `hive_api_base()` being set.
 
 ## Exact-Head Re-Review
 

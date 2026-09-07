@@ -84,15 +84,60 @@ For monitoring all night or across long batch runs:
 3. Track active subagent commands for timeouts or hung external calls (`gh run watch`).
 4. File actionable findings with reproducible evidence to the repository issue tracker.
 
+## Showing Concurrency
+
+Mass review runs unattended, so the interface has one job while nobody is
+watching: say what is running, how much capacity exists, and how old the
+answer is.
+
+Local work and Hive work are **two separate displays and must never be
+conflated**. Local review and landing lanes are the dashboard's own processes;
+the Hive fleet is other machines running contributor tasks the dashboard does
+not control. A maintainer who reads one as the other will size a batch against
+capacity that is not theirs.
+
+```text
+Reviews:  4 active / 6 capacity · 11 queued · 2 retrying
+Landings: 2 active / 6 capacity · 3 queued
+Hive:     7 workers · 5 busy · queue 23            (as of 12s ago)
+```
+
+Show the **effective** capacity, not the configured one. Capacity resolves to
+the minimum of every bound that applies, so a run throttled to two slots on a
+small machine must say two — otherwise a correctly throttled scheduler and a
+broken one look identical.
+
+Every panel sourced from a remote carries its age. The dangerous failure for
+an unattended display is not an outage; it is hours-old state rendered as
+though it were current. Data that cannot be refreshed degrades visibly rather
+than sitting there looking fine.
+
+Local panels are always present. The Hive panel is absent when no hub is
+configured — `just review-queue org/repo` against a repository with no Hive at
+all is a first-class path, never a degraded one.
+
+Hive's own observation endpoints are the source for the fleet panel:
+`/api/contribute/fleet` and `/api/contribute/queue` are current truth, and
+`/api/contribute/events` is a low-latency notification stream, not a
+replacement for them. The stream drops events for a subscriber whose channel
+is full **without disconnecting it**, so a client that trusts the stream alone
+misses activity silently. Reconcile against a snapshot on a timer, and treat
+prolonged byte-level silence as a reconnect trigger rather than as quiet.
+
 ## Common Rationalizations
 
 | Rationalization | Reality |
 |---|---|
 | "Read static queue.json to monitor state." | Static JSON is an antipattern. Inspect live container, GitHub, and landing JSONL. |
 | "Kill the container when agent is quiet." | Agents may be waiting on legitimate image builds or CI checks; verify processes first. |
+| "One concurrency number is simpler." | Local lanes and the Hive fleet are different machines under different authority. One number invites sizing a batch against capacity you do not own. |
+| "Show the configured cap." | Capacity is the minimum of every bound. A silently throttled run and a broken scheduler look the same unless the effective cap is shown. |
+| "SSE is connected, so the view is current." | A full subscriber channel drops events without disconnecting. Reconcile against `/fleet` and `/queue`. |
 
 ## Red Flags
 
 - Scraping agent console output instead of reading structured JSONL status.
 - Polling static files or mocking state when the live container is accessible.
 - Ignoring permission errors in agent logs as harmless noise.
+- Remote-sourced state rendered without its age.
+- Local lanes and Hive fleet counts shown as one number.

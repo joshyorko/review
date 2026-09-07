@@ -347,6 +347,25 @@
       "doc_type": "procedure"
     },
     {
+      "id": "review-scheduler",
+      "name": "review-scheduler",
+      "one_line_purpose": "Admit review work process-wide, batch transport, and never batch judgement.",
+      "entry_point": "docs/skills/review-scheduler.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "scheduler",
+        "capacity",
+        "throughput",
+        "rate-limit",
+        "worktree"
+      ],
+      "description": "Owns process-wide review admission, capacity measurement, subprocess deadlines, dependency circuit breakers, and repository transport reuse. Use when changing review_engine.py, capacity.py, or anything that dispatches reviews.",
+      "version": "1.0",
+      "last_updated": "2026-09-07",
+      "doc_type": "runbook"
+    },
+    {
       "id": "skill-improvement",
       "name": "skill-improvement",
       "one_line_purpose": "Keep review documentation source-backed, current, and compact.",
