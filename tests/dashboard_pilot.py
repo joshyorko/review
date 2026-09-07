@@ -2066,6 +2066,295 @@ async def main() -> int:
         artifact.unlink(missing_ok=True)
     gh_log.write_text("")
 
+    # ── bulk a ActionPlan and exact-list drift gate ───────────────────────
+    pr7_view_count = workdir / "pr7_view_count"
+    pr7_view_count.unlink(missing_ok=True)
+    head_a = "a" * 40
+    head_b = "b" * 40
+    head_c = "c" * 40
+    head_d = "d" * 40
+    head_e = "e" * 40
+    write_stub(
+        workdir / "gh",
+        f'printf "%s\\n" "$*" >>"{gh_log}"\n'
+        'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        + org_queue_branch +
+        f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
+        'if [ "$1 $2" = "pr view" ]; then\n'
+        '  case "$3" in\n'
+        f'    31) printf \'{{"headRefOid":"{head_a}","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","isDraft":false,"statusCheckRollup":[]}}\\n\'; exit 0 ;;\n'
+        f'    7) if [ -f "{pr7_view_count}" ]; then\n'
+        f'         printf \'{{"headRefOid":"{head_c}","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","isDraft":false,"statusCheckRollup":[]}}\\n\';\n'
+        f'       else\n'
+        f'         touch "{pr7_view_count}";\n'
+        f'         printf \'{{"headRefOid":"{head_b}","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","isDraft":false,"statusCheckRollup":[]}}\\n\';\n'
+        f'       fi;\n'
+        '       exit 0 ;;\n'
+        f'    99) printf \'{{"headRefOid":"{head_d}","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","isDraft":true,"statusCheckRollup":[]}}\\n\'; exit 0 ;;\n'
+        f'    100) printf \'{{"headRefOid":"{head_e}","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","isDraft":false,"statusCheckRollup":[]}}\\n\'; exit 0 ;;\n'
+        '    *) echo "{}"; exit 0 ;;\n'
+        '  esac\n'
+        'fi\n'
+        'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
+        "exit 0\n",
+    )
+    async with tui.ReviewDashboard(tui.QueueFilters(action="")).run_test() as pilot:
+        app = pilot.app
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        app.self_login = "castrojo"
+        for stop in app.stops:
+            stop.selected = True
+        await pilot.press("a")
+        for _ in range(50):
+            if isinstance(app.screen, tui.BatchMutationConfirmation):
+                break
+            await pilot.pause(0.05)
+        check(
+            isinstance(app.screen, tui.BatchMutationConfirmation),
+            "bulk a must open the exact-list ActionPlan gate",
+        )
+        gate = app.screen
+        if isinstance(gate, tui.BatchMutationConfirmation):
+            expected = " ".join(
+                f"{item.repository}#{item.number}@{item.head_sha}"
+                for item in gate.preview_record.items
+            )
+            await pilot.click("#batch-confirmation")
+            await pilot.press(*expected)
+            await pilot.press("enter")
+            for _ in range(50):
+                if getattr(app, "batch_action_receipt", None) is not None:
+                    break
+                await pilot.pause(0.05)
+            check(
+                app.batch_action_receipt.rejected == {7: "head drift invalidates the item"},
+                "a changed live head must reject only that item",
+            )
+            check(
+                app.batch_action_receipt.succeeded == {31: 1},
+                "an unchanged item must still execute after another item drifts",
+            )
+            check(
+                app.batch_mutation_in_flight is False,
+                "in-flight flag must reset to False after batch execution finishes",
+            )
+
+        # In-flight guard: prevent duplicate concurrent executions
+        app.batch_mutation_in_flight = True
+        app.batch_queue_automerge(app.stops)
+        check(
+            not isinstance(app.screen, tui.BatchMutationConfirmation),
+            "in-flight guard must prevent starting batch mutation when one is already in flight",
+        )
+        app._on_batch_execution_error("plan expired", app.stops, getattr(gate, "preview_record", None))
+        check(
+            app.batch_mutation_in_flight is False,
+            "execution error handler must reset batch_mutation_in_flight to False",
+        )
+
+        # Cross-repository collision with mixed outcomes: repo-a#31 succeeds and repo-b#31 drifts
+        stop_a = tui.Stop("projectbluefin/repo-a", 31, "review", "repo a 31")
+        stop_b = tui.Stop("projectbluefin/repo-b", 31, "review", "repo b 31")
+        item_a = tui.action_plan.BatchMutationItem(
+            repository="projectbluefin/repo-a",
+            pull_request=31,
+            head_sha="a" * 40,
+            prerequisites=tui.action_plan.Prerequisites.from_mappings(
+                permissions={"self_login": "castrojo"}, checks={"ci": "success"}
+            ),
+            operations=(("python3", "image/tui/hive_api.py", "queue", "https://hive.example/pr/31"),),
+        )
+        item_b = tui.action_plan.BatchMutationItem(
+            repository="projectbluefin/repo-b",
+            pull_request=31,
+            head_sha="b" * 40,
+            prerequisites=tui.action_plan.Prerequisites.from_mappings(
+                permissions={"self_login": "castrojo"}, checks={"ci": "success"}
+            ),
+            operations=(("python3", "image/tui/hive_api.py", "queue", "https://hive.example/pr/31"),),
+        )
+        dummy_plan = tui.action_plan.BatchActionPlan.build(
+            actor="castrojo",
+            tenant="projectbluefin",
+            action_kind="approve-and-queue",
+            items=(item_a, item_b),
+        )
+        succeeded_map = tui.action_plan.BatchResultMap()
+        succeeded_map.record(item_a, 1)
+        rejected_map = tui.action_plan.BatchResultMap()
+        rejected_map.record(item_b, "head drift invalidates the item")
+        collision_receipt = tui.action_plan.BatchActionReceipt(
+            succeeded=succeeded_map,
+            rejected=rejected_map,
+            failed={},
+        )
+        app._on_batch_execution_finished(collision_receipt, [stop_a, stop_b], dummy_plan)
+        check(
+            stop_a.failure == "",
+            "repo-a#31 succeeded and must have no failure",
+        )
+        check(
+            stop_b.failure == "head drift invalidates the item",
+            "repo-b#31 drifted and must record its own failure without collision",
+        )
+
+        # Draft rejection: skip draft PRs in plan building and drift on execution
+        draft_stop = tui.Stop("projectbluefin/repo-draft", 99, "review", "draft PR")
+        draft_stop.live = {
+            "headRefOid": "d" * 40,
+            "isDraft": True,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [],
+        }
+        try:
+            app.build_batch_queue_plan([draft_stop])
+            check(False, "build_batch_queue_plan must reject/skip draft PRs")
+        except tui.action_plan.InvalidPlanError as error:
+            check("no queueable pull requests in batch" in str(error),
+                  "batch with only draft PRs must raise InvalidPlanError")
+
+        valid_stop = tui.Stop("projectbluefin/repo-valid", 100, "review", "valid PR")
+        valid_stop.live = {
+            "headRefOid": "e" * 40,
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [],
+        }
+        mixed_plan = app.build_batch_queue_plan([draft_stop, valid_stop])
+        check(
+            len(mixed_plan.items) == 1 and mixed_plan.items[0].pull_request == 100,
+            "build_batch_queue_plan must filter out draft PRs from the batch",
+        )
+
+        try:
+            tui.action_plan.CurrentState.capture(
+                actor="castrojo",
+                tenant="projectbluefin",
+                repository="projectbluefin/review",
+                pull_request=100,
+                head_sha="e" * 40,
+                live={"isDraft": True},
+            )
+            check(False, "CurrentState.capture must raise PlanDriftError for draft PR")
+        except tui.action_plan.PlanDriftError as error:
+            check("PR is draft" in str(error), "draft PR must drift with 'PR is draft'")
+
+        # Stale-fetch failure: fresh fetch fails and must not fall back to cached stop.live
+        stale_stop = tui.Stop("projectbluefin/repo-stale", 101, "review", "stale PR")
+        stale_stop.live = {
+            "headRefOid": "f" * 40,
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [],
+        }
+        try:
+            app.build_batch_queue_plan([stale_stop])
+            check(False, "stale-fetch failure must not fall back to cached stop.live")
+        except tui.action_plan.InvalidPlanError as error:
+            check("no queueable pull requests in batch" in str(error),
+                  "stale-fetch failure must raise InvalidPlanError without fallback")
+
+        # In-flight guard: dismissing confirmation modal resets in-flight to False
+        app.batch_mutation_in_flight = True
+        app._present_batch_confirmation(mixed_plan, [valid_stop])
+        await pilot.pause()
+        check(isinstance(app.screen, tui.BatchMutationConfirmation), "must present modal")
+        app.screen.dismiss(None)
+        await pilot.pause()
+        check(
+            app.batch_mutation_in_flight is False,
+            "dismissing confirmation modal must reset batch_mutation_in_flight to False",
+        )
+
+        # Regression: a stale modal callback (mismatched batch generation token)
+        # must not clear batch_mutation_in_flight/_current_batch_plan when a
+        # newer batch is already active. Stub push_screen so each batch's
+        # confirmation callback can be captured and invoked directly, without
+        # depending on the real screen stack.
+        original_push_screen = app.push_screen
+        captured_callbacks = []
+
+        def fake_push_screen(screen, callback=None, **kwargs):
+            captured_callbacks.append(callback)
+
+        app.push_screen = fake_push_screen
+        try:
+            app.batch_mutation_in_flight = True
+            app._current_batch_plan = None
+            app._present_batch_confirmation(mixed_plan, [valid_stop])
+            stale_callback = captured_callbacks[-1]
+
+            # A newer batch starts (bumping the generation token and plan)
+            # before the first modal's callback ever fires.
+            app._present_batch_confirmation(mixed_plan, [valid_stop])
+            newer_plan = app._current_batch_plan
+            newer_token = app._batch_generation_token
+        finally:
+            app.push_screen = original_push_screen
+
+        # Fire the OLD (now-stale) callback, simulating a late dismiss/abort
+        # delivered after the newer batch has already taken over.
+        stale_callback(None)
+        check(
+            app.batch_mutation_in_flight is True,
+            "a stale modal callback must not clear batch_mutation_in_flight of an active newer batch",
+        )
+        check(
+            app._current_batch_plan is newer_plan,
+            "a stale modal callback must not clear _current_batch_plan of an active newer batch",
+        )
+        check(
+            app._batch_generation_token == newer_token,
+            "a stale modal callback must not alter the active batch generation token",
+        )
+
+        # Cleanup so subsequent assertions in this run are unaffected.
+        app.batch_mutation_in_flight = False
+        app._current_batch_plan = None
+    pr7_view_count.unlink(missing_ok=True)
+    write_stub(
+        workdir / "gh",
+        f'printf "%s\\n" "$*" >>"{gh_log}"\n'
+        'if [ "$1 $2" = "api user" ]; then\n'
+        '  if [ -n "${GH_USER_FAIL-}" ]; then echo "authentication required" >&2; exit 1; fi\n'
+        '  echo castrojo; exit 0;\n'
+        'fi\n'
+        + org_queue_branch +
+        'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
+        f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_JSON+x}" ]; then printf "%s\\n" "$RE_REVIEW_COMPARE_JSON"; else printf "%s\\n" "{}"; fi; exit 0\n'
+        'fi\n'
+        f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
+        'if [ "$1 $2" = "pr view" ]; then\n'
+        '  if [ -n "${PR_VIEW_JSON-}" ]; then printf "%s\\n" "$PR_VIEW_JSON"; exit 0; fi\n'
+        '  echo "{}"; exit 0;\n'
+        'fi\n'
+        'if [ "$1 $2" = "pr diff" ]; then\n'
+        f'  request_id="${{DIFF_REQUEST_ID-unknown}}"; mode="${{DIFF_MODE-}}"\n'
+        f'  if [ "$mode" = "slow-old" ]; then printf "request:%s:%s\\n" "$request_id" "$mode" >>"{diff_events}"; (sleep 0.2) & delay_pid=$!; : >"{old_request_started}"; wait "$delay_pid"; printf "response:%s:OLD-DIFF\\n" "$request_id" >>"{diff_events}"; printf "%s" "OLD-DIFF"; exit 0; fi\n'
+        f'  if [ "$mode" = "fast-new" ]; then printf "request:%s:%s\\n" "$request_id" "$mode" >>"{diff_events}"; printf "response:%s:NEW-DIFF\\n" "$request_id" >>"{diff_events}"; printf "%s" "NEW-DIFF"; exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "oversized" ]; then head -c 400010 /dev/zero | tr "\\0" x; exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "empty" ]; then exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "error" ]; then printf "%s\\n" "terminal diff failure" >&2; exit 7; fi\n'
+        '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "api" ] && [ "$2" = "--paginate" ]; then\n'
+        '  if [ -n "${LIVE_GH_ERROR-}" ]; then printf "%s\\n" "$LIVE_GH_ERROR" >&2; exit 1; fi\n'
+        '  if [ -n "${LIVE_PAGES-}" ]; then cat "$LIVE_QUEUE_FILE"; else printf "[%s]" "$(cat "$LIVE_QUEUE_FILE")"; fi; exit 0\n'
+        'fi\n'
+        'if [ "$1 $2" = "pr list" ]; then\n'
+        '  echo "[]"\n'
+        '  exit 0\n'
+        'fi\n'
+        "exit 0\n",
+    )
+    gh_log.write_text("")
+
     # ── a relaunched dashboard restores a previous batch's failure ──────
     # The landings directory persists on the host; the rows must show what
     # it records at startup, or the failure markings are still lost on every

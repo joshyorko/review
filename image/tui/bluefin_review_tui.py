@@ -56,6 +56,7 @@ if _TUI_DIR not in sys.path:
     sys.path.insert(0, _TUI_DIR)
 from review_result import ReviewResult, adapt_current_engine
 from semantic_view import DecisionState, build_decision_card
+import action_plan
 import landing
 import lab_client
 import hive_api
@@ -426,6 +427,12 @@ def link(text: str, url: str) -> str:
 def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["gh", *args], capture_output=True, text=True, timeout=timeout
+    )
+
+
+def _run_mutation(command: list[str], timeout: int = MUTATION_TIMEOUT) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command, capture_output=True, text=True, timeout=timeout
     )
 
 
@@ -1408,6 +1415,45 @@ class ConfirmMutation(ModalScreen[bool]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self.dismiss(event.value.strip() == self.expected)
+
+
+class BatchMutationConfirmation(ModalScreen[str | None]):
+    BINDINGS = [
+        Binding("enter", "submit", "confirm exact list", priority=True),
+        *back_bindings("dismiss(None)"),
+    ]
+
+    def __init__(self, preview: action_plan.BatchActionPreview) -> None:
+        super().__init__()
+        self.preview_record = preview
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("type every exact PR and head, separated by spaces:")
+            for item in self.preview_record.items:
+                yield Static(f"  {item.identity}", classes="confirm-command")
+            yield Input(id="batch-confirmation")
+            yield Static("[enter] confirm exact list · [esc] abort", markup=False)
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one("#batch-confirmation", Input).focus()
+        except Exception:
+            pass
+
+    def action_submit(self) -> None:
+        self.dismiss(self.query_one("#batch-confirmation", Input).value.strip())
+
+    def on_input_submitted(self, _event: Input.Submitted) -> None:
+        self.action_submit()
+
+
+class DashboardBatchReceiptLedger:
+    def __init__(self) -> None:
+        self.receipts: list[action_plan.BatchActionReceipt] = []
+
+    def record(self, receipt: action_plan.BatchActionReceipt) -> None:
+        self.receipts.append(receipt)
 
 
 class MergeRecovery(ModalScreen[str | None]):
@@ -2620,6 +2666,10 @@ class ReviewDecisionScreen(ModalScreen[None]):
 class ReviewDashboard(App):
     """PROJECT BLUEFIN REVIEW DASHBOARD."""
 
+    batch_mutation_in_flight: bool = False
+    _current_batch_plan: action_plan.BatchActionPlan | None = None
+    _batch_generation_token: int = 0
+
     TITLE = "BLUEFIN REVIEW DASHBOARD"
     CSS = """
     #status-bar { height: 1; background: $panel; color: cyan; }
@@ -2746,8 +2796,14 @@ class ReviewDashboard(App):
         self.pending_review_events: dict[str, list[ReviewEvent]] = {}
         self.evidence_generation: dict[str, int] = {}
         self.triage: dict[str, TriageState] = {}
+        self.triage_by_key = self.triage
         self.review_scope = REVIEW_SCOPE
         self.review_scope_version = REVIEW_SCOPE_VERSION
+        self.batch_action_receipt: action_plan.BatchActionReceipt | None = None
+        self.batch_mutation_in_flight: bool = False
+        self._current_batch_plan: action_plan.BatchActionPlan | None = None
+        self._batch_generation_token: int = 0
+        self._batch_receipt_ledger = DashboardBatchReceiptLedger()
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -4310,6 +4366,9 @@ class ReviewDashboard(App):
         """
         if not commands:
             return
+        if self.batch_mutation_in_flight:
+            self.notify("a batch mutation is already in flight", severity="warning")
+            return
 
         def finish(confirmed: bool | None) -> None:
             if not confirmed:
@@ -4331,8 +4390,8 @@ class ReviewDashboard(App):
         MUTATION_TIMEOUT and reports back through call_from_thread."""
         for command in commands:
             try:
-                result = subprocess.run(
-                    command, capture_output=True, text=True, timeout=MUTATION_TIMEOUT
+                result = _run_mutation(
+                    command, timeout=MUTATION_TIMEOUT
                 )
             except (subprocess.TimeoutExpired, OSError) as error:
                 trace(
@@ -4523,6 +4582,29 @@ class ReviewDashboard(App):
             self.start_review_batch(batch)
         elif self.current:
             self.start_review(self.current)
+
+    def fetch_live_pr(self, repository: str, number: int, force: bool = False) -> dict[str, Any]:
+        stop = next((s for s in self.stops if s.repository == repository and s.number == number), None)
+        if not force and stop and stop.live.get("baseRefOid") and stop.live.get("headRefOid"):
+            return stop.live
+        live = gh(
+            "pr", "view", str(number), "--repo", repository,
+            "--json",
+            "author,state,baseRefOid,headRefOid,isDraft,mergeable,mergeStateStatus,"
+            "reviewDecision,additions,deletions,changedFiles,updatedAt,body,"
+            "closingIssuesReferences,statusCheckRollup,labels,reviews,title",
+        )
+        if live.returncode == 0:
+            data = json.loads(live.stdout)
+            if stop:
+                stop.live = data
+                if data.get("headRefOid"):
+                    stop.head_sha = str(data["headRefOid"])
+                stop.triage_state = self.triage.get(self.triage_key(stop), "unseen")
+            return data
+        if not force and stop and stop.live:
+            return stop.live
+        raise RuntimeError(f"failed to fetch live PR {repository}#{number}: {live.stderr}")
 
     def leave_review(self, stop: Stop) -> None:
         """Submit a review to GitHub: approve, request changes, or comment.
@@ -4838,9 +4920,267 @@ class ReviewDashboard(App):
 
         self.mutate_all(stop, [command], then=queued, on_error=failed)
 
+    def build_batch_queue_plan(self, batch: list[Stop]) -> action_plan.BatchActionPlan:
+        items = []
+        for stop in batch:
+            try:
+                live = self.fetch_live_pr(stop.repository, stop.number, force=True)
+            except Exception:
+                continue
+            if not live or not isinstance(live, dict):
+                continue
+            head = str(live.get("headRefOid") or "")
+            if not head:
+                continue
+            stop.live = live
+            stop.head_sha = head
+            if live.get("isDraft"):
+                continue
+            if not self._queueable(stop):
+                continue
+            owner, repository = stop.repository.split("/", 1)
+            base = hive_api_base() or "https://hive.example"
+            endpoint = (
+                f"{base}/api/v1/prs/{owner}/{repository}/{stop.number}/queue-automerge"
+            )
+            items.append(
+                action_plan.BatchMutationItem(
+                    stop.repository,
+                    stop.number,
+                    head,
+                    action_plan.Prerequisites.from_mappings(
+                        permissions={"self_login": self.self_login},
+                        checks={"ci": effective_check_state(stop.check_state, live)},
+                    ),
+                    (("python3", "image/tui/hive_api.py", "queue", endpoint),),
+                )
+            )
+        if not items:
+            raise action_plan.InvalidPlanError("no queueable pull requests in batch")
+        return action_plan.BatchActionPlan.build(
+            actor=self.self_login,
+            tenant="projectbluefin",
+            action_kind="approve-and-queue",
+            items=tuple(items),
+        )
+
+    def batch_queue_automerge(self, batch: list[Stop]) -> None:
+        if self.batch_mutation_in_flight:
+            self.notify("a batch mutation is already in flight", severity="warning")
+            return
+        if not self.self_login:
+            self.notify(
+                "your GitHub login is unknown; the queue approval needs it.",
+                severity="warning",
+            )
+            return
+        base = hive_api_base()
+        if not base:
+            self.notify("Hive is unreachable; nothing was queued.", severity="warning")
+            return
+        self.batch_mutation_in_flight = True
+        self.notify("preparing batch action plan…")
+        self._hydrate_batch_and_confirm(batch)
+
+    @work(thread=True)
+    def _hydrate_batch_and_confirm(self, batch: list[Stop]) -> None:
+        try:
+            plan = self.build_batch_queue_plan(batch)
+        except action_plan.ActionPlanError as error:
+            self.call_from_thread(self._on_batch_hydration_error, f"could not build batch plan: {error}")
+            return
+        except Exception as error:
+            self.call_from_thread(self._on_batch_hydration_error, f"could not build batch plan: {error}")
+            return
+        self.call_from_thread(self._present_batch_confirmation, plan, batch)
+
+    def _on_batch_hydration_error(self, message: str) -> None:
+        self.batch_mutation_in_flight = False
+        self._current_batch_plan = None
+        self.notify(message, severity="error")
+
+    def _present_batch_confirmation(
+        self,
+        plan: action_plan.BatchActionPlan,
+        batch: list[Stop],
+    ) -> None:
+        if not self.batch_mutation_in_flight:
+            return
+        self._current_batch_plan = plan
+        self._batch_generation_token += 1
+        current_token = self._batch_generation_token
+        preview = plan.preview()
+
+        def confirmed(typed_items: str | None) -> None:
+            if self._batch_generation_token != current_token:
+                # A stale callback from a dismissed/aborted modal. A newer batch
+                # may already own batch_mutation_in_flight/_current_batch_plan;
+                # touching either here would clobber that active batch's state.
+                return
+            if not self.batch_mutation_in_flight or self._current_batch_plan is not plan:
+                self.batch_mutation_in_flight = False
+                self._current_batch_plan = None
+                self.notify("batch mutation aborted or stale.", severity="warning")
+                return
+            if not typed_items:
+                self.batch_mutation_in_flight = False
+                self._current_batch_plan = None
+                self.notify("aborted; nothing was run.", severity="warning")
+                return
+            try:
+                confirmation = plan.confirm_human(
+                    preview=preview,
+                    actor=self.self_login,
+                    tenant="projectbluefin",
+                    typed_items=typed_items,
+                )
+                eligibility = plan.execution_eligibility(confirmation)
+            except action_plan.ActionPlanError as error:
+                self.batch_mutation_in_flight = False
+                self._current_batch_plan = None
+                self.notify(f"confirmation failed: {error}", severity="error")
+                return
+            self.execute_batch_queue_plan(plan, eligibility, batch)
+
+        self.push_screen(BatchMutationConfirmation(preview), confirmed)
+
+    @work(thread=True)
+    def execute_batch_queue_plan(
+        self,
+        plan: action_plan.BatchActionPlan,
+        eligibility: action_plan.BatchExecutionEligibility,
+        batch: list[Stop],
+    ) -> None:
+        stops_by_key = {s.key: s for s in batch}
+
+        def current_state_fetcher(item: action_plan.BatchMutationItem) -> action_plan.CurrentState:
+            result = gh(
+                "pr", "view", str(item.pull_request),
+                "--repo", item.repository,
+                "--json", "headRefOid,statusCheckRollup,mergeable,mergeStateStatus,isDraft",
+            )
+            if result.returncode != 0:
+                raise action_plan.PlanDriftError("cannot fetch live PR state")
+            try:
+                live_data = json.loads(result.stdout)
+            except Exception as error:
+                raise action_plan.PlanDriftError(f"malformed live PR data: {error}")
+            if live_data.get("isDraft"):
+                raise action_plan.PlanDriftError("PR is draft")
+            head = str(live_data.get("headRefOid") or "")
+            if not head:
+                raise action_plan.PlanDriftError("live PR has no head SHA")
+            stop = stops_by_key.get(f"{item.repository}#{item.pull_request}")
+            snapshot_check = stop.check_state if stop else "unknown"
+            return action_plan.CurrentState.capture(
+                actor=self.self_login,
+                tenant="projectbluefin",
+                repository=item.repository,
+                pull_request=item.pull_request,
+                head_sha=head,
+                permissions={"self_login": self.self_login},
+                checks={"ci": effective_check_state(snapshot_check, live_data)},
+                live=live_data,
+            )
+
+        def executor(
+            item: action_plan.BatchMutationItem,
+            operation: tuple[str, ...],
+        ) -> action_plan.OperationResult:
+            cmd = list(operation)
+            if (
+                len(cmd) == 4
+                and cmd[0] == "python3"
+                and cmd[1] == "image/tui/hive_api.py"
+                and HIVE_API_HELPER != "image/tui/hive_api.py"
+            ):
+                cmd[0] = sys.executable
+                cmd[1] = HIVE_API_HELPER
+            res = _run_mutation(
+                cmd,
+                timeout=MUTATION_TIMEOUT,
+            )
+            return action_plan.OperationResult(
+                return_code=res.returncode,
+                detail=res.stderr.strip() if res.returncode != 0 else "",
+            )
+
+        try:
+            receipt = plan.execute(
+                eligibility,
+                current_state_fetcher,
+                executor,
+                ledger=self._batch_receipt_ledger,
+            )
+            self.call_from_thread(self._on_batch_execution_finished, receipt, batch, plan)
+        except action_plan.PlanExpiredError as error:
+            self.call_from_thread(self._on_batch_execution_error, str(error), batch, plan)
+        except Exception as error:
+            self.call_from_thread(self._on_batch_execution_error, str(error), batch, plan)
+
+    def _on_batch_execution_error(
+        self,
+        error_message: str,
+        batch: list[Stop],
+        plan: action_plan.BatchActionPlan | None,
+    ) -> None:
+        self.batch_mutation_in_flight = False
+        self._current_batch_plan = None
+        self.notify(f"batch mutation failed: {error_message}", severity="error")
+        if plan and hasattr(plan, "items"):
+            stops_by_key = {s.key: s for s in batch}
+            for item in plan.items:
+                stop = stops_by_key.get(f"{item.repository}#{item.pull_request}")
+                if stop:
+                    stop.failure = error_message
+        self.refresh_rows()
+
+    def _on_batch_execution_finished(
+        self,
+        receipt: action_plan.BatchActionReceipt,
+        batch: list[Stop],
+        plan: action_plan.BatchActionPlan,
+    ) -> None:
+        self.batch_mutation_in_flight = False
+        self._current_batch_plan = None
+        self.batch_action_receipt = receipt
+        stops_by_key = {s.key: s for s in batch}
+
+        for item in plan.items:
+            stop = stops_by_key.get(f"{item.repository}#{item.pull_request}")
+            if not stop:
+                continue
+            item_key = (item.repository, item.pull_request)
+            if item_key in receipt.succeeded or item.identity in receipt.succeeded or stop.key in receipt.succeeded:
+                stop.failure = ""
+                landing.record_event(
+                    stop.key, "queued", f"queued by @{self.self_login or 'maintainer'}"
+                )
+            elif item_key in receipt.rejected or item.identity in receipt.rejected or stop.key in receipt.rejected:
+                reason = (
+                    receipt.rejected.get(item_key)
+                    or receipt.rejected.get(item.identity)
+                    or receipt.rejected.get(stop.key)
+                )
+                stop.failure = str(reason)
+            elif item_key in receipt.failed or item.identity in receipt.failed or stop.key in receipt.failed:
+                reason = (
+                    receipt.failed.get(item_key)
+                    or receipt.failed.get(item.identity)
+                    or receipt.failed.get(stop.key)
+                )
+                stop.failure = str(reason)
+
+        self.refresh_rows()
+
     def action_merge(self) -> None:
-        # `a` is approve+queue only. The batch key is `A` — a selection
-        # must never turn this key into an undocumented batch gate.
+        batch = [s for s in self.stops if s.selected]
+        if len(batch) > 1:
+            self.batch_queue_automerge(batch)
+            return
+        if self.batch_mutation_in_flight:
+            self.notify("a batch mutation is already in flight", severity="warning")
+            return
         stop = self.current
         if not stop:
             return
