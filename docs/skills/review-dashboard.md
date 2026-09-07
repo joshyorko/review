@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "2.5"
-last_updated: 2026-09-06
+version: "2.6"
+last_updated: 2026-09-07
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -37,21 +37,19 @@ surface `just review-queue` opens.
 
 ## When Not to Use
 
-Do not use this for the launcher that starts the container
-([`launcher.md`](launcher.md)), the image it runs in
-([`image-build.md`](image-build.md)), or Hive's contributor protocol
-([`hive-runtime.md`](hive-runtime.md)).
+Do not use this for the launcher ([`launcher.md`](launcher.md)), the container image
+([`image-build.md`](image-build.md)), or Hive's protocol ([`hive-runtime.md`](hive-runtime.md)).
 
 ## Semantic Foundation
 
 `image/tui/semantic_view.py` defines the pure semantic contract for the dashboard.
-`ActionID` explicitly separates verdict selection, review submission, PR mutations,
-and navigation. `command_registry()` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`,
-`h/l`, Enter, Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`).
+`ActionID` separates verdict selection, review submission, PR mutations, and navigation.
+`command_registry()` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter,
+Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`, `Tab`/`I`).
 
-`QueueRow` and `DecisionCard` bind the 40-character head SHA, CI rollup, mergeability,
-and findings. The right-hand panes scroll evidence (`h`/`l`), while `e` opens decision
-evidence, `r` toggles raw transcripts, and `[u]` updates clean branches.
+`QueueRow` and `DecisionCard` bind head SHA, CI rollup, mergeability, and findings.
+The right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, `r` toggles raw
+transcripts, and `[u]` updates clean branches.
 
 ## Core Process
 
@@ -73,10 +71,8 @@ evidence, `r` toggles raw transcripts, and `[u]` updates clean branches.
    finishes.
 5. **Batch every action that a maintainer repeats.** Merging and updating
    branches take the batch selection when one exists. `A` on a selection is
-   different: the reviewed batch
-   becomes one landing agent's brief behind
-   one proportionate gate (see "Batch landing" below), not one typed gate
-   per pull request.
+   different: the reviewed batch becomes one landing agent's brief behind one
+   proportionate gate (see "Batch landing" below), not one gate per PR.
 6. **Add the behaviour to `tests/dashboard_pilot.py`**, which drives the real
    app through `run_test()`. The static greps in
    `tests/dashboard-contract.sh` are for proving *absence* — a power the
@@ -113,12 +109,10 @@ distinct states. `[o]` is only an optional browser escape hatch.
   notification disappears. Update, retry, queue, and skip are explicit; a true
   conflict offers manual handoff without a bypass.
 - **Colour is never the only carrier of a fact.** Rows colour by state *and*
-  carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
-  `? CI UNKNOWN`, as applicable. The batch queue applies the same rule three
-  layers deep — printed state word, a shape-distinct glyph from
-  `LANDING_STATE_STYLES`, then colour — so a colourless or colour-blind read
-  loses nothing (see "Batch landing"). Selection is not colour-only either:
-  a selected row leads with a `●` marker and carries a full-row background.
+  carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or `? CI UNKNOWN`.
+  The batch queue applies the same rule three layers deep — printed state word,
+  glyph from `LANDING_STATE_STYLES`, then colour — so a colourless read loses
+  nothing. Selection leads with `●` and carries a full-row background.
 - **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
   request whose queue evidence or fetched live evidence says CI failed or is
   pending; GitHub branch protection remains an additional gate.
@@ -141,6 +135,12 @@ distinct states. `[o]` is only an optional browser escape hatch.
   and applies `lgtm`. On a selection, `A` dispatches one landing agent for the
   batch; without a selection `A` no-ops. `w` opens the batch queue. `m` squashes
   now (gated on `push` permission). `L` leaves a review and merges nothing.
+- **Issues view and triage:** `Tab` or `I` toggles between the PR and issues
+  queues. Highlighting an issue renders its metadata and description in details,
+  and recent comments in context. Triage actions: `c` comments via `CommentBody`,
+  `CommentPreview`, and the typed issue-number gate; `x` closes the issue with a
+  triage comment behind the typed number gate; `o` opens in browser; `y` copies
+  handoff. PR actions (`r`, `v`, `m`, `u`, `a`/`A`, `L`) notify PRs only.
 - **Keyboard reference modal on `?`**: `?` opens `HelpScreen`, a modal
   grouping navigation, review, batching, and mutations with cyan/magenta
   badges; dismisses cleanly with `?`, `q`, or `Esc`.
@@ -192,8 +192,7 @@ pre-commit run --all-files
 ```
 
 - [ ] Every new mutation runs through `mutate_all()` and shows its commands.
-- [ ] Multi-command actions are one gate, ordered so the first failure is
-      harmless.
+- [ ] Multi-command actions are one gate, ordered so the first failure is harmless.
 - [ ] Failures mark the row and keep the stop selected.
 - [ ] All GitHub- and agent-sourced text passes through `escape()`.
 - [ ] No DOM access inside a thread worker.

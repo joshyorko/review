@@ -161,10 +161,71 @@ async def main() -> int:
     old_request_started = workdir / f"old-request-start-{workdir.name}"
     perm_file = workdir / "permissions.push"
     perm_file.write_text("true\n")
+    org_issues_file = workdir / "org-issues.json"
+    issue_view_file = workdir / "issue-view.json"
+
+    issue_node = {
+        "number": 42,
+        "title": "bug: test issue",
+        "updatedAt": "2026-09-06T01:00:00Z",
+        "createdAt": "2026-09-06T00:00:00Z",
+        "author": {"login": "testuser"},
+        "repository": {"nameWithOwner": "projectbluefin/review"},
+        "labels": {"nodes": [{"name": "bug"}]},
+        "comments": [
+            {
+                "createdAt": "2026-09-06T00:00:00Z",
+                "author": {"login": "helper"},
+                "body": "comment text",
+            }
+        ],
+        "body": "Issue description test body",
+    }
+    org_issues_file.write_text(
+        json.dumps([
+            {
+                "data": {
+                    "search": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [issue_node],
+                    }
+                }
+            }
+        ])
+    )
+
+    issue_view_file.write_text(
+        json.dumps({
+            "title": "bug: test issue",
+            "body": "Issue description test body",
+            "author": {"login": "testuser"},
+            "labels": [{"name": "bug"}],
+            "comments": [
+                {
+                    "createdAt": "2026-09-06T00:00:00Z",
+                    "author": {"login": "helper"},
+                    "body": "comment text",
+                }
+            ],
+            "createdAt": "2026-09-06T00:00:00Z",
+            "updatedAt": "2026-09-06T01:00:00Z",
+            "state": "OPEN",
+        })
+    )
+
     org_queue_branch = (
         'if [ "$1 $2" = "api graphql" ]; then\n'
         '  if [ -n "${ORG_GH_ERROR-}" ]; then printf "%s\\n" "$ORG_GH_ERROR" >&2; exit 1; fi\n'
+        '  case "$*" in *"is:issue"*) '
+        f'cat "{org_issues_file}"; exit 0 ;; esac\n'
         f'  cat "{org_queue_file}"; exit 0\n'
+        'fi\n'
+        'if [ "$1 $2" = "issue view" ]; then\n'
+        '  if [ -n "${ISSUE_VIEW_JSON-}" ]; then printf "%s\\n" "$ISSUE_VIEW_JSON"; exit 0; fi\n'
+        f'  cat "{issue_view_file}"; exit 0\n'
+        'fi\n'
+        'if [ "$1 $2" = "issue comment" ] || [ "$1 $2" = "issue close" ]; then\n'
+        '  exit 0\n'
         'fi\n'
     )
     gh_stub = write_stub(
@@ -1638,6 +1699,7 @@ async def main() -> int:
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{landing_stub} @PROMPT"
     os.environ["BLUEFIN_REVIEW_INSTANCE"] = "review-queue-pilot"
+    os.environ["BLUEFIN_REVIEW_PARTITION_BATCH"] = "0"
 
     # ── a selected batch dispatches one landing agent behind one gate ────
     # The selection is the review, so the batch gate is proportionate: the
@@ -6865,6 +6927,127 @@ async def main() -> int:
         ],
         f"every review must be traced with its outcome, got {outcomes}",
     )
+
+    # ── issues view: toggling, triage details, and mutations ─────────────
+    gh_log.write_text("")
+    os.environ["GH_TOKEN"] = "dashboard-pilot-token"
+    set_org_queue(SNAPSHOT["items"])
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        check(app.view_mode == "prs", "dashboard must start in prs view_mode")
+
+        # Press tab: verify view_mode == "issues"
+        await pilot.press("tab")
+        check(app.view_mode == "issues", "Tab must switch view_mode to issues")
+
+        # Wait for issue rows to settle/populate
+        for _ in range(200):
+            if app.stops and app.stops[0].is_issue:
+                break
+            await pilot.pause(0.05)
+        check(
+            len(app.stops) > 0 and app.stops[0].is_issue is True,
+            f"issues view must populate stops with is_issue=True, got {app.stops}",
+        )
+
+        # Highlighted issue renders details (including title and body)
+        for _ in range(200):
+            details = str(app.query_one("#details", tui.Static).render())
+            if "bug: test issue" in details:
+                break
+            await pilot.pause(0.05)
+        details = str(app.query_one("#details", tui.Static).render())
+        check(
+            "bug: test issue" in details,
+            f"highlighted issue must render details, got {details!r}",
+        )
+
+        # Test c: comment on issue
+        gh_log.write_text("")
+        await pilot.press("c")
+        for _ in range(50):
+            if type(app.screen).__name__ == "CommentBody":
+                break
+            await pilot.pause(0.05)
+        check(
+            type(app.screen).__name__ == "CommentBody",
+            f"pressing c must open CommentBody modal, got {type(app.screen).__name__}",
+        )
+        app.screen.query_one(tui.Input).value = "triage comment on issue"
+        await pilot.press("ctrl+s")
+        for _ in range(50):
+            if isinstance(app.screen, tui.CommentPreview):
+                break
+            await pilot.pause(0.05)
+        check(
+            isinstance(app.screen, tui.CommentPreview),
+            f"submitting comment body must open CommentPreview, got {type(app.screen).__name__}",
+        )
+        check(
+            "triage comment on issue" in app.screen.body,
+            "CommentPreview must show comment text",
+        )
+        await pilot.click("#comment-preview-submit")
+        for _ in range(50):
+            if isinstance(app.screen, tui.ConfirmMutation):
+                break
+            await pilot.pause(0.05)
+        check(
+            isinstance(app.screen, tui.ConfirmMutation),
+            f"comment preview submit must reach ConfirmMutation gate, got {type(app.screen).__name__}",
+        )
+        gate = app.screen
+        await pilot.press(*gate.expected)
+        await pilot.press("enter")
+        for _ in range(200):
+            if "issue comment" in gh_log.read_text():
+                break
+            await pilot.pause(0.05)
+        check(
+            "issue comment" in gh_log.read_text(),
+            f"gh_log must record 'issue comment', got {gh_log.read_text()!r}",
+        )
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        # Test x: close issue
+        gh_log.write_text("")
+        await pilot.press("x")
+        for _ in range(50):
+            if isinstance(app.screen, tui.ConfirmMutation):
+                break
+            await pilot.pause(0.05)
+        check(
+            isinstance(app.screen, tui.ConfirmMutation),
+            f"pressing x must open ConfirmMutation modal, got {type(app.screen).__name__}",
+        )
+        gate = app.screen
+        await pilot.press(*gate.expected)
+        await pilot.press("enter")
+        for _ in range(200):
+            if "issue close" in gh_log.read_text():
+                break
+            await pilot.pause(0.05)
+        check(
+            "issue close" in gh_log.read_text(),
+            f"gh_log must record 'issue close', got {gh_log.read_text()!r}",
+        )
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        # Press tab again: verify view_mode == "prs" and PR stops restored
+        await pilot.press("tab")
+        check(app.view_mode == "prs", "pressing tab again must switch view_mode back to prs")
+        for _ in range(200):
+            if app.stops and not app.stops[0].is_issue:
+                break
+            await pilot.pause(0.05)
+        check(
+            len(app.stops) > 0 and app.stops[0].is_issue is False,
+            f"switching back to PRs view must restore PR stops, got {app.stops}",
+        )
+    gh_log.write_text("")
 
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)

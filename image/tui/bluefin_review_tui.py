@@ -3470,6 +3470,11 @@ class ReviewDashboard(App):
         if event.key == "escape" and self.focused is self.query_one("#steer", Input):
             event.stop()
             self.query_one("#queue", ListView).focus()
+            return
+        if event.key == "tab" and len(self.screen_stack) <= 1 and not isinstance(self.focused, (Input, TextArea)):
+            event.stop()
+            self.action_toggle_view()
+            return
 
     def _dispatch_terminal_action(self, label: str, action) -> None:
         try:
