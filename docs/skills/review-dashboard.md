@@ -91,11 +91,9 @@ Verified against Context7 `/textualize/textual`:
 - **Theme Variables:** Use theme pairs like `[$text-success on $success-muted]` for status bars.
 - **Thread Safety:** Never touch the DOM or call `query_one()` from worker threads. Dispatch updates through `self.call_from_thread(self.method, data)`.
 
-**Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`.
-`ansi_dark` resolves to the terminal's own palette instead of assuming a
-background colour. `DiffScreen` keeps GitHub's complete response in bounded
-pages; `[` and `]` navigate them, while loading, success, and fetch error are
-distinct states. `[o]` is only an optional browser escape hatch.
+**Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`. `ansi_dark` resolves to the terminal's own palette instead of assuming a background colour. `DiffScreen` keeps GitHub's complete response in bounded pages; `[` and `]` navigate them, while loading, success, and fetch error are distinct states. `[o]` is only an optional browser escape hatch.
+
+**Conversations get Textual's `Markdown` widget**. `CommentsScreen` renders an issue or pull request's opening post, comments, and reviews as one document ordered by timestamp across both kinds. A review with no body is dropped unless its state is `APPROVED` or `CHANGES_REQUESTED`, where the state *is* the verdict. `[C]` opens it from the queue, for issues too unlike the diff; `[c]` opens it from the review screen. A late refresh is discarded unless it matches the generation that asked for it.
 
 ## Design Rules
 
@@ -154,7 +152,7 @@ distinct states. `[o]` is only an optional browser escape hatch.
 
 Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings enable `[f] fix & land in background`. See [`landing-batches.md`](landing-batches.md) for the `[$]` state machine, landing gate, concurrency lanes, and state persistence, and [`review-scheduler.md`](review-scheduler.md) for admission, capacity, and transport reuse.
 The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying capacity, and trust a receipt only when its full run and check-scope identity matches. Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission and cache publication; a cancelled run cannot publish or delete another session's receipt. Local lanes and the Hive fleet are two separate concurrency displays and are never conflated; see [`review-monitoring.md`](review-monitoring.md).
-On the dashboard, `B` selects or clears every visible row, `Space` toggles the highlighted row and advances, `n` marks an unseen exact head skipped and moves to the next unseen row, and `r` reviews the selection as a batch while retaining its selection on snapshot failure. Queue rows show running and verdict badges. `Enter` on a reviewed row reloads GitHub evidence before rendering cached analysis; CI, mergeability, reviews, and overlap are never restored from the cache.
+On the dashboard, `B` selects or clears every visible row, `Space` toggles the highlighted row and advances, `n` jumps to the next pull request lacking the maintainer's own GitHub review, and `r` reviews the selection as a batch while retaining its selection on snapshot failure. Queue rows show running and verdict badges. `Enter` on a reviewed row reloads GitHub evidence before rendering cached analysis; CI, mergeability, reviews, and overlap are never restored from the cache.
 
 ## Common Rationalizations
 

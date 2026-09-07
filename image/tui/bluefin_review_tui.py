@@ -47,6 +47,7 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    Markdown,
     RichLog,
     Button,
     Static,
@@ -299,6 +300,7 @@ COMMANDS = (
     CommandSpec("docs", "d", "docs", "update docs"),
     CommandSpec("open_browser", "o", "open_browser", "open"),
     CommandSpec("view_diff", "v", "view_diff", "diff"),
+    CommandSpec("view_comments", "C", "view_comments", "comments"),
     CommandSpec("comment", "c", "comment", "comment", mutating=True),
     CommandSpec("approve_or_land", "a", "merge", "approve+queue", mutating=True),
     CommandSpec("land_batch", "A", "land_batch", "land batch", mutating=True),
@@ -332,9 +334,9 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # typed-number gate.
 KEYS_READING = (
     " [b]Tab[/b] issues/PRs"
-    " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
+    " [b]r[/b] review [b]v[/b] diff [b]C[/b] comments [b]o[/b] open [b]h[/b] handoff"
     " [b]/[/b] steer [b]f[/b] filter [b]b[/b]/[b]B[/b] select"
-    " [b]Space[/b] select+next [b]n[/b] next unseen"
+    " [b]Space[/b] select+next [b]n[/b] next lacking my review"
     " [b]w[/b] watch batches"
     " [b]P[/b] review policy [b]H[/b] hive"
     " [b]R[/b] refresh [b]q[/b]/Esc back"
@@ -2137,6 +2139,152 @@ class DiffScreen(ModalScreen[None]):
             self.render_page()
 
 
+def fetch_github_thread(repository: str, number: int) -> tuple[dict | None, str]:
+    """Fetch GitHub issue or pull request details with comments and reviews."""
+    result = gh(
+        "pr", "view", str(number), "--repo", repository,
+        "--json", "title,body,author,createdAt,comments,reviews",
+    )
+    if result.returncode != 0:
+        result = gh(
+            "issue", "view", str(number), "--repo", repository,
+            "--json", "title,body,author,createdAt,comments",
+        )
+    if result.returncode != 0:
+        return None, result.stderr.strip() or f"exit {result.returncode}"
+    try:
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict):
+            return None, "unexpected JSON payload from GitHub"
+        return data, ""
+    except json.JSONDecodeError as error:
+        return None, f"invalid JSON: {error}"
+
+
+def _thread_login(value: object) -> str:
+    return value.get("login", "unknown") if isinstance(value, dict) else "unknown"
+
+
+def _thread_timestamp(value: object) -> str:
+    return str(value or "").replace("T", " ").replace("Z", " UTC")
+
+
+def format_github_thread(data: dict, stop_key: str) -> str:
+    """Format a GitHub issue/PR opening post, comments and reviews as Markdown."""
+    lines: list[str] = []
+    title = str(data.get("title") or "")
+    body = str(data.get("body") or "").strip()
+
+    lines.append(f"# {stop_key}: {title}\n")
+    lines.append(
+        f"**@{_thread_login(data.get('author'))}** opened on "
+        f"{_thread_timestamp(data.get('createdAt'))}:\n"
+    )
+    lines.append(body if body else "*No description provided.*")
+
+    events: list[tuple[str, str, str, str, str]] = []
+    for comment in data.get("comments") or []:
+        if not isinstance(comment, dict):
+            continue
+        events.append((
+            str(comment.get("createdAt") or ""),
+            "comment",
+            _thread_login(comment.get("author")),
+            "",
+            str(comment.get("body") or "").strip(),
+        ))
+
+    for review in data.get("reviews") or []:
+        if not isinstance(review, dict):
+            continue
+        state = str(review.get("state") or "REVIEW")
+        review_body = str(review.get("body") or "").strip()
+        # An empty comment carries no information, but an empty approval or
+        # change request is itself the verdict and must still be shown.
+        if not review_body and state not in ("APPROVED", "CHANGES_REQUESTED"):
+            continue
+        events.append((
+            str(review.get("submittedAt") or review.get("createdAt") or ""),
+            "review",
+            _thread_login(review.get("author")),
+            state,
+            review_body,
+        ))
+
+    events.sort(key=lambda item: item[0])
+
+    if not events:
+        lines.append("\n\n---\n\n*No comments or reviews yet.*")
+    for timestamp, kind, author, state, event_body in events:
+        lines.append("\n\n---\n")
+        stamp = _thread_timestamp(timestamp)
+        if kind == "review":
+            lines.append(f"### **@{author}** ({state}) on {stamp}:\n")
+        else:
+            lines.append(f"### **@{author}** commented on {stamp}:\n")
+        lines.append(event_body if event_body else f"*{state}*")
+
+    return "\n".join(lines)
+
+
+class CommentsScreen(ModalScreen[None]):
+    """Issue or pull request comments and conversation rendered in Markdown."""
+
+    BINDINGS = back_bindings("dismiss") + [
+        Binding("r", "refresh_comments", "refresh"),
+        Binding("o", "open_browser", "open in browser"),
+    ]
+
+    def __init__(self, stop: Stop) -> None:
+        super().__init__()
+        self.stop_record = stop
+        self.request_generation = 0
+
+    def compose(self) -> ComposeResult:
+        stop = self.stop_record
+        yield Static(
+            f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
+            f"{escape(stop.title[:70])}  (comments)  {escape('[escape]')} closes",
+            id="comments-header",
+        )
+        with ScrollableContainer(id="comments-scroll"):
+            yield Markdown("loading comments…", id="comments-body")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.action_refresh_comments()
+
+    def action_refresh_comments(self) -> None:
+        # A refresh that lands after a later one must not overwrite it, so
+        # every response is bound to the generation that asked for it.
+        self.request_generation += 1
+        self.fetch_comments(self.request_generation)
+
+    def action_open_browser(self) -> None:
+        stop = self.stop_record
+        gh("pr", "view", str(stop.number), "--repo", stop.repository, "--web")
+
+    @work(thread=True)
+    def fetch_comments(self, generation: int) -> None:
+        stop = self.stop_record
+        data, error = fetch_github_thread(stop.repository, stop.number)
+        if data is not None:
+            formatted = format_github_thread(data, stop.key)
+            self.app.call_from_thread(self.render_comments_result, generation, formatted)
+        else:
+            self.app.call_from_thread(self.render_comments_error, generation, error)
+
+    def render_comments_result(self, generation: int, text: str) -> None:
+        if generation == self.request_generation:
+            self.query_one("#comments-body", Markdown).update(text)
+
+    def render_comments_error(self, generation: int, message: str) -> None:
+        if generation == self.request_generation:
+            self.query_one("#comments-body", Markdown).update(
+                f"**ERROR loading comments:** {message}"
+            )
+
+
 class HarnessTakeoff(ModalScreen[str | None]):
     """One explicit maintainer choice before a selected harness starts."""
 
@@ -2238,7 +2386,7 @@ class HelpScreen(ModalScreen[None]):
                     yield Static("[bold cyan]b[/]         Toggle PR batch select", classes="help-row")
                     yield Static("[bold cyan]B[/]         Select / clear visible rows", classes="help-row")
                     yield Static("[bold cyan]space[/]     Toggle row and advance", classes="help-row")
-                    yield Static("[bold cyan]n[/]         Skip to next unseen row", classes="help-row")
+                    yield Static("[bold cyan]n[/]         Skip to next PR lacking my review", classes="help-row")
                     yield Static("[bold magenta]$[/]         Slay PR (review+fix+land)", classes="help-row")
                     yield Static("[bold cyan]A[/]         Land selected batch", classes="help-row")
                     yield Static("[bold cyan]w[/]         Watch running agents", classes="help-row")
@@ -2299,6 +2447,8 @@ class ReviewScreen(Screen):
         Binding("u", "update_branch", "update clean branch"),
         Binding("e", "toggle_evidence", "evidence"),
         Binding("r", "toggle_raw_transcript", "raw transcript"),
+        Binding("c", "view_comments", "comments"),
+        Binding("v", "view_diff", "diff"),
     ]
 
     def __init__(
@@ -2653,8 +2803,8 @@ class ReviewScreen(Screen):
         lines.append(
             "actions   "
             f"{escape('[f]')} fix & land  {escape('[F]')} steer fix  "
-            f"{escape('[L]')} review  {escape('[a]')} approve+queue  "
-            f"{escape('[m]')} merge  {escape('[u]')} update  "
+            f"{escape('[L]')} review  {escape('[c]')} comments  {escape('[v]')} diff  "
+            f"{escape('[a]')} approve+queue  {escape('[m]')} merge  {escape('[u]')} update  "
             f"{escape('[e]')} evidence"
         )
         self.query_one("#review-card", Static).update("\n".join(lines))
@@ -2835,6 +2985,12 @@ class ReviewScreen(Screen):
     def action_toggle_raw_transcript(self) -> None:
         self.query_one("#review-log", RichLog).toggle_class("hidden")
 
+    def action_view_comments(self) -> None:
+        self.app.push_screen(CommentsScreen(self.stop_record))
+
+    def action_view_diff(self) -> None:
+        self.app.push_screen(DiffScreen(self.stop_record))
+
     def return_to_queue(self, action) -> None:
         if not self.finished:
             self.notify("review still running — [x] stops it")
@@ -2952,6 +3108,9 @@ class ReviewDashboard(App):
     #review-evidence.hidden, #review-log.hidden { display: none; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
+    #comments-header { height: 1; background: $panel; color: cyan; text-style: bold; }
+    #comments-scroll { border: solid $secondary; background: $surface; }
+    #comments-body { padding: 0 1; width: auto; }
     ListItem.selected { background: $primary-muted; }
     ListItem.selected Label { color: magenta; text-style: bold; }
     #review-status { height: auto; padding: 0 1; background: $panel; }
@@ -6041,6 +6200,13 @@ class ReviewDashboard(App):
             self.notify("action applies to pull requests only", severity="warning")
             return
         self.push_screen(DiffScreen(stop))
+
+    def action_view_comments(self) -> None:
+        # Unlike the diff, a comment thread exists for issues too, and the
+        # issues view is where triage reads them.
+        stop = self.current
+        if stop:
+            self.push_screen(CommentsScreen(stop))
 
     def action_comment(self) -> None:
         stop = self.current

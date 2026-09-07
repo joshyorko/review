@@ -1330,6 +1330,7 @@ async def main() -> int:
         tui.BatchPlanScreen: "dismiss(False)",
         tui.LandingScreen: "dismiss(None)",
         tui.DiffScreen: "dismiss",
+        tui.CommentsScreen: "dismiss",
         tui.ReviewScreen: "close",
         tui.ReviewVerdict: "dismiss(None)",
         tui.MergeRecovery: "dismiss(None)",
@@ -1504,6 +1505,13 @@ async def main() -> int:
         await pilot.pause()
         check(app.screen is root_screen, "q must close DiffScreen")
 
+        app.push_screen(tui.CommentsScreen(tui.Stop("projectbluefin/review", 165, "review", "review")))
+        await pilot.pause()
+        check(isinstance(app.screen, tui.CommentsScreen), "q acceptance must activate CommentsScreen")
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.screen is root_screen, "q must close CommentsScreen")
+
         harness_option = SimpleNamespace(
             harness=SimpleNamespace(branding=SimpleNamespace(
                 harness_id="test", terminal_badge="TT", display_name="Test",
@@ -1676,6 +1684,14 @@ async def main() -> int:
             await pilot.press("r")
             await pilot.pause()
             check("hidden" not in raw.classes, "[r] must reveal the secondary raw transcript")
+            await pilot.press("c")
+            await pilot.pause()
+            check(isinstance(app.screen, tui.CommentsScreen), "[c] on ReviewScreen must open CommentsScreen")
+            await pilot.press("escape")
+            await pilot.pause()
+            check(isinstance(app.screen, tui.ReviewScreen), "escape on CommentsScreen must return to ReviewScreen")
+            check("[c] comments" in str(card.render()), "decision card must advertise comments viewer")
+            check("[v] diff" in str(card.render()), "decision card must advertise diff viewer")
             await pilot.press("q")
             await pilot.pause()
             tui.adapt_current_engine = original_adapter
@@ -4638,6 +4654,98 @@ async def main() -> int:
     os.environ.pop("DIFF_REQUEST_ID", None)
     gh_log.write_text("")
 
+    # ── comments viewer ──────────────────────────────────────────────────
+    sample_thread = {
+        "title": "Add comments viewer",
+        "author": {"login": "castrojo"},
+        "createdAt": "2026-09-07T12:00:00Z",
+        "body": "Opening description",
+        "comments": [
+            {
+                "author": {"login": "reviewer1"},
+                "createdAt": "2026-09-07T12:05:00Z",
+                "body": "First comment",
+            }
+        ],
+        "reviews": [
+            {
+                "author": {"login": "reviewer2"},
+                "createdAt": "2026-09-07T12:10:00Z",
+                "state": "APPROVED",
+                "body": "LGTM",
+            }
+        ],
+    }
+    rendered_thread = tui.format_github_thread(sample_thread, "projectbluefin/review#42")
+    check("# projectbluefin/review#42: Add comments viewer" in rendered_thread, "thread header must render")
+    check("**@castrojo** opened on 2026-09-07 12:00:00 UTC:" in rendered_thread, "author and timestamp must render")
+    check("Opening description" in rendered_thread, "body must render")
+    check("### **@reviewer1** commented on 2026-09-07 12:05:00 UTC:" in rendered_thread, "comment header must render")
+    check("First comment" in rendered_thread, "comment body must render")
+    check("### **@reviewer2** (APPROVED) on 2026-09-07 12:10:00 UTC:" in rendered_thread, "review header must render")
+    check("LGTM" in rendered_thread, "review body must render")
+
+    empty_thread = {"title": "Empty", "author": {"login": "bot"}, "createdAt": "2026-09-07T00:00:00Z", "body": ""}
+    rendered_empty = tui.format_github_thread(empty_thread, "test#1")
+    check("*No comments or reviews yet.*" in rendered_empty, "empty thread must report no comments")
+    check("*No description provided.*" in rendered_empty, "empty body must report no description")
+
+    # A bodyless approval is itself the verdict and must survive; a bodyless
+    # plain comment carries nothing and must not become an empty entry.
+    verdict_thread = {
+        "title": "Verdicts",
+        "author": {"login": "bot"},
+        "createdAt": "2026-09-07T00:00:00Z",
+        "body": "x",
+        "reviews": [
+            {"author": {"login": "approver"}, "submittedAt": "2026-09-07T01:00:00Z",
+             "state": "APPROVED", "body": ""},
+            {"author": {"login": "noisy"}, "submittedAt": "2026-09-07T02:00:00Z",
+             "state": "COMMENTED", "body": ""},
+        ],
+    }
+    rendered_verdicts = tui.format_github_thread(verdict_thread, "test#2")
+    check("**@approver** (APPROVED)" in rendered_verdicts, "a bodyless approval must still render")
+    check("@noisy" not in rendered_verdicts, "a bodyless plain review comment must be dropped")
+
+    # Ordering is by timestamp across both comments and reviews, not by kind.
+    interleaved = {
+        "title": "Order", "author": {"login": "bot"},
+        "createdAt": "2026-09-07T00:00:00Z", "body": "x",
+        "comments": [{"author": {"login": "late"}, "createdAt": "2026-09-07T09:00:00Z", "body": "later"}],
+        "reviews": [{"author": {"login": "early"}, "submittedAt": "2026-09-07T03:00:00Z",
+                     "state": "COMMENTED", "body": "earlier"}],
+    }
+    rendered_order = tui.format_github_thread(interleaved, "test#3")
+    check(
+        rendered_order.index("@early") < rendered_order.index("@late"),
+        "the thread must be ordered by timestamp across comments and reviews",
+    )
+
+    app = tui.ReviewDashboard(tui.QueueFilters())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        await pilot.press("C")
+        await pilot.pause()
+        screen = app.screen
+        check(
+            isinstance(screen, tui.CommentsScreen),
+            f"'C' must open the comments screen from dashboard, got {type(screen).__name__}",
+        )
+        if isinstance(screen, tui.CommentsScreen):
+            check(screen.query("#comments-scroll"), "the comments must live in a scrollable container")
+            check(screen.query("#comments-body"), "comments body widget must exist")
+        await pilot.press("escape")
+        await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.CommentsScreen),
+            "escape must close the comments screen",
+        )
+
     # ── everything identifying a pull request is a hyperlink ─────────────
     # And the bug found while adding them: Rich reads a bracket as markup, so
     # the unescaped "[review]" action tag and any title carrying "[skip ci]"
@@ -5390,7 +5498,7 @@ async def main() -> int:
         "failure text must outrank the healthy queue presentation",
     )
 
-    for key in ("r", "v", "o", "h", "/", "f", "b", "H", "R", "q"):
+    for key in ("r", "v", "C", "o", "h", "/", "f", "b", "H", "R", "q"):
         check(
             f"[b]{key}[/b]" in tui.KEYS_READING,
             f"the reading key line must document {key!r}",

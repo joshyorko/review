@@ -399,13 +399,14 @@ comment behind the typed issue-number gate, `o` opens in the browser, and `y` co
 | `b` | toggle batch selection for the highlighted pull request |
 | `B` | select / clear all visible rows |
 | `Space` | toggle selection on highlighted row and advance |
-| `n` | advance to next unseen row |
+| `n` | advance to the next pull request lacking my review on GitHub |
 | `r` | **start a review with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
 | `$` | **slay pull request** — review if unreviewed, fix with agent if findings exist, land in batch |
 | `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
 | `o` | optional browser escape hatch |
 | `v` | view the complete diff — full screen, coloured, paginated, with loading/error state |
+| `C` | view the issue or pull request conversation — opening post, comments, and reviews rendered as Markdown |
 | `c` | comment (PR or issue) |
 | `a` | approve and queue through Hive: its App records the exact-head approval and applies `lgtm`; for the batch selection if one exists |
 | `A` | land selected batch through background landing agents (gated with BatchPlanScreen) |
