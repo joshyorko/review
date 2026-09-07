@@ -4543,6 +4543,9 @@ class ReviewDashboard(App):
         self.refresh_rows()
         self._queue().action_cursor_down()
 
+    def action_toggle_view(self) -> None:
+        pass
+
     def action_next_unreviewed(self) -> None:
         if not self.stops:
             return
