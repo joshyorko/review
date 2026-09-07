@@ -16,7 +16,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, TextIO, cast
+from typing import Any, Callable, Mapping, Protocol, Sequence, TextIO, cast
 
 from harness.registry import Harness, HarnessRegistry
 from tui.capacity import CapacityGovernor
@@ -371,11 +371,112 @@ class LocalExecutor:
             self._cancelled.discard(run.identity)
 
 
+_REPO_FETCH_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_REPO_FETCH_LOCKS_GUARD = threading.Lock()
+
+
+def _get_repo_fetch_lock(root: str, repository: str) -> threading.Lock:
+    key = (str(Path(root).resolve()), repository)
+    with _REPO_FETCH_LOCKS_GUARD:
+        lock = _REPO_FETCH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _REPO_FETCH_LOCKS[key] = lock
+        return lock
+
+
+def _mirror_path(root: str, repository: str) -> Path:
+    return Path(root) / "mirrors" / repository.replace("/", "__")
+
+
 def _worktree_path(root: str, item: BatchReviewItem) -> Path:
     digest = hashlib.sha256(
         f"{item.repository}\0{item.head_sha}".encode("utf-8")
     ).hexdigest()[:24]
     return Path(root) / f"{item.repository.replace('/', '__')}-{digest}"
+
+
+def _has_commit(mirror: Path, commit_sha: str) -> bool:
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(mirror), "cat-file", "-e", commit_sha],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _ensure_mirror(repository: str, root: str) -> Path:
+    mirror = _mirror_path(root, repository)
+    if mirror.exists() and (mirror / ".git").exists():
+        return mirror
+    with _get_repo_fetch_lock(root, repository):
+        if mirror.exists() and (mirror / ".git").exists():
+            return mirror
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["gh", "repo", "clone", repository, str(mirror), "--", "--quiet"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        return mirror
+
+
+def _fetch_commits(repository: str, commits: Sequence[str], root: str) -> None:
+    mirror = _ensure_mirror(repository, root)
+    missing = [c for c in commits if not _has_commit(mirror, c)]
+    if not missing:
+        return
+    with _get_repo_fetch_lock(root, repository):
+        still_missing = [c for c in missing if not _has_commit(mirror, c)]
+        if not still_missing:
+            return
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(mirror),
+                "fetch",
+                "--quiet",
+                "origin",
+                *still_missing,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+
+def _prepare_transport_batch(
+    items: Sequence[BatchReviewItem],
+    root: str,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> None:
+    needed = [it for it in items if not _worktree_path(root, it).exists()]
+    if not needed:
+        return
+    by_repo: dict[str, list[str]] = {}
+    for it in needed:
+        by_repo.setdefault(it.repository, []).append(it.head_sha)
+    for repo, heads in by_repo.items():
+        if is_cancelled is not None and is_cancelled():
+            break
+        try:
+            _ensure_mirror(repo, root)
+            if is_cancelled is not None and is_cancelled():
+                break
+            _fetch_commits(repo, heads, root)
+        except Exception:
+            # Prefetch only. A failure here costs a round trip, not the batch:
+            # _prepare_worktree() fetches the head it needs and raises there,
+            # where the failure belongs to an identifiable review.
+            pass
 
 
 def _prepare_worktree(item: BatchReviewItem, root: str) -> Path:
@@ -385,6 +486,7 @@ def _prepare_worktree(item: BatchReviewItem, root: str) -> Path:
         actual = subprocess.check_output(
             ["git", "-C", str(path), "rev-parse", "HEAD"],
             text=True,
+            timeout=30,
         ).strip()
         if actual != item.head_sha:
             raise RuntimeError(f"{item.key} worktree head drifted to {actual}")
@@ -398,37 +500,81 @@ def _prepare_worktree(item: BatchReviewItem, root: str) -> Path:
                 "--untracked-files=all",
             ],
             text=True,
+            timeout=30,
         )
         if dirty:
             raise RuntimeError(f"{item.key} worktree has local changes")
         return path
-    subprocess.run(
-        ["gh", "repo", "clone", item.repository, str(path), "--", "--quiet"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "fetch", "--quiet", "origin", item.head_sha],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(path),
-            "checkout",
-            "--quiet",
-            "--detach",
-            item.head_sha,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+
+    mirror = _ensure_mirror(item.repository, root)
+    if not _has_commit(mirror, item.head_sha):
+        _fetch_commits(item.repository, [item.head_sha], root)
+
+    target = str(path.resolve())
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(mirror),
+                    "worktree",
+                    "add",
+                    "--detach",
+                    "--quiet",
+                    target,
+                    item.head_sha,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            break
+        except subprocess.CalledProcessError as exc:
+            last_err = exc
+            if path.exists():
+                actual = subprocess.check_output(
+                    ["git", "-C", str(path), "rev-parse", "HEAD"],
+                    text=True,
+                    timeout=30,
+                ).strip()
+                if actual != item.head_sha:
+                    raise RuntimeError(f"{item.key} worktree head drifted to {actual}")
+                dirty = subprocess.check_output(
+                    [
+                        "git",
+                        "-C",
+                        str(path),
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=all",
+                    ],
+                    text=True,
+                    timeout=30,
+                )
+                if dirty:
+                    raise RuntimeError(f"{item.key} worktree has local changes")
+                return path
+            try:
+                subprocess.run(
+                    ["git", "-C", str(mirror), "worktree", "prune"],
+                    capture_output=True,
+                    check=False,
+                    timeout=30,
+                )
+            except Exception:
+                pass
+            time.sleep(0.05 * (2 ** attempt))
+    else:
+        if last_err is not None:
+            raise last_err
+
     return path
+
+
+_DEFAULT_PREPARE_WORKTREE = _prepare_worktree
 
 
 @dataclass
@@ -696,6 +842,16 @@ class ReviewEngine:
                         callback,
                     )
                 pending = remaining
+                if (
+                    pending
+                    and not self._is_cancelled(batch)
+                    and _prepare_worktree is _DEFAULT_PREPARE_WORKTREE
+                ):
+                    _prepare_transport_batch(
+                        pending,
+                        self.worktree_root,
+                        is_cancelled=lambda: self._is_cancelled(batch),
+                    )
                 while pending and not self._is_cancelled(batch):
                     item = pending.pop(0)
                     run = ReviewRun.from_request(
