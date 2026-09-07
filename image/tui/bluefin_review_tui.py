@@ -105,6 +105,27 @@ query($endCursor: String) {
   }
 }
 """
+# The issues search query: every open issue in the organization.
+ORG_ISSUES_QUERY = f"""\
+query($endCursor: String) {{
+  search(query: "org:{GITHUB_ORG} is:issue is:open archived:false", type: ISSUE, first: 100, after: $endCursor) {{
+    pageInfo {{ hasNextPage endCursor }}
+    nodes {{
+      ... on Issue {{
+        number
+        title
+        updatedAt
+        createdAt
+        author {{ login }}
+        repository {{ nameWithOwner }}
+        labels(first: 100) {{ nodes {{ name }} }}
+        comments {{ totalCount }}
+        body
+      }}
+    }}
+  }}
+}}
+"""
 PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 TRACE_PATH = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
@@ -738,7 +759,7 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
         return "yellow"
     if action == "ready-for-human-merge":
         return "bold green"
-    if action == "review" or review == "approved":
+    if action in ("review", "triage") or review == "approved":
         return "cyan"
     if action == "investigate" or checks == "unknown":
         return "grey62"
@@ -887,6 +908,70 @@ def org_queue_item(node: dict) -> dict:
         "base_sha": str(node.get("baseRefOid") or ""),
         "head_sha": str(node.get("headRefOid") or ""),
         "recommended_action": classify_action(check_state, mergeable_state, review_state),
+    }
+
+
+def org_issue_item(node: dict) -> dict:
+    """One issue item from one GraphQL search node, validated field by field.
+
+    Raises ValueError on any shape GitHub should never send, so a malformed
+    response becomes one honest source state instead of a wrong queue.
+    """
+    number = node.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise ValueError("an issue has an invalid number")
+    repository = (node.get("repository") or {}).get("nameWithOwner")
+    if not isinstance(repository, str) or not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
+        raise ValueError(f"issue {number} has an invalid repository")
+    if not isinstance(node.get("title"), str):
+        raise ValueError(f"{repository}#{number} has an invalid title")
+    author_node = node.get("author")
+    if author_node is not None and not isinstance(author_node, dict):
+        raise ValueError(f"{repository}#{number} has an invalid author")
+    author = ""
+    if author_node and "login" in author_node:
+        if not isinstance(author_node["login"], str):
+            raise ValueError(f"{repository}#{number} has an invalid login")
+        author = author_node["login"]
+    label_nodes = node.get("labels")
+    labels = []
+    if isinstance(label_nodes, dict):
+        raw_labels = label_nodes.get("nodes") or []
+    elif isinstance(label_nodes, list):
+        raw_labels = label_nodes
+    else:
+        raw_labels = []
+    for label in raw_labels:
+        if isinstance(label, dict):
+            name = label.get("name")
+            if isinstance(name, str):
+                labels.append(name)
+        elif isinstance(label, str):
+            labels.append(label)
+    comments = node.get("comments")
+    comments_count = 0
+    if isinstance(comments, dict):
+        cnt = comments.get("totalCount")
+        if isinstance(cnt, int) and not isinstance(cnt, bool):
+            comments_count = cnt
+    elif isinstance(comments, (int, float)) and not isinstance(comments, bool):
+        comments_count = int(comments)
+    elif isinstance(comments, list):
+        comments_count = len(comments)
+    body = str(node.get("body") or "")
+    return {
+        "is_issue": True,
+        "action": "triage",
+        "recommended_action": "triage",
+        "repository": repository,
+        "number": number,
+        "title": node["title"],
+        "author": author,
+        "labels": labels,
+        "comments_count": comments_count,
+        "body": body,
+        "created_at": str(node.get("createdAt") or ""),
+        "updated_at": str(node.get("updatedAt") or ""),
     }
 
 
@@ -1408,8 +1493,9 @@ class ConfirmMutation(ModalScreen[bool]):
             for index, command in enumerate(self.commands):
                 yield Static(" ".join(command), classes="confirm-command",
                              id=f"confirm-command-{index}")
+            target_name = "issue" if any("issue" in cmd for cmd in self.commands) else "pull request"
             yield Label(
-                f"type the pull request number ({self.expected}) to run it; "
+                f"type the {target_name} number ({self.expected}) to run it; "
                 "empty or Esc aborts"
             )
             yield Input(placeholder=self.expected, id="confirm-input")
@@ -2670,6 +2756,8 @@ class ReviewDecisionScreen(ModalScreen[None]):
 class ReviewDashboard(App):
     """PROJECT BLUEFIN REVIEW DASHBOARD."""
 
+    view_mode: str = "prs"
+    issues_items: list[dict] = []
     batch_mutation_in_flight: bool = False
     _current_batch_plan: action_plan.BatchActionPlan | None = None
     _batch_generation_token: int = 0
@@ -2725,6 +2813,8 @@ class ReviewDashboard(App):
     def __init__(self, filters: QueueFilters | None = None) -> None:
         super().__init__()
         self.filters = filters or QueueFilters()
+        self.view_mode = "prs"
+        self.issues_items = []
         self.stops: list[Stop] = []
         self.self_login = ""
         self.pulls_cache: dict[str, list[dict]] = {}
@@ -3558,12 +3648,197 @@ class ReviewDashboard(App):
         self.source_message = ""
         return {"items": items}
 
+    @work(thread=True, exclusive=True)
+    def load_issues(self) -> None:
+        if self.filters.live:
+            snapshot = self.load_live_issues(self.filters.live_repository)
+        else:
+            snapshot = self.load_org_issues()
+        self.issues_items = snapshot.get("items", [])
+        self.call_from_thread(self.apply_filters)
+
+    def load_org_issues(self) -> dict:
+        """Every open issue in the organization, live from GitHub.
+
+        One paginated GraphQL search carries open issues; there is no static snapshot behind this.
+        """
+        try:
+            result = gh(
+                "api", "graphql", "--paginate", "--slurp",
+                "-f", f"query={ORG_ISSUES_QUERY}",
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.source_state = "error"
+            self.source_message = bounded_detail(
+                f"GitHub could not list the {GITHUB_ORG} issues: {error}"
+            )
+            return {"items": []}
+        if result.returncode:
+            detail = bounded_detail((result.stderr or result.stdout).strip())
+            lowered = detail.lower()
+            if ("authentication" in lowered or "login" in lowered
+                    or "permission" in lowered or "forbidden" in lowered
+                    or "not accessible" in lowered):
+                self.source_state = "inaccessible"
+            else:
+                self.source_state = "error"
+            self.source_message = detail or f"GitHub could not list the {GITHUB_ORG} issues"
+            return {"items": []}
+        try:
+            pages = json.loads(result.stdout)
+            if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
+                raise ValueError("GitHub returned malformed search pages")
+            items = []
+            for page in pages:
+                nodes = ((page.get("data") or {}).get("search") or {}).get("nodes")
+                if not isinstance(nodes, list):
+                    raise ValueError("GitHub returned a page without search nodes")
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        raise ValueError("GitHub returned a malformed issue node")
+                    if not node:
+                        continue
+                    items.append(org_issue_item(node))
+        except (json.JSONDecodeError, ValueError) as error:
+            self.source_state = "malformed"
+            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            return {"items": []}
+        self.source_state = "empty" if not items else "ready"
+        self.source_message = ""
+        return {"items": items}
+
+    def load_live_issues(self, repository: str) -> dict:
+        if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
+            self.source_state = "malformed"
+            self.source_message = bounded_detail(f"invalid repository '{repository}'; use owner/repo")
+            return {"items": []}
+        try:
+            result = gh(
+                "api", "--paginate", "--slurp", "--method", "GET",
+                f"repos/{repository}/issues?state=open&per_page=100",
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.source_state = "error"
+            self.source_message = bounded_detail(f"GitHub could not read this repository: {error}")
+            return {"items": []}
+        if result.returncode:
+            detail = bounded_detail((result.stderr or result.stdout).strip())
+            lowered = detail.lower()
+            if ("authentication" in lowered or "login" in lowered
+                    or "permission" in lowered or "forbidden" in lowered
+                    or "not accessible" in lowered):
+                self.source_state = "inaccessible"
+            elif "not found" in lowered or "could not resolve" in lowered:
+                self.source_state = "missing"
+            else:
+                self.source_state = "error"
+            self.source_message = detail or "GitHub could not read this repository"
+            return {"items": []}
+        try:
+            pages = json.loads(result.stdout)
+            if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+                raise ValueError("GitHub returned malformed issue pages")
+            raw_issues = [issue for page in pages for issue in page]
+            if any(not isinstance(issue, dict) for issue in raw_issues):
+                raise ValueError("GitHub returned a malformed issue entry")
+        except (json.JSONDecodeError, ValueError) as error:
+            self.source_state = "malformed"
+            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            return {"items": []}
+        try:
+            items = []
+            for index, issue in enumerate(raw_issues, 1):
+                if "pull_request" in issue:
+                    continue
+                number = issue.get("number")
+                if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+                    raise ValueError(f"issue {index} has invalid number")
+                if not isinstance(issue.get("title"), str):
+                    raise ValueError(f"issue {index} has invalid title")
+                author_source = issue.get("user") if "user" in issue else issue.get("author")
+                if author_source is not None and not isinstance(author_source, dict):
+                    raise ValueError(f"issue {index} has invalid author")
+                author = ""
+                if author_source is not None and "login" in author_source:
+                    if not isinstance(author_source["login"], str):
+                        raise ValueError(f"issue {index} has invalid login")
+                    author = author_source["login"]
+                labels = []
+                for label in issue.get("labels") or []:
+                    if isinstance(label, dict) and isinstance(label.get("name"), str):
+                        labels.append(label["name"])
+                    elif isinstance(label, str):
+                        labels.append(label)
+                comments_count = issue.get("comments", 0)
+                if not isinstance(comments_count, int) or isinstance(comments_count, bool):
+                    comments_count = 0
+                items.append({
+                    "is_issue": True,
+                    "repository": repository,
+                    "number": number,
+                    "action": "triage",
+                    "recommended_action": "triage",
+                    "title": issue["title"],
+                    "author": author,
+                    "labels": labels,
+                    "comments_count": comments_count,
+                    "body": str(issue.get("body") or ""),
+                    "created_at": str(issue.get("created_at", "") or ""),
+                    "updated_at": str(issue.get("updated_at", "") or ""),
+                })
+        except ValueError as error:
+            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            self.source_state = "malformed"
+            return {"items": []}
+        self.source_state = "empty" if not items else "ready"
+        self.source_message = ""
+        return {"items": items}
+
     def apply_filters(self) -> None:
         for stop in self.stops:
             self.evidence_generation[stop.key] = (
                 self.evidence_generation.get(stop.key, 0) + 1
             )
         stops = []
+        if self.view_mode == "issues":
+            for item in self.issues_items:
+                if not self.filters.wants(item):
+                    continue
+                stop = Stop(
+                    repository=item["repository"],
+                    number=item["number"],
+                    action=item.get("action", "triage"),
+                    title=item.get("title", ""),
+                    author=item.get("author", "") or "",
+                    live={
+                        "labels": item.get("labels", []),
+                        "comments_count": item.get("comments_count", 0),
+                        "body": item.get("body", ""),
+                        "created_at": item.get("created_at", ""),
+                        "updated_at": item.get("updated_at", ""),
+                    },
+                    is_issue=True,
+                )
+                stop.triage_state = self.triage.get(
+                    self.triage_key(stop), "unseen"
+                )
+                stops.append(stop)
+            stops.sort(key=lambda s: (s.repository, s.number))
+            if self.reselect:
+                for stop in stops:
+                    stop.selected = stop.key in self.reselect
+                self.reselect = set()
+            self.stops = stops
+            self.populate(stops)
+            if self.current:
+                self.show_evidence(self.current)
+            elif not stops:
+                try:
+                    self.query_one("#details", Static).update("[dim]No open issues.[/dim]")
+                    self.query_one("#context", Static).update("")
+                except NoMatches:
+                    pass
+            return
         for item in self.queue_items:
             if not self.filters.wants(item):
                 continue
@@ -3625,6 +3900,31 @@ class ReviewDashboard(App):
         # Selection is not colour-only: a ● leads the row and the whole row
         # carries a background, so the batch in progress reads at a glance.
         selected = "● " if stop.selected else "  "
+        if stop.is_issue:
+            labels_source = stop.live.get("labels", [])
+            labels_list = []
+            for l in labels_source:
+                if isinstance(l, dict) and "name" in l:
+                    labels_list.append(l["name"])
+                elif isinstance(l, str):
+                    labels_list.append(l)
+            labels_str = f" [{', '.join(escape(l) for l in labels_list)}]" if labels_list else ""
+            comments_source = stop.live.get("comments")
+            if isinstance(comments_source, list):
+                comments_count = len(comments_source)
+            elif isinstance(comments_source, dict):
+                comments_count = comments_source.get("totalCount", 0)
+            elif isinstance(stop.live.get("comments_count"), int):
+                comments_count = stop.live.get("comments_count", 0)
+            else:
+                comments_count = 0
+            body = (
+                f"{selected}{link(stop.key, issue_url(stop.repository, stop.number))}: "
+                f"{escape(stop.title[:60])}{labels_str} "
+                f"({comments_count} comments) [triage]"
+            )
+            style = stop_style(stop.action, "", "", "")
+            return f"[{style}]{body}[/{style}]" if style else body
         # MECHANICAL replaces the old title-only BATCHABLE tag: it means this
         # branch can be brought current, never that the change is approved.
         tag = " (MECHANICAL)" if stop.mechanical else ""
@@ -3675,7 +3975,16 @@ class ReviewDashboard(App):
         queue.clear()
         if not stops:
             empty_source = not self.queue_items and self.source_state in ("empty", "ready")
-            if empty_source and self.slay_frame >= 0:
+            if self.view_mode == "issues":
+                queue.append(ListItem(Static("[dim]No open issues found.[/dim]")))
+                try:
+                    details = self.query_one("#details", Static)
+                    details.update("[dim]No open issues.[/dim]")
+                    context = self.query_one("#context", Static)
+                    context.update("")
+                except NoMatches:
+                    pass
+            elif empty_source and self.slay_frame >= 0:
                 frame_text = SLAY_FRAMES[self.slay_frame]
                 queue.append(ListItem(Static(frame_text)))
                 try:
@@ -3790,13 +4099,23 @@ class ReviewDashboard(App):
             status_bar = self.query_one("#status-bar", Static)
         except NoMatches:
             return
-        status_bar.update(
-            f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
-            f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
-            f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected}{stuck}{review_failures}{agents}{landed}{policy}"
-            f" | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
-        )
+        view_tag = "[Tab] Issues view | " if self.view_mode == "issues" else "[Tab] PR view | "
+        if self.view_mode == "issues":
+            status_bar.update(
+                f" {view_tag}Issues: {shown} open "
+                f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
+                f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
+                f"| batch: {selected}"
+                f" | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+            )
+        else:
+            status_bar.update(
+                f" {view_tag}Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
+                f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
+                f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
+                f"| batch: {selected}{stuck}{review_failures}{agents}{landed}{policy}"
+                f" | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+            )
 
     def action_filter(self) -> None:
         """Cycle the action filter: every action, then one at a time."""
@@ -3842,6 +4161,53 @@ class ReviewDashboard(App):
         generation: int,
         open_decision: bool,
     ) -> None:
+        if stop.is_issue:
+            try:
+                result = gh(
+                    "issue",
+                    "view",
+                    str(stop.number),
+                    "--repo",
+                    stop.repository,
+                    "--json",
+                    "title,body,author,labels,comments,createdAt,updatedAt,state",
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        bounded_detail(
+                            (result.stderr or result.stdout).strip()
+                            or f"GitHub could not read {stop.repository}#{stop.number}"
+                        )
+                    )
+                live = json.loads(result.stdout)
+                if not isinstance(live, dict):
+                    raise ValueError(
+                        f"GitHub returned malformed evidence for {stop.repository}#{stop.number}"
+                    )
+            except (
+                OSError,
+                RuntimeError,
+                subprocess.TimeoutExpired,
+                ValueError,
+                json.JSONDecodeError,
+            ) as error:
+                self.call_from_thread(
+                    self.evidence_failed,
+                    stop,
+                    bounded_detail(str(error) or type(error).__name__),
+                    generation,
+                    open_decision,
+                )
+                return
+            self.call_from_thread(
+                self.evidence_loaded,
+                stop,
+                live,
+                None,
+                generation,
+                open_decision,
+            )
+            return
         try:
             live = fetch_live_review(stop.repository, stop.number)
         except (
@@ -3916,6 +4282,15 @@ class ReviewDashboard(App):
             not any(candidate is stop for candidate in self.stops)
             or self.evidence_generation.get(stop.key) != generation
         ):
+            return
+        if stop.is_issue:
+            stop.live = dict(live)
+            stop.live["repository"] = stop.repository
+            stop.live["number"] = stop.number
+            stop.triage_state = self.triage.get(
+                self.triage_key(stop), "unseen"
+            )
+            self.render_evidence(stop)
             return
         previous_base = str(stop.live.get("baseRefOid") or "")
         previous_head = stop.head_identity
@@ -4141,6 +4516,55 @@ class ReviewDashboard(App):
     def render_evidence(self, stop: Stop) -> None:
         if self.current is not stop:
             return
+        if stop.is_issue:
+            self.refresh_rows()
+            live = stop.live or {}
+            title = live.get("title") or stop.title
+            author_source = live.get("author")
+            author = (
+                author_source.get("login", stop.author or "-")
+                if isinstance(author_source, dict)
+                else (stop.author or "-")
+            )
+            state = str(live.get("state", "OPEN") or "OPEN")
+            created_at = str(live.get("createdAt", "") or live.get("created_at", "") or "")
+            updated_at = str(live.get("updatedAt", "") or live.get("updated_at", "") or "")
+            raw_labels = live.get("labels") or []
+            label_names = []
+            for l in raw_labels:
+                if isinstance(l, dict) and "name" in l:
+                    label_names.append(l["name"])
+                elif isinstance(l, str):
+                    label_names.append(l)
+            labels_str = ", ".join(escape(n) for n in label_names) or "-"
+
+            raw_comments = live.get("comments")
+            if isinstance(raw_comments, list):
+                comments_count = len(raw_comments)
+            elif isinstance(raw_comments, dict):
+                comments_count = raw_comments.get("totalCount", 0)
+            elif isinstance(stop.live.get("comments_count"), int):
+                comments_count = stop.live.get("comments_count", 0)
+            else:
+                comments_count = 0
+
+            body = str(live.get("body") or "").strip()
+            body_display = escape(body) if body else "[dim]No description provided.[/dim]"
+            issue_link = link(stop.key, issue_url(stop.repository, stop.number))
+
+            self.query_one("#details", Static).update(
+                f"[b]{issue_link}[/b]  {escape(title)}\n"
+                f"author     {link(author, f'https://github.com/{author}')}\n"
+                f"state      {escape(state)}\n"
+                f"created    {escape(created_at[:19] if created_at else '-')}\n"
+                f"updated    {escape(updated_at[:19] if updated_at else '-')}\n"
+                f"labels     {labels_str}\n"
+                f"comments   {comments_count}\n\n"
+                f"[b]DESCRIPTION[/b]\n"
+                f"{body_display}"
+            )
+            self.render_issue_context(stop)
+            return
         live = stop.live
         self.refresh_rows()
         checks = authoritative_checks(live)
@@ -4352,6 +4776,27 @@ class ReviewDashboard(App):
             self.paint_context, stop, "\n".join(lines), dupes, overlaps
         )
 
+    def render_issue_context(self, stop: Stop) -> None:
+        live = stop.live or {}
+        raw_comments = live.get("comments")
+        lines = ["[b]RECENT COMMENTS[/b]"]
+        if isinstance(raw_comments, list) and raw_comments:
+            for comment in raw_comments[-5:]:
+                if isinstance(comment, dict):
+                    author_obj = comment.get("author")
+                    c_author = author_obj.get("login", "?") if isinstance(author_obj, dict) else "?"
+                    c_created = str(comment.get("createdAt", "") or "")[:10]
+                    c_body = str(comment.get("body", "") or "").strip()
+                    first_line = c_body.splitlines()[0] if c_body else ""
+                    lines.append(f"• [b]{escape(c_author)}[/b] ({c_created}): {escape(first_line[:80])}")
+        else:
+            lines.append("[dim]no comments on this issue yet[/dim]")
+        lines.append("")
+        lines.append("[b]Triage keys[/b]: [b]c[/b] comment · [b]x[/b] close · [b]o[/b] browser · [b]y[/b] copy link")
+        context = self.query("#context")
+        if context:
+            context.first().update("\n".join(lines))
+
     # ── the mutation gate ─────────────────────────────────────────────────
 
     def mutate(self, stop: Stop, *args: str, then=None) -> None:
@@ -4497,7 +4942,9 @@ class ReviewDashboard(App):
 
     def action_activate(self) -> None:
         stop = self.current
-        if stop and stop.review_result is not None:
+        if stop and stop.is_issue:
+            self.show_evidence(stop)
+        elif stop and stop.review_result is not None:
             self.show_evidence(stop, open_decision=True)
         elif stop:
             self.action_view_diff()
@@ -4544,7 +4991,21 @@ class ReviewDashboard(App):
         self._queue().action_cursor_down()
 
     def action_toggle_view(self) -> None:
-        pass
+        if self.view_mode == "prs":
+            self.view_mode = "issues"
+            self.notify("switched to issues view")
+            if not self.issues_items:
+                self.stops = []
+                self.populate([])
+                self.load_issues()
+            else:
+                self.apply_filters()
+        else:
+            self.view_mode = "prs"
+            self.notify("switched to pull requests view")
+            self.apply_filters()
+        if self.current:
+            self.show_evidence(self.current)
 
     def action_next_unreviewed(self) -> None:
         if not self.stops:
@@ -4570,6 +5031,9 @@ class ReviewDashboard(App):
         return stop.triage_key
 
     def action_review(self) -> None:
+        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         batch = [stop for stop in self.stops if stop.selected]
         if batch:
             keys = {stop.key for stop in batch}
@@ -4681,8 +5145,11 @@ class ReviewDashboard(App):
         self.reselect = {stop.key for stop in self.stops if stop.selected}
         self.last_landing_outcome = ""
         self.notify("refreshing the queue…")
-        self.load_queue()
-        self.load_hive()
+        if self.view_mode == "issues":
+            self.load_issues()
+        else:
+            self.load_queue()
+            self.load_hive()
 
     def action_update_branch(self) -> None:
         """Bring the branch up to date with its base — the batch, if set.
@@ -4694,6 +5161,9 @@ class ReviewDashboard(App):
         in one pass. A real conflict still cannot be resolved this way, and
         GitHub says so rather than pretending otherwise.
         """
+        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         batch = [s for s in self.stops if s.selected]
         if not batch and self.current:
             batch = [self.current]
@@ -4746,6 +5216,9 @@ class ReviewDashboard(App):
         is then judged on freshly fetched live evidence, so the selection is
         never wider than what GitHub currently reports.
         """
+        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         candidates = [
             stop for stop in self.stops
             if (stop.author or "").lower() in RENOVATE_BOTS
@@ -4798,12 +5271,17 @@ class ReviewDashboard(App):
     def action_open_browser(self) -> None:
         stop = self.current
         if stop:
-            gh("pr", "view", str(stop.number), "--repo", stop.repository, "--web")
+            target = "issue" if stop.is_issue else "pr"
+            gh(target, "view", str(stop.number), "--repo", stop.repository, "--web")
 
     def action_view_diff(self) -> None:
         stop = self.current
-        if stop:
-            self.push_screen(DiffScreen(stop))
+        if not stop:
+            return
+        if self.view_mode == "issues" or stop.is_issue:
+            self.notify("action applies to pull requests only", severity="warning")
+            return
+        self.push_screen(DiffScreen(stop))
 
     def action_comment(self) -> None:
         stop = self.current
@@ -4847,8 +5325,9 @@ class ReviewDashboard(App):
             body_file = os.path.join(os.path.dirname(TRACE_PATH), "comment.md")
             with open(body_file, "w", encoding="utf-8") as sink:
                 sink.write(body + "\n")
+            target = "issue" if stop.is_issue else "pr"
             command = [
-                "gh", "pr", "comment", str(stop.number),
+                "gh", target, "comment", str(stop.number),
                 "--repo", stop.repository, "--body-file", body_file,
             ]
 
@@ -5181,6 +5660,9 @@ class ReviewDashboard(App):
         self.refresh_rows()
 
     def action_merge(self) -> None:
+        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         batch = [s for s in self.stops if s.selected]
         if len(batch) > 1:
             self.batch_queue_automerge(batch)
@@ -5205,6 +5687,9 @@ class ReviewDashboard(App):
         batch plan gate. Without a selection there is nothing to land; the
         read-only batch queue this key used to open lives on [w].
         """
+        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         batch = [s for s in self.stops if s.selected]
         if not batch:
             self.notify(
@@ -5644,6 +6129,9 @@ class ReviewDashboard(App):
         checks still refuses, and that refusal is reported rather than worked
         around.
         """
+        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         batch = [s for s in self.stops if s.selected]
         if not batch and self.current:
             batch = [self.current]
@@ -5765,18 +6253,22 @@ class ReviewDashboard(App):
             return
         body_file = os.path.join(os.path.dirname(TRACE_PATH), "reject.md")
         os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
+        target = "issue" if stop.is_issue else "pr"
+        message = (
+            "Closing issue after maintainer triage.\n"
+            if stop.is_issue
+            else "Closing after maintainer review; see the review notes above.\n"
+        )
         with open(body_file, "w", encoding="utf-8") as sink:
-            sink.write(
-                "Closing after maintainer review; see the review notes above.\n"
-            )
+            sink.write(message)
         self.mutate_all(
             stop,
             [
                 [
-                    "gh", "pr", "comment", str(stop.number),
+                    "gh", target, "comment", str(stop.number),
                     "--repo", stop.repository, "--body-file", body_file,
                 ],
-                ["gh", "pr", "close", str(stop.number), "--repo", stop.repository],
+                ["gh", target, "close", str(stop.number), "--repo", stop.repository],
             ],
         )
 
@@ -5787,6 +6279,29 @@ class ReviewDashboard(App):
         agent. Read-only."""
         stop = self.current
         if not stop:
+            return
+        if stop.is_issue:
+            live = stop.live
+            lines = [
+                f"{stop.key} — {stop.title}",
+                issue_url(stop.repository, stop.number),
+                f"author: {stop.author or (live.get('author') or {}).get('login', '?')}",
+                f"state: {live.get('state', 'OPEN')}",
+            ]
+            raw_labels = live.get("labels") or []
+            label_names = [
+                l["name"] if isinstance(l, dict) and "name" in l else l
+                for l in raw_labels
+            ]
+            if label_names:
+                lines.append(f"labels: {', '.join(label_names)}")
+            body = str(live.get("body") or "").strip()
+            if body:
+                lines.append(f"summary:\n{body[:500]}")
+            self.copy_to_clipboard("\n".join(lines))
+            self.notify(
+                f"handoff for {stop.key} copied (OSC 52; the terminal must support it)."
+            )
             return
         live = stop.live
         lines = [
@@ -5826,6 +6341,9 @@ class ReviewDashboard(App):
         )
 
     def action_resolve_cluster(self) -> None:
+        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         stop = self.current
         if not stop:
             return
