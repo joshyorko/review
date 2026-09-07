@@ -139,7 +139,6 @@ class ActionPlanContractTests(unittest.TestCase):
         module = self.require_contract()
         plan = make_plan()
 
-        self.assertEqual(plan.identity, plan.plan_hash)
         self.assertEqual(plan.operations[0].argv[-1], "Reviewed exactly.\n")
         self.assertEqual(make_plan().identity, plan.identity)
         self.assertNotEqual(

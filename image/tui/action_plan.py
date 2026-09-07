@@ -666,14 +666,6 @@ class ActionPlan:
         }
         return sha256(_canonical(payload)).hexdigest()
 
-    @property
-    def plan_hash(self) -> str:
-        return self.identity
-
-    @property
-    def plan_id(self) -> str:
-        return self.identity
-
     def is_expired(self, now: datetime | None = None) -> bool:
         return _now(now) >= self.expires_at
 
@@ -863,12 +855,6 @@ class ActionPlan:
         )
         ledger.record(receipt)
         return receipt
-
-
-def build_action_plan(**kwargs: Any) -> ActionPlan:
-    """Functional construction entry point for non-class-oriented callers."""
-
-    return ActionPlan.build(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -1064,13 +1050,6 @@ class BatchActionReceipt:
             object.__setattr__(self, "failed", m)
 
 
-class BatchReceiptLedger(Protocol):
-    """Caller-owned batch receipt storage contract."""
-
-    def record(self, receipt: BatchActionReceipt) -> None:
-        """Persist the batch receipt."""
-
-
 @dataclass(frozen=True)
 class BatchActionPlan:
     actor: str
@@ -1126,14 +1105,6 @@ class BatchActionPlan:
 
     @property
     def identity(self) -> str:
-        return self._identity
-
-    @property
-    def plan_hash(self) -> str:
-        return self._identity
-
-    @property
-    def plan_id(self) -> str:
         return self._identity
 
     def preview(self) -> BatchActionPreview:
@@ -1262,12 +1233,10 @@ __all__ = [
     "BatchExecutionEligibility",
     "BatchHumanConfirmation",
     "BatchMutationItem",
-    "BatchReceiptLedger",
     "BatchResultMap",
     "CurrentState",
     "ExecutionEligibility",
     "ExecutionNotEligible",
-    "FrozenInstanceError",
     "GitHubOperation",
     "HumanConfirmation",
     "HumanConfirmationRequired",
@@ -1278,5 +1247,4 @@ __all__ = [
     "PlanExpiredError",
     "Prerequisites",
     "ReceiptLedger",
-    "build_action_plan",
 ]

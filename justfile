@@ -91,7 +91,6 @@ opus_context_limit := "264000"
 sol_model := "gpt-5.6-sol"
 k3_model := "kimi-k3"
 k3_context_limit := "264000"
-default_profile := "gemini"
 # The fsdk-derived contributor image, used by every recipe that starts a
 # container.
 #
@@ -472,16 +471,12 @@ resolve_codex_auth_file() {
   return 0
 }
 stage_codex_auth_file() {
-  local stage_root=/tmp
   CODEX_AUTH_FILE=""
   CODEX_AUTH_STAGING_DIR=""
   resolve_codex_auth_file
   [[ -n "$CODEX_AUTH_SOURCE_FILE" ]] || return 0
-  if [[ "$stage_root" != /* || ! -d "$stage_root" || ! -w "$stage_root" ]]; then
-    stage_root=/tmp
-  fi
   umask 077
-  CODEX_AUTH_STAGING_DIR="$(mktemp -d "${stage_root%/}/review-codex-auth.XXXXXX")"
+  CODEX_AUTH_STAGING_DIR="$(mktemp -d /tmp/review-codex-auth.XXXXXX)"
   CODEX_AUTH_FILE="${CODEX_AUTH_STAGING_DIR}/auth.json"
   cp -- "$CODEX_AUTH_SOURCE_FILE" "$CODEX_AUTH_FILE"
   chmod 0600 "$CODEX_AUTH_FILE"
@@ -1010,8 +1005,6 @@ add_review_exec_container_args() {
     CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_SOCKET=/run/bluefin-review-exec/broker.sock")
     CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_SESSION=${REVIEW_EXEC_SESSION}")
     CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_AVAILABLE=1")
-  else
-    CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_AVAILABLE=0")
   fi
 }
 

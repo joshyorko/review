@@ -314,7 +314,6 @@ fi
 "${venv}/bin/python" "$repo_root/tests/review_result_contract.py"
 "${venv}/bin/python" "$repo_root/tests/review_run_contract.py"
 "${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_contract.py"
-"${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_unit.py"
 "${venv}/bin/python" "$repo_root/tests/action_plan_contract.py"
 "${venv}/bin/python" "$repo_root/tests/re_review_contract.py"
 "${venv}/bin/python" "$repo_root/tests/semantic_view_contract.py"

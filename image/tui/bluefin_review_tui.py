@@ -66,7 +66,7 @@ from harness.goose import GooseHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
-from review_evidence_manifest import ReviewRequest, ReviewEvidenceManifest
+from review_evidence_manifest import ReviewRequest
 from re_review import (DeltaInput, FindingEvidence, H1Evidence, PriorFinding,
                        Region, classify_head_delta)
 from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry
@@ -2635,7 +2635,7 @@ class ReviewScreen(Screen):
         try:
             request = ReviewRequest(*self.stop_record.repository.split("/", 1), self.stop_record.number, base, current, "maintainer", "review", generated_at="dashboard")
             delta = classify_head_delta(DeltaInput(
-                reviewed, current, historical_base, base, ReviewEvidenceManifest(request),
+                reviewed, current, historical_base, base, request,
                 self.compare_evidence.regions, prior_findings, evidence, new,
                 self.compare_evidence.mapping_uncertain or prior_malformed or current_malformed,
                 self.compare_evidence.sensitive_surfaces_changed,
@@ -2648,7 +2648,7 @@ class ReviewScreen(Screen):
         lines = [
             "", "RE-REVIEW  exact-head delta",
             f"reviewed {escape(reviewed)}  current {escape(current)}",
-            f"H1 manifest  base {escape(base)}  head {escape(delta.current_h1_manifest.request.head_sha)}  result {escape(result.state)}",
+            f"H1 manifest  base {escape(base)}  head {escape(delta.current_h1_request.head_sha)}  result {escape(result.state)}",
         ]
         lines.append(
             "dispositions  " + ", ".join(
