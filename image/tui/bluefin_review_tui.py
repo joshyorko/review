@@ -3226,6 +3226,7 @@ class ReviewDashboard(App):
         self.review_pending_keys.difference_update(requested_keys)
         current_by_key = {stop.key: stop for stop in self.stops}
         if not requested_keys.issubset(current_by_key):
+            self.slay_in_flight.difference_update(requested_keys)
             self.notify(
                 "batch review not started: the visible queue changed.",
                 severity="warning",
@@ -3233,6 +3234,7 @@ class ReviewDashboard(App):
             return
         current_stops = [current_by_key[stop.key] for stop in stops]
         if not snapshot.ready:
+            self.slay_in_flight.difference_update(requested_keys)
             for stop in current_stops:
                 failure = snapshot.failures.get(stop.key)
                 if failure:
@@ -3256,6 +3258,7 @@ class ReviewDashboard(App):
             and stop.head_identity != by_key[stop.key].head_sha
         ]
         if stale:
+            self.slay_in_flight.difference_update(requested_keys)
             for stop in stale:
                 stop.failure = "review snapshot stale: head changed"
                 stop.failure_command = "gh pr view"
@@ -3305,6 +3308,7 @@ class ReviewDashboard(App):
                 on_event=self.review_event,
             )
         except (OSError, RuntimeError, ValueError) as error:
+            self.slay_in_flight.difference_update(requested_keys)
             for key in event_heads:
                 self.review_expected_heads.pop(key, None)
             detail = bounded_detail(str(error) or type(error).__name__)
@@ -3364,6 +3368,7 @@ class ReviewDashboard(App):
             and stop.head_identity
             and expected_head != stop.head_identity
         ):
+            self.slay_in_flight.discard(stop.key)
             if event.state in {
                 "cached",
                 "complete",
@@ -3412,6 +3417,7 @@ class ReviewDashboard(App):
             and stop.head_identity
             and batch_item.head_sha != stop.head_identity
         ):
+            self.slay_in_flight.discard(stop.key)
             stop.review_status = ""
             stop.review_result = None
             stop.cached_age = ""
@@ -3457,6 +3463,7 @@ class ReviewDashboard(App):
                         or receipt.identity.base_sha
                         != str(stop.live.get("baseRefOid") or "")
                     ):
+                        self.slay_in_flight.discard(stop.key)
                         self.review_expected_heads.pop(event.key, None)
                         self.review_batch_ids.pop(event.key, None)
                         stop.review_status = ""
@@ -5194,6 +5201,10 @@ class ReviewDashboard(App):
             for item in review_batch.items
         }
         if keys & (active | self.review_pending_keys):
+            self.notify(
+                f"[$] {stop.key} is already being reviewed.",
+                severity="warning",
+            )
             return
         self.review_pending_keys.update(keys)
         self.start_review_batch([stop])
