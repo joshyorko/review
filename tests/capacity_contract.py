@@ -23,12 +23,10 @@ from tui.capacity import (
 
 class CapacityContractTests(unittest.TestCase):
     def test_meminfo_reader_parses_memavailable_kib(self):
-        path = Path("/tmp/capacity-meminfo-test")
-        path.write_text("MemTotal: 8000000 kB\nMemAvailable: 4096000 kB\n")
-        try:
+        with tempfile.TemporaryDirectory(dir=".") as temp_dir:
+            path = Path(temp_dir) / "capacity-meminfo-test"
+            path.write_text("MemTotal: 8000000 kB\nMemAvailable: 4096000 kB\n")
             self.assertEqual(read_mem_available_mb(str(path)), 4000)
-        finally:
-            path.unlink(missing_ok=True)
 
     def test_default_meminfo_reader_reads_host_meminfo_if_present(self):
         if Path("/proc/meminfo").exists():
@@ -80,25 +78,25 @@ class CapacityContractTests(unittest.TestCase):
         with self.assertRaises(CapacityError):
             read_mem_available_mb("/nonexistent/meminfo")
 
-        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as temp:
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", dir=".") as temp:
             temp.write("MemTotal: 8000000 kB\nMemFree: 1000000 kB\n")
             temp.flush()
             with self.assertRaises(CapacityError):
                 read_mem_available_mb(temp.name)
 
-        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as temp:
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", dir=".") as temp:
             temp.write("MemAvailable: not_a_number kB\n")
             temp.flush()
             with self.assertRaises(CapacityError):
                 read_mem_available_mb(temp.name)
 
-        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as temp:
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", dir=".") as temp:
             temp.write("MemAvailable: 4000000 mB\n")
             temp.flush()
             with self.assertRaises(CapacityError):
                 read_mem_available_mb(temp.name)
 
-        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as temp:
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", dir=".") as temp:
             temp.write("MemAvailable: -1024 kB\n")
             temp.flush()
             with self.assertRaises(CapacityError):

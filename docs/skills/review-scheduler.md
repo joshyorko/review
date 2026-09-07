@@ -70,6 +70,21 @@ machine looks identical to a broken scheduler.
 Choose a default by benchmarking at 1, 2, 4, 6, and 8 workers. Do not raise a
 default because a formula permits it.
 
+Benchmarking `scripts/benchmark-capacity.py` across 1, 2, 4, 6, and 8 workers
+on a 6-core/12-thread host (AMD Ryzen 5 7600X, 16 GB) with five check
+subagents per slot establishes `DEFAULT_REVIEW_CAP = 4`. Throughput scales
+sharply from 1 to 2 workers (4.05 to 6.7 u/s), gains modestly from 2 to 4
+(7.7 u/s), and then **plateaus**: 4, 6 and 8 workers all land within a few
+percent of each other across five repetitions, which is inside the run-to-run
+spread. Peak descendant-tree RSS, by contrast, keeps scaling linearly — about
+810 MB at 4 workers, 1200 MB at 6, 1600 MB at 8.
+
+So the cap is set by memory, not by a throughput cliff. Past 4 workers each
+extra slot costs roughly 400 MB and buys no measurable throughput. Three
+repetitions were not enough to see this: they produced an apparent 15%
+regression at 8 workers that five repetitions showed to be noise. Smaller
+machines throttle below this automatically via `cores // 2`.
+
 ## Deadlines are mandatory
 
 Every subprocess the scheduler starts has a deadline: the review executor, and
