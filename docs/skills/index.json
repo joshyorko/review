@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-06",
+  "generated_at": "2026-09-07",
   "schema_version": "1.0",
   "skills": [
     {
@@ -325,6 +325,25 @@
       "description": "Maintains the optional review-exec UDS broker, typed review Jobs, session cleanup, and local fallback.",
       "version": "1.0",
       "last_updated": "2026-09-06",
+      "doc_type": "procedure"
+    },
+    {
+      "id": "review-monitoring",
+      "name": "review-monitoring",
+      "one_line_purpose": "Monitor running review containers, landing batch execution, and container health.",
+      "entry_point": "docs/skills/review-monitoring.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "monitoring",
+        "container",
+        "review",
+        "landings",
+        "queue"
+      ],
+      "description": "Use when observing, diagnosing, or monitoring running review-queue or review-container instances, landing batches, or agent process health.",
+      "version": "1.0",
+      "last_updated": "2026-09-07",
       "doc_type": "procedure"
     },
     {

@@ -21,6 +21,7 @@ it scopes every task, so read it alongside the matching skill.
 | Audit image composition, SBOM manifests, SLSA, or publishing | [`image-audit.md`](skills/image-audit.md) |
 | Change the maintainer review dashboard or its pilot tests | [`review-dashboard.md`](skills/review-dashboard.md) |
 | Manage multi-PR landing batches and background fix-and-land | [`landing-batches.md`](skills/landing-batches.md) |
+| Monitor running review containers, landing batches, and agent health | [`review-monitoring.md`](skills/review-monitoring.md) |
 | Prepare a branch, commit, or pull request | [`pr-workflow.md`](skills/pr-workflow.md) |
 | Triage, label, or route an issue or pull request | [`pr-labels.md`](skills/pr-labels.md) |
 | Maintain documentation, skills, or factory compliance | [`skill-improvement.md`](skills/skill-improvement.md) |
