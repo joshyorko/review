@@ -7049,6 +7049,37 @@ async def main() -> int:
         )
     gh_log.write_text("")
 
+    # ── multi-repo selection partitions into concurrent landing tasks (#399) ──
+    os.environ["BLUEFIN_REVIEW_PARTITION_BATCH"] = "1"
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        check(
+            isinstance(gate, tui.BatchPlanScreen),
+            "multi-repo batch landing must gate with BatchPlanScreen",
+        )
+        check(
+            isinstance(gate.plan, (list, tui._CompositePlan)) and len(gate.plan) == 2,
+            f"multi-repo selection must partition into 2 landing tasks, got {gate.plan}",
+        )
+        await pilot.press("enter")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.LandingScreen),
+            "confirming partitioned batch must push LandingScreen",
+        )
+    os.environ["BLUEFIN_REVIEW_PARTITION_BATCH"] = "0"
+    gh_log.write_text("")
+
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)
     print(f"dashboard pilot: {checks - len(failures)}/{checks} checks passed")

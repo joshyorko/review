@@ -1146,6 +1146,47 @@ def live_review_verification(live: dict) -> list[dict]:
     return records
 
 
+class _CompositePlan:
+    def __init__(self, tasks: list["landing.LandingTask"]) -> None:
+        self.tasks = tasks
+
+    def __len__(self) -> int:
+        return len(self.tasks)
+
+    def __iter__(self):
+        return iter(self.tasks)
+
+    def __getitem__(self, index: int):
+        return self.tasks[index]
+
+    @property
+    def stops(self) -> list:
+        return [s for t in self.tasks for s in t.stops]
+
+    @property
+    def keys(self) -> list[str]:
+        return [k for t in self.tasks for k in t.keys]
+
+    @property
+    def task_id(self) -> str:
+        return self.tasks[0].task_id if self.tasks else ""
+
+    @property
+    def prompt_path(self) -> str:
+        return self.tasks[0].prompt_path if self.tasks else ""
+
+    @property
+    def command(self) -> list[str]:
+        return self.tasks[0].command if self.tasks else []
+
+    @property
+    def returncode(self) -> int | None:
+        codes = [t.returncode for t in self.tasks]
+        if any(c is None for c in codes):
+            return None
+        return next((c for c in codes if c != 0), 0)
+
+
 class BatchPlanScreen(ModalScreen[bool]):
     """The batch gate: the whole plan on one screen, one Enter to dispatch.
 
@@ -1163,21 +1204,30 @@ class BatchPlanScreen(ModalScreen[bool]):
         *back_bindings("dismiss(False)"),
     ]
 
-    def __init__(self, task: "landing.LandingTask") -> None:
+    def __init__(self, task: "landing.LandingTask | list[landing.LandingTask] | _CompositePlan") -> None:
         super().__init__()
-        self.plan = task
+        if isinstance(task, list):
+            self.plan = _CompositePlan(task) if len(task) > 1 else task[0]
+        else:
+            self.plan = task
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
+            num_agents = len(self.plan.tasks) if isinstance(self.plan, _CompositePlan) else 1
+            agent_label = "one agent" if num_agents == 1 else f"{num_agents} concurrent agents"
             yield Label(
-                f"one agent will land {len(self.plan.stops)} pull requests:",
+                f"{agent_label} will land {len(self.plan.stops)} pull requests:",
                 id="confirm-heading",
             )
             for stop in self.plan.stops:
                 yield Static(
                     f"  {stop.key} — {stop.title}", classes="confirm-command"
                 )
-            yield Static(" ".join(self.plan.command), classes="confirm-command")
+            if isinstance(self.plan, _CompositePlan):
+                for task in self.plan.tasks:
+                    yield Static(" ".join(task.command), classes="confirm-command")
+            else:
+                yield Static(" ".join(self.plan.command), classes="confirm-command")
             yield Label("[enter] dispatch · [esc] abort")
 
     def action_dispatch(self) -> None:
@@ -5769,17 +5819,37 @@ class ReviewDashboard(App):
 
             self.push_screen(FinalPolicyScreen(), chosen)
             return
-        task = landing.new_task(batch, self.self_login)
-        task.policy = self.final_policy
+        # Partition stops by repository to allow concurrent landing lanes (#399)
+        groups: dict[str, list[Stop]] = {}
+        for stop in batch:
+            repo = (
+                getattr(stop, "repository", "")
+                or getattr(stop, "repo", "")
+                or (stop.key.rsplit("#", 1)[0] if "#" in getattr(stop, "key", "") else "")
+            )
+            groups.setdefault(repo, []).append(stop)
+
+        should_partition = (
+            len(groups) > 1
+            and os.environ.get("BLUEFIN_REVIEW_PARTITION_BATCH", "1") != "0"
+        )
+        if should_partition:
+            tasks = [landing.new_task(repo_stops, self.self_login) for repo_stops in groups.values()]
+        else:
+            tasks = [landing.new_task(batch, self.self_login)]
+
+        for task in tasks:
+            task.policy = self.final_policy
 
         def finish(confirmed: bool | None) -> None:
             if not confirmed:
                 self.notify("aborted; nothing was dispatched.", severity="warning")
                 return
-            self.enqueue_landing(task)
+            for task in tasks:
+                self.enqueue_landing(task)
             self.push_screen(LandingScreen(self))
 
-        self.push_screen(BatchPlanScreen(task), finish)
+        self.push_screen(BatchPlanScreen(tasks if should_partition else tasks[0]), finish)
 
     def _landing_repositories(self, task: "landing.LandingTask") -> set[str]:
         repositories: set[str] = set()
