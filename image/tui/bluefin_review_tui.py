@@ -252,6 +252,7 @@ COMMANDS = (
     CommandSpec("filter", "f", "filter", "filter"),
     CommandSpec("hive", "H", "hive", "ask hive"),
     CommandSpec("refresh", "R", "refresh", "refresh"),
+    CommandSpec("slay_pr", "$", "slay_pr", "slay (review+fix+land)"),
 )
 
 
@@ -283,7 +284,7 @@ KEYS_READING = (
     " [b]R[/b] refresh [b]q[/b]/Esc back"
 )
 KEYS_ACTING = (
-    " [b]L[/b] leave review [b]a[/b] approve+queue [b]A[/b] land batch [b]m[/b] merge"
+    " [b]L[/b] leave review [b]a[/b] approve+queue [b]A[/b] land batch [b]m[/b] merge [b]$[/b] slay"
     " [b]u[/b] update clean branch [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
 )
 
@@ -2137,6 +2138,7 @@ class HelpScreen(ModalScreen[None]):
                     yield Static("[bold cyan]B[/]         Select / clear visible rows", classes="help-row")
                     yield Static("[bold cyan]space[/]     Toggle row and advance", classes="help-row")
                     yield Static("[bold cyan]n[/]         Skip to next unseen row", classes="help-row")
+                    yield Static("[bold magenta]$[/]         Slay PR (review+fix+land)", classes="help-row")
                     yield Static("[bold cyan]A[/]         Land selected batch", classes="help-row")
                     yield Static("[bold cyan]w[/]         Watch running agents", classes="help-row")
                     yield Static("[bold cyan]P[/]         Final review policy", classes="help-row")
@@ -2951,6 +2953,7 @@ class ReviewDashboard(App):
         self._current_batch_plan: action_plan.BatchActionPlan | None = None
         self._batch_generation_token: int = 0
         self._batch_receipt_ledger = DashboardBatchReceiptLedger()
+        self.slay_in_flight: set[str] = set()
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -3485,6 +3488,15 @@ class ReviewDashboard(App):
         }:
             self.review_expected_heads.pop(event.key, None)
             self.review_batch_ids.pop(event.key, None)
+            if stop.key in self.slay_in_flight:
+                self.slay_in_flight.discard(stop.key)
+                if event.state in {"cached", "complete", "findings"}:
+                    self._dispatch_slay_landing(stop)
+                else:
+                    self.notify(
+                        f"[$] {stop.key}: review {event.state}, auto-landing aborted",
+                        severity="warning",
+                    )
         if batch is not None:
             self.sync_batch_headroom(batch)
         self.refresh_rows()
@@ -5144,6 +5156,65 @@ class ReviewDashboard(App):
             self.start_review_batch(batch)
         elif self.current:
             self.start_review(self.current)
+
+    def action_slay_pr(self) -> None:
+        """`$`: slay a pull request (review if unreviewed, fix if findings, land in batch)."""
+        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+            self.notify("action applies to pull requests only", severity="warning")
+            return
+        if not self.self_login:
+            self.notify("your GitHub login is unknown; needed for landing.", severity="warning")
+            return
+        targets = [s for s in self.stops if s.selected] or ([self.current] if self.current else [])
+        if not targets:
+            self.notify("nothing selected to slay", severity="warning")
+            return
+        for stop in targets:
+            self._slay_stop(stop)
+
+    def _slay_stop(self, stop: Stop) -> None:
+        if stop.key in self.slay_in_flight:
+            self.notify(f"[$] {stop.key} is already being slayed", severity="warning")
+            return
+        has_review = (
+            stop.review_status in {"cached", "complete", "findings"}
+            or stop.review_result is not None
+        )
+        if has_review:
+            self._dispatch_slay_landing(stop)
+            return
+
+        self.slay_in_flight.add(stop.key)
+        self.notify(f"[$] slaying {stop.key}: running review…")
+        keys = {stop.key}
+        active = {
+            item.key
+            for review_batch in self.review_batches
+            if review_batch.running
+            for item in review_batch.items
+        }
+        if keys & (active | self.review_pending_keys):
+            return
+        self.review_pending_keys.update(keys)
+        self.start_review_batch([stop])
+
+    def _dispatch_slay_landing(self, stop: Stop) -> None:
+        if not self.self_login:
+            self.notify("your GitHub login is unknown; needed for landing.", severity="warning")
+            return
+        findings = list(stop.review_result.findings if stop.review_result else [])
+        if findings or stop.review_status == "findings":
+            task = landing.new_fix_task(stop, findings, self.self_login)
+            task.policy = self.final_policy or "automatic"
+            self.enqueue_landing(task)
+            self.notify(f"[$] {stop.key}: findings detected — dispatched auto-fix & land [w]")
+        else:
+            task = landing.new_task([stop], self.self_login)
+            task.policy = self.final_policy or "automatic"
+            self.enqueue_landing(task)
+            self.notify(f"[$] {stop.key}: review clean — dispatched batch landing [w]")
+        stop.selected = False
+        self.refresh_rows()
 
     def fetch_live_pr(self, repository: str, number: int, force: bool = False) -> dict[str, Any]:
         stop = next((s for s in self.stops if s.repository == repository and s.number == number), None)

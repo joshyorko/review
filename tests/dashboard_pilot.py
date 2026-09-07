@@ -7095,6 +7095,94 @@ async def main() -> int:
     os.environ["BLUEFIN_REVIEW_PARTITION_BATCH"] = "0"
     gh_log.write_text("")
 
+    # ── option $: slay PR (review + fix if needed + land in batch) ──
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) >= 1:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+
+        # Test 1: Slay on already-reviewed clean PR dispatches landing task immediately
+        stop.review_status = "complete"
+        stop.review_result = None
+        initial_landings = len(app.landing_queue)
+        await pilot.press("$")
+        await pilot.pause()
+        task = next((t for t in app.landing_queue[initial_landings:] if not t.phase), None)
+        check(
+            task is not None,
+            f"slay on clean PR must enqueue landing task, queue={app.landing_queue[initial_landings:]}",
+        )
+        check(
+            task.stops[0].key == stop.key,
+            f"landing task must target stop {stop.key}, got {task.stops[0].key}",
+        )
+
+        # Test 2: Slay on PR with findings dispatches fix task
+        class MockResult:
+            state = "findings"
+            is_clean = False
+            findings = [{"rule": "test-finding", "message": "issue found"}]
+
+        stop.review_status = "findings"
+        stop.review_result = MockResult()
+        initial_landings = len(app.landing_queue)
+        await pilot.press("$")
+        await pilot.pause()
+        fix_task = next((t for t in app.landing_queue[initial_landings:] if "-fix" in t.task_id and not t.phase), None)
+        check(
+            fix_task is not None,
+            f"slay on PR with findings must enqueue fix task, queue={app.landing_queue[initial_landings:]}",
+        )
+
+        # Test 3: Slay on unreviewed PR registers in slay_in_flight and triggers on event
+        stop.review_status = "unreviewed"
+        stop.review_result = None
+        stop.selected = False
+        app.slay_in_flight.clear()
+        app.review_pending_keys.add(stop.key)  # avoid network dispatch in pilot
+        await pilot.press("$")
+        await pilot.pause()
+        check(
+            stop.key in app.slay_in_flight,
+            f"{stop.key} must be registered in slay_in_flight when unreviewed",
+        )
+        # Deliver completion event
+        initial_landings = len(app.landing_queue)
+        stop.review_status = "complete"
+        app.apply_review_event(
+            tui.ReviewEvent(
+                key=stop.key,
+                state="complete",
+                note="clean",
+                timestamp=int(time.time()),
+            )
+        )
+        await pilot.pause()
+        check(
+            stop.key not in app.slay_in_flight,
+            f"{stop.key} must be removed from slay_in_flight on completion",
+        )
+        slay_task = next((t for t in app.landing_queue[initial_landings:] if not t.phase), None)
+        check(
+            slay_task is not None,
+            f"slay_in_flight completion event must dispatch landing task, queue={app.landing_queue[initial_landings:]}",
+        )
+
+        # Test 4: Slay guarded in issues view
+        app.view_mode = "issues"
+        initial_landings = len(app.landing_queue)
+        await pilot.press("$")
+        await pilot.pause()
+        check(
+            len(app.landing_queue) == initial_landings,
+            "slay in issues view must be ignored",
+        )
+    gh_log.write_text("")
+
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)
     print(f"dashboard pilot: {checks - len(failures)}/{checks} checks passed")

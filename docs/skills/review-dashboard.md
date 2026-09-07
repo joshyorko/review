@@ -48,8 +48,7 @@ Do not use this for the launcher ([`launcher.md`](launcher.md)), the container i
 Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`, `Tab`/`I`).
 
 `QueueRow` and `DecisionCard` bind head SHA, CI rollup, mergeability, and findings.
-The right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, `r` toggles raw
-transcripts, and `[u]` updates clean branches.
+Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updates clean branches.
 
 ## Core Process
 
@@ -135,6 +134,9 @@ distinct states. `[o]` is only an optional browser escape hatch.
   and applies `lgtm`. On a selection, `A` dispatches one landing agent for the
   batch; without a selection `A` no-ops. `w` opens the batch queue. `m` squashes
   now (gated on `push` permission). `L` leaves a review and merges nothing.
+  `$` ("slay") executes the full review weapon pipeline: reviews unreviewed PRs,
+  dispatches automated fix-and-land if findings are detected, and enqueues batch
+  landing if clean.
 - **Issues view and triage:** `Tab` or `I` toggles between the PR and issues
   queues. Highlighting an issue renders its metadata and description in details,
   and recent comments in context. Triage actions: `c` comments via `CommentBody`,
@@ -194,6 +196,5 @@ pre-commit run --all-files
 - [ ] Every new mutation runs through `mutate_all()` and shows its commands.
 - [ ] Multi-command actions are one gate, ordered so the first failure is harmless.
 - [ ] Failures mark the row and keep the stop selected.
-- [ ] All GitHub- and agent-sourced text passes through `escape()`.
-- [ ] No DOM access inside a thread worker.
+- [ ] All GitHub- and agent-sourced text passes through `escape()`. No thread DOM access.
 - [ ] The pilot presses the key and asserts the result.
