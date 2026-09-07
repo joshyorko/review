@@ -22,7 +22,6 @@ python3 "$repo_root/tests/review_deadline_contract.py"
 python3 "$repo_root/tests/capacity_contract.py"
 python3 "$repo_root/tests/model_profiles_contract.py"
 python3 "$repo_root/tests/run_state_contract.py"
-python3 "$repo_root/tests/slay_state_contract.py"
 python3 "$repo_root/tests/gh_client_contract.py"
 
 fail() {
@@ -327,6 +326,7 @@ fi
 "${venv}/bin/python" "$repo_root/tests/action_plan_contract.py"
 "${venv}/bin/python" "$repo_root/tests/re_review_contract.py"
 "${venv}/bin/python" "$repo_root/tests/semantic_view_contract.py"
+"${venv}/bin/python" "$repo_root/tests/slay_state_contract.py"
 "${venv}/bin/python" "$repo_root/tests/dashboard_pilot.py"
 
 printf 'dashboard contract OK\n'
