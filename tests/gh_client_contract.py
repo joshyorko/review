@@ -274,6 +274,28 @@ class GhClientContractTests(unittest.TestCase):
 
         self.assertEqual(result.stdout, '[{"data":{"search":{"nodes":[]}}}]')
 
+    def test_paginated_slurped_api_output_strips_headers_after_commas(self):
+        runner = QueueRunner(completed(
+            0,
+            "[HTTP/2.0 200 OK\n"
+            "Content-Type: application/json\n"
+            "\n"
+            '{"data":{"page":1}}\n'
+            ",HTTP/2.0 200 OK\n"
+            "Content-Type: application/json\n"
+            "\n"
+            '{"data":{"page":2}}\n'
+            "]",
+        ))
+        client = GhClient(run=runner)
+
+        result = client.read("api", "graphql", "--paginate", "--slurp")
+
+        self.assertEqual(
+            result.stdout,
+            '[{"data":{"page":1}}\n,{"data":{"page":2}}\n]',
+        )
+
     def test_github_breaker_does_not_open_hive_or_model_provider_breakers(self):
         clock = FakeClock()
         breakers = BreakerRegistry(clock=clock)
