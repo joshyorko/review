@@ -172,13 +172,7 @@ async def main() -> int:
         "author": {"login": "testuser"},
         "repository": {"nameWithOwner": "projectbluefin/review"},
         "labels": {"nodes": [{"name": "bug"}]},
-        "comments": [
-            {
-                "createdAt": "2026-09-06T00:00:00Z",
-                "author": {"login": "helper"},
-                "body": "comment text",
-            }
-        ],
+        "comments": {"totalCount": 1},
         "body": "Issue description test body",
     }
     org_issues_file.write_text(
@@ -6943,24 +6937,34 @@ async def main() -> int:
 
         # Wait for issue rows to settle/populate
         for _ in range(200):
-            if app.stops and app.stops[0].is_issue:
+            if app.stops and app.stops[0].is_issue and len(app._queue().children) > 0:
                 break
             await pilot.pause(0.05)
         check(
             len(app.stops) > 0 and app.stops[0].is_issue is True,
             f"issues view must populate stops with is_issue=True, got {app.stops}",
         )
+        first_item = app._queue().children[0]
+        check(
+            isinstance(first_item, tui.ListItem),
+            f"queue child must be a ListItem, got {type(first_item).__name__}",
+        )
+        row = str(first_item.query(tui.Label).first().render())
+        check(
+            "bug: test issue" in row and "[triage]" in row,
+            f"queue issue row must contain 'bug: test issue' and '[triage]', got {row!r}",
+        )
 
         # Highlighted issue renders details (including title and body)
         for _ in range(200):
             details = str(app.query_one("#details", tui.Static).render())
-            if "bug: test issue" in details:
+            if "bug: test issue" in details and "Issue description test body" in details:
                 break
             await pilot.pause(0.05)
         details = str(app.query_one("#details", tui.Static).render())
         check(
-            "bug: test issue" in details,
-            f"highlighted issue must render details, got {details!r}",
+            "bug: test issue" in details and "Issue description test body" in details,
+            f"highlighted issue must render details with title and body, got {details!r}",
         )
 
         # Test c: comment on issue
@@ -7001,12 +7005,12 @@ async def main() -> int:
         await pilot.press(*gate.expected)
         await pilot.press("enter")
         for _ in range(200):
-            if "issue comment" in gh_log.read_text():
+            if "issue comment 42 --repo projectbluefin/review" in gh_log.read_text():
                 break
             await pilot.pause(0.05)
         check(
-            "issue comment" in gh_log.read_text(),
-            f"gh_log must record 'issue comment', got {gh_log.read_text()!r}",
+            "issue comment 42 --repo projectbluefin/review" in gh_log.read_text(),
+            f"gh_log must record 'issue comment 42 --repo projectbluefin/review', got {gh_log.read_text()!r}",
         )
         await app.workers.wait_for_complete()
         await pilot.pause()
@@ -7026,12 +7030,12 @@ async def main() -> int:
         await pilot.press(*gate.expected)
         await pilot.press("enter")
         for _ in range(200):
-            if "issue close" in gh_log.read_text():
+            if "issue close 42 --repo projectbluefin/review" in gh_log.read_text():
                 break
             await pilot.pause(0.05)
         check(
-            "issue close" in gh_log.read_text(),
-            f"gh_log must record 'issue close', got {gh_log.read_text()!r}",
+            "issue close 42 --repo projectbluefin/review" in gh_log.read_text(),
+            f"gh_log must record 'issue close 42 --repo projectbluefin/review', got {gh_log.read_text()!r}",
         )
         await app.workers.wait_for_complete()
         await pilot.pause()
