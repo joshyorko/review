@@ -4151,6 +4151,9 @@ class ReviewDashboard(App):
             if self.landing_queue
             else ""
         )
+        review_cap = getattr(self.review_engine, "effective_review_cap", lambda: 0)()
+        review_running = getattr(self.review_engine, "active_review_slots", lambda: 0)()
+        reviews = f" | review slots: {review_running}/{review_cap}"
         shown = len(self.stops)
         total = len(self.queue_items)
         scope = self.filters.action or "all"
@@ -4213,7 +4216,7 @@ class ReviewDashboard(App):
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}"
-                f" | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+                f"{reviews} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
         else:
             status_bar.update(
@@ -4221,7 +4224,7 @@ class ReviewDashboard(App):
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}{stuck}{review_failures}{agents}{landed}{policy}"
-                f" | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+                f"{reviews} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
 
     def action_filter(self) -> None:
@@ -5176,38 +5179,45 @@ class ReviewDashboard(App):
         if not targets:
             self.notify("nothing selected to slay", severity="warning")
             return
+        review_targets = []
         for stop in targets:
-            self._slay_stop(stop)
-
-    def _slay_stop(self, stop: Stop) -> None:
-        if stop.key in self.slay_in_flight:
-            self.notify(f"[$] {stop.key} is already being slayed", severity="warning")
+            if stop.key in self.slay_in_flight:
+                self.notify(f"[$] {stop.key} is already being slayed", severity="warning")
+                continue
+            has_review = (
+                stop.review_status in {"cached", "complete", "findings"}
+                or stop.review_result is not None
+            )
+            if has_review:
+                self._dispatch_slay_landing(stop)
+            else:
+                self.slay_in_flight.add(stop.key)
+                self.notify(f"[$] slaying {stop.key}: running review…")
+                review_targets.append(stop)
+        if not review_targets:
             return
-        has_review = (
-            stop.review_status in {"cached", "complete", "findings"}
-            or stop.review_result is not None
-        )
-        if has_review:
-            self._dispatch_slay_landing(stop)
-            return
-
-        self.slay_in_flight.add(stop.key)
-        self.notify(f"[$] slaying {stop.key}: running review…")
-        keys = {stop.key}
         active = {
             item.key
             for review_batch in self.review_batches
             if review_batch.running
             for item in review_batch.items
         }
-        if keys & (active | self.review_pending_keys):
-            self.notify(
-                f"[$] {stop.key} is already being reviewed.",
-                severity="warning",
-            )
+        ready = []
+        for stop in review_targets:
+            if stop.key in (active | self.review_pending_keys):
+                # The claim in `slay_in_flight` stays: the review already
+                # running will complete, and its event handler lands it.
+                self.notify(
+                    f"[$] {stop.key} is already being reviewed.",
+                    severity="warning",
+                )
+            else:
+                ready.append(stop)
+        if not ready:
             return
-        self.review_pending_keys.update(keys)
-        self.start_review_batch([stop])
+        ready_keys = {stop.key for stop in ready}
+        self.review_pending_keys.update(ready_keys)
+        self.start_review_batch(ready)
 
     def _dispatch_slay_landing(self, stop: Stop) -> None:
         if not self.self_login:

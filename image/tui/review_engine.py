@@ -13,7 +13,7 @@ import signal
 import subprocess
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, TextIO, cast
@@ -24,6 +24,7 @@ from tui.headroom import HeadroomRoute, HeadroomSession
 from tui.review_cache import ReviewCache
 from tui.review_receipt import ReceiptIdentity, ReviewReceipt
 from tui.review_run import ReviewRun, ReviewRunController, ReviewRunState
+from tui.scheduler import scheduler
 from tui.review_snapshot import BatchReviewItem, BatchSnapshot
 
 TERMINAL_REVIEW_STATES = frozenset(
@@ -626,6 +627,12 @@ class ReviewEngine:
             event = self._cancel_events.get(batch.batch_id)
         return event.is_set() if event is not None else False
 
+    def effective_review_cap(self) -> int:
+        return scheduler().effective_cap(self.governor)
+
+    def active_review_slots(self) -> int:
+        return scheduler().running_count()
+
     def _run(
         self,
         batch: ReviewBatch,
@@ -641,13 +648,68 @@ class ReviewEngine:
         with self._state_lock:
             self._active_runs[batch.batch_id] = {}
         try:
-            with ThreadPoolExecutor(
-                max_workers=max(1, cast(int, self.governor.cap))
-            ) as pool:
-                while pending or active:
-                    if self._is_cancelled(batch):
-                        while pending:
-                            item = pending.pop(0)
+            while pending or active:
+                if self._is_cancelled(batch):
+                    while pending:
+                        item = pending.pop(0)
+                        failures[item.key] = "cancelled before dispatch"
+                        self._emit(
+                            batch,
+                            ReviewEvent(
+                                item.key,
+                                "cancelled",
+                                failures[item.key],
+                                int(time.time()),
+                            ),
+                            callback,
+                        )
+                    for future in active:
+                        future.cancel()
+                remaining: list[BatchReviewItem] = []
+                for item in pending:
+                    run = ReviewRun.from_request(
+                        item.request(),
+                        backend=batch.backend,
+                        model=batch.model,
+                        effort=batch.effort,
+                    )
+                    cached = self.cache.get(run, check_scope_version)
+                    if (
+                        cached is None
+                        or cached.analysis.state
+                        not in {"complete", "findings"}
+                    ):
+                        remaining.append(item)
+                        continue
+                    results[item.key] = cached
+                    self._emit(
+                        batch,
+                        ReviewEvent(
+                            item.key,
+                            "cached",
+                            "exact identity hit",
+                            int(time.time()),
+                            self.cache.path_for(
+                                run, check_scope_version
+                            ).name,
+                        ),
+                        callback,
+                    )
+                pending = remaining
+                while pending and not self._is_cancelled(batch):
+                    item = pending.pop(0)
+                    run = ReviewRun.from_request(
+                        item.request(),
+                        backend=batch.backend,
+                        model=batch.model,
+                        effort=batch.effort,
+                    )
+                    controller: ReviewRunController | None = None
+                    try:
+                        workdir = _prepare_worktree(
+                            item, self.worktree_root
+                        )
+                        if self._is_cancelled(batch):
                             failures[item.key] = "cancelled before dispatch"
                             self._emit(
                                 batch,
@@ -659,201 +721,187 @@ class ReviewEngine:
                                 ),
                                 callback,
                             )
-                    remaining: list[BatchReviewItem] = []
-                    for item in pending:
-                        run = ReviewRun.from_request(
-                            item.request(),
-                            backend=batch.backend,
-                            model=batch.model,
-                            effort=batch.effort,
-                        )
-                        cached = self.cache.get(run, check_scope_version)
-                        if (
-                            cached is None
-                            or cached.analysis.state
-                            not in {"complete", "findings"}
-                        ):
-                            remaining.append(item)
                             continue
-                        results[item.key] = cached
-                        self._emit(
-                            batch,
-                            ReviewEvent(
-                                item.key,
-                                "cached",
-                                "exact identity hit",
-                                int(time.time()),
-                                self.cache.path_for(
-                                    run, check_scope_version
-                                ).name,
-                            ),
-                            callback,
+                        executor = (
+                            self.broker_executor or self.local_executor
                         )
-                    pending = remaining
-                    while (
-                        pending
-                        and not self._is_cancelled(batch)
-                    ):
-                        item = pending[0]
-                        run = ReviewRun.from_request(
-                            item.request(),
-                            backend=batch.backend,
-                            model=batch.model,
-                            effort=batch.effort,
+                        route, telemetry = self._headroom_snapshot(
+                            batch.backend
                         )
-                        if not self.governor.can_start(len(active)):
-                            break
-                        pending.pop(0)
-                        controller: ReviewRunController | None = None
-                        try:
-                            workdir = _prepare_worktree(
-                                item, self.worktree_root
+                        controller = ReviewRunController(
+                            run,
+                            cast(Harness, executor),
+                            HarnessRegistry(),
+                        )
+                        with self._state_lock:
+                            cancel_event = self._cancel_events[
+                                batch.batch_id
+                            ]
+                            cancelled_before_dispatch = (
+                                cancel_event.is_set()
                             )
-                            if self._is_cancelled(batch):
-                                failures[item.key] = "cancelled before dispatch"
-                                self._emit(
-                                    batch,
-                                    ReviewEvent(
-                                        item.key,
-                                        "cancelled",
-                                        failures[item.key],
-                                        int(time.time()),
-                                    ),
-                                    callback,
+                            if not cancelled_before_dispatch:
+                                controller.start()
+                                self._active_runs[batch.batch_id][
+                                    run.identity
+                                ] = run
+                                future = scheduler().submit(
+                                    self.governor,
+                                    self._run_one,
+                                    cancel_event,
+                                    executor,
+                                    item,
+                                    run,
+                                    workdir,
+                                    check_scope_version,
+                                    check_scope,
+                                    route,
+                                    telemetry,
                                 )
-                                continue
-                            executor = (
-                                self.broker_executor or self.local_executor
+                                active[future] = _ActiveReview(
+                                    item,
+                                    run,
+                                    controller,
+                                )
+                        if cancelled_before_dispatch:
+                            failures[item.key] = (
+                                "cancelled before dispatch"
                             )
-                            route, telemetry = self._headroom_snapshot(
-                                batch.backend
-                            )
-                            controller = ReviewRunController(
-                                run,
-                                cast(Harness, executor),
-                                HarnessRegistry(),
-                            )
-                            with self._state_lock:
-                                cancel_event = self._cancel_events[
-                                    batch.batch_id
-                                ]
-                                cancelled_before_dispatch = (
-                                    cancel_event.is_set()
-                                )
-                                if not cancelled_before_dispatch:
-                                    controller.start()
-                                    self._active_runs[batch.batch_id][
-                                        run.identity
-                                    ] = run
-                                    future = pool.submit(
-                                        self._run_one,
-                                        cancel_event,
-                                        executor,
-                                        item,
-                                        run,
-                                        workdir,
-                                        check_scope_version,
-                                        check_scope,
-                                        route,
-                                        telemetry,
-                                    )
-                                    active[future] = _ActiveReview(
-                                        item,
-                                        run,
-                                        controller,
-                                    )
-                            if cancelled_before_dispatch:
-                                failures[item.key] = (
-                                    "cancelled before dispatch"
-                                )
-                                self._emit(
-                                    batch,
-                                    ReviewEvent(
-                                        item.key,
-                                        "cancelled",
-                                        failures[item.key],
-                                        int(time.time()),
-                                    ),
-                                    callback,
-                                )
-                                continue
                             self._emit(
                                 batch,
                                 ReviewEvent(
                                     item.key,
-                                    "running",
-                                    "review dispatched",
-                                    int(time.time()),
-                                ),
-                                callback,
-                            )
-                        except Exception as error:
-                            with self._state_lock:
-                                self._active_runs[batch.batch_id].pop(
-                                    run.identity, None
-                                )
-                            failures[item.key] = self._error_text(error)
-                            if (
-                                controller is not None
-                                and controller.state is ReviewRunState.RUNNING
-                            ):
-                                controller.fail(failures[item.key])
-                            self._emit(
-                                batch,
-                                ReviewEvent(
-                                    item.key,
-                                    "failed",
+                                    "cancelled",
                                     failures[item.key],
                                     int(time.time()),
                                 ),
                                 callback,
                             )
-                    finished = [
-                        future for future in active if future.done()
-                    ]
-                    if not finished:
-                        time.sleep(0.02)
+                            continue
+                        self._emit(
+                            batch,
+                            ReviewEvent(
+                                item.key,
+                                "running",
+                                "review dispatched",
+                                int(time.time()),
+                            ),
+                            callback,
+                        )
+                    except Exception as error:
+                        with self._state_lock:
+                            self._active_runs[batch.batch_id].pop(
+                                run.identity, None
+                            )
+                        failures[item.key] = self._error_text(error)
+                        if (
+                            controller is not None
+                            and controller.state is ReviewRunState.RUNNING
+                        ):
+                            controller.fail(failures[item.key])
+                        self._emit(
+                            batch,
+                            ReviewEvent(
+                                item.key,
+                                "failed",
+                                failures[item.key],
+                                int(time.time()),
+                            ),
+                            callback,
+                        )
+                finished = [
+                    future for future in active if future.done()
+                ]
+                if not finished:
+                    if not active:
                         continue
-                    for future in finished:
-                        current = active.pop(future)
-                        if self._is_cancelled(batch):
-                            current.controller.cancel()
-                            failures[current.item.key] = "cancelled"
+                    done, _ = wait(
+                        tuple(active),
+                        timeout=0.1,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    finished = list(done)
+                    if not finished:
+                        continue
+                for future in finished:
+                    current = active.pop(future)
+                    if self._is_cancelled(batch):
+                        current.controller.cancel()
+                        failures[current.item.key] = "cancelled"
+                        self._release_active(batch, current.run)
+                        self._clear_executor_cancel(current.run)
+                        self._emit(
+                            batch,
+                            ReviewEvent(
+                                current.item.key,
+                                "cancelled",
+                                "cancelled",
+                                int(time.time()),
+                            ),
+                            callback,
+                        )
+                        continue
+                    try:
+                        receipt = future.result()
+                        expected_identity = ReceiptIdentity.from_run(
+                            current.run, check_scope_version
+                        )
+                        if receipt.identity != expected_identity:
+                            raise RuntimeError(
+                                "receipt identity mismatch"
+                            )
+                        if receipt.analysis.state not in {
+                            "complete",
+                            "findings",
+                        }:
+                            raise RuntimeError(
+                                "review ended "
+                                f"{receipt.analysis.state}"
+                            )
+                        receipt_path = self.cache.put(receipt)
+                    except Exception as error:
+                        failures[current.item.key] = self._error_text(error)
+                        current.controller.fail(failures[current.item.key])
+                        self._release_active(batch, current.run)
+                        self._emit(
+                            batch,
+                            ReviewEvent(
+                                current.item.key,
+                                "failed",
+                                failures[current.item.key],
+                                int(time.time()),
+                            ),
+                            callback,
+                        )
+                        continue
+                    with self._state_lock:
+                        cancel_event = self._cancel_events[
+                            batch.batch_id
+                        ]
+                        cancelled_after_cache = cancel_event.is_set()
+                        if not cancelled_after_cache:
+                            current.controller.complete(
+                                receipt.analysis_result()
+                            )
+                            self._active_runs[batch.batch_id].pop(
+                                current.run.identity, None
+                            )
+                            results[current.item.key] = receipt
+                    if cancelled_after_cache:
+                        try:
+                            self.cache.remove_if_matches(receipt)
+                        except OSError as error:
+                            failures[current.item.key] = self._error_text(
+                                RuntimeError(
+                                    "cancelled; cache cleanup failed: "
+                                    f"{error}"
+                                )
+                            )
+                            current.controller.fail(
+                                failures[current.item.key]
+                            )
                             self._release_active(batch, current.run)
                             self._clear_executor_cancel(current.run)
-                            self._emit(
-                                batch,
-                                ReviewEvent(
-                                    current.item.key,
-                                    "cancelled",
-                                    "cancelled",
-                                    int(time.time()),
-                                ),
-                                callback,
-                            )
-                            continue
-                        try:
-                            receipt = future.result()
-                            expected_identity = ReceiptIdentity.from_run(
-                                current.run, check_scope_version
-                            )
-                            if receipt.identity != expected_identity:
-                                raise RuntimeError(
-                                    "receipt identity mismatch"
-                                )
-                            if receipt.analysis.state not in {
-                                "complete",
-                                "findings",
-                            }:
-                                raise RuntimeError(
-                                    "review ended "
-                                    f"{receipt.analysis.state}"
-                                )
-                            receipt_path = self.cache.put(receipt)
-                        except Exception as error:
-                            failures[current.item.key] = self._error_text(error)
-                            current.controller.fail(failures[current.item.key])
-                            self._release_active(batch, current.run)
                             self._emit(
                                 batch,
                                 ReviewEvent(
@@ -865,71 +913,32 @@ class ReviewEngine:
                                 callback,
                             )
                             continue
-                        with self._state_lock:
-                            cancel_event = self._cancel_events[
-                                batch.batch_id
-                            ]
-                            cancelled_after_cache = cancel_event.is_set()
-                            if not cancelled_after_cache:
-                                current.controller.complete(
-                                    receipt.analysis_result()
-                                )
-                                self._active_runs[batch.batch_id].pop(
-                                    current.run.identity, None
-                                )
-                                results[current.item.key] = receipt
-                        if cancelled_after_cache:
-                            try:
-                                self.cache.remove_if_matches(receipt)
-                            except OSError as error:
-                                failures[current.item.key] = self._error_text(
-                                    RuntimeError(
-                                        "cancelled; cache cleanup failed: "
-                                        f"{error}"
-                                    )
-                                )
-                                current.controller.fail(
-                                    failures[current.item.key]
-                                )
-                                self._release_active(batch, current.run)
-                                self._clear_executor_cancel(current.run)
-                                self._emit(
-                                    batch,
-                                    ReviewEvent(
-                                        current.item.key,
-                                        "failed",
-                                        failures[current.item.key],
-                                        int(time.time()),
-                                    ),
-                                    callback,
-                                )
-                                continue
-                            current.controller.cancel()
-                            failures[current.item.key] = "cancelled"
-                            self._release_active(batch, current.run)
-                            self._clear_executor_cancel(current.run)
-                            self._emit(
-                                batch,
-                                ReviewEvent(
-                                    current.item.key,
-                                    "cancelled",
-                                    "cancelled",
-                                    int(time.time()),
-                                ),
-                                callback,
-                            )
-                            continue
+                        current.controller.cancel()
+                        failures[current.item.key] = "cancelled"
+                        self._release_active(batch, current.run)
+                        self._clear_executor_cancel(current.run)
                         self._emit(
                             batch,
                             ReviewEvent(
                                 current.item.key,
-                                receipt.analysis.state,
-                                "review complete",
+                                "cancelled",
+                                "cancelled",
                                 int(time.time()),
-                                receipt_path.name,
                             ),
                             callback,
                         )
+                        continue
+                    self._emit(
+                        batch,
+                        ReviewEvent(
+                            current.item.key,
+                            receipt.analysis.state,
+                            "review complete",
+                            int(time.time()),
+                            receipt_path.name,
+                        ),
+                        callback,
+                    )
         finally:
             with self._state_lock:
                 self._active_runs.pop(batch.batch_id, None)
