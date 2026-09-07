@@ -71,7 +71,7 @@ class ReviewRun:
     pull_request: int
     base_sha: str
     head_sha: str
-    evidence_id: str  # ReviewEvidenceManifest identity
+    evidence_id: str  # derived from the reviewed base and head
     backend: str      # harness name (e.g. "goose", "codex")
     model: str
     effort: str

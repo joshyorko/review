@@ -1176,7 +1176,7 @@ class BatchActionPlan:
         current_state: Callable[[BatchMutationItem], CurrentState],
         executor: Callable[[BatchMutationItem, tuple[str, ...]], OperationResult | int],
         *,
-        ledger: ReceiptLedger | BatchReceiptLedger,
+        ledger: ReceiptLedger,
         now: datetime | None = None,
     ) -> BatchActionReceipt:
         current = _now(now)
