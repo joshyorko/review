@@ -41,6 +41,8 @@ or cluster scale-out (`cluster-workers.md`).
 4. **Fix & Land:** From `ReviewScreen`, `[f]` dispatches a background
    fix-and-land agent (`new_fix_task`) seeded with evidenced review findings.
    `[F]` prompts for steering guidance before dispatching.
+   `[$]` ("slay") executes the pipeline end-to-end: reviews if unreviewed,
+   dispatches `new_fix_task` if findings exist, or enqueues batch landing if clean.
 5. **State Directory:** State persists at `${XDG_STATE_HOME}/bluefin-review/landings/`.
    Each batch receives `.jsonl` events, `.log` output, and `.prompt.md`.
    Filenames qualify with `BLUEFIN_REVIEW_INSTANCE` to avoid cross-session collisions.

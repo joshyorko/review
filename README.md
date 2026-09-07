@@ -389,19 +389,31 @@ finding count anyway — reports **INCOMPLETE** and says the count is not a
 clean bill of health. Those two must never look alike, so they are the
 regression `tests/dashboard_pilot.py` drives the real app to prove.
 
+`Tab` or `I` toggles between the pull requests queue and the live open issues queue.
+Highlighting an issue presents its description and evidence; `c` comments, `x` closes with a
+comment behind the typed issue-number gate, `o` opens in the browser, and `y` copies handoff context.
+
 | Key | Action |
 |---|---|
+| `Tab` / `I` | toggle between open pull requests and open issues queue |
 | `b` | toggle batch selection for the highlighted pull request |
+| `B` | select / clear all visible rows |
+| `Space` | toggle selection on highlighted row and advance |
+| `n` | advance to next unseen row |
 | `r` | **start a review with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
+| `$` | **slay pull request** — review if unreviewed, fix with agent if findings exist, land in batch |
 | `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
 | `o` | optional browser escape hatch |
 | `v` | view the complete diff — full screen, coloured, paginated, with loading/error state |
-| `c` | comment |
+| `c` | comment (PR or issue) |
 | `a` | approve and queue through Hive: its App records the exact-head approval and applies `lgtm`; for the batch selection if one exists |
+| `A` | land selected batch through background landing agents (gated with BatchPlanScreen) |
+| `w` | watch running landing agents in the batch queue |
+| `P` | configure session final-review policy |
 | `m` | merge now: squash immediately, no `lgtm`, maintainers only — the batch selection if one exists |
-| `x` | reject: comment, then close |
-| `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
+| `x` | reject / close: comment then close (PR or issue) |
+| `y` | handoff: copy the pull request or issue context to your clipboard (OSC 52) |
 | `/` | steer: type instructions that ride along with the review you start |
 | `f` | cycle the action filter (every action → one at a time → back) |
 | `R` | re-read the live queue and re-ask Hive (keeps your batch) |
