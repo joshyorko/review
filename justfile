@@ -881,7 +881,7 @@ offer_lab_session() {
   lab_probe_context || return 0
   if [[ "${REVIEW_LAB:-}" == "1" ]]; then
     answer="y"
-  elif [[ -r /dev/tty && -w /dev/tty ]]; then
+  elif ( : </dev/tty && : >/dev/tty ) 2>/dev/null; then
     printf '?  Kubernetes context %s is reachable. Use it for this session only? [y/N] ' \
       "$LAB_CONTEXT" >/dev/tty
     read -r answer </dev/tty || answer=""
@@ -953,7 +953,7 @@ start_review_exec_broker() {
   python3 "$broker" serve \
     --socket "$REVIEW_EXEC_SOCKET" \
     --session "$REVIEW_EXEC_SESSION" \
-    --image "${CONTRIBUTOR_IMAGE:-ghcr.io/projectbluefin/review:latest}" \
+    --image "${CONTRIBUTOR_IMAGE:-ghcr.io/projectbluefin/review:stable}" \
     >"${REVIEW_EXEC_SOCKET_DIR}/broker.log" 2>&1 &
   REVIEW_EXEC_BROKER_PID=$!
   for _ in $(seq 1 50); do
@@ -986,7 +986,7 @@ offer_review_exec_session() {
   local answer=""
   if [[ "${REVIEW_EXEC:-}" == "1" ]]; then
     answer="y"
-  elif [[ -r /dev/tty && -w /dev/tty ]]; then
+  elif ( : </dev/tty && : >/dev/tty ) 2>/dev/null; then
     printf '?  Kubernetes context %s is reachable. Offload batch reviews to ghost cluster for this session only? [y/N] ' \
       "$REVIEW_EXEC_CONTEXT" >/dev/tty
     read -r answer </dev/tty || answer=""
