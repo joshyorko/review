@@ -7002,6 +7002,12 @@ async def main() -> int:
             f"comment preview submit must reach ConfirmMutation gate, got {type(app.screen).__name__}",
         )
         gate = app.screen
+        check(
+            gate.commands[0][:5] == ["gh", "issue", "comment", "42", "--repo"]
+            and gate.commands[0][5] == "projectbluefin/review"
+            and "--body-file" in gate.commands[0],
+            f"exact issue comment command structure, got {gate.commands}",
+        )
         await pilot.press(*gate.expected)
         await pilot.press("enter")
         for _ in range(200):
@@ -7009,8 +7015,8 @@ async def main() -> int:
                 break
             await pilot.pause(0.05)
         check(
-            "issue comment 42 --repo projectbluefin/review" in gh_log.read_text(),
-            f"gh_log must record 'issue comment 42 --repo projectbluefin/review', got {gh_log.read_text()!r}",
+            "issue comment 42 --repo projectbluefin/review --body-file" in gh_log.read_text(),
+            f"gh_log must record exact issue comment command with --body-file, got {gh_log.read_text()!r}",
         )
         await app.workers.wait_for_complete()
         await pilot.pause()
@@ -7027,6 +7033,11 @@ async def main() -> int:
             f"pressing x must open ConfirmMutation modal, got {type(app.screen).__name__}",
         )
         gate = app.screen
+        check(
+            gate.commands[0][:5] == ["gh", "issue", "comment", "42", "--repo"]
+            and gate.commands[1] == ["gh", "issue", "close", "42", "--repo", "projectbluefin/review"],
+            f"exact issue close command sequence, got {gate.commands}",
+        )
         await pilot.press(*gate.expected)
         await pilot.press("enter")
         for _ in range(200):
