@@ -309,6 +309,25 @@
       "doc_type": "runbook"
     },
     {
+      "id": "review-exec-broker",
+      "name": "review-exec-broker",
+      "one_line_purpose": "Offload selected batch reviews through a session-scoped host broker.",
+      "entry_point": "docs/skills/review-exec-broker.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "review",
+        "broker",
+        "kubernetes",
+        "socket",
+        "batch"
+      ],
+      "description": "Maintains the optional review-exec UDS broker, typed review Jobs, session cleanup, and local fallback.",
+      "version": "1.0",
+      "last_updated": "2026-09-06",
+      "doc_type": "procedure"
+    },
+    {
       "id": "skill-improvement",
       "name": "skill-improvement",
       "one_line_purpose": "Keep review documentation source-backed, current, and compact.",

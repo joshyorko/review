@@ -914,6 +914,107 @@ add_lab_container_args() {
   done
 }
 
+review_exec_broker_script() {
+  printf '%s' "${REVIEW_EXEC_BROKER:-${PWD}/scripts/review-exec-broker.py}"
+}
+
+review_exec_probe_context() {
+  REVIEW_EXEC_CONTEXT=""
+  local broker probe_json
+  broker="$(review_exec_broker_script)"
+  [[ -f "$broker" ]] || return 1
+  command -v python3 &>/dev/null || return 1
+  command -v kubectl &>/dev/null || return 1
+  probe_json="$(python3 "$broker" probe 2>/dev/null)" || return 1
+  REVIEW_EXEC_CONTEXT="$(printf '%s' "$probe_json" | sed -n 's/.*"context":"\([^"]*\)".*/\1/p')"
+  [[ -n "$REVIEW_EXEC_CONTEXT" ]]
+}
+
+review_exec_runtime_flags() {
+  local runtime
+  runtime="$(podman info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null || true)"
+  if [[ "$runtime" == runsc ]]; then
+    printf '%s' "--runtime-flag=host-uds=open"
+  fi
+  return 0
+}
+
+start_review_exec_broker() {
+  local broker runtime_dir
+  broker="$(review_exec_broker_script)"
+  runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [[ ! -d "$runtime_dir" || ! -w "$runtime_dir" ]]; then
+    return 1
+  fi
+  REVIEW_EXEC_SESSION="$(python3 -c 'import secrets; print(secrets.token_hex(8))')" || return 1
+  REVIEW_EXEC_SOCKET_DIR="$(mktemp -d "${runtime_dir}/bluefin-review-exec.XXXXXX")" || return 1
+  chmod 700 "$REVIEW_EXEC_SOCKET_DIR"
+  REVIEW_EXEC_SOCKET="${REVIEW_EXEC_SOCKET_DIR}/broker.sock"
+  python3 "$broker" serve \
+    --socket "$REVIEW_EXEC_SOCKET" \
+    --session "$REVIEW_EXEC_SESSION" \
+    --image "${CONTRIBUTOR_IMAGE:-ghcr.io/projectbluefin/review:latest}" \
+    >"${REVIEW_EXEC_SOCKET_DIR}/broker.log" 2>&1 &
+  REVIEW_EXEC_BROKER_PID=$!
+  for _ in $(seq 1 50); do
+    [[ -S "$REVIEW_EXEC_SOCKET" ]] && return 0
+    kill -0 "$REVIEW_EXEC_BROKER_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  cleanup_review_exec_broker
+  return 1
+}
+
+cleanup_review_exec_broker() {
+  if [[ -n "${REVIEW_EXEC_BROKER_PID:-}" ]]; then
+    kill "$REVIEW_EXEC_BROKER_PID" 2>/dev/null || true
+    wait "$REVIEW_EXEC_BROKER_PID" 2>/dev/null || true
+    REVIEW_EXEC_BROKER_PID=""
+  fi
+  if [[ -n "${REVIEW_EXEC_SOCKET_DIR:-}" && -d "$REVIEW_EXEC_SOCKET_DIR" ]]; then
+    rm -rf "$REVIEW_EXEC_SOCKET_DIR"
+    REVIEW_EXEC_SOCKET_DIR=""
+  fi
+  REVIEW_EXEC_SOCKET=""
+  REVIEW_EXEC_SESSION=""
+}
+
+offer_review_exec_session() {
+  REVIEW_EXEC_SOCKET="" REVIEW_EXEC_SESSION="" REVIEW_EXEC_SOCKET_DIR="" REVIEW_EXEC_BROKER_PID=""
+  [[ "${REVIEW_EXEC:-}" == "0" ]] && return 0
+  review_exec_probe_context || return 0
+  local answer=""
+  if [[ "${REVIEW_EXEC:-}" == "1" ]]; then
+    answer="y"
+  elif [[ -r /dev/tty && -w /dev/tty ]]; then
+    printf '?  Kubernetes context %s is reachable. Offload batch reviews to ghost cluster for this session only? [y/N] ' \
+      "$REVIEW_EXEC_CONTEXT" >/dev/tty
+    read -r answer </dev/tty || answer=""
+  else
+    return 0
+  fi
+  [[ "$answer" == [Yy]* ]] || return 0
+  start_review_exec_broker || {
+    echo "! review-exec broker did not start; reviews remain local." >&2
+    return 0
+  }
+  echo "✓ review-exec enabled for this session (context ${REVIEW_EXEC_CONTEXT}); one socket, no credentials."
+}
+
+add_review_exec_container_args() {
+  if [[ -n "${REVIEW_EXEC_SOCKET:-}" ]]; then
+    local flag
+    flag="$(review_exec_runtime_flags)"
+    [[ -n "$flag" ]] && CONTAINER_ARGS+=("$flag")
+    CONTAINER_ARGS+=(--volume "${REVIEW_EXEC_SOCKET_DIR}:/run/bluefin-review-exec:rw,z")
+    CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_SOCKET=/run/bluefin-review-exec/broker.sock")
+    CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_SESSION=${REVIEW_EXEC_SESSION}")
+    CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_AVAILABLE=1")
+  else
+    CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_AVAILABLE=0")
+  fi
+}
+
 scale_cluster_contributors() {
   local replicas="$1" profile="${2:-gemini}" effort="${3:-}"
   command -v kubectl &>/dev/null || {
@@ -1353,6 +1454,7 @@ review-queue *queue_args:
     # question. Declining, no terminal, no kubectl, or an unreachable
     # cluster all leave LAB_SOCKET empty and the dashboard fully usable.
     offer_lab_session
+    offer_review_exec_session
 
     CONTAINER_ARGS=(
       podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
@@ -1362,6 +1464,7 @@ review-queue *queue_args:
       --env COLORTERM
     )
     add_lab_container_args
+    add_review_exec_container_args
     # The dashboard's record — dispatched landing batches, their failure
     # reasons, the action trace — lives under the container's XDG state
     # directory, and a reclaim-by-replace relaunch must not lose it (#281).
@@ -1407,9 +1510,9 @@ review-queue *queue_args:
     # from the host login or configuration directory. The official CLI may
     # refresh only the disposable copy, which is removed when this run exits.
     CODEX_AUTH_STAGING_DIR=""
-    # One trap owns this session's teardown: the staged Codex credential and
-    # the lab broker both die with the terminal that launched the dashboard.
-    trap 'cleanup_codex_auth_file; cleanup_lab_broker' EXIT
+    # One trap owns this session's teardown: the staged Codex credential,
+    # the lab broker, and the review-exec broker die with the terminal.
+    trap 'cleanup_codex_auth_file; cleanup_lab_broker; cleanup_review_exec_broker' EXIT
     if [[ "$REVIEW_BACKEND" == codex ]]; then
       stage_codex_auth_file
       if [[ -n "$CODEX_AUTH_FILE" ]]; then

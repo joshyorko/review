@@ -189,6 +189,96 @@ def _with_headroom_provenance(
     )
 
 
+class BrokerExecutor:
+    def __init__(
+        self,
+        client_module: Any = None,
+        poll_seconds: float = 0.2,
+        timeout_seconds: float = 3600.0,
+    ) -> None:
+        self.client = client_module
+        self.poll_seconds = poll_seconds
+        self.timeout_seconds = timeout_seconds
+
+    def _client(self) -> Any:
+        if self.client is not None:
+            return self.client
+        try:
+            from tui import review_exec_client
+            return review_exec_client
+        except ImportError:
+            import review_exec_client
+            return review_exec_client
+
+    def run(
+        self,
+        review_item: BatchReviewItem,
+        run: ReviewRun,
+        workdir: Path,
+        check_scope_version: str,
+        check_scope: str,
+        headroom_route: HeadroomRoute,
+        headroom_telemetry: Mapping[str, Any],
+    ) -> ReviewReceipt:
+        client = self._client()
+        try:
+            submitted = client.submit(
+                review_item.repository,
+                review_item.number,
+                review_item.base_sha,
+                review_item.head_sha,
+                run.backend,
+                run.model,
+                run.effort,
+            )
+        except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+            raise BrokerUnavailable(str(error)) from error
+        if not submitted.get("ok") or submitted.get("result") != "submitted":
+            raise BrokerUnavailable(
+                str(submitted.get("detail") or submitted.get("error") or "submit failed")
+            )
+        job = submitted.get("job")
+        if not isinstance(job, str) or not job:
+            raise BrokerUnavailable("broker returned no Job name")
+        deadline = time.monotonic() + self.timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                status = client.status()
+            except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+                raise BrokerUnavailable(str(error)) from error
+            if not status.get("ok"):
+                raise BrokerUnavailable(
+                    str(status.get("detail") or status.get("error") or "status failed")
+                )
+            record = next(
+                (entry for entry in status.get("jobs", []) if entry.get("job") == job),
+                None,
+            )
+            if record is None:
+                raise BrokerUnavailable(f"broker lost Job {job}")
+            if int(record.get("succeeded", 0) or 0) or int(record.get("failed", 0) or 0):
+                logs = client.logs(job)
+                if not logs.get("ok"):
+                    raise BrokerUnavailable(
+                        str(logs.get("detail") or "log collection failed")
+                    )
+                return ReviewReceipt.from_json(
+                    str(logs.get("logs") or "")
+                ).with_provenance({
+                    "headroom_state": headroom_route.state,
+                    "headroom_route": headroom_route.base_url or "",
+                    "headroom_status_line": headroom_telemetry["status_line"],
+                    "headroom_output_reduction_percent": headroom_telemetry["output_reduction_percent"],
+                    "headroom_output_reduction_method": headroom_telemetry["output_reduction_method"],
+                    "headroom_output_tokens_saved": headroom_telemetry["output_tokens_saved"],
+                })
+            time.sleep(self.poll_seconds)
+        raise BrokerUnavailable(f"Job {job} exceeded the broker collection timeout")
+
+    def cancel(self, run: ReviewRun) -> None:
+        return None
+
+
 class LocalExecutor:
     def __init__(self, command: str | None = None) -> None:
         self.command = command or os.environ.get(
@@ -388,6 +478,8 @@ class ReviewEngine:
         )
         self.local_executor = local_executor or LocalExecutor()
         self.broker_executor = broker_executor
+        if self.broker_executor is None and os.environ.get("BLUEFIN_REVIEW_EXEC_AVAILABLE") == "1":
+            self.broker_executor = BrokerExecutor()
         self.worktree_root = str(worktree_root or self.state_root / "worktrees")
         self._batches: dict[str, ReviewBatch] = {}
         self._cancel_events: dict[str, threading.Event] = {}
