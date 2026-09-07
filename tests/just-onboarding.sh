@@ -66,6 +66,7 @@ for executable in /usr/bin/* /bin/*; do
   [[ "$name" == "kubectl" || -e "$system_bin/$name" || -L "$system_bin/$name" ]] && continue
   ln -s "$executable" "$system_bin/$name"
 done
+[[ -n "$real_just" && -x "$real_just" ]] && ln -sf "$real_just" "$system_bin/just"
 
 # ── failure reporting ─────────────────────────────────────────────────────
 scenario="<startup>"
