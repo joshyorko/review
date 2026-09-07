@@ -32,6 +32,7 @@ class ActionID(str, Enum):
     RESOLVE_DUPLICATES = "resolve-duplicates"
     VIEW_DIFF = "view-diff"
     TOGGLE_EVIDENCE = "toggle-evidence"
+    TOGGLE_VIEW = "toggle-view"
     BATCH_SELECT = "batch-select"
     FILTER_QUEUE = "filter-queue"
     REFRESH = "refresh"
@@ -89,6 +90,7 @@ _ACTION_SPECS = (
     (ActionID.RESOLVE_DUPLICATES, ActionSpec("Resolve duplicates", True, True)),
     (ActionID.VIEW_DIFF, ActionSpec("View diff")),
     (ActionID.TOGGLE_EVIDENCE, ActionSpec("Toggle evidence")),
+    (ActionID.TOGGLE_VIEW, ActionSpec("Toggle view (PRs / Issues)", mutating=False)),
     (ActionID.BATCH_SELECT, ActionSpec("Batch select")),
     (ActionID.FILTER_QUEUE, ActionSpec("Filter queue")),
     (ActionID.REFRESH, ActionSpec("Refresh")),

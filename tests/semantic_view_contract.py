@@ -45,6 +45,8 @@ class SemanticViewContractTests(unittest.TestCase):
         self.assertTrue(ACTIONS[ActionID.APPROVE_AND_QUEUE].mutating)
         self.assertTrue(ACTIONS[ActionID.APPROVE_AND_QUEUE].confirmation_required)
         self.assertFalse(ACTIONS[ActionID.VIEW_DIFF].mutating)
+        self.assertEqual(ActionID.TOGGLE_VIEW.value, "toggle-view")
+        self.assertFalse(ACTIONS[ActionID.TOGGLE_VIEW].mutating)
         self.assertFalse(ACTIONS[ActionID.OPEN_BROWSER].ordinary_journey)
 
     def test_registry_names_human_actions_without_mutation_ambiguity(self):

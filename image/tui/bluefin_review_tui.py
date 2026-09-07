@@ -212,6 +212,8 @@ COMMANDS = (
     CommandSpec("batch", "b", "batch", "batch select"),
     CommandSpec("select_all", "B", "select_all", "select/clear visible rows"),
     CommandSpec("toggle_advance", "space", "toggle_advance", "toggle and advance"),
+    CommandSpec("toggle_view", "tab", "toggle_view", "toggle PRs/issues"),
+    CommandSpec("toggle_view_alias", "I", "toggle_view", "toggle PRs/issues"),
     CommandSpec("next_unreviewed", "n", "next_unreviewed", "next unreviewed row"),
     CommandSpec("docs", "d", "docs", "update docs"),
     CommandSpec("open_browser", "o", "open_browser", "open"),
@@ -251,6 +253,7 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # changes anything on GitHub; everything on the second goes through the
 # typed-number gate.
 KEYS_READING = (
+    " [b]Tab[/b] issues/PRs"
     " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
     " [b]/[/b] steer [b]f[/b] filter [b]b[/b]/[b]B[/b] select"
     " [b]Space[/b] select+next [b]n[/b] next unseen"
@@ -981,6 +984,7 @@ class Stop:
     cached_age: str = ""
     head_sha: str = ""
     triage_state: TriageState = "unseen"
+    is_issue: bool = False
 
     @property
     def key(self) -> str:
