@@ -177,7 +177,7 @@ been removed; the contributor container is the only runtime.
 
 Running a downstream consumer of Hive's contributor protocol means we find
 things upstream cannot see from inside. Reporting that evidence to
-[`kubestellar/hive`](https://github.com/kubestellar/hive), and following up on
+[`hivecommons/hive`](https://github.com/hivecommons/hive), and following up on
 what we file, is part of the job. We report observations, reproductions, and
 options with tradeoffs; upstream owns the design decision and its own triage.
 We do not add a local workaround for an accepted upstream gap, because a

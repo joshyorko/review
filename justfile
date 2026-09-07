@@ -77,8 +77,8 @@
 # KEY=VALUE, so it cannot be a plain recipe parameter. Unsupported values are
 # hard errors rather than silent fallbacks.
 tool_env := env("TOOL", "")
-hive_repo_url := "https://github.com/kubestellar/hive"
-# origin/v4 via `git ls-remote --heads https://github.com/kubestellar/hive v4`
+hive_repo_url := "https://github.com/hivecommons/hive"
+# origin/v4 via `git ls-remote --heads https://github.com/hivecommons/hive v4`
 # on 2026-09-06.
 hive_commit := "fe34da51434ad9b0924eee1492047c3c95c705ff"
 gemini_model := "gemini-3.8-flash"
@@ -123,7 +123,7 @@ can_run_attended_hive_setup() {
 print_missing_hive_setup_guidance() {
   local path="$1" reason="$2" tool="$3" commit="$4"
   echo "ERROR: missing Hive setup at ${path}; ${reason}." >&2
-  echo "  Re-run review from an interactive terminal, or pre-seed it yourself from kubestellar/hive @ ${commit} by running \`just contribute-setup ${tool}\` in an interactive checkout (set REVIEW_HIVE_COMMIT to another full commit if needed)" >&2
+  echo "  Re-run review from an interactive terminal, or pre-seed it yourself from hivecommons/hive @ ${commit} by running \`just contribute-setup ${tool}\` in an interactive checkout (set REVIEW_HIVE_COMMIT to another full commit if needed)" >&2
 }
 GOOSE_INSTALL_HINT="Install: https://github.com/block/goose/releases"
 GOOSE_FIXIT_HINT="Run: goose configure, select GitHub Copilot, and complete the device flow."
@@ -618,7 +618,7 @@ prepare_pinned_hive_checkout() {
     git -C "$HIVE_SRC_DIR" remote add origin "$HIVE_REPO_URL"
   fi
 
-  echo "Preparing kubestellar/hive @ ${HIVE_COMMIT:0:12} -> ${HIVE_SRC_DIR}..."
+  echo "Preparing hivecommons/hive @ ${HIVE_COMMIT:0:12} -> ${HIVE_SRC_DIR}..."
   git -C "$HIVE_SRC_DIR" fetch --depth 1 origin "$HIVE_COMMIT"
   git -C "$HIVE_SRC_DIR" checkout --detach -f FETCH_HEAD
   actual_commit="$(git -C "$HIVE_SRC_DIR" rev-parse HEAD)"
@@ -1725,7 +1725,7 @@ review-doctor:
     else
       echo "  ✗ ${HIVE_CONTRIBUTOR_ENV} is missing"
       echo "    review runs upstream 'just contribute-setup goose' from"
-      echo "    kubestellar/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
+      echo "    hivecommons/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
       echo "    That runs with upstream's documented HIVE_SKIP_VERSION_CHECK=true,"
       echo "    because the pinned checkout is detached and cannot match origin/v4."
       fail=$((fail+1))

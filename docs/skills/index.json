@@ -386,7 +386,7 @@
     {
       "id": "upstream-hive",
       "name": "upstream-hive",
-      "one_line_purpose": "File and follow up on kubestellar/hive issues as an exemplary downstream.",
+      "one_line_purpose": "File and follow up on hivecommons/hive issues as an exemplary downstream.",
       "entry_point": "docs/skills/upstream-hive.md",
       "category": "ci-ops",
       "status": "active",
@@ -397,7 +397,7 @@
         "evidence",
         "contribution"
       ],
-      "description": "Defines how this repository reports evidence to kubestellar/hive and follows up on filed issues. Use before opening, commenting on, or responding to an upstream Hive issue or pull request.",
+      "description": "Defines how this repository reports evidence to hivecommons/hive and follows up on filed issues. Use before opening, commenting on, or responding to an upstream Hive issue or pull request.",
       "version": "1.3",
       "last_updated": "2026-08-07",
       "doc_type": "policy"

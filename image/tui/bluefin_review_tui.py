@@ -6127,7 +6127,7 @@ class ReviewDashboard(App):
         Hive's App-authorship check (#247).
 
         The versioned `/api/v1` route is the only one a GitHub bearer token
-        may use: kubestellar/hive#4052 gave it a hosted ingress without the
+        may use: hivecommons/hive#4052 gave it a hosted ingress without the
         browser-login intercept, while the session-only `/api/prs` route still
         belongs to the dashboard's browser clients (#258).
         """

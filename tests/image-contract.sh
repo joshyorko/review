@@ -49,9 +49,9 @@ require image/Containerfile \
   'COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint' \
   'PYTHONPATH=/opt/bluefin/tui:/opt/bluefin' \
   'COPY image/tmux.conf /etc/tmux.conf' \
-  'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
-  'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
-  'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/config/backends.conf' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf' \
   '/usr/local/bin/goose --version' \
   'tmux -V' \
   'codex --version' \
