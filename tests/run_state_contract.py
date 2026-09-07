@@ -449,6 +449,69 @@ class RunStateContractTests(unittest.TestCase):
                 self.assertTrue(record.is_terminal)
                 self.assertFalse(record.may_mutate())
 
+    def test_escalation_required_and_re_reviewing_transitions(self):
+        """#411: ESCALATION_REQUIRED and RE_REVIEWING allow re-review but forbid direct mutation."""
+        with self._store_dir() as root:
+            store = RunStateStore(root)
+            identity = _identity(1)
+            store.create(identity)
+            store.transition(identity, RunState.REVIEWING)
+            store.transition(identity, RunState.REVIEW_CLEAN)
+
+            # REVIEW_CLEAN -> ESCALATION_REQUIRED
+            escalating = store.transition(identity, RunState.ESCALATION_REQUIRED, reason="needs strong review")
+            self.assertEqual(escalating.state, RunState.ESCALATION_REQUIRED)
+            self.assertFalse(escalating.is_terminal)
+            self.assertFalse(escalating.may_mutate())
+
+            # ESCALATION_REQUIRED cannot transition directly to MUTATING
+            with self.assertRaises(IllegalRunTransition):
+                store.transition(identity, RunState.MUTATING)
+
+            # ESCALATION_REQUIRED -> RE_REVIEWING
+            re_reviewing = store.transition(identity, RunState.RE_REVIEWING)
+            self.assertEqual(re_reviewing.state, RunState.RE_REVIEWING)
+            self.assertTrue(re_reviewing.in_flight)
+            self.assertFalse(re_reviewing.may_mutate())
+
+            # RE_REVIEWING cannot transition directly to MUTATING
+            with self.assertRaises(IllegalRunTransition):
+                store.transition(identity, RunState.MUTATING)
+
+            # RE_REVIEWING -> REVIEW_CLEAN -> MUTATING (with high-assurance identity)
+            clean = store.transition(identity, RunState.REVIEW_CLEAN)
+            self.assertEqual(clean.state, RunState.REVIEW_CLEAN)
+            self.assertTrue(clean.may_mutate())
+
+            mutating = store.transition(identity, RunState.MUTATING)
+            self.assertEqual(mutating.state, RunState.MUTATING)
+
+    def test_transition_to_mutating_enforces_high_assurance_or_low_risk(self):
+        """#411: cheap model clean verdict cannot authorise merge unless low-risk."""
+        with self._store_dir() as root:
+            store = RunStateStore(root)
+            cheap_identity = RunIdentity(
+                repository="projectbluefin/review",
+                pull_request=411,
+                base_sha=_sha("a"),
+                head_sha=_sha("b"),
+                backend="goose",
+                model="gemini-3.8-flash",
+                effort="high",
+                check_scope_version="checks-v1",
+            )
+            store.create(cheap_identity)
+            store.transition(cheap_identity, RunState.REVIEWING)
+            store.transition(cheap_identity, RunState.REVIEW_CLEAN)
+
+            # Attempting to mutate cheap model without low-risk flag raises
+            with self.assertRaises(IllegalRunTransition):
+                store.transition(cheap_identity, RunState.MUTATING)
+
+            # Low-risk flag allows cheap model to mutate
+            mutating = store.transition(cheap_identity, RunState.MUTATING, low_risk=True)
+            self.assertEqual(mutating.state, RunState.MUTATING)
+
 
 if __name__ == "__main__":
     unittest.main()

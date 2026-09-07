@@ -17,6 +17,11 @@ from typing import Any, Iterator, Mapping
 
 from tui.review_receipt import ReceiptIdentity as RunIdentity
 
+try:
+    from tui.model_profiles import is_high_assurance
+except ImportError:
+    from model_profiles import is_high_assurance  # type: ignore[no-redef]
+
 RUN_STATE_VERSION = 1
 DEFAULT_MAX_RECORDS = 500
 FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -31,6 +36,8 @@ class RunState(str, Enum):
     REVIEWING = "reviewing"
     REVIEW_CLEAN = "review_clean"
     REVIEW_FINDINGS = "review_findings"
+    ESCALATION_REQUIRED = "escalation_required"
+    RE_REVIEWING = "re_reviewing"
     MUTATING = "mutating"
     BLOCKED = "blocked"
     RETRY_AT = "retry_at"
@@ -70,11 +77,12 @@ _TERMINAL_OUTCOMES = {
     RunState.HUMAN_REVIEW_MISSING: TerminalOutcome.HUMAN_REVIEW_MISSING,
 }
 
-_IN_FLIGHT = frozenset({RunState.REVIEWING, RunState.MUTATING})
+_IN_FLIGHT = frozenset({RunState.REVIEWING, RunState.RE_REVIEWING, RunState.MUTATING})
 _MAY_MUTATE = frozenset({RunState.REVIEW_CLEAN, RunState.REVIEW_FINDINGS})
 _TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.PENDING: frozenset({
         RunState.REVIEWING,
+        RunState.RE_REVIEWING,
         RunState.HEAD_CHANGED,
         RunState.BLOCKED,
         RunState.RETRY_AT,
@@ -92,12 +100,34 @@ _TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     }),
     RunState.REVIEW_CLEAN: frozenset({
         RunState.MUTATING,
+        RunState.ESCALATION_REQUIRED,
+        RunState.RE_REVIEWING,
         RunState.HEAD_CHANGED,
         RunState.BLOCKED,
         RunState.RETRY_AT,
     }),
     RunState.REVIEW_FINDINGS: frozenset({
         RunState.MUTATING,
+        RunState.ESCALATION_REQUIRED,
+        RunState.RE_REVIEWING,
+        RunState.HEAD_CHANGED,
+        RunState.BLOCKED,
+        RunState.RETRY_AT,
+    }),
+    RunState.ESCALATION_REQUIRED: frozenset({
+        RunState.RE_REVIEWING,
+        RunState.REVIEWING,
+        RunState.HEAD_CHANGED,
+        RunState.BLOCKED,
+        RunState.RETRY_AT,
+    }),
+    RunState.RE_REVIEWING: frozenset({
+        RunState.REVIEW_CLEAN,
+        RunState.REVIEW_FINDINGS,
+        RunState.REVIEW_MISSING,
+        RunState.REVIEW_FAILED,
+        RunState.REVIEW_INCOMPLETE,
+        RunState.REVIEW_UNPARSABLE,
         RunState.HEAD_CHANGED,
         RunState.BLOCKED,
         RunState.RETRY_AT,
@@ -405,6 +435,7 @@ class RunStateStore:
         *,
         reason: str = "",
         retry_at: str = "",
+        low_risk: bool = False,
     ) -> RunRecord:
         """Transition a run to a target state.
 
@@ -438,6 +469,10 @@ class RunStateStore:
                 raise IllegalRunTransition(
                     f"cannot transition from {record.state.value} to {target.value}"
                 )
+            if target == RunState.MUTATING and not low_risk and not is_high_assurance(identity):
+                raise IllegalRunTransition(
+                    f"cannot transition {identity.model} to mutating: high-assurance review required (not low-risk)"
+                )
             if target == RunState.RETRY_AT and not retry_at:
                 raise ValueError("retry_at state requires retry_at")
             outcome = _TERMINAL_OUTCOMES.get(target)
@@ -465,7 +500,9 @@ class RunStateStore:
             self._write(records, next_sequence + 1)
             return updated
 
-    def revalidate_head(self, identity: RunIdentity, live_head_sha: str) -> RunRecord:
+    def revalidate_head(
+        self, identity: RunIdentity, live_head_sha: str, *, fixer_advanced: bool = False
+    ) -> RunRecord:
         if not FULL_SHA.fullmatch(live_head_sha):
             raise ValueError("live_head_sha must be a full lowercase SHA")
         record = self.get(identity)
@@ -473,6 +510,12 @@ class RunStateStore:
             raise KeyError(f"unknown run {identity.cache_identity}")
         if live_head_sha == identity.head_sha:
             return record
+        if fixer_advanced:
+            return self.transition(
+                identity,
+                RunState.ESCALATION_REQUIRED,
+                reason=f"head advanced by fixer: reviewed {identity.head_sha[:12]}, live {live_head_sha[:12]}",
+            )
         return self.transition(
             identity,
             RunState.HEAD_CHANGED,

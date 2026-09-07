@@ -20,12 +20,34 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, TextIO, cast
 
 from harness.registry import Harness, HarnessRegistry
 from tui.capacity import CapacityGovernor
+from tui.gh_client import _kill_process_group
 from tui.headroom import HeadroomRoute, HeadroomSession
 from tui.review_cache import ReviewCache
 from tui.review_receipt import ReceiptIdentity, ReviewReceipt
 from tui.review_run import ReviewRun, ReviewRunController, ReviewRunState
 from tui.scheduler import scheduler
 from tui.review_snapshot import BatchReviewItem, BatchSnapshot
+
+BLUEFIN_REVIEW_DEADLINE_SECONDS = "BLUEFIN_REVIEW_DEADLINE_SECONDS"
+DEFAULT_REVIEW_DEADLINE_SECONDS = 1800.0
+
+
+class ReviewDeadlineExceeded(RuntimeError):
+    """The review executor exceeded its configured deadline."""
+    pass
+
+
+def _positive_deadline(value: str | int | float, name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a number")
+    try:
+        result = float(value)
+    except (ValueError, TypeError) as error:
+        raise ValueError(f"{name} must be a number") from error
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
 
 TERMINAL_REVIEW_STATES = frozenset(
     {"complete", "findings", "failed", "cancelled"}
@@ -281,10 +303,23 @@ class BrokerExecutor:
 
 
 class LocalExecutor:
-    def __init__(self, command: str | None = None) -> None:
+    def __init__(
+        self,
+        command: str | None = None,
+        timeout: float | None = None,
+    ) -> None:
         self.command = command or os.environ.get(
             "BLUEFIN_REVIEW_COMMAND", "bluefin-review"
         )
+        if timeout is not None:
+            self.timeout = _positive_deadline(timeout, "timeout")
+        else:
+            raw = os.environ.get(BLUEFIN_REVIEW_DEADLINE_SECONDS)
+            self.timeout = (
+                _positive_deadline(raw, BLUEFIN_REVIEW_DEADLINE_SECONDS)
+                if raw is not None
+                else DEFAULT_REVIEW_DEADLINE_SECONDS
+            )
         self._processes: dict[str, subprocess.Popen[str]] = {}
         self._cancelled: set[str] = set()
         self._lock = threading.Lock()
@@ -340,7 +375,17 @@ class LocalExecutor:
             )
             self._processes[run.identity] = process
         try:
-            stdout, stderr = process.communicate()
+            stdout, stderr = process.communicate(timeout=self.timeout)
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_group(process.pid, signal.SIGTERM)
+            try:
+                stdout, stderr = process.communicate(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(process.pid, signal.SIGKILL)
+                stdout, stderr = process.communicate()
+            raise ReviewDeadlineExceeded(
+                f"review deadline exceeded after {self.timeout:g}s"
+            ) from exc
         finally:
             with self._lock:
                 self._processes.pop(run.identity, None)
@@ -361,10 +406,7 @@ class LocalExecutor:
             process = self._processes.get(run.identity)
         if process is None:
             return
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
+        _kill_process_group(process.pid, signal.SIGTERM)
 
     def _clear_cancel(self, run: ReviewRun) -> None:
         with self._lock:
@@ -1203,11 +1245,14 @@ class ReviewEngine:
 
 
 __all__ = [
+    "BLUEFIN_REVIEW_DEADLINE_SECONDS",
     "BrokerUnavailable",
+    "DEFAULT_REVIEW_DEADLINE_SECONDS",
     "LocalExecutor",
     "REVIEW_ENGINE_STATE_DIR",
     "ReviewBatch",
     "ReviewBatchResult",
+    "ReviewDeadlineExceeded",
     "ReviewEngine",
     "ReviewEvent",
     "append_review_event",

@@ -85,6 +85,23 @@ from tui.run_state import (
 )
 from tui.gh_client import GhClient
 
+try:
+    from tui.model_profiles import (
+        HIGH_ASSURANCE_MODELS,
+        classify_batch,
+        escalation_triple,
+        is_high_assurance,
+        is_low_risk,
+    )
+except ImportError:
+    from model_profiles import (  # type: ignore[no-redef]
+        HIGH_ASSURANCE_MODELS,
+        classify_batch,
+        escalation_triple,
+        is_high_assurance,
+        is_low_risk,
+    )
+
 if TYPE_CHECKING:
     from tui.review_engine import ReviewBatch, ReviewEvent
     from tui.review_snapshot import BatchReviewItem, BatchSnapshot
@@ -2979,15 +2996,45 @@ class ReviewDashboard(App):
         self._current_batch_plan: action_plan.BatchActionPlan | None = None
         self._batch_generation_token: int = 0
         self._batch_receipt_ledger = DashboardBatchReceiptLedger()
+        self.fixer_advanced_heads: set[tuple[str, int, str]] = set()
+        self.active_review_identities: dict[str, RunIdentity] = {}
 
-    def run_identity(self, stop: Stop) -> RunIdentity:
+    def record_fixer_head(self, repository: str, number: int, head_sha: str) -> None:
+        """Explicitly record that a head was produced and pushed by our fixer."""
+        if FULL_SHA.fullmatch(head_sha):
+            self.fixer_advanced_heads.add((repository, number, head_sha))
+
+    def is_fixer_head(self, repository: str, number: int, head_sha: str) -> bool:
+        """Deliberately and explicitly distinguish our fixer's pushed head from a foreign head change."""
+        return (repository, number, head_sha) in self.fixer_advanced_heads
+
+    def escalation_profile(self, stop: Stop) -> tuple[str, str, str]:
+        """The (backend, model, effort) triple for an escalated, high-assurance review."""
+        policy = self.final_policy or "automatic"
+        classification = classify_batch([stop])
+        return escalation_triple(policy, classification)
+
+    def run_identity(
+        self,
+        stop: Stop,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        head_sha: str | None = None,
+    ) -> RunIdentity:
         base_sha = str(stop.live.get("baseRefOid") or "")
         if not FULL_SHA.fullmatch(base_sha):
             base_sha = "a" * 40
-        head_sha = stop.head_identity
+        if head_sha is None:
+            head_sha = stop.head_identity
         if not FULL_SHA.fullmatch(head_sha):
             head_sha = "b" * 40
-        model, effort = self.review_profile(stop.repository)
+        if model is None or effort is None:
+            default_model, default_effort = self.review_profile(stop.repository)
+            if model is None:
+                model = default_model
+            if effort is None:
+                effort = default_effort
         return RunIdentity(
             repository=stop.repository,
             pull_request=stop.number,
@@ -3309,25 +3356,32 @@ class ReviewDashboard(App):
         )
 
     @work(thread=True)
-    def start_review_batch(self, stops: list[Stop]) -> None:
+    def start_review_batch(
+        self, stops: list[Stop], *, model: str | None = None, effort: str | None = None
+    ) -> None:
         from tui.review_snapshot import hydrate_batch_snapshot
 
         snapshot = hydrate_batch_snapshot(stops, fetch_live_review)
         self.call_from_thread(
-            self.begin_review_batch, list(stops), snapshot
+            self.begin_review_batch, list(stops), snapshot, model=model, effort=effort
         )
 
     def begin_review_batch(
-        self, stops: list[Stop], snapshot: BatchSnapshot
+        self,
+        stops: list[Stop],
+        snapshot: BatchSnapshot,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> None:
         requested_keys = {stop.key for stop in stops}
         self.review_pending_keys.difference_update(requested_keys)
         current_by_key = {stop.key: stop for stop in self.stops}
         if not requested_keys.issubset(current_by_key):
             for stop in stops:
-                id_ = self.run_identity(stop)
+                id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
                 rec = self.run_store.get(id_)
-                if rec and rec.state == RunState.REVIEWING:
+                if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
                     self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="queue changed")
             self.notify(
                 "batch review not started: the visible queue changed.",
@@ -3337,9 +3391,9 @@ class ReviewDashboard(App):
         current_stops = [current_by_key[stop.key] for stop in stops]
         if not snapshot.ready:
             for stop in current_stops:
-                id_ = self.run_identity(stop)
+                id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
                 rec = self.run_store.get(id_)
-                if rec and rec.state == RunState.REVIEWING:
+                if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
                     self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="snapshot failed")
                 failure = snapshot.failures.get(stop.key)
                 if failure:
@@ -3364,9 +3418,9 @@ class ReviewDashboard(App):
         ]
         if stale:
             for stop in stale:
-                id_ = self.run_identity(stop)
+                id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
                 rec = self.run_store.get(id_)
-                if rec and rec.state == RunState.REVIEWING:
+                if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
                     self.run_store.revalidate_head(id_, by_key[stop.key].head_sha)
                 stop.failure = "review snapshot stale: head changed"
                 stop.failure_command = "gh pr view"
@@ -3380,6 +3434,11 @@ class ReviewDashboard(App):
                 severity="warning",
             )
             return
+        default_model, default_effort = self.review_profile(
+            current_stops[0].repository
+        )
+        selected_model = model or default_model
+        selected_effort = effort or default_effort
         for stop in current_stops:
             item = by_key[stop.key]
             self.evidence_generation[stop.key] = (
@@ -3398,9 +3457,9 @@ class ReviewDashboard(App):
             stop.cached_age = ""
             stop.triage_state = "reviewed"
             self.triage[self.triage_key(stop)] = "reviewed"
-        selected_model, selected_effort = self.review_profile(
-            current_stops[0].repository
-        )
+            self.active_review_identities[stop.key] = self.run_identity(
+                stop, model=selected_model, effort=selected_effort, head_sha=item.head_sha
+            )
         event_heads = {
             item.key: item.head_sha for item in snapshot.items
         }
@@ -3654,9 +3713,9 @@ class ReviewDashboard(App):
             else:
                 stop.review_status = event.state
 
-        id_ = self.run_identity(stop)
+        id_ = self.active_review_identities.pop(event.key, None) or self.run_identity(stop)
         rec = self.run_store.get(id_)
-        if rec and rec.state == RunState.REVIEWING:
+        if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
             if stop.review_status in {"cached", "complete", "findings"}:
                 self.review_expected_heads.pop(event.key, None)
                 self.review_batch_ids.pop(event.key, None)
@@ -5508,8 +5567,11 @@ class ReviewDashboard(App):
         if not FULL_SHA.fullmatch(live_head_sha):
             live_head_sha = identity.head_sha
 
-        # Revalidate head (#410)
-        record = self.run_store.revalidate_head(identity, live_head_sha)
+        # Revalidate head (#410, #411)
+        head_moved = (live_head_sha != identity.head_sha)
+        fixer_advanced = head_moved and self.is_fixer_head(stop.repository, stop.number, live_head_sha)
+
+        record = self.run_store.revalidate_head(identity, live_head_sha, fixer_advanced=fixer_advanced)
         if record.state == RunState.HEAD_CHANGED:
             stop.failure = f"landing aborted: head changed (reviewed {identity.head_sha[:12]}, live {live_head_sha[:12]})"
             stop.failure_command = "gh pr view"
@@ -5520,8 +5582,67 @@ class ReviewDashboard(App):
             self.refresh_rows()
             return
 
+        if record.state == RunState.ESCALATION_REQUIRED:
+            # Head was advanced by our fixer (#411). Trigger fresh high-assurance review of the new head.
+            esc_backend, esc_model, esc_effort = self.escalation_profile(stop)
+            new_id = self.run_identity(
+                stop, head_sha=live_head_sha, model=esc_model, effort=esc_effort
+            )
+            self.run_store.create(new_id)
+            self.run_store.transition(new_id, RunState.RE_REVIEWING)
+            stop.head_sha = live_head_sha
+            stop.live["headRefOid"] = live_head_sha
+            stop.review_status = "running"
+            stop.review_result = None
+            self.active_review_identities[stop.key] = new_id
+            if stop.key not in self.review_pending_keys:
+                self.start_review_batch([stop], model=esc_model, effort=esc_effort)
+            self.notify(
+                f"[$] {stop.key}: head advanced by fixer ({live_head_sha[:8]}) — triggering fresh strong review ({esc_model})…",
+            )
+            self.refresh_rows()
+            return
+
+        findings = list(stop.review_result.findings if stop.review_result else [])
+        if findings or stop.review_status == "findings":
+            task = landing.new_fix_task(stop, findings, self.self_login)
+            task.policy = self.final_policy or "automatic"
+            self.enqueue_landing(task)
+            self.notify(f"[$] {stop.key}: findings detected — dispatched auto-fix & land [w]")
+            stop.selected = False
+            self.refresh_rows()
+            return
+
+        # Escalation check on clean review (#411)
+        low_risk = is_low_risk(stop)
+        high_assurance = is_high_assurance(identity.model)
+        if not high_assurance and not low_risk:
+            # Cheap first-pass clean verdict cannot authorise merge on its own (#411).
+            # Escalation is skippable only for the explicit low-risk class.
+            self.run_store.transition(
+                identity,
+                RunState.ESCALATION_REQUIRED,
+                reason=f"cheap model {identity.model} clean verdict cannot authorise merge",
+            )
+            esc_backend, esc_model, esc_effort = self.escalation_profile(stop)
+            new_id = self.run_identity(
+                stop, head_sha=live_head_sha, model=esc_model, effort=esc_effort
+            )
+            self.run_store.create(new_id)
+            self.run_store.transition(new_id, RunState.RE_REVIEWING)
+            stop.review_status = "running"
+            stop.review_result = None
+            self.active_review_identities[stop.key] = new_id
+            if stop.key not in self.review_pending_keys:
+                self.start_review_batch([stop], model=esc_model, effort=esc_effort)
+            self.notify(
+                f"[$] {stop.key}: clean first pass ({identity.model}) cannot authorise merge — triggering strong review ({esc_model})…",
+            )
+            self.refresh_rows()
+            return
+
         # Transition to MUTATING before gate checks
-        self.run_store.transition(identity, RunState.MUTATING)
+        self.run_store.transition(identity, RunState.MUTATING, low_risk=low_risk)
 
         # Human review invariant at the landing gate (#414)
         if not self.has_human_review(live_data):
@@ -5564,17 +5685,10 @@ class ReviewDashboard(App):
         except Exception:
             pass
 
-        findings = list(stop.review_result.findings if stop.review_result else [])
-        if findings or stop.review_status == "findings":
-            task = landing.new_fix_task(stop, findings, self.self_login)
-            task.policy = self.final_policy or "automatic"
-            self.enqueue_landing(task)
-            self.notify(f"[$] {stop.key}: findings detected — dispatched auto-fix & land [w]")
-        else:
-            task = landing.new_task([stop], self.self_login)
-            task.policy = self.final_policy or "automatic"
-            self.enqueue_landing(task)
-            self.notify(f"[$] {stop.key}: review clean — dispatched batch landing [w]")
+        task = landing.new_task([stop], self.self_login)
+        task.policy = self.final_policy or "automatic"
+        self.enqueue_landing(task)
+        self.notify(f"[$] {stop.key}: review clean — dispatched batch landing [w]")
         stop.selected = False
         self.refresh_rows()
 

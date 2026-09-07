@@ -159,6 +159,145 @@ class SlayStateMachineContractTests(unittest.TestCase):
         stops.sort(key=lambda s: (0 if app.stop_lacks_my_review(s) else 1, s.number))
         self.assertEqual(stops, [stop_unreviewed, stop_reviewed])
 
+    def _setup_app(self, store_dir):
+        app = tui.ReviewDashboard()
+        app.self_login = "jorge"
+        app.run_store = RunStateStore(store_dir)
+        app.refresh_rows = lambda: None
+        app.refresh_status = lambda: None
+        app.notify = lambda *a, **kw: None
+        app.drain_landings = lambda: None
+        app.start_review_batch = lambda stops, **kw: None
+        return app
+
+    def test_fixer_advanced_head_distinguished_from_foreign_head_change(self):
+        """#411: head moved by our fixer triggers fresh review; foreign change aborts."""
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+
+            # Foreign head change aborts
+            stop_foreign = tui.Stop(
+                repository="projectbluefin/review",
+                number=410,
+                action="review",
+                title="feat: foreign change",
+                live={"headRefOid": _sha("1"), "reviews": [{"author": {"login": "jorge"}, "state": "APPROVED"}]},
+            )
+            stop_foreign.head_sha = _sha("1")
+            id_foreign = _identity(410, _sha("1"))
+            app.run_store.create(id_foreign)
+            app.run_store.transition(id_foreign, RunState.REVIEWING)
+            app.run_store.transition(id_foreign, RunState.REVIEW_CLEAN)
+
+            # Live PR moved to sha("2")
+            app.fetch_live_pr = lambda repo, num, force=False: {"headRefOid": _sha("2"), "reviews": [{"author": {"login": "jorge"}, "state": "APPROVED"}]}
+            app._dispatch_slay_landing(stop_foreign, identity=id_foreign)
+
+            rec_foreign = app.run_store.get(id_foreign)
+            self.assertEqual(rec_foreign.state, RunState.HEAD_CHANGED)
+
+            # Fixer-advanced head triggers fresh review bound to new head
+            stop_fixer = tui.Stop(
+                repository="projectbluefin/review",
+                number=411,
+                action="review",
+                title="feat: fixer change",
+                live={"headRefOid": _sha("1"), "reviews": [{"author": {"login": "jorge"}, "state": "APPROVED"}]},
+            )
+            stop_fixer.head_sha = _sha("1")
+            id_fixer = _identity(411, _sha("1"))
+            app.run_store.create(id_fixer)
+            app.run_store.transition(id_fixer, RunState.REVIEWING)
+            app.run_store.transition(id_fixer, RunState.REVIEW_FINDINGS)
+
+            # Record that fixer pushed sha("3")
+            app.record_fixer_head(stop_fixer.repository, stop_fixer.number, _sha("3"))
+            self.assertTrue(app.is_fixer_head(stop_fixer.repository, stop_fixer.number, _sha("3")))
+            self.assertFalse(app.is_fixer_head(stop_fixer.repository, stop_fixer.number, _sha("4")))
+
+            app.fetch_live_pr = lambda repo, num, force=False: {"headRefOid": _sha("3"), "reviews": [{"author": {"login": "jorge"}, "state": "APPROVED"}]}
+            app._dispatch_slay_landing(stop_fixer, identity=id_fixer)
+
+            # Old record reached ESCALATION_REQUIRED (not HEAD_CHANGED)
+            rec_old = app.run_store.get(id_fixer)
+            self.assertEqual(rec_old.state, RunState.ESCALATION_REQUIRED)
+
+            # New identity exists at sha("3") with high-assurance profile
+            esc_profile = app.escalation_profile(stop_fixer)
+            new_id = app.run_identity(stop_fixer, head_sha=_sha("3"), model=esc_profile[1], effort=esc_profile[2])
+            rec_new = app.run_store.get(new_id)
+            self.assertIsNotNone(rec_new)
+            self.assertEqual(rec_new.identity.head_sha, _sha("3"))
+            self.assertEqual(rec_new.identity.model, esc_profile[1])
+            self.assertIn(rec_new.state, (RunState.REVIEWING, RunState.RE_REVIEWING))
+
+    def test_cheap_clean_verdict_refused_without_escalation_unless_low_risk(self):
+        """#411: cheap model clean verdict cannot authorise merge on its own."""
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+
+            # Case 1: non-low-risk PR with cheap clean review -> escalation triggered, no landing task
+            stop_feat = tui.Stop(
+                repository="projectbluefin/review",
+                number=501,
+                action="review",
+                title="feat: add widget",
+                live={"headRefOid": _sha("5"), "reviews": [{"author": {"login": "jorge"}, "state": "APPROVED"}]},
+            )
+            stop_feat.head_sha = _sha("5")
+            stop_feat.review_status = "complete"
+            id_cheap = RunIdentity(
+                repository="projectbluefin/review",
+                pull_request=501,
+                base_sha=_sha("a"),
+                head_sha=_sha("5"),
+                backend="goose",
+                model="gemini-3.8-flash",
+                effort="high",
+                check_scope_version="image-v1",
+            )
+            app.run_store.create(id_cheap)
+            app.run_store.transition(id_cheap, RunState.REVIEWING)
+            app.run_store.transition(id_cheap, RunState.REVIEW_CLEAN)
+
+            app.fetch_live_pr = lambda repo, num, force=False: {"headRefOid": _sha("5"), "reviews": [{"author": {"login": "jorge"}, "state": "APPROVED"}]}
+            init_landings = len(app.landing_queue)
+            app._dispatch_slay_landing(stop_feat, identity=id_cheap)
+
+            self.assertEqual(len(app.landing_queue), init_landings)
+            self.assertEqual(app.run_store.get(id_cheap).state, RunState.ESCALATION_REQUIRED)
+
+            # Case 2: low-risk PR with cheap clean review -> escalation skipped, landing task dispatched
+            stop_dep = tui.Stop(
+                repository="projectbluefin/review",
+                number=502,
+                action="review",
+                title="chore(deps): update foo",
+                live={"headRefOid": _sha("6"), "reviews": [{"author": {"login": "jorge"}, "state": "APPROVED"}]},
+            )
+            stop_dep.head_sha = _sha("6")
+            stop_dep.review_status = "complete"
+            id_dep = RunIdentity(
+                repository="projectbluefin/review",
+                pull_request=502,
+                base_sha=_sha("a"),
+                head_sha=_sha("6"),
+                backend="goose",
+                model="gemini-3.8-flash",
+                effort="high",
+                check_scope_version="image-v1",
+            )
+            app.run_store.create(id_dep)
+            app.run_store.transition(id_dep, RunState.REVIEWING)
+            app.run_store.transition(id_dep, RunState.REVIEW_CLEAN)
+
+            app.fetch_live_pr = lambda repo, num, force=False: {"headRefOid": _sha("6"), "reviews": [{"author": {"login": "jorge"}, "state": "APPROVED"}]}
+            init_landings = len(app.landing_queue)
+            app._dispatch_slay_landing(stop_dep, identity=id_dep)
+
+            self.assertEqual(len(app.landing_queue), init_landings + 1)
+            self.assertEqual(app.run_store.get(id_dep).state, RunState.MUTATING)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7119,7 +7119,8 @@ async def main() -> int:
             await pilot.pause(0.05)
         stop = app.stops[0]
 
-        # Test 1: Slay on already-reviewed clean PR dispatches landing task immediately
+        # Test 1: Slay on low-risk clean PR dispatches landing task immediately (#411 low-risk skip class)
+        stop.title = "chore(deps): update pin"
         stop.head_sha = "a1" + "0" * 38
         stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "complete"
@@ -7133,11 +7134,69 @@ async def main() -> int:
         task = next((t for t in app.landing_queue[initial_landings:] if not t.phase), None)
         check(
             task is not None,
-            f"slay on clean PR must enqueue landing task, queue={app.landing_queue[initial_landings:]}",
+            f"slay on low-risk clean PR must enqueue landing task, queue={app.landing_queue[initial_landings:]}",
+        )
+        if task:
+            check(
+                task.stops[0].key == stop.key,
+                f"landing task must target stop {stop.key}, got {task.stops[0].key}",
+            )
+
+        # Test 1b: Cheap clean verdict on non-low-risk PR cannot authorise merge; triggers escalation (#411)
+        stop.title = "fix: core memory leak"
+        stop.head_sha = "e1" + "0" * 38
+        stop.live["headRefOid"] = stop.head_sha
+        stop.review_status = "complete"
+        stop.review_result = None
+        cheap_id = app.run_identity(stop, head_sha=stop.head_sha, model="gemini-3.8-flash", effort="high")
+        app.run_store.create(cheap_id)
+        app.run_store.transition(cheap_id, tui.RunState.REVIEWING)
+        app.run_store.transition(cheap_id, tui.RunState.REVIEW_CLEAN)
+        initial_landings = len(app.landing_queue)
+        app.review_pending_keys.add(stop.key)
+        await pilot.press("$")
+        await pilot.pause()
+        check(
+            len(app.landing_queue) == initial_landings,
+            "cheap clean verdict on non-low-risk PR must not land without escalation",
+        )
+        cheap_rec = app.run_store.get(cheap_id)
+        check(
+            cheap_rec is not None and cheap_rec.state == tui.RunState.ESCALATION_REQUIRED,
+            f"cheap clean review must reach ESCALATION_REQUIRED, got {cheap_rec}",
+        )
+        esc_triple = app.escalation_profile(stop)
+        check(
+            esc_triple[1] in tui.HIGH_ASSURANCE_MODELS,
+            f"escalation profile model must be in HIGH_ASSURANCE_MODELS, got {esc_triple}",
+        )
+        # Assert the resolved model in run_store matches model_profiles.py (not a string in a log)
+        strong_id = app.run_identity(stop, head_sha=stop.head_sha, model=esc_triple[1], effort=esc_triple[2])
+        strong_rec = app.run_store.get(strong_id)
+        check(
+            strong_rec is not None and strong_rec.identity.model == esc_triple[1],
+            f"escalated run must use model from model_profiles ({esc_triple[1]}), got {strong_rec}",
+        )
+        # Deliver clean completion for the high-assurance review -> now lands
+        initial_landings = len(app.landing_queue)
+        stop.review_status = "complete"
+        app.apply_review_event(
+            tui.ReviewEvent(
+                key=stop.key,
+                state="complete",
+                note="high-assurance clean",
+                timestamp=int(time.time()),
+            )
+        )
+        await pilot.pause()
+        slay_strong_task = next((t for t in app.landing_queue[initial_landings:] if not t.phase), None)
+        check(
+            slay_strong_task is not None,
+            f"high-assurance clean review must dispatch landing task, queue={app.landing_queue[initial_landings:]}",
         )
         check(
-            task.stops[0].key == stop.key,
-            f"landing task must target stop {stop.key}, got {task.stops[0].key}",
+            app.run_store.get(strong_id).state == tui.RunState.MUTATING,
+            "strong review record must reach MUTATING on landing dispatch",
         )
 
         # Test 2: Slay on PR with findings dispatches fix task
@@ -7162,7 +7221,67 @@ async def main() -> int:
             f"slay on PR with findings must enqueue fix task, queue={app.landing_queue[initial_landings:]}",
         )
 
-        # Test 3: Slay on unreviewed PR registers in run_store and triggers on event
+        # Test 2b: Head produced by fixer is independently reviewed before landing (#411)
+        fixed_head = "b2" + "0" * 38
+        app.record_fixer_head(stop.repository, stop.number, fixed_head)
+        check(
+            app.is_fixer_head(stop.repository, stop.number, fixed_head),
+            "app must explicitly recognise fixer-advanced head",
+        )
+        # Slay when head was advanced by fixer
+        stop.head_sha = "a2" + "0" * 38
+        stop.live["headRefOid"] = fixed_head
+        stop.review_status = "complete"
+        stop.review_result = None
+        old_identity = app.run_identity(stop, head_sha="a2" + "0" * 38)
+        initial_landings = len(app.landing_queue)
+        app.review_pending_keys.add(stop.key)
+        app._dispatch_slay_landing(stop, identity=old_identity)
+        await pilot.pause()
+        check(
+            len(app.landing_queue) == initial_landings,
+            "fixer-advanced head must not land before fresh review",
+        )
+        old_rec = app.run_store.get(old_identity)
+        check(
+            old_rec is not None and old_rec.state == tui.RunState.ESCALATION_REQUIRED,
+            f"old run record must reach ESCALATION_REQUIRED, got {old_rec}",
+        )
+        fixed_id = app.run_identity(stop, head_sha=fixed_head, model=esc_triple[1], effort=esc_triple[2])
+        fixed_rec = app.run_store.get(fixed_id)
+        check(
+            fixed_rec is not None and fixed_rec.identity.head_sha == fixed_head,
+            f"fresh review must be bound to exact new head {fixed_head}",
+        )
+        check(
+            fixed_rec.identity.model == esc_triple[1],
+            f"fresh review on fixed head must use escalation profile model {esc_triple[1]}",
+        )
+        # Completing the review on the fixed head authorises merge
+        initial_landings = len(app.landing_queue)
+        stop.head_sha = fixed_head
+        stop.review_status = "complete"
+        app.apply_review_event(
+            tui.ReviewEvent(
+                key=stop.key,
+                state="complete",
+                note="clean on fixed head",
+                timestamp=int(time.time()),
+            )
+        )
+        await pilot.pause()
+        fixed_land_task = next((t for t in app.landing_queue[initial_landings:] if not t.phase), None)
+        check(
+            fixed_land_task is not None,
+            f"clean review of fixer-advanced head must authorise landing, queue={app.landing_queue[initial_landings:]}",
+        )
+        check(
+            app.run_store.get(fixed_id).state == tui.RunState.MUTATING,
+            "fixed head record must reach MUTATING on landing",
+        )
+
+        # Test 3: Slay on unreviewed low-risk PR registers in run_store and triggers on event
+        stop.title = "chore(deps): bump deps"
         stop.head_sha = "a3" + "0" * 38
         stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "unreviewed"
