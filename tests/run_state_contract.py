@@ -425,6 +425,29 @@ class RunStateContractTests(unittest.TestCase):
             self.assertIsNotNone(found)
             self.assertEqual(found.identity, identity)
             self.assertIsNone(store.get_by_pr("projectbluefin/review", 999))
+    def test_human_review_refusal_is_distinct_from_a_failed_mutation(self):
+        with self._store_dir() as root:
+            store = RunStateStore(root)
+
+            def landed_to(state):
+                identity = _identity(414 + list(RunState).index(state))
+                store.create(identity)
+                store.transition(identity, RunState.REVIEWING)
+                store.transition(identity, RunState.REVIEW_CLEAN)
+                store.transition(identity, RunState.MUTATING)
+                return store.transition(identity, state, reason="gate")
+
+            refused = landed_to(RunState.HUMAN_REVIEW_MISSING)
+            broke = landed_to(RunState.MUTATION_FAILED)
+
+            self.assertNotEqual(refused.state, broke.state)
+            self.assertNotEqual(refused.terminal_outcome, broke.terminal_outcome)
+            self.assertEqual(
+                refused.terminal_outcome, TerminalOutcome.HUMAN_REVIEW_MISSING
+            )
+            for record in (refused, broke):
+                self.assertTrue(record.is_terminal)
+                self.assertFalse(record.may_mutate())
 
 
 if __name__ == "__main__":

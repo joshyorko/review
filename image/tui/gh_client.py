@@ -312,4 +312,3 @@ def run_mutation(
 
 def get_breaker(dependency: Dependency | str = Dependency.GITHUB) -> BreakerState:
     return default_breakers.state(dependency)
-

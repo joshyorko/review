@@ -41,6 +41,7 @@ class RunState(str, Enum):
     REVIEW_UNPARSABLE = "review_unparsable"
     MUTATION_FAILED = "mutation_failed"
     HEAD_CHANGED = "head_changed"
+    HUMAN_REVIEW_MISSING = "human_review_missing"
 
     @property
     def is_terminal(self) -> bool:
@@ -55,6 +56,7 @@ class TerminalOutcome(str, Enum):
     REVIEW_UNPARSABLE = "review_unparsable"
     MUTATION_FAILED = "mutation_failed"
     HEAD_CHANGED = "head_changed"
+    HUMAN_REVIEW_MISSING = "human_review_missing"
 
 
 _TERMINAL_OUTCOMES = {
@@ -65,6 +67,7 @@ _TERMINAL_OUTCOMES = {
     RunState.REVIEW_UNPARSABLE: TerminalOutcome.REVIEW_UNPARSABLE,
     RunState.MUTATION_FAILED: TerminalOutcome.MUTATION_FAILED,
     RunState.HEAD_CHANGED: TerminalOutcome.HEAD_CHANGED,
+    RunState.HUMAN_REVIEW_MISSING: TerminalOutcome.HUMAN_REVIEW_MISSING,
 }
 
 _IN_FLIGHT = frozenset({RunState.REVIEWING, RunState.MUTATING})
@@ -102,6 +105,7 @@ _TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.MUTATING: frozenset({
         RunState.COMPLETED,
         RunState.MUTATION_FAILED,
+        RunState.HUMAN_REVIEW_MISSING,
         RunState.HEAD_CHANGED,
         RunState.BLOCKED,
         RunState.RETRY_AT,

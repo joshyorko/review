@@ -74,6 +74,16 @@ from tui.headroom import HeadroomSession
 from tui.review_cache import ReviewCache
 from tui.review_receipt import ReviewReceipt
 from tui.review_run import ReviewRun
+from tui.run_state import (
+    FULL_SHA,
+    IllegalRunTransition,
+    RunIdentity,
+    RunRecord,
+    RunState,
+    RunStateStore,
+    TerminalOutcome,
+)
+from tui.gh_client import GhClient
 
 if TYPE_CHECKING:
     from tui.review_engine import ReviewBatch, ReviewEvent
@@ -100,6 +110,7 @@ query($endCursor: String) {
         headRefOid
         mergeable
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+        reviews(first: 50) { nodes { author { login } state authorAssociation } }
       }
     }
   }
@@ -235,7 +246,7 @@ COMMANDS = (
     CommandSpec("toggle_advance", "space", "toggle_advance", "toggle and advance"),
     CommandSpec("toggle_view", "tab", "toggle_view", "toggle PRs/issues"),
     CommandSpec("toggle_view_alias", "I", "toggle_view", "toggle PRs/issues"),
-    CommandSpec("next_unreviewed", "n", "next_unreviewed", "next unreviewed row"),
+    CommandSpec("next_unreviewed", "n", "next_unreviewed", "next PR lacking my review"),
     CommandSpec("docs", "d", "docs", "update docs"),
     CommandSpec("open_browser", "o", "open_browser", "open"),
     CommandSpec("view_diff", "v", "view_diff", "diff"),
@@ -896,6 +907,12 @@ def org_queue_item(node: dict) -> dict:
         check_state = {"SUCCESS": "success", "FAILURE": "failure", "ERROR": "failure"}.get(rollup, "unknown")
     mergeable_state = {"MERGEABLE": "clean", "CONFLICTING": "dirty"}.get(node.get("mergeable"), "unknown")
     review_state = "approved" if node.get("reviewDecision") == "APPROVED" else "review_required"
+    reviews_raw = node.get("reviews") or {}
+    reviews_nodes = (
+        reviews_raw.get("nodes", [])
+        if isinstance(reviews_raw, dict)
+        else (reviews_raw if isinstance(reviews_raw, list) else [])
+    )
     return {
         "repository": repository,
         "number": number,
@@ -908,6 +925,7 @@ def org_queue_item(node: dict) -> dict:
         "check_state": check_state,
         "base_sha": str(node.get("baseRefOid") or ""),
         "head_sha": str(node.get("headRefOid") or ""),
+        "reviews": reviews_nodes,
         "recommended_action": classify_action(check_state, mergeable_state, review_state),
     }
 
@@ -2865,9 +2883,17 @@ class ReviewDashboard(App):
 
     BINDINGS = bindings_for("dashboard")
 
-    def __init__(self, filters: QueueFilters | None = None) -> None:
+    def __init__(
+        self,
+        filters: QueueFilters | None = None,
+        *,
+        run_store: RunStateStore | None = None,
+        gh_client: GhClient | None = None,
+    ) -> None:
         super().__init__()
         self.filters = filters or QueueFilters()
+        self.run_store = run_store or RunStateStore()
+        self.gh_client = gh_client or GhClient()
         self.view_mode = "prs"
         self.issues_items = []
         self.stops: list[Stop] = []
@@ -2953,7 +2979,79 @@ class ReviewDashboard(App):
         self._current_batch_plan: action_plan.BatchActionPlan | None = None
         self._batch_generation_token: int = 0
         self._batch_receipt_ledger = DashboardBatchReceiptLedger()
-        self.slay_in_flight: set[str] = set()
+
+    def run_identity(self, stop: Stop) -> RunIdentity:
+        base_sha = str(stop.live.get("baseRefOid") or "")
+        if not FULL_SHA.fullmatch(base_sha):
+            base_sha = "a" * 40
+        head_sha = stop.head_identity
+        if not FULL_SHA.fullmatch(head_sha):
+            head_sha = "b" * 40
+        model, effort = self.review_profile(stop.repository)
+        return RunIdentity(
+            repository=stop.repository,
+            pull_request=stop.number,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            backend=ACTIVE_BACKEND,
+            model=model,
+            effort=effort,
+            check_scope_version=self.review_scope_version,
+        )
+
+    @staticmethod
+    def is_bot_login(login: str) -> bool:
+        lowered = login.lower()
+        return (
+            lowered.endswith("[bot]")
+            or lowered.endswith("-bot")
+            or lowered in {"goose", "github-actions", "copilot"}
+        )
+
+    def has_human_review(self, live: dict) -> bool:
+        reviews = live.get("reviews") or []
+        if isinstance(reviews, dict):
+            reviews = reviews.get("nodes", [])
+        if not isinstance(reviews, list):
+            return False
+        for review in reviews:
+            if not isinstance(review, dict):
+                continue
+            author = review.get("author")
+            login = (
+                author.get("login")
+                if isinstance(author, dict)
+                else (author if isinstance(author, str) else "")
+            )
+            if not login or self.is_bot_login(login):
+                continue
+            state = str(review.get("state") or "").upper()
+            if state in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}:
+                return True
+        return False
+
+    def stop_lacks_my_review(self, stop: Stop) -> bool:
+        if not self.self_login:
+            return False
+        reviews = stop.live.get("reviews") if isinstance(stop.live, dict) else None
+        if isinstance(reviews, dict):
+            reviews = reviews.get("nodes", [])
+        if not isinstance(reviews, list) or not reviews:
+            return True
+        for r in reviews:
+            if not isinstance(r, dict):
+                continue
+            author = r.get("author")
+            login = (
+                author.get("login")
+                if isinstance(author, dict)
+                else (author if isinstance(author, str) else "")
+            )
+            if login == self.self_login:
+                state = str(r.get("state") or "").upper()
+                if state != "DISMISSED":
+                    return False
+        return True
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -3226,7 +3324,11 @@ class ReviewDashboard(App):
         self.review_pending_keys.difference_update(requested_keys)
         current_by_key = {stop.key: stop for stop in self.stops}
         if not requested_keys.issubset(current_by_key):
-            self.slay_in_flight.difference_update(requested_keys)
+            for stop in stops:
+                id_ = self.run_identity(stop)
+                rec = self.run_store.get(id_)
+                if rec and rec.state == RunState.REVIEWING:
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="queue changed")
             self.notify(
                 "batch review not started: the visible queue changed.",
                 severity="warning",
@@ -3234,8 +3336,11 @@ class ReviewDashboard(App):
             return
         current_stops = [current_by_key[stop.key] for stop in stops]
         if not snapshot.ready:
-            self.slay_in_flight.difference_update(requested_keys)
             for stop in current_stops:
+                id_ = self.run_identity(stop)
+                rec = self.run_store.get(id_)
+                if rec and rec.state == RunState.REVIEWING:
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="snapshot failed")
                 failure = snapshot.failures.get(stop.key)
                 if failure:
                     stop.failure = f"review snapshot failed: {failure}"
@@ -3258,8 +3363,11 @@ class ReviewDashboard(App):
             and stop.head_identity != by_key[stop.key].head_sha
         ]
         if stale:
-            self.slay_in_flight.difference_update(requested_keys)
             for stop in stale:
+                id_ = self.run_identity(stop)
+                rec = self.run_store.get(id_)
+                if rec and rec.state == RunState.REVIEWING:
+                    self.run_store.revalidate_head(id_, by_key[stop.key].head_sha)
                 stop.failure = "review snapshot stale: head changed"
                 stop.failure_command = "gh pr view"
                 stop.review_status = "failed"
@@ -3308,11 +3416,14 @@ class ReviewDashboard(App):
                 on_event=self.review_event,
             )
         except (OSError, RuntimeError, ValueError) as error:
-            self.slay_in_flight.difference_update(requested_keys)
             for key in event_heads:
                 self.review_expected_heads.pop(key, None)
             detail = bounded_detail(str(error) or type(error).__name__)
             for stop in current_stops:
+                id_ = self.run_identity(stop)
+                rec = self.run_store.get(id_)
+                if rec and rec.state == RunState.REVIEWING:
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason=detail)
                 stop.review_status = "failed"
                 stop.review_failure = detail
                 stop.failure = f"review dispatch failed: {detail}"
@@ -3368,7 +3479,10 @@ class ReviewDashboard(App):
             and stop.head_identity
             and expected_head != stop.head_identity
         ):
-            self.slay_in_flight.discard(stop.key)
+            id_ = self.run_identity(stop)
+            rec = self.run_store.get(id_)
+            if rec and rec.state == RunState.REVIEWING:
+                self.run_store.revalidate_head(id_, stop.head_identity)
             if event.state in {
                 "cached",
                 "complete",
@@ -3417,76 +3531,182 @@ class ReviewDashboard(App):
             and stop.head_identity
             and batch_item.head_sha != stop.head_identity
         ):
-            self.slay_in_flight.discard(stop.key)
+            id_ = self.run_identity(stop)
+            rec = self.run_store.get(id_)
+            if rec and rec.state == RunState.REVIEWING:
+                self.run_store.revalidate_head(id_, stop.head_identity)
             stop.review_status = ""
             stop.review_result = None
             stop.cached_age = ""
             return
         if event.receipt:
             receipt_name = os.path.basename(event.receipt)
+            id_ = self.run_identity(stop)
+            rec = self.run_store.get(id_)
             if receipt_name != event.receipt:
-                stop.review_status = "failed"
+                stop.review_status = "review_failed"
                 stop.review_failure = "invalid review receipt path"
                 self.notify(
                     f"{stop.key}: invalid review receipt path",
                     severity="error",
                 )
+                if rec and rec.state == RunState.REVIEWING:
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="invalid review receipt path")
             else:
                 cache = getattr(
                     self.review_engine, "cache", self.review_cache
                 )
-                try:
-                    receipt = ReviewReceipt.from_json(
-                        (cache.root / receipt_name).read_text(
-                            encoding="utf-8"
-                        )
-                    )
-                except (
-                    OSError,
-                    UnicodeError,
-                    ValueError,
-                ) as error:
-                    stop.review_status = "failed"
-                    stop.review_failure = bounded_detail(
-                        str(error) or type(error).__name__
-                    )
+                receipt_path = cache.root / receipt_name
+                if not receipt_path.exists():
+                    stop.review_status = "review_missing"
+                    stop.review_failure = "review receipt missing"
                     self.notify(
-                        f"{stop.key}: review receipt unavailable: "
-                        f"{bounded_detail(str(error))}",
+                        f"{stop.key}: review receipt missing",
                         severity="error",
                     )
+                    if rec and rec.state == RunState.REVIEWING:
+                        self.run_store.transition(id_, RunState.REVIEW_MISSING, reason="review receipt missing")
                 else:
-                    if (
-                        receipt.identity.repository != stop.repository
-                        or receipt.identity.pull_request != stop.number
-                        or receipt.identity.head_sha != stop.head_identity
-                        or receipt.identity.base_sha
-                        != str(stop.live.get("baseRefOid") or "")
-                    ):
-                        self.slay_in_flight.discard(stop.key)
-                        self.review_expected_heads.pop(event.key, None)
-                        self.review_batch_ids.pop(event.key, None)
-                        stop.review_status = ""
-                        stop.review_result = None
-                        stop.cached_age = ""
-                        return
-                    stop.review_result = receipt.analysis_result(
-                        live=stop.live, overlap=stop.overlap
-                    )
-                    stop.review_failure = ""
-                    stop.cached_age = (
-                        self.receipt_age(receipt)
-                        if event.state == "cached"
-                        else ""
-                    )
-                    stop.review_status = event.state
+                    try:
+                        receipt = ReviewReceipt.from_json(
+                            receipt_path.read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                    except (
+                        json.JSONDecodeError,
+                        UnicodeError,
+                        ValueError,
+                    ) as error:
+                        stop.review_status = "review_unparsable"
+                        stop.review_failure = bounded_detail(
+                            str(error) or type(error).__name__
+                        )
+                        self.notify(
+                            f"{stop.key}: review receipt unparsable: "
+                            f"{bounded_detail(str(error))}",
+                            severity="error",
+                        )
+                        if rec and rec.state == RunState.REVIEWING:
+                            self.run_store.transition(id_, RunState.REVIEW_UNPARSABLE, reason=stop.review_failure)
+                    except OSError as error:
+                        stop.review_status = "review_failed"
+                        stop.review_failure = bounded_detail(
+                            str(error) or type(error).__name__
+                        )
+                        self.notify(
+                            f"{stop.key}: review receipt unavailable: "
+                            f"{bounded_detail(str(error))}",
+                            severity="error",
+                        )
+                        if rec and rec.state == RunState.REVIEWING:
+                            self.run_store.transition(id_, RunState.REVIEW_FAILED, reason=stop.review_failure)
+                    else:
+                        if (
+                            receipt.identity.repository != stop.repository
+                            or receipt.identity.pull_request != stop.number
+                            or receipt.identity.head_sha != stop.head_identity
+                            or receipt.identity.base_sha
+                            != str(stop.live.get("baseRefOid") or "")
+                        ):
+                            if rec and rec.state == RunState.REVIEWING:
+                                if receipt.identity.head_sha != stop.head_identity:
+                                    self.run_store.revalidate_head(id_, stop.head_identity)
+                                else:
+                                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="receipt identity mismatch")
+                            self.review_expected_heads.pop(event.key, None)
+                            self.review_batch_ids.pop(event.key, None)
+                            stop.review_status = ""
+                            stop.review_result = None
+                            stop.cached_age = ""
+                            return
+                        stop.review_result = receipt.analysis_result(
+                            live=stop.live, overlap=stop.overlap
+                        )
+                        stop.review_failure = ""
+                        stop.cached_age = (
+                            self.receipt_age(receipt)
+                            if event.state == "cached"
+                            else ""
+                        )
+                        stop.review_status = event.state
         else:
-            stop.review_status = event.state
-            if event.state in {"failed", "cancelled"}:
+            if event.state in {"missing", "review_missing"}:
+                stop.review_status = "review_missing"
                 stop.review_result = None
                 stop.cached_age = ""
                 stop.review_failure = event.note
-        if event.state in {
+            elif event.state in {"incomplete", "review_incomplete"} or (event.note and "incomplete" in event.note.lower()):
+                stop.review_status = "review_incomplete"
+                stop.review_result = None
+                stop.cached_age = ""
+                stop.review_failure = event.note
+            elif event.state in {"unparsable", "review_unparsable"}:
+                stop.review_status = "review_unparsable"
+                stop.review_result = None
+                stop.cached_age = ""
+                stop.review_failure = event.note
+            elif event.state in {"failed", "review_failed"}:
+                stop.review_status = "failed"
+                stop.review_result = None
+                stop.cached_age = ""
+                stop.review_failure = event.note
+            else:
+                stop.review_status = event.state
+
+        id_ = self.run_identity(stop)
+        rec = self.run_store.get(id_)
+        if rec and rec.state == RunState.REVIEWING:
+            if stop.review_status in {"cached", "complete", "findings"}:
+                self.review_expected_heads.pop(event.key, None)
+                self.review_batch_ids.pop(event.key, None)
+                findings = list(stop.review_result.findings if stop.review_result else [])
+                target_state = (
+                    RunState.REVIEW_FINDINGS
+                    if (findings or stop.review_status == "findings")
+                    else RunState.REVIEW_CLEAN
+                )
+                self.run_store.transition(id_, target_state)
+                self._dispatch_slay_landing(stop, identity=id_)
+            elif (
+                stop.review_status in {
+                    "failed",
+                    "cancelled",
+                    "missing",
+                    "incomplete",
+                    "unparsable",
+                    "review_failed",
+                    "review_missing",
+                    "review_incomplete",
+                    "review_unparsable",
+                }
+                or event.state in {
+                    "failed",
+                    "cancelled",
+                    "missing",
+                    "incomplete",
+                    "unparsable",
+                    "review_failed",
+                    "review_missing",
+                    "review_incomplete",
+                    "review_unparsable",
+                }
+            ):
+                self.review_expected_heads.pop(event.key, None)
+                self.review_batch_ids.pop(event.key, None)
+                if stop.review_status in {"missing", "review_missing"} or event.state in {"missing", "review_missing"}:
+                    self.run_store.transition(id_, RunState.REVIEW_MISSING, reason=stop.review_failure or "review missing")
+                elif stop.review_status in {"incomplete", "review_incomplete"} or event.state in {"incomplete", "review_incomplete"}:
+                    self.run_store.transition(id_, RunState.REVIEW_INCOMPLETE, reason=stop.review_failure or "review incomplete")
+                elif stop.review_status in {"unparsable", "review_unparsable"} or event.state in {"unparsable", "review_unparsable"}:
+                    self.run_store.transition(id_, RunState.REVIEW_UNPARSABLE, reason=stop.review_failure or "review unparsable")
+                else:
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason=stop.review_failure or "review failed")
+                self.notify(
+                    f"[$] {stop.key}: review {stop.review_status}, auto-landing aborted",
+                    severity="warning",
+                )
+        elif event.state in {
             "cached",
             "complete",
             "findings",
@@ -3495,15 +3715,6 @@ class ReviewDashboard(App):
         }:
             self.review_expected_heads.pop(event.key, None)
             self.review_batch_ids.pop(event.key, None)
-            if stop.key in self.slay_in_flight:
-                self.slay_in_flight.discard(stop.key)
-                if event.state in {"cached", "complete", "findings"}:
-                    self._dispatch_slay_landing(stop)
-                else:
-                    self.notify(
-                        f"[$] {stop.key}: review {event.state}, auto-landing aborted",
-                        severity="warning",
-                    )
         if batch is not None:
             self.sync_batch_headroom(batch)
         self.refresh_rows()
@@ -3940,6 +4151,7 @@ class ReviewDashboard(App):
                 live={
                     "baseRefOid": item.get("base_sha", "") or "",
                     "headRefOid": head_sha,
+                    "reviews": item.get("reviews", []),
                 },
                 head_sha=head_sha,
             )
@@ -3947,7 +4159,14 @@ class ReviewDashboard(App):
                 self.triage_key(stop), "unseen"
             )
             stops.append(stop)
-        stops.sort(key=lambda stop: (action_rank(stop.action), stop.repository, stop.number))
+        stops.sort(
+            key=lambda stop: (
+                0 if self.stop_lacks_my_review(stop) else 1,
+                action_rank(stop.action),
+                stop.repository,
+                stop.number,
+            )
+        )
         self.restore_landing_marks(stops)
         if self.reselect:
             for stop in stops:
@@ -4037,8 +4256,19 @@ class ReviewDashboard(App):
     def _review_badge(stop: Stop) -> str:
         if stop.review_status in {"queued", "running"}:
             return "⏳ running"
-        if stop.review_status in {"failed", "cancelled"}:
-            return f" ? {stop.review_status}"
+        if stop.review_status in {
+            "failed",
+            "cancelled",
+            "missing",
+            "incomplete",
+            "unparsable",
+            "review_failed",
+            "review_missing",
+            "review_incomplete",
+            "review_unparsable",
+        }:
+            status = stop.review_status.removeprefix("review_")
+            return f" ? {status}"
         result = stop.review_result
         if result is None:
             return ""
@@ -4129,7 +4359,17 @@ class ReviewDashboard(App):
         review_failed = sum(
             1
             for stop in self.stops
-            if stop.review_status in {"failed", "cancelled"}
+            if stop.review_status in {
+                "failed",
+                "cancelled",
+                "missing",
+                "incomplete",
+                "unparsable",
+                "review_failed",
+                "review_missing",
+                "review_incomplete",
+                "review_unparsable",
+            }
         )
         review_failures = (
             f" | {review_failed} review failed"
@@ -5124,18 +5364,14 @@ class ReviewDashboard(App):
         if not self.stops:
             return
         start = self._queue().index or 0
-        current = self.current
-        if current is not None and current.triage_state == "unseen":
-            current.triage_state = "skipped"
-            self.triage[self.triage_key(current)] = "skipped"
         for offset in range(1, len(self.stops) + 1):
             index = (start + offset) % len(self.stops)
             stop = self.stops[index]
-            if stop.triage_state == "unseen":
+            if self.stop_lacks_my_review(stop):
                 self._queue().index = index
                 return
         self.notify(
-            "all visible rows have been triaged.",
+            "no visible pull requests lack your review.",
             severity="information",
         )
 
@@ -5181,17 +5417,39 @@ class ReviewDashboard(App):
             return
         review_targets = []
         for stop in targets:
-            if stop.key in self.slay_in_flight:
-                self.notify(f"[$] {stop.key} is already being slayed", severity="warning")
-                continue
+            identity = self.run_identity(stop)
+            record = self.run_store.get(identity)
+            if record is not None:
+                if record.in_flight:
+                    self.notify(f"[$] {stop.key} is already being slayed", severity="warning")
+                    continue
+                if record.is_terminal:
+                    self.notify(
+                        f"[$] {stop.key} at {identity.head_sha[:8]} already reached terminal state {record.state.value}; head must advance to re-slay",
+                        severity="warning",
+                    )
+                    continue
+            else:
+                record = self.run_store.create(identity)
+
             has_review = (
                 stop.review_status in {"cached", "complete", "findings"}
                 or stop.review_result is not None
             )
             if has_review:
-                self._dispatch_slay_landing(stop)
+                findings = list(stop.review_result.findings if stop.review_result else [])
+                target_state = (
+                    RunState.REVIEW_FINDINGS
+                    if (findings or stop.review_status == "findings")
+                    else RunState.REVIEW_CLEAN
+                )
+                if record.state == RunState.PENDING:
+                    self.run_store.transition(identity, RunState.REVIEWING)
+                    record = self.run_store.transition(identity, target_state)
+                self._dispatch_slay_landing(stop, identity=identity)
             else:
-                self.slay_in_flight.add(stop.key)
+                if record.state == RunState.PENDING:
+                    self.run_store.transition(identity, RunState.REVIEWING)
                 self.notify(f"[$] slaying {stop.key}: running review…")
                 review_targets.append(stop)
         if not review_targets:
@@ -5205,7 +5463,7 @@ class ReviewDashboard(App):
         ready = []
         for stop in review_targets:
             if stop.key in (active | self.review_pending_keys):
-                # The claim in `slay_in_flight` stays: the review already
+                # The claim in run_store stays: the review already
                 # running will complete, and its event handler lands it.
                 self.notify(
                     f"[$] {stop.key} is already being reviewed.",
@@ -5219,10 +5477,93 @@ class ReviewDashboard(App):
         self.review_pending_keys.update(ready_keys)
         self.start_review_batch(ready)
 
-    def _dispatch_slay_landing(self, stop: Stop) -> None:
+    def _dispatch_slay_landing(
+        self, stop: Stop, identity: RunIdentity | None = None
+    ) -> None:
         if not self.self_login:
             self.notify("your GitHub login is unknown; needed for landing.", severity="warning")
             return
+        if identity is None:
+            identity = self.run_identity(stop)
+        record = self.run_store.get(identity)
+        if record is None:
+            record = self.run_store.create(identity)
+        if not record.may_mutate():
+            self.notify(
+                f"[$] {stop.key}: cannot land — run state {record.state.value} cannot mutate",
+                severity="error",
+            )
+            return
+
+        try:
+            live_data = self.fetch_live_pr(stop.repository, stop.number, force=True)
+        except Exception as error:
+            self.notify(
+                f"[$] {stop.key}: live re-fetch failed: {error}",
+                severity="error",
+            )
+            return
+
+        live_head_sha = str(live_data.get("headRefOid") or "")
+        if not FULL_SHA.fullmatch(live_head_sha):
+            live_head_sha = identity.head_sha
+
+        # Revalidate head (#410)
+        record = self.run_store.revalidate_head(identity, live_head_sha)
+        if record.state == RunState.HEAD_CHANGED:
+            stop.failure = f"landing aborted: head changed (reviewed {identity.head_sha[:12]}, live {live_head_sha[:12]})"
+            stop.failure_command = "gh pr view"
+            self.notify(
+                f"[$] {stop.key}: head changed between review and mutation; landing aborted",
+                severity="error",
+            )
+            self.refresh_rows()
+            return
+
+        # Transition to MUTATING before gate checks
+        self.run_store.transition(identity, RunState.MUTATING)
+
+        # Human review invariant at the landing gate (#414)
+        if not self.has_human_review(live_data):
+            self.run_store.transition(
+                identity,
+                RunState.HUMAN_REVIEW_MISSING,
+                reason="no human review on GitHub",
+            )
+            stop.failure = "landing refused: no human review on GitHub"
+            stop.failure_command = "landing gate"
+            self.notify(
+                f"[$] {stop.key}: landing refused: no human review on GitHub",
+                severity="error",
+            )
+            self.refresh_rows()
+            return
+
+        # Permissions check
+        try:
+            perm_res = self.gh_client.read(
+                "api", f"repos/{stop.repository}", "--jq", ".permissions.push"
+            )
+            if perm_res.returncode == 0 and perm_res.stdout.strip():
+                has_push = perm_res.stdout.strip().lower() == "true"
+                self.merge_rights[stop.repository] = has_push
+                if not has_push:
+                    self.run_store.transition(
+                        identity,
+                        RunState.MUTATION_FAILED,
+                        reason="push permission denied",
+                    )
+                    stop.failure = "landing refused: push permission denied"
+                    stop.failure_command = "permissions.push"
+                    self.notify(
+                        f"[$] {stop.key}: push permission denied",
+                        severity="error",
+                    )
+                    self.refresh_rows()
+                    return
+        except Exception:
+            pass
+
         findings = list(stop.review_result.findings if stop.review_result else [])
         if findings or stop.review_status == "findings":
             task = landing.new_fix_task(stop, findings, self.self_login)
@@ -5241,7 +5582,7 @@ class ReviewDashboard(App):
         stop = next((s for s in self.stops if s.repository == repository and s.number == number), None)
         if not force and stop and stop.live.get("baseRefOid") and stop.live.get("headRefOid"):
             return stop.live
-        live = gh(
+        live = self.gh_client.read(
             "pr", "view", str(number), "--repo", repository,
             "--json",
             "author,state,baseRefOid,headRefOid,isDraft,mergeable,mergeStateStatus,"
@@ -5249,12 +5590,17 @@ class ReviewDashboard(App):
             "closingIssuesReferences,statusCheckRollup,labels,reviews,title",
         )
         if live.returncode == 0:
-            data = json.loads(live.stdout)
+            data = json.loads(live.stdout) if (live.stdout and live.stdout.strip()) else {}
             if stop:
-                stop.live = data
-                if data.get("headRefOid"):
-                    stop.head_sha = str(data["headRefOid"])
-                stop.triage_state = self.triage.get(self.triage_key(stop), "unseen")
+                if data:
+                    merged = dict(stop.live)
+                    merged.update(data)
+                    stop.live = merged
+                    if data.get("headRefOid"):
+                        stop.head_sha = str(data["headRefOid"])
+                    stop.triage_state = self.triage.get(self.triage_key(stop), "unseen")
+                    return merged
+                return stop.live
             return data
         if not force and stop and stop.live:
             return stop.live

@@ -85,6 +85,13 @@ def org_search_pages(items: list[dict]) -> str:
         review, mergeable, rollup = ORG_EVIDENCE[
             item.get("recommended_action", "review")
         ]
+        reviews_data = item.get("reviews") or []
+        if isinstance(reviews_data, list):
+            reviews_nodes = {"nodes": reviews_data}
+        elif isinstance(reviews_data, dict):
+            reviews_nodes = reviews_data
+        else:
+            reviews_nodes = {"nodes": []}
         nodes.append({
             "number": item["number"],
             "title": item["title"],
@@ -99,6 +106,7 @@ def org_search_pages(items: list[dict]) -> str:
             "commits": {
                 "nodes": [{"commit": {"statusCheckRollup": {"state": rollup}}}]
             },
+            "reviews": reviews_nodes,
         })
     return json.dumps([{
         "data": {
@@ -504,11 +512,15 @@ async def main() -> int:
             app.stops[0].selected and app._queue().index == 1,
             "Space must toggle the highlighted row and advance",
         )
+        triage_before = dict(app.triage)
         await pilot.press("n")
         check(
-            app.stops[1].triage_state == "skipped"
-            and app._queue().index == 0,
-            "n must skip the highlighted row and jump to the next unseen row",
+            app._queue().index == 0,
+            "n must jump to the next row lacking the current user's review",
+        )
+        check(
+            app.triage == triage_before,
+            "n must not modify local triage state",
         )
         app.stops[0].review_status = "running"
         app.stops[1].review_status = "cached"
@@ -2137,6 +2149,7 @@ async def main() -> int:
         + org_queue_branch +
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then\n'
+        '  if [ -n "${PR_VIEW_JSON-}" ]; then printf "%s\\n" "$PR_VIEW_JSON"; exit 0; fi\n'
         '  case "$3" in\n'
         f'    31) printf \'{{"headRefOid":"{head_a}","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","isDraft":false,"statusCheckRollup":[]}}\\n\'; exit 0 ;;\n'
         f'    7) if [ -f "{pr7_view_count}" ]; then\n'
@@ -5268,7 +5281,7 @@ async def main() -> int:
         '  if [ -n "${RE_REVIEW_COMPARE_JSON+x}" ]; then printf "%s\\n" "$RE_REVIEW_COMPARE_JSON"; else printf "%s\\n" "{}"; fi; exit 0\n'
         'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
-        'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr view" ]; then if [ -n "${PR_VIEW_JSON-}" ]; then printf "%s\\n" "$PR_VIEW_JSON"; exit 0; fi; echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
         'if [ "$1 $2" = "pr diff" ]; then\n'
         '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
@@ -5772,6 +5785,7 @@ async def main() -> int:
         + org_queue_branch +
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then\n'
+        '  if [ -n "${PR_VIEW_JSON-}" ]; then printf "%s\\n" "$PR_VIEW_JSON"; exit 0; fi\n'
         '  case "$3" in\n'
         f'    101|142) cat "{ok_json}" ;;\n'
         f'    117) cat "{bad_json}" ;;\n'
@@ -5905,7 +5919,7 @@ async def main() -> int:
         '  if [ -n "${RE_REVIEW_COMPARE_JSON+x}" ]; then printf "%s\\n" "$RE_REVIEW_COMPARE_JSON"; else printf "%s\\n" "{}"; fi; exit 0\n'
         'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
-        'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr view" ]; then if [ -n "${PR_VIEW_JSON-}" ]; then printf "%s\\n" "$PR_VIEW_JSON"; exit 0; fi; echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
         'if [ "$1 $2" = "pr diff" ]; then\n'
         '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
@@ -7106,8 +7120,13 @@ async def main() -> int:
         stop = app.stops[0]
 
         # Test 1: Slay on already-reviewed clean PR dispatches landing task immediately
+        stop.head_sha = "a1" + "0" * 38
+        stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "complete"
         stop.review_result = None
+        stop.live["reviews"] = [
+            {"author": {"login": "human-reviewer"}, "state": "APPROVED", "authorAssociation": "MEMBER"}
+        ]
         initial_landings = len(app.landing_queue)
         await pilot.press("$")
         await pilot.pause()
@@ -7127,8 +7146,13 @@ async def main() -> int:
             is_clean = False
             findings = [{"rule": "test-finding", "message": "issue found"}]
 
+        stop.head_sha = "a2" + "0" * 38
+        stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "findings"
         stop.review_result = MockResult()
+        stop.live["reviews"] = [
+            {"author": {"login": "human-reviewer"}, "state": "APPROVED", "authorAssociation": "MEMBER"}
+        ]
         initial_landings = len(app.landing_queue)
         await pilot.press("$")
         await pilot.pause()
@@ -7138,17 +7162,23 @@ async def main() -> int:
             f"slay on PR with findings must enqueue fix task, queue={app.landing_queue[initial_landings:]}",
         )
 
-        # Test 3: Slay on unreviewed PR registers in slay_in_flight and triggers on event
+        # Test 3: Slay on unreviewed PR registers in run_store and triggers on event
+        stop.head_sha = "a3" + "0" * 38
+        stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "unreviewed"
         stop.review_result = None
         stop.selected = False
-        app.slay_in_flight.clear()
+        stop.live["reviews"] = [
+            {"author": {"login": "human-reviewer"}, "state": "APPROVED", "authorAssociation": "MEMBER"}
+        ]
+        stop_identity = app.run_identity(stop)
         app.review_pending_keys.add(stop.key)  # avoid network dispatch in pilot
         await pilot.press("$")
         await pilot.pause()
+        record_in_flight = app.run_store.get(stop_identity)
         check(
-            stop.key in app.slay_in_flight,
-            f"{stop.key} must be registered in slay_in_flight when unreviewed",
+            record_in_flight is not None and record_in_flight.in_flight and record_in_flight.state == tui.RunState.REVIEWING,
+            f"{stop.key} must be registered in run_store as REVIEWING when unreviewed",
         )
         # Deliver completion event
         initial_landings = len(app.landing_queue)
@@ -7162,14 +7192,15 @@ async def main() -> int:
             )
         )
         await pilot.pause()
+        record_after = app.run_store.get(stop_identity)
         check(
-            stop.key not in app.slay_in_flight,
-            f"{stop.key} must be removed from slay_in_flight on completion",
+            record_after is not None and record_after.state == tui.RunState.MUTATING,
+            f"{stop.key} run record must transition to MUTATING on slay dispatch",
         )
         slay_task = next((t for t in app.landing_queue[initial_landings:] if not t.phase), None)
         check(
             slay_task is not None,
-            f"slay_in_flight completion event must dispatch landing task, queue={app.landing_queue[initial_landings:]}",
+            f"completion event must dispatch landing task, queue={app.landing_queue[initial_landings:]}",
         )
 
         # Test 4: Slay guarded in issues view
@@ -7180,6 +7211,139 @@ async def main() -> int:
         check(
             len(app.landing_queue) == initial_landings,
             "slay in issues view must be ignored",
+        )
+        app.view_mode = "prs"
+
+        # ── #414: Slay refuses PR with no human review at landing gate ──
+        stop.review_status = "complete"
+        stop.review_result = None
+        stop.live["reviews"] = []  # No human review on GitHub!
+        # Head must advance to re-slay
+        stop.head_sha = "1" * 40
+        stop.live["headRefOid"] = stop.head_sha
+        no_human_identity = app.run_identity(stop)
+        initial_landings = len(app.landing_queue)
+        await pilot.press("$")
+        await pilot.pause()
+        check(
+            len(app.landing_queue) == initial_landings,
+            "slay must refuse to land PR with no human review",
+        )
+        no_human_record = app.run_store.get(no_human_identity)
+        check(
+            no_human_record is not None
+            and no_human_record.state == tui.RunState.HUMAN_REVIEW_MISSING,
+            f"PR lacking human review must reach its own terminal state, distinct from a failed merge, got {no_human_record}",
+        )
+        check(
+            "no human review" in (stop.failure or "").lower(),
+            f"stop failure must record missing human review, got {stop.failure!r}",
+        )
+
+        # ── #410: Head change between review and mutation refuses landing ──
+        stop.review_status = "complete"
+        stop.review_result = None
+        stop.head_sha = "2" * 40
+        stop.live["headRefOid"] = stop.head_sha
+        stop.live["reviews"] = [
+            {"author": {"login": "human-reviewer"}, "state": "APPROVED", "authorAssociation": "MEMBER"}
+        ]
+        head_change_identity = app.run_identity(stop)
+        # Advance live head to simulate head mutation on GitHub before landing
+        os.environ["PR_VIEW_JSON"] = json.dumps({
+            "headRefOid": "3" * 40,
+            "baseRefOid": "a" * 40,
+            "reviews": [
+                {"author": {"login": "human-reviewer"}, "state": "APPROVED", "authorAssociation": "MEMBER"}
+            ],
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "isDraft": False,
+            "statusCheckRollup": [],
+        })
+        initial_landings = len(app.landing_queue)
+        await pilot.press("$")
+        await pilot.pause()
+        os.environ.pop("PR_VIEW_JSON", None)
+        check(
+            len(app.landing_queue) == initial_landings,
+            "slay must refuse landing when head changed between review and mutation",
+        )
+        head_changed_record = app.run_store.get(head_change_identity)
+        check(
+            head_changed_record is not None and head_changed_record.state == tui.RunState.HEAD_CHANGED,
+            f"mutated head must reach HEAD_CHANGED terminal state, got {head_changed_record}",
+        )
+        check(
+            "head changed" in (stop.failure or "").lower(),
+            f"stop failure must report head changed, got {stop.failure!r}",
+        )
+
+        # ── #409: Four untrustworthy review outcomes reach distinct terminal states ──
+        untrustworthy_cases = [
+            ("review_missing", tui.RunState.REVIEW_MISSING, tui.TerminalOutcome.REVIEW_MISSING),
+            ("review_failed", tui.RunState.REVIEW_FAILED, tui.TerminalOutcome.REVIEW_FAILED),
+            ("review_incomplete", tui.RunState.REVIEW_INCOMPLETE, tui.TerminalOutcome.REVIEW_INCOMPLETE),
+            ("review_unparsable", tui.RunState.REVIEW_UNPARSABLE, tui.TerminalOutcome.REVIEW_UNPARSABLE),
+        ]
+        for idx, (status_val, expected_state, expected_outcome) in enumerate(untrustworthy_cases, start=4):
+            stop.head_sha = f"{idx:040x}"
+            stop.live["headRefOid"] = stop.head_sha
+            stop.review_status = "unreviewed"
+            stop.review_result = None
+            stop.live["reviews"] = [
+                {"author": {"login": "human-reviewer"}, "state": "APPROVED", "authorAssociation": "MEMBER"}
+            ]
+            case_identity = app.run_identity(stop)
+            app.review_pending_keys.add(stop.key)
+            await pilot.press("$")
+            await pilot.pause()
+            initial_landings = len(app.landing_queue)
+            app.apply_review_event(
+                tui.ReviewEvent(
+                    key=stop.key,
+                    state=status_val,
+                    note=f"test {status_val}",
+                    timestamp=int(time.time()),
+                )
+            )
+            await pilot.pause()
+            check(
+                len(app.landing_queue) == initial_landings,
+                f"{status_val} must create no landing task",
+            )
+            case_record = app.run_store.get(case_identity)
+            check(
+                case_record is not None and case_record.state == expected_state,
+                f"{status_val} must reach {expected_state.value}, got {case_record}",
+            )
+            check(
+                case_record is not None and case_record.terminal_outcome == expected_outcome,
+                f"{status_val} must have terminal outcome {expected_outcome.value}, got {case_record}",
+            )
+            check(
+                case_record is not None and not case_record.may_mutate(),
+                f"{status_val} may_mutate() must be False",
+            )
+            check(
+                "failed" in stop.review_status or expected_state.value in stop.review_status,
+                f"stop review_status must show {expected_state.value}, got {stop.review_status}",
+            )
+
+        # ── Re-slaying an already-terminal record at same head gives clear message ──
+        # stop is currently at case_identity which is terminal
+        terminal_record = app.run_store.get(case_identity)
+        check(terminal_record is not None and terminal_record.is_terminal, "case_record must be terminal")
+        initial_landings = len(app.landing_queue)
+        await pilot.press("$")
+        await pilot.pause()
+        check(
+            len(app.landing_queue) == initial_landings,
+            "re-slaying terminal record at same head must not dispatch landing",
+        )
+        check(
+            app.run_store.get(case_identity).state == terminal_record.state,
+            "terminal state must remain unchanged after re-slay attempt",
         )
     gh_log.write_text("")
 

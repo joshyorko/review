@@ -21,6 +21,7 @@ python3 "$repo_root/tests/review_transport_contract.py"
 python3 "$repo_root/tests/capacity_contract.py"
 python3 "$repo_root/tests/model_profiles_contract.py"
 python3 "$repo_root/tests/run_state_contract.py"
+python3 "$repo_root/tests/slay_state_contract.py"
 python3 "$repo_root/tests/gh_client_contract.py"
 
 fail() {
