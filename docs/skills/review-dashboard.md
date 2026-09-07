@@ -44,7 +44,7 @@ Do not use this for the launcher ([`launcher.md`](launcher.md)), the container i
 
 `image/tui/semantic_view.py` defines the pure semantic contract for the dashboard.
 `ActionID` separates verdict selection, review submission, PR mutations, and navigation.
-`command_registry()` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter,
+`COMMANDS` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter,
 Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`, `Tab`/`I`).
 
 `QueueRow` and `DecisionCard` bind head SHA, CI rollup, mergeability, and findings.

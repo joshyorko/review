@@ -1299,7 +1299,7 @@ async def main() -> int:
 
     # Semantic navigation contract: bindings, help, and the palette must be
     # projections of one registry rather than independent key lists.
-    registry = tui.command_registry()
+    registry = tui.COMMANDS
     ids = {command.id for command in registry}
     check(
         {"navigate_down", "navigate_up", "navigate_first", "navigate_last",

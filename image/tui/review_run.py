@@ -147,9 +147,6 @@ class ReviewRunController:
     state: ReviewRunState = ReviewRunState.PENDING
     _terminal_result: ReviewResult | None = field(default=None, repr=False)
 
-    def has_result(self) -> bool:
-        return self._terminal_result is not None
-
     def terminal_result(self) -> ReviewResult | None:
         return self._terminal_result
 

@@ -257,8 +257,6 @@ grep -q 'never force-push, never remove a hold' "$landing_py" ||
 # satisfy the governor's authorship contract (#247).
 grep -q '/api/v1/prs/{owner}/{repository}/{stop.number}/queue-automerge' "$tui" ||
   fail "queueing must call Hive's queue-automerge endpoint"
-grep -q 'QUEUE_LABEL = "lgtm"' "$tui" ||
-  fail "the sweep's label must still be lgtm"
 queue_body="$(sed -n '/def _queue_automerge/,/def action_merge/p' "$tui")"
 grep -q '"gh", "pr", "review"' <<<"$queue_body" &&
   fail "queueing must never submit a human-authored approval"

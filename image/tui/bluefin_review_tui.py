@@ -188,9 +188,6 @@ MAX_CONCURRENT_LANDINGS = int(
 )
 HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
-# The label Hive's governor sweep scans for. It is not defined in most
-# repositories; Hive's queue endpoint owns creating and applying it.
-QUEUE_LABEL = "lgtm"
 MAX_RE_REVIEW_FILES = 128
 MAX_RE_REVIEW_HUNKS = 512
 MAX_RE_REVIEW_RESPONSE_CHARS = 1_000_000
@@ -303,10 +300,6 @@ COMMANDS = (
     CommandSpec("refresh", "R", "refresh", "refresh"),
     CommandSpec("slay_pr", "$", "slay_pr", "slay (review+fix+land)"),
 )
-
-
-def command_registry() -> tuple[CommandSpec, ...]:
-    return COMMANDS
 
 
 def bindings_for(_owner) -> list[Binding]:
