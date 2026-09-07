@@ -83,7 +83,28 @@ from tui.run_state import (
     RunStateStore,
     TerminalOutcome,
 )
-from tui.gh_client import GhClient
+try:
+    from tui.gh_client import (
+        BreakerRegistry,
+        BreakerState,
+        Dependency,
+        GhClient,
+        default_client,
+        get_breaker,
+        gh as gh_client_read,
+        run_mutation as gh_client_run_mutation,
+    )
+except ImportError:
+    from gh_client import (  # type: ignore[no-redef]
+        BreakerRegistry,
+        BreakerState,
+        Dependency,
+        GhClient,
+        default_client,
+        get_breaker,
+        gh as gh_client_read,
+        run_mutation as gh_client_run_mutation,
+    )
 
 try:
     from tui.model_profiles import (
@@ -478,15 +499,17 @@ def link(text: str, url: str) -> str:
 
 
 def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["gh", *args], capture_output=True, text=True, timeout=timeout
-    )
+    # Bare subprocess.run calls replaced by throttled gh_client.read
+    return gh_client_read(*args, timeout=timeout)
 
 
-def _run_mutation(command: list[str], timeout: int = MUTATION_TIMEOUT) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        command, capture_output=True, text=True, timeout=timeout
-    )
+def _run_mutation(
+    command: list[str] | Sequence[str],
+    timeout: int = MUTATION_TIMEOUT,
+    idempotent: bool = False,
+) -> subprocess.CompletedProcess:
+    # Bare subprocess.run(command) replaced by gh_client.run_mutation with deadlines
+    return gh_client_run_mutation(command, timeout=timeout, idempotent=idempotent)
 
 
 def fetch_live_review(repository: str, number: int) -> dict:
@@ -2910,7 +2933,7 @@ class ReviewDashboard(App):
         super().__init__()
         self.filters = filters or QueueFilters()
         self.run_store = run_store or RunStateStore()
-        self.gh_client = gh_client or GhClient()
+        self.gh_client = gh_client or default_client
         self.view_mode = "prs"
         self.issues_items = []
         self.stops: list[Stop] = []
@@ -4453,6 +4476,17 @@ class ReviewDashboard(App):
         review_cap = getattr(self.review_engine, "effective_review_cap", lambda: 0)()
         review_running = getattr(self.review_engine, "active_review_slots", lambda: 0)()
         reviews = f" | review slots: {review_running}/{review_cap}"
+        breaker_parts = []
+        for dep in Dependency:
+            b_state = getattr(self.gh_client, "state", lambda d: BreakerState(False))(dep)
+            if not b_state.blocked:
+                d_state = get_breaker(dep)
+                if d_state.blocked:
+                    b_state = d_state
+            if b_state.blocked:
+                retry_detail = f" (retry_at {b_state.retry_at})" if b_state.retry_at is not None else ""
+                breaker_parts.append(f" | {dep.value} breaker: blocked{retry_detail}")
+        breakers = "".join(breaker_parts)
         shown = len(self.stops)
         total = len(self.queue_items)
         scope = self.filters.action or "all"
@@ -4515,7 +4549,7 @@ class ReviewDashboard(App):
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}"
-                f"{reviews} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+                f"{reviews}{breakers} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
         else:
             status_bar.update(
@@ -4523,7 +4557,7 @@ class ReviewDashboard(App):
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}{stuck}{review_failures}{agents}{landed}{policy}"
-                f"{reviews} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+                f"{reviews}{breakers} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
 
     def action_filter(self) -> None:
@@ -5249,7 +5283,7 @@ class ReviewDashboard(App):
         for command in commands:
             try:
                 result = _run_mutation(
-                    command, timeout=MUTATION_TIMEOUT
+                    command, timeout=MUTATION_TIMEOUT, idempotent=False
                 )
             except (subprocess.TimeoutExpired, OSError) as error:
                 trace(
@@ -6231,6 +6265,7 @@ class ReviewDashboard(App):
             res = _run_mutation(
                 cmd,
                 timeout=MUTATION_TIMEOUT,
+                idempotent=False,
             )
             return action_plan.OperationResult(
                 return_code=res.returncode,

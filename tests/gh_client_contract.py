@@ -1,5 +1,6 @@
 # tests/gh_client_contract.py
 import os
+import re
 import subprocess
 import sys
 import time
@@ -311,6 +312,35 @@ else:
                 return
             time.sleep(0.05)
         self.fail(f"grandchild {grandchild} survived the process-group deadline kill")
+
+    def test_dashboard_contains_no_bare_subprocess_run_bypassing_gh_client(self):
+        tui_path = Path(__file__).parents[1] / "image" / "tui" / "bluefin_review_tui.py"
+        content = tui_path.read_text()
+        self.assertFalse(
+            bool(re.search(r'subprocess\.run\(\s*\[\s*["\']gh["\']', content)),
+            "bluefin_review_tui.py must contain no bare subprocess.run(['gh', ...]) bypassing gh_client",
+        )
+        gh_body = content.split("def gh(")[1].split("def _run_mutation")[0]
+        self.assertNotIn(
+            "return subprocess.run",
+            gh_body,
+            "gh() must delegate to gh_client rather than calling subprocess.run directly",
+        )
+        mut_body = content.split("def _run_mutation(")[1].split("def fetch_live_review")[0]
+        self.assertNotIn(
+            "return subprocess.run",
+            mut_body,
+            "_run_mutation() must delegate to gh_client rather than calling subprocess.run directly",
+        )
+
+    def test_mutation_does_not_retry_when_idempotency_not_proven(self):
+        runner = QueueRunner(rate_limited(), completed(0, "{}\n"))
+        clock = FakeClock()
+        client = GhClient(run=runner, clock=clock, sleep=clock.sleep)
+        result = client.mutation("pr", "merge", "31", attempts=4, idempotent=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(len(clock.sleeps), 0)
 
 
 if __name__ == "__main__":

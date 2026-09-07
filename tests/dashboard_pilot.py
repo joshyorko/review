@@ -144,6 +144,16 @@ async def settle_evidence(app, pilot) -> None:
 
 
 def write_stub(path: Path, body: str) -> str:
+    if path.name == "gh":
+        body = (
+            "args=()\n"
+            'for a in "$@"; do\n'
+            '  if [ "$a" != "--include" ] && [ "$a" != "-i" ]; then\n'
+            '    args+=("$a")\n'
+            "  fi\n"
+            "done\n"
+            'set -- "${args[@]}"\n' + body
+        )
     path.write_text("#!/usr/bin/env bash\n" + body)
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
     return str(path)
@@ -7464,6 +7474,79 @@ async def main() -> int:
             app.run_store.get(case_identity).state == terminal_record.state,
             "terminal state must remain unchanged after re-slay attempt",
         )
+
+    # ── Dependency breaker visibility in status bar and mutation idempotency ──
+    from tui.gh_client import Dependency, BreakerState
+    breaker_app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with breaker_app.run_test() as pilot:
+        await wait_for_live_rows(breaker_app, pilot, "ready", 2)
+        # Healthy state: breaker closed, status bar has no breaker clutter
+        status_healthy = str(breaker_app.query_one("#status-bar", tui.Static).render())
+        check(
+            "breaker" not in status_healthy and "blocked" not in status_healthy,
+            f"healthy breaker state must not clutter status bar, got {status_healthy!r}",
+        )
+        check(
+            "review slots:" in status_healthy,
+            f"status bar must show review slots, got {status_healthy!r}",
+        )
+        # Open GitHub breaker: status bar surfaces 'blocked' and 'retry_at'
+        fake_retry_at = round(time.time() + 120.0, 1)
+        breaker_app.gh_client._breakers.open(Dependency.GITHUB, 120.0, "API rate limit")
+        breaker_app.gh_client._breakers._states[Dependency.GITHUB] = BreakerState(
+            True, fake_retry_at, "API rate limit"
+        )
+        breaker_app.refresh_rows()
+        await pilot.pause()
+        status_open = str(breaker_app.query_one("#status-bar", tui.Static).render())
+        check(
+            "github" in status_open and "blocked" in status_open and "retry_at" in status_open,
+            f"open GitHub breaker must be visible in status bar with blocked and retry_at, got {status_open!r}",
+        )
+        check(
+            str(fake_retry_at) in status_open,
+            f"open GitHub breaker must show retry_at in status bar, got {status_open!r}",
+        )
+        # Close breaker: returns to healthy and uncluttered
+        breaker_app.gh_client._breakers.close(Dependency.GITHUB)
+        breaker_app.refresh_rows()
+        await pilot.pause()
+        status_closed = str(breaker_app.query_one("#status-bar", tui.Static).render())
+        check(
+            "blocked" not in status_closed and "retry_at" not in status_closed,
+            f"closed breaker must restore clean status bar, got {status_closed!r}",
+        )
+
+    # Source-level assertion: bluefin_review_tui.py contains no bare subprocess.run(["gh", ...])
+    tui_source = Path(tui.__file__).read_text()
+    check(
+        not re.search(r'subprocess\.run\(\s*\[\s*["\']gh["\']', tui_source),
+        "bluefin_review_tui.py must contain no bare subprocess.run(['gh', ...]) bypassing gh_client",
+    )
+    check(
+        "return subprocess.run" not in tui_source.split("def gh(")[1].split("def _run_mutation")[0],
+        "gh() must delegate to gh_client rather than calling subprocess.run directly",
+    )
+    check(
+        "return subprocess.run" not in tui_source.split("def _run_mutation(")[1].split("def fetch_live_review")[0],
+        "_run_mutation() must delegate to gh_client rather than calling subprocess.run directly",
+    )
+
+    # Mutation idempotency: mutation is not retried when idempotency is not proven
+    test_calls = []
+    def recording_runner(cmd, timeout):
+        test_calls.append(cmd)
+        return subprocess.CompletedProcess(["gh"], 1, "", "gh: secondary rate limit (HTTP 403)")
+    test_gh_client = tui.GhClient(
+        run=recording_runner,
+        clock=lambda: 1000.0,
+        sleep=lambda s: None,
+    )
+    res_mut = test_gh_client.mutation("pr", "merge", "31", attempts=4, idempotent=False)
+    check(
+        res_mut.returncode == 1 and len(test_calls) == 1,
+        f"mutation must not retry when idempotency is not proven, made {len(test_calls)} calls",
+    )
     gh_log.write_text("")
 
     for failure in failures:
