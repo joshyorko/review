@@ -114,6 +114,34 @@ proven**; an ambiguous timeout on a mutation is not a licence to repeat it.
 States are explicit and durable: `blocked`, `retry_at`, and terminal outcomes
 are values the interface can show, not conditions inferred from silence.
 
+## Run state and diagnostics have different lifetimes
+
+An unattended run accumulates something per pull request in several places at
+once: a review batch, a landing task, a triage entry, a permission answer, and
+a trace line. None of that may grow for the lifetime of the process.
+
+Separate the two kinds of state and give each its own bound. **Run state** is
+what the appliance still has to act on -- it belongs in the durable run store,
+which bounds itself and survives restart. **Diagnostics** are what a human
+reads afterwards; they belong in one size-capped rotating log, and losing an
+old segment must cost no decision.
+
+Every in-memory collection gets a bound or a prune. Eviction is oldest-first
+and never removes live work: a running batch still carries its watcher and its
+events, and an unstarted or active landing is still owed execution. Two traps
+recur:
+
+- **`id()` is reused once an object is freed.** A set of `id(task)` left
+  behind by an evicted task will misreport an unrelated later task as active.
+  Discard the membership entry in the same step that drops the object.
+- **A cap on a parsed transcript is a correctness bug, not a memory fix.**
+  Review output is parsed into a verdict, so silently truncating it hands
+  findings from a partial capture to the landing gate. Fail closed instead:
+  past the cap, refuse the verdict.
+
+State that is written and never read is not a cache to bound -- it is a leak
+to delete.
+
 ## Rationalisations
 
 | Rationalisation | Reality |
@@ -123,6 +151,7 @@ are values the interface can show, not conditions inferred from silence.
 | "Measure the Python process to size a slot." | A slot is a process tree including every check subagent. Measure the tree. |
 | "Retry the failed mutation." | Only when idempotency is proven. Otherwise an ambiguous timeout becomes a duplicate action. |
 | "Raise concurrency first, add throttling later." | Concurrency without a rate-limit strategy is how a shared token gets banned. |
+| "Cap the collection and move on." | A cap on state something still parses or acts on changes behaviour. Bound caches; fail closed on evidence. |
 
 ## Red flags
 
@@ -132,6 +161,7 @@ are values the interface can show, not conditions inferred from silence.
 - A capacity constant that no measurement produced.
 - A GitHub call that bypasses the throttled entry point.
 - A busy-wait where a blocked state belongs.
+- An append-only log or an unbounded collection on the per-pull-request path.
 
 ## Verification
 
@@ -140,6 +170,10 @@ python3 tests/review_scheduler_contract.py
 python3 tests/review_engine_contract.py
 bash tests/dashboard-contract.sh
 ```
+
+`tests/soak_contract.py` imports the dashboard, so it runs in the Textual
+virtualenv that `tests/dashboard-contract.sh` builds rather than under a bare
+`python3`.
 
 The scheduler's defining test: dispatch far more reviews than the cap as
 independent single-item requests, and assert that concurrent reviews never

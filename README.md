@@ -429,7 +429,12 @@ pull request to Hive's governor sweep with `a`, drafts are
 refused, and every
 action
 is appended as a JSON trace to `~/.local/state/bluefin-review/trace.jsonl`
-for the review feedback loop. The launcher bind-mounts that directory from
+for the review feedback loop. That trace is diagnostics, not run state: it is
+size-capped and rotated (8 MB with three backups by default, tunable with
+`BLUEFIN_REVIEW_TRACE_MAX_BYTES` and `BLUEFIN_REVIEW_TRACE_BACKUPS`), so a
+long unattended run cannot fill the disk with it. What a run still has to act
+on lives in the durable run store instead, which bounds itself and survives
+restart. The launcher bind-mounts that directory from
 the host (`${XDG_STATE_HOME:-~/.local/state}/bluefin-review`), so the trace
 and the landing-batch records under `landings/` — what was dispatched, what
 failed, and the agent's reasons — survive a `review-queue` relaunch, and the
