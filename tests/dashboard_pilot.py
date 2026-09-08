@@ -78,44 +78,50 @@ ORG_EVIDENCE = {
 }
 
 
-def org_search_pages(items: list[dict]) -> str:
+def org_search_pages(items: list[dict], pages_count: int = 1) -> str:
     """GraphQL search pages, as `gh api graphql --paginate --slurp` emits."""
-    nodes = []
-    for item in items:
-        review, mergeable, rollup = ORG_EVIDENCE[
-            item.get("recommended_action", "review")
-        ]
-        reviews_data = item.get("reviews") or []
-        if isinstance(reviews_data, list):
-            reviews_nodes = {"nodes": reviews_data}
-        elif isinstance(reviews_data, dict):
-            reviews_nodes = reviews_data
-        else:
-            reviews_nodes = {"nodes": []}
-        nodes.append({
-            "number": item["number"],
-            "title": item["title"],
-            "updatedAt": item.get("updated_at", "2026-08-08T00:00:00Z"),
-            "author": {"login": item.get("author", "")},
-            "repository": {"nameWithOwner": item["repository"]},
-            "labels": {"nodes": [{"name": name} for name in item.get("labels", [])]},
-            "reviewDecision": review,
-            "baseRefOid": item.get("base_sha", "a" * 40),
-            "headRefOid": item.get("head_sha", f"{item['number']:040x}"),
-            "mergeable": mergeable,
-            "commits": {
-                "nodes": [{"commit": {"statusCheckRollup": {"state": rollup}}}]
-            },
-            "reviews": reviews_nodes,
-        })
-    return json.dumps([{
-        "data": {
-            "search": {
-                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                "nodes": nodes,
+    pages = []
+    for page in range(pages_count):
+        nodes = []
+        for item in items[page::pages_count]:
+            review, mergeable, rollup = ORG_EVIDENCE[
+                item.get("recommended_action", "review")
+            ]
+            reviews_data = item.get("reviews") or []
+            if isinstance(reviews_data, list):
+                reviews_nodes = {"nodes": reviews_data}
+            elif isinstance(reviews_data, dict):
+                reviews_nodes = reviews_data
+            else:
+                reviews_nodes = {"nodes": []}
+            nodes.append({
+                "number": item["number"],
+                "title": item["title"],
+                "updatedAt": item.get("updated_at", "2026-08-08T00:00:00Z"),
+                "author": {"login": item.get("author", "")},
+                "repository": {"nameWithOwner": item["repository"]},
+                "labels": {"nodes": [{"name": name} for name in item.get("labels", [])]},
+                "reviewDecision": review,
+                "baseRefOid": item.get("base_sha", "a" * 40),
+                "headRefOid": item.get("head_sha", f"{item['number']:040x}"),
+                "mergeable": mergeable,
+                "commits": {
+                    "nodes": [{"commit": {"statusCheckRollup": {"state": rollup}}}]
+                },
+                "reviews": reviews_nodes,
+            })
+        pages.append({
+            "data": {
+                "search": {
+                    "pageInfo": {
+                        "hasNextPage": page + 1 < pages_count,
+                        "endCursor": str(page + 1) if page + 1 < pages_count else None,
+                    },
+                    "nodes": nodes,
+                }
             }
-        }
-    }])
+        })
+    return json.dumps(pages)
 
 failures: list[str] = []
 checks = 0
@@ -166,8 +172,8 @@ async def main() -> int:
     # dashboard has no static snapshot path; this is its only default source.
     org_queue_file = workdir / "org-queue.json"
 
-    def set_org_queue(items: list[dict]) -> None:
-        org_queue_file.write_text(org_search_pages(items))
+    def set_org_queue(items: list[dict], pages_count: int = 1) -> None:
+        org_queue_file.write_text(org_search_pages(items, pages_count))
 
     set_org_queue(SNAPSHOT["items"])
 
@@ -175,6 +181,8 @@ async def main() -> int:
     # network, and any attempt to run one is recorded for the assertions.
     gh_log = workdir / "gh.log"
     curl_log = workdir / "curl.log"
+    queue_refresh_log = workdir / "queue-refresh.log"
+    delay_queue_refresh = workdir / "delay-queue-refresh"
     diff_events = workdir / "diff-events.log"
     old_request_started = workdir / f"old-request-start-{workdir.name}"
     perm_file = workdir / "permissions.push"
@@ -230,6 +238,10 @@ async def main() -> int:
         '  if [ -n "${ORG_GH_ERROR-}" ]; then printf "%s\\n" "$ORG_GH_ERROR" >&2; exit 1; fi\n'
         '  case "$*" in *"is:issue"*) '
         f'cat "{org_issues_file}"; exit 0 ;; esac\n'
+        f'  if [ -f "{delay_queue_refresh}" ]; then\n'
+        f'    printf "request\\n" >>"{queue_refresh_log}"\n'
+        '    sleep 0.45\n'
+        '  fi\n'
         f'  cat "{org_queue_file}"; exit 0\n'
         'fi\n'
         'if [ "$1 $2" = "issue view" ]; then\n'
@@ -308,6 +320,12 @@ async def main() -> int:
     review_stub(0, "a finding")
 
     import bluefin_review_tui as tui
+    reconciliation_request = tui.ReviewDashboard._request_reconciliation
+    # Most fixtures below drive an isolated landing/report state machine while
+    # deliberately reusing one temporary landing directory. Keep those tests
+    # focused on their own reports; the dedicated reconciliation pilot binds
+    # the production callback back onto its dashboard below.
+    tui.ReviewDashboard._request_reconciliation = lambda self: None
 
     # Every batch flow below would meet the #378 final-review policy gate,
     # which is asked once per dashboard process. It gets its own coverage
@@ -6200,6 +6218,113 @@ async def main() -> int:
         subprocess.run = real_run
     gh_log.write_text("")
 
+    # ── completed work refreshes the retained queue without freezing keys ──
+    # Removing the reconciliation request, making it synchronous, or launching
+    # one refresh per completion must fail this test. The actual landing
+    # completion callback is used; only the external GitHub/Hive transports
+    # are stubbed and delayed.
+    set_org_queue([
+        item for item in SNAPSHOT["items"] if item["number"] != 31
+    ], pages_count=3)
+    hive_requests: list[str] = []
+    original_hive_get = tui.hive_get
+
+    def reconciliation_hive_get(path: str):
+        hive_requests.append(path)
+        time.sleep(0.15)
+        if path == "/api/v1/status":
+            return tui.hive_api.Result(
+                True, "ok", "online",
+                {"hub": "online", "actionable_items": 2},
+            )
+        return tui.hive_api.Result(
+            True, "ok", "online",
+            {"contributors": []},
+        )
+
+    tui.hive_get = reconciliation_hive_get
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    app._request_reconciliation = reconciliation_request.__get__(
+        app, tui.ReviewDashboard
+    )
+    try:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops and app.hive_state:
+                    break
+                await pilot.pause(0.01)
+            await app.workers.wait_for_complete()
+            # The initial load is not an operation-triggered reconciliation.
+            set_org_queue(SNAPSHOT["items"])
+            await pilot.press("R")
+            for _ in range(200):
+                if any(stop.number == 31 for stop in app.stops):
+                    break
+                await pilot.pause(0.01)
+            await app.workers.wait_for_complete()
+            queue_refresh_log.write_text("")
+            hive_requests.clear()
+            set_org_queue([
+                item for item in SNAPSHOT["items"] if item["number"] != 31
+            ])
+            delay_queue_refresh.touch()
+
+            def completed_landing(number: int):
+                task = tui.landing.new_task(
+                    [tui.Stop("projectbluefin/bluefinctl", number, "review", "landed")],
+                    "tester",
+                )
+                Path(task.status_path).write_text(
+                    f'{{"pr":"projectbluefin/bluefinctl#{number}","state":"merged","note":"on :stable"}}\n'
+                    '{"state":"done","note":"landed"}\n'
+                )
+                app.landing_finished(task)
+                return task
+
+            completed_landing(31)
+            completed_landing(7)
+            completed_landing(8)
+            await pilot.press("j")
+            await pilot.pause(0.05)
+            queue = app.query_one("#queue", tui.ListView)
+            check(
+                queue.index == 1,
+                "navigation must process while the delayed queue reconciliation runs",
+            )
+            status = str(app.query_one("#status-bar", tui.Static).render())
+            check(
+                "refreshing" in status.lower(),
+                f"the status bar must expose bounded refresh progress, got {status!r}",
+            )
+            for _ in range(200):
+                if not any(stop.number == 31 for stop in app.stops):
+                    break
+                await pilot.pause(0.01)
+            check(
+                not any(stop.number == 31 for stop in app.stops),
+                "a completed landing must replace the cached queue so a merged PR disappears",
+            )
+            check(
+                queue_refresh_log.read_text().splitlines() == ["request"],
+                "concurrent completed operations must coalesce to one GitHub queue refresh",
+            )
+            check(
+                hive_requests.count("/api/v1/status") == 1
+                and hive_requests.count("/api/v1/contributors") == 1,
+                f"concurrent completed operations must coalesce to one Hive refresh, got {hive_requests!r}",
+            )
+            await pilot.pause(0.2)
+            check(
+                queue_refresh_log.read_text().splitlines() == ["request"],
+                "no timer may create another queue refresh after reconciliation completes",
+            )
+    finally:
+        tui.hive_get = original_hive_get
+        delay_queue_refresh.unlink(missing_ok=True)
+    set_org_queue(SNAPSHOT["items"])
+    gh_log.write_text("")
+
     # ── a completed structured review becomes a concise decision card ───
     clean_output = (FIXTURE_DIR / "goose-review-clean.txt").read_text()
     findings_output = (FIXTURE_DIR / "goose-review-findings.txt").read_text()
@@ -7229,6 +7354,11 @@ async def main() -> int:
 
     # ── option $: slay PR (review + fix if needed + land in batch) ──
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    # This state-machine fixture mutates one in-memory stop through several
+    # synthetic outcomes. The operation-triggered reconciliation contract is
+    # exercised above with real queue replacement; isolate this older unit of
+    # behavior from its intentionally unrelated transport refresh.
+    app._request_reconciliation = lambda: None
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):

@@ -54,6 +54,12 @@ from textual.widgets import (
     Select,
     TextArea,
 )
+try:
+    from textual.worker import get_current_worker
+except ModuleNotFoundError:  # minimal non-Textual import contracts
+    def get_current_worker():
+        return type("_NoWorker", (), {"is_cancelled": False})()
+
 _TUI_DIR = os.path.dirname(__file__)
 if _TUI_DIR not in sys.path:
     sys.path.insert(0, _TUI_DIR)
@@ -3169,6 +3175,10 @@ class ReviewDashboard(App):
         self.hive_workers: list[dict] = []
         self.hive_unavailable = False
         self.hive_workers_stale = False
+        self._reconciliation_request = 0
+        self._reconciliation_waiting: set[str] = set()
+        self.reconciliation_state = "not refreshed"
+        self._queue_load_lock = threading.Lock()
         # Keys to re-select after a refresh: a refresh that silently empties
         # the batch you spent a minute building is worse than no refresh.
         self.reselect: set[str] = set()
@@ -3450,7 +3460,7 @@ class ReviewDashboard(App):
             )
 
     @work(thread=True, group="hive", exclusive=True)
-    def load_hive(self) -> None:
+    def load_hive(self, reconciliation_request: int = 0) -> None:
         """Ask Hive what it is doing. Read-only, and never blocking.
 
         Hive probes are only retried by an explicit maintainer action. The
@@ -3458,15 +3468,39 @@ class ReviewDashboard(App):
         calls while the hub is unavailable.
         """
         if not hive_api_base():
-            self.call_from_thread(self.hive_failed, "not configured")
+            if get_current_worker().is_cancelled:
+                if reconciliation_request:
+                    self.call_from_thread(
+                        self._reconciliation_finished, "hive", reconciliation_request
+                    )
+                return
+            self.call_from_thread(
+                self.hive_failed, "not configured", reconciliation_request
+            )
             return
         status = hive_get("/api/v1/status")
         if not status.ok:
-            self.call_from_thread(self.hive_failed, status.message)
+            if get_current_worker().is_cancelled:
+                if reconciliation_request:
+                    self.call_from_thread(
+                        self._reconciliation_finished, "hive", reconciliation_request
+                    )
+                return
+            self.call_from_thread(
+                self.hive_failed, status.message, reconciliation_request
+            )
             return
         contributor_result = hive_get("/api/v1/contributors")
         if not contributor_result.ok:
-            self.call_from_thread(self.hive_failed, contributor_result.message)
+            if get_current_worker().is_cancelled:
+                if reconciliation_request:
+                    self.call_from_thread(
+                        self._reconciliation_finished, "hive", reconciliation_request
+                    )
+                return
+            self.call_from_thread(
+                self.hive_failed, contributor_result.message, reconciliation_request
+            )
             return
         contributors = contributor_result.data.get("contributors", [])
         workers = [
@@ -3482,9 +3516,19 @@ class ReviewDashboard(App):
             f"{status.data.get('actionable_items', '?')} actionable · "
             f"{len(workers)} working"
         )
-        self.call_from_thread(self.hive_loaded, state, workers)
+        if get_current_worker().is_cancelled:
+            if reconciliation_request:
+                self.call_from_thread(
+                    self._reconciliation_finished, "hive", reconciliation_request
+                )
+            return
+        self.call_from_thread(
+            self.hive_loaded, state, workers, reconciliation_request
+        )
 
-    def hive_loaded(self, state: str, workers: list[dict]) -> None:
+    def hive_loaded(
+        self, state: str, workers: list[dict], reconciliation_request: int = 0
+    ) -> None:
         self.hive_state = state
         self.hive_workers = workers
         self.hive_unavailable = False
@@ -3493,8 +3537,9 @@ class ReviewDashboard(App):
         stop = self.current
         if stop:
             self.render_context(stop)
+        self._reconciliation_finished("hive", reconciliation_request)
 
-    def hive_failed(self, state: str) -> None:
+    def hive_failed(self, state: str, reconciliation_request: int = 0) -> None:
         """Keep the dashboard usable when a read-only Hive probe fails."""
         self.hive_state = state
         self.hive_unavailable = True
@@ -3503,6 +3548,33 @@ class ReviewDashboard(App):
         stop = self.current
         if stop:
             self.render_context(stop)
+        self._reconciliation_finished("hive", reconciliation_request)
+
+    def _request_reconciliation(self) -> None:
+        """Refresh retained GitHub and Hive evidence after a completed operation."""
+        if self._reconciliation_waiting:
+            return
+        self._reconciliation_request += 1
+        request = self._reconciliation_request
+        self._reconciliation_waiting = {"queue", "hive"}
+        self.reconciliation_state = "refreshing"
+        self.reselect = {stop.key for stop in self.stops if stop.selected}
+        self.refresh_status()
+        self.load_queue(request)
+        self.load_hive(request)
+
+    def _reconciliation_finished(self, source: str, request: int) -> None:
+        if request != self._reconciliation_request:
+            return
+        self._reconciliation_waiting.discard(source)
+        if self._reconciliation_waiting:
+            return
+        self.reconciliation_state = (
+            "fresh"
+            if self.source_state in {"ready", "empty"} and not self.hive_unavailable
+            else "unavailable"
+        )
+        self.refresh_status()
 
     def repo_queue(self, repository: str) -> tuple[dict[str, int], int]:
         """This repository's merge queue, by segment, and its total."""
@@ -4129,8 +4201,33 @@ class ReviewDashboard(App):
 
     # ── data layer (walker parity) ────────────────────────────────────────
 
-    @work(thread=True, exclusive=True)
-    def load_queue(self) -> None:
+    @work(thread=True, group="queue", exclusive=True)
+    def load_queue(self, reconciliation_request: int = 0) -> None:
+        with self._queue_load_lock:
+            cached = (
+                self.self_login,
+                self.source_state,
+                self.source_message,
+            )
+            self._load_queue_data()
+            if get_current_worker().is_cancelled:
+                (
+                    self.self_login,
+                    self.source_state,
+                    self.source_message,
+                ) = cached
+                if reconciliation_request:
+                    self.call_from_thread(
+                        self._reconciliation_finished, "queue", reconciliation_request
+                    )
+                return
+        self.call_from_thread(self.apply_filters)
+        if reconciliation_request:
+            self.call_from_thread(
+                self._reconciliation_finished, "queue", reconciliation_request
+            )
+
+    def _load_queue_data(self) -> None:
         try:
             who = gh("api", "user", "--jq", ".login")
             identity_detail = (who.stderr or who.stdout).strip()
@@ -4141,8 +4238,6 @@ class ReviewDashboard(App):
         if not self.self_login:
             self.source_state = "auth-failed"
             self.source_message = bounded_detail(identity_detail or "GitHub identity is unavailable; sign in and retry")
-            self.all_items = self.queue_items = []
-            self.call_from_thread(self.apply_filters)
             return
         if self.filters.live:
             snapshot = self.load_live_queue(self.filters.live_repository)
@@ -4153,14 +4248,14 @@ class ReviewDashboard(App):
         # The unfiltered set: "how busy is this repository" must count the
         # maintainer's own pull requests too, even though they never appear
         # as stops to review.
-        self.all_items = snapshot.get("items", [])
-        self.queue_items = [
-            item
-            for item in self.all_items
-            # Own-work filtering: a maintainer reviews other people's work.
-            if not (self.self_login and item.get("author") == self.self_login)
-        ]
-        self.call_from_thread(self.apply_filters)
+        if self.source_state in {"ready", "empty"}:
+            self.all_items = snapshot.get("items", [])
+            self.queue_items = [
+                item
+                for item in self.all_items
+                # Own-work filtering: a maintainer reviews other people's work.
+                if not (self.self_login and item.get("author") == self.self_login)
+            ]
 
     def load_org_queue(self) -> dict:
         """Every open pull request in the organization, live from GitHub.
@@ -4460,6 +4555,7 @@ class ReviewDashboard(App):
         return {"items": items}
 
     def apply_filters(self) -> None:
+        prior_stops = {stop.key: stop for stop in self.stops}
         for stop in self.stops:
             self.evidence_generation[stop.key] = (
                 self.evidence_generation.get(stop.key, 0) + 1
@@ -4516,22 +4612,38 @@ class ReviewDashboard(App):
             if not self.filters.wants(item):
                 continue
             head_sha = item.get("head_sha", "") or ""
-            stop = Stop(
-                repository=item["repository"],
-                number=item["number"],
-                action=item.get("recommended_action", ""),
-                title=item.get("title", ""),
-                author=item.get("author", "") or "",
-                mergeable_state=item.get("mergeable_state", "") or "",
-                check_state=item.get("check_state", "") or "",
-                review_state=item.get("review_state", "") or "",
-                live={
+            key = f"{item['repository']}#{item['number']}"
+            stop = prior_stops.get(key)
+            if stop is None:
+                stop = Stop(
+                    repository=item["repository"],
+                    number=item["number"],
+                    action=item.get("recommended_action", ""),
+                    title=item.get("title", ""),
+                    author=item.get("author", "") or "",
+                    mergeable_state=item.get("mergeable_state", "") or "",
+                    check_state=item.get("check_state", "") or "",
+                    review_state=item.get("review_state", "") or "",
+                    live={
+                        "baseRefOid": item.get("base_sha", "") or "",
+                        "headRefOid": head_sha,
+                        "reviews": item.get("reviews", []),
+                    },
+                    head_sha=head_sha,
+                )
+            else:
+                stop.action = item.get("recommended_action", "")
+                stop.title = item.get("title", "")
+                stop.author = item.get("author", "") or ""
+                stop.mergeable_state = item.get("mergeable_state", "") or ""
+                stop.check_state = item.get("check_state", "") or ""
+                stop.review_state = item.get("review_state", "") or ""
+                stop.live.update({
                     "baseRefOid": item.get("base_sha", "") or "",
                     "headRefOid": head_sha,
                     "reviews": item.get("reviews", []),
-                },
-                head_sha=head_sha,
-            )
+                })
+                stop.head_sha = head_sha
             stop.triage_state = self.triage.get(
                 self.triage_key(stop), "unseen"
             )
@@ -4844,6 +4956,7 @@ class ReviewDashboard(App):
             if self.observability.status == "unavailable"
             else ""
         )
+        reconciliation = f" | queue {self.reconciliation_state}"
         try:
             status_bar = self.query_one("#status-bar", Static)
         except NoMatches:
@@ -4854,7 +4967,7 @@ class ReviewDashboard(App):
                 f" {view_tag}Issues: {shown} open "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}"
+                f"| batch: {selected}{reconciliation}"
                 f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
         else:
@@ -4862,7 +4975,7 @@ class ReviewDashboard(App):
                 f" {view_tag}Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}{stuck}{review_failures}{agents}{landed}{policy}"
+                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{policy}"
                 f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
 
@@ -5661,6 +5774,8 @@ class ReviewDashboard(App):
             self.show_evidence(stop)
         elif self.current:
             self.show_evidence(self.current)
+        if not stop.is_issue:
+            self._request_reconciliation()
 
     # ── actions ───────────────────────────────────────────────────────────
 
@@ -6654,6 +6769,8 @@ class ReviewDashboard(App):
                 stop.failure = str(reason)
 
         self.refresh_rows()
+        if receipt.succeeded:
+            self._request_reconciliation()
 
     def action_merge(self) -> None:
         if self.view_mode == "issues" or (self.current and self.current.is_issue):
@@ -7041,6 +7158,8 @@ class ReviewDashboard(App):
         self.last_landing_outcome = message
         self.refresh_rows()
         self.notify(message, severity=severity)
+        if done:
+            self._request_reconciliation()
         self.advance_final_review(task)
         self._wake_landing_dispatch()
 
