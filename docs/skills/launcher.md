@@ -138,9 +138,9 @@ bundle under `/var/lib/bluefin-review/runtime/gvisor/<release>/`. Install it
 explicitly with `sudo just review-runtime install`; `update` and `remove` are
 explicit lifecycle operations. The bundle keeps `runsc`,
 `containerd-shim-runsc-v1`, and `gvisor-bin/` together, verifies the pinned
-architecture archive before extraction, rejects unsafe members and symlinked
-targets, and publishes only after validation. `review-doctor` is diagnostic and
-never downloads a missing runtime.
+`release-20260831.0` architecture archive before extraction, rejects unsafe
+members and symlinked targets, and publishes only after validation.
+`review-doctor` is diagnostic and never downloads a missing runtime.
 
 The launcher discovers the absolute Review-owned `runsc` path and passes that
 path to rootless Podman after `runsc --version` and the credential-free probe.
