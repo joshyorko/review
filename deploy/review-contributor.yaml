@@ -33,7 +33,7 @@ spec:
       containers:
         - name: contributor
           image: ghcr.io/projectbluefin/review:stable
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: GOOSE_MODEL
               value: "gemini-3.8-flash"

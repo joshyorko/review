@@ -2060,6 +2060,11 @@ grep -Fq -- '--timeout=15s' <<<"$cluster_body" ||
 if grep -q '^[[:space:]]*- name: HIVE_HUB$' "$repo_root/deploy/review-contributor.yaml"; then
   fail "the deployment manifest must leave HIVE_HUB to the launcher"
 fi
+if ! grep -A1 '^          image: ghcr.io/projectbluefin/review:stable$' \
+  "$repo_root/deploy/review-contributor.yaml" |
+  grep -Fxq '          imagePullPolicy: Always'; then
+  fail "the stable contributor deployment must always pull the published image"
+fi
 
 begin "static: turbo-review initializes models and forwards arguments through positional parameters"
 turbo_body="$(sed -n '/^turbo-review \*args:/,/^# Preflight check:/p' "$code")"
