@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-07",
+  "generated_at": "2026-09-08",
   "schema_version": "1.0",
   "skills": [
     {
@@ -229,8 +229,8 @@
         "kubernetes"
       ],
       "description": "Maintains the five review recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.7",
-      "last_updated": "2026-09-07",
+      "version": "3.8",
+      "last_updated": "2026-09-08",
       "doc_type": "runbook"
     },
     {
@@ -305,8 +305,8 @@
         "maintainer"
       ],
       "description": "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests.",
-      "version": "2.6",
-      "last_updated": "2026-09-07",
+      "version": "2.7",
+      "last_updated": "2026-09-08",
       "doc_type": "runbook"
     },
     {
@@ -344,8 +344,8 @@
         "countme"
       ],
       "description": "Use when observing, diagnosing, or monitoring running review-queue or review-container instances, landing batches, or agent process health.",
-      "version": "1.3",
-      "last_updated": "2026-09-07",
+      "version": "1.4",
+      "last_updated": "2026-09-08",
       "doc_type": "procedure"
     },
     {

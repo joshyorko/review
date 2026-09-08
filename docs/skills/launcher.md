@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.7"
-last_updated: 2026-09-07
+version: "3.8"
+last_updated: 2026-09-08
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -90,8 +90,8 @@ unattended contributor workers across Kubernetes. See
 ## Kubernetes Dashboard Sessions
 
 `REVIEW_RUNTIME=k8s just review-queue` selects one foreground dashboard Pod;
-it does not add a recipe or change contributor-worker scale-out. Apply its
-dedicated state claim first:
+it does not add a recipe or change contributor-worker scale-out. Provision
+its dedicated state claim first:
 
 ```bash
 kubectl apply -f deploy/review-queue-state.yaml
@@ -99,14 +99,18 @@ REVIEW_RUNTIME=k8s just review-queue
 ```
 
 Absent or unreachable Kubernetes preserves Podman. A reachable cluster with a
-missing or unreadable `review-queue-state` claim stops before Secret or Pod
-creation. The restricted Pod uses `imagePullPolicy: Always`, attaches to the
-terminal, and removes itself and its file-descriptor-staged session Secret on
-`q`, Ctrl-C, or terminal exit. The claim holds dashboard state only.
+missing or unreadable `review-queue-state` claim stops before Secret or Pod creation.
+The restricted, non-root Pod uses `imagePullPolicy: Always`, waits Ready before
+terminal attach, and removes itself and its file-descriptor-staged session Secret
+on `q`, Ctrl-C, or terminal exit. The claim holds dashboard state only.
 
-Countme uses local `OTEL_EXPORTER_OTLP_ENDPOINT` and optional
-`OTEL_EXPORTER_OTLP_HEADERS` only in that Secret: never print, persist, or
-commit them. No endpoint is a no-op; export failure affects countme only.
+For each new Podman session, the launcher automatically refreshes a moving published
+image tag before it starts; an existing attended session keeps its image. Immutable
+digests, CI `sha-` tags, and local images are not refreshed.
+
+Optional countme configuration remains local to the session-secret handoff, never
+repository configuration. Without it, countme is a no-op. Its bounded measurements
+exclude secrets, prompts, and pull-request content; export failure affects countme only.
 
 ## Rootless Podman And Mounted Host Files
 
@@ -178,7 +182,7 @@ broker is offered only to the local Podman dashboard.
   or connection credential.
 - A Kubernetes dashboard session without the dedicated state claim, foreground
   attach, or Pod-and-Secret cleanup.
-- An OTLP endpoint or header outside the Kubernetes session Secret.
+- Countme configuration outside the local Kubernetes session-secret handoff.
 - A model-catalog or model-ID validity check in the launcher; only the profile
   name is a closed set.
 - Contributor task-selection policy outside Hive (own-work exclusion on the

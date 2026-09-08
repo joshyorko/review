@@ -1,7 +1,7 @@
 ---
 name: review-monitoring
-version: "1.3"
-last_updated: 2026-09-07
+version: "1.4"
+last_updated: 2026-09-08
 id: review-monitoring
 one_line_purpose: Monitor running review containers, landing batch execution, and container health.
 entry_point: docs/skills/review-monitoring.md
@@ -77,20 +77,21 @@ state. Never inspect a Secret for queue state or credentials.
 ### 2. Queue Reconciliation
 
 The dashboard caches its last good live GitHub open-PR queue and read-only
-Hive status. A successful review, merge, queue, or terminal landing schedules
-one asynchronous refresh; triggers coalesce, with one bounded follow-up for a
-completion during refresh. It never polls or changes Hive assignments. Failure
-retains the aged display; use `R` for an explicit read, never a static artifact.
+Hive view. A receipt-verified clean review, successful mutation or batch queue,
+or terminal landing completion schedules one asynchronous refresh; triggers
+coalesce, with one bounded follow-up for a completion during refresh. It never
+polls or changes Hive assignments or completion. Failure retains the aged
+display; use `R` for an explicit read, never a static artifact.
 
 ### 3. Dashboard Activity
 
 The normal dashboard always shows an `AGENT ACTIVITY` surface above the queue.
 It separately names parent reviews (active review batches), check workers
 (the review engine's active slots), landing agents, and queued landing work.
-It lists a bounded number of active review, landing, and known Hive contributor
-assignments using only repository-qualified pull-request keys. A missing or
-malformed Hive assignment reads as unavailable; it is never inferred from an
-agent name, task identifier, prompt, or pull-request title.
+It lists a bounded number of active review, landing, and read-only Hive
+contributor-assignment rows using only repository-qualified pull-request keys.
+A missing or malformed Hive assignment reads as unavailable; it is never
+inferred from an agent name, task identifier, prompt, or pull-request title.
 
 `Snapshot:` makes the cached answer's state explicit:
 
@@ -106,10 +107,10 @@ a polling timer nor a Hive mutation.
 
 ### 4. Countme
 
-Countme receives local `OTEL_EXPORTER_OTLP_ENDPOINT` and optional
-`OTEL_EXPORTER_OTLP_HEADERS` only through a session Secret; never place values
-in commands, logs, durable state, or repository files. It records queue refresh
-duration/pages/items, active counts, and review/landing outcome; failure affects countme only.
+Optional countme remains local to the session-secret handoff and is disabled
+without that configuration. It records only bounded queue refresh
+duration/pages/items, active counts, and review/landing outcomes: no secrets,
+prompts, or pull-request content. Failure affects countme only.
 
 ### 5. Remote Engine & Image Boundary
 
@@ -190,5 +191,6 @@ No configured Hive hub is a first-class path, not a degraded dashboard.
 - Ignoring permission errors in agent logs as harmless noise.
 - Remote-sourced state rendered without its age.
 - Local lanes and Hive fleet counts shown as one number.
-- A dashboard polling loop, a queue refresh that mutates Hive assignments, or
-  a countme value in a log, command, durable state, or repository file.
+- A dashboard polling loop, a queue refresh that mutates Hive assignments or
+  completion, or a countme value in a log, command, durable state, or
+  repository file.

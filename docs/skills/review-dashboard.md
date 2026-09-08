@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "2.6"
-last_updated: 2026-09-07
+version: "2.7"
+last_updated: 2026-09-08
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -28,6 +28,11 @@ queue rows. The authenticated maintainer's own pull requests remain hidden.
 The dashboard distinguishes ready, empty, missing, inaccessible, malformed,
 and failed sources; `R` rereads whichever source is active. The flag form
 `--repo` narrows the org-wide queue to one repository.
+
+The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified
+clean reviews, successful mutations or batch queues, and terminal landing completion request
+reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive
+assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
 
 ## When to Use
 
@@ -79,9 +84,13 @@ Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updat
 7. **Completed reviews cross the `ReviewResult` contract.** Transcripts without
    valid JSONL findings and terminal events are `unparsable`, never clean. Keep
    decision cards concise and bounded raw evidence on `e`.
-8. **Keep the acting surface explicit.** The shipped keys cover review,
-   merge, branch updates, rejection, handoff, docs, and dupe
-   cleanup; label and priority mutation are not part of the dashboard.
+8. **Keep the acting surface and activity explicit.** The shipped keys cover
+   review, merge, branch updates, rejection, handoff, docs, and dupe cleanup;
+   label and priority mutation are excluded. Above the queue, `AGENT ACTIVITY`
+   shows active parent reviews, check subagents, landing agents, queued work,
+   bounded repository-qualified rows, and freshness. Hive rows are read-only,
+   unavailable when malformed, and never inferred from a name, prompt, title,
+   or task identifier.
 
 ## Textual Patterns
 
