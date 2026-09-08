@@ -87,7 +87,7 @@ Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updat
 8. **Keep the acting surface and activity explicit.** The shipped keys cover
    review, merge, branch updates, rejection, handoff, docs, and dupe cleanup;
    label and priority mutation are excluded. Above the queue, `AGENT ACTIVITY`
-   shows active parent reviews, check subagents, landing agents, queued work,
+   shows active parent reviews, Check workers, landing agents, queued work,
    bounded repository-qualified rows, and freshness. Hive rows are read-only,
    unavailable when malformed, and never inferred from a name, prompt, title,
    or task identifier.

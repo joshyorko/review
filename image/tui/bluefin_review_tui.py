@@ -3501,7 +3501,8 @@ class ReviewDashboard(App):
         try:
             if not hive_api_base():
                 if not get_current_worker().is_cancelled:
-                    self.call_from_thread(self.hive_failed, "not configured")
+                    self.call_from_thread(self.hive_not_configured)
+                success = True
                 return
             status = hive_get("/api/v1/status")
             if not status.ok:
@@ -3556,6 +3557,17 @@ class ReviewDashboard(App):
         self.hive_state = state
         self.hive_unavailable = True
         self.hive_workers_stale = bool(self.hive_workers)
+        self.refresh_status()
+        stop = self.current
+        if stop:
+            self.render_context(stop)
+
+    def hive_not_configured(self) -> None:
+        """Clear Hive state when this dashboard has no Hive projection."""
+        self.hive_state = "not configured"
+        self.hive_workers = []
+        self.hive_unavailable = False
+        self.hive_workers_stale = False
         self.refresh_status()
         stop = self.current
         if stop:

@@ -28,7 +28,7 @@ session logs, or design scratchpads as competing explanations.
 | **Managed Reviewer Client** | A foreground, preconfigured Goose session that a Maintainer Reviewer may choose after examining Review Evidence. | It prepares a Review Draft. Its merge keys only execute a typed, human-confirmed decision: asking Hive's authenticated endpoint to create the App-authored exact-head approval and `lgtm` opt-in, or a maintainer's direct squash merge, which requires GitHub's `push` permission and never overrides branch protection. It decides nothing itself. It can also submit the maintainer's own review — approve, request changes, or comment — which merges nothing and arms nothing. |
 | **Portable Reviewer Prompt** | Markdown Review Evidence and queue instructions for a maintainer's own client. | It is context, not an assignment. |
 | **Bluefin PR Queue** | A cached, live GitHub view of open factory pull requests and suggested next actions. | GitHub is authoritative; the queue neither assigns work nor merges. |
-| **Dashboard Activity** | The high-priority, bounded display of active parent reviews, check subagents, landing agents, queued work, and freshness. | It reports live or retained evidence; it never assigns Hive work. |
+| **Dashboard Activity** | The high-priority, bounded display of active parent reviews, Check workers, landing agents, queued work, and freshness. | It reports live or retained evidence; it never assigns Hive work. |
 | **Review Draft** | Analysis, review text, or commands prepared for a Maintainer Reviewer. | A human explicitly considers and submits it. |
 
 Avoid classifying contributors by role; this isn't a class system it's the loadout a contributor chooses to use that day.

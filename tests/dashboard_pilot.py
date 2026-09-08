@@ -4494,15 +4494,41 @@ async def main() -> int:
         # No hub configured at all is its own honest answer.
         tui.hive_api_base = lambda: ""
         app = tui.ReviewDashboard(tui.QueueFilters())
+        app._request_reconciliation = reconciliation_request.__get__(
+            app, tui.ReviewDashboard
+        )
         async with app.run_test() as pilot:
             await pilot.pause()
             for _ in range(200):
-                if app.hive_state:
+                if app.hive_state and app.stops:
                     break
                 await pilot.pause(0.05)
             check(
                 app.hive_state == "not configured",
                 f"no hub must read as not configured, got {app.hive_state!r}",
+            )
+            activity = app.query_one("#activity", tui.Static)
+            activity_text = str(activity.render())
+            check(
+                "Snapshot: current" in activity_text
+                and "retained/last good" not in activity_text
+                and "Hive assignments unavailable" not in activity_text,
+                "an unconfigured Hive must leave the live queue snapshot "
+                f"honest, got {activity_text!r}",
+            )
+            app._request_reconciliation()
+            for _ in range(200):
+                if not app._reconciliation_waiting:
+                    break
+                await pilot.pause(0.05)
+            activity_text = str(activity.render())
+            check(
+                app.reconciliation_state == "fresh"
+                and "Snapshot: current" in activity_text
+                and "retained/last good" not in activity_text
+                and "Hive assignments unavailable" not in activity_text,
+                "an operation refresh without Hive must retain honest live "
+                f"queue freshness, got {activity_text!r}",
             )
     finally:
         tui.hive_get = real_hive_get
