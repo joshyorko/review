@@ -30,9 +30,9 @@ require_install_owner() {
 
 architecture_asset() {
   case "$(uname -m)" in
-    x86_64) printf 'gvisor-x86_64.tar.bz2 %s\n' "$GVISOR_X86_64_SHA256" ;;
-    aarch64|arm64) printf 'gvisor-aarch64.tar.bz2 %s\n' "$GVISOR_AARCH64_SHA256" ;;
-    *) die "unsupported architecture: $(uname -m)" ;;
+  x86_64) printf 'gvisor-x86_64.tar.bz2 %s\n' "$GVISOR_X86_64_SHA256" ;;
+  aarch64 | arm64) printf 'gvisor-aarch64.tar.bz2 %s\n' "$GVISOR_AARCH64_SHA256" ;;
+  *) die "unsupported architecture: $(uname -m)" ;;
   esac
 }
 
@@ -57,8 +57,8 @@ resolved_bundle_dir() {
   if [[ -L "$runtime_current" ]]; then
     target="$(readlink -f -- "$runtime_current")"
     case "$target" in
-      "${runtime_root%/}"/*) ;;
-      *) die "current runtime link escapes the Review runtime root" ;;
+    "${runtime_root%/}"/*) ;;
+    *) die "current runtime link escapes the Review runtime root" ;;
     esac
     printf '%s\n' "$target"
     return 0
@@ -71,8 +71,8 @@ validate_archive_members() {
   local archive="$1" member
   while IFS= read -r member; do
     case "$member" in
-      runsc|containerd-shim-runsc-v1|gvisor-bin/|gvisor-bin/*) ;;
-      *) die "archive contains an unexpected member: $member" ;;
+    runsc | containerd-shim-runsc-v1 | gvisor-bin/ | gvisor-bin/*) ;;
+    *) die "archive contains an unexpected member: $member" ;;
     esac
     [[ "$member" != /* && "$member" != *../* && "$member" != */../* ]] ||
       die "archive contains an unsafe member: $member"
@@ -171,9 +171,12 @@ usage() {
 
 require_absolute_root
 case "${1:-}" in
-  path) path_bundle ;;
-  status) status_bundle ;;
-  install|update) install_bundle ;;
-  remove) remove_bundle ;;
-  *) usage; exit 2 ;;
+path) path_bundle ;;
+status) status_bundle ;;
+install | update) install_bundle ;;
+remove) remove_bundle ;;
+*)
+  usage
+  exit 2
+  ;;
 esac
