@@ -17,8 +17,8 @@
         "turbo"
       ],
       "description": "Manages cluster contributor workers in bluefin-system, secret synchronization, and turbo-review orchestration. Use when scaling workers or operating review-contributor on Kubernetes.",
-      "version": "1.0",
-      "last_updated": "2026-09-06",
+      "version": "1.1",
+      "last_updated": "2026-09-07",
       "doc_type": "procedure"
     },
     {
@@ -225,11 +225,12 @@
         "just",
         "launcher",
         "podman",
-        "container"
+        "container",
+        "kubernetes"
       ],
       "description": "Maintains the five review recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.5",
-      "last_updated": "2026-09-06",
+      "version": "3.7",
+      "last_updated": "2026-09-07",
       "doc_type": "runbook"
     },
     {
@@ -336,13 +337,14 @@
       "status": "active",
       "tags": [
         "monitoring",
-        "container",
         "review",
         "landings",
-        "queue"
+        "queue",
+        "kubernetes",
+        "countme"
       ],
       "description": "Use when observing, diagnosing, or monitoring running review-queue or review-container instances, landing batches, or agent process health.",
-      "version": "1.0",
+      "version": "1.2",
       "last_updated": "2026-09-07",
       "doc_type": "procedure"
     },

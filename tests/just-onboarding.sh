@@ -340,6 +340,7 @@ run_recipe() {
       -u REVIEW_QUEUE_NAME -u REVIEW_SCALE -u XDG_STATE_HOME -u FAKE_GIT_TOPLEVEL \
       -u REVIEW_RUNTIME -u FAKE_KUBECTL_DASHBOARD_API_UNAVAILABLE \
       -u FAKE_KUBECTL_DASHBOARD_PVC_MISSING -u FAKE_KUBECTL_DASHBOARD_PVC_FORBIDDEN \
+      -u OTEL_EXPORTER_OTLP_ENDPOINT -u OTEL_EXPORTER_OTLP_HEADERS \
       -u REVIEW_LAB -u REVIEW_LAB_BROKER -u REVIEW_PERSONAL_SKILLS \
       -u HIVE_HUB \
       -u FAKE_KUBECTL_ANNOTATION_GET_FAIL -u FAKE_KUBECTL_ANNOTATE_FAIL \
@@ -774,6 +775,21 @@ assert "hostPath" not in json.dumps(pod)
 PY
 }
 
+assert_review_queue_state_manifest() {
+  local manifest="$repo_root/deploy/review-queue-state.yaml"
+  assert_file_exists "$manifest"
+  assert_file_contains "kind: PersistentVolumeClaim" "$manifest"
+  assert_file_contains "name: review-queue-state" "$manifest"
+  assert_file_contains "namespace: bluefin-system" "$manifest"
+  assert_file_contains "- ReadWriteOnce" "$manifest"
+  assert_file_contains "storage: 1Gi" "$manifest"
+  assert_file_not_contains "hostPath" "$manifest"
+  assert_file_not_contains "OTEL_" "$manifest"
+}
+
+begin "review-queue: Kubernetes state claim is a dedicated durable PVC"
+assert_review_queue_state_manifest
+
 begin "review-queue: no host kubectl means no lab and no prompt"
 reset_logs
 remove_fake_kubectl
@@ -817,10 +833,31 @@ assert_file_before "wait --for=condition=Ready pod/review-queue-" \
   "attach --stdin --tty review-queue-" "$kubectl_log"
 assert_file_contains "delete pod review-queue-" "$kubectl_log"
 assert_file_contains "delete secret review-session-" "$kubectl_log"
+assert_file_before "attach --stdin --tty review-queue-" \
+  "delete pod review-queue-" "$kubectl_log"
+assert_file_before "delete pod review-queue-" \
+  "delete secret review-session-" "$kubectl_log"
 assert_eq "$(wc -c <"$runner_log")" 0 "Kubernetes runtime must not launch Podman"
 assert_file_not_contains "gho-test-token" "$kubectl_log"
 assert_file_not_contains "gho-test-token" "$kubernetes_manifest_log"
 assert_kubernetes_dashboard_manifest || fail "Kubernetes dashboard manifest violates its runtime contract"
+
+begin "review-queue: Kubernetes countme values remain in the session Secret"
+reset_logs
+otlp_endpoint="https://countme.example.invalid/v1/metrics"
+otlp_headers="x-session-key=otlp-test-secret"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s \
+  OTEL_EXPORTER_OTLP_ENDPOINT="$otlp_endpoint" \
+  OTEL_EXPORTER_OTLP_HEADERS="$otlp_headers"
+assert_zero_status "$STATUS" "the fake Kubernetes dashboard session must succeed"
+assert_file_contains "--from-file=OTEL_EXPORTER_OTLP_ENDPOINT=" "$kubectl_log"
+assert_file_contains "--from-file=OTEL_EXPORTER_OTLP_HEADERS=" "$kubectl_log"
+assert_not_contains "$otlp_endpoint" "$OUT"
+assert_file_not_contains "$otlp_endpoint" "$kubectl_log"
+assert_file_not_contains "$otlp_endpoint" "$kubernetes_manifest_log"
+assert_not_contains "$otlp_headers" "$OUT"
+assert_file_not_contains "$otlp_headers" "$kubectl_log"
+assert_file_not_contains "$otlp_headers" "$kubernetes_manifest_log"
 
 begin "review-queue: a missing dashboard state claim fails before starting a Pod"
 reset_logs
