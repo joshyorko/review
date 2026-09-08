@@ -1709,13 +1709,17 @@ review-queue *queue_args:
       offer_review_exec_session
     fi
 
-    CONTAINER_ARGS=(
-      podman --runtime="$RUNSC_PATH" run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
-      --label "$(owner_run_label)"
-      --userns "keep-id:uid=1000,gid=1000"
-      # Podman does not pass COLORTERM through on its own.
-      --env COLORTERM
-    )
+    if [[ "$K8S_DASHBOARD" == 1 ]]; then
+      CONTAINER_ARGS=()
+    else
+      CONTAINER_ARGS=(
+        podman --runtime="$RUNSC_PATH" run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
+        --label "$(owner_run_label)"
+        --userns "keep-id:uid=1000,gid=1000"
+        # Podman does not pass COLORTERM through on its own.
+        --env COLORTERM
+      )
+    fi
     add_lab_container_args
     add_review_exec_container_args
     # The dashboard's record — dispatched landing batches, their failure

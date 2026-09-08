@@ -17,7 +17,8 @@ runtime_release="release-20260831.0"
 runtime_path="$runtime_root/$runtime_release/runsc"
 mkdir -p "$fake_bin" "$system_bin" "$state_dir"
 for system_tool in bash basename cat grep mktemp ps rm rmdir sleep tr \
-  mkdir dirname awk sed head tail sort wc cut env chmod touch ln date id uname; do
+  mkdir dirname awk sed head tail sort wc cut env chmod touch ln date id uname \
+  find stat readlink; do
   ln -s "$(command -v "$system_tool")" "$system_bin/$system_tool"
 done
 
