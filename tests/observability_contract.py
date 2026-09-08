@@ -1,12 +1,28 @@
+import glob
 import sys
+import json
+import subprocess
 import unittest
 from os import environ
 from pathlib import Path
 from unittest.mock import patch
 
 
+site_pkgs = glob.glob(
+    str(
+        Path(__file__).parents[1]
+        / ".cache"
+        / "tui-venv"
+        / "lib"
+        / "python*"
+        / "site-packages"
+    )
+)
+if site_pkgs:
+    sys.path.insert(0, site_pkgs[0])
 sys.path.insert(0, str(Path(__file__).parents[1] / "image" / "tui"))
 
+import bluefin_review_tui as tui
 from observability import _OtlpMetricExporter, ReviewObservability
 
 
@@ -74,6 +90,35 @@ class ObservabilityContractTest(unittest.TestCase):
             exporter.records,
             [("queue.refresh", 1.2, {"pages": 3, "items": 224})],
         )
+
+    def test_live_queue_records_its_bounded_refresh_measurement(self):
+        """Single-repository queues emit the same bounded countme as org queues."""
+        exporter = FakeExporter()
+        app = tui.ReviewDashboard()
+        app.observability = ReviewObservability.from_environment(
+            {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector"},
+            exporter=exporter,
+        )
+        response = json.dumps([[
+            {
+                "number": 77,
+                "title": "fix: live queue countme",
+                "user": {"login": "maintainer"},
+            }
+        ]])
+        with patch.object(
+            tui,
+            "gh",
+            return_value=subprocess.CompletedProcess([], 0, response, ""),
+        ):
+            snapshot = app.load_live_queue("projectbluefin/review")
+
+        self.assertEqual(snapshot["state"], "ready")
+        self.assertEqual(len(exporter.records), 1)
+        name, duration, attributes = exporter.records[0]
+        self.assertEqual(name, "queue.refresh")
+        self.assertGreaterEqual(duration, 0)
+        self.assertEqual(attributes, {"pages": 1, "items": 1})
 
     def test_export_failure_marks_countme_unavailable_without_raising(self):
         exporter = FailingExporter()

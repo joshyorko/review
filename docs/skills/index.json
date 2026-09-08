@@ -210,8 +210,8 @@
         "automerge"
       ],
       "description": "Manages batch landings, multi-repo lane partitioning, fix-and-land agents, and landing status persistence. Use when modifying batch execution or landing.py.",
-      "version": "1.0",
-      "last_updated": "2026-09-06",
+      "version": "1.1",
+      "last_updated": "2026-09-08",
       "doc_type": "procedure"
     },
     {
@@ -344,7 +344,7 @@
         "countme"
       ],
       "description": "Use when observing, diagnosing, or monitoring running review-queue or review-container instances, landing batches, or agent process health.",
-      "version": "1.4",
+      "version": "1.5",
       "last_updated": "2026-09-08",
       "doc_type": "procedure"
     },

@@ -3643,7 +3643,8 @@ class ReviewDashboard(App):
     def action_hive(self) -> None:
         """Ask Hive again, and say what it is working on right now."""
         self.notify("asking Hive…")
-        self.load_hive()
+        request = self._reconciliation_request if self._reconciliation_waiting else 0
+        self.load_hive(request)
 
     def action_steer(self) -> None:
         """Focus the steering box: free text that rides along with the next
@@ -4372,27 +4373,40 @@ class ReviewDashboard(App):
         return finished("empty" if not items else "ready", "", items)
 
     def load_live_queue(self, repository: str) -> dict:
+        started = time.monotonic()
+        pages_count = 0
+        items_count = 0
+
+        def finished(state: str, message: str, items: list[dict]) -> dict:
+            self.observability.operation(
+                "queue.refresh",
+                time.monotonic() - started,
+                pages=pages_count,
+                items=items_count,
+            )
+            return {"state": state, "message": message, "items": items}
+
         if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
-            return {
-                "state": "malformed",
-                "message": bounded_detail(
+            return finished(
+                "malformed",
+                bounded_detail(
                     f"invalid repository '{repository}'; use owner/repo"
                 ),
-                "items": [],
-            }
+                [],
+            )
         try:
             result = gh(
                 "api", "--paginate", "--slurp", "--method", "GET",
                 f"repos/{repository}/pulls?state=open&per_page=100",
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            return {
-                "state": "error",
-                "message": bounded_detail(
+            return finished(
+                "error",
+                bounded_detail(
                     f"GitHub could not read this repository: {error}"
                 ),
-                "items": [],
-            }
+                [],
+            )
         if result.returncode:
             detail = bounded_detail((result.stderr or result.stdout).strip())
             lowered = detail.lower()
@@ -4404,24 +4418,23 @@ class ReviewDashboard(App):
                 state = "missing"
             else:
                 state = "error"
-            return {
-                "state": state,
-                "message": detail or "GitHub could not read this repository",
-                "items": [],
-            }
+            return finished(
+                state, detail or "GitHub could not read this repository", []
+            )
         try:
             pages = json.loads(result.stdout)
             if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
                 raise ValueError("GitHub returned malformed pull-request pages")
+            pages_count = len(pages)
             pulls = [pull for page in pages for pull in page]
             if any(not isinstance(pull, dict) for pull in pulls):
                 raise ValueError("GitHub returned a malformed pull-request entry")
         except (json.JSONDecodeError, ValueError) as error:
-            return {
-                "state": "malformed",
-                "message": bounded_detail(f"malformed GitHub response: {error}"),
-                "items": [],
-            }
+            return finished(
+                "malformed",
+                bounded_detail(f"malformed GitHub response: {error}"),
+                [],
+            )
         try:
             items = []
             for index, pull in enumerate(pulls, 1):
@@ -4461,13 +4474,14 @@ class ReviewDashboard(App):
                         or ""
                     ),
                 })
+            items_count = len(items)
         except ValueError as error:
-            return {
-                "state": "malformed",
-                "message": bounded_detail(f"malformed GitHub response: {error}"),
-                "items": [],
-            }
-        return {"state": "empty" if not items else "ready", "message": "", "items": items}
+            return finished(
+                "malformed",
+                bounded_detail(f"malformed GitHub response: {error}"),
+                [],
+            )
+        return finished("empty" if not items else "ready", "", items)
 
     @work(thread=True, exclusive=True)
     def load_issues(self) -> None:
@@ -6421,8 +6435,13 @@ class ReviewDashboard(App):
         if self.view_mode == "issues":
             self.load_issues()
         else:
-            self.load_queue()
-            self.load_hive()
+            request = (
+                self._reconciliation_request
+                if self._reconciliation_waiting
+                else 0
+            )
+            self.load_queue(request)
+            self.load_hive(request)
 
     def action_update_branch(self) -> None:
         """Bring the branch up to date with its base — the batch, if set.
@@ -7242,10 +7261,11 @@ class ReviewDashboard(App):
         self.drain_landings()
 
     def landing_finished(self, task: "landing.LandingTask") -> None:
-        """Fold the agent's report back onto the rows and say so: landed
-        work leaves the batch; blocked, failed, and unfinished work stays
-        selected with its reason. The notification announces the outcome —
-        the row marking is what survives it."""
+        """Fold the agent's report back onto rows without re-arming retries.
+
+        Landing results remain visible as row failures, but every retry needs
+        an explicit maintainer selection and confirmation.
+        """
         if task.phase:
             # A final review-and-fix round (#378) is not a landing: the pull
             # requests already have their outcomes, so re-folding them would
@@ -7266,14 +7286,14 @@ class ReviewDashboard(App):
                 stop.selected = False
                 stop.failure = ""
             elif state in ("blocked", "failed", "awaiting-stable"):
-                # blocked/failed need a maintainer; an agent that exits with
-                # a PR still short of :stable has not finished, whatever its
-                # exit code — the row keeps the reason and stays selected.
-                stop.selected = True
-                stop.failure = f"{state}: {event.get('note', 'no reason given')}"
+                stop.selected = False
+                stop.failure = (
+                    f"{state}: "
+                    f"{bounded_detail(str(event.get('note', 'no reason given')))}"
+                )
             else:
                 detail = f"last report: {state}" if state else "no report"
-                stop.selected = True
+                stop.selected = False
                 if done:
                     # The agent closed its report but never carried this
                     # pull request to an outcome — a hole in the report,
@@ -7451,7 +7471,10 @@ class ReviewDashboard(App):
                 continue
             state = event.get("state")
             if state in ("blocked", "failed", "awaiting-stable"):
-                stop.failure = f"{state}: {event.get('note', 'no reason given')}"
+                stop.failure = (
+                    f"{state}: "
+                    f"{bounded_detail(str(event.get('note', 'no reason given')))}"
+                )
 
     def action_agents(self) -> None:
         if not self.landing_queue:

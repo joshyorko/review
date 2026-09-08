@@ -2804,9 +2804,9 @@ async def main() -> int:
             "a merged pull request leaves the batch",
         )
         check(
-            app.stops[1].selected and "failed" in app.stops[1].failure,
-            "a failed pull request stays selected with its reason — the "
-            "notification does not outlive the row",
+            not app.stops[1].selected and "failed" in app.stops[1].failure,
+            "a failed pull request keeps its reason without automatic "
+            "reselection",
         )
         # The outcome also persists where a toast cannot: the status line
         # keeps the last batch's result until the next dispatch or refresh.
@@ -2887,8 +2887,8 @@ async def main() -> int:
                 break
             await pilot.pause(0.05)
         check(
-            all(s.selected for s in app.stops),
-            "an unfinished batch keeps every pull request selected",
+            not any(s.selected for s in app.stops),
+            "an unfinished batch must require explicit reselection",
         )
         check(
             all("died mid-batch" in s.failure for s in app.stops),
@@ -2985,8 +2985,8 @@ async def main() -> int:
             f"got {[s.failure for s in app.stops]}",
         )
         check(
-            app.stops[1].selected,
-            "the out-of-report pull request stays in the batch",
+            not app.stops[1].selected,
+            "an out-of-report pull request must require explicit reselection",
         )
     gh_log.write_text("")
 
@@ -6553,6 +6553,35 @@ async def main() -> int:
                 and app.reconciliation_state == "fresh",
                 "a later operation must start and finish a refresh after a worker exception",
             )
+
+            # Explicit reads supersede the operation-triggered workers in
+            # Textual's exclusive groups. They must settle the same request,
+            # rather than leaving a fresh snapshot labelled unavailable.
+            for explicit_read in (
+                lambda: pilot.press("R"),
+                app.action_hive,
+            ):
+                queue_refresh_log.write_text("")
+                delay_queue_refresh.touch()
+                app._request_reconciliation()
+                for _ in range(200):
+                    if queue_refresh_log.read_text().splitlines() == ["request"]:
+                        break
+                    await pilot.pause(0.01)
+                result = explicit_read()
+                if asyncio.iscoroutine(result):
+                    await result
+                for _ in range(200):
+                    if not app._reconciliation_waiting:
+                        break
+                    await pilot.pause(0.01)
+                await app.workers.wait_for_complete()
+                check(
+                    app.reconciliation_state == "fresh",
+                    "an explicit queue or Hive read during reconciliation "
+                    "must settle the fresh snapshot, not latch unavailable",
+                )
+                delay_queue_refresh.unlink(missing_ok=True)
     finally:
         tui.hive_get = original_hive_get
         delay_queue_refresh.unlink(missing_ok=True)

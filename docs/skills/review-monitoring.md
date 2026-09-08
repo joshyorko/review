@@ -1,6 +1,6 @@
 ---
 name: review-monitoring
-version: "1.4"
+version: "1.5"
 last_updated: 2026-09-08
 id: review-monitoring
 one_line_purpose: Monitor running review containers, landing batch execution, and container health.
@@ -81,7 +81,7 @@ Hive view. A receipt-verified clean review, successful mutation or batch queue,
 or terminal landing completion schedules one asynchronous refresh; triggers
 coalesce, with one bounded follow-up for a completion during refresh. It never
 polls or changes Hive assignments or completion. Failure retains the aged
-display; use `R` for an explicit read, never a static artifact.
+display; use `R` for an explicit read, never a static artifact. An explicit queue or Hive read that supersedes an exclusive reconciliation worker retains the active request identity, so its fresh replacement settles the snapshot rather than falsely leaving it unavailable.
 
 ### 3. Dashboard Activity
 
@@ -108,9 +108,7 @@ a polling timer nor a Hive mutation.
 ### 4. Countme
 
 Optional countme remains local to the session-secret handoff and is disabled
-without that configuration. It records only bounded queue refresh
-duration/pages/items, active counts, and review/landing outcomes: no secrets,
-prompts, or pull-request content. Failure affects countme only.
+without that configuration. It records only bounded queue refresh duration/pages/items for both organization and single-repository queues, active counts, and review/landing outcomes: no secrets, prompts, or pull-request content. Failure affects countme only.
 
 ### 5. Remote Engine & Image Boundary
 
@@ -137,6 +135,8 @@ tail -f "${XDG_STATE_HOME:-$HOME/.local/state}/bluefin-review/landings/"*.jsonl
 # Monitor agent log output
 tail -n 50 -f "${XDG_STATE_HOME:-$HOME/.local/state}/bluefin-review/landings/"*.log
 ```
+
+Terminal failures, policy blocks, incomplete reports, and publication waits stay visibly marked but are not automatically reselected. Once every PR in a maintainer-confirmed batch has a terminal outcome, the same landing lane starts one consolidated recovery review with bounded terminal evidence; it neither retries nor merges. A maintainer explicitly selects and confirms any retry.
 
 ### 7. Agent Health & Diagnostics
 
