@@ -38,7 +38,7 @@ spec:
             - name: GOOSE_MODEL
               value: "gemini-3.8-flash"
             - name: GOOSE_THINKING_EFFORT
-              value: "high"
+              value: "max"
             - name: GH_TOKEN
               valueFrom:
                 secretKeyRef:

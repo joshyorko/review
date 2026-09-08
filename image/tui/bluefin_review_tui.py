@@ -2489,7 +2489,7 @@ class ReviewScreen(Screen):
         super().__init__()
         self.stop_record = stop
         self.steer = steer
-        self.selection = selection or Preference(ACTIVE_BACKEND, "gemini-3.8-flash", "high")
+        self.selection = selection or Preference(ACTIVE_BACKEND, "gemini-3.8-flash", "max")
         self.headroom_session = (
             headroom_session or HeadroomSession.from_environment()
         )
@@ -2697,7 +2697,7 @@ class ReviewScreen(Screen):
                 remember_success(
                     load_preferences(), stop.repository,
                     Preference("codex", result.provenance.get("model", "gemini-3.8-flash"),
-                               result.provenance.get("reasoning_effort", "high")),
+                               result.provenance.get("reasoning_effort", "max")),
                 )
         reviewed_base = str(self.live_snapshot.get("baseRefOid") or "")
         reviewed_head = str(self.live_snapshot.get("headRefOid") or "")
@@ -3482,7 +3482,7 @@ class ReviewDashboard(App):
         if result.availability is Availability.READY:
             label.update(
                 "Harness Autopilot — READY · Codex / gemini-3.8-flash · "
-                "reason: high · Start requires Enter/click"
+                "reason: max · Start requires Enter/click"
             )
         else:
             label.update(
@@ -5519,7 +5519,7 @@ class ReviewDashboard(App):
         if ACTIVE_BACKEND == "goose":
             return (
                 os.environ.get("GOOSE_MODEL", "gemini-3.8-flash"),
-                os.environ.get("GOOSE_THINKING_EFFORT", "high"),
+                os.environ.get("GOOSE_THINKING_EFFORT", "max"),
             )
         options = self.harness_options or discover_all()
         preferences = load_preferences()
@@ -5527,7 +5527,7 @@ class ReviewDashboard(App):
             repository, preferences, options
         )
         if selected is None:
-            return "gemini-3.8-flash", "high"
+            return "gemini-3.8-flash", "max"
         preference = next(
             (
                 candidate
