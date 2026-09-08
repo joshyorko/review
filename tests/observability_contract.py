@@ -1,11 +1,13 @@
 import sys
 import unittest
+from os import environ
 from pathlib import Path
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "image" / "tui"))
 
-from observability import ReviewObservability
+from observability import _OtlpMetricExporter, ReviewObservability
 
 
 class FakeExporter:
@@ -26,6 +28,22 @@ class FailingExporter:
 
 
 class ObservabilityContractTest(unittest.TestCase):
+    def test_sdk_uses_standard_endpoint_and_parses_headers(self):
+        with patch.dict(
+            environ,
+            {
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
+                "OTEL_EXPORTER_OTLP_HEADERS": "x-countme-contract=enabled",
+            },
+        ):
+            countme_exporter = _OtlpMetricExporter(lambda: None)
+            reader = next(iter(countme_exporter._provider._metric_readers))
+            exporter = reader._exporter._exporter
+            self.assertEqual(exporter._endpoint, "http://collector:4318/v1/metrics")
+            self.assertIsInstance(exporter._headers, dict)
+            self.assertEqual(exporter._headers, {"x-countme-contract": "enabled"})
+            countme_exporter._provider.shutdown()
+
     def test_unconfigured_observability_never_exports(self):
         exporter = FakeExporter()
         observability = ReviewObservability.from_environment({}, exporter=exporter)

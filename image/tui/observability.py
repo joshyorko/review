@@ -47,7 +47,7 @@ class ReviewObservability:
         environment = os.environ if environment is None else environment
         if not environment.get(_ENDPOINT, "").strip():
             return NoopReviewObservability()
-        return OtlpReviewObservability(environment, exporter)
+        return OtlpReviewObservability(exporter)
 
     def operation(
         self, name: str, duration_seconds: float, **counts: int
@@ -72,9 +72,8 @@ class OtlpReviewObservability(ReviewObservability):
     status = "ready"
 
     def __init__(
-        self, environment: Mapping[str, str], exporter: _Exporter | None
+        self, exporter: _Exporter | None
     ) -> None:
-        self._environment = environment
         self._exporter = exporter
 
     def operation(
@@ -102,7 +101,7 @@ class OtlpReviewObservability(ReviewObservability):
         try:
             exporter = self._exporter
             if exporter is None:
-                exporter = _OtlpMetricExporter(self._environment, self._failed)
+                exporter = _OtlpMetricExporter(self._failed)
                 self._exporter = exporter
             exporter.record(
                 name,
@@ -127,9 +126,7 @@ class OtlpReviewObservability(ReviewObservability):
 
 
 class _OtlpMetricExporter:
-    def __init__(
-        self, environment: Mapping[str, str], failed
-    ) -> None:
+    def __init__(self, failed) -> None:
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
             OTLPMetricExporter,
         )
@@ -160,9 +157,11 @@ class _OtlpMetricExporter:
                     failed()
                 return result
 
-            def shutdown(self, timeout_millis=30_000):
+            def shutdown(self, timeout_millis=30_000, **kwargs):
                 try:
-                    self._exporter.shutdown(timeout_millis=timeout_millis)
+                    self._exporter.shutdown(
+                        timeout_millis=timeout_millis, **kwargs
+                    )
                 except Exception:
                     failed()
 
@@ -175,10 +174,7 @@ class _OtlpMetricExporter:
                     failed()
                     return False
 
-        exporter = OTLPMetricExporter(
-            endpoint=environment[_ENDPOINT],
-            headers=environment.get(_HEADERS, ""),
-        )
+        exporter = OTLPMetricExporter()
         reader = PeriodicExportingMetricReader(
             FailureIsolatingExporter(exporter),
             export_interval_millis=60_000,

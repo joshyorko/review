@@ -124,9 +124,15 @@ for path in \
 done
 
 grep -q '^opentelemetry-exporter-otlp-proto-http==' image/tui/requirements.lock ||
-  fail "the TUI requirements must pin the optional Countme exporter"
+  {
+    echo "::error file=image/tui/requirements.lock::the TUI requirements must pin the optional Countme exporter"
+    fail=1
+  }
 grep -q '^opentelemetry-sdk==' image/tui/requirements.lock ||
-  fail "the TUI requirements must pin the Countme SDK"
+  {
+    echo "::error file=image/tui/requirements.lock::the TUI requirements must pin the Countme SDK"
+    fail=1
+  }
 
 # shellcheck disable=SC2016 # single quotes are intentional: matching literal string
 require image/entrypoint.sh \
