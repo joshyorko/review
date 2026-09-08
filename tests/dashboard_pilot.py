@@ -6333,6 +6333,59 @@ async def main() -> int:
                 "no timer may create another queue refresh after reconciliation completes",
             )
 
+            # A completed clean review is itself a successful operation. It
+            # must request the same one-shot retained-cache reconciliation as
+            # landing, while every other review update remains local.
+            queue_refresh_log.write_text("")
+            hive_requests.clear()
+            delay_queue_refresh.touch()
+            app.apply_review_event(
+                tui.ReviewEvent(
+                    key=app.stops[0].key,
+                    state="complete",
+                    note="clean review",
+                    timestamp=int(time.time()),
+                )
+            )
+            for _ in range(200):
+                if (
+                    not app._reconciliation_waiting
+                    and queue_refresh_log.read_text().splitlines() == ["request"]
+                    and hive_requests.count("/api/v1/status") == 1
+                    and hive_requests.count("/api/v1/contributors") == 1
+                ):
+                    break
+                await pilot.pause(0.01)
+            check(
+                queue_refresh_log.read_text().splitlines() == ["request"]
+                and hive_requests.count("/api/v1/status") == 1
+                and hive_requests.count("/api/v1/contributors") == 1,
+                "a terminal clean review must trigger exactly one GitHub and Hive reconciliation",
+            )
+            await pilot.pause(0.2)
+            check(
+                queue_refresh_log.read_text().splitlines() == ["request"]
+                and hive_requests.count("/api/v1/status") == 1
+                and hive_requests.count("/api/v1/contributors") == 1,
+                "a terminal clean review must not start a background reconciliation repeat",
+            )
+            for state in ("findings", "failed", "cancelled", "incomplete", "running"):
+                app.apply_review_event(
+                    tui.ReviewEvent(
+                        key=app.stops[0].key,
+                        state=state,
+                        note=f"{state} review",
+                        timestamp=int(time.time()),
+                    )
+                )
+            await pilot.pause(0.2)
+            check(
+                queue_refresh_log.read_text().splitlines() == ["request"]
+                and hive_requests.count("/api/v1/status") == 1
+                and hive_requests.count("/api/v1/contributors") == 1,
+                "findings, unsuccessful, and nonterminal review events must not reconcile",
+            )
+
             # Queue and issue workers run in separate exclusive groups. A
             # failed queue refresh must retain its good queue even when an
             # issue response updates the shared source display meanwhile.

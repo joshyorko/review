@@ -4127,6 +4127,8 @@ class ReviewDashboard(App):
                 self.observability.operation(
                     f"review.{outcome}", time.monotonic() - started
                 )
+        if event.state == "complete" and stop.review_status == "complete":
+            self._request_reconciliation()
         self.refresh_rows()
 
     def sync_batch_headroom(self, batch: ReviewBatch) -> None:
