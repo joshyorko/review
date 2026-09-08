@@ -83,9 +83,9 @@ publish_bundle() {
   local stage="$1" selector
   if [[ -e "$runtime_dir" || -L "$runtime_dir" ]]; then
     validate_bundle "$runtime_dir" || die "existing pinned bundle is invalid; refusing replacement"
-  else
-    mv -- "$stage" "$runtime_dir" || die "bundle publication failed"
+    return 0
   fi
+  mv -- "$stage" "$runtime_dir" || die "bundle publication failed"
   selector="${runtime_root%/}/.current.$$"
   ln -s -- "$GVISOR_RELEASE" "$selector"
   mv -T -- "$selector" "$runtime_current"
@@ -101,6 +101,11 @@ install_bundle() {
   if [[ "$(id -u)" == 0 ]]; then
     chown 0:0 "$runtime_root"
     chmod 0755 "$runtime_root"
+  fi
+  if [[ -e "$runtime_dir" || -L "$runtime_dir" ]]; then
+    validate_bundle "$runtime_dir"
+    printf 'Review gVisor bundle %s is already installed; update the pinned release to advance it\n' "$GVISOR_RELEASE"
+    return 0
   fi
   stage="$(mktemp -d "${runtime_root%/}/.staging-${GVISOR_RELEASE}.XXXXXX")"
   trap 'rm -rf -- "$stage"' RETURN

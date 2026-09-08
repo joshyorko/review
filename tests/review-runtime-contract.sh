@@ -22,6 +22,11 @@ path="$(BLUEFIN_REVIEW_RUNTIME_ROOT="$root" "$manager" path)"
   exit 1
 }
 BLUEFIN_REVIEW_RUNTIME_ROOT="$root" "$manager" status >/dev/null
+BLUEFIN_REVIEW_RUNTIME_ROOT="$root" "$manager" update >/dev/null
+[[ "$(BLUEFIN_REVIEW_RUNTIME_ROOT="$root" "$manager" path)" == "$bundle/runsc" ]] || {
+  echo 'runtime update changed the pinned path unexpectedly' >&2
+  exit 1
+}
 
 mv "$bundle" "$root/real-release"
 ln -s "$root/real-release" "$bundle"
