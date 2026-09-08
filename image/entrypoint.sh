@@ -79,8 +79,9 @@ codex)
 esac
 
 # The maintainer review surface is the PR-review launch path: the dashboard
-# needs GH_TOKEN and Goose but no Hive registration, so it skips the
-# contributor.env gate and the Hive handover below.
+# needs GH_TOKEN and Goose but no mounted Hive registration, so it skips the
+# contributor.env gate and the Hive handover below. The launcher may pass only
+# HIVE_HUB so this surface can consult the selected deployment.
 review_dashboard=false
 if [ "${1:-}" = queue ]; then
   review_dashboard=true
@@ -96,7 +97,7 @@ if [ "$review_dashboard" = false ] && [ ! -f "${hive_config}/contributor.env" ];
 fi
 
 if [ "$review_dashboard" = true ]; then
-  note 'Bluefin Operations | review dashboard starting (no Hive)'
+  note 'Bluefin Operations | review dashboard starting'
 else
   note 'Bluefin Operations | contributor runtime starting'
 fi
@@ -117,15 +118,19 @@ fi
 # Goose refuses to start without a model. Keep the direct-image fallback in
 # sync with the launcher's default for users who invoke this image directly.
 if [ -z "${GOOSE_MODEL:-}" ]; then
-  GOOSE_MODEL="gpt-5.6-luna"
+  GOOSE_MODEL="gemini-3.8-flash"
   note "GOOSE_MODEL not set; defaulting to ${GOOSE_MODEL} for GitHub Copilot"
 fi
 export GOOSE_MODEL
 
-export GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-high}"
+export GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-max}"
 
 if [ "$review_dashboard" = true ]; then
-  banner 'PR queue dashboard (no Hive)'
+  if [ -n "${HIVE_HUB:-}" ]; then
+    banner 'PR queue dashboard (Hive configured)'
+  else
+    banner 'PR queue dashboard (Hive not configured)'
+  fi
 else
   banner 'Hive contributor'
 fi
@@ -182,26 +187,22 @@ fi
 if [ "$review_dashboard" = true ]; then
   # The dashboard gets its context the way a Hive session does, minus Hive:
   # source the pinned runtime's extension seam (/etc/hive/entrypoint.d), whose
-  # hook owns the hosted hub URL and the curl rewrite to its authenticated
-  # endpoint, then fetch the knowledge export with upstream's own expression.
-  # The hook gates on HIVE_HUB, so it is sourced twice: once to learn the hub
-  # it owns, once with HIVE_HUB exported so the rewrite installs. The hub URL
-  # is defined once in this image, in the hook — never here.
+  # hook installs the exact curl rewrite for the selected hosted endpoint.
+  # Then fetch the knowledge export with upstream's own expression. An absent
+  # HIVE_HUB stays absent: queue mode never silently chooses a deployment.
   if [ -n "${GH_TOKEN:-}" ]; then
     shopt -s nullglob
     for hook in /etc/hive/entrypoint.d/*.sh; do
       # shellcheck disable=SC1090
       [ -r "$hook" ] && . "$hook"
     done
-    if [ -n "${hosted_hub:-}" ]; then
-      export HIVE_HUB="$hosted_hub"
-      for hook in /etc/hive/entrypoint.d/*.sh; do
-        # shellcheck disable=SC1090
-        [ -r "$hook" ] && . "$hook"
-      done
+    if [ -n "${HIVE_HUB:-}" ]; then
       hub_http="${HIVE_HUB/wss:\/\//https://}"
-      curl -sf --max-time 30 "${hub_http%/contribute}/api/knowledge/export" \
-        -o "${HOME}/agent.md" || rm -f "${HOME}/agent.md"
+      if ! curl -sf --max-time 30 "${hub_http%/contribute}/api/knowledge/export" \
+        -o "${HOME}/agent.md"; then
+        rm -f "${HOME}/agent.md"
+        note "Hive knowledge export unavailable from ${hub_http%/contribute}; reviews continue without it."
+      fi
       # The export stays a file the agent can search, and is deliberately NOT
       # linked to AGENTS.md/.goosehints/.goose-instructions.md. Goose loads
       # those into EVERY subprocess it starts, and 'goose review' starts one
@@ -212,7 +213,11 @@ if [ "$review_dashboard" = true ]; then
       # the knowledge base is reachable at the cost of one line.
     fi
   fi
-  note 'Bluefin Operations | maintainer review dashboard (no Hive)'
+  if [ -n "${HIVE_HUB:-}" ]; then
+    note 'Bluefin Operations | maintainer review dashboard (Hive configured)'
+  else
+    note 'Bluefin Operations | maintainer review dashboard (Hive not configured)'
+  fi
   # The dashboard runs as a background job this shell waits on; it must NOT be
   # exec'd. PID 1 owes the container one duty the Textual process does not
   # perform: reaping adopted children. Goose review tool calls leave orphaned

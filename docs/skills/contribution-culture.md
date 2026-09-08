@@ -114,29 +114,15 @@ sentence pointing at it. Prose explaining why something is broken cannot be
 assigned or closed, so it survives the fix and becomes the reason nobody
 noticed the fix was possible.
 
-The worked example is local. This repository shipped Python `find` and `cmp`
-shims that a document described as grandfathered. That one word kept 214 lines
-alive after the pinned base gained GNU findutils 4.10.0 and diffutils 3.12.
-The shims installed to `/usr/local/bin`, which precedes `/usr/sbin` on `PATH`,
-so they shadowed the real GNU tools rather than filling a gap. And the shim was
-wrong: it bound `-o` more loosely than GNU, so Hive's prune expression
-`-name '*.out' -o -name '*.html' -mmin +60 -exec rm -f {} +` deleted
-freshly-written `*.out` agent output that GNU `find` leaves untouched —
-measured directly, GNU removed `c.html` while the shim removed `a.out`,
-`c.html`, and `d.out`, and `a.out` was seconds old. That is live data loss,
-protected by the word "grandfathered."
+The worked example is local: Python `find` and `cmp` shims in `/usr/local/bin`
+shadowed the real GNU tools in `/usr/sbin` and got `-o` precedence wrong,
+deleting fresh agent output. Worse, a test pinned the wrong behavior, making
+the bug hard to fix without breaking CI. **A test locking in an exception
+makes the defect permanent.**
 
-The real lesson is the test. `tests/find-semantics.sh` pinned the shim's wrong
-behavior as expected, so correcting the bug would have failed CI. **A test that
-locks in an exception is how the exception becomes permanent.** When an
-exception is granted, its test stops being a safety net and becomes the thing
-defending the defect. Check what a failing test is actually protecting before
-assuming it is protecting you.
-
-The positive rule: use the tools already in the image. If a common tool is
-missing, add it at the FSDK seam so every consumer is fixed at once. Never
-hand-roll a local reimplementation of standard userland, and never leave a
-shim standing once the seam fix lands.
+The positive rule: use the tools already in the image. If a tool is missing,
+add it at the FSDK seam. Never hand-roll a local reimplementation, and never
+leave a shim standing once the seam fix lands.
 
 ## Sizing A Change
 

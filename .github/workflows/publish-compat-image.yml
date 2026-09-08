@@ -153,10 +153,10 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             uname: x86_64
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             uname: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -373,7 +373,7 @@ jobs:
   publish:
     if: github.repository == 'projectbluefin/review'
     needs: [build, metadata]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

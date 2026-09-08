@@ -64,6 +64,23 @@ state.
 - Knowing the next steps is not a stop condition. Continue until the outcome
   is merged or concretely externally blocked.
 
+## Delivery Cadence
+
+Review is fast-moving, and cadence is part of correctness here.
+
+- Batch every compatible, ready fix into one integrated branch and one pull
+  request. A staged sequence of micro-batches buys nothing a single reviewable
+  diff does not, and each stage costs a full review round trip.
+- Parallelize read-only work — research, exploration, and review passes. It
+  shares no state and cannot conflict, so it never needs a lane.
+- Do not add process overhead that produces no evidence: no staged approval
+  gates between compatible changes, no intermediate PRs opened to be closed.
+- Cadence never buys out a correctness gate. Batched work still passes the
+  repository's full validation, every change still carries its evidence, and
+  the sole-writer boundaries hold: one writer per branch or worktree, one
+  agent per landing batch, and Hive as the only assignment authority.
+  Parallelism belongs to reading; writing stays single-writer.
+
 ## Human Continuation
 
 When a human must intervene to restart continuation or correct scheduling,

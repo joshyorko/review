@@ -4,10 +4,6 @@ goose-*.tar.gz
 .worktrees/
 image/bluefin-operations/node_modules/
 
-# queue/generate.mjs writes these on every run and the workflow deploys them
-# from a fresh checkout; public/index.html is hand-authored, so it stays.
-public/queue.json
-public/queue.md
 
 # tests/image-audit.sh --report writes generated audit reports; they are
 # per-run evidence, never source.

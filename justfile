@@ -14,8 +14,8 @@
 #   review-container  Run the contributor container: the Hive queue
 #                     worker that receives assigned tasks and donates
 #                     inference. Takes an optional model profile and
-#                     thinking effort, e.g. 'just review-container opus5
-#                     high'. Foreground when attended; REVIEW_DETACH=1
+#                     thinking effort, e.g. 'just review-container sol
+#                     medium'. Foreground when attended; REVIEW_DETACH=1
 #                     runs it as a labeled detached worker.
 #   review-stop       Stop a detached worker. Refuses attended runs and
 #                     containers this launcher did not start.
@@ -29,7 +29,10 @@
 #                     Takes the same model profile and effort as
 #                     review-container, then passes the rest through to
 #                     the dashboard, e.g.
-#                     'just review-queue kimi high --repo bluefin'.
+#                     'just review-queue k3 high --repo bluefin'.
+#   turbo-review      Scale three cluster contributor workers, then launch
+#                     review-queue in the foreground with all arguments
+#                     forwarded.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # LIFECYCLE
@@ -77,20 +80,20 @@
 # KEY=VALUE, so it cannot be a plain recipe parameter. Unsupported values are
 # hard errors rather than silent fallbacks.
 tool_env := env("TOOL", "")
-hive_repo_url := "https://github.com/kubestellar/hive"
-# origin/v2 via `git ls-remote --heads https://github.com/kubestellar/hive v2`
-# on 2026-08-04.
-hive_commit := "8ac1994a4994ec3454f83c2ed5a989abd430e1af"
-copilot_default_model := "gpt-5.6-luna"
+hive_repo_url := "https://github.com/hivecommons/hive"
+# origin/v4 via `git ls-remote --heads https://github.com/hivecommons/hive v4`
+# on 2026-09-06.
+hive_commit := "fe34da51434ad9b0924eee1492047c3c95c705ff"
+gemini_model := "gemini-3.8-flash"
 # Contributor runs are automated in practice — Hive keeps feeding the session —
 # so a large window is money spent on context nobody reads. Opus and Kimi are
-# the models whose default windows are worth clamping; luna keeps the provider
-# default because it is already the cheap path.
+# the models whose default windows are worth clamping.
 opus_model := "claude-opus-5"
 opus_context_limit := "264000"
 # Kimi K3's default window is ~1M tokens, so the same clamp applies.
-kimi_model := "kimi-k3"
-kimi_context_limit := "264000"
+sol_model := "gpt-5.6-sol"
+k3_model := "kimi-k3"
+k3_context_limit := "264000"
 # The fsdk-derived contributor image, used by every recipe that starts a
 # container.
 #
@@ -123,7 +126,7 @@ can_run_attended_hive_setup() {
 print_missing_hive_setup_guidance() {
   local path="$1" reason="$2" tool="$3" commit="$4"
   echo "ERROR: missing Hive setup at ${path}; ${reason}." >&2
-  echo "  Re-run review from an interactive terminal, or pre-seed it yourself from kubestellar/hive @ ${commit} by running \`just contribute-setup ${tool}\` in an interactive checkout (set REVIEW_HIVE_COMMIT to another full commit if needed)" >&2
+  echo "  Re-run review from an interactive terminal, or pre-seed it yourself from hivecommons/hive @ ${commit} by running \`just contribute-setup ${tool}\` in an interactive checkout (set REVIEW_HIVE_COMMIT to another full commit if needed)" >&2
 }
 GOOSE_INSTALL_HINT="Install: https://github.com/block/goose/releases"
 GOOSE_FIXIT_HINT="Run: goose configure, select GitHub Copilot, and complete the device flow."
@@ -372,14 +375,23 @@ isolation_runtime_failure() {
   echo "ERROR: isolation runtime: gVisor/runsc (${classification})" >&2
   echo "  ${detail}" >&2
   echo "  Review did not start an agent or mount credentials." >&2
-  # Provisioning is #348; there is no supported manual install recipe.
-  echo "  Supported provisioning: https://github.com/projectbluefin/review/issues/348" >&2
+  echo "  Install the Review-owned pinned host bundle with: sudo just review-runtime install" >&2
+  echo "  Review's local isolation contract: https://github.com/projectbluefin/review/issues/348" >&2
   return 1
+}
+
+review_runtime_path() {
+  local manager="${BLUEFIN_REVIEW_RUNTIME_MANAGER:-scripts/review-runtime.sh}"
+  [[ -x "$manager" ]] || {
+    isolation_runtime_failure missing "Review runtime manager is unavailable at ${manager}."
+    return 1
+  }
+  "$manager" path
 }
 
 runsc_runtime_probe() (
   set -euo pipefail
-  local image="$1" runtime_root="${XDG_RUNTIME_DIR:-/tmp}"
+  local image="$1" runtime_root="${XDG_RUNTIME_DIR:-/tmp}" runtime_path="${RUNSC_PATH:-}"
   local probe_dir probe_name probe_token cidfile probe_id= probe_status=0
   local probe_evidence probe_owner cleanup_status=0
   probe_dir="$(mktemp -d "${runtime_root%/}/review-runtime-probe-XXXXXX")"
@@ -428,7 +440,8 @@ runsc_runtime_probe() (
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  timeout --kill-after=2s 20s podman --runtime=runsc run --rm --detach \
+  [[ -n "$runtime_path" ]] || return 70
+  timeout --kill-after=2s 20s podman --runtime="$runtime_path" run --rm --detach \
     --name "$probe_name" --cidfile "$cidfile" --label "review.probe=$probe_token" \
     --network=none --pull=never --entrypoint /usr/bin/sleep "$image" 30 \
     >/dev/null || probe_status=$?
@@ -450,15 +463,16 @@ runsc_runtime_probe() (
 
 require_runsc_host() {
   local runsc_path rootless
-  runsc_path="$(command -v runsc 2>/dev/null || true)"
+  runsc_path="$(review_runtime_path 2>/dev/null || true)"
   if [[ -z "$runsc_path" || ! -f "$runsc_path" || ! -x "$runsc_path" ]]; then
-    isolation_runtime_failure missing 'runsc is not installed as an executable host command.'
+    isolation_runtime_failure missing 'the Review-owned pinned host bundle is not installed as an executable runtime.'
     return
   fi
   if ! "$runsc_path" --version >/dev/null 2>&1; then
-    isolation_runtime_failure 'installed but unusable' 'runsc --version failed.'
+    isolation_runtime_failure 'installed but unusable' 'the Review-owned runsc --version check failed.'
     return
   fi
+  RUNSC_PATH="$runsc_path"
   rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)"
   if [[ "$rootless" != true ]]; then
     isolation_runtime_failure 'incompatible with this host/Podman configuration' \
@@ -497,6 +511,68 @@ require_runsc_runtime() {
       'Podman did not preserve the probe ownership label.'
     return
   fi
+}
+review_queue_kubernetes_available() {
+  command -v kubectl &>/dev/null || return 1
+  kubectl config current-context >/dev/null 2>&1 || return 1
+  kubectl get --raw='/readyz?verbose' --request-timeout=5s >/dev/null 2>&1 || return 1
+  kubectl get pvc review-queue-state -n bluefin-system --request-timeout=5s >/dev/null 2>&1 || {
+    echo "ERROR: Kubernetes dashboard state claim 'review-queue-state' cannot be read; it may be absent or access may be denied." >&2
+    return 2
+  }
+}
+cleanup_kubernetes_dashboard() {
+  [[ -n "${K8S_DASHBOARD_POD:-}" ]] ||
+    [[ -n "${K8S_DASHBOARD_SECRET:-}" ]] || return 0
+  kubectl delete pod "${K8S_DASHBOARD_POD:-}" -n bluefin-system \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete secret "${K8S_DASHBOARD_SECRET:-}" -n bluefin-system \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+review_queue_kubernetes() {
+  local image="$1"
+  shift
+  local session_id env_names
+  local -a otlp_secret_args=()
+  session_id="$(date +%s)-$$"
+  K8S_DASHBOARD_POD="review-queue-${session_id}"
+  K8S_DASHBOARD_SECRET="review-session-${session_id}"
+  K8S_ENV_NAMES=(
+    GH_TOKEN GITHUB_COPILOT_TOKEN HIVE_HUB BLUEFIN_REVIEW_INSTANCE
+    GOOSE_PROVIDER GOOSE_MODEL GOOSE_THINKING_EFFORT GOOSE_CONTEXT_LIMIT
+    BLUEFIN_REVIEW_BACKEND
+  )
+  if [[ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]]; then
+    K8S_ENV_NAMES+=(OTEL_EXPORTER_OTLP_ENDPOINT)
+    otlp_secret_args+=(
+      --from-file=OTEL_EXPORTER_OTLP_ENDPOINT=<(printf '%s' "$OTEL_EXPORTER_OTLP_ENDPOINT")
+    )
+    if [[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]]; then
+      K8S_ENV_NAMES+=(OTEL_EXPORTER_OTLP_HEADERS)
+      otlp_secret_args+=(
+        --from-file=OTEL_EXPORTER_OTLP_HEADERS=<(printf '%s' "$OTEL_EXPORTER_OTLP_HEADERS")
+      )
+    fi
+  fi
+  env_names="$(IFS=,; echo "${K8S_ENV_NAMES[*]}")"
+
+  kubectl create secret generic "$K8S_DASHBOARD_SECRET" -n bluefin-system \
+    --from-file=GH_TOKEN=<(printf '%s' "$GH_TOKEN_VALUE") \
+    --from-file=GITHUB_COPILOT_TOKEN=<(printf '%s' "${COPILOT_TOKEN:-}") \
+    --from-file=HIVE_HUB=<(printf '%s' "$DASHBOARD_HIVE_HUB") \
+    --from-file=BLUEFIN_REVIEW_INSTANCE=<(printf '%s' "$K8S_DASHBOARD_POD") \
+    --from-file=GOOSE_PROVIDER=<(printf '%s' "${GOOSE_PROVIDER:-}") \
+    --from-file=GOOSE_MODEL=<(printf '%s' "${GOOSE_MODEL:-}") \
+    --from-file=GOOSE_THINKING_EFFORT=<(printf '%s' "${GOOSE_THINKING_EFFORT:-}") \
+    --from-file=GOOSE_CONTEXT_LIMIT=<(printf '%s' "${GOOSE_CONTEXT_LIMIT:-}") \
+    --from-file=BLUEFIN_REVIEW_BACKEND=<(printf '%s' "$REVIEW_BACKEND") \
+    "${otlp_secret_args[@]}" >/dev/null
+
+  python3 scripts/review-session-runtime.py "$session_id" "$image" \
+    "$K8S_DASHBOARD_SECRET" review-queue-state "$env_names" queue "$@" |
+    kubectl create -f -
+  kubectl wait --for=condition=Ready "pod/${K8S_DASHBOARD_POD}" -n bluefin-system --timeout=5m
+  kubectl attach --stdin --tty "$K8S_DASHBOARD_POD" -n bluefin-system
 }
 
 resolve_copilot_token() {
@@ -603,16 +679,12 @@ resolve_codex_auth_file() {
   return 0
 }
 stage_codex_auth_file() {
-  local stage_root=/tmp
   CODEX_AUTH_FILE=""
   CODEX_AUTH_STAGING_DIR=""
   resolve_codex_auth_file
   [[ -n "$CODEX_AUTH_SOURCE_FILE" ]] || return 0
-  if [[ "$stage_root" != /* || ! -d "$stage_root" || ! -w "$stage_root" ]]; then
-    stage_root=/tmp
-  fi
   umask 077
-  CODEX_AUTH_STAGING_DIR="$(mktemp -d "${stage_root%/}/review-codex-auth.XXXXXX")"
+  CODEX_AUTH_STAGING_DIR="$(mktemp -d /tmp/review-codex-auth.XXXXXX)"
   CODEX_AUTH_FILE="${CODEX_AUTH_STAGING_DIR}/auth.json"
   cp -- "$CODEX_AUTH_SOURCE_FILE" "$CODEX_AUTH_FILE"
   chmod 0600 "$CODEX_AUTH_FILE"
@@ -656,18 +728,18 @@ resolve_goose_selection() {
   # Goose is fixed to GitHub Copilot. The model stays noninteractive and the
   # environment still overrides it for automation.
   GOOSE_PROVIDER="github_copilot"
-  GOOSE_MODEL="${GOOSE_MODEL:-${COPILOT_DEFAULT_MODEL}}"
+  GOOSE_MODEL="${GOOSE_MODEL:-${GEMINI_MODEL}}"
   return 0
 }
-# Turn a short profile name ('luna', 'opus5') plus an optional thinking effort
-# into GOOSE_MODEL / GOOSE_THINKING_EFFORT / GOOSE_CONTEXT_LIMIT. Two profiles,
-# no picker: an empty profile is the default one. Profiles are defaults, never
-# overrides — an explicit GOOSE_* value in the environment still wins.
+# Turn a short profile name plus an optional thinking effort into GOOSE_MODEL /
+# GOOSE_THINKING_EFFORT / GOOSE_CONTEXT_LIMIT. Four profiles, no picker:
+# an empty profile is the default one. Profiles are defaults, never overrides —
+# an explicit GOOSE_* value in the environment still wins.
 resolve_model_profile() {
   local profile="${1:-}" effort="${2:-}"
   case "${profile,,}" in
-    ""|luna)
-      PROFILE_MODEL="${COPILOT_DEFAULT_MODEL}"
+    ""|gemini|gemini-3.8|gemini38)
+      PROFILE_MODEL="${GEMINI_MODEL}"
       PROFILE_EFFORT="max"
       PROFILE_CONTEXT_LIMIT=""
       ;;
@@ -676,14 +748,19 @@ resolve_model_profile() {
       PROFILE_EFFORT="high"
       PROFILE_CONTEXT_LIMIT="${OPUS_CONTEXT_LIMIT}"
       ;;
-    kimi)
-      PROFILE_MODEL="${KIMI_MODEL}"
+    sol|gpt-sol|gptsol)
+      PROFILE_MODEL="${SOL_MODEL}"
+      PROFILE_EFFORT="medium"
+      PROFILE_CONTEXT_LIMIT=""
+      ;;
+    k3|kimi)
+      PROFILE_MODEL="${K3_MODEL}"
       PROFILE_EFFORT="max"
-      PROFILE_CONTEXT_LIMIT="${KIMI_CONTEXT_LIMIT}"
+      PROFILE_CONTEXT_LIMIT="${K3_CONTEXT_LIMIT}"
       ;;
     *)
       echo "ERROR: unknown model profile '${profile}'." >&2
-      echo "  Known profiles: luna (${COPILOT_DEFAULT_MODEL}), opus5 (${OPUS_MODEL}), kimi (${KIMI_MODEL})." >&2
+      echo "  Known profiles: gemini (${GEMINI_MODEL}), sol (${SOL_MODEL}), opus5 (${OPUS_MODEL}), k3 (${K3_MODEL})." >&2
       return 1
       ;;
   esac
@@ -749,7 +826,7 @@ prepare_pinned_hive_checkout() {
     git -C "$HIVE_SRC_DIR" remote add origin "$HIVE_REPO_URL"
   fi
 
-  echo "Preparing kubestellar/hive @ ${HIVE_COMMIT:0:12} -> ${HIVE_SRC_DIR}..."
+  echo "Preparing hivecommons/hive @ ${HIVE_COMMIT:0:12} -> ${HIVE_SRC_DIR}..."
   git -C "$HIVE_SRC_DIR" fetch --depth 1 origin "$HIVE_COMMIT"
   git -C "$HIVE_SRC_DIR" checkout --detach -f FETCH_HEAD
   actual_commit="$(git -C "$HIVE_SRC_DIR" rev-parse HEAD)"
@@ -852,11 +929,11 @@ ensure_hive_contributor_env() {
   echo "Running upstream pinned setup: just contribute-setup goose"
   # HIVE_SKIP_VERSION_CHECK=true is upstream's own documented opt-out, not a
   # local workaround. Upstream's private 'check-version' recipe — a prerequisite
-  # of 'contribute-setup' — compares HEAD against origin/v2 and aborts when they
+  # of 'contribute-setup' — compares HEAD against origin/v4 and aborts when they
   # differ, printing "Or skip: export HIVE_SKIP_VERSION_CHECK=true". That check
-  # assumes a tracking checkout of v2. We deliberately run a pinned, detached
+  # assumes a tracking checkout of v4. We deliberately run a pinned, detached
   # SHA (see prepare_pinned_hive_checkout), so the comparison can only ever
-  # fail once v2 moves past the pin, and it would abort first-run onboarding on
+  # fail once v4 moves past the pin, and it would abort first-run onboarding on
   # every clean machine. Taking upstream's flag for exactly the case it
   # documents keeps Hive the authority; removing it would break setup without
   # unpinning, and unpinning would mean executing unreviewed upstream code.
@@ -869,8 +946,8 @@ report_hive_selection() {
   # Say out loud which hive this launch contributes to. A silent default is
   # how a contributor ends up watching one hub's dashboard while their agent
   # asks another for work. The token is never printed — the hub only.
-  local hub
-  hub="$(read_hive_value HIVE_HUB)"
+  local hub="${1:-}"
+  [[ -n "$hub" ]] || hub="$(read_hive_value HIVE_HUB)"
   if [[ -n "$HIVE_REGISTRATION_NAME" && "$HIVE_CONTRIBUTOR_ENV" == *"contributor.${HIVE_REGISTRATION_NAME}.env" ]]; then
     echo "✓ hive: ${hub:-unknown} (registration '${HIVE_REGISTRATION_NAME}')"
   else
@@ -882,25 +959,383 @@ report_hive_selection() {
 }
 read_hive_value() {
   local key="$1"
-  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$HIVE_CONTRIBUTOR_ENV"
+  awk -F= -v wanted="$key" '
+    {
+      name = $1
+      sub(/^[[:space:]]*export[[:space:]]+/, "", name)
+      gsub(/[[:space:]]/, "", name)
+      if (name != wanted) next
+      sub(/^[^=]*=/, "")
+      sub(/^[[:space:]]+/, "")
+      sub(/[[:space:]]+$/, "")
+      if (($0 ~ /^".*"$/) || ($0 ~ /^\047.*\047$/)) {
+        $0 = substr($0, 2, length($0) - 2)
+      }
+      print
+      exit
+    }
+  ' "$HIVE_CONTRIBUTOR_ENV"
+}
+valid_hive_hub() {
+  local hub="$1"
+  [[ -n "$hub" ]] &&
+    [[ "$hub" != *,* ]] &&
+    [[ "$hub" =~ ^(wss|https)://[^/@?\#[:space:]]+([/?\#][^[:space:]]*)?$ ]]
+}
+
+# ── the optional lab (#379) ────────────────────────────────────────────────
+# This appliance owns no lab and depends on none, and none of that changes
+# here: what follows is a capability a maintainer can hand ONE dashboard
+# session, on their own machine, with their own cluster. Nothing requires it,
+# nothing waits for it, and nothing about a pull request's verdict may need
+# it — a missing lab only means the deliverable is verified from published
+# registry evidence instead.
+#
+# What crosses into the container is one Unix socket. Not the kubeconfig, not
+# a Kubernetes credential, not the host home, not host networking, not the
+# Podman socket, not a host binary. The broker on the other end holds all of
+# that and answers exactly three typed questions.
+REVIEW_LAB_SKILLS=(lab-test k3s-cluster-ops kubernetes-specialist live-dev-common)
+
+lab_broker_script() {
+  printf '%s' "${REVIEW_LAB_BROKER:-${PWD}/scripts/review-lab-broker.py}"
+}
+
+lab_probe_context() {
+  # Host capability, decided before anything is offered and without printing
+  # a credential, a kubeconfig path, or a server URL: the probe answers with
+  # the current context's NAME and whether nodes can be listed at all.
+  LAB_CONTEXT=""
+  local broker probe_json
+  broker="$(lab_broker_script)"
+  [[ -f "$broker" ]] || return 1
+  command -v python3 &>/dev/null || return 1
+  command -v kubectl &>/dev/null || return 1
+  probe_json="$(python3 "$broker" probe 2>/dev/null)" || return 1
+  LAB_CONTEXT="$(printf '%s' "$probe_json" | sed -n 's/.*"context":"\([^"]*\)".*/\1/p')"
+  [[ -n "$LAB_CONTEXT" ]]
+}
+
+lab_runtime_flags() {
+  # gVisor blocks host Unix domain sockets by default, so the one socket this
+  # session mounts needs runsc's host-uds=open — and ONLY under runsc: crun
+  # and runc reject the flag outright, so probing the configured runtime is
+  # what keeps the flag from breaking every other machine. review-container
+  # never reaches this function: it receives no lab capability at all.
+  local runtime
+  runtime="$(podman info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null || true)"
+  if [[ "$runtime" == runsc ]]; then
+    printf '%s' "--runtime-flag=host-uds=open"
+  fi
+  return 0
+}
+
+start_lab_broker() {
+  # The broker lives exactly as long as this foreground session: it is
+  # started here, killed by the EXIT trap, and its socket directory removed
+  # with it. Nothing survives the terminal that launched it.
+  local broker runtime_dir waited
+  broker="$(lab_broker_script)"
+  runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [[ ! -d "$runtime_dir" || ! -w "$runtime_dir" ]]; then
+    echo "! no writable XDG_RUNTIME_DIR; the dashboard starts without the lab." >&2
+    return 1
+  fi
+  LAB_SESSION="$(python3 -c 'import secrets; print(secrets.token_hex(8))')" || return 1
+  LAB_SOCKET_DIR="$(mktemp -d "${runtime_dir}/bluefin-review-lab.XXXXXX")" || return 1
+  chmod 700 "$LAB_SOCKET_DIR"
+  LAB_SOCKET="${LAB_SOCKET_DIR}/broker.sock"
+  python3 "$broker" serve --socket "$LAB_SOCKET" --session "$LAB_SESSION" \
+    >"${LAB_SOCKET_DIR}/broker.log" 2>&1 &
+  LAB_BROKER_PID=$!
+  for waited in $(seq 1 50); do
+    [[ -S "$LAB_SOCKET" ]] && break
+    kill -0 "$LAB_BROKER_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [[ ! -S "$LAB_SOCKET" ]]; then
+    echo "! the lab broker did not come up; the dashboard starts without the lab." >&2
+    cleanup_lab_broker
+    return 1
+  fi
+  return 0
+}
+
+cleanup_lab_broker() {
+  if [[ -n "${LAB_BROKER_PID:-}" ]]; then
+    kill "$LAB_BROKER_PID" 2>/dev/null || true
+    wait "$LAB_BROKER_PID" 2>/dev/null || true
+    LAB_BROKER_PID=""
+  fi
+  if [[ -n "${LAB_SOCKET_DIR:-}" && -d "$LAB_SOCKET_DIR" ]]; then
+    rm -rf "$LAB_SOCKET_DIR"
+    LAB_SOCKET_DIR=""
+  fi
+  LAB_SOCKET=""
+}
+
+offer_lab_session() {
+  # Asked once, per dashboard process, on the terminal that launched it.
+  # REVIEW_LAB=1/0 answers it without a prompt for an unattended launch;
+  # anything else, including no terminal at all, leaves the lab off.
+  LAB_SOCKET="" LAB_SESSION="" LAB_SOCKET_DIR="" LAB_BROKER_PID=""
+  local answer=""
+  [[ "${REVIEW_LAB:-}" == "0" ]] && return 0
+  lab_probe_context || return 0
+  if [[ "${REVIEW_LAB:-}" == "1" ]]; then
+    answer="y"
+  elif ( : </dev/tty && : >/dev/tty ) 2>/dev/null; then
+    printf '?  Kubernetes context %s is reachable. Use it for this session only? [y/N] ' \
+      "$LAB_CONTEXT" >/dev/tty
+    read -r answer </dev/tty || answer=""
+  else
+    return 0
+  fi
+  [[ "$answer" == [Yy]* ]] || return 0
+  start_lab_broker || return 0
+  echo "✓ lab enabled for this session (context ${LAB_CONTEXT}); one socket, no credentials."
+}
+
+add_lab_container_args() {
+  # Only the socket directory and two non-secret strings. The personal lab
+  # skills are read-only documents the review agent already knows how to
+  # read; common owns the shared lab skill, so only the maintainer's own
+  # ids are mounted here, never a second copy of the org inventory.
+  [[ -n "${LAB_SOCKET:-}" ]] || return 0
+  local flag skill_root skill
+  flag="$(lab_runtime_flags)"
+  if [[ -n "$flag" ]]; then
+    CONTAINER_ARGS+=("$flag")
+  fi
+  CONTAINER_ARGS+=(--volume "${LAB_SOCKET_DIR}:/run/bluefin-review-lab:rw,z")
+  CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_LAB_SOCKET=/run/bluefin-review-lab/broker.sock")
+  CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_LAB_SESSION=${LAB_SESSION}")
+  skill_root="${REVIEW_PERSONAL_SKILLS:-${HOME}/.copilot/skills}"
+  for skill in "${REVIEW_LAB_SKILLS[@]}"; do
+    [[ -d "${skill_root}/${skill}" ]] || continue
+    CONTAINER_ARGS+=(--volume "${skill_root}/${skill}:/home/dev/.agents/skills/${skill}:ro,z")
+  done
+}
+
+review_exec_broker_script() {
+  printf '%s' "${REVIEW_EXEC_BROKER:-${PWD}/scripts/review-exec-broker.py}"
+}
+
+review_exec_probe_context() {
+  REVIEW_EXEC_CONTEXT=""
+  local broker probe_json
+  broker="$(review_exec_broker_script)"
+  [[ -f "$broker" ]] || return 1
+  command -v python3 &>/dev/null || return 1
+  command -v kubectl &>/dev/null || return 1
+  probe_json="$(python3 "$broker" probe 2>/dev/null)" || return 1
+  REVIEW_EXEC_CONTEXT="$(printf '%s' "$probe_json" | sed -n 's/.*"context":"\([^"]*\)".*/\1/p')"
+  [[ -n "$REVIEW_EXEC_CONTEXT" ]]
+}
+
+review_exec_runtime_flags() {
+  local runtime
+  runtime="$(podman info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null || true)"
+  if [[ "$runtime" == runsc ]]; then
+    printf '%s' "--runtime-flag=host-uds=open"
+  fi
+  return 0
+}
+
+start_review_exec_broker() {
+  local broker runtime_dir
+  broker="$(review_exec_broker_script)"
+  runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [[ ! -d "$runtime_dir" || ! -w "$runtime_dir" ]]; then
+    return 1
+  fi
+  REVIEW_EXEC_SESSION="$(python3 -c 'import secrets; print(secrets.token_hex(8))')" || return 1
+  REVIEW_EXEC_SOCKET_DIR="$(mktemp -d "${runtime_dir}/bluefin-review-exec.XXXXXX")" || return 1
+  chmod 700 "$REVIEW_EXEC_SOCKET_DIR"
+  REVIEW_EXEC_SOCKET="${REVIEW_EXEC_SOCKET_DIR}/broker.sock"
+  python3 "$broker" serve \
+    --socket "$REVIEW_EXEC_SOCKET" \
+    --session "$REVIEW_EXEC_SESSION" \
+    --image "${CONTRIBUTOR_IMAGE:-ghcr.io/projectbluefin/review:stable}" \
+    >"${REVIEW_EXEC_SOCKET_DIR}/broker.log" 2>&1 &
+  REVIEW_EXEC_BROKER_PID=$!
+  for _ in $(seq 1 50); do
+    [[ -S "$REVIEW_EXEC_SOCKET" ]] && return 0
+    kill -0 "$REVIEW_EXEC_BROKER_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  cleanup_review_exec_broker
+  return 1
+}
+
+cleanup_review_exec_broker() {
+  if [[ -n "${REVIEW_EXEC_BROKER_PID:-}" ]]; then
+    kill "$REVIEW_EXEC_BROKER_PID" 2>/dev/null || true
+    wait "$REVIEW_EXEC_BROKER_PID" 2>/dev/null || true
+    REVIEW_EXEC_BROKER_PID=""
+  fi
+  if [[ -n "${REVIEW_EXEC_SOCKET_DIR:-}" && -d "$REVIEW_EXEC_SOCKET_DIR" ]]; then
+    rm -rf "$REVIEW_EXEC_SOCKET_DIR"
+    REVIEW_EXEC_SOCKET_DIR=""
+  fi
+  REVIEW_EXEC_SOCKET=""
+  REVIEW_EXEC_SESSION=""
+}
+
+offer_review_exec_session() {
+  REVIEW_EXEC_SOCKET="" REVIEW_EXEC_SESSION="" REVIEW_EXEC_SOCKET_DIR="" REVIEW_EXEC_BROKER_PID=""
+  [[ "${REVIEW_EXEC:-}" == "0" ]] && return 0
+  review_exec_probe_context || return 0
+  local answer=""
+  if [[ "${REVIEW_EXEC:-}" == "1" ]]; then
+    answer="y"
+  elif ( : </dev/tty && : >/dev/tty ) 2>/dev/null; then
+    printf '?  Kubernetes context %s is reachable. Offload batch reviews to ghost cluster for this session only? [y/N] ' \
+      "$REVIEW_EXEC_CONTEXT" >/dev/tty
+    read -r answer </dev/tty || answer=""
+  else
+    return 0
+  fi
+  [[ "$answer" == [Yy]* ]] || return 0
+  start_review_exec_broker || {
+    echo "! review-exec broker did not start; reviews remain local." >&2
+    return 0
+  }
+  echo "✓ review-exec enabled for this session (context ${REVIEW_EXEC_CONTEXT}); one socket, no credentials."
+}
+
+add_review_exec_container_args() {
+  if [[ -n "${REVIEW_EXEC_SOCKET:-}" ]]; then
+    local flag
+    flag="$(review_exec_runtime_flags)"
+    [[ -n "$flag" ]] && CONTAINER_ARGS+=("$flag")
+    CONTAINER_ARGS+=(--volume "${REVIEW_EXEC_SOCKET_DIR}:/run/bluefin-review-exec:rw,z")
+    CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_SOCKET=/run/bluefin-review-exec/broker.sock")
+    CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_SESSION=${REVIEW_EXEC_SESSION}")
+    CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_AVAILABLE=1")
+  fi
+}
+
+scale_cluster_contributors() {
+  local replicas="$1" profile="${2:-gemini}" effort="${3:-}"
+  command -v kubectl &>/dev/null || {
+    echo "ERROR: kubectl is required for cluster contributor scale-out." >&2
+    return 1
+  }
+  local context
+  context="$(kubectl config current-context 2>/dev/null || true)"
+  if [[ -z "$context" ]]; then
+    echo "ERROR: no active Kubernetes context found." >&2
+    return 1
+  fi
+
+  resolve_model_profile "$profile" "$effort"
+
+  ensure_hive_contributor_env
+  local hub
+  hub="$(read_hive_value HIVE_HUB)"
+  if ! valid_hive_hub "$hub"; then
+    echo "ERROR: HIVE_HUB is not set in ${HIVE_CONTRIBUTOR_ENV}." >&2
+    return 1
+  fi
+  CLUSTER_HIVE_HUB="$hub"
+
+  resolve_gh_token
+  if [[ -z "${GH_TOKEN_VALUE:-}" ]]; then
+    report_missing_gh_token
+    echo "ERROR: refusing to update the cluster Secret without a GitHub token." >&2
+    return 1
+  fi
+  resolve_copilot_token
+  if [[ -z "${COPILOT_TOKEN:-}" ]]; then
+    report_missing_copilot_credential
+    echo "ERROR: refusing to update the cluster Secret without a Copilot credential." >&2
+    return 1
+  fi
+
+  kubectl create namespace bluefin-system --dry-run=client -o yaml |
+    kubectl apply -f - >/dev/null || return 1
+
+  kubectl create secret generic review-contributor-secret -n bluefin-system \
+    --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
+    --from-file=GH_TOKEN=<(printf '%s' "$GH_TOKEN_VALUE") \
+    --from-file=GITHUB_COPILOT_TOKEN=<(printf '%s' "$COPILOT_TOKEN") \
+    --dry-run=client -o yaml |
+    kubectl apply --server-side --force-conflicts -f - >/dev/null || return 1
+  local legacy_annot
+  legacy_annot="$(kubectl get secret review-contributor-secret -n bluefin-system -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}')" || {
+    echo "ERROR: failed to read secret annotations." >&2
+    return 1
+  }
+  if [[ -n "$legacy_annot" ]]; then
+    kubectl annotate secret review-contributor-secret -n bluefin-system \
+      kubectl.kubernetes.io/last-applied-configuration- >/dev/null || {
+        echo "ERROR: failed to remove legacy plaintext secret annotation." >&2
+        return 1
+      }
+  fi
+
+  local deploy_file="deploy/review-contributor.yaml"
+  if [[ ! -f "$deploy_file" ]]; then
+    echo "ERROR: ${deploy_file} not found." >&2
+    return 1
+  fi
+  kubectl apply -f "$deploy_file" >/dev/null || return 1
+  kubectl set env deployment/review-contributor -n bluefin-system \
+    GOOSE_MODEL="$PROFILE_MODEL" \
+    GOOSE_THINKING_EFFORT="$PROFILE_EFFORT" \
+    HIVE_HUB="$hub" >/dev/null || return 1
+  kubectl scale deployment/review-contributor -n bluefin-system --replicas="$replicas" >/dev/null || return 1
+  if [[ "$replicas" -gt 0 ]]; then
+    echo "✓ scaled cluster contributor workers to ${replicas} (context ${context}, model ${PROFILE_MODEL} at ${PROFILE_EFFORT} effort)."
+    if ! kubectl rollout status deployment/review-contributor -n bluefin-system --timeout=15s 2>/dev/null; then
+      echo "! rollout still progressing after 15s; workers will continue pulling/starting in background." >&2
+    fi
+    kubectl get pods -n bluefin-system -o wide
+  else
+    echo "✓ scaled cluster contributor workers to 0."
+  fi
+}
+
+stop_cluster_contributors() {
+  if command -v kubectl &>/dev/null && kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
+    kubectl scale deployment/review-contributor -n bluefin-system --replicas=0 >/dev/null
+    echo "✓ stopped all cluster contributor workers (scaled to 0 in bluefin-system)."
+    return 0
+  else
+    echo "✓ no cluster contributor deployment found."
+    return 0
+  fi
 }
 '''
+
+[doc("Manage the Review-owned pinned host gVisor runtime bundle.")]
+review-runtime *runtime_args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    manager="${BLUEFIN_REVIEW_RUNTIME_MANAGER:-scripts/review-runtime.sh}"
+    [[ -x "$manager" ]] || {
+      echo "ERROR: Review runtime manager is unavailable at ${manager}." >&2
+      exit 1
+    }
+    exec "$manager" "${runtime_args[@]}"
 
 # Run the contributor container: the Hive queue worker.
 # Receives Hive-assigned tasks and donates inference through the
 # maintainer's credentials.
 #
-#   just review-container              # luna: gpt-5.6-luna at max effort
-#   just review-container luna         # the same, named explicitly
+#   just review-container              # gemini: gemini-3.8-flash at max effort
+#   just review-container gemini       # the same, named explicitly
+#   just review-container sol          # gpt-5.6-sol, medium effort
 #   just review-container opus5 high   # claude-opus-5, high effort, 264k context
-#   just review-container kimi         # kimi-k3, max effort, 264k context
+#   just review-container k3           # kimi-k3, max effort, 264k context
 #
 # One instance owns the 'review-container' name, so a second concurrent agent
 # needs a name of its own:
 #
 #   REVIEW_CONTAINER_NAME=review-container-2 just review-container opus5 high
 #
-# Usage: just review-container [luna|opus5|kimi] [low|medium|high|max]
+# Usage: just review-container [gemini|sol|gpt-sol|opus5|k3|kimi] [low|medium|high|max]
 # Env:   REVIEW_CONTAINER_NAME=<name>  run a concurrent second instance
 #        (default 'review-container'; must match [a-zA-Z0-9][a-zA-Z0-9_.-]*)
 #        REVIEW_HIVE=<name>  use ~/.config/hive/contributor.<name>.env; when
@@ -913,27 +1348,32 @@ review-container profile="" effort="":
     set -euo pipefail
     {{shared_functions}}
     TOOL="{{tool_env}}"
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
+    GEMINI_MODEL="{{gemini_model}}"
     OPUS_MODEL="{{opus_model}}"
     OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
-    KIMI_MODEL="{{kimi_model}}"
-    KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
+    SOL_MODEL="{{sol_model}}"
+    K3_MODEL="{{k3_model}}"
+    K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
-    # Isolation is a security boundary. The host check runs before image
-    # retrieval, then the credential-free disposable proof runs as soon as
-    # the contributor image is available. No state, credential, model setup,
-    # or Hive registration may happen before both checks pass.
-    command -v podman &>/dev/null || {
-      echo "ERROR: Podman is required to run the contributor container." >&2
-      echo "  Install Podman, then re-run review-container." >&2
-      exit 1
-    }
-    require_runsc_host
+    # Isolation is a security boundary for local Podman work. Kubernetes
+    # scale-out is a separate node-owned runtime boundary and must not inherit
+    # proof from this launcher's host.
+    raw_profile="{{profile}}"
+    if [[ "$raw_profile" != cluster && -z "${REVIEW_SCALE:-}" ]]; then
+      command -v podman &>/dev/null || {
+        echo "ERROR: Podman is required to run the contributor container." >&2
+        echo "  Install Podman, then re-run review-container." >&2
+        exit 1
+      }
+      require_runsc_host
+    fi
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
-    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
-    require_runsc_runtime "$CONTRIBUTOR_IMAGE"
-    echo "✓ isolation runtime: gVisor/runsc"
+    if [[ "$raw_profile" != cluster && -z "${REVIEW_SCALE:-}" ]]; then
+      ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+      require_runsc_runtime "$CONTRIBUTOR_IMAGE"
+      echo "✓ isolation runtime: gVisor/runsc"
+    fi
 
     STATE_DIR="${HOME}/.local/state/review"
     HIVE_SRC_DIR="${STATE_DIR}/hive-src"
@@ -945,6 +1385,26 @@ review-container profile="" effort="":
     require_goose_backend "$TOOL"
     BACKEND="${TOOL:-goose}"
     preflight_agent "$BACKEND"
+
+    raw_effort="{{effort}}"
+
+    if [[ "$raw_profile" == "cluster" || -n "${REVIEW_SCALE:-}" ]]; then
+      replicas="${REVIEW_SCALE:-2}"
+      model_profile="gemini"
+      model_effort="max"
+      if [[ "$raw_profile" == "cluster" ]]; then
+        if [[ "$raw_effort" =~ ^[0-9]+$ ]]; then
+          replicas="$raw_effort"
+        elif [[ -n "$raw_effort" ]]; then
+          model_profile="$raw_effort"
+        fi
+      elif [[ -n "$raw_profile" ]]; then
+        model_profile="$raw_profile"
+        model_effort="${raw_effort:-max}"
+      fi
+      scale_cluster_contributors "$replicas" "$model_profile" "$model_effort"
+      exit 0
+    fi
 
     # Resolved before anything interactive so a typo fails immediately rather
     # than after the model picker and the Hive setup.
@@ -971,12 +1431,12 @@ review-container profile="" effort="":
     DETACH="${REVIEW_DETACH:-0}"
     if [[ "$DETACH" == 1 ]]; then
       CONTAINER_ARGS=(
-        podman --runtime=runsc run --rm --detach --replace --name "$CONTAINER_NAME"
+        podman --runtime="$RUNSC_PATH" run --rm --detach --replace --name "$CONTAINER_NAME"
         --label "review.owner=detached"
       )
     else
       CONTAINER_ARGS=(
-        podman --runtime=runsc run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
+        podman --runtime="$RUNSC_PATH" run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
         --label "$(owner_run_label)"
       )
     fi
@@ -1076,6 +1536,15 @@ review-container profile="" effort="":
     fi
     exec "${CONTAINER_ARGS[@]}"
 
+# Start an unattended contributor worker. The existing launcher owns all
+# credential checks and lifecycle behavior; this selects its explicit
+# detached path so the worker survives the launching terminal.
+[doc("Start an unattended Hive contributor worker; local runs detach by default.")]
+contribute profile="" effort="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    REVIEW_DETACH=1 just review-container "{{profile}}" "{{effort}}"
+
 # Stop a detached review worker. This is the explicit lifecycle verb for
 # containers started with REVIEW_DETACH=1; it refuses to touch anything this
 # launcher did not start (no review.owner label) and never force-removes.
@@ -1086,6 +1555,10 @@ review-stop name="review-container":
     set -euo pipefail
     {{shared_functions}}
     NAME="{{name}}"
+    if [[ "$NAME" == "cluster" ]]; then
+      stop_cluster_contributors
+      exit 0
+    fi
     [[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || {
       echo "ERROR: '${NAME}' is not a valid container name." >&2
       exit 1
@@ -1108,41 +1581,59 @@ review-stop name="review-container":
     cleanup_codex_auth_staging_dir "$codex_auth_staging_dir"
     echo "✓ stopped the detached worker ${NAME}."
 
-# The maintainer review dashboard over the Bluefin PR queue — no Hive.
+# The maintainer review dashboard over the Bluefin PR queue.
 # The container runs the dashboard instead of the contributor agent, so no
-# Hive registration is mounted or required. Foreground: q or Ctrl-C stops.
+# Hive registration is mounted or required. When one exists, only its HIVE_HUB
+# URL is passed so the dashboard can consult the selected deployment.
+# Foreground: q or Ctrl-C stops.
 # Arguments pass straight through to the dashboard:
 #
-#   just review-queue                      # everything the queue marks 'review'
-#   just review-queue kimi high            # pick the model profile and effort
+#   just review-queue                      # gemini: gemini-3.8-flash at max effort
+#   just review-queue sol                  # gpt-5.6-sol at medium effort
+#   just review-queue k3 high              # pick the model profile and effort
 #   just review-queue owner/repo            # live open PRs for one repository
-#   just review-queue --repo bluefin       # static snapshot filter (legacy form)
+#   just review-queue --repo bluefin       # narrow the org queue to one repository
 #   just review-queue opus5 --all          # profile, then dashboard flags
 #
 # One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
 # for a concurrent second dashboard, exactly as REVIEW_CONTAINER_NAME does for
 # review-container.
-[doc("Open the maintainer review dashboard over the Bluefin PR queue (no Hive).")]
+[doc("Open the maintainer review dashboard over the Bluefin PR queue.")]
 review-queue *queue_args:
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}
     TOOL="{{tool_env}}"
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
+    GEMINI_MODEL="{{gemini_model}}"
     OPUS_MODEL="{{opus_model}}"
     OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
-    KIMI_MODEL="{{kimi_model}}"
-    KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
+    SOL_MODEL="{{sol_model}}"
+    K3_MODEL="{{k3_model}}"
+    K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
     resolve_review_backend
-    # Isolation is a security boundary, so it is proven before any credential
-    # is resolved or staged.
-    command -v podman &>/dev/null || {
-      echo "ERROR: Podman is required to run the contributor container." >&2
-      echo "  Install Podman, then re-run review-queue." >&2
-      exit 1
-    }
-    require_runsc_host
+    K8S_DASHBOARD=0
+    if [[ "${REVIEW_RUNTIME:-}" == k8s ]]; then
+      if review_queue_kubernetes_available; then
+        K8S_DASHBOARD=1
+      else
+        runtime_status=$?
+        if [[ "$runtime_status" == 2 ]]; then
+          exit 1
+        fi
+        echo "! Kubernetes is unavailable; using the local Podman dashboard." >&2
+      fi
+    fi
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      command -v podman &>/dev/null || {
+        echo "ERROR: Podman is required to run the contributor container." >&2
+        echo "  Install Podman, then re-run review-queue." >&2
+        exit 1
+      }
+      # Isolation is a security boundary, so it is proven before any
+      # credential is resolved or staged on the local Podman route.
+      require_runsc_host
+    fi
 
     require_goose_backend "$TOOL"
     if [[ "$REVIEW_BACKEND" == codex ]]; then
@@ -1163,7 +1654,7 @@ review-queue *queue_args:
     profile="" effort=""
     if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then profile="$1"; shift; fi
     if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then effort="$1"; shift; fi
-    resolve_model_profile "$profile" "$effort"
+    resolve_model_profile "${profile:-gemini}" "$effort"
     # The unambiguous repository form follows the existing profile/effort
     # pair. Keep all flag forms byte-for-byte available to the dashboard.
     if [[ $# -gt 0 && "$1" != -* ]]; then
@@ -1171,33 +1662,82 @@ review-queue *queue_args:
     fi
     [[ "$REVIEW_BACKEND" == codex ]] || resolve_goose_selection
 
+    # The dashboard needs only the selected hub URL. Resolve the same named
+    # registration as review-container, but never mount contributor.env or pass
+    # its registration token into the maintainer surface.
+    HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.env"
+    hive_registration_name
+    if [[ -n "$HIVE_REGISTRATION_NAME" ]]; then
+      named_hive_env="${HOME}/.config/hive/contributor.${HIVE_REGISTRATION_NAME}.env"
+      if [[ -f "$named_hive_env" ]]; then
+        HIVE_CONTRIBUTOR_ENV="$named_hive_env"
+      elif [[ -n "${REVIEW_HIVE:-}" ]]; then
+        echo "ERROR: no hive registration named '${HIVE_REGISTRATION_NAME}' at ${named_hive_env}." >&2
+        echo "  Register it first: REVIEW_HIVE=${HIVE_REGISTRATION_NAME} just review-container" >&2
+        exit 1
+      fi
+    fi
+    DASHBOARD_HIVE_HUB="${HIVE_HUB:-}"
+    if [[ -n "$DASHBOARD_HIVE_HUB" ]]; then
+      if ! valid_hive_hub "$DASHBOARD_HIVE_HUB"; then
+        echo "! inherited HIVE_HUB is unsupported; the dashboard requires one wss:// or https:// URL and will continue without Hive." >&2
+        DASHBOARD_HIVE_HUB=""
+      fi
+    elif [[ -f "$HIVE_CONTRIBUTOR_ENV" ]]; then
+      DASHBOARD_HIVE_HUB="$(read_hive_value HIVE_HUB)"
+      if [[ -z "$DASHBOARD_HIVE_HUB" ]]; then
+        echo "! ${HIVE_CONTRIBUTOR_ENV} has no usable HIVE_HUB; the dashboard will continue without Hive." >&2
+      elif ! valid_hive_hub "$DASHBOARD_HIVE_HUB"; then
+        echo "! ${HIVE_CONTRIBUTOR_ENV} has an unsupported HIVE_HUB; the dashboard requires one wss:// or https:// URL and will continue without Hive." >&2
+        DASHBOARD_HIVE_HUB=""
+      fi
+    fi
+
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
-    require_no_running_instance "$CONTAINER_NAME"
-    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
-    require_runsc_runtime "$CONTRIBUTOR_IMAGE"
-    echo "✓ isolation runtime: gVisor/runsc"
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      require_no_running_instance "$CONTAINER_NAME"
+      ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+      require_runsc_runtime "$CONTRIBUTOR_IMAGE"
+      echo "✓ isolation runtime: gVisor/runsc"
+    fi
+
+    # The lab offer happens before anything starts and answers in one
+    # question. Declining, no terminal, no kubectl, or an unreachable
+    # cluster all leave LAB_SOCKET empty and the dashboard fully usable.
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      offer_lab_session
+      offer_review_exec_session
+    fi
 
     CONTAINER_ARGS=(
-      podman --runtime=runsc run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
+      podman --runtime="$RUNSC_PATH" run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
       --label "$(owner_run_label)"
       --userns "keep-id:uid=1000,gid=1000"
       # Podman does not pass COLORTERM through on its own.
       --env COLORTERM
     )
+    add_lab_container_args
+    add_review_exec_container_args
     # The dashboard's record — dispatched landing batches, their failure
     # reasons, the action trace — lives under the container's XDG state
     # directory, and a reclaim-by-replace relaunch must not lose it (#281).
     # One shared host directory under the host XDG state root: the queue it
     # records is the same whichever instance name runs, and :z keeps it
     # writable for concurrent named dashboards.
-    QUEUE_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
-    mkdir -p "$QUEUE_STATE_DIR"
-    CONTAINER_ARGS+=(--volume "${QUEUE_STATE_DIR}:/home/dev/.local/state/bluefin-review:rw,z")
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      QUEUE_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
+      mkdir -p "$QUEUE_STATE_DIR"
+      CONTAINER_ARGS+=(--volume "${QUEUE_STATE_DIR}:/home/dev/.local/state/bluefin-review:rw,z")
+    fi
     # The instance name qualifies each landing batch id: two named dashboards
     # share the state directory, and a bare timestamp id would let their
     # batches overwrite each other's prompt, status, and log.
     export BLUEFIN_REVIEW_INSTANCE="$CONTAINER_NAME"
     CONTAINER_ARGS+=(--env BLUEFIN_REVIEW_INSTANCE)
+    if [[ -n "$DASHBOARD_HIVE_HUB" ]]; then
+      CONTAINER_ARGS+=(--env "HIVE_HUB=${DASHBOARD_HIVE_HUB}")
+      report_hive_selection "$DASHBOARD_HIVE_HUB"
+    fi
     if [[ "$REVIEW_BACKEND" != codex ]]; then
       [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
       [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
@@ -1225,15 +1765,21 @@ review-queue *queue_args:
     # from the host login or configuration directory. The official CLI may
     # refresh only the disposable copy, which is removed when this run exits.
     CODEX_AUTH_STAGING_DIR=""
-    trap cleanup_codex_auth_file EXIT
+    # One trap owns this session's teardown: the staged Codex credential,
+    # the lab broker, and the review-exec broker die with the terminal.
+    trap 'cleanup_kubernetes_dashboard; cleanup_codex_auth_file; cleanup_lab_broker; cleanup_review_exec_broker' EXIT
     if [[ "$REVIEW_BACKEND" == codex ]]; then
-      stage_codex_auth_file
-      if [[ -n "$CODEX_AUTH_FILE" ]]; then
-        CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
-        echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+      if [[ "$K8S_DASHBOARD" != 1 ]]; then
+        stage_codex_auth_file
+        if [[ -n "$CODEX_AUTH_FILE" ]]; then
+          CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
+          echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+        else
+          echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
+          echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
+        fi
       else
-        echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
-        echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
+        echo "! Kubernetes dashboard sessions do not stage a Codex subscription login." >&2
       fi
     fi
     # The dashboard is a GitHub reader from the first keystroke to the last, so
@@ -1248,12 +1794,89 @@ review-queue *queue_args:
     CONTAINER_ARGS+=(--env GH_TOKEN)
     report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
 
+    if [[ "$K8S_DASHBOARD" == 1 ]]; then
+      echo "✓ starting the maintainer review dashboard in Kubernetes."
+      echo "  q or Ctrl-C stops; the dashboard is the only thing running."
+      review_queue_kubernetes "$CONTRIBUTOR_IMAGE" "$@"
+      exit $?
+    fi
+
     # Whatever survived the profile/effort shift belongs to the dashboard.
     CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue "$@")
 
-    echo "✓ starting the maintainer review dashboard (no Hive)."
+    if [[ -n "$DASHBOARD_HIVE_HUB" ]]; then
+      echo "✓ starting the maintainer review dashboard (Hive configured)."
+    else
+      echo "✓ starting the maintainer review dashboard (Hive not configured)."
+    fi
     echo "  q or Ctrl-C stops; the dashboard is the only thing running."
     "${CONTAINER_ARGS[@]}"
+
+# Scale 3 cluster workers and open the maintainer review dashboard in the foreground.
+# Workers continue running in the cluster after the dashboard exits.
+#
+#   just turbo-review                      # default gemini profile, 3 cluster workers
+#   just turbo-review sol                  # sol profile, 3 cluster workers
+#   just turbo-review projectbluefin/review # live review of one repository
+[doc("Scale 3 cluster workers and open the maintainer review dashboard.")]
+turbo-review *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{shared_functions}}
+    TOOL="{{tool_env}}"
+    GEMINI_MODEL="{{gemini_model}}"
+    OPUS_MODEL="{{opus_model}}"
+    OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
+    SOL_MODEL="{{sol_model}}"
+    K3_MODEL="{{k3_model}}"
+    K3_CONTEXT_LIMIT="{{k3_context_limit}}"
+
+    replicas="${REVIEW_SCALE:-3}"
+    profile="gemini"
+    effort=""
+    CLUSTER_HIVE_HUB=""
+    # Leading non-flag arguments are the model profile and thinking effort,
+    # exactly as review-queue takes them. Keep "$@" intact for the dashboard.
+    # shellcheck disable=SC2086
+    set -- {{args}}
+    if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then
+      profile="$1"
+      if [[ $# -gt 1 && "$2" != -* && "$2" != */* ]]; then effort="$2"; fi
+    fi
+
+    echo "=== Launching review turbo ==="
+    if command -v kubectl &>/dev/null && [[ -n "$(kubectl config current-context 2>/dev/null || true)" ]]; then
+      echo "✓ scaling ${replicas} cluster contributor workers in bluefin-system..."
+      scale_cluster_contributors "$replicas" "$profile" "$effort" || {
+        echo "! cluster worker scale-out failed; continuing with local review dashboard." >&2
+      }
+      if [[ -n "$CLUSTER_HIVE_HUB" ]]; then
+        export HIVE_HUB="$CLUSTER_HIVE_HUB"
+      fi
+    else
+      echo "! no active Kubernetes context found; continuing with local review dashboard only." >&2
+    fi
+
+    report_cluster_exit_status() {
+      echo ""
+      echo "=== Cluster contributor status ==="
+      if ! command -v kubectl &>/dev/null; then
+        echo "! kubectl is unavailable; cluster contributor status was not checked."
+      elif ! kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
+        echo "! unable to read cluster contributor status in bluefin-system."
+      else
+        ready="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+        total="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
+        echo "✓ ${ready:-0}/${total:-0} cluster contributor workers active in bluefin-system."
+      fi
+      echo "  Stop workers: just review-stop cluster"
+      echo "  Check health: just review-doctor"
+    }
+    trap report_cluster_exit_status EXIT
+
+    echo "✓ starting maintainer review dashboard in foreground..."
+    # Execute review-queue as a child process to isolate environment variables and traps.
+    just review-queue "$@"
 
 # Preflight check: is this machine actually ready for 'just review-container'?
 # Starts no agent and mounts no credential; the one thing it runs is a
@@ -1263,7 +1886,6 @@ review-doctor:
     #!/usr/bin/env bash
     set -uo pipefail
     {{shared_functions}}
-    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
     HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
     HIVE_COMMIT="${HIVE_COMMIT,,}"
     pass=0; fail=0
@@ -1400,10 +2022,30 @@ review-doctor:
     else
       echo "  ✗ ${HIVE_CONTRIBUTOR_ENV} is missing"
       echo "    review runs upstream 'just contribute-setup goose' from"
-      echo "    kubestellar/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
+      echo "    hivecommons/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
       echo "    That runs with upstream's documented HIVE_SKIP_VERSION_CHECK=true,"
-      echo "    because the pinned checkout is detached and cannot match origin/v2."
+      echo "    because the pinned checkout is detached and cannot match origin/v4."
       fail=$((fail+1))
+    fi
+    echo ""
+
+    echo "=== Cluster scale-out ==="
+    if command -v kubectl &>/dev/null; then
+      k8s_ctx="$(kubectl config current-context 2>/dev/null || true)"
+      if [[ -n "$k8s_ctx" ]]; then
+        echo "  ✓ Kubernetes context: ${k8s_ctx}"
+        if kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
+          ready_rep="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+          spec_rep="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
+          echo "  ✓ review-contributor: ${ready_rep:-0}/${spec_rep:-0} ready replicas in bluefin-system"
+        else
+          echo "  - review-contributor: not deployed (scale with 'just review-container cluster [N]')"
+        fi
+      else
+        echo "  - kubectl installed, no active context"
+      fi
+    else
+      echo "  - kubectl not installed (optional; for cluster scale-out)"
     fi
     echo ""
 

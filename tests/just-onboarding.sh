@@ -2,7 +2,7 @@
 # Hermetic regression harness for the root justfile.
 #
 # Everything the launcher can shell out to (gh, goose, gum, podman, git,
-# secret-tool) is faked on PATH, so this test never touches the network,
+# secret-tool, kubectl) is faked on PATH, so this test never touches the network,
 # never starts a real container, and never
 # depends on what happens to be installed on the developer's machine.
 #
@@ -36,6 +36,11 @@ for base in "${XDG_RUNTIME_DIR:-}" "/run/user/$(id -u)" "${HOME:-}/.cache"; do
 done
 [[ -n "$tmp_root" ]] || tmp_root="${scratch}/tmp"
 fake_bin="$scratch/bin"
+system_bin="$scratch/system-bin"
+runtime_root="$scratch/runtime-root"
+runtime_release="release-20260831.0"
+runtime_root="$scratch/runtime-root"
+runtime_release="release-20260831.0"
 home="$scratch/home"
 cfg_dir="$home/.config/review"
 state_dir="$home/.local/state/review"
@@ -43,6 +48,8 @@ gum_log="$scratch/gum.log"
 runner_log="$scratch/runner.log"
 image_log="$scratch/image.log"
 credential_log="$scratch/credentials.log"
+kubectl_log="$scratch/kubectl.log"
+kubernetes_manifest_log="$scratch/kubernetes-manifest.json"
 
 default_hive_backup=""
 cleanup() {
@@ -53,8 +60,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$fake_bin" "$tmp_root" \
+mkdir -p "$fake_bin" "$system_bin" "$tmp_root" \
   "$home/.config/goose" "$home/.config/hive" "$cfg_dir" "$state_dir"
+
+# Preserve the launcher's normal system tools without allowing a host kubectl
+# to appear after the fake is removed for missing-command scenarios.
+for executable in /usr/bin/* /bin/*; do
+  [[ -x "$executable" && ! -d "$executable" ]] || continue
+  name="${executable##*/}"
+  [[ "$name" == "kubectl" || -e "$system_bin/$name" || -L "$system_bin/$name" ]] && continue
+  ln -s "$executable" "$system_bin/$name"
+done
+[[ -n "$real_just" && -x "$real_just" ]] && ln -sf "$real_just" "$system_bin/just"
 
 # ── failure reporting ─────────────────────────────────────────────────────
 scenario="<startup>"
@@ -94,6 +111,16 @@ assert_file_not_contains() {
 $(cat "$2" 2>/dev/null)
 --------------"
   return 0
+}
+assert_file_before() {
+  local earlier later file earlier_line later_line
+  earlier="$1"
+  later="$2"
+  file="$3"
+  earlier_line="$(grep -nF -- "$earlier" "$file" | head -1 | cut -d: -f1)"
+  later_line="$(grep -nF -- "$later" "$file" | head -1 | cut -d: -f1)"
+  [[ -n "$earlier_line" && -n "$later_line" && "$earlier_line" -lt "$later_line" ]] ||
+    fail "expected '$earlier' before '$later' in $file"
 }
 assert_file_exists() { [[ -e "$1" ]] || fail "expected file to exist: $1"; }
 assert_file_not_exists() { [[ ! -e "$1" ]] || fail "expected file to be absent: $1"; }
@@ -161,9 +188,9 @@ cat >"$fake_bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 # Isolation is fail-closed, so every agent-capable launch now calls
-# 'podman --runtime=runsc run'. Drop the flag before dispatching so the
+# 'podman --runtime=<Review-owned-path> run'. Drop the flag before dispatching so the
 # existing argument assertions keep matching.
-if [[ "${1:-}" == --runtime=runsc ]]; then
+if [[ "${1:-}" == --runtime=* ]]; then
   shift
 fi
 # The disposable gVisor probe is a diagnostic, not a launch. It must never
@@ -197,7 +224,13 @@ fi
 case "${1:-}" in
   info)
     # require_runsc_host asks whether rootless Podman is in play.
-    printf '%s\n' "${FAKE_PODMAN_ROOTLESS:-true}"
+    # The launcher asks which OCI runtime podman is configured with, because
+    # runsc is the only one that takes --runtime-flag=host-uds=open.
+    if [[ "${3:-}" == *Security.Rootless* ]]; then
+      printf '%s\n' "${FAKE_PODMAN_ROOTLESS:-true}"
+    else
+      printf '%s\n' "${FAKE_PODMAN_RUNTIME:-crun}"
+    fi
     exit 0
     ;;
   rm)
@@ -316,13 +349,17 @@ if [[ "${FAKE_PODMAN_DETACH_SUCCESS:-0}" == 1 && "${detached:-false}" == true ]]
 fi
 exit 97
 EOF
-cat >"$fake_bin/runsc" <<'EOF'
+mkdir -p "$runtime_root/$runtime_release/gvisor-bin"
+cat >"$runtime_root/$runtime_release/runsc" <<'EOF'
 #!/usr/bin/env bash
 # The host isolation runtime. A scenario can make it unusable to prove the
 # launcher fails closed instead of falling back to Podman's default.
 [[ "${FAKE_RUNSC_BROKEN:-0}" == 1 ]] && exit 1
 printf 'runsc version test\n'
 EOF
+printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_root/$runtime_release/containerd-shim-runsc-v1"
+printf 'gvisor bundle fixture\n' >"$runtime_root/$runtime_release/gvisor-bin/sentry"
+chmod +x "$runtime_root/$runtime_release/runsc" "$runtime_root/$runtime_release/containerd-shim-runsc-v1" "$runtime_root/$runtime_release/gvisor-bin/sentry" "$runtime_root/$runtime_release/gvisor-bin"
 chmod +x "$fake_bin"/*
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -348,6 +385,8 @@ reset_logs() {
   : >"$runner_log"
   : >"$image_log"
   : >"$credential_log"
+  : >"$kubectl_log"
+  : >"$kubernetes_manifest_log"
   RECIPE_ARGS=()
 }
 reset_logs
@@ -373,12 +412,28 @@ run_recipe() {
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
       -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
-      -u REVIEW_QUEUE_NAME -u XDG_STATE_HOME -u FAKE_GIT_TOPLEVEL \
-      HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
+      -u REVIEW_QUEUE_NAME -u REVIEW_SCALE -u XDG_STATE_HOME -u FAKE_GIT_TOPLEVEL \
+      -u REVIEW_RUNTIME -u FAKE_KUBECTL_DASHBOARD_API_UNAVAILABLE \
+      -u FAKE_KUBECTL_DASHBOARD_PVC_MISSING -u FAKE_KUBECTL_DASHBOARD_PVC_FORBIDDEN \
+      -u OTEL_EXPORTER_OTLP_ENDPOINT -u OTEL_EXPORTER_OTLP_HEADERS \
+      -u REVIEW_LAB -u REVIEW_LAB_BROKER -u REVIEW_PERSONAL_SKILLS \
+      -u HIVE_HUB \
+      -u FAKE_KUBECTL_ANNOTATION_GET_FAIL -u FAKE_KUBECTL_ANNOTATE_FAIL \
+      -u FAKE_KUBECTL_DEPLOYMENT_GET_FAIL -u FAKE_KUBECTL_HAS_LAST_APPLIED \
+      -u FAKE_KUBECTL_NAMESPACE_APPLY_FAIL -u FAKE_KUBECTL_SECRET_APPLY_FAIL \
+      -u FAKE_KUBECTL_DEPLOY_APPLY_FAIL -u FAKE_KUBECTL_SET_ENV_FAIL \
+      -u FAKE_KUBECTL_SCALE_FAIL -u FAKE_KUBECTL_ROLLOUT_FAIL \
+      -u FAKE_KUBECTL_REWRITE_HIVE_HUB \
+      HOME="$home" PATH="$fake_bin:$system_bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
+      BLUEFIN_REVIEW_RUNTIME_ROOT="$runtime_root" \
+      FAKE_PODMAN_ROOTLESS=true \
+      BLUEFIN_REVIEW_RUNTIME_ROOT="$runtime_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
       IMAGE_LOG="$image_log" \
       CREDENTIAL_LOG="$credential_log" \
+      KUBECTL_LOG="$kubectl_log" \
+      KUBERNETES_MANIFEST_LOG="$kubernetes_manifest_log" \
       "$@" \
       "$real_just" --justfile "$justfile" "$recipe" "${RECIPE_ARGS[@]}" 2>&1
   )"
@@ -497,12 +552,12 @@ rm -f "$home/.codex/auth.json"
 rmdir "$home/.codex"
 write_goose_config
 
-begin "selection: default Copilot model is noninteractive"
+begin "selection: default Gemini model is noninteractive"
 reset_logs
 run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
 assert_file_not_exists "$cfg_dir/last-selections.env"
 assert_file_not_exists "$cfg_dir/secrets.env"
@@ -514,10 +569,10 @@ run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
   GOOSE_THINKING_EFFORT=medium
 assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 
-begin "review-container: no profile is luna at max with the provider's own context"
+begin "review-container: no profile is gemini at max with the provider's own context"
 reset_logs
 run_recipe review-container GH_READY=1
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
 assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
 assert_eq "$(wc -c <"$gum_log")" 0 "a headless run must not invoke gum"
@@ -530,13 +585,21 @@ assert_file_contains "--env GOOSE_MODEL=claude-opus-5" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
 
-begin "review-container: the kimi profile is max effort with a clamped context"
+begin "review-container: the k3 profile is max effort with a clamped context"
 reset_logs
-RECIPE_ARGS=(kimi)
+RECIPE_ARGS=(k3)
 run_recipe review-container GH_READY=1
 assert_file_contains "--env GOOSE_MODEL=kimi-k3" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
 assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
+
+begin "review-container: the sol profile is medium effort with provider context"
+reset_logs
+RECIPE_ARGS=(gpt-sol)
+run_recipe review-container GH_READY=1
+assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
+assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
 
 begin "review-container: an effort argument overrides the profile default"reset_logs
 RECIPE_ARGS=(opus5 max)
@@ -550,10 +613,11 @@ run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "an unknown profile must not launch anything"
 assert_contains "unknown model profile 'gpt-9'" "$OUT"
 assert_contains "Known profiles" "$OUT"
+assert_contains "gemini (gemini-3.8-flash), sol (gpt-5.6-sol), opus5 (claude-opus-5), k3 (kimi-k3)" "$OUT"
 
 begin "review-container: an unknown thinking effort is one actionable error"
 reset_logs
-RECIPE_ARGS=(luna ludicrous)
+RECIPE_ARGS=(gemini ludicrous)
 run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "an unknown effort must not launch anything"
 assert_contains "unknown thinking effort 'ludicrous'" "$OUT"
@@ -567,7 +631,7 @@ RECIPE_ARGS=("" high)
 run_recipe review-container GH_READY=1 \
   GUM_CHOOSE_RESPONSE=opus5
 assert_eq "$(wc -c <"$gum_log")" 0 "the launcher must never prompt for a model"
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 
 begin "review-container: maintainer backend choice never changes Hive selection"
@@ -576,8 +640,8 @@ run_recipe review-container GH_READY=1 BLUEFIN_REVIEW_BACKEND=codex
 assert_file_contains "--env AGENT_BACKEND=goose" "$runner_log"
 assert_file_not_contains "BLUEFIN_REVIEW_BACKEND" "$runner_log"
 
-# ══ 2b. Dashboard: no Hive, GH_TOKEN required, args pass through ═════════
-begin "review-queue: launches the dashboard with no Hive config at all"
+# ══ 2b. Dashboard: optional Hive URL, GH_TOKEN required, args pass through ═
+begin "review-queue: launches the dashboard without Hive when none is configured"
 reset_logs
 mv "$home/.config/hive" "$home/.config/hive.saved"
 RECIPE_ARGS=(--repo bluefin)
@@ -589,10 +653,64 @@ assert_file_contains "queue --repo bluefin" "$runner_log"
 assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
 assert_file_not_contains "BLUEFIN_REVIEW_BACKEND" "$runner_log"
 assert_file_not_contains ".config/hive" "$runner_log"
+assert_file_not_contains "HIVE_HUB" "$runner_log"
 assert_file_contains "GH_TOKEN:present" "$credential_log"
 assert_not_contains "contributor.env" "$OUT"
 assert_file_not_contains "/home/dev/.codex/auth.json" "$runner_log"
-assert_contains "starting the maintainer review dashboard (no Hive)" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive not configured)" "$OUT"
+
+begin "review-queue: passes the default Hive URL without mounting its registration"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_file_contains "--env HIVE_HUB=wss://example.invalid/contribute" "$runner_log"
+assert_file_not_contains ".config/hive" "$runner_log"
+assert_file_not_contains "super-secret-registration-token" "$runner_log"
+assert_contains "hive: wss://example.invalid/contribute (default registration)" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive configured)" "$OUT"
+
+begin "review-queue: REVIEW_HIVE selects another hosted Hive"
+reset_logs
+cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.endusers.env"
+sed -i 's|^HIVE_HUB=.*|export HIVE_HUB="wss://endusers.invalid/contribute"|' \
+  "$home/.config/hive/contributor.endusers.env"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_HIVE=endusers
+assert_file_contains "--env HIVE_HUB=wss://endusers.invalid/contribute" "$runner_log"
+assert_file_not_contains ".config/hive" "$runner_log"
+assert_file_not_contains "super-secret-registration-token" "$runner_log"
+assert_contains "hive: wss://endusers.invalid/contribute (registration 'endusers')" "$OUT"
+rm -f "$home/.config/hive/contributor.endusers.env"
+
+begin "review-queue: an unusable Hive file does not block GitHub review"
+reset_logs
+cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.broken.env"
+sed -i '/^HIVE_HUB=/d' "$home/.config/hive/contributor.broken.env"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_HIVE=broken
+assert_file_not_contains "HIVE_HUB" "$runner_log"
+assert_contains "has no usable HIVE_HUB; the dashboard will continue without Hive" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive not configured)" "$OUT"
+rm -f "$home/.config/hive/contributor.broken.env"
+
+begin "review-queue: a plaintext Hive cannot receive the maintainer token"
+reset_logs
+cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.plaintext.env"
+sed -i 's|^HIVE_HUB=.*|HIVE_HUB=ws://plaintext.invalid/contribute|' \
+  "$home/.config/hive/contributor.plaintext.env"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_HIVE=plaintext
+assert_file_not_contains "HIVE_HUB" "$runner_log"
+assert_contains "has an unsupported HIVE_HUB; the dashboard requires one wss:// or https:// URL" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive not configured)" "$OUT"
+rm -f "$home/.config/hive/contributor.plaintext.env"
+
+begin "review-queue: a multi-hub worker registration is not an API target"
+reset_logs
+cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.multi.env"
+sed -i 's|^HIVE_HUB=.*|HIVE_HUB=wss://one.invalid/contribute,wss://two.invalid/contribute|' \
+  "$home/.config/hive/contributor.multi.env"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_HIVE=multi
+assert_file_not_contains "HIVE_HUB" "$runner_log"
+assert_contains "has an unsupported HIVE_HUB; the dashboard requires one wss:// or https:// URL" "$OUT"
+assert_contains "starting the maintainer review dashboard (Hive not configured)" "$OUT"
+rm -f "$home/.config/hive/contributor.multi.env"
 
 begin "review-queue: the dashboard state directory persists on the host"
 reset_logs
@@ -612,6 +730,463 @@ run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   XDG_STATE_HOME="$scratch/xdg"
 assert_file_contains "--volume ${scratch}/xdg/bluefin-review:/home/dev/.local/state/bluefin-review:rw,z" "$runner_log"
 assert_file_exists "${scratch}/xdg/bluefin-review"
+
+# ══ 2c. The optional lab: one socket, one session, nothing else (#379) ════
+# The launcher offers the lab only when the host can actually reach a
+# cluster, asks once, and hands the container exactly one Unix socket. None
+# of it may become a dependency: every negative path here still launches a
+# fully usable dashboard.
+lab_broker="$repo_root/scripts/review-lab-broker.py"
+lab_skills="$scratch/personal-skills"
+mkdir -p "$lab_skills/lab-test" "$lab_skills/k3s-cluster-ops"
+printf 'personal lab skill\n' >"$lab_skills/lab-test/SKILL.md"
+printf 'personal lab skill\n' >"$lab_skills/k3s-cluster-ops/SKILL.md"
+
+install_fake_kubectl() {
+  cat >"$fake_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
+case "$*" in
+  "config current-context") printf 'ghost-lab\n' ;;
+  "get --raw=/readyz?verbose --request-timeout=5s")
+    [[ "${FAKE_KUBECTL_DASHBOARD_API_UNAVAILABLE:-0}" == 1 ]] && exit 52
+    ;;
+  "get nodes -o name") printf 'node/ghost\nnode/exo-0\n' ;;
+  "get pvc review-queue-state -n bluefin-system"*)
+    [[ "${FAKE_KUBECTL_DASHBOARD_PVC_MISSING:-0}" == 1 ]] && exit 51
+    [[ "${FAKE_KUBECTL_DASHBOARD_PVC_FORBIDDEN:-0}" == 1 ]] && exit 53
+    ;;
+  "create -f -") cat >"${KUBERNETES_MANIFEST_LOG:?}" ;;
+  "attach --stdin --tty review-queue-"*"-n bluefin-system") ;;
+  "delete pod review-queue-"*"-n bluefin-system --ignore-not-found --wait=false") ;;
+  "delete secret review-session-"*"-n bluefin-system --ignore-not-found --wait=false") ;;
+  "apply -f -")
+    cat >/dev/null
+    [[ "${FAKE_KUBECTL_NAMESPACE_APPLY_FAIL:-0}" == 1 ]] && exit 45
+    ;;
+  "apply --server-side --force-conflicts -f -")
+    cat >/dev/null
+    [[ "${FAKE_KUBECTL_SECRET_APPLY_FAIL:-0}" == 1 ]] && exit 46
+    ;;
+  "apply -f deploy/review-contributor.yaml")
+    [[ "${FAKE_KUBECTL_DEPLOY_APPLY_FAIL:-0}" == 1 ]] && exit 47
+    ;;
+  "set env deployment/review-contributor -n bluefin-system "*)
+    [[ "${FAKE_KUBECTL_SET_ENV_FAIL:-0}" == 1 ]] && exit 48
+    ;;
+  "scale deployment/review-contributor -n bluefin-system --replicas="*)
+    if [[ -n "${FAKE_KUBECTL_REWRITE_HIVE_HUB:-}" ]]; then
+      sed -i "s|^HIVE_HUB=.*|HIVE_HUB=${FAKE_KUBECTL_REWRITE_HIVE_HUB}|" \
+        "$HOME/.config/hive/contributor.env"
+    fi
+    [[ "${FAKE_KUBECTL_SCALE_FAIL:-0}" == 1 ]] && exit 49
+    ;;
+  "rollout status deployment/review-contributor -n bluefin-system --timeout=15s")
+    [[ "${FAKE_KUBECTL_ROLLOUT_FAIL:-0}" == 1 ]] && exit 50
+    ;;
+  "get deployment review-contributor -n bluefin-system")
+    [[ "${FAKE_KUBECTL_DEPLOYMENT_GET_FAIL:-0}" == 1 ]] && exit 44
+    ;;
+  "get deployment review-contributor -n bluefin-system -o jsonpath={.status.readyReplicas}")
+    printf '3'
+    ;;
+  "get deployment review-contributor -n bluefin-system -o jsonpath={.spec.replicas}")
+    printf '3'
+    ;;
+  "get secret review-contributor-secret -n bluefin-system -o jsonpath={.metadata.annotations.kubectl\\.kubernetes\\.io/last-applied-configuration}")
+    [[ "${FAKE_KUBECTL_ANNOTATION_GET_FAIL:-0}" == 1 ]] && exit 43
+    [[ "${FAKE_KUBECTL_HAS_LAST_APPLIED:-0}" == 1 ]] &&
+      printf 'legacy-configuration\n'
+    ;;
+  "annotate secret review-contributor-secret -n bluefin-system kubectl.kubernetes.io/last-applied-configuration-")
+    [[ "${FAKE_KUBECTL_ANNOTATE_FAIL:-0}" == 1 ]] && exit 42
+    ;;
+  "create secret generic "*)
+    if [[ "$*" == *"--from-env-file="* && ("$*" == *"--from-file="* || "$*" == *"--from-literal="*) ]]; then
+      echo "error: from-env-file cannot be combined with from-file or from-literal" >&2
+      exit 1
+    fi
+    printf '{"items":[]}\n'
+    ;;
+  *) printf '{"items":[]}\n' ;;
+esac
+exit 0
+EOF
+  chmod +x "$fake_bin/kubectl"
+}
+remove_fake_kubectl() { rm -f "$fake_bin/kubectl"; }
+
+assert_no_lab_handoff() {
+  assert_file_not_contains "/run/bluefin-review-lab" "$runner_log"
+  assert_file_not_contains "BLUEFIN_REVIEW_LAB_SOCKET" "$runner_log"
+  assert_file_not_contains "BLUEFIN_REVIEW_LAB_SESSION" "$runner_log"
+  assert_file_not_contains "host-uds" "$runner_log"
+}
+
+assert_kubernetes_dashboard_manifest() {
+  python3 - "$kubernetes_manifest_log" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as stream:
+    pod = json.load(stream)
+
+container = pod["spec"]["containers"][0]
+assert pod["metadata"]["namespace"] == "bluefin-system"
+assert pod["spec"]["automountServiceAccountToken"] is False
+assert pod["spec"]["restartPolicy"] == "Never"
+assert container["stdin"] is True
+assert container["stdinOnce"] is True
+assert container["tty"] is True
+assert container["imagePullPolicy"] == "Always"
+assert all("value" not in item and "secretKeyRef" in item["valueFrom"] for item in container["env"])
+assert container["securityContext"]["allowPrivilegeEscalation"] is False
+assert container["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+assert any(volume["name"] == "workspace" and volume["emptyDir"] == {} for volume in pod["spec"]["volumes"])
+assert any(
+    volume["name"] == "state"
+    and volume["persistentVolumeClaim"]["claimName"] == "review-queue-state"
+    for volume in pod["spec"]["volumes"]
+)
+assert "hostPath" not in json.dumps(pod)
+PY
+}
+
+assert_review_queue_state_manifest() {
+  local manifest="$repo_root/deploy/review-queue-state.yaml"
+  assert_file_exists "$manifest"
+  assert_file_contains "kind: PersistentVolumeClaim" "$manifest"
+  assert_file_contains "name: review-queue-state" "$manifest"
+  assert_file_contains "namespace: bluefin-system" "$manifest"
+  assert_file_contains "- ReadWriteOnce" "$manifest"
+  assert_file_contains "storage: 1Gi" "$manifest"
+  assert_file_not_contains "hostPath" "$manifest"
+  assert_file_not_contains "OTEL_" "$manifest"
+}
+
+begin "review-queue: Kubernetes state claim is a dedicated durable PVC"
+assert_review_queue_state_manifest
+
+begin "review-queue: no host kubectl means no lab and no prompt"
+reset_logs
+remove_fake_kubectl
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_no_lab_handoff
+assert_not_contains "Use it for this session only?" "$OUT"
+assert_contains "starting the maintainer review dashboard" "$OUT"
+
+begin "review-queue: an unavailable Kubernetes runtime falls back to Podman"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s
+assert_nonzero_status "$STATUS" "the Podman fallback runner exits non-zero"
+assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
+assert_contains "Kubernetes is unavailable; using the local Podman dashboard" "$OUT"
+
+install_fake_kubectl
+begin "review-queue: an unreachable Kubernetes API falls back before state-claim lookup"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s \
+  FAKE_KUBECTL_DASHBOARD_API_UNAVAILABLE=1
+assert_nonzero_status "$STATUS" "the Podman fallback runner exits non-zero"
+assert_contains "Kubernetes is unavailable; using the local Podman dashboard" "$OUT"
+assert_file_contains "get --raw=/readyz?verbose --request-timeout=5s" "$kubectl_log"
+assert_file_not_contains "get pvc review-queue-state -n bluefin-system" "$kubectl_log"
+assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
+
+begin "review-queue: Kubernetes runtime uses an ephemeral restricted dashboard Pod"
+reset_logs
+RECIPE_ARGS=(--repo bluefin)
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s
+assert_zero_status "$STATUS" "the fake Kubernetes dashboard session must succeed"
+assert_file_contains "config current-context" "$kubectl_log"
+assert_file_contains "get --raw=/readyz?verbose --request-timeout=5s" "$kubectl_log"
+assert_file_contains "get pvc review-queue-state -n bluefin-system" "$kubectl_log"
+assert_file_contains "create secret generic review-session-" "$kubectl_log"
+assert_file_contains "create -f -" "$kubectl_log"
+assert_file_contains "wait --for=condition=Ready pod/review-queue-" "$kubectl_log"
+assert_file_contains "-n bluefin-system --timeout=5m" "$kubectl_log"
+assert_file_contains "attach --stdin --tty review-queue-" "$kubectl_log"
+assert_file_before "wait --for=condition=Ready pod/review-queue-" \
+  "attach --stdin --tty review-queue-" "$kubectl_log"
+assert_file_contains "delete pod review-queue-" "$kubectl_log"
+assert_file_contains "delete secret review-session-" "$kubectl_log"
+assert_file_before "attach --stdin --tty review-queue-" \
+  "delete pod review-queue-" "$kubectl_log"
+assert_file_before "delete pod review-queue-" \
+  "delete secret review-session-" "$kubectl_log"
+assert_eq "$(wc -c <"$runner_log")" 0 "Kubernetes runtime must not launch Podman"
+assert_file_not_contains "gho-test-token" "$kubectl_log"
+assert_file_not_contains "gho-test-token" "$kubernetes_manifest_log"
+assert_kubernetes_dashboard_manifest || fail "Kubernetes dashboard manifest violates its runtime contract"
+
+begin "review-queue: Kubernetes countme values remain in the session Secret"
+reset_logs
+otlp_endpoint="https://countme.example.invalid/v1/metrics"
+otlp_headers="x-session-key=otlp-test-secret"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s \
+  OTEL_EXPORTER_OTLP_ENDPOINT="$otlp_endpoint" \
+  OTEL_EXPORTER_OTLP_HEADERS="$otlp_headers"
+assert_zero_status "$STATUS" "the fake Kubernetes dashboard session must succeed"
+assert_file_contains "--from-file=OTEL_EXPORTER_OTLP_ENDPOINT=" "$kubectl_log"
+assert_file_contains "--from-file=OTEL_EXPORTER_OTLP_HEADERS=" "$kubectl_log"
+assert_not_contains "$otlp_endpoint" "$OUT"
+assert_file_not_contains "$otlp_endpoint" "$kubectl_log"
+assert_file_not_contains "$otlp_endpoint" "$kubernetes_manifest_log"
+assert_not_contains "$otlp_headers" "$OUT"
+assert_file_not_contains "$otlp_headers" "$kubectl_log"
+assert_file_not_contains "$otlp_headers" "$kubernetes_manifest_log"
+
+begin "review-queue: a missing dashboard state claim fails before starting a Pod"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s \
+  FAKE_KUBECTL_DASHBOARD_PVC_MISSING=1
+assert_nonzero_status "$STATUS" "a Kubernetes dashboard needs its persistent state claim"
+assert_contains "Kubernetes dashboard state claim 'review-queue-state' cannot be read" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "a missing state claim must not fall back to a Podman session"
+assert_file_not_contains "create secret generic review-session-" "$kubectl_log"
+assert_file_not_contains "create -f -" "$kubectl_log"
+
+begin "review-queue: an unreadable dashboard state claim fails before starting a Pod"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s \
+  FAKE_KUBECTL_DASHBOARD_PVC_FORBIDDEN=1
+assert_nonzero_status "$STATUS" "an unreadable state claim must stop the Kubernetes dashboard"
+assert_contains "Kubernetes dashboard state claim 'review-queue-state' cannot be read" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "an unreadable state claim must not fall back to a Podman session"
+assert_file_not_contains "create secret generic review-session-" "$kubectl_log"
+assert_file_not_contains "create -f -" "$kubectl_log"
+
+begin "review-queue: Kubernetes Codex sessions explain unstaged subscription login"
+reset_logs
+run_recipe review-queue BLUEFIN_REVIEW_BACKEND=codex GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s
+assert_zero_status "$STATUS" "the fake Kubernetes Codex dashboard session must succeed"
+assert_contains "Kubernetes dashboard sessions do not stage a Codex subscription login" "$OUT"
+assert_file_not_contains "CODEX_AUTH_MOUNT:" "$credential_log"
+
+begin "review-queue: a declined lab starts no broker and mounts nothing"
+reset_logs
+install_fake_kubectl
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=0 REVIEW_LAB_BROKER="$lab_broker"
+assert_no_lab_handoff
+assert_not_contains "lab enabled for this session" "$OUT"
+
+begin "review-queue: an accepted lab hands over one socket and nothing else"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" REVIEW_PERSONAL_SKILLS="$lab_skills"
+assert_contains "lab enabled for this session (context ghost-lab)" "$OUT"
+assert_file_contains ":/run/bluefin-review-lab:rw,z" "$runner_log"
+assert_file_contains "--env BLUEFIN_REVIEW_LAB_SOCKET=/run/bluefin-review-lab/broker.sock" "$runner_log"
+assert_file_contains "--env BLUEFIN_REVIEW_LAB_SESSION=" "$runner_log"
+# The credential boundary: the container gets the socket, never the cluster.
+assert_file_not_contains "kubeconfig" "$runner_log"
+assert_file_not_contains ".kube" "$runner_log"
+assert_file_not_contains "--network host" "$runner_log"
+assert_file_not_contains "podman.sock" "$runner_log"
+assert_file_not_contains "docker.sock" "$runner_log"
+assert_file_not_contains "/var/run" "$runner_log"
+assert_file_not_contains "$(command -v kubectl 2>/dev/null || echo /nonexistent-kubectl)" "$runner_log"
+# Exactly one host socket crosses the boundary, and it is the broker's.
+lab_socket_mounts="$(tr ' ' '\n' <"$runner_log" | grep -c '/run/bluefin-review-lab' || true)"
+assert_eq "$lab_socket_mounts" 2 "expected exactly the socket mount and its env"
+# Personal lab skills ride read-only, and only the ones that exist.
+assert_file_contains "${lab_skills}/lab-test:/home/dev/.agents/skills/lab-test:ro,z" "$runner_log"
+assert_file_contains "${lab_skills}/k3s-cluster-ops:/home/dev/.agents/skills/k3s-cluster-ops:ro,z" "$runner_log"
+assert_file_not_contains "kubernetes-specialist" "$runner_log"
+assert_file_not_contains "lab-testing" "$runner_log"
+
+begin "review-queue: the broker and its socket die with the session"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" REVIEW_PERSONAL_SKILLS="$lab_skills"
+socket_dir="$(tr ' ' '\n' <"$runner_log" | sed -n 's|^\(.*bluefin-review-lab\.[^:]*\):/run/bluefin-review-lab:rw,z$|\1|p' | head -1)"
+[[ -n "$socket_dir" ]] || fail "the accepted lab must name its socket directory"
+assert_file_not_exists "$socket_dir"
+pgrep -f "review-lab-broker.py serve --socket ${socket_dir}" >/dev/null 2>&1 &&
+  fail "the broker must not outlive the foreground session"
+
+begin "review-queue: gVisor gets host-uds=open, other runtimes never do"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" FAKE_PODMAN_RUNTIME=runsc
+assert_file_contains "--runtime-flag=host-uds=open" "$runner_log"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" FAKE_PODMAN_RUNTIME=crun
+assert_file_contains "/run/bluefin-review-lab" "$runner_log"
+assert_file_not_contains "host-uds" "$runner_log"
+
+begin "review-container: the contributor worker receives no lab capability"
+reset_logs
+run_recipe review-container GH_READY=1 \
+  REVIEW_LAB=1 REVIEW_LAB_BROKER="$lab_broker" REVIEW_PERSONAL_SKILLS="$lab_skills"
+assert_no_lab_handoff
+assert_file_not_contains "/home/dev/.agents/skills/lab-test" "$runner_log"
+assert_not_contains "lab enabled for this session" "$OUT"
+
+begin "review-container cluster: absent legacy annotation needs no removal"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token
+assert_zero_status "$STATUS" "cluster scale-out must succeed without the legacy annotation"
+assert_file_contains "get secret review-contributor-secret -n bluefin-system" "$kubectl_log"
+assert_file_not_contains "annotate secret review-contributor-secret" "$kubectl_log"
+assert_file_contains "--from-file=GH_TOKEN=" "$kubectl_log"
+assert_file_contains "--from-file=GITHUB_COPILOT_TOKEN=" "$kubectl_log"
+assert_file_not_contains "--from-literal=" "$kubectl_log"
+assert_file_not_contains "gho-test-token" "$kubectl_log"
+assert_file_not_contains "copilot-test-token" "$kubectl_log"
+
+begin "review-container cluster: missing GitHub token leaves the Secret unchanged"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token
+assert_nonzero_status "$STATUS" "cluster scale-out without a GitHub token must fail"
+assert_contains "cluster Secret without a GitHub token" "$OUT"
+assert_file_not_contains "create namespace bluefin-system" "$kubectl_log"
+assert_file_not_contains "create secret generic review-contributor-secret" "$kubectl_log"
+
+begin "review-container cluster: missing Copilot token leaves the Secret unchanged"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_nonzero_status "$STATUS" "cluster scale-out without a Copilot token must fail"
+assert_contains "cluster Secret without a Copilot credential" "$OUT"
+assert_file_not_contains "create namespace bluefin-system" "$kubectl_log"
+assert_file_not_contains "create secret generic review-contributor-secret" "$kubectl_log"
+
+begin "review-container cluster: annotation read errors stop deployment"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token \
+  FAKE_KUBECTL_ANNOTATION_GET_FAIL=1
+assert_nonzero_status "$STATUS" "a failed annotation read must fail cluster scale-out"
+assert_contains "ERROR: failed to read secret annotations." "$OUT"
+assert_file_contains "get secret review-contributor-secret -n bluefin-system -o jsonpath=" "$kubectl_log"
+assert_file_not_contains "apply -f deploy/review-contributor.yaml" "$kubectl_log"
+
+begin "review-container cluster: annotation removal errors stop deployment"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token \
+  FAKE_KUBECTL_HAS_LAST_APPLIED=1 FAKE_KUBECTL_ANNOTATE_FAIL=1
+assert_nonzero_status "$STATUS" "a failed annotation removal must fail cluster scale-out"
+assert_contains "ERROR: failed to remove legacy plaintext secret annotation." "$OUT"
+assert_file_contains "annotate secret review-contributor-secret -n bluefin-system" "$kubectl_log"
+assert_file_not_contains "apply -f deploy/review-contributor.yaml" "$kubectl_log"
+
+for failure_spec in \
+  "namespace apply|FAKE_KUBECTL_NAMESPACE_APPLY_FAIL=1|create secret generic review-contributor-secret" \
+  "Secret apply|FAKE_KUBECTL_SECRET_APPLY_FAIL=1|get secret review-contributor-secret" \
+  "deployment apply|FAKE_KUBECTL_DEPLOY_APPLY_FAIL=1|set env deployment/review-contributor" \
+  "deployment env update|FAKE_KUBECTL_SET_ENV_FAIL=1|scale deployment/review-contributor" \
+  "deployment scale|FAKE_KUBECTL_SCALE_FAIL=1|rollout status deployment/review-contributor"; do
+  IFS='|' read -r mutation_label failure_flag blocked_command <<<"$failure_spec"
+  begin "turbo-review: ${mutation_label} failure aborts cluster mutation sequence"
+  reset_logs
+  RECIPE_ARGS=(--all)
+  run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+    FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0 \
+    "$failure_flag"
+  assert_contains "cluster worker scale-out failed; continuing with local review dashboard" "$OUT"
+  assert_file_not_contains "$blocked_command" "$kubectl_log"
+  assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
+done
+
+begin "review-container cluster: rollout timeout warns after 15 seconds"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token FAKE_KUBECTL_ROLLOUT_FAIL=1
+assert_zero_status "$STATUS" "rollout observation timeout must not fail cluster scale-out"
+assert_file_contains "rollout status deployment/review-contributor -n bluefin-system --timeout=15s" "$kubectl_log"
+assert_contains "! rollout still progressing after 15s; workers will continue pulling/starting in background." "$OUT"
+
+begin "turbo-review: a leading profile configures cluster and dashboard"
+reset_logs
+RECIPE_ARGS=(sol)
+run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
+assert_nonzero_status "$STATUS" "the fake dashboard runner always exits non-zero"
+assert_file_contains "scale deployment/review-contributor -n bluefin-system --replicas=3" "$kubectl_log"
+assert_file_contains "GOOSE_MODEL=gpt-5.6-sol" "$kubectl_log"
+assert_file_contains "GOOSE_THINKING_EFFORT=medium" "$kubectl_log"
+assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
+assert_file_contains " queue" "$runner_log"
+assert_contains "3/3 cluster contributor workers active in bluefin-system" "$OUT"
+assert_contains "Stop workers: just review-stop cluster" "$OUT"
+assert_contains "Check health: just review-doctor" "$OUT"
+
+begin "turbo-review: explicit effort and dashboard flags stay intact"
+reset_logs
+RECIPE_ARGS=(k3 low --repo bluefin)
+run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
+assert_file_contains "GOOSE_MODEL=kimi-k3" "$kubectl_log"
+assert_file_contains "GOOSE_THINKING_EFFORT=low" "$kubectl_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=low" "$runner_log"
+assert_file_contains "queue --repo bluefin" "$runner_log"
+
+begin "turbo-review: a repository argument keeps the cluster default"
+reset_logs
+RECIPE_ARGS=(projectbluefin/review)
+run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
+assert_file_contains "GOOSE_MODEL=gemini-3.8-flash" "$kubectl_log"
+assert_file_contains "GOOSE_THINKING_EFFORT=max" "$kubectl_log"
+assert_file_contains "queue --live-repo projectbluefin/review" "$runner_log"
+
+begin "turbo-review: flags first keep the cluster default"
+reset_logs
+RECIPE_ARGS=(--repo bluefin)
+run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
+assert_file_contains "GOOSE_MODEL=gemini-3.8-flash" "$kubectl_log"
+assert_file_contains "GOOSE_THINKING_EFFORT=max" "$kubectl_log"
+assert_file_contains "queue --repo bluefin" "$runner_log"
+
+begin "turbo-review: dashboard inherits the hub resolved for cluster workers"
+reset_logs
+RECIPE_ARGS=(--all)
+run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0 \
+  FAKE_KUBECTL_REWRITE_HIVE_HUB=wss://changed.invalid/contribute
+assert_file_contains "HIVE_HUB=wss://example.invalid/contribute" "$kubectl_log"
+assert_file_contains "--env HIVE_HUB=wss://example.invalid/contribute" "$runner_log"
+assert_file_not_contains "HIVE_HUB=wss://changed.invalid/contribute" "$runner_log"
+sed -i 's|^HIVE_HUB=.*|HIVE_HUB=wss://example.invalid/contribute|' \
+  "$home/.config/hive/contributor.env"
+
+begin "turbo-review: failed exit status check is reported"
+reset_logs
+RECIPE_ARGS=(--all)
+run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0 \
+  FAKE_KUBECTL_DEPLOYMENT_GET_FAIL=1
+assert_contains "unable to read cluster contributor status in bluefin-system" "$OUT"
+assert_contains "Stop workers: just review-stop cluster" "$OUT"
+assert_contains "Check health: just review-doctor" "$OUT"
+
+begin "turbo-review: missing kubectl warns and still launches the dashboard"
+reset_logs
+remove_fake_kubectl
+RECIPE_ARGS=(--all)
+run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_LAB=0
+assert_nonzero_status "$STATUS" "the fake dashboard runner always exits non-zero"
+assert_contains "no active Kubernetes context found" "$OUT"
+assert_contains "kubectl is unavailable; cluster contributor status was not checked" "$OUT"
+assert_contains "Stop workers: just review-stop cluster" "$OUT"
+assert_contains "Check health: just review-doctor" "$OUT"
+assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
+assert_file_contains "queue --all" "$runner_log"
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
 reset_logs
@@ -678,7 +1253,7 @@ assert_file_not_contains "--name review-queue " "$runner_log"
 
 begin "review-queue: a leading profile and effort set the model, flags pass through"
 reset_logs
-RECIPE_ARGS=(kimi high --repo bluefin)
+RECIPE_ARGS=(k3 high --repo bluefin)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
 assert_file_contains "--env GOOSE_MODEL=kimi-k3" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
@@ -694,10 +1269,10 @@ assert_file_contains "queue --live-repo acme/widgets" "$runner_log"
 
 begin "review-queue: profile effort owner/repo preserves live grammar"
 reset_logs
-RECIPE_ARGS=(luna max acme/widgets)
+RECIPE_ARGS=(gpt-sol medium acme/widgets)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
 assert_file_contains "queue --live-repo acme/widgets" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 
 begin "review-queue: an unknown profile is one actionable error, nothing launches"
 reset_logs
@@ -708,11 +1283,20 @@ assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "unknown model profile 'gpt-9'" "$OUT"
 assert_eq "$(wc -c <"$runner_log")" 0 "no container may start on a bad profile"
 
-begin "review-queue: flags first means no profile, everything passes through"
+begin "review-queue: flags first means no profile, defaults to gemini at max effort"
 reset_logs
 RECIPE_ARGS=(--all)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
+assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
+assert_file_contains "queue --all" "$runner_log"
+
+begin "review-queue: explicit sol profile selects structured triage"
+reset_logs
+RECIPE_ARGS=(sol --all)
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 assert_file_contains "queue --all" "$runner_log"
 
 # ══ 3. Doctor: no failure on a fully provisioned host ═════════════════════
@@ -771,6 +1355,14 @@ assert_file_not_contains "--interactive" "$runner_log"
 assert_file_not_contains "--tty" "$runner_log"
 assert_contains "just review-stop review-container" "$OUT"
 assert_contains "podman logs -f review-container" "$OUT"
+
+begin "contribute: launches the marked worker detached"
+reset_logs
+run_recipe contribute GH_READY=1
+assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
+assert_file_contains "run --rm --detach --replace --name review-container" "$runner_log"
+assert_file_contains "--label review.owner=detached" "$runner_log"
+assert_file_not_contains "--interactive" "$runner_log"
 
 begin "review-container: detached Codex auth survives until review-stop"
 reset_logs
@@ -1341,39 +1933,39 @@ sed -E 's/^[[:space:]]*#.*$//' "$justfile" >"$code"
 # which pairs --detach with the 'detached' owner label so a later launch
 # refuses to reclaim it and review-stop can stop it. Any other detach is a
 # hole.
-assert_eq "$(grep -cE 'podman (--runtime=runsc )?run --rm --detach --replace --name' "$code")" 1 \
+assert_eq "$(grep -cE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run --rm --detach --replace --name' "$code")" 1 \
   "expected exactly one detached launch site (the marked worker)"
 assert_eq "$(grep -c 'review.owner=detached' "$code")" 1 \
   "the detached label is stamped at exactly one launch site"
 assert_eq "$(grep -c '"detached"' "$code")" 2 \
   "both the ownership check and review-stop must honor the detached marker"
-if grep -nE 'podman (--runtime=runsc )?run' "$code" | grep -vE -- '--detach|--interactive --tty'; then
+if grep -nE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run' "$code" | grep -vE -- '--detach|--interactive --tty'; then
   fail "every podman run is either the marked detached worker or interactive"
 fi
 # A lone trailing '&' backgrounds the launch; '&&' and '2>&1' must not match.
-if grep -nE '(podman (--runtime=runsc )?run).*[^&>]&[[:space:]]*$' "$code"; then
+if grep -nE '(podman --runtime=(runsc|"\\$[A-Za-z_]+") run).*[^&>]&[[:space:]]*$' "$code"; then
   fail "a launch line must never end in a background '&'"
 fi
 if grep -nE '(^|[^[:alnum:]_])(nohup|setsid)([^[:alnum:]_]|$)' "$code"; then
   fail "nohup/setsid must never appear on a launch path"
 fi
-assert_eq "$(grep -cE 'podman (--runtime=runsc )?run --rm --interactive --tty' "$code")" 2 \
+assert_eq "$(grep -cE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run --rm --interactive --tty' "$code")" 2 \
   "expected exactly two foreground podman run sites (contributor container and queue walk)"
 # A stale container from a hard-killed terminal must never block a relaunch.
-assert_eq "$(grep -cE 'podman (--runtime=runsc )?run --rm --interactive --tty --replace --name' "$code")" 2 \
+assert_eq "$(grep -cE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run --rm --interactive --tty --replace --name' "$code")" 2 \
   "every named foreground run must reclaim its name with --replace"
 # Isolation is fail-closed: no agent-capable launch may reach Podman's
 # default runtime, or any other runtime. This is a universal check, not a
 # count: 'podman --runtime=crun run' would satisfy every count below while
 # putting a credential-carrying agent outside the gVisor boundary.
-if grep -nE 'podman[[:space:]]+(--runtime=[^[:space:]]+[[:space:]]+)?run' "$code" |
-  grep -v -- '--runtime=runsc'; then
+if grep -nE 'podman[[:space:]]+--runtime=([^[:space:]]+|"\\$[A-Za-z_]+")([[:space:]]+)run' "$code" |
+  grep -vE -- '--runtime=(runsc|"\\$[A-Za-z_]+")'; then
   fail "every podman run must select the runsc isolation runtime"
 fi
 # Four sites select it — the two foreground launches, the marked detached
 # worker, and the disposable isolation probe itself. The count additionally
 # pins that no new launch site appears unnoticed.
-assert_eq "$(grep -cE 'podman --runtime=runsc run' "$code")" 4 \
+assert_eq "$(grep -cE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run' "$code")" 4 \
   "every agent-capable launch must select the runsc runtime explicitly"
 # Isolation failure guidance names the tracked provisioning contract and
 # stops there: an embedded installer is unsupported guidance. A mutable
@@ -1415,7 +2007,7 @@ awk '
   /CONTAINER_ARGS\+?=\(/           { inargs = 1 }
   inargs                           { print; if ($0 ~ /\)[[:space:]]*$/) inargs = 0; next }
   /podman[[:space:]]+(--runtime=[^[:space:]]+[[:space:]]+)?(run|create)/ { print }
-' "$joined" | grep -vE 'podman (--runtime=runsc )?run --rm --detach --replace --name' |
+' "$joined" | grep -vE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run --rm --detach --replace --name' |
   grep -vxF "$probe_launch" >"$launch_args"
 # Excluding the probe above is only safe because it is a diagnostic, not a
 # launch: it carries no credential, starts no agent, and is reaped by trap.
@@ -1510,17 +2102,19 @@ fi
 if grep -nE '^review-(start|restart|kill|clean|down|up)[ :]' "$code"; then
   fail "no resurrection or force verbs: stop is the only lifecycle command"
 fi
-# The recipe list is exactly: launch the container, stop a detached worker,
-# diagnose, walk the PR queue.
-assert_eq "$(grep -cE '^review[a-z-]*[ :]' "$code")" 4 \
-  "expected exactly four recipes (review-container, -stop, -doctor, -queue)"
+# The recipe list is exactly: launch foreground or unattended contributors,
+# stop a detached worker, diagnose, walk the PR queue, and scale workers.
+grep -qE '^turbo-review[ :]' "$code" ||
+  fail "turbo-review must exist as the worker scale-out plus dashboard recipe"
+assert_eq "$(grep -cE '^(contribute|review[a-z-]*|turbo-review)[ :]' "$code")" 6 \
+  "expected exactly six recipes (contribute, review-container, -stop, -doctor, -queue, turbo-review)"
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private
 # 'check-version' recipe is a prerequisite of 'contribute-setup' and aborts
-# whenever HEAD != origin/v2, telling the user to
+# whenever HEAD != origin/v4, telling the user to
 # "export HIVE_SKIP_VERSION_CHECK=true". Without that flag, first-run
-# onboarding is guaranteed to fail the moment v2 moves past the pin.
+# onboarding is guaranteed to fail the moment v4 moves past the pin.
 # shellcheck disable=SC2016 # the launcher source is matched literally
 grep -q 'HIVE_SKIP_VERSION_CHECK=true just --working-directory "\$HIVE_SRC_DIR"' "$code" ||
   fail "upstream contribute-setup must run with HIVE_SKIP_VERSION_CHECK=true"
@@ -1561,6 +2155,60 @@ grep -Fq "stat -c %a \"\$staging_dir/auth.json\"" <<<"$cleanup_body" ||
   fail "Codex cleanup must inspect auth-file mode"
 grep -Fq 'id -u' <<<"$cleanup_body" ||
   fail "Codex cleanup must compare ownership with the invoking UID"
+
+begin "static: cluster scale-out validates Hive before mutation and scrubs secret metadata"
+cluster_body="$(sed -n '/^scale_cluster_contributors()/,/^stop_cluster_contributors()/p' "$code")"
+hub_guard_line="$(grep -nF "if ! valid_hive_hub \"\$hub\"; then" <<<"$cluster_body" | cut -d: -f1)"
+namespace_line="$(grep -nF 'kubectl create namespace bluefin-system' <<<"$cluster_body" | cut -d: -f1)"
+if [[ -z "$hub_guard_line" || -z "$namespace_line" || "$hub_guard_line" -ge "$namespace_line" ]]; then
+  fail "cluster scale-out must validate HIVE_HUB before its first cluster mutation"
+fi
+grep -Fq "echo \"ERROR: HIVE_HUB is not set in \${HIVE_CONTRIBUTOR_ENV}.\" >&2" <<<"$cluster_body" ||
+  fail "cluster scale-out must report the selected Hive registration when HIVE_HUB is invalid"
+grep -Fq 'kubectl annotate secret review-contributor-secret -n bluefin-system' <<<"$cluster_body" ||
+  fail "cluster scale-out must remove stale client-side apply metadata from the Secret"
+grep -Fq 'kubectl.kubernetes.io/last-applied-configuration-' <<<"$cluster_body" ||
+  fail "cluster scale-out must remove the last-applied-configuration annotation"
+grep -Fq -- '--from-file=GH_TOKEN=' <<<"$cluster_body" ||
+  fail "cluster scale-out must feed token values via file descriptors"
+grep -Fq -- '--from-file=GITHUB_COPILOT_TOKEN=' <<<"$cluster_body" ||
+  fail "cluster scale-out must feed copilot token via file descriptors"
+if grep -Fq -- '--from-literal=' <<<"$cluster_body"; then
+  fail "cluster scale-out must not place token values in kubectl arguments"
+fi
+grep -Fq -- '--timeout=15s' <<<"$cluster_body" ||
+  fail "cluster scale-out must cap rollout observation at 15 seconds"
+if grep -q '^[[:space:]]*- name: HIVE_HUB$' "$repo_root/deploy/review-contributor.yaml"; then
+  fail "the deployment manifest must leave HIVE_HUB to the launcher"
+fi
+if ! grep -A1 '^          image: ghcr.io/projectbluefin/review:stable$' \
+  "$repo_root/deploy/review-contributor.yaml" |
+  grep -Fxq '          imagePullPolicy: Always'; then
+  fail "the stable contributor deployment must always pull the published image"
+fi
+
+begin "static: turbo-review initializes models and forwards arguments through positional parameters"
+turbo_body="$(sed -n '/^turbo-review \*args:/,/^# Preflight check:/p' "$code")"
+for assignment in \
+  'TOOL="{{tool_env}}"' \
+  'GEMINI_MODEL="{{gemini_model}}"' \
+  'OPUS_MODEL="{{opus_model}}"' \
+  'OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"' \
+  'SOL_MODEL="{{sol_model}}"' \
+  'K3_MODEL="{{k3_model}}"' \
+  'K3_CONTEXT_LIMIT="{{k3_context_limit}}"'; do
+  grep -Fq "$assignment" <<<"$turbo_body" ||
+    fail "turbo-review must initialize ${assignment%%=*}"
+done
+grep -Fq 'set -- {{args}}' <<<"$turbo_body" ||
+  fail "turbo-review must establish positional arguments before parsing"
+grep -Fq 'just review-queue "$@"' <<<"$turbo_body" ||
+  fail "turbo-review must forward dashboard arguments through the positional array"
+grep -Fq "export HIVE_HUB=\"\$CLUSTER_HIVE_HUB\"" <<<"$turbo_body" ||
+  fail "turbo-review must export the cluster-resolved Hive hub to review-queue"
+if grep -Fq 'just review-queue {{args}}' <<<"$turbo_body"; then
+  fail "turbo-review must not render arguments directly into the review-queue command"
+fi
 
 begin "static: nothing here filters the work Hive assigns"
 # Hive's selectTask is the sole authority on what gets worked on: the hub's

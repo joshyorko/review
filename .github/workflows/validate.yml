@@ -71,11 +71,6 @@ jobs:
           python3 tests/harness-contract.py
           python3 tests/autopilot-contract.py
 
-      - name: PR queue generator contract
-        run: |
-          set -euo pipefail
-          node --test queue/test/queue.test.mjs
-
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
@@ -88,6 +83,11 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/just-onboarding.sh
+
+      - name: Review-owned host runtime contract
+        run: |
+          set -euo pipefail
+          bash tests/review-runtime-contract.sh
 
       - name: Recipe bodies are valid bash
         run: |

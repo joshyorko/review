@@ -1,10 +1,11 @@
 # review — Agent Operating Contract
 
 `review` is the Bluefin review appliance: one OCI image fork and a launcher.
-The current `review-container` and `review-queue` recipes run the restored
-Goose/Hive worker and maintainer dashboard. Review owns the image, publication,
-launcher credential handoff, and review context; Hive owns its contributor
-protocol, task selection, tmux session, prompt injection, and output capture.
+The `review-container` and `review-queue` recipes run the restored Goose/Hive
+worker and maintainer dashboard; `turbo-review` scales cluster workers before
+opening that dashboard. Review owns the image, publication, launcher credential
+handoff, and review context; Hive owns its contributor protocol, task
+selection, tmux session, prompt injection, and output capture.
 
 ## Read order
 
@@ -57,6 +58,36 @@ not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
 one permitted filter is own-work exclusion on the maintainer-facing queue
 view — a reviewer never receives their own authored pull requests to review.
 
+Keep review checks and interactive skills as separate layers. `goose review`
+does not consume `~/.agents/skills/`; `bluefin-review` supplies the image-owned
+`/opt/bluefin/review-scope/.agents/` overlay through `--check-scope`. The five
+specialized check subagents (`bluefin-doctrine`, `security`, `correctness`,
+`test-coverage`, `simplicity`) live in `image/review-scope/checks/` and execute
+concurrently under Goose's review orchestrator. Skills generated from the
+Bluefin catalog, or installed from `skills.sh` and other compatible open
+catalogs, belong under `~/.agents/skills/` for interactive contributor sessions
+and do not become review checks automatically. See [`docs/skills/review-checks.md`](docs/skills/review-checks.md).
+
+`just turbo-review` requests three Hive contributor workers by default, then
+runs the maintainer dashboard in the foreground. The cluster workers process
+their own Hive assignments; they do not replace, select, or submit the human's
+review.
+`just turbo-review *args` forwards the same profile, effort, repository, and
+dashboard arguments accepted by `review-queue`:
+
+```bash
+just turbo-review
+just turbo-review sol
+just turbo-review projectbluefin/review
+```
+
+Static queue snapshots are an antipattern: never create or consume a static
+queue artifact to understand pull-request status, queues, or review state. We
+either get pull-request state live — the dashboard's org-wide GitHub search,
+Hive, or the active review container (`podman exec`, container inspection, and
+`${XDG_STATE_HOME:-~/.local/state}/bluefin-review/landings/` logs) — or not at
+all. Never rely on or fetch static JSON artifacts.
+
 This appliance owns no lab and depends on none. Nothing in this repository
 may require, integrate with, or gate on maintainer-local infrastructure: a
 review decision that needs someone's private endpoint to be reachable is
@@ -64,6 +95,25 @@ wrong by construction. When a check backed by such a service cannot run,
 the deliverable it would have validated is verified from published registry
 evidence instead, and the absence of that evidence is reported as a
 finding, never as a blocked pull request.
+
+A maintainer may nonetheless lend one dashboard session their own cluster.
+`just review-queue` detects a usable host Kubernetes context, asks once on
+`/dev/tty`, and — only on yes — starts a host-side broker whose private
+Unix socket is the single thing the container receives. No kubeconfig, no
+Kubernetes credential, no host home, no host networking, no Podman socket,
+and no host binary crosses that boundary; gVisor blocks host sockets by
+default, so `review-queue` alone passes `--runtime-flag=host-uds=open`, and
+only when podman reports the `runsc` runtime. The broker answers three typed
+requests — `status`, `health`, `submit` — bound to session, repository, pull
+request, and exact 40-character head, dispatches only an explicit map of
+QA/test WorkflowTemplates, and files stable verified findings automatically
+to `projectbluefin/lab` (cluster platform) or `projectbluefin/server`
+(server product) behind a versioned fingerprint, a host lock, and a
+duplicate search. `review-container` receives no lab capability at all. The
+capability is optional, session-scoped, and non-blocking: declining it, an
+unreachable cluster, a dead broker, or a failed workflow all leave Review
+fully functional on the registry-evidence path above. See
+[`docs/skills/launcher.md`](docs/skills/launcher.md).
 
 Latest upstream, everywhere. Every dependency — base image, runtimes,
 tools, protocols — tracks the newest upstream version, and Renovate moves
@@ -107,7 +157,7 @@ Verify a utility's absence by executing it at the pinned digest before
 concluding the base lacks it. See
 [`docs/skills/image-build.md`](docs/skills/image-build.md).
 
-Reporting downstream evidence upstream to `kubestellar/hive` is expected work,
+Reporting downstream evidence upstream to `hivecommons/hive` is expected work,
 and filed issues are followed up rather than abandoned. Report observations,
 reproductions, and options; upstream owns the design decision and the triage
 labels. Never add a local workaround for an accepted upstream gap. See
@@ -116,14 +166,15 @@ labels. Never add a local workaround for an accepted upstream gap. See
 ## Repository layout
 
 - `justfile` is the only shipped launcher artifact. Its
-  four public recipes and private helpers intentionally live together.
+  seven public recipes and private helpers intentionally live together.
 - `image/` builds the FSDK-derived contributor image and its layered runtime
   configuration.
 - `package.json` and `package-lock.json` at the root pin only the contributor
   relay's `ws` dependency for the image build. This repository is not a Node
   project.
-- `queue/` generates the static PR queue published from `public/`.
-- `scripts/` contains build-time skill generation and documentation checks.
+- `scripts/` contains build-time skill generation, documentation checks, and
+  the host-side lab broker `review-lab-broker.py` the launcher starts for an
+  opted-in `review-queue` session.
 - `tests/` contains launcher and image contracts.
 - `docs/` contains the skill router and catalog.
 
@@ -133,14 +184,12 @@ the Hive-managed path.
 
 ## Permitted changes
 
-Agents may change `justfile`, `image/`, `queue/`, `scripts/`,
-`tests/`, `docs/`, `README.md`, `AGENTS.md`, and `.github/workflows/`.
+Agents may change `justfile`, `deploy/`, `image/`, `scripts/`, `tests/`,
+`docs/`, `README.md`, `AGENTS.md`, and `.github/workflows/`.
 
 Do not modify `ublue-os/*`, or commit generated `.agents/skills/` content.
 The generator is the artifact; `projectbluefin/common`'s
-`docs/skills/index.json` is the organization-skill source. `public/` is
-likewise generated: `update-pr-queue.yml` runs `queue/generate.mjs` and
-deploys the result, so change the generator, not its output.
+`docs/skills/index.json` is the organization-skill source.
 
 When behavior changes, update the matching user documentation. Treat the
 launcher, image, and tests as the sources of truth for this repository's
@@ -175,8 +224,10 @@ bash tests/sbom-manifest.sh
 bash tests/image-contract.sh
 bash tests/bluefin-review.sh
 bash tests/dashboard-contract.sh
+python3 tests/lab-broker-contract.py
 bash tests/worktree-guard.sh
 bash tests/runsc-isolation.sh
+bash tests/review-runtime-contract.sh
 bash tests/just-onboarding.sh
 git diff --check
 just --list
@@ -209,7 +260,7 @@ container; CI invokes it explicitly.
 ## References
 
 - Hive protocol, contributor runtime, and upstream issue reporting:
-  `kubestellar/hive` (default branch `v2`; no contributing guide or issue
+  `hivecommons/hive` (default branch `v4`, v2 is retired; no contributing guide or issue
   templates, DCO sign-off required on pull requests).
 - Organization skills and factory rules: `projectbluefin/common`.
 - External API details: Context7 documentation. Context7 reaches agents both

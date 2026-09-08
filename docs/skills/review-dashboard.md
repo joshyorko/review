@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "2.0"
-last_updated: 2026-08-25
+version: "2.9"
+last_updated: 2026-09-08
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -14,18 +14,14 @@ tags: [textual, tui, dashboard, review, maintainer]
 description: "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests."
 metadata:
   type: runbook
-  context7-sources: [/websites/textual_textualize_io]
+  context7-sources: [/websites/textual_textualize_io, /textualize/textual]
 ---
 
 # Review Dashboard
 
-`just review-queue` reads the generated Bluefin queue snapshot. `just
-review-queue owner/repo` reads that repository's open pull requests through
-the shipped GitHub CLI and normalizes them into the same repository-qualified
-queue rows. The authenticated maintainer's own pull requests remain hidden.
-The dashboard distinguishes ready, empty, missing, inaccessible, malformed,
-and failed sources; `R` rereads whichever source is active. The flag form
-`--repo` remains the existing snapshot filter.
+`just review-queue` reads the organization's open pull requests live: one paginated GraphQL search through the shipped GitHub CLI, carrying the review, mergeability, and CI-rollup evidence each recommended action is classified from. `just review-queue owner/repo` reads that repository's open pull requests the same way and normalizes them into the same repository-qualified queue rows. The authenticated maintainer's own pull requests remain hidden. The dashboard distinguishes ready, empty, missing, inaccessible, malformed, and failed sources; `R` rereads whichever source is active. The flag form `--repo` narrows the org-wide queue to one repository.
+
+The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified clean reviews, successful mutations or batch queues, and terminal landing completion request reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
 
 ## When to Use
 
@@ -35,75 +31,18 @@ surface `just review-queue` opens.
 
 ## When Not to Use
 
-Do not use this for the launcher that starts the container
-([`launcher.md`](launcher.md)), the image it runs in
-([`image-build.md`](image-build.md)), the snapshot generator
-([`static-pr-queue.md`](static-pr-queue.md)), or Hive's contributor protocol
-([`hive-runtime.md`](hive-runtime.md)).
+Do not use this for the launcher ([`launcher.md`](launcher.md)), the container image
+([`image-build.md`](image-build.md)), or Hive's protocol ([`hive-runtime.md`](hive-runtime.md)).
 
 ## Semantic Foundation
 
-`image/tui/semantic_view.py` is the pure semantic contract for the dashboard.
-Its builders consume queue snapshots and validated `ReviewResult` values; they
-do not call Textual, GitHub, Hive, a harness, or a mutation gate.
+`image/tui/semantic_view.py` defines the pure semantic contract for the dashboard.
+`ActionID` separates verdict selection, review submission, PR mutations, and navigation.
+`COMMANDS` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter,
+Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`, `Tab`/`I`).
 
-`ActionID` is a stable shared registry. Verdict selection and submission are
-separate intents: `CHOOSE_REVIEW_VERDICT`, `APPROVE_REVIEW`,
-`REQUEST_CHANGES`, `COMMENT_REVIEW`, and `SUBMIT_REVIEW`. Pull-request
-mutation intents are explicit (`APPROVE_AND_QUEUE`, `MERGE_NOW`,
-`UPDATE_BRANCH`, `CLOSE_PULL_REQUEST`, `ADD_PULL_REQUEST_COMMENT`, and
-`RESOLVE_DUPLICATES`); `COPY_REVIEW_CONTEXT` is read-only. Navigation owns
-`NAVIGATE_UP`, `NAVIGATE_DOWN`, `NAVIGATE_FIRST`, `NAVIGATE_LAST`,
-`NAVIGATE_PAGE_UP`, `NAVIGATE_PAGE_DOWN`, `PANE_NEXT`, `PANE_PREVIOUS`,
-`BACK`, `HELP`, and `OPEN_COMMAND_PALETTE`. Harness preparation owns
-`SWITCH_HARNESS`, `PREPARE_HARNESS`, `SIGN_IN_HARNESS`, `INSTALL_HARNESS`,
-`RETRY_HARNESS_DETECTION`, `HARNESS_DIAGNOSTICS`, and `START_REVIEW`.
-Review-body intent is `GENERATE_BODY`, `EDIT_BODY`, `PREVIEW_BODY`, and
-`SUBMIT_REVIEW`. The registry must not reintroduce ambiguous `REJECT`,
-`LEAVE_REVIEW`, `COMMENT`, or `HANDOFF` identifiers.
-
-`ActionSpec.suspended_in_editor` marks navigation and pane intents that must
-be suppressed while a text editor owns focus. `mutating` identifies a
-GitHub-side mutation; `confirmation_required` also records local preparation
-actions that require explicit human consent.
-
-The live TUI exposes one `command_registry()` from
-`image/tui/bluefin_review_tui.py`. Bindings and help/palette entries are
-projections of that registry, including `j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`,
-Enter, Escape, `q`, `Ctrl-C`, `Ctrl-q`, `/`, `r`, `y`, `Ctrl-p`, `:`, and `?`.
-On the root dashboard, `q` and Ctrl-C quit; on pushed screens, `q` and Escape
-go back. Textual editor and confirmation focus remains authoritative: suspended commands do
-not consume typed prose or PR numbers. `u` remains the gated branch update;
-`U` selects live-evidence mechanical Renovate rows; `a` is approve+queue
-only and never touches a selection; `A` is the only batch-landing key (it
-does nothing without a selection) and `w` opens the read-only batch queue.
-
-`QueueRow` and `DecisionCard` carry the pull-request identity, TL;DR, current
-and reviewed heads, freshness, CI, mergeability, provenance, verification,
-findings, and available human actions. A full current head is bound only when
-Codex-style `provenance.head_sha` or the landed Goose `live.head` evidence is
-the exact 40-character SHA. An abbreviated Goose head is insufficient: it
-produces `STALE` and withholds the current exact head. If an adapter receives
-an abbreviated Goose head, repository-backed unique expansion belongs before
-this pure builder; the builder performs no repository lookup. Missing evidence
-or any disagreement also produces `STALE` and cannot produce a clean card.
-`effort` is preferred while `reasoning_effort` remains accepted for existing
-adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
-`STALE`, and `CANCELLED`.
-
-Terminal-normalized Shift-L may arrive as lowercase key identity plus uppercase
-character. The dashboard dispatches that event to ordinary review and keeps
-lowercase `l` pane movement on the active `Screen` focus API. The two
-right-hand evidence panes are focusable `ScrollableContainer`s wrapping the
-`#details`/`#context` Statics, so `h`/`l` reach them and evidence taller
-than the pane scrolls instead of clipping. Review and
-comment editor shortcuts are priority bindings, with literal hints and buttons
-that call the same actions. Review submission remains exact-body preview then
-the typed-number gate; comments use the same preview-before-gate sequence.
-Terminal dispatch failures become bounded visible errors instead of ending the
-dashboard. `e` opens bounded decision evidence; `r` opens the
-explicitly secondary raw backend transcript. `[u]` updates only clean branches;
-conflicts direct the maintainer to manual resolution before a gate.
+`QueueRow` and `DecisionCard` bind head SHA, CI rollup, mergeability, and findings.
+Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updates clean branches.
 
 ## Core Process
 
@@ -120,92 +59,34 @@ conflicts direct the maintainer to manual resolution before a gate.
    consequence first — creating a missing `lgtm` label before submitting the
    approval means a failure leaves no approval that nothing will act on.
 4. **A failure must survive the notification.** Record it on the `Stop`, mark
-   the row, count it in the status line, and keep the stop selected so a
-   batch carries it forward. A toast is gone before a batch of eight
-   finishes.
+   the row, and count it in the status line. Review and ordinary mutation
+   failures keep their selection; terminal landing outcomes are visibly
+   deselected and need an explicit new selection before retry. A toast is gone
+   before a batch of eight finishes.
 5. **Batch every action that a maintainer repeats.** Merging and updating
    branches take the batch selection when one exists. `A` on a selection is
-   different: the reviewed batch
-   becomes one landing agent's brief behind
-   one proportionate gate (see "Batch landing" below), not one typed gate
-   per pull request.
+   different: the reviewed batch becomes one landing agent's brief behind one
+   proportionate gate (see "Batch landing" below), not one gate per PR.
 6. **Add the behaviour to `tests/dashboard_pilot.py`**, which drives the real
    app through `run_test()`. The static greps in
    `tests/dashboard-contract.sh` are for proving *absence* — a power the
    dashboard must not have. Presence is proven by pressing the key.
-7. **Completed reviews cross the `ReviewResult` contract.** The current Goose
-   adapter accepts its JSONL findings and orchestrator progress records. An
-   exit-zero transcript without that structure is `unparsable`, never clean.
-   The Codex adapter accepts one complete official JSONL run: one thread and
-   turn start, one final result-bearing `item.completed` agent message, and an
-   immediately following successful `turn.completed`. Bare results,
-   ambiguous result messages, and malformed, failed, cancelled, out-of-order,
-   or trailing terminal events are `unparsable` with bounded raw evidence.
-   It enables code-mode-only and the bundled official code-mode host, disables
-   direct-tool fallback, and uses the review container as the shell isolation
-   boundary so the CLI never depends on a nested bubblewrap sandbox. A
-   re-entrant harness persists its opaque continuation before waiting for an
-   external event; only that durable continuation may make the run resumable.
-   Keep the decision card concise and keep bounded raw evidence reachable with
-   `e`; backend prose does not belong in Textual rendering code.
-8. **Keep the acting surface explicit.** The shipped keys cover review,
-   merge, branch updates, rejection, handoff, docs, and dupe
-   cleanup; label and priority mutation are not part of the dashboard.
+7. **Completed reviews cross the `ReviewResult` contract.** Transcripts without
+   valid JSONL findings and terminal events are `unparsable`, never clean. Keep
+   decision cards concise and bounded raw evidence on `e`.
+8. **Keep the acting surface and activity explicit.** The shipped keys cover review, merge, branch updates, rejection, handoff, docs, and dupe cleanup; label and priority mutation are excluded. Above the queue, `AGENT ACTIVITY` shows active parent reviews, Check workers, landing agents, queued work, bounded repository-qualified rows, and freshness. Hive rows are read-only, unavailable when malformed, and never inferred from a name, prompt, title, or task identifier. Selected rows also state remote analysis in progress, local clean/findings drafts, and a GitHub review submitted by the authenticated maintainer; all derive from retained local/live evidence and add no transport or polling.
 
 ## Textual Patterns
 
-Verified against `/websites/textual_textualize_io`.
+Verified against Context7 `/textualize/textual`:
+- **Bracket Escaping:** Always escape opening brackets in PR titles or git text via `escape(text)` so `[WIP]` or `[H]` do not corrupt Rich/Textual markup.
+- **Quoted Links:** Terminal OSC 8 links require quotes: `[link="https://..."]`.
+- **Theme Variables:** Use theme pairs like `[$text-success on $success-muted]` for status bars.
+- **Thread Safety:** Never touch the DOM or call `query_one()` from worker threads. Dispatch updates through `self.call_from_thread(self.method, data)`.
 
-**Escaping is not optional, and upstream's `escape` is not sufficient.** Both
-`rich.markup.escape` and `textual.markup.escape` compile
-`(\\*)(\[[a-z#/@][^[]*?])` — the tag pattern matches **lowercase only** — while
-the renderer consumes `[H]` and `[WIP]` all the same. A pull request titled
-`[WIP] fix the thing` silently lost its prefix. Use the module's own
-`escape()`, which escapes every opening bracket:
+**Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`. `ansi_dark` resolves to the terminal's own palette instead of assuming a background colour. `DiffScreen` keeps GitHub's complete response in bounded pages; `[` and `]` navigate them, while loading, success, and fetch error are distinct states. `[o]` is only an optional browser escape hatch.
 
-```python
-def escape(text: str) -> str:
-    return str(text).replace("\\", "\\\\").replace("[", "\\[")
-```
-
-Upstream's own recommendation for mixing variables into markup is template
-substitution, which sidesteps the question entirely:
-
-```python
-Content.from_markup("hello [bold]$name[/bold]!", name=name)
-```
-
-**Links need a quoted URL.** `[link=https://…]` fails the markup value parser
-at the colon; `[link="https://…"]` is correct, and reaches the terminal as
-OSC 8.
-
-**Markup spans resolve `$`-theme variables.** `[$text-success on
-$success-muted]…[/]` inside a `Static` parses through the active app's
-stylesheet, so the theme's text-on-muted pairings work in markup, not only
-in CSS. Padding spaces inside a span keep its background — that is how a
-markup line becomes a full-width bar (`ljust` the label to the content
-width, then wrap it in the styled span).
-
-**Never touch the DOM from a thread worker — including the query.** Textual
-is not thread-safe. `self.call_from_thread(self.query_one(...).update, text)`
-looks safe and is not: the query runs on the worker thread and can race a
-repaint. Hand the whole operation over:
-
-```python
-@work(thread=True)
-def render_context(self, stop: Stop) -> None:
-    ...
-    self.call_from_thread(self.paint_context, "\n".join(lines))
-
-def paint_context(self, text: str) -> None:
-    self.query_one("#context", Static).update(text)
-```
-
-**Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`.
-`ansi_dark` resolves to the terminal's own palette instead of assuming a
-background colour. `DiffScreen` keeps GitHub's complete response in bounded
-pages; `[` and `]` navigate them, while loading, success, and fetch error are
-distinct states. `[o]` is only an optional browser escape hatch.
+**Conversations get Textual's `Markdown` widget**. `CommentsScreen` renders an issue or pull request's opening post, comments, and reviews as one document ordered by timestamp across both kinds. A review with no body is dropped unless its state is `APPROVED` or `CHANGES_REQUESTED`, where the state *is* the verdict. `[C]` opens it from the queue, for issues too unlike the diff; `[c]` opens it from the review screen. A late refresh is discarded unless it matches the generation that asked for it.
 
 ## Design Rules
 
@@ -215,228 +96,56 @@ distinct states. `[o]` is only an optional browser escape hatch.
   many stops are hidden.
 - **Keep mutation failures inspectable.** The selected stop and recovery screen
   retain the exact command, GitHub error, checks, and branch state after the
-  notification disappears. Update, retry, queue, and skip are explicit; a
-  true conflict offers exceptional manual handoff without a bypass.
+  notification disappears. Update, retry, queue, and skip are explicit; a true
+  conflict offers manual handoff without a bypass.
 - **Colour is never the only carrier of a fact.** Rows colour by state *and*
-  carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
-  `? CI UNKNOWN`, as applicable. The batch queue applies the same rule three
-  layers deep — printed state word, a shape-distinct glyph from
-  `LANDING_STATE_STYLES`, then colour — so a colourless or colour-blind read
-  loses nothing (see "Batch landing"). Selection is not colour-only either:
-  a selected row leads with a `●` marker and carries a full-row background.
+  carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or `? CI UNKNOWN`.
+  The batch queue applies the same rule three layers deep — printed state word,
+  glyph from `LANDING_STATE_STYLES`, then colour — so a colourless read loses
+  nothing. Selection leads with `●` and carries a full-row background.
 - **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
-  request whose snapshot or fetched live evidence says CI failed or is
+  request whose queue evidence or fetched live evidence says CI failed or is
   pending; GitHub branch protection remains an additional gate.
 - **Roll up checks at the exact current head.** Fetch `headRefOid` and
-  `statusCheckRollup` in the same `gh pr view`, group check runs by workflow
-  and job name (commit statuses by context), and use only the newest run in
-  each stable context. Superseded cancellations do not make a successful
-  rerun fail; authoritative failures, cancellations, pending checks, absent
-  checks, and GitHub's merge state remain separate evidence.
-- **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
+  `statusCheckRollup` in one `gh pr view`, group check runs by workflow and job
+  name (commit statuses by context), and use only the newest run per stable
+  context, so a superseded cancellation cannot fail a successful rerun.
+  Authoritative failures, cancellations, pending and absent checks, and
+  GitHub's merge state remain separate evidence.
+- **Prefer the queue evidence already in memory.** `mergeable_state`, `check_state`,
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
   summaries all cost zero extra requests.
-- **Classify from evidence, never from a title.** `MECHANICAL` marks the one
-  low-judgment operation the dashboard can prove is safe: merging the base
-  into a green, mergeable branch that is merely behind. It requires the
-  configured Renovate author (`BLUEFIN_REVIEW_RENOVATE_BOTS`), Renovate's own
-  declared update type (`digest`, `pin`, `patch`, or `minor` — never `major`),
-  an open non-draft pull request, `MERGEABLE` + `BEHIND`, and every reported
-  check complete and green. `[U]` selects exactly those stops for the existing
-  gated `[u]`. **`MECHANICAL` describes updateability, not approval and not
-  merge safety.** The earlier `BATCHABLE` tag matched dependency-shaped titles,
-  which is duplicate evidence about the subject and says nothing about whether
-  the branch can be brought current; `dependency_subject()` survives for
-  duplicate detection only.
-- **Distinguish the merge paths.** `a` asks Hive to create the
-  App-authored exact-head approval and apply `lgtm` to the highlighted
-  pull request, an opt-in to its sweep.
-  On a selection, `A` dispatches one
-  landing agent for the whole batch; without a selection `A` does nothing.
-  `a` never touches a selection — it is approve+queue only.
-  `w` opens the read-only batch queue.
-  `m` squashes now and is gated on
-  GitHub's `push` permission, read per repository. `L` leaves a review and
-  merges nothing. A review that can only be given by also queueing or
-  merging is not a review.
-- **Treat the Hive API as JSON, not a browser.** The read-only status probe
-  reports missing hub configuration, missing credentials, network failure,
-  authentication, authorization, edge/login redirects, malformed responses,
-  and server failure as separate concise states. A malformed response names
-  its own shape — status, content type, byte count, and a bounded redacted
-  body excerpt in the failure state and the trace — so an intercepted SPA
-  page reads differently from invalid JSON or a JSON array. The queue POST
-  never follows a redirect and succeeds only when a bounded JSON response
-  explicitly says `queued`; the typed pull-request-number gate remains the
-  authority boundary. A failed Hive probe leaves the queue and review
-  evidence visible, marks any retained worker assignments as last-known
-  rather than current, and reports that current assignment state is unknown.
-  Hive probes run only at startup or after an explicit maintainer refresh;
-  direct GitHub review and merge actions remain available while Hive is down.
-  Hosted queueing remains blocked by the ingress defect tracked in #258.
+- **Classify from evidence, never from a title.** `MECHANICAL` marks
+  merging the base into a green, mergeable branch that is merely behind. It
+  requires a Renovate author, update type (`digest`, `pin`, `patch`, `minor`),
+  an open non-draft pull request, `MERGEABLE` + `BEHIND`, and all checks green.
+  `[U]` selects those stops for gated `[u]`.
+- **Distinguish the merge paths.** `a` requests Hive's App-authored approval
+  and applies `lgtm`. On a selection, `A` dispatches one landing agent for the
+  batch; without a selection `A` no-ops. `w` opens the batch queue. `m` squashes
+  now (gated on `push` permission). `L` leaves a review and merges nothing.
+  `$` ("slay") executes the full review weapon pipeline: reviews unreviewed PRs,
+  dispatches automated fix-and-land if findings are detected, and enqueues batch
+  landing if clean.
+- **Issues view and triage:** `Tab` or `I` toggles between the PR and issues
+  queues. Highlighting an issue renders its metadata and description in details,
+  and recent comments in context. Triage actions: `c` comments via `CommentBody`,
+  `CommentPreview`, and the typed issue-number gate; `x` closes the issue with a
+  triage comment behind the typed number gate; `o` opens in browser; `y` copies
+  handoff. PR actions (`r`, `v`, `m`, `u`, `a`/`A`, `L`) notify PRs only.
+- **Keyboard reference modal on `?`**: `?` opens `HelpScreen`, a modal
+  grouping navigation, review, batching, and mutations with cyan/magenta
+  badges; dismisses cleanly with `?`, `q`, or `Esc`.
+- **Evidence-first CI failure triage card**: Failing, errored, or timed-out checks surface an immediate `CI FAILURE TRIAGE` section displaying the workflow name, job/check context, failing step, head SHA, execution timestamps, and direct evidence URLs.
+- **Empty queue celebration (`ALL SYSTEMS SLAY`)**: Draining the active review source (repository-scoped, own-work excluded) triggers a one-shot 1.3s retro sequence: Round 8/Fight (400ms) → Bluefin charging `SLAYDOKEN!` (300ms) → `9999!` hit (250ms) → `K.O.` (350ms) → `ALL SYSTEMS SLAY` held frame. Startup with an empty queue skips directly to the held frame. Action-filtered views do not trigger celebration.
+- **Treat the Hive API as JSON, not a browser.** The read-only status probe reports missing hub config, missing credentials, network/auth failure, edge/login redirects, malformed responses, and server failure as separate concise states. The queue POST succeeds only when bounded JSON says `queued`; the typed PR-number gate remains the boundary. Failed probes leave queue/review evidence visible and mark retained assignments as last-known. Direct GitHub review and merge stay available.
 
-## Batch landing
+## Batch Review and Landing
 
-The selection is the review, so the batch gate is proportionate:
-`BatchPlanScreen` shows every selected pull request and the exact agent
-command, Enter dispatches, Esc aborts — no typed count. A typed-number gate
-earns its ceremony on a single irreversible command; on a batch reviewed
-row by row it teaches nothing.
-
-One `LandingTask` (image/tui/landing.py) owns the whole selection. Confirmed
-batches enter `app.landing_queue` and drain FIFO, one agent at a time — a
-batch confirmed while another runs waits behind it, never races it. The
-agent is Goose's documented one-shot (`goose run --no-session -i
-<prompt-file>`, overridable with `BLUEFIN_REVIEW_LANDING_COMMAND`), run in
-its own process group so `[x]` stops it whole.
-
-The agent reports, the screen polls: every per-PR state change is one JSON
-line in the task's status file (`diagnosing|fixing|waiting-ci|merging|
-awaiting-stable|merged|blocked|failed`, then a task-level `done`), and
-`LandingScreen` ([w], auto-pushed on dispatch) renders all batches, per-PR
-state, the agent log tail, and Hive stats. Never scrape agent prose for
-status. When a task finishes, `landing_finished` folds the report onto the
-rows and notifies the maintainer: the toast carries the batch id and the
-per-state counts, at error severity when anything failed or the agent
-exited without the task-level `done` event, and the same text persists on
-the status line (`last batch …`) until the next dispatch or refresh. The
-rows keep what the toast cannot outlive: merged leaves the batch; blocked,
-failed, and awaiting-stable stays selected with the agent's reason — the
-same rule as every other failure. A pull request the agent never carried
-to an outcome is marked `no outcome reported` when the agent closed its
-report with `done` and `agent died mid-batch` when it never did — each
-with the last reported state, both distinguishable from every state the
-agent can report.
-
-The brief teaches the agent to batch a repository-level blocker: a required
-check that fails on the toolchain or the base branch blocks every pull
-request in that repository identically, so the first such `blocked` verdict
-is diagnosed once and applied to the remaining same-repository rows in one
-pass — each note naming the one root cause — instead of re-diagnosing them
-one at a time. The fix never goes inside one pull request's branch: a
-mechanical root cause (a toolchain pin bump, a workflow repair) is fixed at
-the root as its own branch and pull request, named in each covered note;
-since it was not in the maintainer's confirmed selection the agent reports
-it rather than merging it. A root cause with no mechanical fix is a written
-finding in the done note.
-
-The screen is a cabinet of framed panels (`BATCHES`, `HIVE`, `AGENT LOG`,
-round `$secondary` borders with titles) over a title bar. Each batch header
-is a full-width state bar (`batch_bar_style`: running is `$text-primary on
-$primary-muted`, queued `$text-warning on $warning-muted`, exited 0
-`$text-success on $success-muted`, anything else `$text-error on
-$error-muted`). A running batch's header also names its heartbeat — the
-age of the status file's last append (`last report 3m ago`) — so a healthy
-long wait is distinguishable from a dead agent (#291), and each pull
-request carries its state three ways at once:
-the printed word, a shape-distinct glyph, and a colour from
-`LANDING_STATE_STYLES` — `◌` waiting, `◐` diagnosing/fixing, `◔`
-waiting-ci, `▶` merging, `◆` awaiting-stable, `✓` merged, `■` blocked, `✗`
-failed, `✔` for the task-level done. Colour is additive: terminal states
-also read bold on a muted fill, so hue is never the only difference between
-two states. Verified against the pinned Textual: markup spans resolve
-`$`-theme variables through the active app's stylesheet, and padding spaces
-inside a span keep its background — that is what makes the header bar
-full-width.
-
-The record outlives the run: the launcher mounts the state directory from
-the host, and `restore_landing_marks` folds the newest persisted outcome
-(`landing.persisted_events`, oldest file first) back onto matching rows
-whenever the queue (re)builds them — a relaunch shows the failure marking
-again instead of reverting to un-reviewed (#281). Only the marking is
-restored; rebuilding a batch selection stays the maintainer's. A manual
-success — a re-queue, a direct merge — clears the row in memory, so it
-also writes a superseding event (`landing.record_event`, appended to
-`manual.jsonl` with a fresh mtime, which wins the fold) or the next
-refresh would fold the stale failure back onto the row (#290). The record
-is durable, so it is bounded: batch files older than seven days are pruned
-when the record is read. Each task id
-carries the instance name (`BLUEFIN_REVIEW_INSTANCE`, set by the launcher
-from the container name) because named dashboards share the one state
-directory — a bare one-second stamp would let two of them overwrite each
-other's files, and the name makes the record attributable. Same-second
-batches from one dashboard get a numeric suffix.
-
-**Done is the release tag, not the merge — where an image is published.**
-A GitHub merge only starts the
-publish pipeline; the batch item is landed when the repository's release
-tag carries the merged commit. The tag is the repository's fact, never an
-assumption: the brief has the agent list the package's tags through the
-anonymous ghcr flow and accept the publish it can prove — the convention
-is `:stable`, a repository publishing only `:latest` proves it there
-(common#1008 was reported blocked on a successful `latest` publish), and
-a commit-tagged image with no moving release tag is itself a proven
-publish. `failed`/`blocked` is only for a merge commit no publication can
-evidence. The agent reports
-`awaiting-stable` at merge and `merged` only once the tag has it.
-A repository with no publish workflow and no image package — a
-config/quadlets repository — can never publish, so the brief has
-the agent detect that *before* merging and define done as the GitHub merge
-itself, reported as `merged` with a note that no image pipeline exists.
-The detection never uses the packages API (the shipped token lacks
-`read:packages`, and the orgs endpoint 404s on user-owned repositories —
-both read as a false "no package"): a repository counts as publishing
-unless both signals are absent — no workflow's YAML names `ghcr.io`, and
-the package is not anonymously readable: ghcr never 404s a missing
-package, so the signal is a denied anonymous token mint (403 DENIED) or
-`/tags/list` answering 401/403. A 403 alone is ambiguous with a private
-package; the mandatory workflow conjunction covers that case.
-On a merge-queue repository, `gh pr merge` answering "accepted by merge
-queue" means the merge completes later: poll `gh pr view` until MERGED and
-verify the merge commit's push-event publish run; never `gh run watch` a
-merge_group gate run post-merge (#291). Every wait-state note names its
-target and timeout. GitHub computes mergeability asynchronously, so a
-`mergeable: UNKNOWN` answer is a cache-warming placeholder: the brief has
-the agent re-query with backoff for up to a minute and act only on the
-computed state — `blocked` on UNKNOWN alone reports nothing a maintainer
-can act on (#294). Publish detection also has a change-level edge: a
-publish workflow can be path-filtered, scheduled, or manual, so a merge
-that touches none of its triggers owes no publication — the brief has
-the agent prove the filter from the workflow YAML and the merge commit's
-file list and report the merge itself as the deliverable, never `failed`
-for a publication the repository never promised. Above all of these
-stands one policy: this appliance owns no lab and depends on none — no
-pull request may ever report `blocked` because a maintainer-local
-service is missing; its absence or failure only moves the
-verification to ghcr evidence. The same holds for a required check that
-fails without
-testing the pull request: when the external service the check drives — a
-lab endpoint, a runner pool — is unreachable, that is infrastructure
-unavailability, not a defect, and never `blocked` on its own. The brief
-has the agent prove the distinction in the check's logs, verify the
-check's deliverable in ghcr instead (the head's `sha-<head>` image is the
-substitute evidence), and continue the normal path — approve and merge,
-or the `lgtm` label with the evidence named when branch protection
-refuses with the check still red. Merging around it stays forbidden.
-- **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
-  the queue's existing handlers, so permissions, live-head checks, exact
-  commands, and typed-number confirmation remain the authority boundary.
-- **Show evidence state, not a verdict invented from prose.** The card carries
-  exact severity counts, cited file/line findings, engine and live-CI
-  verification, duplicate/overlap context, mergeability, head, and
-  backend/model provenance. Incomplete, failed, and unparsable results direct
-  the reviewer to raw evidence and never display a clean conclusion. The card
-  is a point-in-time record: `ReviewScreen` pins the live and overlap
-  evidence at review start, because the queue's background workers keep
-  rewriting `stop.live`/`stop.overlap` while the review runs (#339).
-- **Never bypass branch protection.** No `--admin`, no `--delete-branch`, no
-  push.
-
-### Review bodies
-
-`L` keeps the existing verdict picker, then opens a multiline `TextArea` for
-approve, request-changes, or comment. `Ctrl-g` asks the active drafting
-capability for bounded prose from the stored completed `ReviewResult` and
-live PR facts; failed, incomplete, or untrusted evidence refuses generation,
-while manual text remains available. `Ctrl-e` returns focus to editing,
-`Ctrl-p` previews the exact Markdown and command, `Ctrl-Shift-k` clears the
-body, and `Ctrl-s` submits through the existing typed PR-number gate.
-
-The final Markdown is written verbatim to a bounded temporary body file for
-`gh pr review --body-file` only. The file is removed after success, failure,
-or cancellation; no draft action selects a verdict, discovers findings, or
-mutates GitHub.
+Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings enable `[f] fix & land in background`. See [`landing-batches.md`](landing-batches.md) for the `[$]` state machine, landing gate, concurrency lanes, and state persistence, and [`review-scheduler.md`](review-scheduler.md) for admission, capacity, and transport reuse.
+The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying capacity, and trust a receipt only when its full run and check-scope identity matches. Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission and cache publication; a cancelled run cannot publish or delete another session's receipt. Local lanes and the Hive fleet are two separate concurrency displays and are never conflated; see [`review-monitoring.md`](review-monitoring.md).
+On the dashboard, `B` selects or clears every visible row, `Space` toggles the highlighted row and advances, `n` jumps to the next pull request lacking the maintainer's own GitHub review, and `r` reviews the selection as a batch while retaining its selection on snapshot failure. Queue rows show running and verdict badges. `Enter` on a reviewed row reloads GitHub evidence before rendering cached analysis; CI, mergeability, reviews, and overlap are never restored from the cache.
 
 ## Common Rationalizations
 
@@ -450,28 +159,21 @@ mutates GitHub.
 ## Red Flags
 
 - `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
-- Interpolating any GitHub- or agent-sourced text into markup without
-  `escape()`. An agent-reported JSONL state is attacker-shaped text too:
+- Interpolating any GitHub- or agent-sourced text into markup without `escape()`. An agent-reported JSONL state is attacker-shaped text too:
   unescaped, `waiting[/][blink]OWNED` raised `MarkupError` in
   `rows.update()` and took the whole batch-queue screen down.
 - `self.query_one(...)` evaluated inside an `@work(thread=True)` body.
 - A new mutating verb passed to the read-only `gh()` helper.
 - A default view that filters the queue without saying so.
 - A feature added with only a `tests/dashboard-contract.sh` grep behind it.
+- Remote-sourced state rendered without its age.
+- A core-loop path that gates on `hive_api_base()` being set.
 
-## Exact-head re-review
+## Exact-Head Re-Review
 
-When a completed result is bound to an older full H0 while the point-in-time
-live snapshot contains a different full H1, the decision card appends a
-bounded, read-only delta: both identities, each prior finding disposition,
-newly supported H1 evidence, and an explicit statement that H0 authority is
-not carried forward. The review worker obtains changed H1 regions only through
-the bounded read-only GitHub compare endpoint; a failed, malformed, oversized,
-or partial response is concrete full-review evidence, never a guessed mapping.
-Uncertain mappings, merge-base changes, sensitive workflow changes, incomplete
-H0, and unavailable capability show their concrete fallback reasons and direct
-the maintainer to a full review. Missing or malformed delta inputs fail closed
-and do not alter ordinary same-head review cards or any action gate.
+When a completed result is bound to an older head H0 while the live snapshot is H1,
+the decision card appends a bounded delta: both identities, prior findings, and H1 evidence.
+Fallback reasons direct to a full review if merge-base changes or responses are partial.
 
 ## Verification
 
@@ -483,9 +185,7 @@ pre-commit run --all-files
 ```
 
 - [ ] Every new mutation runs through `mutate_all()` and shows its commands.
-- [ ] Multi-command actions are one gate, ordered so the first failure is
-      harmless.
-- [ ] Failures mark the row and keep the stop selected.
-- [ ] All GitHub- and agent-sourced text passes through `escape()`.
-- [ ] No DOM access inside a thread worker.
+- [ ] Multi-command actions are one gate, ordered so the first failure is harmless.
+- [ ] Failures mark the row; terminal landing outcomes require explicit reselection.
+- [ ] All GitHub- and agent-sourced text passes through `escape()`. No thread DOM access.
 - [ ] The pilot presses the key and asserts the result.

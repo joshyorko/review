@@ -12,6 +12,8 @@ cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
+printf '%s\n' "$(git rev-parse HEAD 2>/dev/null || true)" >"${GOOSE_HEAD:-/dev/null}"
+printf '%s\n' "$PWD" >"${GOOSE_WORKDIR:-/dev/null}"
 printf '%s\n' 'adapter invoked' >"${GOOSE_ADAPTER_CALLED:-/dev/null}"
 exit 23
 EOF
@@ -24,6 +26,7 @@ expected_banner=$'+------------------------+\n| BLUEFIN REVIEW         |\n| HUMA
 # the projected org skills. The context test further down opts back in.
 export BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/absent"
 export BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/absent"
+export BLUEFIN_REVIEW_KNOWLEDGE_FILE="$scratch/absent"
 
 # --- default mode: banner, then hand the range to goose review ---------------
 # 'main...HEAD' is a real 'goose review' argument. An earlier version of this
@@ -51,6 +54,7 @@ set -e
 rm -f "$scratch/goose-args-help"
 help_out="$(PATH="$scratch/bin:$PATH" GOOSE_ARGS="$scratch/goose-args-help" "$review" --help)"
 [[ "$help_out" == *'bluefin-review pr'* ]]
+[[ "$help_out" == *'--prepare-worktree'* ]]
 [[ ! -e "$scratch/goose-args-help" ]]
 
 # --- pr mode: check the pull request out and review it against its base -------
@@ -106,6 +110,90 @@ set -e
 ((bad_number != 0))
 ((missing_number != 0))
 
+# --- isolated worktree path contract ------------------------------------------
+worktree_a="$(
+  PATH="$scratch/bin:$PATH" BLUEFIN_REVIEW_WORKTREE_ROOT="$scratch/worktrees" \
+    "$review" --print-worktree projectbluefin/alpha \
+    0123456789abcdef0123456789abcdef01234567
+)"
+worktree_b="$(
+  PATH="$scratch/bin:$PATH" BLUEFIN_REVIEW_WORKTREE_ROOT="$scratch/worktrees" \
+    "$review" --print-worktree projectbluefin/alpha \
+    1123456789abcdef0123456789abcdef01234567
+)"
+[[ "$worktree_a" != "$worktree_b" ]]
+[[ "$worktree_a" == *"projectbluefin__alpha-"* ]]
+[[ "$worktree_b" == *"projectbluefin__alpha-"* ]]
+
+# --- isolated worktree pr mode: review using an explicit isolated workdir -----
+rm -f "$scratch/gh-calls-isolated" "$scratch/goose-args-isolated" "$scratch/goose-head-isolated" "$scratch/goose-workdir-isolated"
+isolated_dir="$scratch/worktrees/isolated-alpha"
+mkdir -p "$isolated_dir"
+git -C "$isolated_dir" init --quiet
+git -C "$isolated_dir" config user.email t@example.com
+git -C "$isolated_dir" config user.name t
+git -C "$isolated_dir" commit --allow-empty --no-verify -m "test: isolated base commit" --quiet
+iso_base="$(git -C "$isolated_dir" rev-parse HEAD)"
+git -C "$isolated_dir" commit --allow-empty --no-verify -m "test: isolated head commit" --quiet
+iso_head="$(git -C "$isolated_dir" rev-parse HEAD)"
+[[ "$iso_base" != "$iso_head" ]]
+
+rm -rf "$scratch/workspace/alpha"
+
+set +e
+iso_pr_out="$(PATH="$scratch/bin:$PATH" GH_CALLS="$scratch/gh-calls-isolated" \
+  GOOSE_ARGS="$scratch/goose-args-isolated" GOOSE_HEAD="$scratch/goose-head-isolated" \
+  GOOSE_WORKDIR="$scratch/goose-workdir-isolated" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  "$review" pr projectbluefin/alpha 31 \
+  --workdir "$isolated_dir" \
+  --base-sha "$iso_base" \
+  --head-sha "$iso_head" 2>&1)"
+iso_pr_status=$?
+set -e
+
+[[ "$iso_pr_status" -eq 23 ]]
+[[ ! -d "$scratch/workspace/alpha" ]]
+if grep -q 'pr checkout' "$scratch/gh-calls-isolated" 2>/dev/null; then
+  echo "isolated mode must not invoke gh pr checkout" >&2
+  exit 1
+fi
+if grep -q 'baseRefName' "$scratch/gh-calls-isolated" 2>/dev/null; then
+  echo "isolated mode with --base-sha must not query baseRefName" >&2
+  exit 1
+fi
+[[ "$(cat "$scratch/goose-args-isolated")" == "review ${iso_base}...HEAD" ]]
+[[ "$(cat "$scratch/goose-head-isolated")" == "$iso_head" ]]
+[[ "$(cat "$scratch/goose-workdir-isolated")" == "$isolated_dir" ]]
+
+# Recreate workspace alpha for subsequent tests
+mkdir -p "$scratch/workspace/alpha"
+git -C "$scratch/workspace/alpha" init --quiet
+git -C "$scratch/workspace/alpha" config user.email t@example.com
+git -C "$scratch/workspace/alpha" config user.name t
+
+# Worktree head drift must be detected and rejected
+set +e
+drift_out="$(
+  cd "$isolated_dir"
+  PATH="$scratch/bin:$PATH" \
+    BLUEFIN_REVIEW_EXPECTED_HEAD_SHA="0000000000000000000000000000000000000001" \
+    "$review" 2>&1
+)"
+drift_status=$?
+set -e
+((drift_status != 0))
+[[ "$drift_out" == *"does not match expected"* ]]
+
+# Input validation on repo format and head SHA
+set +e
+PATH="$scratch/bin:$PATH" "$review" --prepare-worktree not-an-owner-repo 0123456789abcdef0123456789abcdef01234567 >/dev/null 2>&1
+bad_repo_status=$?
+PATH="$scratch/bin:$PATH" "$review" --prepare-worktree projectbluefin/alpha not-a-sha >/dev/null 2>&1
+bad_sha_status=$?
+set -e
+((bad_repo_status != 0))
+((bad_sha_status != 0))
+
 # --- a review whose checks returned no verdict is never reported as clean -----
 # 'goose review' exits 0 when a check answers with prose or an empty response
 # instead of JSON, and still prints a finding count. Reading that as a clean
@@ -155,6 +243,34 @@ set -e
 ((clean_status == 0))
 [[ "$clean_out" == *'The Review Draft above is for you to judge'* ]]
 [[ "$clean_out" != *'REVIEW INCOMPLETE'* ]]
+
+# --- receipt mode emits a versioned machine-readable result receipt -----------
+base_sha="$(printf '%040d' 0)"
+head_sha="0123456789abcdef0123456789abcdef01234567"
+receipt_json="$(
+  PATH="$scratch/bin:$PATH" \
+    BLUEFIN_REVIEW_HARNESS_ROOT="$repo_root/image" \
+    "$review" receipt \
+    --repository projectbluefin/alpha \
+    --pull-request 31 \
+    --base-sha "$base_sha" \
+    --head-sha "$head_sha" \
+    --backend goose \
+    --model gemini-3.8-flash \
+    --effort high \
+    --check-scope-version scope-v7 \
+    --workdir "$scratch/workspace/alpha"
+)"
+python3 - "$receipt_json" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+assert payload["version"] == 1
+assert payload["identity"]["repository"] == "projectbluefin/alpha"
+assert payload["identity"]["head_sha"] == "0123456789abcdef0123456789abcdef01234567"
+assert "live" not in payload["analysis"] or payload["analysis"]["live"] == {}
+assert "overlap" not in payload["analysis"] or payload["analysis"]["overlap"] == {}
+PY
 
 # A zero-exit malformed stream is still an adapter failure, not a clean draft.
 cat >"$scratch/bin/goose" <<'EOF'
@@ -594,8 +710,8 @@ analyzer_out() {
 # stub records its contents at invocation time.
 mkdir -p "$scratch/overlay/.agents/checks"
 printf 'SCOPED REVIEW PROMPT\n' >"$scratch/overlay/.agents/REVIEW.md"
-cp "$repo_root/image/review-scope/checks/bluefin-doctrine.md" \
-  "$scratch/overlay/.agents/checks/bluefin-doctrine.md"
+cp "$repo_root/image/review-scope/checks/"*.md \
+  "$scratch/overlay/.agents/checks/"
 
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
@@ -640,6 +756,10 @@ argv_scope="$(tr '\0' '\n' <"$scratch/argv-scope")"
 [[ "$argv_scope" != *'--instructions'* ]]
 grep -q '^\.agents/REVIEW\.md$' "$scratch/scope-listing"
 grep -q '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/security\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/correctness\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/test-coverage\.md$' "$scratch/scope-listing"
+grep -q '^\.agents/checks/simplicity\.md$' "$scratch/scope-listing"
 grep -q '^\.agents/checks/00-repository-context\.md$' "$scratch/scope-listing"
 repository_context_line="$(grep -n '^\.agents/checks/00-repository-context\.md$' "$scratch/scope-listing" | cut -d: -f1)"
 bluefin_doctrine_line="$(grep -n '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing" | cut -d: -f1)"

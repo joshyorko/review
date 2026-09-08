@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import FrozenInstanceError, dataclass, field
@@ -23,25 +24,15 @@ MAX_OPERATIONS = 32
 MAX_RECEIPT_DETAIL = 256
 _FULL_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _REPOSITORY = re.compile(r"[^/\s]+/[^/\s]+\Z")
-_ACTION_KIND = re.compile(r"[a-z][a-z0-9_-]*\Z")
 _FORBIDDEN_OPERATION_ARGS = {
     "--admin",
     "--auto",
     "--delete-branch",
     "--force",
     "--force-with-lease",
+    "-f",
 }
-_ALLOWED_ACTION_KINDS = {
-    "approve-and-queue",
-    "comment",
-    "merge",
-    "queue",
-    "reject",
-    "resolve-cluster",
-    "review",
-    "update-branch",
-}
-_ALLOWED_PR_OPERATIONS = {
+_ALLOWED_BATCH_GH_PR_COMMANDS = {
     "close",
     "comment",
     "edit",
@@ -77,12 +68,6 @@ class ExecutionNotEligible(ActionPlanError):
 
 _JSON_SCALAR = type(None) | bool | int | float | str
 
-
-def _bounded_detail(value: object) -> str:
-    detail = str(value)
-    if len(detail) <= MAX_RECEIPT_DETAIL:
-        return detail
-    return detail[:MAX_RECEIPT_DETAIL]
 
 
 def _utc(value: datetime, field_name: str) -> datetime:
@@ -225,8 +210,11 @@ class CurrentState:
     head_sha: str
     body: str | None
     prerequisites: Prerequisites
+    is_draft: bool = False
 
     def __post_init__(self) -> None:
+        if self.is_draft:
+            raise PlanDriftError("PR is draft")
         object.__setattr__(self, "actor", _text(self.actor, "actor"))
         object.__setattr__(self, "tenant", _text(self.tenant, "tenant"))
         object.__setattr__(self, "repository", _text(self.repository, "repository"))
@@ -252,7 +240,12 @@ class CurrentState:
         prerequisites: Prerequisites | None = None,
         permissions: Mapping[str, object] | None = None,
         checks: Mapping[str, object] | None = None,
+        is_draft: bool | None = None,
+        live: Mapping[str, object] | None = None,
     ) -> "CurrentState":
+        draft = is_draft is True or (live is not None and bool(live.get("isDraft")))
+        if draft:
+            raise PlanDriftError("PR is draft")
         return cls(
             actor=actor,
             tenant=tenant,
@@ -261,6 +254,7 @@ class CurrentState:
             head_sha=head_sha,
             body=body,
             prerequisites=_resolve_prerequisites(prerequisites, permissions, checks),
+            is_draft=False,
         )
 
 
@@ -282,123 +276,6 @@ def _resolve_prerequisites(
 
 
 @dataclass(frozen=True)
-class ActionPreview:
-    """The plan's exact intent, with no executable confirmation capability."""
-
-    plan_identity: str
-    actor: str
-    tenant: str
-    repository: str
-    pull_request: int
-    head_sha: str
-    action_kind: str
-    body: str | None
-    operations: tuple[GitHubOperation, ...]
-    prerequisites: Prerequisites
-    created_at: datetime
-    expires_at: datetime
-    idempotency_key: str
-
-
-_HUMAN_CAPABILITY = object()
-
-
-@dataclass(frozen=True, init=False)
-class HumanConfirmation:
-    """Opaque confirmation issued only by ``ActionPlan.confirm_human``."""
-
-    plan_identity: str
-    actor: str
-    tenant: str
-    pull_request: int
-    confirmed_at: datetime
-    _capability: object = field(repr=False, compare=False)
-
-    def __init__(
-        self,
-        *,
-        plan_identity: str,
-        actor: str,
-        tenant: str,
-        pull_request: int,
-        confirmed_at: datetime,
-        _capability: object,
-    ) -> None:
-        if _capability is not _HUMAN_CAPABILITY:
-            raise HumanConfirmationRequired("only direct human confirmation can authorize execution")
-        object.__setattr__(self, "plan_identity", plan_identity)
-        object.__setattr__(self, "actor", actor)
-        object.__setattr__(self, "tenant", tenant)
-        object.__setattr__(self, "pull_request", pull_request)
-        object.__setattr__(self, "confirmed_at", confirmed_at)
-        object.__setattr__(self, "_capability", _capability)
-
-    @classmethod
-    def _issue(
-        cls,
-        *,
-        plan_identity: str,
-        actor: str,
-        tenant: str,
-        pull_request: int,
-        confirmed_at: datetime,
-    ) -> "HumanConfirmation":
-        return cls(
-            plan_identity=plan_identity,
-            actor=actor,
-            tenant=tenant,
-            pull_request=pull_request,
-            confirmed_at=confirmed_at,
-            _capability=_HUMAN_CAPABILITY,
-        )
-
-
-_EXECUTION_CAPABILITY = object()
-
-
-@dataclass(frozen=True, init=False)
-class ExecutionEligibility:
-    """Opaque authorization produced after confirmation and live revalidation."""
-
-    plan_identity: str
-    idempotency_key: str
-    actor: str
-    tenant: str
-    eligible_at: datetime
-    _capability: object = field(repr=False, compare=False)
-
-    def __init__(
-        self,
-        *,
-        plan_identity: str,
-        idempotency_key: str,
-        actor: str,
-        tenant: str,
-        eligible_at: datetime,
-        _capability: object,
-    ) -> None:
-        if _capability is not _EXECUTION_CAPABILITY:
-            raise ExecutionNotEligible("execution eligibility is issued by plan validation")
-        object.__setattr__(self, "plan_identity", plan_identity)
-        object.__setattr__(self, "idempotency_key", idempotency_key)
-        object.__setattr__(self, "actor", actor)
-        object.__setattr__(self, "tenant", tenant)
-        object.__setattr__(self, "eligible_at", eligible_at)
-        object.__setattr__(self, "_capability", _capability)
-
-    @classmethod
-    def _issue(cls, plan: "ActionPlan", *, actor: str, tenant: str, now: datetime):
-        return cls(
-            plan_identity=plan.identity,
-            idempotency_key=plan.idempotency_key,
-            actor=actor,
-            tenant=tenant,
-            eligible_at=now,
-            _capability=_EXECUTION_CAPABILITY,
-        )
-
-
-@dataclass(frozen=True)
 class OperationResult:
     """The bounded result an operation executor reports to the contract."""
 
@@ -412,156 +289,218 @@ class OperationResult:
             raise ValueError("detail must be a string")
 
 
-@dataclass(frozen=True)
-class ActionReceipt:
-    """A bounded, non-transcript result for one plan execution."""
-
-    plan_identity: str
-    idempotency_key: str
-    status: str
-    total_operations: int
-    attempted_operations: int
-    completed_operations: int
-    started_at: datetime
-    finished_at: datetime
-    detail: str = ""
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "detail", _bounded_detail(self.detail))
-
-
 class ReceiptLedger(Protocol):
     """Caller-owned atomic claim and bounded receipt storage contract."""
 
     def claim(self, idempotency_key: str) -> bool:
         """Atomically claim a key, returning false when already claimed."""
 
-    def record(self, receipt: ActionReceipt) -> None:
+    def record(self, receipt: object) -> None:
         """Persist the bounded receipt for a claimed key."""
 
 
-def _coerce_operation(value: GitHubOperation | Sequence[str]) -> GitHubOperation:
-    if isinstance(value, GitHubOperation):
-        return value
-    return GitHubOperation.from_argv(value)
-
-
-def _validate_operation(
-    operation: GitHubOperation,
-    *,
-    repository: str,
-    pull_request: int,
-    body: str | None,
-) -> bool:
-    argv = operation.argv
-    if argv[0] != "gh":
-        raise InvalidPlanError("every operation must invoke gh directly")
-    if any(argument in _FORBIDDEN_OPERATION_ARGS for argument in argv):
-        raise InvalidPlanError("admin, force, and branch-deletion operations are forbidden")
-    try:
-        repo_index = argv.index("--repo")
-        operation_repository = argv[repo_index + 1]
-    except (ValueError, IndexError) as error:
-        raise InvalidPlanError("every operation must bind --repo to the plan repository") from error
-    if operation_repository != repository:
-        raise InvalidPlanError("operation repository does not match the plan")
-
-    if len(argv) < 3:
-        raise InvalidPlanError("operation is incomplete")
-    if argv[1] == "pr":
-        if len(argv) < 4 or argv[2] not in _ALLOWED_PR_OPERATIONS:
-            raise InvalidPlanError("operation is not an existing pull-request mutation")
-        try:
-            operation_pull_request = int(argv[3])
-        except ValueError as error:
-            raise InvalidPlanError("pull-request operation must name its PR number") from error
-        if operation_pull_request != pull_request:
-            raise InvalidPlanError("operation pull request does not match the plan")
-    elif argv[1:3] != ("label", "create"):
-        raise InvalidPlanError("operation is not an existing review mutation")
-
-    saw_body = False
-    for index, argument in enumerate(argv):
-        if argument not in {"--body", "--body-file"}:
-            continue
-        if index + 1 >= len(argv):
-            raise InvalidPlanError("body operation is missing its exact value")
-        if body is None:
-            raise InvalidPlanError("body-bearing operation requires the exact plan body")
-        saw_body = True
-        if argument == "--body" and argv[index + 1] != body:
-            raise InvalidPlanError("operation body does not match the exact plan body")
-        if argument == "--body-file" and operation.body != body:
-            raise InvalidPlanError("body-file operation must carry the exact plan body")
-    if operation.body is not None and not saw_body:
-        raise InvalidPlanError("operation body is not represented by its argv")
-    return saw_body
-
-
 @dataclass(frozen=True)
-class ActionPlan:
-    """Immutable intent bound to one PR head and one human decision."""
-
-    actor: str
-    tenant: str
+class BatchMutationItem:
     repository: str
     pull_request: int
     head_sha: str
-    action_kind: str
-    body: str | None
-    operations: tuple[GitHubOperation, ...]
     prerequisites: Prerequisites
-    created_at: datetime
-    expires_at: datetime
-    idempotency_key: str
+    operations: tuple[tuple[str, ...], ...]
 
     def __post_init__(self) -> None:
-        actor = _text(self.actor, "actor")
-        tenant = _text(self.tenant, "tenant")
-        repository = _text(self.repository, "repository")
-        if not _REPOSITORY.fullmatch(repository):
+        if not _REPOSITORY.fullmatch(_text(self.repository, "repository")):
             raise InvalidPlanError("repository must be owner/name")
-        action_kind = _text(self.action_kind, "action_kind")
-        if not _ACTION_KIND.fullmatch(action_kind) or action_kind not in _ALLOWED_ACTION_KINDS:
-            raise InvalidPlanError("action_kind is not an existing review mutation")
-        if self.body is not None and not isinstance(self.body, str):
-            raise InvalidPlanError("body must be an exact Markdown string or None")
-        prerequisites = self.prerequisites
-        if not isinstance(prerequisites, Prerequisites):
-            raise InvalidPlanError("prerequisites must be a Prerequisites value")
-        try:
-            operations = tuple(_coerce_operation(operation) for operation in self.operations)
-        except TypeError as error:
-            raise InvalidPlanError("operations must be a sequence") from error
-        if not operations:
-            raise InvalidPlanError("a plan must contain at least one exact operation")
-        if len(operations) > MAX_OPERATIONS:
-            raise InvalidPlanError(f"a plan cannot contain more than {MAX_OPERATIONS} operations")
-        plan_has_body = False
-        for operation in operations:
-            plan_has_body = _validate_operation(
-                operation,
-                repository=repository,
-                pull_request=_pull_request(self.pull_request),
-                body=self.body,
-            ) or plan_has_body
-        if self.body is not None and not plan_has_body:
-            raise InvalidPlanError("exact plan body is not represented by its operations")
-        created_at = _utc(self.created_at, "created_at")
-        expires_at = _utc(self.expires_at, "expires_at")
-        if expires_at <= created_at:
-            raise InvalidPlanError("expires_at must be after created_at")
-        idempotency_key = _text(self.idempotency_key, "idempotency_key")
-        object.__setattr__(self, "actor", actor)
-        object.__setattr__(self, "tenant", tenant)
-        object.__setattr__(self, "repository", repository)
         object.__setattr__(self, "pull_request", _pull_request(self.pull_request))
         object.__setattr__(self, "head_sha", _head(self.head_sha))
-        object.__setattr__(self, "action_kind", action_kind)
+        if not isinstance(self.prerequisites, Prerequisites):
+            raise InvalidPlanError("prerequisites must be a Prerequisites value")
+        operations = tuple(tuple(operation) for operation in self.operations)
+        if not operations or any(
+            not operation or any(not isinstance(arg, str) for arg in operation)
+            for operation in operations
+        ):
+            raise InvalidPlanError("batch operations must be non-empty argv vectors")
+        for operation in operations:
+            if any(arg in _FORBIDDEN_OPERATION_ARGS for arg in operation) or any(
+                arg == "git push"
+                or (arg == "git" and idx + 1 < len(operation) and operation[idx + 1] == "push")
+                for idx, arg in enumerate(operation)
+            ):
+                raise InvalidPlanError("admin, force, and branch-deletion operations are forbidden")
+            is_valid_gh = (
+                len(operation) >= 3
+                and operation[0] == "gh"
+                and operation[1] == "pr"
+                and operation[2] in _ALLOWED_BATCH_GH_PR_COMMANDS
+            )
+            is_valid_hive = (
+                len(operation) == 4
+                and operation[0] == "python3"
+                and operation[1] == "image/tui/hive_api.py"
+                and operation[2] == "queue"
+                and (operation[3].startswith("https://") or operation[3].startswith("http://"))
+            )
+            if not (is_valid_gh or is_valid_hive):
+                raise InvalidPlanError(
+                    "batch operations must be an allowed gh pr command or python3 image/tui/hive_api.py queue"
+                )
         object.__setattr__(self, "operations", operations)
-        object.__setattr__(self, "created_at", created_at)
-        object.__setattr__(self, "expires_at", expires_at)
-        object.__setattr__(self, "idempotency_key", idempotency_key)
+
+    @property
+    def identity(self) -> str:
+        return f"{self.repository}#{self.pull_request}@{self.head_sha}"
+
+    @property
+    def number(self) -> int:
+        return self.pull_request
+
+
+@dataclass(frozen=True)
+class BatchActionPreview:
+    plan_identity: str
+    actor: str
+    tenant: str
+    action_kind: str
+    items: tuple[BatchMutationItem, ...]
+    created_at: datetime
+    expires_at: datetime
+
+
+_BATCH_HUMAN_CAPABILITY = object()
+_BATCH_EXECUTION_CAPABILITY = object()
+
+
+@dataclass(frozen=True, init=False)
+class BatchHumanConfirmation:
+    plan_identity: str
+    actor: str
+    tenant: str
+    items: tuple[str, ...]
+    confirmed_at: datetime
+    _capability: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        plan_identity: str,
+        actor: str,
+        tenant: str,
+        items: Sequence[str],
+        confirmed_at: datetime,
+        _capability: object,
+    ) -> None:
+        if _capability is not _BATCH_HUMAN_CAPABILITY:
+            raise HumanConfirmationRequired("batch confirmation is not human-issued")
+        object.__setattr__(self, "plan_identity", plan_identity)
+        object.__setattr__(self, "actor", actor)
+        object.__setattr__(self, "tenant", tenant)
+        object.__setattr__(self, "items", tuple(items))
+        object.__setattr__(self, "confirmed_at", confirmed_at)
+        object.__setattr__(self, "_capability", _capability)
+
+
+@dataclass(frozen=True, init=False)
+class BatchExecutionEligibility:
+    plan_identity: str
+    actor: str
+    tenant: str
+    confirmed_items: tuple[str, ...]
+    eligible_at: datetime
+    _capability: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        plan_identity: str,
+        actor: str,
+        tenant: str,
+        confirmed_items: Sequence[str],
+        eligible_at: datetime,
+        _capability: object,
+    ) -> None:
+        if _capability is not _BATCH_EXECUTION_CAPABILITY:
+            raise ExecutionNotEligible("batch execution eligibility is not plan-issued")
+        object.__setattr__(self, "plan_identity", plan_identity)
+        object.__setattr__(self, "actor", actor)
+        object.__setattr__(self, "tenant", tenant)
+        object.__setattr__(self, "confirmed_items", tuple(confirmed_items))
+        object.__setattr__(self, "eligible_at", eligible_at)
+        object.__setattr__(self, "_capability", _capability)
+
+
+class BatchResultMap(dict):
+    """Mapping supporting lookup by int (PR number), key (repo#number), tuple (repo, number), or identity."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._by_repo_pr: dict[tuple[str, int], Any] = {}
+        self._by_key: dict[str, Any] = {}
+        self._by_identity: dict[str, Any] = {}
+        for k, v in list(self.items()):
+            if isinstance(k, tuple) and len(k) == 2:
+                self._by_repo_pr[k] = v
+            elif isinstance(k, str) and "#" in k:
+                if "@" in k:
+                    self._by_identity[k] = v
+                self._by_key[k] = v
+
+    def record(self, item: BatchMutationItem, value: Any) -> None:
+        self[item.pull_request] = value
+        self._by_repo_pr[(item.repository, item.pull_request)] = value
+        self._by_key[f"{item.repository}#{item.pull_request}"] = value
+        self._by_identity[item.identity] = value
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, tuple) and len(key) == 2:
+            return self._by_repo_pr[key]
+        if isinstance(key, str) and "#" in key:
+            if "@" in key and key in self._by_identity:
+                return self._by_identity[key]
+            if key in self._by_key:
+                return self._by_key[key]
+        return super().__getitem__(key)
+
+    def __contains__(self, key: Any) -> bool:
+        if isinstance(key, tuple) and len(key) == 2:
+            return key in self._by_repo_pr
+        if isinstance(key, str) and "#" in key:
+            return key in self._by_identity or key in self._by_key
+        return super().__contains__(key)
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+@dataclass(frozen=True)
+class BatchActionReceipt:
+    succeeded: BatchResultMap | dict[int, int]
+    rejected: BatchResultMap | dict[int, str]
+    failed: BatchResultMap | dict[int, str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.succeeded, BatchResultMap):
+            m = BatchResultMap(self.succeeded)
+            object.__setattr__(self, "succeeded", m)
+        if not isinstance(self.rejected, BatchResultMap):
+            m = BatchResultMap(self.rejected)
+            object.__setattr__(self, "rejected", m)
+        if not isinstance(self.failed, BatchResultMap):
+            m = BatchResultMap(self.failed)
+            object.__setattr__(self, "failed", m)
+
+
+@dataclass(frozen=True)
+class BatchActionPlan:
+    actor: str
+    tenant: str
+    action_kind: str
+    items: tuple[BatchMutationItem, ...]
+    created_at: datetime
+    expires_at: datetime
+    _identity: str
 
     @classmethod
     def build(
@@ -569,300 +508,174 @@ class ActionPlan:
         *,
         actor: str,
         tenant: str,
-        repository: str,
-        pull_request: int,
-        head_sha: str,
         action_kind: str,
-        body: str | None = None,
-        operations: Sequence[GitHubOperation | Sequence[str]],
-        prerequisites: Prerequisites | None = None,
-        permissions: Mapping[str, object] | None = None,
-        checks: Mapping[str, object] | None = None,
+        items: Sequence[BatchMutationItem],
         created_at: datetime | None = None,
         expires_at: datetime | None = None,
-        idempotency_key: str | None = None,
-    ) -> "ActionPlan":
+    ) -> "BatchActionPlan":
         created = _utc(created_at, "created_at") if created_at else datetime.now(timezone.utc)
-        expires = (
-            _utc(expires_at, "expires_at")
-            if expires_at
-            else created + DEFAULT_PLAN_TTL
-        )
-        resolved_prerequisites = _resolve_prerequisites(prerequisites, permissions, checks)
-        resolved_operations = tuple(_coerce_operation(operation) for operation in operations)
-        if idempotency_key is None:
-            idempotency_key = sha256(
-                _canonical(
-                    {
-                        "actor": actor,
-                        "tenant": tenant,
-                        "repository": repository,
-                        "pull_request": pull_request,
-                        "head_sha": head_sha.lower() if isinstance(head_sha, str) else head_sha,
-                        "action_kind": action_kind,
-                        "body": body,
-                        "operations": [
-                            {"argv": list(operation.argv), "body": operation.body}
-                            for operation in resolved_operations
-                        ],
-                        "prerequisites": resolved_prerequisites.payload(),
-                        "created_at": created.isoformat(),
-                        "expires_at": expires.isoformat(),
-                    }
-                )
-            ).hexdigest()
+        expires = _utc(expires_at, "expires_at") if expires_at else created + DEFAULT_PLAN_TTL
+        normalized = tuple(items)
+        if not normalized:
+            raise InvalidPlanError("batch action plan requires at least one item")
+        if len(normalized) > MAX_OPERATIONS:
+            raise InvalidPlanError(f"batch action plan cannot exceed {MAX_OPERATIONS} items")
+        material = {
+            "actor": actor,
+            "tenant": tenant,
+            "action_kind": action_kind,
+            "items": [
+                {
+                    "identity": item.identity,
+                    "prerequisites": item.prerequisites.payload(),
+                    "operations": [list(operation) for operation in item.operations],
+                }
+                for item in normalized
+            ],
+            "created_at": created.isoformat(),
+            "expires_at": expires.isoformat(),
+        }
         return cls(
-            actor=actor,
-            tenant=tenant,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            action_kind=action_kind,
-            body=body,
-            operations=resolved_operations,
-            prerequisites=resolved_prerequisites,
-            created_at=created,
-            expires_at=expires,
-            idempotency_key=idempotency_key,
+            _text(actor, "actor"),
+            _text(tenant, "tenant"),
+            _text(action_kind, "action_kind"),
+            normalized,
+            created,
+            expires,
+            sha256(_canonical(material)).hexdigest(),
         )
 
     @property
     def identity(self) -> str:
-        payload = {
-            "actor": self.actor,
-            "tenant": self.tenant,
-            "repository": self.repository,
-            "pull_request": self.pull_request,
-            "head_sha": self.head_sha,
-            "action_kind": self.action_kind,
-            "body": self.body,
-            "operations": [
-                {"argv": list(operation.argv), "body": operation.body}
-                for operation in self.operations
-            ],
-            "prerequisites": self.prerequisites.payload(),
-            "created_at": self.created_at.isoformat(),
-            "expires_at": self.expires_at.isoformat(),
-            "idempotency_key": self.idempotency_key,
-        }
-        return sha256(_canonical(payload)).hexdigest()
+        return self._identity
 
-    @property
-    def plan_hash(self) -> str:
-        return self.identity
-
-    @property
-    def plan_id(self) -> str:
-        return self.identity
-
-    def is_expired(self, now: datetime | None = None) -> bool:
-        return _now(now) >= self.expires_at
-
-    def preview(self) -> ActionPreview:
-        return ActionPreview(
-            plan_identity=self.identity,
-            actor=self.actor,
-            tenant=self.tenant,
-            repository=self.repository,
-            pull_request=self.pull_request,
-            head_sha=self.head_sha,
-            action_kind=self.action_kind,
-            body=self.body,
-            operations=self.operations,
-            prerequisites=self.prerequisites,
-            created_at=self.created_at,
-            expires_at=self.expires_at,
-            idempotency_key=self.idempotency_key,
+    def preview(self) -> BatchActionPreview:
+        return BatchActionPreview(
+            self._identity,
+            self.actor,
+            self.tenant,
+            self.action_kind,
+            self.items,
+            self.created_at,
+            self.expires_at,
         )
 
     def confirm_human(
         self,
         *,
-        preview: ActionPreview,
+        preview: BatchActionPreview,
         actor: str,
         tenant: str,
-        typed_pull_request: int,
+        typed_items: str,
         now: datetime | None = None,
-    ) -> HumanConfirmation:
-        if not isinstance(preview, ActionPreview):
-            raise HumanConfirmationRequired("confirmation must follow an ActionPlan preview")
-        if preview.plan_identity != self.identity:
-            raise HumanConfirmationRequired("preview belongs to another plan")
-        confirmed_at = _now(now)
-        self._ensure_live(confirmed_at)
-        if actor != self.actor:
-            raise HumanConfirmationRequired("confirmation actor does not match the plan")
-        if tenant != self.tenant:
-            raise HumanConfirmationRequired("confirmation tenant does not match the plan")
-        if typed_pull_request != self.pull_request:
-            raise HumanConfirmationRequired("typed pull request does not match the plan")
-        return HumanConfirmation._issue(
-            plan_identity=self.identity,
+    ) -> BatchHumanConfirmation:
+        current = _now(now)
+        if preview.plan_identity != self._identity or actor != self.actor or tenant != self.tenant:
+            raise HumanConfirmationRequired("batch confirmation does not match the plan")
+        if current < self.created_at or current >= self.expires_at:
+            raise PlanExpiredError("batch action plan has expired")
+        expected = tuple(item.identity for item in self.items)
+        actual = tuple(str(value) for value in str(typed_items).split())
+        if actual != expected:
+            raise HumanConfirmationRequired("typed confirmation does not match every exact PR and head")
+        return BatchHumanConfirmation(
+            plan_identity=self._identity,
             actor=actor,
             tenant=tenant,
-            pull_request=typed_pull_request,
-            confirmed_at=confirmed_at,
+            items=actual,
+            confirmed_at=current,
+            _capability=_BATCH_HUMAN_CAPABILITY,
         )
-
-    def _ensure_live(self, now: datetime) -> None:
-        if now < self.created_at:
-            raise PlanExpiredError("plan is not valid before its creation time")
-        if now >= self.expires_at:
-            raise PlanExpiredError("plan has expired")
-
-    def revalidate(
-        self,
-        current: CurrentState,
-        *,
-        now: datetime | None = None,
-    ) -> None:
-        self._ensure_live(_now(now))
-        if not isinstance(current, CurrentState):
-            raise PlanDriftError("current state is required")
-        comparisons = (
-            ("actor", self.actor, current.actor),
-            ("tenant", self.tenant, current.tenant),
-            ("repository", self.repository, current.repository),
-            ("pull_request", self.pull_request, current.pull_request),
-            ("head", self.head_sha, current.head_sha),
-            ("body", self.body, current.body),
-            ("permissions", self.prerequisites.permissions, current.prerequisites.permissions),
-            ("checks", self.prerequisites.checks, current.prerequisites.checks),
-        )
-        for field_name, expected, actual in comparisons:
-            if expected != actual:
-                raise PlanDriftError(f"{field_name} drift invalidates the ActionPlan")
 
     def execution_eligibility(
         self,
-        confirmation: HumanConfirmation,
-        current: CurrentState,
+        confirmation: BatchHumanConfirmation,
         *,
         now: datetime | None = None,
-    ) -> ExecutionEligibility:
-        if not isinstance(confirmation, HumanConfirmation):
-            raise HumanConfirmationRequired(
-                "a preview or model-only confirmation cannot authorize execution"
-            )
-        if confirmation._capability is not _HUMAN_CAPABILITY:
-            raise HumanConfirmationRequired("human confirmation capability is invalid")
-        if confirmation.plan_identity != self.identity:
-            raise HumanConfirmationRequired("confirmation belongs to another plan")
-        if confirmation.actor != self.actor or confirmation.tenant != self.tenant:
-            raise HumanConfirmationRequired("confirmation authority drifted")
-        if confirmation.pull_request != self.pull_request:
-            raise HumanConfirmationRequired("confirmation pull request drifted")
-        current_time = _now(now)
-        self._ensure_live(current_time)
-        if confirmation.confirmed_at > current_time:
-            raise HumanConfirmationRequired("confirmation is from the future")
-        self.revalidate(current, now=current_time)
-        return ExecutionEligibility._issue(
-            self,
-            actor=confirmation.actor,
-            tenant=confirmation.tenant,
-            now=current_time,
+    ) -> BatchExecutionEligibility:
+        current = _now(now)
+        if not isinstance(confirmation, BatchHumanConfirmation):
+            raise HumanConfirmationRequired("batch execution requires human confirmation")
+        if (
+            confirmation.plan_identity != self._identity
+            or confirmation.items != tuple(item.identity for item in self.items)
+        ):
+            raise HumanConfirmationRequired("batch confirmation is for another list")
+        if current < self.created_at or current >= self.expires_at:
+            raise PlanExpiredError("batch action plan has expired")
+        return BatchExecutionEligibility(
+            plan_identity=self._identity,
+            actor=self.actor,
+            tenant=self.tenant,
+            confirmed_items=confirmation.items,
+            eligible_at=current,
+            _capability=_BATCH_EXECUTION_CAPABILITY,
         )
 
     def execute(
         self,
-        eligibility: ExecutionEligibility,
-        current: CurrentState,
-        executor: Callable[[GitHubOperation], OperationResult | int],
+        eligibility: BatchExecutionEligibility,
+        current_state: Callable[[BatchMutationItem], CurrentState],
+        executor: Callable[[BatchMutationItem, tuple[str, ...]], OperationResult | int],
         *,
         ledger: ReceiptLedger,
         now: datetime | None = None,
-    ) -> ActionReceipt:
-        if not isinstance(eligibility, ExecutionEligibility):
-            raise ExecutionNotEligible("execution requires plan-issued eligibility")
-        if eligibility._capability is not _EXECUTION_CAPABILITY:
-            raise ExecutionNotEligible("execution eligibility capability is invalid")
-        if eligibility.plan_identity != self.identity:
-            raise ExecutionNotEligible("execution eligibility belongs to another plan")
-        if eligibility.idempotency_key != self.idempotency_key:
-            raise ExecutionNotEligible("execution idempotency key does not match")
+    ) -> BatchActionReceipt:
+        current = _now(now)
+        if current < self.created_at or current >= self.expires_at:
+            raise PlanExpiredError("batch action plan has expired")
+        if not isinstance(eligibility, BatchExecutionEligibility) or eligibility.plan_identity != self._identity:
+            raise ExecutionNotEligible("batch execution eligibility does not match")
+        if getattr(eligibility, "_capability", None) is not _BATCH_EXECUTION_CAPABILITY:
+            raise ExecutionNotEligible("batch execution eligibility is not plan-issued")
         if eligibility.actor != self.actor or eligibility.tenant != self.tenant:
-            raise ExecutionNotEligible("execution authority does not match")
-        started_at = _now(now)
-        self.revalidate(current, now=started_at)
-        if not callable(executor):
-            raise ExecutionNotEligible("an operation executor is required")
-        if not callable(getattr(ledger, "claim", None)) or not callable(
-            getattr(ledger, "record", None)
-        ):
-            raise ExecutionNotEligible("a caller-owned receipt ledger is required")
-        if not ledger.claim(self.idempotency_key):
-            raise ExecutionNotEligible("execution idempotency key was already claimed")
-
-        for index, operation in enumerate(self.operations):
+            raise ExecutionNotEligible("batch execution authority does not match")
+        if eligibility.confirmed_items != tuple(item.identity for item in self.items):
+            raise ExecutionNotEligible("batch execution eligibility does not match")
+        succeeded = BatchResultMap()
+        rejected = BatchResultMap()
+        failed = BatchResultMap()
+        for item in self.items:
             try:
-                result = executor(operation)
-                if isinstance(result, bool):
-                    raise TypeError("executor returned a boolean instead of an operation result")
-                if isinstance(result, int):
-                    result = OperationResult(return_code=result)
-                if not isinstance(result, OperationResult):
-                    raise TypeError("executor returned an invalid operation result")
+                live = current_state(item)
+                if live.head_sha != item.head_sha or live.prerequisites != item.prerequisites:
+                    rejected.record(item, "head drift invalidates the item")
+                    continue
+                for operation in item.operations:
+                    result = executor(item, operation)
+                    if isinstance(result, int) and not isinstance(result, bool):
+                        result = OperationResult(result)
+                    if not isinstance(result, OperationResult) or result.return_code != 0:
+                        detail = (
+                            result.detail
+                            if isinstance(result, OperationResult)
+                            else "invalid operation result"
+                        )
+                        failed.record(item, detail[:MAX_RECEIPT_DETAIL])
+                        break
+                else:
+                    succeeded.record(item, len(item.operations))
+            except PlanDriftError as error:
+                rejected.record(item, str(error))
             except Exception as error:
-                receipt = ActionReceipt(
-                    plan_identity=self.identity,
-                    idempotency_key=self.idempotency_key,
-                    status="failed",
-                    total_operations=len(self.operations),
-                    attempted_operations=index + 1,
-                    completed_operations=index,
-                    started_at=started_at,
-                    finished_at=started_at,
-                    detail=_bounded_detail(error),
-                )
-                ledger.record(receipt)
-                return receipt
-            if result.return_code != 0:
-                receipt = ActionReceipt(
-                    plan_identity=self.identity,
-                    idempotency_key=self.idempotency_key,
-                    status="failed",
-                    total_operations=len(self.operations),
-                    attempted_operations=index + 1,
-                    completed_operations=index,
-                    started_at=started_at,
-                    finished_at=started_at,
-                    detail=result.detail,
-                )
-                ledger.record(receipt)
-                return receipt
-
-        receipt = ActionReceipt(
-            plan_identity=self.identity,
-            idempotency_key=self.idempotency_key,
-            status="succeeded",
-            total_operations=len(self.operations),
-            attempted_operations=len(self.operations),
-            completed_operations=len(self.operations),
-            started_at=started_at,
-            finished_at=started_at,
-        )
+                failed.record(item, str(error)[:MAX_RECEIPT_DETAIL])
+        receipt = BatchActionReceipt(succeeded, rejected, failed)
         ledger.record(receipt)
         return receipt
 
 
-def build_action_plan(**kwargs: Any) -> ActionPlan:
-    """Functional construction entry point for non-class-oriented callers."""
-
-    return ActionPlan.build(**kwargs)
-
-
 __all__ = [
-    "ActionPlan",
     "ActionPlanError",
-    "ActionPreview",
-    "ActionReceipt",
+    "BatchActionPlan",
+    "BatchActionPreview",
+    "BatchActionReceipt",
+    "BatchExecutionEligibility",
+    "BatchHumanConfirmation",
+    "BatchMutationItem",
+    "BatchResultMap",
     "CurrentState",
-    "ExecutionEligibility",
     "ExecutionNotEligible",
-    "FrozenInstanceError",
     "GitHubOperation",
-    "HumanConfirmation",
     "HumanConfirmationRequired",
     "InvalidPlanError",
     "MAX_RECEIPT_DETAIL",
@@ -871,5 +684,4 @@ __all__ = [
     "PlanExpiredError",
     "Prerequisites",
     "ReceiptLedger",
-    "build_action_plan",
 ]

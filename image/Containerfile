@@ -12,10 +12,10 @@
 # was never once offered an update and silently froze. A pin no tool can track
 # is not a stricter pin, it is a stale one. The reference below is the only
 # source of truth for which base this is; do not restate its value here.
-ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:60d990a1bf8ff0bbf4bffebb9e88bb2ea1720ecfcc835060b6caa0cf261fca8b
+ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:8161102cfbe84d51f0ca7d7a8c8b0e6d7ef5f78bd4bb92454da87b74dd0be8ed
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
-ARG HIVE_COMMIT=8ac1994a4994ec3454f83c2ed5a989abd430e1af
+ARG HIVE_COMMIT=fe34da51434ad9b0924eee1492047c3c95c705ff
 ARG NODE_VERSION=24.18.1
 ARG GH_VERSION=2.97.0
 ARG TMUX_VERSION=3.7b
@@ -30,8 +30,8 @@ ARG PI_SHA512=817421dd26999964df54c738028e7e2c66d578abf3c8eeeda25a24d272ec660abd
 # `canary` is a mutable release tag, not an artifact identity. CI resolves
 # these from the release asset API for every build and passes them as build
 # inputs; these defaults keep a local build pinned to a known attested asset.
-ARG GOOSE_X86_64_SHA256=db1ae20729ac87ebff0e55d161ec88515d92e580ddd1b0b4371a162f16d05180
-ARG GOOSE_AARCH64_SHA256=187e0564d735cd99678f471c303546df64eafab6db851421781c96b8700e9792
+ARG GOOSE_X86_64_SHA256=14971bf6f9b48d649379c9df42fbd5038ad17f887ff5724ab89492ff35f52881
+ARG GOOSE_AARCH64_SHA256=7da3f5314514cab65caaf7864dc7b7e694def1a4eee090cf05c0ce2041ffc099
 ARG UV_VERSION=0.12.3
 ARG UV_X86_64_SHA256=0643b9fb8c9fb27458e709ce6ff939695013c41975ff7b02d3f3b138d8d4bdb3
 ARG UV_AARCH64_SHA256=fa513fca1eb2913334c944fe9adbdd410274a1cbe8dd05d03699a9eb85311d4e
@@ -216,7 +216,8 @@ RUN set -eu; \
 
 # The maintainer TUI runtime: uv (pinned, checksum-verified) creates a
 # self-contained virtual environment on the base's own CPython and installs
-# Textual from the hash-locked requirements file. uv stays installed at
+# Textual and the optional Countme exporter from the hash-locked requirements
+# file. uv stays installed at
 # /usr/local/bin/uv; the venv lives under /opt/bluefin/tui and is never on
 # PATH, so nothing here shadows base tools.
 ARG UV_VERSION
@@ -262,7 +263,7 @@ RUN set -eu; \
       --python /opt/bluefin/tui/.venv/bin/python \
       --require-hashes --no-deps \
       -r /opt/bluefin/tui/requirements.lock; \
-    /opt/bluefin/tui/.venv/bin/python -c "import textual; print(textual.__version__)"; \
+    /opt/bluefin/tui/.venv/bin/python -c "import opentelemetry.sdk, textual; print(textual.__version__)"; \
     /opt/bluefin/tui/.venv/bin/python -m compileall -q /opt/bluefin/tui/*.py; \
     for tui_module in /opt/bluefin/tui/*.py; do \
       PYTHONPATH=/opt/bluefin/tui:/opt/bluefin /opt/bluefin/tui/.venv/bin/python \
@@ -342,21 +343,25 @@ RUN set -eu; \
 RUN set -eu; \
     mkdir -p /usr/local/etc/hive /etc/hive/restrictions; \
     curl --fail --location --show-error --silent \
-      "https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-agent.sh" \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh" \
       -o /usr/local/bin/contributor-agent.sh; \
     curl --fail --location --show-error --silent \
-      "https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-relay.sh" \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh" \
       -o /usr/local/bin/contributor-relay.sh; \
     curl --fail --location --show-error --silent \
-      "https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/config/backends.conf" \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js" \
+      -o /usr/local/bin/pi-backend.js; \
+    curl --fail --location --show-error --silent \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf" \
       -o /usr/local/etc/hive/backends.conf; \
-    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.sh
+    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.sh; \
+    node -e 'require("/usr/local/bin/pi-backend.js")'
 
 # Create the non-root runtime user expected by the launcher and workflows.
 RUN set -eu; \
     grep -q '^dev:' /etc/group || echo 'dev:x:1000:' >> /etc/group; \
     grep -q '^dev:' /etc/passwd || echo 'dev:x:1000:1000:Developer:/home/dev:/usr/bin/bash' >> /etc/passwd; \
-    mkdir -p /run/hive-metrics /home/dev/Downloads /home/dev/.config/goose /home/dev/.config/gh /home/dev/.codex /home/dev/.agents; \
+    mkdir -p /run/hive-metrics /home/dev/Downloads /home/dev/.config/goose /home/dev/.config/gh /home/dev/.codex /home/dev/.agents /home/dev/.local/state/bluefin-review /home/dev/.local/share; \
     chown -R 1000:1000 /run/hive-metrics /home/dev
 
 # Hive's contributor runtime calls `find` and `cmp` directly: the relay prunes
@@ -456,8 +461,9 @@ RUN set -eu; \
 # index.json; Goose only discovers directories containing SKILL.md, under fixed
 # roots. Generating at build time means every session sees the whole inventory
 # (name + description only, ~2k tokens) with bodies loaded on demand, and no
-# org repository has to change. lab-testing is excluded: this appliance owns
-# no lab and depends on none (AGENTS.md).
+# org repository has to change. The org inventory is taken whole: the lab is
+# an optional session capability the launcher grants (#379), so the skill that
+# describes it belongs in the image whether or not a given session has one.
 ARG SKILLS_COMMIT
 ARG SKILLS_REFRESH=0
 COPY --chmod=0755 scripts/generate-skills.py /usr/local/libexec/review-generate-skills
@@ -466,7 +472,6 @@ RUN set -eu; \
     /usr/local/libexec/review-generate-skills \
       --index "https://raw.githubusercontent.com/projectbluefin/common/${SKILLS_COMMIT}/docs/skills/index.json" \
       --raw-base "https://raw.githubusercontent.com/projectbluefin/common/${SKILLS_COMMIT}/" \
-      --exclude lab-testing \
       --out /home/dev/.agents/skills; \
     chown -R 1000:1000 /home/dev/.agents; \
     rm -f /usr/local/libexec/review-generate-skills; \

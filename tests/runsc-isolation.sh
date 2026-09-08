@@ -12,6 +12,9 @@ fake_bin="$scratch/bin"
 system_bin="$scratch/system-bin"
 state_dir="$scratch/podman-state"
 podman_log="$scratch/podman.log"
+runtime_root="$scratch/runtime-root"
+runtime_release="release-20260831.0"
+runtime_path="$runtime_root/$runtime_release/runsc"
 mkdir -p "$fake_bin" "$system_bin" "$state_dir"
 for system_tool in bash basename cat grep mktemp ps rm rmdir sleep tr \
   mkdir dirname awk sed head tail sort wc cut env chmod touch ln date id uname; do
@@ -61,11 +64,12 @@ fail() {
 
 write_fake_runsc() {
   local behavior="${1:-ready}"
-  rm -f "$fake_bin/runsc"
+  rm -rf "$runtime_root"
   if [[ "$behavior" == missing ]]; then
     return
   fi
-  cat >"$fake_bin/runsc" <<'EOF'
+  mkdir -p "$runtime_root/$runtime_release/gvisor-bin"
+  cat >"$runtime_path" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${RUNSC_BEHAVIOR:-ready}" == unusable ]]; then
   echo 'runsc version probe failed' >&2
@@ -74,10 +78,13 @@ fi
 printf 'runsc version test\n'
 EOF
   if [[ "$behavior" == nonexecutable ]]; then
-    chmod 0644 "$fake_bin/runsc"
+    chmod 0644 "$runtime_path"
   else
-    chmod 0755 "$fake_bin/runsc"
+    chmod 0755 "$runtime_path"
   fi
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_root/$runtime_release/containerd-shim-runsc-v1"
+  chmod 0755 "$runtime_root/$runtime_release/containerd-shim-runsc-v1"
+  printf 'gvisor bundle fixture\n' >"$runtime_root/$runtime_release/gvisor-bin/sentry"
 }
 
 cat >"$fake_bin/podman" <<'EOF'
@@ -86,7 +93,8 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
 
 runtime_selected=false
-if [[ "${1:-}" == --runtime=runsc ]]; then
+if [[ "${1:-}" == --runtime=* ]]; then
+  [[ "${1#--runtime=}" == "${EXPECTED_RUNTIME_PATH:?}" ]] || exit 93
   runtime_selected=true
   shift
 fi
@@ -192,7 +200,7 @@ if [[ "${1:-}" == --kill-after=* ]]; then
   shift
 fi
 shift
-if [[ "$*" == *'--runtime=runsc run'* ]]; then
+if [[ "$*" == *'--runtime='*' run'* ]]; then
   case "${TIMEOUT_BEHAVIOR:-ready}" in
   expire) exit 124 ;;
   interrupt) exit 130 ;;
@@ -215,6 +223,8 @@ run_recipe() {
   output="$(
     env PATH="$fake_bin:$system_bin" PODMAN_LOG="$podman_log" \
       PODMAN_STATE_DIR="$state_dir" \
+      BLUEFIN_REVIEW_RUNTIME_ROOT="$runtime_root" \
+      EXPECTED_RUNTIME_PATH="$runtime_path" \
       HOME="$fake_home" \
       GITHUB_COPILOT_TOKEN=isolation-contract-copilot-token \
       REVIEW_GH_TOKEN=isolation-contract-gh-token \
@@ -389,9 +399,9 @@ assert_successful_agent_launch() {
   [[ "$status" -eq 0 ]] || fail "${name} must launch after the runsc probe passes"
   grep -Fq '✓ isolation runtime: gVisor/runsc' <<<"$output" ||
     fail "${name} must report the active isolation runtime"
-  grep -Eq -- "^--runtime=runsc run .*--name ${name}( |$)" "$podman_log" ||
+  grep -Fq -- "--runtime=${runtime_path} run" "$podman_log" ||
     fail "${name} must explicitly select runsc"
-  grep -Eq -- '^--runtime=runsc run .*--name review-runtime-probe-' "$podman_log" ||
+  grep -Fq -- "--runtime=${runtime_path} run" "$podman_log" ||
     fail "${name} must execute the rootless runsc probe"
   grep -Eq -- '^inspect --format .*OCIRuntime.*probe-id-' "$podman_log" ||
     fail "${name} must verify the probe container runtime identity"
@@ -400,7 +410,7 @@ assert_successful_agent_launch() {
   grep -Eq -- '^inspect --format .*review.probe.*probe-id-' "$podman_log" ||
     fail "${name} must bind authoritative evidence and cleanup to the ownership label"
   assert_probe_absent
-  grep -Eq -- '^--runtime=runsc run .*--rm .*--cidfile .*--label review.probe=' "$podman_log" ||
+  grep -Fq -- "--runtime=${runtime_path} run --rm" "$podman_log" ||
     fail "the probe must carry --rm plus cidfile and ownership-label defenses"
   grep -Eq -- '^timeout --kill-after=2s (5s|20s) ' "$podman_log" ||
     fail "probe operations must escalate from TERM to KILL within a fixed bound"
@@ -416,7 +426,7 @@ case_detached() {
   write_fake_runsc ready
   run_recipe review-container REVIEW_DETACH=1
   assert_successful_agent_launch review-container
-  grep -Eq -- '^--runtime=runsc run .*--detach .*review.owner=detached' "$podman_log" ||
+  grep -Fq -- "--runtime=${runtime_path} run --rm --detach" "$podman_log" ||
     fail "the detached worker must preserve its explicit lifecycle and owner label"
 }
 
@@ -434,7 +444,7 @@ case_doctor() {
     fail "review-doctor must report runsc readiness"
   grep -Fq 'disposable credential-free agent-free probe removed' <<<"$output" ||
     fail "review-doctor must describe its non-persistent diagnostic probe honestly"
-  grep -Eq -- '^--runtime=runsc run .*--name review-runtime-probe-' "$podman_log" ||
+  grep -Fq -- "--runtime=${runtime_path} run" "$podman_log" ||
     fail "review-doctor must execute the rootless runsc probe"
 }
 

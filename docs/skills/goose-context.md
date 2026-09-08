@@ -1,7 +1,7 @@
 ---
 name: goose-context
-version: "2.3"
-last_updated: 2026-08-25
+version: "2.4"
+last_updated: 2026-09-06
 id: goose-context
 one_line_purpose: Keep Goose config and skill routing working in the container.
 entry_point: docs/skills/goose-context.md
@@ -14,7 +14,7 @@ tags: [goose, context7, skills, mcp, config]
 description: "Keeps Goose configuration and global and repository skill routing available in the container, and records how Context7 reaches agents today. Use when Goose loses its config or misses a skill."
 metadata:
   type: reference
-  context7-sources: [/aaif-goose/goose, /websites/cli_github_manual]
+  context7-sources: [/aaif-goose/goose, /addyosmani/agent-skills, /websites/cli_github_manual]
 ---
 
 # Goose Context
@@ -52,8 +52,8 @@ task delivery; use the Hive runtime documentation instead.
    existing `~/.config/goose/config.yaml`; the controlled root still separates
    image policy, data, and state from that runtime-owned file.
 2. Keep the image Copilot-only. `GOOSE_PROVIDER` may be unset or
-   `github_copilot`; the entrypoint supplies `gpt-5.6-luna` and
-   `GOOSE_THINKING_EFFORT=high` when callers do not override them.
+   `github_copilot`; the entrypoint supplies `gemini-3.8-flash` and
+   `GOOSE_THINKING_EFFORT=max` when callers do not override them.
 3. Goose follows the upstream `canary` release. Build it with the required
    `github_token` secret so GitHub CLI can verify signed provenance from the
    official `canary.yml` workflow; never put that token in an image layer.
@@ -120,49 +120,27 @@ it. Upstream writes a non-empty "Knowledge base not yet available." placeholder
 on fetch failure, so `bluefin-review` checks content, not just size, before
 naming the export in its instructions.
 
-## Review Context Is Not Session Context
+## Review Context vs Session Context
 
-`goose review` does **not** read `~/.agents/skills`. Without `--check-scope`
-it discovers its own context from `.agents/REVIEW.md` and `.agents/checks/*.md`
-inside the repository being reviewed. Verified with `goose review --dry-run`:
-a check placed at the reviewed repository's root is reported as
-`discovered ... (scope: <root>)`, while the same file under
-`$HOME/.agents/checks` is ignored — unless a `--check-scope <DIR>` names an
-out-of-tree directory, in which case that directory's `.agents/` REPLACES
-repo-root discovery entirely. This image ships such an overlay at
-`/opt/bluefin/review-scope/.agents/`, and `bluefin-review` copies it into a
-per-run scratch scope (adding a per-stop `cluster-resolution` check when a
-duplicate cluster exists) before every review. A reviewed repository's own
-`.agents/checks/` is therefore suppressed under the overlay; Bluefin
-repositories keep their checks in the shared overlay instead, and the
-additive-flag gap is filed upstream as
-[aaif-goose/goose#11060](https://github.com/aaif-goose/goose/issues/11060).
+`goose review` does **not** read `~/.agents/skills`. It discovers context
+from `.agents/REVIEW.md` and `.agents/checks/*.md`. The image ships an overlay
+at `/opt/bluefin/review-scope/.agents/` containing the five review check
+subagents (`bluefin-doctrine`, `security`, `correctness`, `test-coverage`,
+`simplicity`), loaded via `--check-scope`. See [`review-checks.md`](review-checks.md)
+for full details on check subagents and multi-threaded review execution.
 
-Two consequences:
+The image generates Bluefin's interactive skills from the pinned
+`projectbluefin/common` catalog into `~/.agents/skills/` for interactive
+contributor sessions.
 
-1. Projecting an org skill into `~/.agents/skills` puts it in *session*
-   context only. It does nothing for a review.
-2. The reviewed repository belongs to someone else, so writing `.agents/`
-   files into it is not available as a fix.
-
-Use `--instructions`, which is additive. `--prompt` replaces Goose's embedded
-review prompt wholesale and throws away its correctness and code-quality
-passes. Name the documents on disk rather than inlining them: the projected
-`pr-review` skill plus its references is roughly 33 KB, and Goose dispatches
-one subprocess per check, so an inlined copy is paid on every check of every
-review. `bluefin-review` sends a sub-1 KB pointer covering `pr-review`,
-`queue-feed`, `hive-review`, `human-gates`, and Hive's `~/agent.md` knowledge
-export, and omits any entry whose file is absent.
+Use `--instructions` (additive) rather than `--prompt` (wholesale replacement).
+`bluefin-review` sends a lean pointer covering doctrine and knowledge exports.
 
 ## Skill References Must Be Projected Too
 
 `scripts/generate-skills.py` writes `SKILL.md` from each manifest
-`entry_point`. Skill bodies also link sibling material as
-`references/<name>.md`, and the manifest does not list those files, so they
-are resolved from the body. Without that, `pr-review` alone shipped four
-dangling links. Reference names come from a fetched body rather than the
-manifest, so treat them as untrusted: accept a plain `<file>.md` sibling only,
-and reject any path separator or traversal segment before joining a path.
+`entry_point` and copies local standard skill directories. Remote skill bodies
+linking `references/<name>.md` are resolved safely, rejecting path traversal.
 
 ## Common Rationalizations
 

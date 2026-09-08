@@ -15,6 +15,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tui="$repo_root/image/tui/bluefin_review_tui.py"
 
 python3 "$repo_root/tests/hive_api_contract.py"
+python3 "$repo_root/tests/review_scheduler_contract.py"
+python3 "$repo_root/tests/review_engine_contract.py"
+python3 "$repo_root/tests/review_transport_contract.py"
+python3 "$repo_root/tests/review_deadline_contract.py"
+python3 "$repo_root/tests/capacity_contract.py"
+python3 "$repo_root/tests/model_profiles_contract.py"
+python3 "$repo_root/tests/run_state_contract.py"
+python3 "$repo_root/tests/gh_client_contract.py"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -60,6 +68,12 @@ fi
 [[ "$(grep -c 'subprocess.Popen(' "$tui")" -eq 2 ]] ||
   fail "expected exactly two subprocess.Popen sites (the streamed review and the landing agent)"
 
+# Batch review is read-only orchestration. It may hydrate live GitHub evidence
+# and dispatch ReviewEngine, but it must not reach any mutation gate.
+batch_review="$(sed -n '/def start_review_batch/,/def on_key/p' "$tui")"
+grep -q 'self\.mutate' <<<"$batch_review" &&
+  fail "batch review must not invoke a GitHub mutation gate"
+
 # The batch path: a selected batch opens the proportionate plan gate (Enter,
 # no typed count) and dispatches one agent for the whole selection.
 grep -q 'class BatchPlanScreen' "$tui" ||
@@ -71,12 +85,13 @@ grep -q 'landing.new_task(batch, self.self_login)' "$tui" ||
 grep -q 'self.enqueue_landing(task)' "$tui" ||
   fail "a confirmed batch must enter the landing queue"
 grep -q 'def drain_landings' "$tui" ||
-  fail "the landing queue must drain one agent at a time"
+  fail "the landing queue must have a repository-aware dispatcher"
 
 # The landing agent's brief keeps the mutation rules: no drafts, no failing
 # required checks, no branch-protection bypass, per-PR JSONL status the
 # screen polls instead of scraped prose.
 landing_py="$repo_root/image/tui/landing.py"
+model_profiles_py="$repo_root/image/tui/model_profiles.py"
 grep -q 'never pass' "$landing_py" ||
   fail "the landing brief must state what the agent may not do"
 grep -q -- '--admin' "$landing_py" ||
@@ -99,10 +114,15 @@ for doc in "$landing_py" \
   grep -q 'skopeo inspect' "$doc" &&
     fail "$(basename "$doc") must not instruct skopeo; the image does not ship it (fsdk-containers#164)"
 done
-# The brief's verification is the anonymous ghcr flow: no token scope, no
-# org/user endpoint split, index children count as carrying a tag.
-grep -q 'ghcr.io/token' "$landing_py" ||
-  fail "the landing brief must verify :stable through the anonymous ghcr token flow"
+# The brief's verification is the anonymous ghcr flow through the module's
+# probe command: the mint, pagination, and content negotiation live in code
+# so a denied token mint can never be masked by a shell pipeline (#375).
+grep -q 'def probe_package' "$landing_py" ||
+  fail "the landing module must ship the anonymous ghcr probe"
+grep -q '/token?scope=repository:' "$landing_py" ||
+  fail "the probe must use the anonymous ghcr token flow"
+grep -q 'probe --package' "$landing_py" ||
+  fail "the landing brief must instruct the probe command"
 # This appliance owns no lab: the brief must treat an unreachable external
 # check service as infrastructure unavailability and substitute ghcr
 # evidence — never a blocked pull request.
@@ -123,6 +143,44 @@ grep -q 'path-filtered' "$landing_py" ||
 grep -q 'no publication of it exists' "$landing_py" ||
   fail "the landing brief must not fail a merge that owes no publication"
 
+# The status record has exactly one writer: the landing module's report CLI.
+# It serializes under flock, writes a terminal state once, and closes the
+# batch only when every selected pull request has a terminal outcome (#377).
+grep -q 'fcntl.flock' "$landing_py" ||
+  fail "the landing reporter must serialize status writes under flock"
+grep -q 'add_parser("report"' "$landing_py" ||
+  fail "the landing module must ship the report CLI the brief instructs"
+grep -q 'report --status' "$landing_py" ||
+  fail "the landing brief must route status writes through the report CLI"
+grep -q 'no printf' "$landing_py" ||
+  fail "the landing brief must forbid direct status-file writes"
+grep -q 'written once' "$landing_py" ||
+  fail "the landing brief must define a terminal state as written once"
+# The token probe must not pipe curl into jq: without pipefail the pipeline
+# reports jq's status, and a denied mint reads as a successful one (#375).
+grep -qE 'curl[^|]*\| *jq' "$landing_py" &&
+  fail "the token mint must not pipe curl into jq — jq masks a denied mint (#375)"
+grep -q 'never evidence of absence' "$landing_py" ||
+  fail "a probe that cannot answer must never read as a missing package"
+# A ghcr.io mention is not a publish signal: the brief must require a real
+# publication path targeting the repository's own package, the wait must end
+# when the identified workflow's runs are terminal, and an empty run list is
+# never evidence — runs can lag the merge (#376).
+grep -q 'on.push' "$landing_py" ||
+  fail "the publish signal must be an on.push publication path"
+grep -q 'workflow_call' "$landing_py" ||
+  fail "reusable workflows must not count as a publication path"
+grep -q 'workflow_run' "$landing_py" ||
+  fail "workflow_run-triggered publishes must be covered"
+grep -q 'release' "$landing_py" ||
+  fail "release-triggered publishes must be covered"
+grep -q 'an empty run list is never evidence' "$landing_py" ||
+  fail "an empty run list must not read as 'no publication'"
+grep -q 'publish-verdict' "$landing_py" ||
+  fail "the wait/stop decision must route through the publish-verdict command"
+grep -q 'stop polling' "$landing_py" ||
+  fail "the publish wait must stop once terminal runs prove no publication is owed"
+
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"
 grep -q 'ConfirmMutation(commands, str(stop.number))' "$tui" ||
@@ -141,13 +199,64 @@ grep -q '\[b\]l\[/b\]' "$tui" &&
 grep -q '\[b\]p\[/b\]' "$tui" &&
   fail "the acting key line must not advertise priority mutation"
 
+# ── the optional lab is optional, and holds no credential (#379) ─────────
+# The container half must never reach for a cluster directly: it has no
+# kubeconfig, no kubectl, and no argo, by design.
+lab_client="$repo_root/image/tui/lab_client.py"
+broker="$repo_root/scripts/review-lab-broker.py"
+grep -qE '\b(kubectl|kubeconfig|argo|k8sgpt)\b' "$lab_client" &&
+  fail "the container-side lab client must not name a host cluster tool"
+grep -qE '\bsubprocess\b|\bos\.system\b' "$lab_client" &&
+  fail "the lab client speaks the socket protocol, never a local command"
+grep -q 'LAB_DEGRADED' "$lab_client" ||
+  fail "an unreachable broker must degrade rather than answer cleanly"
+grep -q "usb4-link-observed-at" "$broker" ||
+  fail "the USB4 predicate must read the observation timestamp"
+grep -q '45' "$broker" ||
+  fail "the USB4 freshness window must be the documented 45 seconds"
+# The dashboard renders the word; the bolt is decoration on top of it.
+grep -q 'LAB ⚡ ACTIVE' "$tui" ||
+  fail "the status area must carry the lab state as text plus the glyph"
+grep -qE 'lab_client\.(status|lab_state)' "$tui" ||
+  fail "the dashboard must read lab state through the client"
+grep -q 'set_interval(30.0, self.poll_lab)' "$tui" ||
+  fail "the lab must be polled coarsely, not on the dashboard's own pace"
+# Filing is a narrow machine authority with fixed destinations.
+grep -q 'projectbluefin/lab' "$broker" ||
+  fail "cluster-platform findings must route to projectbluefin/lab"
+grep -q 'projectbluefin/server' "$broker" ||
+  fail "server-product findings must route to projectbluefin/server"
+grep -q 'unroutable' "$broker" ||
+  fail "an ambiguous finding must file nothing"
+
+# ── the final review runs in the existing lane (#378) ───────────────────
+grep -q 'class FinalPolicyScreen' "$tui" ||
+  fail "the session's final-review policy must be one explicit gate"
+grep -q 'landing_draining' "$tui" ||
+  fail "one drainer must own the landing lane, or a round runs twice"
+grep -qE 'self\.[a-z_]*queue: list\[landing\.LandingTask\]' "$tui" ||
+  fail "the final review must reuse the landing queue, not add a second one"
+grep -cE '^\s+self\.[a-z_]+_queue: list' "$tui" | grep -qx 1 ||
+  fail "the dashboard must own exactly one agent queue"
+grep -q 'FINAL_ROUND_LIMIT = 5' "$landing_py" ||
+  fail "the five-round breaker must be a constant in the record's writer"
+grep -q 'is outside 1\.\.' "$landing_py" ||
+  fail "the record itself must refuse a round past the limit"
+grep -q 'already review-blocked\|already {rounds\[-1\]' "$landing_py" ||
+  fail "nothing may be written after the final phase closes"
+grep -q 'GOOSE_MODEL' "$landing_py" "$model_profiles_py" 2>/dev/null ||
+  fail "a Goose round must carry its model explicitly"
+grep -q 'BLUEFIN_REVIEW_FINAL_MODEL' "$landing_py" "$model_profiles_py" 2>/dev/null ||
+  fail "a Codex round must not be handed Goose variables that do nothing"
+# shellcheck disable=SC2016 # single quotes are intentional for literal markdown backticks
+grep -q 'never force-push, never remove a hold' "$landing_py" ||
+  fail "a fix round must be told never to bypass branch protection"
+
 # Queueing goes through Hive's authenticated mutation endpoint. Hive owns the
 # App-authored exact-head approval and queue label; a human gh review cannot
 # satisfy the governor's authorship contract (#247).
 grep -q '/api/v1/prs/{owner}/{repository}/{stop.number}/queue-automerge' "$tui" ||
   fail "queueing must call Hive's queue-automerge endpoint"
-grep -q 'QUEUE_LABEL = "lgtm"' "$tui" ||
-  fail "the sweep's label must still be lgtm"
 queue_body="$(sed -n '/def _queue_automerge/,/def action_merge/p' "$tui")"
 grep -q '"gh", "pr", "review"' <<<"$queue_body" &&
   fail "queueing must never submit a human-authored approval"
@@ -212,10 +321,13 @@ fi
 "${venv}/bin/python" "$repo_root/tests/review_result_contract.py"
 "${venv}/bin/python" "$repo_root/tests/review_run_contract.py"
 "${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_contract.py"
-"${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_unit.py"
 "${venv}/bin/python" "$repo_root/tests/action_plan_contract.py"
 "${venv}/bin/python" "$repo_root/tests/re_review_contract.py"
 "${venv}/bin/python" "$repo_root/tests/semantic_view_contract.py"
+"${venv}/bin/python" "$repo_root/tests/slay_state_contract.py"
+"${venv}/bin/python" "$repo_root/tests/soak_contract.py"
+"${venv}/bin/python" "$repo_root/tests/observability_contract.py"
+"${venv}/bin/python" "$repo_root/tests/review_session_runtime_contract.py"
 "${venv}/bin/python" "$repo_root/tests/dashboard_pilot.py"
 
 printf 'dashboard contract OK\n'

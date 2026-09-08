@@ -105,4 +105,148 @@ find "$tmpdir/out" -name 'passwd.md' | grep -q . && {
 # A single-file skill has no references directory to project from.
 test ! -e "$tmpdir/out/valid-skill/references"
 
-echo "✓ skill generator rejects unsafe manifest paths."
+# Community catalogs commonly keep each skill in a standard directory rather
+# than below docs/skills. A local manifest resolves relative to its own
+# directory and projects the complete skill tree without following symlinks.
+mkdir -p \
+  "$tmpdir/community/community-skill/assets" \
+  "$tmpdir/community/community-skill/scripts"
+cat >"$tmpdir/community/community-skill/SKILL.md" <<'EOF'
+---
+name: community-skill
+description: "A community skill."
+license: Apache-2.0
+---
+
+# Community Skill
+EOF
+printf 'COMMUNITY_ASSET_MARKER\n' \
+  >"$tmpdir/community/community-skill/assets/template.txt"
+printf '#!/usr/bin/env bash\nprintf "community helper\\n"\n' \
+  >"$tmpdir/community/community-skill/scripts/helper.sh"
+chmod +x "$tmpdir/community/community-skill/scripts/helper.sh"
+ln -s /etc/passwd "$tmpdir/community/community-skill/assets/unsafe-link"
+
+cat >"$tmpdir/community/index.json" <<'EOF'
+{
+  "skills": [
+    {
+      "id": "community-skill",
+      "name": "community-skill",
+      "description": "A community skill.",
+      "entry_point": "community-skill"
+    }
+  ]
+}
+EOF
+
+cat >"$tmpdir/direct-skill.md" <<'EOF'
+---
+name: direct-skill
+description: "A directly projected skill."
+license: MIT
+---
+
+# Direct Skill
+EOF
+
+python3 "$repo_root/scripts/generate-skills.py" \
+  --source "$tmpdir/community/index.json" \
+  --source "$tmpdir/direct-skill.md" \
+  --out "$tmpdir/community-out" \
+  2>"$tmpdir/community-stderr"
+
+test -f "$tmpdir/community-out/community-skill/SKILL.md"
+test -f "$tmpdir/community-out/community-skill/assets/template.txt"
+test -f "$tmpdir/community-out/community-skill/scripts/helper.sh"
+test -x "$tmpdir/community-out/community-skill/scripts/helper.sh"
+grep -Fq 'COMMUNITY_ASSET_MARKER' \
+  "$tmpdir/community-out/community-skill/assets/template.txt"
+test ! -e "$tmpdir/community-out/community-skill/assets/unsafe-link"
+grep -Fq \
+  'skipped community-skill/assets/unsafe-link: symlink or unsupported file' \
+  "$tmpdir/community-stderr"
+
+# A direct SKILL.md source is copied verbatim, retaining standard community
+# frontmatter fields that are not part of the Bluefin factory manifest.
+test -f "$tmpdir/community-out/direct-skill/SKILL.md"
+grep -Fq 'license: MIT' "$tmpdir/community-out/direct-skill/SKILL.md"
+
+# Refuse an output nested inside its source before replacing any files.
+if python3 "$repo_root/scripts/generate-skills.py" \
+  --source "$tmpdir/community/community-skill" \
+  --out "$tmpdir/community/community-skill/projected" \
+  2>"$tmpdir/overlap-stderr"; then
+  echo "skill generator accepted overlapping source and output" >&2
+  exit 1
+fi
+test -f "$tmpdir/community/community-skill/SKILL.md"
+test ! -e "$tmpdir/community/community-skill/projected"
+grep -Fq 'source and target directories overlap' "$tmpdir/overlap-stderr"
+
+# HTTP sources use the same projection path without depending on the public
+# network. The local server also proves linked references resolve beside a
+# remote SKILL.md.
+mkdir -p "$tmpdir/remote/remote-skill/references"
+cat >"$tmpdir/remote/remote-skill/SKILL.md" <<'EOF'
+---
+name: remote-skill
+description: "A remotely projected skill."
+---
+
+# Remote Skill
+
+[Remote reference](references/remote.md)
+EOF
+printf 'REMOTE_REFERENCE_MARKER\n' \
+  >"$tmpdir/remote/remote-skill/references/remote.md"
+
+REPO_ROOT="$repo_root" REMOTE_ROOT="$tmpdir/remote" \
+  REMOTE_OUT="$tmpdir/remote-out" python3 - <<'PY'
+import functools
+import http.server
+import os
+import pathlib
+import subprocess
+import threading
+
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+
+handler = functools.partial(
+    QuietHandler,
+    directory=os.environ["REMOTE_ROOT"],
+)
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+try:
+    source = (
+        f"http://127.0.0.1:{server.server_port}/remote-skill/SKILL.md"
+    )
+    subprocess.run(
+        [
+            "python3",
+            str(pathlib.Path(os.environ["REPO_ROOT"]) / "scripts/generate-skills.py"),
+            "--source",
+            source,
+            "--out",
+            os.environ["REMOTE_OUT"],
+        ],
+        check=True,
+        stderr=subprocess.DEVNULL,
+    )
+finally:
+    server.shutdown()
+    thread.join()
+    server.server_close()
+PY
+
+test -f "$tmpdir/remote-out/remote-skill/SKILL.md"
+grep -Fq 'REMOTE_REFERENCE_MARKER' \
+  "$tmpdir/remote-out/remote-skill/references/remote.md"
+
+echo "✓ skill generator safely projects manifests and community skills."

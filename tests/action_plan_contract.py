@@ -1,4 +1,4 @@
-"""Focused contract tests for the shared exact-head ActionPlan."""
+"""Focused contract tests for the batch exact-head action plan."""
 
 from __future__ import annotations
 
@@ -46,68 +46,6 @@ def prerequisites(
     )
 
 
-def make_plan(
-    *,
-    body: str | None = "Reviewed exactly.\n",
-    operations=None,
-    action_kind: str = "review",
-    plan_head: str = HEAD,
-    plan_prerequisites=None,
-    expires_at: datetime = EXPIRES,
-):
-    if contract is None:
-        return None
-    operations = operations or (
-        operation(
-            "gh",
-            "pr",
-            "review",
-            str(PULL_REQUEST),
-            "--repo",
-            REPOSITORY,
-            "--approve",
-            "--body",
-            body or "",
-        ),
-    )
-    return contract.ActionPlan.build(
-        actor=ACTOR,
-        tenant=TENANT,
-        repository=REPOSITORY,
-        pull_request=PULL_REQUEST,
-        head_sha=plan_head,
-        action_kind=action_kind,
-        body=body,
-        operations=operations,
-        prerequisites=plan_prerequisites or prerequisites(),
-        created_at=NOW,
-        expires_at=expires_at,
-        idempotency_key="issue-184-test-plan",
-    )
-
-
-def current_state(
-    *,
-    actor: str = ACTOR,
-    tenant: str = TENANT,
-    head_sha: str = HEAD,
-    body: str | None = "Reviewed exactly.\n",
-    permissions: dict[str, bool] | None = None,
-    checks: dict[str, str] | None = None,
-):
-    if contract is None:
-        return None
-    return contract.CurrentState.capture(
-        actor=actor,
-        tenant=tenant,
-        repository=REPOSITORY,
-        pull_request=PULL_REQUEST,
-        head_sha=head_sha,
-        body=body,
-        prerequisites=prerequisites(permissions, checks),
-    )
-
-
 class TestReceiptLedger:
     def __init__(self):
         self.claimed = set()
@@ -123,399 +61,709 @@ class TestReceiptLedger:
         self.receipts.append(receipt)
 
 
-class ActionPlanContractTests(unittest.TestCase):
-    def require_contract(self):
-        if contract is None:
-            self.fail("the shared ActionPlan contract module must exist")
-        return contract
+def batch_item(module, number, head):
+    return module.BatchMutationItem(
+        repository="projectbluefin/review",
+        pull_request=number,
+        head_sha=head,
+        prerequisites=module.Prerequisites.from_mappings(
+            permissions={"push": True},
+            checks={"ci": "success"},
+        ),
+        operations=(
+            (
+                "python3",
+                "image/tui/hive_api.py",
+                "queue",
+                f"https://hive.example/pr/{number}",
+            ),
+        ),
+    )
 
-    def test_shared_action_plan_module_exists(self) -> None:
+
+def test_batch_gate_binds_every_exact_head():
+    module = contract
+    first = batch_item(module, 184, "a" * 40)
+    second = batch_item(module, 185, "b" * 40)
+    plan = module.BatchActionPlan.build(
+        actor="maintainer",
+        tenant="projectbluefin",
+        action_kind="approve-and-queue",
+        items=(first, second),
+        created_at=NOW,
+        expires_at=EXPIRES,
+    )
+    preview = plan.preview()
+    confirmation = plan.confirm_human(
+        preview=preview,
+        actor="maintainer",
+        tenant="projectbluefin",
+        typed_items=(
+            "projectbluefin/review#184@"
+            + "a" * 40
+            + " projectbluefin/review#185@"
+            + "b" * 40
+        ),
+        now=NOW,
+    )
+    assert confirmation.items == (first.identity, second.identity)
+
+
+def test_batch_drift_rejects_only_the_changed_item():
+    module = contract
+    first = batch_item(module, 184, "a" * 40)
+    second = batch_item(module, 185, "b" * 40)
+    plan = module.BatchActionPlan.build(
+        actor="maintainer",
+        tenant="projectbluefin",
+        action_kind="approve-and-queue",
+        items=(first, second),
+        created_at=NOW,
+        expires_at=EXPIRES,
+    )
+    confirmation = plan.confirm_human(
+        preview=plan.preview(),
+        actor="maintainer",
+        tenant="projectbluefin",
+        typed_items=(
+            "projectbluefin/review#184@" + "a" * 40
+            + " projectbluefin/review#185@" + "b" * 40
+        ),
+        now=NOW,
+    )
+    eligibility = plan.execution_eligibility(confirmation, now=NOW)
+    seen = []
+    current = lambda item: module.CurrentState.capture(
+        actor="maintainer",
+        tenant="projectbluefin",
+        repository=item.repository,
+        pull_request=item.pull_request,
+        head_sha=("c" * 40 if item.pull_request == 184 else item.head_sha),
+        permissions={"push": True},
+        checks={"ci": "success"},
+    )
+    receipt = plan.execute(
+        eligibility,
+        current,
+        lambda item, operation: seen.append(item.pull_request) or 0,
+        ledger=TestReceiptLedger(),
+        now=NOW,
+    )
+    assert receipt.rejected == {184: "head drift invalidates the item"}
+    assert receipt.succeeded == {185: 1}
+    assert seen == [185]
+
+
+def test_batch_execution_fails_on_expiration():
+    module = contract
+    first = batch_item(module, 184, "a" * 40)
+    plan = module.BatchActionPlan.build(
+        actor="maintainer",
+        tenant="projectbluefin",
+        action_kind="approve-and-queue",
+        items=(first,),
+        created_at=NOW,
+        expires_at=EXPIRES,
+    )
+    preview = plan.preview()
+    confirmation = plan.confirm_human(
+        preview=preview,
+        actor="maintainer",
+        tenant="projectbluefin",
+        typed_items=first.identity,
+        now=NOW,
+    )
+    eligibility = plan.execution_eligibility(confirmation, now=NOW)
+    current = lambda item: module.CurrentState.capture(
+        actor="maintainer",
+        tenant="projectbluefin",
+        repository=item.repository,
+        pull_request=item.pull_request,
+        head_sha=item.head_sha,
+        permissions={"push": True},
+        checks={"ci": "success"},
+    )
+    try:
+        plan.execute(
+            eligibility,
+            current,
+            lambda item, operation: 0,
+            ledger=TestReceiptLedger(),
+            now=EXPIRES + timedelta(seconds=1),
+        )
+        assert False, "expected PlanExpiredError"
+    except module.PlanExpiredError as error:
+        assert "expired" in str(error)
+
+
+def test_batch_mutation_item_forbids_unsafe_arguments():
+    module = contract
+    forbidden = [
+        ("--admin",),
+        ("--force",),
+        ("-f",),
+        ("--delete-branch",),
+        ("git", "push"),
+        ("git push",),
+    ]
+    for arg_seq in forbidden:
+        op = ("gh", "pr", "merge", "184", *arg_seq)
+        try:
+            module.BatchMutationItem(
+                repository="projectbluefin/review",
+                pull_request=184,
+                head_sha="a" * 40,
+                prerequisites=module.Prerequisites.from_mappings(
+                    permissions={"push": True},
+                    checks={"ci": "success"},
+                ),
+                operations=(op,),
+            )
+            assert False, f"expected InvalidPlanError for {arg_seq}"
+        except module.InvalidPlanError as error:
+            assert "admin, force, and branch-deletion operations are forbidden" in str(error)
+
+
+def test_batch_mutation_item_requires_allowed_patterns():
+    module = contract
+    invalid_ops = [
+        ("rm", "-rf", "/tmp"),
+        ("curl", "https://example.com"),
+        ("echo", "hello"),
+    ]
+    for op in invalid_ops:
+        try:
+            module.BatchMutationItem(
+                repository="projectbluefin/review",
+                pull_request=184,
+                head_sha="a" * 40,
+                prerequisites=module.Prerequisites.from_mappings(
+                    permissions={"push": True},
+                    checks={"ci": "success"},
+                ),
+                operations=(op,),
+            )
+            assert False, f"expected InvalidPlanError for {op}"
+        except module.InvalidPlanError:
+            pass
+
+
+def test_batch_confirmation_rejects_mismatched_items():
+    module = contract
+    first = batch_item(module, 184, "a" * 40)
+    second = batch_item(module, 185, "b" * 40)
+    plan = module.BatchActionPlan.build(
+        actor="maintainer",
+        tenant="projectbluefin",
+        action_kind="approve-and-queue",
+        items=(first, second),
+        created_at=NOW,
+        expires_at=EXPIRES,
+    )
+    preview = plan.preview()
+    # Missing second item
+    try:
+        plan.confirm_human(
+            preview=preview,
+            actor="maintainer",
+            tenant="projectbluefin",
+            typed_items=first.identity,
+            now=NOW,
+        )
+        assert False, "expected HumanConfirmationRequired"
+    except module.HumanConfirmationRequired as error:
+        assert "typed confirmation does not match every exact PR and head" in str(error)
+
+    # Wrong head on second item
+    try:
+        plan.confirm_human(
+            preview=preview,
+            actor="maintainer",
+            tenant="projectbluefin",
+            typed_items=f"{first.identity} projectbluefin/review#185@{'c' * 40}",
+            now=NOW,
+        )
+        assert False, "expected HumanConfirmationRequired"
+    except module.HumanConfirmationRequired as error:
+        assert "typed confirmation does not match every exact PR and head" in str(error)
+
+
+def test_batch_execution_requires_plan_issued_capability():
+    module = contract
+    first = batch_item(module, 184, "a" * 40)
+    plan = module.BatchActionPlan.build(
+        actor="maintainer",
+        tenant="projectbluefin",
+        action_kind="approve-and-queue",
+        items=(first,),
+        created_at=NOW,
+        expires_at=EXPIRES,
+    )
+    confirmation = plan.confirm_human(
+        preview=plan.preview(),
+        actor="maintainer",
+        tenant="projectbluefin",
+        typed_items=first.identity,
+        now=NOW,
+    )
+    fake_eligibility = object()
+    try:
+        plan.execute(
+            fake_eligibility,
+            lambda item: None,
+            lambda item, op: 0,
+            ledger=TestReceiptLedger(),
+            now=NOW,
+        )
+        assert False, "expected ExecutionNotEligible"
+    except module.ExecutionNotEligible as error:
+        assert "eligibility" in str(error)
+
+
+def test_batch_cross_repository_pr_number_collision():
+    module = contract
+    first = module.BatchMutationItem(
+        repository="projectbluefin/repo-a",
+        pull_request=31,
+        head_sha="a" * 40,
+        prerequisites=module.Prerequisites.from_mappings(
+            permissions={"push": True}, checks={"ci": "success"}
+        ),
+        operations=(("gh", "pr", "review", "31", "--repo", "projectbluefin/repo-a", "--approve"),),
+    )
+    second = module.BatchMutationItem(
+        repository="projectbluefin/repo-b",
+        pull_request=31,
+        head_sha="b" * 40,
+        prerequisites=module.Prerequisites.from_mappings(
+            permissions={"push": True}, checks={"ci": "success"}
+        ),
+        operations=(("gh", "pr", "review", "31", "--repo", "projectbluefin/repo-b", "--approve"),),
+    )
+    plan = module.BatchActionPlan.build(
+        actor="maintainer",
+        tenant="projectbluefin",
+        action_kind="approve-and-queue",
+        items=(first, second),
+        created_at=NOW,
+        expires_at=EXPIRES,
+    )
+    preview = plan.preview()
+    confirmation = plan.confirm_human(
+        preview=preview,
+        actor="maintainer",
+        tenant="projectbluefin",
+        typed_items=f"{first.identity} {second.identity}",
+        now=NOW,
+    )
+    eligibility = plan.execution_eligibility(confirmation, now=NOW)
+    current = lambda item: module.CurrentState.capture(
+        actor="maintainer",
+        tenant="projectbluefin",
+        repository=item.repository,
+        pull_request=item.pull_request,
+        head_sha=item.head_sha,
+        permissions={"push": True},
+        checks={"ci": "success"},
+    )
+    seen = []
+    receipt = plan.execute(
+        eligibility,
+        current,
+        lambda item, operation: seen.append(item.identity) or 0,
+        ledger=TestReceiptLedger(),
+        now=NOW,
+    )
+    assert len(seen) == 2
+    assert receipt.succeeded[("projectbluefin/repo-a", 31)] == 1
+    assert receipt.succeeded[("projectbluefin/repo-b", 31)] == 1
+    assert receipt.succeeded[first.identity] == 1
+    assert receipt.succeeded[second.identity] == 1
+    assert ("projectbluefin/repo-a", 31) in receipt.succeeded
+    assert ("projectbluefin/repo-b", 31) in receipt.succeeded
+
+
+def test_batch_forbidden_gh_commands_raise_invalid_plan():
+    module = contract
+    forbidden_ops = [
+        ("gh", "repo", "delete", "projectbluefin/review"),
+        ("gh", "api", "-X", "DELETE", "/repos/projectbluefin/review"),
+        ("gh", "pr", "merge", "184", "--delete-branch"),
+        ("gh", "pr", "merge", "184", "--admin"),
+        ("gh", "pr", "merge", "184", "--force"),
+        ("gh", "pr", "merge", "184", "-f"),
+        ("gh", "issue", "delete", "184"),
+        ("gh", "issue", "view", "184"),
+        ("gh", "issue", "comment", "184", "--body", "fixed"),
+        ("gh", "issue", "edit", "184", "--add-label", "bug"),
+        ("gh", "issue", "close", "184"),
+    ]
+    for op in forbidden_ops:
+        try:
+            module.BatchMutationItem(
+                repository="projectbluefin/review",
+                pull_request=184,
+                head_sha="a" * 40,
+                prerequisites=module.Prerequisites.from_mappings(
+                    permissions={"push": True}, checks={"ci": "success"}
+                ),
+                operations=(op,),
+            )
+            assert False, f"expected InvalidPlanError for {op}"
+        except module.InvalidPlanError:
+            pass
+
+    # Allowed operations
+    allowed_ops = [
+        ("gh", "pr", "review", "184", "--approve"),
+        ("gh", "pr", "merge", "184"),
+        ("gh", "pr", "edit", "184", "--add-label", "lgtm"),
+        ("gh", "pr", "comment", "184", "--body", "done"),
+        ("gh", "pr", "close", "184"),
+        ("gh", "pr", "update-branch", "184"),
+        ("gh", "pr", "update-branch", "184", "--repo", "projectbluefin/review"),
+        ("python3", "image/tui/hive_api.py", "queue", "https://hive.example/pr/184"),
+    ]
+    for op in allowed_ops:
+        item = module.BatchMutationItem(
+            repository="projectbluefin/review",
+            pull_request=184,
+            head_sha="a" * 40,
+            prerequisites=module.Prerequisites.from_mappings(
+                permissions={"push": True}, checks={"ci": "success"}
+            ),
+            operations=(op,),
+        )
+        assert item.operations == (op,)
+
+
+def test_batch_hive_script_exactness():
+    module = contract
+    invalid_hive_ops = [
+        ("python3", "evil_hive_api.py", "queue", "https://hive.example/pr/184"),
+        ("python3", "image/tui/evil_hive_api.py", "queue", "https://hive.example/pr/184"),
+        ("python", "image/tui/hive_api.py", "queue", "https://hive.example/pr/184"),
+        ("/usr/bin/python3", "image/tui/hive_api.py", "queue", "https://hive.example/pr/184"),
+        ("python3", "image/tui/hive_api.py", "queue"),
+        ("python3", "image/tui/hive_api.py", "queue", "https://hive.example/pr/184", "--extra"),
+        ("python3", "image/tui/hive_api.py", "status", "https://hive.example/pr/184"),
+        ("python3", "image/tui/hive_api.py", "queue", "ftp://hive.example/pr/184"),
+        ("python3", "image/tui/hive_api.py", "queue", "file:///etc/passwd"),
+        ("python3", "image/tui/hive_api.py", "queue", "invalid-url"),
+    ]
+    for op in invalid_hive_ops:
+        try:
+            module.BatchMutationItem(
+                repository="projectbluefin/review",
+                pull_request=184,
+                head_sha="a" * 40,
+                prerequisites=module.Prerequisites.from_mappings(
+                    permissions={"push": True}, checks={"ci": "success"}
+                ),
+                operations=(op,),
+            )
+            assert False, f"expected InvalidPlanError for non-exact hive op: {op}"
+        except module.InvalidPlanError:
+            pass
+
+    valid_hive_ops = [
+        ("python3", "image/tui/hive_api.py", "queue", "https://hive.example/pr/184"),
+        ("python3", "image/tui/hive_api.py", "queue", "http://hive.example/pr/184"),
+    ]
+    for op in valid_hive_ops:
+        item = module.BatchMutationItem(
+            repository="projectbluefin/review",
+            pull_request=184,
+            head_sha="a" * 40,
+            prerequisites=module.Prerequisites.from_mappings(
+                permissions={"push": True}, checks={"ci": "success"}
+            ),
+            operations=(op,),
+        )
+        assert item.operations == (op,)
+
+
+def test_batch_cross_repository_pr_number_collision_mixed_outcomes():
+    module = contract
+    first = module.BatchMutationItem(
+        repository="projectbluefin/repo-a",
+        pull_request=31,
+        head_sha="a" * 40,
+        prerequisites=module.Prerequisites.from_mappings(
+            permissions={"push": True}, checks={"ci": "success"}
+        ),
+        operations=(("gh", "pr", "review", "31", "--repo", "projectbluefin/repo-a", "--approve"),),
+    )
+    second = module.BatchMutationItem(
+        repository="projectbluefin/repo-b",
+        pull_request=31,
+        head_sha="b" * 40,
+        prerequisites=module.Prerequisites.from_mappings(
+            permissions={"push": True}, checks={"ci": "success"}
+        ),
+        operations=(("gh", "pr", "review", "31", "--repo", "projectbluefin/repo-b", "--approve"),),
+    )
+    plan = module.BatchActionPlan.build(
+        actor="maintainer",
+        tenant="projectbluefin",
+        action_kind="approve-and-queue",
+        items=(first, second),
+        created_at=NOW,
+        expires_at=EXPIRES,
+    )
+    preview = plan.preview()
+    confirmation = plan.confirm_human(
+        preview=preview,
+        actor="maintainer",
+        tenant="projectbluefin",
+        typed_items=f"{first.identity} {second.identity}",
+        now=NOW,
+    )
+    eligibility = plan.execution_eligibility(confirmation, now=NOW)
+    current = lambda item: module.CurrentState.capture(
+        actor="maintainer",
+        tenant="projectbluefin",
+        repository=item.repository,
+        pull_request=item.pull_request,
+        head_sha=("c" * 40 if item.repository == "projectbluefin/repo-b" else item.head_sha),
+        permissions={"push": True},
+        checks={"ci": "success"},
+    )
+    seen = []
+    receipt = plan.execute(
+        eligibility,
+        current,
+        lambda item, operation: seen.append(item.identity) or 0,
+        ledger=TestReceiptLedger(),
+        now=NOW,
+    )
+    assert seen == [first.identity]
+    assert receipt.succeeded[("projectbluefin/repo-a", 31)] == 1
+    assert ("projectbluefin/repo-a", 31) in receipt.succeeded
+    assert ("projectbluefin/repo-b", 31) not in receipt.succeeded
+    assert receipt.rejected[("projectbluefin/repo-b", 31)] == "head drift invalidates the item"
+    assert ("projectbluefin/repo-b", 31) in receipt.rejected
+    assert ("projectbluefin/repo-a", 31) not in receipt.rejected
+
+
+def test_batch_draft_rejection():
+    module = contract
+    # CurrentState capture with draft
+    try:
+        module.CurrentState.capture(
+            actor="maintainer",
+            tenant="projectbluefin",
+            repository="projectbluefin/review",
+            pull_request=184,
+            head_sha="a" * 40,
+            live={"isDraft": True},
+        )
+        assert False, "expected PlanDriftError for draft PR"
+    except module.PlanDriftError as error:
+        assert "PR is draft" in str(error)
+
+    try:
+        module.CurrentState.capture(
+            actor="maintainer",
+            tenant="projectbluefin",
+            repository="projectbluefin/review",
+            pull_request=184,
+            head_sha="a" * 40,
+            is_draft=True,
+        )
+        assert False, "expected PlanDriftError for is_draft=True"
+    except module.PlanDriftError as error:
+        assert "PR is draft" in str(error)
+
+    # Batch execution with one draft item
+    first = batch_item(module, 184, "a" * 40)
+    second = batch_item(module, 185, "b" * 40)
+    plan = module.BatchActionPlan.build(
+        actor="maintainer",
+        tenant="projectbluefin",
+        action_kind="approve-and-queue",
+        items=(first, second),
+        created_at=NOW,
+        expires_at=EXPIRES,
+    )
+    confirmation = plan.confirm_human(
+        preview=plan.preview(),
+        actor="maintainer",
+        tenant="projectbluefin",
+        typed_items=f"{first.identity} {second.identity}",
+        now=NOW,
+    )
+    eligibility = plan.execution_eligibility(confirmation, now=NOW)
+
+    def current_fetcher(item):
+        if item.pull_request == 184:
+            raise module.PlanDriftError("PR is draft")
+        return module.CurrentState.capture(
+            actor="maintainer",
+            tenant="projectbluefin",
+            repository=item.repository,
+            pull_request=item.pull_request,
+            head_sha=item.head_sha,
+            permissions={"push": True},
+            checks={"ci": "success"},
+        )
+
+    receipt = plan.execute(
+        eligibility,
+        current_fetcher,
+        lambda item, operation: 0,
+        ledger=TestReceiptLedger(),
+        now=NOW,
+    )
+    assert receipt.rejected[184] == "PR is draft"
+    assert ("projectbluefin/review", 184) in receipt.rejected
+    assert receipt.succeeded[185] == 1
+    assert ("projectbluefin/review", 185) in receipt.succeeded
+
+
+def test_batch_stale_fetch_does_not_fall_back_to_stale_cache():
+    module = contract
+    # 1. ActionPlan execution rejects failed/drifted fetch and never falls back
+    first = batch_item(module, 184, "a" * 40)
+    second = batch_item(module, 185, "b" * 40)
+    plan = module.BatchActionPlan.build(
+        actor="maintainer",
+        tenant="projectbluefin",
+        action_kind="approve-and-queue",
+        items=(first, second),
+        created_at=NOW,
+        expires_at=EXPIRES,
+    )
+    confirmation = plan.confirm_human(
+        preview=plan.preview(),
+        actor="maintainer",
+        tenant="projectbluefin",
+        typed_items=f"{first.identity} {second.identity}",
+        now=NOW,
+    )
+    eligibility = plan.execution_eligibility(confirmation, now=NOW)
+
+    def failing_fetcher(item):
+        if item.pull_request == 184:
+            raise module.PlanDriftError("cannot fetch live PR state")
+        return module.CurrentState.capture(
+            actor="maintainer",
+            tenant="projectbluefin",
+            repository=item.repository,
+            pull_request=item.pull_request,
+            head_sha=item.head_sha,
+            permissions={"push": True},
+            checks={"ci": "success"},
+        )
+
+    receipt = plan.execute(
+        eligibility,
+        failing_fetcher,
+        lambda item, op: 0,
+        ledger=TestReceiptLedger(),
+        now=NOW,
+    )
+    assert receipt.rejected[184] == "cannot fetch live PR state"
+    assert ("projectbluefin/review", 184) in receipt.rejected
+    assert receipt.succeeded[185] == 1
+    assert ("projectbluefin/review", 185) in receipt.succeeded
+
+    # 2. In dashboard plan builder: fresh fetch failure does not fall back to cached stop.live
+    import unittest.mock
+    class MockBase:
+        pass
+    mock_app = unittest.mock.MagicMock()
+    mock_app.App = MockBase
+    sys.modules["textual.app"] = mock_app
+    for mod in [
+        "rich", "rich.syntax", "textual", "textual.binding", "textual.containers",
+        "textual.css", "textual.css.query", "textual.screen", "textual.widgets",
+        "textual.geometry",
+    ]:
+        sys.modules.setdefault(mod, unittest.mock.MagicMock())
+    import bluefin_review_tui as tui
+
+    class DummyDashboard:
+        self_login = "maintainer"
+        def _queue_command(self, stop):
+            return ["python3", "image/tui/hive_api.py", "queue", f"https://hive.example/pr/{stop.number}"]
+        def _queueable(self, stop):
+            return True
+        build_batch_queue_plan = tui.ReviewDashboard.build_batch_queue_plan
+
+    import os
+    os.environ.setdefault("HIVE_HUB", "wss://hive.example/contribute")
+    dashboard = DummyDashboard()
+    stop_stale = tui.Stop("projectbluefin/review", 184, "review", "stale PR")
+    stop_stale.live = {"headRefOid": "a" * 40, "isDraft": False}
+    # fetch_live_pr fails
+    dashboard.fetch_live_pr = unittest.mock.Mock(side_effect=RuntimeError("API error"))
+    try:
+        dashboard.build_batch_queue_plan([stop_stale])
+        assert False, "expected InvalidPlanError when stale-fetch fails without fallback"
+    except module.InvalidPlanError as error:
+        assert "no queueable pull requests" in str(error)
+
+    # When one fails and one succeeds with fresh data, only fresh is included
+    stop_fresh = tui.Stop("projectbluefin/review", 185, "review", "fresh PR")
+    stop_fresh.live = {"headRefOid": "old" * 10, "isDraft": False}
+    fresh_head = "b" * 40
+    def mixed_fetch(repo, number, force=False):
+        if number == 184:
+            raise RuntimeError("API error")
+        return {"headRefOid": fresh_head, "isDraft": False, "statusCheckRollup": []}
+    dashboard.fetch_live_pr = mixed_fetch
+    built_plan = dashboard.build_batch_queue_plan([stop_stale, stop_fresh])
+    assert len(built_plan.items) == 1
+    assert built_plan.items[0].pull_request == 185
+    assert built_plan.items[0].head_sha == fresh_head
+
+
+class BatchActionPlanContractTests(unittest.TestCase):
+    def test_shared_action_plan_module_exists(self):
         self.assertIsNotNone(
             importlib.util.find_spec("action_plan"),
-            "the shared ActionPlan contract module must exist",
+            "the shared action plan contract module must exist",
         )
 
-    def test_plan_is_immutable_and_hash_binds_exact_body_and_operations(self) -> None:
-        module = self.require_contract()
-        plan = make_plan()
+    def test_batch_gate_binds_every_exact_head(self):
+        test_batch_gate_binds_every_exact_head()
 
-        self.assertEqual(plan.identity, plan.plan_hash)
-        self.assertEqual(plan.operations[0].argv[-1], "Reviewed exactly.\n")
-        self.assertEqual(make_plan().identity, plan.identity)
-        self.assertNotEqual(
-            make_plan(body="Reviewed exactly.\n ").identity,
-            plan.identity,
-        )
-        self.assertNotEqual(
-            make_plan(
-                operations=(
-                    operation(
-                        "gh",
-                        "pr",
-                        "review",
-                        str(PULL_REQUEST),
-                        "--repo",
-                        REPOSITORY,
-                        "--approve",
-                        "--body",
-                        "Reviewed exactly.\n",
-                    ),
-                    operation(
-                        "gh",
-                        "pr",
-                        "edit",
-                        str(PULL_REQUEST),
-                        "--repo",
-                        REPOSITORY,
-                        "--add-label",
-                        "lgtm",
-                    ),
-                ),
-            ).identity,
-            plan.identity,
-        )
-        with self.assertRaises((AttributeError, module.FrozenInstanceError)):
-            plan.head_sha = "b" * 40
+    def test_batch_drift_rejects_only_the_changed_item(self):
+        test_batch_drift_rejects_only_the_changed_item()
 
-    def test_plan_requires_full_head_and_safe_exact_operations(self) -> None:
-        module = self.require_contract()
-        with self.assertRaises(module.InvalidPlanError):
-            make_plan(plan_head="a" * 39)
-        with self.assertRaises(module.InvalidPlanError):
-            make_plan(action_kind="invented-mutation")
-        with self.assertRaises(module.InvalidPlanError):
-            make_plan(
-                operations=(
-                    operation(
-                        "gh",
-                        "pr",
-                        "merge",
-                        str(PULL_REQUEST + 1),
-                        "--repo",
-                        REPOSITORY,
-                    ),
-                ),
-            )
-        with self.assertRaises(module.InvalidPlanError):
-            make_plan(
-                operations=(
-                    operation(
-                        "gh",
-                        "pr",
-                        "merge",
-                        str(PULL_REQUEST),
-                        "--repo",
-                        REPOSITORY,
-                        "--auto",
-                    ),
-                ),
-            )
-        with self.assertRaises(module.InvalidPlanError):
-            make_plan(
-                operations=(
-                    operation(
-                        "gh",
-                        "pr",
-                        "review",
-                        str(PULL_REQUEST),
-                        "--repo",
-                        REPOSITORY,
-                        "--approve",
-                        "--body-file",
-                        "/tmp/review.md",
-                    ),
-                ),
-            )
-        with self.assertRaises(module.InvalidPlanError):
-            make_plan(
-                operations=(
-                    operation(
-                        "gh",
-                        "pr",
-                        "merge",
-                        str(PULL_REQUEST),
-                        "--repo",
-                        REPOSITORY,
-                        "--admin",
-                    ),
-                ),
-            )
+    def test_batch_execution_fails_on_expiration(self):
+        test_batch_execution_fails_on_expiration()
 
-    def test_preview_exposes_exact_intent_without_authority(self) -> None:
-        self.require_contract()
-        plan = make_plan()
-        preview = plan.preview()
+    def test_batch_mutation_item_forbids_unsafe_arguments(self):
+        test_batch_mutation_item_forbids_unsafe_arguments()
 
-        self.assertEqual(preview.plan_identity, plan.identity)
-        self.assertEqual(preview.body, "Reviewed exactly.\n")
-        self.assertEqual(preview.operations, plan.operations)
-        self.assertFalse(hasattr(preview, "confirmation"))
+    def test_batch_mutation_item_requires_allowed_patterns(self):
+        test_batch_mutation_item_requires_allowed_patterns()
 
-    def test_model_only_preview_cannot_authorize_execution(self) -> None:
-        module = self.require_contract()
-        plan = make_plan()
-        with self.assertRaises(module.HumanConfirmationRequired):
-            plan.execution_eligibility(plan.preview(), current_state(), now=NOW)
+    def test_batch_confirmation_rejects_mismatched_items(self):
+        test_batch_confirmation_rejects_mismatched_items()
 
-    def test_human_confirmation_requires_exact_actor_tenant_and_typed_pr(self) -> None:
-        module = self.require_contract()
-        plan = make_plan()
-        preview = plan.preview()
+    def test_batch_execution_requires_plan_issued_capability(self):
+        test_batch_execution_requires_plan_issued_capability()
 
-        confirmation = plan.confirm_human(
-            preview=preview,
-            actor=ACTOR,
-            tenant=TENANT,
-            typed_pull_request=PULL_REQUEST,
-            now=NOW,
-        )
-        self.assertEqual(confirmation.plan_identity, plan.identity)
-        with self.assertRaises(module.HumanConfirmationRequired):
-            plan.confirm_human(
-                preview=preview,
-                actor="different-maintainer",
-                tenant=TENANT,
-                typed_pull_request=PULL_REQUEST,
-                now=NOW,
-            )
-        with self.assertRaises(module.HumanConfirmationRequired):
-            plan.confirm_human(
-                preview=preview,
-                actor=ACTOR,
-                tenant=TENANT,
-                typed_pull_request=PULL_REQUEST + 1,
-                now=NOW,
-            )
+    def test_batch_cross_repository_pr_number_collision(self):
+        test_batch_cross_repository_pr_number_collision()
 
-    def test_revalidation_fails_closed_on_authority_and_evidence_drift(self) -> None:
-        module = self.require_contract()
-        plan = make_plan()
-        cases = (
-            ("actor", {"actor": "other"}),
-            ("tenant", {"tenant": "other-tenant"}),
-            ("head", {"head_sha": "b" * 40}),
-            ("body", {"body": "Changed body.\n"}),
-            ("permissions", {"permissions": {"push": False}}),
-            ("checks", {"checks": {"ci": "failure"}}),
-        )
-        for field, changes in cases:
-            with self.subTest(field=field):
-                with self.assertRaises(module.PlanDriftError) as error:
-                    plan.revalidate(current_state(**changes), now=NOW)
-                self.assertIn(field, str(error.exception))
+    def test_batch_forbidden_gh_commands_raise_invalid_plan(self):
+        test_batch_forbidden_gh_commands_raise_invalid_plan()
 
-    def test_expired_plan_cannot_be_confirmed_or_revalidated(self) -> None:
-        module = self.require_contract()
-        plan = make_plan(expires_at=NOW + timedelta(seconds=1))
-        with self.assertRaises(module.PlanExpiredError):
-            plan.confirm_human(
-                preview=plan.preview(),
-                actor=ACTOR,
-                tenant=TENANT,
-                typed_pull_request=PULL_REQUEST,
-                now=NOW + timedelta(seconds=2),
-            )
-        with self.assertRaises(module.PlanExpiredError):
-            plan.revalidate(current_state(), now=NOW + timedelta(seconds=2))
+    def test_batch_hive_script_exactness(self):
+        test_batch_hive_script_exactness()
 
-    def test_one_confirmation_covers_only_explicit_operations_for_one_pr(self) -> None:
-        module = self.require_contract()
-        body = "Approved by @maintainer for Hive auto-merge on green CI."
-        plan = make_plan(
-            action_kind="approve-and-queue",
-            body=body,
-            operations=(
-                operation(
-                    "gh",
-                    "label",
-                    "create",
-                    "lgtm",
-                    "--repo",
-                    REPOSITORY,
-                ),
-                operation(
-                    "gh",
-                    "pr",
-                    "review",
-                    str(PULL_REQUEST),
-                    "--repo",
-                    REPOSITORY,
-                    "--approve",
-                    "--body",
-                    body,
-                ),
-                operation(
-                    "gh",
-                    "pr",
-                    "edit",
-                    str(PULL_REQUEST),
-                    "--repo",
-                    REPOSITORY,
-                    "--add-label",
-                    "lgtm",
-                ),
-            ),
-        )
-        preview = plan.preview()
-        confirmation = plan.confirm_human(
-            preview=preview,
-            actor=ACTOR,
-            tenant=TENANT,
-            typed_pull_request=PULL_REQUEST,
-            now=NOW,
-        )
-        eligibility = plan.execution_eligibility(
-            confirmation,
-            current_state(body=body),
-            now=NOW,
-        )
-        seen = []
+    def test_batch_cross_repository_pr_number_collision_mixed_outcomes(self):
+        test_batch_cross_repository_pr_number_collision_mixed_outcomes()
 
-        def executor(operation_record):
-            seen.append(operation_record.argv)
-            return module.OperationResult(return_code=0)
+    def test_batch_draft_rejection(self):
+        test_batch_draft_rejection()
 
-        receipt = plan.execute(
-            eligibility,
-            current_state(body=body),
-            executor,
-            ledger=TestReceiptLedger(),
-            now=NOW,
-        )
-        self.assertEqual(receipt.status, "succeeded")
-        self.assertEqual(receipt.attempted_operations, 3)
-        self.assertEqual(tuple(seen), tuple(op.argv for op in plan.operations))
-
-    def test_execution_revalidates_before_running_any_operation(self) -> None:
-        module = self.require_contract()
-        plan = make_plan()
-        preview = plan.preview()
-        confirmation = plan.confirm_human(
-            preview=preview,
-            actor=ACTOR,
-            tenant=TENANT,
-            typed_pull_request=PULL_REQUEST,
-            now=NOW,
-        )
-        eligibility = plan.execution_eligibility(
-            confirmation,
-            current_state(),
-            now=NOW,
-        )
-        calls = []
-        with self.assertRaises(module.PlanDriftError):
-            plan.execute(
-                eligibility,
-                current_state(head_sha="b" * 40),
-                lambda op: calls.append(op),
-                ledger=TestReceiptLedger(),
-                now=NOW,
-            )
-        self.assertEqual(calls, [])
-
-    def test_execution_claims_idempotency_key_before_runner_and_rejects_replay(self) -> None:
-        module = self.require_contract()
-        plan = make_plan()
-        preview = plan.preview()
-        confirmation = plan.confirm_human(
-            preview=preview,
-            actor=ACTOR,
-            tenant=TENANT,
-            typed_pull_request=PULL_REQUEST,
-            now=NOW,
-        )
-        eligibility = plan.execution_eligibility(
-            confirmation,
-            current_state(),
-            now=NOW,
-        )
-
-        ledger = TestReceiptLedger()
-        calls = []
-
-        def executor(operation_record):
-            calls.append(operation_record)
-            return module.OperationResult(return_code=0)
-
-        first = plan.execute(
-            eligibility,
-            current_state(),
-            executor,
-            ledger=ledger,
-            now=NOW,
-        )
-        self.assertEqual(first.status, "succeeded")
-        with self.assertRaises(module.ExecutionNotEligible):
-            plan.execute(
-                eligibility,
-                current_state(),
-                executor,
-                ledger=ledger,
-                now=NOW,
-            )
-        self.assertEqual(len(calls), len(plan.operations))
-        self.assertEqual(ledger.receipts, [first])
-
-    def test_failed_sequence_stops_and_receipt_is_bounded(self) -> None:
-        module = self.require_contract()
-        plan = make_plan(
-            operations=(
-                operation(
-                    "gh",
-                    "pr",
-                    "review",
-                    str(PULL_REQUEST),
-                    "--repo",
-                    REPOSITORY,
-                    "--approve",
-                    "--body",
-                    "Reviewed exactly.\n",
-                ),
-                operation(
-                    "gh",
-                    "pr",
-                    "edit",
-                    str(PULL_REQUEST),
-                    "--repo",
-                    REPOSITORY,
-                    "--add-label",
-                    "lgtm",
-                ),
-            ),
-        )
-        preview = plan.preview()
-        confirmation = plan.confirm_human(
-            preview=preview,
-            actor=ACTOR,
-            tenant=TENANT,
-            typed_pull_request=PULL_REQUEST,
-            now=NOW,
-        )
-        eligibility = plan.execution_eligibility(
-            confirmation,
-            current_state(),
-            now=NOW,
-        )
-        calls = []
-
-        def executor(operation_record):
-            calls.append(operation_record)
-            return module.OperationResult(
-                return_code=1,
-                detail="x" * 10_000,
-            )
-
-        receipt = plan.execute(
-            eligibility,
-            current_state(),
-            executor,
-            ledger=TestReceiptLedger(),
-            now=NOW,
-        )
-        self.assertEqual(receipt.status, "failed")
-        self.assertEqual(receipt.attempted_operations, 1)
-        self.assertEqual(len(calls), 1)
-        self.assertLessEqual(len(receipt.detail), module.MAX_RECEIPT_DETAIL)
+    def test_batch_stale_fetch_does_not_fall_back_to_stale_cache(self):
+        test_batch_stale_fetch_does_not_fall_back_to_stale_cache()
 
 
 if __name__ == "__main__":

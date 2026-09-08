@@ -42,7 +42,7 @@ require_absent() {
 require_heading
 require_before '^## +(Start here|Quick start)([[:space:]]|$)' '^## +What this is for([[:space:]]|$)'
 
-for command in review-doctor review-queue review-container review-stop; do
+for command in contribute review-doctor review-queue review-container review-stop review-runtime; do
   require_text "just $command"
 done
 
@@ -53,10 +53,8 @@ require_text 'TOOL=pi'
 require_text 'REVIEW_DETACH=1'
 require_text 'just review-stop'
 
-# The unsupported manual runsc installation recipe was removed from the
-# README: provisioning is review#348 and there is no supported manual
-# recipe. Neither a mutable release/latest download nor an
-# --ignore-cgroups wrapper may reappear in README guidance.
+# Runtime management is explicit and pinned; the launcher must not acquire a
+# moving release or weaken cgroup enforcement.
 require_absent 'release/latest' 'README must not embed a mutable release/latest download'
 require_absent '--ignore-cgroups' 'README must not recommend an --ignore-cgroups wrapper'
 
