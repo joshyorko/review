@@ -388,6 +388,7 @@ review_queue_kubernetes() {
   local image="$1"
   shift
   local session_id env_names
+  local -a otlp_secret_args=()
   session_id="$(date +%s)-$$"
   K8S_DASHBOARD_POD="review-queue-${session_id}"
   K8S_DASHBOARD_SECRET="review-session-${session_id}"
@@ -396,6 +397,18 @@ review_queue_kubernetes() {
     GOOSE_PROVIDER GOOSE_MODEL GOOSE_THINKING_EFFORT GOOSE_CONTEXT_LIMIT
     BLUEFIN_REVIEW_BACKEND
   )
+  if [[ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]]; then
+    K8S_ENV_NAMES+=(OTEL_EXPORTER_OTLP_ENDPOINT)
+    otlp_secret_args+=(
+      --from-file=OTEL_EXPORTER_OTLP_ENDPOINT=<(printf '%s' "$OTEL_EXPORTER_OTLP_ENDPOINT")
+    )
+    if [[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]]; then
+      K8S_ENV_NAMES+=(OTEL_EXPORTER_OTLP_HEADERS)
+      otlp_secret_args+=(
+        --from-file=OTEL_EXPORTER_OTLP_HEADERS=<(printf '%s' "$OTEL_EXPORTER_OTLP_HEADERS")
+      )
+    fi
+  fi
   env_names="$(IFS=,; echo "${K8S_ENV_NAMES[*]}")"
 
   kubectl create secret generic "$K8S_DASHBOARD_SECRET" -n bluefin-system \
@@ -407,7 +420,8 @@ review_queue_kubernetes() {
     --from-file=GOOSE_MODEL=<(printf '%s' "${GOOSE_MODEL:-}") \
     --from-file=GOOSE_THINKING_EFFORT=<(printf '%s' "${GOOSE_THINKING_EFFORT:-}") \
     --from-file=GOOSE_CONTEXT_LIMIT=<(printf '%s' "${GOOSE_CONTEXT_LIMIT:-}") \
-    --from-file=BLUEFIN_REVIEW_BACKEND=<(printf '%s' "$REVIEW_BACKEND") >/dev/null
+    --from-file=BLUEFIN_REVIEW_BACKEND=<(printf '%s' "$REVIEW_BACKEND") \
+    "${otlp_secret_args[@]}" >/dev/null
 
   python3 scripts/review-session-runtime.py "$session_id" "$image" \
     "$K8S_DASHBOARD_SECRET" review-queue-state "$env_names" queue "$@" |

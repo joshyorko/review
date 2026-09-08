@@ -11,6 +11,20 @@ from typing import Any, Sequence
 NAMESPACE = "bluefin-system"
 
 
+def secret_environment_refs(
+    secret_name: str, env_names: Sequence[str]
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": name,
+            "valueFrom": {
+                "secretKeyRef": {"name": secret_name, "key": name}
+            },
+        }
+        for name in env_names
+    ]
+
+
 def build_kubernetes_dashboard_pod(
     session_id: str,
     image: str,
@@ -51,15 +65,7 @@ def build_kubernetes_dashboard_pod(
                     "stdin": True,
                     "stdinOnce": True,
                     "tty": True,
-                    "env": [
-                        {
-                            "name": name,
-                            "valueFrom": {
-                                "secretKeyRef": {"name": secret_name, "key": name}
-                            },
-                        }
-                        for name in env_names
-                    ],
+                    "env": secret_environment_refs(secret_name, env_names),
                     "securityContext": {
                         "allowPrivilegeEscalation": False,
                         "capabilities": {"drop": ["ALL"]},

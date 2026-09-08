@@ -113,6 +113,7 @@ for path in \
   image/config/goose.yaml \
   image/tmux.conf \
   image/tui/bluefin_review_tui.py \
+  image/tui/observability.py \
   image/harness/goose.py \
   package.json \
   package-lock.json; do
@@ -121,6 +122,11 @@ for path in \
     fail=1
   }
 done
+
+grep -q '^opentelemetry-exporter-otlp-proto-http==' image/tui/requirements.lock ||
+  fail "the TUI requirements must pin the optional Countme exporter"
+grep -q '^opentelemetry-sdk==' image/tui/requirements.lock ||
+  fail "the TUI requirements must pin the Countme SDK"
 
 # shellcheck disable=SC2016 # single quotes are intentional: matching literal string
 require image/entrypoint.sh \

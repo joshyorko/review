@@ -63,6 +63,7 @@ import action_plan
 import landing
 import lab_client
 import hive_api
+from observability import ReviewObservability
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
 from harness.goose import GooseHarness
@@ -3148,6 +3149,7 @@ class ReviewDashboard(App):
         self.filters = filters or QueueFilters()
         self.run_store = run_store or RunStateStore()
         self.gh_client = gh_client or default_client
+        self.observability = ReviewObservability.from_environment()
         self.view_mode = "prs"
         self.issues_items = []
         self.stops: list[Stop] = []
@@ -3235,6 +3237,7 @@ class ReviewDashboard(App):
         self._batch_receipt_ledger = DashboardBatchReceiptLedger()
         self.fixer_advanced_heads: set[tuple[str, int, str]] = set()
         self.active_review_identities: dict[str, RunIdentity] = {}
+        self.review_started_at: dict[str, float] = {}
 
     def record_fixer_head(self, repository: str, number: int, head_sha: str) -> None:
         """Explicitly record that a head was produced and pushed by our fixer."""
@@ -3702,6 +3705,9 @@ class ReviewDashboard(App):
             item.key: item.head_sha for item in snapshot.items
         }
         self.review_expected_heads.update(event_heads)
+        review_started = time.monotonic()
+        for key in event_heads:
+            self.review_started_at[key] = review_started
         try:
             batch = self.review_engine.start(
                 snapshot,
@@ -3715,6 +3721,7 @@ class ReviewDashboard(App):
         except (OSError, RuntimeError, ValueError) as error:
             for key in event_heads:
                 self.review_expected_heads.pop(key, None)
+                self.review_started_at.pop(key, None)
             detail = bounded_detail(str(error) or type(error).__name__)
             for stop in current_stops:
                 id_ = self.run_identity(stop)
@@ -4015,6 +4022,43 @@ class ReviewDashboard(App):
             self.review_batch_ids.pop(event.key, None)
         if batch is not None:
             self.sync_batch_headroom(batch)
+        terminal_states = {
+            "cached",
+            "complete",
+            "findings",
+            "failed",
+            "cancelled",
+            "missing",
+            "incomplete",
+            "unparsable",
+            "review_failed",
+            "review_missing",
+            "review_incomplete",
+            "review_unparsable",
+        }
+        if event.state in terminal_states:
+            started = self.review_started_at.pop(event.key, None)
+            if started is not None:
+                if stop.review_status == "findings":
+                    outcome = "findings"
+                elif event.state == "cancelled":
+                    outcome = "cancelled"
+                elif stop.review_status in {
+                    "incomplete",
+                    "unparsable",
+                    "review_incomplete",
+                    "review_unparsable",
+                    "missing",
+                    "review_missing",
+                }:
+                    outcome = "incomplete"
+                elif stop.review_status in {"cached", "complete"}:
+                    outcome = "complete"
+                else:
+                    outcome = "failed"
+                self.observability.operation(
+                    f"review.{outcome}", time.monotonic() - started
+                )
         self.refresh_rows()
 
     def sync_batch_headroom(self, batch: ReviewBatch) -> None:
@@ -4124,6 +4168,19 @@ class ReviewDashboard(App):
         One paginated GraphQL search carries the evidence the recommended
         action is classified from; there is no static snapshot behind this.
         """
+        started = time.monotonic()
+        pages_count = 0
+        items_count = 0
+
+        def finished(items: list[dict]) -> dict:
+            self.observability.operation(
+                "queue.refresh",
+                time.monotonic() - started,
+                pages=pages_count,
+                items=items_count,
+            )
+            return {"items": items}
+
         try:
             result = gh(
                 "api", "graphql", "--paginate", "--slurp",
@@ -4134,7 +4191,7 @@ class ReviewDashboard(App):
             self.source_message = bounded_detail(
                 f"GitHub could not list the {GITHUB_ORG} queue: {error}"
             )
-            return {"items": []}
+            return finished([])
         if result.returncode:
             detail = bounded_detail((result.stderr or result.stdout).strip())
             lowered = detail.lower()
@@ -4145,12 +4202,13 @@ class ReviewDashboard(App):
             else:
                 self.source_state = "error"
             self.source_message = detail or f"GitHub could not list the {GITHUB_ORG} queue"
-            return {"items": []}
+            return finished([])
         try:
             pages = json.loads(result.stdout)
             if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
                 raise ValueError("GitHub returned malformed search pages")
             items = []
+            pages_count = len(pages)
             for page in pages:
                 nodes = ((page.get("data") or {}).get("search") or {}).get("nodes")
                 if not isinstance(nodes, list):
@@ -4161,13 +4219,14 @@ class ReviewDashboard(App):
                     if not node:
                         continue
                     items.append(org_queue_item(node))
+            items_count = len(items)
         except (json.JSONDecodeError, ValueError) as error:
             self.source_state = "malformed"
             self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            return {"items": []}
+            return finished([])
         self.source_state = "empty" if not items else "ready"
         self.source_message = ""
-        return {"items": items}
+        return finished(items)
 
     def load_live_queue(self, repository: str) -> dict:
         if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
@@ -4711,6 +4770,12 @@ class ReviewDashboard(App):
         )
         review_cap = getattr(self.review_engine, "effective_review_cap", lambda: 0)()
         review_running = getattr(self.review_engine, "active_review_slots", lambda: 0)()
+        active_reviews = sum(
+            1 for stop in self.stops if stop.review_status == "running"
+        )
+        self.observability.state("reviews.active", active_reviews)
+        self.observability.state("landings.active", running)
+        self.observability.state("check_workers.active", review_running)
         reviews = f" | review slots: {review_running}/{review_cap}"
         breaker_parts = []
         for dep in Dependency:
@@ -4774,6 +4839,11 @@ class ReviewDashboard(App):
             and isinstance(method, str)
             else ""
         )
+        countme = (
+            " | Countme unavailable"
+            if self.observability.status == "unavailable"
+            else ""
+        )
         try:
             status_bar = self.query_one("#status-bar", Static)
         except NoMatches:
@@ -4785,7 +4855,7 @@ class ReviewDashboard(App):
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}"
-                f"{reviews}{breakers} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+                f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
         else:
             status_bar.update(
@@ -4793,7 +4863,7 @@ class ReviewDashboard(App):
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}{stuck}{review_failures}{agents}{landed}{policy}"
-                f"{reviews}{breakers} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+                f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
 
     def action_filter(self) -> None:
@@ -6833,6 +6903,7 @@ class ReviewDashboard(App):
     def run_landing_task(self, task: "landing.LandingTask") -> None:
         """One batch agent, off the UI thread, its own process group so
         [x] stops the agent and everything it spawned together."""
+        task.started = time.monotonic()
         try:
             try:
                 log = open(task.log_path, "a", encoding="utf-8")
@@ -6956,6 +7027,16 @@ class ReviewDashboard(App):
             severity = "warning"
         else:
             severity = "information"
+        duration = max(0.0, time.monotonic() - task.started)
+        if counts["failed"]:
+            outcome = "failed"
+        elif counts["no outcome"] or counts["died mid-batch"] or not done:
+            outcome = "incomplete"
+        elif counts["blocked"] or counts["awaiting-stable"]:
+            outcome = "blocked"
+        else:
+            outcome = "complete"
+        self.observability.operation(f"landing.{outcome}", duration)
         # Set before refresh_rows: refresh_status renders it onto the bar.
         self.last_landing_outcome = message
         self.refresh_rows()
