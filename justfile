@@ -569,6 +569,80 @@ cleanup_codex_auth_staging_dir() {
   rm -f -- "${staging_dir}/auth.json"
   rmdir -- "$staging_dir" 2>/dev/null || true
 }
+podman_default_connection_uri() {
+  # Podman resolves its target engine in this order: CONTAINER_HOST wins
+  # outright, CONTAINER_CONNECTION names a saved connection, and otherwise
+  # whichever connection is marked default applies. Mirror that order so the
+  # check below sees exactly the engine 'podman run' itself would use.
+  if [[ -n "${CONTAINER_HOST:-}" ]]; then
+    printf '%s\n' "$CONTAINER_HOST"
+    return 0
+  fi
+  local list
+  if ! list="$(podman system connection list --format '{{.Name}}\t{{.URI}}\t{{.Default}}' 2>/dev/null)"; then
+    echo "ERROR: could not resolve Podman connections." >&2
+    return 1
+  fi
+  if [[ -n "${CONTAINER_CONNECTION:-}" ]]; then
+    local selected
+    selected="$(awk -F'\t' -v n="$CONTAINER_CONNECTION" '$1==n{print $2; exit}' <<<"$list")"
+    if [[ -z "$selected" ]]; then
+      echo "ERROR: could not resolve selected Podman connection '${CONTAINER_CONNECTION}'." >&2
+      return 1
+    fi
+    printf '%s\n' "$selected"
+    return 0
+  fi
+  awk -F'\t' '$3=="true"{print $2; exit}' <<<"$list"
+  return 0
+}
+podman_redacted_uri() {
+  local uri="$1" scheme rest
+  case "$uri" in
+    *://*)
+      scheme="${uri%%://*}"
+      rest="${uri#*://}"
+      rest="${rest#*@}"
+      printf '%s://%s\n' "$scheme" "$rest"
+      ;;
+    *) printf '%s\n' "$uri" ;;
+  esac
+}
+require_local_podman_engine() {
+  # review-queue binds its dashboard state (#281) from the client-side
+  # ${XDG_STATE_HOME:-$HOME/.local/state}/bluefin-review path and presents it
+  # as this host's durable record of landing batches. When podman's default
+  # connection is an ssh:// remote, that same-looking bind resolves on the
+  # ENGINE host instead: the dashboard silently reads and writes a directory
+  # that never existed on the launcher's filesystem, and landing batches
+  # appear to vanish while they are live somewhere nobody is looking (#400).
+  local engine_uri display_uri
+  if ! engine_uri="$(podman_default_connection_uri)"; then
+    return 1
+  fi
+  case "$engine_uri" in
+    ""|unix://*) return 0 ;;
+    *)
+      display_uri="$(podman_redacted_uri "$engine_uri")"
+      case "${REVIEW_QUEUE_ALLOW_REMOTE_STATE:-}" in
+        1)
+          echo "! podman's selected engine is remote (${display_uri}); the dashboard state directory binds on that engine host, not $(hostname)." >&2
+          return 0
+          ;;
+        ""|0)
+          echo "ERROR: podman's selected engine is remote (${display_uri})." >&2
+          ;;
+        *)
+          echo "ERROR: REVIEW_QUEUE_ALLOW_REMOTE_STATE must be exactly 1 for a remote engine (got '${REVIEW_QUEUE_ALLOW_REMOTE_STATE}')." >&2
+          ;;
+      esac
+      echo "  review-queue binds its dashboard state from \${XDG_STATE_HOME:-\$HOME/.local/state}/bluefin-review on THIS host, but podman would resolve that same-looking bind on the engine host instead -- landing batches would be written where nothing local, including the next 'just review-queue', can find them." >&2
+      echo "  Switch to a local connection:  podman system connection default <local-name>" >&2
+      echo "  Or, once you have confirmed the remote engine host's directory is the one you actually want, acknowledge it explicitly:  REVIEW_QUEUE_ALLOW_REMOTE_STATE=1 just review-queue" >&2
+      return 1
+      ;;
+  esac
+}
 resolve_review_backend() {
   REVIEW_BACKEND="${BLUEFIN_REVIEW_BACKEND:-}"
   case "$REVIEW_BACKEND" in
@@ -1463,6 +1537,7 @@ review-queue *queue_args:
         echo "  Install Podman, then re-run review-queue." >&2
         exit 1
       }
+      require_local_podman_engine
     fi
 
     require_goose_backend "$TOOL"
