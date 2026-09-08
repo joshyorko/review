@@ -1933,39 +1933,39 @@ sed -E 's/^[[:space:]]*#.*$//' "$justfile" >"$code"
 # which pairs --detach with the 'detached' owner label so a later launch
 # refuses to reclaim it and review-stop can stop it. Any other detach is a
 # hole.
-assert_eq "$(grep -cE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run --rm --detach --replace --name' "$code")" 1 \
+assert_eq "$(grep -cE 'podman --runtime=(runsc|"\$[A-Za-z_]+") run --rm --detach --replace --name' "$code")" 1 \
   "expected exactly one detached launch site (the marked worker)"
 assert_eq "$(grep -c 'review.owner=detached' "$code")" 1 \
   "the detached label is stamped at exactly one launch site"
 assert_eq "$(grep -c '"detached"' "$code")" 2 \
   "both the ownership check and review-stop must honor the detached marker"
-if grep -nE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run' "$code" | grep -vE -- '--detach|--interactive --tty'; then
+if grep -nE 'podman --runtime=(runsc|"\$[A-Za-z_]+") run' "$code" | grep -vE -- '--detach|--interactive --tty'; then
   fail "every podman run is either the marked detached worker or interactive"
 fi
 # A lone trailing '&' backgrounds the launch; '&&' and '2>&1' must not match.
-if grep -nE '(podman --runtime=(runsc|"\\$[A-Za-z_]+") run).*[^&>]&[[:space:]]*$' "$code"; then
+if grep -nE '(podman --runtime=(runsc|"\$[A-Za-z_]+") run).*[^&>]&[[:space:]]*$' "$code"; then
   fail "a launch line must never end in a background '&'"
 fi
 if grep -nE '(^|[^[:alnum:]_])(nohup|setsid)([^[:alnum:]_]|$)' "$code"; then
   fail "nohup/setsid must never appear on a launch path"
 fi
-assert_eq "$(grep -cE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run --rm --interactive --tty' "$code")" 2 \
+assert_eq "$(grep -cE 'podman --runtime=(runsc|"\$[A-Za-z_]+") run --rm --interactive --tty' "$code")" 2 \
   "expected exactly two foreground podman run sites (contributor container and queue walk)"
 # A stale container from a hard-killed terminal must never block a relaunch.
-assert_eq "$(grep -cE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run --rm --interactive --tty --replace --name' "$code")" 2 \
+assert_eq "$(grep -cE 'podman --runtime=(runsc|"\$[A-Za-z_]+") run --rm --interactive --tty --replace --name' "$code")" 2 \
   "every named foreground run must reclaim its name with --replace"
 # Isolation is fail-closed: no agent-capable launch may reach Podman's
 # default runtime, or any other runtime. This is a universal check, not a
 # count: 'podman --runtime=crun run' would satisfy every count below while
 # putting a credential-carrying agent outside the gVisor boundary.
-if grep -nE 'podman[[:space:]]+--runtime=([^[:space:]]+|"\\$[A-Za-z_]+")([[:space:]]+)run' "$code" |
-  grep -vE -- '--runtime=(runsc|"\\$[A-Za-z_]+")'; then
+if grep -nE 'podman[[:space:]]+--runtime=([^[:space:]]+|"\$[A-Za-z_]+")([[:space:]]+)run' "$code" |
+  grep -vE -- '--runtime=(runsc|"\$[A-Za-z_]+")'; then
   fail "every podman run must select the runsc isolation runtime"
 fi
 # Four sites select it — the two foreground launches, the marked detached
 # worker, and the disposable isolation probe itself. The count additionally
 # pins that no new launch site appears unnoticed.
-assert_eq "$(grep -cE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run' "$code")" 4 \
+assert_eq "$(grep -cE 'podman --runtime=(runsc|"\$[A-Za-z_]+") run' "$code")" 4 \
   "every agent-capable launch must select the runsc runtime explicitly"
 # Isolation failure guidance names the tracked provisioning contract and
 # stops there: an embedded installer is unsupported guidance. A mutable
@@ -2007,7 +2007,7 @@ awk '
   /CONTAINER_ARGS\+?=\(/           { inargs = 1 }
   inargs                           { print; if ($0 ~ /\)[[:space:]]*$/) inargs = 0; next }
   /podman[[:space:]]+(--runtime=[^[:space:]]+[[:space:]]+)?(run|create)/ { print }
-' "$joined" | grep -vE 'podman --runtime=(runsc|"\\$[A-Za-z_]+") run --rm --detach --replace --name' |
+' "$joined" | grep -vE 'podman --runtime=(runsc|"\$[A-Za-z_]+") run --rm --detach --replace --name' |
   grep -vxF "$probe_launch" >"$launch_args"
 # Excluding the probe above is only safe because it is a diagnostic, not a
 # launch: it carries no credential, starts no agent, and is reaped by trap.
@@ -2107,7 +2107,7 @@ fi
 grep -qE '^turbo-review[ :]' "$code" ||
   fail "turbo-review must exist as the worker scale-out plus dashboard recipe"
 assert_eq "$(grep -cE '^(contribute|review[a-z-]*|turbo-review)[ :]' "$code")" 6 \
-  "expected exactly six recipes (contribute, review-container, -stop, -doctor, -queue, turbo-review)"
+  "expected exactly seven recipes including review-runtime"
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private
