@@ -6275,6 +6275,80 @@ async def main() -> int:
             ])
             delay_queue_refresh.touch()
 
+            # The always-visible activity surface is assembled from the
+            # dashboard's own lifecycle state: no process discovery or new
+            # transport is involved. The fixture covers a parent review,
+            # its check workers, an active and queued landing, and one
+            # cached Hive contributor assignment.
+            active_landing = tui.landing.new_task(
+                [tui.Stop(
+                    "projectbluefin/common", 7, "review", "active landing"
+                )],
+                "tester",
+            )
+            active_landing.process = object()
+            queued_landing = tui.landing.new_task(
+                [tui.Stop(
+                    "projectbluefin/review", 42, "review", "queued landing"
+                )],
+                "tester",
+            )
+            app.landing_queue = [active_landing, queued_landing]
+            app.review_batches = [
+                SimpleNamespace(
+                    batch_id="activity-review",
+                    items=(SimpleNamespace(
+                        key="projectbluefin/bluefinctl#31",
+                    ),),
+                    running=True,
+                )
+            ]
+            app.stops[0].review_status = "running"
+            app.review_engine = SimpleNamespace(
+                effective_review_cap=lambda: 6,
+                active_review_slots=lambda: 2,
+            )
+            app.hive_workers = [{
+                "login": "hive-contributor",
+                "task": {
+                    "repo": "projectbluefin/dakota",
+                    "number": 88,
+                    "task_id": "ignored-by-activity",
+                },
+            }]
+            app.hive_unavailable = False
+            app.hive_workers_stale = False
+            app.reconciliation_state = "fresh"
+            app.reconciliation_updated_at = time.monotonic() - 61
+            app.refresh_status()
+            activity = app.query("#activity")
+            activity_text = (
+                str(activity.first().render()) if activity else ""
+            )
+            for expected in (
+                "AGENT ACTIVITY",
+                "Parent reviews: 1",
+                "Check workers: 2",
+                "Landing agents: 1",
+                "Queued work: 1",
+                "Review — projectbluefin/bluefinctl#31",
+                "Landing — projectbluefin/common#7",
+                "Hive @hive-contributor — projectbluefin/dakota#88",
+                "Snapshot: current",
+                "1m ago",
+            ):
+                check(
+                    expected in activity_text,
+                    "the normal dashboard activity surface must render "
+                    f"{expected!r}, got {activity_text!r}",
+                )
+
+            # The active fixture is display-only. Keep the real landing
+            # completion focused on reconciliation rather than leaving a
+            # fabricated process in the scheduler's active lane.
+            app.landing_queue = []
+            app.advance_final_review = lambda _task: None
+
             def completed_landing(number: int):
                 task = tui.landing.new_task(
                     [tui.Stop("projectbluefin/bluefinctl", number, "review", "landed")],
@@ -6288,6 +6362,16 @@ async def main() -> int:
                 return task
 
             completed_landing(31)
+            activity = app.query("#activity")
+            activity_text = (
+                str(activity.first().render()) if activity else ""
+            )
+            check(
+                "Snapshot: refreshing" in activity_text,
+                "a completed operation must refresh the activity snapshot "
+                "through cached reconciliation, got "
+                f"{activity_text!r}",
+            )
             completed_landing(7)
             completed_landing(8)
             await pilot.press("j")
@@ -6318,6 +6402,15 @@ async def main() -> int:
                 ):
                     break
                 await pilot.pause(0.01)
+            activity = app.query("#activity")
+            activity_text = (
+                str(activity.first().render()) if activity else ""
+            )
+            check(
+                "Snapshot: current" in activity_text,
+                "a completed reconciliation must refresh the visible "
+                f"activity snapshot, got {activity_text!r}",
+            )
             check(
                 queue_refresh_log.read_text().splitlines() == ["request", "request"],
                 "operations during a refresh must coalesce to one additional GitHub queue refresh",

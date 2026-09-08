@@ -1,6 +1,6 @@
 ---
 name: review-monitoring
-version: "1.2"
+version: "1.3"
 last_updated: 2026-09-07
 id: review-monitoring
 one_line_purpose: Monitor running review containers, landing batch execution, and container health.
@@ -82,14 +82,36 @@ one asynchronous refresh; triggers coalesce, with one bounded follow-up for a
 completion during refresh. It never polls or changes Hive assignments. Failure
 retains the aged display; use `R` for an explicit read, never a static artifact.
 
-### 3. Countme
+### 3. Dashboard Activity
+
+The normal dashboard always shows an `AGENT ACTIVITY` surface above the queue.
+It separately names parent reviews (active review batches), check workers
+(the review engine's active slots), landing agents, and queued landing work.
+It lists a bounded number of active review, landing, and known Hive contributor
+assignments using only repository-qualified pull-request keys. A missing or
+malformed Hive assignment reads as unavailable; it is never inferred from an
+agent name, task identifier, prompt, or pull-request title.
+
+`Snapshot:` makes the cached answer's state explicit:
+
+- `current` includes the age of the oldest component of the cached answer;
+- `refreshing` retains and ages the last good answer while the existing
+  reconciliation is in flight;
+- `retained/last good` marks cached assignment data after a failed read; and
+- `unavailable` means no answer can be shown honestly.
+
+Review and landing lifecycle completions repaint this surface through the same
+operation-triggered reconciliation already used for the queue. It adds neither
+a polling timer nor a Hive mutation.
+
+### 4. Countme
 
 Countme receives local `OTEL_EXPORTER_OTLP_ENDPOINT` and optional
 `OTEL_EXPORTER_OTLP_HEADERS` only through a session Secret; never place values
 in commands, logs, durable state, or repository files. It records queue refresh
 duration/pages/items, active counts, and review/landing outcome; failure affects countme only.
 
-### 4. Remote Engine & Image Boundary
+### 5. Remote Engine & Image Boundary
 
 Podman remote setup is machine-local operator state (`podman system connection`,
 `containers.conf`, or environment): never commit `CONTAINER_HOST`, endpoints,
@@ -98,7 +120,7 @@ SSH targets, sockets, or credentials. A default connection applies transparently
 An attended review container is user-owned; a pulled or rebuilt image affects
 only future launches, never a reason to stop, restart, or kill the instance.
 
-### 5. Batch Landing Stream
+### 6. Batch Landing Stream
 
 Landing state persists under `${XDG_STATE_HOME:-~/.local/state}/bluefin-review/landings/`:
 - `<id>.prompt.md`: The brief dispatched to the landing agent.
@@ -115,7 +137,7 @@ tail -f "${XDG_STATE_HOME:-$HOME/.local/state}/bluefin-review/landings/"*.jsonl
 tail -n 50 -f "${XDG_STATE_HOME:-$HOME/.local/state}/bluefin-review/landings/"*.log
 ```
 
-### 6. Agent Health & Diagnostics
+### 7. Agent Health & Diagnostics
 
 Landing agents execute headless (`goose run --no-session -i <prompt>`).
 Common health failure modes to detect:
@@ -123,7 +145,7 @@ Common health failure modes to detect:
 2. **Permission Denied on Logs:** Missing user ownership on `/home/dev/.local/state` causing Goose logging failures.
 3. **Partitioning Starvation:** Multiple repositories packed into a single task instead of concurrent per-repo lanes.
 
-### 7. Long-Running Observation
+### 8. Long-Running Observation
 
 For a long batch, sample live container or Pod state and landing events as
 needed. Do not add a dashboard polling loop: event-triggered reconciliation
@@ -133,43 +155,16 @@ outage. Track active subagent commands for timeouts or hung external calls
 
 ## Showing Concurrency
 
-Mass review runs unattended, so the interface has one job while nobody is
-watching: say what is running, how much capacity exists, and how old the
-answer is.
+Mass review runs unattended: say what is running, available capacity, and age.
 
-Local work and Hive work are **two separate displays and must never be
-conflated**. Local review and landing lanes are the dashboard's own processes;
-the Hive fleet is other machines running contributor tasks the dashboard does
-not control. A maintainer who reads one as the other will size a batch against
-capacity that is not theirs.
+Local review and landing lanes are the dashboard's own processes; Hive
+contributors are other machines and must remain a separate display.
 
-```text
-Reviews:  4 active / 6 capacity · 11 queued · 2 retrying
-Landings: 2 active / 6 capacity · 3 queued
-Hive:     7 workers · 5 busy · queue 23            (as of 12s ago)
-```
+Show the **effective** capacity: the minimum of every applicable bound.
 
-Show the **effective** capacity, not the configured one. Capacity resolves to
-the minimum of every bound that applies, so a run throttled to two slots on a
-small machine must say two — otherwise a correctly throttled scheduler and a
-broken one look identical.
+Every remote panel carries its age; unavailable data degrades visibly.
 
-Every panel sourced from a remote carries its age. The dangerous failure for
-an unattended display is not an outage; it is hours-old state rendered as
-though it were current. Data that cannot be refreshed degrades visibly rather
-than sitting there looking fine.
-
-Local panels are always present. The Hive panel is absent when no hub is
-configured — `just review-queue org/repo` against a repository with no Hive at
-all is a first-class path, never a degraded one.
-
-Hive's own observation endpoints are the source for the fleet panel:
-`/api/contribute/fleet` and `/api/contribute/queue` are current truth, and
-`/api/contribute/events` is a low-latency notification stream, not a
-replacement for them. The stream drops events for a subscriber whose channel
-is full **without disconnecting it**, so a client that trusts the stream alone
-misses activity silently. Reconcile against a snapshot on a timer, and treat
-prolonged byte-level silence as a reconnect trigger rather than as quiet.
+No configured Hive hub is a first-class path, not a degraded dashboard.
 
 ## Common Rationalizations
 

@@ -203,6 +203,9 @@ MAX_TRIAGE_ENTRIES = int(os.environ.get("BLUEFIN_REVIEW_MAX_TRIAGE", "2000"))
 MAX_MERGE_RIGHTS_ENTRIES = int(os.environ.get("BLUEFIN_REVIEW_MAX_MERGE_RIGHTS", "500"))
 MAX_LANDING_QUEUE = int(os.environ.get("BLUEFIN_REVIEW_MAX_LANDING_QUEUE", "200"))
 MAX_REVIEW_OUTPUT_LINES = int(os.environ.get("BLUEFIN_REVIEW_MAX_OUTPUT_LINES", "200000"))
+MAX_ACTIVITY_ROWS = 8
+MAX_ACTIVITY_WORK_KEYS = 2
+MAX_ACTIVITY_TEXT = 96
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
 MAX_CONCURRENT_LANDINGS = int(
@@ -691,6 +694,20 @@ def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> Compa
 def bounded_detail(detail: str) -> str:
     detail = re.sub(r"[\x00-\x1f\x7f]+", " ", str(detail))
     return " ".join(detail.split())[:240]
+
+
+def activity_age(timestamp: float | None) -> str:
+    """A compact age for a cached dashboard snapshot."""
+    if timestamp is None:
+        return ""
+    seconds = max(0, int(time.monotonic() - timestamp))
+    if seconds < 60:
+        return "<1m ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
 
 
 def hive_token() -> str:
@@ -3099,6 +3116,10 @@ class ReviewDashboard(App):
     TITLE = "BLUEFIN REVIEW DASHBOARD"
     CSS = """
     #status-bar { height: 1; background: $panel; color: cyan; }
+    #activity {
+        border: heavy $primary; height: auto; padding: 0 1;
+        color: $text;
+    }
     #queue-pane { width: 45%; border: solid $secondary; }
     #right-pane { width: 55%; }
     #details-pane { height: 60%; border: solid $secondary; padding: 0 1; }
@@ -3178,6 +3199,9 @@ class ReviewDashboard(App):
         self.hive_workers: list[dict] = []
         self.hive_unavailable = False
         self.hive_workers_stale = False
+        self.queue_snapshot_at: float | None = None
+        self.hive_snapshot_at: float | None = None
+        self.reconciliation_updated_at: float | None = None
         self._reconciliation_request = 0
         self._reconciliation_waiting: set[str] = set()
         self._reconciliation_success: dict[str, bool] = {}
@@ -3360,6 +3384,7 @@ class ReviewDashboard(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("loading queue…", id="status-bar")
+        yield Static("AGENT ACTIVITY\nSnapshot: unavailable", id="activity")
         yield Static("Harness Autopilot — CHECKING…", id="harness-status")
         with Horizontal():
             with Vertical(id="queue-pane"):
@@ -3520,6 +3545,7 @@ class ReviewDashboard(App):
         self.hive_workers = workers
         self.hive_unavailable = False
         self.hive_workers_stale = False
+        self.hive_snapshot_at = time.monotonic()
         self.refresh_status()
         stop = self.current
         if stop:
@@ -3567,6 +3593,8 @@ class ReviewDashboard(App):
             if all(self._reconciliation_success.values())
             else "unavailable"
         )
+        if self.reconciliation_state == "fresh":
+            self.reconciliation_updated_at = time.monotonic()
         self.refresh_status()
         if self._reconciliation_pending:
             self._reconciliation_pending = False
@@ -4256,6 +4284,7 @@ class ReviewDashboard(App):
                 for item in self.all_items
                 if not (self.self_login and item.get("author") == self.self_login)
             ]
+            self.queue_snapshot_at = time.monotonic()
         if self.view_mode == "prs":
             self.apply_filters()
 
@@ -4861,6 +4890,117 @@ class ReviewDashboard(App):
             item.set_class(stop.selected, "selected")
         self.refresh_status()
 
+    def _activity_freshness(self) -> str:
+        timestamps = [
+            timestamp
+            for timestamp in (
+                self.queue_snapshot_at,
+                self.hive_snapshot_at,
+                self.reconciliation_updated_at,
+            )
+            if timestamp is not None
+        ]
+        age = activity_age(min(timestamps)) if timestamps else ""
+        if self.reconciliation_state == "refreshing":
+            return (
+                f"refreshing — last good {age}"
+                if age else "refreshing"
+            )
+        if self.hive_unavailable or self.reconciliation_state == "unavailable":
+            return (
+                f"retained/last good — {age}"
+                if age else "unavailable"
+            )
+        if timestamps:
+            return f"current — {age}" if age else "current"
+        return "unavailable"
+
+    @staticmethod
+    def _activity_work(keys: list[str]) -> str:
+        shown = [
+            bounded_detail(key)[:MAX_ACTIVITY_TEXT]
+            for key in keys[:MAX_ACTIVITY_WORK_KEYS]
+        ]
+        if len(keys) > len(shown):
+            shown.append(f"+{len(keys) - len(shown)}")
+        return ", ".join(shown)[:MAX_ACTIVITY_TEXT] or "assignment unavailable"
+
+    def refresh_activity(self) -> None:
+        """Render current lifecycle state without discovering new work."""
+        try:
+            panel = self.query_one("#activity", Static)
+        except NoMatches:
+            return
+        active_reviews: list[str] = []
+        parent_reviews = 0
+        for batch in self.review_batches:
+            if not getattr(batch, "running", False):
+                continue
+            parent_reviews += 1
+            for item in getattr(batch, "items", ()):
+                key = str(getattr(item, "key", ""))
+                if key and key not in active_reviews:
+                    active_reviews.append(key)
+        active_reviews.extend(
+            stop.key
+            for stop in self.stops
+            if stop.review_status == "running" and stop.key not in active_reviews
+        )
+        check_workers = getattr(
+            self.review_engine, "active_review_slots", lambda: 0
+        )()
+        active_landings = [
+            task for task in self.landing_queue
+            if self._landing_task_active(task)
+        ]
+        queued_landings = [
+            task for task in self.landing_queue
+            if (
+                not self._landing_task_active(task)
+                and task.process is None
+                and task.returncode is None
+            )
+        ]
+        lines = [
+            "AGENT ACTIVITY",
+            f"Parent reviews: {parent_reviews}",
+            f"Check workers: {check_workers}",
+            f"Landing agents: {len(active_landings)}",
+            f"Queued work: {len(queued_landings)}",
+            f"Snapshot: {self._activity_freshness()}",
+        ]
+        rows = [f"Review — {self._activity_work([key])}" for key in active_reviews]
+        rows.extend(
+            f"Landing — {self._activity_work(list(task.keys))}"
+            for task in active_landings
+        )
+        for worker in self.hive_workers:
+            task = worker.get("task")
+            repository = task.get("repo") if isinstance(task, dict) else None
+            number = task.get("number") if isinstance(task, dict) else None
+            login = bounded_detail(str(worker.get("login") or "?"))[:48]
+            if (
+                isinstance(repository, str)
+                and re.fullmatch(r"[^/\s]+/[^/\s]+", repository)
+                and isinstance(number, int)
+                and not isinstance(number, bool)
+                and number > 0
+            ):
+                prefix = "Hive last known @" if self.hive_workers_stale else "Hive @"
+                rows.append(
+                    f"{prefix}{login} — "
+                    f"{self._activity_work([f'{repository}#{number}'])}"
+                )
+            else:
+                rows.append(f"Hive @{login} — assignment unavailable")
+        if self.hive_unavailable and not self.hive_workers:
+            rows.append("Hive assignments unavailable")
+        if len(rows) > MAX_ACTIVITY_ROWS:
+            rows = rows[:MAX_ACTIVITY_ROWS - 1] + [
+                f"… {len(rows) - (MAX_ACTIVITY_ROWS - 1)} more active assignments"
+            ]
+        panel.update("\n".join(escape(line) for line in [*lines, *rows]))
+
     def refresh_status(self) -> None:
         selected = sum(1 for s in self.stops if s.selected)
         failed = sum(1 for s in self.stops if s.failure)
@@ -4977,6 +5117,7 @@ class ReviewDashboard(App):
             else ""
         )
         reconciliation = f" | queue {self.reconciliation_state}"
+        self.refresh_activity()
         try:
             status_bar = self.query_one("#status-bar", Static)
         except NoMatches:
@@ -7075,6 +7216,7 @@ class ReviewDashboard(App):
                         )
                     else:
                         task.process = process
+                        self.call_from_thread(self.refresh_status)
                         task.returncode = process.wait()
         finally:
             with self._landing_condition:
