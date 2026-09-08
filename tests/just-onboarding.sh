@@ -2106,7 +2106,7 @@ fi
 # stop a detached worker, diagnose, walk the PR queue, and scale workers.
 grep -qE '^turbo-review[ :]' "$code" ||
   fail "turbo-review must exist as the worker scale-out plus dashboard recipe"
-assert_eq "$(grep -cE '^(contribute|review[a-z-]*|turbo-review)[ :]' "$code")" 6 \
+assert_eq "$(grep -cE '^(contribute|review[a-z-]*|turbo-review)[ :]' "$code")" 7 \
   "expected exactly seven recipes including review-runtime"
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
