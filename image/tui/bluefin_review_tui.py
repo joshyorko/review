@@ -965,7 +965,10 @@ def org_queue_item(node: dict) -> dict:
     number = node.get("number")
     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
         raise ValueError("a pull request has an invalid number")
-    repository = (node.get("repository") or {}).get("nameWithOwner")
+    repository_node = node.get("repository")
+    if repository_node is not None and not isinstance(repository_node, dict):
+        raise ValueError(f"pull request {number} has an invalid repository")
+    repository = (repository_node or {}).get("nameWithOwner")
     if not isinstance(repository, str) or not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
         raise ValueError(f"pull request {number} has an invalid repository")
     if not isinstance(node.get("title"), str):
@@ -3177,6 +3180,8 @@ class ReviewDashboard(App):
         self.hive_workers_stale = False
         self._reconciliation_request = 0
         self._reconciliation_waiting: set[str] = set()
+        self._reconciliation_success: dict[str, bool] = {}
+        self._reconciliation_pending = False
         self.reconciliation_state = "not refreshed"
         self._queue_load_lock = threading.Lock()
         # Keys to re-select after a refresh: a refresh that silently empties
@@ -3467,68 +3472,50 @@ class ReviewDashboard(App):
         exclusive worker prevents repeated key presses from stacking network
         calls while the hub is unavailable.
         """
-        if not hive_api_base():
-            if get_current_worker().is_cancelled:
-                if reconciliation_request:
-                    self.call_from_thread(
-                        self._reconciliation_finished, "hive", reconciliation_request
-                    )
+        success = False
+        try:
+            if not hive_api_base():
+                if not get_current_worker().is_cancelled:
+                    self.call_from_thread(self.hive_failed, "not configured")
                 return
-            self.call_from_thread(
-                self.hive_failed, "not configured", reconciliation_request
-            )
-            return
-        status = hive_get("/api/v1/status")
-        if not status.ok:
-            if get_current_worker().is_cancelled:
-                if reconciliation_request:
-                    self.call_from_thread(
-                        self._reconciliation_finished, "hive", reconciliation_request
-                    )
+            status = hive_get("/api/v1/status")
+            if not status.ok:
+                if not get_current_worker().is_cancelled:
+                    self.call_from_thread(self.hive_failed, status.message)
                 return
-            self.call_from_thread(
-                self.hive_failed, status.message, reconciliation_request
-            )
-            return
-        contributor_result = hive_get("/api/v1/contributors")
-        if not contributor_result.ok:
-            if get_current_worker().is_cancelled:
-                if reconciliation_request:
-                    self.call_from_thread(
-                        self._reconciliation_finished, "hive", reconciliation_request
-                    )
+            contributor_result = hive_get("/api/v1/contributors")
+            if not contributor_result.ok:
+                if not get_current_worker().is_cancelled:
+                    self.call_from_thread(self.hive_failed, contributor_result.message)
                 return
-            self.call_from_thread(
-                self.hive_failed, contributor_result.message, reconciliation_request
+            contributors = contributor_result.data.get("contributors", [])
+            workers = [
+                {
+                    "login": contributor.get("github_username", "?"),
+                    "task": contributor.get("current_task") or {},
+                }
+                for contributor in contributors
+                if contributor.get("current_task")
+            ]
+            state = (
+                f"{status.data.get('hub', 'online')} · "
+                f"{status.data.get('actionable_items', '?')} actionable · "
+                f"{len(workers)} working"
             )
-            return
-        contributors = contributor_result.data.get("contributors", [])
-        workers = [
-            {
-                "login": contributor.get("github_username", "?"),
-                "task": contributor.get("current_task") or {},
-            }
-            for contributor in contributors
-            if contributor.get("current_task")
-        ]
-        state = (
-            f"{status.data.get('hub', 'online')} · "
-            f"{status.data.get('actionable_items', '?')} actionable · "
-            f"{len(workers)} working"
-        )
-        if get_current_worker().is_cancelled:
+            if get_current_worker().is_cancelled:
+                return
+            success = True
+            self.call_from_thread(self.hive_loaded, state, workers)
+        finally:
             if reconciliation_request:
                 self.call_from_thread(
-                    self._reconciliation_finished, "hive", reconciliation_request
+                    self._reconciliation_finished,
+                    "hive",
+                    reconciliation_request,
+                    success,
                 )
-            return
-        self.call_from_thread(
-            self.hive_loaded, state, workers, reconciliation_request
-        )
 
-    def hive_loaded(
-        self, state: str, workers: list[dict], reconciliation_request: int = 0
-    ) -> None:
+    def hive_loaded(self, state: str, workers: list[dict]) -> None:
         self.hive_state = state
         self.hive_workers = workers
         self.hive_unavailable = False
@@ -3537,9 +3524,8 @@ class ReviewDashboard(App):
         stop = self.current
         if stop:
             self.render_context(stop)
-        self._reconciliation_finished("hive", reconciliation_request)
 
-    def hive_failed(self, state: str, reconciliation_request: int = 0) -> None:
+    def hive_failed(self, state: str) -> None:
         """Keep the dashboard usable when a read-only Hive probe fails."""
         self.hive_state = state
         self.hive_unavailable = True
@@ -3548,33 +3534,43 @@ class ReviewDashboard(App):
         stop = self.current
         if stop:
             self.render_context(stop)
-        self._reconciliation_finished("hive", reconciliation_request)
 
     def _request_reconciliation(self) -> None:
         """Refresh retained GitHub and Hive evidence after a completed operation."""
         if self._reconciliation_waiting:
+            self._reconciliation_pending = True
             return
+        self._start_reconciliation()
+
+    def _start_reconciliation(self) -> None:
         self._reconciliation_request += 1
         request = self._reconciliation_request
         self._reconciliation_waiting = {"queue", "hive"}
+        self._reconciliation_success = {"queue": False, "hive": False}
         self.reconciliation_state = "refreshing"
         self.reselect = {stop.key for stop in self.stops if stop.selected}
         self.refresh_status()
         self.load_queue(request)
         self.load_hive(request)
 
-    def _reconciliation_finished(self, source: str, request: int) -> None:
-        if request != self._reconciliation_request:
+    def _reconciliation_finished(
+        self, source: str, request: int, success: bool
+    ) -> None:
+        if not request or request != self._reconciliation_request:
             return
+        self._reconciliation_success[source] = success
         self._reconciliation_waiting.discard(source)
         if self._reconciliation_waiting:
             return
         self.reconciliation_state = (
             "fresh"
-            if self.source_state in {"ready", "empty"} and not self.hive_unavailable
+            if all(self._reconciliation_success.values())
             else "unavailable"
         )
         self.refresh_status()
+        if self._reconciliation_pending:
+            self._reconciliation_pending = False
+            self._start_reconciliation()
 
     def repo_queue(self, repository: str) -> tuple[dict[str, int], int]:
         """This repository's merge queue, by segment, and its total."""
@@ -4203,59 +4199,63 @@ class ReviewDashboard(App):
 
     @work(thread=True, group="queue", exclusive=True)
     def load_queue(self, reconciliation_request: int = 0) -> None:
-        with self._queue_load_lock:
-            cached = (
-                self.self_login,
-                self.source_state,
-                self.source_message,
-            )
-            self._load_queue_data()
+        success = False
+        try:
+            with self._queue_load_lock:
+                snapshot = self._load_queue_data()
             if get_current_worker().is_cancelled:
-                (
-                    self.self_login,
-                    self.source_state,
-                    self.source_message,
-                ) = cached
-                if reconciliation_request:
-                    self.call_from_thread(
-                        self._reconciliation_finished, "queue", reconciliation_request
-                    )
                 return
-        self.call_from_thread(self.apply_filters)
-        if reconciliation_request:
-            self.call_from_thread(
-                self._reconciliation_finished, "queue", reconciliation_request
-            )
+            success = snapshot["state"] in {"ready", "empty"}
+            self.call_from_thread(self._apply_queue_snapshot, snapshot)
+        finally:
+            if reconciliation_request:
+                self.call_from_thread(
+                    self._reconciliation_finished,
+                    "queue",
+                    reconciliation_request,
+                    success,
+                )
 
-    def _load_queue_data(self) -> None:
+    def _load_queue_data(self) -> dict:
         try:
             who = gh("api", "user", "--jq", ".login")
             identity_detail = (who.stderr or who.stdout).strip()
         except (OSError, subprocess.TimeoutExpired) as error:
             who = None
             identity_detail = str(error)
-        self.self_login = who.stdout.strip() if who and who.returncode == 0 else ""
-        if not self.self_login:
-            self.source_state = "auth-failed"
-            self.source_message = bounded_detail(identity_detail or "GitHub identity is unavailable; sign in and retry")
-            return
-        if self.filters.live:
-            snapshot = self.load_live_queue(self.filters.live_repository)
-        else:
-            snapshot = self.load_org_queue()
-        # Keep the whole queue: the action filter is a view over it, so
-        # narrowing and widening never needs another fetch.
-        # The unfiltered set: "how busy is this repository" must count the
-        # maintainer's own pull requests too, even though they never appear
-        # as stops to review.
-        if self.source_state in {"ready", "empty"}:
-            self.all_items = snapshot.get("items", [])
+        login = who.stdout.strip() if who and who.returncode == 0 else ""
+        if not login:
+            return {
+                "self_login": "",
+                "state": "auth-failed",
+                "message": bounded_detail(
+                    identity_detail or "GitHub identity is unavailable; sign in and retry"
+                ),
+                "items": [],
+            }
+        snapshot = (
+            self.load_live_queue(self.filters.live_repository)
+            if self.filters.live
+            else self.load_org_queue()
+        )
+        snapshot["self_login"] = login
+        return snapshot
+
+    def _apply_queue_snapshot(self, snapshot: dict) -> None:
+        self.self_login = str(snapshot["self_login"])
+        state = str(snapshot["state"])
+        if self.view_mode == "prs":
+            self.source_state = state
+            self.source_message = str(snapshot["message"])
+        if state in {"ready", "empty"}:
+            self.all_items = snapshot["items"]
             self.queue_items = [
                 item
                 for item in self.all_items
-                # Own-work filtering: a maintainer reviews other people's work.
                 if not (self.self_login and item.get("author") == self.self_login)
             ]
+        if self.view_mode == "prs":
+            self.apply_filters()
 
     def load_org_queue(self) -> dict:
         """Every open pull request in the organization, live from GitHub.
@@ -4267,14 +4267,14 @@ class ReviewDashboard(App):
         pages_count = 0
         items_count = 0
 
-        def finished(items: list[dict]) -> dict:
+        def finished(state: str, message: str, items: list[dict]) -> dict:
             self.observability.operation(
                 "queue.refresh",
                 time.monotonic() - started,
                 pages=pages_count,
                 items=items_count,
             )
-            return {"items": items}
+            return {"state": state, "message": message, "items": items}
 
         try:
             result = gh(
@@ -4282,22 +4282,27 @@ class ReviewDashboard(App):
                 "-f", f"query={ORG_QUEUE_QUERY}",
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            self.source_state = "error"
-            self.source_message = bounded_detail(
-                f"GitHub could not list the {GITHUB_ORG} queue: {error}"
+            return finished(
+                "error",
+                bounded_detail(
+                    f"GitHub could not list the {GITHUB_ORG} queue: {error}"
+                ),
+                [],
             )
-            return finished([])
         if result.returncode:
             detail = bounded_detail((result.stderr or result.stdout).strip())
             lowered = detail.lower()
             if ("authentication" in lowered or "login" in lowered
                     or "permission" in lowered or "forbidden" in lowered
                     or "not accessible" in lowered):
-                self.source_state = "inaccessible"
+                state = "inaccessible"
             else:
-                self.source_state = "error"
-            self.source_message = detail or f"GitHub could not list the {GITHUB_ORG} queue"
-            return finished([])
+                state = "error"
+            return finished(
+                state,
+                detail or f"GitHub could not list the {GITHUB_ORG} queue",
+                [],
+            )
         try:
             pages = json.loads(result.stdout)
             if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
@@ -4316,40 +4321,51 @@ class ReviewDashboard(App):
                     items.append(org_queue_item(node))
             items_count = len(items)
         except (json.JSONDecodeError, ValueError) as error:
-            self.source_state = "malformed"
-            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            return finished([])
-        self.source_state = "empty" if not items else "ready"
-        self.source_message = ""
-        return finished(items)
+            return finished(
+                "malformed",
+                bounded_detail(f"malformed GitHub response: {error}"),
+                [],
+            )
+        return finished("empty" if not items else "ready", "", items)
 
     def load_live_queue(self, repository: str) -> dict:
         if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
-            self.source_state = "malformed"
-            self.source_message = bounded_detail(f"invalid repository '{repository}'; use owner/repo")
-            return {"items": []}
+            return {
+                "state": "malformed",
+                "message": bounded_detail(
+                    f"invalid repository '{repository}'; use owner/repo"
+                ),
+                "items": [],
+            }
         try:
             result = gh(
                 "api", "--paginate", "--slurp", "--method", "GET",
                 f"repos/{repository}/pulls?state=open&per_page=100",
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            self.source_state = "error"
-            self.source_message = bounded_detail(f"GitHub could not read this repository: {error}")
-            return {"items": []}
+            return {
+                "state": "error",
+                "message": bounded_detail(
+                    f"GitHub could not read this repository: {error}"
+                ),
+                "items": [],
+            }
         if result.returncode:
             detail = bounded_detail((result.stderr or result.stdout).strip())
             lowered = detail.lower()
             if ("authentication" in lowered or "login" in lowered
                     or "permission" in lowered or "forbidden" in lowered
                     or "not accessible" in lowered):
-                self.source_state = "inaccessible"
+                state = "inaccessible"
             elif "not found" in lowered or "could not resolve" in lowered:
-                self.source_state = "missing"
+                state = "missing"
             else:
-                self.source_state = "error"
-            self.source_message = detail or "GitHub could not read this repository"
-            return {"items": []}
+                state = "error"
+            return {
+                "state": state,
+                "message": detail or "GitHub could not read this repository",
+                "items": [],
+            }
         try:
             pages = json.loads(result.stdout)
             if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
@@ -4358,9 +4374,11 @@ class ReviewDashboard(App):
             if any(not isinstance(pull, dict) for pull in pulls):
                 raise ValueError("GitHub returned a malformed pull-request entry")
         except (json.JSONDecodeError, ValueError) as error:
-            self.source_state = "malformed"
-            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            return {"items": []}
+            return {
+                "state": "malformed",
+                "message": bounded_detail(f"malformed GitHub response: {error}"),
+                "items": [],
+            }
         try:
             items = []
             for index, pull in enumerate(pulls, 1):
@@ -4401,12 +4419,12 @@ class ReviewDashboard(App):
                     ),
                 })
         except ValueError as error:
-            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            self.source_state = "malformed"
-            return {"items": []}
-        self.source_state = "empty" if not items else "ready"
-        self.source_message = ""
-        return {"items": items}
+            return {
+                "state": "malformed",
+                "message": bounded_detail(f"malformed GitHub response: {error}"),
+                "items": [],
+            }
+        return {"state": "empty" if not items else "ready", "message": "", "items": items}
 
     @work(thread=True, exclusive=True)
     def load_issues(self) -> None:

@@ -242,6 +242,7 @@ async def main() -> int:
         f'    printf "request\\n" >>"{queue_refresh_log}"\n'
         '    sleep 0.45\n'
         '  fi\n'
+        '  if [ -n "${ORG_QUEUE_GH_ERROR-}" ]; then printf "%s\\n" "$ORG_QUEUE_GH_ERROR" >&2; exit 1; fi\n'
         f'  cat "{org_queue_file}"; exit 0\n'
         'fi\n'
         'if [ "$1 $2" = "issue view" ]; then\n'
@@ -6255,6 +6256,10 @@ async def main() -> int:
                     break
                 await pilot.pause(0.01)
             await app.workers.wait_for_complete()
+            check(
+                app.reconciliation_state == "not refreshed",
+                "initial Hive and queue loads must not change reconciliation state",
+            )
             # The initial load is not an operation-triggered reconciliation.
             set_org_queue(SNAPSHOT["items"])
             await pilot.press("R")
@@ -6305,19 +6310,76 @@ async def main() -> int:
                 not any(stop.number == 31 for stop in app.stops),
                 "a completed landing must replace the cached queue so a merged PR disappears",
             )
+            for _ in range(200):
+                if (
+                    not app._reconciliation_waiting
+                    and queue_refresh_log.read_text().splitlines() == ["request", "request"]
+                    and hive_requests.count("/api/v1/contributors") == 2
+                ):
+                    break
+                await pilot.pause(0.01)
             check(
-                queue_refresh_log.read_text().splitlines() == ["request"],
-                "concurrent completed operations must coalesce to one GitHub queue refresh",
+                queue_refresh_log.read_text().splitlines() == ["request", "request"],
+                "operations during a refresh must coalesce to one additional GitHub queue refresh",
             )
             check(
-                hive_requests.count("/api/v1/status") == 1
-                and hive_requests.count("/api/v1/contributors") == 1,
-                f"concurrent completed operations must coalesce to one Hive refresh, got {hive_requests!r}",
+                hive_requests.count("/api/v1/status") == 2
+                and hive_requests.count("/api/v1/contributors") == 2,
+                f"operations during a refresh must coalesce to one additional Hive refresh, got {hive_requests!r}",
             )
             await pilot.pause(0.2)
             check(
-                queue_refresh_log.read_text().splitlines() == ["request"],
+                queue_refresh_log.read_text().splitlines() == ["request", "request"],
                 "no timer may create another queue refresh after reconciliation completes",
+            )
+
+            # Queue and issue workers run in separate exclusive groups. A
+            # failed queue refresh must retain its good queue even when an
+            # issue response updates the shared source display meanwhile.
+            set_org_queue(SNAPSHOT["items"])
+            await pilot.press("R")
+            await app.workers.wait_for_complete()
+            os.environ["ORG_QUEUE_GH_ERROR"] = "queue unavailable"
+            delay_queue_refresh.touch()
+            app._request_reconciliation()
+            app.load_issues()
+            for _ in range(200):
+                if not app._reconciliation_waiting:
+                    break
+                await pilot.pause(0.01)
+            check(
+                any(stop.number == 31 for stop in app.stops),
+                "a failed queue refresh concurrent with issue loading must retain the good queue",
+            )
+            os.environ.pop("ORG_QUEUE_GH_ERROR", None)
+            delay_queue_refresh.unlink(missing_ok=True)
+
+            # This truthy non-mapping passes the outer page validation and
+            # raises while a worker normalizes the pull request. Completion
+            # must still unblock a later successful operation refresh.
+            malformed_pages = json.loads(org_search_pages(SNAPSHOT["items"]))
+            malformed_pages[0]["data"]["search"]["nodes"][0]["repository"] = "not-a-mapping"
+            org_queue_file.write_text(json.dumps(malformed_pages))
+            app._request_reconciliation()
+            for _ in range(200):
+                if not app._reconciliation_waiting:
+                    break
+                await pilot.pause(0.01)
+            check(
+                not app._reconciliation_waiting,
+                "an unexpected queue worker exception must finish reconciliation",
+            )
+            request_after_error = app._reconciliation_request
+            set_org_queue(SNAPSHOT["items"])
+            app._request_reconciliation()
+            for _ in range(200):
+                if not app._reconciliation_waiting:
+                    break
+                await pilot.pause(0.01)
+            check(
+                app._reconciliation_request == request_after_error + 1
+                and app.reconciliation_state == "fresh",
+                "a later operation must start and finish a refresh after a worker exception",
             )
     finally:
         tui.hive_get = original_hive_get
