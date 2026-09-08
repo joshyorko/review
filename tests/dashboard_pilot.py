@@ -6330,6 +6330,19 @@ async def main() -> int:
                 )
             ]
             app.stops[0].review_status = "running"
+            app.stops[0].selected = True
+            app.stops[1].selected = True
+            app.self_login = "castrojo"
+            app.stops[1].review_status = "complete"
+            app.stops[1].review_result = tui.ReviewResult(
+                1,
+                "complete",
+                {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            )
+            app.stops[1].live["reviews"] = [{
+                "author": {"login": "castrojo"},
+                "state": "APPROVED",
+            }]
             app.review_engine = SimpleNamespace(
                 effective_review_cap=lambda: 6,
                 active_review_slots=lambda: 2,
@@ -6360,6 +6373,9 @@ async def main() -> int:
                 "Review — projectbluefin/bluefinctl#31",
                 "Landing — projectbluefin/common#7",
                 "Hive @hive-contributor — projectbluefin/dakota#88",
+                "Remote analysis: projectbluefin/bluefinctl#31",
+                "Local draft: projectbluefin/common#7 (clean)",
+                "GitHub review: projectbluefin/common#7 (APPROVED)",
                 "Snapshot: current",
                 "1m ago",
             ):

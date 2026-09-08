@@ -4972,6 +4972,43 @@ class ReviewDashboard(App):
             shown.append(f"+{len(keys) - len(shown)}")
         return ", ".join(shown)[:MAX_ACTIVITY_TEXT] or "assignment unavailable"
 
+    def _review_activity_rows(self) -> list[str]:
+        """Summarize selected review state without another GitHub request."""
+        selected = [stop for stop in self.stops if stop.selected]
+        if not selected:
+            return ["Review status: select a PR to inspect its review state"]
+        active = []
+        drafts = []
+        submitted = []
+        for stop in selected:
+            if stop.review_status in {"queued", "running"}:
+                active.append(stop.key)
+            result = stop.review_result
+            if result and stop.review_status in {"complete", "findings"}:
+                verdict = "clean" if result.is_clean else "findings"
+                drafts.append(f"{stop.key} ({verdict})")
+            reviews = stop.live.get("reviews") or []
+            if isinstance(reviews, dict):
+                reviews = reviews.get("nodes") or []
+            if not isinstance(reviews, list):
+                continue
+            for review in reviews:
+                if not isinstance(review, dict):
+                    continue
+                login = (review.get("author") or {}).get("login")
+                state = str(review.get("state") or "").upper()
+                if login == self.self_login and state:
+                    submitted.append(f"{stop.key} ({state})")
+                    break
+        rows = []
+        if active:
+            rows.append(f"Remote analysis: {self._activity_work(active)}")
+        if drafts:
+            rows.append(f"Local draft: {self._activity_work(drafts)}")
+        if submitted:
+            rows.append(f"GitHub review: {self._activity_work(submitted)}")
+        return rows or ["Review status: no active analysis, draft, or GitHub review"]
+
     def refresh_activity(self) -> None:
         """Render current lifecycle state without discovering new work."""
         try:
@@ -5016,6 +5053,7 @@ class ReviewDashboard(App):
             f"Queued work: {len(queued_landings)}",
             f"Snapshot: {self._activity_freshness()}",
         ]
+        lines.extend(self._review_activity_rows())
         rows = [f"Review — {self._activity_work([key])}" for key in active_reviews]
         rows.extend(
             f"Landing — {self._activity_work(list(task.keys))}"
