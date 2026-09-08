@@ -108,6 +108,16 @@ $(cat "$2" 2>/dev/null)
 --------------"
   return 0
 }
+assert_file_before() {
+  local earlier later file earlier_line later_line
+  earlier="$1"
+  later="$2"
+  file="$3"
+  earlier_line="$(grep -nF -- "$earlier" "$file" | head -1 | cut -d: -f1)"
+  later_line="$(grep -nF -- "$later" "$file" | head -1 | cut -d: -f1)"
+  [[ -n "$earlier_line" && -n "$later_line" && "$earlier_line" -lt "$later_line" ]] ||
+    fail "expected '$earlier' before '$later' in $file"
+}
 assert_file_exists() { [[ -e "$1" ]] || fail "expected file to exist: $1"; }
 assert_file_not_exists() { [[ ! -e "$1" ]] || fail "expected file to be absent: $1"; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "${3:-value mismatch}: expected '$2', got '$1'"; }
@@ -328,7 +338,8 @@ run_recipe() {
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
       -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
       -u REVIEW_QUEUE_NAME -u REVIEW_SCALE -u XDG_STATE_HOME -u FAKE_GIT_TOPLEVEL \
-      -u REVIEW_RUNTIME -u FAKE_KUBECTL_DASHBOARD_PVC_MISSING \
+      -u REVIEW_RUNTIME -u FAKE_KUBECTL_DASHBOARD_API_UNAVAILABLE \
+      -u FAKE_KUBECTL_DASHBOARD_PVC_MISSING -u FAKE_KUBECTL_DASHBOARD_PVC_FORBIDDEN \
       -u REVIEW_LAB -u REVIEW_LAB_BROKER -u REVIEW_PERSONAL_SKILLS \
       -u HIVE_HUB \
       -u FAKE_KUBECTL_ANNOTATION_GET_FAIL -u FAKE_KUBECTL_ANNOTATE_FAIL \
@@ -659,9 +670,13 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
 case "$*" in
   "config current-context") printf 'ghost-lab\n' ;;
+  "get --raw=/readyz?verbose --request-timeout=5s")
+    [[ "${FAKE_KUBECTL_DASHBOARD_API_UNAVAILABLE:-0}" == 1 ]] && exit 52
+    ;;
   "get nodes -o name") printf 'node/ghost\nnode/exo-0\n' ;;
-  "get pvc review-queue-state -n bluefin-system")
+  "get pvc review-queue-state -n bluefin-system"*)
     [[ "${FAKE_KUBECTL_DASHBOARD_PVC_MISSING:-0}" == 1 ]] && exit 51
+    [[ "${FAKE_KUBECTL_DASHBOARD_PVC_FORBIDDEN:-0}" == 1 ]] && exit 53
     ;;
   "create -f -") cat >"${KUBERNETES_MANIFEST_LOG:?}" ;;
   "attach --stdin --tty review-queue-"*"-n bluefin-system") ;;
@@ -775,16 +790,31 @@ assert_file_contains "run --rm --interactive --tty --replace --name review-queue
 assert_contains "Kubernetes is unavailable; using the local Podman dashboard" "$OUT"
 
 install_fake_kubectl
+begin "review-queue: an unreachable Kubernetes API falls back before state-claim lookup"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s \
+  FAKE_KUBECTL_DASHBOARD_API_UNAVAILABLE=1
+assert_nonzero_status "$STATUS" "the Podman fallback runner exits non-zero"
+assert_contains "Kubernetes is unavailable; using the local Podman dashboard" "$OUT"
+assert_file_contains "get --raw=/readyz?verbose --request-timeout=5s" "$kubectl_log"
+assert_file_not_contains "get pvc review-queue-state -n bluefin-system" "$kubectl_log"
+assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
+
 begin "review-queue: Kubernetes runtime uses an ephemeral restricted dashboard Pod"
 reset_logs
 RECIPE_ARGS=(--repo bluefin)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s
 assert_zero_status "$STATUS" "the fake Kubernetes dashboard session must succeed"
 assert_file_contains "config current-context" "$kubectl_log"
+assert_file_contains "get --raw=/readyz?verbose --request-timeout=5s" "$kubectl_log"
 assert_file_contains "get pvc review-queue-state -n bluefin-system" "$kubectl_log"
 assert_file_contains "create secret generic review-session-" "$kubectl_log"
 assert_file_contains "create -f -" "$kubectl_log"
+assert_file_contains "wait --for=condition=Ready pod/review-queue-" "$kubectl_log"
+assert_file_contains "-n bluefin-system --timeout=5m" "$kubectl_log"
 assert_file_contains "attach --stdin --tty review-queue-" "$kubectl_log"
+assert_file_before "wait --for=condition=Ready pod/review-queue-" \
+  "attach --stdin --tty review-queue-" "$kubectl_log"
 assert_file_contains "delete pod review-queue-" "$kubectl_log"
 assert_file_contains "delete secret review-session-" "$kubectl_log"
 assert_eq "$(wc -c <"$runner_log")" 0 "Kubernetes runtime must not launch Podman"
@@ -797,10 +827,27 @@ reset_logs
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s \
   FAKE_KUBECTL_DASHBOARD_PVC_MISSING=1
 assert_nonzero_status "$STATUS" "a Kubernetes dashboard needs its persistent state claim"
-assert_contains "Kubernetes dashboard state claim 'review-queue-state' is unavailable" "$OUT"
+assert_contains "Kubernetes dashboard state claim 'review-queue-state' cannot be read" "$OUT"
 assert_eq "$(wc -c <"$runner_log")" 0 "a missing state claim must not fall back to a Podman session"
 assert_file_not_contains "create secret generic review-session-" "$kubectl_log"
 assert_file_not_contains "create -f -" "$kubectl_log"
+
+begin "review-queue: an unreadable dashboard state claim fails before starting a Pod"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s \
+  FAKE_KUBECTL_DASHBOARD_PVC_FORBIDDEN=1
+assert_nonzero_status "$STATUS" "an unreadable state claim must stop the Kubernetes dashboard"
+assert_contains "Kubernetes dashboard state claim 'review-queue-state' cannot be read" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "an unreadable state claim must not fall back to a Podman session"
+assert_file_not_contains "create secret generic review-session-" "$kubectl_log"
+assert_file_not_contains "create -f -" "$kubectl_log"
+
+begin "review-queue: Kubernetes Codex sessions explain unstaged subscription login"
+reset_logs
+run_recipe review-queue BLUEFIN_REVIEW_BACKEND=codex GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_RUNTIME=k8s
+assert_zero_status "$STATUS" "the fake Kubernetes Codex dashboard session must succeed"
+assert_contains "Kubernetes dashboard sessions do not stage a Codex subscription login" "$OUT"
+assert_file_not_contains "CODEX_AUTH_MOUNT:" "$credential_log"
 
 begin "review-queue: a declined lab starts no broker and mounts nothing"
 reset_logs

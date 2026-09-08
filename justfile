@@ -370,8 +370,9 @@ ensure_contributor_image() {
 review_queue_kubernetes_available() {
   command -v kubectl &>/dev/null || return 1
   kubectl config current-context >/dev/null 2>&1 || return 1
-  kubectl get pvc review-queue-state -n bluefin-system >/dev/null 2>&1 || {
-    echo "ERROR: Kubernetes dashboard state claim 'review-queue-state' is unavailable." >&2
+  kubectl get --raw='/readyz?verbose' --request-timeout=5s >/dev/null 2>&1 || return 1
+  kubectl get pvc review-queue-state -n bluefin-system --request-timeout=5s >/dev/null 2>&1 || {
+    echo "ERROR: Kubernetes dashboard state claim 'review-queue-state' cannot be read; it may be absent or access may be denied." >&2
     return 2
   }
 }
@@ -411,6 +412,7 @@ review_queue_kubernetes() {
   python3 scripts/review-session-runtime.py "$session_id" "$image" \
     "$K8S_DASHBOARD_SECRET" review-queue-state "$env_names" queue "$@" |
     kubectl create -f -
+  kubectl wait --for=condition=Ready "pod/${K8S_DASHBOARD_POD}" -n bluefin-system --timeout=5m
   kubectl attach --stdin --tty "$K8S_DASHBOARD_POD" -n bluefin-system
 }
 
@@ -1581,6 +1583,8 @@ review-queue *queue_args:
           echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
           echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
         fi
+      else
+        echo "! Kubernetes dashboard sessions do not stage a Codex subscription login." >&2
       fi
     fi
     # The dashboard is a GitHub reader from the first keystroke to the last, so
