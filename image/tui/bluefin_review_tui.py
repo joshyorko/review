@@ -3205,6 +3205,7 @@ class ReviewDashboard(App):
         self._reconciliation_request = 0
         self._reconciliation_waiting: set[str] = set()
         self._reconciliation_success: dict[str, bool] = {}
+        self._reconciliation_source_attempts = {"queue": 0, "hive": 0}
         self._reconciliation_pending = False
         self.reconciliation_state = "not refreshed"
         self._queue_load_lock = threading.Lock()
@@ -3490,7 +3491,9 @@ class ReviewDashboard(App):
             )
 
     @work(thread=True, group="hive", exclusive=True)
-    def load_hive(self, reconciliation_request: int = 0) -> None:
+    def load_hive(
+        self, reconciliation_request: int = 0, reconciliation_attempt: int = 0
+    ) -> None:
         """Ask Hive what it is doing. Read-only, and never blocking.
 
         Hive probes are only retried by an explicit maintainer action. The
@@ -3538,6 +3541,7 @@ class ReviewDashboard(App):
                     self._reconciliation_finished,
                     "hive",
                     reconciliation_request,
+                    reconciliation_attempt,
                     success,
                 )
 
@@ -3588,13 +3592,24 @@ class ReviewDashboard(App):
         self.reconciliation_state = "refreshing"
         self.reselect = {stop.key for stop in self.stops if stop.selected}
         self.refresh_status()
-        self.load_queue(request)
-        self.load_hive(request)
+        self._start_reconciliation_source("queue", request)
+        self._start_reconciliation_source("hive", request)
+
+    def _start_reconciliation_source(self, source: str, request: int) -> None:
+        """Start one source attempt and identify its eventual callback."""
+        self._reconciliation_source_attempts[source] += 1
+        attempt = self._reconciliation_source_attempts[source]
+        if source == "queue":
+            self.load_queue(request, attempt)
+        else:
+            self.load_hive(request, attempt)
 
     def _reconciliation_finished(
-        self, source: str, request: int, success: bool
+        self, source: str, request: int, attempt: int, success: bool
     ) -> None:
         if not request or request != self._reconciliation_request:
+            return
+        if attempt != self._reconciliation_source_attempts.get(source):
             return
         self._reconciliation_success[source] = success
         self._reconciliation_waiting.discard(source)
@@ -3644,7 +3659,10 @@ class ReviewDashboard(App):
         """Ask Hive again, and say what it is working on right now."""
         self.notify("asking Hive…")
         request = self._reconciliation_request if self._reconciliation_waiting else 0
-        self.load_hive(request)
+        if request:
+            self._start_reconciliation_source("hive", request)
+        else:
+            self.load_hive()
 
     def action_steer(self) -> None:
         """Focus the steering box: free text that rides along with the next
@@ -4241,7 +4259,9 @@ class ReviewDashboard(App):
     # ── data layer (walker parity) ────────────────────────────────────────
 
     @work(thread=True, group="queue", exclusive=True)
-    def load_queue(self, reconciliation_request: int = 0) -> None:
+    def load_queue(
+        self, reconciliation_request: int = 0, reconciliation_attempt: int = 0
+    ) -> None:
         success = False
         try:
             with self._queue_load_lock:
@@ -4256,6 +4276,7 @@ class ReviewDashboard(App):
                     self._reconciliation_finished,
                     "queue",
                     reconciliation_request,
+                    reconciliation_attempt,
                     success,
                 )
 
@@ -6440,8 +6461,12 @@ class ReviewDashboard(App):
                 if self._reconciliation_waiting
                 else 0
             )
-            self.load_queue(request)
-            self.load_hive(request)
+            if request:
+                self._start_reconciliation_source("queue", request)
+                self._start_reconciliation_source("hive", request)
+            else:
+                self.load_queue()
+                self.load_hive()
 
     def action_update_branch(self) -> None:
         """Bring the branch up to date with its base — the batch, if set.

@@ -408,6 +408,22 @@ class SlayStateMachineContractTests(unittest.TestCase):
 
             self.assertEqual(restored.failure, f"failed: {'x' * 240}")
 
+    def test_late_reconciliation_callback_cannot_overwrite_fresh_source(self):
+        """A cancelled worker cannot stale a source settled by its replacement."""
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+            app._reconciliation_request = 1
+            app._reconciliation_waiting = {"hive"}
+            app._reconciliation_success = {"queue": True, "hive": False}
+            app._reconciliation_source_attempts = {"queue": 1, "hive": 2}
+            app.reconciliation_state = "refreshing"
+
+            app._reconciliation_finished("hive", 1, 2, True)
+            self.assertEqual(app.reconciliation_state, "fresh")
+
+            app._reconciliation_finished("hive", 1, 1, False)
+            self.assertEqual(app.reconciliation_state, "fresh")
+
 
 if __name__ == "__main__":
     unittest.main()
