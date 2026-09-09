@@ -1,10 +1,10 @@
 """Contract checks for the mixed-workboard foundation slice.
 
 Validates that:
-- QueueFilters defaults to kind="mixed" and supports "prs" and "issues".
+- QueueFilters defaults to kind="prs" and supports "mixed" and "issues".
 - QueueFilters.wants_kind and wants filter correctly for PRs and issues.
 - ReviewDashboard composes PR and issue items into a single stops list.
-- Tab toggles cycle mixed -> prs -> issues -> mixed.
+- I toggles cycle prs -> issues -> mixed -> prs.
 - PR and issue source states are modeled independently (failing issue fetch does
   not corrupt PR source state or wipe out PR stops, and vice versa).
 - Selection (b/B/Space) is shared and type-agnostic across PRs and issues.
@@ -31,9 +31,9 @@ import tui.bluefin_review_tui as tui
 
 
 class MixedWorkboardContractTests(unittest.TestCase):
-    def test_queue_filters_default_kind(self) -> None:
+    def test_queue_filters_default_to_pull_requests(self) -> None:
         filters = tui.QueueFilters()
-        self.assertEqual(filters.kind, "mixed")
+        self.assertEqual(filters.kind, "prs")
 
     def test_queue_filters_wants_kind(self) -> None:
         pr_item = {"repository": "acme/repo", "number": 1, "is_issue": False}
@@ -68,26 +68,54 @@ class MixedWorkboardContractTests(unittest.TestCase):
         self.assertFalse(action_filter.wants(pr2))
         self.assertFalse(action_filter.wants(issue1))
 
-    def test_dashboard_default_view_mode_is_mixed(self) -> None:
+    def test_dashboard_default_view_mode_is_pull_requests(self) -> None:
         app = tui.ReviewDashboard()
-        self.assertEqual(app.view_mode, "mixed")
-        self.assertEqual(app.filters.kind, "mixed")
-
-    def test_tab_cycles_mixed_prs_issues_mixed(self) -> None:
-        app = tui.ReviewDashboard()
-        self.assertEqual(app.view_mode, "mixed")
-        app.action_toggle_view()
         self.assertEqual(app.view_mode, "prs")
         self.assertEqual(app.filters.kind, "prs")
+
+    def test_tab_cycles_prs_issues_mixed_prs(self) -> None:
+        app = tui.ReviewDashboard()
+        self.assertEqual(app.view_mode, "prs")
         app.action_toggle_view()
         self.assertEqual(app.view_mode, "issues")
         self.assertEqual(app.filters.kind, "issues")
         app.action_toggle_view()
         self.assertEqual(app.view_mode, "mixed")
         self.assertEqual(app.filters.kind, "mixed")
+        app.action_toggle_view()
+        self.assertEqual(app.view_mode, "prs")
+        self.assertEqual(app.filters.kind, "prs")
+
+    def test_i_is_the_only_view_toggle_binding(self) -> None:
+        self.assertEqual(
+            [command.key for command in tui.COMMANDS if command.action == "toggle_view"],
+            ["I"],
+        )
+
+    def test_multi_pr_slay_confirmation_uses_one_word(self) -> None:
+        gate = tui.SlayConfirmScreen([
+            tui.Stop("acme/repo", 1, "review", "one"),
+            tui.Stop("acme/repo", 2, "review", "two"),
+        ])
+        self.assertEqual(gate.expected, "slay")
+
+    def test_batch_selection_does_not_run_lifecycle_refresh(self) -> None:
+        app = tui.ReviewDashboard()
+        stop = tui.Stop("acme/repo", 1, "review", "one")
+        with (
+            mock.patch.object(
+                type(app), "current", new_callable=mock.PropertyMock, return_value=stop
+            ),
+            mock.patch.object(app, "refresh_rows") as refresh_rows,
+        ):
+            app.action_batch()
+        self.assertTrue(stop.selected)
+        refresh_rows.assert_not_called()
 
     def test_apply_filters_composes_prs_and_issues_in_mixed_mode(self) -> None:
         app = tui.ReviewDashboard()
+        app.view_mode = "mixed"
+        app.filters.kind = "mixed"
         app.queue_items = [
             {
                 "repository": "projectbluefin/bluefinctl",
@@ -1409,8 +1437,8 @@ class MixedWorkboardContractTests(unittest.TestCase):
         self.assertEqual(gate.targets, [pr1, pr2])
         # Issue selection must remain intact
         self.assertTrue(issue1.selected)
-        # Gate must show exact PRs and heads
-        self.assertEqual(gate.expected, "31 7")
+        # Gate must show exact PRs and heads behind one bounded confirmation.
+        self.assertEqual(gate.expected, "slay")
         self.assertEqual(gate.targets[0].head_identity, "b" * 40)
         self.assertEqual(gate.targets[1].head_identity, "c" * 40)
         self.assertNotIn(issue1, gate.targets)

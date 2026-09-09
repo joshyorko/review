@@ -2775,7 +2775,31 @@ async def main() -> int:
         # left: capture both reference backgrounds first.
         cursor_bg = queue.children[0].styles.background
         plain_bg = queue.children[1].styles.background
+
+        class CountingRunStore:
+            def __init__(self) -> None:
+                self.snapshot_calls = 0
+                self.get_calls = 0
+
+            def snapshot(self) -> dict[str, object]:
+                self.snapshot_calls += 1
+                return {}
+
+            def get(self, _identity) -> None:
+                self.get_calls += 1
+                return None
+
+        run_store = CountingRunStore()
+        app.run_store = run_store
         await pilot.press("b")
+        check(
+            run_store.snapshot_calls == 1,
+            "batch selection must read run state once for the whole visible queue",
+        )
+        check(
+            run_store.get_calls == 0,
+            "batch selection must not read run state separately for each row",
+        )
         await pilot.press("down")
         await pilot.pause()
         check(
@@ -7690,15 +7714,41 @@ async def main() -> int:
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await wait_for_live_rows(app, pilot, "ready", 3)
-        check(app.view_mode == "mixed", "dashboard must start in mixed view_mode")
+        check(app.view_mode == "prs", "dashboard must start in PR view_mode")
         check(
-            any(not s.is_issue for s in app.stops) and any(s.is_issue for s in app.stops),
-            "mixed view must contain both PRs and issues",
+            app.stops and all(not s.is_issue for s in app.stops),
+            "default PR view must contain only pull requests",
         )
         status = str(app.query_one("#status-bar", tui.Static).render())
         check(
-            "[Tab] Mixed view" in status and "Board:" in status,
-            f"status bar must reflect mixed lens, got {status!r}",
+            "[I] PR view" in status and "Queue: 2 PRs" in status,
+            f"status bar must reflect PR lens, got {status!r}",
+        )
+
+        await pilot.press("tab")
+        await pilot.pause()
+        check(
+            app.view_mode == "prs",
+            "Tab must retain Textual's focus traversal instead of changing views",
+        )
+        app.query_one("#queue", tui.ListView).focus()
+
+        # Reach the optional mixed workboard for shared PR/issue selection.
+        await pilot.press("I")
+        await pilot.press("I")
+        for _ in range(200):
+            if (
+                app.view_mode == "mixed"
+                and any(not s.is_issue for s in app.stops)
+                and any(s.is_issue for s in app.stops)
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            app.view_mode == "mixed"
+            and any(not s.is_issue for s in app.stops)
+            and any(s.is_issue for s in app.stops),
+            "mixed view must contain both PRs and issues",
         )
 
         # Shared selection across PRs and issues
@@ -7712,9 +7762,9 @@ async def main() -> int:
             f"selection must cover both PR and issue rows, got {[(s.key, s.selected) for s in app.stops]}",
         )
 
-        # Press tab: verify view_mode == "prs"
-        await pilot.press("tab")
-        check(app.view_mode == "prs", "Tab must switch view_mode from mixed to prs")
+        # Press I: verify view_mode == "prs"
+        await pilot.press("I")
+        check(app.view_mode == "prs", "I must switch view_mode from mixed to prs")
         for _ in range(200):
             if app.stops and all(not s.is_issue for s in app.stops):
                 break
@@ -7724,11 +7774,11 @@ async def main() -> int:
             f"prs view must contain only PRs, got {app.stops}",
         )
         status = str(app.query_one("#status-bar", tui.Static).render())
-        check("[Tab] PR view" in status, f"status bar must reflect PR lens, got {status!r}")
+        check("[I] PR view" in status, f"status bar must reflect PR lens, got {status!r}")
 
-        # Press tab again: verify view_mode == "issues"
-        await pilot.press("tab")
-        check(app.view_mode == "issues", "Tab must switch view_mode from prs to issues")
+        # Press I again: verify view_mode == "issues"
+        await pilot.press("I")
+        check(app.view_mode == "issues", "I must switch view_mode from prs to issues")
         for _ in range(200):
             if app.stops and app.stops[0].is_issue and len(app._queue().children) > 0:
                 break
@@ -7738,7 +7788,7 @@ async def main() -> int:
             f"issues view must populate stops with is_issue=True, got {app.stops}",
         )
         status = str(app.query_one("#status-bar", tui.Static).render())
-        check("[Tab] Issues view" in status, f"status bar must reflect issues lens, got {status!r}")
+        check("[I] Issues view" in status, f"status bar must reflect issues lens, got {status!r}")
 
         first_item = app._queue().children[0]
         check(
@@ -7787,14 +7837,18 @@ async def main() -> int:
             if isinstance(app.screen, tui.CommentPreview):
                 break
             await pilot.pause(0.05)
+        preview = app.screen
         check(
-            isinstance(app.screen, tui.CommentPreview),
-            f"submitting comment body must open CommentPreview, got {type(app.screen).__name__}",
+            isinstance(preview, tui.CommentPreview),
+            f"submitting comment body must open CommentPreview, got {type(preview).__name__}",
         )
-        check(
-            "triage comment on issue" in app.screen.body,
-            "CommentPreview must show comment text",
-        )
+        if isinstance(preview, tui.CommentPreview):
+            check(
+                "triage comment on issue" in preview.body,
+                "CommentPreview must show comment text",
+            )
+        else:
+            failures.append("CommentPreview must show comment text")
         await pilot.click("#comment-preview-submit")
         for _ in range(50):
             if isinstance(app.screen, tui.ConfirmMutation):
@@ -7854,9 +7908,9 @@ async def main() -> int:
         await app.workers.wait_for_complete()
         await pilot.pause()
 
-        # Press tab again: verify cycling back to mixed
-        await pilot.press("tab")
-        check(app.view_mode == "mixed", "pressing tab again must switch view_mode back to mixed")
+        # Press I again: verify cycling back to mixed
+        await pilot.press("I")
+        check(app.view_mode == "mixed", "pressing I again must switch view_mode back to mixed")
         for _ in range(200):
             if len(app.stops) == 2:
                 break

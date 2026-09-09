@@ -290,7 +290,6 @@ COMMANDS = (
     CommandSpec("batch", "b", "batch", "batch select"),
     CommandSpec("select_all", "B", "select_all", "select/clear visible rows"),
     CommandSpec("toggle_advance", "space", "toggle_advance", "toggle and advance"),
-    CommandSpec("toggle_view", "tab", "toggle_view", "toggle PRs/issues"),
     CommandSpec("toggle_view_alias", "I", "toggle_view", "toggle PRs/issues"),
     CommandSpec("next_unreviewed", "n", "next_unreviewed", "next PR lacking my review"),
     CommandSpec("docs", "d", "docs", "update docs"),
@@ -329,7 +328,7 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # changes anything on GitHub; everything on the second goes through the
 # typed-number gate.
 KEYS_READING = (
-    " [b]Tab[/b] issues/PRs"
+    " [b]I[/b] issues/PRs [b]Tab[/b] focus panes"
     " [b]r[/b] review [b]v[/b] diff [b]C[/b] comments [b]o[/b] open [b]h[/b] handoff"
     " [b]/[/b] steer [b]f[/b] filter [b]b[/b]/[b]B[/b] select"
     " [b]Space[/b] select+next [b]n[/b] next lacking my review"
@@ -1152,7 +1151,7 @@ class QueueFilters:
     action: str = ""
     repository: str = ""
     live_repository: str = ""
-    kind: str = "mixed"
+    kind: str = "prs"
 
     @property
     def live(self) -> bool:
@@ -1887,8 +1886,8 @@ class SlayConfirmScreen(ModalScreen[bool]):
 
     Shows exact selected pull requests and their exact heads before creating
     any review run records or dispatching fix/landing work.
-    Requires typing the expected confirmation (PR number for single PR, or
-    PR numbers separated by space for batch).
+    Requires typing the expected confirmation (PR number for a single PR, or
+    "slay" for a batch).
     """
 
     BINDINGS = back_bindings("dismiss(False)")
@@ -1899,7 +1898,7 @@ class SlayConfirmScreen(ModalScreen[bool]):
         if len(self.targets) == 1:
             self.expected = str(self.targets[0].number)
         else:
-            self.expected = " ".join(str(s.number) for s in self.targets)
+            self.expected = "slay"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
@@ -1910,7 +1909,7 @@ class SlayConfirmScreen(ModalScreen[bool]):
             prompt_label = (
                 f"type the PR number ({self.expected}) to confirm; empty or Esc aborts"
                 if len(self.targets) == 1
-                else f"type the PR numbers ({self.expected}) to confirm; empty or Esc aborts"
+                else "type slay to confirm; empty or Esc aborts"
             )
             yield Label(prompt_label)
             yield Input(placeholder=self.expected, id="confirm-input")
@@ -4721,11 +4720,6 @@ class ReviewDashboard(App):
             event.stop()
             self.query_one("#queue", ListView).focus()
             return
-        if event.key == "tab" and len(self.screen_stack) <= 1 and not isinstance(self.focused, (Input, TextArea)):
-            event.stop()
-            self.action_toggle_view()
-            return
-
     def _dispatch_terminal_action(self, label: str, action) -> None:
         try:
             action()
@@ -5584,6 +5578,34 @@ class ReviewDashboard(App):
             self._repaint_blocked_cache = None
             self._repaint_preferences = None
 
+    def refresh_selection_rows(self) -> None:
+        """Repaint batch markers without re-sorting the queue."""
+        try:
+            queue = self.query_one("#queue", ListView)
+        except (NoMatches, ScreenStackError):
+            return
+        record_snapshot = self.run_store.snapshot()
+        self._repaint_record_snapshot = record_snapshot
+        self._repaint_profile_cache = {}
+        self._repaint_ident_cache = {}
+        self._repaint_blocked_cache = {}
+        self._repaint_preferences = load_preferences()
+        try:
+            for stop, item in zip(self.stops, queue.children):
+                labels = item.query(Label)
+                if labels:
+                    labels.first().update(
+                        self.row_markup(stop, record_snapshot=record_snapshot)
+                    )
+                item.set_class(stop.selected, "selected")
+            self.refresh_status(record_snapshot=record_snapshot)
+        finally:
+            self._repaint_record_snapshot = None
+            self._repaint_profile_cache = None
+            self._repaint_ident_cache = None
+            self._repaint_blocked_cache = None
+            self._repaint_preferences = None
+
     def _activity_freshness(self) -> str:
         timestamps = [
             timestamp
@@ -5867,12 +5889,12 @@ class ReviewDashboard(App):
         except (NoMatches, ScreenStackError):
             return
         view_tag = (
-            f"{escape('[Tab]')} Mixed view | "
+            f"{escape('[I]')} Mixed view | "
             if self.view_mode == "mixed"
             else (
-                f"{escape('[Tab]')} PR view | "
+                f"{escape('[I]')} PR view | "
                 if self.view_mode == "prs"
-                else f"{escape('[Tab]')} Issues view | "
+                else f"{escape('[I]')} Issues view | "
             )
         )
         if self.view_mode == "issues":
@@ -6789,7 +6811,7 @@ class ReviewDashboard(App):
         if not stop:
             return
         stop.selected = not stop.selected
-        self.refresh_rows()
+        self.refresh_selection_rows()
 
     def action_select_all(self) -> None:
         should_select = (
@@ -6798,7 +6820,7 @@ class ReviewDashboard(App):
         )
         for stop in self.stops:
             stop.selected = should_select
-        self.refresh_rows()
+        self.refresh_selection_rows()
 
     def action_toggle_advance(self) -> None:
         queue = self._queue()
@@ -6812,20 +6834,20 @@ class ReviewDashboard(App):
             else None
         )
         stop.selected = not stop.selected
-        self.refresh_rows()
+        self.refresh_selection_rows()
         if successor is not None:
             queue.index = self.stops.index(successor)
 
     def action_toggle_view(self) -> None:
-        if self.view_mode == "mixed":
-            self.view_mode = "prs"
-            self.notify("switched to pull requests view")
-        elif self.view_mode == "prs":
+        if self.view_mode == "prs":
             self.view_mode = "issues"
             self.notify("switched to issues view")
-        else:
+        elif self.view_mode == "issues":
             self.view_mode = "mixed"
             self.notify("switched to mixed workboard view")
+        else:
+            self.view_mode = "prs"
+            self.notify("switched to pull requests view")
         self._sync_source_state()
         self.apply_filters()
         if self.current:

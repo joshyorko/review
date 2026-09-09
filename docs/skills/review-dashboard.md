@@ -19,7 +19,7 @@ metadata:
 
 # Review Dashboard
 
-`just review-queue` reads the organization's open pull requests and open issues live into a unified mixed workboard: one paginated GraphQL search through the shipped GitHub CLI, carrying the review, mergeability, and CI-rollup evidence each recommended action is classified from. `just review-queue owner/repo` reads that repository's open pull requests and issues the same way and normalizes them into repository-qualified queue rows. The flag form `--repo` narrows the queue to one repository without disabling mixed view or issue navigation. The authenticated maintainer's own pull requests remain hidden. The dashboard distinguishes ready, empty, missing, inaccessible, malformed, and failed sources; `R` rereads whichever source is active. A source failure displays an explicit error row and status message rather than rendering an empty successful queue.
+`just review-queue` reads the organization's open pull requests and open issues live through paginated GraphQL searches using the shipped GitHub CLI, carrying the review, mergeability, and CI-rollup evidence each recommended action is classified from. It opens on the pull-request view; `I` reaches issues and the mixed workboard when needed. `just review-queue owner/repo` reads that repository's open pull requests and issues the same way and normalizes them into repository-qualified queue rows. The flag form `--repo` narrows the queue to one repository without disabling mixed view or issue navigation. The authenticated maintainer's own pull requests remain hidden. The dashboard distinguishes ready, empty, missing, inaccessible, malformed, and failed sources; `R` rereads whichever source is active. A source failure displays an explicit error row and status message rather than rendering an empty successful queue.
 
 The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified clean reviews, successful mutations or batch queues, and terminal landing completion request reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
 
@@ -37,9 +37,11 @@ Do not use this for the launcher ([`launcher.md`](launcher.md)), image build ([`
 
 `image/tui/semantic_view.py` defines the pure semantic contract for the dashboard.
 `ActionID` separates verdict selection, review submission, PR mutations, and navigation.
-`COMMANDS` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter, Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`, `Tab`/`I`).
+`COMMANDS` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter, Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`, `I`); `Tab` retains Textual's native focus traversal.
 `QueueRow` and `DecisionCard` bind head SHA, CI rollup, mergeability, and findings.
 Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updates clean branches.
+
+**Textual list behavior is preserved.** Up/down only highlight and update evidence. Enter or click activates the highlighted item. `b` and Space explicitly toggle batch selection; marking repaints its marker in place and never reloads or re-sorts the queue.
 
 ## Core Process
 
@@ -108,9 +110,9 @@ Verified against Context7 `/textualize/textual`:
   landing if clean. Prior reviewed identities are captured before live refresh,
   and exact-head revalidation aborts landing when a pull request advances to a
   new head on GitHub, preventing stale approvals from landing unreviewed code.
-- **Mixed workboard and three-way view cycle:** The dashboard opens in the mixed
-  view by default. `Tab` or `I` cycles through three views: mixed workboard (both
-  PRs and issues), PRs only, and issues only (`mixed -> prs -> issues -> mixed`).
+- **Mixed workboard and three-way view cycle:** The dashboard opens on pull
+  requests. `I` cycles through PRs only, issues only, and the mixed
+  workboard (both PRs and issues) (`prs -> issues -> mixed -> prs`).
   Highlighting an issue renders its metadata and description in details, and
   recent comments in context. Triage actions: `c` comments via `CommentBody`,
   `CommentPreview`, and the typed issue-number gate; `x` closes the issue with a
