@@ -558,23 +558,23 @@ cleanup_codex_auth_staging_dir() {
   rm -f -- "${staging_dir}/auth.json"
   rmdir -- "$staging_dir" 2>/dev/null || true
 }
-podman_default_connection_uri() {
+podman_selected_connection() {
   # Podman resolves its target engine in this order: CONTAINER_HOST wins
   # outright, CONTAINER_CONNECTION names a saved connection, and otherwise
   # whichever connection is marked default applies. Mirror that order so the
-  # check below sees exactly the engine 'podman run' itself would use.
+  # queue guard and remote credential staging see the engine 'podman run' uses.
   if [[ -n "${CONTAINER_HOST:-}" ]]; then
-    printf '%s\n' "$CONTAINER_HOST"
+    printf '%s\t\n' "$CONTAINER_HOST"
     return 0
   fi
   local list
-  if ! list="$(podman system connection list --format '{{.Name}}\t{{.URI}}\t{{.Default}}' 2>/dev/null)"; then
+  if ! list="$(podman system connection list --format '{{.Name}}\t{{.URI}}\t{{.Identity}}\t{{.Default}}' 2>/dev/null)"; then
     echo "ERROR: could not resolve Podman connections." >&2
     return 1
   fi
   if [[ -n "${CONTAINER_CONNECTION:-}" ]]; then
     local selected
-    selected="$(awk -F'\t' -v n="$CONTAINER_CONNECTION" '$1==n{print $2; exit}' <<<"$list")"
+    selected="$(awk -F'\t' -v n="$CONTAINER_CONNECTION" '$1==n{printf "%s\t%s\n", $2, $3; exit}' <<<"$list")"
     if [[ -z "$selected" ]]; then
       echo "ERROR: could not resolve selected Podman connection '${CONTAINER_CONNECTION}'." >&2
       return 1
@@ -582,7 +582,13 @@ podman_default_connection_uri() {
     printf '%s\n' "$selected"
     return 0
   fi
-  awk -F'\t' '$3=="true"{print $2; exit}' <<<"$list"
+  awk -F'\t' '$4=="true"{printf "%s\t%s\n", $2, $3; exit}' <<<"$list"
+}
+podman_default_connection_uri() {
+  local selected uri
+  selected="$(podman_selected_connection)" || return 1
+  IFS=$'\t' read -r uri _ <<<"$selected"
+  printf '%s\n' "$uri"
   return 0
 }
 podman_redacted_uri() {
@@ -862,16 +868,13 @@ ensure_hive_contributor_env() {
 }
 stage_hive_registration_for_remote_podman() {
   # Podman remote resolves bind mounts on its engine host, not the client.
-  # Mirror only the selected 0600 Hive registration when its configured
-  # default connection is SSH-backed, staging to an isolated private 0700
+  # Mirror only the selected 0600 Hive registration when Podman targets an
+  # SSH engine, staging to an isolated private 0700
   # directory and removing only that path on exit.
-  local default_conn uri identity authority target port remote_dir remote_env
-  default_conn="$(podman system connection list --format '{{range .}}{{if .Default}}{{.URI}}{{"\t"}}{{.Identity}}{{end}}{{end}}')" || {
-    echo "ERROR: cannot inspect the Podman connection." >&2
-    return 1
-  }
-  [[ -n "$default_conn" ]] || return 0
-  IFS=$'\t' read -r uri identity <<<"$default_conn"
+  local selected_connection uri identity authority target port remote_dir remote_env
+  selected_connection="$(podman_selected_connection)" || return 1
+  [[ -n "$selected_connection" ]] || return 0
+  IFS=$'\t' read -r uri identity <<<"$selected_connection"
   [[ "$uri" == ssh://* ]] || return 0
   authority="${uri#ssh://}"
   authority="${authority%%/*}"

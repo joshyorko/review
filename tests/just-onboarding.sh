@@ -195,8 +195,14 @@ case "${1:-}" in
         printf '%s\n' "${FAKE_PODMAN_CONNECTIONS:-[]}"
         exit 0
       fi
-      if [[ " $* " == *'{{.Name}}\t{{.URI}}\t{{.Default}}'* ]]; then
-        printf '%s\n' "${FAKE_PODMAN_CONNECTIONS:-}"
+      if [[ " $* " == *'.Name'* ]]; then
+        if [[ "${FAKE_PODMAN_CONNECTIONS:-}" == \[* ]]; then
+          /usr/bin/jq -r '.[] | [.Name, .URI, .Identity, (.Default | tostring)] | @tsv' \
+            <<<"$FAKE_PODMAN_CONNECTIONS"
+        else
+          awk -F'\t' '{printf "%s\t%s\t\t%s\n", $1, $2, $3}' \
+            <<<"${FAKE_PODMAN_CONNECTIONS:-}"
+        fi
         exit 0
       fi
       if [[ -n "${FAKE_PODMAN_CONNECTIONS:-}" && "${FAKE_PODMAN_CONNECTIONS:-}" != "[]" ]]; then
@@ -1578,6 +1584,15 @@ assert_not_contains "dev@engine" "$OUT"
 assert_not_contains "super-secret-registration-token" "$OUT"
 assert_file_contains "ssh -o BatchMode=yes -i /fake/key -p 2222 dev@engine chmod 0600 /tmp/review-hive-registration.a1b2c3/contributor.env" "$remote_log"
 assert_file_contains "rm -f -- /tmp/review-hive-registration.a1b2c3/contributor.env; rmdir -- /tmp/review-hive-registration.a1b2c3" "$remote_log"
+assert_file_not_exists "$fake_remote_root/tmp/review-hive-registration.a1b2c3"
+
+begin "review-container: explicitly selected remote engine stages Hive registration"
+reset_logs
+run_recipe review-container GH_READY=1 CONTAINER_CONNECTION=remote \
+  'FAKE_PODMAN_CONNECTIONS=[{"Name":"local","URI":"unix:///run/user/1000/podman/podman.sock","Identity":"","Default":true},{"Name":"remote","URI":"ssh://dev@engine:2222/run/user/1000/podman/podman.sock","Identity":"/fake/key","Default":false}]'
+assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
+assert_file_contains "ssh -o BatchMode=yes -i /fake/key -p 2222 dev@engine" "$remote_log"
+assert_file_contains "--volume /tmp/review-hive-registration.a1b2c3/contributor.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$fake_remote_root/tmp/review-hive-registration.a1b2c3"
 
 begin "review-container: remote Podman cleans up private staging directory when scp fails"
