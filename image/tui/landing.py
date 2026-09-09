@@ -559,7 +559,9 @@ def parse_status(path: str) -> dict[str, dict]:
                     continue
                 if not isinstance(event, dict) or "state" not in event:
                     continue
-                latest[str(event.get("pr", ""))] = event
+                key = str(event.get("pr", ""))
+                latest.pop(key, None)
+                latest[key] = event
     except OSError:
         pass
     return latest
@@ -1351,6 +1353,7 @@ def persisted_events(directory: str | None = None) -> dict[str, dict]:
     for path in paths:
         for key, event in parse_status(path).items():
             if key:
+                latest.pop(key, None)
                 latest[key] = event
     return latest
 
