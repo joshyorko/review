@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.9"
-last_updated: 2026-09-08
+version: "3.10"
+last_updated: 2026-09-09
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -141,6 +141,8 @@ explicit lifecycle operations. The bundle keeps `runsc`,
 `release-20260831.0` architecture archive before extraction, rejects unsafe
 members and symlinked targets, and publishes only after validation.
 `review-doctor` is diagnostic and never downloads a missing runtime.
+The runtime recipe forwards its action as positional arguments; verify the
+public `just review-runtime` commands as well as the bundle manager directly.
 
 The launcher discovers the absolute Review-owned `runsc` path and passes that
 path to rootless Podman after `runsc --version` and the credential-free probe.

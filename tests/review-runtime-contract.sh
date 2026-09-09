@@ -22,6 +22,13 @@ path="$(BLUEFIN_REVIEW_RUNTIME_ROOT="$root" "$manager" path)"
   exit 1
 }
 BLUEFIN_REVIEW_RUNTIME_ROOT="$root" "$manager" status >/dev/null
+for action in status install update; do
+  BLUEFIN_REVIEW_RUNTIME_ROOT="$root" just --justfile "$repo_root/justfile" review-runtime "$action" >/dev/null
+done
+[[ "$(BLUEFIN_REVIEW_RUNTIME_ROOT="$root" just --justfile "$repo_root/justfile" review-runtime path)" == "$bundle/runsc" ]] || {
+  echo 'runtime recipe did not forward the path action' >&2
+  exit 1
+}
 BLUEFIN_REVIEW_RUNTIME_ROOT="$root" "$manager" update >/dev/null
 [[ "$(BLUEFIN_REVIEW_RUNTIME_ROOT="$root" "$manager" path)" == "$bundle/runsc" ]] || {
   echo 'runtime update changed the pinned path unexpectedly' >&2
@@ -37,7 +44,7 @@ fi
 rm -f "$bundle"
 mv "$root/real-release" "$bundle"
 
-BLUEFIN_REVIEW_RUNTIME_ROOT="$root" "$manager" remove >/dev/null
+BLUEFIN_REVIEW_RUNTIME_ROOT="$root" just --justfile "$repo_root/justfile" review-runtime remove >/dev/null
 [[ ! -e "$bundle" ]] || {
   echo 'runtime remove left the pinned bundle behind' >&2
   exit 1

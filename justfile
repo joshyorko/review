@@ -1310,6 +1310,7 @@ stop_cluster_contributors() {
 '''
 
 [doc("Manage the Review-owned pinned host gVisor runtime bundle.")]
+[positional-arguments]
 review-runtime *runtime_args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1318,7 +1319,7 @@ review-runtime *runtime_args:
       echo "ERROR: Review runtime manager is unavailable at ${manager}." >&2
       exit 1
     }
-    exec "$manager" "${runtime_args[@]}"
+    exec "$manager" "$@"
 
 # Run the contributor container: the Hive queue worker.
 # Receives Hive-assigned tasks and donates inference through the
