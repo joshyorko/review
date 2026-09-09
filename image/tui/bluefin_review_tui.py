@@ -3845,6 +3845,9 @@ class ReviewDashboard(App):
             )
         self.refresh_status()
         self.load_queue()
+        pending_population = getattr(self, "_pending_population", None)
+        if pending_population is not None:
+            self.call_after_refresh(self._flush_pending_population)
         self.load_issues()
         self.load_hive()
         self.discover_harness()
@@ -5527,6 +5530,20 @@ class ReviewDashboard(App):
             return "[bold cyan]QUEUED[/bold cyan]"
         return "[dim]READY[/dim]"
 
+    def _flush_pending_population(self) -> None:
+        self._population_flush_scheduled = False
+        pending = getattr(self, "_pending_population", None)
+        if pending is None:
+            return
+        try:
+            queue = self.query_one("#queue", ListView)
+        except (NoMatches, ScreenStackError):
+            return
+        if not queue.is_attached:
+            return
+        self._pending_population = None
+        self.populate(*pending)
+
     def populate(
         self, stops: list[Stop], record_snapshot: dict[str, RunRecord] | None = None
     ) -> None:
@@ -5534,6 +5551,14 @@ class ReviewDashboard(App):
         try:
             queue = self.query_one("#queue", ListView)
         except (NoMatches, ScreenStackError):
+            return
+        if not queue.is_attached:
+            self._pending_population = (list(stops), record_snapshot)
+            if getattr(self, "is_attached", False) and not getattr(
+                self, "_population_flush_scheduled", False
+            ):
+                self._population_flush_scheduled = True
+                self.call_after_refresh(self._flush_pending_population)
             return
         queue.clear()
         if not stops:
@@ -5874,7 +5899,9 @@ class ReviewDashboard(App):
             *reversed(completed),
         ]
         visible = 0
-        total = sum(len(task.stops) for task in rows)
+        unique_keys = {stop.key for task in rows for stop in task.stops}
+        total = len(unique_keys)
+        seen_keys: set[str] = set()
         for task in rows:
             if visible >= MAX_LANDING_CONTROL_ROWS:
                 break
@@ -5890,6 +5917,9 @@ class ReviewDashboard(App):
             for stop in task.stops:
                 if visible >= MAX_LANDING_CONTROL_ROWS:
                     break
+                if stop.key in seen_keys:
+                    continue
+                seen_keys.add(stop.key)
                 event = events.get(stop.key, {})
                 phase = str(event.get("state") or fallback)
                 lines.append(f"{stop.key} — {phase} · {model}")
@@ -6723,7 +6753,7 @@ class ReviewDashboard(App):
                 if counts.get(key)
             )
             lines.append(
-                f"[b]merge queue[/b] {escape(stop.repository)} — {total} open"
+                f"[b]merge queue[/b] · {escape(stop.repository)} — {total} open"
             )
             lines.append(f"  {meter_bar(counts)}")
             lines.append(f"  {summary}")

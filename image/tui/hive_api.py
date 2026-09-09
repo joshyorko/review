@@ -15,6 +15,11 @@ from dataclasses import dataclass
 MAX_DETAIL = 240
 MAX_SNIPPET = 120
 MAX_BODY = 16_384
+CONTRIBUTE_PROJECTIONS = (
+    ("status", "/api/v1/status"),
+    ("me", "/api/v1/me"),
+    ("contributors", "/api/v1/contributors"),
+)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -132,6 +137,24 @@ def request(
     if not isinstance(data, dict):
         return _malformed(code, content_type, body, token, "not a JSON object")
     return Result(True, "ok", "online", data)
+
+
+def read_projections(base: str, token: str, *, timeout: float = 15, opener=None) -> dict:
+    """Read Hive's authenticated contributor projections without write powers."""
+    if not base.strip():
+        return {"ok": False, "category": "configuration", "message": "Hive hub not configured"}
+    result = {}
+    for name, path in CONTRIBUTE_PROJECTIONS:
+        response = request(
+            f"{base.rstrip('/')}{path}",
+            token,
+            timeout=timeout,
+            opener=opener,
+        )
+        if not response.ok:
+            return {"ok": False, "category": response.category, "message": response.message}
+        result[name] = response.data
+    return {"ok": True, "data": result}
 
 
 def main() -> int:
