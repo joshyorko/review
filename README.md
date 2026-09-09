@@ -885,7 +885,7 @@ All configuration is read at launch.
 | `GITHUB_COPILOT_TOKEN` | Optional Copilot credential override. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional local Kubernetes-session countme configuration; it is staged only in the ephemeral session Secret. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Optional local countme authentication headers; they are staged only in the ephemeral session Secret. |
-| `TOOL` | Contributor agent backend selector: `goose` (default), `codex`, or `pi`. It does not select the maintainer dashboard backend. |
+| `TOOL` | Contributor agent backend selector: `goose` (default) or `codex`. It does not select the maintainer dashboard backend. |
 
 The maintainer dashboard may remember non-secret harness preferences at
 `~/.config/bluefin-review/harness.json` (or the equivalent
