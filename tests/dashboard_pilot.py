@@ -26,6 +26,7 @@ import threading
 import time
 import tempfile
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -2178,7 +2179,7 @@ async def main() -> int:
             rows_widget = screen.query_one("#landing-rows", tui.Static)
             rows = str(rows_widget.render())
             for expected in (
-                f"batch {colour_task.task_id} — running",
+                f"batch {colour_task.task_id} — waiting",
                 # A running batch names its heartbeat: the age of the last
                 # report, so a stale wait is visible next to a healthy one
                 # (#291).
@@ -2186,7 +2187,7 @@ async def main() -> int:
                 "✓ merged",
                 "✗ failed",
                 "◆ awaiting-stable",
-                "◌ waiting",
+                "? unreported",
                 "✔ done",
                 "publish workflow red",
                 "two landed, one failed",
@@ -2195,6 +2196,16 @@ async def main() -> int:
                     expected in rows,
                     f"the batch queue must show {expected!r}, got {rows!r}",
                 )
+            landing_status = str(
+                screen.query_one("#landing-status", tui.Static).render()
+            )
+            check(
+                "stage" in landing_status
+                and "terminal" in landing_status
+                and "elapsed" in landing_status
+                and "ETA" not in landing_status,
+                f"landing status must show observed progress without ETA, got {landing_status!r}",
+            )
 
             def line_styles(fragment: str) -> list:
                 """The segment styles of the rendered line holding fragment."""
@@ -2222,13 +2233,13 @@ async def main() -> int:
                     and style.bgcolor.get_truecolor() != base_rgb
                 ]
 
-            header_fills = fills(f"batch {colour_task.task_id} — running")
+            header_fills = fills(f"batch {colour_task.task_id} — waiting")
             check(
                 any(
-                    style.bgcolor.get_truecolor() == theme_rgb("primary-muted")
+                    style.bgcolor.get_truecolor() == theme_rgb("warning-muted")
                     for style in header_fills
                 ),
-                "the running batch header must be a filled bar, got "
+                "the waiting batch header must be a filled bar, got "
                 f"{header_fills!r}",
             )
             merged_fills = fills("✓ merged")
@@ -2289,6 +2300,59 @@ async def main() -> int:
         Path(colour_task.prompt_path),
         Path(colour_task.status_path),
     ):
+        artifact.unlink(missing_ok=True)
+    gh_log.write_text("")
+
+    # ── landing log and stop actions share one explicit batch target ───────
+    first_status = workdir / "first.jsonl"
+    second_status = workdir / "second.jsonl"
+    first_log = workdir / "first.log"
+    second_log = workdir / "second.log"
+    first_status.write_text("{\"pr\":\"projectbluefin/review#1\",\"state\":\"fixing\"}\n")
+    second_status.write_text("{\"pr\":\"projectbluefin/review#2\",\"state\":\"fixing\"}\n")
+    first_log.write_text("first batch log\n")
+    second_log.write_text("second batch log\n")
+    first_task = tui.landing.LandingTask(
+        task_id="first-batch",
+        stops=[tui.Stop("projectbluefin/review", 1, "review", "first")],
+        login="tester",
+        status_path=str(first_status),
+        log_path=str(first_log),
+        process=SimpleNamespace(pid=101),
+    )
+    second_task = tui.landing.LandingTask(
+        task_id="second-batch",
+        stops=[tui.Stop("projectbluefin/review", 2, "review", "second")],
+        login="tester",
+        status_path=str(second_status),
+        log_path=str(second_log),
+        process=SimpleNamespace(pid=202),
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        app.landing_queue.extend([first_task, second_task])
+        await app.push_screen(tui.LandingScreen(app))
+        await pilot.pause()
+        screen = app.screen
+        if isinstance(screen, tui.LandingScreen):
+            screen.select_task(first_task.task_id)
+            screen.poll()
+            log_widget = screen.query_one("#landing-log", tui.RichLog)
+            log = "\n".join(
+                "".join(segment.text for segment in strip)
+                for strip in log_widget.lines
+            )
+            check("first batch log" in log and "second batch log" not in log,
+                  f"selected batch log must be displayed, got {log!r}")
+            with mock.patch.object(tui.os, "getpgid", return_value=101) as getpgid, \
+                    mock.patch.object(tui.os, "killpg") as killpg:
+                screen.action_stop_agent()
+            check(getpgid.call_args.args == (101,), "stop must target the displayed batch")
+            check(killpg.call_args.args == (101, tui.signal.SIGTERM),
+                  "stop must terminate the displayed batch process group")
+            check(first_task.stop_requested and not second_task.stop_requested,
+                  "stopping one batch must not target another batch")
+    for artifact in (first_status, second_status, first_log, second_log):
         artifact.unlink(missing_ok=True)
     gh_log.write_text("")
 
@@ -2935,9 +2999,9 @@ async def main() -> int:
         notices: list[str] = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append(str(message))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append(str(message))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         await pilot.press("A")
@@ -3033,9 +3097,9 @@ async def main() -> int:
         notices: list[tuple[str, str]] = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append((str(message), kwargs.get("severity", "information")))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append((str(message), kwargs.get("severity", "information")))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         for stop in app.stops:
@@ -3126,9 +3190,9 @@ async def main() -> int:
         notices = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append((str(message), kwargs.get("severity", "information")))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append((str(message), kwargs.get("severity", "information")))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         for stop in app.stops:
@@ -3205,9 +3269,9 @@ async def main() -> int:
         notices = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append((str(message), kwargs.get("severity", "information")))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append((str(message), kwargs.get("severity", "information")))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         for stop in app.stops:
@@ -3290,9 +3354,9 @@ async def main() -> int:
         notices = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append((str(message), kwargs.get("severity", "information")))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append((str(message), kwargs.get("severity", "information")))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         for stop in app.stops:
@@ -3351,9 +3415,9 @@ async def main() -> int:
             notices = []
             real_notify = app.notify
 
-            def record(message, *args, **kwargs):
-                notices.append((str(message), kwargs.get("severity", "information")))
-                real_notify(message, *args, **kwargs)
+            def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+                _notices.append((str(message), kwargs.get("severity", "information")))
+                _notify(message, *args, **kwargs)
 
             app.notify = record
             for stop in app.stops:
@@ -3769,13 +3833,13 @@ async def main() -> int:
     )
     seeded_status = workdir / "cli-seeded.jsonl"
     seeded_status.write_text(
-        json.dumps({"expect": ["org/repo#a", "org/repo#b"]}, separators=(",", ":"))
+        json.dumps({"expect": ["org/repo#10", "org/repo#11"]}, separators=(",", ":"))
         + "\n"
     )
     result = subprocess.run(
         [
             sys.executable, str(landing_py), "report", "--status",
-            str(seeded_status), "event", "--pr", "org/repo#a",
+            str(seeded_status), "event", "--pr", "org/repo#10",
             "--state", "merged", "--note", "green",
         ],
         capture_output=True, text=True, timeout=30,
@@ -3784,20 +3848,20 @@ async def main() -> int:
     result = subprocess.run(
         [
             sys.executable, str(landing_py), "report", "--status",
-            str(seeded_status), "done", "--expect", "org/repo#a",
+            str(seeded_status), "done", "--expect", "org/repo#10",
             "--note", "subset",
         ],
         capture_output=True, text=True, timeout=30,
     )
     check(
-        result.returncode != 0 and "org/repo#b" in result.stderr,
+        result.returncode != 0 and "org/repo#11" in result.stderr,
         "done must refuse to close when a seeded selection member lacks a "
         f"terminal state even if --expect under-names it, got "
         f"{result.returncode}: {result.stderr}",
     )
     folded = tui.landing.parse_status(str(seeded_status))
     check(
-        "" not in folded and folded.get("org/repo#a", {}).get("state") == "merged",
+        "" not in folded and folded.get("org/repo#10", {}).get("state") == "merged",
         f"parse_status must skip the selection header, got {folded}",
     )
 
@@ -4149,7 +4213,7 @@ async def main() -> int:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
-        for i in range(16)
+        for i in range(1, 17)
     ]
     codes = [racer.wait(timeout=60) for racer in racers]
     race_lines = race_status.read_text().splitlines()
@@ -5188,6 +5252,8 @@ async def main() -> int:
         stop = app.stops[0]
         stop.live = {
             "isDraft": False,
+            "baseRefOid": "a" * 40,
+            "headRefOid": "b" * 40,
             "reviews": [
                 {
                     "author": {"login": "hanthor"},
@@ -5417,6 +5483,7 @@ async def main() -> int:
                   "unavailable Codex must preserve the manual review body")
             check(unavailable_probe_calls,
                   "unavailable Codex must be reached during generation")
+            await app.workers.wait_for_complete()
             check(any("unavailable" in notification.message.lower()
                       for notification in app._notifications),
                   "unavailable Codex must show a degraded generation message")
@@ -5462,6 +5529,8 @@ async def main() -> int:
             editor = app.screen.query_one("#review-body-editor", tui.TextArea)
             editor.text = "manual Goose body"
             app.screen.action_generate()
+            await pilot.pause()
+            await app.workers.wait_for_complete()
             await pilot.pause()
             check(editor.text == "generated Goose body",
                   "Goose drafting must use the selected drafting capability")
@@ -5790,8 +5859,8 @@ async def main() -> int:
 
     # ── two key lines, colour by state, refresh, and update-branch ───────
     check(
-        tui.stop_style("review", "dirty", "success", "approved") == "red",
-        "a conflicted pull request must be red whatever else is true of it",
+        tui.stop_style("review", "dirty", "success", "approved") == "",
+        "a conflict must not color the entire row as a failed inference",
     )
     check(
         tui.stop_style("review", "clean", "failure", "unknown") == "red",
@@ -5830,6 +5899,14 @@ async def main() -> int:
         "conflict text must outrank the healthy queue presentation",
     )
     check(
+        not text_rows["conflict"].startswith("[red]"),
+        "a conflict row body must remain neutral rather than whole-row red",
+    )
+    check(
+        "[bold red]⚑ CONFLICTS[/bold red]" in text_rows["conflict"],
+        "the conflict marker itself must retain meaningful red emphasis",
+    )
+    check(
         text_rows["failure"].index("✗ CI FAILED") < text_rows["failure"].index("[review]"),
         "failure text must outrank the healthy queue presentation",
     )
@@ -5851,7 +5928,7 @@ async def main() -> int:
         )
 
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         for _ in range(200):
             if len(app.stops) == 2:
@@ -8058,6 +8135,7 @@ async def main() -> int:
     # ── multi-repo selection partitions into concurrent landing tasks (#399) ──
     os.environ["BLUEFIN_REVIEW_PARTITION_BATCH"] = "1"
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    app.final_policy = "automatic"
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -8100,6 +8178,22 @@ async def main() -> int:
     # exercised above with real queue replacement; isolate this older unit of
     # behavior from its intentionally unrelated transport refresh.
     app._request_reconciliation = lambda: None
+    original_fetch_live = app.fetch_live_pr
+
+    def fixture_live(repository, number, force=False):
+        # The production forced read rejects a headless response. This fixture
+        # owns the exact live snapshot for each synthetic head instead of
+        # routing the state-machine checks through the generic empty response.
+        if os.environ.get("PR_VIEW_JSON"):
+            return original_fetch_live(repository, number, force=force)
+        candidate = next(
+            item
+            for item in app.stops
+            if item.repository == repository and item.number == number
+        )
+        return dict(candidate.live)
+
+    app.fetch_live_pr = fixture_live
     app.show_evidence = lambda *a, **kw: None
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -8223,6 +8317,13 @@ async def main() -> int:
             state = "findings"
             is_clean = False
             findings = [{"rule": "test-finding", "message": "issue found"}]
+            provenance = {
+                "repository": "projectbluefin/review",
+                "pull_request": 42,
+                "head_sha": "a2" + "0" * 38,
+            }
+            counts = {"high": 1}
+            raw_evidence = []
 
         stop.head_sha = "a2" + "0" * 38
         stop.live["baseRefOid"] = "a" * 40
@@ -8382,9 +8483,9 @@ async def main() -> int:
         notices: list[str] = []
         real_notify = app.notify
 
-        def record_notice(message, *args, **kwargs):
-            notices.append(message)
-            real_notify(message, *args, **kwargs)
+        def record_notice(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append(message)
+            _notify(message, *args, **kwargs)
 
         app.notify = record_notice
         await slay_and_confirm()

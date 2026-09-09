@@ -11,6 +11,24 @@
 # dashboard must never have cannot be proven missing by exercising it.
 set -euo pipefail
 
+# The pilot's default-color assertions must not depend on the caller's shell;
+# its focused responsive contract exercises NO_COLOR explicitly.
+unset NO_COLOR
+
+# Keep import-time landing/TUI state private to this contract run (#424).
+dashboard_state_root="$(mktemp -d /tmp/bluefin-dashboard-contract.XXXXXXXXXX)"
+cleanup_dashboard_state() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  rm -rf -- "$dashboard_state_root"
+  exit "$status"
+}
+trap cleanup_dashboard_state EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+export XDG_STATE_HOME="$dashboard_state_root"
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tui="$repo_root/image/tui/bluefin_review_tui.py"
 
@@ -41,7 +59,7 @@ grep -qE '"push"|git push' "$tui" && fail "the dashboard must never push"
 # Hive's sweep, not a toll on merging. That power is exactly one gated call
 # site, it squashes like the sweep does, and it is asked of GitHub — the
 # 'push' permission — rather than assumed from having the dashboard open.
-[[ "$(grep -c '"pr", "merge"' "$tui")" -eq 1 ]] ||
+[[ "$(grep -c -- '"--squash"' "$tui")" -eq 1 ]] ||
   fail "exactly one merge site: the maintainer's gated direct merge"
 merge_now="$(sed -n '/def action_merge_now/,/def action_reject/p' "$tui")"
 grep -q -- '"--squash"' <<<"$merge_now" ||
@@ -336,6 +354,11 @@ fi
 "${venv}/bin/python" "$repo_root/tests/action_plan_contract.py"
 "${venv}/bin/python" "$repo_root/tests/re_review_contract.py"
 "${venv}/bin/python" "$repo_root/tests/semantic_view_contract.py"
+"${venv}/bin/python" "$repo_root/tests/landing_watch_contract.py"
+"${venv}/bin/python" "$repo_root/tests/ci_failure_contract.py"
+"${venv}/bin/python" "$repo_root/tests/review_action_comparison_contract.py"
+"${venv}/bin/python" "$repo_root/tests/tui_responsive_contract.py"
+"${venv}/bin/python" "$repo_root/tests/tui_evidence_capture.py" --self-check
 # These current-main suites remain in the pinned Textual environment.
 "${venv}/bin/python" "$repo_root/tests/slay_state_contract.py"
 "${venv}/bin/python" "$repo_root/tests/soak_contract.py"

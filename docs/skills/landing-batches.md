@@ -33,7 +33,7 @@ or cluster scale-out (`cluster-workers.md`).
 
 1. **Selection & Confirmation:** `[b]` marks stops for batching; `[A]` opens
    `BatchPlanScreen` showing every selected PR and the exact agent command.
-   Enter dispatches; Escape aborts.
+   The Dispatch button or Enter proceeds; the Abort button or Escape cancels.
 2. **Multi-Repository Partitioning:** Multi-repo selections partition into
    independent per-repository `LandingTask` lanes.
 3. **Concurrent Execution:** Up to `BLUEFIN_REVIEW_CONCURRENT_LANDINGS`
@@ -52,6 +52,23 @@ or cluster scale-out (`cluster-workers.md`).
    `/opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/landing.py report ...`
 7. **Process Termination:** The agent runs in its own process group; `[x]` on
    the batch screen stops it cleanly via `SIGTERM`.
+
+The landing module is the status writer and command boundary. It builds argv
+and cwd separately from untrusted repository, title, and note text, and all
+status changes pass through its locked reporter. A `WatchTarget` retains the
+exact repository, pull request, head, workflow run, attempt, status, observed
+time, and deadline. A timeout while the same run remains queued or active is a
+continuation of that watch; an active run is never rerun merely because a watch
+command timed out. A newer observed attempt or head may supersede an active
+target; an older late observation is rejected so it cannot restore stale state.
+
+`LandingScreen` reads a bounded log tail by bytes and lines and preserves the
+current scroll position unless the maintainer is following the tail. The
+selected task is the target shown in the status and the target stopped by
+`[x]`. Its progress is an observation of reported stages and evidence age:
+running, waiting, stopped, failed, incomplete, and completed-with-blockers are
+kept distinct. A zero exit code alone is incomplete until the report closes
+and every selected pull request has a terminal outcome.
 
 ## `[$]` is a state machine
 

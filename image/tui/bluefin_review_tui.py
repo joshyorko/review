@@ -33,7 +33,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
+from rich.errors import MarkupError
 from rich.syntax import Syntax
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
@@ -82,6 +84,7 @@ from tui.review_cache import ReviewCache
 from tui.review_receipt import ReviewReceipt
 from tui.observability import ReviewObservability
 from tui.review_run import ReviewRun
+from tui.display_brand import display_title
 from tui.run_state import (
     FULL_SHA,
     IllegalRunTransition,
@@ -200,6 +203,8 @@ MAX_CONCURRENT_LANDINGS = int(
 )
 HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
+MAX_ACTION_RECEIPTS = 64
+MAX_ACTION_FINDINGS = 64
 MAX_RE_REVIEW_FILES = 128
 MAX_RE_REVIEW_HUNKS = 512
 MAX_RE_REVIEW_RESPONSE_CHARS = 1_000_000
@@ -208,6 +213,43 @@ MAX_RE_REVIEW_NEW_EVIDENCE = 8
 SENSITIVE_RE_REVIEW_PATHS = (".github/workflows/",)
 
 SLAY_DELAYS = [0.4, 0.3, 0.25, 0.35]
+
+
+def _enabled_environment_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def no_color_requested() -> bool:
+    """Honor the standard opt-out without removing textual state words."""
+    return "NO_COLOR" in os.environ
+
+
+def ascii_ui_requested() -> bool:
+    """Use printable markers when the operator explicitly requests ASCII."""
+    return _enabled_environment_flag("BLUEFIN_REVIEW_ASCII")
+
+
+def reduced_motion_requested() -> bool:
+    """Disable decorative queue animation when the terminal requests it."""
+    return _enabled_environment_flag("BLUEFIN_REVIEW_REDUCED_MOTION") or _enabled_environment_flag(
+        "TEXTUAL_REDUCED_MOTION"
+    )
+
+
+def ui_glyph(unicode_glyph: str, ascii_glyph: str) -> str:
+    return ascii_glyph if ascii_ui_requested() else unicode_glyph
+
+
+def ui_style(style: str) -> str:
+    return "" if no_color_requested() else style
+
+
+def ui_span(text: str, style: str) -> str:
+    return f"[{style}]{text}[/]" if style else text
+
+
 SLAY_FRAMES = [
     # Frame 1: Round 8 / Fight (400ms)
     (
@@ -297,6 +339,7 @@ COMMANDS = (
     CommandSpec("open_browser", "o", "open_browser", "open"),
     CommandSpec("view_diff", "v", "view_diff", "diff"),
     CommandSpec("view_comments", "C", "view_comments", "comments"),
+    CommandSpec("ci_failure_logs", "i", "ci_failure_logs", "CI failure logs"),
     CommandSpec("comment", "c", "comment", "comment", mutating=True),
     CommandSpec("approve_or_land", "a", "merge", "approve+queue", mutating=True),
     CommandSpec("land_batch", "A", "land_batch", "land batch", mutating=True),
@@ -332,18 +375,30 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # changes anything on GitHub; everything on the second goes through the
 # typed-number gate.
 KEYS_READING = (
-    " [b]I[/b] issues/PRs [b]Tab[/b] focus panes"
-    " [b]r[/b] review [b]v[/b] diff [b]C[/b] comments [b]o[/b] open [b]h[/b] handoff"
-    " [b]/[/b] steer [b]f[/b] filter [b]b[/b]/[b]B[/b] select"
-    " [b]Space[/b] select+next [b]n[/b] next lacking my review"
-    " [b]w[/b] watch batches"
-    " [b]P[/b] review policy [b]H[/b] hive"
-    " [b]R[/b] refresh [b]q[/b]/Esc back"
+    " [b]I[/b]:issues/PRs · [b]Tab[/b]:focus panes"
+    " · [b]r[/b]:review · [b]v[/b]:diff · [b]C[/b]:comments · [b]o[/b]:open · [b]h[/b]:handoff"
+    " · [b]/[/b]:steer · [b]f[/b]:filter · [b]b[/b]/[b]B[/b]:select"
+    " · [b]Space[/b]:select+next · [b]n[/b]:next lacking my review"
+    " · [b]w[/b]:watch batches · [b]i[/b]:CI logs"
+    " · [b]P[/b]:review policy · [b]H[/b]:hive"
+    " · [b]R[/b]:refresh · [b]q[/b]/Esc:back"
 )
 KEYS_ACTING = (
-    " [b]L[/b] leave review [b]a[/b] approve+queue [b]A[/b] land batch [b]m[/b] merge [b]$[/b] slay"
-    " [b]u[/b] update clean branch [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
+    " [b]L[/b]:leave review · [b]a[/b]:approve+queue · [b]A[/b]:land batch · [b]m[/b]:merge · [b]$[/b]:slay"
+    " · [b]u[/b]:update clean branch · [b]U[/b]:select mechanical · [b]x[/b]:reject · [b]M[/b]:dupes"
 )
+KEYS_READING_COMPACT = (
+    " [b]j/k[/b]:move · [b]b/B[/b]:select · [b]/[/b]:steer · [b]i[/b]:CI"
+    " · [b]w[/b]:batches · [b]R[/b]:refresh · [b]q[/b]/Esc:back"
+)
+KEYS_ACTING_COMPACT = (
+    " [b]A[/b]:land · [b]a[/b]:approve · [b]L[/b]:review · [b]m[/b]:merge"
+    " · [b]x[/b]:reject · [b]u[/b]:update · [b]$[/b]:slay"
+)
+STEER_PLACEHOLDER = (
+    "[/] steer the review of the highlighted PR — enter runs it, esc returns to the queue"
+)
+STEER_PLACEHOLDER_COMPACT = "[/] steer highlighted PR · Enter run · Esc back"
 
 # The bot whose pull requests can be classified as mechanical. The login is
 # configurable because the Renovate installation differs per deployment: this
@@ -561,6 +616,132 @@ class CompareEvidence:
     sensitive_surfaces_changed: bool = False
     bounded_risk_exceeded: bool = False
     capability_available: bool = True
+
+
+@dataclass(frozen=True)
+class ReviewActionReceipt:
+    """A bounded observation of one review result and one successful action."""
+
+    repository: str
+    number: int
+    reviewed_head: str
+    review_state: str
+    finding_count: int
+    action: str
+    identity: str
+    classification: str
+    evidence: tuple[str, ...] = ()
+    verified: bool = False
+
+
+def classify_review_action(
+    result: ReviewResult | None,
+    action: str,
+    *,
+    repository: str,
+    number: int,
+    head_sha: str,
+    actor: str,
+    action_success: bool = True,
+    action_head: str = "",
+    action_verified: bool = False,
+) -> ReviewActionReceipt:
+    """Classify only a correlated review and ordinary review verdict pair."""
+    review_state = result.state if result is not None else "unknown"
+    reviewed_head = ""
+    finding_count = 0
+    evidence: tuple[str, ...] = ()
+    if result is not None:
+        reviewed_head = str(result.provenance.get("head_sha") or "")
+        finding_count = min(sum(result.counts.values()), MAX_ACTION_FINDINGS)
+        evidence = tuple(str(item)[:240] for item in result.raw_evidence[:4])
+    raw_action = str(action or "").strip().lower().replace("_", "-")
+    raw_action = re.sub(r"\s+", "-", raw_action)
+    normalized_action = {
+        "accept": "approve",
+        "accepted": "approve",
+        "approved": "approve",
+        "approve-review": "approve",
+        "reject": "request-changes",
+        "rejected": "request-changes",
+        "request changes": "request-changes",
+        "changes-requested": "request-changes",
+        "request-change": "request-changes",
+        "accept-and-queue": "approve-and-queue",
+        "approved-and-queued": "approve-and-queue",
+        "merge-completed": "merge",
+    }.get(raw_action, raw_action)
+    provenance = result.provenance if result is not None else {}
+    correlated = (
+        isinstance(provenance, dict)
+        and provenance.get("repository") == repository
+        and provenance.get("pull_request") == number
+    )
+    # A queue request is a successful acceptance action, but it is not proof
+    # that a merge completed. Only the direct merge category may carry that
+    # completion flag.
+    verified_action = normalized_action == "merge" and (
+        action_verified or raw_action == "merge-completed"
+    )
+    classification = "unclassified"
+    if (
+        result is not None
+        and review_state in {"complete", "findings"}
+        and correlated
+        and FULL_SHA.fullmatch(reviewed_head)
+        and FULL_SHA.fullmatch(head_sha)
+        and reviewed_head == head_sha
+        and (
+            not action_head
+            or (FULL_SHA.fullmatch(action_head) and action_head == head_sha)
+        )
+        and action_success
+        and (
+            normalized_action in {"approve", "approve-and-queue", "request-changes"}
+            or (normalized_action == "merge" and verified_action)
+        )
+    ):
+        has_findings = review_state == "findings" or finding_count > 0 or bool(result.findings)
+        accepted = normalized_action in {"approve", "approve-and-queue"} or (
+            normalized_action == "merge" and verified_action
+        )
+        if accepted:
+            classification = "disagreement" if has_findings else "agreement"
+        else:
+            classification = "agreement" if has_findings else "disagreement"
+    return ReviewActionReceipt(
+        repository,
+        number,
+        reviewed_head,
+        review_state,
+        finding_count,
+        normalized_action,
+        actor or "unknown",
+        classification,
+        evidence,
+        verified_action,
+    )
+
+
+def generation_is_current(
+    expected_generation: int,
+    expected_edit_revision: int,
+    generation: int,
+    edit_revision: int,
+    closed: bool,
+    expected_target: tuple[str, int, str, str] | None = None,
+    current_target: tuple[str, int, str, str] | None = None,
+) -> bool:
+    """Guard a background draft before it writes into the editor."""
+    return (
+        not closed
+        and expected_generation == generation
+        and expected_edit_revision == edit_revision
+        and (
+            expected_target is None
+            or expected_target == current_target
+        )
+    )
 
 
 def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> CompareEvidence:
@@ -865,8 +1046,10 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
     turns the list into something scannable: what is ready, what is merely
     stuck behind its own branch, and what nobody can act on yet.
     """
+    if no_color_requested():
+        return ""
     if mergeable == "dirty":
-        return "red"
+        return ""
     if checks == "failure":
         return "red"
     if action == "ready-for-human-merge":
@@ -881,9 +1064,9 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
 def ci_marker(checks: str) -> str:
     """Carry the snapshot's CI state as text, not colour alone."""
     return {
-        "success": "✓ CI GREEN",
-        "failure": "✗ CI FAILED",
-        "pending": "… CI PENDING",
+        "success": f"{ui_glyph('✓', '+')} CI GREEN",
+        "failure": f"{ui_glyph('✗', 'x')} CI FAILED",
+        "pending": f"{ui_glyph('…', '.')} CI PENDING",
         "unknown": "? CI UNKNOWN",
     }.get(checks, "? CI UNKNOWN")
 
@@ -919,6 +1102,333 @@ def authoritative_checks(live: dict) -> list[dict]:
         if key not in latest or rank > latest[key][0]:
             latest[key] = (rank, check)
     return [item[1] for item in sorted(latest.values(), key=lambda item: item[0])] + ungrouped
+
+
+CI_LOG_MAX_BYTES = 64 * 1024
+CI_LOG_MAX_LINES = 200
+CI_LOG_PROCESS_MAX_BYTES = CI_LOG_MAX_BYTES * 2
+_ANSI_OSC = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
+_ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_SECRET_FORMS = (
+    re.compile(r"\b(?:ghp|ghs|gho|github_pat)_[A-Za-z0-9_\-]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),
+    re.compile(r"\b(?:xox[baprs]|npm|pypi|AIza)[-_][A-Za-z0-9_\-]{16,}\b"),
+    re.compile(r"(?i)\bbearer\s+[^\s]+"),
+    re.compile(r"(?i)\b(?:token|secret|password|authorization)\s*[:=]\s*[^\s]+"),
+)
+
+
+def _check_integer(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _run_id_from_url(value: object) -> int | None:
+    match = re.search(r"/runs?/(\d+)(?:/|$)", str(value or ""))
+    return _check_integer(match.group(1)) if match else None
+
+
+def ci_failure_evidence(
+    live: dict, *, repository: str = "", number: int | None = None
+) -> list[dict]:
+    """Normalize current-head failed checks for an evidence-first diagnosis."""
+    failures: list[dict] = []
+    head_sha = str(live.get("headRefOid") or "")
+    if not FULL_SHA.fullmatch(head_sha):
+        return failures
+    repository = repository or str(live.get("repository") or live.get("repositoryName") or "")
+    number = number or _check_integer(live.get("number"))
+    for check in authoritative_checks(live):
+        check_head = str(
+            check.get("headSha")
+            or check.get("head_sha")
+            or ((check.get("commit") or {}).get("oid") if isinstance(check.get("commit"), dict) else "")
+            or ""
+        )
+        if check_head and head_sha and check_head != head_sha:
+            continue
+        conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
+        if conclusion not in {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"}:
+            continue
+        suite = check.get("checkSuite") if isinstance(check.get("checkSuite"), dict) else {}
+        workflow_run = (
+            check.get("workflowRun")
+            if isinstance(check.get("workflowRun"), dict)
+            else suite.get("workflowRun")
+            if isinstance(suite.get("workflowRun"), dict)
+            else {}
+        )
+        annotations = check.get("annotations") or []
+        if isinstance(annotations, dict):
+            annotations = annotations.get("nodes") or []
+        normalized_annotations = []
+        for annotation in annotations[:8] if isinstance(annotations, list) else []:
+            if not isinstance(annotation, dict):
+                continue
+            normalized: dict[str, str] = {}
+            for source, target in (
+                ("path", "path"),
+                ("start_line", "start_line"),
+                ("startLine", "start_line"),
+                ("end_line", "end_line"),
+                ("endLine", "end_line"),
+                ("message", "message"),
+                ("annotation_level", "annotation_level"),
+                ("annotationLevel", "annotation_level"),
+            ):
+                if target not in normalized and annotation.get(source) is not None:
+                    normalized[target] = str(annotation[source])[:240]
+            normalized_annotations.append(normalized)
+        check_id = _check_integer(check.get("databaseId") or check.get("checkId"))
+        run_id = next(
+            (
+                value
+                for value in (
+                    _check_integer(check.get("runId") or check.get("run_id")),
+                    _check_integer(workflow_run.get("databaseId")),
+                    _check_integer(workflow_run.get("id")),
+                    _run_id_from_url(check.get("detailsUrl") or check.get("url")),
+                )
+                if value is not None
+            ),
+            None,
+        )
+        attempt = next(
+            (
+                value
+                for value in (
+                    _check_integer(check.get("runAttempt") or check.get("run_attempt")),
+                    _check_integer(
+                        workflow_run.get("runAttempt") or workflow_run.get("run_attempt")
+                    ),
+                )
+                if value is not None
+            ),
+            None,
+        )
+        job = check.get("job") if isinstance(check.get("job"), dict) else {}
+        steps = check.get("steps") or check.get("step_details") or job.get("steps")
+        failing_step = None
+        if isinstance(steps, dict):
+            steps = steps.get("nodes") or []
+        if isinstance(steps, list):
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                step_conclusion = str(step.get("conclusion") or step.get("status") or "").upper()
+                if step_conclusion in {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"}:
+                    failing_step = step.get("name") or step.get("stepName")
+                    if failing_step:
+                        break
+        job_id = _check_integer(
+            check.get("jobId")
+            or job.get("databaseId")
+            or job.get("id")
+        )
+        workflow = workflow_run.get("workflow") if isinstance(workflow_run.get("workflow"), dict) else {}
+        workflow_id = _check_integer(
+            check.get("workflowId")
+            or check.get("workflow_id")
+            or workflow_run.get("workflowId")
+            or workflow_run.get("workflow_id")
+            or workflow.get("databaseId")
+            or workflow.get("id")
+        )
+        failures.append(
+            {
+                "repository": repository or "unknown",
+                "pull_request": number,
+                    "check": str(
+                        check.get("name") or check.get("context") or "unknown"
+                    ),
+                "check_id": check_id,
+                "workflow": str(
+                    check.get("workflowName")
+                    or suite.get("workflowName")
+                    or workflow_run.get("workflowName")
+                    or workflow_run.get("name")
+                    or "unknown"
+                ),
+                "workflow_id": workflow_id,
+                "job": str(
+                    check.get("name")
+                    or check.get("context")
+                    or job.get("name")
+                    or "unknown"
+                ),
+                "job_id": job_id,
+                "step": str(
+                    check.get("stepName")
+                    or check.get("step_name")
+                    or failing_step
+                    or "unknown"
+                ),
+                "conclusion": conclusion,
+                "head_sha": head_sha if FULL_SHA.fullmatch(head_sha) else "",
+                "run_id": run_id,
+                "attempt": attempt,
+                "started_at": str(
+                    check.get("startedAt")
+                    or check.get("started_at")
+                    or workflow_run.get("createdAt")
+                    or workflow_run.get("created_at")
+                    or ""
+                ),
+                "completed_at": str(
+                    check.get("completedAt")
+                    or check.get("completed_at")
+                    or workflow_run.get("updatedAt")
+                    or workflow_run.get("updated_at")
+                    or ""
+                ),
+                "url": str(
+                    check.get("detailsUrl")
+                    or check.get("url")
+                    or workflow_run.get("url")
+                    or workflow_run.get("htmlUrl")
+                    or workflow_run.get("html_url")
+                    or ""
+                ),
+                "annotations": normalized_annotations,
+            }
+        )
+    return failures
+
+
+def format_ci_failure_evidence(
+    evidence: dict, repository: str = "", number: int | None = None
+) -> list[str]:
+    """Format every CI identity field with an explicit unknown value."""
+    repo = evidence.get("repository") or repository or "unknown"
+    pull_request = evidence.get("pull_request") or number or "unknown"
+    lines = [
+        f"repository  {repo}",
+        f"pull request {pull_request}",
+        f"head       {evidence.get('head_sha') or 'unknown'}",
+        f"check     {evidence.get('check') or 'unknown'}",
+        f"check id   {evidence.get('check_id') or 'unknown'}",
+        f"workflow   {evidence.get('workflow') or 'unknown'}",
+        f"workflow id {evidence.get('workflow_id') or 'unknown'}",
+        f"job       {evidence.get('job') or 'unknown'}",
+        f"job id    {evidence.get('job_id') or 'unknown'}",
+        f"run       {evidence.get('run_id') or 'unknown'}",
+        f"attempt   {evidence.get('attempt') or 'unknown'}",
+        f"conclusion {evidence.get('conclusion') or 'unknown'}",
+        f"started    {evidence.get('started_at') or 'unknown'}",
+        f"completed  {evidence.get('completed_at') or 'unknown'}",
+        f"step      {evidence.get('step') or 'unknown'}",
+    ]
+    annotations = evidence.get("annotations") or []
+    if annotations:
+        lines.append(f"annotations {len(annotations)}")
+        for annotation in annotations:
+            lines.append(
+                "  "
+                + str(annotation.get("path") or "unknown")
+                + ":"
+                + str(annotation.get("start_line") or "?")
+                + " "
+                + str(annotation.get("message") or "")
+            )
+    else:
+        lines.append("annotations unknown")
+    lines.append(f"evidence  {evidence.get('url') or 'unknown'}")
+    return lines
+
+
+def ci_log_failure_state(detail: str) -> str:
+    """Classify a failed on-demand log read without hiding its cause."""
+    lowered = str(detail or "").lower()
+    if "401" in lowered or "authentication" in lowered or "unauthorized" in lowered:
+        return "authentication failed"
+    if "403" in lowered or "permission" in lowered or "forbidden" in lowered:
+        return "permission denied"
+    if (
+        "404" in lowered
+        or "410" in lowered
+        or "not found" in lowered
+        or "expired" in lowered
+    ):
+        return "expired or unavailable"
+    return "transport failed"
+
+
+def ci_log_command(repository: str, evidence: dict) -> list[str]:
+    """Build the read-only command for one exact workflow run and attempt."""
+    run_id = _check_integer(evidence.get("run_id"))
+    if run_id is None:
+        return []
+    command = ["gh", "run", "view", str(run_id), "--repo", repository]
+    job_id = _check_integer(evidence.get("job_id"))
+    attempt = _check_integer(evidence.get("attempt"))
+    if job_id is not None:
+        command.extend(["--job", str(job_id)])
+    if attempt is not None:
+        command.extend(["--attempt", str(attempt)])
+    command.append("--log-failed")
+    return command
+
+
+def ci_result_is_current(
+    expected_repository: str,
+    expected_number: int,
+    expected_head: str,
+    expected_generation: int,
+    closed: bool,
+    current_repository: str,
+    current_number: int,
+    current_head: str,
+    current_generation: int,
+) -> bool:
+    """Reject a CI result after navigation, head refresh, or cancellation."""
+    return (
+        not closed
+        and expected_generation == current_generation
+        and expected_repository == current_repository
+        and expected_number == current_number
+        and expected_head == current_head
+    )
+
+
+def sanitize_ci_log(
+    raw: str | bytes | None,
+    *,
+    max_lines: int = CI_LOG_MAX_LINES,
+    max_bytes: int = CI_LOG_MAX_BYTES,
+) -> tuple[str, list[str]]:
+    """Return bounded, redacted, terminal-control-free log evidence."""
+    if raw is None:
+        return "missing", []
+    if raw == "" or raw == b"":
+        return "empty", []
+    if max_lines < 1 or max_bytes < 1:
+        return "invalid-limit", []
+    process_bytes = min(max_bytes * 2, CI_LOG_PROCESS_MAX_BYTES)
+    if isinstance(raw, bytes):
+        text = raw[:process_bytes].decode("utf-8", "replace")
+    else:
+        text = str(raw)[:process_bytes]
+    for pattern in _SECRET_FORMS:
+        text = pattern.sub("[redacted]", text)
+    text = _ANSI_OSC.sub("", _ANSI_CSI.sub("", text))
+    text = "".join(
+        character
+        for character in text
+        if character in "\n\t"
+        or (
+            ord(character) >= 0x20
+            and ord(character) != 0x7F
+            and not 0x80 <= ord(character) <= 0x9F
+        )
+    )
+    bounded = text.encode("utf-8", "replace")[:max_bytes].decode("utf-8", "ignore")
+    lines = bounded.splitlines()[:max_lines]
+    return ("available", lines) if lines else ("empty", [])
 
 
 def effective_check_state(snapshot: str, live: dict) -> str:
@@ -1168,7 +1678,9 @@ def meter_bar(counts: dict[str, int], width: int = 24) -> str:
         if not count:
             continue
         size = max(1, round(count / total * width))
-        cells.append(f"[{colour}]{'█' * size}[/{colour}]")
+        bar = ui_glyph("█", "#") * size
+        style = ui_style(colour)
+        cells.append(f"[{style}]{bar}[/{style}]" if style else bar)
     return "".join(cells)
 
 
@@ -1260,6 +1772,14 @@ class Stop:
         return mechanical_reason(self.author, self.live)
 
 
+def draft_target(stop: Stop) -> tuple[str, int, str, str]:
+    """Identify the exact stop snapshot a draft was requested for."""
+    return (
+        stop.repository,
+        stop.number,
+        str(stop.live.get("baseRefOid") or ""),
+        str(stop.live.get("headRefOid") or stop.head_identity),
+    )
 REVIEW_FAILURES = {
     "failed",
     "cancelled",
@@ -1533,7 +2053,8 @@ class BatchPlanScreen(ModalScreen[bool]):
     command. On a batch the maintainer has already reviewed row by row —
     the selection was the review — typing the count back teaches nothing
     and only slows the loop. This gate is proportionate: every pull request
-    and the exact agent command are shown, Enter dispatches, Esc aborts.
+    and the exact agent command are shown, Dispatch or Enter proceeds, and
+    Abort or Esc cancels.
     There is no default and no timer; dispatch is still a decision, not a
     typing exercise.
     """
@@ -1567,10 +2088,19 @@ class BatchPlanScreen(ModalScreen[bool]):
                     yield Static(" ".join(task.command), classes="confirm-command")
             else:
                 yield Static(" ".join(self.plan.command), classes="confirm-command")
+            with Horizontal(id="confirm-actions"):
+                yield Button("Dispatch", id="batch-dispatch", variant="primary")
+                yield Button("Abort", id="batch-abort")
             yield Label("[enter] dispatch · [esc] abort")
 
     def action_dispatch(self) -> None:
         self.dismiss(True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "batch-dispatch":
+            self.dismiss(True)
+        elif event.button.id == "batch-abort":
+            self.dismiss(False)
 
 
 class FinalPolicyScreen(ModalScreen[str]):
@@ -1639,6 +2169,7 @@ class FinalPolicyScreen(ModalScreen[str]):
 # app.stylesheet.parse_style), and padding spaces inside a span keep its
 # background — which is what turns a batch header into a full-width bar.
 LANDING_STATE_STYLES: dict[str, tuple[str, str]] = {
+    "unreported": ("?", "dim"),
     "waiting": ("◌", "dim"),
     "diagnosing": ("◐", "cyan"),
     "fixing": ("◐", "cyan"),
@@ -1667,12 +2198,52 @@ def batch_bar_style(state: str) -> str:
     filled bar, its fill naming the state with the theme's own
     text-on-muted pairing so the text stays legible on it."""
     if state == "running":
-        return "bold $text-primary on $primary-muted"
+        return ui_style("bold $text-primary on $primary-muted")
     if state == "queued":
-        return "bold $text-warning on $warning-muted"
-    if state == "exited 0":
-        return "bold $text-success on $success-muted"
-    return "bold $text-error on $error-muted"
+        return ui_style("bold $text-warning on $warning-muted")
+    if state == "complete":
+        return ui_style("bold $text-success on $success-muted")
+    if state in {"waiting", "completed-with-blockers"}:
+        return ui_style("bold $text-warning on $warning-muted")
+    return ui_style("bold $text-error on $error-muted")
+
+
+class LandingFooter(Footer):
+    """Clickable landing controls sized for the landing screen only."""
+
+    _CONTROLS = (
+        ("escape", "esc/q", "back"),
+        ("j", "j", "next"),
+        ("k", "k", "previous"),
+        ("x", "x", "stop"),
+        ("ctrl+p", "^p", "palette"),
+        ("ctrl+q", "^q", "quit"),
+    )
+
+    def compose(self) -> ComposeResult:
+        if not self._bindings_ready:
+            return
+        try:
+            from textual.widgets._footer import FooterKey
+        except ModuleNotFoundError:
+            # Import-only contract tests provide a small widgets stub; the
+            # real Textual runtime supplies the clickable footer key.
+            return
+        active = self.screen.active_bindings
+        for key, key_display, description in self._CONTROLS:
+            try:
+                _node, binding, enabled, tooltip = active[key]
+            except KeyError:
+                continue
+            yield FooterKey(
+                key,
+                key_display,
+                description,
+                binding.action,
+                disabled=not enabled,
+                tooltip=tooltip or binding.description,
+                classes="-grouped",
+            ).data_bind(compact=Footer.compact)
 
 
 class LandingScreen(Screen):
@@ -1691,38 +2262,97 @@ class LandingScreen(Screen):
 
     CSS = """
     #landing-status {
-        height: 1; background: $secondary; color: $text; text-style: bold;
+        height: auto; max-height: 3; overflow: hidden;
+        background: $secondary; color: $text; text-style: bold;
     }
     #landing-rows {
-        border: round $secondary; height: auto; padding: 0 1;
+        border: round $secondary; height: 1fr; min-height: 5; padding: 0 1;
+        overflow-y: scroll;
     }
     #landing-hive {
         border: round $secondary; height: 3; padding: 0 1;
         color: $text-secondary;
     }
-    #landing-log { border: round $secondary; }
+    #landing-log {
+        border: round $secondary; height: 1fr; min-height: 5;
+        overflow-y: scroll;
+    }
+    #landing-keys {
+        height: 1; background: $panel; color: $text-accent;
+        padding: 0 1; overflow: hidden;
+    }
     """
 
     BINDINGS = [
         *back_bindings("dismiss(None)"),
+        Binding("j", "next_batch", "next batch"),
+        Binding("k", "previous_batch", "previous batch"),
         Binding("x", "stop_agent", "stop the running agent"),
     ]
 
     def __init__(self, dashboard: "ReviewDashboard") -> None:
         super().__init__()
         self.dashboard = dashboard
+        self.selected_task_id = ""
+
+    def _tasks(self) -> list[landing.LandingTask]:
+        return [task for task in self.dashboard.landing_queue if not task.phase]
+
+    def _selected_task(self) -> landing.LandingTask | None:
+        tasks = self._tasks()
+        selected = next(
+            (task for task in tasks if task.task_id == self.selected_task_id),
+            None,
+        )
+        if selected is None and tasks:
+            selected = tasks[-1]
+            self.selected_task_id = selected.task_id
+        return selected
+
+    def select_task(self, task_id: str) -> None:
+        if any(task.task_id == task_id for task in self._tasks()):
+            self.selected_task_id = task_id
+            self.poll()
+
+    def _move_task(self, step: int) -> None:
+        tasks = self._tasks()
+        if not tasks:
+            return
+        current = next(
+            (index for index, task in enumerate(tasks) if task.task_id == self.selected_task_id),
+            len(tasks) - 1,
+        )
+        self.selected_task_id = tasks[(current + step) % len(tasks)].task_id
+        self.poll()
+
+    def action_next_batch(self) -> None:
+        self._move_task(1)
+
+    def action_previous_batch(self) -> None:
+        self._move_task(-1)
 
     def compose(self) -> ComposeResult:
-        yield Static("batch queue", id="landing-status")
+        yield Static("batch queue", id="landing-status", markup=False)
         yield Static("", id="landing-rows")
         yield Static("", id="landing-hive")
-        yield RichLog(highlight=False, markup=False, wrap=True, id="landing-log")
-        yield Footer()
+        yield RichLog(
+            highlight=False,
+            markup=False,
+            wrap=True,
+            max_lines=200,
+            id="landing-log",
+        )
+        yield LandingFooter(
+            id="landing-keys",
+            compact=True,
+            show_command_palette=False,
+        )
 
     def on_mount(self) -> None:
         self.query_one("#landing-rows", Static).border_title = "BATCHES"
         self.query_one("#landing-hive", Static).border_title = "HIVE"
         self.query_one("#landing-log", RichLog).border_title = "AGENT LOG"
+        self._selected_task()
         self.poll()
         self.set_interval(2.0, self.poll)
 
@@ -1730,29 +2360,27 @@ class LandingScreen(Screen):
         rows = self.query_one("#landing-rows", Static)
         width = rows.content_region.width
         lines: list[str] = []
+        selected_task = self._selected_task()
         for task in self.dashboard.landing_queue:
             if task.phase:
                 # Final review-and-fix rounds (#378) belong to the batch that
                 # produced them, not beside it: the final-review line below
                 # carries their phase, round, and model.
                 continue
-            if task.returncode is None:
-                state = (
-                    "running"
-                    if self.dashboard._landing_task_active(task)
-                    else "queued"
-                )
-            else:
-                state = f"exited {task.returncode}"
-            header = f" batch {task.task_id} — {state}"
-            if self.dashboard._landing_task_active(task):
+            active = self.dashboard._landing_task_active(task)
+            outcome = landing.batch_outcome(task, active=active)
+            marker = ui_glyph("▶", ">") if task is selected_task else " "
+            header = f"{marker} batch {task.task_id} — {outcome.label}"
+            if active:
                 # A wait that names its target is still invisible if the
                 # row cannot say how long the agent has been silent: the
                 # report file's mtime is the heartbeat (#291).
                 header += f" · {landing.report_age(task.status_path)}"
             # ljust(0) is a no-op, so the first pre-layout poll renders a
             # text-wide bar and the next tick paints it to the panel's edge.
-            lines.append(f"[{batch_bar_style(state)}]{header.ljust(width)}[/]")
+            if outcome.reason and outcome.state not in {"running", "queued"}:
+                header += f" · {escape(outcome.reason)}"
+            lines.append(ui_span(header.ljust(width), batch_bar_style(outcome.state)))
             events = landing.parse_status(task.status_path)
             done = events.get("", {})
             for stop in task.stops:
@@ -1763,10 +2391,12 @@ class LandingScreen(Screen):
                 # before it meets the markup parser. The styled branch only
                 # fires on this module's own fixed literal keys, so the
                 # escape belongs on the fallback alone.
-                mark = str(event.get("state", "waiting"))
+                mark = str(event.get("state") or "unreported")
                 glyph, style = LANDING_STATE_STYLES.get(mark, ("?", ""))
+                glyph = ui_glyph(glyph, "*")
+                style = ui_style(style)
                 if style:
-                    badge = f"[{style}]{glyph} {mark}[/]"
+                    badge = ui_span(f"{glyph} {mark}", style)
                 else:
                     badge = f"{glyph} {escape(mark)}"
                 lines.append(
@@ -1777,7 +2407,7 @@ class LandingScreen(Screen):
             if done:
                 note = escape(str(done.get("note", "")))
                 lines.append(
-                    "  [bold $text-success]✔ done[/]"
+                    f"  {ui_span(ui_glyph('✔', '+') + ' done', ui_style('bold $text-success'))}"
                     + (f" — {note}" if note else "")
                 )
             # The final review-and-fix phase (#378): which round, which
@@ -1804,10 +2434,9 @@ class LandingScreen(Screen):
                 glyph, style = LANDING_STATE_STYLES.get(
                     mark.replace(" running", ""), ("?", "")
                 )
-                badge = (
-                    f"[{style}]{glyph} {escape(mark)}[/]" if style
-                    else f"{glyph} {escape(mark)}"
-                )
+                glyph = ui_glyph(glyph, "*")
+                style = ui_style(style)
+                badge = ui_span(f"{glyph} {escape(mark)}", style)
                 heads = " ".join(
                     f"{label} {escape(str(final.get(key)))[:7]}"
                     for key, label in (("input_head", "from"), ("output_head", "to"))
@@ -1827,33 +2456,66 @@ class LandingScreen(Screen):
         self.query_one("#landing-hive", Static).update(
             f" Hive: {escape(self.dashboard.hive_state or 'asking…')}"
         )
-        task = self.dashboard.landing_queue[-1]
-        try:
-            with open(task.log_path, encoding="utf-8") as handle:
-                tail = handle.readlines()[-200:]
-        except OSError:
-            tail = []
         log = self.query_one("#landing-log", RichLog)
+        try:
+            prior_offset = log.scroll_offset.y
+            following_tail = prior_offset >= log.max_scroll_y
+        except (AttributeError, TypeError):
+            prior_offset = 0
+            following_tail = True
+        tail = (
+            landing.read_log_tail(selected_task.log_path)
+            if selected_task is not None
+            else []
+        )
         log.clear()
         for line in tail:
             log.write(line.rstrip("\n"))
+        try:
+            if following_tail:
+                log.scroll_end(animate=False)
+            else:
+                log.scroll_to(y=prior_offset, animate=False)
+        except (AttributeError, TypeError):
+            pass
         running = sum(
             1
             for t in self.dashboard.landing_queue
             if self.dashboard._landing_task_active(t)
         )
+        progress = (
+            landing.progress_snapshot(
+                selected_task,
+                landing.parse_status(selected_task.status_path),
+            )
+            if selected_task is not None
+            else None
+        )
+        progress_text = ""
+        if progress is not None:
+            model = f" · model {progress.model}" if progress.model else ""
+            round_text = f" · round {progress.round}" if progress.round else ""
+            progress_text = (
+                f" · stage {progress.stage}{model}{round_text}"
+                f" · {progress.completed}/{progress.total} terminal"
+                f" · {progress.waiting} external waiting"
+                f" · {progress.blocked} blocked"
+                f" · {progress.failed} failed"
+                f" · elapsed {progress.elapsed}"
+                f" · evidence age {progress.evidence_age}"
+            )
         self.query_one("#landing-status", Static).update(
             f" batch queue: {len(self.dashboard.landing_queue)} batches, "
-            f"{running} running · [x] stop · [esc] back"
+            f"{running} running · target {selected_task.task_id if selected_task else 'none'} "
+            f"{progress_text} · [j/k] select · [x] stop · [esc] back"
         )
 
     def action_stop_agent(self) -> None:
-        task = next(
-            (t for t in self.dashboard.landing_queue if t.running), None
-        )
-        if task is None or task.process is None:
-            self.app.notify("no agent is running.", severity="warning")
+        task = self._selected_task()
+        if task is None or task.process is None or not self.dashboard._landing_task_active(task):
+            self.app.notify("the selected batch is not running.", severity="warning")
             return
+        task.stop_requested = True
         try:
             os.killpg(os.getpgid(task.process.pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError, AttributeError) as error:
@@ -2152,12 +2814,18 @@ class ReviewBody(ModalScreen[str | None]):
         self.draft_provenance: dict = {}
         self.body_file: str | None = None
         self.previewed_body: str | None = None
+        self.generation = 0
+        self.edit_revision = 0
+        self.closed = False
+        self.draft_target: tuple[str, int, str, str] | None = None
+        self.generation_source_text: str | None = None
 
     def compose(self) -> ComposeResult:
         optional = " (empty is allowed for an approval)" if self.verdict == "approve" else ""
         with Vertical(id="confirm-box"):
             yield Label(f"{self.verdict} — say why{optional}:")
             yield TextArea(id="review-body-editor")
+            yield Static("draft: idle", id="review-body-status")
             yield Static(
                 "[ctrl-g] generate · [ctrl-e] edit · [ctrl-p] preview · "
                 "[ctrl-shift-k] clear · [ctrl-s] submit",
@@ -2172,12 +2840,23 @@ class ReviewBody(ModalScreen[str | None]):
                 yield Button("Submit", id="review-body-submit", variant="primary")
 
     def on_mount(self) -> None:
+        self.closed = False
         self.query_one(TextArea).focus()
+
+    def on_unmount(self) -> None:
+        self.closed = True
+        self.generation += 1
+        self.draft_target = None
+        self.generation_source_text = None
 
     def action_edit(self) -> None:
         self.query_one(TextArea).focus()
 
     def action_cancel(self) -> None:
+        self.closed = True
+        self.generation += 1
+        self.draft_target = None
+        self.generation_source_text = None
         self.cleanup()
         self.dismiss(None)
 
@@ -2198,6 +2877,7 @@ class ReviewBody(ModalScreen[str | None]):
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id == "review-body-editor":
+            self.edit_revision += 1
             self._invalidate_preview()
 
     def action_generate(self) -> None:
@@ -2212,6 +2892,73 @@ class ReviewBody(ModalScreen[str | None]):
                 str(self.stop_record.live["baseRefOid"]), str(self.stop_record.live["headRefOid"]),
                 actor="maintainer", tenant="review", generated_at="dashboard",
             )
+        except (KeyError, TypeError, ValueError) as error:
+            self.notify(f"draft unavailable: {error}", severity="warning")
+            return
+        self.generation += 1
+        generation = self.generation
+        target = draft_target(self.stop_record)
+        source_text = self.query_one(TextArea).text
+        self.draft_target = target
+        self.generation_source_text = source_text
+        self.query_one(TextArea).focus()
+        self.query_one("#review-body-status", Static).update(
+            "draft: generating in background; editor remains available"
+        )
+        self.app.call_after_refresh(
+            lambda: self._start_generation(
+                generation,
+                request,
+                result,
+                live_review_context(self.stop_record.live),
+                target,
+                source_text,
+            )
+        )
+
+    def _start_generation(
+        self,
+        generation: int,
+        request: ReviewRequest,
+        result: ReviewResult,
+        live_context: dict,
+        target: tuple[str, int, str, str],
+        source_text: str,
+    ) -> None:
+        if not generation_is_current(
+            generation,
+            self.edit_revision,
+            self.generation,
+            self.edit_revision,
+            self.closed,
+            target,
+            draft_target(self.stop_record),
+        ):
+            return
+        self.generate_draft(
+            generation,
+            self.edit_revision,
+            request,
+            result,
+            live_context,
+            target,
+            source_text,
+        )
+
+    @work(thread=True, exclusive=True, group="draft")
+    def generate_draft(
+        self,
+        generation: int,
+        edit_revision: int,
+        request: ReviewRequest,
+        result: ReviewResult,
+        live_context: dict,
+        target: tuple[str, int, str, str],
+        source_text: str,
+    ) -> None:
+        draft = None
+        error = ""
+        try:
             registry = HarnessRegistry()
             registry.register(GooseHarness())
             registry.register(CodexHarness(availability=CodexHarness.probe()))
@@ -2219,16 +2966,61 @@ class ReviewBody(ModalScreen[str | None]):
             if not adapter.capabilities.body_drafting:
                 raise RuntimeError(f"{ACTIVE_BACKEND} unavailable: UNSUPPORTED_CAPABILITY")
             draft = adapter.draft(
-                DraftRequest(request, self.verdict, result, live_review_context(self.stop_record.live))
+                DraftRequest(request, self.verdict, result, live_context)
             )
-        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as error:
-            self.notify(f"draft unavailable: {error}", severity="warning")
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
+            error = str(exc)
+        if get_current_worker().is_cancelled:
             return
-        if draft.state is not DraftState.COMPLETE or not draft.markdown:
-            self.notify("draft unavailable: evidence did not produce review prose", severity="warning")
+        self.app.call_from_thread(
+            self.apply_generated_draft,
+            generation,
+            edit_revision,
+            draft,
+            error,
+            target,
+            source_text,
+        )
+
+    def apply_generated_draft(
+        self,
+        generation: int,
+        edit_revision: int,
+        draft,
+        error: str,
+        target: tuple[str, int, str, str] | None = None,
+        source_text: str | None = None,
+    ) -> None:
+        if not generation_is_current(
+            generation,
+            edit_revision,
+            self.generation,
+            self.edit_revision,
+            self.closed,
+            target,
+            draft_target(self.stop_record) if target is not None else None,
+        ):
+            return
+        if source_text is not None and self.query_one(TextArea).text != source_text:
+            return
+        if error:
+            self.notify(f"draft unavailable: {error}", severity="warning")
+            self.query_one("#review-body-status", Static).update(
+                f"draft: unavailable — {escape(error)}"
+            )
+            return
+        if draft is None or draft.state is not DraftState.COMPLETE or not draft.markdown:
+            self.notify(
+                "draft unavailable: evidence did not produce review prose",
+                severity="warning",
+            )
+            self.query_one("#review-body-status", Static).update(
+                "draft: unavailable — evidence did not produce review prose"
+            )
             return
         self.draft_provenance = dict(getattr(draft, "provenance", {}))
         self.query_one(TextArea).text = draft.markdown
+        self.query_one("#review-body-status", Static).update("draft: generated; edit before preview")
 
     def _command(self, body_file: str) -> list[str]:
         return ["gh", "pr", "review", str(self.stop_record.number), "--repo",
@@ -2301,6 +3093,151 @@ class ReviewBody(ModalScreen[str | None]):
                 pass
             self.body_file = None
         self.previewed_body = None
+
+
+class CIFailureScreen(ModalScreen[None]):
+    """Inspect one exact-head CI failure and optionally fetch bounded logs."""
+
+    BINDINGS = [
+        Binding("i", "load_logs", "load bounded logs"),
+        *back_bindings("dismiss(None)"),
+    ]
+
+    def __init__(self, stop: Stop, evidence: dict) -> None:
+        super().__init__()
+        self.stop_record = stop
+        self.evidence = evidence
+        self.generation = 0
+        self.loading = False
+        self.closed = False
+        self.expected_identity = (
+            stop.repository,
+            stop.number,
+            str(evidence.get("head_sha") or stop.head_identity),
+        )
+
+    def compose(self) -> ComposeResult:
+        evidence = self.evidence
+        lines = [
+            "CI FAILURE TRIAGE · " + self.stop_record.key,
+            *format_ci_failure_evidence(
+                evidence, self.stop_record.repository, self.stop_record.number
+            ),
+        ]
+        with Vertical(id="ci-failure-box"):
+            with ScrollableContainer(id="ci-failure-evidence-scroll"):
+                yield Static(escape("\n".join(lines)), id="ci-failure-evidence")
+            yield Button("Load bounded logs", id="ci-load-logs")
+            yield Static(
+                "logs: not loaded · untrusted · [i] load · [esc] back",
+                id="ci-log-state",
+                markup=False,
+            )
+            yield RichLog(highlight=False, markup=False, wrap=True, id="ci-log")
+            yield Footer()
+
+    def on_mount(self) -> None:
+        self.closed = False
+        self.query_one("#ci-load-logs", Button).focus()
+
+    def on_unmount(self) -> None:
+        self.closed = True
+        self.generation += 1
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ci-load-logs":
+            self.action_load_logs()
+
+    def action_load_logs(self) -> None:
+        if self.loading:
+            return
+        if not ci_log_command(self.stop_record.repository, self.evidence):
+            self.render_logs("logs: missing · workflow run id is unknown", [])
+            return
+        self.loading = True
+        self.generation += 1
+        generation = self.generation
+        self.query_one("#ci-log-state", Static).update("logs: loading bounded evidence…")
+        self.load_logs(generation)
+
+    @work(thread=True, exclusive=True)
+    def load_logs(self, generation: int, run_id: int | None = None) -> None:
+        evidence = self.evidence
+        if run_id is not None:
+            evidence = {**evidence, "run_id": run_id}
+        command = ci_log_command(self.stop_record.repository, evidence)
+        if not command:
+            self.app.call_from_thread(
+                self.render_logs, "logs: missing · workflow run id is unknown", [], generation
+            )
+            return
+        try:
+            result = gh(*command[1:], timeout=30)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+            if not get_current_worker().is_cancelled:
+                self.app.call_from_thread(
+                    self.render_logs, f"logs: transport failed · {type(error).__name__}", [], generation
+                )
+            return
+        if get_current_worker().is_cancelled:
+            return
+        if result.returncode == 0:
+            state, lines = sanitize_ci_log(result.stdout)
+            label = "available · UNTRUSTED" if state == "available" else state
+            self.app.call_from_thread(self.render_logs, f"logs: {label}", lines, generation)
+            return
+        detail = result.stderr or result.stdout or ""
+        state = ci_log_failure_state(detail)
+        self.app.call_from_thread(self.render_logs, f"logs: {state}", [], generation)
+
+    def render_logs(
+        self,
+        state: str,
+        lines: list[str],
+        generation: int | None = None,
+    ) -> None:
+        if generation is not None and (
+            generation != self.generation or not self._result_is_current()
+        ):
+            return
+        self.loading = False
+        try:
+            self.query_one("#ci-log-state", Static).update(state)
+            log = self.query_one("#ci-log", RichLog)
+        except NoMatches:
+            return
+        log.clear()
+        _, safe_lines = sanitize_ci_log("\n".join(lines))
+        for line in safe_lines:
+            log.write(line)
+
+    def _result_is_current(self) -> bool:
+        if self.closed:
+            return False
+        repository, number, head = self.expected_identity
+        current_repository, current_number, current_head = repository, number, head
+        dashboard = self.app
+        if hasattr(dashboard, "current"):
+            try:
+                current = dashboard.current
+            except (NoMatches, AttributeError):
+                return False
+            if current is not self.stop_record:
+                return False
+            current_repository = current.repository
+            current_number = current.number
+            current_head = current.head_identity
+        return ci_result_is_current(
+            repository,
+            number,
+            head,
+            self.generation,
+            self.closed,
+            current_repository,
+            current_number,
+            current_head,
+            self.generation,
+        )
 
 
 class DiffScreen(ModalScreen[None]):
@@ -2665,6 +3602,7 @@ class HelpScreen(ModalScreen[None]):
                     yield Static("[bold cyan]f[/] / [bold cyan]F[/]       Auto-fix & land / steer fix", classes="help-row")
                     yield Static("[bold cyan]/[/]         Steer review with prompt", classes="help-row")
                     yield Static("[bold cyan]v[/]         View full diff", classes="help-row")
+                    yield Static("[bold cyan]i[/]         Inspect bounded CI failure logs", classes="help-row")
                     yield Static("[bold cyan]o[/]         Open in browser", classes="help-row")
                     yield Static("[bold cyan]y[/]         Copy review context", classes="help-row")
                     yield Static("[bold cyan]c[/]         Comment on PR", classes="help-row")
@@ -2713,6 +3651,7 @@ class ReviewScreen(Screen):
         Binding("r", "toggle_raw_transcript", "raw transcript"),
         Binding("c", "view_comments", "comments"),
         Binding("v", "view_diff", "diff"),
+        Binding("i", "ci_failure_logs", "CI failure logs"),
     ]
 
     def __init__(
@@ -3253,6 +4192,9 @@ class ReviewScreen(Screen):
     def action_view_comments(self) -> None:
         self.app.push_screen(CommentsScreen(self.stop_record))
 
+    def action_ci_failure_logs(self) -> None:
+        self.app.open_ci_failure_logs(self.stop_record)
+
     def action_view_diff(self) -> None:
         self.app.push_screen(DiffScreen(self.stop_record))
 
@@ -3337,14 +4279,14 @@ class ReviewDashboard(App):
     _current_batch_plan: action_plan.BatchActionPlan | None = None
     _batch_generation_token: int = 0
 
-    TITLE = "BLUEFIN REVIEW DASHBOARD"
+    TITLE = display_title("DASHBOARD")
     CSS = """
-    #status-bar { height: 1; background: $panel; color: cyan; }
+    #status-bar { height: 1; background: $panel; color: $text-accent; }
     #activity {
         border: heavy $primary; height: auto; padding: 0 1;
         color: $text;
     }
-    #review-metadata, #landing-row { height: 1fr; }
+    #landing-row { height: auto; min-height: 4; }
     #activity {
         width: 50%;
     }
@@ -3352,37 +4294,45 @@ class ReviewDashboard(App):
         width: 50%; border: heavy $primary; height: auto; padding: 0 1;
         color: $text;
     }
-    #landing-control { height: 100%; }
-    #landing-control-status { height: 1fr; }
+    #landing-control-status { height: auto; max-height: 5; overflow-y: auto; }
     #landing-control-buttons { height: 3; }
     #landing-control-buttons Button { width: 1fr; min-width: 9; margin: 0 1; }
-    #queue-pane { height: 1fr; border: solid $secondary; }
-    #queue { height: 1fr; }
-    #details-pane, #context-pane {
-        width: 50%; height: 1fr; border: solid $secondary; padding: 0 1;
-    }
+    #main-content { height: 1fr; min-height: 7; }
+    #queue-pane { width: 45%; min-width: 28; height: 1fr; border: solid $secondary; }
+    #right-pane { width: 55%; min-width: 0; height: 1fr; }
+    #details-pane { height: 60%; min-height: 4; border: solid $secondary; padding: 0 1; }
+    #context-pane { height: 40%; min-height: 3; border: solid $secondary; padding: 0 1; }
     #details, #context { height: auto; }
     #confirm-box {
-        border: heavy magenta; background: $surface;
-        width: 80%; height: auto; padding: 1 2; margin: 4 4;
+        border: heavy $text-accent; background: $surface;
+        width: 1fr; max-width: 92%; max-height: 90%; overflow-y: auto;
+        height: auto; padding: 1 2; margin: 1 2;
     }
-    #confirm-command, .confirm-command { color: magenta; text-style: bold; }
+    #confirm-actions { width: auto; height: auto; align: center middle; }
+    #confirm-actions Button { margin: 1 1; }
+    #confirm-command, .confirm-command { color: $text-accent; text-style: bold; }
     #steer { border: solid $secondary; height: 3; }
     #keys-reading, #keys-acting { height: 1; background: $panel; }
     #keys-reading { color: $text; }
-    #keys-acting { color: magenta; }
-    #diff-header { height: 1; background: $panel; color: cyan; text-style: bold; }
+    #keys-acting { color: $text-warning; }
+    #diff-header { height: 1; background: $panel; color: $text-accent; text-style: bold; }
     #review-card { border: solid $success; padding: 1 2; height: auto; color: $text; }
     #review-evidence.hidden, #review-log.hidden { display: none; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
-    #comments-header { height: 1; background: $panel; color: cyan; text-style: bold; }
+    #comments-header { height: 1; background: $panel; color: $text-accent; text-style: bold; }
     #comments-scroll { border: solid $secondary; background: $surface; }
     #comments-body { padding: 0 1; width: auto; }
     ListItem.selected { background: $primary-muted; }
-    ListItem.selected Label { color: magenta; text-style: bold; }
+    ListItem.selected Label { color: $text-primary; text-style: bold; }
+    #queue:focus > ListItem.-highlight {
+        background: $accent-muted; color: $text-primary; text-style: bold;
+    }
+    #queue:focus > ListItem.-highlight Label {
+        color: $text-primary; text-style: bold;
+    }
     #review-status { height: auto; padding: 0 1; background: $panel; }
-    #review-status.running { background: $panel; color: cyan; }
+    #review-status.running { background: $panel; color: $text-accent; }
     #review-status.complete { background: $success; color: $text; text-style: bold; }
     #review-status.incomplete { background: $warning; color: $text; text-style: bold; }
     #review-status.stale { background: $warning; color: $text; text-style: bold; }
@@ -3390,17 +4340,61 @@ class ReviewDashboard(App):
         background: $error; color: $text; text-style: bold;
     }
     #review-log { border: solid $secondary; }
-    #takeoff-box { border: heavy cyan; background: $surface; width: 80%; height: auto; padding: 1 2; margin: 4 4; }
-    #help-box {
-        border: heavy cyan; background: $surface;
-        width: 76; height: auto; padding: 1 2; margin: 2 4;
+    #takeoff-box {
+        border: heavy $text-accent; background: $surface; width: 1fr; max-width: 92%;
+        max-height: 90%; overflow-y: auto; height: auto; padding: 1 2; margin: 1 2;
     }
-    #help-title { text-align: center; height: 1; margin-bottom: 1; border-bottom: solid $secondary; color: cyan; text-style: bold; }
+    #help-box {
+        border: heavy $text-accent; background: $surface;
+        width: 1fr; max-width: 76; max-height: 90%; overflow-y: auto;
+        height: auto; padding: 1 2; margin: 1 2;
+    }
+    #help-title { text-align: center; height: 1; margin-bottom: 1; border-bottom: solid $secondary; color: $text-accent; text-style: bold; }
     #help-columns { width: 100%; height: auto; }
     .help-col { width: 50%; height: auto; padding: 0 1; }
-    .help-section-title { margin-top: 1; margin-bottom: 0; color: magenta; text-style: bold; }
+    .help-section-title { margin-top: 1; margin-bottom: 0; color: $text-accent; text-style: bold; }
     .help-row { height: 1; }
     #help-footer { text-align: center; margin-top: 1; color: $text-muted; }
+    #ci-failure-box {
+        border: heavy $text-error; background: $surface;
+        width: 90%; height: 90%; padding: 1 2; margin: 1 2;
+    }
+    #ci-failure-evidence-scroll {
+        height: auto; max-height: 45%; overflow-y: scroll;
+        border: solid $secondary;
+    }
+    #ci-failure-evidence { height: auto; }
+    #ci-log-state { height: 1; color: $text-warning; }
+    #ci-log { border: solid $secondary; height: 1fr; }
+    #keys-reading, #keys-acting { overflow: hidden; }
+    ToastRack { margin-bottom: 9; }
+    App.no-color Screen { color: ansi_default; background: ansi_default; }
+    App.no-color Screen * { color: ansi_default; background: ansi_default; }
+    App.no-color Screen #status-bar,
+    App.no-color Screen #activity,
+    App.no-color Screen #harness-status,
+    App.no-color Screen #keys-reading,
+    App.no-color Screen #keys-acting,
+    App.no-color Screen #review-status,
+    App.no-color Screen #diff-header,
+    App.no-color Screen #comments-header,
+    App.no-color Screen #review-card,
+    App.no-color Screen #ci-log-state,
+    App.no-color Screen #brand,
+    App.no-color Screen #state-badge { color: ansi_default; background: ansi_default; }
+    App.no-color Screen #activity,
+    App.no-color Screen #queue-pane,
+    App.no-color Screen #details-pane,
+    App.no-color Screen #context-pane,
+    App.no-color Screen #steer,
+    App.no-color Screen #review-status,
+    App.no-color Screen #review-log,
+    App.no-color Screen #confirm-box,
+    App.no-color Screen #takeoff-box,
+    App.no-color Screen #help-box,
+    App.no-color Screen #ci-failure-box,
+    App.no-color Screen #ci-failure-evidence-scroll,
+    App.no-color Screen #ci-log { border: solid ansi_default; }
     """
 
     BINDINGS = bindings_for("dashboard")
@@ -3413,6 +4407,9 @@ class ReviewDashboard(App):
         gh_client: GhClient | None = None,
     ) -> None:
         super().__init__()
+        if no_color_requested():
+            self.add_class("no-color")
+        self.title = display_title("DASHBOARD")
         self.filters = filters or QueueFilters()
         self.run_store = run_store or RunStateStore()
         self.gh_client = gh_client or default_client
@@ -3525,6 +4522,8 @@ class ReviewDashboard(App):
         self._current_batch_plan: action_plan.BatchActionPlan | None = None
         self._batch_generation_token: int = 0
         self._batch_receipt_ledger = DashboardBatchReceiptLedger()
+        self.action_comparisons: dict[str, ReviewActionReceipt] = {}
+        self.last_action_comparison: ReviewActionReceipt | None = None
         self.fixer_advanced_heads: set[tuple[str, int, str]] = set()
         self.active_review_identities: dict[str, RunIdentity] = {}
         self.review_started_at: dict[str, float] = {}
@@ -3802,15 +4801,7 @@ class ReviewDashboard(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("loading queue…", id="status-bar")
-        with Vertical(id="queue-pane"):
-            yield ListView(id="queue")
-        with Vertical(id="review-metadata"):
-            yield Static("Harness Autopilot — CHECKING…", id="harness-status")
-            with Horizontal():
-                with ScrollableContainer(id="details-pane"):
-                    yield Static("", id="details")
-                with ScrollableContainer(id="context-pane"):
-                    yield Static("", id="context")
+        yield Static("Harness Autopilot — CHECKING…", id="harness-status")
         with Horizontal(id="landing-row"):
             yield Static("AGENT ACTIVITY\nSnapshot: unavailable", id="activity")
             with Vertical(id="landing-control"):
@@ -3819,9 +4810,16 @@ class ReviewDashboard(App):
                     yield Button("-", id="landing-concurrency-down")
                     yield Button("+", id="landing-concurrency-up")
                     yield Button("Pause", id="landing-pause")
+        with Horizontal(id="main-content"):
+            with Vertical(id="queue-pane"):
+                yield ListView(id="queue")
+            with Vertical(id="right-pane"):
+                with ScrollableContainer(id="details-pane"):
+                    yield Static("", id="details")
+                with ScrollableContainer(id="context-pane"):
+                    yield Static("", id="context")
         yield Input(
-            placeholder="[/] steer the review of the highlighted PR — "
-            "enter runs it, esc returns to the queue",
+            placeholder=STEER_PLACEHOLDER,
             id="steer",
         )
         # Two lines, not Textual's one-line Footer. Fourteen bindings do not
@@ -3831,10 +4829,49 @@ class ReviewDashboard(App):
         yield Static(KEYS_READING, id="keys-reading")
         yield Static(KEYS_ACTING, id="keys-acting")
 
+    def _apply_responsive_layout(self, width: int) -> None:
+        """Keep the queue usable when the terminal is narrower than two panes."""
+        try:
+            main = self.query_one("#main-content")
+            queue = self.query_one("#queue-pane")
+            right = self.query_one("#right-pane")
+            context = self.query_one("#context-pane")
+            activity = self.query_one("#activity")
+            steer = self.query_one("#steer", Input)
+            reading = self.query_one("#keys-reading")
+            acting = self.query_one("#keys-acting")
+        except NoMatches:
+            return
+        narrow = width <= 100
+        main.styles.layout = "vertical" if narrow else "horizontal"
+        # The queue carries identity, CI, and action evidence in one row;
+        # standard 120-column terminals need the same 55% allocation as the
+        # desktop layout to keep that suffix visible.
+        queue.styles.width = "100%" if narrow else "55%"
+        queue.styles.height = "45%" if narrow else "1fr"
+        right.styles.width = "100%" if narrow else "45%"
+        right.styles.height = "55%" if narrow else "1fr"
+        context.styles.display = "none" if narrow else "block"
+        activity.styles.height = 5 if narrow else "auto"
+        steer.placeholder = (
+            STEER_PLACEHOLDER_COMPACT if narrow else STEER_PLACEHOLDER
+        )
+        reading.update(KEYS_READING_COMPACT if narrow else KEYS_READING)
+        acting.update(KEYS_ACTING_COMPACT if narrow else KEYS_ACTING)
+        reading.styles.height = 1
+        acting.styles.height = 1
+        self.refresh_activity()
+        if self.stops:
+            self.refresh_rows()
+
+    def on_resize(self, event) -> None:
+        self._apply_responsive_layout(event.size.width)
+
     def on_mount(self) -> None:
         # The queue keeps the keystrokes. The steer box is entered on purpose
         # with [/], because a focused Input swallows every single-key binding.
         self.query_one("#queue", ListView).focus()
+        self._apply_responsive_layout(self.size.width)
         with self.headroom_lock:
             self.headroom_session.refresh(ACTIVE_BACKEND)
             self.headroom_status_line = self.headroom_session.status_line(
@@ -3892,25 +4929,50 @@ class ReviewDashboard(App):
 
     def harness_loaded(self, options: list[HarnessOption]) -> None:
         self.harness_options = options
-        result = next((option.discovery for option in options if option.harness.branding.harness_id == ACTIVE_BACKEND), options[0].discovery)
-        self.harness_state = result.availability.value
+        selected = next(
+            (
+                option
+                for option in options
+                if option.harness.branding.harness_id == ACTIVE_BACKEND
+            ),
+            None,
+        )
         try:
             label = self.query_one("#harness-status", Static)
-        except NoMatches:
+        except (NoMatches, ScreenStackError):
             # The asynchronous probe can finish after Textual has torn down
             # this dashboard. State remains useful for a live screen, but an
             # unmounted screen has nowhere safe to render it.
             return
-        if result.availability is Availability.READY:
+        if selected is None:
+            self.harness_state = "UNAVAILABLE"
             label.update(
-                "Harness Autopilot — READY · Codex / gemini-3.8-flash · "
-                "reason: max · Start requires Enter/click"
+                "Harness Autopilot — unavailable · backend unknown / model unknown · "
+                "effort: unknown · [Diagnostics] [Retry] · no fallback"
             )
         else:
-            label.update(
-                f"Harness Autopilot — {result.availability.value} · "
-                "[Diagnostics] [Sign in] [Install] [Retry] · no fallback"
-            )
+            result = selected.discovery
+            self.harness_state = result.availability.value
+            backend = str(result.backend or ACTIVE_BACKEND or "unknown").strip()
+            backend = backend.title() if backend != "unknown" else backend
+            if result.availability is Availability.READY:
+                model = str(getattr(selected.harness, "model", "") or result.model or "").strip()
+                effort = str(getattr(selected.harness, "effort", "") or "").strip()
+                if selected.harness.branding.harness_id == "goose":
+                    model = os.environ.get("GOOSE_MODEL", model).strip()
+                    effort = os.environ.get("GOOSE_THINKING_EFFORT", effort).strip()
+                model = model or "unknown"
+                effort = effort if effort in {"low", "medium", "high", "max"} else "unknown"
+                label.update(
+                    f"Harness Autopilot — READY · {backend} / {model} · "
+                    f"effort: {effort} · Start requires Enter/click"
+                )
+            else:
+                label.update(
+                    f"Harness Autopilot — {result.availability.value} · "
+                    f"{backend} / model unknown · effort: unknown · "
+                    "[Diagnostics] [Sign in] [Install] [Retry] · no fallback"
+                )
         try:
             self.refresh_rows()
         except Exception:
@@ -5408,6 +6470,10 @@ class ReviewDashboard(App):
                 self.set_timer(delay, self._advance_slay_frame)
 
     def start_slay_sequence(self) -> None:
+        if reduced_motion_requested():
+            self.slay_frame = len(SLAY_FRAMES) - 1
+            self.populate(self.stops)
+            return
         self.slay_frame = 0
         self.populate(self.stops)
         try:
@@ -5420,7 +6486,7 @@ class ReviewDashboard(App):
     ) -> str:
         # Selection is not colour-only: a ● leads the row and the whole row
         # carries a background, so the batch in progress reads at a glance.
-        selected = "● " if stop.selected else "  "
+        selected = f"{ui_glyph('●', '*')} " if stop.selected else "  "
         if stop.is_issue:
             labels_source = stop.live.get("labels", [])
             labels_list = []
@@ -5453,23 +6519,91 @@ class ReviewDashboard(App):
         # A stop that would not merge says so on its own row, so a failure in
         # the middle of a batch survives the notification that reported it.
         failed = " ✗ DID NOT MERGE" if stop.failure else ""
-        marks = self._review_badge(stop, record_snapshot=record_snapshot)
         checks = effective_check_state(stop.check_state, stop.live)
+        ci_only_failure = (
+            checks == "failure"
+            and not stop.failure
+            and stop.review_status not in REVIEW_FAILURES
+            and stop.mergeable_state != "dirty"
+        )
+        marks = (
+            ""
+            if ci_only_failure
+            else self._review_badge(stop, record_snapshot=record_snapshot)
+        )
         if stop.mergeable_state == "dirty":
-            marks += " ⚑ CONFLICTS"
-        marks += f" {ci_marker(checks)}"
+            if not stop.failure and stop.review_status not in REVIEW_FAILURES:
+                marks = ""
+            marks += (" ⚑ CONFLICTS" if no_color_requested()
+                      else " [bold red]⚑ CONFLICTS[/bold red]")
+        ci_text = ci_marker(checks)
+        ci_style = {"success": "green", "failure": "red", "pending": "yellow"}.get(checks)
+        if ci_style and not no_color_requested():
+            ci_text = f"[{ci_style}]{ci_text}[/{ci_style}]"
+        marks += f" {ci_text}"
         if stop.review_state == "approved":
             marks += " ✓ approved"
         hive_rank_str = self.hive_rank_display(stop)
+        landing_task = next(
+            (
+                task
+                for task in self.landing_queue
+                if not task.phase and stop.key in task.keys
+            ),
+            None,
+        )
+        if (
+            landing_task is not None
+            and self._landing_task_active(landing_task)
+            and not stop.failure
+            and stop.review_status not in REVIEW_FAILURES
+            and stop.mergeable_state != "dirty"
+        ):
+            # The landing marker already names the active operation; repeating
+            # the generic review badge consumes the action suffix on compact rows.
+            marks = ""
+        if landing_task is None:
+            suffix = f"{tag}{hive_rank_str} {marks} {escape(f'[{stop.action}]')}{failed}"
+        else:
+            landing_mark = (
+                "⟳ LANDING"
+                if self._landing_task_active(landing_task)
+                else "… LANDING QUEUED"
+            )
+            suffix = f"{tag}{hive_rank_str} {marks} {landing_mark} {escape(f'[{stop.action}]')}{failed}"
+        title = self._fit_queue_title(stop, suffix, selected)
         body = (
             f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
-            f"{escape(stop.title[:60])}{tag}{hive_rank_str} "
-            f"{marks} {escape('[' + stop.action + ']')}{failed}"
+            f"{escape(title)}{suffix}"
         )
         style = stop_style(
             stop.action, stop.mergeable_state, checks, stop.review_state
         )
         return f"[{style}]{body}[/{style}]" if style else body
+
+    def _fit_queue_title(self, stop: Stop, suffix: str, selected: str) -> str:
+        """Reserve visible room for state and action evidence in each row."""
+        try:
+            width = self.query_one("#queue", ListView).content_region.width
+            if type(width) is not int:
+                width = 80
+        except (NoMatches, ScreenStackError, AttributeError, TypeError):
+            width = 80
+        if width < 1:
+            width = 80
+        prefix = f"{selected}{stop.key}: "
+        try:
+            visible_suffix = Text.from_markup(suffix).plain
+        except MarkupError:
+            visible_suffix = suffix
+        # ListView may consume edge columns for the scrollbar after the label
+        # is measured; reserve them so the action/CI suffix remains visible.
+        available = max(1, width - 2 - len(prefix) - len(visible_suffix))
+        if len(stop.title) <= available:
+            return stop.title
+        if available == 1:
+            return "…"
+        return stop.title[: available - 1] + "…"
 
     def _queue_state(
         self_or_stop: Any,
@@ -5497,6 +6631,14 @@ class ReviewDashboard(App):
             or effective_check_state(stop.check_state, stop.live) == "failure"
         ):
             return "failed"
+        if self is not None:
+            for task in self.landing_queue:
+                if stop.key not in task.keys:
+                    continue
+                if self._landing_task_active(task):
+                    return "in progress"
+                if task.process is None and task.returncode is None:
+                    return "queued"
         if stop.review_status in {"queued", "running"}:
             return "in progress"
         if stop.review_result is not None:
@@ -5847,7 +6989,34 @@ class ReviewDashboard(App):
             rows = rows[:MAX_ACTIVITY_ROWS - 1] + [
                 f"… {len(rows) - (MAX_ACTIVITY_ROWS - 1)} more active assignments"
             ]
-        panel.update("\n".join(escape(line) for line in [*lines, *rows]))
+        if self.size.width <= 100:
+            active_landing_keys = [
+                key
+                for task in active_landings
+                for key in task.keys
+            ]
+            if active_landing_keys:
+                active_detail = (
+                    f"active: {self._activity_work(active_landing_keys)}"
+                )
+            elif active_reviews:
+                active_detail = (
+                    f"active review: {self._activity_work(active_reviews)}"
+                )
+            else:
+                active_detail = "active work: none"
+            compact_lines = [
+                "AGENT ACTIVITY",
+                f"reviews {parent_reviews} · checks {check_workers} · landing {len(active_landings)}",
+                f"{active_detail} · queued {len(queued_landings)} · {self._activity_freshness()}",
+            ]
+            # Keep the complete diagnostic rows in the renderable content for
+            # scrolling and existing consumers, while the five-line compact
+            # viewport leads with the active identity.
+            rendered_lines = [*compact_lines, *lines[1:], *rows]
+        else:
+            rendered_lines = [*lines, *rows]
+        panel.update("\n".join(escape(line) for line in rendered_lines))
 
     def refresh_landing_control(self) -> None:
         """Render the live dispatch queue without opening a second screen."""
@@ -6000,7 +7169,12 @@ class ReviewDashboard(App):
             else ""
         )
         landed = (
-            f" | last {self.last_landing_outcome}"
+            f" | last {self.last_landing_outcome} | "
+            if self.last_landing_outcome
+            else ""
+        )
+        landing_prefix = (
+            f"last {self.last_landing_outcome} | "
             if self.last_landing_outcome
             else ""
         )
@@ -6080,7 +7254,7 @@ class ReviewDashboard(App):
         )
         if self.view_mode == "issues":
             status_bar.update(
-                f" {view_tag}Issues: {shown} open "
+                f" {landing_prefix}{view_tag}Issues: {shown} open "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}{reconciliation}"
@@ -6088,22 +7262,22 @@ class ReviewDashboard(App):
             )
         elif self.view_mode == "prs":
             status_bar.update(
-                f" {view_tag}Queue: {shown} PRs{held_back}{out_of_hands} | {queue_status} "
+                f" {landing_prefix}{view_tag}Queue: {shown} PRs{held_back}{out_of_hands} | {queue_status} "
                 f"| filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{recent_merges}{policy}"
+                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{recent_merges}{policy}"
                 f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
         else:
             pr_shown = sum(1 for s in self.stops if not s.is_issue)
             issue_shown = sum(1 for s in self.stops if s.is_issue)
             status_bar.update(
-                f" {view_tag}Board: {shown} items ({pr_shown} PRs, {issue_shown} issues){held_back}{out_of_hands} | {queue_status} "
+                f" {landing_prefix}{view_tag}Board: {shown} items ({pr_shown} PRs, {issue_shown} issues){held_back}{out_of_hands} | {queue_status} "
                 f"| filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{recent_merges}{policy}"
+                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{recent_merges}{policy}"
                 f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
 
@@ -6259,6 +7433,13 @@ class ReviewDashboard(App):
                 f"{stop.key}: current evidence unavailable: {message}",
                 severity="error",
             )
+            return
+        if (
+            isinstance(self.screen, CIFailureScreen)
+            and self.screen.stop_record is stop
+        ):
+            # A refresh failure must not erase the exact head owned by the
+            # CI evidence screen while its on-demand result is being read.
             return
         stop.live = {}
         stop.head_sha = ""
@@ -6470,8 +7651,22 @@ class ReviewDashboard(App):
         return self.pulls_cache[repo]
 
     def paint_context(
-        self, stop: Stop, text: str, dupes: list[dict], overlaps: list[dict]
+        self,
+        stop: Stop,
+        text: str,
+        dupes: list[dict],
+        overlaps: list[dict],
+        generation: int | None = None,
     ) -> None:
+        try:
+            current = self.current
+        except NoMatches:
+            return
+        if current is not stop or (
+            generation is not None
+            and self.evidence_generation.get(stop.key) != generation
+        ):
+            return
         stop.overlap = {
             "duplicates": [item["number"] for item in dupes],
             "overlaps": [item["number"] for item in overlaps],
@@ -6575,7 +7770,7 @@ class ReviewDashboard(App):
             except NoMatches:
                 return
             details.update(
-                f"[b]{issue_link}[/b]  {escape(title)}\n"
+                f"[b]{issue_link}[/b] — {escape(title)}\n"
                 f"author     {link(author, f'https://github.com/{author}')}\n"
                 f"state      {escape(state)}\n"
                 f"created    {escape(created_at[:19] if created_at else '-')}\n"
@@ -6645,30 +7840,26 @@ class ReviewDashboard(App):
             else ""
         )
         ci_triage_block = ""
-        if bad > 0:
+        failures = ci_failure_evidence(
+            live, repository=stop.repository, number=stop.number
+        )
+        if failures:
             lines_ci = ["\n[b red]CI FAILURE TRIAGE[/b red]"]
-            for check in checks:
-                conc = check.get("conclusion") or check.get("state") or "PENDING"
-                if conc in ("FAILURE", "ERROR", "TIMED_OUT"):
-                    wf = check.get("workflowName") or ""
-                    job_name = check.get("name") or check.get("context") or "check"
-                    step_name = check.get("stepName") or ""
-                    step_info = f" › {escape(step_name)}" if step_name else ""
-                    url = check.get("detailsUrl") or check.get("url") or ""
-                    started = str(check.get("startedAt") or "")[:19]
-                    completed = str(check.get("completedAt") or "")[:19]
-                    time_info = f" ({started} -> {completed})" if started and completed else ""
-                    head_sha = str(live.get("headRefOid") or "")[:12]
-                    sha_info = f" @ {head_sha}" if head_sha else ""
-                    lines_ci.append(
-                        f"  [red]✗ {conc}[/red] {escape(wf + ' / ' if wf else '')}[b]{escape(job_name)}[/b]{step_info}{sha_info}{time_info}"
+            for failure in failures:
+                lines_ci.extend(
+                    "  " + escape(line)
+                    for line in format_ci_failure_evidence(
+                        failure, stop.repository, stop.number
                     )
-                    if url:
-                        lines_ci.append(f"    evidence: {link(url, url)}")
+                )
+                if failure.get("run_id"):
+                    lines_ci.append(
+                        "  " + escape("[i] inspect logs on demand · logs are untrusted")
+                    )
             ci_triage_block = "\n" + "\n".join(lines_ci)
 
         self.query_one("#details", Static).update(
-            f"[b]{link(stop.key, pr_url(stop.repository, stop.number))}[/b]  "
+            f"[b]{link(stop.key, pr_url(stop.repository, stop.number))}[/b] — "
             f"{escape(stop.title)}\n"
             f"queue says: {escape(stop.action)}\n"
             f"author   {link(author, f'https://github.com/{author}')}\n"
@@ -6683,7 +7874,7 @@ class ReviewDashboard(App):
             f"{ci_triage_block}\n"
             f"{reviews_block}\n"
             f"linked   {issues}\n"
-            f"labels   {labels}{mechanical_block}"
+            f"labels   {labels}{mechanical_block}{self._comparison_block(stop)}"
             + (
                 "\n\n[b]LAST MUTATION FAILURE[/b]\n"
                 f"command  {escape(stop.failure_command)}\n"
@@ -6700,10 +7891,10 @@ class ReviewDashboard(App):
                 else ""
             )
         )
-        self.render_context(stop)
+        self.render_context(stop, self.evidence_generation.get(stop.key, 0))
 
     @work(thread=True)
-    def render_context(self, stop: Stop) -> None:
+    def render_context(self, stop: Stop, generation: int | None = None) -> None:
         dupes, overlaps = self.cluster(stop)
         lines = ["[b]CONTEXT & VERIFICATION[/b]"]
 
@@ -6795,7 +7986,7 @@ class ReviewDashboard(App):
         # moment. Upstream: "avoid calling methods on your UI directly from a
         # threaded worker" (textual.textualize.io/guide/workers).
         self.call_from_thread(
-            self.paint_context, stop, "\n".join(lines), dupes, overlaps
+            self.paint_context, stop, "\n".join(lines), dupes, overlaps, generation
         )
 
     def render_issue_context(self, stop: Stop) -> None:
@@ -6820,6 +8011,89 @@ class ReviewDashboard(App):
             context.first().update("\n".join(lines))
 
     # ── the mutation gate ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _action_category(commands: list[list[str]] | list[str]) -> str:
+        if commands and isinstance(commands[0], str):
+            commands = [commands]  # type: ignore[list-item]
+        for command in reversed(commands):  # type: ignore[union-attr]
+            if (
+                len(command) >= 3
+                and command[2] == "queue"
+                and str(command[1]).replace("\\", "/").endswith("/hive_api.py")
+            ):
+                return "approve-and-queue"
+            if "--request-changes" in command:
+                return "request-changes"
+            if "--approve" in command:
+                return "approve"
+            if len(command) >= 3 and command[0:3] == ["gh", "pr", "merge"]:
+                return "merge"
+            if len(command) >= 3 and command[0:3] == ["gh", "pr", "edit"]:
+                return "queue" if "--add-label" in command else "edit"
+            if len(command) >= 3 and command[0:3] in (
+                ["gh", "pr", "comment"],
+                ["gh", "issue", "comment"],
+            ):
+                return "comment"
+            if len(command) >= 3 and command[0:3] == ["gh", "pr", "update-branch"]:
+                return "branch-update"
+        return "unsupported"
+
+    def record_action_comparison(
+        self,
+        stop: Stop,
+        commands: list[list[str]] | list[str],
+        *,
+        action_success: bool = True,
+        action_verified: bool = False,
+    ) -> ReviewActionReceipt:
+        action = self._action_category(commands)
+        receipt = classify_review_action(
+            stop.review_result,
+            action,
+            repository=stop.repository,
+            number=stop.number,
+            head_sha=stop.head_identity,
+            actor=self.self_login or "maintainer",
+            action_success=action_success,
+            action_head=stop.head_identity,
+            action_verified=action_verified,
+        )
+        key = f"{receipt.repository}#{receipt.number}@{receipt.reviewed_head or stop.head_identity}"
+        self.action_comparisons[key] = receipt
+        while len(self.action_comparisons) > MAX_ACTION_RECEIPTS:
+            self.action_comparisons.pop(next(iter(self.action_comparisons)))
+        self.last_action_comparison = receipt
+        return receipt
+
+    def action_comparison_for(self, stop: Stop) -> ReviewActionReceipt | None:
+        for receipt in reversed(list(self.action_comparisons.values())):
+            if (
+                receipt.repository == stop.repository
+                and receipt.number == stop.number
+                and receipt.reviewed_head == stop.head_identity
+            ):
+                return receipt
+        return None
+
+    def _comparison_block(self, stop: Stop) -> str:
+        receipt = self.action_comparison_for(stop)
+        if receipt is None:
+            return ""
+        evidence = ""
+        if receipt.evidence:
+            evidence = f" · evidence {len(receipt.evidence)} lines"
+        verified = " · verified completion" if receipt.verified else ""
+        return (
+            "\n\n[b]REVIEW / ACTION RECEIPT[/b]\n"
+            f"{escape(receipt.repository)}#{receipt.number} · head "
+            f"{escape(receipt.reviewed_head[:12])} · "
+            f"review {escape(receipt.review_state)} · findings {receipt.finding_count} · "
+            f"action {escape(receipt.action)} · {escape(receipt.classification)}"
+            f" · @{escape(receipt.identity)}{verified}{evidence}\n"
+            "disagreement describes this evidence/action pair; it does not judge the maintainer."
+        )
 
     def mutate(self, stop: Stop, *args: str, then=None) -> None:
         """Run one gh mutation behind the typed-number confirmation."""
@@ -6913,6 +8187,7 @@ class ReviewDashboard(App):
         stop.failure_checks = context["ci"]
         stop.failure_branch = f"{context['mergeable']}/{context['merge_state']}"
         stop.selected = True
+        self.record_action_comparison(stop, command, action_success=False)
         self.refresh_rows()
         self.notify(f"{shlex.join(command[:4])}…: {escape(message[:200])}", severity="error")
         self.show_evidence(stop)
@@ -6926,6 +8201,7 @@ class ReviewDashboard(App):
     ) -> None:
         """Apply one finished sequence on the UI thread."""
         self.pulls_cache.pop(stop.repository, None)
+        self.record_action_comparison(stop, commands)
         self.notify(f"done: {' '.join(commands[-1][:4])}…")
         if then:
             then()
@@ -6962,10 +8238,28 @@ class ReviewDashboard(App):
         queue.index = max(0, queue.index - max(1, queue.size.height - 1))
 
     def action_pane_previous(self) -> None:
-        self.screen.focus_previous()
+        self._focus_evidence_pane(-1)
 
     def action_pane_next(self) -> None:
-        self.screen.focus_next()
+        self._focus_evidence_pane(1)
+
+    def _focus_evidence_pane(self, step: int) -> None:
+        panes = [
+            pane
+            for pane in (
+                self.query_one("#details-pane"),
+                self.query_one("#context-pane"),
+            )
+            if pane.styles.display != "none"
+        ]
+        if not panes:
+            return
+        focused = self.focused
+        try:
+            index = panes.index(focused)
+        except ValueError:
+            index = -1 if step > 0 else 0
+        panes[(index + step) % len(panes)].focus()
 
     def action_activate(self) -> None:
         stop = self.current
@@ -7557,7 +8851,26 @@ class ReviewDashboard(App):
             "closingIssuesReferences,statusCheckRollup,labels,reviews,title",
         )
         if live.returncode == 0:
-            data = json.loads(live.stdout) if (live.stdout and live.stdout.strip()) else {}
+            if not live.stdout or not live.stdout.strip():
+                if force:
+                    raise RuntimeError(
+                        f"live PR response was empty for {repository}#{number}"
+                    )
+                return stop.live if stop else {}
+            try:
+                data = json.loads(live.stdout)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    f"live PR response was malformed for {repository}#{number}"
+                ) from error
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    f"live PR response was not an object for {repository}#{number}"
+                )
+            if force and not FULL_SHA.fullmatch(str(data.get("headRefOid") or "")):
+                raise RuntimeError(
+                    f"live PR response is missing an exact head for {repository}#{number}"
+                )
             if stop:
                 if data:
                     merged = dict(stop.live)
@@ -7792,6 +9105,73 @@ class ReviewDashboard(App):
         stop = self.current
         if stop:
             self.push_screen(CommentsScreen(stop))
+
+    def open_ci_failure_logs(self, stop: Stop) -> None:
+        if stop.is_issue:
+            self.notify("CI failure logs apply to pull requests only", severity="warning")
+            return
+        expected_head = stop.head_identity
+        self.load_ci_failure_evidence(stop, expected_head)
+
+    @work(thread=True, exclusive=True, group="ci")
+    def load_ci_failure_evidence(self, stop: Stop, expected_head: str) -> None:
+        try:
+            live = self.fetch_live_pr(stop.repository, stop.number, force=True)
+            failures = ci_failure_evidence(
+                live, repository=stop.repository, number=stop.number
+            )
+            error = ""
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            live = {}
+            failures = []
+            error = bounded_detail(str(exc))
+        if get_current_worker().is_cancelled:
+            return
+        self.call_from_thread(
+            self.show_ci_failure_evidence,
+            stop,
+            expected_head,
+            live,
+            failures,
+            error,
+        )
+
+    def show_ci_failure_evidence(
+        self,
+        stop: Stop,
+        expected_head: str,
+        live: dict,
+        failures: list[dict],
+        error: str,
+    ) -> None:
+        current_head = stop.head_identity
+        if self.current is not stop or (
+            current_head and current_head != expected_head
+        ):
+            return
+        live_head = str(live.get("headRefOid") or "")
+        if not FULL_SHA.fullmatch(live_head):
+            self.notify(
+                "CI evidence unavailable: live response missing exact head",
+                severity="warning",
+            )
+            return
+        if live_head != expected_head:
+            self.notify("CI evidence is stale; the pull request head changed", severity="warning")
+            return
+        if live:
+            stop.live = {**stop.live, **live}
+        if error:
+            self.notify(f"CI evidence unavailable: {error}", severity="warning")
+            return
+        if not failures:
+            self.notify("no current-head CI failure evidence is available", severity="warning")
+            return
+        self.push_screen(CIFailureScreen(stop, failures[0]))
+
+    def action_ci_failure_logs(self) -> None:
+        if self.current:
+            self.open_ci_failure_logs(self.current)
 
     def action_comment(self) -> None:
         stop = self.current
@@ -8281,7 +9661,14 @@ class ReviewDashboard(App):
                 self.notify("aborted; nothing was dispatched.", severity="warning")
                 return
             for task in tasks:
+                for stop in task.stops:
+                    stop.selected = False
                 self.enqueue_landing(task)
+            self.last_landing_outcome = (
+                f"dispatched {len(tasks)} landing batch"
+                f"{'es' if len(tasks) != 1 else ''}; review queue remains open"
+            )
+            self.refresh_status()
 
         self.push_screen(BatchPlanScreen(tasks if should_partition else tasks[0]), finish)
 
@@ -8459,6 +9846,7 @@ class ReviewDashboard(App):
                             task.command,
                             stdout=log,
                             stderr=subprocess.STDOUT,
+                            cwd=task.cwd or None,
                             start_new_session=True,
                             # A final-review round runs with the model its phase
                             # chose, passed explicitly (#378): the launch-time
@@ -8569,6 +9957,11 @@ class ReviewDashboard(App):
             if state == "merged":
                 stop.selected = False
                 stop.failure = ""
+                self.record_action_comparison(
+                    stop,
+                    ["gh", "pr", "merge", str(stop.number), "--repo", stop.repository],
+                    action_verified=True,
+                )
                 self._close_run_record(stop, RunState.COMPLETED, "landed")
             elif state in ("pr-opened", "finding-filed"):
                 # Issue outcomes: the deliverable exists (a PR under the
@@ -8619,7 +10012,12 @@ class ReviewDashboard(App):
             )
             if counts[state]
         ]
-        if done:
+        if task.stop_requested:
+            message = (
+                f"batch {task.task_id} stopped by maintainer: "
+                f"{', '.join(parts) or 'no terminal outcomes'}"
+            )
+        elif done:
             message = f"batch {task.task_id} finished: {', '.join(parts)}"
         else:
             # The agent never closed its report: distinguishable from a
@@ -8630,7 +10028,9 @@ class ReviewDashboard(App):
             )
             if log_tail:
                 message = f"{message} — {log_tail}"
-        if (
+        if task.stop_requested:
+            severity = "warning"
+        elif (
             counts["failed"]
             or counts["no outcome"]
             or counts["died mid-batch"]
@@ -8642,7 +10042,9 @@ class ReviewDashboard(App):
         else:
             severity = "information"
         duration = max(0.0, time.monotonic() - task.started)
-        if counts["failed"]:
+        if task.stop_requested:
+            outcome = "stopped"
+        elif counts["failed"]:
             outcome = "failed"
         elif counts["no outcome"] or counts["died mid-batch"] or not done:
             outcome = "incomplete"
