@@ -130,6 +130,17 @@ connection`, `containers.conf`, or user environment). Never put
 repository. When an existing local Podman connection is default, builds,
 pulls, and recipe runs execute on that service transparently.
 
+`review-queue` resolves the engine Podman will actually use in this order:
+`CONTAINER_HOST`, an explicitly selected `CONTAINER_CONNECTION`, then the
+saved default connection. SSH and TCP engines fail closed before preflight,
+credential staging, or `podman run`; an unresolved explicit connection also
+fails closed. Local mode and local Unix sockets remain usable. A maintainer who
+has deliberately accepted remote state may set
+`REVIEW_QUEUE_ALLOW_REMOTE_STATE=1` for that launch; other values do not
+acknowledge it, and diagnostics redact URI userinfo. `REVIEW_RUNTIME=k8s`
+uses its Kubernetes route and does not infer cluster runtime isolation from
+this local Podman check.
+
 When an operator configures an SSH-backed default Podman system connection, the
 launcher stages the selected `0600` Hive contributor registration to a unique
 per-run private `0700` directory on the remote engine host for the duration of the

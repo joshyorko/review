@@ -22,12 +22,12 @@ from pathlib import Path
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-TUI_DIR = REPO_ROOT / "image" / "tui"
-if str(TUI_DIR) not in sys.path:
-    sys.path.insert(0, str(TUI_DIR))
+IMAGE_DIR = REPO_ROOT / "image"
+if str(IMAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(IMAGE_DIR))
 
 os.environ["BLUEFIN_REVIEW_COMMAND"] = "true"
-import bluefin_review_tui as tui
+import tui.bluefin_review_tui as tui
 
 
 class MixedWorkboardContractTests(unittest.TestCase):

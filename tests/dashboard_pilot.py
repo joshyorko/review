@@ -39,7 +39,7 @@ TUI_DIR = Path(
     )
 )
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
-sys.path.insert(0, str(TUI_DIR))
+sys.path.insert(0, str(TUI_DIR.parent))
 
 SNAPSHOT = {
     "items": [
@@ -325,7 +325,7 @@ async def main() -> int:
     os.environ["BLUEFIN_REVIEW_COMMAND"] = str(workdir / "bluefin-review")
     review_stub(0, "a finding")
 
-    import bluefin_review_tui as tui
+    import tui.bluefin_review_tui as tui
     tui.TRACE_PATH = str(Path(os.environ["XDG_STATE_HOME"]) / "bluefin-review" / "trace.jsonl")
     tui._TRACE_LOGGER = None
     reconciliation_request = tui.ReviewDashboard._request_reconciliation
