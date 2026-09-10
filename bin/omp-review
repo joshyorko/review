@@ -2,13 +2,19 @@
 # Entrypoint for omp in dedicated Bluefin review / issues mode.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EXTENSION_PATH="${BLUEFIN_REVIEW_EXTENSION_PATH:-/opt/bluefin/extensions/bluefin-review.ts}"
+if [[ ! -f "$EXTENSION_PATH" && -f "$SCRIPT_DIR/image/extension/bluefin-review.ts" ]]; then
+  EXTENSION_PATH="$SCRIPT_DIR/image/extension/bluefin-review.ts"
+fi
+
 # Check if a specific PR or issue argument is passed
 if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
   TARGET_PR="$1"
   shift
-  exec omp --extension /opt/bluefin/extensions/bluefin-review.ts "$@" \
+  exec omp --extension "$EXTENSION_PATH" "$@" \
     "Review exact pull request #${TARGET_PR} for projectbluefin. Inspect changes, check doctrine, security, correctness, and report findings."
 fi
 
 # Default: Launch interactive omp with lower-third dashboard widget & review mode enabled
-exec omp --extension /opt/bluefin/extensions/bluefin-review.ts "$@"
+exec omp --extension "$EXTENSION_PATH" "$@"
