@@ -201,6 +201,21 @@ class OmpHarness:
             },
         }
 
+    def process_rpc_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Process inbound/outbound OMP RPC event frame and normalize review telemetry."""
+        event_type = event.get("type", "unknown")
+        if event_type == "message_update":
+            assistant_event = event.get("assistantMessageEvent", {})
+            delta = assistant_event.get("delta", "")
+            return {"kind": "delta", "delta": delta, "is_tool": "toolCall" in assistant_event}
+        elif event_type == "agent_end":
+            return {"kind": "terminal", "is_terminal": event.get("isTerminal", True)}
+        elif event_type == "tool_execution_start":
+            return {"kind": "tool_start", "tool": event.get("toolName", "")}
+        elif event_type == "tool_execution_end":
+            return {"kind": "tool_end", "tool": event.get("toolName", "")}
+        return {"kind": "passthrough", "event_type": event_type}
+
     def convert_draft(self, payload: str, request: DraftRequest, exit_code: int = 0) -> DraftResult:
         if exit_code != 0 or not payload.strip():
             return DraftResult(

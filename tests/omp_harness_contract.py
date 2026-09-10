@@ -239,6 +239,26 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIn(plan.identity, prompt_frame["message"])
         self.assertIn("projectbluefin/review#42", prompt_frame["message"])
 
+    def test_process_rpc_event_frames(self):
+        delta_frame = {
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "Looks good."},
+        }
+        processed_delta = self.harness.process_rpc_event(delta_frame)
+        self.assertEqual(processed_delta["kind"], "delta")
+        self.assertEqual(processed_delta["delta"], "Looks good.")
+        self.assertFalse(processed_delta["is_tool"])
+
+        terminal_frame = {"type": "agent_end", "isTerminal": True}
+        processed_term = self.harness.process_rpc_event(terminal_frame)
+        self.assertEqual(processed_term["kind"], "terminal")
+        self.assertTrue(processed_term["is_terminal"])
+
+        tool_frame = {"type": "tool_execution_start", "toolName": "read"}
+        processed_tool = self.harness.process_rpc_event(tool_frame)
+        self.assertEqual(processed_tool["kind"], "tool_start")
+        self.assertEqual(processed_tool["tool"], "read")
+
 
 if __name__ == "__main__":
     unittest.main()
