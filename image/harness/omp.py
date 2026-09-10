@@ -182,6 +182,25 @@ class OmpHarness:
             "items": sliced,
         }
 
+    def format_batch_plan_prompt(self, plan: Any) -> dict[str, Any]:
+        """Format BatchActionPlan preview into an OMP interactive confirmation prompt."""
+        preview = plan.preview() if hasattr(plan, "preview") else plan
+        items_summary = [f"{item.repository}#{item.pull_request}@{item.head_sha[:8]}" for item in preview.items]
+        return {
+            "type": "prompt",
+            "message": (
+                f"Batch action plan '{preview.action_kind}' ready for human confirmation.\n"
+                f"Plan ID: {preview.plan_identity}\n"
+                f"Targets ({len(preview.items)}): {', '.join(items_summary)}\n"
+                "To execute, confirm exact targets matching plan."
+            ),
+            "metadata": {
+                "plan_identity": preview.plan_identity,
+                "action_kind": preview.action_kind,
+                "target_count": len(preview.items),
+            },
+        }
+
     def convert_draft(self, payload: str, request: DraftRequest, exit_code: int = 0) -> DraftResult:
         if exit_code != 0 or not payload.strip():
             return DraftResult(

@@ -12,6 +12,7 @@ from harness.registry import (
     DraftState,
     HarnessRegistry,
 )
+from tui.action_plan import BatchActionPlan, BatchMutationItem, Prerequisites
 from tui.re_review import (
     ClassifiedFinding,
     DeltaInput,
@@ -216,6 +217,27 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIn("ORG_ISSUES_QUERY", content)
         self.assertIn("fetchLiveQueue", content)
         self.assertIn("bluefin-review-lower-third", content)
+
+    def test_format_batch_plan_prompt(self):
+        item = BatchMutationItem(
+            repository="projectbluefin/review",
+            pull_request=42,
+            head_sha="0123456789abcdef0123456789abcdef01234567",
+            prerequisites=Prerequisites.from_mappings(permissions={"push": True}, checks={"ci": "success"}),
+            operations=(("gh", "pr", "merge", "42", "--squash"),),
+        )
+        plan = BatchActionPlan.build(
+            actor="maintainer",
+            tenant="projectbluefin",
+            action_kind="squash-merge",
+            items=(item,),
+        )
+        prompt_frame = self.harness.format_batch_plan_prompt(plan)
+        self.assertEqual(prompt_frame["type"], "prompt")
+        self.assertEqual(prompt_frame["metadata"]["action_kind"], "squash-merge")
+        self.assertEqual(prompt_frame["metadata"]["target_count"], 1)
+        self.assertIn(plan.identity, prompt_frame["message"])
+        self.assertIn("projectbluefin/review#42", prompt_frame["message"])
 
 
 if __name__ == "__main__":
