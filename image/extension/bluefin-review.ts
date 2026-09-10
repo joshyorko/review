@@ -257,6 +257,33 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("landing-batch", {
+    description: "Inspect or queue multi-PR landing batches",
+    handler: async (_args, ctx) => {
+      const prs = queue.items.filter((i) => i.type === "pr");
+      if (prs.length === 0) {
+        ctx.ui.notify("No PRs in queue to batch", "info");
+        return;
+      }
+      const batchSummary = prs.slice(0, 5).map((p) => `#${p.id}`).join(", ");
+      ctx.ui.notify(`Landing batch candidate: ${batchSummary}`, "info");
+      pi.sendUserMessage(
+        `Examine landing batch candidate for PRs: ${batchSummary}. Verify CI status and build exact BatchActionPlan.`
+      );
+    },
+  });
+
+  pi.registerCommand("tui-evidence", {
+    description: "Capture and report current TUI evidence manifest",
+    handler: async (_args, ctx) => {
+      const current = queue.getCurrent();
+      const itemDetails = current
+        ? `Item #${current.id} (${current.type}) in repo ${current.repo}`
+        : "No active queue item";
+      ctx.ui.notify(`TUI Evidence captured: ${itemDetails}`, "info");
+    },
+  });
+
   // Shortcuts
   pi.registerShortcut("j", () => queue.next());
   pi.registerShortcut("k", () => queue.prev());

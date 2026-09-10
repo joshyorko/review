@@ -217,6 +217,8 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIn("ORG_ISSUES_QUERY", content)
         self.assertIn("fetchLiveQueue", content)
         self.assertIn("bluefin-review-lower-third", content)
+        self.assertIn("landing-batch", content)
+        self.assertIn("tui-evidence", content)
 
     def test_format_batch_plan_prompt(self):
         item = BatchMutationItem(
@@ -258,6 +260,13 @@ class OmpHarnessContract(unittest.TestCase):
         processed_tool = self.harness.process_rpc_event(tool_frame)
         self.assertEqual(processed_tool["kind"], "tool_start")
         self.assertEqual(processed_tool["tool"], "read")
+
+    def test_composer_shape_spec(self):
+        shape = self.harness.composer_shape_spec()
+        self.assertEqual(shape["id"], "bluefin-dock")
+        self.assertEqual(shape["bottomBar"], "full")
+        self.assertTrue(shape["bottomBarGap"])
+        self.assertEqual(shape["defaultPromptGutter"], "❯ ")
 
 
 if __name__ == "__main__":

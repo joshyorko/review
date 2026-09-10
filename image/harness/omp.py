@@ -253,6 +253,20 @@ class OmpHarness:
         shortcuts = "  [j/k] Navigate  [r] Review  [a] Approve/Land  [I] Issues Mode  [$] Slay (Fix+Land)"[:width]
         return [header, item_line, shortcuts]
 
+    def composer_shape_spec(self) -> dict[str, Any]:
+        """Return ComposerStyle shape configuration for docking the lower third in OMP."""
+        return {
+            "id": "bluefin-dock",
+            "sideBorders": False,
+            "verticalChrome": 1,
+            "statusAttachment": "none",
+            "bottomBar": "full",
+            "bottomBarGap": True,
+            "defaultPromptGutter": "❯ ",
+            "label": "Bluefin Review Dock",
+            "description": "Lower-third queue dashboard beneath OMP composer input",
+        }
+
     def bst_element_spec(self) -> dict[str, Any]:
         """Return the BuildStream element definition for distributing omp-review."""
         return {
