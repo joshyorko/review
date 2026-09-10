@@ -46,9 +46,9 @@ fi
 if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
   TARGET_PR="$1"
   shift
-  exec omp --extension "$EXTENSION_PATH" "$@" \
+  exec omp --profile review --extension "$EXTENSION_PATH" "$@" \
     "Review exact pull request #${TARGET_PR} for projectbluefin. Inspect changes, check doctrine, security, correctness, and report findings."
 fi
 
-# Default: Launch interactive omp with lower-third dashboard widget & review mode enabled
-exec omp --extension "$EXTENSION_PATH" "$@"
+# Default: Launch interactive omp with isolated profile and review extension
+exec omp --profile review --extension "$EXTENSION_PATH" "$@"
