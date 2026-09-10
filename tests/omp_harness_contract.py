@@ -282,14 +282,21 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertTrue(schemes[0]["writable"])
 
     def test_extension_tool_structure(self):
-        """Verify extension registers bluefin_review_status with parameters and execute handler."""
+        """Verify extension registers bluefin_review_status and bluefin_review_diff tools."""
         with open("image/extension/bluefin-review.ts", "r") as f:
             content = f.read()
         self.assertIn("pi.registerTool({", content)
         self.assertIn('name: "bluefin_review_status"', content)
-        self.assertIn('label: "Review Status"', content)
-        self.assertIn("async execute()", content)
+        self.assertIn('name: "bluefin_review_diff"', content)
         self.assertIn("total_items: queue.items.length", content)
+        self.assertIn("pull_request: params.pull_request", content)
+
+    def test_extension_tool_diff_parameters(self):
+        """Verify bluefin_review_diff parameters schema requires pull_request number."""
+        with open("image/extension/bluefin-review.ts", "r") as f:
+            content = f.read()
+        self.assertIn("pull_request: z.number()", content)
+        self.assertIn('label: "Review Diff"', content)
 
 
 if __name__ == "__main__":

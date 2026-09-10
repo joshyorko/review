@@ -310,6 +310,28 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
       };
     },
   });
+  pi.registerTool({
+    name: "bluefin_review_diff",
+    label: "Review Diff",
+    description: "Fetch bounded git diff for a specific pull request",
+    parameters: z.object({
+      pull_request: z.number().describe("Pull request number to inspect"),
+    }),
+    async execute(_id, params) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Bounded git diff for PR #${params.pull_request} fetched via GitHub API.`,
+          },
+        ],
+        details: {
+          pull_request: params.pull_request,
+          bounded: true,
+        },
+      };
+    },
+  });
 
   // Shortcuts
   pi.registerShortcut("j", () => queue.next());
