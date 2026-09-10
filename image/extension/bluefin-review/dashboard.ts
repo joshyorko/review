@@ -377,9 +377,14 @@ export class ReviewDashboard {
 		const items = this.mode.visibleItems();
 		const rows: string[] = [];
 		if (items.length === 0) {
-			const emptyMsg = this.mode.loading
-				? `  ${this.painter.fg("warning", statusIcon("running", this.frame))} loading queue…`
-				: "  nothing open";
+			let emptyMsg: string;
+			if (this.mode.loading) {
+				emptyMsg = `  ${this.painter.fg("warning", statusIcon("running", this.frame))} loading queue…`;
+			} else if (this.mode.hiveOnly && this.mode.hive.online && this.mode.items.length > 0) {
+				emptyMsg = `  no Hive-ranked ${this.mode.queueMode} (${this.mode.items.length} unranked open — press H to show all, i for ${this.mode.queueMode === "prs" ? "issues" : "prs"})`;
+			} else {
+				emptyMsg = "  nothing open";
+			}
 			rows.push(this.painter.fg("dim", emptyMsg));
 			return rows;
 		}

@@ -109,11 +109,17 @@ export function renderRail(
 		const item = mode.selected();
 		if (!item) {
 			const spinner = painter.fg("warning", statusIcon("running", frame));
+			let reasonText = "queue empty";
+			if (mode.loading) {
+				reasonText = "loading queue…";
+			} else if (mode.hiveOnly && mode.hive.online && mode.items.length > 0) {
+				reasonText = `no Hive-ranked ${mode.queueMode} (${mode.items.length} unranked open — H shows all)`;
+			}
 			const reason = mode.queueError
 				? painter.fg("error", `${statusIcon("failure")} ${mode.queueError}`)
 				: mode.loading
-					? `${spinner} ${painter.fg("warning", "loading queue…")}`
-					: painter.fg("dim", `${statusIcon("pending")} queue empty`);
+					? `${spinner} ${painter.fg("warning", reasonText)}`
+					: painter.fg("dim", `${statusIcon("pending")} ${reasonText}`);
 			const hint = painter.fg("dim", "alt+b: dash");
 			return [truncateToWidth(`${painter.fg("accent", `${GLYPH.hex} bluefin`)} ${reason}  │  ${hint}`, width)];
 		}
@@ -167,9 +173,15 @@ export function renderRail(
 
 	const item = mode.selected();
 	if (!item) {
+		let reasonText = "queue empty";
+		if (mode.loading) {
+			reasonText = "loading queue…";
+		} else if (mode.hiveOnly && mode.hive.online && mode.items.length > 0) {
+			reasonText = `no Hive-ranked ${mode.queueMode} (${mode.items.length} unranked open — H shows all, alt+i toggles prs/issues)`;
+		}
 		const reason = mode.queueError
 			? painter.fg("error", `${statusIcon("failure")} ${mode.queueError}`)
-			: painter.fg("dim", `${statusIcon("pending")} ${mode.loading ? "loading queue…" : "queue empty"}`);
+			: painter.fg("dim", `${statusIcon("pending")} ${reasonText}`);
 		rows.push(truncateToWidth(`${painter.fg("dim", GLYPH.railBar)}${reason}`, width));
 	} else {
 		const ci = ciGlyph(item.ciStatus);

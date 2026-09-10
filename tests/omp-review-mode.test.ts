@@ -607,6 +607,31 @@ test("rail explains an empty queue instead of pretending to load forever", () =>
 	const rows = renderRail(mode, PLAIN_PAINTER, 80, NOW, 0, []);
 	assert.match(rows[0], /401/);
 });
+
+test("rail and dashboard clarify when queue is empty because of hive-only filter", () => {
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: join(tmpdir(), "nope") });
+	mode.hive = {
+		...EMPTY_HIVE,
+		configured: true,
+		online: true,
+		hub: "https://hive.example",
+	};
+	mode.items = [queueItem({ id: 10, title: "Unranked item" })];
+	mode.reprioritize();
+
+	// In default hive-only view, visibleItems is empty because item 10 is unranked
+	assert.equal(mode.hiveOnly, true);
+	assert.equal(mode.visibleItems().length, 0);
+
+	const railRows = renderRail(mode, PLAIN_PAINTER, 100, NOW, 0, []);
+	assert.ok(railRows.some((r) => r.includes("no Hive-ranked prs")));
+	assert.ok(railRows.some((r) => r.includes("H shows all")));
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	const frame = dashboard.render(160);
+	dashboard.dispose();
+	assert.ok(frame.some((r) => r.includes("no Hive-ranked prs")));
+	assert.ok(frame.some((r) => r.includes("press H to show all")));
+});
 test("queue age is silent while fresh and loud once stale", (t) => {
 	assert.equal(queueAge(NOW - 1000, NOW), undefined, "a fresh queue must not repaint a counter every tick");
 	assert.match(queueAge(NOW - STALE_AFTER_MS - 1, NOW), /^stale /);
