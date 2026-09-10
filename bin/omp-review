@@ -35,6 +35,8 @@ export GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 export COPILOT_GITHUB_TOKEN="${COPILOT_GITHUB_TOKEN:-}"
 export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-}"
 export CONTEXT7_API_KEY="${CONTEXT7_API_KEY:-}"
+# Pin Copilot client identity to developer CLI so Gemini/Kimi models are permitted by GitHub Copilot
+export COPILOT_INTEGRATION_ID="${COPILOT_INTEGRATION_ID:-copilot-developer-cli}"
 
 # 4. Resolve Hive Hub and ensure Hive knowledge export is available
 if [[ -z "${HIVE_HUB:-}" ]]; then
