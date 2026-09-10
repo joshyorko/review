@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/images/logo.png" alt="Bluefin Review" width="360">
-</p>
-
 # Bluefin Review
 
 enslaving the oppressors since 2026
