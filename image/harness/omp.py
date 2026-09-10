@@ -49,6 +49,55 @@ class OmpHarness:
     process_group_cancellation = True
     _process: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
+    @classmethod
+    def probe(cls, executable: str = "omp") -> Availability:
+        if shutil.which(executable) is None:
+            return Availability.UNAVAILABLE_BINARY
+        return Availability.READY
+
+    def draft(self, request: DraftRequest) -> DraftResult:
+        if self.availability is not Availability.READY:
+            raise RuntimeError(f"omp unavailable: {self.availability.value}")
+        process = subprocess.run(
+            self.draft_command(request), capture_output=True, text=True, check=False
+        )
+        return self.convert_draft(process.stdout, request, process.returncode)
+
+    def stream(self, binding: ReviewRequest, *, prompt: str,
+               on_line: Callable[[str], None], effort: str | None = None,
+               model: str | None = None, steer: str | None = None,
+               extra_args: tuple[str, ...] = ()) -> ReviewResult:
+        cmd = self.command(binding, prompt=prompt, effort=effort, model=model, steer=steer, extra_args=extra_args)
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            bufsize=1, start_new_session=True,
+        )
+        lines: list[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            lines.append(line.rstrip("\n"))
+            on_line(lines[-1])
+        process.wait()
+        return adapt_current_engine(
+            "\n".join(lines), process.returncode,
+            {
+                "backend": self.name,
+                "model": model or self.model,
+                "repository": f"{binding.owner}/{binding.repository}",
+                "pull_request": binding.pull_request_number,
+                "base_sha": binding.base_sha,
+                "head_sha": binding.head_sha,
+                "reasoning_effort": effort or self.effort,
+            }
+        )
+
+    def invoke(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
+               effort: str | None = None, steer: str | None = None) -> ReviewResult:
+        if self.availability is not Availability.READY:
+            raise RuntimeError(f"omp unavailable: {self.availability.value}")
+        return self.stream(binding, prompt=prompt, on_line=lambda _line: None,
+                           effort=effort, model=model, steer=steer)
+
     def command(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
                 effort: str | None = None, steer: str | None = None,
                 extra_args: tuple[str, ...] = ()) -> list[str]:

@@ -3,6 +3,7 @@
 import json
 import unittest
 
+from harness.autopilot import discover_all, choose_option, Preference
 from harness.omp import OmpHarness
 from harness.registry import (
     Availability,
@@ -128,6 +129,18 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIn("sources", spec)
         self.assertIn("config", spec)
         self.assertEqual(spec["config"]["entrypoint"], ["/usr/local/bin/omp-review"])
+
+    def test_autopilot_discovery_includes_omp(self):
+        options = discover_all()
+        backends = [opt.discovery.backend for opt in options]
+        self.assertIn("omp", backends)
+
+    def test_autopilot_prefers_omp_when_configured(self):
+        options = discover_all()
+        pref = Preference("omp", "github-copilot/gemini-3.8-flash", "max")
+        chosen = choose_option("projectbluefin/review", {"*": pref}, options)
+        self.assertIsNotNone(chosen)
+        self.assertEqual(chosen.discovery.backend, "omp")
 
 
 if __name__ == "__main__":

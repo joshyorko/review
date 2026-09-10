@@ -72,6 +72,7 @@ from tui import lab_client
 from tui import hive_api
 from harness.codex import CodexHarness
 from harness.goose import GooseHarness
+from harness.omp import OmpHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
@@ -483,7 +484,7 @@ def action_rank(action: str) -> int:
 # comment, or close path of its own, so running it can never mutate GitHub.
 REVIEW_COMMAND = os.environ.get("BLUEFIN_REVIEW_COMMAND", "bluefin-review")
 ACTIVE_BACKEND = os.environ.get("BLUEFIN_REVIEW_BACKEND", "goose")
-if ACTIVE_BACKEND not in {"goose", "codex"}:
+if ACTIVE_BACKEND not in {"goose", "codex", "omp"}:
     raise RuntimeError(f"unsupported review backend: {ACTIVE_BACKEND}")
 REVIEW_SCOPE = os.environ.get(
     "BLUEFIN_REVIEW_SCOPE_ROOT", "/opt/bluefin/review-scope"
@@ -3040,6 +3041,7 @@ class ReviewBody(ModalScreen[str | None]):
             registry = HarnessRegistry()
             registry.register(GooseHarness())
             registry.register(CodexHarness(availability=CodexHarness.probe()))
+            registry.register(OmpHarness(availability=OmpHarness.probe()))
             adapter = registry.require_ready(ACTIVE_BACKEND)
             if not adapter.capabilities.body_drafting:
                 raise RuntimeError(f"{ACTIVE_BACKEND} unavailable: UNSUPPORTED_CAPABILITY")

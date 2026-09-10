@@ -11,6 +11,7 @@ from typing import Iterable
 
 from .codex import CodexHarness
 from .goose import GooseHarness
+from .omp import OmpHarness
 from tui.review_evidence_manifest import ReviewRequest
 from .registry import Availability
 from tui.review_result import ReviewResult
@@ -98,13 +99,19 @@ def discover() -> Discovery:
 def discover_all() -> list[HarnessOption]:
     """Discover every registered maintainer harness without starting inference."""
     goose = GooseHarness()
+    omp = OmpHarness(availability=OmpHarness.probe())
     return [
         HarnessOption(goose, Discovery(
             "goose", "ready", "ready", "ready", "gemini-3.8-flash", "max", goose.availability,
         )),
         HarnessOption(CodexHarness(), discover()),
+        HarnessOption(omp, Discovery(
+            "omp", "ready" if omp.availability is Availability.READY else "missing",
+            "ready" if omp.availability is Availability.READY else "missing",
+            "ready" if omp.availability is Availability.READY else "unavailable",
+            "github-copilot/gemini-3.8-flash", "max", omp.availability,
+        )),
     ]
-
 
 def choose_option(repository: str, preferences: dict[str, Preference],
                   options: list[HarnessOption], configured: Preference | None = None) -> HarnessOption | None:
