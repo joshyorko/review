@@ -75,6 +75,17 @@ export class ReviewQueueState {
       this.currentIndex = Math.max(0, this.items.length - 1);
     }
   }
+  getStatusSegment(): string {
+    const current = this.getCurrent();
+    const modeLabel = this.activeMode.toUpperCase();
+    const count = this.items.length;
+    const pos = count > 0 ? `${this.currentIndex + 1}/${count}` : "0/0";
+    if (!current) {
+      return `[${modeLabel}: ${pos} (loading...)]`;
+    }
+    const ciBadge = current.ciStatus ? `CI:${current.ciStatus.toUpperCase()} ` : "";
+    return `[${modeLabel} ${pos}: #${current.id} ${ciBadge}${current.title.slice(0, 32)}]`;
+  }
 
   renderLowerThirdWidget(width: number): string[] {
     const current = this.getCurrent();
@@ -233,13 +244,16 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
 
   pi.setLabel("Bluefin Review & Issues");
 
-  const updateWidgets = (ctx: { ui: { setWidget: (id: string, lines: string[], opts?: { placement?: string }) => void } }) => {
+  const updateStatusAndWidgets = (ctx: { ui: { setStatus: (key: string, text: string | undefined) => void; setWidget: (id: string, lines: string[], opts?: { placement?: string }) => void } }) => {
+    // 1. Live status segment inside OMP's actual bottom status bar alongside gemini-3.8-flash / tokens
+    ctx.ui.setStatus("bluefin_queue", queue.getStatusSegment());
+
+    // 2. Lower-third drawer widget beneath editor
     const w = process.stdout.columns ?? 100;
     ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
       placement: "belowEditor",
     });
   };
-
   // Show welcome box and lower-third widget on session start
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) {
@@ -250,11 +264,8 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
         placement: "aboveEditor",
       });
 
-      // Lower-third docked queue widget
-      ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(termWidth), {
-        placement: "belowEditor",
-      });
-
+      // Lower-third docked queue widget & status bar segment
+      updateStatusAndWidgets(ctx);
       // Background load queue
       let token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.COPILOT_GITHUB_TOKEN;
       if (!token) {
@@ -268,7 +279,7 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
       fetchLiveQueue(queue.activeMode, token).then((items) => {
         if (items.length > 0) {
           queue.setItems(items);
-          updateWidgets(ctx);
+          updateStatusAndWidgets(ctx);
         }
       });
     }
@@ -279,7 +290,7 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
     description: "Next item in queue",
     handler(ctx) {
       queue.next();
-      updateWidgets(ctx);
+      updateStatusAndWidgets(ctx);
     },
   });
 
@@ -287,7 +298,7 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
     description: "Previous item in queue",
     handler(ctx) {
       queue.prev();
-      updateWidgets(ctx);
+      updateStatusAndWidgets(ctx);
     },
   });
 
@@ -295,11 +306,11 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
     description: "Toggle PRs / Issues mode",
     handler(ctx) {
       queue.toggleMode();
-      updateWidgets(ctx);
+      updateStatusAndWidgets(ctx);
       let token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
       fetchLiveQueue(queue.activeMode, token).then((items) => {
         queue.setItems(items);
-        updateWidgets(ctx);
+        updateStatusAndWidgets(ctx);
       });
       ctx.ui.notify(`Switched to ${queue.activeMode.toUpperCase()} mode`, "info");
     },
