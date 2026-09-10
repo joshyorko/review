@@ -219,6 +219,7 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIn("bluefin-review-lower-third", content)
         self.assertIn("landing-batch", content)
         self.assertIn("tui-evidence", content)
+        self.assertIn("bluefin_review_status", content)
 
     def test_format_batch_plan_prompt(self):
         item = BatchMutationItem(

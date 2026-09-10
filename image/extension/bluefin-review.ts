@@ -284,6 +284,33 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
     },
   });
 
+  // Register LLM-callable extension tools
+  const z = pi.zod;
+  pi.registerTool({
+    name: "bluefin_review_status",
+    label: "Review Status",
+    description: "Get current Bluefin review queue status and selected item details",
+    parameters: z.object({}),
+    async execute() {
+      const current = queue.getCurrent();
+      return {
+        content: [
+          {
+            type: "text",
+            text: current
+              ? `Selected item #${current.id} (${current.type}) in ${current.repo}: ${current.title} [CI: ${current.ciStatus ?? "unknown"}]`
+              : "No item currently selected in queue",
+          },
+        ],
+        details: {
+          mode: queue.activeMode,
+          total_items: queue.items.length,
+          current_item: current ?? null,
+        },
+      };
+    },
+  });
+
   // Shortcuts
   pi.registerShortcut("j", () => queue.next());
   pi.registerShortcut("k", () => queue.prev());
