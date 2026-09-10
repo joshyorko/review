@@ -20,6 +20,29 @@ export interface QueueItem {
   labels: string[];
 }
 
+interface GraphQlSearchNode {
+  number: number;
+  title: string;
+  author?: { login: string };
+  repository?: { nameWithOwner: string };
+  commits?: {
+    nodes?: Array<{
+      commit?: {
+        statusCheckRollup?: { state: string };
+      };
+    }>;
+  };
+  labels?: { nodes?: Array<{ name: string }> };
+}
+
+interface GraphQlSearchPayload {
+  data?: {
+    search?: {
+      nodes?: GraphQlSearchNode[];
+    };
+  };
+}
+
 export class ReviewQueueState {
   items: QueueItem[] = [];
   currentIndex: number = 0;
@@ -39,6 +62,13 @@ export class ReviewQueueState {
 
   toggleMode(): void {
     this.activeMode = this.activeMode === "prs" ? "issues" : "prs";
+  }
+
+  setItems(newItems: QueueItem[]): void {
+    this.items = newItems;
+    if (this.currentIndex >= this.items.length) {
+      this.currentIndex = Math.max(0, this.items.length - 1);
+    }
   }
 
   renderLowerThirdWidget(width: number): string[] {
@@ -62,6 +92,81 @@ export class ReviewQueueState {
   }
 }
 
+export const GITHUB_ORG = "projectbluefin";
+
+export const ORG_QUEUE_QUERY = `
+query($endCursor: String) {
+  search(query: "org:projectbluefin is:pr is:open archived:false", type: ISSUE, first: 100, after: $endCursor) {
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        author { login }
+        repository { nameWithOwner }
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+        labels(first: 20) { nodes { name } }
+      }
+    }
+  }
+}
+`;
+
+export const ORG_ISSUES_QUERY = `
+query($endCursor: String) {
+  search(query: "org:projectbluefin is:issue is:open archived:false", type: ISSUE, first: 100, after: $endCursor) {
+    nodes {
+      ... on Issue {
+        number
+        title
+        author { login }
+        repository { nameWithOwner }
+        labels(first: 20) { nodes { name } }
+      }
+    }
+  }
+}
+`;
+
+export async function fetchLiveQueue(mode: "prs" | "issues", token?: string): Promise<QueueItem[]> {
+  const query = mode === "prs" ? ORG_QUEUE_QUERY : ORG_ISSUES_QUERY;
+  const headers: Record<string, string> = {
+    "User-Agent": "Bluefin-Review-OMP",
+    "Content-Type": "application/json",
+  };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  try {
+    const res = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query }),
+    });
+    if (!res.ok) return [];
+    const payload = (await res.json()) as GraphQlSearchPayload;
+    const nodes = payload.data?.search?.nodes ?? [];
+
+    return nodes.map((node) => {
+      const ciState = node.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state?.toLowerCase();
+      let ciStatus: "success" | "failure" | "pending" | undefined;
+      if (ciState === "success") ciStatus = "success";
+      else if (ciState === "failure" || ciState === "error") ciStatus = "failure";
+      else if (ciState) ciStatus = "pending";
+
+      return {
+        id: node.number,
+        type: mode === "prs" ? "pr" : "issue",
+        repo: node.repository?.nameWithOwner ?? GITHUB_ORG,
+        title: node.title,
+        author: node.author?.login ?? "unknown",
+        ciStatus,
+        labels: (node.labels?.nodes ?? []).map((l) => l.name),
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 export default function bluefinReviewExtension(pi: ExtensionAPI): void {
   const queue = new ReviewQueueState();
 
@@ -73,6 +178,12 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
       ctx.ui.setWidget("bluefin-review-lower-third", {
         placement: "belowEditor",
         render: (width) => queue.renderLowerThirdWidget(width),
+      });
+
+      // Background refresh queue
+      const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+      fetchLiveQueue(queue.activeMode, token).then((items) => {
+        if (items.length > 0) queue.setItems(items);
       });
     }
   });
@@ -97,6 +208,10 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
     description: "Toggle Issues / PR mode in lower third queue",
     handler: async (_args, ctx) => {
       queue.toggleMode();
+      const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+      fetchLiveQueue(queue.activeMode, token).then((items) => {
+        queue.setItems(items);
+      });
       ctx.ui.notify(`Switched to ${queue.activeMode.toUpperCase()} mode`, "info");
     },
   });
