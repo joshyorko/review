@@ -281,6 +281,16 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertEqual(schemes[0]["scheme"], "bluefin")
         self.assertTrue(schemes[0]["writable"])
 
+    def test_extension_tool_structure(self):
+        """Verify extension registers bluefin_review_status with parameters and execute handler."""
+        with open("image/extension/bluefin-review.ts", "r") as f:
+            content = f.read()
+        self.assertIn("pi.registerTool({", content)
+        self.assertIn('name: "bluefin_review_status"', content)
+        self.assertIn('label: "Review Status"', content)
+        self.assertIn("async execute()", content)
+        self.assertIn("total_items: queue.items.length", content)
+
 
 if __name__ == "__main__":
     unittest.main()
