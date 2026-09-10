@@ -184,11 +184,14 @@ leave a shim standing once the seam fix lands.
 
 ## Verification
 
+CI enforces the complete verification suite in `.github/workflows/validate.yml` (see [`docs/image-and-development.md`](../image-and-development.md#validation) for the full local command list).
+
+For documentation, skill changes, and cultural guidelines within this repository, run:
+
 ```bash
+git diff --check
 bash scripts/check-skill-frontmatter.sh
 bash tests/generate-skills.sh
-git diff --check
 ```
-
 For any change to an assigned repository, run that project's own validation
 and quote its result. When no such tooling exists, state that plainly.

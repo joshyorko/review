@@ -140,21 +140,37 @@ the two official release-asset digests and pass
 
 ### Validation
 
+CI enforces the complete contract suite in `.github/workflows/validate.yml`. To run the local portion of the suite (everything preceding container image builds and registry calls):
+
 ```bash
+# Static hygiene and formatting
+pre-commit run --all-files
+git diff --check
+
+# Commit, skill, and manifest contracts
+bash tests/check-commit-message.sh
 bash scripts/check-skill-frontmatter.sh
 bash tests/generate-skills.sh
+bash tests/sbom-manifest.sh
+python3 tests/harness-contract.py
+python3 tests/autopilot-contract.py
+
+# Launcher and onboarding contracts
+just --list
+bash tests/just-onboarding.sh
+bash tests/readme-quickstart.sh
+
+# Runtime and image contracts
 bash tests/image-contract.sh
 bash tests/hive-compatibility.sh
 bash tests/bluefin-review.sh
+bash tests/worktree-guard.sh
 bash tests/omp-review-mode.sh
 bash tests/appliance-contract.sh
-python3 tests/lab-broker-contract.py
-bash tests/just-onboarding.sh
-git diff --check
-just --list
-pre-commit run --all-files
+bash tests/dashboard-contract.sh
 ```
 
+Additional focused contract tests (such as `python3 tests/lab-broker-contract.py` or `python3 tests/review_engine_contract.py`) cover individual subsystems as documented in their respective skill files.
 `tests/image-audit.sh` inspects a real image, so it needs a container engine
 and network access. It uses `podman`; `CONTAINER_ENGINE` names another one.
 Use `--verify-base-evidence` to check the pinned

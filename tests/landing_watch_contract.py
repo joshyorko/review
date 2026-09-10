@@ -90,12 +90,11 @@ class LandingWatchContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             path = str(Path(root) / "events.jsonl")
             self.assertNotEqual(landing.report_event(path, "bad", "merged", "note"), 0)
-            self.assertEqual(landing.report_event(path, "org/repo#7", "merged", "x\nstate"), 0)
-            self.assertEqual(
-                landing.parse_status(path)["org/repo#7"]["note"],
-                "x\nstate",
-            )
-
+            self.assertNotEqual(landing.report_event(path, "org/repo#7", "merged", "note", head_sha="bad-sha"), 0)
+            self.assertEqual(landing.report_event(path, "org/repo#7", "merged", "x\nstate", head_sha="a" * 40), 0)
+            parsed = landing.parse_status(path)["org/repo#7"]
+            self.assertEqual(parsed["note"], "x\nstate")
+            self.assertEqual(parsed["head"], "a" * 40)
     def test_watch_target_round_trips_and_matches_exact_identity(self) -> None:
         target = landing.WatchTarget(
             repository="org/repo",

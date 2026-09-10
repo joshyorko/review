@@ -10,6 +10,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { deadlineSignal } from "./deadline.ts";
 
 export type QueueMode = "prs" | "issues";
 export type CiStatus = "success" | "failure" | "pending";
@@ -58,6 +59,20 @@ const QUEUE_FIELDS = `
 	labels(first: 20) { nodes { name } }
 `;
 
+/** What a pull request carries beyond the fields an issue shares. */
+const PR_ITEM_FIELDS = `
+	isDraft
+	mergeable
+	reviewDecision
+	additions
+	deletions
+	changedFiles
+	commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+	closingIssuesReferences(first: 5) {
+		nodes { number repository { nameWithOwner } }
+	}
+`;
+
 export const PR_QUEUE_QUERY = `
 query($search: String!, $cursor: String) {
 	search(query: $search, type: ISSUE, first: 50, after: $cursor) {
@@ -65,16 +80,7 @@ query($search: String!, $cursor: String) {
 		nodes {
 			... on PullRequest {
 				${QUEUE_FIELDS}
-				isDraft
-				mergeable
-				reviewDecision
-				additions
-				deletions
-				changedFiles
-				commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-				closingIssuesReferences(first: 5) {
-					nodes { number repository { nameWithOwner } }
-				}
+				${PR_ITEM_FIELDS}
 			}
 		}
 	}
@@ -168,6 +174,7 @@ interface SearchNode {
 	reviewDecision?: string | null;
 	additions?: number;
 	deletions?: number;
+	closed?: boolean;
 	changedFiles?: number;
 	author?: { login?: string } | null;
 	repository?: { nameWithOwner?: string } | null;
@@ -250,9 +257,23 @@ export interface FetchOptions {
 	scope?: QueueScope;
 	/** Hard ceiling on items pulled, across pages. */
 	limit?: number;
+	/** Ceiling on the whole walk, pages included. */
+	timeoutMs?: number;
 	signal?: AbortSignal;
 	fetchImpl?: typeof fetch;
 }
+
+/**
+ * Default queue deadline.
+ *
+ * An org-wide walk is three sequential GraphQL pages, each resolving check
+ * rollups for fifty pull requests; measured against `projectbluefin` it takes
+ * upwards of fifteen seconds, so a ceiling in that range fails the ordinary
+ * case. What the ceiling is for is the pathological one: it stays under the
+ * queue's own refetch cadence, so a wedged walk is abandoned and reported
+ * before the next one starts rather than accumulating.
+ */
+export const QUEUE_TIMEOUT_MS = 45_000;
 
 /** Fetch the open org queue, following pagination up to `limit` items. */
 export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): Promise<QueueResult> {
@@ -260,6 +281,7 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 	const scope = options.scope ?? orgScope(org);
 	const doFetch = options.fetchImpl ?? fetch;
 	const query = mode === "prs" ? PR_QUEUE_QUERY : ISSUE_QUEUE_QUERY;
+	const deadline = deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal);
 	const items: QueueItem[] = [];
 	let cursor: string | undefined;
 
@@ -273,7 +295,10 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 				method: "POST",
 				headers: { ...headers(token), "Content-Type": "application/json" },
 				body: JSON.stringify({ query, variables: { search: searchExpression(mode, scope), cursor: cursor ?? null } }),
-				signal,
+				signal: deadline,
+				// These are API endpoints, not documents. A redirect off api.github.com
+				// carries an Authorization header nowhere it belongs.
+				redirect: "error",
 			});
 			if (!response.ok) {
 				return { items, error: `GitHub GraphQL ${response.status} ${response.statusText}`, fetchedAt: Date.now() };
@@ -298,6 +323,99 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 		// Stopped on the ceiling rather than the end of the queue: say so, so the
 		// counter cannot read as "this is everything open".
 		return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: true };
+	} catch (error) {
+		if (signal?.aborted) return { items, error: "aborted", fetchedAt: Date.now() };
+		// The deadline expired mid-walk. Keep the pages that did land: a partial
+		// queue in priority order still beats an empty one, as long as it says so.
+		if (deadline.aborted) {
+			return {
+				items,
+				error: `GitHub queue timed out after ${options.timeoutMs ?? QUEUE_TIMEOUT_MS}ms`,
+				fetchedAt: Date.now(),
+				truncated: items.length > 0,
+			};
+		}
+		return { items, error: error instanceof Error ? error.message : String(error), fetchedAt: Date.now() };
+	}
+}
+
+/** `owner/repo#number`, as Hive names its work. */
+const ITEM_KEY = /^([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)#(\d+)$/;
+
+/**
+ * Named work, fetched by identity instead of found by search.
+ *
+ * The queue is a search over recently updated items, and Hive's backlog is
+ * mostly neither recent nor updated: measured against `projectbluefin`, six of
+ * ten queued items fell outside the window, so the tool whose purpose is
+ * burning that queue down never showed them. Search decides what is nearby;
+ * this decides what is required.
+ *
+ * One aliased request for the whole set. Anything closed, moved, or of the
+ * other kind is simply absent from the result — the caller reports the
+ * shortfall rather than inventing a row for it.
+ */
+export async function fetchItemsByKey(
+	keys: readonly string[],
+	mode: QueueMode,
+	options: FetchOptions = {},
+): Promise<QueueResult> {
+	const { token, signal } = options;
+	const doFetch = options.fetchImpl ?? fetch;
+	const items: QueueItem[] = [];
+	if (keys.length === 0) return { items, fetchedAt: Date.now() };
+	if (!token) {
+		return { items, error: "no GitHub credential (set GH_TOKEN or run gh auth login)", fetchedAt: Date.now() };
+	}
+
+	const targets: Array<{ alias: string; owner: string; name: string; number: number }> = [];
+	for (const key of keys) {
+		const match = ITEM_KEY.exec(key);
+		if (!match) continue;
+		const [owner, name] = match[1]!.split("/") as [string, string];
+		targets.push({ alias: `w${targets.length}`, owner, name, number: Number(match[2]) });
+	}
+	if (targets.length === 0) return { items, fetchedAt: Date.now() };
+
+	const wanted = mode === "prs" ? "PullRequest" : "Issue";
+	const extras = mode === "prs" ? PR_ITEM_FIELDS : "";
+	const query = `query {\n${targets
+		.map(
+			({ alias, owner, name, number }) =>
+				`\t${alias}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) {\n` +
+				`\t\tissueOrPullRequest(number: ${number}) { ... on ${wanted} { closed ${QUEUE_FIELDS} ${extras} } }\n\t}`,
+		)
+		.join("\n")}\n}`;
+
+	try {
+		const response = await doFetch("https://api.github.com/graphql", {
+			method: "POST",
+			headers: { ...headers(token), "Content-Type": "application/json" },
+			body: JSON.stringify({ query }),
+			signal: deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal),
+			redirect: "error",
+		});
+		if (!response.ok) {
+			return { items, error: `GitHub GraphQL ${response.status} ${response.statusText}`, fetchedAt: Date.now() };
+		}
+		const payload = (await response.json()) as {
+			data?: Record<string, { issueOrPullRequest?: SearchNode | null } | null>;
+			errors?: Array<{ message?: string }>;
+		};
+		// Partial data is normal here: one unreadable repository must not discard
+		// the rest of Hive's queue, so errors are reported beside what did resolve.
+		for (const { alias } of targets) {
+			const node = payload.data?.[alias]?.issueOrPullRequest;
+			// The search path is `is:open`; by name it has to be asked. Hive keeps
+			// ranking work after it is closed, and a finished item is not a queue.
+			if (!node || node.closed === true) continue;
+			const item = toQueueItem(node, mode);
+			if (item) items.push(item);
+		}
+		const failed = payload.errors?.length
+			? payload.errors.map((entry) => entry.message ?? "unknown").join("; ")
+			: undefined;
+		return { items, error: failed, fetchedAt: Date.now() };
 	} catch (error) {
 		if (signal?.aborted) return { items, error: "aborted", fetchedAt: Date.now() };
 		return { items, error: error instanceof Error ? error.message : String(error), fetchedAt: Date.now() };
@@ -352,7 +470,7 @@ export async function fetchDiff(repo: string, pullRequest: number, options: Diff
 	try {
 		const response = await doFetch(
 			`https://api.github.com/repos/${repo}/pulls/${pullRequest}/files?per_page=100`,
-			{ headers: headers(token), signal },
+			{ headers: headers(token), signal, redirect: "error" },
 		);
 		if (!response.ok) {
 			result.error = `GitHub REST ${response.status} ${response.statusText}`;

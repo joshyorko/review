@@ -69,13 +69,23 @@ function orderLine(mode: ReviewMode): string {
 		return `order: local — hive configured but unreachable (${hive.error ?? "unknown"})`;
 	}
 	const actionable = hive.actionableItems === undefined ? "" : `, ${hive.actionableItems} actionable overall`;
+	const coverage = mode.hiveCoverage();
 	if (mode.orderSource() !== "hive") {
 		return `order: local — hive is online at ${hive.hub} but has queued nothing in this scope${actionable}`;
 	}
-	return `order: hive — ${mode.hiveRankedCount()} of ${mode.items.length} items ranked by ${hive.hub}${actionable}. Hive owns priority; do not reorder or reassign it.`;
+	const shortfall =
+		coverage.present < coverage.total
+			? ` ${coverage.total - coverage.present} of Hive's ${coverage.total} queued items could not be resolved on GitHub and are missing from this queue.`
+			: "";
+	return `order: hive — ${mode.hiveRankedCount()} of ${mode.items.length} items ranked by ${hive.hub}${actionable}. Hive owns priority; do not reorder or reassign it.${shortfall}`;
 }
 
-export function registerTools(pi: ToolHost, mode: ReviewMode): void {
+/**
+ * @param whenReady Resolves once startup has fetched the hub and the queue.
+ *   `session_start` returns before that, so a tool called early would otherwise
+ *   report an empty queue as though the organization had nothing open.
+ */
+export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => Promise<void>): void {
 	const z = pi.zod;
 
 	pi.registerTool({
@@ -85,6 +95,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode): void {
 			"Current Bluefin review queue: mode, counts, the selected item, and the durable pipeline trace recorded for it (run state, review events, landing events, receipt findings).",
 		parameters: z.object({}),
 		async execute() {
+			await whenReady();
 			const now = Date.now();
 			const item = mode.selected();
 			const tally = mode.ciTally();
@@ -125,6 +136,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode): void {
 						online: hive.online,
 						hub: hive.hub || null,
 						ranked: mode.hiveRankedCount(),
+						queued: mode.hiveCoverage(),
 						actionable_items: hive.actionableItems ?? null,
 						triage: hive.triage,
 						error: hive.error ?? null,
@@ -151,6 +163,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode): void {
 			limit: z.number().describe("maximum rows to return (default 30)").optional(),
 		}),
 		async execute(_id, params) {
+			await whenReady();
 			const limit = typeof params.limit === "number" ? Math.max(1, Math.min(100, params.limit)) : 30;
 			const needle = typeof params.filter === "string" ? params.filter.toLowerCase() : "";
 			const rows = mode.visibleItems()
@@ -282,6 +295,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode): void {
 			target: z.string().describe("Target query: 'status' (default), 'knowledge' (curated patterns & test gaps), 'me' (contributor identity and task), 'queue' (ordered tasks), 'triage' (stages), or 'leaderboard' (top 25 contributors & task counts)").optional(),
 		}),
 		async execute(_id, params) {
+			await whenReady();
 			const target = typeof params.target === "string" ? params.target.toLowerCase().trim() : "status";
 			const hive = mode.hive;
 			if (!hive.configured) {

@@ -51,14 +51,18 @@ jobs:
       - name: Static hygiene
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pre-commit
+          python -m pip install --require-hashes -r requirements-ci.lock
           pre-commit run --all-files --show-diff-on-failure
+
+      - name: Commit message CI-skip guard contract
+        run: |
+          set -euo pipefail
+          bash tests/check-commit-message.sh
 
       - name: Skill frontmatter valid and generated index fresh
         run: |
           set -euo pipefail
           bash scripts/check-skill-frontmatter.sh
-
       - name: Skill generator rejects unsafe manifest paths
         run: |
           set -euo pipefail

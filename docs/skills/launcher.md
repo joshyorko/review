@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [just, launcher, podman, container, kubernetes]
-description: "Maintains the six review recipes and their credential boundaries. Use when editing justfile."
+description: "Maintains the review launcher recipes and their credential boundaries. Use when editing justfile."
 metadata:
   type: runbook
   context7-sources: [/websites/podman_io_en, /websites/kubernetes_io]
@@ -36,16 +36,17 @@ Goose, or image build skill documents.
 
 ## Core Process
 
-1. Keep exactly five public recipes:
+1. Document and maintain the public recipes and their purposes:
 
    | Recipe | Purpose |
    |---|---|
    | `contribute` | Start a foreground Hive contributor worker. |
-   | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. Foreground only; Ctrl-C stops it. |
+   | `review-appliance` | Run the distroless Bluefin Review appliance container. |
+   | `review-appliance-build` | Build the review appliance image locally and verify its contract. |
+   | `review-container` | Run the Hive contributor worker: receive assigned tasks and donate inference. Foreground only; Ctrl-C stops it. |
+   | `review-doctor` | Perform read-only preflight diagnostics for this machine. Starts no agent. |
+   | `review-queue` | Open the maintainer review dashboard over the Bluefin PR queue. |
    | `review-stop` | Stop cluster contributor workers; refuses attended runs and unlabeled containers. |
-   | `review-doctor` | Perform read-only preflight checks. |
-   | `review-queue` | Walk the live PR queue in the container; no Hive registration is mounted, but the selected hub URL is passed when configured. |
-
    `just` reads only this directory's justfile; use a `~/.local/bin` shim elsewhere.
 
 2. Interactive paths stay foreground; Ctrl-C stops them. Detached contributor
@@ -177,7 +178,7 @@ bash tests/just-onboarding.sh
 git diff --check
 ```
 
-The recipe list must contain only the six public commands. Doctor must not start a container.
+The recipe list must match the documented public recipes. Doctor must not start a container.
 
 ## Sources
 

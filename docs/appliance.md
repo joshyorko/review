@@ -124,6 +124,40 @@ the maintainer's. Without a hub the queue is classified from live GitHub
 evidence instead, using the same action vocabulary as the Textual dashboard.
 The header always names which one ran.
 
+Hive's queued work is in the queue whether or not a GitHub search would have
+found it. The search covers what is recent; anything Hive ranked is then
+fetched by name and added, because a backlog is rarely the most recently
+updated thing in an organization. The header counts it as `N/M queued`, so a
+queue that is short because Hive's work could not be resolved on GitHub — a
+closed item, a repository the token cannot read — is visibly different from a
+queue that is short because Hive has little to do.
+
+On an issue, `s` means ship it: implement what the issue asks, run the smallest
+test covering the change, and open a pull request that closes it. Review and
+merge stay with a human, and an issue that cannot be finished gets an evidenced
+finding instead of a pull request.
+
+### Working the backlog down
+
+The loop is narrow, select, dispatch, and it is three keys:
+
+1. `L` steps the queue through Hive's own triage stages — `triaging`, `ready`,
+   `implementing`, `reviewing`, `closed` — and back to all of it. `/` narrows
+   further by title, repository, author, label or number.
+2. `A` selects every row the filters left on screen, up to 25. Pressing it on a
+   fully selected slice clears it.
+3. `s` dispatches the slice. Issues become one pull request each; pull requests
+   get the landing pass.
+
+A dispatched slice is worked **concurrently** — one agent per item, in a single
+wave, not one item per turn — and every item reports its own outcome, so a batch
+that half failed cannot report as a success. Twenty-five is the ceiling because
+the wave is real concurrency, not a longer list.
+
+The detail pane names the contributor whose worker holds an item right now, from
+Hive's live contributor state. Two people burning the same queue down do not
+need to negotiate; they can see what is already taken.
+
 Credentials are inherited by name (`--env GH_TOKEN`), never passed as arguments
 and never baked into a layer. The mode resolves a token from `GH_TOKEN`,
 `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, or `gh auth token` in that order.

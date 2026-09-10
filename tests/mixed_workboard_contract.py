@@ -14,9 +14,11 @@ Validates that:
 
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -27,6 +29,13 @@ if str(IMAGE_DIR) not in sys.path:
     sys.path.insert(0, str(IMAGE_DIR))
 
 os.environ["BLUEFIN_REVIEW_COMMAND"] = "true"
+# Before the import, because landing_state_dir() resolves this at call time and
+# a task constructed by any test in this module would otherwise be written into
+# the maintainer's real dashboard state — where it shows up as a dispatched
+# batch that never reported anything.
+_STATE_ROOT = tempfile.mkdtemp(prefix="mixed-workboard-state-")
+os.environ["XDG_STATE_HOME"] = _STATE_ROOT
+atexit.register(shutil.rmtree, _STATE_ROOT, True)
 import tui.bluefin_review_tui as tui
 
 

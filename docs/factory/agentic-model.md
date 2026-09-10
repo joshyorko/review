@@ -168,7 +168,14 @@ Keep the model executable and compact:
 
 ## Verification
 
+CI enforces the complete verification suite in `.github/workflows/validate.yml` (see [`docs/image-and-development.md`](../image-and-development.md#validation) for the full local command list).
+
+For factory model, skills, and image contract changes, run the core contract checks:
+
 ```bash
+pre-commit run --all-files
+git diff --check
+just --list
 bash scripts/check-skill-frontmatter.sh
 bash tests/generate-skills.sh
 bash tests/image-contract.sh
@@ -176,10 +183,6 @@ bash tests/bluefin-review.sh
 bash tests/dashboard-contract.sh
 bash tests/worktree-guard.sh
 bash tests/just-onboarding.sh
-git diff --check
-just --list
-pre-commit run --all-files
 ```
-
 [common-model]: https://github.com/projectbluefin/common/blob/main/docs/factory/agentic-model.md
 [common-onboarding]: https://github.com/projectbluefin/common/blob/main/docs/skills/factory-onboarding.md

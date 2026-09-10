@@ -143,15 +143,19 @@ for proving absence of forbidden powers.
 
 ## Verification
 
+CI enforces the complete verification suite in `.github/workflows/validate.yml` (see [`docs/image-and-development.md`](../image-and-development.md#validation) for the full local command list).
+
+For pull request workflow, documentation, and skill changes, run this focused surface subset:
+
 ```bash
+pre-commit run --all-files
+git diff --check
+just --list
 bash scripts/check-skill-frontmatter.sh
 bash tests/generate-skills.sh
 bash tests/image-contract.sh
 bash tests/just-onboarding.sh
-git diff --check
-just --list
 ```
-
 `pre-commit run --all-files` runs all contributor hygiene checks, ShellCheck
 included: the hook uses the shellcheck-py wheel, so it needs no container
 socket and behaves identically locally and in the required `validate`

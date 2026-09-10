@@ -12,8 +12,11 @@ still apply.
 ## Quick start
 
 You need **Linux, rootless Podman, Git, `just`, and GitHub CLI (`gh`)**.
-Goose and Codex are bundled in the container; model authentication is a
-separate, one-time setup on your host.
+For the default Goose backend, the launcher requires `goose` installed on your
+host (`goose configure` with GitHub Copilot). Codex uses host credential storage
+(`codex login`). In contrast, the distroless appliance recipes
+(`just review-appliance`, `just review-appliance-build`) need nothing on the host
+besides the container engine and Git credentials.
 
 ### 1. Get the launcher and sign in to GitHub
 

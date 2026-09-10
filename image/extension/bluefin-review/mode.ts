@@ -13,10 +13,11 @@ import {
 	type QueueMode,
 	type QueueResult,
 	type QueueScope,
+	fetchItemsByKey,
 	fetchQueue,
 	orgScope,
 } from "./github.ts";
-import { type HiveSnapshot, EMPTY_HIVE, fetchHive, fetchHiveKnowledge } from "./hive.ts";
+import { type HiveSnapshot, type HiveWorkItem, EMPTY_HIVE, fetchHive, fetchHiveKnowledge } from "./hive.ts";
 import { type PrioritizedQueue, type Priority, itemKey, prioritize } from "./priority.ts";
 import {
 	type StateSnapshot,
@@ -38,6 +39,15 @@ export interface ReviewModeOptions {
 	env?: NodeJS.ProcessEnv;
 }
 
+/**
+ * Most items one dispatch may carry.
+ *
+ * A batch is fanned out one agent per item, so this is a concurrency ceiling
+ * wearing a selection's clothes. Past it the wave stops being a burn-down and
+ * starts being a queue of its own, with a context window to match.
+ */
+export const BATCH_LIMIT = 25;
+
 /** Shape persisted to the session so a resumed session reopens where it left off. */
 export interface PersistedSelection {
 	mode: QueueMode;
@@ -45,6 +55,7 @@ export interface PersistedSelection {
 	id?: number;
 	filter?: string;
 	hiveOnly?: boolean;
+	hiveLevel?: string;
 	scope?: QueueScope;
 }
 
@@ -58,6 +69,8 @@ export class ReviewMode {
 	cursor = 0;
 	filter = "";
 	hiveOnly = true;
+	/** Hive triage stage the queue is drilled into; undefined is all of it. */
+	hiveLevel?: string;
 	queueError?: string;
 	queueTruncated = false;
 	fetchedAt = 0;
@@ -72,6 +85,8 @@ export class ReviewMode {
 	private fetchImpl?: typeof fetch;
 	private env: NodeJS.ProcessEnv;
 	private inflight?: AbortController;
+	/** Hive-ranked keys this scope wanted but GitHub would not resolve. */
+	private hiveMissing = 0;
 	private snapshotSignature = "";
 	private ranked: PrioritizedQueue = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
 
@@ -143,12 +158,63 @@ export class ReviewMode {
 		});
 	}
 
-	/** Items in priority order, after hive-only and substring filters. */
+	/**
+	 * The Hive work item behind a queue row, if there is one.
+	 *
+	 * A pull request is rarely queued by Hive directly, so the link is usually
+	 * the issue it closes — the same path `hiveRankFor` ranks it through.
+	 */
+	hiveWorkFor(item: QueueItem): HiveWorkItem | undefined {
+		const keys = [itemKey(item), ...(item.closingIssues ?? [])];
+		for (const key of keys) {
+			const match = this.hive.items.find((candidate) => candidate.key === key);
+			if (match) return match;
+		}
+		return undefined;
+	}
+
+	/** Hive's triage levels, in the hub's own order, for stepping through. */
+	hiveLevels(): string[] {
+		return this.hive.triage.map((group) => group.level).filter(Boolean);
+	}
+
+	/**
+	 * Step the queue to Hive's next triage stage, then back to all of it.
+	 *
+	 * Drilling down a backlog is stage by stage — what is ready to implement is a
+	 * different sitting from what is still being triaged.
+	 */
+	cycleHiveLevel(): string | undefined {
+		const levels = this.hiveLevels();
+		if (levels.length === 0) {
+			this.hiveLevel = undefined;
+			return undefined;
+		}
+		const at = this.hiveLevel === undefined ? -1 : levels.indexOf(this.hiveLevel);
+		this.hiveLevel = at + 1 >= levels.length ? undefined : levels[at + 1];
+		this.cursor = 0;
+		return this.hiveLevel;
+	}
+
+	/** The contributor whose worker holds this item right now, if any. */
+	claimFor(item: QueueItem): string | undefined {
+		for (const key of [itemKey(item), ...(item.closingIssues ?? [])]) {
+			const who = this.hive.claims.get(key);
+			if (who) return who;
+		}
+		return undefined;
+	}
+
+	/** Items in priority order, after hive-only, level, and substring filters. */
 	visibleItems(): QueueItem[] {
 		const ordered = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
-		const candidates = this.hiveOnly && this.hive.online
+		let candidates = this.hiveOnly && this.hive.online
 			? ordered.filter((item) => this.priorityFor(item)?.category === "hive")
 			: ordered;
+		if (this.hiveLevel !== undefined) {
+			const level = this.hiveLevel;
+			candidates = candidates.filter((item) => this.hiveWorkFor(item)?.level === level);
+		}
 		if (!this.filter) return candidates;
 		const needle = this.filter.toLowerCase();
 		return candidates.filter(
@@ -158,7 +224,8 @@ export class ReviewMode {
 				item.author.toLowerCase().includes(needle) ||
 				String(item.id).includes(needle) ||
 				item.labels.some((label) => label.toLowerCase().includes(needle)) ||
-				(this.priorityFor(item)?.category ?? "").includes(needle),
+				(this.priorityFor(item)?.category ?? "").includes(needle) ||
+				(this.hiveWorkFor(item)?.level ?? "").includes(needle),
 		);
 	}
 
@@ -218,6 +285,24 @@ export class ReviewMode {
 		return true;
 	}
 
+	/**
+	 * Take everything currently on screen, or drop it.
+	 *
+	 * Burning a backlog down means dispatching a slice at a time, and a slice is
+	 * whatever the filters have narrowed the queue to. Selecting it one row at a
+	 * time is the reason nobody does it. Returns the resulting selection size.
+	 */
+	selectAllVisible(limit = BATCH_LIMIT): number {
+		const visible = this.visibleItems();
+		const everySelected = visible.length > 0 && visible.every((item) => this.selectedKeys.has(itemKey(item)));
+		if (everySelected) {
+			this.selectedKeys.clear();
+			return 0;
+		}
+		for (const item of visible.slice(0, limit)) this.selectedKeys.add(itemKey(item));
+		return this.selectedKeys.size;
+	}
+
 	clearSelected(): void {
 		this.selectedKeys.clear();
 	}
@@ -261,7 +346,13 @@ export class ReviewMode {
 		return await fetchHiveKnowledge({ env: this.env, signal, fetchImpl: this.fetchImpl });
 	}
 
-	/** Fetch the queue, cancelling any fetch still in flight. */
+	/**
+	 * Fetch the queue, cancelling any fetch still in flight.
+	 *
+	 * Two sources, one queue: a search for what is nearby, then Hive's own work
+	 * by name. The search alone cannot serve Hive — it is ordered by recency and
+	 * cut off by a ceiling, and Hive's backlog is neither recent nor small.
+	 */
 	async refreshQueue(): Promise<QueueResult> {
 		this.inflight?.abort();
 		const controller = new AbortController();
@@ -284,7 +375,8 @@ export class ReviewMode {
 			this.fetchedAt = result.fetchedAt;
 			if (!result.error || result.items.length > 0) {
 				const previousKey = this.selectedKey();
-				this.items = result.items;
+				this.items = [...result.items, ...(await this.missingHiveWork(result.items, options))];
+				if (controller.signal.aborted) return result;
 				this.reprioritize();
 				if (previousKey) {
 					const index = this.visibleItems().findIndex((item) => queueKey(item.repo, item.id) === previousKey);
@@ -298,6 +390,41 @@ export class ReviewMode {
 				this.inflight = undefined;
 			}
 		}
+	}
+
+	/**
+	 * Hive's queued work that the search did not return.
+	 *
+	 * Scope is respected: a repository-scoped queue stays that repository's, so
+	 * asking for one project never drags in another project's Hive work.
+	 */
+	private async missingHiveWork(fetched: readonly QueueItem[], options: FetchOptions): Promise<QueueItem[]> {
+		this.hiveMissing = 0;
+		if (!this.hive.online) return [];
+		const present = new Set(fetched.map(itemKey));
+		const wanted = [...this.hive.ranks.keys()].filter((key) => !present.has(key) && this.inScope(key));
+		if (wanted.length === 0) return [];
+		const result = await fetchItemsByKey(wanted, this.queueMode, options);
+		this.hiveMissing = wanted.length - result.items.length;
+		return result.items;
+	}
+
+	private inScope(key: string): boolean {
+		const repo = key.slice(0, key.indexOf("#"));
+		return this.scope.kind === "org" ? repo.startsWith(`${this.scope.value}/`) : repo === this.scope.value;
+	}
+
+	/**
+	 * How much of Hive's queue this session can actually act on.
+	 *
+	 * `total` counts the work Hive ranked for this scope; `present` counts what
+	 * reached the queue. A gap is real — a closed item, another kind, a
+	 * repository the token cannot read — and saying so is the difference between
+	 * a short queue and a queue that lost work.
+	 */
+	hiveCoverage(): { present: number; total: number } {
+		const total = [...this.hive.ranks.keys()].filter((key) => this.inScope(key)).length;
+		return { present: Math.max(0, total - this.hiveMissing), total };
 	}
 
 	/** Durable pipeline trace for the selected item. */
@@ -340,6 +467,7 @@ export class ReviewMode {
 			id: item?.id,
 			filter: this.filter || undefined,
 			hiveOnly: this.hiveOnly,
+			hiveLevel: this.hiveLevel,
 			scope: this.scope,
 		};
 	}
@@ -352,6 +480,7 @@ export class ReviewMode {
 		}
 		if (persisted.filter) this.filter = persisted.filter;
 		if (typeof persisted.hiveOnly === "boolean") this.hiveOnly = persisted.hiveOnly;
+		if (typeof persisted.hiveLevel === "string") this.hiveLevel = persisted.hiveLevel;
 		if (typeof persisted.id === "number") this.selectById(persisted.repo, persisted.id);
 	}
 }

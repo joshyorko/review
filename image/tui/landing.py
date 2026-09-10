@@ -723,6 +723,8 @@ Execute the following end-to-end loop:
    overrides it and pushes to the base repository instead, which creates a
    stray branch and leaves the pull request unchanged:
    git push
+   HEAD_SHA=$(git rev-parse HEAD)
+   {reporter} report --status {status} event --pr {pr} --state "waiting-ci" --head "$HEAD_SHA" --note "pushed fix $HEAD_SHA; waiting for CI"
    cd / && rm -rf "$WORKDIR"
 
 3. Wait for CI checks to turn green:
@@ -816,7 +818,20 @@ failed, or blocked), close the batch:
 
 def new_issue_task(stops: list, login: str) -> LandingTask:
     """An issue-batch task: same ledger, prompt, and log layout as a landing
-    task, with the issue brief and an issue-qualified id."""
+    task, with the issue brief and an issue-qualified id.
+
+    Every stop is validated. The landing and fix lanes have always done this;
+    this one did not, and an item that was neither an issue nor open reached
+    an agent as "fix issue #N" with a placeholder title."""
+    if not stops:
+        raise ValueError("an issue batch needs at least one issue")
+    for stop in stops:
+        _validate_stop(stop)
+        if not getattr(stop, "is_issue", False):
+            raise ValueError(
+                f"{getattr(stop, 'key', '?')} is not an issue: the issue lane "
+                "opens a pull request, it cannot land one"
+            )
     directory = landing_state_dir()
     instance = re.sub(
         r"[^A-Za-z0-9_.-]+", "-", os.environ.get("BLUEFIN_REVIEW_INSTANCE", "")
@@ -1332,7 +1347,7 @@ def _stamp(event: dict) -> dict:
     return {**event, "ts": int(time.time())}
 
 
-def report_event(status_path: str, pr: str, state: str, note: str) -> int:
+def report_event(status_path: str, pr: str, state: str, note: str, head_sha: str = "") -> int:
     """Append one pull-request event. A terminal state is written once: an
     identical retry is a no-op, and a post-terminal non-terminal write is
     refused. A terminal verdict later proven wrong is corrected by the new
@@ -1341,6 +1356,9 @@ def report_event(status_path: str, pr: str, state: str, note: str) -> int:
     are refused. Returns the process exit status."""
     if not PULL_REQUEST.fullmatch(str(pr)) or state not in PR_STATES:
         print("error: invalid pull request event", file=sys.stderr)
+        return 1
+    if head_sha and not FULL_SHA.fullmatch(head_sha):
+        print(f"error: --head must be a 40-character head sha, got {head_sha!r}", file=sys.stderr)
         return 1
     try:
         note = _bounded_text(note, field="note", limit=MAX_NOTE, allow_newlines=True)
@@ -1371,7 +1389,10 @@ def report_event(status_path: str, pr: str, state: str, note: str) -> int:
                     file=sys.stderr,
                 )
                 return 1
-        line = _append_event(handle, _stamp({"pr": pr, "state": state, "note": note}))
+        event = {"pr": pr, "state": state, "note": note}
+        if head_sha:
+            event["head"] = head_sha
+        line = _append_event(handle, _stamp(event))
     print(line)
     return 0
 
@@ -1697,6 +1718,7 @@ def main(argv: list[str] | None = None) -> int:
     event.add_argument("--pr", required=True, help="org/repo#N")
     event.add_argument("--state", required=True, choices=PR_STATES)
     event.add_argument("--note", required=True)
+    event.add_argument("--head", default="", metavar="SHA", help="resulting 40-character commit sha")
     watch = kinds.add_parser("watch", help="record one exact CI watch target")
     watch.add_argument("--pr", required=True, help="org/repo#N")
     watch.add_argument("--repository", required=True, help="owner/repo")
@@ -1744,7 +1766,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(answer, separators=(",", ":")))
         return status
     if args.kind == "event":
-        return report_event(args.status, args.pr, args.state, args.note)
+        return report_event(args.status, args.pr, args.state, args.note, args.head)
     if args.kind == "watch":
         try:
             repository, number_text = args.pr.rsplit("#", 1)
@@ -2128,7 +2150,7 @@ def prune_landings(root: str, now: float | None = None) -> None:
             continue
 
 
-def record_event(key: str, state: str, note: str) -> None:
+def record_event(key: str, state: str, note: str, head_sha: str = "") -> None:
     """Supersede a persisted outcome from outside a batch. A manual
     success — a re-queue, a direct merge — clears the row's marking in
     memory only; unless the record says so too, the next refresh folds
@@ -2144,8 +2166,45 @@ def record_event(key: str, state: str, note: str) -> None:
                         "pr": key,
                         "state": state,
                         "note": note,
+                        **({"head": head_sha} if head_sha and FULL_SHA.fullmatch(head_sha) else {}),
                         "ts": int(time.time()),
                     },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
+def record_refusal(task: "LandingTask", blocker: str) -> None:
+    """Write a refused dispatch into the batch's own ledger.
+
+    A task file that holds only its `expect` header is ambiguous: the agent
+    may have run and reported nothing, or may never have been started at all.
+    Those are opposite problems and they looked identical on disk, so a
+    maintainer asking "what happened to that batch" got the same silence
+    either way. The refusal belongs in the record it refused.
+    Best-effort: a state-directory problem must not swallow the refusal the
+    caller is already reporting on screen."""
+    try:
+        with open(task.status_path, "a", encoding="utf-8") as handle:
+            for key in task.keys:
+                handle.write(
+                    json.dumps(
+                        {
+                            "pr": key,
+                            "state": "not-dispatched",
+                            "note": blocker,
+                            "ts": int(time.time()),
+                        },
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+            handle.write(
+                json.dumps(
+                    {"state": "not-dispatched", "note": blocker, "ts": int(time.time())},
                     separators=(",", ":"),
                 )
                 + "\n"

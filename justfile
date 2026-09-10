@@ -119,7 +119,7 @@ print_missing_hive_setup_guidance() {
   echo "ERROR: missing Hive setup at ${path}; ${reason}." >&2
   echo "  Re-run review from an interactive terminal, or pre-seed it yourself from hivecommons/hive @ ${commit} by running \`just contribute-setup ${tool}\` in an interactive checkout (set REVIEW_HIVE_COMMIT to another full commit if needed)" >&2
 }
-GOOSE_INSTALL_HINT="Install: https://github.com/block/goose/releases"
+GOOSE_INSTALL_HINT="Install: https://github.com/aaif-goose/goose/releases"
 GOOSE_FIXIT_HINT="Run: goose configure, select GitHub Copilot, and complete the device flow."
 
 goose_configured() {

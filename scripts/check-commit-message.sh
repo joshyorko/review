@@ -26,7 +26,7 @@ fi
 
 # GitHub's documented set, matched case-insensitively as GitHub matches it.
 directives=(
-  "skip ci" "ci skip" "skip actions" "actions skip"
+  "skip ci" "ci skip" "no ci" "skip actions" "actions skip"
 )
 
 for directive in "${directives[@]}"; do

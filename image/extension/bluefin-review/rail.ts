@@ -78,9 +78,16 @@ export function orderSourceLabel(mode: ReviewMode): { text: string; role: PaintR
 	const hive = mode.hive;
 	if (!hive.configured) return { text: "local ranking", role: "dim" };
 	if (hive.error) return { text: `hive unreachable (${hive.error.split(" \u2192 ")[0]})`, role: "error" };
+	const coverage = mode.hiveCoverage();
 	if (mode.orderSource() === "hive") {
 		const actionable = hive.actionableItems === undefined ? "" : ` \u00b7 ${hive.actionableItems} actionable`;
-		return { text: `hive \u25b8 ${mode.hiveRankedCount()} ranked${actionable}`, role: "accent" };
+		// present/total, not a bare count: a queue missing half of Hive's work
+		// looks identical to a short queue unless it says so.
+		const queued = `${coverage.present}/${coverage.total} queued`;
+		return { text: `hive \u25b8 ${queued}${actionable}`, role: "accent" };
+	}
+	if (coverage.total > 0) {
+		return { text: `hive \u25b8 0/${coverage.total} queued \u00b7 none reachable here`, role: "error" };
 	}
 	return { text: "hive \u25b8 nothing queued here", role: "dim" };
 }

@@ -52,10 +52,16 @@ grep -qF 'KNOWN_BACKENDS="claude copilot goose codex agy bob pi aider litellm op
 # Exercise the hook with an inert command after it has installed its wrapper.
 # The exact hosted URL is rewritten and receives a Bearer token; unrelated
 # curl calls retain their original arguments.
+#
+# Every nested shell here runs --noprofile --norc. Bash sources the invoking
+# user's rc when it believes it was started by a remote shell — stdin being a
+# socket is enough — and this repository's own maintainers export HIVE_HUB from
+# ~/.bashrc. That silently replaced the hub these assertions set, and the suite
+# failed claiming the hook had overwritten the launcher's selection.
 hook_output="$(
   HIVE_HUB='wss://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev/contribute' \
     GH_TOKEN='compatibility-test-token' \
-    bash -c '
+    bash --noprofile --norc -c '
       source image/hive-entrypoint.d/hosted-knowledge.sh
       curl_binary=/bin/echo
       curl -sf "https://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev/api/knowledge/export" -o /dev/null
@@ -69,7 +75,7 @@ hook_output="$(
   }
 
 if HIVE_HUB='wss://other.hive.example/contribute' GH_TOKEN='compatibility-test-token' \
-  bash -c 'source image/hive-entrypoint.d/hosted-knowledge.sh; declare -F curl' |
+  bash --noprofile --norc -c 'source image/hive-entrypoint.d/hosted-knowledge.sh; declare -F curl' |
   grep -q .; then
   echo "::error::hosted knowledge hook must not intercept other Hive deployments" >&2
   exit 1
@@ -77,7 +83,7 @@ fi
 
 selected_hub="$(
   HIVE_HUB='wss://other.hive.example/contribute' GH_TOKEN='compatibility-test-token' \
-    bash -c 'source image/hive-entrypoint.d/hosted-knowledge.sh; printf "%s\n" "$HIVE_HUB"'
+    bash --noprofile --norc -c 'source image/hive-entrypoint.d/hosted-knowledge.sh; printf "%s\n" "$HIVE_HUB"'
 )"
 if [[ "$selected_hub" != 'wss://other.hive.example/contribute' ]]; then
   echo "::error::hosted knowledge hook overwrote the launcher-selected Hive" >&2
@@ -87,7 +93,7 @@ fi
 unset_hub="$(
   # shellcheck disable=SC2016 # single quotes are intentional for bash -c script
   env -u HIVE_HUB GH_TOKEN='compatibility-test-token' \
-    bash -c 'source image/hive-entrypoint.d/hosted-knowledge.sh; printf "%s\n" "${HIVE_HUB:-}"'
+    bash --noprofile --norc -c 'source image/hive-entrypoint.d/hosted-knowledge.sh; printf "%s\n" "${HIVE_HUB:-}"'
 )"
 if [[ -n "$unset_hub" ]]; then
   echo "::error::hosted knowledge hook silently selected a Hive for queue mode" >&2

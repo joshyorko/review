@@ -224,6 +224,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
         app.notify = lambda *a, **kw: None
         app.drain_landings = lambda: None
         app.start_review_batch = lambda stops, **kw: None
+        app._request_reconciliation = lambda: None
         return app
 
     def test_fixer_advanced_head_distinguished_from_foreign_head_change(self):
@@ -266,8 +267,23 @@ class SlayStateMachineContractTests(unittest.TestCase):
             app.run_store.transition(id_fixer, RunState.REVIEWING)
             app.run_store.transition(id_fixer, RunState.REVIEW_FINDINGS)
 
-            # Record that fixer pushed sha("3")
-            app.record_fixer_head(stop_fixer.repository, stop_fixer.number, _sha("3"))
+            # Simulate fix-and-land completion with fixer reporting pushed head sha("3")
+            status_path = Path(root) / "fix-landing.jsonl"
+            status_path.write_text(
+                f'{{"pr":"{stop_fixer.key}","state":"waiting-ci","head":"{_sha("3")}","note":"pushed fix"}}\n'
+                '{"state":"done","note":"fix completed"}\n'
+            )
+            task = tui.landing.LandingTask(
+                task_id="fix-task",
+                stops=[stop_fixer],
+                login="jorge",
+                status_path=str(status_path),
+                log_path=str(Path(root) / "fix-task.log"),
+                started=0.0,
+            )
+            app.advance_final_review = lambda _task: None
+            app.landing_finished(task)
+
             self.assertTrue(app.is_fixer_head(stop_fixer.repository, stop_fixer.number, _sha("3")))
             self.assertFalse(app.is_fixer_head(stop_fixer.repository, stop_fixer.number, _sha("4")))
 

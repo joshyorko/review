@@ -36,10 +36,12 @@ export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "space", label: "select" },
 	{ chord: "x", label: "clear" },
 	{ chord: "j/k", label: "move" },
+	{ chord: "A", label: "select all" },
 	{ chord: "tab", label: "pane" },
 	{ chord: "h/l", label: "fold" },
 	{ chord: "i", label: "prs/issues" },
 	{ chord: "H", label: "hive-only" },
+	{ chord: "L", label: "hive stage" },
 	{ chord: "enter/r", label: "review" },
 	{ chord: "d", label: "diff" },
 	{ chord: "D", label: "docs" },
@@ -58,12 +60,13 @@ const HELP: readonly string[] = [
 	"",
 	"  space            toggle selection on the highlighted item",
 	"  x                clear all selections",
-	"  j / k, ↓ / ↑     move the cursor in the focused pane",
+	"  A                select every row the filters left on screen (max 25)",
 	"  tab              switch between queue and trace",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
 	"  i                toggle pull requests and issues",
 	"  H                toggle hive-only filter (default: on)",
+	"  L                step through Hive's triage stages, then back to all",
 	"  o                review another repository (owner/repo)",
 	"  u                refetch the queue now",
 	"  /                filter by title, repo, author, label, number",
@@ -72,7 +75,8 @@ const HELP: readonly string[] = [
 	"  D                update documentation enforcing agentic docs system",
 	"  a                verify checks, approve, squash merge",
 	"  f                fix the findings reported for it",
-	"  s                slay: review, patch, verify, land",
+	"  s                slay: on a pull request review, patch, verify, land;",
+	"                   on an issue implement it and open a pull request",
 	"  y                cite the selection in the prompt",
 	"  b                build a container snapshot",
 	"  *                hive weekly leaderboard (top 25 contributors)",
@@ -197,6 +201,9 @@ export class ReviewDashboard {
 			case "space":
 				this.toggleSelection();
 				return;
+			case "A":
+				this.mode.selectAllVisible();
+				return;
 			case "x":
 				this.mode.clearSelected();
 				return;
@@ -230,6 +237,9 @@ export class ReviewDashboard {
 				return;
 			case "H":
 				this.mode.toggleHiveOnly();
+				return;
+			case "L":
+				this.mode.cycleHiveLevel();
 				return;
 			case "u":
 				this.onRefresh();
@@ -353,6 +363,9 @@ export class ReviewDashboard {
 		];
 		const source = orderSourceLabel(this.mode);
 		const sourceText = this.mode.hiveOnly && this.mode.hive.online ? `${source.text} (hive-only)` : source.text;
+		if (this.mode.hiveLevel !== undefined) {
+			parts.push(this.painter.fg("dim", GLYPH.dot), this.painter.fg("warning", `stage ${this.mode.hiveLevel}`));
+		}
 		parts.push(this.painter.fg("dim", GLYPH.dot), this.painter.fg(source.role, sourceText));
 		for (const group of this.mode.hive.triage) {
 			if (group.count > 0) parts.push(this.painter.fg("dim", `${group.label.toLowerCase()} ${group.count}`));
@@ -400,10 +413,82 @@ export class ReviewDashboard {
 		return rows;
 	}
 
+	/**
+	 * What Hive knows about the selected row.
+	 *
+	 * Hive's queue is mostly issues, and an issue has no recorded pipeline, so
+	 * the pane that exists to explain the selection was blank for exactly the
+	 * work this tool is pointed at. This is the drill-down: why it is ranked
+	 * where it is, what stage Hive has it at, and whether a change already
+	 * exists that would close it.
+	 */
+	private hiveRows(width: number): string[] {
+		const item = this.mode.selected();
+		if (!item) return [];
+		const work = this.mode.hiveWorkFor(item);
+		const priority = this.mode.priorityFor(item);
+		if (!work && priority?.hiveRank === undefined) return [];
+
+		const rows: string[] = [];
+		const rank = priority?.hiveRank === undefined ? "" : `hive #${priority.hiveRank + 1}`;
+		const stage = work?.level ? ` ${GLYPH.dot} stage ${work.level}` : "";
+		rows.push(truncateToWidth(`  ${this.painter.fg("accent", rank)}${this.painter.fg("dim", stage)}`, width));
+		// The reason only earns a row when it says something the rank and stage
+		// above it do not: `hive <level> #<n>` is the same sentence twice.
+		if (priority?.reason && priority.hiveRank === undefined) {
+			rows.push(truncateToWidth(this.painter.fg("dim", `  ${priority.reason}`), width));
+		}
+		const claimedBy = this.mode.claimFor(item);
+		if (claimedBy) {
+			rows.push(truncateToWidth(this.painter.fg("warning", `  a worker is on this now: ${claimedBy}`), width));
+		}
+		if (work && work.key !== `${item.repo}#${item.id}`) {
+			// Ranked through the issue it closes, not on its own name.
+			rows.push(truncateToWidth(this.painter.fg("dim", `  queued as ${work.key}`), width));
+		}
+		if (work?.labels.length) {
+			rows.push(truncateToWidth(this.painter.fg("dim", `  labels ${work.labels.join(", ")}`), width));
+		}
+		if (work?.url) rows.push(truncateToWidth(this.painter.fg("dim", `  ${work.url}`), width));
+
+		// Changes that already answer this queued work, so a maintainer never
+		// starts an issue somebody has already finished. Hive's own link is
+		// authoritative and survives a queue window that never fetched the pull
+		// request; the fetched queue adds any others that close the same issue.
+		const answering = this.mode.items.filter(
+			(candidate) => candidate.type === "pr" && (candidate.closingIssues ?? []).includes(work?.key ?? ""),
+		);
+		if (work?.pr) {
+			const state = work.pr.state ? ` ${GLYPH.dot} ${work.pr.state}` : "";
+			rows.push(
+				truncateToWidth(
+					`  ${this.painter.fg("accent", `#${work.pr.number}`)}${this.painter.fg("dim", `${state} ${GLYPH.dot} hive`)}`,
+					width,
+				),
+			);
+		}
+		for (const pr of answering) {
+			if (pr.id === work?.pr?.number) continue;
+			const ci = ciGlyph(pr.ciStatus);
+			rows.push(
+				truncateToWidth(
+					`  ${this.painter.fg(statusRole(ci.status), ci.glyph)} ${this.painter.fg("accent", `#${pr.id}`)} ${this.painter.fg("text", pr.title)}`,
+					width,
+				),
+			);
+		}
+		if (work && !work.pr && answering.length === 0) {
+			rows.push(truncateToWidth(this.painter.fg("dim", "  no open change closes this yet"), width));
+		}
+		rows.push("");
+		return rows;
+	}
+
 	private traceRows(width: number, height: number, now: number): string[] {
+		const hive = this.hiveRows(width);
 		const roots = this.traceRoots(now);
 		if (roots.length === 0) {
-			return [this.painter.fg("dim", `  ${statusIcon("pending")} no pipeline state recorded yet`)];
+			return [...hive, this.painter.fg("dim", `  ${statusIcon("pending")} no pipeline state recorded yet`)];
 		}
 		const ids = this.traceIds(now);
 		this.traceCursor = Math.min(this.traceCursor, Math.max(0, ids.length - 1));
@@ -416,7 +501,7 @@ export class ReviewDashboard {
 			frame: this.frame,
 			expansion: this.expansion,
 			focusedId,
-			maxLogLines: Math.max(3, Math.floor(height / 3)),
+			maxLogLines: Math.max(3, Math.floor((height - hive.length) / 3)),
 		});
 
 		if (focusedId === undefined) {
@@ -428,7 +513,10 @@ export class ReviewDashboard {
 			const cursorRow = rendered.findIndex((row) => row.kind === "span" && row.spanId === focusedId);
 			this.traceScroll = clampScroll(Math.max(0, cursorRow), this.traceScroll, height);
 		}
-		return rendered.slice(this.traceScroll, this.traceScroll + height).map((row) => row.text);
+		const spans = rendered
+			.slice(this.traceScroll, this.traceScroll + Math.max(1, height - hive.length))
+			.map((row) => row.text);
+		return [...hive, ...spans];
 	}
 
 	private paneTitle(pane: Pane, text: string, width: number): string {

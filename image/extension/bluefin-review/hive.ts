@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { deadlineSignal } from "./deadline.ts";
 
 /** One item Hive has queued, in Hive's own order. */
 export interface HiveWorkItem {
@@ -27,6 +28,8 @@ export interface HiveWorkItem {
 	labels: string[];
 	/** Triage level this item was found under, when it came from the triage view. */
 	level?: string;
+	/** The change Hive already knows answers this work, when it knows of one. */
+	pr?: { number: number; url: string; state: string };
 }
 
 export interface HiveTriageGroup {
@@ -45,6 +48,8 @@ export interface HiveSnapshot {
 	triage: HiveTriageGroup[];
 	/** `owner/repo#number` → position in Hive's order. */
 	ranks: ReadonlyMap<string, number>;
+	/** `owner/repo#number` → the contributor whose worker is on it right now. */
+	claims: ReadonlyMap<string, string>;
 	error?: string;
 	fetchedAt: number;
 }
@@ -56,6 +61,7 @@ export const EMPTY_HIVE: HiveSnapshot = {
 	items: [],
 	triage: [],
 	ranks: new Map(),
+	claims: new Map(),
 	fetchedAt: 0,
 };
 
@@ -125,6 +131,17 @@ export function resolveHiveToken(env: NodeJS.ProcessEnv = process.env): string {
 	}
 }
 
+function toLinkedPr(raw: unknown): HiveWorkItem["pr"] {
+	if (!raw || typeof raw !== "object") return undefined;
+	const record = raw as Record<string, unknown>;
+	if (typeof record.number !== "number" || !Number.isInteger(record.number)) return undefined;
+	return {
+		number: record.number,
+		url: typeof record.url === "string" ? record.url : "",
+		state: typeof record.state === "string" ? record.state : "",
+	};
+}
+
 function toWorkItem(raw: unknown, level?: string): HiveWorkItem | undefined {
 	if (!raw || typeof raw !== "object") return undefined;
 	const record = raw as Record<string, unknown>;
@@ -139,6 +156,7 @@ function toWorkItem(raw: unknown, level?: string): HiveWorkItem | undefined {
 		url: typeof record.url === "string" ? record.url : "",
 		labels: Array.isArray(record.labels) ? record.labels.filter((label): label is string => typeof label === "string") : [],
 		level,
+		pr: toLinkedPr(record.pr),
 	};
 }
 
@@ -203,12 +221,76 @@ export function buildRankMap(queue: readonly HiveWorkItem[], triage: readonly Hi
 	return ranks;
 }
 
+/**
+ * Which contributor's worker is on which item right now.
+ *
+ * `active_tasks` is the live set; `current_task` is the same thing for a hub
+ * that reports only one. Nothing here is a lock — it is the difference between
+ * picking up unclaimed work and duplicating somebody's afternoon.
+ */
+export function parseClaims(payload: unknown): Map<string, string> {
+	const claims = new Map<string, string>();
+	if (!payload || typeof payload !== "object") return claims;
+	const list = (payload as Record<string, unknown>).contributors;
+	if (!Array.isArray(list)) return claims;
+	for (const raw of list) {
+		if (!raw || typeof raw !== "object") continue;
+		const contributor = raw as Record<string, unknown>;
+		if (contributor.active !== true) continue;
+		const who = typeof contributor.github_username === "string" ? contributor.github_username : "";
+		if (!who) continue;
+		const tasks = Array.isArray(contributor.active_tasks) ? contributor.active_tasks : [];
+		const current = contributor.current_task;
+		for (const task of [...tasks, current]) {
+			if (!task || typeof task !== "object") continue;
+			const key = (task as Record<string, unknown>).key;
+			if (typeof key === "string" && key) claims.set(key, who);
+		}
+	}
+	return claims;
+}
+
+/**
+ * One item per key, carrying everything both views know about it.
+ *
+ * Hive returns the same work twice — once in the ready queue, which fixes its
+ * position, and once under a triage group, which is the only place its stage
+ * and its linked pull request appear. Keeping both entries meant whichever was
+ * found first won, so an item's stage was invisible exactly when it was queued.
+ */
+export function mergeWorkItems(
+	queue: readonly HiveWorkItem[],
+	triage: readonly HiveWorkItem[],
+): HiveWorkItem[] {
+	const merged = new Map<string, HiveWorkItem>();
+	for (const item of [...queue, ...triage]) {
+		const existing = merged.get(item.key);
+		if (!existing) {
+			merged.set(item.key, item);
+			continue;
+		}
+		merged.set(item.key, {
+			...existing,
+			title: existing.title || item.title,
+			url: existing.url || item.url,
+			labels: existing.labels.length > 0 ? existing.labels : item.labels,
+			level: existing.level ?? item.level,
+			pr: existing.pr ?? item.pr,
+		});
+	}
+	return [...merged.values()];
+}
+
 export interface HiveFetchOptions {
 	env?: NodeJS.ProcessEnv;
 	signal?: AbortSignal;
 	fetchImpl?: typeof fetch;
+	/** Ceiling on the whole read. A wedged hub must not hold a startup handler. */
 	timeoutMs?: number;
 }
+
+/** Default hub deadline: three parallel reads, generous for a slow link. */
+export const HIVE_TIMEOUT_MS = 10_000;
 
 /**
  * Read the hub. Never throws, never fatal.
@@ -230,17 +312,21 @@ export async function fetchHive(options: HiveFetchOptions = {}): Promise<HiveSna
 	};
 	if (token) headers.Authorization = `Bearer ${token}`;
 
+	const signal = deadlineSignal(options.timeoutMs ?? HIVE_TIMEOUT_MS, options.signal);
 	const get = async (path: string): Promise<unknown> => {
-		const response = await doFetch(`${hub}${path}`, { headers, signal: options.signal, redirect: "error" });
+		const response = await doFetch(`${hub}${path}`, { headers, signal, redirect: "error" });
 		if (!response.ok) throw new Error(`${path} → ${response.status} ${response.statusText}`);
 		return await response.json();
 	};
 
 	try {
-		const [statusPayload, queuePayload, triagePayload] = await Promise.all([
+		const [statusPayload, queuePayload, triagePayload, contributorPayload] = await Promise.all([
 			get("/api/v1/status").catch(() => get("/api/contribute/status")),
 			get("/api/contribute/queue"),
 			get("/api/contribute/triage"),
+			// Who is already on something. A backlog worked by several people at
+			// once needs this or two of them start the same issue.
+			get("/api/v1/contributors").catch(() => undefined),
 		]);
 
 		const status = (statusPayload ?? {}) as Record<string, unknown>;
@@ -252,9 +338,10 @@ export async function fetchHive(options: HiveFetchOptions = {}): Promise<HiveSna
 			configured: true,
 			online: true,
 			actionableItems: typeof status.actionable_items === "number" ? status.actionable_items : undefined,
-			items: [...queue, ...triageItems],
+			items: mergeWorkItems(queue, triageItems),
 			triage: groups,
 			ranks: buildRankMap(queue, triageItems),
+			claims: parseClaims(contributorPayload),
 			fetchedAt: Date.now(),
 		};
 	} catch (error) {

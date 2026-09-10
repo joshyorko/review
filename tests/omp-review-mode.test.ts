@@ -21,10 +21,11 @@ import { appendFileSync } from "node:fs";
 import { fetchDiff, fetchQueue, parseScope, searchExpression } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
-import { ReviewMode } from "../image/extension/bluefin-review/mode.ts";
+import { BATCH_LIMIT, ReviewMode } from "../image/extension/bluefin-review/mode.ts";
 import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts";
 import { STALE_AFTER_MS, queueAge, renderHitlist, renderRail, statusSegment } from "../image/extension/bluefin-review/rail.ts";
 import { SessionTrace } from "../image/extension/bluefin-review/session.ts";
+import { BluefinAnsiSplash } from "../image/extension/bluefin-review/splash.ts";
 import { STATE_ENTRY, actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
 
 const NOW = 1_800_000_000_000;
@@ -143,12 +144,27 @@ function queueItem(overrides = {}) {
 	};
 }
 
-/** Fake GitHub: one GraphQL page and one REST files response. */
-function fakeFetch(calls) {
+/**
+ * Fake GitHub: one GraphQL search page, aliased by-key lookups, and one REST
+ * files response.
+ *
+ * `known` maps `owner/repo#number` to the node returned when the queue asks for
+ * that item by name — the path Hive-queued work takes when it falls outside the
+ * search window.
+ */
+function fakeFetch(calls, known = {}) {
 	return async (url, init) => {
 		calls.push(String(url));
 		if (String(url).includes("/graphql")) {
 			const body = JSON.parse(String(init?.body ?? "{}"));
+			if (body.variables?.search === undefined) {
+				const data = {};
+				const alias = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+				for (const [, name, owner, repo, number] of body.query.matchAll(alias)) {
+					data[name] = { issueOrPullRequest: known[`${owner}/${repo}#${number}`] ?? null };
+				}
+				return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+			}
 			assert.match(body.variables.search, /org:projectbluefin/);
 			return {
 				ok: true,
@@ -245,15 +261,25 @@ function fakeHost() {
 	};
 }
 
+/**
+ * Fake omp session context.
+ *
+ * `ui.custom` models a real overlay: it builds the component and resolves only
+ * when that component calls `done`. A fake that resolved immediately hid the
+ * defect that shipped — a splash which only a keypress could dismiss, awaited
+ * inside `session_start` until omp killed the handler.
+ */
 function fakeCtx() {
 	const notifications = [];
 	const statuses = new Map();
 	const widgets = new Map();
+	const overlays = [];
 	return {
 		hasUI: true,
 		notifications,
 		statuses,
 		widgets,
+		overlays,
 		pasted: [],
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
@@ -263,7 +289,11 @@ function fakeCtx() {
 			pasteToEditor(text) {
 				this.parent.pasted.push(text);
 			},
-			custom: async () => ({ kind: "close" }),
+			custom(factory) {
+				const { promise, resolve } = Promise.withResolvers();
+				overlays.push(factory({ requestRender: () => {} }, this.theme, {}, resolve));
+				return promise;
+			},
 			theme: { fg: (_c, t) => t, bold: (t) => t, inverse: (t) => t },
 		},
 		sessionManager: { getBranch: () => [] },
@@ -881,6 +911,22 @@ test("a hub's queue and triage become one rank map in Hive's order", async () =>
 			const body =
 				path === "/api/v1/status"
 					? { hub: "online", actionable_items: 122 }
+					: path === "/api/v1/contributors"
+						? {
+								contributors: [
+									{
+										github_username: "danathar",
+										active: true,
+										current_task: { key: "projectbluefin/review#42", repo: "projectbluefin/review", number: 42 },
+									},
+									// Offline workers hold nothing: their last task is history.
+									{
+										github_username: "ghost",
+										active: false,
+										current_task: { key: "projectbluefin/docs#1092", repo: "projectbluefin/docs", number: 1092 },
+									},
+								],
+							}
 					: path === "/api/contribute/queue"
 						? { queue: [{ repo: "projectbluefin/docs", number: 1092, title: "fix pin state", labels: ["3-clanker-queue"] }] }
 						: {
@@ -888,8 +934,19 @@ test("a hub's queue and triage become one rank map in Hive's order", async () =>
 									{
 										level: "reviewing",
 										label: "Reviewing",
-										count: 1,
-										issues: [{ repo: "projectbluefin/review", number: 42, title: "under review" }],
+										count: 2,
+										issues: [
+											{ repo: "projectbluefin/review", number: 42, title: "under review" },
+											// The same work the ready queue already listed. Hive says
+											// what stage it is at and which change answers it; only
+											// the queue says where it sits.
+											{
+												repo: "projectbluefin/docs",
+												number: 1092,
+												title: "fix pin state",
+												pr: { number: 1170, url: "https://github.com/projectbluefin/docs/pull/1170", state: "open" },
+											},
+										],
 									},
 								],
 							};
@@ -903,8 +960,18 @@ test("a hub's queue and triage become one rank map in Hive's order", async () =>
 		["projectbluefin/docs#1092", 0],
 		["projectbluefin/review#42", 1],
 	]);
-	assert.deepEqual(snapshot.triage, [{ level: "reviewing", label: "Reviewing", count: 1 }]);
-	assert.equal(calls.length, 3);
+	assert.deepEqual(snapshot.triage, [{ level: "reviewing", label: "Reviewing", count: 2 }]);
+
+	// One entry per key: the queue's position, the triage view's stage and link.
+	assert.equal(snapshot.items.length, 2);
+	const queued = snapshot.items.find((item) => item.key === "projectbluefin/docs#1092");
+	assert.equal(queued.level, "reviewing", "an item's stage must survive being in both views");
+	assert.deepEqual(queued.pr, { number: 1170, url: "https://github.com/projectbluefin/docs/pull/1170", state: "open" });
+	assert.deepEqual(queued.labels, ["3-clanker-queue"], "the queue view's labels are kept");
+
+	// Who is already on something, so a batch never duplicates a live worker.
+	assert.deepEqual([...snapshot.claims.entries()], [["projectbluefin/review#42", "danathar"]]);
+	assert.equal(calls.length, 4);
 });
 
 test("a repository scope is parsed strictly and reaches the search", () => {
@@ -969,7 +1036,7 @@ test("tool executions become spans on the current turn", () => {
 
 test("the extension registers keyboard-only surfaces and real tools", async () => {
 	const pi = fakeHost();
-	createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
 
 	assert.deepEqual(pi.labels, ["Bluefin Review"]);
 	assert.deepEqual([...pi.shortcuts.keys()].sort(), ["alt+b", "alt+i", "alt+j", "alt+k", "alt+o", "alt+u", "alt+x", "alt+y"]);
@@ -986,7 +1053,9 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
+	pi.flagValues.set("splash", false);
 	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
 	// Ranked, not fetched-order: #7 is green and landable, #42 is failing.
 	assert.ok(ctx.statuses.get("bluefin_queue")?.includes("#7"), ctx.statuses.get("bluefin_queue"));
 	assert.equal(typeof ctx.widgets.get("bluefin-rail"), "function", "the rail is a component, not capped strings");
@@ -1018,20 +1087,88 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.equal(live.details.selected.id, 7);
 	const lookup = await pi.tools.get("bluefin_hive_lookup").execute("id", {});
 	assert.match(lookup.content[0].text, /Hive hub is not configured/);
-	// Verify autoReopen on turn_end when dispatching from dashboard
-	let customUiOpened = 0;
-	ctx.ui.custom = async (component) => {
-		customUiOpened++;
-		return { kind: "close" };
-	};
-	// Trigger alt+b to run dashboard
+	// Startup opens the dashboard itself, and it stays open until the maintainer
+	// closes it, so alt+b on an open dashboard must not stack a second overlay.
+	assert.equal(ctx.overlays.length, 1, "startup opens exactly one dashboard");
 	await pi.shortcuts.get("alt+b").handler(ctx);
-	assert.ok(customUiOpened >= 1, "alt+b opens dashboard");
+	assert.equal(ctx.overlays.length, 1, "alt+b on an open dashboard opens nothing new");
+});
+
+// The timeout is the assertion: a handler that waits on its own work never
+// returns here, and node:test turns that into a failure instead of a hung suite.
+test("session_start returns without waiting for the queue or the intro", { timeout: 5000 }, async () => {
+	const pi = fakeHost();
+	// A GitHub that never answers and an intro nobody dismisses. omp kills an
+	// extension handler that has not returned inside its budget, and everything
+	// that keeps the queue fresh — the state, queue and hub poll timers — is
+	// registered by this handler. Blocking here cost the session all three.
+	const stalled = Promise.withResolvers();
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: () => stalled.promise,
+		env: ISOLATED_ENV,
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+
+	// Handed back mid-flight, not by skipping the work: the intro is on screen
+	// and the rail is mounted to show the queue arriving behind it.
+	assert.equal(ctx.overlays.length, 1, "the intro is still open when the handler returns");
+	assert.equal(typeof ctx.widgets.get("bluefin-rail"), "function", "the rail is mounted before the first await");
+
+	// Let the stalled reads answer and dismiss the intro: startup then completes
+	// on its own and lands the maintainer in the dashboard.
+	stalled.resolve({ ok: false, status: 504, statusText: "Gateway Timeout", json: async () => ({}) });
+	ctx.overlays[0].handleInput(" ");
+	await review.whenStarted();
+	assert.equal(ctx.overlays.length, 2, "the dashboard opens once the intro is done");
+	assert.ok(
+		ctx.notifications.some((entry) => entry.level === "error" && /504/.test(entry.message)),
+		"a queue that failed says so instead of rendering as an empty queue",
+	);
+});
+
+test("a headless session hands the queue to the tools, not to the handler", async () => {
+	const pi = fakeHost();
+	createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.hasUI = false;
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	// No rail, no intro, no dashboard: there is nothing to render into.
+	assert.equal(ctx.overlays.length, 0);
+	assert.equal(ctx.widgets.size, 0);
+
+	// The handler returned before the fetch landed, so the tool has to wait for
+	// it. Reading the queue too early is how a print-mode run reports that a busy
+	// organization has nothing open.
+	const queue = await pi.tools.get("bluefin_review_queue").execute("id", {});
+	assert.match(queue.content[0].text, /projectbluefin\/other#7/);
+	assert.equal(queue.details.items.length, 2);
+});
+
+test("the intro dismisses itself instead of holding the session open", (t) => {
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	let dismissals = 0;
+	const timed = new BluefinAnsiSplash({ requestRender: () => {} }, () => dismissals++);
+	t.mock.timers.tick(10_000);
+	assert.equal(dismissals, 1, "the intro must end on its own, and exactly once");
+	timed.dispose();
+
+	// A keypress still ends it early; that is the affordance the intro advertises.
+	let pressed = 0;
+	const interactive = new BluefinAnsiSplash({ requestRender: () => {} }, () => pressed++);
+	interactive.handleInput(" ");
+	t.mock.timers.tick(10_000);
+	assert.equal(pressed, 1, "a keypress dismisses the intro once, and the timer cannot repeat it");
 });
 
 test("a resumed session reopens on the item it left", async () => {
 	const pi = fakeHost();
-	createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
 
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
@@ -1042,7 +1179,9 @@ test("a resumed session reopens on the item it left", async () => {
 			{ type: "custom", customType: STATE_ENTRY, data: { mode: "prs", repo: "projectbluefin/other", id: 7 } },
 		],
 	};
+	pi.flagValues.set("splash", false);
 	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
 	assert.ok(ctx.statuses.get("bluefin_queue")?.includes("#7"));
 });
 
@@ -1063,10 +1202,12 @@ test("the status tool names the authority that ordered the queue", async () => {
 
 	const statusFor = async (fetchImpl, env) => {
 		const pi = fakeHost();
-		createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env });
+		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env });
 		const ctx = fakeCtx();
 		ctx.ui.parent = ctx;
+		pi.flagValues.set("splash", false);
 		await pi.events.get("session_start")({}, ctx);
+		await review.whenStarted();
 		return await pi.tools.get("bluefin_review_status").execute("id", {});
 	};
 
@@ -1118,4 +1259,199 @@ test("action prompts name the evidence and refuse to merge red checks", () => {
 	assert.match(batchPrompt, /Repository `projectbluefin\/other`/);
 	assert.match(batchPrompt, /cross-repository contract compatibility/);
 	assert.equal(actionPrompt({ kind: "close" }), undefined);
+});
+
+test("slaying an issue ships a pull request for someone else to merge", () => {
+	const issue = queueItem({ id: 936, type: "issue", repo: "projectbluefin/documentation", title: "npm test misses scripts/lib" });
+	const prompt = actionPrompt({ kind: "slay", item: issue });
+	assert.match(prompt, /open a pull request/);
+	assert.match(prompt, /Closes projectbluefin\/documentation#936/);
+	assert.match(prompt, /never merge your own/);
+	assert.doesNotMatch(prompt, /review the diff/, "an issue has no diff to land");
+
+	// A pull request still gets the landing pass; the key means two things.
+	const landing = actionPrompt({ kind: "slay", item: queueItem() });
+	assert.match(landing, /Run the full landing pass/);
+	assert.match(landing, /Do not merge without green checks/);
+
+	// A batch of issues is still one pull request per issue, not one for the lot.
+	const batch = [issue, queueItem({ id: 941, type: "issue", repo: "projectbluefin/documentation" })];
+	const batchPrompt = actionPrompt({ kind: "slay", item: issue, items: batch });
+	assert.match(batchPrompt, /one pull request per issue/);
+	assert.match(batchPrompt, /never merge your own/);
+	assert.match(batchPrompt, /report an evidenced finding/);
+
+	// A mixed selection cannot be both, so it keeps the landing pass it had.
+	const mixed = actionPrompt({ kind: "slay", item: issue, items: [issue, queueItem()] });
+	assert.match(mixed, /Run the full landing pass/);
+});
+
+test("hive work the search never returned is still admitted to the queue", async () => {
+	// Hive queues an issue that is nowhere near the top of a recency-ordered
+	// search. Without admitting it by name, the tool whose purpose is burning
+	// Hive's queue down would never show it.
+	const queued = [
+		{ repo: "projectbluefin/lab", number: 470, title: "vanilla-kde: boot KDE natively" },
+		{ repo: "projectbluefin/documentation", number: 936, title: "npm test misses scripts/lib" },
+		// Hive keeps ranking work after it is finished. A queue is what is left.
+		{ repo: "projectbluefin/lab", number: 466, title: "Gate C soak" },
+	];
+	const known = {
+		"projectbluefin/lab#470": {
+			number: 470,
+			title: "vanilla-kde: boot KDE natively",
+			url: "https://github.com/projectbluefin/lab/issues/470",
+			updatedAt: new Date(NOW - 90 * 24 * 3600 * 1000).toISOString(),
+			author: { login: "castrojo" },
+			repository: { nameWithOwner: "projectbluefin/lab" },
+			labels: { nodes: [] },
+			closed: false,
+		},
+		"projectbluefin/lab#466": {
+			number: 466,
+			title: "Gate C soak",
+			url: "https://github.com/projectbluefin/lab/issues/466",
+			updatedAt: new Date(NOW - 40 * 24 * 3600 * 1000).toISOString(),
+			author: { login: "castrojo" },
+			repository: { nameWithOwner: "projectbluefin/lab" },
+			labels: { nodes: [] },
+			closed: true,
+		},
+	};
+	const hubFetch = async (url, init) => {
+		const target = String(url);
+		if (target.includes("/graphql")) return fakeFetch([], known)(url, init);
+		const path = target.replace("https://hive.example", "");
+		const body =
+			path === "/api/v1/status"
+				? { hub: "online", actionable_items: 108 }
+				: path === "/api/contribute/queue"
+					? { queue: queued }
+					: { groups: [] };
+		return { ok: true, status: 200, statusText: "OK", json: async () => body };
+	};
+
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: hubFetch,
+		env: { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" },
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	pi.flagValues.set("splash", false);
+	pi.flagValues.set("issues", true);
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	const queue = await pi.tools.get("bluefin_review_queue").execute("id", {});
+	assert.match(queue.content[0].text, /projectbluefin\/lab#470/, "hive work outside the search must still be queued");
+	assert.equal(queue.details.order_source, "hive");
+
+	// #936 resolved to nothing — moved or unreadable — and #466 came back closed.
+	// Neither is in the queue, and the shortfall is reported rather than hidden
+	// behind a list that merely looks complete.
+	assert.doesNotMatch(queue.content[0].text, /#936/);
+	assert.doesNotMatch(queue.content[0].text, /#466/, "finished work is not a queue");
+	const status = await pi.tools.get("bluefin_review_status").execute("id", {});
+	assert.equal(status.details.hive.queued.present, 1);
+	assert.equal(status.details.hive.queued.total, 3);
+});
+
+test("the dashboard drills into Hive's queue by stage and explains each item", (t) => {
+	const root = stateTree();
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: root });
+
+	const ready = { key: "projectbluefin/lab#470", repo: "projectbluefin/lab", number: 470, title: "vanilla-kde", url: "https://github.com/projectbluefin/lab/issues/470", labels: ["gate"], level: "ready" };
+	const triaging = { key: "projectbluefin/docs#936", repo: "projectbluefin/docs", number: 936, title: "npm test gap", url: "", labels: [], level: "triaging" };
+	mode.hive = {
+		...EMPTY_HIVE,
+		hub: "https://hive.example",
+		configured: true,
+		online: true,
+		items: [ready, triaging],
+		triage: [
+			{ level: "triaging", label: "Triaging", count: 1 },
+			{ level: "ready", label: "Ready to implement", count: 1 },
+		],
+		ranks: new Map([[ready.key, 0], [triaging.key, 1]]),
+	};
+	mode.items = [
+		queueItem({ id: 470, type: "issue", repo: "projectbluefin/lab", title: "vanilla-kde" }),
+		queueItem({ id: 936, type: "issue", repo: "projectbluefin/docs", title: "npm test gap" }),
+		// A pull request that closes the ready issue: work already exists for it.
+		queueItem({ id: 12, repo: "projectbluefin/lab", title: "feat: boot KDE under OVMF", ciStatus: "success", closingIssues: [ready.key] }),
+	];
+	mode.refreshState();
+	mode.reprioritize();
+
+	// L steps through Hive's own stages, in the hub's order, then back to all.
+	assert.equal(mode.visibleItems().length, 3);
+	assert.equal(mode.cycleHiveLevel(), "triaging");
+	assert.deepEqual(mode.visibleItems().map((item) => item.id), [936]);
+	assert.equal(mode.cycleHiveLevel(), "ready");
+	assert.deepEqual(mode.visibleItems().map((item) => item.id).sort(), [12, 470]);
+	assert.equal(mode.cycleHiveLevel(), undefined, "the last stage returns to the whole queue");
+	assert.equal(mode.visibleItems().length, 3);
+
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	t.after(() => dashboard.dispose());
+	dashboard.handleInput("L");
+	assert.equal(mode.hiveLevel, "triaging", "L is bound to the stage walk");
+
+	// Select the ready issue and read the detail pane: rank, stage, and the open
+	// change that already answers it.
+	mode.hiveLevel = undefined;
+	mode.selectById("projectbluefin/lab", 470);
+	const detail = dashboard.render(120).join("\n");
+	assert.match(detail, /hive #1/);
+	assert.match(detail, /stage ready/);
+	assert.match(detail, /#12 feat: boot KDE under OVMF/, "an open change closing the issue is shown");
+
+	// The issue nobody has answered says so instead of leaving the pane blank.
+	mode.selectById("projectbluefin/docs", 936);
+	const unanswered = dashboard.render(120).join("\n");
+	assert.match(unanswered, /stage triaging/);
+	assert.match(unanswered, /no open change closes this yet/);
+});
+
+test("a filtered slice is selected and dispatched in one wave", (t) => {
+	const root = stateTree();
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: root });
+	mode.items = Array.from({ length: 40 }, (_, i) =>
+		queueItem({ id: 100 + i, type: "issue", repo: "projectbluefin/lab", title: `queued work ${i}` }),
+	);
+	mode.reprioritize();
+
+	// One key takes the whole slice the filters left, up to the dispatch ceiling.
+	assert.equal(mode.selectAllVisible(), BATCH_LIMIT, "a burn-down selects a slice, not a row");
+	assert.equal(mode.chosenItems().length, BATCH_LIMIT);
+	// Pressing it again on a fully selected slice clears it: one key, both ways.
+	mode.items = mode.items.slice(0, BATCH_LIMIT);
+	mode.reprioritize();
+	assert.equal(mode.selectAllVisible(), 0);
+	assert.equal(mode.chosenItems().length, 0);
+
+	// It respects the filters, so a stage or a search is what gets dispatched.
+	mode.filter = "work 1";
+	const narrowed = mode.selectAllVisible();
+	assert.equal(narrowed, mode.visibleItems().length);
+	assert.ok(narrowed > 1 && narrowed < BATCH_LIMIT, `expected a narrowed slice, got ${narrowed}`);
+
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	t.after(() => dashboard.dispose());
+	mode.clearSelected();
+	dashboard.handleInput("A");
+	assert.equal(mode.selectedKeys.size, narrowed, "A is bound to the slice selection");
+
+	// The dispatched prompt must fan out. A batch worked top to bottom is a list.
+	const batch = mode.chosenItems();
+	const prompt = actionPrompt({ kind: "slay", item: batch[0], items: batch });
+	assert.match(prompt, /concurrently/);
+	assert.match(prompt, /one agent per item/);
+	assert.match(prompt, /Do not process the list sequentially/);
+	assert.match(prompt, /name every item that failed/);
+	assert.doesNotMatch(prompt, /repository sequence/);
 });

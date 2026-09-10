@@ -123,24 +123,35 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		}
 
 		const crossRepoHeader = isCrossRepo
-			? `These ${batch.length} items span ${repoGroups.size} repositories (${[...repoGroups.keys()].join(", ")}). Batch all operations by repository to maximize caching and avoid thrashing workspaces.`
+			? `These ${batch.length} items span ${repoGroups.size} repositories (${[...repoGroups.keys()].join(", ")}).`
 			: "";
 
-		const auditInstruction = `At the end of this batch, automatically dispatch the \`k3-final-review\` subagent (Kimi K3 at max effort) to audit all ${batch.length} items across all ${repoGroups.size} affected repositories (${[...repoGroups.keys()].join(", ")}). The K3 auditor must verify cross-repository contract compatibility, shared schema/dependency alignment, doctrine invariants, and Ponytail simplicity before closing.`;
+		// The point of selecting a slice is to spend one wall clock on all of it.
+		// A batch worked top to bottom is a list, not a batch, and a backlog that
+		// only moves at one item per turn never comes down.
+		const fanOut = `Work all ${batch.length} items concurrently: dispatch them as ONE batch of subagents, one agent per item, each owning exactly its own item and nothing else. Do not process the list sequentially, and do not wait for one item before starting the next. Tell every agent to skip formatters, linters and project-wide suites and to run only the smallest existing test covering what it changed. Two items that would edit the same file in the same repository are the one exception: name them and run those two in sequence. Report per item — what you did, the evidence, the outcome — and name every item that failed rather than summarising the batch as a success.`;
+
+		const auditInstruction = `When every item has reported, dispatch the \`k3-final-review\` subagent (Kimi K3 at max effort) once over all ${batch.length} items across ${repoGroups.size} repositories (${[...repoGroups.keys()].join(", ")}) to verify cross-repository contract compatibility, shared schema and dependency alignment, doctrine invariants, and simplicity.`;
+
+		const protocol = `${fanOut}\n\n${auditInstruction}`;
 
 		switch (action.kind) {
 			case "review":
-				return `Review the following ${batch.length} selected items grouped by repository for efficiency:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group: read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not.\n\n${auditInstruction}`;
+				return `Review the following ${batch.length} selected items grouped by repository for efficiency:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group: read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not.\n\n${protocol}`;
 			case "diff":
 				return `Inspect and summarize the diffs for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group, call bluefin_review_diff and summarize what changed file by file, with the cross-repo risk each change carries.`;
 			case "docs":
-				return `Update and align documentation for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Enforce the projectbluefin/common agentic documentation system with brutal alignment: ensure AGENTS.md, docs/factory/agentic-model.md, docs/SKILL.md, and docs/skills/*.md are strictly source-backed, concise (<200 lines soft max, <256 char descriptions), zero-filler, with no grandfathering or speculative noise. Run \`bash scripts/check-skill-frontmatter.sh --write\` and ensure \`docs/skills/index.json\` is regenerated cleanly.\n\n${auditInstruction}`;
+				return `Update and align documentation for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Enforce the projectbluefin/common agentic documentation system with brutal alignment: ensure AGENTS.md, docs/factory/agentic-model.md, docs/SKILL.md, and docs/skills/*.md are strictly source-backed, concise (<200 lines soft max, <256 char descriptions), zero-filler, with no grandfathering or speculative noise. Run \`bash scripts/check-skill-frontmatter.sh --write\` and ensure \`docs/skills/index.json\` is regenerated cleanly.\n\n${protocol}`;
 			case "approve":
-				return `For the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Confirm every required check is green per repository, restate the merge risk and cross-repo dependencies, then approve and squash merge in dependency order. Stop and report if any check is failing or pending.\n\n${auditInstruction}`;
+				return `For the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Confirm every required check is green per repository, restate the merge risk and cross-repo dependencies, then approve and squash merge in dependency order. Stop and report if any check is failing or pending.\n\n${protocol}`;
 			case "fix":
-				return `Fix the findings recorded for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository, read them with bluefin_review_trace, address each at its source, run the smallest contract test covering the changed surface, and prepare clean commits.\n\n${auditInstruction}`;
+				return `Fix the findings recorded for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository, read them with bluefin_review_trace, address each at its source, run the smallest contract test covering the changed surface, and prepare clean commits.\n\n${protocol}`;
 			case "slay":
-				return `Run the full landing pass on the following ${batch.length} selected items in repository sequence:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Review each diff, patch what is broken, run focused contract tests for each repo, and report merge readiness. Do not merge without green checks.\n\n${auditInstruction}`;
+				// Issues have no diff to land. Slaying one means producing the change
+				// it asked for and handing it to a human as a pull request.
+				return batch.every((entry) => entry.type === "issue")
+					? `Close out the following ${batch.length} queued issues by shipping the work, one pull request per issue:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each issue: read it and the repository's contract documents, implement what it asks for and nothing else, run the smallest existing test that covers the changed surface, then open a pull request that closes it with \`Closes <owner/repo>#<number>\` in the body. Someone else reviews and merges: never merge your own, never approve, and never close an issue by hand. Where an issue cannot be finished as asked, open no pull request for it and report an evidenced finding instead, naming what blocked you.\n\n${protocol}`
+					: `Run the full landing pass on the following ${batch.length} selected items:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Review each diff, patch what is broken, run focused contract tests for each repo, and report merge readiness. Do not merge without green checks.\n\n${protocol}`;
 			default:
 				break;
 		}
@@ -157,7 +168,11 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		case "fix":
 			return `Fix the findings recorded for ${cite(action.item)}. Read them with bluefin_review_trace, address each one at its source, run the smallest contract test that covers the changed surface, and prepare one clean commit. Do not suppress a finding you cannot fix — report it.${hive}`;
 		case "slay":
-			return `Run the full landing pass on ${cite(action.item)}: review the diff, patch what is broken, run the focused contract tests for the changed surface, then report merge readiness. Do not merge without green checks.${hive}`;
+			// Issues have no diff to land. Slaying one means producing the change it
+			// asked for and handing it to a human as a pull request.
+			return action.item.type === "issue"
+				? `Close out ${cite(action.item)} by shipping the work. Read the issue and the repository's contract documents, implement what it asks for and nothing else, run the smallest existing test that covers the changed surface, then open a pull request against the default branch whose body contains \`Closes ${action.item.repo}#${action.item.id}\`. Someone else reviews and merges it: never merge your own, never approve it, and never close the issue by hand. If it cannot be finished as asked, open no pull request and report an evidenced finding naming what blocked you.${hive}`
+				: `Run the full landing pass on ${cite(action.item)}: review the diff, patch what is broken, run the focused contract tests for the changed surface, then report merge readiness. Do not merge without green checks.${hive}`;
 		case "snapshot":
 			return `Submit the Argo workflow in deploy/argo-review-fsdk-build.yaml to build and push a container snapshot of the current tree, then report the workflow name and how to watch it.`;
 		default:
@@ -165,7 +180,18 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 	}
 }
 
-export function createReviewExtension(pi: ReviewExtensionHost, options: ExtensionOptions = {}): void {
+/**
+ * What the caller keeps after wiring the mode into a host.
+ *
+ * `session_start` returns before its own work is finished, so "the session has
+ * started" and "the queue is on screen" are two different moments. Anything that
+ * needs the second one — a test, a headless caller — awaits this.
+ */
+export interface ReviewExtension {
+	whenStarted(): Promise<void>;
+}
+
+export function createReviewExtension(pi: ReviewExtensionHost, options: ExtensionOptions = {}): ReviewExtension {
 	const env = options.env ?? process.env;
 	const matchKey = options.matchKey;
 	const mode = new ReviewMode({
@@ -181,13 +207,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let dashboardOpen = false;
 	let autoReopenDashboard = false;
 	let activeCtx: CtxLike | undefined;
+	let started: Promise<void> = Promise.resolve();
 	pi.setLabel("Bluefin Review");
 	pi.registerFlag("pr", { description: "Preselect a pull request or issue number", type: "string" });
 	pi.registerFlag("issues", { description: "Start in issues mode instead of pull requests", type: "boolean", default: false });
 	pi.registerFlag("all", { description: "Show all queue items instead of defaulting to Hive-only", type: "boolean", default: false });
 	pi.registerFlag("splash", { description: "Show 1990s demoscene Razor 1911 ANSI splash screen", type: "boolean", default: true });
 	pi.registerFlag("repo", { description: "Review one repository: owner/repo, or org:name for a whole organization", type: "string" });
-	registerTools(pi as unknown as ToolHost, mode);
+	registerTools(pi as unknown as ToolHost, mode, () => started);
 
 	const repaint = () => tui?.requestRender();
 
@@ -321,11 +348,58 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				await openDashboard(ctx);
 				return;
 			}
+		} catch {
+			// The overlay was cancelled. Nothing awaits this call, so a rejection
+			// here would surface as an unhandled rejection, not a closed dashboard.
 		} finally {
 			dashboardOpen = false;
 			persist();
 			syncStatus(ctx);
 		}
+	};
+
+	/**
+	 * Everything startup does that is not instantaneous.
+	 *
+	 * omp kills an extension handler that has not returned inside its budget, and
+	 * this is two network round trips plus an animated intro. Run inside
+	 * `session_start` it timed out every session: the poll timers below it never
+	 * started, so the queue was fetched once, at most, and never refreshed.
+	 */
+	const startSession = async (ctx: CtxLike, persisted: PersistedSelection | undefined) => {
+		// Started, not awaited: the intro plays over the fetch instead of after it.
+		const splash =
+			pi.getFlag("splash") === false
+				? undefined
+				: ctx.ui.custom<void>(
+						(hostTui, _theme, _keybindings, done) => {
+							return new BluefinAnsiSplash(hostTui as { requestRender(): void }, done);
+						},
+						{ overlay: false },
+					);
+
+		// Ask the hub before the queue: an item that arrives already ranked is
+		// never shown in the wrong order, not even for one frame.
+		const hive = await mode.refreshHive();
+		if (hive.configured && hive.error) {
+			ctx.ui.notify(`Hive unreachable, ordering locally: ${hive.error}`, "warning");
+		}
+		await refreshQueue(ctx);
+		mode.restore(persisted);
+
+		const preselect = pi.getFlag("pr");
+		if (typeof preselect === "string" && preselect.trim()) {
+			const number = Number.parseInt(preselect.trim().replace(/^#/, ""), 10);
+			if (Number.isInteger(number) && !mode.selectById(undefined, number)) {
+				ctx.ui.notify(`#${number} is not in the open ${mode.queueMode} queue`, "warning");
+			}
+		}
+		syncStatus(ctx);
+
+		await splash;
+		// Opened, not awaited: `ctx.ui.custom` resolves when the maintainer closes
+		// the dashboard, and startup is over long before that.
+		void openDashboard(ctx);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -349,16 +423,19 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			else if (ctx.hasUI) ctx.ui.notify(`--repo is not a repository: ${flagRepo}`, "error");
 		}
 
-		// Ask the hub before the queue: an item that arrives already ranked is
-		// never shown in the wrong order, not even for one frame.
-		const hive = await mode.refreshHive();
-		if (hive.configured && hive.error && ctx.hasUI) {
-			ctx.ui.notify(`Hive unreachable, ordering locally: ${hive.error}`, "warning");
-		}
-
 		if (!ctx.hasUI) {
-			await refreshQueue(ctx);
-			mode.restore(persisted);
+			// No UI, so no frame can show an unranked queue: the two reads race
+			// safely, and both reprioritize on arrival. Nothing is awaited here
+			// either — the queue tools await `started` themselves, which is what a
+			// headless caller actually needs and what the handler budget allows.
+			started = Promise.all([mode.refreshHive(), refreshQueue(ctx)])
+				.then(() => {
+					mode.restore(persisted);
+				})
+				.catch(() => {
+					// fetchHive and fetchQueue report failure in their results; a
+					// throw here must still leave `started` resolvable for the tools.
+				});
 			return;
 		}
 
@@ -374,30 +451,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		mode.refreshState();
 		syncStatus(ctx);
-		await refreshQueue(ctx);
-		mode.restore(persisted);
 
-		const preselect = pi.getFlag("pr");
-		if (typeof preselect === "string" && preselect.trim()) {
-			const number = Number.parseInt(preselect.trim().replace(/^#/, ""), 10);
-			if (Number.isInteger(number) && !mode.selectById(undefined, number)) {
-				ctx.ui.notify(`#${number} is not in the open ${mode.queueMode} queue`, "warning");
-			}
-		}
-		syncStatus(ctx);
-
-		const showSplash = pi.getFlag("splash") !== false;
-		if (showSplash) {
-			await ctx.ui.custom<void>(
-				(hostTui, _theme, _keybindings, done) => {
-					return new BluefinAnsiSplash(hostTui as { requestRender(): void }, done);
-				},
-				{ overlay: false },
-			);
-		}
-
-		// Open the dashboard by default so the maintainer starts in the cockpit view
-		void openDashboard(ctx);
+		// Before the first await: a startup that fails or drags must still leave a
+		// session that refreshes itself.
 		every(STATE_POLL_MS, () => {
 			if (mode.refreshState()) repaint();
 		});
@@ -408,6 +464,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			void mode.refreshHive().then(() => {
 				syncStatus(ctx);
 			});
+		});
+
+		// Detached: nothing awaits this, so an escaping rejection would take the
+		// whole session process down with it.
+		started = startSession(ctx, persisted).catch((error: unknown) => {
+			ctx.ui.notify(`Bluefin review startup: ${error instanceof Error ? error.message : String(error)}`, "error");
 		});
 	});
 
@@ -513,4 +575,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.pasteToEditor(text);
 		},
 	});
+
+	return { whenStarted: () => started };
 }

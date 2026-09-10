@@ -2478,9 +2478,11 @@ class LandingScreen(Screen):
                     badge = ui_span(f"{glyph} {mark}", style)
                 else:
                     badge = f"{glyph} {escape(mark)}"
+                head = str(event.get("head") or "")
+                head_badge = f"  head {escape(head[:7])}" if FULL_SHA.fullmatch(head) else ""
                 lines.append(
                     f"  {link(stop.key, pr_url(stop.repository, stop.number))}"
-                    f"  {badge}"
+                    f"  {badge}{head_badge}"
                     + (f" — {escape(str(note))}" if note else "")
                 )
             if done:
@@ -10045,6 +10047,7 @@ class ReviewDashboard(App):
     def _fail_landing_dispatch(self, task: "landing.LandingTask", blocker: str) -> None:
         """Refuse a dispatch whose agent would die at startup, with the cause."""
         task.returncode = 1
+        landing.record_refusal(task, blocker)
         for stop in task.stops:
             stop.selected = False
             stop.failure = f"not dispatched: {bounded_detail(blocker)}"
@@ -10080,6 +10083,9 @@ class ReviewDashboard(App):
         counts: Counter[str] = Counter()
         for stop in task.stops:
             event = events.get(stop.key, {})
+            head_sha = str(event.get("head") or "")
+            if FULL_SHA.fullmatch(head_sha):
+                self.record_fixer_head(stop.repository, stop.number, head_sha)
             state = event.get("state")
             if state == "merged":
                 stop.selected = False

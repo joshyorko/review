@@ -9,11 +9,23 @@ export interface SplashHostTui {
 	requestRender(): void;
 }
 
+/** ~8 FPS: smooth, clean animation. */
+const FRAME_MS = 125;
+/**
+ * Two full animation cycles, then the splash leaves on its own.
+ *
+ * An intro that only a keypress can dismiss is an intro that hides the queue
+ * from anyone who walked away during startup, and blocks whatever the session
+ * meant to open next.
+ */
+const FRAMES = 32;
+
 export class BluefinAnsiSplash {
 	private tui: SplashHostTui;
 	private done: () => void;
 	private frame = 0;
-	private interval: ReturnType<typeof setInterval> | null = null;
+	private interval: NodeJS.Timeout | null = null;
+	private finished = false;
 
 	constructor(tui: SplashHostTui, done: () => void) {
 		this.tui = tui;
@@ -22,11 +34,22 @@ export class BluefinAnsiSplash {
 	}
 
 	private start(): void {
-		// ~8 FPS: smooth, clean animation
 		this.interval = setInterval(() => {
 			this.frame++;
+			if (this.frame >= FRAMES) {
+				this.finish();
+				return;
+			}
 			this.tui.requestRender();
-		}, 125);
+		}, FRAME_MS);
+	}
+
+	/** Idempotent: the host may dispose a component the timer already finished. */
+	private finish(): void {
+		if (this.finished) return;
+		this.finished = true;
+		this.dispose();
+		this.done();
 	}
 
 	dispose(): void {
@@ -37,9 +60,8 @@ export class BluefinAnsiSplash {
 	}
 
 	handleInput(_data: string): void {
-		// Any keypress dismisses the splash intro
-		this.dispose();
-		this.done();
+		// Any keypress dismisses the splash intro early.
+		this.finish();
 	}
 
 	render(width: number): string[] {

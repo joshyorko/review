@@ -40,7 +40,107 @@ env:
   BUILDAH_IMAGE: quay.io/buildah/stable:v1.43@sha256:ca4edbaabf71ca330ec9b2714bf8e06c726a6e85ae215cfb1474d2e2c832aacb
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.x'
+
+      - name: Static hygiene
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r requirements-ci.lock
+          pre-commit run --all-files --show-diff-on-failure
+
+      - name: Commit message CI-skip guard contract
+        run: |
+          set -euo pipefail
+          bash tests/check-commit-message.sh
+
+      - name: Skill frontmatter valid and generated index fresh
+        run: |
+          set -euo pipefail
+          bash scripts/check-skill-frontmatter.sh
+
+      - name: Skill generator rejects unsafe manifest paths
+        run: |
+          set -euo pipefail
+          bash tests/generate-skills.sh
+
+      - name: SBOM manifest generator contract
+        run: |
+          set -euo pipefail
+          bash tests/sbom-manifest.sh
+
+      - name: Harness registry and adapter contracts
+        run: |
+          set -euo pipefail
+          python3 tests/harness-contract.py
+          python3 tests/autopilot-contract.py
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Justfile parses
+        run: |
+          set -euo pipefail
+          just --justfile justfile --list
+
+      - name: Guided Goose onboarding behavior
+        run: |
+          set -euo pipefail
+          bash tests/just-onboarding.sh
+
+      - name: Recipe bodies are valid bash
+        run: |
+          set -euo pipefail
+          awk '
+            /^[a-zA-Z][a-zA-Z0-9_-]*:$/ { flag=1; next }
+            /^[^ \t#]/ { flag=0 }
+            flag { print }
+          ' justfile > recipe_bodies.sh
+          bash -n recipe_bodies.sh
+          rm -f recipe_bodies.sh
+
+      - name: Image contract — Containerfile, config, entrypoint, shims, hooks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash tests/image-contract.sh
+          bash tests/hive-compatibility.sh
+          bash tests/bluefin-review.sh
+          bash tests/worktree-guard.sh
+
+      - name: Review mode and appliance contracts
+        run: |
+          set -euo pipefail
+          bash tests/omp-review-mode.sh
+          bash tests/appliance-contract.sh
+
+      - name: Dashboard contract and pilot
+        run: |
+          set -euo pipefail
+          bash tests/dashboard-contract.sh
+
+      - name: Interactive launcher docs and shell stay aligned
+        run: |
+          set -euo pipefail
+          bash tests/readme-quickstart.sh
+          grep -Fq 'review-container' justfile
+          grep -Fq 'review-queue' justfile
+          grep -Fq 'ghcr.io/projectbluefin/review-contributor:stable' justfile
+          grep -Fq 'review-entrypoint' image/Containerfile
+          grep -Fq 'ghcr.io/projectbluefin/review-contributor:stable' README.md
+          grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
+
   resolve-goose:
+    needs: validate
     runs-on: ubuntu-latest
     outputs:
       x86_64_sha256: ${{ steps.goose.outputs.x86_64_sha256 }}
@@ -69,6 +169,7 @@ jobs:
   # stamp these as config labels and the index carries the identical set as
   # annotations, so 'created' has to be decided once, before either.
   metadata:
+    needs: validate
     runs-on: ubuntu-latest
     outputs:
       created: ${{ steps.metadata.outputs.created }}
@@ -78,6 +179,7 @@ jobs:
       sha: ${{ steps.metadata.outputs.sha }}
       oci_version: ${{ steps.metadata.outputs.oci_version }}
       stable: ${{ steps.metadata.outputs.stable }}
+      release: ${{ steps.metadata.outputs.release }}
       tags: ${{ steps.metadata.outputs.tags }}
       platforms: ${{ steps.metadata.outputs.platforms }}
     steps:
@@ -143,10 +245,23 @@ jobs:
             if [[ "$release" == true || "$main" == true ]]; then
               tags+=" ${IMAGE}:stable"
             fi
+            echo "release=${release}"
             printf 'tags=%s\n' "$tags"
           } >> "$GITHUB_OUTPUT"
 
-  # One job per architecture, each on a runner of that architecture. Nothing
+      - name: Refuse to republish an existing version tag
+        if: steps.metadata.outputs.release == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if skopeo inspect --raw "docker://${IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            echo "::error::${IMAGE}:${VERSION} already exists. Bump release tag." >&2
+            exit 1
+          fi
+          echo "${IMAGE}:${VERSION} is free"
   # is cross-built: the runner's own CPU produces the layers, runs the smoke
   # checks, and the audit measures a container it can actually execute.
   build:
