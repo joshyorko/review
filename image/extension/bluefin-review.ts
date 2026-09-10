@@ -215,6 +215,32 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
       ctx.ui.notify(`Switched to ${queue.activeMode.toUpperCase()} mode`, "info");
     },
   });
+  pi.registerCommand("approve", {
+    description: "Approve the selected PR after evidence verification",
+    handler: async (args, ctx) => {
+      const prNum = args.trim() || queue.getCurrent()?.id;
+      if (!prNum) {
+        ctx.ui.notify("No PR selected to approve", "error");
+        return;
+      }
+      ctx.ui.notify(`Approving PR #${prNum}...`, "info");
+      pi.sendUserMessage(
+        `Verify all checks and approve PR #${prNum} using gh pr review ${prNum} --approve.`
+      );
+    },
+  });
+
+  pi.registerCommand("diff", {
+    description: "Inspect diff for the selected PR",
+    handler: async (args, ctx) => {
+      const prNum = args.trim() || queue.getCurrent()?.id;
+      if (!prNum) {
+        ctx.ui.notify("No PR selected", "error");
+        return;
+      }
+      pi.sendUserMessage(`Show bounded git diff for PR #${prNum}.`);
+    },
+  });
 
   pi.registerCommand("slay", {
     description: "Slay PR: automated review + fix + land sequence",
@@ -235,4 +261,16 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
   pi.registerShortcut("j", () => queue.next());
   pi.registerShortcut("k", () => queue.prev());
   pi.registerShortcut("I", () => queue.toggleMode());
+  pi.registerShortcut("a", () => {
+    const current = queue.getCurrent();
+    if (current && current.type === "pr") {
+      pi.sendUserMessage(`Approve and queue PR #${current.id} for landing.`);
+    }
+  });
+  pi.registerShortcut("r", () => {
+    const current = queue.getCurrent();
+    if (current && current.type === "pr") {
+      pi.sendUserMessage(`Start exact review for PR #${current.id}.`);
+    }
+  });
 }
