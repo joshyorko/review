@@ -30,6 +30,21 @@ if [[ -z "${COPILOT_GITHUB_TOKEN:-}" && -n "${GH_TOKEN:-}" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# 3. Resolve Context7 API key transparently
+if [[ -z "${CONTEXT7_API_KEY:-}" ]]; then
+  MEH_FILE="${SCRIPT_DIR}/meh.txt"
+  if [[ -f "$MEH_FILE" ]]; then
+    export CONTEXT7_API_KEY="$(cat "$MEH_FILE" | tr -d '\r\n[:space:]')"
+  fi
+fi
+
+# 4. Ensure all spawned subagents, subprocesses, and tool bridges inherit credentials
+export GH_TOKEN="${GH_TOKEN:-}"
+export GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+export COPILOT_GITHUB_TOKEN="${COPILOT_GITHUB_TOKEN:-}"
+export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-}"
+export CONTEXT7_API_KEY="${CONTEXT7_API_KEY:-}"
 EXTENSION_PATH="${BLUEFIN_REVIEW_EXTENSION_PATH:-/opt/bluefin/extensions/bluefin-review.ts}"
 if [[ ! -f "$EXTENSION_PATH" && -f "$SCRIPT_DIR/image/extension/bluefin-review.ts" ]]; then
   EXTENSION_PATH="$SCRIPT_DIR/image/extension/bluefin-review.ts"
