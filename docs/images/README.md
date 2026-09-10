@@ -1,9 +1,6 @@
 # Visual credits
 
-`review-logo.webp` is the approved transparent README mark: Bluefin's raptor
-above neon arcade lettering with a claw-impact accent. It was developed with
-ImageGen from the Easter egg pose artwork, then composited and alpha-masked
-locally; the WebP export is lossless. The character is guided by Bluefin's
+`logo.png` is the approved Bluefin Review mark, guided by Bluefin's
 [canonical Deinonychus illustration](https://github.com/projectbluefin/documentation/blob/main/static/img/user-attachments/97324a75-e6c6-409e-b9ee-18f69d3715d0.png)
 and the [Bluefin mascot](https://github.com/projectbluefin/common/blob/main/system_files/bluefin/usr/share/ublue-os/bluefin-logos/bluefin.png).
 The [dinosaur guide](https://github.com/projectbluefin/documentation/blob/main/docs/dinosaurs.md)

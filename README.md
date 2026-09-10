@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/review-logo.webp" alt="Bluefin Review — neon arcade lettering beneath a lunging feathered raptor" width="800">
+  <img src="docs/images/logo.png" alt="Bluefin Review" width="360">
 </p>
 
 # Bluefin Review
