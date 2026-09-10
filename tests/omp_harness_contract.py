@@ -1,6 +1,7 @@
 """Hermetic contract tests for OMP (Oh My Pi) review adapter, extension, and UI modes."""
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -160,7 +161,10 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertEqual(chosen.discovery.backend, "omp")
 
     def test_omp_probe_ready(self):
-        availability = OmpHarness.probe()
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "omp"
+            executable.touch(mode=0o755)
+            availability = OmpHarness.probe(str(executable))
         self.assertEqual(availability, Availability.READY)
 
     def test_omp_terminal_status(self):

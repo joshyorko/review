@@ -407,7 +407,7 @@ jobs:
           done
 
           # Checksums for all release assets
-          (cd "$staging" && sha256sum * > SHA256SUMS.txt)
+          (cd "$staging" && sha256sum -- * > SHA256SUMS.txt)
           ls -lh "$staging"
 
       - name: Generate release notes
