@@ -146,6 +146,14 @@ class OmpHarnessContract(unittest.TestCase):
         availability = OmpHarness.probe()
         self.assertEqual(availability, Availability.READY)
 
+    def test_omp_terminal_status(self):
+        clean_res = ReviewResult(1, "complete")
+        findings_res = ReviewResult(1, "findings")
+        failed_res = ReviewResult(1, "failed", live={"process_exit_code": 23})
+        self.assertEqual(self.harness.terminal_status(clean_res), 0)
+        self.assertEqual(self.harness.terminal_status(findings_res), 0)
+        self.assertEqual(self.harness.terminal_status(failed_res), 23)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -91,6 +91,14 @@ class OmpHarness:
             }
         )
 
+    @staticmethod
+    def terminal_status(result: ReviewResult) -> int:
+        if result.state == "incomplete":
+            return 65
+        if result.state in ("complete", "findings"):
+            return 0
+        return int(result.live.get("process_exit_code", 1)) or 1
+
     def invoke(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
                effort: str | None = None, steer: str | None = None) -> ReviewResult:
         if self.availability is not Availability.READY:
