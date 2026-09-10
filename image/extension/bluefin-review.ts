@@ -106,10 +106,12 @@ export class ReviewQueueState {
       line("  • /issues         Triage open issues or select work to implement"),
       line("  • /review [num]   Start thorough multi-agent doctrine review"),
       line("  • /diff [num]     Inspect bounded changes for a PR"),
+      line("  • /fix [notes]    Agent implements your review feedback immediately"),
+      line("  • /snapshot-build Trigger container build to snapshot current progress"),
       line("  • /approve [num]  Verify checks and approve for landing"),
       line("  • /slay           Automated review + patch + verify + land"),
       line(""),
-      line("Controls: ctrl+n (next) | ctrl+p (prev) | ctrl+i (toggle mode)"),
+      line("Shortcuts: ctrl+n (next) | ctrl+p (prev) | ctrl+i (toggle mode)"),
       `└${"─".repeat(w - 2)}┘`,
     ];
   }
@@ -278,6 +280,30 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
         return;
       }
       pi.sendUserMessage(`Show bounded git diff for PR #${prNum}.`);
+    },
+  });
+
+  pi.registerCommand("fix", {
+    description: "Fix issues or findings identified during review",
+    handler: async (args, ctx) => {
+      const current = queue.getCurrent();
+      const prContext = current ? `for PR #${current.id} (${current.title})` : "";
+      const instructions = args.trim() || "all reported findings and doctrine violations";
+      ctx.ui.notify(`Fixing ${prContext}: ${instructions}`, "info");
+      pi.sendUserMessage(
+        `Reviewer fix directive ${prContext}: address ${instructions}. Modify code, verify hermetic contract tests, run type checks, and prepare clean commit.`
+      );
+    },
+  });
+
+  pi.registerCommand("snapshot-build", {
+    description: "Trigger snapshot container build on cluster as review/fixes progress",
+    handler: async (args, ctx) => {
+      const tag = args.trim() || `omp-snap-${Date.now().toString(36)}`;
+      ctx.ui.notify(`Triggering snapshot container build: ${tag}`, "info");
+      pi.sendUserMessage(
+        `Submit Argo Workflow to build and push container snapshot with tag '${tag}' to local registry.`
+      );
     },
   });
 
