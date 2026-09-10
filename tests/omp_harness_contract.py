@@ -142,6 +142,10 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIsNotNone(chosen)
         self.assertEqual(chosen.discovery.backend, "omp")
 
+    def test_omp_probe_ready(self):
+        availability = OmpHarness.probe()
+        self.assertEqual(availability, Availability.READY)
+
 
 if __name__ == "__main__":
     unittest.main()
