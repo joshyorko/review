@@ -92,27 +92,58 @@ export class ReviewQueueState {
   }
 
   renderWelcomeBox(width: number): string[] {
-    const w = Math.min(width - 2, 72);
-    const line = (text: string) => {
-      const padded = `  ${text}`.padEnd(w - 2);
-      return `│${padded.slice(0, w - 2)}│`;
+    const rows = [
+      "Project Bluefin Review Appliance (OMP Mode)",
+      "",
+      "WORK BUCKETS:",
+      "  • /prs            Browse open PRs waiting for maintainer review",
+      "  • /issues         Triage open issues or select work to implement",
+      "  • /review [num]   Start thorough multi-agent doctrine review",
+      "  • /diff [num]     Inspect bounded changes for a PR",
+      "  • /fix [notes]    Agent implements review feedback immediately",
+      "  • /snapshot-build Trigger container build to snapshot progress",
+      "  • /approve [num]  Verify checks and approve for landing",
+      "  • /slay           Automated review + patch + verify + land",
+      "",
+      "Shortcuts: ctrl+n (next) | ctrl+p (prev) | ctrl+i (toggle mode)",
+    ];
+
+    const visibleLength = (str: string) => {
+      let len = 0;
+      for (const ch of str) {
+        const code = ch.codePointAt(0) ?? 0;
+        if (code >= 0x1100 && (
+          code <= 0x115f || code === 0x2329 || code === 0x232a ||
+          (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+          (code >= 0xac00 && code <= 0xd7a3) ||
+          (code >= 0xf900 && code <= 0xfaff) ||
+          (code >= 0xfe10 && code <= 0xfe19) ||
+          (code >= 0xfe30 && code <= 0xfe6f) ||
+          (code >= 0xff00 && code <= 0xff60) ||
+          (code >= 0xffe0 && code <= 0xffe6) ||
+          (code >= 0x1f000 && code <= 0x1f9ff)
+        )) {
+          len += 2;
+        } else {
+          len += 1;
+        }
+      }
+      return len;
     };
+
+    const maxContentLen = Math.max(...rows.map((r) => visibleLength(r)));
+    const contentWidth = Math.min(Math.max(maxContentLen + 2, 40), Math.max(width - 4, 40));
+
+    const padRow = (text: string) => {
+      const vLen = visibleLength(text);
+      const remaining = Math.max(0, contentWidth - vLen);
+      return `│ ${text}${" ".repeat(Math.max(0, remaining - 1))}│`;
+    };
+
     return [
-      `┌${"─".repeat(w - 2)}┐`,
-      line("🔷 PROJECT BLUEFIN REVIEW APPLIANCE (OMP MODE) 🔷"),
-      line(""),
-      line("POSSIBLE WORK BUCKETS:"),
-      line("  • /prs            Browse open PRs waiting for maintainer review"),
-      line("  • /issues         Triage open issues or select work to implement"),
-      line("  • /review [num]   Start thorough multi-agent doctrine review"),
-      line("  • /diff [num]     Inspect bounded changes for a PR"),
-      line("  • /fix [notes]    Agent implements your review feedback immediately"),
-      line("  • /snapshot-build Trigger container build to snapshot current progress"),
-      line("  • /approve [num]  Verify checks and approve for landing"),
-      line("  • /slay           Automated review + patch + verify + land"),
-      line(""),
-      line("Shortcuts: ctrl+n (next) | ctrl+p (prev) | ctrl+i (toggle mode)"),
-      `└${"─".repeat(w - 2)}┘`,
+      `┌${"─".repeat(contentWidth)}┐`,
+      ...rows.map((r) => padRow(r)),
+      `└${"─".repeat(contentWidth)}┘`,
     ];
   }
 }
