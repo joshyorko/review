@@ -27,6 +27,8 @@ it scopes every task, so read it alongside the matching skill.
 | Maintain documentation, skills, or factory compliance | [`skill-improvement.md`](skills/skill-improvement.md) |
 | Coordinate bounded factory continuation and writable capacity | [`factory-operations.md`](skills/factory-operations.md) |
 | Run or evaluate automated final batch reviews | [`final-review.md`](skills/final-review.md) |
+| Control review-scheduler admission, capacity, and deadlines | [`review-scheduler.md`](skills/review-scheduler.md) |
+| Maintain the review-exec UDS broker and typed review jobs | [`review-exec-broker.md`](skills/review-exec-broker.md) |
 
 `docs/skills/index.json` is the machine-readable catalog, generated from the
 frontmatter in each skill file. When changing a skill, regenerate it with

@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from pathlib import Path
 
 from harness.autopilot import discover_all, choose_option, Preference
 from harness.omp import OmpHarness
@@ -110,37 +111,41 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIn("omp", reg.names())
         self.assertEqual(reg.get("omp").name, "omp")
 
-    def test_lower_third_widget_rendering(self):
-        """Test lower third dashboard UI representation."""
-        lines = self.harness.render_lower_third(
-            items=[{"id": 42, "title": "feat: add omp review mode", "author": "jorge", "ci": "SUCCESS"}],
-            active_index=0,
-            mode="prs",
-            width=80,
-        )
-        self.assertEqual(len(lines), 3)
-        self.assertIn("BLUEFIN PRS QUEUE", lines[0])
-        self.assertIn("#42", lines[1])
-        self.assertIn("[Ctrl+A] Approve+Merge", lines[2])
+    def test_extension_package_is_loadable_by_omp(self):
+        """The mode must be a real omp extension package: manifest, entry, agents.
 
-    def test_issues_mode_toggle_and_rendering(self):
-        """Test issues mode in lower third widget."""
-        lines = self.harness.render_lower_third(
-            items=[{"id": 101, "title": "bug: fix crash in rpc mode", "author": "alice"}],
-            active_index=0,
-            mode="issues",
-            width=80,
-        )
-        self.assertIn("BLUEFIN ISSUES QUEUE", lines[0])
-        self.assertIn("#101", lines[1])
+        omp resolves a --extension directory through package.json#omp.extensions and
+        discovers companion task agents under <extension-root>/agents. An agent file
+        missing name or description is skipped in silence, so assert the frontmatter
+        omp actually requires.
+        """
+        root = Path("image/extension/bluefin-review")
+        manifest = json.loads((root / "package.json").read_text())
+        self.assertEqual(manifest["omp"]["extensions"], ["./index.ts"])
+        self.assertTrue((root / "index.ts").is_file())
 
-    def test_bst_container_recipe_spec(self):
-        """Test BuildStream element configuration schema for omp-review container."""
-        spec = self.harness.bst_element_spec()
-        self.assertEqual(spec["kind"], "oci")
-        self.assertIn("sources", spec)
-        self.assertIn("config", spec)
-        self.assertEqual(spec["config"]["entrypoint"], ["/usr/local/bin/omp-review"])
+        agents = sorted((root / "agents").glob("*.md"))
+        self.assertTrue(agents, "the mode ships companion review agents")
+        for agent in agents:
+            frontmatter = agent.read_text().split("---")[1]
+            fields = {}
+            for line in frontmatter.splitlines():
+                if ":" in line and not line[:1].isspace():
+                    key, value = line.split(":", 1)
+                    fields[key.strip()] = value.strip()
+            self.assertEqual(fields.get("name"), agent.stem)
+            self.assertTrue(fields.get("description"), f"{agent.name} needs a description omp can index")
+            # These agents travel inside the appliance, where no project config
+            # exists to resolve a role alias. A dangling "@role" does not fail:
+            # it silently falls back to whatever the parent session is running,
+            # which is how a review ends up on an unintended model.
+            model = fields.get("model", "")
+            self.assertNotIn("@", model, f"{agent.name} must name a model, not a role alias")
+            self.assertRegex(
+                model,
+                r"^[a-z0-9-]+/[A-Za-z0-9._-]+(:[a-z]+)?$",
+                f"{agent.name} must pin provider/model",
+            )
 
     def test_autopilot_discovery_includes_omp(self):
         options = discover_all()
@@ -208,25 +213,6 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertEqual(len(page2["items"]), 5)
         self.assertFalse(page2["has_next"])
 
-    def test_extension_source_exports_review_queue_and_graphql(self):
-        """Verify extension source contains key exports and queries."""
-        with open("image/extension/bluefin-review.ts", "r") as f:
-            content = f.read()
-        self.assertIn("ReviewQueueState", content)
-        self.assertIn("ORG_QUEUE_QUERY", content)
-        self.assertIn("ORG_ISSUES_QUERY", content)
-        self.assertIn("fetchLiveQueue", content)
-        self.assertIn("bluefin-review-lower-third", content)
-        self.assertIn("bluefin-welcome-box", content)
-        self.assertIn('pi.registerShortcut("ctrl+j"', content)
-        self.assertIn('pi.registerShortcut("ctrl+k"', content)
-        self.assertIn('pi.registerShortcut("tab"', content)
-        self.assertIn('pi.registerShortcut("ctrl+r"', content)
-        self.assertIn('pi.registerShortcut("ctrl+a"', content)
-        self.assertIn('pi.registerShortcut("ctrl+f"', content)
-        self.assertIn('pi.registerShortcut("ctrl+$"', content)
-        self.assertIn('pi.registerShortcut("ctrl+d"', content)
-
     def test_format_batch_plan_prompt(self):
         item = BatchMutationItem(
             repository="projectbluefin/review",
@@ -267,42 +253,6 @@ class OmpHarnessContract(unittest.TestCase):
         processed_tool = self.harness.process_rpc_event(tool_frame)
         self.assertEqual(processed_tool["kind"], "tool_start")
         self.assertEqual(processed_tool["tool"], "read")
-
-    def test_composer_shape_spec(self):
-        shape = self.harness.composer_shape_spec()
-        self.assertEqual(shape["id"], "bluefin-dock")
-        self.assertEqual(shape["bottomBar"], "full")
-        self.assertTrue(shape["bottomBarGap"])
-        self.assertEqual(shape["defaultPromptGutter"], "❯ ")
-
-    def test_host_tools_and_uri_schemes(self):
-        tools = self.harness.host_tools_spec()
-        self.assertEqual(len(tools), 2)
-        tool_names = [t["name"] for t in tools]
-        self.assertIn("bluefin_query_queue", tool_names)
-        self.assertIn("bluefin_submit_verdict", tool_names)
-
-        schemes = self.harness.host_uri_schemes_spec()
-        self.assertEqual(len(schemes), 1)
-        self.assertEqual(schemes[0]["scheme"], "bluefin")
-        self.assertTrue(schemes[0]["writable"])
-
-    def test_extension_tool_structure(self):
-        """Verify extension registers bluefin_review_status and bluefin_review_diff tools."""
-        with open("image/extension/bluefin-review.ts", "r") as f:
-            content = f.read()
-        self.assertIn("pi.registerTool({", content)
-        self.assertIn('name: "bluefin_review_status"', content)
-        self.assertIn('name: "bluefin_review_diff"', content)
-        self.assertIn("total_items: queue.items.length", content)
-        self.assertIn("pull_request: params.pull_request", content)
-
-    def test_extension_tool_diff_parameters(self):
-        """Verify bluefin_review_diff parameters schema requires pull_request number."""
-        with open("image/extension/bluefin-review.ts", "r") as f:
-            content = f.read()
-        self.assertIn("pull_request: z.number()", content)
-        self.assertIn('label: "Review Diff"', content)
 
 
 if __name__ == "__main__":

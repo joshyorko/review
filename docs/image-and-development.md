@@ -146,6 +146,8 @@ bash tests/generate-skills.sh
 bash tests/image-contract.sh
 bash tests/hive-compatibility.sh
 bash tests/bluefin-review.sh
+bash tests/omp-review-mode.sh
+bash tests/appliance-contract.sh
 python3 tests/lab-broker-contract.py
 bash tests/just-onboarding.sh
 git diff --check

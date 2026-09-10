@@ -111,6 +111,16 @@ jobs:
           bash tests/bluefin-review.sh
           bash tests/worktree-guard.sh
 
+      # The omp review mode and the appliance it ships in. The mode is the only
+      # TypeScript here and executes only inside a TUI, so it is driven
+      # headlessly against a fake host; the appliance's static contract holds
+      # its pins and its version derivation without needing a container engine.
+      - name: Review mode and appliance contracts
+        run: |
+          set -euo pipefail
+          bash tests/omp-review-mode.sh
+          bash tests/appliance-contract.sh
+
       # Drives the real Textual app: builds the hash-locked Textual venv from
       # image/tui/requirements.lock, then presses keys and asserts what the
       # maintainer is told. Separate from the step above because it installs.
@@ -125,8 +135,10 @@ jobs:
           bash tests/readme-quickstart.sh
           grep -Fq 'review-container' justfile
           grep -Fq 'review-queue' justfile
-          grep -Fq 'ghcr.io/projectbluefin/review:stable' justfile
+          grep -Fq 'ghcr.io/projectbluefin/review-contributor:stable' justfile
           grep -Fq 'review-entrypoint' image/Containerfile
+          grep -Fq 'ghcr.io/projectbluefin/review-contributor:stable' README.md
+          # The appliance is the image named 'review'; the README teaches it.
           grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
 
       - name: Resolve official Goose canary asset identities

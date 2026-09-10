@@ -108,6 +108,25 @@ repos:
         entry: bash tests/sbom-manifest.sh
         files: ^(scripts/generate-sbom-manifest\.py|tests/sbom-manifest\.sh|image/Containerfile|\.dockerignore|\.github/workflows/publish-compat-image\.yml)$
         pass_filenames: false
+      # The omp review mode ships as loose TypeScript that only executes inside a
+      # TUI, so a break there is invisible until a maintainer is mid-review. This
+      # runs it headlessly against a fake host.
+      - id: omp-review-mode
+        name: omp review mode contract
+        language: system
+        entry: bash tests/omp-review-mode.sh
+        files: ^(image/extension/|image/harness/omp\.py|bin/omp-review|tests/omp-review-mode\.(sh|test\.ts)|tests/omp_harness_contract\.py)
+        pass_filenames: false
+      # The appliance is assembled from pinned artifacts rather than installed,
+      # so its Containerfile is the whole supply chain. The static half of the
+      # contract needs no container engine and holds the pins, the version
+      # derivation, and the "nothing can install anything" rule.
+      - id: appliance-contract
+        name: review appliance contract
+        language: system
+        entry: bash tests/appliance-contract.sh
+        files: ^(image/appliance/|scripts/(review-appliance-version|generate-appliance-sbom)|tests/appliance-contract\.sh|\.github/workflows/publish-appliance\.yml|\.dockerignore)
+        pass_filenames: false
       # A commit that merely writes about GitHub's CI-skip directive silently
       # skips its own validation and publish. Catch it at commit time.
       - id: check-commit-message

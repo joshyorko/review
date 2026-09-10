@@ -22,7 +22,7 @@ class ReviewSessionRuntimeContractTest(unittest.TestCase):
     def test_dashboard_pod_has_tty_secret_env_and_no_service_token(self):
         pod = build_kubernetes_dashboard_pod(
             "session-a",
-            "ghcr.io/projectbluefin/review:stable",
+            "ghcr.io/projectbluefin/review-contributor:stable",
             ["queue"],
             "review-session-a",
             "review-queue-state",
@@ -52,7 +52,7 @@ class ReviewSessionRuntimeContractTest(unittest.TestCase):
 
         container = pod["spec"]["containers"][0]
         self.assertEqual(container["name"], "dashboard")
-        self.assertEqual(container["image"], "ghcr.io/projectbluefin/review:stable")
+        self.assertEqual(container["image"], "ghcr.io/projectbluefin/review-contributor:stable")
         self.assertEqual(container["imagePullPolicy"], "Always")
         self.assertEqual(container["args"], ["queue"])
         self.assertIs(container["stdin"], True)
@@ -122,7 +122,7 @@ class ReviewSessionRuntimeContractTest(unittest.TestCase):
     def test_kubectl_create_args_create_a_manifest_from_standard_input(self):
         pod = build_kubernetes_dashboard_pod(
             "session-a",
-            "ghcr.io/projectbluefin/review:stable",
+            "ghcr.io/projectbluefin/review-contributor:stable",
             ["queue", "--repo", "bluefin"],
             "review-session-a",
             "review-queue-state",

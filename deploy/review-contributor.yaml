@@ -32,7 +32,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: contributor
-          image: ghcr.io/projectbluefin/review:stable
+          image: ghcr.io/projectbluefin/review-contributor:stable
           imagePullPolicy: Always
           env:
             - name: GOOSE_MODEL

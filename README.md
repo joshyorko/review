@@ -52,12 +52,74 @@ See the [launcher guide](docs/skills/launcher.md) for authentication setup,
 model profiles, and troubleshooting. For the default Goose setup,
 `just review-doctor` checks readiness without starting an agent.
 
+**Bluefin Review appliance — one container, nothing else**
+
+`ghcr.io/projectbluefin/review` is a distroless image that carries the review
+mode, `omp`, `pi`, `gh` and `git` and needs nothing from the host but a
+container engine:
+
+```bash
+just review-appliance             # the whole organization queue
+just review-appliance owner/repo  # review any repository, anywhere
+just review-appliance --pr 1284   # preselect one pull request
+just review-appliance --issues    # start on issues instead
+```
+
+Without a checkout, the same thing is one `podman run`:
+
+```bash
+podman run --rm -it --userns keep-id:uid=65532,gid=65532 \
+  --volume bluefin-review-home:/home/bluefin --env GH_TOKEN \
+  ghcr.io/projectbluefin/review:stable
+```
+
+It is versioned on FSDK's series plus a tool revision (`26.08.03`), built from
+Project Bluefin's distroless FSDK base, and every artifact inside it is pinned
+by digest. See the [appliance guide](docs/appliance.md).
+
+The same mode runs against a locally installed `omp` with `bin/omp-review`,
+which takes the same shortcuts: `bin/omp-review owner/repo`, `bin/omp-review 1284`,
+`bin/omp-review issues`.
+
+**Hive orders the queue when a project uses Hive.** With `HIVE_HUB` set or a
+contributor registration on the machine, the queue is Hive's work queue in
+Hive's positions, and a pull request that closes queued work inherits that
+position — so reviewing through this tool contributes to what the project
+already decided matters. The mode only reads: task selection, assignment and
+priority stay with Hive, and merge decisions stay with the maintainer. Without a
+hub the queue is classified from live GitHub evidence into the same actions the
+dashboard uses — `ready-for-human-merge`, `review`, `resolve-conflicts`,
+`fix-ci`, `investigate`, `triage` — so an unorchestrated project still opens on
+what it can land instead of on whatever GitHub touched last.
+
+A live queue rail sits under the prompt, and `alt+b` opens a full dashboard
+whose right pane is a Dagger-style trace of the pipeline recorded for the
+selected pull request — run state, review events, landing events, and receipt
+findings — beside the tool calls of the turn running right now. It is keyboard
+driven end to end and registers no slash commands:
+
+| Key | Action |
+| --- | --- |
+| `alt+b` | Open the dashboard |
+| `alt+j` / `alt+k` | Next / previous queue item |
+| `alt+i` | Toggle pull requests and issues |
+| `alt+o` | Review another repository (`owner/repo`) |
+| `alt+u` | Refetch the queue |
+| `alt+y` | Cite the selection in the prompt |
+
+Inside the dashboard: `j`/`k` move, `tab` switches pane, `h`/`l` fold a span,
+`o` opens another repository, `/` filters, `r` reviews, `d` diffs, `a` approves
+and merges, `f` fixes findings, `s` runs the full landing pass, `?` explains,
+`q` closes. The mode
+also ships the `bluefin-doctrine` and `bluefin-ci-triage` task agents.
+
 ### 3. Start with one repository, or browse the organization
 
 The commands above open the whole Project Bluefin queue. To narrow it, append
 a repository—for example, `just review-queue projectbluefin/review`.
-The launcher pulls `ghcr.io/projectbluefin/review:stable`; no local image build
-is required. Opening the dashboard does not start a review.
+The Goose and Codex launchers pull `ghcr.io/projectbluefin/review-contributor:stable`,
+the contributor image that carries the Textual dashboard and the Hive worker; no
+local image build is required. Opening the dashboard does not start a review.
 
 ## Using the dashboard
 

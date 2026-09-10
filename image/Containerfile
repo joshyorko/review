@@ -502,6 +502,7 @@ RUN set -eu; \
     chmod 0755 /opt/bluefin/sbom; \
     chmod 0644 /opt/bluefin/sbom/review-components.spdx.json
 
+COPY --chmod=0755 bin/dinosay /usr/local/bin/dinosay
 COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint
 COPY image/tmux.conf /etc/tmux.conf
 

@@ -1,0 +1,227 @@
+/**
+ * What to look at first.
+ *
+ * Two providers, one shape. When a Hive hub is configured the order is Hive's,
+ * preserved exactly: this file records the position it was given and never
+ * recomputes it, because task selection and priority belong to Hive. Without a
+ * hub, the queue is classified from live GitHub evidence so an unorchestrated
+ * project still gets a maintainer's order instead of GitHub's update order.
+ *
+ * The action vocabulary and the classifier are the dashboard's own
+ * (`classify_action` and `MAINTAINER_ORDER` in `image/tui/bluefin_review_tui.py`).
+ * One product, one set of words: a second vocabulary for the same queue is how
+ * two surfaces start disagreeing about what "ready" means.
+ *
+ * Whichever provider ran, the UI says so. "Hive says nothing is urgent" and "we
+ * could not reach Hive" must never look the same.
+ */
+
+import type { QueueItem } from "./github.ts";
+import type { HiveSnapshot } from "./hive.ts";
+
+export type PriorityCategory =
+	| "hive"
+	| "ready-for-human-merge"
+	| "review"
+	| "resolve-conflicts"
+	| "fix-ci"
+	| "investigate"
+	| "triage";
+
+export interface Priority {
+	category: PriorityCategory;
+	source: "hive" | "local";
+	/** Short human reason, shown next to the item. */
+	reason: string;
+	/** Hive's own position, when Hive supplied it. */
+	hiveRank?: number;
+	/** Sinks bot bumps and abandoned branches within their category. */
+	demotion: number;
+}
+
+export interface PrioritizeContext {
+	hive: HiveSnapshot;
+	/** True when durable review state recorded findings for this key. */
+	hasFindings: (key: string) => boolean;
+	now: number;
+}
+
+export interface PrioritizedQueue {
+	items: QueueItem[];
+	priorities: ReadonlyMap<string, Priority>;
+	source: "hive" | "local";
+	/** How many items Hive ranked, for the headline. */
+	hiveRanked: number;
+}
+
+/**
+ * The order a maintainer wants, which is not the order GitHub returns.
+ *
+ * A queue that buries what you can land under sixty things you cannot is a queue
+ * you stop reading.
+ */
+const MAINTAINER_ORDER: Record<PriorityCategory, number> = {
+	hive: 0,
+	"ready-for-human-merge": 1,
+	review: 2,
+	"resolve-conflicts": 3,
+	"fix-ci": 4,
+	investigate: 5,
+	triage: 6,
+};
+
+const STALE_AFTER_MS = 21 * 24 * 60 * 60 * 1000;
+
+const BOT_AUTHORS: Record<string, true> = {
+	renovate: true,
+	"renovate[bot]": true,
+	dependabot: true,
+	"dependabot[bot]": true,
+	mergeraptor: true,
+	"github-actions[bot]": true,
+};
+
+const DEPENDENCY_LABELS = /(^|[/-])(deps|dependencies|dependency)([/-]|$)/i;
+
+export function itemKey(item: QueueItem): string {
+	return `${item.repo}#${item.id}`;
+}
+
+export function isDependencyBump(item: QueueItem): boolean {
+	if (BOT_AUTHORS[item.author.toLowerCase()]) return true;
+	if (item.labels.some((label) => DEPENDENCY_LABELS.test(label))) return true;
+	return /^chore\(deps\)/i.test(item.title);
+}
+
+/**
+ * The local fallback: the dashboard's classifier, first match wins.
+ *
+ * A failing check is actionable before a conflict is, incomplete evidence is a
+ * task of its own, and only a green, approved pull request is ready for a human
+ * merge. Two signals the live queue does not have are folded in first: a draft
+ * is waiting on its author, and a recorded finding is a decision waiting on you.
+ */
+export function categorize(item: QueueItem, context: PrioritizeContext): { category: PriorityCategory; reason: string } {
+	if (item.type === "issue") return { category: "triage", reason: "issue awaiting triage" };
+	if (item.draft) return { category: "investigate", reason: "draft, waiting on its author" };
+	if (context.hasFindings(itemKey(item))) return { category: "review", reason: "recorded review findings" };
+	if (item.ciStatus === "failure") return { category: "fix-ci", reason: "checks failing" };
+	if (item.mergeState === "dirty") return { category: "resolve-conflicts", reason: "conflicts with the base" };
+	if (item.ciStatus === undefined || item.ciStatus === "pending") {
+		return { category: "investigate", reason: item.ciStatus === "pending" ? "checks still running" : "no checks reported" };
+	}
+	if (item.mergeState === "unknown" || item.reviewState === "unknown") {
+		return { category: "investigate", reason: "incomplete evidence from GitHub" };
+	}
+	if (item.reviewState === "approved") return { category: "ready-for-human-merge", reason: "green and approved" };
+	return { category: "review", reason: "green, awaiting review" };
+}
+
+/**
+ * Within a category, what sinks.
+ *
+ * A dependency bump is real work but it is never the thing a maintainer should
+ * read first, and a branch nobody has touched in three weeks is not urgent
+ * because its checks happen to be green.
+ */
+export function demotionFor(item: QueueItem, now: number): number {
+	let demotion = 0;
+	if (isDependencyBump(item)) demotion += 1;
+	if (item.updatedAt > 0 && now - item.updatedAt > STALE_AFTER_MS) demotion += 2;
+	return demotion;
+}
+
+/**
+ * Hive's rank for an item.
+ *
+ * A pull request is rarely queued by Hive directly — Hive queues the issue. The
+ * link is the pull request's own closing references, so a change that closes
+ * prioritized work inherits that priority instead of sinking into date order.
+ */
+export function hiveRankFor(item: QueueItem, hive: HiveSnapshot): number | undefined {
+	const candidates = [itemKey(item), ...(item.closingIssues ?? [])];
+	let best: number | undefined;
+	for (const key of candidates) {
+		const rank = hive.ranks.get(key);
+		if (rank === undefined) continue;
+		if (best === undefined || rank < best) best = rank;
+	}
+	return best;
+}
+
+function hiveReason(item: QueueItem, hive: HiveSnapshot, rank: number): string {
+	const match = hive.items.find(
+		(candidate) => candidate.key === itemKey(item) || (item.closingIssues ?? []).includes(candidate.key),
+	);
+	const level = match?.level;
+	const via = match && match.key !== itemKey(item) ? ` via ${match.key}` : "";
+	return level ? `hive ${level} #${rank + 1}${via}` : `hive #${rank + 1}${via}`;
+}
+
+/**
+ * Order the queue and explain every position.
+ *
+ * Stable by construction: ties break on the most recent update, then on the key,
+ * so a refetch that changes nothing does not reshuffle the list under the cursor.
+ */
+export function prioritize(items: readonly QueueItem[], context: PrioritizeContext): PrioritizedQueue {
+	const priorities = new Map<string, Priority>();
+	let hiveRanked = 0;
+
+	for (const item of items) {
+		const key = itemKey(item);
+		const demotion = demotionFor(item, context.now);
+		const rank = context.hive.online ? hiveRankFor(item, context.hive) : undefined;
+		if (rank !== undefined) {
+			hiveRanked += 1;
+			priorities.set(key, {
+				category: "hive",
+				source: "hive",
+				reason: hiveReason(item, context.hive, rank),
+				hiveRank: rank,
+				demotion: 0,
+			});
+			continue;
+		}
+		const { category, reason } = categorize(item, context);
+		priorities.set(key, { category, source: "local", reason, demotion });
+	}
+
+	const ordered = [...items].sort((left, right) => {
+		const a = priorities.get(itemKey(left))!;
+		const b = priorities.get(itemKey(right))!;
+		if (a.hiveRank !== undefined || b.hiveRank !== undefined) {
+			// Hive-ranked work always precedes unranked work, in Hive's order.
+			if (a.hiveRank === undefined) return 1;
+			if (b.hiveRank === undefined) return -1;
+			if (a.hiveRank !== b.hiveRank) return a.hiveRank - b.hiveRank;
+		}
+		const byCategory = MAINTAINER_ORDER[a.category] - MAINTAINER_ORDER[b.category];
+		if (byCategory !== 0) return byCategory;
+		if (a.demotion !== b.demotion) return a.demotion - b.demotion;
+		if (right.updatedAt !== left.updatedAt) return right.updatedAt - left.updatedAt;
+		return itemKey(left).localeCompare(itemKey(right));
+	});
+
+	return {
+		items: ordered,
+		priorities,
+		source: hiveRanked > 0 ? "hive" : "local",
+		hiveRanked,
+	};
+}
+
+/** Counts per category, for the headline. */
+export function categoryTally(priorities: ReadonlyMap<string, Priority>): Record<PriorityCategory, number> {
+	const tally: Record<PriorityCategory, number> = {
+		hive: 0,
+		"ready-for-human-merge": 0,
+		review: 0,
+		"resolve-conflicts": 0,
+		"fix-ci": 0,
+		investigate: 0,
+		triage: 0,
+	};
+	for (const priority of priorities.values()) tally[priority.category] += 1;
+	return tally;
+}

@@ -1,0 +1,37 @@
+# Project settings for projectbluefin/review.
+#
+# Subagent work in this repository runs on Gemini 3.8 Flash, the same model the
+# review appliance and the Textual dashboard already default to
+# (image/harness/omp.py, justfile's gemini_model). Research, review and triage
+# fan out across many agents; running them on the model this project is actually
+# tuned and budgeted for is what keeps a wide fan-out affordable and its output
+# consistent with what the appliance produces.
+#
+# Deliberately absent: modelRoles.default. The model *you* drive is yours to
+# pick with /model; this file only decides what the agents you spawn run on.
+task:
+  agentModelOverrides:
+    # Read-only research and mechanical collection.
+    scout: github-copilot/gemini-3.8-flash
+    sonic: github-copilot/gemini-3.8-flash
+    task: github-copilot/gemini-3.8-flash
+    # Judgement work gets the same model at a higher effort rather than a
+    # different model: one lineage, one set of habits, one failure mode.
+    reviewer: github-copilot/gemini-3.8-flash:high
+    security-reviewer: github-copilot/gemini-3.8-flash:high
+    bluefin-doctrine: github-copilot/gemini-3.8-flash:high
+    bluefin-ci-triage: github-copilot/gemini-3.8-flash
+    bluefin-correctness: github-copilot/gemini-3.8-flash:high
+    bluefin-security: github-copilot/gemini-3.8-flash:high
+    bluefin-test-coverage: github-copilot/gemini-3.8-flash:high
+    bluefin-simplicity: github-copilot/gemini-3.8-flash:high
+    bluefin-reviewer: github-copilot/gemini-3.8-flash:high
+    bluefin-queue-triage: github-copilot/gemini-3.8-flash:high
+    # Final batch audit subagent runs Kimi K3 at max effort.
+    k3-final-review: github-copilot/kimi-k3:max
+# Role aliases the shipped review agents and any local agent may reference.
+# Concrete selectors live here so an agent definition can name a role without
+# hardcoding a provider.
+modelRoles:
+  review: github-copilot/gemini-3.8-flash:high
+  fast: github-copilot/gemini-3.8-flash

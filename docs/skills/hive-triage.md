@@ -47,7 +47,7 @@ issue — collect the evidence here, then follow
 2. Read the relay log first. When the hub declines to assign work it sends a
    `task_unavailable` negative-ack and the relay prints the reason before
    re-asking 30 seconds later. The reason strings are the hub's, defined in
-   `v2/pkg/dashboard/contribute_ws.go`; the relay only prints `msg.reason`, and
+   `src/pkg/dashboard/contribute_ws.go`; the relay only prints `msg.reason`, and
    its own comment naming `no_work` is stale — no such reason exists in the
    hub. Read the constants, and take the string the relay actually printed over
    any list, including this one:
@@ -66,20 +66,20 @@ issue — collect the evidence here, then follow
    three are hub-wide conditions no local change affects. A relay predating
    these cases logs the message as an unknown type and then stops asking; that
    is a pin problem, not a hub problem.
-3. Read the hub's own read-only endpoints rather than guessing at them. On a
-   hosted hub these answer unauthenticated, while `/api/health` and
-   `/api/status` redirect to OAuth and tell you nothing:
+3. Read the hub's authenticated and public endpoints rather than guessing at them.
+   `/api/health` and `/api/status` redirect to OAuth and tell you nothing.
 
-   | Endpoint | Answers |
-   |---|---|
-   | `/api/contribute/status` | `hub`, `actionable_items`, `active_contributors` |
-   | `/api/contribute/triage` | count per stage; all zero means nothing is admitted |
-   | `/api/contribute/metrics` | `queue_depth` history, so you can watch it drain |
-   | `/api/contribute/fleet` | each connected clanker's `trust_tier` and `idle_reason` |
+   | Endpoint | Auth | Answers |
+   |---|---|---|
+   | `/api/v1/status` | Bearer `GH_TOKEN` | Authoritative `actionable_items`, `active_contributors`, `hub` |
+   | `/api/v1/me` | Bearer `GH_TOKEN` | Current contributor state, active status, assigned task |
+   | `/api/v1/knowledge` | Bearer `GH_TOKEN` | Authenticated markdown knowledge base export |
+   | `/api/contribute/queue` | Bearer `GH_TOKEN` / Public | Ordered contributor queue items |
+   | `/api/contribute/triage` | Bearer `GH_TOKEN` / Public | Count and items per stage (`triaging`, `ready`, `closed`) |
+   | `/api/contribute/fleet` | Public | Connected clanker fleet, `trust_tier`, `idle_reason` |
 
-   `actionable_items` counts candidates, not assignable work, so a large value
-   beside an empty triage total is the normal shape of a starved queue rather
-   than a contradiction.
+   `actionable_items` counts candidate issues across the organization, not
+   assignable work or queue items.
 4. Classify the condition: no admissible work for any contributor, work held
    by another live contributor, repeated failures returning the same work to
    selection, or a contributor-specific connectivity/authorization problem.

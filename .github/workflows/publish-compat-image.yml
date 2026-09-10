@@ -30,7 +30,10 @@ permissions:
 # those two digests, so no shipped layer is ever produced under emulation and
 # every runtime claim comes from a container the runner could really execute.
 env:
-  IMAGE: ghcr.io/projectbluefin/review
+  # The contributor runtime. 'ghcr.io/projectbluefin/review' is the
+  # distroless appliance published by publish-appliance.yml; this image is
+  # the Hive worker and Textual dashboard, which need a whole userland.
+  IMAGE: ghcr.io/projectbluefin/review-contributor
   # Assembling and annotating an image index needs 'buildah manifest annotate
   # --index', which the runner's own buildah predates. Pinned by digest and
   # run unprivileged: manifest assembly moves descriptors, never layers.

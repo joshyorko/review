@@ -47,7 +47,7 @@ class ReviewExecContractTests(unittest.TestCase):
         broker.run_kubectl = fake
         context = broker.BrokerContext(
             session="session-a",
-            image="ghcr.io/projectbluefin/review:stable",
+            image="ghcr.io/projectbluefin/review-contributor:stable",
         )
         answer = broker.handle_submit(
             context,

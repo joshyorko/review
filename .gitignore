@@ -13,6 +13,7 @@ __pycache__/
 # tests/dashboard-contract.sh builds a pinned Textual venv here to drive the
 # dashboard pilot; it is a build artifact, never source.
 .cache/
+.agents/
 
 # Planning trees, progress files, and per-task reports are session state. The
 # factory bans committing them: they go stale and then mislead every later

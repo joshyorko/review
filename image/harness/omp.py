@@ -236,101 +236,12 @@ class OmpHarness:
             markdown=payload.strip(),
         )
 
-    def render_lower_third(self, items: list[dict[str, Any]], active_index: int, mode: str, width: int) -> list[str]:
-        """Render the lower-third dashboard widget mimicking omp status chrome."""
-        mode_label = mode.upper()
-        count = len(items)
-        pos = f"{active_index + 1}/{count}" if count > 0 else "0/0"
-        header = f"── [BLUEFIN {mode_label} QUEUE] ── ({pos}) ─────────────────────────────"[:width]
-        if 0 <= active_index < len(items):
-            current = items[active_index]
-            ci_badge = f"[CI: {current['ci']}] " if "ci" in current else ""
-            item_line = f"  #{current['id']} {ci_badge}{current['title']} (@{current.get('author', 'unknown')})"
-        else:
-            item_line = "  No items in queue"
-        if len(item_line) > width:
-            item_line = item_line[:width - 3] + "..."
-        shortcuts = "  [Ctrl+J/K] Next/Prev  [Tab] Mode  [Ctrl+R] Review  [Ctrl+A] Approve+Merge  [Ctrl+$] Slay"[:width]
-        return [header, item_line, shortcuts]
-
-    def composer_shape_spec(self) -> dict[str, Any]:
-        """Return ComposerStyle shape configuration for docking the lower third in OMP."""
-        return {
-            "id": "bluefin-dock",
-            "sideBorders": False,
-            "verticalChrome": 1,
-            "statusAttachment": "none",
-            "bottomBar": "full",
-            "bottomBarGap": True,
-            "defaultPromptGutter": "❯ ",
-            "label": "Bluefin Review Dock",
-            "description": "Lower-third queue dashboard beneath OMP composer input",
-        }
-
-    def host_tools_spec(self) -> list[dict[str, Any]]:
-        """Return host tool definitions for OMP RPC mode (e.g. queue querying and batch execution)."""
-        return [
-            {
-                "name": "bluefin_query_queue",
-                "label": "Query Queue",
-                "description": "Query active Bluefin PR or issue queue",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "mode": {"type": "string", "enum": ["prs", "issues"]},
-                        "limit": {"type": "number"},
-                    },
-                    "required": ["mode"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "bluefin_submit_verdict",
-                "label": "Submit Verdict",
-                "description": "Submit a human-confirmed review draft verdict",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pull_request": {"type": "number"},
-                        "verdict": {"type": "string", "enum": ["approve", "request-changes", "comment"]},
-                        "body": {"type": "string"},
-                    },
-                    "required": ["pull_request", "verdict", "body"],
-                    "additionalProperties": False,
-                },
-            },
-        ]
-
-    def host_uri_schemes_spec(self) -> list[dict[str, Any]]:
-        """Return custom virtual URL schemes for Bluefin review entities."""
-        return [
-            {
-                "scheme": "bluefin",
-                "description": "Virtual repository queue items, review receipts, and landing manifests",
-                "writable": True,
-                "immutable": False,
-            }
-        ]
-
-    def bst_element_spec(self) -> dict[str, Any]:
-        """Return the BuildStream element definition for distributing omp-review."""
-        return {
-            "kind": "oci",
-            "description": "Project Bluefin OMP Review Appliance Container",
-            "sources": [
-                {"kind": "local", "path": "image/extension"},
-                {"kind": "local", "path": "image/harness"},
-            ],
-            "depends": [
-                {"filename": "components/omp.bst"},
-                {"filename": "components/gh-cli.bst"},
-                {"filename": "components/git.bst"},
-            ],
-            "config": {
-                "entrypoint": ["/usr/local/bin/omp-review"],
-                "env": {
-                    "PI_EXTENSIONS": "/opt/bluefin/extensions/bluefin-review.ts",
-                    "BLUEFIN_REVIEW_MODE": "dashboard",
-                },
-            },
-        }
+    # The review UI is owned by the omp extension package in
+    # image/extension/bluefin-review: the rail under the editor, the dashboard
+    # overlay, the status segment, and the LLM tools all live there, rendered by
+    # omp itself. The Python shapes that used to describe that chrome from this
+    # side (lower third, composer shape, host tool declarations, bluefin: URI
+    # scheme) described a UI nothing built, so they are gone rather than kept as
+    # a second, silently diverging description of the same surface. The
+    # BuildStream element that used to live here went the same way: the
+    # appliance is built by image/appliance/Containerfile.

@@ -193,10 +193,4 @@ git diff --check
 The `find` and `cmp` Hive's relay calls come from the FSDK base, so there is
 nothing in the checkout to test: `image/Containerfile` proves them at build
 time against the real base and the build fails if either regresses.
-## Sources
-- Hive `v4`: `bin/contributor-agent.sh`, `bin/contributor-relay.sh`,
-  `config/backends.conf`; Goose `canary` assets; Context7 `/npm/cli`,
-  `/websites/podman_io_en` (`--secret` forms, authfile lookup order),
-  `/podman-container-tools/buildah` (`manifest annotate --index`),
-  `/podman-container-tools/skopeo`, `/websites/cli_github_manual`,
-  `/websites/github_en_actions`.
+- Hive `v4`: `bin/contributor-agent.sh`, `bin/contributor-relay.sh`, `config/backends.conf`; Goose `canary`; Context7 `/npm/cli`, `/websites/podman_io_en`, `/podman-container-tools/buildah`, `/podman-container-tools/skopeo`, `/websites/cli_github_manual`, `/websites/github_en_actions`.

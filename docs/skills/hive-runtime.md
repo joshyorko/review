@@ -49,10 +49,10 @@ credential handling ([`launcher.md`](launcher.md)).
    (`src/pkg/knowledge/context7.go`) and delivers assigned-task context through
    its knowledge export, and the image's controlled Goose config enables the
    `context7` extension for on-demand lookups (see `goose-context.md`).
-   review starts the runtime and does not reproduce Hive's jobs. The attended
-   contributor surface may display a passive status companion that performs
-   only authenticated GETs to `/api/v1/status`, `/api/v1/me`, and
-   `/api/v1/contributors`. It projects `hub`, `actionable_items`, and
+   review starts the runtime and does not reproduce Hive's jobs. Authenticated
+   reads use `Authorization: Bearer ${GH_TOKEN}` over HTTPS to `/api/v1/status`,
+   `/api/v1/me`, `/api/v1/contributors`, `/api/v1/knowledge`, `/api/contribute/queue`,
+   and `/api/contribute/triage`. It projects `hub`, `actionable_items`, and
    `active_contributors` from status, plus `github_username`, `active`, and
    `current_task.repo`/`number`/`title` from me; absent fields render as
    `unknown`, active me records render as `working` or `idle`, inactive
@@ -61,8 +61,6 @@ credential handling ([`launcher.md`](launcher.md)).
    stale age. Hub-wide actionable and contributor counts are labeled
    separately from the worker's own state, and the Hive-owned tmux session
    remains authoritative.
-   Reader exceptions and explicit failures produce unavailable read evidence,
-   never the no-new-data sentinel used by a throttled refresh.
 2. Attach only to inspect or deliberately steer a live session:
 
    ```bash
@@ -118,7 +116,7 @@ credential handling ([`launcher.md`](launcher.md)).
 
 Hosted deployments serve under `hivecommons.dev` (with the Project Bluefin spoke
 at `https://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev`). At Hive
-`11bee81280861d03416a0c6278da35c9778cbdee`, the public `/api/contribute` prefix exposes read-only status, queue,
+`c7a88b8518abf1163e13803b2094f2262605490b` (served SHA `55bd2bc`), the public `/api/contribute` prefix exposes read-only status, queue,
 events, activity, fleet, limits, and triage projections. Prefix
 publicity does not make mutation handlers unauthenticated; those handlers
 still enforce their own write requirements. Review may display these
@@ -183,14 +181,14 @@ and no launcher change duplicates Hive lifecycle behavior.
 Cite upstream by pinned permalink, never a branch path.
 
 - Relay message cases, including `task_unavailable`:
-  [`bin/contributor-relay.sh` @ 11bee81](https://github.com/hivecommons/hive/blob/11bee81280861d03416a0c6278da35c9778cbdee/bin/contributor-relay.sh)
+  [`bin/contributor-relay.sh` @ c7a88b8](https://github.com/hivecommons/hive/blob/c7a88b8518abf1163e13803b2094f2262605490b/bin/contributor-relay.sh)
 - Workspace preparation and tmux rooting:
-  [`bin/contributor-agent.sh` @ 11bee81](https://github.com/hivecommons/hive/blob/11bee81280861d03416a0c6278da35c9778cbdee/bin/contributor-agent.sh)
+  [`bin/contributor-agent.sh` @ c7a88b8](https://github.com/hivecommons/hive/blob/c7a88b8518abf1163e13803b2094f2262605490b/bin/contributor-agent.sh)
 - Task release on disconnect:
-  [`src/pkg/dashboard/contribute_ws.go#L3445-L3470` @ 11bee81](https://github.com/hivecommons/hive/blob/11bee81280861d03416a0c6278da35c9778cbdee/src/pkg/dashboard/contribute_ws.go#L3445-L3470)
+  [`src/pkg/dashboard/contribute_ws.go` @ c7a88b8](https://github.com/hivecommons/hive/blob/c7a88b8518abf1163e13803b2094f2262605490b/src/pkg/dashboard/contribute_ws.go)
 - tmux terminal and mouse configuration: Context7 `/tmux/tmux`
-- Public contribute projections and assignment policy @ `11bee81`:
+- Public contribute projections and assignment policy @ `c7a88b8`:
   [`server.go`, `api_contribute.go`, `contribute_sse.go`, and
-  `contribute_ws.go`](https://github.com/hivecommons/hive/tree/11bee81280861d03416a0c6278da35c9778cbdee/src/pkg/dashboard)
-- PR-link projection @ `11bee81`:
-  [`contribute_prlink.go`](https://github.com/hivecommons/hive/blob/11bee81280861d03416a0c6278da35c9778cbdee/src/pkg/dashboard/contribute_prlink.go)
+  `contribute_ws.go`](https://github.com/hivecommons/hive/tree/c7a88b8518abf1163e13803b2094f2262605490b/src/pkg/dashboard)
+- PR-link projection @ `c7a88b8`:
+  [`contribute_prlink.go`](https://github.com/hivecommons/hive/blob/c7a88b8518abf1163e13803b2094f2262605490b/src/pkg/dashboard/contribute_prlink.go)

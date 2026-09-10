@@ -36,19 +36,77 @@ export COPILOT_GITHUB_TOKEN="${COPILOT_GITHUB_TOKEN:-}"
 export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-}"
 export CONTEXT7_API_KEY="${CONTEXT7_API_KEY:-}"
 
+# 4. Resolve Hive Hub and ensure Hive knowledge export is available
+if [[ -z "${HIVE_HUB:-}" ]]; then
+  HIVE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hive"
+  if [[ -f "${HIVE_CONFIG_DIR}/contributor.env" ]]; then
+    RESOLVED_HUB="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?HIVE_HUB=[[:space:]]*["'\'']?([^"'\'']+)["'\'']?/\2/p' "${HIVE_CONFIG_DIR}/contributor.env" | head -1 || true)"
+    if [[ -n "$RESOLVED_HUB" ]]; then
+      export HIVE_HUB="$RESOLVED_HUB"
+    fi
+  fi
+fi
+
+if [[ -n "${HIVE_HUB:-}" && -n "${GH_TOKEN:-}" ]]; then
+  HUB_HTTP="${HIVE_HUB/wss:\/\//https://}"
+  HUB_ROOT="${HUB_HTTP%/contribute}"
+  KNOWLEDGE_FILE="${HOME}/agent.md"
+  # Refresh knowledge export if missing or older than 10 minutes
+  if [[ ! -s "$KNOWLEDGE_FILE" ]] || test $(($(date +%s) - $(date -r "$KNOWLEDGE_FILE" +%s 2>/dev/null || echo 0))) -gt 600; then
+    curl -sf --max-time 15 -H "Authorization: Bearer ${GH_TOKEN}" \
+      "${HUB_ROOT}/api/v1/knowledge" -o "${KNOWLEDGE_FILE}.tmp" 2>/dev/null || \
+    curl -sf --max-time 15 \
+      "${HUB_ROOT}/api/knowledge/export" -o "${KNOWLEDGE_FILE}.tmp" 2>/dev/null || true
+    if [[ -s "${KNOWLEDGE_FILE}.tmp" ]]; then
+      mv -f "${KNOWLEDGE_FILE}.tmp" "$KNOWLEDGE_FILE"
+    else
+      rm -f "${KNOWLEDGE_FILE}.tmp"
+    fi
+  fi
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXTENSION_PATH="${BLUEFIN_REVIEW_EXTENSION_PATH:-/opt/bluefin/extensions/bluefin-review.ts}"
-if [[ ! -f "$EXTENSION_PATH" && -f "$SCRIPT_DIR/image/extension/bluefin-review.ts" ]]; then
-  EXTENSION_PATH="$SCRIPT_DIR/image/extension/bluefin-review.ts"
+
+# The mode ships as an extension package directory: index.ts plus the companion
+# agents omp discovers under <extension-root>/agents.
+EXTENSION_PATH="${BLUEFIN_REVIEW_EXTENSION_PATH:-/opt/bluefin/extensions/bluefin-review}"
+if [[ ! -e "$EXTENSION_PATH" && -d "$SCRIPT_DIR/image/extension/bluefin-review" ]]; then
+  EXTENSION_PATH="$SCRIPT_DIR/image/extension/bluefin-review"
+fi
+if [[ ! -e "$EXTENSION_PATH" ]]; then
+  echo "omp-review: review extension not found at $EXTENSION_PATH" >&2
+  exit 1
 fi
 
-# Check if a specific PR or issue argument is passed
-if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
-  TARGET_PR="$1"
+# 5. Ensure organization & repository skills are projected for agent discovery
+if [[ -f "$SCRIPT_DIR/docs/skills/index.json" && -f "$SCRIPT_DIR/scripts/generate-skills.py" ]]; then
+  python3 "$SCRIPT_DIR/scripts/generate-skills.py" \
+    --index "$SCRIPT_DIR/docs/skills/index.json" \
+    --raw-base "$SCRIPT_DIR" \
+    --out "$SCRIPT_DIR/.agents/skills" \
+    --allow-empty &>/dev/null || true
+fi
+
+# Positional shortcuts, so the common cases need no flags. A leading number
+# preselects that queue item, `owner/repo` scopes the queue to one repository,
+# and `issues` starts on issues. Everything after is passed to omp untouched.
+ARGS=()
+if [[ "${1:-}" =~ ^#?[0-9]+$ ]]; then
+  ARGS+=(--pr "${1#\#}")
   shift
-  exec omp --profile review --extension "$EXTENSION_PATH" "$@" \
-    "Review exact pull request #${TARGET_PR} for projectbluefin. Inspect changes, check doctrine, security, correctness, and report findings."
+elif [[ "${1:-}" =~ ^(https://github\.com/)?[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ || "${1:-}" =~ ^org:[A-Za-z0-9._-]+$ ]]; then
+  ARGS+=(--repo "$1")
+  shift
+  if [[ "${1:-}" =~ ^#?[0-9]+$ ]]; then
+    ARGS+=(--pr "${1#\#}")
+    shift
+  fi
+fi
+if [[ "${1:-}" == "issues" ]]; then
+  ARGS+=(--issues)
+  shift
+elif [[ "${1:-}" == "all" ]]; then
+  ARGS+=(--all)
+  shift
 fi
 
-# Default: Launch interactive omp with isolated profile and review extension
-exec omp --profile review --extension "$EXTENSION_PATH" "$@"
+exec omp --profile review --extension "$EXTENSION_PATH" ${ARGS[@]+"${ARGS[@]}"} "$@"

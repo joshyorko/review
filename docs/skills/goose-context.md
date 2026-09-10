@@ -62,7 +62,7 @@ task delivery; use the Hive runtime documentation instead.
    against the keyless public endpoint (`https://mcp.context7.com/mcp`), and
    the agent policy routes external API, framework, and platform questions
    through it before memory. Hive's hub still queries Context7 server-side
-   (`v2/pkg/knowledge/context7.go`) and folds the result into the knowledge
+   (`src/pkg/knowledge/context7.go`) and folds the result into the knowledge
    export — two deliveries of the same capability, one for assigned-task
    context, one for on-demand lookups. `tests/image-contract.sh` requires the
    extension in the config and the routing rule in the policy.

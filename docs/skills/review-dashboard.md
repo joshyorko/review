@@ -167,75 +167,20 @@ Verified against Context7 `/textualize/textual`:
   repository/PR provenance, stale heads, failed actions, comments, branch
   updates, and unsupported actions are `unclassified`. The receipt describes an
   evidence/action pair and has no approval or merge authority.
-- **Responsive screens preserve focus**: Draft generation runs through a
-  Textual worker with generation and edit revision guards, while log refreshes
-  read bounded tails and restore the user's scroll position. Small terminals
-  condense activity, keep both key rows visible, skip hidden panes during focus
-  navigation, keep transient notices above the controls, and expose compact CI
-  evidence through a focusable scroll pane. Theme-token accent, warning, error,
-  selection, and muted metadata colors supplement text and icons; no-color,
-  reduced-motion, and ASCII modes carry the same facts in text.
-- **Empty queue celebration (`ALL SYSTEMS SLAY`)**: Draining the active review source (repository-scoped, own-work excluded) triggers a one-shot 1.3s retro sequence: Round 8/Fight (400ms) → Bluefin charging `SLAYDOKEN!` (300ms) → `9999!` hit (250ms) → `K.O.` (350ms) → `ALL SYSTEMS SLAY` held frame. Startup with an empty queue skips directly to the held frame. Action-filtered views do not trigger celebration.
-- **Treat the Hive API as JSON, not a browser.** The read-only status probe
-  reports missing hub config, missing credentials, network/auth failure,
-  edge/login redirects, malformed responses, and server failure as separate
-  concise states. The queue POST succeeds only when bounded JSON says `queued`;
-  the typed PR-number gate remains the boundary. Failed probes leave
-  queue/review evidence visible and mark retained assignments as last-known.
-  Hive contributor projections (ready-queue ranks `#N` and triage stages) are
-  read-only display evidence and do not dictate maintainer queue ordering or
-  selection priority. Retained or unavailable Hive rank evidence carries an
-  explicit status and age (for example, `[dim]#1 (retained <1m ago)[/dim]`)
-  rather than unqualified current ranks. Optional Hive enrichment endpoints
-  (`/api/contribute/queue`, `/api/contribute/triage`) with documented shapes
-  (such as stage count maps) do not fail a healthy Hive reconciliation when
-  absent. Direct GitHub review and merge stay available.
-
+- **Responsive screens preserve focus**: Small terminals condense activity, keep key rows visible, and expose compact CI evidence. Accent, warning, error, and muted metadata colors supplement text and icons.
+- **Empty queue celebration (`ALL SYSTEMS SLAY`)**: Draining active reviews triggers a one-shot 1.3s sequence ending in `ALL SYSTEMS SLAY`. Action-filtered views do not trigger celebration.
+- **Treat the Hive API as JSON, not a browser.** The read-only status probe reports missing config, credentials, transport failure, and concise states. Ranks `#N` are display evidence only.
 ## Batch Review and Landing
 
-Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings are repaired through `[$]`, which dispatches the fixer behind slay's gates; the standalone `[f]`/`[F]` fix lane is deleted — it ran the same fixer with no confirmation, no blocked-reason check, and no durable run record. See [`landing-batches.md`](landing-batches.md) for the `[$]` state machine, landing gate, concurrency lanes, and state persistence, and [`review-scheduler.md`](review-scheduler.md) for admission, capacity, and transport reuse.
-The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying capacity, and trust a receipt only when its full run and check-scope identity matches. Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission and cache publication; a cancelled run cannot publish or delete another session's receipt. Local lanes and the Hive fleet are two separate concurrency displays and are never conflated; see [`review-monitoring.md`](review-monitoring.md).
-On the dashboard, `b` toggles the highlighted row, `B` selects or clears every visible row, `Space` toggles the highlighted row and advances, `n` jumps to the next pull request lacking the maintainer's own GitHub review, and `r` reviews the selection as a batch while retaining its selection on snapshot failure. Rows say `QUEUED` in cyan, `IN PROGRESS` in yellow, `DONE` in green, `FAILED` in red, or `BLOCKED` in yellow; failures lead the queue, followed by active, queued, ready, completed, and unroutable blocked work. A completed review remains visible until normal live reconciliation removes a merged pull request. The status bar summarizes those states and retains the three newest repository-qualified merged pull requests from landing records. `Enter` on a reviewed row reloads GitHub evidence before rendering cached analysis; CI, mergeability, reviews, and overlap are never restored from the cache.
+Batch landings partition across independent repository lanes via background agents. Evidenced review findings are repaired through `[$]` behind slay's gates; see [`landing-batches.md`](landing-batches.md) and [`review-scheduler.md`](review-scheduler.md). `b` toggles highlighted rows, `B` selects/clears visible rows, `Space` toggles and advances, and `r` reviews the batch.
 
-## Common Rationalizations
+## Common Rationalizations & Red Flags
 
-| Rationalization | Reality |
-|---|---|
-| "Two confirmations is safer than one." | It is the same decision twice. The second prompt teaches the number as a reflex, and an abort at it leaves half the action applied. |
-| "The notification reports the failure." | It is gone before a batch finishes. Mark the row. |
-| "A grep proves the feature works." | It proves the source contains a string. The pilot presses the key. |
-| "I know this Textual API." | `escape` misses uppercase tags and `[link=…]` needs quotes — both were found by running it, not by remembering it. |
-
-## Red Flags
-
-- `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
-- Interpolating any GitHub- or agent-sourced text into markup without `escape()`. An agent-reported JSONL state is attacker-shaped text too:
-  unescaped, `waiting[/][blink]OWNED` raised `MarkupError` in
-  `rows.update()` and took the whole batch-queue screen down.
-- `self.query_one(...)` evaluated inside an `@work(thread=True)` body.
-- A new mutating verb passed to the read-only `gh()` helper.
-- A default view that filters the queue without saying so.
-- A feature added with only a `tests/dashboard-contract.sh` grep behind it.
-- Remote-sourced state rendered without its age.
-- A core-loop path that gates on `hive_api_base()` being set.
-
-## Exact-Head Re-Review
-
-When a completed result is bound to an older head H0 while the live snapshot is H1,
-the decision card appends a bounded delta: both identities, prior findings, and H1 evidence.
-Fallback reasons direct to a full review if merge-base changes or responses are partial.
-
-## Acceptance Evidence
-
-Use the locked `image/tui/requirements.lock` environment for Pilot journeys.
-Pilot verifies interaction and state transitions; it does not replace rendered
-evidence. For a final candidate, capture the running application at 80x24,
-120x40, and a normal desktop size, including queue-after-`A`, landing progress,
-CI failure drill-down, editor/slow-provider, focus/resize, and the worker
-companion when applicable. Record the exact candidate SHA, scenario, terminal
-dimensions, and read-only fixture provenance. A shipped-image PTY smoke with
-fake external operations is separate proof from a headless or fixture render.
-
+- Two confirmations is reflex, not safety. The first prompt is the decision.
+- Never interpolate GitHub- or agent-sourced text without `escape()`.
+- Never access `self.query_one()` from worker threads.
+- Remote-sourced state must always display its age.
+- Headless tests verify logic; Pilot verifies live interaction and state transitions.
 ## Verification
 
 ```bash

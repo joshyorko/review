@@ -99,7 +99,7 @@ k3_context_limit := "264000"
 # unknown'.
 # REVIEW_CONTRIBUTOR_IMAGE overrides this when you need a specific
 # 'sha-' tag or digest.
-contributor_image := env("REVIEW_CONTRIBUTOR_IMAGE", "ghcr.io/projectbluefin/review:stable")
+contributor_image := env("REVIEW_CONTRIBUTOR_IMAGE", "ghcr.io/projectbluefin/review-contributor:stable")
 
 # Shared bash, 'eval''d at the top of every recipe script that needs it:
 # host preflight, Goose selection, and the pinned Hive checkout. Keeping
@@ -340,8 +340,8 @@ ensure_contributor_image() {
   podman pull "$ref" && return 0
   echo "ERROR: cannot obtain the contributor image ${ref}." >&2
   echo "  Published tags are 'stable', the version tags and 'sha-<commit>' — there is no ':latest'." >&2
-  echo "  Pick a published tag with REVIEW_CONTRIBUTOR_IMAGE=ghcr.io/projectbluefin/review:stable," >&2
-  echo "  or build the commit you have: ref=ghcr.io/projectbluefin/review:sha-\$(git rev-parse HEAD)" >&2
+  echo "  Pick a published tag with REVIEW_CONTRIBUTOR_IMAGE=ghcr.io/projectbluefin/review-contributor:stable," >&2
+  echo "  or build the commit you have: ref=ghcr.io/projectbluefin/review-contributor:sha-\$(git rev-parse HEAD)" >&2
   echo "    podman build -f image/Containerfile -t \"\$ref\" . && REVIEW_CONTRIBUTOR_IMAGE=\"\$ref\" just review-container" >&2
   return 1
 }
@@ -1145,7 +1145,7 @@ start_review_exec_broker() {
   python3 "$broker" serve \
     --socket "$REVIEW_EXEC_SOCKET" \
     --session "$REVIEW_EXEC_SESSION" \
-    --image "${CONTRIBUTOR_IMAGE:-ghcr.io/projectbluefin/review:stable}" \
+    --image "${CONTRIBUTOR_IMAGE:-ghcr.io/projectbluefin/review-contributor:stable}" \
     >"${REVIEW_EXEC_SOCKET_DIR}/broker.log" 2>&1 &
   REVIEW_EXEC_BROKER_PID=$!
   for _ in $(seq 1 50); do
@@ -1747,6 +1747,86 @@ review-queue *queue_args:
     fi
     echo "  q or Ctrl-C stops; the dashboard is the only thing running."
     "${CONTAINER_ARGS[@]}"
+
+# The distroless review appliance: one image, no host toolchain, no Python
+# dashboard, no Hive worker. It is the Bluefin Review mode of omp and the
+# binaries it needs, and it runs the same on any machine with podman or docker.
+#
+#   just review-appliance                  # the whole organization queue
+#   just review-appliance owner/repo       # review one repository, anywhere
+#   just review-appliance --pr 1284        # preselect one pull request
+#   just review-appliance --issues         # start on issues
+#
+# State lives in a named volume rather than the image, so sessions, logs and
+# review receipts survive a pull. The current directory is mounted read-write at
+# /workspace: the agent reviews what you are standing in.
+[doc("Run the distroless Bluefin Review appliance container.")]
+review-appliance *appliance_args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMAGE="${REVIEW_APPLIANCE_IMAGE:-ghcr.io/projectbluefin/review:stable}"
+    ENGINE="${CONTAINER_ENGINE:-podman}"
+    if ! command -v "$ENGINE" >/dev/null 2>&1; then
+      echo "ERROR: ${ENGINE} is not installed; the appliance needs podman or docker." >&2
+      exit 1
+    fi
+
+    # The token is resolved on the host and inherited by name. It is never an
+    # argument, never a mount, and never lands in the image or a log line.
+    if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+      GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+      export GH_TOKEN
+    fi
+    if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
+      echo "WARNING: no GitHub credential found; the queue will load empty." >&2
+      echo "  Run 'gh auth login' or export GH_TOKEN." >&2
+    fi
+
+    ARGS=(run --rm --interactive --tty --name "${REVIEW_APPLIANCE_NAME:-bluefin-review}" --replace)
+    if [[ "$ENGINE" == podman ]]; then
+      # Map the invoking user onto the image's nonroot uid so the named volume
+      # and the workspace mount are writable without loosening either.
+      ARGS+=(--userns "keep-id:uid=65532,gid=65532")
+    fi
+    ARGS+=(
+      --volume "${REVIEW_APPLIANCE_VOLUME:-bluefin-review-home}:/home/bluefin:rw"
+      --volume "${PWD}:/workspace:rw,z"
+      --env GH_TOKEN --env GITHUB_TOKEN --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN
+      --env ANTHROPIC_API_KEY --env OPENAI_API_KEY
+      # Hive owns priority when a hub is configured. The hub URL is inherited by
+      # name like every other credential-adjacent value; the appliance only ever
+      # reads from it.
+      --env HIVE_HUB
+      --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}"
+      --env BLUEFIN_REVIEW_ORG
+    )
+    # A bare `owner/repo` is the repository shortcut; anything else is passed to
+    # the mode untouched.
+    APPLIANCE_ARGS=({{appliance_args}})
+    if [[ "${APPLIANCE_ARGS[0]:-}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+      APPLIANCE_ARGS=(--repo "${APPLIANCE_ARGS[0]}" "${APPLIANCE_ARGS[@]:1}")
+    fi
+
+    "$ENGINE" "${ARGS[@]}" "$IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
+
+# Build the appliance from this checkout and hold it to its contract. The
+# version is derived, never typed: FSDK series from the pinned base, revision
+# from image/appliance/REVISION.
+[doc("Build the review appliance image locally and verify its contract.")]
+review-appliance-build tag="localhost/projectbluefin/review:dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENGINE="${CONTAINER_ENGINE:-podman}"
+    VERSION="$(bash scripts/review-appliance-version.sh)"
+    echo "→ building {{tag}} as version ${VERSION}"
+    "$ENGINE" build \
+      --format oci \
+      --build-arg REVIEW_VERSION="$VERSION" \
+      --build-arg REVIEW_REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)" \
+      --file image/appliance/Containerfile \
+      --tag "{{tag}}" \
+      .
+    bash tests/appliance-contract.sh --image "{{tag}}" --expect-arch "$(uname -m)"
 
 # Preflight check: is this machine actually ready for 'just review-container'?
 # Starts no agent and mounts no credential.

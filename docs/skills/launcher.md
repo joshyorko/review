@@ -100,29 +100,7 @@ orchestration.
 
 ## Kubernetes Dashboard Sessions
 
-`REVIEW_RUNTIME=k8s just review-queue` selects one foreground dashboard Pod;
-it does not add a recipe or change contributor-worker scale-out. Provision
-its dedicated state claim first:
-
-```bash
-kubectl apply -f deploy/review-queue-state.yaml
-REVIEW_RUNTIME=k8s just review-queue
-```
-
-Absent or unreachable Kubernetes preserves Podman. A reachable cluster with a
-missing or unreadable `review-queue-state` claim stops before Secret or Pod creation.
-The restricted, non-root Pod uses `imagePullPolicy: Always`, waits Ready before
-terminal attach, and removes itself and its file-descriptor-staged session Secret
-on `q`, Ctrl-C, or terminal exit. The claim holds dashboard state only.
-
-For each new Podman session, the launcher automatically refreshes a moving published
-image tag before it starts; an existing attended session keeps its image. Immutable
-digests, CI `sha-` tags, and local images are not refreshed.
-
-Optional countme configuration remains local to the session-secret handoff, never
-repository configuration. Without it, countme is a no-op. Its bounded measurements
-exclude secrets, prompts, and pull-request content; export failure affects countme only.
-
+`REVIEW_RUNTIME=k8s just review-queue` runs a foreground dashboard Pod with its dedicated state claim (`deploy/review-queue-state.yaml`). Unreachable cluster falls back to Podman; missing claim stops before Secret or Pod creation. Pod uses `imagePullPolicy: Always` and removes itself on exit. Optional countme remains local to the session Secret.
 ## Rootless Podman And Mounted Host Files
 
 Rootless Podman maps the host user to container **root**, not to the container
@@ -139,24 +117,7 @@ connection`, `containers.conf`, or user environment). Never put
 repository. When an existing local Podman connection is default, builds,
 pulls, and recipe runs execute on that service transparently.
 
-`review-queue` resolves the engine Podman will actually use in this order:
-`CONTAINER_HOST`, an explicitly selected `CONTAINER_CONNECTION`, then the
-saved default connection. SSH and TCP engines fail closed before preflight,
-credential staging, or `podman run`; an unresolved explicit connection also
-fails closed. Local mode and local Unix sockets remain usable. A maintainer who
-has deliberately accepted remote state may set
-`REVIEW_QUEUE_ALLOW_REMOTE_STATE=1` for that launch; other values do not
-acknowledge it, and diagnostics redact URI userinfo. `REVIEW_RUNTIME=k8s`
-uses its Kubernetes route and does not infer cluster runtime isolation from
-this local Podman check.
-
-When an operator configures an SSH-backed default Podman system connection, the
-launcher stages the selected `0600` Hive contributor registration to a unique
-per-run private `0700` directory on the remote engine host for the duration of the
-container run, and removes only that private staging path on exit. Remote canonical
-configuration (`~/.config/hive` and `contributor.env`) is never altered or deleted.
-Operator control remains explicit through Podman connection configuration; no
-credential values, SSH targets, or endpoints are printed or committed.
+`review-queue` resolves engines in order: `CONTAINER_HOST`, `CONTAINER_CONNECTION`, then saved default. Remote engines fail closed unless `REVIEW_QUEUE_ALLOW_REMOTE_STATE=1`. An SSH-backed connection stages `0600` Hive credentials to a private `0700` remote directory and removes it on exit without altering remote canonical configs.
 
 A locally built image has no registry behind it and is not a moving tag.
 Build local images under the `sha-<commit>` tag CI mints for that commit.
@@ -172,24 +133,12 @@ kubeconfig or credentials enter the container. See [`lab-broker.md`](lab-broker.
 for full broker details. This is distinct from `REVIEW_RUNTIME=k8s`: the lab
 broker is offered only to the local Podman dashboard.
 
-## Common Rationalizations
-
-- "It's only a comment or test fixture." Workflow assertions, onboarding
-  fixtures, and operator comments are part of the public launcher surface and
-  must be rebranded with the code.
-- "We can leave an alias for safety." This launcher's contract is a clean
-  break; aliases preserve stale instructions and weaken test coverage.
-- "Passing `--env NAME=value` is equivalent." For secrets it is not: inherited
-  `--env NAME` avoids printing values into the Podman command line.
-- "Mounting `~/.codex` is simpler." It also passes provider configuration and
-  lets a container mutate the host login. Stage only `auth.json`; never mount
-  the directory or the original file.
-- "Restart a running container after an image rebuild." A pulled or rebuilt
-  image cannot mutate a running container. Attended instances are user-owned;
-  image updates affect only future launches.
-- "Put remote connection settings in repository recipes." Remote connection
-  setup is machine-local operator state. Recipes invoke standard Podman CLI.
-
+- An alias or undocumented public recipe, or a detached/background contributor run.
+- Altering remote canonical configuration during staging or broad deletion on cleanup.
+- Host directory mounts beyond read-only Hive config or host Codex config/login instead of staged auth.
+- Tokens in output, files, args, or persisted launcher state.
+- Ownership inferred from `pgrep` rather than a live, same-boot PID label.
+- Remote connection settings or endpoints committed to repository files.
 ## Red Flags
 
 - An undocumented public recipe, or a detached/background contributor launch.

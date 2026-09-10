@@ -1455,7 +1455,7 @@ assert_file_not_contains "super-secret-registration-token" "$runner_log"
 
 # A moving tag must be refreshed on every launch, or a contributor silently
 # keeps running whatever copy they first pulled.
-assert_file_contains "pull ghcr.io/projectbluefin/review:stable" "$image_log"
+assert_file_contains "pull ghcr.io/projectbluefin/review-contributor:stable" "$image_log"
 
 begin "contribute: launches the worker in the foreground"
 reset_logs
@@ -1783,7 +1783,7 @@ begin "review-container: an immutable reference is not re-pulled"
 reset_logs
 run_recipe review-container GH_READY=1 \
   GOOSE_MODEL=gpt-test \
-  REVIEW_CONTRIBUTOR_IMAGE=ghcr.io/projectbluefin/review:sha-deadbeef
+  REVIEW_CONTRIBUTOR_IMAGE=ghcr.io/projectbluefin/review-contributor:sha-deadbeef
 assert_file_contains "image exists" "$image_log"
 assert_file_not_contains "pull" "$image_log"
 
@@ -2118,7 +2118,7 @@ begin "static: the container never defaults to an unpublished ':latest' tag"
 if grep -n 'review:latest' "$code"; then
   fail "the default contributor image must be a tag the publish workflow actually pushes"
 fi
-grep -q 'ghcr.io/projectbluefin/review:stable' "$code" ||
+grep -q 'ghcr.io/projectbluefin/review-contributor:stable' "$code" ||
   fail "the default contributor image must be the published ':stable' tag"
 
 begin "static: the lifecycle verb stops cluster workers and refuses attended runs"
@@ -2144,12 +2144,20 @@ if grep -nE '^review-(start|restart|kill|clean|down|up)[ :]' "$code"; then
   fail "no resurrection or force verbs: stop is the only lifecycle command"
 fi
 # The recipe list is exactly: launch foreground or unattended contributors,
-# stop a detached worker, diagnose, and walk the PR queue.
+# stop a detached worker, diagnose, walk the PR queue, and run or build the
+# distroless appliance.
 if grep -qE '^turbo-review[ :]' "$code"; then
   fail "turbo-review is removed: scaling workers is an explicit 'review-container cluster' choice, never a side effect of opening the dashboard"
 fi
-assert_eq "$(grep -cE '^(contribute|review[a-z-]*)[ :]' "$code")" 5 \
-  "expected exactly five recipes (contribute, review-container, -stop, -doctor, -queue)"
+assert_eq "$(grep -cE '^(contribute|review[a-z-]*)[ :]' "$code")" 7 \
+  "expected exactly seven recipes (contribute, review-container, -stop, -doctor, -queue, -appliance, -appliance-build)"
+grep -qE '^review-appliance \*appliance_args:' "$code" ||
+  fail "review-appliance must pass its arguments through to the appliance entrypoint"
+grep -q 'keep-id:uid=65532,gid=65532' "$code" ||
+  fail "the appliance runs as the image's own nonroot uid, never root"
+if grep -nE '\-\-env GH_TOKEN=' "$code"; then
+  fail "credentials are inherited by name, never passed as argument values"
+fi
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private
@@ -2223,7 +2231,7 @@ grep -Fq -- '--timeout=15s' <<<"$cluster_body" ||
 if grep -q '^[[:space:]]*- name: HIVE_HUB$' "$repo_root/deploy/review-contributor.yaml"; then
   fail "the deployment manifest must leave HIVE_HUB to the launcher"
 fi
-if ! grep -A1 '^          image: ghcr.io/projectbluefin/review:stable$' \
+if ! grep -A1 '^          image: ghcr.io/projectbluefin/review-contributor:stable$' \
   "$repo_root/deploy/review-contributor.yaml" |
   grep -Fxq '          imagePullPolicy: Always'; then
   fail "the stable contributor deployment must always pull the published image"
