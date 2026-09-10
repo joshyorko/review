@@ -121,7 +121,7 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertEqual(len(lines), 3)
         self.assertIn("BLUEFIN PRS QUEUE", lines[0])
         self.assertIn("#42", lines[1])
-        self.assertIn("[j/k] Navigate", lines[2])
+        self.assertIn("[ctrl+n/p] Navigate", lines[2])
 
     def test_issues_mode_toggle_and_rendering(self):
         """Test issues mode in lower third widget."""
@@ -217,6 +217,7 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIn("ORG_ISSUES_QUERY", content)
         self.assertIn("fetchLiveQueue", content)
         self.assertIn("bluefin-review-lower-third", content)
+        self.assertIn("bluefin-welcome-box", content)
         self.assertIn("landing-batch", content)
         self.assertIn("tui-evidence", content)
         self.assertIn("bluefin_review_status", content)

@@ -250,7 +250,7 @@ class OmpHarness:
             item_line = "  No items in queue"
         if len(item_line) > width:
             item_line = item_line[:width - 3] + "..."
-        shortcuts = "  [j/k] Navigate  [r] Review  [a] Approve/Land  [I] Issues Mode  [$] Slay (Fix+Land)"[:width]
+        shortcuts = "  [ctrl+n/p] Navigate  [/review] Start Review  [/approve] Approve  [/issues] Toggle"[:width]
         return [header, item_line, shortcuts]
 
     def composer_shape_spec(self) -> dict[str, Any]:

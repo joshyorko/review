@@ -86,9 +86,32 @@ export class ReviewQueueState {
         itemLine = itemLine.slice(0, width - 3) + "...";
       }
     }
-    const shortcuts = `  [j/k] Navigate  [r] Review  [a] Approve/Land  [I] Issues Mode  [$] Slay (Fix+Land)`.slice(0, width);
+    const shortcuts = `  [ctrl+n/p] Navigate  [/review] Start Review  [/approve] Approve  [/issues] Toggle`.slice(0, width);
 
     return [header, itemLine, shortcuts];
+  }
+
+  renderWelcomeBox(width: number): string[] {
+    const w = Math.min(width - 2, 72);
+    const line = (text: string) => {
+      const padded = `  ${text}`.padEnd(w - 2);
+      return `│${padded.slice(0, w - 2)}│`;
+    };
+    return [
+      `┌${"─".repeat(w - 2)}┐`,
+      line("🔷 PROJECT BLUEFIN REVIEW APPLIANCE (OMP MODE) 🔷"),
+      line(""),
+      line("POSSIBLE WORK BUCKETS:"),
+      line("  • /prs            Browse open PRs waiting for maintainer review"),
+      line("  • /issues         Triage open issues or select work to implement"),
+      line("  • /review [num]   Start thorough multi-agent doctrine review"),
+      line("  • /diff [num]     Inspect bounded changes for a PR"),
+      line("  • /approve [num]  Verify checks and approve for landing"),
+      line("  • /slay           Automated review + patch + verify + land"),
+      line(""),
+      line("Controls: ctrl+n (next) | ctrl+p (prev) | ctrl+i (toggle mode)"),
+      `└${"─".repeat(w - 2)}┘`,
+    ];
   }
 }
 
@@ -172,18 +195,34 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
 
   pi.setLabel("Bluefin Review & Issues");
 
-  // Lower-third dashboard widget below editor
+  // Show welcome box with work buckets and lower-third queue widget
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) {
-      ctx.ui.setWidget("bluefin-review-lower-third", {
-        placement: "belowEditor",
-        render: (width) => queue.renderLowerThirdWidget(width),
+      const termWidth = process.stdout.columns ?? 100;
+      // Show work buckets in a boxed layout like the omp logo
+      ctx.ui.setWidget("bluefin-welcome-box", queue.renderWelcomeBox(termWidth), {
+        placement: "aboveEditor",
       });
+
+      // Show lower-third queue dock
+      ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(termWidth), {
+        placement: "belowEditor",
+      });
+
+      const refreshWidgets = () => {
+        const w = process.stdout.columns ?? 100;
+        ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
+          placement: "belowEditor",
+        });
+      };
 
       // Background refresh queue
       const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
       fetchLiveQueue(queue.activeMode, token).then((items) => {
-        if (items.length > 0) queue.setItems(items);
+        if (items.length > 0) {
+          queue.setItems(items);
+          refreshWidgets();
+        }
       });
     }
   });
@@ -333,20 +372,38 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
     },
   });
 
-  // Shortcuts
-  pi.registerShortcut("j", () => queue.next());
-  pi.registerShortcut("k", () => queue.prev());
-  pi.registerShortcut("I", () => queue.toggleMode());
-  pi.registerShortcut("a", () => {
-    const current = queue.getCurrent();
-    if (current && current.type === "pr") {
-      pi.sendUserMessage(`Approve and queue PR #${current.id} for landing.`);
-    }
+  // Shortcuts: use Ctrl combinations so normal typing in prompt is not intercepted
+  pi.registerShortcut("ctrl+n", {
+    description: "Next item in queue",
+    handler(ctx) {
+      queue.next();
+      const w = process.stdout.columns ?? 100;
+      ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
+        placement: "belowEditor",
+      });
+    },
   });
-  pi.registerShortcut("r", () => {
-    const current = queue.getCurrent();
-    if (current && current.type === "pr") {
-      pi.sendUserMessage(`Start exact review for PR #${current.id}.`);
-    }
+
+  pi.registerShortcut("ctrl+p", {
+    description: "Previous item in queue",
+    handler(ctx) {
+      queue.prev();
+      const w = process.stdout.columns ?? 100;
+      ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
+        placement: "belowEditor",
+      });
+    },
+  });
+
+  pi.registerShortcut("ctrl+i", {
+    description: "Toggle PRs / Issues mode",
+    handler(ctx) {
+      queue.toggleMode();
+      const w = process.stdout.columns ?? 100;
+      ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
+        placement: "belowEditor",
+      });
+      ctx.ui.notify(`Switched to ${queue.activeMode.toUpperCase()} mode`, "info");
+    },
   });
 }
