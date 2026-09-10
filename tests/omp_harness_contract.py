@@ -268,6 +268,18 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertTrue(shape["bottomBarGap"])
         self.assertEqual(shape["defaultPromptGutter"], "❯ ")
 
+    def test_host_tools_and_uri_schemes(self):
+        tools = self.harness.host_tools_spec()
+        self.assertEqual(len(tools), 2)
+        tool_names = [t["name"] for t in tools]
+        self.assertIn("bluefin_query_queue", tool_names)
+        self.assertIn("bluefin_submit_verdict", tool_names)
+
+        schemes = self.harness.host_uri_schemes_spec()
+        self.assertEqual(len(schemes), 1)
+        self.assertEqual(schemes[0]["scheme"], "bluefin")
+        self.assertTrue(schemes[0]["writable"])
+
 
 if __name__ == "__main__":
     unittest.main()

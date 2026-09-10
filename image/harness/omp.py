@@ -267,6 +267,51 @@ class OmpHarness:
             "description": "Lower-third queue dashboard beneath OMP composer input",
         }
 
+    def host_tools_spec(self) -> list[dict[str, Any]]:
+        """Return host tool definitions for OMP RPC mode (e.g. queue querying and batch execution)."""
+        return [
+            {
+                "name": "bluefin_query_queue",
+                "label": "Query Queue",
+                "description": "Query active Bluefin PR or issue queue",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {"type": "string", "enum": ["prs", "issues"]},
+                        "limit": {"type": "number"},
+                    },
+                    "required": ["mode"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "bluefin_submit_verdict",
+                "label": "Submit Verdict",
+                "description": "Submit a human-confirmed review draft verdict",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pull_request": {"type": "number"},
+                        "verdict": {"type": "string", "enum": ["approve", "request-changes", "comment"]},
+                        "body": {"type": "string"},
+                    },
+                    "required": ["pull_request", "verdict", "body"],
+                    "additionalProperties": False,
+                },
+            },
+        ]
+
+    def host_uri_schemes_spec(self) -> list[dict[str, Any]]:
+        """Return custom virtual URL schemes for Bluefin review entities."""
+        return [
+            {
+                "scheme": "bluefin",
+                "description": "Virtual repository queue items, review receipts, and landing manifests",
+                "writable": True,
+                "immutable": False,
+            }
+        ]
+
     def bst_element_spec(self) -> dict[str, Any]:
         """Return the BuildStream element definition for distributing omp-review."""
         return {
