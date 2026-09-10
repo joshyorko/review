@@ -207,6 +207,16 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertEqual(len(page2["items"]), 5)
         self.assertFalse(page2["has_next"])
 
+    def test_extension_source_exports_review_queue_and_graphql(self):
+        """Verify extension source contains key exports and queries."""
+        with open("image/extension/bluefin-review.ts", "r") as f:
+            content = f.read()
+        self.assertIn("ReviewQueueState", content)
+        self.assertIn("ORG_QUEUE_QUERY", content)
+        self.assertIn("ORG_ISSUES_QUERY", content)
+        self.assertIn("fetchLiveQueue", content)
+        self.assertIn("bluefin-review-lower-third", content)
+
 
 if __name__ == "__main__":
     unittest.main()
