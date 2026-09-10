@@ -217,9 +217,15 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
           placement: "belowEditor",
         });
       };
-
-      // Background refresh queue
-      const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+      let token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.COPILOT_GITHUB_TOKEN;
+      if (!token) {
+        try {
+          const { execSync } = require("child_process");
+          token = execSync("gh auth token", { encoding: "utf-8", timeout: 2000 }).trim();
+        } catch {
+          // silent fallback
+        }
+      }
       fetchLiveQueue(queue.activeMode, token).then((items) => {
         if (items.length > 0) {
           queue.setItems(items);

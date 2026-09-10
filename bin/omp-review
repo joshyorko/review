@@ -2,12 +2,38 @@
 # Entrypoint for omp in dedicated Bluefin review / issues mode.
 set -euo pipefail
 
+# 1. Resolve GitHub API token transparently from gh CLI if not explicitly set
+if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]]; then
+  if command -v gh &>/dev/null; then
+    RESOLVED_GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+    if [[ -n "$RESOLVED_GH_TOKEN" ]]; then
+      export GH_TOKEN="$RESOLVED_GH_TOKEN"
+      export GITHUB_TOKEN="$RESOLVED_GH_TOKEN"
+    fi
+  fi
+fi
+
+# 2. Resolve Copilot token transparently from keyring or environment
+if [[ -z "${COPILOT_GITHUB_TOKEN:-}" && -z "${GITHUB_COPILOT_TOKEN:-}" ]]; then
+  if command -v secret-tool &>/dev/null; then
+    RESOLVED_COPILOT="$(secret-tool lookup service goose username secrets 2>/dev/null | sed -nE 's/.*"GITHUB_COPILOT_TOKEN"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1 || true)"
+    if [[ -n "$RESOLVED_COPILOT" ]]; then
+      export COPILOT_GITHUB_TOKEN="$RESOLVED_COPILOT"
+      export GITHUB_COPILOT_TOKEN="$RESOLVED_COPILOT"
+    fi
+  fi
+fi
+
+# If COPILOT_GITHUB_TOKEN is still unset, fall back to GH_TOKEN so GitHub API provider can auth
+if [[ -z "${COPILOT_GITHUB_TOKEN:-}" && -n "${GH_TOKEN:-}" ]]; then
+  export COPILOT_GITHUB_TOKEN="$GH_TOKEN"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXTENSION_PATH="${BLUEFIN_REVIEW_EXTENSION_PATH:-/opt/bluefin/extensions/bluefin-review.ts}"
 if [[ ! -f "$EXTENSION_PATH" && -f "$SCRIPT_DIR/image/extension/bluefin-review.ts" ]]; then
   EXTENSION_PATH="$SCRIPT_DIR/image/extension/bluefin-review.ts"
 fi
-
 # Check if a specific PR or issue argument is passed
 if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
   TARGET_PR="$1"
