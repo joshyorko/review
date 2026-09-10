@@ -97,6 +97,38 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIn("omp", reg.names())
         self.assertEqual(reg.get("omp").name, "omp")
 
+    def test_lower_third_widget_rendering(self):
+        """Test lower third dashboard UI representation."""
+        lines = self.harness.render_lower_third(
+            items=[{"id": 42, "title": "feat: add omp review mode", "author": "jorge", "ci": "SUCCESS"}],
+            active_index=0,
+            mode="prs",
+            width=80,
+        )
+        self.assertEqual(len(lines), 3)
+        self.assertIn("BLUEFIN PRS QUEUE", lines[0])
+        self.assertIn("#42", lines[1])
+        self.assertIn("[j/k] Navigate", lines[2])
+
+    def test_issues_mode_toggle_and_rendering(self):
+        """Test issues mode in lower third widget."""
+        lines = self.harness.render_lower_third(
+            items=[{"id": 101, "title": "bug: fix crash in rpc mode", "author": "alice"}],
+            active_index=0,
+            mode="issues",
+            width=80,
+        )
+        self.assertIn("BLUEFIN ISSUES QUEUE", lines[0])
+        self.assertIn("#101", lines[1])
+
+    def test_bst_container_recipe_spec(self):
+        """Test BuildStream element configuration schema for omp-review container."""
+        spec = self.harness.bst_element_spec()
+        self.assertEqual(spec["kind"], "oci")
+        self.assertIn("sources", spec)
+        self.assertIn("config", spec)
+        self.assertEqual(spec["config"]["entrypoint"], ["/usr/local/bin/omp-review"])
+
 
 if __name__ == "__main__":
     unittest.main()

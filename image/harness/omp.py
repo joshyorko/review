@@ -7,7 +7,7 @@ import signal
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from tui.review_evidence_manifest import ReviewRequest
 from tui.review_result import ReviewResult, adapt_current_engine
@@ -116,3 +116,43 @@ class OmpHarness:
             },
             markdown=payload.strip(),
         )
+
+    def render_lower_third(self, items: list[dict[str, Any]], active_index: int, mode: str, width: int) -> list[str]:
+        """Render the lower-third dashboard widget mimicking omp status chrome."""
+        mode_label = mode.upper()
+        count = len(items)
+        pos = f"{active_index + 1}/{count}" if count > 0 else "0/0"
+        header = f"── [BLUEFIN {mode_label} QUEUE] ── ({pos}) ─────────────────────────────"[:width]
+        if 0 <= active_index < len(items):
+            current = items[active_index]
+            ci_badge = f"[CI: {current['ci']}] " if "ci" in current else ""
+            item_line = f"  #{current['id']} {ci_badge}{current['title']} (@{current.get('author', 'unknown')})"
+        else:
+            item_line = "  No items in queue"
+        if len(item_line) > width:
+            item_line = item_line[:width - 3] + "..."
+        shortcuts = "  [j/k] Navigate  [r] Review  [a] Approve/Land  [I] Issues Mode  [$] Slay (Fix+Land)"[:width]
+        return [header, item_line, shortcuts]
+
+    def bst_element_spec(self) -> dict[str, Any]:
+        """Return the BuildStream element definition for distributing omp-review."""
+        return {
+            "kind": "oci",
+            "description": "Project Bluefin OMP Review Appliance Container",
+            "sources": [
+                {"kind": "local", "path": "image/extension"},
+                {"kind": "local", "path": "image/harness"},
+            ],
+            "depends": [
+                {"filename": "components/omp.bst"},
+                {"filename": "components/gh-cli.bst"},
+                {"filename": "components/git.bst"},
+            ],
+            "config": {
+                "entrypoint": ["/usr/local/bin/omp-review"],
+                "env": {
+                    "PI_EXTENSIONS": "/opt/bluefin/extensions/bluefin-review.ts",
+                    "BLUEFIN_REVIEW_MODE": "dashboard",
+                },
+            },
+        }
