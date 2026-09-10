@@ -12,6 +12,17 @@ from harness.registry import (
     DraftState,
     HarnessRegistry,
 )
+from tui.re_review import (
+    ClassifiedFinding,
+    DeltaInput,
+    FallbackReason,
+    FindingDisposition,
+    FindingEvidence,
+    H1Evidence,
+    PriorFinding,
+    Region,
+    classify_head_delta,
+)
 from tui.review_evidence_manifest import ReviewRequest
 from tui.review_result import ReviewResult
 
@@ -165,6 +176,36 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertEqual(prompt_frame["type"], "prompt")
         self.assertIn("projectbluefin/review#42", prompt_frame["message"])
         self.assertIn("approve", prompt_frame["message"])
+
+    def test_re_review_prompt_synthesis(self):
+        delta = DeltaInput(
+            reviewed_head_sha=self.binding.head_sha,
+            current_head_sha=self.binding.head_sha,
+            reviewed_merge_base_sha=self.binding.base_sha,
+            current_merge_base_sha=self.binding.base_sha,
+            current_h1_request=self.binding,
+            prior_findings=(PriorFinding("f1", FindingEvidence("src/main.py", 10, 20)),),
+            evidence=(FindingEvidence("src/main.py", 10, 20),),
+            changed_regions=(Region("src/main.py", 15, 18),),
+        )
+        result = classify_head_delta(delta)
+        prompt_frame = self.harness.re_review_prompt(result)
+        self.assertEqual(prompt_frame["type"], "prompt")
+        self.assertEqual(prompt_frame["streamingBehavior"], "steer")
+        self.assertIn(self.binding.head_sha, prompt_frame["message"])
+        self.assertIn("changed-region", prompt_frame["message"])
+
+    def test_queue_pagination(self):
+        items = [{"id": i} for i in range(25)]
+        page0 = self.harness.format_queue_page(items, page=0, per_page=10)
+        self.assertEqual(page0["page"], 0)
+        self.assertEqual(len(page0["items"]), 10)
+        self.assertTrue(page0["has_next"])
+
+        page2 = self.harness.format_queue_page(items, page=2, per_page=10)
+        self.assertEqual(page2["page"], 2)
+        self.assertEqual(len(page2["items"]), 5)
+        self.assertFalse(page2["has_next"])
 
 
 if __name__ == "__main__":

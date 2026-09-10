@@ -154,6 +154,34 @@ class OmpHarness:
             )
         }
 
+    def re_review_prompt(self, delta: Any) -> dict[str, Any]:
+        """Format re-review delta classification into an OMP steer/prompt command."""
+        delta_dict = delta.to_dict() if hasattr(delta, "to_dict") else dict(delta)
+        payload = json.dumps(delta_dict, sort_keys=True, separators=(",", ":"))
+        return {
+            "type": "prompt",
+            "message": (
+                f"Re-review delta update for head {delta.current_head_sha}. "
+                f"Classified findings: {payload}. "
+                "Focus only on changed regions and newly supported findings."
+            ),
+            "streamingBehavior": "steer",
+        }
+
+    def format_queue_page(self, items: list[dict[str, Any]], page: int, per_page: int = 10) -> dict[str, Any]:
+        """Paginate items for OMP extension and RPC consumer consumption."""
+        total = len(items)
+        start = page * per_page
+        end = start + per_page
+        sliced = items[start:end]
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "has_next": end < total,
+            "items": sliced,
+        }
+
     def convert_draft(self, payload: str, request: DraftRequest, exit_code: int = 0) -> DraftResult:
         if exit_code != 0 or not payload.strip():
             return DraftResult(
