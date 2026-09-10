@@ -154,6 +154,18 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertEqual(self.harness.terminal_status(findings_res), 0)
         self.assertEqual(self.harness.terminal_status(failed_res), 23)
 
+    def test_omp_rpc_prompt_synthesis(self):
+        draft_req = DraftRequest(
+            binding=self.binding,
+            verdict="approve",
+            evidence=self.evidence,
+            live_facts={"ci": "success"}
+        )
+        prompt_frame = self.harness.draft_request_to_rpc_prompt(draft_req)
+        self.assertEqual(prompt_frame["type"], "prompt")
+        self.assertIn("projectbluefin/review#42", prompt_frame["message"])
+        self.assertIn("approve", prompt_frame["message"])
+
 
 if __name__ == "__main__":
     unittest.main()
