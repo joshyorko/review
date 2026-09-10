@@ -634,9 +634,9 @@ require_local_podman_engine() {
 resolve_review_backend() {
   REVIEW_BACKEND="${BLUEFIN_REVIEW_BACKEND:-}"
   case "$REVIEW_BACKEND" in
-    ""|goose|codex) return 0 ;;
+    ""|goose|codex|omp) return 0 ;;
     *)
-      echo "ERROR: unsupported review backend '${REVIEW_BACKEND}'; expected goose or codex." >&2
+      echo "ERROR: unsupported review backend '${REVIEW_BACKEND}'; expected goose, codex, or omp." >&2
       return 1
       ;;
   esac
