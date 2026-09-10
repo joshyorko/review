@@ -30,6 +30,28 @@ from tui.review_snapshot import BatchReviewItem, BatchSnapshot
 
 BLUEFIN_REVIEW_DEADLINE_SECONDS = "BLUEFIN_REVIEW_DEADLINE_SECONDS"
 DEFAULT_REVIEW_DEADLINE_SECONDS = 1800.0
+MAX_DIAGNOSTIC_CHARS = 240
+
+
+def _diagnostic_tail(detail: str, limit: int = MAX_DIAGNOSTIC_CHARS) -> str:
+    """The end of a failure, which is the part that names the cause.
+
+    Python prints a traceback oldest-frame first and puts the exception type
+    and message on the LAST line. Truncating from the front kept the runpy
+    frames and threw the cause away, so every crashed receipt was recorded as
+    an identical, unactionable 'Traceback (most recent call last): File
+    "<frozen runpy>"...' with no error in it. Keep the tail instead, and
+    prefer the final non-empty line so the reason survives on its own.
+    """
+    text = (detail or "").strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    lines = [line for line in text.splitlines() if line.strip()]
+    if lines and len(lines[-1]) <= limit:
+        return lines[-1].strip()
+    return "..." + text[-(limit - 3):]
 
 
 class ReviewDeadlineExceeded(RuntimeError):
@@ -390,7 +412,7 @@ class LocalExecutor:
             detail = (stderr or stdout).strip() or (
                 f"receipt exited {process.returncode}"
             )
-            raise RuntimeError(detail[:240])
+            raise RuntimeError(_diagnostic_tail(detail))
         receipt = ReviewReceipt.from_json(stdout.strip())
         return _with_headroom_provenance(
             receipt, headroom_route, headroom_telemetry
@@ -1205,7 +1227,7 @@ class ReviewEngine:
 
     @staticmethod
     def _error_text(error: Exception) -> str:
-        return (str(error) or type(error).__name__)[:240]
+        return _diagnostic_tail(str(error) or type(error).__name__)
 
     def _clear_executor_cancel(self, run: ReviewRun) -> None:
         clear = getattr(self.local_executor, "_clear_cancel", None)

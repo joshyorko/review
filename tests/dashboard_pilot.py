@@ -8501,15 +8501,19 @@ async def main() -> int:
             f"PR lacking human review must reach its own terminal state, distinct from a failed merge, got {no_human_record}",
         )
         check(
-            "no human review" in (stop.failure or "").lower(),
-            f"stop failure must record missing human review, got {stop.failure!r}",
+            "approval" in (stop.failure or "").lower(),
+            f"stop failure must record the missing approval, got {stop.failure!r}",
         )
         check(
-            f"[$] {stop.key}: landing blocked — GitHub has no qualifying human review. "
-            f"{stop.repository} requires a human review; leave one with [L], "
-            "then re-run [$]; no merge was attempted."
-            in notices,
-            "missing human review must explain the qualifying action and safe retry",
+            any(
+                message.startswith(f"[$] {stop.key}: landing blocked —")
+                and "approval" in message
+                and "[L]" in message
+                and "No merge was attempted." in message
+                for message in notices
+            ),
+            "missing approval must name the shortfall, the qualifying action, "
+            f"and the safe retry; got {notices!r}",
         )
         stop.repository = "projectbluefin/bluefinctl"
 

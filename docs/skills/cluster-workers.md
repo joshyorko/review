@@ -7,8 +7,8 @@ one_line_purpose: Scale out review contributor workers across Kubernetes cluster
 entry_point: docs/skills/cluster-workers.md
 category: ci-ops
 status: active
-tags: [kubernetes, cluster, scale, workers, turbo]
-description: "Manages cluster contributor workers in bluefin-system, secret synchronization, and turbo-review orchestration. Use when scaling workers or operating review-contributor on Kubernetes."
+tags: [kubernetes, cluster, scale, workers]
+description: "Manages cluster contributor workers in bluefin-system and secret synchronization. Use when scaling workers or operating review-contributor on Kubernetes."
 metadata:
   type: procedure
   context7-sources: [/websites/kubernetes_io, /websites/podman_io_en]
@@ -22,7 +22,7 @@ metadata:
 ## When to Use
 
 Load this when scaling cluster contributors, modifying `deploy/review-contributor.yaml`,
-configuring `review-contributor-secret`, or running `just turbo-review`.
+or configuring `review-contributor-secret`.
 
 ## When Not to Use
 
@@ -33,8 +33,6 @@ dashboard navigation (`review-dashboard.md`).
 
 ```bash
 just review-container cluster 3     # scale 3 cluster workers
-just turbo-review                   # scale 3 workers and open dashboard
-just turbo-review sol               # scale with Sol profile + dashboard
 just review-stop cluster            # scale workers to 0
 just review-doctor                  # check cluster deployment health
 ```

@@ -2,9 +2,8 @@
 
 `review` is the Bluefin review appliance: one OCI image fork and a launcher.
 The `review-container` and `review-queue` recipes run the restored Goose/Hive
-worker and maintainer dashboard; `turbo-review` scales cluster workers before
-opening that dashboard. Review owns the image, publication, launcher credential
-handoff, and review context; Hive owns its contributor protocol, task
+worker and maintainer dashboard. Review owns the image, publication, launcher
+credential handoff, and review context; Hive owns its contributor protocol, task
 selection, tmux session, prompt injection, and output capture.
 
 ## Read order
@@ -70,18 +69,12 @@ Bluefin catalog, or installed from `skills.sh` and other compatible open
 catalogs, belong under `~/.agents/skills/` for interactive contributor sessions
 and do not become review checks automatically. See [`docs/skills/review-checks.md`](docs/skills/review-checks.md).
 
-`just turbo-review` requests three Hive contributor workers by default, then
-runs the maintainer dashboard in the foreground. The cluster workers process
-their own Hive assignments; they do not replace, select, or submit the human's
-review.
-`just turbo-review *args` forwards the same profile, effort, repository, and
-dashboard arguments accepted by `review-queue`:
-
-```bash
-just turbo-review
-just turbo-review sol
-just turbo-review projectbluefin/review
-```
+Opening the maintainer dashboard never starts a contributor worker. Scaling
+cluster workers is an explicit, separate choice — `just review-container
+cluster [N]` — and they are stopped with `just review-stop cluster`. A worker
+claims Hive assignments under the contributor's own identity and books hub-side
+failure cooldowns against their standing when it cannot run, so a surface whose
+purpose is reviewing must never scale one as a side effect.
 
 Static queue snapshots are an antipattern: never create or consume a static
 queue artifact to understand pull-request status, queues, or review state. We

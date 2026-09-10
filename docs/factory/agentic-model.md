@@ -162,6 +162,9 @@ Keep the model executable and compact:
    append-only status documents. They are historical noise, not the model.
 5. Use the pinned `projectbluefin/common` catalog as a shared sidecar after
    local documentation; it complements but does not override local authority.
+   Its [factory onboarding sequence][common-onboarding] is the shared entry
+   procedure and self-repair loop; follow it there rather than restating it
+   here.
 
 ## Verification
 
@@ -179,3 +182,4 @@ pre-commit run --all-files
 ```
 
 [common-model]: https://github.com/projectbluefin/common/blob/main/docs/factory/agentic-model.md
+[common-onboarding]: https://github.com/projectbluefin/common/blob/main/docs/skills/factory-onboarding.md

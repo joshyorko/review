@@ -101,9 +101,10 @@ TOOL=codex just review-container         # Codex contributor worker
 Keep the launching terminal open. **Ctrl-C stops the attended worker.**
 Detached contributor containers are unsupported (`REVIEW_DETACH=1` is rejected).
 
-Kubernetes users can scale workers with `just turbo-review` and stop them with
-`just review-stop cluster`. Start with the [cluster guide](docs/skills/cluster-workers.md);
-a cluster is not required for the ordinary dashboard.
+Kubernetes users can scale workers with `just review-container cluster [N]` and
+stop them with `just review-stop cluster`. Start with the
+[cluster guide](docs/skills/cluster-workers.md); a cluster is not required for
+the ordinary dashboard, and opening the dashboard never starts a worker.
 
 ## Guides
 

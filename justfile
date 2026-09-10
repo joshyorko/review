@@ -29,9 +29,6 @@
 #                     review-container, then passes the rest through to
 #                     the dashboard, e.g.
 #                     'just review-queue k3 high --repo bluefin'.
-#   turbo-review      Scale three cluster contributor workers, then launch
-#                     review-queue in the foreground with all arguments
-#                     forwarded.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # LIFECYCLE
@@ -1750,72 +1747,6 @@ review-queue *queue_args:
     fi
     echo "  q or Ctrl-C stops; the dashboard is the only thing running."
     "${CONTAINER_ARGS[@]}"
-
-# Scale 3 cluster workers and open the maintainer review dashboard in the foreground.
-# Workers continue running in the cluster after the dashboard exits.
-#
-#   just turbo-review                      # default gemini profile, 3 cluster workers
-#   just turbo-review sol                  # sol profile, 3 cluster workers
-#   just turbo-review projectbluefin/review # live review of one repository
-[doc("Scale 3 cluster workers and open the maintainer review dashboard.")]
-turbo-review *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    {{shared_functions}}
-    TOOL="{{tool_env}}"
-    GEMINI_MODEL="{{gemini_model}}"
-    OPUS_MODEL="{{opus_model}}"
-    OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
-    SOL_MODEL="{{sol_model}}"
-    K3_MODEL="{{k3_model}}"
-    K3_CONTEXT_LIMIT="{{k3_context_limit}}"
-
-    replicas="${REVIEW_SCALE:-3}"
-    profile="gemini"
-    effort=""
-    CLUSTER_HIVE_HUB=""
-    # Leading non-flag arguments are the model profile and thinking effort,
-    # exactly as review-queue takes them. Keep "$@" intact for the dashboard.
-    # shellcheck disable=SC2086
-    set -- {{args}}
-    if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then
-      profile="$1"
-      if [[ $# -gt 1 && "$2" != -* && "$2" != */* ]]; then effort="$2"; fi
-    fi
-
-    echo "=== Launching review turbo ==="
-    if command -v kubectl &>/dev/null && [[ -n "$(kubectl config current-context 2>/dev/null || true)" ]]; then
-      echo "✓ scaling ${replicas} cluster contributor workers in bluefin-system..."
-      scale_cluster_contributors "$replicas" "$profile" "$effort" || {
-        echo "! cluster worker scale-out failed; continuing with local review dashboard." >&2
-      }
-      if [[ -n "$CLUSTER_HIVE_HUB" ]]; then
-        export HIVE_HUB="$CLUSTER_HIVE_HUB"
-      fi
-    else
-      echo "! no active Kubernetes context found; continuing with local review dashboard only." >&2
-    fi
-
-    report_cluster_exit_status() {
-      echo ""
-      echo "=== Cluster contributor status ==="
-      if ! command -v kubectl &>/dev/null; then
-        echo "! kubectl is unavailable; cluster contributor status was not checked."
-      elif ! kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
-        echo "! unable to read cluster contributor status in bluefin-system."
-      else
-        ready="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
-        total="$(kubectl get deployment review-contributor -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
-        echo "✓ ${ready:-0}/${total:-0} cluster contributor workers active in bluefin-system."
-      fi
-      echo "  Stop workers: just review-stop cluster"
-      echo "  Check health: just review-doctor"
-    }
-    trap report_cluster_exit_status EXIT
-
-    echo "✓ starting maintainer review dashboard in foreground..."
-    # Execute review-queue as a child process to isolate environment variables and traps.
-    just review-queue "$@"
 
 # Preflight check: is this machine actually ready for 'just review-container'?
 # Starts no agent and mounts no credential.

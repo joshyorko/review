@@ -717,8 +717,12 @@ Execute the following end-to-end loop:
    gh pr checkout {number} --repo {repository}
    Keep changes surgical, minimal (Ponytail doctrine), and scoped strictly to the reported defects.
    Run existing project tests and linters to verify the fix works and introduces no regressions.
-   Commit and push the fixes to the pull request branch:
-   git push origin HEAD
+   Commit and push the fixes to the pull request branch with a bare `git push`.
+   Most contributor pull requests come from a fork, and `gh pr checkout` has
+   already pointed `branch.<name>.pushRemote` at that fork. Naming a remote
+   overrides it and pushes to the base repository instead, which creates a
+   stray branch and leaves the pull request unchanged:
+   git push
    cd / && rm -rf "$WORKDIR"
 
 3. Wait for CI checks to turn green:
@@ -920,7 +924,10 @@ For each pull request, in order:
 2. Repair mechanical CI failures only — a stale sha256 after a version bump,
    a lockfile, formatting. If applying fixes, operate in a scratch workdir:
    `WORKDIR=$(mktemp -d /tmp/landing-XXXXXX) && gh repo clone <owner>/<repo> "$WORKDIR" && cd "$WORKDIR" && gh pr checkout <number> --repo <owner>/<repo>`.
-   Push the fix to the PR branch when you have permission: `git push origin HEAD`, then clean up.
+   Push the fix with a bare `git push` when you have permission, then clean up.
+   Most contributor pull requests come from a fork and `gh pr checkout` already
+   set `branch.<name>.pushRemote` to it; naming a remote pushes to the base
+   repository instead and leaves the pull request untouched.
    Never rewrite the PR's purpose.
    3. Rerun flaky checks: before invoking `gh run rerun <id> --failed --repo <owner>/<repo>`,
    verify that the run status is completed with `gh run view <id> --repo <owner>/<repo> --json status,conclusion`.
@@ -932,9 +939,18 @@ For each pull request, in order:
    timeout as a failure or rerun an active run.
    Wait for completion with `gh run watch <id> --repo <owner>/<repo> --exit-status`. If watch times out
    while the run is still active, continue watching rather than treating the timeout as failure.
-4. When checks are green and the PR is mergeable, approve it:
+4. When checks are green and the pull request is mergeable, approve it:
    `gh pr review <number> --repo <owner>/<repo> --approve --body "Approved by @{task.login} for Hive auto-merge on green CI."`
-   then squash-merge: `gh pr merge <number> --repo <owner>/<repo> --squash`.
+   Then land it the way the repository is configured, which you must read
+   rather than assume:
+   `gh api repos/<owner>/<repo>/rulesets --jq '.[].id'`, then for each id
+   `gh api repos/<owner>/<repo>/rulesets/<id> --jq '.rules[] | select(.type=="merge_queue" or .type=="pull_request")'`.
+   If an active ruleset carries a `merge_queue` rule, the branch is served by a
+   merge queue: enqueue with `gh pr merge <number> --repo <owner>/<repo> --auto`
+   and report the pull request as queued. Do not pass a merge-method flag that
+   contradicts the queue's own `merge_method`, and never bypass the queue with a
+   direct merge. Only when no merge queue applies, merge directly using a method
+   the ruleset's `allowed_merge_methods` permits.
    Never approve or merge a pull request authored by @{task.login}: Bluefin
    policy requires review by a different contributor, so an own-authored
    pull request in this batch is reported `blocked` with the note

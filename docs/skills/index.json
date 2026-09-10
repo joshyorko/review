@@ -13,10 +13,9 @@
         "kubernetes",
         "cluster",
         "scale",
-        "workers",
-        "turbo"
+        "workers"
       ],
-      "description": "Manages cluster contributor workers in bluefin-system, secret synchronization, and turbo-review orchestration. Use when scaling workers or operating review-contributor on Kubernetes.",
+      "description": "Manages cluster contributor workers in bluefin-system and secret synchronization. Use when scaling workers or operating review-contributor on Kubernetes.",
       "version": "1.1",
       "last_updated": "2026-09-07",
       "doc_type": "procedure"

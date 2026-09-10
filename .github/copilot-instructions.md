@@ -25,7 +25,6 @@ only for the image's pinned `ws` dependency; this is not a Node application.
 | Contribute one local Hive worker | `just review-container` | Hive selects and assigns tasks. |
 | Scale cluster contributors | `just review-container cluster [N]` | Workers are separate from the maintainer dashboard. |
 | Review live pull requests | `just review-queue [profile] [effort] [flags...]` | Foreground maintainer dashboard; it does not register with Hive. |
-| Scale the default three cluster workers and open the local dashboard in one foreground command | `just turbo-review [profile] [effort] [flags...]` | Forward dashboard arguments after scale-out; do not require the user to combine worker and dashboard commands. |
 | Stop deliberately detached local workers or cluster workers | `just review-stop [name\|cluster]` | Use the explicit lifecycle command. |
 | Diagnose launch readiness | `just review-doctor` | Read-only preflight; starts no agent. |
 

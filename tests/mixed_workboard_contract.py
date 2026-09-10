@@ -106,36 +106,47 @@ class MixedWorkboardContractTests(unittest.TestCase):
             ["-", "+", "p"],
         )
 
-    def test_only_named_repositories_block_missing_human_review(self) -> None:
-        for repository in (
-            "projectbluefin/common",
-            "projectbluefin/bluefin",
-            "projectbluefin/bluefin-lts",
-            "projectbluefin/dakota",
+    def test_review_requirement_follows_the_repository_ruleset(self) -> None:
+        """The gate obeys GitHub's declared approval count, not a local list.
+
+        A repository allowlist in this codebase let any repository missing from
+        it land with no review at all, and drifted from the ruleset the moment
+        either side changed. What blocks a row is the repository's own
+        required_approving_review_count.
+        """
+        stop = lambda repository: tui.Stop(
+            repository,
+            1,
+            "review",
+            "one",
+            failure="landing refused: no human review on GitHub",
+        )
+        with mock.patch.object(
+            tui, "repo_review_policy", return_value={"approvals": 2, "code_owners": False,
+                                                     "last_push_approval": False,
+                                                     "merge_queue": False, "source": "ruleset"}
         ):
             self.assertEqual(
-                tui.classify_routability(
-                    tui.Stop(
-                        repository,
-                        1,
-                        "review",
-                        "one",
-                        failure="landing refused: no human review on GitHub",
-                    )
-                ),
+                tui.classify_routability(stop("projectbluefin/documentation")),
                 "human review required",
             )
-        self.assertIsNone(
-            tui.classify_routability(
-                tui.Stop(
-                    "projectbluefin/documentation",
-                    1,
-                    "review",
-                    "one",
-                    failure="landing refused: no human review on GitHub",
-                )
+        with mock.patch.object(
+            tui, "repo_review_policy", return_value={"approvals": 0, "code_owners": False,
+                                                     "last_push_approval": False,
+                                                     "merge_queue": False, "source": "ruleset"}
+        ):
+            self.assertIsNone(
+                tui.classify_routability(stop("projectbluefin/documentation"))
             )
-        )
+
+    def test_review_policy_survives_an_unreadable_ruleset(self) -> None:
+        """An unreadable ruleset requires review; it never opens the gate."""
+        tui._REVIEW_POLICY_CACHE.clear()
+        with mock.patch.object(tui, "gh", return_value=True):
+            policy = tui.repo_review_policy("acme/unreadable")
+        self.assertEqual(policy["source"], "fallback")
+        self.assertGreater(policy["approvals"], 0)
+        tui._REVIEW_POLICY_CACHE.clear()
 
     def test_multi_pr_slay_confirmation_uses_one_word(self) -> None:
         gate = tui.SlayConfirmScreen([

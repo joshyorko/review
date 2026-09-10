@@ -1281,15 +1281,14 @@ for failure_spec in \
   "deployment env update|FAKE_KUBECTL_SET_ENV_FAIL=1|scale deployment/review-contributor" \
   "deployment scale|FAKE_KUBECTL_SCALE_FAIL=1|rollout status deployment/review-contributor"; do
   IFS='|' read -r mutation_label failure_flag blocked_command <<<"$failure_spec"
-  begin "turbo-review: ${mutation_label} failure aborts cluster mutation sequence"
+  begin "review-container cluster: ${mutation_label} failure aborts cluster mutation sequence"
   reset_logs
-  RECIPE_ARGS=(--all)
-  run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
-    FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0 \
+  RECIPE_ARGS=(cluster)
+  run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+    FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token \
     "$failure_flag"
-  assert_contains "cluster worker scale-out failed; continuing with local review dashboard" "$OUT"
+  assert_nonzero_status "$STATUS" "a failed cluster mutation must fail scale-out"
   assert_file_not_contains "$blocked_command" "$kubectl_log"
-  assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
 done
 
 begin "review-container cluster: rollout timeout warns after 15 seconds"
@@ -1300,86 +1299,6 @@ run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
 assert_zero_status "$STATUS" "rollout observation timeout must not fail cluster scale-out"
 assert_file_contains "rollout status deployment/review-contributor -n bluefin-system --timeout=15s" "$kubectl_log"
 assert_contains "! rollout still progressing after 15s; workers will continue pulling/starting in background." "$OUT"
-
-begin "turbo-review: a leading profile configures cluster and dashboard"
-reset_logs
-RECIPE_ARGS=(sol)
-run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
-  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
-assert_nonzero_status "$STATUS" "the fake dashboard runner always exits non-zero"
-assert_file_contains "scale deployment/review-contributor -n bluefin-system --replicas=3" "$kubectl_log"
-assert_file_contains "GOOSE_MODEL=gpt-5.6-sol" "$kubectl_log"
-assert_file_contains "GOOSE_THINKING_EFFORT=medium" "$kubectl_log"
-assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
-assert_file_contains " queue" "$runner_log"
-assert_contains "3/3 cluster contributor workers active in bluefin-system" "$OUT"
-assert_contains "Stop workers: just review-stop cluster" "$OUT"
-assert_contains "Check health: just review-doctor" "$OUT"
-
-begin "turbo-review: explicit effort and dashboard flags stay intact"
-reset_logs
-RECIPE_ARGS=(k3 low --repo bluefin)
-run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
-  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
-assert_file_contains "GOOSE_MODEL=kimi-k3" "$kubectl_log"
-assert_file_contains "GOOSE_THINKING_EFFORT=low" "$kubectl_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=low" "$runner_log"
-assert_file_contains "queue --repo bluefin" "$runner_log"
-
-begin "turbo-review: a repository argument keeps the cluster default"
-reset_logs
-RECIPE_ARGS=(projectbluefin/review)
-run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
-  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
-assert_file_contains "GOOSE_MODEL=gemini-3.8-flash" "$kubectl_log"
-assert_file_contains "GOOSE_THINKING_EFFORT=max" "$kubectl_log"
-assert_file_contains "queue --live-repo projectbluefin/review" "$runner_log"
-
-begin "turbo-review: flags first keep the cluster default"
-reset_logs
-RECIPE_ARGS=(--repo bluefin)
-run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
-  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
-assert_file_contains "GOOSE_MODEL=gemini-3.8-flash" "$kubectl_log"
-assert_file_contains "GOOSE_THINKING_EFFORT=max" "$kubectl_log"
-assert_file_contains "queue --repo bluefin" "$runner_log"
-
-begin "turbo-review: dashboard inherits the hub resolved for cluster workers"
-reset_logs
-RECIPE_ARGS=(--all)
-run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
-  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0 \
-  FAKE_KUBECTL_REWRITE_HIVE_HUB=wss://changed.invalid/contribute
-assert_file_contains "HIVE_HUB=wss://example.invalid/contribute" "$kubectl_log"
-assert_file_contains "--env HIVE_HUB=wss://example.invalid/contribute" "$runner_log"
-assert_file_not_contains "HIVE_HUB=wss://changed.invalid/contribute" "$runner_log"
-sed -i 's|^HIVE_HUB=.*|HIVE_HUB=wss://example.invalid/contribute|' \
-  "$home/.config/hive/contributor.env"
-
-begin "turbo-review: failed exit status check is reported"
-reset_logs
-RECIPE_ARGS=(--all)
-run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
-  FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0 \
-  FAKE_KUBECTL_DEPLOYMENT_GET_FAIL=1
-assert_contains "unable to read cluster contributor status in bluefin-system" "$OUT"
-assert_contains "Stop workers: just review-stop cluster" "$OUT"
-assert_contains "Check health: just review-doctor" "$OUT"
-
-begin "turbo-review: missing kubectl warns and still launches the dashboard"
-reset_logs
-remove_fake_kubectl
-RECIPE_ARGS=(--all)
-run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token REVIEW_LAB=0
-assert_nonzero_status "$STATUS" "the fake dashboard runner always exits non-zero"
-assert_contains "no active Kubernetes context found" "$OUT"
-assert_contains "kubectl is unavailable; cluster contributor status was not checked" "$OUT"
-assert_contains "Stop workers: just review-stop cluster" "$OUT"
-assert_contains "Check health: just review-doctor" "$OUT"
-assert_file_contains "run --rm --interactive --tty --replace --name review-queue" "$runner_log"
-assert_file_contains "queue --all" "$runner_log"
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
 reset_logs
@@ -2225,11 +2144,12 @@ if grep -nE '^review-(start|restart|kill|clean|down|up)[ :]' "$code"; then
   fail "no resurrection or force verbs: stop is the only lifecycle command"
 fi
 # The recipe list is exactly: launch foreground or unattended contributors,
-# stop a detached worker, diagnose, walk the PR queue, and scale workers.
-grep -qE '^turbo-review[ :]' "$code" ||
-  fail "turbo-review must exist as the worker scale-out plus dashboard recipe"
-assert_eq "$(grep -cE '^(contribute|review[a-z-]*|turbo-review)[ :]' "$code")" 6 \
-  "expected exactly six recipes (contribute, review-container, -stop, -doctor, -queue, turbo-review)"
+# stop a detached worker, diagnose, and walk the PR queue.
+if grep -qE '^turbo-review[ :]' "$code"; then
+  fail "turbo-review is removed: scaling workers is an explicit 'review-container cluster' choice, never a side effect of opening the dashboard"
+fi
+assert_eq "$(grep -cE '^(contribute|review[a-z-]*)[ :]' "$code")" 5 \
+  "expected exactly five recipes (contribute, review-container, -stop, -doctor, -queue)"
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private
@@ -2325,29 +2245,6 @@ if grep -nE 'rm -rf|rm -r' <<<"$cleanup_func"; then
 fi
 grep -q 'rmdir' <<<"$cleanup_func" ||
   fail "remote Hive cleanup must use rmdir for the private directory"
-
-begin "static: turbo-review initializes models and forwards arguments through positional parameters"
-turbo_body="$(sed -n '/^turbo-review \*args:/,/^# Preflight check:/p' "$code")"
-for assignment in \
-  'TOOL="{{tool_env}}"' \
-  'GEMINI_MODEL="{{gemini_model}}"' \
-  'OPUS_MODEL="{{opus_model}}"' \
-  'OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"' \
-  'SOL_MODEL="{{sol_model}}"' \
-  'K3_MODEL="{{k3_model}}"' \
-  'K3_CONTEXT_LIMIT="{{k3_context_limit}}"'; do
-  grep -Fq "$assignment" <<<"$turbo_body" ||
-    fail "turbo-review must initialize ${assignment%%=*}"
-done
-grep -Fq 'set -- {{args}}' <<<"$turbo_body" ||
-  fail "turbo-review must establish positional arguments before parsing"
-grep -Fq 'just review-queue "$@"' <<<"$turbo_body" ||
-  fail "turbo-review must forward dashboard arguments through the positional array"
-grep -Fq "export HIVE_HUB=\"\$CLUSTER_HIVE_HUB\"" <<<"$turbo_body" ||
-  fail "turbo-review must export the cluster-resolved Hive hub to review-queue"
-if grep -Fq 'just review-queue {{args}}' <<<"$turbo_body"; then
-  fail "turbo-review must not render arguments directly into the review-queue command"
-fi
 
 begin "static: nothing here filters the work Hive assigns"
 # Hive's selectTask is the sole authority on what gets worked on: the hub's

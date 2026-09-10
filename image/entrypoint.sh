@@ -149,6 +149,28 @@ fi
 # so the first checkout of a freshly forked repository just works.
 git config --global checkout.defaultRemote origin || true
 
+# The dashboard path never runs contributor-agent.sh, which is where Hive sets
+# user.name and user.email. Without them `git commit` aborts with "Author
+# identity unknown", so every fix, issue, and landing agent this surface
+# dispatches dies the moment it tries to commit. Derive the identity from the
+# same credential the agent already acts with, so a commit is attributable to
+# the human whose token authorised it. The numeric-id noreply form is the one
+# GitHub links back to the account; the bare login form does not on accounts
+# created after 2017, and an unattributable commit additionally trips the
+# require_extra_approval_for_unattributed_changes rule on every projectbluefin
+# ruleset. Never overwrite an identity that is already set.
+if [ -n "${GH_TOKEN:-}" ] && ! git config --global --get user.email >/dev/null 2>&1; then
+  gh_identity="$(gh api user --jq '[.login, .id] | @tsv' 2>/dev/null || true)"
+  if [ -n "$gh_identity" ]; then
+    gh_login="${gh_identity%%	*}"
+    gh_uid="${gh_identity##*	}"
+    git config --global user.name "$gh_login" || true
+    git config --global user.email "${gh_uid}+${gh_login}@users.noreply.github.com" || true
+  else
+    note 'GitHub identity lookup failed; git commits would abort with "Author identity unknown".'
+  fi
+fi
+
 skills_root="${HOME}/.agents/skills"
 if [ -d "$skills_root" ]; then
   shopt -s nullglob

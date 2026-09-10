@@ -36,7 +36,7 @@ Goose, or image build skill documents.
 
 ## Core Process
 
-1. Keep exactly six public recipes:
+1. Keep exactly five public recipes:
 
    | Recipe | Purpose |
    |---|---|
@@ -45,7 +45,6 @@ Goose, or image build skill documents.
    | `review-stop` | Stop cluster contributor workers; refuses attended runs and unlabeled containers. |
    | `review-doctor` | Perform read-only preflight checks. |
    | `review-queue` | Walk the live PR queue in the container; no Hive registration is mounted, but the selected hub URL is passed when configured. |
-   | `turbo-review` | Scale three cluster contributor workers by default, then forward its arguments to the foreground `review-queue` dashboard. |
 
    `just` reads only this directory's justfile; use a `~/.local/bin` shim elsewhere.
 
@@ -94,9 +93,10 @@ launch. Hive selects tasks; the launcher never filters or skips assignments.
 
 ## Cluster Contributor Scale-Out
 
-`just review-container cluster [N]` and `just turbo-review *args` scale out
-unattended contributor workers across Kubernetes. See
-[`cluster-workers.md`](cluster-workers.md) for secrets and orchestration.
+`just review-container cluster [N]` scales out unattended contributor workers
+across Kubernetes. It is always an explicit choice: no dashboard recipe starts a
+worker. See [`cluster-workers.md`](cluster-workers.md) for secrets and
+orchestration.
 
 ## Kubernetes Dashboard Sessions
 

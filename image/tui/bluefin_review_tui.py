@@ -1792,12 +1792,90 @@ REVIEW_FAILURES = {
     "review_unparsable",
 }
 
-HUMAN_REVIEW_REPOSITORIES = frozenset({
-    "projectbluefin/common",
-    "projectbluefin/bluefin",
-    "projectbluefin/bluefin-lts",
-    "projectbluefin/dakota",
-})
+# How many approvals a pull request needs, and who may skip them, is declared
+# by the repository's own GitHub ruleset. A list here duplicated that
+# declaration, drifted from it the moment either side changed, and silently
+# let repositories absent from the list land with no review at all. Read the
+# ruleset instead and obey what it says.
+_REVIEW_POLICY_CACHE: dict[str, dict] = {}
+_REVIEW_POLICY_LOCK = threading.Lock()
+DEFAULT_REQUIRED_APPROVALS = 1
+
+
+def repo_review_policy(repository: str) -> dict:
+    """The repository's live merge requirements, cached for the session.
+
+    Returns the approval count, whether a code-owner review is required,
+    whether the last pusher is barred from approving, and whether the branch
+    is served by a merge queue. An unreadable ruleset is not permission to
+    land unreviewed: it falls back to requiring an approval.
+    """
+    key = repository.casefold()
+    with _REVIEW_POLICY_LOCK:
+        cached = _REVIEW_POLICY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    policy = {
+        "approvals": DEFAULT_REQUIRED_APPROVALS,
+        "code_owners": False,
+        "last_push_approval": False,
+        "merge_queue": False,
+        "source": "fallback",
+    }
+
+    def _payload(result) -> object:
+        """Decode a gh result, tolerating a stub that is not a real process."""
+        if getattr(result, "returncode", 1) != 0:
+            return None
+        raw = getattr(result, "stdout", "")
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        return json.loads(raw)
+
+    try:
+        entries = _payload(gh("api", f"repos/{repository}/rulesets", timeout=20))
+        if isinstance(entries, list):
+            approvals = 0
+            seen = False
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("target") != "branch":
+                    continue
+                ruleset = _payload(
+                    gh("api", f"repos/{repository}/rulesets/{entry['id']}", timeout=20)
+                )
+                if not isinstance(ruleset, dict):
+                    continue
+                if ruleset.get("enforcement") != "active":
+                    continue
+                for rule in ruleset.get("rules") or []:
+                    if not isinstance(rule, dict):
+                        continue
+                    if rule.get("type") == "merge_queue":
+                        policy["merge_queue"] = True
+                    if rule.get("type") != "pull_request":
+                        continue
+                    seen = True
+                    parameters = rule.get("parameters") or {}
+                    approvals = max(
+                        approvals,
+                        int(parameters.get("required_approving_review_count") or 0),
+                    )
+                    policy["code_owners"] = policy["code_owners"] or bool(
+                        parameters.get("require_code_owner_review")
+                    )
+                    policy["last_push_approval"] = policy["last_push_approval"] or bool(
+                        parameters.get("require_last_push_approval")
+                    )
+            if seen:
+                policy["approvals"] = approvals
+                policy["source"] = "ruleset"
+    except (OSError, ValueError, TypeError, AttributeError, KeyError,
+            subprocess.TimeoutExpired):
+        pass
+    with _REVIEW_POLICY_LOCK:
+        _REVIEW_POLICY_CACHE[key] = policy
+    return policy
+
 
 QUEUE_STATE_RANK = {
     "failed": 0,
@@ -1810,7 +1888,7 @@ QUEUE_STATE_RANK = {
 
 
 def requires_human_review(repository: str) -> bool:
-    return repository.casefold() in HUMAN_REVIEW_REPOSITORIES
+    return repo_review_policy(repository)["approvals"] > 0
 
 
 def classify_routability(stop: Stop, record: RunRecord | None = None) -> str | None:
@@ -4751,12 +4829,20 @@ class ReviewDashboard(App):
             or lowered in {"goose", "github-actions", "copilot"}
         )
 
-    def has_human_review(self, live: dict) -> bool:
+    @staticmethod
+    def human_approvals(live: dict) -> set[str]:
+        """Distinct human logins whose current verdict on this head is APPROVED.
+
+        Only an approval counts toward a merge requirement. A comment is not a
+        verdict and CHANGES_REQUESTED is the opposite of one, so neither may
+        satisfy the ruleset's approval count.
+        """
         reviews = live.get("reviews") or []
         if isinstance(reviews, dict):
             reviews = reviews.get("nodes", [])
         if not isinstance(reviews, list):
-            return False
+            return set()
+        approved: set[str] = set()
         for review in reviews:
             if not isinstance(review, dict):
                 continue
@@ -4766,12 +4852,25 @@ class ReviewDashboard(App):
                 if isinstance(author, dict)
                 else (author if isinstance(author, str) else "")
             )
-            if not login or self.is_bot_login(login):
+            if not login or ReviewDashboard.is_bot_login(login):
                 continue
             state = str(review.get("state") or "").upper()
-            if state in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}:
-                return True
-        return False
+            if state == "APPROVED":
+                approved.add(login)
+            elif state == "CHANGES_REQUESTED":
+                approved.discard(login)
+        return approved
+
+    def has_human_review(self, live: dict, repository: str = "") -> bool:
+        """Whether GitHub already carries the approvals this repository needs."""
+        required = (
+            repo_review_policy(repository)["approvals"]
+            if repository
+            else DEFAULT_REQUIRED_APPROVALS
+        )
+        if required <= 0:
+            return True
+        return len(self.human_approvals(live)) >= required
 
     def stop_lacks_my_review(self, stop: Stop) -> bool:
         if stop.is_issue or not self.self_login:
@@ -8778,26 +8877,52 @@ class ReviewDashboard(App):
         # Transition to MUTATING before gate checks
         self.run_store.transition(identity, RunState.MUTATING, low_risk=low_risk)
 
-        # Human review invariant at the landing gate (#414)
-        if (
-            requires_human_review(stop.repository)
-            and not self.has_human_review(live_data)
-        ):
+        # Landing gate: GitHub's own declared approval requirement (#414).
+        review_policy = repo_review_policy(stop.repository)
+        required_approvals = review_policy["approvals"]
+        approvals = self.human_approvals(live_data)
+        if required_approvals > 0 and len(approvals) < required_approvals:
+            shortfall = (
+                f"{len(approvals)}/{required_approvals} approvals"
+                if required_approvals > 1
+                else "no human approval"
+            )
             self.run_store.transition(
                 identity,
                 RunState.HUMAN_REVIEW_MISSING,
-                reason="no human review on GitHub",
+                reason=f"{shortfall} on GitHub",
             )
-            stop.failure = "landing refused: no human review on GitHub"
+            stop.failure = f"landing refused: {shortfall} on GitHub"
             stop.failure_command = "landing gate"
             self.notify(
-                f"[$] {stop.key}: landing blocked — GitHub has no qualifying human review. "
-                f"{stop.repository} requires a human review; leave one with [L], "
-                "then re-run [$]; no merge was attempted.",
+                f"[$] {stop.key}: landing blocked — {shortfall}. "
+                f"{stop.repository} requires {required_approvals}. "
+                "Leave yours with [L]; another maintainer supplies the rest. "
+                "No merge was attempted.",
                 severity="error",
             )
             self.refresh_rows()
             return
+        if review_policy["last_push_approval"] and self.self_login in approvals:
+            # require_last_push_approval: pushing invalidates the pusher's own
+            # approval, so a fixer that pushed under this account cannot also
+            # be counted toward the requirement.
+            if self.is_fixer_head(stop.repository, stop.number, stop.head_sha):
+                self.run_store.transition(
+                    identity,
+                    RunState.HUMAN_REVIEW_MISSING,
+                    reason="own push invalidates own approval",
+                )
+                stop.failure = "landing refused: our push invalidated our approval"
+                stop.failure_command = "landing gate"
+                self.notify(
+                    f"[$] {stop.key}: landing blocked — {stop.repository} sets "
+                    "require_last_push_approval and we pushed the head, so our "
+                    "approval no longer counts. Another maintainer must approve.",
+                    severity="error",
+                )
+                self.refresh_rows()
+                return
 
         # Permissions check
         try:
