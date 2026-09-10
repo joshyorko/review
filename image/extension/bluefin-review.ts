@@ -1,11 +1,16 @@
 /**
  * Project Bluefin Review Extension for Oh My Pi (omp).
  *
- * Implements:
- * 1. Dedicated Review Mode (`/review [pr_number]` or shortcut `r`)
- * 2. Dedicated Issues Mode (`/issues` or shortcut `I`)
- * 3. Lower-Third TUI dashboard widget showing live PR queue & issue stats
- * 4. Keyboard shortcuts for quick implement, review, approve, and landing
+ * Keyboard shortcuts only — no slash commands:
+ *   Alt+J / Alt+N : Next queue item
+ *   Alt+K / Alt+P : Previous queue item
+ *   Alt+I         : Toggle PRs / Issues mode
+ *   Alt+R         : Start review of selected PR
+ *   Alt+D         : Inspect diff of selected PR
+ *   Alt+A         : Approve and queue selected PR for landing
+ *   Alt+S         : Slay (automated review + fix + test + squash merge)
+ *   Alt+F         : Fix reported review findings
+ *   Alt+B         : Trigger container snapshot build
  */
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -78,7 +83,7 @@ export class ReviewQueueState {
     const pos = count > 0 ? `${this.currentIndex + 1}/${count}` : "0/0";
 
     const header = `── [BLUEFIN ${modeLabel} QUEUE] ── (${pos}) ─────────────────────────────`.slice(0, width);
-    let itemLine = "  No items in queue";
+    let itemLine = "  No items in queue (fetching from GitHub...)";
     if (current) {
       const ciBadge = current.ciStatus ? `[CI: ${current.ciStatus.toUpperCase()}] ` : "";
       itemLine = `  #${current.id} ${ciBadge}${current.title} (@${current.author})`;
@@ -86,7 +91,7 @@ export class ReviewQueueState {
         itemLine = itemLine.slice(0, width - 3) + "...";
       }
     }
-    const shortcuts = `  [ctrl+n/p] Navigate  [/review] Start Review  [/approve] Approve  [/issues] Toggle`.slice(0, width);
+    const shortcuts = "  [Ctrl+J/K] Next/Prev  [Tab] Mode  [Ctrl+R] Review  [Ctrl+A] Approve+Merge  [Ctrl+$] Slay".slice(0, width);
 
     return [header, itemLine, shortcuts];
   }
@@ -95,17 +100,17 @@ export class ReviewQueueState {
     const rows = [
       "Project Bluefin Review Appliance (OMP Mode)",
       "",
-      "WORK BUCKETS:",
-      "  • /prs            Browse open PRs waiting for maintainer review",
-      "  • /issues         Triage open issues or select work to implement",
-      "  • /review [num]   Start thorough multi-agent doctrine review",
-      "  • /diff [num]     Inspect bounded changes for a PR",
-      "  • /fix [notes]    Agent implements review feedback immediately",
-      "  • /snapshot-build Trigger container build to snapshot progress",
-      "  • /approve [num]  Verify checks and approve for landing",
-      "  • /slay           Automated review + patch + verify + land",
+      "KEYBOARD SHORTCUTS:",
+      "  Ctrl+J / Ctrl+K  - Next / previous queue item",
+      "  Tab              - Toggle between PRs and Issues mode",
+      "  Ctrl+R           - Start exact multi-agent doctrine review",
+      "  Ctrl+D           - Inspect bounded changes/diff for selected PR",
+      "  Ctrl+A           - Approve and squash merge selected PR",
+      "  Ctrl+F           - Fix reported review findings immediately",
+      "  Ctrl+$           - Slay: automated review + patch + test + land",
+      "  Ctrl+B           - Build container snapshot of current state",
       "",
-      "Shortcuts: ctrl+n (next) | ctrl+p (prev) | ctrl+i (toggle mode)",
+      "Review queue docked below the prompt area.",
     ];
 
     const visibleLength = (str: string) => {
@@ -228,125 +233,135 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
 
   pi.setLabel("Bluefin Review & Issues");
 
-  // Show welcome box with work buckets and lower-third queue widget
+  const updateWidgets = (ctx: { ui: { setWidget: (id: string, lines: string[], opts?: { placement?: string }) => void } }) => {
+    const w = process.stdout.columns ?? 100;
+    ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
+      placement: "belowEditor",
+    });
+  };
+
+  // Show welcome box and lower-third widget on session start
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) {
       const termWidth = process.stdout.columns ?? 100;
-      // Show work buckets in a boxed layout like the omp logo
+
+      // Welcome box with shortcuts
       ctx.ui.setWidget("bluefin-welcome-box", queue.renderWelcomeBox(termWidth), {
         placement: "aboveEditor",
       });
 
-      // Show lower-third queue dock
+      // Lower-third docked queue widget
       ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(termWidth), {
         placement: "belowEditor",
       });
 
-      const refreshWidgets = () => {
-        const w = process.stdout.columns ?? 100;
-        ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
-          placement: "belowEditor",
-        });
-      };
+      // Background load queue
       let token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.COPILOT_GITHUB_TOKEN;
       if (!token) {
         try {
           const { execSync } = require("child_process");
           token = execSync("gh auth token", { encoding: "utf-8", timeout: 2000 }).trim();
         } catch {
-          // silent fallback
+          // ignore
         }
       }
       fetchLiveQueue(queue.activeMode, token).then((items) => {
         if (items.length > 0) {
           queue.setItems(items);
-          refreshWidgets();
+          updateWidgets(ctx);
         }
       });
     }
   });
 
-  // Slash Commands
-  pi.registerCommand("review", {
-    description: "Enter Review Mode for a PR",
-    handler: async (args, ctx) => {
-      const prNum = args.trim() || queue.getCurrent()?.id;
-      if (!prNum) {
-        ctx.ui.notify("Specify PR number or select in queue", "error");
-        return;
-      }
-      ctx.ui.notify(`Starting review for PR #${prNum}...`, "info");
-      pi.sendUserMessage(
-        `Perform exact Bluefin review for PR #${prNum}. Check doctrine, correctness, security, tests, and simplicity.`
-      );
+  // KEYBOARD SHORTCUTS (Ctrl-based, Tab for toggle, Ctrl+$ for slay)
+  pi.registerShortcut("ctrl+j", {
+    description: "Next item in queue",
+    handler(ctx) {
+      queue.next();
+      updateWidgets(ctx);
     },
   });
 
-  pi.registerCommand("issues", {
-    description: "Toggle Issues / PR mode in lower third queue",
-    handler: async (_args, ctx) => {
+  pi.registerShortcut("ctrl+k", {
+    description: "Previous item in queue",
+    handler(ctx) {
+      queue.prev();
+      updateWidgets(ctx);
+    },
+  });
+
+  pi.registerShortcut("tab", {
+    description: "Toggle PRs / Issues mode",
+    handler(ctx) {
       queue.toggleMode();
-      const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+      updateWidgets(ctx);
+      let token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
       fetchLiveQueue(queue.activeMode, token).then((items) => {
         queue.setItems(items);
+        updateWidgets(ctx);
       });
       ctx.ui.notify(`Switched to ${queue.activeMode.toUpperCase()} mode`, "info");
     },
   });
-  pi.registerCommand("approve", {
-    description: "Approve the selected PR after evidence verification",
-    handler: async (args, ctx) => {
-      const prNum = args.trim() || queue.getCurrent()?.id;
-      if (!prNum) {
-        ctx.ui.notify("No PR selected to approve", "error");
+
+  pi.registerShortcut("ctrl+r", {
+    description: "Start review of current item",
+    handler(ctx) {
+      const current = queue.getCurrent();
+      if (!current) {
+        ctx.ui.notify("No item selected in queue", "error");
         return;
       }
-      ctx.ui.notify(`Approving PR #${prNum}...`, "info");
+      ctx.ui.notify(`Starting review for PR #${current.id}...`, "info");
       pi.sendUserMessage(
-        `Verify all checks and approve PR #${prNum} using gh pr review ${prNum} --approve.`
+        `Perform exact Bluefin review for PR #${current.id} (${current.title}). Check doctrine, correctness, security, tests, and simplicity.`
       );
     },
   });
 
-  pi.registerCommand("diff", {
-    description: "Inspect diff for the selected PR",
-    handler: async (args, ctx) => {
-      const prNum = args.trim() || queue.getCurrent()?.id;
-      if (!prNum) {
+  pi.registerShortcut("ctrl+d", {
+    description: "Inspect bounded diff of current PR",
+    handler(ctx) {
+      const current = queue.getCurrent();
+      if (!current) {
         ctx.ui.notify("No PR selected", "error");
         return;
       }
-      pi.sendUserMessage(`Show bounded git diff for PR #${prNum}.`);
+      pi.sendUserMessage(`Show bounded git diff for PR #${current.id}.`);
     },
   });
 
-  pi.registerCommand("fix", {
-    description: "Fix issues or findings identified during review",
-    handler: async (args, ctx) => {
+  pi.registerShortcut("ctrl+a", {
+    description: "Approve and merge selected PR",
+    handler(ctx) {
+      const current = queue.getCurrent();
+      if (!current) {
+        ctx.ui.notify("No PR selected to approve", "error");
+        return;
+      }
+      ctx.ui.notify(`Approving and merging PR #${current.id}...`, "info");
+      pi.sendUserMessage(
+        `Verify all CI checks pass on PR #${current.id}, approve using gh pr review ${current.id} --approve, and squash merge via gh pr merge ${current.id} --squash.`
+      );
+    },
+  });
+
+  pi.registerShortcut("ctrl+f", {
+    description: "Fix review findings on current PR",
+    handler(ctx) {
       const current = queue.getCurrent();
       const prContext = current ? `for PR #${current.id} (${current.title})` : "";
-      const instructions = args.trim() || "all reported findings and doctrine violations";
-      ctx.ui.notify(`Fixing ${prContext}: ${instructions}`, "info");
+      ctx.ui.notify(`Fixing findings ${prContext}`, "info");
       pi.sendUserMessage(
-        `Reviewer fix directive ${prContext}: address ${instructions}. Modify code, verify hermetic contract tests, run type checks, and prepare clean commit.`
+        `Reviewer fix directive ${prContext}: address all findings and doctrine violations. Modify code, run hermetic contract tests, run type checks, and prepare clean commit.`
       );
     },
   });
 
-  pi.registerCommand("snapshot-build", {
-    description: "Trigger snapshot container build on cluster as review/fixes progress",
-    handler: async (args, ctx) => {
-      const tag = args.trim() || `omp-snap-${Date.now().toString(36)}`;
-      ctx.ui.notify(`Triggering snapshot container build: ${tag}`, "info");
-      pi.sendUserMessage(
-        `Submit Argo Workflow to build and push container snapshot with tag '${tag}' to local registry.`
-      );
-    },
-  });
-
-  pi.registerCommand("slay", {
-    description: "Slay PR: automated review + fix + land sequence",
-    handler: async (_args, ctx) => {
+  pi.registerShortcut("ctrl+$", {
+    description: "Slay PR (review + fix + test + land)",
+    handler(ctx) {
       const current = queue.getCurrent();
       if (!current) {
         ctx.ui.notify("No active item selected to slay", "error");
@@ -359,34 +374,18 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerCommand("landing-batch", {
-    description: "Inspect or queue multi-PR landing batches",
-    handler: async (_args, ctx) => {
-      const prs = queue.items.filter((i) => i.type === "pr");
-      if (prs.length === 0) {
-        ctx.ui.notify("No PRs in queue to batch", "info");
-        return;
-      }
-      const batchSummary = prs.slice(0, 5).map((p) => `#${p.id}`).join(", ");
-      ctx.ui.notify(`Landing batch candidate: ${batchSummary}`, "info");
+  pi.registerShortcut("ctrl+b", {
+    description: "Trigger snapshot container build on cluster",
+    handler(ctx) {
+      const tag = `omp-snap-${Date.now().toString(36)}`;
+      ctx.ui.notify(`Triggering snapshot container build: ${tag}`, "info");
       pi.sendUserMessage(
-        `Examine landing batch candidate for PRs: ${batchSummary}. Verify CI status and build exact BatchActionPlan.`
+        `Submit Argo Workflow to build and push container snapshot with tag '${tag}' to local registry.`
       );
     },
   });
 
-  pi.registerCommand("tui-evidence", {
-    description: "Capture and report current TUI evidence manifest",
-    handler: async (_args, ctx) => {
-      const current = queue.getCurrent();
-      const itemDetails = current
-        ? `Item #${current.id} (${current.type}) in repo ${current.repo}`
-        : "No active queue item";
-      ctx.ui.notify(`TUI Evidence captured: ${itemDetails}`, "info");
-    },
-  });
-
-  // Register LLM-callable extension tools
+  // LLM Tools for programmatic interaction
   const z = pi.zod;
   pi.registerTool({
     name: "bluefin_review_status",
@@ -412,6 +411,7 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
       };
     },
   });
+
   pi.registerTool({
     name: "bluefin_review_diff",
     label: "Review Diff",
@@ -432,41 +432,6 @@ export default function bluefinReviewExtension(pi: ExtensionAPI): void {
           bounded: true,
         },
       };
-    },
-  });
-
-  // Shortcuts: use Ctrl combinations so normal typing in prompt is not intercepted
-  pi.registerShortcut("ctrl+n", {
-    description: "Next item in queue",
-    handler(ctx) {
-      queue.next();
-      const w = process.stdout.columns ?? 100;
-      ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
-        placement: "belowEditor",
-      });
-    },
-  });
-
-  pi.registerShortcut("ctrl+p", {
-    description: "Previous item in queue",
-    handler(ctx) {
-      queue.prev();
-      const w = process.stdout.columns ?? 100;
-      ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
-        placement: "belowEditor",
-      });
-    },
-  });
-
-  pi.registerShortcut("ctrl+i", {
-    description: "Toggle PRs / Issues mode",
-    handler(ctx) {
-      queue.toggleMode();
-      const w = process.stdout.columns ?? 100;
-      ctx.ui.setWidget("bluefin-review-lower-third", queue.renderLowerThirdWidget(w), {
-        placement: "belowEditor",
-      });
-      ctx.ui.notify(`Switched to ${queue.activeMode.toUpperCase()} mode`, "info");
     },
   });
 }

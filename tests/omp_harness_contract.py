@@ -121,7 +121,7 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertEqual(len(lines), 3)
         self.assertIn("BLUEFIN PRS QUEUE", lines[0])
         self.assertIn("#42", lines[1])
-        self.assertIn("[ctrl+n/p] Navigate", lines[2])
+        self.assertIn("[Ctrl+A] Approve+Merge", lines[2])
 
     def test_issues_mode_toggle_and_rendering(self):
         """Test issues mode in lower third widget."""
@@ -218,9 +218,14 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertIn("fetchLiveQueue", content)
         self.assertIn("bluefin-review-lower-third", content)
         self.assertIn("bluefin-welcome-box", content)
-        self.assertIn("landing-batch", content)
-        self.assertIn("tui-evidence", content)
-        self.assertIn("bluefin_review_status", content)
+        self.assertIn('pi.registerShortcut("ctrl+j"', content)
+        self.assertIn('pi.registerShortcut("ctrl+k"', content)
+        self.assertIn('pi.registerShortcut("tab"', content)
+        self.assertIn('pi.registerShortcut("ctrl+r"', content)
+        self.assertIn('pi.registerShortcut("ctrl+a"', content)
+        self.assertIn('pi.registerShortcut("ctrl+f"', content)
+        self.assertIn('pi.registerShortcut("ctrl+$"', content)
+        self.assertIn('pi.registerShortcut("ctrl+d"', content)
 
     def test_format_batch_plan_prompt(self):
         item = BatchMutationItem(
