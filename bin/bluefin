@@ -16,7 +16,24 @@ case "$command_name" in
     [[ -x "$sif" ]] || { echo "ERROR: review SIF is missing: ${sif}" >&2; exit 1; }
     runtime_home="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
     mkdir -p "$runtime_home"
-    exec apptainer run --home "${runtime_home}:/home/bluefin" "$sif" "$@"
+    # The distroless review SIF bundles its own gh binary but no persisted
+    # `gh auth login` state — each apptainer run gets a fresh $HOME, and gh's
+    # credential is stored in ~/.config/gh, not an env var, so it never
+    # follows the container in. Resolve it from the HOST's own gh session
+    # (mirrors bin/omp-review's identical resolution for the source-run
+    # path) and forward it as an env var, which is all the containerized
+    # `gh`/the review extension's own token lookup actually needs.
+    if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+      resolved_gh_token="$(gh auth token 2>/dev/null || true)"
+      if [[ -n "$resolved_gh_token" ]]; then
+        export GH_TOKEN="$resolved_gh_token"
+        export GITHUB_TOKEN="$resolved_gh_token"
+      fi
+    fi
+    env_args=()
+    [[ -n "${GH_TOKEN:-}" ]] && env_args+=(--env "GH_TOKEN=${GH_TOKEN}")
+    [[ -n "${GITHUB_TOKEN:-}" ]] && env_args+=(--env "GITHUB_TOKEN=${GITHUB_TOKEN}")
+    exec apptainer run "${env_args[@]}" --home "${runtime_home}:/home/bluefin" "$sif" "$@"
     ;;
   *)
     echo "Usage: bluefin {contribute|review}" >&2
