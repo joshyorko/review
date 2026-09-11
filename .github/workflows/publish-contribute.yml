@@ -469,6 +469,34 @@ jobs:
           subject-digest: ${{ steps.publish.outputs.digest }}
           push-to-registry: true
 
+      - name: Download the per-architecture SIF files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: bluefin-contribute-sif-*
+          path: ${{ runner.temp }}/sifs
+          merge-multiple: true
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="${RUNNER_TEMP}/release-assets"
+          mkdir -p "$staging"
+          cp "${RUNNER_TEMP}/sifs/"*.sif "$staging/"
+          (cd "$staging" && sha256sum -- *.sif > SHA256SUMS.txt)
+          ls -lh "$staging"
+
+      - name: Publish GitHub Release assets
+        if: needs.metadata.outputs.release == 'true'
+        uses: softprops/action-gh-release@c95fe1489396fe8a9ec87484f746654261073809 # v2.2.1
+        with:
+          name: v${{ needs.metadata.outputs.version }}
+          tag_name: v${{ needs.metadata.outputs.version }}
+          files: |
+            ${{ runner.temp }}/release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Summarize the publication
         shell: bash
         env:
