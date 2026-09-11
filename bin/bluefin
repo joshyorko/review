@@ -30,10 +30,12 @@ case "$command_name" in
         export GITHUB_TOKEN="$resolved_gh_token"
       fi
     fi
-    env_args=()
-    [[ -n "${GH_TOKEN:-}" ]] && env_args+=(--env "GH_TOKEN=${GH_TOKEN}")
-    [[ -n "${GITHUB_TOKEN:-}" ]] && env_args+=(--env "GITHUB_TOKEN=${GITHUB_TOKEN}")
-    exec apptainer run "${env_args[@]}" --home "${runtime_home}:/home/bluefin" "$sif" "$@"
+    export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+    export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
+    # apptainer imports the full host environment by default (only
+    # `--cleanenv`/`--no-env` opt out), so the exported token above already
+    # reaches the contained process without putting its value in this argv.
+    exec apptainer run --home "${runtime_home}:/home/bluefin" "$sif" "$@"
     ;;
   *)
     echo "Usage: bluefin {contribute|review}" >&2

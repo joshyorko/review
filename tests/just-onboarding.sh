@@ -2210,7 +2210,7 @@ grep -Fq 'id -u' <<<"$cleanup_body" ||
   fail "Codex cleanup must compare ownership with the invoking UID"
 
 begin "static: cluster scale-out validates Hive before mutation and scrubs secret metadata"
-cluster_body="$(sed -n '/^scale_cluster_contributors()/,/^stop_cluster_contributors()/p' "$code")"
+cluster_body="$(sed -n '/^scale_cluster_contributors()/,/^}/p' "$code")"
 hub_guard_line="$(grep -nF "if ! valid_hive_hub \"\$hub\"; then" <<<"$cluster_body" | cut -d: -f1)"
 namespace_line="$(grep -nF 'kubectl create namespace bluefin-system' <<<"$cluster_body" | cut -d: -f1)"
 if [[ -z "$hub_guard_line" || -z "$namespace_line" || "$hub_guard_line" -ge "$namespace_line" ]]; then

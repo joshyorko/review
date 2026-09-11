@@ -26,6 +26,38 @@ command -v apptainer >/dev/null 2>&1 || {
   exit 1
 }
 
+# The SIF gets a fresh $HOME every run (see bin/bluefin's identical note for
+# the review SIF): nothing here persists a `gh auth login`, and apptainer
+# only forwards a token that is actually set in this shell. Without one, the
+# contributor picks up a Hive task, its first `git fetch`/`gh` call fails
+# against a stale or absent credential, it retries through an interactive
+# `gh auth login` device-code prompt, and — headless, nobody there to type
+# the code — that hangs forever, burning CPU on a task that can never
+# complete. Resolve the token from the host the same way bin/bluefin review
+# and bin/omp-review do, and fail fast instead of launching into that hang.
+if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+  resolved_gh_token="$(gh auth token 2>/dev/null || true)"
+  if [[ -n "$resolved_gh_token" ]]; then
+    export GH_TOKEN="$resolved_gh_token"
+    export GITHUB_TOKEN="$resolved_gh_token"
+  fi
+fi
+if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]]; then
+  echo "ERROR: no GitHub token available; the agent would have no GitHub identity." >&2
+  echo "  It cannot fork, clone, push, or open a pull request, and would hang at an" >&2
+  echo "  interactive 'gh auth login' device-code prompt nobody can answer." >&2
+  echo "  Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org" >&2
+  echo "  Or export GH_TOKEN with a scoped PAT." >&2
+  exit 1
+fi
+
+# apptainer imports the full host environment by default (only `--cleanenv`
+# or `--no-env` opts out), so the exported tokens above already reach the
+# contained process; passing them again as literal `--env NAME=value`
+# arguments would put credential values in this process's argv instead.
+export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
+
 runtime_home="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-contribute"
 mkdir -p "${runtime_home}/.config/hive"
 exec apptainer run \
