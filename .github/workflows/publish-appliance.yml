@@ -488,7 +488,7 @@ jobs:
           for arch in darwin-arm64 darwin-x64; do
             dir="${RUNNER_TEMP}/bluefin-review-${arch}"
             mkdir -p "${dir}/bin" "${dir}/extension"
-            curl -sSfL "https://github.com/can1357/oh-my-pi/releases/download/v18.1.16/omp-${arch}" -o "${dir}/bin/omp"
+            curl -sSfL "https://github.com/can1357/oh-my-pi/releases/download/v18.1.17/omp-${arch}" -o "${dir}/bin/omp"
             chmod 0755 "${dir}/bin/omp"
             cp -r image/extension/bluefin-review/* "${dir}/extension/"
             tar -czf "${staging}/bluefin-review-${arch}.tar.gz" -C "${RUNNER_TEMP}" "bluefin-review-${arch}"
@@ -499,7 +499,7 @@ jobs:
           for arch in windows-x64 windows-arm64; do
             dir="${RUNNER_TEMP}/bluefin-review-${arch}"
             mkdir -p "${dir}/bin" "${dir}/extension"
-            curl -sSfL "https://github.com/can1357/oh-my-pi/releases/download/v18.1.16/omp-${arch}.exe" -o "${dir}/bin/omp.exe"
+            curl -sSfL "https://github.com/can1357/oh-my-pi/releases/download/v18.1.17/omp-${arch}.exe" -o "${dir}/bin/omp.exe"
             cp -r image/extension/bluefin-review/* "${dir}/extension/"
             cat << 'CMD' > "${dir}/bluefin-review.cmd"
           @echo off
