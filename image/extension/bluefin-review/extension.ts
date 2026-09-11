@@ -97,7 +97,8 @@ function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
  * is not told the link cannot honor it.
  */
 export function actionPrompt(action: DashboardAction, priority?: Priority): string | undefined {
-	const hive = priority?.hiveRank === undefined ? "" : ` This is Hive-prioritized work (${priority.reason}); keep the linked issue's intent in view and reference it in what you report.`;
+	const autonomousRule = "This is an automated review and landing tool: execute all actions end-to-end autonomously. Never ask the user for confirmation, permission, or interactive prompts to proceed. Once a batch or queue item is complete, immediately move on to the next batch or return cleanly.";
+	const hive = priority?.hiveRank === undefined ? ` ${autonomousRule}` : ` This is Hive-prioritized work (${priority.reason}); keep the linked issue's intent in view and reference it in what you report. ${autonomousRule}`;
 	const cite = (item: QueueItem) => `${item.repo}#${item.id} (${item.title})`;
 	const batch = "items" in action && action.items && action.items.length > 1 ? action.items : undefined;
 	if (batch) {
@@ -129,17 +130,23 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		// The point of selecting a slice is to spend one wall clock on all of it.
 		// A batch worked top to bottom is a list, not a batch, and a backlog that
 		// only moves at one item per turn never comes down.
-		const fanOut = `Work all ${batch.length} items concurrently: dispatch them as ONE batch of subagents, one agent per item, each owning exactly its own item and nothing else. Do not process the list sequentially, and do not wait for one item before starting the next. Tell every agent to skip formatters, linters and project-wide suites and to run only the smallest existing test covering what it changed. Two items that would edit the same file in the same repository are the one exception: name them and run those two in sequence. Report per item — what you did, the evidence, the outcome — and name every item that failed rather than summarising the batch as a success.`;
+		// Dispatch one subagent per individual issue or PR, capped at a maximum of 7 concurrent
+		// subagents at any time (queue remaining items and dispatch as running slots free up).
+		// Review agents do not count toward this cap so they can take their time.
+		// When subagents complete, the review agent (k3-final-review) clumps by repository:
+		// for each repository cohort (e.g. 10 issues in bluefin), it waits for that repo's queue
+		// to finish, then audits, consolidates all changes, and lands them together into ONE PR per repo.
+		const fanOut = `Work all ${batch.length} items with ONE subagent per issue/PR, capped at a maximum of 7 concurrent subagents at any time (queue remaining items and dispatch as running subagents complete; review/landing agents do not count against the 7 cap). Each subagent owns exactly its assigned item. Tell every subagent to skip formatters, linters, and project-wide suites and run only the smallest existing test covering what changed. Report per item — what you did, the evidence, and the outcome.`;
 
-		const auditInstruction = `When every item has reported, dispatch the \`k3-final-review\` subagent (Kimi K3 at max effort) once over all ${batch.length} items across ${repoGroups.size} repositories (${[...repoGroups.keys()].join(", ")}) to verify cross-repository contract compatibility, shared schema and dependency alignment, doctrine invariants, and simplicity.`;
+		const auditInstruction = `When issues/PRs are worked, repository clumping happens at the review agent level: for each repository (e.g. all items in \`${[...repoGroups.keys()].join("`, `")}\`), dispatch one \`k3-final-review\` subagent (Kimi K3 at max effort; review agents do not consume the 7 cap). If the review agent has to wait for that repository's queue to finish through the 7-subagent cap, it waits. Once that repository cohort finishes, the review agent audits, consolidates all changes, and lands them all in one PR per repository, verifying cross-repository contract compatibility, shared schema and dependency alignment, doctrine invariants, and simplicity.`;
 
-		const protocol = `${fanOut}\n\n${auditInstruction}`;
-
+		const autonomousRule = "This is an automated review and landing tool: execute all actions end-to-end autonomously. Never ask the user for confirmation, permission, or interactive prompts to proceed. Once a batch or queue item is complete, immediately move on to the next batch or return cleanly.";
+		const protocol = `${fanOut}\n\n${auditInstruction}\n\n${autonomousRule}`;
 		switch (action.kind) {
 			case "review":
 				return `Review the following ${batch.length} selected items grouped by repository for efficiency:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group: read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not.\n\n${protocol}`;
 			case "diff":
-				return `Inspect and summarize the diffs for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group, call bluefin_review_diff and summarize what changed file by file, with the cross-repo risk each change carries.`;
+				return `Inspect and summarize the diffs for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group, call bluefin_review_diff and summarize what changed file by file, with the cross-repo risk each change carries.\n\n${autonomousRule}`;
 			case "docs":
 				return `Update and align documentation for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Enforce the projectbluefin/common agentic documentation system with brutal alignment: ensure AGENTS.md, docs/factory/agentic-model.md, docs/SKILL.md, and docs/skills/*.md are strictly source-backed, concise (<200 lines soft max, <256 char descriptions), zero-filler, with no grandfathering or speculative noise. Run \`bash scripts/check-skill-frontmatter.sh --write\` and ensure \`docs/skills/index.json\` is regenerated cleanly.\n\n${protocol}`;
 			case "approve":
@@ -151,7 +158,7 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 				// it asked for and handing it to a human as a pull request.
 				return batch.every((entry) => entry.type === "issue")
 					? `Close out the following ${batch.length} queued issues by shipping the work, one pull request per issue:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each issue: read it and the repository's contract documents, implement what it asks for and nothing else, run the smallest existing test that covers the changed surface, then open a pull request that closes it with \`Closes <owner/repo>#<number>\` in the body. Someone else reviews and merges: never merge your own, never approve, and never close an issue by hand. Where an issue cannot be finished as asked, open no pull request for it and report an evidenced finding instead, naming what blocked you.\n\n${protocol}`
-					: `Run the full landing pass on the following ${batch.length} selected items:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Review each diff, patch what is broken, run focused contract tests for each repo, and report merge readiness. Do not merge without green checks.\n\n${protocol}`;
+					: `Run the full landing pass on the following ${batch.length} selected items:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Review each diff, patch what is broken, run focused contract tests for each repo, and report merge readiness. If CI is broken/failing on any item: investigate why using \`gh run view <run-id> --log-failed\` or the \`bluefin-ci-triage\` agent. Most CI issues are transient or infrastructure flakes that resolve by rekicking CI (\`gh run rerun <run-id> --failed\`); re-kick those immediately. If there is a genuine failing test or major defect, fix it if within scope, and inform the user explicitly with the failing test details and root cause. Do not merge without green checks.\n\n${protocol}`;
 			default:
 				break;
 		}
@@ -160,11 +167,11 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		case "review":
 			return `Review ${cite(action.item)}. Read the bounded diff with bluefin_review_diff and the recorded pipeline with bluefin_review_trace before judging. Report findings by severity with file:line evidence, covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not.${hive}`;
 		case "diff":
-			return `Call bluefin_review_diff for pull request ${action.item.id} in ${action.item.repo} and summarise what actually changed, file by file, with the risk each change carries.`;
+			return `Call bluefin_review_diff for pull request ${action.item.id} in ${action.item.repo} and summarise what actually changed, file by file, with the risk each change carries. ${autonomousRule}`;
 		case "docs":
-			return `Update and align documentation for ${cite(action.item)}. Enforce the projectbluefin/common agentic documentation system with brutal alignment: inspect the actual diff and changed surface, update the closest matching docs/skills/*.md file or core contract (AGENTS.md, docs/factory/agentic-model.md, docs/SKILL.md), eliminate any grandfathering/speculative filler, enforce token efficiency (descriptions <= 256 chars, skill documents <= 200 lines soft max), and run \`bash scripts/check-skill-frontmatter.sh --write\` to ensure docs/skills/index.json is synchronized perfectly for token-efficient agent ingestion.`;
+			return `Update and align documentation for ${cite(action.item)}. Enforce the projectbluefin/common agentic documentation system with brutal alignment: inspect the actual diff and changed surface, update the closest matching docs/skills/*.md file or core contract (AGENTS.md, docs/factory/agentic-model.md, docs/SKILL.md), eliminate any grandfathering/speculative filler, enforce token efficiency (descriptions <= 256 chars, skill documents <= 200 lines soft max), and run \`bash scripts/check-skill-frontmatter.sh --write\` to ensure docs/skills/index.json is synchronized perfectly for token-efficient agent ingestion. ${autonomousRule}`;
 		case "approve":
-			return `For ${cite(action.item)}: confirm every required check is green with \`gh pr checks ${action.item.id} --repo ${action.item.repo}\`, restate the merge risk in one line, then approve with \`gh pr review ${action.item.id} --repo ${action.item.repo} --approve\` and squash merge with \`gh pr merge ${action.item.id} --repo ${action.item.repo} --squash\`. Stop and report instead of merging if any check is failing or pending.`;
+			return `For ${cite(action.item)}: confirm every required check is green with \`gh pr checks ${action.item.id} --repo ${action.item.repo}\`, restate the merge risk in one line, then approve with \`gh pr review ${action.item.id} --repo ${action.item.repo} --approve\` and squash merge with \`gh pr merge ${action.item.id} --repo ${action.item.repo} --squash\`. Stop and report instead of merging if any check is failing or pending. ${autonomousRule}`;
 		case "fix":
 			return `Fix the findings recorded for ${cite(action.item)}. Read them with bluefin_review_trace, address each one at its source, run the smallest contract test that covers the changed surface, and prepare one clean commit. Do not suppress a finding you cannot fix — report it.${hive}`;
 		case "slay":
@@ -172,7 +179,7 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 			// asked for and handing it to a human as a pull request.
 			return action.item.type === "issue"
 				? `Close out ${cite(action.item)} by shipping the work. Read the issue and the repository's contract documents, implement what it asks for and nothing else, run the smallest existing test that covers the changed surface, then open a pull request against the default branch whose body contains \`Closes ${action.item.repo}#${action.item.id}\`. Someone else reviews and merges it: never merge your own, never approve it, and never close the issue by hand. If it cannot be finished as asked, open no pull request and report an evidenced finding naming what blocked you.${hive}`
-				: `Run the full landing pass on ${cite(action.item)}: review the diff, patch what is broken, run the focused contract tests for the changed surface, then report merge readiness. Do not merge without green checks.${hive}`;
+				: `Run the full landing pass on ${cite(action.item)}: review the diff, patch what is broken, run focused contract tests for the changed surface, then report merge readiness. If CI is broken or failing: find out why (\`gh run view <run-id> --log-failed\` or \`bluefin-ci-triage\`). Most CI issues are transient flakes that resolve by rekicking CI (\`gh run rerun <run-id> --failed\`) — re-kick those immediately. If there is a failing test or major defect, fix it if within scope, and inform the user explicitly of the failing test details and root cause. Do not merge without green checks.${hive}`;
 		case "snapshot":
 			return `Submit the Argo workflow in deploy/argo-review-fsdk-build.yaml to build and push a container snapshot of the current tree, then report the workflow name and how to watch it.`;
 		default:

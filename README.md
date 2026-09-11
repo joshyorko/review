@@ -151,12 +151,26 @@ dispatches—not agents already running. See [batch landing](docs/skills/landing
 
 ## Run a worker
 
-This is a separate mode: **Hive assigns contributor work; the dashboard is for
-human review.** Choose one worker backend:
+This is a separate mode: **Hive assigns contributor work; the dashboard is for human review.** The isolated OMP worker uses an explicit OMP model profile:
 
 ```bash
-just contribute                         # default Goose worker (TOOL=goose)
-TOOL=codex just review-container         # Codex contributor worker
+CONTRIBUTE_IMAGE=contribute:stable just contribute          # GitHub Copilot Gemini
+CONTRIBUTE_IMAGE=contribute:stable just contribute luna     # GPT-5.6 Luna
+CONTRIBUTE_IMAGE=contribute:stable just contribute opus5    # Claude Opus 5
+CONTRIBUTE_IMAGE=contribute:stable just contribute sol      # GPT-5.6 Sol
+```
+
+`review-container` remains the compatibility Goose/Codex worker path.
+
+Run the locally built SIF without binding the host home; `--writable-tmpfs` provides the disposable runtime state OMP, tmux, and Hive need:
+
+```bash
+export AGENT_MODEL=github-copilot/gpt-5.6-luna
+export COPILOT_GITHUB_TOKEN
+export GH_TOKEN
+apptainer run --writable-tmpfs --no-home \
+  --bind "$HOME/.config/hive/contributor.env:/home/bluefin/.config/hive/contributor.env:ro" \
+  ./bluefin-contribute.sif
 ```
 
 Keep the launching terminal open. **Ctrl-C stops the attended worker.**
@@ -188,7 +202,7 @@ is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 <details>
 <summary>Image provenance</summary>
 
-The image layers the pinned Hive runtime at `ebd5db6adf95c2eceb77c1a4376f137af0836d4b`.
+The compatibility image layers the pinned Hive runtime at `ebd5db6adf95c2eceb77c1a4376f137af0836d4b`. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker; the review appliance remains the maintainer-facing OMP image.
 See [image architecture and validation](docs/image-and-development.md).
 
 </details>

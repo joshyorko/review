@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command_name="${1:-}"
+shift || true
+script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+
+case "$command_name" in
+  contribute)
+    exec "${repo_root}/bin/bluefin-contribute"
+    ;;
+  review)
+    sif="${BLUEFIN_REVIEW_SIF:-${repo_root}/bluefin-review.sif}"
+    command -v apptainer >/dev/null 2>&1 || { echo "ERROR: apptainer is required." >&2; exit 127; }
+    [[ -x "$sif" ]] || { echo "ERROR: review SIF is missing: ${sif}" >&2; exit 1; }
+    runtime_home="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
+    mkdir -p "$runtime_home"
+    exec apptainer run --home "${runtime_home}:/home/bluefin" "$sif" "$@"
+    ;;
+  *)
+    echo "Usage: bluefin {contribute|review}" >&2
+    exit 2
+    ;;
+esac

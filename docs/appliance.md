@@ -149,10 +149,12 @@ The loop is narrow, select, dispatch, and it is three keys:
 3. `s` dispatches the slice. Issues become one pull request each; pull requests
    get the landing pass.
 
-A dispatched slice is worked **concurrently** — one agent per item, in a single
-wave, not one item per turn — and every item reports its own outcome, so a batch
-that half failed cannot report as a success. Twenty-five is the ceiling because
-the wave is real concurrency, not a longer list.
+A dispatched slice is worked **concurrently clumped by repository** — one agent
+per repository lane, not one agent per item or one item per turn, so multiple
+agents do not race or conflict on the same branch. Each repository agent reviews
+and prepares its repository's items, and `k3-final-review` consolidates and
+lands all changes in one pull request per repository. Twenty-five is the ceiling
+because the wave is real concurrency across repositories, not a longer list.
 
 The detail pane names the contributor whose worker holds an item right now, from
 Hive's live contributor state. Two people burning the same queue down do not

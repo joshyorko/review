@@ -177,6 +177,8 @@ See [`image-audit.md`](image-audit.md) for full image audit assertions, package 
 - Reaching for BuildKit, `docker buildx`, or QEMU cross-building. Always build natively with Podman/Buildah.
 - Committing generated `.agents/skills/` output or markdown audit reports.
 
+`image/contribute/Containerfile` is the separate distroless Hive + OMP closure. It stages only OMP, Node, GitHub CLI, tmux, locked `ws`, the merged Hive runtime, and the FSDK shell/git closure; it must not absorb Goose, Codex, Pi, Python, dashboard, review scope, or generated skills.
+
 ## Verification
 
 ```bash

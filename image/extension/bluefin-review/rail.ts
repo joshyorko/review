@@ -254,8 +254,16 @@ export function renderHitlist(
 		start = Math.max(0, end - maxItems);
 	}
 
+	let lastRepo: string | undefined;
 	for (let i = start; i < end; i++) {
 		const item = items[i]!;
+		if (item.repo !== lastRepo) {
+			if (lastRepo !== undefined && rows.length < maxItems + 2) {
+				const divider = `─── ${item.repo} `.padEnd(width, "─");
+				rows.push(truncateToWidth(painter.fg("dim", divider), width));
+			}
+			lastRepo = item.repo;
+		}
 		const active = i === cursor;
 		const isChecked = mode.selectedKeys.has(`${item.repo}#${item.id}`);
 		const check = isChecked ? painter.fg("accent", "☒") : painter.fg("dim", "☐");

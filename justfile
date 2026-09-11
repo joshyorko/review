@@ -73,7 +73,14 @@
 tool_env := env("TOOL", "")
 hive_repo_url := "https://github.com/hivecommons/hive"
 # origin/v4 via `git ls-remote --heads https://github.com/hivecommons/hive v4`
-# on 2026-09-06.
+# on 2026-09-11, after kubestellar/hive#6637 (fix: key OMP readiness/busy/idle
+# off real captured chrome instead of a hand-written fixture that never
+# exercised OMP's actual welcome/idle/busy chrome at real dimensions),
+# kubestellar/hive#6639 (fix: stop OMP's rotating "Log in to several
+# accounts..." startup tip from faking a needs-login verdict), and
+# kubestellar/hive#6670 (fix: scope OMP's login/onboarding checks to the
+# pane's last 3 lines instead of a 15-line tail a tip or a finished turn's
+# own prose could still land in).
 hive_commit := "ebd5db6adf95c2eceb77c1a4376f137af0836d4b"
 gemini_model := "gemini-3.8-flash"
 # Contributor runs are automated in practice — Hive keeps feeding the session —
@@ -100,6 +107,7 @@ k3_context_limit := "264000"
 # REVIEW_CONTRIBUTOR_IMAGE overrides this when you need a specific
 # 'sha-' tag or digest.
 contributor_image := env("REVIEW_CONTRIBUTOR_IMAGE", "ghcr.io/projectbluefin/review-contributor:stable")
+contribute_image := env("CONTRIBUTE_IMAGE", "ghcr.io/projectbluefin/contribute:stable")
 
 # Shared bash, 'eval''d at the top of every recipe script that needs it:
 # host preflight, Goose selection, and the pinned Hive checkout. Keeping
@@ -782,7 +790,7 @@ register_named_hive() {
   # one; an exported HIVE_HUB is honored as-is.
   local target="$1" tmp
   if [[ "${REVIEW_NON_INTERACTIVE:-}" == "true" ]]; then
-    print_missing_hive_setup_guidance "$target" "non-interactive mode cannot answer the upstream prompts" goose "$HIVE_COMMIT"
+    print_missing_hive_setup_guidance "$target" "non-interactive mode cannot answer the upstream prompts" "${HIVE_SETUP_BACKEND:-goose}" "$HIVE_COMMIT"
     return 1
   fi
   if ! can_run_attended_hive_setup; then
@@ -796,7 +804,7 @@ register_named_hive() {
   prepare_pinned_hive_checkout || return 1
   echo "Registering hive '${HIVE_REGISTRATION_NAME}': upstream contribute-setup with an isolated config_dir."
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/review-hive-setup.XXXXXX")"
-  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" config_dir="$tmp" contribute-setup goose || {
+  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" config_dir="$tmp" contribute-setup "${HIVE_SETUP_BACKEND:-goose}" || {
     rm -rf "$tmp"
     echo "ERROR: upstream contribute-setup did not complete; nothing was registered." >&2
     return 1
@@ -813,8 +821,8 @@ register_named_hive() {
   echo "✓ hive '${HIVE_REGISTRATION_NAME}' registered: ${target}"
 }
 ensure_hive_contributor_env() {
-  # Upstream 'just contribute-setup goose' writes these files. They are the
-  # only host state the container genuinely needs, and Hive owns their format.
+  # Upstream 'contribute-setup' writes these files. They are the only host
+  # state the container genuinely needs, and Hive owns their format.
   # Selection: an explicit REVIEW_HIVE name, then the current repository's
   # name, then the default registration.
   local hive_dir="${HOME}/.config/hive"
@@ -831,11 +839,11 @@ ensure_hive_contributor_env() {
   fi
   [[ -f "$HIVE_CONTRIBUTOR_ENV" ]] && return 0
   if [[ "${REVIEW_NON_INTERACTIVE:-}" == "true" ]]; then
-    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "non-interactive mode cannot answer the upstream prompts" goose "$HIVE_COMMIT"
+    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "non-interactive mode cannot answer the upstream prompts" "${HIVE_SETUP_BACKEND:-goose}" "$HIVE_COMMIT"
     return 1
   fi
   if ! can_run_attended_hive_setup; then
-    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "stdin/stdout/stderr are not attached to a terminal" goose "$HIVE_COMMIT"
+    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "stdin/stdout/stderr are not attached to a terminal" "${HIVE_SETUP_BACKEND:-goose}" "$HIVE_COMMIT"
     return 1
   fi
   echo "Upstream contribute-setup hasn't run yet (no ${HIVE_CONTRIBUTOR_ENV})."
@@ -843,7 +851,7 @@ ensure_hive_contributor_env() {
     command -v "$cmd" &>/dev/null || { echo "ERROR: '${cmd}' is required to run contribute-setup." >&2; return 1; }
   done
   prepare_pinned_hive_checkout || return 1
-  echo "Running upstream pinned setup: just contribute-setup goose"
+  echo "Running upstream pinned setup: just contribute-setup ${HIVE_SETUP_BACKEND:-goose}"
   # HIVE_SKIP_VERSION_CHECK=true is upstream's own documented opt-out, not a
   # local workaround. Upstream's private 'check-version' recipe — a prerequisite
   # of 'contribute-setup' — compares HEAD against origin/v4 and aborts when they
@@ -855,7 +863,7 @@ ensure_hive_contributor_env() {
   # documents keeps Hive the authority; removing it would break setup without
   # unpinning, and unpinning would mean executing unreviewed upstream code.
   # Scoped to this one invocation so nothing else in the run inherits it.
-  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" contribute-setup goose
+  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" contribute-setup "${HIVE_SETUP_BACKEND:-goose}"
   [[ -f "$HIVE_CONTRIBUTOR_ENV" ]] || { echo "ERROR: contribute-setup ran but ${HIVE_CONTRIBUTOR_ENV} still missing." >&2; return 1; }
   echo "✓ Upstream contribute-setup complete."
 }
@@ -1286,6 +1294,31 @@ scale_cluster_contributors() {
   fi
 }
 
+scale_contribute() {
+  local replicas="$1" hub model="github-copilot/gemini-3.8-flash"
+  HIVE_SETUP_BACKEND=omp
+  ensure_hive_contributor_env || return 1
+  hub="$(read_hive_value HIVE_HUB)"
+  valid_hive_hub "$hub" || { echo "ERROR: HIVE_HUB is not set in ${HIVE_CONTRIBUTOR_ENV}." >&2; return 1; }
+  resolve_gh_token
+  [[ -n "${GH_TOKEN_VALUE:-}" ]] || { report_missing_gh_token; return 1; }
+  resolve_copilot_token
+  [[ -n "${COPILOT_TOKEN:-}" ]] || { report_missing_copilot_credential; return 1; }
+  kubectl create namespace bluefin-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
+  kubectl create secret generic contribute-secret -n bluefin-system \
+    --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
+    --from-file=GH_TOKEN=<(printf '%s' "$GH_TOKEN_VALUE") \
+    --from-file=GITHUB_COPILOT_TOKEN=<(printf '%s' "$COPILOT_TOKEN") \
+    --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null || return 1
+  local legacy_annot
+  legacy_annot="$(kubectl get secret contribute-secret -n bluefin-system -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}')" || return 1
+  [[ -z "$legacy_annot" ]] || kubectl annotate secret contribute-secret -n bluefin-system kubectl.kubernetes.io/last-applied-configuration- >/dev/null || return 1
+  kubectl apply -f deploy/contribute.yaml >/dev/null || return 1
+  kubectl set env deployment/contribute -n bluefin-system AGENT_BACKEND=omp AGENT_MODEL="$model" HIVE_HUB="$hub" >/dev/null || return 1
+  kubectl scale deployment/contribute -n bluefin-system --replicas="$replicas" >/dev/null || return 1
+  kubectl rollout status deployment/contribute -n bluefin-system --timeout=15s >/dev/null 2>&1 || echo "! rollout still progressing after 15s; workers will continue pulling/starting in background." >&2
+}
+
 stop_cluster_contributors() {
   if command -v kubectl &>/dev/null && kubectl get deployment review-contributor -n bluefin-system &>/dev/null; then
     kubectl scale deployment/review-contributor -n bluefin-system --replicas=0 >/dev/null
@@ -1481,13 +1514,62 @@ review-container profile="" effort="":
     "${CONTAINER_ARGS[@]}" || status=$?
     exit "$status"
 
-# The contributor entrypoint deliberately reuses review-container so the
-# credential handoff and foreground lifecycle stay identical.
-[doc("Start a foreground Hive contributor worker.")]
+# Start the isolated OMP contributor image. Hive still owns registration,
+# assignment, tmux lifecycle, prompt delivery, and completion.
+[doc("Start the isolated Hive + OMP contributor worker.")]
 contribute profile="" effort="":
     #!/usr/bin/env bash
     set -euo pipefail
-    just review-container "{{profile}}" "{{effort}}"
+    {{shared_functions}}
+    if [[ "{{profile}}" == cluster ]]; then
+      replicas="{{effort}}"; replicas="${replicas:-2}"
+      [[ "$replicas" =~ ^[0-9]+$ ]] || { echo "ERROR: contribute cluster expects a replica count." >&2; exit 1; }
+      STATE_DIR="${HOME}/.local/state/review"; HIVE_SRC_DIR="${STATE_DIR}/hive-src"; HIVE_REPO_URL="{{hive_repo_url}}"
+      HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"; HIVE_COMMIT="${HIVE_COMMIT,,}"; mkdir -p "$STATE_DIR"
+      HIVE_SETUP_BACKEND=omp; REVIEW_RECIPE=contribute
+      scale_contribute "$replicas"
+      exit $?
+    fi
+    command -v podman &>/dev/null || { echo "ERROR: Podman is required to run contribute." >&2; exit 1; }
+    [[ -z "${REVIEW_DETACH:-}" ]] || { echo "ERROR: detached contributor containers are not supported." >&2; exit 1; }
+    case "{{profile}}" in
+      ""|gemini) default_model="github-copilot/gemini-3.8-flash" ;;
+      luna) default_model="github-copilot/gpt-5.6-luna" ;;
+      opus5) default_model="github-copilot/claude-opus-5" ;;
+      sol) default_model="github-copilot/gpt-5.6-sol" ;;
+      *) echo "ERROR: unknown contribute profile '{{profile}}'; expected gemini, luna, opus5, or sol." >&2; exit 1 ;;
+    esac
+    [[ -z "{{effort}}" ]] || { echo "ERROR: contribute does not accept a thinking-effort argument; OMP owns its model settings." >&2; exit 1; }
+    export AGENT_MODEL="${AGENT_MODEL:-$default_model}"
+    STATE_DIR="${HOME}/.local/state/review"
+    HIVE_SRC_DIR="${STATE_DIR}/hive-src"
+    HIVE_REPO_URL="{{hive_repo_url}}"
+    HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
+    HIVE_COMMIT="${HIVE_COMMIT,,}"
+    mkdir -p "$STATE_DIR"
+    HIVE_SETUP_BACKEND=omp
+    REVIEW_RECIPE=contribute
+    ensure_hive_contributor_env
+    report_hive_selection
+    REMOTE_HIVE_TARGET=""; REMOTE_HIVE_DIR=""; REMOTE_HIVE_ENV=""; REMOTE_HIVE_SSH_ARGS=()
+    trap 'cleanup_remote_hive_registration' EXIT
+    stage_hive_registration_for_remote_podman
+    CONTAINER_NAME="${CONTRIBUTE_CONTAINER_NAME:-contribute}"
+    require_valid_container_name "$CONTAINER_NAME"
+    CONTRIBUTOR_IMAGE="{{contribute_image}}"
+    require_no_running_instance "$CONTAINER_NAME"
+    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    CONTAINER_ARGS=(podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME" --label "$(owner_run_label)" --userns "keep-id:uid=65532,gid=65532")
+    CONTAINER_ARGS+=(--volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env AGENT_MODEL --env COLORTERM)
+    for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
+      [[ -n "${!name:-}" ]] && CONTAINER_ARGS+=(--env "$name")
+    done
+    resolve_gh_token
+    if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then export GH_TOKEN="$GH_TOKEN_VALUE"; CONTAINER_ARGS+=(--env GH_TOKEN); report_gh_token_blast_radius "$GH_TOKEN_SOURCE"; else report_missing_gh_token; fi
+    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE")
+    echo "✓ starting the isolated OMP contributor container."
+    echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
+    "${CONTAINER_ARGS[@]}"
 
 # Stop cluster contributor workers. This is the explicit lifecycle verb for
 # cluster workers; it refuses attended local runs (which end with Ctrl-C in

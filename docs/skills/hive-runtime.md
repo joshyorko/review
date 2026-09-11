@@ -102,15 +102,7 @@ credential handling ([`launcher.md`](launcher.md)).
    informational. The relay reports its runtime posture during authentication,
    and Hive stores and surfaces it without routing or gating assignments on it.
    Do not add downstream capability-based task selection.
-8. Expect the interactive delivery mode. The pinned runtime reads
-   `CONTRIBUTOR_MODE`, which selects between `interactive` (the default: a
-   live tmux pane the relay types the prompt into) and `headless` (no tmux
-   session at all — the relay drives a one-shot CLI per task and writes
-   lifecycle state to `HIVE_HEADLESS_STATUS_FILE`). review sets neither and
-   runs interactive, which is what `just review-container` attaches to and
-   what the entrypoint's `tmux has-session -t contributor` readiness check
-   requires. Headless exists for an unattended Kubernetes contributor; do not
-   set it here expecting the same attachable session.
+8. Expect interactive delivery from `just contribute` and `just review-container`. The pinned runtime reads `CONTRIBUTOR_MODE`, which selects between `interactive` (the default: a live tmux pane the relay types the prompt into) and `headless` (no tmux session at all — the relay drives a one-shot CLI per task and writes lifecycle state to `HIVE_HEADLESS_STATUS_FILE`). The isolated OMP contributor is interactive-only; its Kubernetes manifest retains tmux probes but must not select a headless OMP path until upstream proves one-shot semantics. Do not set headless expecting the same attachable session.
 
 ### Hive runtime contract
 

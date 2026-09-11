@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Run the local OMP-only Hive contributor SIF with its required isolation.
+set -euo pipefail
+
+script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+sif="${BLUEFIN_CONTRIBUTE_SIF:-${repo_root}/bluefin-contribute.sif}"
+registration="${HIVE_CONTRIBUTOR_ENV:-${HOME}/.config/hive/contributor.env}"
+omp_state="${BLUEFIN_OMP_STATE:-${HOME}/.omp}"
+
+command -v apptainer >/dev/null 2>&1 || {
+  echo "ERROR: apptainer is required to run Bluefin Contribute." >&2
+  exit 127
+}
+[[ -x "$sif" ]] || {
+  echo "ERROR: contributor SIF is missing: ${sif}" >&2
+  exit 1
+}
+[[ -r "$registration" ]] || {
+  echo "ERROR: Hive registration is missing or unreadable: ${registration}" >&2
+  exit 1
+}
+
+[[ -d "$omp_state" ]] || {
+  echo "ERROR: OMP state directory is missing: ${omp_state}" >&2
+  exit 1
+}
+
+runtime_home="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-contribute"
+mkdir -p "${runtime_home}/.config/hive"
+exec apptainer run \
+  --home "${runtime_home}:/home/bluefin" \
+  --bind "${registration}:/home/bluefin/.config/hive/contributor.env:ro" \
+  --bind "${omp_state}:/home/bluefin/.omp:rw" \
+  "$sif"

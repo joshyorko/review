@@ -333,12 +333,19 @@ RUN set -eu; \
       "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh" \
       -o /usr/local/bin/contributor-agent.sh; \
     curl --fail --location --show-error --silent \
-      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh" \
-      -o /usr/local/bin/contributor-relay.sh; \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.js" \
+      -o /usr/local/bin/contributor-relay.js; \
+    curl --fail --location --show-error --silent \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js" \
+      -o /usr/local/bin/pi-backend.js; \
+    mkdir -p /usr/local/bin/lib; \
+    curl --fail --location --show-error --silent \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/lib/pane-classifier.js" \
+      -o /usr/local/bin/lib/pane-classifier.js; \
     curl --fail --location --show-error --silent \
       "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf" \
       -o /usr/local/etc/hive/backends.conf; \
-    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.sh
+    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.js /usr/local/bin/pi-backend.js
 
 # Create the non-root runtime user expected by the launcher and workflows.
 RUN set -eu; \

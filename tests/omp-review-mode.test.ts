@@ -732,6 +732,37 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	dashboard.handleInput("?");
 	assert.ok(frame().some((row) => row.includes("slay")), "help lists the action keys");
 });
+test("dashboard interactive search live-filters and selects items by title", (t) => {
+	const root = stateTree();
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: root });
+	mode.items = [
+		queueItem({ id: 7, repo: "projectbluefin/other", title: "token exchange fix", ciStatus: "success" }),
+		queueItem({ id: 42, repo: "projectbluefin/review", title: "second item", ciStatus: "failure" }),
+	];
+	mode.refreshState();
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 20);
+	t.after(() => dashboard.dispose());
+
+	// Open search input with '/'
+	dashboard.handleInput("/");
+	assert.ok(dashboard.render(100).some((line) => line.includes("search")));
+
+	// Type search query for title "token"
+	for (const ch of "token") dashboard.handleInput(ch);
+	dashboard.handleInput("\r");
+
+	// The rendered queue shows only the matching item
+	const renderedSearch = dashboard.render(100);
+	assert.ok(renderedSearch.some((line) => line.includes("#7") && line.includes("token exchange fix")));
+	assert.ok(!renderedSearch.some((line) => line.includes("#42") && line.includes("second item")));
+
+	// Select it with Tab or Space
+	dashboard.handleInput(" ");
+	assert.ok(mode.selectedKeys.has("projectbluefin/other#7"), "selected item via search input");
+	assert.equal(mode.selectedKeys.size, 1);
+	assert.ok(mode.selectedKeys.has("projectbluefin/other#7"));
+});
 test("dashboard supports multi-selection with space, x to clear, and batch action dispatch", (t) => {
 	const root = stateTree();
 	t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -839,6 +870,39 @@ test("without a hub the queue takes the maintainer's order", () => {
 		"triage",
 	);
 });
+test("issue queue is organized by repo and delineated with dividers", () => {
+	const now = NOW;
+	const items = [
+		queueItem({ id: 201, type: "issue", repo: "projectbluefin/server", title: "server issue", updatedAt: now - 100 }),
+		queueItem({ id: 101, type: "issue", repo: "projectbluefin/actions", title: "actions issue", updatedAt: now - 50 }),
+		queueItem({ id: 202, type: "issue", repo: "projectbluefin/server", title: "another server issue", updatedAt: now - 10 }),
+		queueItem({ id: 102, type: "issue", repo: "projectbluefin/actions", title: "second actions issue", updatedAt: now - 20 }),
+	];
+	const ranked = prioritize(items, { hive: EMPTY_HIVE, hasFindings: () => false, now });
+	// Must group by repository first so cohorts stay within repository borders
+	assert.deepEqual(
+		ranked.items.map((it) => `${it.repo}#${it.id}`),
+		[
+			"projectbluefin/actions#102",
+			"projectbluefin/actions#101",
+			"projectbluefin/server#202",
+			"projectbluefin/server#201",
+		],
+	);
+
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: "/nonexistent" });
+	mode.items = items;
+	mode.queueMode = "issues";
+	mode.reprioritize();
+
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	const lines = dashboard.render(80);
+	dashboard.dispose();
+
+	// Divider row between projectbluefin/actions and projectbluefin/server
+	assert.ok(lines.some((line) => line.includes("─── projectbluefin/server")), "dashboard delineates repo transitions with horizontal dividers");
+});
+
 
 test("with a hub the order is Hive's, including through a closing reference", () => {
 	const hive = {
@@ -1284,6 +1348,9 @@ test("action prompts name the evidence and refuse to merge red checks", () => {
 	assert.match(batchPrompt, /Repository `projectbluefin\/other`/);
 	assert.match(batchPrompt, /cross-repository contract compatibility/);
 	assert.equal(actionPrompt({ kind: "close" }), undefined);
+	assert.match(batchPrompt, /Never ask the user for confirmation/);
+	assert.match(batchPrompt, /execute all actions end-to-end autonomously/);
+	assert.match(actionPrompt({ kind: "review", item }), /Never ask the user for confirmation/);
 });
 
 test("slaying an issue ships a pull request for someone else to merge", () => {
@@ -1298,7 +1365,8 @@ test("slaying an issue ships a pull request for someone else to merge", () => {
 	const landing = actionPrompt({ kind: "slay", item: queueItem() });
 	assert.match(landing, /Run the full landing pass/);
 	assert.match(landing, /Do not merge without green checks/);
-
+	assert.match(landing, /rekicking CI/);
+	assert.match(landing, /failing test or major defect/);
 	// A batch of issues is still one pull request per issue, not one for the lot.
 	const batch = [issue, queueItem({ id: 941, type: "issue", repo: "projectbluefin/documentation" })];
 	const batchPrompt = actionPrompt({ kind: "slay", item: issue, items: batch });
@@ -1471,12 +1539,11 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	dashboard.handleInput("A");
 	assert.equal(mode.selectedKeys.size, narrowed, "A is bound to the slice selection");
 
-	// The dispatched prompt must fan out. A batch worked top to bottom is a list.
+	// The dispatched prompt fans out one subagent per issue/PR, capped at 7.
 	const batch = mode.chosenItems();
 	const prompt = actionPrompt({ kind: "slay", item: batch[0], items: batch });
-	assert.match(prompt, /concurrently/);
-	assert.match(prompt, /one agent per item/);
-	assert.match(prompt, /Do not process the list sequentially/);
-	assert.match(prompt, /name every item that failed/);
-	assert.doesNotMatch(prompt, /repository sequence/);
+	assert.match(prompt, /ONE subagent per issue\/PR/);
+	assert.match(prompt, /capped at a maximum of 7 concurrent subagents/);
+	assert.match(prompt, /k3-final-review/);
+	assert.match(prompt, /lands them all in one PR per repository/);
 });

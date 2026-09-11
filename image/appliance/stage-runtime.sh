@@ -12,6 +12,7 @@
 set -euo pipefail
 
 dest="${1:?usage: stage-runtime <destdir>}"
+shift
 
 # Executables copied verbatim into /usr/bin.
 #
@@ -34,6 +35,16 @@ binaries=(
   /usr/bin/tar
   /usr/bin/xargs
 )
+
+# Callers may name additional absolute executables after the destination. Their
+# ELF closures are staged by the same ldd path as the appliance's fixed base.
+for binary in "$@"; do
+  [[ "$binary" == /* ]] || {
+    echo "stage-runtime: extra executable must be absolute: $binary" >&2
+    exit 1
+  }
+  binaries+=("$binary")
+done
 
 # git's helpers live on GIT_EXEC_PATH. Only the HTTPS remote helper is kept:
 # the appliance talks to GitHub over https and nothing else.

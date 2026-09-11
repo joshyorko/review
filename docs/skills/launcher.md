@@ -180,6 +180,8 @@ git diff --check
 
 The recipe list must match the documented public recipes. Doctor must not start a container.
 
+`just contribute [gemini|luna|opus5|sol]` starts the isolated OMP worker. It mounts one selected Hive registration at `/home/bluefin/.config/hive/contributor.env`, passes provider credentials only by inherited environment names, and uses `--userns keep-id:uid=65532,gid=65532`; `review-container` remains on the compatibility image.
+
 ## Sources
 
 - Podman environment inheritance: Context7 `/websites/podman_io_en`

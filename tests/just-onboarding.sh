@@ -1461,7 +1461,10 @@ begin "contribute: launches the worker in the foreground"
 reset_logs
 run_recipe contribute GH_READY=1
 assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
-assert_file_contains "run --rm --interactive --tty --replace --name review-container" "$runner_log"
+assert_file_contains "run --rm --interactive --tty --replace --name contribute" "$runner_log"
+assert_file_contains "keep-id:uid=65532,gid=65532" "$runner_log"
+assert_file_contains "/home/bluefin/.config/hive/contributor.env:ro,z" "$runner_log"
+assert_file_contains "ghcr.io/projectbluefin/contribute:stable" "$runner_log"
 assert_file_not_contains "--detach" "$runner_log"
 
 begin "review-container: REVIEW_DETACH=1 is rejected"
@@ -2030,10 +2033,10 @@ fi
 if grep -nE '(^|[^[:alnum:]_])(nohup|setsid)([^[:alnum:]_]|$)' "$code"; then
   fail "nohup/setsid must never appear on a launch path"
 fi
-assert_eq "$(grep -cE 'podman run --rm --interactive --tty' "$code")" 2 \
-  "expected exactly two foreground podman run sites (contributor container and queue walk)"
+assert_eq "$(grep -cE 'podman run --rm --interactive --tty' "$code")" 3 \
+  "expected three foreground podman run sites (compatibility contributor, contribute, queue)"
 # A stale container from a hard-killed terminal must never block a relaunch.
-assert_eq "$(grep -cE 'podman run --rm --interactive --tty --replace --name' "$code")" 2 \
+assert_eq "$(grep -cE 'podman run --rm --interactive --tty --replace --name' "$code")" 3 \
   "every named foreground run must reclaim its name with --replace"
 begin "static: a launch cannot detach through an option form or a second line"
 # The greps above read one physical line at a time and only recognise a
@@ -2175,7 +2178,7 @@ fi
 grep -q 'must be a full 40-character commit SHA' "$code" ||
   fail "the Hive checkout must remain pinned to a full commit SHA"
 begin "static: no legacy backends survive in the launcher"
-for legacy in copilot_live_models 'Multiple AI CLIs' LAST_TOOL AGENT_MODEL=; do
+for legacy in copilot_live_models 'Multiple AI CLIs' LAST_TOOL; do
   if grep -Fn -- "$legacy" "$code"; then
     fail "legacy backend leftover found: $legacy"
   fi

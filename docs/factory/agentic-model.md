@@ -73,14 +73,9 @@ carries the operational form of this section.
 
 ## Repository boundary
 
-`review` owns the contributor image, credential handoff, and review context.
-Hive owns the contributor WebSocket protocol, task selection, assignment prompt
-injection, the `contributor` tmux session, and output capture. The launcher
-must not decline, retry, or otherwise manage assignments mid-protocol; the
-one permitted filter is own-work exclusion on the maintainer-facing queue
-view, so a reviewer never receives their own authored pull requests.
-Hive also owns contributor completion. Review may display a read-only Hive
-projection, but it never completes an assignment.
+`review` owns the compatibility contributor image, the isolated `contribute` OMP worker image, credential handoff, and review context. Hive owns the contributor WebSocket protocol, task selection, assignment prompt injection, the `contributor` tmux session, and output capture. The launcher must not decline, retry, or otherwise manage assignments mid-protocol; the one permitted filter is own-work exclusion on the maintainer-facing queue view, so a reviewer never receives their own authored pull requests. Hive also owns contributor completion. Review may display a read-only Hive projection, but it never completes an assignment.
+
+The `contribute` image defines one narrow contributor experience: it always launches OMP and rejects every other `AGENT_BACKEND` value before Hive starts. Its FSDK closure contains only the tools required by OMP and Hive's interactive relay. The generic upstream helper files needed by that relay are implementation dependencies, not alternate agent surfaces. No dashboard, review extension, scheduler, Goose, Codex, Pi, or provider state belongs in the image.
 
 The human Maintainer Reviewer is the decision point. A Factory Worker,
 Managed Reviewer Client, Portable Reviewer Prompt, Review Evidence view, or

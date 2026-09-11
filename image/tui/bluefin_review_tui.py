@@ -200,7 +200,7 @@ PERSISTED_PR_KEY_PATTERN = re.compile(
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
 MAX_CONCURRENT_LANDINGS = int(
-    os.environ.get("BLUEFIN_REVIEW_CONCURRENT_LANDINGS", "6")
+    os.environ.get("BLUEFIN_REVIEW_CONCURRENT_LANDINGS", "7")
 )
 HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
@@ -7128,8 +7128,12 @@ class ReviewDashboard(App):
             pause = self.query_one("#landing-pause", Button)
         except (NoMatches, ScreenStackError):
             return
+        # Review / phase tasks (like k3-final-review or final rounds) do not count
+        # against worker concurrency slots or display as consuming the worker cap.
         active = [
-            task for task in self.landing_queue if self._landing_task_active(task)
+            task
+            for task in self.landing_queue
+            if self._landing_task_active(task) and not task.phase
         ]
         queued = [
             task
@@ -7138,6 +7142,7 @@ class ReviewDashboard(App):
                 not self._landing_task_active(task)
                 and task.process is None
                 and task.returncode is None
+                and not task.phase
             )
         ]
         state = "PAUSED" if self.landing_paused else "RUNNING"
@@ -7155,9 +7160,13 @@ class ReviewDashboard(App):
         # again would show every landed pull request twice while the round
         # runs (a race the pilot caught on fast machines), so a round is one
         # batch-level line and per-PR rows come from landing tasks alone.
-        rounds = [task for task in (*active, *queued) if task.phase]
+        rounds = [
+            task
+            for task in self.landing_queue
+            if task.phase and (self._landing_task_active(task) or task.process is not None or (task.returncode is None and task.process is None))
+        ]
         for task in rounds:
-            round_state = "running" if task in active else "queued"
+            round_state = "running" if (self._landing_task_active(task) or task.process is not None) else "queued"
             model = task.model or os.environ.get(
                 "GOOSE_MODEL", "gemini-3.8-flash"
             )
@@ -9897,31 +9906,41 @@ class ReviewDashboard(App):
                 with self._landing_condition:
                     if self.landing_paused:
                         return
-                    active = [
+                    # Issue and PR workers count toward landing concurrency.
+                    # Review and landing agents (phase tasks like final-review) do NOT count
+                    # against the concurrency cap so they can take their time without starving worker slots.
+                    active_workers = [
+                        task
+                        for task in self.landing_queue
+                        if self._landing_task_active(task) and not task.phase
+                    ]
+                    active_all = [
                         task
                         for task in self.landing_queue
                         if self._landing_task_active(task)
                     ]
                     running_repos: set[str] = set()
-                    for task in active:
+                    for task in active_all:
                         running_repos.update(self._landing_repositories(task))
-                    slots = self.landing_concurrency - len(active)
+                    slots = self.landing_concurrency - len(active_workers)
                     for task in self.landing_queue:
-                        if slots <= 0:
-                            break
                         if (
                             task.process is not None
                             or task.returncode is not None
                             or id(task) in self._landing_active
                         ):
                             continue
+                        if not task.phase and slots <= 0:
+                            continue
                         task_repos = self._landing_repositories(task)
-                        if not task_repos.isdisjoint(running_repos):
+                        if not task.phase and not task_repos.isdisjoint(running_repos):
                             continue
                         self._landing_active.add(id(task))
-                        active.append(task)
-                        running_repos.update(task_repos)
-                        slots -= 1
+                        active_all.append(task)
+                        if not task.phase:
+                            running_repos.update(task_repos)
+                            slots -= 1
+                            active_workers.append(task)
                         worker = threading.Thread(
                             target=self.run_landing_task,
                             args=(task,),
@@ -9946,7 +9965,7 @@ class ReviewDashboard(App):
                                 severity="error",
                             )
                             self.call_from_thread(self.landing_finished, task)
-                    if not pending() and not active:
+                    if not pending() and not active_all:
                         return
                     self._landing_condition.wait()
         finally:

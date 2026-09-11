@@ -3,12 +3,9 @@
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
 layers the pinned Hive runtime (the tracked revision is in the [README](../README.md)),
 the current Goose canary snapshot, the pinned official Codex CLI, GitHub CLI,
-tmux, uv with the Textual
-dashboard runtime, hooks, and generated
-organization skills. Goose
-publishes that snapshot from its active `main`
-branch; each archive is verified against GitHub's signed build provenance
-before installation.
+tmux, uv with the Textual dashboard runtime, hooks, and generated organization
+skills. Goose publishes that snapshot from its active `main` branch; each
+archive is verified against GitHub's signed build provenance before installation.
 
 The relay uses the root `package-lock.json` to install only the exact `ws`
 dependency with `npm ci --omit=dev --ignore-scripts`. The official,
@@ -17,6 +14,18 @@ checksum-verified Node archive remains intact as a JavaScript runtime: `node`,
 now-unused npm download cache are removed. Those fixed Node, CLI, tmux, and
 relay inputs are built before the mutable Goose refresh layer, so a Goose-only
 refresh reuses them.
+
+`ghcr.io/projectbluefin/review-contributor` remains the compatibility image for
+the maintainer dashboard and legacy `review-container` path.
+`ghcr.io/projectbluefin/contribute` is a separate distroless Hive worker: it
+carries only OMP, Node with the locked `ws` module, GitHub CLI, tmux, the
+upstream Hive runtime, and the FSDK shell/git closure. It contains no Goose,
+Codex, Pi, Python, dashboard, review scope, or generated skills. Its embedded
+SPDX manifest records exactly those artifacts, `ws`, and pinned Hive files; the
+registration is mounted at `/home/bluefin/.config/hive/contributor.env` and
+provider credentials are inherited environment names only.
+
+`contribute` is OMP-only by contract. Its entrypoint rejects any external `AGENT_BACKEND` other than `omp`, so a stale registration cannot reactivate Goose or another Hive backend. This is a product boundary rather than a launcher default: the image defines the entire contributor experience, while Hive retains registration, assignment, tmux lifecycle, prompt injection, retries, and result capture.
 
 That Hive SHA is load-bearing, not decorative. It is the third of three copies
 of the same pin: `hive_commit` in the `justfile`, `ARG HIVE_COMMIT` in

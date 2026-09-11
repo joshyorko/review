@@ -15,9 +15,7 @@ selection, tmux session, prompt injection, and output capture.
 
 ## Boundaries
 
-Keep this repository focused: it ships the review appliance and nothing
-beside it. Persistent state stays limited to launcher configuration and the
-review-queue landing record the launcher mounts for the dashboard.
+Keep this repository focused: it ships the maintainer-facing review appliance and the isolated `contribute` Hive worker. `contribute` is not a general agent distribution: OMP is its only selectable agent surface, Hive remains the sole task authority, and the registration file plus inherited provider credentials are its only runtime inputs.
 
 The interactive recipes run the image runtime in the foreground of the
 terminal that launched them, and Ctrl-C stops them. Detached contributor

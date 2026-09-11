@@ -49,7 +49,9 @@ require image/Containerfile \
   'PYTHONPATH=/opt/bluefin' \
   'COPY image/tmux.conf /etc/tmux.conf' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
-  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.js' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/lib/pane-classifier.js' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf' \
   '/usr/local/bin/goose --version' \
   'tmux -V' \

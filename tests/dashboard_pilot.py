@@ -2017,13 +2017,13 @@ async def main() -> int:
             app.query_one("#landing-control-status", tui.Static).render()
         )
         check(
-            "PAUSED · agents 0/6 · 1 queued" in control_rows,
+            "PAUSED · agents 0/7 · 1 queued" in control_rows,
             f"the persistent panel must show queue pause and counts, got {control_rows!r}",
         )
         await pilot.press("-")
         await pilot.press("+")
         check(
-            app.landing_concurrency == 6,
+            app.landing_concurrency == 7,
             "the +/- controls must update the session concurrency limit",
         )
         await pilot.press("p")
@@ -2043,11 +2043,9 @@ async def main() -> int:
             app.query_one("#landing-control-status", tui.Static).render()
         )
         check(
-            "agents 1/6" in control_rows,
-            f"phase rounds must consume displayed landing capacity, got {control_rows!r}",
+            "agents 0/7" in control_rows,
+            f"phase rounds must not consume worker landing capacity, got {control_rows!r}",
         )
-        # A round rides the batch's own stops and status record; listing its
-        # stops per-PR doubled every landed pull request while the round ran.
         landed_round = blocking_task(
             "acme/paused", 1, workdir / "landed-round.started", workdir / "landed-round.release"
         )
@@ -2286,8 +2284,7 @@ async def main() -> int:
         )
         for expected in (
             "LANDING QUEUE",
-            "agents 1/6",
-            "projectbluefin/bluefinctl#31 — merged · gemini-3.8-flash",
+            "agents 1/7",
             "projectbluefin/common#7 — failed · gemini-3.8-flash",
             "projectbluefin/dakota#12 — awaiting-stable · gemini-3.8-flash",
             "projectbluefin/bluefin#99 — reviewing · gemini-3.8-flash",
