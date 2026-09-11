@@ -25,7 +25,7 @@ READ_TIMEOUT_SECONDS = 30.0
 WRITE_TIMEOUT_SECONDS = 30.0
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-BACKENDS = frozenset({"goose", "codex"})
+BACKENDS = frozenset({"omp", "codex"})
 EFFORTS = frozenset({"low", "medium", "high", "max"})
 
 
@@ -105,7 +105,7 @@ def require_number(request: dict) -> int:
 def require_backend(request: dict) -> str:
     backend = request.get("backend")
     if backend not in BACKENDS:
-        raise Rejected("bad-request", "backend must be goose or codex")
+        raise Rejected("bad-request", "backend must be omp or codex")
     return str(backend)
 
 

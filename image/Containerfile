@@ -24,12 +24,10 @@ ARG CODEX_X86_64_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a96
 ARG CODEX_AARCH64_SHA256=eb677c80f666b1ab8b4b1d083b66e8d614b1281d960bb6f9fd8ca98f58b38b90
 ARG CODEX_CODE_MODE_HOST_X86_64_SHA256=0146adfaac8363ec9fcdb5895f7624db5b2e8617a283887938b7fb97a1dd4356
 ARG CODEX_CODE_MODE_HOST_AARCH64_SHA256=dfd4ff98ea4db30ed078af9c31b6f86e3da4836d0573aa87e225e5a5b54d3c7c
-ARG GOOSE_CHANNEL=canary
-# `canary` is a mutable release tag, not an artifact identity. CI resolves
-# these from the release asset API for every build and passes them as build
-# inputs; these defaults keep a local build pinned to a known attested asset.
-ARG GOOSE_X86_64_SHA256=14971bf6f9b48d649379c9df42fbd5038ad17f887ff5724ab89492ff35f52881
-ARG GOOSE_AARCH64_SHA256=7da3f5314514cab65caaf7864dc7b7e694def1a4eee090cf05c0ce2041ffc099
+# renovate: datasource=github-releases depName=can1357/oh-my-pi
+ARG OMP_VERSION=18.1.18
+ARG OMP_X86_64_SHA256=45421f9a5f112bc47cb9f77c4b4d7927631f8ff859624f821287ec854eb239fc
+ARG OMP_AARCH64_SHA256=1ae8273c231ceb88cebc9971901cf7f5d97ed4149cdc740a814f629cd2b4dcb2
 ARG UV_VERSION=0.12.3
 ARG UV_X86_64_SHA256=0643b9fb8c9fb27458e709ce6ff939695013c41975ff7b02d3f3b138d8d4bdb3
 ARG UV_AARCH64_SHA256=fa513fca1eb2913334c944fe9adbdd410274a1cbe8dd05d03699a9eb85311d4e
@@ -58,7 +56,7 @@ ENV HIVE_CONTRIBUTOR_MODE=true
 
 # FSDK's shell-enabled base keeps the runtime lean but does not ship the whole
 # contributor stack. Keep the pinned Node, GitHub CLI, tmux, and relay module
-# together so a mutable Goose refresh reuses this fixed-tool layer.
+# together so a mutable Codex or OMP refresh reuses this fixed-tool layer.
 #
 # Every archive is checksum-verified with sha256sum BEFORE it is opened, and
 # unpacked by the base's own GNU tar 1.35 -- not by a hand-rolled extractor.
@@ -235,7 +233,7 @@ RUN set -eu; \
     # the file's mode, so the 0644 copies above once produced /opt/bluefin
     # and /opt/bluefin/tui with no execute bit. Root ignored it for the rest
     # of the build, the unprivileged 'dev' user could not traverse into any
-    # image-owned tree underneath, and Goose died reading its GOOSE_PATH_ROOT
+    # image-owned tree underneath, and the agent died reading its own
     # config. State the mode rather than inherit one; the layer near the end
     # of this file asserts the whole tree.
     chmod 0755 /opt/bluefin /opt/bluefin/tui /opt/bluefin/harness; \
@@ -269,46 +267,34 @@ RUN set -eu; \
     done; \
     test ! -e /root/.cache/uv
 
-ARG GOOSE_CHANNEL
-ARG GOOSE_X86_64_SHA256
-ARG GOOSE_AARCH64_SHA256
+ARG OMP_VERSION
+ARG OMP_X86_64_SHA256
+ARG OMP_AARCH64_SHA256
 ARG HIVE_COMMIT
 # Preserve both architecture-specific asset identities in the image
 # configuration. Build provenance records the resolved build arguments too.
-LABEL io.projectbluefin.review.goose.channel="${GOOSE_CHANNEL}" \
-      io.projectbluefin.review.goose.x86_64-unknown-linux-musl.sha256="${GOOSE_X86_64_SHA256}" \
-      io.projectbluefin.review.goose.aarch64-unknown-linux-musl.sha256="${GOOSE_AARCH64_SHA256}"
+LABEL io.projectbluefin.review.omp.version="${OMP_VERSION}" \
+      io.projectbluefin.review.omp.x86_64.sha256="${OMP_X86_64_SHA256}" \
+      io.projectbluefin.review.omp.aarch64.sha256="${OMP_AARCH64_SHA256}"
 
-# Keep Goose's mutable canary refresh in its own layer, after fixed tools.
-ARG GOOSE_REFRESH=0
-RUN --mount=type=secret,id=github_token set -eu; \
-    export GH_TOKEN="$(cat /run/secrets/github_token)"; \
+RUN set -eu; \
     arch="$(uname -m)"; \
     case "$arch" in \
       x86_64) \
-        goose_arch=x86_64; \
-        goose_sha="${GOOSE_X86_64_SHA256}" ;; \
+        omp_asset=omp-linux-x64; \
+        omp_sha="${OMP_X86_64_SHA256}" ;; \
       aarch64|arm64) \
-        goose_arch=aarch64; \
-        goose_sha="${GOOSE_AARCH64_SHA256}" ;; \
+        omp_asset=omp-linux-arm64; \
+        omp_sha="${OMP_AARCH64_SHA256}" ;; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
-    workdir="$(mktemp -d)"; \
-    trap 'rm -rf "$workdir"' EXIT; \
     curl --fail --location --show-error --silent \
-      "https://github.com/aaif-goose/goose/releases/download/${GOOSE_CHANNEL}/goose-${goose_arch}-unknown-linux-musl.tar.gz" \
-      -o "$workdir/goose.tar.gz"; \
-    printf '%s  %s\n' "$goose_sha" "$workdir/goose.tar.gz" | sha256sum -c -; \
-    for attempt in 1 2 3 4 5 6; do \
-      if gh attestation verify "$workdir/goose.tar.gz" --repo aaif-goose/goose --signer-workflow aaif-goose/goose/.github/workflows/canary.yml; then break; fi; \
-      if [ "$attempt" = 6 ]; then echo "goose attestation verification failed after 6 attempts" >&2; exit 1; fi; \
-      echo "attestation endpoint unavailable (attempt ${attempt}/6); retrying" >&2; \
-      sleep 20; \
-    done; \
-    tar -xzOf "$workdir/goose.tar.gz" --occurrence=1 ./goose > /usr/local/bin/goose; \
-    chmod 0755 /usr/local/bin/goose; \
-    /usr/local/bin/goose --version; \
-    /usr/local/bin/goose run --help >/dev/null
+      "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/${omp_asset}" \
+      -o /usr/local/bin/omp.tmp; \
+    printf '%s  %s\n' "$omp_sha" /usr/local/bin/omp.tmp | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/omp.tmp; \
+    mv /usr/local/bin/omp.tmp /usr/local/bin/omp; \
+    /usr/local/bin/omp --version
 
 COPY --chmod=0755 image/bin/bluefin-review /usr/local/bin/bluefin-review
 COPY --chmod=0755 image/bin/worktree-guard /usr/local/bin/worktree-guard
@@ -351,7 +337,7 @@ RUN set -eu; \
 RUN set -eu; \
     grep -q '^dev:' /etc/group || echo 'dev:x:1000:' >> /etc/group; \
     grep -q '^dev:' /etc/passwd || echo 'dev:x:1000:1000:Developer:/home/dev:/usr/bin/bash' >> /etc/passwd; \
-    mkdir -p /run/hive-metrics /home/dev/Downloads /home/dev/.config/goose /home/dev/.config/gh /home/dev/.codex /home/dev/.agents /home/dev/.local/state/bluefin-review /home/dev/.local/share; \
+    mkdir -p /run/hive-metrics /home/dev/Downloads /home/dev/.config/gh /home/dev/.codex /home/dev/.agents /home/dev/.local/state/bluefin-review /home/dev/.local/share; \
     chown -R 1000:1000 /run/hive-metrics /home/dev
 
 # Hive's contributor runtime calls `find` and `cmp` directly: the relay prunes
@@ -405,26 +391,15 @@ RUN set -eu; \
     test -z "$(cmp -s "$probe/cmp-left" "$probe/cmp-right" 2>&1 || true)"; \
     rm -rf "$probe"
 
-# Controlled Goose configuration. This is NOT ~/.config/goose/config.yaml:
-# Hive's contributor runtime overwrites that file at every startup, so the
-# entrypoint points Goose here with GOOSE_PATH_ROOT instead.
-# GOOSE_PATH_ROOT relocates Goose's config AND its data/state roots, so the
-# whole tree must be writable by the runtime user or Goose fails to open its
-# log directory on startup.
-RUN mkdir -p /opt/bluefin/goose/config /opt/bluefin/goose/data /opt/bluefin/goose/state \
-    && chown -R 1000:1000 /opt/bluefin/goose
-COPY --chown=1000:1000 image/config/goose.yaml /opt/bluefin/goose/config/config.yaml
 COPY image/config/local-agent-policy.md /opt/bluefin/local-agent-policy.md
 # The display name is image-owned branding, separate from repository and
 # permission targets. A custom image may replace this one-line setting.
 COPY --chmod=0644 image/config/display-brand /opt/bluefin/config/display-brand
 
-# The image-owned review scope: `goose review --check-scope` loads
-# .agents/REVIEW.md and .agents/checks/*.md from this out-of-tree directory,
-# so Bluefin's review doctrine reaches every review without writing into the
-# repository under review. --check-scope REPLACES repo-root discovery
-# (additive flag filed as aaif-goose/goose#11060), so Bluefin repositories
-# keep their checks in this shared overlay.
+# The image-owned review scope: bluefin-review folds .agents/REVIEW.md and
+# .agents/checks/*.md from this out-of-tree directory into its own prompt,
+# so Bluefin's review doctrine reaches every review without writing into
+# the repository under review.
 COPY --chmod=0644 image/review-scope/REVIEW.md /opt/bluefin/review-scope/.agents/REVIEW.md
 COPY --chmod=0644 image/review-scope/checks/ /opt/bluefin/review-scope/.agents/checks/
 RUN chmod 0755 /opt/bluefin/review-scope /opt/bluefin/review-scope/.agents /opt/bluefin/review-scope/.agents/checks
@@ -435,8 +410,8 @@ COPY --chmod=0755 image/git-hooks/ /opt/bluefin/git-hooks/
 COPY --chmod=0755 image/hive-entrypoint.d/ /etc/hive/entrypoint.d/
 
 # The image runs as the unprivileged 'dev' user, and every tree under
-# /opt/bluefin is image-owned policy that user must read: the Goose config at
-# GOOSE_PATH_ROOT, the TUI venv, the harness, the review scope, the git hooks.
+# /opt/bluefin is image-owned policy that user must read: the TUI venv, the
+# harness, the review scope, the git hooks.
 # Root ignores a missing execute bit, so a directory a builder created at 0644
 # passes the rest of the build and only fails once a real session tries to
 # traverse it. Assert the whole tree here instead.
@@ -448,15 +423,16 @@ RUN set -eu; \
       exit 1; \
     }
 
-# Project the org's skill documents into Goose's native Agent Skills layout.
+# Project the org's skill documents into the standard Agent Skills layout.
 #
 # projectbluefin keeps skills as docs/skills/<id>.md plus a generated
-# index.json; Goose only discovers directories containing SKILL.md, under fixed
-# roots. Generating at build time means every session sees the whole inventory
-# (name + description only, ~2k tokens) with bodies loaded on demand, and no
-# org repository has to change. The org inventory is taken whole: the lab is
-# an optional session capability the launcher grants (#379), so the skill that
-# describes it belongs in the image whether or not a given session has one.
+# index.json; the discovering agent only finds directories containing
+# SKILL.md, under fixed roots. Generating at build time means every session
+# sees the whole inventory (name + description only, ~2k tokens) with
+# bodies loaded on demand, and no org repository has to change. The org
+# inventory is taken whole: the lab is an optional session capability the
+# launcher grants (#379), so the skill that describes it belongs in the
+# image whether or not a given session has one.
 ARG SKILLS_COMMIT
 ARG SKILLS_REFRESH=0
 COPY --chmod=0755 scripts/generate-skills.py /usr/local/libexec/review-generate-skills
@@ -472,12 +448,11 @@ RUN set -eu; \
 
 # Supply-chain manifest (#78). The published SBOM is syft's inventory of the
 # image, and syft only sees package-manager metadata: every component above
-# that was installed from a release archive or fetched source file -- Goose,
+# that was installed from a release archive or fetched source file -- OMP,
 # gh, tmux, Codex, ripgrep, the Hive runtime files, the skill bundles, and
 # the git hooks -- was absent from the attached SPDX document. Record those
 # components as a standalone SPDX document inside the image, generated here
-# where every pin is a resolved build argument (CI resolves the Goose asset
-# digests immediately before building). The publish workflow's syft run
+# where every pin is a resolved build argument. The publish workflow's syft run
 # ingests this document through its sbom-cataloger (SYFT_SELECT_CATALOGERS),
 # and tests/image-audit.sh --require-attestations fails publication when any
 # of them is missing from the attached SPDX evidence.
@@ -487,9 +462,9 @@ RUN set -eu; \
     /usr/local/libexec/review-sbom-manifest \
       --arch "$(uname -m)" \
       --revision "$REVIEW_REVISION" \
-      --goose-channel "$GOOSE_CHANNEL" \
-      --goose-sha256-x86-64 "$GOOSE_X86_64_SHA256" \
-      --goose-sha256-aarch64 "$GOOSE_AARCH64_SHA256" \
+      --omp-version "$OMP_VERSION" \
+      --omp-sha256-x86-64 "$OMP_X86_64_SHA256" \
+      --omp-sha256-aarch64 "$OMP_AARCH64_SHA256" \
       --gh-version "$GH_VERSION" \
       --tmux-version "$TMUX_VERSION" \
       --codex-version "$CODEX_VERSION" \

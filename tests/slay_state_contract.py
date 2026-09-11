@@ -66,7 +66,7 @@ def _identity(number: int, head: str | None = None) -> RunIdentity:
         pull_request=number,
         base_sha=_sha("a"),
         head_sha=head or f"{number:040x}"[-40:],
-        backend="goose",
+        backend="omp",
         model="gemini-3.8-flash",
         effort="high",
         check_scope_version="image-v1",
@@ -88,7 +88,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-        # The dispatch preflight refuses the real headless-goose command when
+        # The dispatch preflight refuses the real headless-omp command when
         # no Copilot credential is present. These tests never run the agent
         # (drain_landings is stubbed), so they opt out with the same override
         # every stubbed-agent test uses.
@@ -323,7 +323,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                 pull_request=501,
                 base_sha=_sha("a"),
                 head_sha=_sha("5"),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
                 check_scope_version="image-v1",
@@ -354,7 +354,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                 pull_request=502,
                 base_sha=_sha("a"),
                 head_sha=_sha("6"),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
                 check_scope_version="image-v1",
@@ -666,7 +666,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             counts={"critical": 0, "high": 1, "medium": 0, "low": 0},
             findings=[{"severity": "high", "file": "a.py", "line": 1, "title": "risk"}],
             provenance={
-                "backend": "goose",
+                "backend": "omp",
                 "model": "gpt-5.6-sol",
                 "repository": "projectbluefin/review",
                 "pull_request": 154,
@@ -734,7 +734,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             result.state,
             result.counts,
             result.findings,
-            provenance={"backend": "goose", "model": "gpt-5.6-sol", "head_sha": _sha("7")},
+            provenance={"backend": "omp", "model": "gpt-5.6-sol", "head_sha": _sha("7")},
         )
         self.assertEqual(
             tui.classify_review_action(
@@ -975,7 +975,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                 base_sha,
                 head_sha,
                 base_sha[:12] + head_sha[:12],
-                "goose",
+                "omp",
                 "gemini-3.8-flash",
                 "max",
             )
@@ -987,7 +987,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                     {"critical": 0, "high": 0, "medium": 0, "low": 0},
                     [],
                     [],
-                    {"backend": "goose", "model": "gemini-3.8-flash"},
+                    {"backend": "omp", "model": "gemini-3.8-flash"},
                 ),
                 ["transcript"],
                 app.review_scope_version,
@@ -1033,7 +1033,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                 base_sha,
                 head_sha,
                 base_sha[:12] + head_sha[:12],
-                "goose",
+                "omp",
                 "gemini-3.8-flash",
                 "max",
             )
@@ -1045,7 +1045,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                     {"critical": 0, "high": 0, "medium": 0, "low": 0},
                     [],
                     [],
-                    {"backend": "goose", "model": "gemini-3.8-flash"},
+                    {"backend": "omp", "model": "gemini-3.8-flash"},
                 ),
                 ["transcript"],
                 app.review_scope_version,
@@ -1868,7 +1868,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             orig_esc_profile = app.escalation_profile
             def custom_esc_profile(stop):
                 if stop.repository == "projectbluefin/other":
-                    return ("goose", "claude-opus-5", "high")
+                    return ("omp", "claude-opus-5", "high")
                 return orig_esc_profile(stop)
             app.escalation_profile = custom_esc_profile
 

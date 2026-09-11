@@ -87,7 +87,7 @@ jobs:
           set -euo pipefail
           just --justfile justfile --list
 
-      - name: Guided Goose onboarding behavior
+      - name: Guided onboarding behavior
         run: |
           set -euo pipefail
           bash tests/just-onboarding.sh
@@ -150,25 +150,6 @@ jobs:
           # The appliance is the image named 'review'; the README teaches it.
           grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
 
-      - name: Resolve official Goose canary asset identities
-        id: goose
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          release="$(gh api repos/aaif-goose/goose/releases/tags/canary)"
-          asset_digest() {
-            jq -er --arg name "$1" \
-              '.assets[] | select(.name == $name) | .digest |
-               select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")' \
-              <<<"$release"
-          }
-          {
-            echo "x86_64_sha256=$(asset_digest goose-x86_64-unknown-linux-musl.tar.gz)"
-            echo "aarch64_sha256=$(asset_digest goose-aarch64-unknown-linux-musl.tar.gz)"
-          } >>"$GITHUB_OUTPUT"
-
       - name: Compatibility image contract and build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -182,8 +163,6 @@ jobs:
           printf '%s' "$GITHUB_TOKEN" > "$secret_file"
           podman build \
             --format oci \
-            --build-arg GOOSE_X86_64_SHA256="${{ steps.goose.outputs.x86_64_sha256 }}" \
-            --build-arg GOOSE_AARCH64_SHA256="${{ steps.goose.outputs.aarch64_sha256 }}" \
             --secret id=github_token,src="$secret_file" \
             -f image/Containerfile -t review:test .
           test "$(podman image inspect review:test --format '{{.Config.User}}')" = "dev"
@@ -202,7 +181,7 @@ jobs:
             --entrypoint /usr/local/bin/bluefin-review \
             review:test --help
           podman run --rm \
-            --entrypoint /usr/local/bin/goose \
+            --entrypoint /usr/local/bin/omp \
             review:test --version
           podman run --rm \
             --entrypoint /usr/local/bin/codex \

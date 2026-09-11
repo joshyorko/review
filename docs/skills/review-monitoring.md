@@ -140,10 +140,10 @@ Terminal failures, policy blocks, incomplete reports, and publication waits stay
 
 ### 7. Agent Health & Diagnostics
 
-Landing agents execute headless (`goose run --no-session -i <prompt>`).
+Landing agents execute headless (`omp --no-session -p --auto-approve @@PROMPT`).
 Common health failure modes to detect:
 1. **Synchronous CI Blockers:** Agent executing long-running `gh run watch` instead of polling `publish-verdict`.
-2. **Permission Denied on Logs:** Missing user ownership on `/home/dev/.local/state` causing Goose logging failures.
+2. **Permission Denied on Logs:** Missing user ownership on `/home/dev/.local/state` causing agent logging failures.
 3. **Partitioning Starvation:** Multiple repositories packed into a single task instead of concurrent per-repo lanes.
 
 ### 8. Long-Running Observation

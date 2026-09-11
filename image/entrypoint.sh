@@ -27,21 +27,20 @@ banner() {
 BANNER
     printf '%s      %sBLUEFIN REVIEW APPLIANCE%s\n' "$r" "$c3" "$r"
     printf '%s%s | model %s | effort %s%s\n' \
-      "$c2" "$mode" "${GOOSE_MODEL:-provider default}" \
-      "${GOOSE_THINKING_EFFORT:-provider default}" "$r"
+      "$c2" "$mode" "${AGENT_MODEL:-provider default}" \
+      "${AGENT_REASONING_EFFORT:-provider default}" "$r"
   } >&2
 }
 
 # Validate the selected backend before startup. Hive remains responsible for
 # assignment selection; this only proves the selected CLI can run here.
-selected_backend="${AGENT_BACKEND:-goose}"
+selected_backend="${AGENT_BACKEND:-omp}"
 case "$selected_backend" in
-goose)
-  if [ -n "${GOOSE_PROVIDER:-}" ] && [ "$GOOSE_PROVIDER" != github_copilot ]; then
-    note "ERROR: GOOSE_PROVIDER=${GOOSE_PROVIDER} is not supported — review supports GitHub Copilot only."
-    note "  Unset GOOSE_PROVIDER or set GOOSE_PROVIDER=github_copilot."
+omp)
+  command -v omp >/dev/null 2>&1 || {
+    note 'ERROR: OMP backend selected but omp is not installed.'
     exit 1
-  fi
+  }
   ;;
 codex)
   command -v codex >/dev/null 2>&1 || {
@@ -64,9 +63,9 @@ codex)
 esac
 
 # The maintainer review surface is the PR-review launch path: the dashboard
-# needs GH_TOKEN and Goose but no mounted Hive registration, so it skips the
-# contributor.env gate and the Hive handover below. The launcher may pass only
-# HIVE_HUB so this surface can consult the selected deployment.
+# needs GH_TOKEN and the selected backend but no mounted Hive registration, so
+# it skips the contributor.env gate and the Hive handover below. The launcher
+# may pass only HIVE_HUB so this surface can consult the selected deployment.
 review_dashboard=false
 if [ "${1:-}" = queue ]; then
   review_dashboard=true
@@ -76,7 +75,7 @@ fi
 hive_config="${HOME}/.config/hive"
 if [ "$review_dashboard" = false ] && [ ! -f "${hive_config}/contributor.env" ]; then
   note "missing ${hive_config}/contributor.env"
-  note "  mount your Hive config, or run: just contribute-setup goose"
+  note "  mount your Hive config, or run: just contribute-setup codex"
   note "  reviewing the PR queue needs no Hive: run the image with 'queue'"
   exit 1
 fi
@@ -86,30 +85,6 @@ if [ "$review_dashboard" = true ]; then
 else
   note 'Bluefin Operations | contributor runtime starting'
 fi
-# --- Goose configuration -----------------------------------------------------
-#
-# GOOSE_PATH_ROOT is the image-owned policy, data, and state seam. The pinned
-# Hive runtime preserves an existing ~/.config/goose/config.yaml, but its
-# runtime-owned file and the image's controlled policy must remain separate.
-export GOOSE_PATH_ROOT="${REVIEW_GOOSE_ROOT:-/opt/bluefin/goose}"
-
-# Goose resolves environment before file, so the launcher's passthrough wins
-# over anything in the controlled config. Goose is Copilot-only; Pi gets its
-# own selected provider credential below.
-if [ "$selected_backend" = goose ]; then
-  export GOOSE_PROVIDER=github_copilot
-fi
-
-# Goose refuses to start without a model. Keep the direct-image fallback in
-# sync with the launcher's default for users who invoke this image directly.
-if [ -z "${GOOSE_MODEL:-}" ]; then
-  GOOSE_MODEL="gemini-3.8-flash"
-  note "GOOSE_MODEL not set; defaulting to ${GOOSE_MODEL} for GitHub Copilot"
-fi
-export GOOSE_MODEL
-
-export GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-max}"
-
 if [ "$review_dashboard" = true ]; then
   if [ -n "${HIVE_HUB:-}" ]; then
     banner 'PR queue dashboard (Hive configured)'
@@ -119,19 +94,6 @@ if [ "$review_dashboard" = true ]; then
 else
   banner 'Hive contributor'
 fi
-
-# No desktop keyring exists in a container; without this Goose fails to store or
-# read provider secrets and falls back inconsistently.
-export GOOSE_DISABLE_KEYRING=1
-
-# Goose asks an interactive telemetry question on first run. Hive drives the
-# CLI with simulated keystrokes, so an unanswered prompt hangs the agent.
-export GOOSE_TELEMETRY_ENABLED="${GOOSE_TELEMETRY_ENABLED:-false}"
-
-# Native skills advertise their descriptions at session start, but their bodies
-# load on demand. Keep this small policy in every turn so the agent routes into
-# the global inventory and each cloned repository's own skill catalog.
-export GOOSE_MOIM_MESSAGE_FILE="${GOOSE_MOIM_MESSAGE_FILE:-/opt/bluefin/local-agent-policy.md}"
 
 # --- Git hooks ---------------------------------------------------------------
 #
@@ -211,13 +173,13 @@ if [ "$review_dashboard" = true ]; then
         note "Hive knowledge export unavailable from ${hub_http%/contribute}; reviews continue without it."
       fi
       # The export stays a file the agent can search, and is deliberately NOT
-      # linked to AGENTS.md/.goosehints/.goose-instructions.md. Goose loads
-      # those into EVERY subprocess it starts, and 'goose review' starts one
-      # per check: linking them spent the live export — 417 KB of scraped
-      # documentation — of each check's context window before the diff was
-      # read, and checks answered with prose or an empty response instead of
-      # a verdict. The review scope's REVIEW.md names the path instead, so
-      # the knowledge base is reachable at the cost of one line.
+      # linked to AGENTS.md/CLAUDE.md-style context files that a backend loads
+      # into every subprocess it starts: linking them spent the live export —
+      # 417 KB of scraped documentation — of each check's context window
+      # before the diff was read, and checks answered with prose or an empty
+      # response instead of a verdict. The review scope's REVIEW.md names the
+      # path instead, so the knowledge base is reachable at the cost of one
+      # line.
     fi
   fi
   if [ -n "${HIVE_HUB:-}" ]; then
@@ -227,7 +189,7 @@ if [ "$review_dashboard" = true ]; then
   fi
   # The dashboard runs as a background job this shell waits on; it must NOT be
   # exec'd. PID 1 owes the container one duty the Textual process does not
-  # perform: reaping adopted children. Goose review tool calls leave orphaned
+  # perform: reaping adopted children. A review's tool calls leave orphaned
   # grandchildren (defunct git/gh) whose intermediate shell exited first, and
   # reparented to an exec'd Python PID 1 — which never waitpid()s a process it
   # did not spawn — they accumulated as zombies for the whole session (#338).
@@ -252,15 +214,15 @@ fi
 # --- Hand over to Hive -------------------------------------------------------
 #
 # contributor-agent.sh creates the tmux session named "contributor", starts the
-# relay, and launches Goose by keystroke injection. Attaching to that session is
+# relay, and launches the selected agent by keystroke injection. Attaching to that session is
 # Hive's own documented flow. Running it in the foreground is deliberate: the
 # launcher never backgrounds or detaches the agent.
 # The attach client must describe the terminal that actually renders tmux.
 # The base ships the full terminfo database, so the caller's TERM normally
 # resolves; the fallback covers terminals newer than the base's ncurses
 # (e.g. xterm-ghostty). A truecolor caller (COLORTERM) gets the direct-color
-# fallback; without it tmux downsamples every pane color to 256 and Goose
-# renders the wrong colors.
+# fallback; without it tmux downsamples every pane color to 256 and the
+# agent renders the wrong colors.
 tmux_fallback_term=xterm-256color
 if ! infocmp "${TERM:-}" >/dev/null 2>&1; then
   case "${COLORTERM:-}" in

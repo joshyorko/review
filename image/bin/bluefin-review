@@ -6,8 +6,8 @@
 # all — the maintainer surface (the dashboard) owns those, behind its own
 # typed-number gate.
 #
-#   bluefin-review [range]           review a local diff through Goose
-#   bluefin-review pr <repo> <num>   review one pull request through Goose
+#   bluefin-review [range]           review a local diff
+#   bluefin-review pr <repo> <num>   review one pull request
 #   bluefin-review receipt <args>    emit a versioned machine-readable receipt
 #
 # The dashboard shells out to 'pr' for its review key, so both surfaces judge a
@@ -26,34 +26,35 @@ request_review_cancel() {
 
 WORKSPACE="${HIVE_WORKSPACE_DIR:-${HOME}/workspace}"
 
-# Goose discovers session skills under ~/.agents/skills, but 'goose review'
-# does not read them: its own context comes from '.agents/REVIEW.md' and
+# The selected backend discovers session skills under ~/.agents/skills, but
+# its own review context comes from '.agents/REVIEW.md' and
 # '.agents/checks/*.md' inside the REVIEWED repository. Reviewing another
-# project therefore gets Goose's generic prompt with none of the org's review
-# doctrine, and we must not write into the repository under review to fix that.
+# project therefore gets the backend's generic prompt with none of the org's
+# review doctrine, and we must not write into the repository under review to
+# fix that.
 #
-# --instructions is the additive seam (--prompt would replace Goose's default
-# prompt wholesale). Pass a POINTER rather than the documents themselves: the
-# projected pr-review skill and its references are ~33 KB, Goose dispatches one
-# subprocess per check, and that cost would be paid on every check of every
-# review. This mirrors local-agent-policy.md, which likewise routes the agent
-# into the skill inventory instead of inlining it.
+# Pass a POINTER rather than the documents themselves: the projected
+# pr-review skill and its references are ~33 KB, and that cost would be paid
+# on every review if it were inlined instead. This mirrors
+# local-agent-policy.md, which likewise routes the agent into the skill
+# inventory instead of inlining it.
 SKILLS_ROOT="${BLUEFIN_REVIEW_SKILLS_ROOT:-${HOME}/.agents/skills}"
 CONTEXT_SKILLS="${BLUEFIN_REVIEW_CONTEXT_SKILLS:-pr-review queue-feed hive-review human-gates}"
 
 # Hive downloads the hub's knowledge export here and refreshes it every ten
-# minutes, symlinking it to the names Goose loads as context files. Naming the
+# minutes, symlinking it to the names the selected backend loads as context
+# files. Naming the
 # path explicitly means a review reaches the knowledge base even if a review
 # subprocess does not inherit those context files.
 KNOWLEDGE_FILE="${BLUEFIN_REVIEW_KNOWLEDGE_FILE:-${HOME}/agent.md}"
 
-# The image-owned review scope. `goose review --check-scope <DIR>` loads
-# .agents/REVIEW.md and .agents/checks/*.md from an out-of-tree directory, so
-# Bluefin's review doctrine reaches every review without writing into the
-# repository under review and without paying the --instructions text once per
-# check subprocess. When the overlay is absent (running outside the image),
-# reviews fall back to the --instructions pointer below.
+# The image-owned review scope. '.agents/REVIEW.md' and '.agents/checks/*.md'
+# from this out-of-tree directory are read directly and folded into the
+# instructions prompt below, so Bluefin's review doctrine reaches every
+review without writing into the repository under review. Checks are folded
+into the instructions prompt below as one consolidated pass.
 SCOPE_ROOT="${BLUEFIN_REVIEW_SCOPE_ROOT:-/opt/bluefin/review-scope}"
+
 
 # Open pull requests fetched per repository for duplicate detection. The busiest
 # factory repository sits well under this; the analyzer says so explicitly when
@@ -86,26 +87,31 @@ prepare_isolated_worktree() {
 }
 
 run_registered_review() {
-  local range="$1" scope="$2" prompt="$3" owner="$4" repository="$5" number="$6" base_sha="$7" head_sha="$8"
+  local prompt="$1" owner="$2" repository="$3" number="$4" base_sha="$5" head_sha="$6"
   local root="${BLUEFIN_REVIEW_HARNESS_ROOT:-/opt/bluefin}"
+  local backend="${BLUEFIN_REVIEW_BACKEND:-omp}"
   PYTHONPATH="${root}${PYTHONPATH:+:${PYTHONPATH}}" \
-    exec python3 - "$range" "$scope" "$prompt" "$owner" "$repository" "$number" "$base_sha" "$head_sha" <<'PY'
+    exec python3 - "$prompt" "$owner" "$repository" "$number" "$base_sha" "$head_sha" "$backend" \
+      "${AGENT_MODEL:-}" "${AGENT_REASONING_EFFORT:-}" <<'PY'
 import sys
-from harness.goose import GooseHarness
 from harness.registry import HarnessRegistry
 from tui.review_evidence_manifest import ReviewRequest
 
-range_name, scope, prompt, owner, repository, number, base_sha, head_sha = sys.argv[1:]
+prompt, owner, repository, number, base_sha, head_sha, backend, model, effort = sys.argv[1:]
+model = model or None
+effort = effort or None
 binding = ReviewRequest(owner, repository, int(number), base_sha, head_sha,
                         "maintainer", "review", generated_at="bluefin-review")
-adapter = GooseHarness(availability=GooseHarness.probe())
 registry = HarnessRegistry()
-registry.register(adapter)
-selected = registry.require_ready("goose")
+if backend == "codex":
+    from harness.codex import CodexHarness
+    registry.register(CodexHarness(availability=CodexHarness.probe()))
+else:
+    from harness.omp import OmpHarness
+    registry.register(OmpHarness(availability=OmpHarness.probe()))
+selected = registry.require_ready(backend)
 result = selected.stream(
-    binding, prompt=prompt, steer=None,
-    extra_args=tuple(["--check-scope", scope] if scope else [])
-    + ((range_name,) if range_name else ()),
+    binding, prompt=prompt, steer=None, model=model, effort=effort,
     on_line=lambda line: print(line, flush=True),
 )
 raise SystemExit(selected.terminal_status(result))
@@ -165,7 +171,8 @@ PY
 }
 
 review_instructions() {
-  local id skill listing="" repository_context
+  local scope_doctrine="${1:-}" range="${2:-}"
+  local id skill listing="" repository_context body=""
   repository_context="$(repository_context_instructions)"
   if [[ -n "$repository_context" ]]; then
     listing+="${repository_context}"$'\n'
@@ -185,28 +192,32 @@ review_instructions() {
   if [[ -s "$KNOWLEDGE_FILE" ]] && ! grep -q 'Knowledge base not yet available' "$KNOWLEDGE_FILE"; then
     listing+="- hive knowledge base (refreshed from the hub): ${KNOWLEDGE_FILE}"$'\n'
   fi
-  if [[ -z "$listing" ]]; then
-    # No doctrine on disk, but a duplicate cluster and the maintainer's own
-    # steering still need to reach Goose.
-    [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]] && printf '%s' "$BLUEFIN_REVIEW_RELATED"
-    [[ -n "${BLUEFIN_REVIEW_STEER:-}" ]] && printf '%s' "$(steer_instructions)"
-    return 0
+  if [[ -n "$scope_doctrine" ]]; then
+    body+="${scope_doctrine}"$'\n\n'
   fi
-
-  printf '%s' "This is a Project Bluefin review. The org's review doctrine is on disk; read the entries that match this diff before judging it, and prefer them over general habit:
+  if [[ -n "$listing" ]]; then
+    body+="This is a Project Bluefin review. The org's review doctrine is on disk; read the entries that match this diff before judging it, and prefer them over general habit:
 ${listing}
 Report findings with severity, file and line references, and the evidence for
 each. State what you could not verify. If there are no evidenced findings, say
 so plainly. A human makes every approval and merge decision; never present a
 recommendation as one."
-  # run_goose_review appends the duplicate cluster here so one review judges
+    body+=$'\n\n'
+  fi
+  if [[ -n "$range" ]]; then
+    body+="Review the diff at range ${range} (run \`git diff ${range}\` in this worktree to see it)."$'\n\n'
+  else
+    body+="Review this worktree's current diff (run \`git diff\` to see it)."$'\n\n'
+  fi
+  # run_pr_review appends the duplicate cluster here so one review judges
   # every pull request doing the same work instead of just the one on screen.
   if [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]]; then
-    printf '\n\n%s' "$BLUEFIN_REVIEW_RELATED"
+    body+="${BLUEFIN_REVIEW_RELATED}"$'\n\n'
   fi
   if [[ -n "${BLUEFIN_REVIEW_STEER:-}" ]]; then
-    printf '\n\n%s' "$(steer_instructions)"
+    body+="$(steer_instructions)"$'\n\n'
   fi
+  printf '%s' "$body"
 }
 
 # The maintainer's own words for this one review, typed into the dashboard's
@@ -250,62 +261,22 @@ run_reviewed() {
 }
 
 # Every review goes through here so both entry points carry the same context.
-# With the image overlay present, context travels as a check scope:
-# --check-scope REPLACES repo-root discovery, so the scratch scope always
-# carries the full static overlay plus the per-review cluster-resolution check
-# when a duplicate cluster exists. Without the overlay, the --instructions
-# pointer carries the same doctrine.
-goose_review() {
-  local scope=""
-  local prior_term prior_int prior_exit
-  prior_term="$(trap -p TERM)"
-  prior_int="$(trap -p INT)"
-  prior_exit="$(trap -p EXIT)"
-  cleanup_review_scope() {
-    if [[ -n "${scope:-}" ]]; then
-      rm -rf "$scope"
-      scope=""
-    fi
-  }
-  finish_scope_signal() {
-    local signal_status="$1"
-    request_review_cancel
-    cleanup_review_scope
-    if [[ -n "$prior_term" ]]; then eval "$prior_term"; else trap - TERM; fi
-    if [[ -n "$prior_int" ]]; then eval "$prior_int"; else trap - INT; fi
-    if [[ -n "$prior_exit" ]]; then eval "$prior_exit"; else trap - EXIT; fi
-    exit "$signal_status"
-  }
+# The image-owned overlay's REVIEW.md and checks/*.md are read directly (no
+# scratch directory, nothing to clean up on signal) and folded into the
+# instructions prompt alongside the per-review cluster-resolution note when a
+# duplicate cluster exists. Without the overlay, the doctrine section is
+# simply absent from the prompt.
+run_review() {
+  local range="${1:-}"
+  local scope_doctrine=""
   if [[ -d "${SCOPE_ROOT}/.agents" ]]; then
-    scope="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review-scope.XXXXXX")"
-    mkdir -p "${scope}/.agents/checks"
-    cp "${SCOPE_ROOT}/.agents/REVIEW.md" "${scope}/.agents/REVIEW.md"
-    cp "${SCOPE_ROOT}/.agents/checks/"*.md "${scope}/.agents/checks/"
-    {
-      printf -- '---\nname: 00-repository-context\n---\n\n'
-      repository_context_instructions
-    } >"${scope}/.agents/checks/00-repository-context.md"
-    if [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]]; then
-      {
-        printf -- '---\nname: cluster-resolution\n---\n\n'
-        printf '%s\n' "$BLUEFIN_REVIEW_RELATED"
-        printf '\nName explicitly which pull request should merge and which should close as superseded, with evidence from the diffs.\n'
-      } >"${scope}/.agents/checks/cluster-resolution.md"
-    fi
-    if [[ -n "${BLUEFIN_REVIEW_STEER:-}" ]]; then
-      {
-        printf -- '---\nname: maintainer-steering\n---\n\n'
-        steer_instructions
-        printf '\n'
-      } >"${scope}/.agents/checks/maintainer-steering.md"
-    fi
+    scope_doctrine="$(cat "${SCOPE_ROOT}/.agents/REVIEW.md" "${SCOPE_ROOT}/.agents/checks/"*.md 2>/dev/null)"
+    local repository_context
+    repository_context="$(repository_context_instructions)"
+    [[ -n "$repository_context" ]] && scope_doctrine+=$'\n\n'"${repository_context}"
   fi
-  trap 'finish_scope_signal 143' TERM
-  trap 'finish_scope_signal 130' INT
-  trap cleanup_review_scope EXIT
-
-  local prompt=""
-  [[ -n "$scope" ]] || prompt="$(review_instructions)"
+  local prompt
+  prompt="$(review_instructions "$scope_doctrine" "$range")"
   local owner="${BLUEFIN_REVIEW_OWNER:-local}"
   local repository="${BLUEFIN_REVIEW_REPOSITORY:-review}"
   local number="${BLUEFIN_REVIEW_PULL_REQUEST:-1}"
@@ -328,15 +299,10 @@ goose_review() {
       base_sha="${expected_base:-$head_sha}"
     fi
   fi
-  local status=0
-  run_reviewed run_registered_review "${1:-}" "$scope" "$prompt" \
-    "$owner" "$repository" "$number" "$base_sha" "$head_sha" || status=$?
-  cleanup_review_scope
-  if [[ -n "$prior_term" ]]; then eval "$prior_term"; else trap - TERM; fi
-  if [[ -n "$prior_int" ]]; then eval "$prior_int"; else trap - INT; fi
-  if [[ -n "$prior_exit" ]]; then eval "$prior_exit"; else trap - EXIT; fi
-  return "$status"
+  run_reviewed run_registered_review "$prompt" \
+    "$owner" "$repository" "$number" "$base_sha" "$head_sha"
 }
+
 
 banner() {
   printf '%s\n' \
@@ -356,8 +322,8 @@ rule() { printf '%s\n' '--------------------------------------------------------
 usage() {
   cat <<'EOF'
 Usage:
-  bluefin-review [range]              review a local diff through Goose
-  bluefin-review pr <repo> <number>   review one pull request through Goose
+  bluefin-review [range]              review a local diff
+  bluefin-review pr <repo> <number>   review one pull request
   bluefin-review receipt <options>    emit a machine-readable result receipt
   bluefin-review --print-worktree <repo> <head-sha>
                                       print deterministic isolated worktree path
@@ -382,7 +348,7 @@ EOF
 # --- duplicate detection ------------------------------------------------------
 
 # Two output modes: human lines for the evidence block, and '--numbers' for
-# run_goose_review, which fetches each duplicate's diff so one review judges
+# run_pr_review, which fetches each duplicate's diff so one review judges
 # the whole cluster instead of walking the same work twice.
 #
 # Renovate opens a digest bump and a version bump for the same dependency, and
@@ -476,10 +442,11 @@ repo_pulls() {
   printf '%s' "$cache"
 }
 
-# Put the pull request on disk in the Hive workspace and hand the diff to Goose.
-# Clone once per repository, then reuse it; a review loop that re-cloned every
-# time would spend its life in git rather than in review.
-run_goose_review() {
+# Put the pull request on disk in the Hive workspace and hand the diff to the
+# selected backend. Clone once per repository, then reuse it; a review loop
+# that re-cloned every time would spend its life in git rather than in
+# review.
+run_pr_review() {
   local repo="$1" number="$2"
   local dir="${BLUEFIN_REVIEW_WORKDIR:-}"
   local expected_head="${BLUEFIN_REVIEW_EXPECTED_HEAD_SHA:-${BLUEFIN_REVIEW_EXPECTED_HEAD:-}}"
@@ -545,7 +512,7 @@ run_goose_review() {
     fi
 
     # Duplicates are the same work wearing another number, so one review must
-    # judge the whole cluster: fetch each duplicate's diff and tell Goose to
+    # judge the whole cluster: fetch each duplicate's diff and tell the agent to
     # name the one that should merge. Overlaps share only files, so they are
     # listed as ordering hazards without spending a review on them.
     local_related=""
@@ -581,7 +548,7 @@ run_goose_review() {
       BLUEFIN_REVIEW_PULL_REQUEST="$number" BLUEFIN_REVIEW_RELATED="$local_related" \
       BLUEFIN_REVIEW_EXPECTED_BASE_SHA="${expected_base}" \
       BLUEFIN_REVIEW_EXPECTED_HEAD_SHA="${expected_head}" \
-      goose_review "$diff_range"
+      run_review "$diff_range"
   }
 }
 
@@ -645,7 +612,7 @@ pr_mode() {
   BLUEFIN_REVIEW_WORKDIR="${workdir:-${BLUEFIN_REVIEW_WORKDIR:-}}" \
   BLUEFIN_REVIEW_EXPECTED_BASE_SHA="${base_sha:-${BLUEFIN_REVIEW_EXPECTED_BASE_SHA:-}}" \
   BLUEFIN_REVIEW_EXPECTED_HEAD_SHA="${head_sha:-${BLUEFIN_REVIEW_EXPECTED_HEAD_SHA:-}}" \
-    run_goose_review "$repo" "$number" || status=$?
+    run_pr_review "$repo" "$number" || status=$?
   if ((status == 0)); then
     printf '\nThe Review Draft above is for you to judge. Nothing was submitted.\n'
   elif ((status == REVIEW_INCOMPLETE)); then
@@ -685,6 +652,6 @@ case "${1-}" in
     ;;
   *)
     banner
-    goose_review "$@"
+    run_review "$@"
     ;;
 esac

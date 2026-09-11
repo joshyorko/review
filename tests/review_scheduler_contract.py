@@ -149,7 +149,7 @@ class ReviewSchedulerContractTests(unittest.TestCase):
             ):
                 return engine.run_sync(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",

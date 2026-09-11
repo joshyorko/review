@@ -323,6 +323,30 @@ async def main() -> int:
             f"exit {exit_code}\n",
         )
 
+    def omp_result_line(findings: list[dict], *, state: str = "findings") -> str:
+        """One `omp --mode json` 'agent_end' event embedding a ReviewResult.
+
+        `findings` uses the same raw shape as a hand-authored finding
+        (severity/path/line_start/line_end/summary/check); this mirrors
+        real omp output, which wraps the model's single JSON verdict in a
+        stream of protocol events rather than printing progress lines.
+        """
+        counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        result_findings = []
+        for entry in findings:
+            result_findings.append({
+                "severity": entry["severity"], "file": entry["path"],
+                "line": entry["line_start"],
+                "end_line": entry.get("line_end", entry["line_start"]),
+                "title": entry["summary"], "check": entry["check"],
+            })
+            counts[entry["severity"]] += 1
+        result = {"version": 1, "state": state, "counts": counts, "findings": result_findings}
+        event = {"type": "agent_end", "messages": [
+            {"role": "assistant", "content": [{"type": "text", "text": json.dumps(result)}]}
+        ]}
+        return json.dumps(event)
+
     os.environ["BLUEFIN_REVIEW_COMMAND"] = str(workdir / "bluefin-review")
     review_stub(0, "a finding")
 
@@ -699,7 +723,7 @@ async def main() -> int:
                 model=model,
                 effort=effort,
                 running=True,
-                headroom_status_line="[ACTIVE] Goose/GitHub Copilot: via Headroom",
+                headroom_status_line="[ACTIVE] OMP: via Headroom",
                 headroom_output_reduction={
                     "output_reduction_percent": 37.5,
                     "output_reduction_method": "measured",
@@ -748,7 +772,7 @@ async def main() -> int:
             base_sha,
             head_sha,
             base_sha[:12] + head_sha[:12],
-            "goose",
+            "omp",
             "gemini-3.8-flash",
             "max",
         )
@@ -767,7 +791,7 @@ async def main() -> int:
                     }
                 ],
                 [],
-                {"backend": "goose", "model": "gemini-3.8-flash"},
+                {"backend": "omp", "model": "gemini-3.8-flash"},
             ),
             ["bounded transcript"],
             app.review_scope_version,
@@ -945,7 +969,7 @@ async def main() -> int:
             1,
             "complete",
             provenance={
-                "backend": "goose",
+                "backend": "omp",
                 "model": "gemini-3.8-flash",
                 "base_sha": base_sha,
                 "head_sha": "c" * 40,
@@ -1110,7 +1134,7 @@ async def main() -> int:
             base_sha,
             head_sha,
             base_sha[:12] + head_sha[:12],
-            "goose",
+            "omp",
             "gemini-3.8-flash",
             "max",
         )
@@ -1129,7 +1153,7 @@ async def main() -> int:
                     }
                 ],
                 [],
-                {"backend": "goose", "model": "gemini-3.8-flash"},
+                {"backend": "omp", "model": "gemini-3.8-flash"},
             ),
             ["bounded transcript"],
             app.review_scope_version,
@@ -1230,7 +1254,7 @@ async def main() -> int:
             ],
             [],
             {
-                "backend": "goose",
+                "backend": "omp",
                 "model": "gemini-3.8-flash",
                 "base_sha": base_sha,
                 "head_sha": head_sha,
@@ -1738,7 +1762,7 @@ async def main() -> int:
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
             app.stops[0].review_result = prior_result
             root_screen = app.screen
-            original_adapter = tui.adapt_current_engine
+            original_convert = tui.OmpHarness.convert
             if compare_json is not None:
                 os.environ["RE_REVIEW_COMPARE_JSON"] = compare_json
             else:
@@ -1748,11 +1772,11 @@ async def main() -> int:
             else:
                 os.environ.pop("RE_REVIEW_COMPARE_FAIL", None)
             if reviewed_head:
-                def stale_adapter(*args, **kwargs):
-                    result = original_adapter(*args, **kwargs)
+                def stale_convert(self, *args, **kwargs):
+                    result = original_convert(self, *args, **kwargs)
                     result.provenance["head_sha"] = reviewed_head
                     return result
-                tui.adapt_current_engine = stale_adapter
+                tui.OmpHarness.convert = stale_convert
             await pilot.press("r")
             await pilot.pause()
             screen = app.screen
@@ -1795,7 +1819,7 @@ async def main() -> int:
             check("[v] diff" in str(card.render()), "decision card must advertise diff viewer")
             await pilot.press("q")
             await pilot.pause()
-            tui.adapt_current_engine = original_adapter
+            tui.OmpHarness.convert = original_convert
             os.environ.pop("RE_REVIEW_COMPARE_JSON", None)
             os.environ.pop("RE_REVIEW_COMPARE_FAIL", None)
             check(app.screen is root_screen, "q must close ReviewScreen")
@@ -4279,12 +4303,12 @@ async def main() -> int:
         and tui.landing.final_triple("opus", "mixed", "fixing")[1] == "kimi-k3",
         "the policy/classification table must pick the documented models",
     )
-    goose_env = tui.landing.final_environment(tui.landing.OPUS_TRIPLE, "goose")
+    omp_env = tui.landing.final_environment(tui.landing.OPUS_TRIPLE, "omp")
     codex_env = tui.landing.final_environment(tui.landing.OPUS_TRIPLE, "codex")
     check(
-        goose_env.get("GOOSE_MODEL") == "claude-opus-5"
-        and goose_env.get("GOOSE_THINKING_EFFORT") == "high",
-        f"a Goose round must carry its model explicitly, got {goose_env}",
+        omp_env.get("BLUEFIN_REVIEW_FINAL_MODEL") == "claude-opus-5"
+        and omp_env.get("BLUEFIN_REVIEW_FINAL_EFFORT") == "high",
+        f"an OMP round must carry its model explicitly, got {omp_env}",
     )
     check(
         "GOOSE_MODEL" not in codex_env
@@ -4296,8 +4320,8 @@ async def main() -> int:
     codex_argv = tui.landing.final_command(
         "/tmp/round.md", tui.landing.OPUS_TRIPLE, "codex"
     )
-    goose_argv = tui.landing.final_command(
-        "/tmp/round.md", tui.landing.OPUS_TRIPLE, "goose"
+    omp_argv = tui.landing.final_command(
+        "/tmp/round.md", tui.landing.OPUS_TRIPLE, "omp"
     )
     if override:
         os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = override
@@ -4306,8 +4330,8 @@ async def main() -> int:
         f"a Codex round must take its model on the command line, got {codex_argv}",
     )
     check(
-        goose_argv[:1] == ["goose"] and "--model" not in goose_argv,
-        f"a Goose round takes its model from the environment, got {goose_argv}",
+        omp_argv[:1] == ["omp"] and "--model" in omp_argv and "claude-opus-5" in omp_argv and "--thinking" in omp_argv and "high" in omp_argv,
+        f"an OMP round passes its model and thinking effort explicitly, got {omp_argv}",
     )
 
     final_status = workdir / "final.jsonl"
@@ -5491,21 +5515,21 @@ async def main() -> int:
         check(tui.ACTIVE_BACKEND == unavailable_backend,
               "unavailable Codex pilot must restore the prior backend")
 
-    # Goose is the selected backend by default and drafts bodies directly.
+    # OMP is the selected backend by default and drafts bodies directly.
     original_backend = tui.ACTIVE_BACKEND
-    original_goose_draft = tui.GooseHarness.draft
-    goose_calls = []
+    original_omp_draft = tui.OmpHarness.draft
+    omp_calls = []
 
-    def goose_draft(self, request):
-        goose_calls.append(request)
+    def omp_draft(self, request):
+        omp_calls.append(request)
         return SimpleNamespace(
             state=tui.DraftState.COMPLETE,
-            markdown="generated Goose body",
-            provenance={"backend": "goose", "model": self.model, "effort": self.effort},
+            markdown="generated OMP body",
+            provenance={"backend": "omp", "model": self.model, "effort": self.effort},
         )
 
-    tui.ACTIVE_BACKEND = "goose"
-    tui.GooseHarness.draft = goose_draft
+    tui.ACTIVE_BACKEND = "omp"
+    tui.OmpHarness.draft = omp_draft
     try:
         app = tui.ReviewDashboard(tui.QueueFilters(action=""))
         async with app.run_test() as pilot:
@@ -5524,14 +5548,14 @@ async def main() -> int:
             await pilot.press("2")
             await pilot.pause()
             editor = app.screen.query_one("#review-body-editor", tui.TextArea)
-            editor.text = "manual Goose body"
+            editor.text = "manual OMP body"
             app.screen.action_generate()
             await pilot.pause()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            check(editor.text == "generated Goose body",
-                  "Goose drafting must use the selected drafting capability")
-            check(len(goose_calls) == 1, "Goose drafting must be invoked directly")
+            check(editor.text == "generated OMP body",
+                  "OMP drafting must use the selected drafting capability")
+            check(len(omp_calls) == 1, "OMP drafting must be invoked directly")
             editor.text = "x" * 4096
             app.screen.action_preview()
             await pilot.pause()
@@ -5549,7 +5573,7 @@ async def main() -> int:
                   "an oversized body must not create a temporary file")
     finally:
         tui.ACTIVE_BACKEND = original_backend
-        tui.GooseHarness.draft = original_goose_draft
+        tui.OmpHarness.draft = original_omp_draft
 
     # A verdict that is not an approval has to say why.
     app = tui.ReviewDashboard(tui.QueueFilters())
@@ -6994,9 +7018,9 @@ async def main() -> int:
     gh_log.write_text("")
 
     # ── a completed structured review becomes a concise decision card ───
-    clean_output = (FIXTURE_DIR / "goose-review-clean.txt").read_text()
-    findings_output = (FIXTURE_DIR / "goose-review-findings.txt").read_text()
-    incomplete_output = (FIXTURE_DIR / "goose-review-incomplete.txt").read_text()
+    clean_output = (FIXTURE_DIR / "omp-review-clean.txt").read_text()
+    findings_output = (FIXTURE_DIR / "omp-review-findings.txt").read_text()
+    incomplete_output = (FIXTURE_DIR / "omp-review-incomplete.txt").read_text()
     text, classes, card = await run_review(0, clean_output)
     check("COMPLETE" in text, f"exit 0 must report COMPLETE, got {text!r}")
     check("complete" in classes, f"exit 0 must carry the complete style, got {classes}")
@@ -7135,12 +7159,10 @@ async def main() -> int:
         ],
         provenance={"head_sha": h0, "base_sha": base, "approval": "must not carry"},
     )
-    re_review_output = "\n".join([
-        "goose review: check 'main' completed: 3 finding(s)",
-        '{"severity":"high","path":"image/entrypoint.sh","line_start":87,"line_end":89,"summary":"H1 changed","check":"main"}',
-        '{"severity":"medium","path":"tests/image-contract.sh","line_start":401,"line_end":401,"summary":"H1 unchanged","check":"main"}',
-        '{"severity":"low","path":"new.py","line_start":3,"line_end":3,"summary":"H1 [new]","check":"main"}',
-        "goose review: orchestrator emitted 3 finding(s) from 1 check(s) (main: ran, 3 finding(s))",
+    re_review_output = omp_result_line([
+        {"severity": "high", "path": "image/entrypoint.sh", "line_start": 87, "line_end": 89, "summary": "H1 changed", "check": "main"},
+        {"severity": "medium", "path": "tests/image-contract.sh", "line_start": 401, "line_end": 401, "summary": "H1 unchanged", "check": "main"},
+        {"severity": "low", "path": "new.py", "line_start": 3, "line_end": 3, "summary": "H1 [new]", "check": "main"},
     ])
     mapped_compare = json.dumps({"total_files": 1, "files": [{
         "filename": "image/entrypoint.sh", "status": "modified",
@@ -7202,13 +7224,9 @@ async def main() -> int:
     # markup input. The real ReviewScreen must render them literally, not let
     # Rich interpret a tag or raise while composing the decision card.
     attacker_path = "[blink]OWNED"
-    attacker_output = "\n".join([
-        "goose review: check 'main' completed: 1 finding(s)",
-        json.dumps({
-            "severity": "high", "path": attacker_path, "line_start": 9,
-            "line_end": 9, "summary": "[blink]OWNED", "check": "main",
-        }),
-        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+    attacker_output = omp_result_line([
+        {"severity": "high", "path": attacker_path, "line_start": 9,
+         "line_end": 9, "summary": "[blink]OWNED", "check": "main"},
     ])
     attacker_compare = json.dumps({"total_files": 1, "files": [{
         "filename": attacker_path, "status": "modified",
@@ -7292,13 +7310,9 @@ async def main() -> int:
     # zero with zero lines, while the new side has real added lines. It must
     # remain deterministic rather than being rejected with every start-zero
     # hunk.
-    pure_add_output = "\n".join([
-        "goose review: check 'main' completed: 1 finding(s)",
-        json.dumps({
-            "severity": "low", "path": "added.py", "line_start": 1,
-            "line_end": 2, "summary": "added evidence", "check": "main",
-        }),
-        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+    pure_add_output = omp_result_line([
+        {"severity": "low", "path": "added.py", "line_start": 1,
+         "line_end": 2, "summary": "added evidence", "check": "main"},
     ])
     pure_add_compare = json.dumps({"total_files": 1, "files": [{
         "filename": "added.py", "status": "added",
@@ -7315,13 +7329,9 @@ async def main() -> int:
 
     # A pure deletion has no H1 line range. It must not let a matching H0
     # finding fall through as unchanged evidence.
-    pure_delete_output = "\n".join([
-        "goose review: check 'main' completed: 1 finding(s)",
-        json.dumps({
-            "severity": "high", "path": "image/entrypoint.sh", "line_start": 87,
-            "line_end": 89, "summary": "deleted evidence", "check": "main",
-        }),
-        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+    pure_delete_output = omp_result_line([
+        {"severity": "high", "path": "image/entrypoint.sh", "line_start": 87,
+         "line_end": 89, "summary": "deleted evidence", "check": "main"},
     ])
     pure_delete_compare = json.dumps({"total_files": 1, "files": [{
         "filename": "image/entrypoint.sh", "status": "modified",
@@ -7380,14 +7390,13 @@ async def main() -> int:
         [{"severity": "high", "file": "stale.py", "line": 7, "title": "H0 stale"}],
         provenance={"head_sha": h0, "base_sha": base},
     )
-    stale_output = "\n".join([
-        "goose review: check 'main' completed: 1 finding(s)",
-        '{"severity":"high","path":"stale.py","line_start":7,"line_end":7,"summary":"H1 stale","check":"main"}',
-        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
-        "REVIEW INCOMPLETE — a check returned no verdict",
-    ])
+    stale_output = omp_result_line(
+        [{"severity": "high", "path": "stale.py", "line_start": 7, "line_end": 7,
+          "summary": "H1 stale", "check": "main"}],
+        state="incomplete",
+    )
     text, classes, card = await run_review(
-        65, stale_output, prior_result=stale_prior,
+        0, stale_output, prior_result=stale_prior,
         compare_json=json.dumps({"total_files": 0, "files": []}),
     )
     check("stale.py:7=stale-re-evaluate" in card,
@@ -7490,9 +7499,9 @@ async def main() -> int:
 
     # ── the regression that started this: a review whose checks returned no
     # verdict must never read as clean ───────────────────────────────────
-    text, classes, card = await run_review(65, incomplete_output)
-    check("INCOMPLETE" in text, f"exit 65 must report INCOMPLETE, got {text!r}")
-    check("incomplete" in classes, f"exit 65 must carry the incomplete style, got {classes}")
+    text, classes, card = await run_review(0, incomplete_output)
+    check("INCOMPLETE" in text, f"an unverified check must report INCOMPLETE, got {text!r}")
+    check("incomplete" in classes, f"an unverified check must carry the incomplete style, got {classes}")
     check(
         "COMPLETE" not in text.replace("INCOMPLETE", ""),
         "an incomplete review must not also claim to be complete",
@@ -7855,7 +7864,7 @@ async def main() -> int:
         os.environ.pop("GH_TOKEN", None)
         tui.subprocess.Popen = real_popen
         tui.CodexHarness.probe = real_probe
-    tui.ACTIVE_BACKEND = "goose"
+    tui.ACTIVE_BACKEND = "omp"
 
     # ── the review path never mutates GitHub ─────────────────────────────
     calls = gh_log.read_text().splitlines() if gh_log.exists() else []

@@ -1,5 +1,6 @@
 # tests/run_state_contract.py
 import concurrent.futures
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,7 +27,7 @@ def _identity(number: int, head: str | None = None) -> RunIdentity:
         pull_request=number,
         base_sha=_sha("a"),
         head_sha=head or f"{number:040x}"[-40:],
-        backend="goose",
+        backend="omp",
         model="gpt-5.6-sol",
         effort="high",
         check_scope_version="checks-v1",
@@ -143,6 +144,45 @@ class RunStateContractTests(unittest.TestCase):
             self.assertIsNotNone(record)
             self.assertEqual(record.state, RunState.REVIEW_CLEAN)
             self.assertTrue(record.may_mutate())
+
+    def test_a_legacy_or_malformed_record_is_skipped_not_fatal(self):
+        with self._store_dir() as root:
+            identity = _identity(1)
+            store = RunStateStore(root)
+            store.create(identity)
+            store.transition(identity, RunState.REVIEWING)
+            store.transition(identity, RunState.REVIEW_CLEAN)
+            del store
+
+            path = Path(root) / "run-state.json"
+            payload = json.loads(path.read_text())
+            payload["records"].append({
+                "identity": {
+                    "repository": "projectbluefin/review",
+                    "pull_request": 2,
+                    "base_sha": _sha("3"),
+                    "head_sha": _sha("4"),
+                    "backend": "goose",
+                    "model": "gpt-4o",
+                    "effort": "high",
+                    "check_scope_version": "checks-v1",
+                },
+                "state": "review_clean",
+                "terminal_outcome": None,
+                "reason": "",
+                "retry_at": "",
+                "created_at": 1,
+                "updated_at": 1,
+                "sequence": 2,
+                "resume_state": None,
+            })
+            path.write_text(json.dumps(payload))
+
+            record = RunStateStore(root).get(identity)
+
+            self.assertIsNotNone(record)
+            self.assertEqual(record.state, RunState.REVIEW_CLEAN)
+            self.assertEqual(len(RunStateStore(root).records()), 1)
 
     def test_prune_retains_newest_records_within_bound(self):
         with self._store_dir() as root:
@@ -495,7 +535,7 @@ class RunStateContractTests(unittest.TestCase):
                 pull_request=411,
                 base_sha=_sha("a"),
                 head_sha=_sha("b"),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
                 check_scope_version="checks-v1",

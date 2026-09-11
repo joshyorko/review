@@ -23,7 +23,7 @@ def review(state="complete", *, repository="projectbluefin/review", number=154, 
         findings=findings,
         raw_evidence=["evidence " + str(index) for index in range(12)],
         provenance={
-            "backend": "goose",
+            "backend": "omp",
             "model": "gpt-5.6-luna",
             "repository": repository,
             "pull_request": number,

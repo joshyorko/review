@@ -304,11 +304,17 @@ class RunStateStore:
             raise ValueError("run state store is unreadable") from error
         if not isinstance(payload, dict) or payload.get("version") != RUN_STATE_VERSION:
             raise ValueError("unsupported run state store")
-        records = [
-            RunRecord.from_dict(record)
-            for record in payload.get("records", [])
-            if isinstance(record, dict)
-        ]
+        records = []
+        for record in payload.get("records", []):
+            if not isinstance(record, dict):
+                continue
+            try:
+                records.append(RunRecord.from_dict(record))
+            except (ValueError, TypeError, KeyError):
+                # A record from a since-removed backend or any other
+                # now-invalid shape must not take down every other run's
+                # state; drop it and keep the rest.
+                continue
         next_sequence = int(payload.get("next_sequence") or 1)
         return {record.run_id: record for record in records}, next_sequence
 

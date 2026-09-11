@@ -351,7 +351,7 @@ class EngineContractTests(unittest.TestCase):
                     BatchSnapshot(
                         tuple(item(n, h) for n, h in enumerate(HEADS, 1)), {}
                     ),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -413,7 +413,7 @@ class EngineContractTests(unittest.TestCase):
             selected = item(1, HEADS[0])
             run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -432,7 +432,7 @@ class EngineContractTests(unittest.TestCase):
                         [],
                         [],
                         {
-                            "backend": "goose",
+                            "backend": "omp",
                             "model": "gemini-3.8-flash",
                         },
                         {},
@@ -445,7 +445,7 @@ class EngineContractTests(unittest.TestCase):
             )
             result = engine.run_sync(
                 BatchSnapshot((selected,), {}),
-                "goose",
+                "omp",
                 "gemini-3.8-flash",
                 "high",
                 "scope-v7",
@@ -461,7 +461,7 @@ class EngineContractTests(unittest.TestCase):
             selected = item(1, HEADS[0])
             run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -503,7 +503,7 @@ class EngineContractTests(unittest.TestCase):
             )
             batch = engine.start(
                 BatchSnapshot((selected,), {}),
-                "goose",
+                "omp",
                 "gemini-3.8-flash",
                 "high",
                 "scope-v7",
@@ -526,7 +526,7 @@ class EngineContractTests(unittest.TestCase):
             selected = item(1, HEADS[0])
             run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -573,7 +573,7 @@ class EngineContractTests(unittest.TestCase):
             ):
                 result = engine.run_sync(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -588,7 +588,7 @@ class EngineContractTests(unittest.TestCase):
             cached_item = item(2, HEADS[1])
             cached_run = ReviewRun.from_request(
                 cached_item.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -634,7 +634,7 @@ class EngineContractTests(unittest.TestCase):
             )
             batch = engine.start(
                 BatchSnapshot((uncached, cached_item), {}),
-                "goose",
+                "omp",
                 "gemini-3.8-flash",
                 "high",
                 "scope-v7",
@@ -681,14 +681,14 @@ class EngineContractTests(unittest.TestCase):
                     BatchSnapshot(
                         tuple(item(n, h) for n, h in enumerate(HEADS, 1)), {}
                     ),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
                 )
-            self.assertEqual(headroom.refresh_calls, ["goose", "goose"])
+            self.assertEqual(headroom.refresh_calls, ["omp", "omp"])
             self.assertEqual(
-                headroom.route_calls, ["goose", "goose", "goose"]
+                headroom.route_calls, ["omp", "omp", "omp"]
             )
             self.assertEqual(
                 result.results[
@@ -772,7 +772,7 @@ class EngineContractTests(unittest.TestCase):
             env_path = Path(root) / "env.txt"
             run = ReviewRun.from_request(
                 item(1, HEADS[0]).request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -811,10 +811,10 @@ class EngineContractTests(unittest.TestCase):
                 "scope-v7",
                 "/opt/bluefin/review-scope",
                 HeadroomRoute(
-                    "ACTIVE", "goose", "http://127.0.0.1:8787", "ready"
+                    "ACTIVE", "omp", "http://127.0.0.1:8787", "ready"
                 ),
                 {
-                    "status_line": "[ACTIVE] Goose via Headroom",
+                    "status_line": "[ACTIVE] OMP via Headroom",
                     "output_reduction_percent": 20.0,
                     "output_reduction_method": "measured",
                     "output_tokens_saved": 20,
@@ -892,7 +892,7 @@ class EngineContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not ready"):
                 engine.start(
                     BatchSnapshot((), {"projectbluefin/review#1": "missing head"}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -923,7 +923,7 @@ class EngineContractTests(unittest.TestCase):
             ):
                 batch = engine.start(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -940,7 +940,7 @@ class EngineContractTests(unittest.TestCase):
             )
             run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -969,7 +969,7 @@ class EngineContractTests(unittest.TestCase):
                     BatchSnapshot(
                         (item(1, HEADS[0]), item(2, HEADS[1])), {}
                     ),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -1002,7 +1002,7 @@ class EngineContractTests(unittest.TestCase):
             ):
                 result = engine.run_sync(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -1011,7 +1011,7 @@ class EngineContractTests(unittest.TestCase):
             self.assertIn(selected.key, result.failures)
             run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -1079,7 +1079,7 @@ class EngineContractTests(unittest.TestCase):
             ):
                 result = engine.run_sync(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -1090,7 +1090,7 @@ class EngineContractTests(unittest.TestCase):
             self.assertEqual(result.results, {})
             expected_run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -1119,7 +1119,7 @@ class EngineContractTests(unittest.TestCase):
             ):
                 batch = engine.start(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -1137,7 +1137,7 @@ class EngineContractTests(unittest.TestCase):
             )
             run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -1174,7 +1174,7 @@ class EngineContractTests(unittest.TestCase):
             ):
                 batch = engine.start(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -1216,7 +1216,7 @@ class EngineContractTests(unittest.TestCase):
             ):
                 batch = engine.start(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -1269,7 +1269,7 @@ class EngineContractTests(unittest.TestCase):
             ), patch.object(shared_scheduler, "submit", new=blocked_submit):
                 batch = engine.start(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -1294,7 +1294,7 @@ class EngineContractTests(unittest.TestCase):
             cache = ReplacingPutCache(Path(root) / "reviews")
             run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -1334,7 +1334,7 @@ class EngineContractTests(unittest.TestCase):
             ):
                 batch = engine.start(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -1504,7 +1504,7 @@ class EngineContractTests(unittest.TestCase):
             ):
                 batch = engine.start(
                     BatchSnapshot((selected,), {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -1527,7 +1527,7 @@ class EngineContractTests(unittest.TestCase):
                 headroom_session=FakeHeadroomSession(),
             )
             snapshot = BatchSnapshot((item(1, HEADS[0]),), {})
-            telemetry = FakeHeadroomSession().telemetry("goose")
+            telemetry = FakeHeadroomSession().telemetry("omp")
             barrier = threading.Barrier(8)
             batches = []
 
@@ -1536,7 +1536,7 @@ class EngineContractTests(unittest.TestCase):
                 batches.append(
                     engine._new_batch(
                         snapshot,
-                        "goose",
+                        "omp",
                         "gemini-3.8-flash",
                         "high",
                         telemetry,

@@ -1,16 +1,16 @@
 """OMP (Oh My Pi) review adapter for the shared harness contract."""
 
 import json
-import os
 import re
+import os
 import signal
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
 from tui.review_evidence_manifest import ReviewRequest
-from tui.review_result import ReviewResult, adapt_current_engine
+from tui.review_result import ReviewResult, parse_review_result
 
 from .registry import (
     Availability,
@@ -72,24 +72,117 @@ class OmpHarness:
             cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             bufsize=1, start_new_session=True,
         )
+        self._process = process
+        def _forward_signal(sig, _frame):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                pass
+        old_term = signal.signal(signal.SIGTERM, _forward_signal)
+        old_int = signal.signal(signal.SIGINT, _forward_signal)
         lines: list[str] = []
         assert process.stdout is not None
-        for line in process.stdout:
-            lines.append(line.rstrip("\n"))
-            on_line(lines[-1])
-        process.wait()
-        return adapt_current_engine(
-            "\n".join(lines), process.returncode,
-            {
-                "backend": self.name,
-                "model": model or self.model,
-                "repository": f"{binding.owner}/{binding.repository}",
-                "pull_request": binding.pull_request_number,
-                "base_sha": binding.base_sha,
-                "head_sha": binding.head_sha,
-                "reasoning_effort": effort or self.effort,
-            }
+        try:
+            for line in process.stdout:
+                lines.append(line.rstrip("\n"))
+                on_line(lines[-1])
+            process.wait()
+        finally:
+            signal.signal(signal.SIGTERM, old_term)
+            signal.signal(signal.SIGINT, old_int)
+            self._process = None
+        result = self.convert("\n".join(lines), binding, process.returncode,
+                              model=model, effort=effort)
+        live = dict(result.live)
+        live["process_exit_code"] = process.returncode
+        return ReviewResult(result.version, result.state, result.counts,
+                            result.findings, result.verification, result.provenance,
+                            result.overlap, live, result.raw_evidence)
+
+    def convert(self, payload: str, binding: ReviewRequest, exit_code: int = 0,
+                *, model: str | None = None, effort: str | None = None) -> ReviewResult:
+        lines = payload.splitlines()
+        if exit_code != 0:
+            result = ReviewResult(1, "failed", raw_evidence=self._unparsable(lines).raw_evidence)
+        else:
+            result = self._convert_json_mode(lines)
+        provenance = dict(result.provenance)
+        provenance.update({
+            "backend": self.name,
+            "model": model or self.model,
+            "repository": f"{binding.owner}/{binding.repository}",
+            "pull_request": binding.pull_request_number,
+            "base_sha": binding.base_sha,
+            "head_sha": binding.head_sha,
+            "reasoning_effort": effort or self.effort,
+        })
+        return ReviewResult(result.version, result.state, result.counts,
+                            result.findings, result.verification, provenance,
+                            result.overlap, result.live, result.raw_evidence)
+
+    @staticmethod
+    def _unparsable(lines: list[str]) -> ReviewResult:
+        return parse_review_result("", raw_evidence=lines)
+
+    @staticmethod
+    def _unfenced(text: str) -> str:
+        """Strip a single whole-message ```json ... ``` (or bare ```) wrapper.
+
+        The result contract tells the model to return raw JSON, but models
+        routinely fence it anyway; only an entire fenced message is unwrapped,
+        never a fence nested inside surrounding prose.
+        """
+        stripped = text.strip()
+        match = re.fullmatch(r"```(?:json)?\n(.*)\n```", stripped, re.DOTALL)
+        return match.group(1) if match else stripped
+
+    @staticmethod
+    def _convert_json_mode(lines: list[str]) -> ReviewResult:
+        """Accept one complete `omp --mode json` turn and nothing else.
+
+        omp's JSON mode wraps the model's answer in a stream of protocol
+        events; only the final `agent_end` frame's last assistant message is
+        the review verdict, and a `stopReason` of "error" means the model
+        never produced one even though the process itself exits 0.
+        """
+        invalid = OmpHarness._unparsable(lines)
+        events: list[dict] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return invalid
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                return invalid
+            events.append(event)
+        terminal = next((event for event in reversed(events) if event.get("type") == "agent_end"), None)
+        if terminal is None:
+            return invalid
+        messages = terminal.get("messages")
+        if not isinstance(messages, list):
+            return invalid
+        final_message = next(
+            (message for message in reversed(messages)
+             if isinstance(message, dict) and message.get("role") == "assistant"),
+            None,
         )
+        if not isinstance(final_message, dict) or final_message.get("stopReason") == "error":
+            return invalid
+        content = final_message.get("content")
+        if not isinstance(content, list):
+            return invalid
+        texts = [
+            item.get("text") for item in content
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)
+        ]
+        if not texts:
+            return invalid
+        result = parse_review_result(OmpHarness._unfenced(texts[-1]))
+        if result.state == "unparsable":
+            return invalid
+        return result
 
     @staticmethod
     def terminal_status(result: ReviewResult) -> int:
@@ -106,23 +199,36 @@ class OmpHarness:
         return self.stream(binding, prompt=prompt, on_line=lambda _line: None,
                            effort=effort, model=model, steer=steer)
 
+    RESULT_CONTRACT = (
+        ' Return only one JSON object shaped as {"version":1,"state":"complete",'
+        '"counts":{"critical":0,"high":0,"medium":0,"low":0},"findings":[]}.'
+        ' Use state "findings" when findings exist; each finding requires severity, file,'
+        ' line, and title, and counts must exactly match the findings. No Markdown.'
+    )
+    READ_ONLY_CONTRACT = (
+        " This is a read-only review. Do not mutate GitHub, push commits,"
+        " submit reviews, add comments, edit or merge pull requests, or change"
+        " repository state."
+    )
+
     def command(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
                 effort: str | None = None, steer: str | None = None,
                 extra_args: tuple[str, ...] = ()) -> list[str]:
         selected_model = model or self.model
+        selected_effort = effort or self.effort
         context = (
             f"{binding.owner}/{binding.repository}#{binding.pull_request_number} "
             f"base={binding.base_sha} head={binding.head_sha}"
         )
-        instruction = (
-            f"Review exact binding {context}. {prompt} "
-            f"Model {selected_model} reasoning {effort or self.effort}."
-        )
+        instruction = f"Review exact binding {context}. {prompt}"
         if steer:
             instruction += f" Maintainer steering: {steer}"
-        cmd = [self.executable, "--mode", "rpc", "--model", selected_model]
+        instruction += self.READ_ONLY_CONTRACT + self.RESULT_CONTRACT
+        cmd = [self.executable, "-p", "--mode", "json", "--model", selected_model,
+               "--thinking", selected_effort]
         if extra_args:
             cmd.extend(extra_args)
+        cmd.append(instruction)
         return cmd
 
     def draft_command(self, request: DraftRequest) -> list[str]:
@@ -136,85 +242,7 @@ class OmpHarness:
             f"Draft concise Markdown review body for verdict {request.verdict}. "
             f"Evidence: {evidence}. Return only Markdown."
         )
-        return [self.executable, "--mode", "rpc", "--model", self.model]
-
-    def draft_request_to_rpc_prompt(self, request: DraftRequest) -> dict:
-        """Format DraftRequest as an OMP RPC prompt command."""
-        evidence = json.dumps(
-            {"result": request.evidence.to_dict(), "live": dict(request.live_facts)},
-            sort_keys=True,
-            separators=(",", ":")
-        )
-        return {
-            "type": "prompt",
-            "message": (
-                f"Draft concise Markdown review body for verdict {request.verdict}. "
-                f"For {request.binding.owner}/{request.binding.repository}#{request.binding.pull_request_number}. "
-                f"Evidence: {evidence}"
-            )
-        }
-
-    def re_review_prompt(self, delta: Any) -> dict[str, Any]:
-        """Format re-review delta classification into an OMP steer/prompt command."""
-        delta_dict = delta.to_dict() if hasattr(delta, "to_dict") else dict(delta)
-        payload = json.dumps(delta_dict, sort_keys=True, separators=(",", ":"))
-        return {
-            "type": "prompt",
-            "message": (
-                f"Re-review delta update for head {delta.current_head_sha}. "
-                f"Classified findings: {payload}. "
-                "Focus only on changed regions and newly supported findings."
-            ),
-            "streamingBehavior": "steer",
-        }
-
-    def format_queue_page(self, items: list[dict[str, Any]], page: int, per_page: int = 10) -> dict[str, Any]:
-        """Paginate items for OMP extension and RPC consumer consumption."""
-        total = len(items)
-        start = page * per_page
-        end = start + per_page
-        sliced = items[start:end]
-        return {
-            "page": page,
-            "per_page": per_page,
-            "total": total,
-            "has_next": end < total,
-            "items": sliced,
-        }
-
-    def format_batch_plan_prompt(self, plan: Any) -> dict[str, Any]:
-        """Format BatchActionPlan preview into an OMP interactive confirmation prompt."""
-        preview = plan.preview() if hasattr(plan, "preview") else plan
-        items_summary = [f"{item.repository}#{item.pull_request}@{item.head_sha[:8]}" for item in preview.items]
-        return {
-            "type": "prompt",
-            "message": (
-                f"Batch action plan '{preview.action_kind}' ready for human confirmation.\n"
-                f"Plan ID: {preview.plan_identity}\n"
-                f"Targets ({len(preview.items)}): {', '.join(items_summary)}\n"
-                "To execute, confirm exact targets matching plan."
-            ),
-            "metadata": {
-                "plan_identity": preview.plan_identity,
-                "action_kind": preview.action_kind,
-                "target_count": len(preview.items),
-            },
-        }
-
-    def process_rpc_event(self, event: dict[str, Any]) -> dict[str, Any]:
-        """Process inbound/outbound OMP RPC event frame and normalize review telemetry."""
-        event_type = event.get("type", "unknown")
-        if event_type == "message_update":
-            assistant_event = event.get("assistantMessageEvent", {})
-            delta = assistant_event.get("delta", "")
-            return {"kind": "delta", "delta": delta, "is_tool": "toolCall" in assistant_event}
-        elif event_type == "agent_end":
-            return {"kind": "terminal", "is_terminal": event.get("isTerminal", True)}
-        elif event_type == "tool_execution_start":
-            return {"kind": "tool_start", "tool": event.get("toolName", "")}
-        elif event_type == "tool_execution_end":
-            return {"kind": "tool_end", "tool": event.get("toolName", "")}
-        return {"kind": "passthrough", "event_type": event_type}
+        return [self.executable, "-p", "--mode", "text", "--model", self.model, prompt]
 
     def convert_draft(self, payload: str, request: DraftRequest, exit_code: int = 0) -> DraftResult:
         if exit_code != 0 or not payload.strip():

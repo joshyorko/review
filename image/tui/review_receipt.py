@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from harness.codex import CodexHarness
-from harness.goose import GooseHarness
+from harness.omp import OmpHarness
 from harness.registry import Availability, HarnessRegistry
 from tui.headroom import HeadroomSession, apply_caveman
 from tui.review_evidence_manifest import ReviewRequest
@@ -23,7 +23,7 @@ RECEIPT_VERSION = 1
 MAX_TRANSCRIPT_LINES = 200
 MAX_TRANSCRIPT_CHARS = 60_000
 FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
-BACKENDS = frozenset({"goose", "codex"})
+BACKENDS = frozenset({"codex", "omp"})
 MUTABLE_PROVENANCE_KEYS = frozenset({
     "ci",
     "checks",
@@ -301,8 +301,8 @@ class ReviewReceipt:
 
 def default_harness_registry() -> HarnessRegistry:
     registry = HarnessRegistry()
-    registry.register(GooseHarness(availability=GooseHarness.probe()))
     registry.register(CodexHarness(availability=CodexHarness.probe()))
+    registry.register(OmpHarness(availability=OmpHarness.probe()))
     return registry
 
 
@@ -316,8 +316,29 @@ def _terminal_status(adapter: Any, result: ReviewResult) -> int:
     return int(result.live.get("process_exit_code", 1)) or 1
 
 
-def _check_scope_args(check_scope: str) -> tuple[str, ...]:
-    return ("--check-scope", check_scope) if check_scope else ()
+def _review_scope_doctrine(check_scope: str) -> str:
+    """Fold the image-owned review scope into prose.
+
+    The image-owned REVIEW.md and checks/*.md content is delivered as prompt
+    text for one consolidated pass.
+    """
+    agents_dir = os.path.join(check_scope, ".agents") if check_scope else ""
+    if not agents_dir or not os.path.isdir(agents_dir):
+        return ""
+    parts: list[str] = []
+    review_md = os.path.join(agents_dir, "REVIEW.md")
+    if os.path.isfile(review_md):
+        parts.append(Path(review_md).read_text(encoding="utf-8", errors="replace"))
+    checks_dir = os.path.join(agents_dir, "checks")
+    if os.path.isdir(checks_dir):
+        for name in sorted(os.listdir(checks_dir)):
+            if name.endswith(".md"):
+                parts.append(
+                    Path(os.path.join(checks_dir, name)).read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                )
+    return "\n\n".join(parts)
 
 
 def run_receipt(
@@ -359,14 +380,15 @@ def run_receipt(
     headroom = HeadroomSession.from_environment()
     route = headroom.route_for_call(backend)
     diff_range = f"{base_sha}...{head_sha}"
+    scope_doctrine = _review_scope_doctrine(check_scope)
     prompt = apply_caveman(
-        f"Review the exact binding by inspecting git diff {diff_range}. "
+        (f"{scope_doctrine}\n\n" if scope_doctrine else "")
+        + f"Review the exact binding by inspecting git diff {diff_range}. "
         "Return only the backend's structured ReviewResult; "
         "use compact findings with file and line evidence and no prose padding.",
         True,
     )
     transcript: list[str] = []
-    extra_args = _check_scope_args(check_scope) + (diff_range,)
     result = adapter.stream(
         request,
         prompt=prompt,
@@ -374,7 +396,6 @@ def run_receipt(
         model=model,
         effort=effort,
         steer=steer or None,
-        extra_args=extra_args,
     )
     exit_code = _terminal_status(adapter, result)
     receipt = ReviewReceipt.from_result(

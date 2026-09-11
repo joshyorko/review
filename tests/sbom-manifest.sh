@@ -11,8 +11,9 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 fail=0
 
-GOOSE_X86_64="db1ae20729ac87ebff0e55d161ec88515d92e580ddd1b0b4371a162f16d05180"
-GOOSE_AARCH64="187e0564d735cd99678f471c303546df64eafab6db851421781c96b8700e9792"
+OMP_VERSION="18.1.18"
+OMP_X86_64="45421f9a5f112bc47cb9f77c4b4d7927631f8ff859624f821287ec854eb239fc"
+OMP_AARCH64="1ae8273c231ceb88cebc9971901cf7f5d97ed4149cdc740a814f629cd2b4dcb2"
 CODEX_X86_64="0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36"
 CODEX_AARCH64="eb677c80f666b1ab8b4b1d083b66e8d614b1281d960bb6f9fd8ca98f58b38b90"
 CMH_X86_64="0146adfaac8363ec9fcdb5895f7624db5b2e8617a283887938b7fb97a1dd4356"
@@ -31,9 +32,9 @@ generate() {
     --arch "$arch" \
     --revision "$REVISION" \
     --out "$out" \
-    --goose-channel canary \
-    --goose-sha256-x86-64 "$GOOSE_X86_64" \
-    --goose-sha256-aarch64 "$GOOSE_AARCH64" \
+    --omp-version "$OMP_VERSION" \
+    --omp-sha256-x86-64 "$OMP_X86_64" \
+    --omp-sha256-aarch64 "$OMP_AARCH64" \
     --gh-version 2.97.0 \
     --tmux-version 3.7b \
     --codex-version 0.147.0 \
@@ -78,7 +79,7 @@ done
 check "$tmpdir/amd64.spdx.json" '
   [.packages[] | {key: .name, value: .versionInfo}] | from_entries ==
   {
-    "goose": "canary",
+    "omp": "18.1.18",
     "gh": "2.97.0",
     "tmux": "3.7b",
     "codex": "0.147.0",
@@ -95,29 +96,29 @@ check "$tmpdir/amd64.spdx.json" '
 # checksum qualifier (the field that survives syft's merge into the published
 # SBOM) all follow --arch.
 check "$tmpdir/amd64.spdx.json" '
-  .packages[] | select(.name == "goose") |
-  .downloadLocation | endswith("goose-x86_64-unknown-linux-musl.tar.gz")' \
-  "amd64 manifest: goose download URL is not the x86_64 asset"
+  .packages[] | select(.name == "omp") |
+  .downloadLocation | endswith("omp-linux-x64")' \
+  "amd64 manifest: omp download URL is not the x86_64 asset"
 check "$tmpdir/amd64.spdx.json" '
-  .packages[] | select(.name == "goose") | .externalRefs[0].referenceLocator ==
-  "pkg:github/aaif-goose/goose@canary?checksum=sha256:'"$GOOSE_X86_64"'"' \
-  "amd64 manifest: goose purl does not carry the verified digest qualifier"
+  .packages[] | select(.name == "omp") | .externalRefs[0].referenceLocator ==
+  "pkg:github/can1357/oh-my-pi@'"$OMP_VERSION"'?checksum=sha256:'"$OMP_X86_64"'"' \
+  "amd64 manifest: omp purl does not carry the verified digest qualifier"
 check "$tmpdir/arm64.spdx.json" '
   .packages[] | select(.name == "ripgrep") | .externalRefs[0].referenceLocator ==
   "pkg:github/burntsushi/ripgrep@15.2.0?checksum=sha256:'"$RG_AARCH64"'"' \
   "arm64 manifest: ripgrep purl does not carry the verified digest qualifier"
 check "$tmpdir/amd64.spdx.json" '
-  .packages[] | select(.name == "goose") | .checksums ==
-  [{"algorithm": "SHA256", "checksumValue": "'"$GOOSE_X86_64"'"}]' \
-  "amd64 manifest: goose checksum is not the x86_64 asset digest"
+  .packages[] | select(.name == "omp") | .checksums ==
+  [{"algorithm": "SHA256", "checksumValue": "'"$OMP_X86_64"'"}]' \
+  "amd64 manifest: omp checksum is not the x86_64 asset digest"
 check "$tmpdir/arm64.spdx.json" '
-  .packages[] | select(.name == "goose") |
-  .downloadLocation | endswith("goose-aarch64-unknown-linux-musl.tar.gz")' \
-  "arm64 manifest: goose download URL is not the aarch64 asset"
+  .packages[] | select(.name == "omp") |
+  .downloadLocation | endswith("omp-linux-arm64")' \
+  "arm64 manifest: omp download URL is not the aarch64 asset"
 check "$tmpdir/arm64.spdx.json" '
-  .packages[] | select(.name == "goose") | .checksums ==
-  [{"algorithm": "SHA256", "checksumValue": "'"$GOOSE_AARCH64"'"}]' \
-  "arm64 manifest: goose checksum is not the aarch64 asset digest"
+  .packages[] | select(.name == "omp") | .checksums ==
+  [{"algorithm": "SHA256", "checksumValue": "'"$OMP_AARCH64"'"}]' \
+  "arm64 manifest: omp checksum is not the aarch64 asset digest"
 
 # Publisher-specific architecture tokens: gh says arm64, ripgrep says
 # aarch64-unknown-linux-musl, codex says aarch64.
@@ -132,8 +133,8 @@ check "$tmpdir/arm64.spdx.json" '
 
 # A pin that is not a digest must fail the generator, not bake a bad record.
 if generate x86_64 "$tmpdir/bad.spdx.json" \
-  --goose-sha256-x86-64 not-a-digest >/dev/null 2>&1; then
-  echo "::error::generator accepted a malformed goose sha256"
+  --omp-sha256-x86-64 not-a-digest >/dev/null 2>&1; then
+  echo "::error::generator accepted a malformed omp sha256"
   fail=1
 fi
 if generate s390x "$tmpdir/bad.spdx.json" >/dev/null 2>&1; then

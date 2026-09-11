@@ -40,7 +40,7 @@ class AutopilotContract(unittest.TestCase):
 
     def test_registry_drives_metadata_and_recommended_selection(self):
         options = discover_all()
-        self.assertTrue({option.harness.branding.harness_id for option in options} >= {"goose", "codex"})
+        self.assertTrue({option.harness.branding.harness_id for option in options} >= {"omp", "codex"})
         self.assertTrue(all(len(option.harness.branding.terminal_badge) == 2 for option in options))
         selected = choose_option("org/repo", {}, options)
         self.assertIsNotNone(selected)

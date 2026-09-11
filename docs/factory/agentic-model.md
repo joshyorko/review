@@ -6,9 +6,9 @@ repository's two-mode review appliance. Read it after
 `AGENTS.md` and before task-specific skills.
 
 The published image derives from the pinned lab-runner base and includes the
-Goose/Hive contributor worker and maintainer dashboard. Its two launch modes
-share the same image while keeping Hive assignment authority separate from
-the human review surface.
+Hive contributor worker (Codex) and maintainer dashboard (OMP default, Codex
+alternate). Its two launch modes share the same image while keeping Hive
+assignment authority separate from the human review surface.
 
 The model is documentation: the launcher, image, tests, skills, and
 user-facing instructions must describe the same roles and authority
@@ -25,7 +25,7 @@ session logs, or design scratchpads as competing explanations.
 | **Contributor** | A contributor using the worker configuration to receive and complete Hive-assigned work. They are treated as a contributor, they just happen to specialize in the `clanker-queue`. It's a "subclass" of contributor like a video game RPG character. Same team, different specialization. | Hive assigns work; the worker implements only its assigned scope. |
 | **Maintainer/Reviewer** | A maintainer assessing an incoming pull request. This is a role, same team but this is an active review process, brainmeat needed. | The human decides review, approval, and merge. |
 | **Review Evidence** | Read-only pull-request, issue, verification, and merge-state context shown before a review. | Evidence informs a human; it never makes a decision. |
-| **Managed Reviewer Client** | A foreground, preconfigured Goose session that a Maintainer Reviewer may choose after examining Review Evidence. | It prepares a Review Draft. Its merge keys only execute a typed, human-confirmed decision: asking Hive's authenticated endpoint to create the App-authored exact-head approval and `lgtm` opt-in, or a maintainer's direct squash merge, which requires GitHub's `push` permission and never overrides branch protection. It decides nothing itself. It can also submit the maintainer's own review — approve, request changes, or comment — which merges nothing and arms nothing. |
+| **Managed Reviewer Client** | A foreground, preconfigured review session (OMP default, Codex alternate) that a Maintainer Reviewer may choose after examining Review Evidence. | It prepares a Review Draft. Its merge keys only execute a typed, human-confirmed decision: asking Hive's authenticated endpoint to create the App-authored exact-head approval and `lgtm` opt-in, or a maintainer's direct squash merge, which requires GitHub's `push` permission and never overrides branch protection. It decides nothing itself. It can also submit the maintainer's own review — approve, request changes, or comment — which merges nothing and arms nothing. |
 | **Portable Reviewer Prompt** | Markdown Review Evidence and queue instructions for a maintainer's own client. | It is context, not an assignment. |
 | **Bluefin PR Queue** | A cached, live GitHub view of open factory pull requests and suggested next actions. | GitHub is authoritative; the queue neither assigns work nor merges. |
 | **Dashboard Activity** | The high-priority, bounded display of active parent reviews, Check workers, landing agents, queued work, and freshness. | It reports live or retained evidence; it never assigns Hive work. |
@@ -75,7 +75,7 @@ carries the operational form of this section.
 
 `review` owns the compatibility contributor image, the isolated `contribute` OMP worker image, credential handoff, and review context. Hive owns the contributor WebSocket protocol, task selection, assignment prompt injection, the `contributor` tmux session, and output capture. The launcher must not decline, retry, or otherwise manage assignments mid-protocol; the one permitted filter is own-work exclusion on the maintainer-facing queue view, so a reviewer never receives their own authored pull requests. Hive also owns contributor completion. Review may display a read-only Hive projection, but it never completes an assignment.
 
-The `contribute` image defines one narrow contributor experience: it always launches OMP and rejects every other `AGENT_BACKEND` value before Hive starts. Its FSDK closure contains only the tools required by OMP and Hive's interactive relay. The generic upstream helper files needed by that relay are implementation dependencies, not alternate agent surfaces. No dashboard, review extension, scheduler, Goose, Codex, Pi, or provider state belongs in the image.
+The `contribute` image defines one narrow contributor experience: it always launches OMP and rejects every other `AGENT_BACKEND` value before Hive starts. Its FSDK closure contains only the tools required by OMP and Hive's interactive relay. The generic upstream helper files needed by that relay are implementation dependencies, not alternate agent surfaces. No dashboard, review extension, scheduler, Codex, Pi, or provider state belongs in the image.
 
 The human Maintainer Reviewer is the decision point. A Factory Worker,
 Managed Reviewer Client, Portable Reviewer Prompt, Review Evidence view, or

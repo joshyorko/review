@@ -40,6 +40,18 @@ grep -qF 'keep-id:uid=65532,gid=65532' justfile || fail "wrong user namespace"
 grep -qF 'HIVE_SETUP_BACKEND=omp' justfile || fail "OMP setup not selected"
 grep -qF 'AGENT_BACKEND=omp' "$containerfile" || fail "OMP must be the image default backend"
 grep -qF 'supports only AGENT_BACKEND=omp' image/contribute/entrypoint.sh || fail "entrypoint must reject alternate backends"
+grep -qF 'COPY image/tmux.conf /etc/tmux.conf' "$containerfile" || fail "missing shared tmux.conf (mouse, truecolor, history-limit)"
+# Positive control: the attended path must actually show the OMP session in
+# the launching terminal instead of leaving the operator staring at relay
+# logs with no way to see the agent (the entrypoint used to `exec` straight
+# into contributor-agent.sh, unwrapped, with nothing waiting for or attaching
+# to the tmux session Hive creates).
+entry=image/contribute/entrypoint.sh
+# shellcheck disable=SC2016 # the entrypoint source is matched literally, not expanded
+grep -q '^/usr/local/bin/contributor-agent.sh "\$@" &$' "$entry" || fail "entrypoint must background contributor-agent.sh so it can wait for and attach to its tmux session"
+grep -qF 'tmux has-session -t contributor' "$entry" || fail "entrypoint must wait for the contributor tmux session before attaching"
+grep -qF 'tmux attach-session -t contributor' "$entry" || fail "entrypoint must attach the attended terminal to the contributor tmux session"
+grep -qF 'attach_pid=' "$entry" || fail "the attach must have explicit PID-1 cleanup ownership"
 
 # --- bin/bluefin-contribute: GH_TOKEN resolution and preflight -----------------
 # A missing GitHub identity used to reach apptainer anyway: the contributor

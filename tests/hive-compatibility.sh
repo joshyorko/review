@@ -100,7 +100,6 @@ if [[ -n "$unset_hub" ]]; then
   exit 1
 fi
 
-grep -qF 'export GOOSE_PATH_ROOT=' image/entrypoint.sh
 if grep -qF 'CONTEXT_FILE_NAMES' image/entrypoint.sh; then
   echo "::error::entrypoint retains an obsolete context filename override" >&2
   exit 1

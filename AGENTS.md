@@ -1,10 +1,10 @@
 # review — Agent Operating Contract
 
 `review` is the Bluefin review appliance: one OCI image fork and a launcher.
-The `review-container` and `review-queue` recipes run the restored Goose/Hive
-worker and maintainer dashboard. Review owns the image, publication, launcher
-credential handoff, and review context; Hive owns its contributor protocol, task
-selection, tmux session, prompt injection, and output capture.
+The `review-container` (Codex-only) and `review-queue` (OMP default, Codex alternate)
+recipes run the Hive contributor worker and maintainer dashboard. Review owns the
+image, publication, launcher credential handoff, and review context; Hive owns its
+contributor protocol, task selection, tmux session, prompt injection, and output capture.
 
 ## Read order
 
@@ -39,10 +39,12 @@ contributor credential; never loosen that file's permissions as a workaround.
 That rule scopes how the launcher starts the container; it is not a ban
 on `&` anywhere in the repository. Backgrounding is required where it is what
 preserves signal responsiveness. Bash defers a trap handler while it waits on
-a foreground child, so `image/entrypoint.sh` runs the contributor agent and
-`tmux attach-session` as background jobs it `wait`s on, keeping PID 1
-signal-responsive; a foreground attach swallowed SIGTERM for the whole session
-and forced podman's ten-second SIGKILL. Do not "fix" that.
+a foreground child, so `image/contribute/entrypoint.sh` runs the contributor
+agent and `tmux attach-session` as background jobs it `wait`s on, and
+`image/entrypoint.sh` runs the contributor agent and its passive
+`worker_status.py` companion the same way — keeping PID 1 signal-responsive
+in both; a foreground attach or companion swallowed SIGTERM for the whole
+session and forced podman's ten-second SIGKILL. Do not "fix" that.
 
 `podman run --rm -it` does not bind a container's lifetime to its client:
 `conmon` supervises the container, survives the client, and reparents to the
@@ -57,12 +59,12 @@ not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
 one permitted filter is own-work exclusion on the maintainer-facing queue
 view — a reviewer never receives their own authored pull requests to review.
 
-Keep review checks and interactive skills as separate layers. `goose review`
-does not consume `~/.agents/skills/`; `bluefin-review` supplies the image-owned
-`/opt/bluefin/review-scope/.agents/` overlay through `--check-scope`. The five
-specialized check subagents (`bluefin-doctrine`, `security`, `correctness`,
-`test-coverage`, `simplicity`) live in `image/review-scope/checks/` and execute
-concurrently under Goose's review orchestrator. Skills generated from the
+Keep review checks and interactive skills as separate layers.
+`image/bin/bluefin-review` supplies the image-owned
+`/opt/bluefin/review-scope/.agents/` overlay directly by folding its `REVIEW.md`
+and five check definitions (`bluefin-doctrine`, `security`, `correctness`,
+`test-coverage`, `simplicity`) into a single consolidated prompt sent to the
+selected backend (Codex or OMP). Skills generated from the
 Bluefin catalog, or installed from `skills.sh` and other compatible open
 catalogs, belong under `~/.agents/skills/` for interactive contributor sessions
 and do not become review checks automatically. See [`docs/skills/review-checks.md`](docs/skills/review-checks.md).
@@ -170,10 +172,6 @@ labels. Never add a local workaround for an accepted upstream gap. See
   opted-in `review-queue` session.
 - `tests/` contains launcher and image contracts.
 - `docs/` contains the skill router and catalog.
-
-Hive rewrites `~/.config/goose/config.yaml`. Keep the controlled Goose
-configuration under `GOOSE_PATH_ROOT=/opt/bluefin/goose`; do not write it to
-the Hive-managed path.
 
 ## Permitted changes
 

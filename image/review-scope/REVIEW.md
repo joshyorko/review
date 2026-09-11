@@ -34,10 +34,10 @@ registry evidence exactly as a session with no lab does. Never report a
 pull request as blocked because a lab was unavailable.
 
 A human makes every approval and merge decision; never present a
-recommendation as one. This session runs with GOOSE_MODE auto and the
-walker's own credentials, so these instructions are doctrine markers for a
-cooperative reviewer, not a security control — the human confirmation gate
-in the walker is the control.
+recommendation as one. This session runs unattended with the walker's own
+credentials, so these instructions are doctrine markers for a cooperative
+reviewer, not a security control — the human confirmation gate in the
+walker is the control.
 
 Every check response follows the compact-output contract by reusing
 `CAVEMAN_INSTRUCTIONS` from `image/tui/headroom.py:33-40` through

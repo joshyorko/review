@@ -213,21 +213,19 @@ containerfile_arg() {
   sed -n "s/^ARG $1=\\(.*\\)\$/\\1/p" image/Containerfile | head -n 1
 }
 
-# The Goose asset digest the build actually verified. CI resolves it from the
-# canary release API immediately before building, so the Containerfile
-# defaults can be older than what shipped; the image's own labels are the
-# record of what was verified. $1: amd64|arm64, $2: labels as key=value lines.
-goose_label_digest() {
+# The OMP asset digest the build actually verified. The image's own labels are
+# the record of what was verified. $1: amd64|arm64, $2: labels as key=value lines.
+omp_label_digest() {
   local arch="$1" labels="$2" label_arch
   case "$arch" in
   amd64) label_arch=x86_64 ;;
   arm64) label_arch=aarch64 ;;
   *)
-    echo "goose_label_digest needs amd64 or arm64, got: ${arch}" >&2
+    echo "omp_label_digest needs amd64 or arm64, got: ${arch}" >&2
     return 2
     ;;
   esac
-  sed -n "s/^io\\.projectbluefin\\.review\\.goose\\.${label_arch}-unknown-linux-musl\\.sha256=\\([0-9a-f]\\{64\\}\\)\$/\\1/p" \
+  sed -n "s/^io\\.projectbluefin\\.review\\.omp\\.${label_arch}\\.sha256=\\([0-9a-f]\\{64\\}\\)\$/\\1/p" \
     <<<"$labels"
 }
 
@@ -241,7 +239,7 @@ goose_label_digest() {
 # review-git-hooks is versioned by the review source revision, which only the
 # publisher knows; without --expected-revision it is a presence check only.
 required_sbom_components() {
-  local arch="$1" goose_sha256="$2" suffix
+  local arch="$1" omp_sha256="$2" suffix
   local hive_commit skills_commit codex_version
   case "$arch" in
   amd64) suffix=X86_64 ;;
@@ -254,7 +252,7 @@ required_sbom_components() {
   hive_commit="$(containerfile_arg HIVE_COMMIT)"
   skills_commit="$(containerfile_arg SKILLS_COMMIT)"
   codex_version="$(containerfile_arg CODEX_VERSION)"
-  printf 'goose\t%s\t%s\n' "$(containerfile_arg GOOSE_CHANNEL)" "$goose_sha256"
+  printf 'omp\t%s\t%s\n' "$(containerfile_arg OMP_VERSION)" "$omp_sha256"
   printf 'gh\t%s\t\n' "$(containerfile_arg GH_VERSION)"
   printf 'tmux\t%s\t\n' "$(containerfile_arg TMUX_VERSION)"
   printf 'codex\t%s\t%s\n' "$codex_version" "$(containerfile_arg "CODEX_${suffix}_SHA256")"
@@ -268,7 +266,7 @@ required_sbom_components() {
 }
 
 check_sbom_components() {
-  local sbom_json="$1" source_desc="$2" arch="$3" goose_sha256="$4"
+  local sbom_json="$1" source_desc="$2" arch="$3" omp_sha256="$4"
   local name expected expected_sha actual
   while IFS=$'\t' read -r name expected expected_sha; do
     [[ -n "$name" ]] || continue
@@ -288,8 +286,8 @@ check_sbom_components() {
       error "${source_desc} records ${name} at ${actual}, expected ${expected}"
     # The digest rides as the purl checksum qualifier: raw in the in-image
     # manifest, percent-encoded after syft re-encodes the locator.
-    if [[ "$name" == goose && -z "$expected_sha" ]]; then
-      error "${source_desc}: image does not record the verified Goose ${arch} asset digest"
+    if [[ "$name" == omp && -z "$expected_sha" ]]; then
+      error "${source_desc}: image does not record the verified OMP ${arch} asset digest"
       continue
     fi
     if [[ -n "$expected_sha" ]] && ! jq -e --arg name "$name" --arg sha "$expected_sha" \
@@ -299,7 +297,7 @@ check_sbom_components() {
       <<<"$sbom_json" >/dev/null; then
       error "${source_desc} records ${name} without its verified archive digest ${expected_sha}"
     fi
-  done < <(required_sbom_components "$arch" "$goose_sha256")
+  done < <(required_sbom_components "$arch" "$omp_sha256")
 }
 
 # The SBOM predicate lives in a signed Sigstore bundle in the registry's
@@ -512,7 +510,7 @@ if "$require_attestations"; then
           platform_labels="$(skopeo inspect --config "docker://${derived_repository}@${digest}" |
             jq -r '.config.Labels // {} | to_entries[] | "\(.key)=\(.value)"')"
           check_sbom_components "$spdx_document" "published linux/${platform} SPDX SBOM" "$platform" \
-            "$(goose_label_digest "$platform" "$platform_labels")"
+            "$(omp_label_digest "$platform" "$platform_labels")"
         else
           error "published linux/${platform} SPDX SBOM predicate could not be read"
         fi
@@ -780,9 +778,9 @@ base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh 
 # (#75). The day the base ships rg, this audit fails, and the answer is to
 # delete review's layer rather than run two copies.
 package_managers="apt dnf apk"
-review_owned="node npm gh tmux codex codex-code-mode-host goose rg"
+review_owned="node npm gh tmux codex codex-code-mode-host omp rg"
 base_forbidden="${review_owned} ${package_managers}"
-derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg find cmp diff grep cat ls infocmp gzip skopeo shellcheck hadolint actionlint"
+derived_required="bash node npm corepack gh tmux codex codex-code-mode-host omp rg find cmp diff grep cat ls infocmp gzip skopeo shellcheck hadolint actionlint"
 derived_forbidden="$package_managers"
 # Base commands Hive's relay calls directly and review must never shim over.
 # image/Containerfile proves their semantics at build time against the real
@@ -866,8 +864,8 @@ setTimeout(() => {
 NODE
     ' ||
       error "derived runtime cannot establish a local ws connection"
-    "$engine" run --rm --entrypoint /usr/local/bin/goose "$image" run --help >/dev/null ||
-      error "derived runtime cannot execute goose run --help"
+    "$engine" run --rm --entrypoint /usr/local/bin/omp "$image" --help >/dev/null ||
+      error "derived runtime cannot execute omp --help"
     "$engine" run --rm --entrypoint /usr/local/bin/codex "$image" --version >/dev/null ||
       error "derived runtime cannot execute codex --version"
     "$engine" run --rm --entrypoint /usr/local/bin/codex-code-mode-host "$image" --help >/dev/null ||
@@ -879,7 +877,7 @@ NODE
     if sbom_manifest="$("$engine" run --rm --entrypoint /usr/bin/cat "$image" \
       /opt/bluefin/sbom/review-components.spdx.json 2>/dev/null)"; then
       check_sbom_components "$sbom_manifest" "derived image SBOM manifest" "$arch" \
-        "$(goose_label_digest "$arch" "$derived_labels")"
+        "$(omp_label_digest "$arch" "$derived_labels")"
     else
       error "derived image is missing /opt/bluefin/sbom/review-components.spdx.json"
     fi

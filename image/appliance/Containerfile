@@ -27,9 +27,9 @@ ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08.0@sha256:497c31303ce95290d
 ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:2c07034a167fec3296605ab1b1287f6c2d14f90d745b7686fab3e19e67fcb899
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
-ARG OMP_VERSION=18.1.17
-ARG OMP_X86_64_SHA256=040c254ddeb30f6d592be67d1469dc67fcac14e933fa04dbf690f42820ffd820
-ARG OMP_AARCH64_SHA256=58ab1b8f75d202cf3767e19901c834d2435898a189d5993be6d5cae6736716e1
+ARG OMP_VERSION=18.1.18
+ARG OMP_X86_64_SHA256=45421f9a5f112bc47cb9f77c4b4d7927631f8ff859624f821287ec854eb239fc
+ARG OMP_AARCH64_SHA256=1ae8273c231ceb88cebc9971901cf7f5d97ed4149cdc740a814f629cd2b4dcb2
 # renovate: datasource=npm depName=@earendil-works/pi-coding-agent
 ARG PI_VERSION=0.85.1
 # node exists in this image only to run pi; omp embeds its own Bun runtime.

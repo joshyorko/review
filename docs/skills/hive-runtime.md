@@ -45,10 +45,9 @@ credential handling ([`launcher.md`](launcher.md)).
 
 1. Let Hive own the WebSocket protocol, assignment selection, `contributor`
    tmux session, prompt injection, and result capture. Context7 reaches the
-   agent twice: the hub queries it server-side
+   agent via the hub, which queries it server-side
    (`src/pkg/knowledge/context7.go`) and delivers assigned-task context through
-   its knowledge export, and the image's controlled Goose config enables the
-   `context7` extension for on-demand lookups (see `goose-context.md`).
+   its knowledge export. Note that `review-container` is Codex-only.
    review starts the runtime and does not reproduce Hive's jobs. Authenticated
    reads use `Authorization: Bearer ${GH_TOKEN}` over HTTPS to `/api/v1/status`,
    `/api/v1/me`, `/api/v1/contributors`, `/api/v1/knowledge`, `/api/contribute/queue`,

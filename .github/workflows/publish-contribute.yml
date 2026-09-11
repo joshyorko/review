@@ -86,7 +86,7 @@ jobs:
           set -euo pipefail
           just --justfile justfile --list
 
-      - name: Guided Goose onboarding behavior
+      - name: Guided onboarding behavior
         run: |
           set -euo pipefail
           bash tests/just-onboarding.sh
