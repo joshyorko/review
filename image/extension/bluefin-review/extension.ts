@@ -13,7 +13,7 @@ import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, parseScope, resolveToken } from "./github.ts";
 import type { Priority } from "./priority.ts";
-import { ReviewMode, type PersistedSelection } from "./mode.ts";
+import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { themePainter } from "./paint.ts";
 import { type RailKey, ReviewHitlist, ReviewRail, statusSegment } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
@@ -584,12 +584,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		},
 	});
 	pi.registerShortcut("alt+s", {
-		description: "Slay selected pull request (autoslay) or triage/close issue",
+		description: "Autoslay queue in Hive priority order (batch up to limit)",
 		handler: (ctx) => {
+			// Autoslay runs directly in strict Hive priority order across the queue,
+			// without requiring manual selection or cherry-picking.
+			const visible = mode.visibleItems();
 			const chosen = mode.chosenItems();
-			const items = chosen.length > 0 ? chosen : [mode.selected()].filter(Boolean) as QueueItem[];
+			const items = (chosen.length > 0 ? chosen : (visible.length > 0 ? visible.slice(0, BATCH_LIMIT) : [mode.selected()].filter(Boolean))) as QueueItem[];
 			if (items.length === 0) {
-				if (ctx.hasUI) ctx.ui.notify("No queue item selected to slay", "warning");
+				if (ctx.hasUI) ctx.ui.notify("No queue items available to slay in Hive priority order", "warning");
 				return;
 			}
 			const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };

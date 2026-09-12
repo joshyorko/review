@@ -1181,6 +1181,10 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.equal(ctx.overlays.length, 1, "startup opens exactly one dashboard");
 	await pi.shortcuts.get("alt+b").handler(ctx);
 	assert.equal(ctx.overlays.length, 1, "alt+b on an open dashboard opens nothing new");
+
+	// alt+s triggers autoslay directly in Hive priority order
+	await pi.shortcuts.get("alt+s").handler(ctx);
+	assert.ok(pi.messages.length > 0, "alt+s must dispatch autoslay user message in Hive priority order");
 });
 
 // The timeout is the assertion: a handler that waits on its own work never
