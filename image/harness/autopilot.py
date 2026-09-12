@@ -104,7 +104,7 @@ def discover_all() -> list[HarnessOption]:
             "omp", "ready" if omp.availability is Availability.READY else "missing",
             "ready" if omp.availability is Availability.READY else "missing",
             "ready" if omp.availability is Availability.READY else "unavailable",
-            "github-copilot/gemini-3.8-flash", "max", omp.availability,
+            "gemini-3.8-flash", "max", omp.availability,
         )),
     ]
 

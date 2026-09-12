@@ -7173,7 +7173,7 @@ class ReviewDashboard(App):
         for task in rounds:
             round_state = "running" if (self._landing_task_active(task) or task.process is not None) else "queued"
             model = task.model or os.environ.get(
-                "AGENT_MODEL", "github-copilot/gemini-3.8-flash"
+                "AGENT_MODEL", "gemini-3.8-flash"
             )
             lines.append(
                 f"final {task.phase} round {task.round}"
@@ -7198,7 +7198,7 @@ class ReviewDashboard(App):
                     "finished" if task.returncode == 0 else "failed"
                 )
             model = task.model or os.environ.get(
-                "AGENT_MODEL", "github-copilot/gemini-3.8-flash"
+                "AGENT_MODEL", "gemini-3.8-flash"
             )
             for stop in task.stops:
                 if visible >= MAX_LANDING_CONTROL_ROWS:

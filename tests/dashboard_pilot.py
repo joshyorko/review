@@ -299,6 +299,7 @@ async def main() -> int:
     )
     os.environ["PATH"] = f"{workdir}:{os.environ['PATH']}"
     os.environ["XDG_STATE_HOME"] = str(workdir / "state")
+    os.environ["XDG_CONFIG_HOME"] = str(workdir / "config")
     os.environ["HIVE_HUB"] = "wss://hive.example.test/contribute"
     os.environ["GH_TOKEN"] = "dashboard-pilot-token"
     write_stub(

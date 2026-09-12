@@ -36,6 +36,7 @@ export const RAIL_KEYS: readonly RailKey[] = [
 	{ chord: "alt+i", label: "prs/issues" },
 	{ chord: "alt+o", label: "repo" },
 	{ chord: "alt+u", label: "refresh" },
+	{ chord: "alt+s", label: "slay" },
 	{ chord: "alt+y", label: "cite" },
 ];
 
@@ -580,6 +581,19 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			const text = items.map((item) => `${item.repo}#${item.id} — ${item.title}\n${item.url}\n`).join("\n");
 			ctx.ui.pasteToEditor(text);
+		},
+	});
+	pi.registerShortcut("alt+s", {
+		description: "Slay selected pull request (autoslay) or triage/close issue",
+		handler: (ctx) => {
+			const chosen = mode.chosenItems();
+			const items = chosen.length > 0 ? chosen : [mode.selected()].filter(Boolean) as QueueItem[];
+			if (items.length === 0) {
+				if (ctx.hasUI) ctx.ui.notify("No queue item selected to slay", "warning");
+				return;
+			}
+			const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
+			void dispatch(ctx, action);
 		},
 	});
 

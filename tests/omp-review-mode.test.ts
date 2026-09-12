@@ -1128,7 +1128,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
 
 	assert.deepEqual(pi.labels, ["Bluefin Review"]);
-	assert.deepEqual([...pi.shortcuts.keys()].sort(), ["alt+b", "alt+i", "alt+j", "alt+k", "alt+o", "alt+u", "alt+x", "alt+y"]);
+	assert.deepEqual([...pi.shortcuts.keys()].sort(), ["alt+b", "alt+i", "alt+j", "alt+k", "alt+o", "alt+s", "alt+u", "alt+x", "alt+y"]);
 	assert.deepEqual([...pi.flags.keys()].sort(), ["all", "issues", "pr", "repo", "splash"]);
 	assert.deepEqual([...pi.tools.keys()].sort(), [
 		"bluefin_hive_lookup",

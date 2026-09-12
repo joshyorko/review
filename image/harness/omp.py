@@ -29,7 +29,7 @@ class OmpHarness:
     branding: HarnessBranding = HarnessBranding(
         "omp", "Oh My Pi", "PI", "Oh My Pi Coding Agent", "can1357/oh-my-pi", None
     )
-    model: str = "github-copilot/gemini-3.8-flash"
+    model: str = "gemini-3.8-flash"
     effort: str = "max"
     availability: Availability = Availability.READY
     executable: str = "omp"

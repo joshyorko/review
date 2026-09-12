@@ -143,7 +143,7 @@ class OmpHarnessContract(unittest.TestCase):
 
     def test_autopilot_prefers_omp_when_configured(self):
         options = discover_all()
-        pref = Preference("omp", "github-copilot/gemini-3.8-flash", "max")
+        pref = Preference("omp", "gemini-3.8-flash", "max")
         chosen = choose_option("projectbluefin/review", {"*": pref}, options)
         self.assertIsNotNone(chosen)
         self.assertEqual(chosen.discovery.backend, "omp")
