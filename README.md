@@ -7,7 +7,27 @@ Bluefin Review brings the evidence and actions into one dashboard. You choose
 what to review and what to merge; GitHub permissions and branch protections
 still apply.
 
-[Quick start](#quick-start) · [Using the dashboard](#using-the-dashboard) · [Run a worker](#run-a-worker) · [Guides](#guides)
+## Installation
+
+Install `bluefin-contributor-tools` in one command from the [Universal Blue experimental tap](https://github.com/ublue-os/homebrew-experimental-tap), which automatically trusts the formula:
+
+```bash
+brew install ublue-os/experimental-tap/bluefin-contributor-tools
+```
+
+This installs the `bluefin` CLI with both `review` and `contribute` subcommands (as well as `bluefin-contribute`):
+
+```bash
+# Review pull requests and inspect CI failures
+bluefin review
+
+# Run an isolated Hive contributor worker
+bluefin contribute
+```
+
+> **Note:** `bluefin` requires [Apptainer](https://apptainer.org/docs/admin/main/installation.html) and the corresponding container SIF images (`BLUEFIN_REVIEW_SIF` and `BLUEFIN_CONTRIBUTE_SIF`).
+
+[Installation](#installation) · [Quick start](#quick-start) · [Using the dashboard](#using-the-dashboard) · [Run a worker](#run-a-worker) · [Guides](#guides)
 
 ## Quick start
 

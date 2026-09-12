@@ -131,7 +131,7 @@ test "$(inspect '{{.Config.User}}')" = 65532:65532 || fail "image user"
 test "$(inspect '{{.Config.WorkingDir}}')" = /home/bluefin/workspace || fail "image workdir"
 test "$(inspect '{{json .Config.Entrypoint}}')" = '["/usr/local/bin/contribute-entrypoint"]' || fail "image entrypoint"
 # shellcheck disable=SC2016 # the single-quoted $HOME expands inside the container, not this shell
-"$engine" run --rm --entrypoint /usr/bin/bash "$image" -c 'set -eu; omp --version; node -e "require.resolve(\"ws\")"; gh --version >/dev/null; tmux -V; git --version >/dev/null; curl --version >/dev/null; find --version >/dev/null; grep --version >/dev/null; sed --version >/dev/null; cmp --version >/dev/null; test -w "$HOME"; test -w "$HOME/workspace"; test -f /usr/local/bin/contributor-relay.js; test -f /usr/local/bin/pi-backend.js; test -f /usr/local/bin/lib/pane-classifier.js; test ! -e /usr/bin/npm; test ! -e /usr/bin/corepack' >/dev/null || fail "runtime closure"
+"$engine" run --rm --entrypoint /usr/bin/bash "$image" -c 'set -eu; omp --version; node -e "require.resolve(\"ws\")"; python3 --version >/dev/null; gh --version >/dev/null; tmux -V; git --version >/dev/null; curl --version >/dev/null; find --version >/dev/null; grep --version >/dev/null; sed --version >/dev/null; cmp --version >/dev/null; test -w "$HOME"; test -w "$HOME/workspace"; test -f /usr/local/bin/contributor-relay.js; test -f /usr/local/bin/pi-backend.js; test -f /usr/local/bin/lib/pane-classifier.js; test ! -e /usr/bin/npm; test ! -e /usr/bin/corepack' >/dev/null || fail "runtime closure"
 if "$engine" run --rm --env AGENT_BACKEND=goose "$image" >/dev/null 2>&1; then
   fail "alternate agent backends must be rejected"
 fi

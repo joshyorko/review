@@ -60,7 +60,7 @@ RUN set -eu; \
     printf 'root:x:0:0:root:/root:/usr/bin/bash\nbluefin:x:65532:65532:Bluefin:/home/bluefin:/usr/bin/bash\n' > /out/etc/passwd; \
     printf 'root:x:0:\nbluefin:x:65532:\n' > /out/etc/group; \
     chown -R 65532:65532 /out/home/bluefin /out/var/run/hive-metrics; \
-    for binary in /out/usr/bin/omp /out/usr/bin/node /out/usr/bin/gh /out/usr/bin/tmux /out/usr/bin/bash /out/usr/bin/git /out/usr/bin/curl /out/usr/bin/find /out/usr/bin/grep /out/usr/bin/sed /out/usr/bin/cmp; do test -x "$binary"; done; \
+    for binary in /out/usr/bin/omp /out/usr/bin/node /out/usr/bin/gh /out/usr/bin/tmux /out/usr/bin/bash /out/usr/bin/git /out/usr/bin/curl /out/usr/bin/find /out/usr/bin/grep /out/usr/bin/sed /out/usr/bin/cmp /out/usr/bin/python3; do test -x "$binary"; done; \
     test ! -e /out/usr/bin/npm; test ! -e /out/usr/bin/corepack
 
 FROM ${FSDK_BASE_IMAGE}

@@ -6,8 +6,8 @@
 # It derives from Project Bluefin's distroless FSDK base — glibc, CA
 # certificates, tzdata, and the full terminfo database, no shell and no package
 # manager — and adds exactly four fetched artifacts (omp, node, pi, gh) plus the
-# smallest closure of FSDK binaries the agent genuinely needs to work: a shell
-# and git. Nothing else. There is no python, no perl, no distro userland, and
+# smallest closure of FSDK binaries the agent genuinely needs to work: a shell,
+# git, and python. Nothing else. There is no perl, no distro userland, and
 # nothing that can install one.
 #
 # A shell is present deliberately and is the single documented deviation from
@@ -175,7 +175,7 @@ COPY --chmod=0755 bin/dinosay /out/usr/bin/dinosay
 # Fail the build here rather than in a maintainer's terminal: every staged
 # binary must resolve its interpreter and libraries against the staged closure.
 RUN set -eu; \
-    for binary in /out/usr/bin/omp /out/usr/bin/node /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash; do \
+    for binary in /out/usr/bin/omp /out/usr/bin/node /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash /out/usr/bin/python3; do \
       test -x "$binary" || { echo "missing $binary" >&2; exit 1; }; \
     done; \
     test -e /out/usr/share/bluefin/review/extension/index.ts; \

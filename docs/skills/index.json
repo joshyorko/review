@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-09",
+  "generated_at": "2026-09-11",
   "schema_version": "1.0",
   "skills": [
     {
@@ -152,8 +152,8 @@
         "audit"
       ],
       "description": "Use when maintaining the pinned FSDK-derived contributor image, audit, OMP assets, Hive runtime, or publishing path.",
-      "version": "2.24",
-      "last_updated": "2026-08-25",
+      "version": "2.25",
+      "last_updated": "2026-09-11",
       "doc_type": "procedure"
     },
     {

@@ -17,8 +17,8 @@ relay inputs are built before the agent layers.
 the maintainer dashboard and legacy `review-container` path.
 `ghcr.io/projectbluefin/contribute` is a separate distroless Hive worker: it
 carries only OMP, Node with the locked `ws` module, GitHub CLI, tmux, the
-upstream Hive runtime, and the FSDK shell/git closure. It contains no
-Codex, Pi, Python, dashboard, review scope, or generated skills. Its embedded
+upstream Hive runtime, and the FSDK shell/git/python closure. It contains no
+Codex, Pi, dashboard, review scope, or generated skills. Its embedded
 SPDX manifest records exactly those artifacts, `ws`, and pinned Hive files; the
 registration is mounted at `/home/bluefin/.config/hive/contributor.env` and
 provider credentials are inherited environment names only.
