@@ -97,6 +97,7 @@ done
 # Lower third live status updater (blue styling: tracks Hive governor, issue/PR counts, and task state)
 (
   update_status() {
+    # shellcheck disable=SC2016
     node -e '
 const fs = require("fs");
 const https = require("https");
