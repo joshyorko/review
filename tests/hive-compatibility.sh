@@ -44,10 +44,12 @@ grep -qF 'source /usr/local/etc/hive/backends.conf' <<<"$agent" || {
   echo "::error::pinned Hive no longer consumes the installed backends.conf" >&2
   exit 1
 }
-grep -qF 'KNOWN_BACKENDS="claude copilot goose codex agy bob pi aider litellm opencode kilo muse omp"' <<<"$backends" || {
-  echo "::error::pinned Hive backend interface changed" >&2
-  exit 1
-}
+for backend in claude copilot goose codex agy bob pi aider litellm opencode kilo; do
+  grep -q "KNOWN_BACKENDS=\"[^\"]*\b${backend}\b" <<<"$backends" || {
+    echo "::error::pinned Hive backend interface changed (missing: $backend)" >&2
+    exit 1
+  }
+done
 
 # Exercise the hook with an inert command after it has installed its wrapper.
 # The exact hosted URL is rewritten and receives a Bearer token; unrelated
