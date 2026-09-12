@@ -37,7 +37,7 @@ or cluster scale-out (`cluster-workers.md`).
 2. **Multi-Repository Partitioning:** Multi-repo selections partition into
    independent per-repository `LandingTask` lanes.
 3. **Concurrent Execution:** Up to `BLUEFIN_REVIEW_CONCURRENT_LANDINGS`
-   (default 6) run concurrently across disjoint repository sets.
+   (default 7) run concurrently across disjoint repository sets.
 4. **Fix & Land:** `[$]` ("slay") executes the pipeline end-to-end and owns
    fix dispatch: a review with evidenced findings seeds a fixer
    (`new_fix_task`) behind slay's own gates. The standalone `[f]`/`[F]`

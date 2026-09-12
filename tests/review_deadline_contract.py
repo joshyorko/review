@@ -129,7 +129,7 @@ class ReviewDeadlineContractTests(unittest.TestCase):
             selected = make_item(1, HEADS[0])
             run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -141,7 +141,7 @@ class ReviewDeadlineContractTests(unittest.TestCase):
                     workdir,
                     "scope-v1",
                     "",
-                    HeadroomRoute("DIRECT", "goose", None, "ready"),
+                    HeadroomRoute("DIRECT", "omp", None, "ready"),
                     {},
                 )
 
@@ -216,7 +216,7 @@ class ReviewDeadlineContractTests(unittest.TestCase):
             with patch("tui.review_engine._prepare_worktree", side_effect=mock_prepare_worktree):
                 result = engine.run_sync(
                     snapshot,
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v1",
@@ -242,7 +242,7 @@ class ReviewDeadlineContractTests(unittest.TestCase):
             selected = make_item(1, HEADS[0])
             run = ReviewRun.from_request(
                 selected.request(),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
             )
@@ -278,8 +278,8 @@ class ReviewDeadlineContractTests(unittest.TestCase):
                 workdir,
                 "scope-v1",
                 "",
-                HeadroomRoute("DIRECT", "goose", None, "ready"),
-                FakeHeadroomSession().telemetry("goose"),
+                HeadroomRoute("DIRECT", "omp", None, "ready"),
+                FakeHeadroomSession().telemetry("omp"),
             )
             self.assertEqual(actual_receipt.identity, receipt.identity)
             self.assertEqual(actual_receipt.analysis.state, "complete")

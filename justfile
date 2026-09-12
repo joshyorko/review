@@ -4,7 +4,7 @@
 # is the launcher a checkout exposes directly.
 #
 # This is the ONLY file that ships/installs. Everything review needs
-# (host preflight, Goose selection, container lifecycle) is
+# (host preflight, backend selection, container lifecycle) is
 # embedded below as private ('_'-prefixed variables and shared shell
 # functions) on purpose: a user browsing the image or this repo should find
 # one just-recipe file and the commands it exposes, not a scattered bin/ of
@@ -63,28 +63,29 @@
 # from the repository root. Persistent state is limited to launcher
 # configuration; the container receives credentials by environment and the
 # read-only ~/.config/hive mount, never a workspace or host home mount.
-# Goose is the default agent backend. Hive remains the sole assignment authority and there is no local
+# Codex is the default agent backend. Hive remains the sole assignment authority and there is no local
 # inference, model catalogue, or multi-CLI auto-detection.
 #
-# TOOL is read from the environment so 'TOOL=goose just review-container'
+# TOOL is read from the environment so 'TOOL=codex just review-container'
 # works as documented — 'just' recipe parameters are positional, not
 # KEY=VALUE, so it cannot be a plain recipe parameter. Unsupported values are
 # hard errors rather than silent fallbacks.
 tool_env := env("TOOL", "")
 hive_repo_url := "https://github.com/hivecommons/hive"
 # origin/v4 via `git ls-remote --heads https://github.com/hivecommons/hive v4`
-# on 2026-09-06.
-hive_commit := "eb37e0a7db5f1526632f399f395b2c3eabe040ed"
+# on 2026-09-11, after kubestellar/hive#6637 (fix: key OMP readiness/busy/idle
+# off real captured chrome instead of a hand-written fixture that never
+# exercised OMP's actual welcome/idle/busy chrome at real dimensions),
+# kubestellar/hive#6639 (fix: stop OMP's rotating "Log in to several
+# accounts..." startup tip from faking a needs-login verdict), and
+# kubestellar/hive#6670 (fix: scope OMP's login/onboarding checks to the
+# pane's last 3 lines instead of a 15-line tail a tip or a finished turn's
+# own prose could still land in).
+hive_commit := "ebd5db6adf95c2eceb77c1a4376f137af0836d4b"
 gemini_model := "gemini-3.8-flash"
-# Contributor runs are automated in practice — Hive keeps feeding the session —
-# so a large window is money spent on context nobody reads. Opus and Kimi are
-# the models whose default windows are worth clamping.
 opus_model := "claude-opus-5"
-opus_context_limit := "264000"
-# Kimi K3's default window is ~1M tokens, so the same clamp applies.
 sol_model := "gpt-5.6-sol"
 k3_model := "kimi-k3"
-k3_context_limit := "264000"
 # The fsdk-derived contributor image, used by every recipe that starts a
 # container.
 #
@@ -100,9 +101,10 @@ k3_context_limit := "264000"
 # REVIEW_CONTRIBUTOR_IMAGE overrides this when you need a specific
 # 'sha-' tag or digest.
 contributor_image := env("REVIEW_CONTRIBUTOR_IMAGE", "ghcr.io/projectbluefin/review-contributor:stable")
+contribute_image := env("CONTRIBUTE_IMAGE", "ghcr.io/projectbluefin/contribute:stable")
 
 # Shared bash, 'eval''d at the top of every recipe script that needs it:
-# host preflight, Goose selection, and the pinned Hive checkout. Keeping
+# host preflight, backend selection, and the pinned Hive checkout. Keeping
 # this in one place instead of duplicating it per-recipe is the only
 # concession to DRY here — it never leaves the Justfile as a file of its own.
 shared_functions := '''
@@ -119,33 +121,11 @@ print_missing_hive_setup_guidance() {
   echo "ERROR: missing Hive setup at ${path}; ${reason}." >&2
   echo "  Re-run review from an interactive terminal, or pre-seed it yourself from hivecommons/hive @ ${commit} by running \`just contribute-setup ${tool}\` in an interactive checkout (set REVIEW_HIVE_COMMIT to another full commit if needed)" >&2
 }
-GOOSE_INSTALL_HINT="Install: https://github.com/aaif-goose/goose/releases"
-GOOSE_FIXIT_HINT="Run: goose configure, select GitHub Copilot, and complete the device flow."
-
-goose_configured() {
-  # An explicit GOOSE_PROVIDER counts as configured because the launcher
-  # passes it straight through to the container; otherwise Goose's own config
-  # must name a provider. Current Goose records the selection as
-  # 'active_provider:' beside a 'providers:' map; older releases wrote a
-  # bare 'provider:' — accept either. A GitHub login alone is deliberately
-  # NOT enough: Goose still needs a provider selected before it can talk
-  # to a model.
-  [[ -n "${GOOSE_PROVIDER:-}" ]] && return 0
-  local cfg="${HOME}/.config/goose/config.yaml"
-  [[ -s "$cfg" ]] && grep -Eq '^[[:space:]]*(GOOSE_PROVIDER|provider|active_provider):[[:space:]]*[^[:space:]#]' "$cfg"
-}
-require_copilot_provider() {
-  local provider="${GOOSE_PROVIDER:-}"
-  [[ -z "$provider" || "$provider" == "github_copilot" ]] && return 0
-  echo "ERROR: GOOSE_PROVIDER=${provider} is not supported — review supports GitHub Copilot only." >&2
-  echo "  Unset GOOSE_PROVIDER or set GOOSE_PROVIDER=github_copilot." >&2
-  return 1
-}
-require_goose_backend() {
+require_valid_tool() {
   local requested="${1:-}"
-  [[ -z "$requested" || "$requested" == goose || "$requested" == codex ]] && return 0
-  echo "ERROR: TOOL=${requested} is not supported — review supports Goose and Codex." >&2
-  echo "  Unset TOOL, or pass TOOL=goose or TOOL=codex." >&2
+  [[ -z "$requested" || "$requested" == codex ]] && return 0
+  echo "ERROR: TOOL=${requested} is not supported — review supports Codex only." >&2
+  echo "  Unset TOOL, or pass TOOL=codex. For an OMP worker, use 'just contribute' instead." >&2
   return 1
 }
 codex_auth_configured() {
@@ -154,24 +134,12 @@ codex_auth_configured() {
   [[ -s "$auth_file" && -r "$auth_file" ]]
 }
 preflight_agent() {
-  local backend="${1:-goose}"
+  local backend="${1:-omp}"
   # Exactly one ERROR line per failure, each with the command that fixes it.
   if [[ "$backend" == codex ]]; then
     codex_auth_configured || {
       echo "ERROR: Codex subscription login is unavailable for the selected backend." >&2
       echo "  Run 'codex login' with file credential storage, then re-run TOOL=codex just review-container." >&2
-      return 1
-    }
-  else
-    require_copilot_provider || return 1
-    command -v goose &>/dev/null || {
-      echo "ERROR: goose is not installed." >&2
-      echo "  ${GOOSE_INSTALL_HINT}" >&2
-      return 1
-    }
-    goose_configured || {
-      echo "ERROR: Goose has no usable provider configuration." >&2
-      echo "  ${GOOSE_FIXIT_HINT}" >&2
       return 1
     }
   fi
@@ -373,7 +341,7 @@ review_queue_kubernetes() {
   K8S_DASHBOARD_SECRET="review-session-${session_id}"
   K8S_ENV_NAMES=(
     GH_TOKEN GITHUB_COPILOT_TOKEN HIVE_HUB BLUEFIN_REVIEW_INSTANCE
-    GOOSE_PROVIDER GOOSE_MODEL GOOSE_THINKING_EFFORT GOOSE_CONTEXT_LIMIT
+    AGENT_MODEL AGENT_REASONING_EFFORT
     BLUEFIN_REVIEW_BACKEND
   )
   if [[ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]]; then
@@ -395,10 +363,8 @@ review_queue_kubernetes() {
     --from-file=GITHUB_COPILOT_TOKEN=<(printf '%s' "${COPILOT_TOKEN:-}") \
     --from-file=HIVE_HUB=<(printf '%s' "$DASHBOARD_HIVE_HUB") \
     --from-file=BLUEFIN_REVIEW_INSTANCE=<(printf '%s' "$K8S_DASHBOARD_POD") \
-    --from-file=GOOSE_PROVIDER=<(printf '%s' "${GOOSE_PROVIDER:-}") \
-    --from-file=GOOSE_MODEL=<(printf '%s' "${GOOSE_MODEL:-}") \
-    --from-file=GOOSE_THINKING_EFFORT=<(printf '%s' "${GOOSE_THINKING_EFFORT:-}") \
-    --from-file=GOOSE_CONTEXT_LIMIT=<(printf '%s' "${GOOSE_CONTEXT_LIMIT:-}") \
+    --from-file=AGENT_MODEL=<(printf '%s' "${AGENT_MODEL:-}") \
+    --from-file=AGENT_REASONING_EFFORT=<(printf '%s' "${AGENT_REASONING_EFFORT:-}") \
     --from-file=BLUEFIN_REVIEW_BACKEND=<(printf '%s' "$REVIEW_BACKEND") \
     "${otlp_secret_args[@]}" >/dev/null
 
@@ -410,43 +376,30 @@ review_queue_kubernetes() {
 }
 
 resolve_copilot_token() {
-  # Goose's github_copilot provider needs the long-lived OAuth token minted by
-  # the Copilot editor device flow (a "ghu_" user-to-server token). Without it
-  # the container starts a fresh device flow on every launch and the pane sits
-  # on "enter code XXXX-XXXX" until a human types one in.
+  # OMP's github-copilot models need the long-lived OAuth token minted by
+  # the Copilot editor device flow (a "ghu_" user-to-server token). Without
+  # it the container starts a fresh device flow on every launch and the pane
+  # sits on "enter code XXXX-XXXX" until a human types one in.
   #
-  # A `gh auth token` ("gho_") is NOT a substitute -- it is a different client
-  # with different scopes, and Goose fails with "failed to get api info" when
-  # handed one. Verified against the contributor image.
-  #
-  # On a desktop Goose keeps the real token in the login keyring, so read it
-  # from there. This is best-effort by design: no keyring, no secret-tool, or
-  # a locked session just means the device flow happens as before.
+  # A `gh auth token` ("gho_") is NOT a substitute -- it is a different
+  # client with different scopes, and Copilot inference rejects it with
+  # "failed to get api info" when handed one. Verified against the
+  # contributor image.
   COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-}"
-  [[ -n "$COPILOT_TOKEN" ]] && return 0
-  command -v secret-tool &>/dev/null || return 0
-  # Extracted with sed rather than a JSON parser so this stays a single line:
-  # CI lifts recipe bodies out of this file and runs 'bash -n' over them, which
-  # a multi-line embedded script breaks. The trailing '|| true' matters under
-  # 'set -euo pipefail': a locked or empty keyring makes secret-tool exit
-  # non-zero, and pipefail would otherwise abort the whole launch over a lookup
-  # that is meant to be optional.
-  COPILOT_TOKEN="$(secret-tool lookup service goose username secrets 2>/dev/null | sed -nE 's/.*"GITHUB_COPILOT_TOKEN"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1 || true)"
   return 0
 }
 report_missing_copilot_credential() {
   # Named so every caller tells the same story. A `gh auth token` is the
   # tempting substitute and the reason this message exists: it looks like a
   # GitHub credential, so a contributor reasonably assumes their gh login is
-  # enough — but Copilot inference rejects it, and a headless
-  # `goose run --no-session` exits immediately with "Provider is not
-  # configured". Every dispatched review, fix, or landing agent dies at
-  # startup, surfacing only as opaque died-mid-batch failures.
+  # enough — but Copilot inference rejects it, and a headless dispatch dies
+  # immediately without a usable model. Every dispatched review, fix, or
+  # landing agent dies at startup, surfacing only as opaque died-mid-batch
+  # failures.
   echo "ERROR: no Copilot credential found; every dispatched agent would die at startup." >&2
-  echo "  Headless 'goose run' exits immediately with 'Provider is not configured'." >&2
+  echo "  A headless dispatch exits immediately without a usable model." >&2
   echo "  A 'gh auth token' is NOT a substitute — Copilot inference rejects it." >&2
-  echo "  Log in once on this host with: goose configure (pick GitHub Copilot)," >&2
-  echo "  or export GITHUB_COPILOT_TOKEN before launching." >&2
+  echo "  Export GITHUB_COPILOT_TOKEN before launching." >&2
   return 0
 }
 hive_contributor_backend() {
@@ -634,46 +587,35 @@ require_local_podman_engine() {
 resolve_review_backend() {
   REVIEW_BACKEND="${BLUEFIN_REVIEW_BACKEND:-}"
   case "$REVIEW_BACKEND" in
-    ""|goose|codex|omp) return 0 ;;
+    ""|codex|omp) return 0 ;;
     *)
-      echo "ERROR: unsupported review backend '${REVIEW_BACKEND}'; expected goose, codex, or omp." >&2
+      echo "ERROR: unsupported review backend '${REVIEW_BACKEND}'; expected codex or omp." >&2
       return 1
       ;;
   esac
 }
-resolve_goose_selection() {
-  # Goose is fixed to GitHub Copilot. The model stays noninteractive and the
-  # environment still overrides it for automation.
-  GOOSE_PROVIDER="github_copilot"
-  GOOSE_MODEL="${GOOSE_MODEL:-${GEMINI_MODEL}}"
-  return 0
-}
-# Turn a short profile name plus an optional thinking effort into GOOSE_MODEL /
-# GOOSE_THINKING_EFFORT / GOOSE_CONTEXT_LIMIT. Four profiles, no picker:
-# an empty profile is the default one. Profiles are defaults, never overrides —
-# an explicit GOOSE_* value in the environment still wins.
+# Turn a short profile name plus an optional thinking effort into AGENT_MODEL /
+# AGENT_REASONING_EFFORT. Four profiles, no picker: an empty profile is the
+# default one. Profiles are defaults, never overrides — an explicit
+# AGENT_* value in the environment still wins.
 resolve_model_profile() {
   local profile="${1:-}" effort="${2:-}"
   case "${profile,,}" in
     ""|gemini|gemini-3.8|gemini38)
       PROFILE_MODEL="${GEMINI_MODEL}"
       PROFILE_EFFORT="max"
-      PROFILE_CONTEXT_LIMIT=""
       ;;
     opus5)
       PROFILE_MODEL="${OPUS_MODEL}"
       PROFILE_EFFORT="high"
-      PROFILE_CONTEXT_LIMIT="${OPUS_CONTEXT_LIMIT}"
       ;;
     sol|gpt-sol|gptsol)
       PROFILE_MODEL="${SOL_MODEL}"
       PROFILE_EFFORT="medium"
-      PROFILE_CONTEXT_LIMIT=""
       ;;
     k3|kimi)
       PROFILE_MODEL="${K3_MODEL}"
       PROFILE_EFFORT="max"
-      PROFILE_CONTEXT_LIMIT="${K3_CONTEXT_LIMIT}"
       ;;
     *)
       echo "ERROR: unknown model profile '${profile}'." >&2
@@ -689,10 +631,9 @@ resolve_model_profile() {
       return 1
       ;;
   esac
-  GOOSE_MODEL="${GOOSE_MODEL:-${PROFILE_MODEL}}"
-  GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-${PROFILE_EFFORT}}"
-  GOOSE_CONTEXT_LIMIT="${GOOSE_CONTEXT_LIMIT:-${PROFILE_CONTEXT_LIMIT}}"
-  echo "✓ model ${GOOSE_MODEL}, thinking effort ${GOOSE_THINKING_EFFORT}, context ${GOOSE_CONTEXT_LIMIT:-provider default}."
+  AGENT_MODEL="${AGENT_MODEL:-${PROFILE_MODEL}}"
+  AGENT_REASONING_EFFORT="${AGENT_REASONING_EFFORT:-${PROFILE_EFFORT}}"
+  echo "✓ model ${AGENT_MODEL}, reasoning effort ${AGENT_REASONING_EFFORT}."
   return 0
 }
 normalize_git_remote() {
@@ -782,7 +723,7 @@ register_named_hive() {
   # one; an exported HIVE_HUB is honored as-is.
   local target="$1" tmp
   if [[ "${REVIEW_NON_INTERACTIVE:-}" == "true" ]]; then
-    print_missing_hive_setup_guidance "$target" "non-interactive mode cannot answer the upstream prompts" goose "$HIVE_COMMIT"
+    print_missing_hive_setup_guidance "$target" "non-interactive mode cannot answer the upstream prompts" "${HIVE_SETUP_BACKEND:-codex}" "$HIVE_COMMIT"
     return 1
   fi
   if ! can_run_attended_hive_setup; then
@@ -796,7 +737,7 @@ register_named_hive() {
   prepare_pinned_hive_checkout || return 1
   echo "Registering hive '${HIVE_REGISTRATION_NAME}': upstream contribute-setup with an isolated config_dir."
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/review-hive-setup.XXXXXX")"
-  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" config_dir="$tmp" contribute-setup goose || {
+  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" config_dir="$tmp" contribute-setup "${HIVE_SETUP_BACKEND:-codex}" || {
     rm -rf "$tmp"
     echo "ERROR: upstream contribute-setup did not complete; nothing was registered." >&2
     return 1
@@ -813,8 +754,8 @@ register_named_hive() {
   echo "✓ hive '${HIVE_REGISTRATION_NAME}' registered: ${target}"
 }
 ensure_hive_contributor_env() {
-  # Upstream 'just contribute-setup goose' writes these files. They are the
-  # only host state the container genuinely needs, and Hive owns their format.
+  # Upstream 'contribute-setup' writes these files. They are the only host
+  # state the container genuinely needs, and Hive owns their format.
   # Selection: an explicit REVIEW_HIVE name, then the current repository's
   # name, then the default registration.
   local hive_dir="${HOME}/.config/hive"
@@ -831,11 +772,11 @@ ensure_hive_contributor_env() {
   fi
   [[ -f "$HIVE_CONTRIBUTOR_ENV" ]] && return 0
   if [[ "${REVIEW_NON_INTERACTIVE:-}" == "true" ]]; then
-    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "non-interactive mode cannot answer the upstream prompts" goose "$HIVE_COMMIT"
+    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "non-interactive mode cannot answer the upstream prompts" "${HIVE_SETUP_BACKEND:-codex}" "$HIVE_COMMIT"
     return 1
   fi
   if ! can_run_attended_hive_setup; then
-    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "stdin/stdout/stderr are not attached to a terminal" goose "$HIVE_COMMIT"
+    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "stdin/stdout/stderr are not attached to a terminal" "${HIVE_SETUP_BACKEND:-codex}" "$HIVE_COMMIT"
     return 1
   fi
   echo "Upstream contribute-setup hasn't run yet (no ${HIVE_CONTRIBUTOR_ENV})."
@@ -843,7 +784,7 @@ ensure_hive_contributor_env() {
     command -v "$cmd" &>/dev/null || { echo "ERROR: '${cmd}' is required to run contribute-setup." >&2; return 1; }
   done
   prepare_pinned_hive_checkout || return 1
-  echo "Running upstream pinned setup: just contribute-setup goose"
+  echo "Running upstream pinned setup: just contribute-setup ${HIVE_SETUP_BACKEND:-codex}"
   # HIVE_SKIP_VERSION_CHECK=true is upstream's own documented opt-out, not a
   # local workaround. Upstream's private 'check-version' recipe — a prerequisite
   # of 'contribute-setup' — compares HEAD against origin/v4 and aborts when they
@@ -855,7 +796,7 @@ ensure_hive_contributor_env() {
   # documents keeps Hive the authority; removing it would break setup without
   # unpinning, and unpinning would mean executing unreviewed upstream code.
   # Scoped to this one invocation so nothing else in the run inherits it.
-  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" contribute-setup goose
+  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" contribute-setup "${HIVE_SETUP_BACKEND:-codex}"
   [[ -f "$HIVE_CONTRIBUTOR_ENV" ]] || { echo "ERROR: contribute-setup ran but ${HIVE_CONTRIBUTOR_ENV} still missing." >&2; return 1; }
   echo "✓ Upstream contribute-setup complete."
 }
@@ -1271,8 +1212,8 @@ scale_cluster_contributors() {
   fi
   kubectl apply -f "$deploy_file" >/dev/null || return 1
   kubectl set env deployment/review-contributor -n bluefin-system \
-    GOOSE_MODEL="$PROFILE_MODEL" \
-    GOOSE_THINKING_EFFORT="$PROFILE_EFFORT" \
+    AGENT_MODEL="$PROFILE_MODEL" \
+    AGENT_REASONING_EFFORT="$PROFILE_EFFORT" \
     HIVE_HUB="$hub" >/dev/null || return 1
   kubectl scale deployment/review-contributor -n bluefin-system --replicas="$replicas" >/dev/null || return 1
   if [[ "$replicas" -gt 0 ]]; then
@@ -1284,6 +1225,31 @@ scale_cluster_contributors() {
   else
     echo "✓ scaled cluster contributor workers to 0."
   fi
+}
+
+scale_contribute() {
+  local replicas="$1" hub model="github-copilot/gemini-3.8-flash"
+  HIVE_SETUP_BACKEND=omp
+  ensure_hive_contributor_env || return 1
+  hub="$(read_hive_value HIVE_HUB)"
+  valid_hive_hub "$hub" || { echo "ERROR: HIVE_HUB is not set in ${HIVE_CONTRIBUTOR_ENV}." >&2; return 1; }
+  resolve_gh_token
+  [[ -n "${GH_TOKEN_VALUE:-}" ]] || { report_missing_gh_token; return 1; }
+  resolve_copilot_token
+  [[ -n "${COPILOT_TOKEN:-}" ]] || { report_missing_copilot_credential; return 1; }
+  kubectl create namespace bluefin-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
+  kubectl create secret generic contribute-secret -n bluefin-system \
+    --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
+    --from-file=GH_TOKEN=<(printf '%s' "$GH_TOKEN_VALUE") \
+    --from-file=GITHUB_COPILOT_TOKEN=<(printf '%s' "$COPILOT_TOKEN") \
+    --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null || return 1
+  local legacy_annot
+  legacy_annot="$(kubectl get secret contribute-secret -n bluefin-system -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}')" || return 1
+  [[ -z "$legacy_annot" ]] || kubectl annotate secret contribute-secret -n bluefin-system kubectl.kubernetes.io/last-applied-configuration- >/dev/null || return 1
+  kubectl apply -f deploy/contribute.yaml >/dev/null || return 1
+  kubectl set env deployment/contribute -n bluefin-system AGENT_BACKEND=omp AGENT_MODEL="$model" HIVE_HUB="$hub" >/dev/null || return 1
+  kubectl scale deployment/contribute -n bluefin-system --replicas="$replicas" >/dev/null || return 1
+  kubectl rollout status deployment/contribute -n bluefin-system --timeout=15s >/dev/null 2>&1 || echo "! rollout still progressing after 15s; workers will continue pulling/starting in background." >&2
 }
 
 stop_cluster_contributors() {
@@ -1328,10 +1294,8 @@ review-container profile="" effort="":
     TOOL="{{tool_env}}"
     GEMINI_MODEL="{{gemini_model}}"
     OPUS_MODEL="{{opus_model}}"
-    OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
     SOL_MODEL="{{sol_model}}"
     K3_MODEL="{{k3_model}}"
-    K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
@@ -1350,8 +1314,8 @@ review-container profile="" effort="":
     HIVE_COMMIT="${HIVE_COMMIT,,}"
     mkdir -p "${STATE_DIR}"
 
-    require_goose_backend "$TOOL"
-    BACKEND="${TOOL:-goose}"
+    require_valid_tool "$TOOL"
+    BACKEND="${TOOL:-codex}"
     preflight_agent "$BACKEND"
 
     raw_profile="{{profile}}"
@@ -1381,9 +1345,6 @@ review-container profile="" effort="":
     require_valid_container_name "$CONTAINER_NAME"
 
     resolve_model_profile "{{profile}}" "{{effort}}"
-    if [[ "$BACKEND" == goose ]]; then
-      resolve_goose_selection
-    fi
     REVIEW_RECIPE=review-container
     ensure_hive_contributor_env
     report_hive_selection
@@ -1434,26 +1395,6 @@ review-container profile="" effort="":
       # the image's narrow terminfo set does not know (e.g. xterm-ghostty).
       --env COLORTERM
     )
-    [[ "$BACKEND" == goose && -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
-    if [[ "$BACKEND" == goose ]]; then
-      [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
-      [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
-      [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
-    fi
-    if [[ "${GOOSE_PROVIDER:-}" == "github_copilot" ]]; then
-      resolve_copilot_token
-      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-        export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
-        CONTAINER_ARGS+=(--env GITHUB_COPILOT_TOKEN)
-        echo "✓ Copilot credential passed to the agent."
-      else
-        # A contributor without this credential still claims Hive assignments
-        # and fails every one at startup, booking hub-side failure cooldowns
-        # against the contributor's own standing. Refuse to launch.
-        report_missing_copilot_credential
-        exit 1
-      fi
-    fi
     if [[ "$BACKEND" == pi ]]; then
       CONTAINER_ARGS+=(--env ANTHROPIC_API_KEY)
       echo "✓ Pi credential passed to the agent (value not shown)."
@@ -1474,20 +1415,70 @@ review-container profile="" effort="":
     CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE")
 
     echo "✓ starting the review contributor container."
-    echo "  The entrypoint attaches to the 'contributor' tmux session for you."
-    echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
+    echo "  The entrypoint shows a passive status companion; attach to the agent's"
+    echo "  session from a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
     echo "  Stop any time with Ctrl-C."
     status=0
     "${CONTAINER_ARGS[@]}" || status=$?
     exit "$status"
 
-# The contributor entrypoint deliberately reuses review-container so the
-# credential handoff and foreground lifecycle stay identical.
-[doc("Start a foreground Hive contributor worker.")]
+# Start the isolated OMP contributor image. Hive still owns registration,
+# assignment, tmux lifecycle, prompt delivery, and completion.
+[doc("Start the isolated Hive + OMP contributor worker.")]
 contribute profile="" effort="":
     #!/usr/bin/env bash
     set -euo pipefail
-    just review-container "{{profile}}" "{{effort}}"
+    {{shared_functions}}
+    if [[ "{{profile}}" == cluster ]]; then
+      replicas="{{effort}}"; replicas="${replicas:-2}"
+      [[ "$replicas" =~ ^[0-9]+$ ]] || { echo "ERROR: contribute cluster expects a replica count." >&2; exit 1; }
+      STATE_DIR="${HOME}/.local/state/review"; HIVE_SRC_DIR="${STATE_DIR}/hive-src"; HIVE_REPO_URL="{{hive_repo_url}}"
+      HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"; HIVE_COMMIT="${HIVE_COMMIT,,}"; mkdir -p "$STATE_DIR"
+      HIVE_SETUP_BACKEND=omp; REVIEW_RECIPE=contribute
+      scale_contribute "$replicas"
+      exit $?
+    fi
+    command -v podman &>/dev/null || { echo "ERROR: Podman is required to run contribute." >&2; exit 1; }
+    [[ -z "${REVIEW_DETACH:-}" ]] || { echo "ERROR: detached contributor containers are not supported." >&2; exit 1; }
+    case "{{profile}}" in
+      ""|gemini) default_model="github-copilot/gemini-3.8-flash" ;;
+      luna) default_model="github-copilot/gpt-5.6-luna" ;;
+      opus5) default_model="github-copilot/claude-opus-5" ;;
+      sol) default_model="github-copilot/gpt-5.6-sol" ;;
+      *) echo "ERROR: unknown contribute profile '{{profile}}'; expected gemini, luna, opus5, or sol." >&2; exit 1 ;;
+    esac
+    [[ -z "{{effort}}" ]] || { echo "ERROR: contribute does not accept a thinking-effort argument; OMP owns its model settings." >&2; exit 1; }
+    export AGENT_MODEL="${AGENT_MODEL:-$default_model}"
+    STATE_DIR="${HOME}/.local/state/review"
+    HIVE_SRC_DIR="${STATE_DIR}/hive-src"
+    HIVE_REPO_URL="{{hive_repo_url}}"
+    HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
+    HIVE_COMMIT="${HIVE_COMMIT,,}"
+    mkdir -p "$STATE_DIR"
+    HIVE_SETUP_BACKEND=omp
+    REVIEW_RECIPE=contribute
+    ensure_hive_contributor_env
+    report_hive_selection
+    REMOTE_HIVE_TARGET=""; REMOTE_HIVE_DIR=""; REMOTE_HIVE_ENV=""; REMOTE_HIVE_SSH_ARGS=()
+    trap 'cleanup_remote_hive_registration' EXIT
+    stage_hive_registration_for_remote_podman
+    CONTAINER_NAME="${CONTRIBUTE_CONTAINER_NAME:-contribute}"
+    require_valid_container_name "$CONTAINER_NAME"
+    CONTRIBUTOR_IMAGE="{{contribute_image}}"
+    require_no_running_instance "$CONTAINER_NAME"
+    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    CONTAINER_ARGS=(podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME" --label "$(owner_run_label)" --userns "keep-id:uid=65532,gid=65532")
+    CONTAINER_ARGS+=(--volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env AGENT_MODEL --env COLORTERM --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman)
+    for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
+      [[ -n "${!name:-}" ]] && CONTAINER_ARGS+=(--env "$name")
+    done
+    resolve_gh_token
+    if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then export GH_TOKEN="$GH_TOKEN_VALUE"; CONTAINER_ARGS+=(--env GH_TOKEN); report_gh_token_blast_radius "$GH_TOKEN_SOURCE"; else report_missing_gh_token; fi
+    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE")
+    echo "✓ starting the isolated OMP contributor container."
+    echo "  The entrypoint attaches this terminal to the 'contributor' tmux session automatically."
+    echo "  For a second, concurrent viewer: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
+    "${CONTAINER_ARGS[@]}"
 
 # Stop cluster contributor workers. This is the explicit lifecycle verb for
 # cluster workers; it refuses attended local runs (which end with Ctrl-C in
@@ -1543,10 +1534,8 @@ review-queue *queue_args:
     TOOL="{{tool_env}}"
     GEMINI_MODEL="{{gemini_model}}"
     OPUS_MODEL="{{opus_model}}"
-    OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
     SOL_MODEL="{{sol_model}}"
     K3_MODEL="{{k3_model}}"
-    K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
     resolve_review_backend
     K8S_DASHBOARD=0
@@ -1570,12 +1559,8 @@ review-queue *queue_args:
       require_local_podman_engine
     fi
 
-    require_goose_backend "$TOOL"
-    if [[ "$REVIEW_BACKEND" == codex ]]; then
-      preflight_github
-    else
-      preflight_agent
-    fi
+    require_valid_tool "$TOOL"
+    preflight_agent "$REVIEW_BACKEND"
 
     CONTAINER_NAME="${REVIEW_QUEUE_NAME:-review-queue}"
     require_valid_container_name "$CONTAINER_NAME"
@@ -1595,7 +1580,6 @@ review-queue *queue_args:
     if [[ $# -gt 0 && "$1" != -* ]]; then
       set -- --live-repo "$1" "${@:2}"
     fi
-    [[ "$REVIEW_BACKEND" == codex ]] || resolve_goose_selection
 
     # The dashboard needs only the selected hub URL. Resolve the same named
     # registration as review-container, but never mount contributor.env or pass
@@ -1672,17 +1656,15 @@ review-queue *queue_args:
       report_hive_selection "$DASHBOARD_HIVE_HUB"
     fi
     if [[ "$REVIEW_BACKEND" != codex ]]; then
-      [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
-      [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
-      [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
-      [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
+      [[ -n "$AGENT_MODEL" ]] && CONTAINER_ARGS+=(--env "AGENT_MODEL=${AGENT_MODEL}")
+      [[ -n "${AGENT_REASONING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "AGENT_REASONING_EFFORT=${AGENT_REASONING_EFFORT}")
     fi
     if [[ -n "$REVIEW_BACKEND" ]]; then
       CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_BACKEND=${REVIEW_BACKEND}")
       echo "✓ review backend preselected: ${REVIEW_BACKEND}; Start still requires confirmation."
     fi
     # The Copilot credential powers every dispatched agent: reviews, fixers,
-    # and landings all run headless `goose run`, which exits immediately with
+    # and landings all run headless, which exits immediately with
     # "Provider is not configured" when the credential is absent. A dashboard
     # that can only produce dead dispatches is broken at its one job, so a
     # missing credential stops the launch.
@@ -1872,40 +1854,16 @@ review-doctor:
     unset GH_TOKEN_VALUE
     echo ""
 
-    BACKEND="${TOOL:-goose}"
-    require_goose_backend "$BACKEND" || fail=$((fail+1))
-    if [[ "$BACKEND" != codex ]]; then
-      echo "=== Agent backend (Goose) ==="
-      if ! require_copilot_provider; then
-        fail=$((fail+1))
-      elif command -v goose &>/dev/null; then
-        if goose_configured; then
-          echo "  ✓ goose: installed + configured"
-          pass=$((pass+1))
-        else
-          echo "  ✗ goose: installed, NOT configured — ${GOOSE_FIXIT_HINT}"
-          fail=$((fail+1))
-        fi
-      else
-        echo "  ✗ goose: not installed — ${GOOSE_INSTALL_HINT}"
-        fail=$((fail+1))
-      fi
-      echo ""
-
-      echo "=== Copilot credential ==="
-      resolve_copilot_token
-      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-        echo "  ✓ a Copilot credential is available (not shown)"
-        pass=$((pass+1))
-      else
-        echo "  ✗ no Copilot credential is available"
-        echo "    Headless 'goose run' exits immediately with 'Provider is not configured',"
-        echo "    so review-queue and review-container refuse to launch without it."
-        echo "    A 'gh auth token' is NOT a substitute — Copilot inference rejects it."
-        echo "    Run: goose configure (pick GitHub Copilot), or export GITHUB_COPILOT_TOKEN."
-        fail=$((fail+1))
-      fi
-      unset COPILOT_TOKEN
+    BACKEND="${TOOL:-codex}"
+    require_valid_tool "$BACKEND" || fail=$((fail+1))
+    echo "=== Agent backend (Codex) ==="
+    if codex_auth_configured; then
+      echo "  ✓ codex: subscription login available"
+      pass=$((pass+1))
+    else
+      echo "  ✗ codex: subscription login unavailable"
+      echo "    Run: codex login (file credential storage)"
+      fail=$((fail+1))
     fi
     echo ""
 
@@ -1940,7 +1898,7 @@ review-doctor:
       fi
     else
       echo "  ✗ ${HIVE_CONTRIBUTOR_ENV} is missing"
-      echo "    review runs upstream 'just contribute-setup goose' from"
+      echo "    review runs upstream 'just contribute-setup codex' from"
       echo "    hivecommons/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
       echo "    That runs with upstream's documented HIVE_SKIP_VERSION_CHECK=true,"
       echo "    because the pinned checkout is detached and cannot match origin/v4."

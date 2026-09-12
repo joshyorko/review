@@ -37,8 +37,8 @@ export interface ReviewModeOptions {
 	token?: string;
 	fetchImpl?: typeof fetch;
 	env?: NodeJS.ProcessEnv;
+	skipRepos?: readonly string[];
 }
-
 /**
  * Most items one dispatch may carry.
  *
@@ -89,6 +89,7 @@ export class ReviewMode {
 	private hiveMissing = 0;
 	private snapshotSignature = "";
 	private ranked: PrioritizedQueue = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
+	skipRepos: Set<string>;
 
 	constructor(options: ReviewModeOptions) {
 		this.org = options.org;
@@ -97,6 +98,12 @@ export class ReviewMode {
 		this.token = options.token;
 		this.fetchImpl = options.fetchImpl;
 		this.env = options.env ?? process.env;
+		const envSkip = (this.env.BLUEFIN_REVIEW_SKIP_REPOS ?? "")
+			.split(",")
+			.map((s) => s.trim().toLowerCase())
+			.filter(Boolean);
+		const optionsSkip = (options.skipRepos ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean);
+		this.skipRepos = new Set([...envSkip, ...optionsSkip]);
 		this.snapshot = { root: this.stateRoot, runs: [], reviewEvents: [], landingEvents: [], receipts: new Map() };
 	}
 
@@ -214,10 +221,17 @@ export class ReviewMode {
 
 	/** Items in priority order, after hive-only, level, and substring filters. */
 	visibleItems(): QueueItem[] {
-		const ordered = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		if (this.skipRepos.size > 0) {
+			base = base.filter((item) => {
+				const repoLower = item.repo.toLowerCase();
+				const shortName = repoLower.includes("/") ? repoLower.split("/")[1]! : repoLower;
+				return !this.skipRepos.has(repoLower) && !this.skipRepos.has(shortName);
+			});
+		}
 		let candidates = this.hiveOnly && this.hive.online
-			? ordered.filter((item) => this.priorityFor(item)?.category === "hive")
-			: ordered;
+			? base.filter((item) => this.priorityFor(item)?.category === "hive")
+			: base;
 		if (this.hiveLevel !== undefined) {
 			const level = this.hiveLevel;
 			candidates = candidates.filter((item) => this.hiveWorkFor(item)?.level === level);
@@ -317,6 +331,27 @@ export class ReviewMode {
 	chosenItems(): QueueItem[] {
 		if (this.selectedKeys.size === 0) return [];
 		return this.visibleItems().filter((item) => this.selectedKeys.has(`${item.repo}#${item.id}`));
+	}
+
+	/**
+	 * Items available for slay execution: visible items first, falling back to
+	 * unranked items in local priority order when no Hive-ranked items exist.
+	 */
+	slayableItems(): QueueItem[] {
+		const chosen = this.chosenItems();
+		if (chosen.length > 0) return chosen;
+		const visible = this.visibleItems();
+		if (visible.length > 0) return visible;
+		// Fallback: when Hive-only filter leaves 0 items, fall back to unranked items
+		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		if (this.skipRepos.size > 0) {
+			base = base.filter((item) => {
+				const repoLower = item.repo.toLowerCase();
+				const shortName = repoLower.includes("/") ? repoLower.split("/")[1]! : repoLower;
+				return !this.skipRepos.has(repoLower) && !this.skipRepos.has(shortName);
+			});
+		}
+		return base;
 	}
 
 	/**

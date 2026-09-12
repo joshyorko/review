@@ -13,9 +13,9 @@ import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, parseScope, resolveToken } from "./github.ts";
 import type { Priority } from "./priority.ts";
-import { ReviewMode, type PersistedSelection } from "./mode.ts";
+import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { themePainter } from "./paint.ts";
-import { type RailKey, ReviewHitlist, ReviewRail, statusSegment } from "./rail.ts";
+import { type RailKey, ReviewHitlist, ReviewRail, statusSegment, tmuxReviewStatusBar } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
 import { type ToolHost, registerTools } from "./tools.ts";
 import { BluefinAnsiSplash } from "./splash.ts";
@@ -30,6 +30,7 @@ const STATE_POLL_MS = 2_000;
 const HIVE_POLL_MS = 120_000;
 
 export const RAIL_KEYS: readonly RailKey[] = [
+	{ chord: "alt+s", label: "autoslay" },
 	{ chord: "alt+b", label: "dashboard" },
 	{ chord: "alt+j/k", label: "next/prev" },
 	{ chord: "alt+x", label: "select" },
@@ -53,6 +54,7 @@ interface UiLike {
 	input(title: string, placeholder?: string): Promise<string | undefined>;
 	setStatus(key: string, value: string | undefined): void;
 	setWidget(key: string, content: unknown, options?: { placement?: string }): void;
+	setFooter?(factory: ((tui: unknown, theme: unknown, footerData: unknown) => { render(width: number): string[]; invalidate?(): void; dispose?(): void }) | undefined): void;
 	setTitle(title: string): void;
 	pasteToEditor(text: string): void;
 	custom<T>(factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown, options?: unknown): Promise<T>;
@@ -97,7 +99,8 @@ function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
  * is not told the link cannot honor it.
  */
 export function actionPrompt(action: DashboardAction, priority?: Priority): string | undefined {
-	const hive = priority?.hiveRank === undefined ? "" : ` This is Hive-prioritized work (${priority.reason}); keep the linked issue's intent in view and reference it in what you report.`;
+	const autonomousRule = "This is an automated review and landing tool: execute all actions end-to-end autonomously in a continuous loop. Never ask the user for confirmation, permission, or interactive prompts to proceed. Once a batch or queue item is complete, immediately request the next assignment from the queue or advance to the next item so the loop runs continuously without stopping.";
+	const hive = priority?.hiveRank === undefined ? ` ${autonomousRule}` : ` This is Hive-prioritized work (${priority.reason}); keep the linked issue's intent in view and reference it in what you report. ${autonomousRule}`;
 	const cite = (item: QueueItem) => `${item.repo}#${item.id} (${item.title})`;
 	const batch = "items" in action && action.items && action.items.length > 1 ? action.items : undefined;
 	if (batch) {
@@ -129,17 +132,23 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		// The point of selecting a slice is to spend one wall clock on all of it.
 		// A batch worked top to bottom is a list, not a batch, and a backlog that
 		// only moves at one item per turn never comes down.
-		const fanOut = `Work all ${batch.length} items concurrently: dispatch them as ONE batch of subagents, one agent per item, each owning exactly its own item and nothing else. Do not process the list sequentially, and do not wait for one item before starting the next. Tell every agent to skip formatters, linters and project-wide suites and to run only the smallest existing test covering what it changed. Two items that would edit the same file in the same repository are the one exception: name them and run those two in sequence. Report per item — what you did, the evidence, the outcome — and name every item that failed rather than summarising the batch as a success.`;
+		// Dispatch one subagent per individual issue or PR, capped at a maximum of 7 concurrent
+		// subagents at any time (queue remaining items and dispatch as running slots free up).
+		// Review agents do not count toward this cap so they can take their time.
+		// When subagents complete, the review agent (k3-final-review) clumps by repository:
+		// for each repository cohort (e.g. 10 issues in bluefin), it waits for that repo's queue
+		// to finish, then audits, consolidates all changes, and lands them together into ONE PR per repo.
+		const fanOut = `Work all ${batch.length} items with ONE subagent per issue/PR, capped at a maximum of 7 concurrent subagents at any time (queue remaining items and dispatch as running subagents complete; review/landing agents do not count against the 7 cap). Each subagent owns exactly its assigned item. Tell every subagent to skip formatters, linters, and project-wide suites and run only the smallest existing test covering what changed. Report per item — what you did, the evidence, and the outcome.`;
 
-		const auditInstruction = `When every item has reported, dispatch the \`k3-final-review\` subagent (Kimi K3 at max effort) once over all ${batch.length} items across ${repoGroups.size} repositories (${[...repoGroups.keys()].join(", ")}) to verify cross-repository contract compatibility, shared schema and dependency alignment, doctrine invariants, and simplicity.`;
+		const auditInstruction = `When issues/PRs are worked, repository clumping happens at the review agent level: for each repository (e.g. all items in \`${[...repoGroups.keys()].join("`, `")}\`), dispatch one \`k3-final-review\` subagent (Kimi K3 at max effort; review agents do not consume the 7 cap). If the review agent has to wait for that repository's queue to finish through the 7-subagent cap, it waits. Once that repository cohort finishes, the review agent audits, consolidates all changes, and lands them all in one PR per repository, verifying cross-repository contract compatibility, shared schema and dependency alignment, doctrine invariants, and simplicity.`;
 
-		const protocol = `${fanOut}\n\n${auditInstruction}`;
-
+		const autonomousRule = "This is an automated review and landing tool: execute all actions end-to-end autonomously in a continuous loop. Never ask the user for confirmation, permission, or interactive prompts to proceed. Once a batch or queue item is complete, immediately request the next assignment from the queue or advance to the next item so the loop runs continuously without stopping.";
+		const protocol = `${fanOut}\n\n${auditInstruction}\n\n${autonomousRule}`;
 		switch (action.kind) {
 			case "review":
 				return `Review the following ${batch.length} selected items grouped by repository for efficiency:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group: read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not.\n\n${protocol}`;
 			case "diff":
-				return `Inspect and summarize the diffs for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group, call bluefin_review_diff and summarize what changed file by file, with the cross-repo risk each change carries.`;
+				return `Inspect and summarize the diffs for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group, call bluefin_review_diff and summarize what changed file by file, with the cross-repo risk each change carries.\n\n${autonomousRule}`;
 			case "docs":
 				return `Update and align documentation for the following ${batch.length} selected items grouped by repository:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Enforce the projectbluefin/common agentic documentation system with brutal alignment: ensure AGENTS.md, docs/factory/agentic-model.md, docs/SKILL.md, and docs/skills/*.md are strictly source-backed, concise (<200 lines soft max, <256 char descriptions), zero-filler, with no grandfathering or speculative noise. Run \`bash scripts/check-skill-frontmatter.sh --write\` and ensure \`docs/skills/index.json\` is regenerated cleanly.\n\n${protocol}`;
 			case "approve":
@@ -150,8 +159,8 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 				// Issues have no diff to land. Slaying one means producing the change
 				// it asked for and handing it to a human as a pull request.
 				return batch.every((entry) => entry.type === "issue")
-					? `Close out the following ${batch.length} queued issues by shipping the work, one pull request per issue:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each issue: read it and the repository's contract documents, implement what it asks for and nothing else, run the smallest existing test that covers the changed surface, then open a pull request that closes it with \`Closes <owner/repo>#<number>\` in the body. Someone else reviews and merges: never merge your own, never approve, and never close an issue by hand. Where an issue cannot be finished as asked, open no pull request for it and report an evidenced finding instead, naming what blocked you.\n\n${protocol}`
-					: `Run the full landing pass on the following ${batch.length} selected items:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}Review each diff, patch what is broken, run focused contract tests for each repo, and report merge readiness. Do not merge without green checks.\n\n${protocol}`;
+					? `Close out the following ${batch.length} queued issues by shipping the work, one pull request per issue:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each issue: do not dismiss or conclude no_work_needed if there is an actionable bug, missing test, broken script, or underlying root cause to address. Diagnose the root cause, implement the fix, run the smallest existing test covering the changed surface, and open a pull request that closes it with \`Closes <owner/repo>#<number>\` in the body. Someone else reviews and merges: never merge your own, never approve. Only if an issue has genuinely already been merged by an earlier PR on the default branch: confirm that commit and close the issue directly with \`gh issue close <number> --repo <owner/repo> --reason completed --comment "<evidence of prior merged PR>"\`. Where an issue cannot be finished as asked, open no pull request for it and report an evidenced finding instead, naming what blocked you.\n\n${protocol}`
+					: `Execute the full fix-and-merge landing pass on the following ${batch.length} selected items:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each PR: review the diff, patch defects directly at source, fix failing tests, verify with focused contract tests, re-kick flaky CI checks (\`gh run rerun <run-id> --failed\`), and once checks are green, approve and squash-merge the pull request with \`gh pr review <id> --repo <repo> --approve\` and \`gh pr merge <id> --repo <repo> --squash\` (or \`--auto --squash\` plus \`lgtm\` label if governed by a merge queue ruleset). Do not leave actionable PRs unmerged once green. Once landed or blocked, immediately proceed to the next assignment.\n\n${protocol}`;
 			default:
 				break;
 		}
@@ -160,19 +169,19 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		case "review":
 			return `Review ${cite(action.item)}. Read the bounded diff with bluefin_review_diff and the recorded pipeline with bluefin_review_trace before judging. Report findings by severity with file:line evidence, covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not.${hive}`;
 		case "diff":
-			return `Call bluefin_review_diff for pull request ${action.item.id} in ${action.item.repo} and summarise what actually changed, file by file, with the risk each change carries.`;
+			return `Call bluefin_review_diff for pull request ${action.item.id} in ${action.item.repo} and summarise what actually changed, file by file, with the risk each change carries. ${autonomousRule}`;
 		case "docs":
-			return `Update and align documentation for ${cite(action.item)}. Enforce the projectbluefin/common agentic documentation system with brutal alignment: inspect the actual diff and changed surface, update the closest matching docs/skills/*.md file or core contract (AGENTS.md, docs/factory/agentic-model.md, docs/SKILL.md), eliminate any grandfathering/speculative filler, enforce token efficiency (descriptions <= 256 chars, skill documents <= 200 lines soft max), and run \`bash scripts/check-skill-frontmatter.sh --write\` to ensure docs/skills/index.json is synchronized perfectly for token-efficient agent ingestion.`;
+			return `Update and align documentation for ${cite(action.item)}. Enforce the projectbluefin/common agentic documentation system with brutal alignment: inspect the actual diff and changed surface, update the closest matching docs/skills/*.md file or core contract (AGENTS.md, docs/factory/agentic-model.md, docs/SKILL.md), eliminate any grandfathering/speculative filler, enforce token efficiency (descriptions <= 256 chars, skill documents <= 200 lines soft max), and run \`bash scripts/check-skill-frontmatter.sh --write\` to ensure docs/skills/index.json is synchronized perfectly for token-efficient agent ingestion. ${autonomousRule}`;
 		case "approve":
-			return `For ${cite(action.item)}: confirm every required check is green with \`gh pr checks ${action.item.id} --repo ${action.item.repo}\`, restate the merge risk in one line, then approve with \`gh pr review ${action.item.id} --repo ${action.item.repo} --approve\` and squash merge with \`gh pr merge ${action.item.id} --repo ${action.item.repo} --squash\`. Stop and report instead of merging if any check is failing or pending.`;
+			return `For ${cite(action.item)}: confirm every required check is green with \`gh pr checks ${action.item.id} --repo ${action.item.repo}\`, restate the merge risk in one line, then approve with \`gh pr review ${action.item.id} --repo ${action.item.repo} --approve\`. Attempt squash merge with \`gh pr merge ${action.item.id} --repo ${action.item.repo} --squash\`; if the repository uses a merge queue or ruleset, enable auto-merge (\`gh pr merge ${action.item.id} --repo ${action.item.repo} --auto --squash\`) and ensure the \`lgtm\` label is present (\`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-label lgtm\`). Stop and report instead of merging if any check is failing or pending. ${autonomousRule}`;
 		case "fix":
 			return `Fix the findings recorded for ${cite(action.item)}. Read them with bluefin_review_trace, address each one at its source, run the smallest contract test that covers the changed surface, and prepare one clean commit. Do not suppress a finding you cannot fix — report it.${hive}`;
 		case "slay":
 			// Issues have no diff to land. Slaying one means producing the change it
 			// asked for and handing it to a human as a pull request.
 			return action.item.type === "issue"
-				? `Close out ${cite(action.item)} by shipping the work. Read the issue and the repository's contract documents, implement what it asks for and nothing else, run the smallest existing test that covers the changed surface, then open a pull request against the default branch whose body contains \`Closes ${action.item.repo}#${action.item.id}\`. Someone else reviews and merges it: never merge your own, never approve it, and never close the issue by hand. If it cannot be finished as asked, open no pull request and report an evidenced finding naming what blocked you.${hive}`
-				: `Run the full landing pass on ${cite(action.item)}: review the diff, patch what is broken, run the focused contract tests for the changed surface, then report merge readiness. Do not merge without green checks.${hive}`;
+				? `Close out ${cite(action.item)} by implementing and shipping the solution. Do not dismiss or conclude with no_work_needed if there is any actionable bug, test failure, code change, documentation fix, or underlying root cause to address. Inspect the code, diagnose the problem, implement the fix, run the smallest existing test that covers the changed surface, then open a pull request against the default branch whose body contains \`Closes ${action.item.repo}#${action.item.id}\`. Someone else reviews and merges it: never merge your own, never approve it. Only if the issue has already been resolved or closed by an existing merged PR or commit on the default branch: confirm the evidence and close the issue directly with \`gh issue close ${action.item.id} --repo ${action.item.repo} --reason completed --comment "<evidence of live resolution or commit>"\`. Otherwise implement what it asks for and open the PR.${hive}`
+				: `Execute the full fix-and-merge landing pass on ${cite(action.item)}: review the diff, patch what is broken, fix and commit any failing tests or defects, ensure contract tests pass, re-kick transient CI failures (\`gh run rerun <run-id> --failed\`), and as soon as checks are green, approve and land the pull request: approve with \`gh pr review ${action.item.id} --repo ${action.item.repo} --approve\`, squash-merge with \`gh pr merge ${action.item.id} --repo ${action.item.repo} --squash\` (or enable auto-merge \`gh pr merge ${action.item.id} --repo ${action.item.repo} --auto --squash\` if using a merge queue), and apply \`lgtm\` label if required by branch protection/rulesets (\`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-label lgtm\`). Once merged or if blocked by policy, advance immediately to the next queue assignment.${hive}`;
 		case "snapshot":
 			return `Submit the Argo workflow in deploy/argo-review-fsdk-build.yaml to build and push a container snapshot of the current tree, then report the workflow name and how to watch it.`;
 		default:
@@ -206,6 +215,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const timers: Array<() => void> = [];
 	let dashboardOpen = false;
 	let autoReopenDashboard = false;
+	let autoslayActive = false;
+	let activeDashboardDone: ((action: DashboardAction) => void) | undefined;
 	let activeCtx: CtxLike | undefined;
 	let started: Promise<void> = Promise.resolve();
 	pi.setLabel("Bluefin Review");
@@ -214,13 +225,27 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.registerFlag("all", { description: "Show all queue items instead of defaulting to Hive-only", type: "boolean", default: false });
 	pi.registerFlag("splash", { description: "Show 1990s demoscene Razor 1911 ANSI splash screen", type: "boolean", default: true });
 	pi.registerFlag("repo", { description: "Review one repository: owner/repo, or org:name for a whole organization", type: "string" });
+	pi.registerFlag("skip-repo", { description: "Comma-separated repositories to skip (e.g. lab, projectbluefin/lab)", type: "string" });
+	pi.registerFlag("autoslay", { description: "Autoslay queue continuously in Hive priority order on startup", type: "boolean", default: false });
 	registerTools(pi as unknown as ToolHost, mode, () => started);
 
 	const repaint = () => tui?.requestRender();
 
 	const syncStatus = (ctx: CtxLike) => {
 		if (!ctx.hasUI) return;
-		ctx.ui.setStatus("bluefin_queue", statusSegment(mode, themePainter(ctx.ui.theme), Date.now()));
+		if (dashboardOpen) {
+			ctx.ui.setStatus("bluefin_queue", undefined);
+		} else {
+			ctx.ui.setStatus("bluefin_queue", statusSegment(mode, themePainter(ctx.ui.theme), Date.now()));
+		}
+		const activeItem = mode.selected();
+		if (activeItem) {
+			const kind = activeItem.type === "pr" ? "PR" : "ISSUE";
+			const repo = activeItem.repo.includes("/") ? activeItem.repo.split("/")[1] : activeItem.repo;
+			ctx.ui.setTitle(`bluefin review · ${kind} #${activeItem.id} (${repo}) ${activeItem.title}`);
+		} else {
+			ctx.ui.setTitle(`bluefin review · ${mode.queueMode} (${mode.position()})`);
+		}
 		repaint();
 	};
 
@@ -270,7 +295,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return true;
 	};
 
-	const dispatch = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
+	const dispatch = async (ctx: CtxLike, action: DashboardAction, options?: { deliverAs?: "steer" | "followUp" }): Promise<void> => {
 		if (action.kind === "close") {
 			autoReopenDashboard = false;
 			return;
@@ -292,9 +317,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const label = count > 1 ? `${action.kind}: ${count} items` : `${action.kind}: ${action.item.repo}#${action.item.id}`;
 		ctx.ui.notify(action.kind === "snapshot" ? "Queuing snapshot build…" : label, "info");
 		activeCtx = ctx;
-		autoReopenDashboard = true;
+		autoReopenDashboard = !autoslayActive;
 		mode.clearSelected();
-		pi.sendUserMessage(prompt);
+		pi.sendUserMessage(prompt, options?.deliverAs ? { deliverAs: options.deliverAs } : undefined);
 	};
 	const openLeaderboard = async (ctx: CtxLike) => {
 		if (!ctx.hasUI) return;
@@ -322,6 +347,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const action = await ctx.ui.custom<DashboardAction>(
 				(hostTui, theme, _keybindings, done) => {
 					tui = hostTui as { requestRender(): void };
+					activeDashboardDone = done;
 					return new ReviewDashboard(
 						tui,
 						themePainter(theme as UiLike["theme"]),
@@ -334,8 +360,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				},
 				{ overlay: false },
 			);
+			if (action.kind === "slay") {
+				autoslayActive = true;
+			}
 			await dispatch(ctx, action);
-			// Changing scope from inside the dashboard should land you back in it,
 			// looking at the queue you just asked for.
 			if (action.kind === "scope") {
 				dashboardOpen = false;
@@ -353,6 +381,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			// here would surface as an unhandled rejection, not a closed dashboard.
 		} finally {
 			dashboardOpen = false;
+			activeDashboardDone = undefined;
 			persist();
 			syncStatus(ctx);
 		}
@@ -397,6 +426,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		syncStatus(ctx);
 
 		await splash;
+		const flagAutoslay = pi.getFlag("autoslay");
+		if (flagAutoslay === true) {
+			autoslayActive = true;
+			const slayable = mode.slayableItems();
+			const items = (slayable.length > 0 ? slayable.slice(0, 7) : [mode.selected()].filter(Boolean)) as QueueItem[];
+			if (items.length > 0) {
+				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
+				void dispatch(ctx, action);
+				return;
+			}
+			autoslayActive = false;
+		}
 		// Opened, not awaited: `ctx.ui.custom` resolves when the maintainer closes
 		// the dashboard, and startup is over long before that.
 		void openDashboard(ctx);
@@ -422,7 +463,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (scope) mode.setScope(scope);
 			else if (ctx.hasUI) ctx.ui.notify(`--repo is not a repository: ${flagRepo}`, "error");
 		}
-
+		const flagSkipRepo = pi.getFlag("skip-repo");
+		if (typeof flagSkipRepo === "string" && flagSkipRepo.trim()) {
+			for (const r of flagSkipRepo.split(",")) {
+				const trimmed = r.trim().toLowerCase();
+				if (trimmed) mode.skipRepos.add(trimmed);
+			}
+		}
 		if (!ctx.hasUI) {
 			// No UI, so no frame can show an unranked queue: the two reads race
 			// safely, and both reprioritize on arrival. Nothing is awaited here
@@ -444,10 +491,21 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			"bluefin-rail",
 			(hostTui: unknown, theme: unknown) => {
 				tui = hostTui as { requestRender(): void };
-				return new ReviewRail(tui, themePainter(theme as UiLike["theme"]), mode, RAIL_KEYS);
+				return new ReviewRail(tui, themePainter(theme as UiLike["theme"]), mode, RAIL_KEYS, () => dashboardOpen);
 			},
 			{ placement: "belowEditor" },
 		);
+
+		if (typeof ctx.ui.setFooter === "function") {
+			ctx.ui.setFooter((_hostTui: unknown, theme: unknown) => {
+				const painter = themePainter(theme as UiLike["theme"]);
+				return {
+					render(width: number): string[] {
+						return [tmuxReviewStatusBar(mode, painter, width, Date.now())];
+					},
+				};
+			});
+		}
 
 		mode.refreshState();
 		syncStatus(ctx);
@@ -487,12 +545,39 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		mode.session.endTurn(Date.now());
 		repaint();
 		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
+		if (autoslayActive && ctxToUse) {
+			await refreshQueue(ctxToUse);
+			const nextBatch = mode.slayableItems();
+			if (nextBatch.length > 0) {
+				const items = nextBatch.slice(0, 7);
+				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
+				void dispatch(ctxToUse, action, { deliverAs: "followUp" });
+				return;
+			}
+			autoslayActive = false;
+			if (ctxToUse.hasUI) ctxToUse.ui.notify("Autoslay completed: queue fully drained", "info");
+		}
 		if (autoReopenDashboard && ctxToUse && ctxToUse.hasUI && !dashboardOpen) {
 			autoReopenDashboard = false;
 			await refreshQueue(ctxToUse);
 			if (mode.visibleItems().length > 0) {
 				void openDashboard(ctxToUse);
 			}
+		}
+	});
+	pi.on("agent_settled", async (_event, eventCtx) => {
+		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
+		if (autoslayActive && ctxToUse) {
+			await refreshQueue(ctxToUse);
+			const nextBatch = mode.slayableItems();
+			if (nextBatch.length > 0) {
+				const items = nextBatch.slice(0, 7);
+				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
+				void dispatch(ctxToUse, action);
+				return;
+			}
+			autoslayActive = false;
+			if (ctxToUse.hasUI) ctxToUse.ui.notify("Autoslay completed: queue fully drained", "info");
 		}
 	});
 	pi.on("tool_execution_start", (event) => {
@@ -573,6 +658,27 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			const text = items.map((item) => `${item.repo}#${item.id} — ${item.title}\n${item.url}\n`).join("\n");
 			ctx.ui.pasteToEditor(text);
+		},
+	});
+	pi.registerShortcut("alt+s", {
+		description: "Autoslay queue in Hive priority order (continuous serial loop)",
+		handler: (ctx) => {
+			// Autoslay runs directly in strict Hive priority order across the queue,
+			// cycling continuously through assignments without requiring manual intervention.
+			autoslayActive = true;
+			const slayable = mode.slayableItems();
+			const items = (slayable.length > 0 ? slayable.slice(0, 7) : [mode.selected()].filter(Boolean)) as QueueItem[];
+			if (items.length === 0) {
+				autoslayActive = false;
+				if (ctx.hasUI) ctx.ui.notify("No queue items available to slay", "warning");
+				return;
+			}
+			const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
+			if (dashboardOpen && activeDashboardDone) {
+				activeDashboardDone(action);
+			} else {
+				void dispatch(ctx, action);
+			}
 		},
 	});
 

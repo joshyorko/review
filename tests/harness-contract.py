@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 
 from harness.codex import CodexHarness  # noqa: E402
-from harness.goose import GooseHarness  # noqa: E402
+from harness.omp import OmpHarness  # noqa: E402
 from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry  # noqa: E402
 from tui.headroom import (  # noqa: E402
     CAVEMAN_INSTRUCTIONS,
@@ -68,13 +68,12 @@ class HarnessContract(unittest.TestCase):
 
     def test_registry_exposes_both_adapters_without_fallback(self):
         registry = HarnessRegistry()
-        registry.register(GooseHarness())
+        registry.register(OmpHarness())
         registry.register(CodexHarness())
-        self.assertEqual(registry.names(), ("goose", "codex"))
-        self.assertIs(registry.get("goose"), registry.require_ready("goose"))
+        self.assertEqual(registry.names(), ("omp", "codex"))
+        self.assertIs(registry.get("omp"), registry.require_ready("omp"))
         with self.assertRaises(RuntimeError):
             registry.require_ready("codex")
-
     def test_codex_unavailable_states_are_explicit(self):
         for state in (Availability.UNAVAILABLE_BINARY, Availability.UNAVAILABLE_AUTH,
                       Availability.UNSUPPORTED_CAPABILITY,
@@ -84,149 +83,12 @@ class HarnessContract(unittest.TestCase):
                 adapter.invoke(self.binding, prompt="p")
 
     def test_default_harnesses_use_the_gemini_max_profile(self):
-        for adapter in (GooseHarness(), CodexHarness()):
+        for adapter in (OmpHarness(), CodexHarness()):
             with self.subTest(adapter=adapter.name):
-                self.assertEqual(adapter.model, "gemini-3.8-flash")
+                self.assertIn("gemini-3.8-flash", adapter.model)
                 self.assertEqual(adapter.effort, "max")
                 self.assertTrue(adapter.capabilities.exact_binding)
                 self.assertTrue(adapter.capabilities.provenance)
-
-    def test_goose_registry_owns_invocation_and_result_conversion(self):
-        adapter = GooseHarness(availability=Availability.READY)
-        command = adapter.command(self.binding, prompt="inspect", model="gpt-5.6-luna", effort="high")
-        self.assertEqual(command[:2], ["goose", "review"])
-        self.assertIn("project/review#166", command[-1])
-        self.assertIn("base=" + "a" * 40, command[-1])
-        self.assertIn("head=" + "b" * 40, command[-1])
-        result = adapter.convert(
-            "goose review: check 'main' completed: 0 finding(s)\n"
-            "goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))",
-            self.binding,
-            0,
-            model="gpt-5.6-luna",
-            effort="high",
-        )
-        self.assertEqual(result.state, "complete")
-        self.assertEqual(result.provenance["head_sha"], "b" * 40)
-        self.assertEqual(result.provenance["backend"], "goose")
-
-    def test_goose_failures_are_explicit_and_fail_closed(self):
-        for state in (Availability.UNAVAILABLE_BINARY, Availability.UNAVAILABLE_AUTH,
-                      Availability.FAILED_CONFORMANCE):
-            with self.subTest(state=state), self.assertRaises(RuntimeError):
-                GooseHarness(availability=state).invoke(self.binding, prompt="inspect")
-        adapter = GooseHarness(availability=Availability.READY)
-        self.assertEqual(adapter.convert("not a Goose result", self.binding, 0).state, "unparsable")
-        self.assertEqual(adapter.convert("", self.binding, 23).state, "failed")
-        self.assertEqual(adapter.convert("", self.binding, 65).state, "incomplete")
-
-    def test_goose_terminal_status_is_owned_by_typed_result(self):
-        adapter = GooseHarness(availability=Availability.READY)
-        for payload, expected in (
-            ("malformed Goose output", 1),
-            ("goose review: check 'main' failed: no verdict\n"
-             "goose review: orchestrator emitted 0 finding(s) from 1 check(s) "
-             "(main: ran, 0 finding(s))", 65),
-        ):
-            with self.subTest(payload=payload):
-                result = adapter.convert(payload, self.binding, 0)
-                self.assertNotEqual(result.state, "complete")
-                self.assertEqual(adapter.terminal_status(result), expected)
-
-    def test_goose_probe_uses_documented_non_secret_readiness_check(self):
-        with self.subTest("binary missing"):
-            self.assertEqual(
-                GooseHarness.probe("/does/not/exist/goose"),
-                Availability.UNAVAILABLE_BINARY,
-            )
-
-        with self.subTest("provider unavailable"):
-            with tempfile.TemporaryDirectory() as directory:
-                executable = Path(directory) / "goose"
-                executable.write_text(
-                    "#!/usr/bin/env bash\n"
-                    "[[ \"$*\" == \"info --check\" ]] || exit 9\n"
-                    "printf '%s\\n' 'provider unavailable' >&2\n"
-                    "exit 1\n"
-                )
-                executable.chmod(0o755)
-                self.assertEqual(
-                    GooseHarness.probe(str(executable)),
-                    Availability.UNAVAILABLE_AUTH,
-                )
-
-        with self.subTest("ready"):
-            with tempfile.TemporaryDirectory() as directory:
-                executable = Path(directory) / "goose"
-                executable.write_text(
-                    "#!/usr/bin/env bash\n"
-                    "[[ \"$*\" == \"info --check\" ]] || exit 9\n"
-                    "printf '%s\\n' 'provider ready'\n"
-                )
-                executable.chmod(0o755)
-                self.assertEqual(
-                    GooseHarness.probe(str(executable)), Availability.READY
-                )
-
-        with self.subTest("zero exit without Goose response"):
-            with tempfile.TemporaryDirectory() as directory:
-                executable = Path(directory) / "goose"
-                executable.write_text("#!/usr/bin/env bash\nexit 0\n")
-                executable.chmod(0o755)
-                self.assertEqual(
-                    GooseHarness.probe(str(executable)), Availability.UNAVAILABLE_AUTH
-                )
-
-    def test_goose_stream_reaches_real_process_and_returns_bound_result(self):
-        with tempfile.TemporaryDirectory() as directory:
-            executable = Path(directory) / "goose"
-            arguments = Path(directory) / "arguments"
-            executable.write_text(
-                "#!/usr/bin/env bash\n"
-                "if [[ \"$*\" == \"info --check\" ]]; then exit 0; fi\n"
-                "printf '%s\\n' \"$*\" > \"$GOOSE_ARGUMENTS\"\n"
-                "printf '%s\\n' 'stream-one'\n"
-                "printf '%s\\n' \"goose review: check 'main' completed: 0 finding(s)\"\n"
-                "printf '%s\\n' \"goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))\"\n"
-            )
-            executable.chmod(0o755)
-            lines = []
-            adapter = GooseHarness(
-                executable=str(executable), availability=Availability.READY
-            )
-            with patch.dict(os.environ, {"GOOSE_ARGUMENTS": str(arguments)}):
-                result = adapter.stream(
-                    self.binding, prompt="inspect", on_line=lines.append,
-                    extra_args=("--check-scope", "/tmp/exact-scope", "main...HEAD"),
-                )
-            self.assertEqual(lines[0], "stream-one")
-            self.assertIn("--check-scope /tmp/exact-scope main...HEAD", arguments.read_text())
-            self.assertEqual(result.state, "complete")
-            self.assertEqual(result.provenance["head_sha"], "b" * 40)
-
-    def test_goose_cancel_terminates_the_process_group(self):
-        class Process:
-            pid = 1234
-            returncode = None
-            wait_called = False
-
-            def wait(self):
-                self.wait_called = True
-
-        process = Process()
-        with patch("harness.goose.os.killpg") as killpg:
-            GooseHarness.cancel(process)
-        killpg.assert_called_once()
-        self.assertTrue(process.wait_called)
-
-    def test_goose_result_redacts_secret_evidence(self):
-        with patch.dict(os.environ, {"GOOSE_API_KEY": "goose-secret"}):
-            result = GooseHarness(availability=Availability.READY).convert(
-                "Authorization: Bearer goose-secret", self.binding
-            )
-        self.assertNotIn("goose-secret", "\n".join(result.raw_evidence))
-        self.assertIn("[REDACTED]", "\n".join(result.raw_evidence))
-
     def test_binding_is_exact_context_shape(self):
         self.assertEqual(f"{self.binding.owner}/{self.binding.repository}", "project/review")
         self.assertEqual(self.binding.pull_request_number, 166)
@@ -492,13 +354,12 @@ class HarnessContract(unittest.TestCase):
             ReviewRequest("project", "review", 166, "?" * 40, "b" * 40, "maintainer", "review", generated_at="test")
 
     def test_branding_has_badge_full_name_accessible_label_and_source(self):
-        for harness in (GooseHarness(), CodexHarness()):
+        for harness in (OmpHarness(), CodexHarness()):
             branding = harness.branding
             self.assertEqual(len(branding.terminal_badge), 2)
             self.assertEqual(branding.accessible_label, branding.accessible_label.strip())
             self.assertNotEqual(branding.accessible_label, branding.terminal_badge)
             self.assertTrue(branding.attribution)
-
     def test_missing_rich_asset_falls_back_to_full_name(self):
         branding = CodexHarness().branding
         self.assertIsNone(branding.asset_ref)
@@ -510,112 +371,12 @@ class HarnessContract(unittest.TestCase):
 
     def test_drafting_is_explicit_for_each_selected_harness(self):
         self.assertTrue(CodexHarness().capabilities.body_drafting)
-        self.assertTrue(GooseHarness().capabilities.body_drafting)
+        self.assertTrue(OmpHarness().capabilities.body_drafting)
         request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
-        command = GooseHarness().draft_command(request, "/tmp/review-draft-prompt")
-        self.assertEqual(command, [
-            "goose", "run", "--no-session", "-i", "/tmp/review-draft-prompt",
+        command = OmpHarness().draft_command(request)
+        self.assertEqual(command[:5], [
+            "omp", "-p", "--mode", "text", "--model",
         ])
-
-    def test_goose_draft_uses_goose_model_and_removes_prompt_and_github_tokens(self):
-        request = DraftRequest(self.binding, "comment", self._evidence(), {"title": "A PR"})
-        captured = {}
-
-        class Process:
-            pid = 123
-            stdout = "Reviewed."
-            stderr = ""
-            returncode = 0
-
-            def communicate(self):
-                return self.stdout, self.stderr
-
-        def run(command, **kwargs):
-            prompt_path = command[-1]
-            captured.update(command=command, prompt_path=prompt_path,
-                            prompt=Path(prompt_path).read_text(), **kwargs)
-            return Process()
-
-        adapter = GooseHarness(
-            availability=Availability.READY, model="gpt-goose", effort="max"
-        )
-        with patch.dict(os.environ, {
-            "GH_TOKEN": "secret", "GITHUB_TOKEN": "secret",
-            "REVIEW_GH_TOKEN": "secret",
-        }), patch("harness.goose.subprocess.Popen", side_effect=run):
-            result = adapter.draft(request)
-        self.assertEqual(result.state, DraftState.COMPLETE)
-        self.assertEqual(result.markdown, "Reviewed.")
-        self.assertEqual(result.provenance["backend"], "goose")
-        self.assertEqual(result.provenance["model"], "gpt-goose")
-        self.assertEqual(result.provenance["effort"], "max")
-        self.assertEqual(captured["command"][:4], [
-            "goose", "run", "--no-session", "-i",
-        ])
-        self.assertIn("verdict comment", captured["prompt"])
-        self.assertIn("Do not perform another code review", captured["prompt"])
-        self.assertNotIn("GH_TOKEN", captured["env"])
-        self.assertNotIn("GITHUB_TOKEN", captured["env"])
-        self.assertNotIn("REVIEW_GH_TOKEN", captured["env"])
-        self.assertEqual(captured["env"]["GOOSE_MODEL"], "gpt-goose")
-        self.assertEqual(captured["env"]["GOOSE_THINKING_EFFORT"], "max")
-        self.assertFalse(Path(captured["prompt_path"]).exists())
-
-    def test_goose_draft_cancellation_terminates_process_group(self):
-        request = DraftRequest(self.binding, "comment", self._evidence(), {})
-        captured = {}
-
-        class Process:
-            pid = 123
-            returncode = -signal.SIGTERM
-
-            def communicate(self):
-                captured["handler"](signal.SIGTERM, None)
-                return "", ""
-
-            def wait(self):
-                captured["waited"] = True
-
-        def install(signum, handler):
-            captured["handler"] = handler
-            return signal.SIG_DFL
-
-        with patch("harness.goose.subprocess.Popen", return_value=Process()), \
-             patch("harness.goose.signal.signal", side_effect=install), \
-             patch("harness.goose.os.killpg") as killpg:
-            result = GooseHarness(availability=Availability.READY).draft(request)
-        self.assertEqual(result.state, DraftState.FAILED)
-        killpg.assert_called_once_with(123, signal.SIGTERM)
-        self.assertTrue(captured["waited"])
-
-    def test_goose_draft_launch_failure_is_bounded_and_provenanced(self):
-        request = DraftRequest(self.binding, "comment", self._evidence(), {})
-        with patch(
-            "harness.goose.subprocess.Popen",
-            side_effect=OSError("goose launch failed"),
-        ):
-            result = GooseHarness(availability=Availability.READY).draft(request)
-        self.assertEqual(result.state, DraftState.FAILED)
-        self.assertEqual(result.provenance["backend"], "goose")
-        self.assertIn("goose launch failed", "\n".join(result.raw_evidence))
-        self.assertLessEqual(len(result.raw_evidence), 400)
-
-    def test_goose_draft_runtime_failure_is_bounded_and_provenanced(self):
-        request = DraftRequest(self.binding, "comment", self._evidence(), {})
-
-        class Process:
-            pid = 123
-
-            def communicate(self):
-                raise subprocess.SubprocessError("goose runtime failed")
-
-        with patch("harness.goose.subprocess.Popen", return_value=Process()):
-            result = GooseHarness(availability=Availability.READY).draft(request)
-        self.assertEqual(result.state, DraftState.FAILED)
-        self.assertEqual(result.provenance["backend"], "goose")
-        self.assertIn("goose runtime failed", "\n".join(result.raw_evidence))
-        self.assertLessEqual(len(result.raw_evidence), 400)
-
     def test_codex_draft_strips_github_tokens_from_subprocess_environment(self):
         request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
         captured = {}
@@ -1026,9 +787,9 @@ class HeadroomContract(unittest.TestCase):
         }
         with patch("urllib.request.urlopen", _fake_urlopen(routes, calls)):
             session = HeadroomSession.from_environment(self.ENV)
-            self.assertEqual(session.refresh("goose").state, "DIRECT")
+            self.assertEqual(session.refresh("omp").state, "DIRECT")
             self.assertEqual(calls, [])
-            self.assertIn("Goose/GitHub Copilot", session.status_line("goose", False))
+            self.assertIn("OMP", session.status_line("omp", False))
             self.assertEqual(session.refresh("codex").state, "ACTIVE")
             self.assertEqual(session.route_for_call("codex").base_url, "http://127.0.0.1:8787")
 
@@ -1078,7 +839,7 @@ class HeadroomContract(unittest.TestCase):
             line = session.status_line("codex", False)
             self.assertIn("DEGRADED", line)
             self.assertIn("degraded", line)
-            self.assertEqual(session.refresh("goose").state, "DIRECT")
+            self.assertEqual(session.refresh("omp").state, "DIRECT")
         self.assertEqual(calls, [])
 
     def test_unavailable_proxy_is_degraded_and_absent_url_is_direct(self):

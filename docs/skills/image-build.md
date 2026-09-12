@@ -1,7 +1,7 @@
 ---
 name: image-build
-version: "2.24"
-last_updated: 2026-08-25
+version: "2.25"
+last_updated: 2026-09-11
 id: image-build
 one_line_purpose: Derive and pin the review contributor image safely.
 entry_point: docs/skills/image-build.md
@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [containerfile, image, digest, pinning, build, audit]
-description: "Use when maintaining the pinned FSDK-derived contributor image, audit, Goose canary assets, Hive runtime, or publishing path."
+description: "Use when maintaining the pinned FSDK-derived contributor image, audit, OMP assets, Hive runtime, or publishing path."
 metadata:
   type: procedure
   context7-sources: [/websites/podman_io_en, /websites/github_en_actions]
@@ -56,7 +56,7 @@ get one sentence naming the issue.
    source, image labels, and SBOM package records can disagree with the
    filesystem; command execution and file inspection against the pinned digest
    define the base interface.
-3. Add only the contributor delta: Goose, the pinned official Codex CLI,
+3. Add only the contributor delta: OMP, the pinned official Codex CLI,
    tmux, GitHub CLI, Node with `ws`, the pinned Hive runtime, controlled
    policy/configuration, and approved agent tools. Do not duplicate a
    capability already present in the verified base.
@@ -83,40 +83,31 @@ get one sentence naming the issue.
    shadow upstream fixes and risk semantic bugs. The Containerfile proves
    canonical GNU `find` and `cmp` resolve from `/usr/sbin` and rejects any
    shadowing from `/usr/local/bin`.
-6. Pin Node, GitHub CLI, tmux, and Codex CLI versions and verify their
+6. Pin Node, GitHub CLI, tmux, Codex CLI, and OMP versions and verify their
    checksums. Codex comes only from OpenAI's official architecture-specific
    Linux release assets, installs as the upstream binary without repacking,
-   and is executable in the final runtime as `codex`. For
-   mutable Goose `canary`, CI resolves official `unknown-linux-musl` asset
-   digests before each build, passes them as build inputs, and records them in
-   image configuration and provenance. The build verifies the selected archive
-   checksum and `gh attestation verify` provenance against the official
-   repository and `canary.yml`; a moved asset fails rather than silently
-   changing an image. Extract safely; never compile, strip, repack, or fork
-   Goose; preserve glibc loader links for dynamic Node and GitHub CLI. Lock
+   and is executable in the final runtime as `codex`.
+   OMP installs from official releases via pinned architecture assets
+   (`OMP_VERSION`, `OMP_X86_64_SHA256`, `OMP_AARCH64_SHA256`) and verifies
+   checksums before chmod/execution, matching the pattern in
+   `image/contribute/Containerfile`. No attestation verification is used.
+   Extract safely; never compile, strip, repack, or fork
+   agent binaries; preserve glibc loader links for dynamic Node and GitHub CLI. Lock
    `ws` in root `package-lock.json` with `npm ci --omit=dev --ignore-scripts`;
-   keep fixed Node/gh/tmux/Codex/ws ahead of mutable Goose. Unpack with the base's
+   keep fixed Node/gh/tmux/Codex/ws ahead of OMP. Unpack with the base's
    own GNU tar, never a hand-rolled extractor — `tar -xO ... --occurrence=1`
    for a single binary, `--strip-components=1` for Node's versioned tree — and
    keep each `sha256sum -c -` ahead of the archive's first read. A missing
    member fails cleanly. Remove only Node headers and unused npm cache;
    retain `node`, `npm`, and `corepack`.
-7. Place controlled Goose configuration under `/opt/bluefin/goose` as the
-   image-owned policy, data, and state seam. Revalidate compatibility settings
-   against the pinned Hive runtime before retaining them; do not preserve stale
-   workarounds solely because an older Hive revision needed them. The current
-   pin preserves its runtime config when present and creates Goose-native
-   `AGENTS.md` and `.goosehints` links, so do not add a `CONTEXT_FILE_NAMES`
-   compatibility override for legacy `CLAUDE.md`.
+7. The container needs no separate agent configuration file; OMP requires
+   no static image-owned configuration file.
 8. Generate org skills at build time from the pinned common catalog into
    `/home/dev/.agents/skills`. Review the generator and catalog inputs, never
    generated output. Remove build-only generation tooling from the final
    filesystem when the build shape permits it.
 9. Keep credentials, workspaces, and host configuration out of image layers.
-   Supply the GitHub token used for canary provenance verification as the
-   required `github_token` build secret; it is available only to that `RUN`
-   step and must not be an argument or environment layer. Codex subscription
-   OAuth is likewise runtime-only: the image carries the CLI and an empty
+   Codex subscription OAuth is runtime-only: the image carries the CLI and an empty
    `/home/dev/.codex`, never an auth cache or provider configuration.
 10. Treat the image as a task runtime, not a general validation distribution.
    At startup, probe the baseline validation commands (`bats`, `shellcheck`,
@@ -177,6 +168,8 @@ See [`image-audit.md`](image-audit.md) for full image audit assertions, package 
 - Reaching for BuildKit, `docker buildx`, or QEMU cross-building. Always build natively with Podman/Buildah.
 - Committing generated `.agents/skills/` output or markdown audit reports.
 
+`image/contribute/Containerfile` is the separate distroless Hive + OMP closure. It stages only OMP, Node, GitHub CLI, tmux, locked `ws`, the merged Hive runtime, and the FSDK shell/git/python closure; it must not absorb Codex, Pi, dashboard, review scope, or generated skills.
+
 ## Verification
 
 ```bash
@@ -193,4 +186,4 @@ git diff --check
 The `find` and `cmp` Hive's relay calls come from the FSDK base, so there is
 nothing in the checkout to test: `image/Containerfile` proves them at build
 time against the real base and the build fails if either regresses.
-- Hive `v4`: `bin/contributor-agent.sh`, `bin/contributor-relay.sh`, `config/backends.conf`; Goose `canary`; Context7 `/npm/cli`, `/websites/podman_io_en`, `/podman-container-tools/buildah`, `/podman-container-tools/skopeo`, `/websites/cli_github_manual`, `/websites/github_en_actions`.
+- Hive `v4`: `bin/contributor-agent.sh`, `bin/contributor-relay.sh`, `config/backends.conf`; OMP; Context7 `/npm/cli`, `/websites/podman_io_en`, `/podman-container-tools/buildah`, `/podman-container-tools/skopeo`, `/websites/cli_github_manual`, `/websites/github_en_actions`.

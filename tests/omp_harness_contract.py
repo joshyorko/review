@@ -10,21 +10,8 @@ from harness.omp import OmpHarness
 from harness.registry import (
     Availability,
     DraftRequest,
-    DraftResult,
     DraftState,
     HarnessRegistry,
-)
-from tui.action_plan import BatchActionPlan, BatchMutationItem, Prerequisites
-from tui.re_review import (
-    ClassifiedFinding,
-    DeltaInput,
-    FallbackReason,
-    FindingDisposition,
-    FindingEvidence,
-    H1Evidence,
-    PriorFinding,
-    Region,
-    classify_head_delta,
 )
 from tui.review_evidence_manifest import ReviewRequest
 from tui.review_result import ReviewResult
@@ -71,7 +58,8 @@ class OmpHarnessContract(unittest.TestCase):
         cmd = self.harness.command(self.binding, prompt="Check correctness")
         self.assertEqual(cmd[0], "omp")
         self.assertIn("--mode", cmd)
-        self.assertIn("rpc", cmd)
+        self.assertIn("json", cmd)
+        self.assertIn("--thinking", cmd)
 
     def test_draft_command_generation(self):
         draft_req = DraftRequest(
@@ -82,7 +70,7 @@ class OmpHarnessContract(unittest.TestCase):
         )
         cmd = self.harness.draft_command(draft_req)
         self.assertEqual(cmd[0], "omp")
-        self.assertIn("rpc", cmd)
+        self.assertIn("text", cmd)
 
     def test_convert_draft_success(self):
         draft_req = DraftRequest(
@@ -155,7 +143,7 @@ class OmpHarnessContract(unittest.TestCase):
 
     def test_autopilot_prefers_omp_when_configured(self):
         options = discover_all()
-        pref = Preference("omp", "github-copilot/gemini-3.8-flash", "max")
+        pref = Preference("omp", "gemini-3.8-flash", "max")
         chosen = choose_option("projectbluefin/review", {"*": pref}, options)
         self.assertIsNotNone(chosen)
         self.assertEqual(chosen.discovery.backend, "omp")
@@ -174,90 +162,6 @@ class OmpHarnessContract(unittest.TestCase):
         self.assertEqual(self.harness.terminal_status(clean_res), 0)
         self.assertEqual(self.harness.terminal_status(findings_res), 0)
         self.assertEqual(self.harness.terminal_status(failed_res), 23)
-
-    def test_omp_rpc_prompt_synthesis(self):
-        draft_req = DraftRequest(
-            binding=self.binding,
-            verdict="approve",
-            evidence=self.evidence,
-            live_facts={"ci": "success"}
-        )
-        prompt_frame = self.harness.draft_request_to_rpc_prompt(draft_req)
-        self.assertEqual(prompt_frame["type"], "prompt")
-        self.assertIn("projectbluefin/review#42", prompt_frame["message"])
-        self.assertIn("approve", prompt_frame["message"])
-
-    def test_re_review_prompt_synthesis(self):
-        delta = DeltaInput(
-            reviewed_head_sha=self.binding.head_sha,
-            current_head_sha=self.binding.head_sha,
-            reviewed_merge_base_sha=self.binding.base_sha,
-            current_merge_base_sha=self.binding.base_sha,
-            current_h1_request=self.binding,
-            prior_findings=(PriorFinding("f1", FindingEvidence("src/main.py", 10, 20)),),
-            evidence=(FindingEvidence("src/main.py", 10, 20),),
-            changed_regions=(Region("src/main.py", 15, 18),),
-        )
-        result = classify_head_delta(delta)
-        prompt_frame = self.harness.re_review_prompt(result)
-        self.assertEqual(prompt_frame["type"], "prompt")
-        self.assertEqual(prompt_frame["streamingBehavior"], "steer")
-        self.assertIn(self.binding.head_sha, prompt_frame["message"])
-        self.assertIn("changed-region", prompt_frame["message"])
-
-    def test_queue_pagination(self):
-        items = [{"id": i} for i in range(25)]
-        page0 = self.harness.format_queue_page(items, page=0, per_page=10)
-        self.assertEqual(page0["page"], 0)
-        self.assertEqual(len(page0["items"]), 10)
-        self.assertTrue(page0["has_next"])
-
-        page2 = self.harness.format_queue_page(items, page=2, per_page=10)
-        self.assertEqual(page2["page"], 2)
-        self.assertEqual(len(page2["items"]), 5)
-        self.assertFalse(page2["has_next"])
-
-    def test_format_batch_plan_prompt(self):
-        item = BatchMutationItem(
-            repository="projectbluefin/review",
-            pull_request=42,
-            head_sha="0123456789abcdef0123456789abcdef01234567",
-            prerequisites=Prerequisites.from_mappings(permissions={"push": True}, checks={"ci": "success"}),
-            operations=(("gh", "pr", "merge", "42", "--squash"),),
-        )
-        plan = BatchActionPlan.build(
-            actor="maintainer",
-            tenant="projectbluefin",
-            action_kind="squash-merge",
-            items=(item,),
-        )
-        prompt_frame = self.harness.format_batch_plan_prompt(plan)
-        self.assertEqual(prompt_frame["type"], "prompt")
-        self.assertEqual(prompt_frame["metadata"]["action_kind"], "squash-merge")
-        self.assertEqual(prompt_frame["metadata"]["target_count"], 1)
-        self.assertIn(plan.identity, prompt_frame["message"])
-        self.assertIn("projectbluefin/review#42", prompt_frame["message"])
-
-    def test_process_rpc_event_frames(self):
-        delta_frame = {
-            "type": "message_update",
-            "assistantMessageEvent": {"type": "text_delta", "delta": "Looks good."},
-        }
-        processed_delta = self.harness.process_rpc_event(delta_frame)
-        self.assertEqual(processed_delta["kind"], "delta")
-        self.assertEqual(processed_delta["delta"], "Looks good.")
-        self.assertFalse(processed_delta["is_tool"])
-
-        terminal_frame = {"type": "agent_end", "isTerminal": True}
-        processed_term = self.harness.process_rpc_event(terminal_frame)
-        self.assertEqual(processed_term["kind"], "terminal")
-        self.assertTrue(processed_term["is_terminal"])
-
-        tool_frame = {"type": "tool_execution_start", "toolName": "read"}
-        processed_tool = self.harness.process_rpc_event(tool_frame)
-        self.assertEqual(processed_tool["kind"], "tool_start")
-        self.assertEqual(processed_tool["tool"], "read")
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """Write the SPDX manifest for review-owned, archive-installed components.
-
 The publish workflow scans the built image with syft, which inventories
 package-manager metadata (npm packages, Python dist-info, binary classifiers)
 but cannot see the components this image installs directly from release
-archives or fetched source files: Goose, the GitHub CLI, tmux, Codex,
+archives or fetched source files: OMP, the GitHub CLI, tmux, Codex,
 ripgrep, the pinned Hive contributor runtime files, the generated skill
 bundles, and the review-owned git hooks. Those are the load-bearing parts of
 the derived image, so an SBOM without them is an incomplete supply-chain
 record (#78).
 
 This script runs inside the image build, where every pin is in scope as a
-resolved build argument -- including the Goose asset digests that CI resolves
-from the release API immediately before building. It writes a standalone SPDX
+resolved build argument. It writes a standalone SPDX
 2.3 JSON document to ``/opt/bluefin/sbom/review-components.spdx.json``. The
 publish workflow's syft run ingests that document through its sbom-cataloger
 (enabled via ``SYFT_SELECT_CATALOGERS``), so the attested SBOM names each
@@ -40,6 +38,7 @@ COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 # build passes uname output and the per-component token is resolved here.
 GH_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}
 TMUX_ARCH = {"x86_64": "x86_64", "aarch64": "arm64"}
+OMP_ARCH = {"x86_64": "x64", "aarch64": "arm64"}
 RG_ARCH = {
     "x86_64": "x86_64-unknown-linux-musl",
     "aarch64": "aarch64-unknown-linux-musl",
@@ -108,14 +107,14 @@ def per_arch_sha256(args: argparse.Namespace, prefix: str, arch: str) -> str:
 
 
 def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
-    goose_sha = per_arch_sha256(args, "goose_sha256", arch)
+    omp_sha = per_arch_sha256(args, "omp_sha256", arch)
     codex_sha = per_arch_sha256(args, "codex_sha256", arch)
     code_mode_host_sha = per_arch_sha256(args, "codex_code_mode_host_sha256", arch)
     ripgrep_sha = per_arch_sha256(args, "ripgrep_sha256", arch)
 
     hive_commit = require_commit(args.hive_commit, "hive commit")
     skills_commit = require_commit(args.skills_commit, "organization skills commit")
-    goose_channel = require_non_empty(args.goose_channel, "goose channel")
+    omp_version = require_non_empty(args.omp_version, "omp version")
     gh_version = require_non_empty(args.gh_version, "gh version")
     tmux_version = require_non_empty(args.tmux_version, "tmux version")
     codex_version = require_non_empty(args.codex_version, "codex version")
@@ -124,16 +123,15 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     hive_raw = f"https://raw.githubusercontent.com/hivecommons/hive/{hive_commit}"
     return [
         package(
-            "goose",
-            goose_channel,
-            "https://github.com/aaif-goose/goose/releases/download/"
-            f"{goose_channel}/goose-{arch}-unknown-linux-musl.tar.gz",
-            f"pkg:github/aaif-goose/goose@{goose_channel}",
-            "The canary channel name is mutable; the asset SHA-256 here is the"
-            " immutable identity, resolved from the release API at build time"
-            " and verified with the aaif-goose/goose canary attestation before"
-            " the archive was opened. Installed to /usr/local/bin/goose.",
-            sha256=goose_sha,
+            "omp",
+            omp_version,
+            "https://github.com/can1357/oh-my-pi/releases/download/"
+            f"v{omp_version}/omp-linux-{OMP_ARCH[arch]}",
+            f"pkg:github/can1357/oh-my-pi@{omp_version}",
+            "Installed to /usr/local/bin/omp from the pinned can1357/oh-my-pi"
+            " release archive, SHA-256 verified against the pin in"
+            " image/Containerfile.",
+            sha256=omp_sha,
         ),
         package(
             "gh",
@@ -233,9 +231,9 @@ def main() -> int:
     parser.add_argument("--arch", required=True, help="uname -m of the build host")
     parser.add_argument("--revision", required=True, help="review source revision (build arg REVIEW_REVISION)")
     parser.add_argument("--out", required=True, type=pathlib.Path, help="output SPDX JSON path")
-    parser.add_argument("--goose-channel", required=True)
-    parser.add_argument("--goose-sha256-x86-64", required=True)
-    parser.add_argument("--goose-sha256-aarch64", required=True)
+    parser.add_argument("--omp-version", required=True)
+    parser.add_argument("--omp-sha256-x86-64", required=True)
+    parser.add_argument("--omp-sha256-aarch64", required=True)
     parser.add_argument("--gh-version", required=True)
     parser.add_argument("--tmux-version", required=True)
     parser.add_argument("--codex-version", required=True)

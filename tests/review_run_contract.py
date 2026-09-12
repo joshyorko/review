@@ -34,20 +34,20 @@ def make_request(owner="projectbluefin", repository="bluefin", number=42,
 
 def make_run(request=None) -> ReviewRun:
     request = request or make_request()
-    return ReviewRun.from_request(request, backend="goose", model="gemini-3.8-flash", effort="high")
+    return ReviewRun.from_request(request, backend="omp", model="gemini-3.8-flash", effort="high")
 
 
 def default_profile() -> None:
     """The implicit Gemini review run matches the dashboard default profile."""
     run = ReviewRun.from_request(make_request())
     check(
-        (run.backend, run.model, run.effort) == ("goose", "gemini-3.8-flash", "max"),
+        (run.backend, run.model, run.effort) == ("omp", "gemini-3.8-flash", "max"),
         f"default review profile must use Gemini at max, got {run!r}",
     )
 
 
 class FakeHarness:
-    name = "goose"
+    name = "omp"
     availability = "READY"
     capabilities = HarnessCapabilities(
         invocation=True, streaming=True, cancellation=True,
@@ -58,7 +58,7 @@ class FakeRegistry:
     def get(self, name):
         return FakeHarness()
     def names(self):
-        return ("goose",)
+        return ("omp",)
 
 
 def identity() -> None:

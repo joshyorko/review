@@ -30,9 +30,8 @@ lifecycle, or credential-passthrough behavior.
 
 ## When Not to Use
 
-Do not use this for Hive task selection, contributor-session triage, Goose
-configuration internals, or image-layer pinning. Those belong to the Hive,
-Goose, or image build skill documents.
+Do not use this for Hive task selection, contributor-session triage,
+or image-layer pinning. Those belong to the Hive or image build skill documents.
 
 ## Core Process
 
@@ -66,11 +65,11 @@ Goose, or image build skill documents.
    an optional TLS `HIVE_HUB` URL, mounts
    `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` with shared `rw,z`, and
    passes `BLUEFIN_REVIEW_INSTANCE`; `REVIEW_HIVE` selects a named registration.
-4. Keep Goose as the default backend (`TOOL=goose`); Codex (`TOOL=codex`) is
-   the explicit alternate backend. Profiles set defaults:
-   `gemini` (`gemini-3.8-flash`, max effort), `sol` (`gpt-5.6-sol`, medium),
-   `opus5` (`claude-opus-5`, high, 264k context), `k3` (`kimi-k3`, max, 264k).
-   Environment `GOOSE_*` always wins.
+4. Codex is the backend for `review-container` (`TOOL=codex`, only valid tool
+   value). For `review-queue`, OMP is the default backend and Codex is the
+   explicit alternate backend (`BLUEFIN_REVIEW_BACKEND=codex`). Model profiles
+   set `AGENT_MODEL` and `AGENT_REASONING_EFFORT` (profiles: `gemini`, `sol`,
+   `opus5`, `k3`). Environment variables always take precedence.
 5. Pass credentials via inherited environment, never CLI args; stage Codex auth at `0600`.
 6. When renaming launcher identifiers, do a full sweep and leave no aliases.
 
@@ -179,6 +178,8 @@ git diff --check
 ```
 
 The recipe list must match the documented public recipes. Doctor must not start a container.
+
+`just contribute [gemini|luna|opus5|sol]` starts the isolated OMP worker. It mounts one selected Hive registration at `/home/bluefin/.config/hive/contributor.env`, passes provider credentials only by inherited environment names, and uses `--userns keep-id:uid=65532,gid=65532`; `review-container` remains on the compatibility image.
 
 ## Sources
 

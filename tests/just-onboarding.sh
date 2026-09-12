@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Hermetic regression harness for the root justfile.
 #
-# Everything the launcher can shell out to (gh, goose, gum, podman, git,
-# secret-tool, kubectl) is faked on PATH, so this test never touches the network,
-# never starts a real container, and never
+# Everything the launcher can shell out to (gh, gum, podman, git,
+# secret-tool, kubectl) is faked on PATH, so this test never touches the
+# network, never starts a real container, and never
 # depends on what happens to be installed on the developer's machine.
 #
 # Host preflight is backend-specific. Codex contributor runs use only their
-# subscription login cache; Goose configuration and Copilot are not required.
+# subscription login cache; Copilot is not required.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -61,7 +61,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$fake_bin" "$system_bin" "$tmp_root" "$fake_remote_root" \
-  "$home/.config/goose" "$home/.config/hive" "$cfg_dir" "$state_dir"
+  "$home/.config/hive" "$cfg_dir" "$state_dir"
 
 # Preserve the launcher's normal system tools without allowing a host kubectl
 # to appear after the fake is removed for missing-command scenarios.
@@ -151,11 +151,6 @@ case "${1:-} ${2:-}" in
     printf '  - Token scopes: %s\n' "${FAKE_GH_SCOPES:-'repo', 'read:org'}" >&2
     ;;
 esac
-exit 0
-EOF
-cat >"$fake_bin/goose" <<'EOF'
-#!/usr/bin/env bash
-[[ "${GOOSE_INSTALLED:-1}" == "1" ]] || exit 127
 exit 0
 EOF
 cat >"$fake_bin/gum" <<'EOF'
@@ -465,22 +460,23 @@ EOF
 chmod +x "$fake_bin"/*
 
 # ── fixtures ──────────────────────────────────────────────────────────────
-write_goose_config() {
-  cat >"$home/.config/goose/config.yaml" <<'EOF'
-provider: openai
-base_url: http://127.0.0.1:11434/v1
-api_key: local-test-key
-model: llama3.1
-EOF
+write_codex_auth() {
+  mkdir -p "$home/.codex"
+  printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+  chmod 0600 "$home/.codex/auth.json"
+}
+remove_codex_auth() {
+  rm -f "$home/.codex/auth.json"
+  rmdir "$home/.codex" 2>/dev/null || true
 }
 cat >"$home/.config/hive/contributor.env" <<'EOF'
 HIVE_REGISTRATION_TOKEN=super-secret-registration-token
 HIVE_HUB=wss://example.invalid/contribute
 CONTRIBUTOR_ID=test-contributor
 CONTRIBUTOR_USERNAME=test-user
-AGENT_BACKEND=goose
+AGENT_BACKEND=codex
 EOF
-write_goose_config
+write_codex_auth
 
 reset_logs() {
   : >"$gum_log"
@@ -505,14 +501,14 @@ run_recipe() {
   OUT="$(
     env \
       -u TOOL -u REVIEW_HIVE_COMMIT \
-      -u AGENT_MODEL -u GOOSE_PROVIDER -u GOOSE_MODEL -u GH_READY \
+      -u AGENT_MODEL -u GH_READY \
       -u GITHUB_COPILOT_TOKEN \
       -u GH_TOKEN -u GITHUB_TOKEN \
       -u REVIEW_GH_TOKEN -u FAKE_GH_TOKEN -u FAKE_GH_SCOPES \
       -u CODEX_HOME \
       -u BLUEFIN_REVIEW_BACKEND \
-      -u GOOSE_THINKING_EFFORT -u GOOSE_CONTEXT_LIMIT \
-      -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
+      \
+      -u REVIEW_NON_INTERACTIVE \
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
       -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
       -u REVIEW_QUEUE_NAME -u REVIEW_SCALE -u XDG_STATE_HOME -u FAKE_GIT_TOPLEVEL \
@@ -534,7 +530,7 @@ run_recipe() {
       -u FAKE_KUBECTL_REWRITE_HIVE_HUB \
       HOME="$home" PATH="$fake_bin:$system_bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
-      FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token \
+      GITHUB_COPILOT_TOKEN=copilot-test-token \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
       IMAGE_LOG="$image_log" \
       CREDENTIAL_LOG="$credential_log" \
@@ -561,82 +557,41 @@ assert_not_contains "claude" "$OUT"
 assert_not_contains "copilot" "$OUT"
 assert_not_contains "codex" "$OUT"
 
-begin "preflight: missing Goose provider configuration yields one actionable error"
-rm -f "$home/.config/goose/config.yaml"
+begin "preflight: missing Codex subscription login yields one actionable error"
+reset_logs
+remove_codex_auth
 run_recipe review-container GH_READY=1
-assert_nonzero_status "$STATUS" "an unconfigured goose must fail the launch"
+assert_nonzero_status "$STATUS" "an unconfigured codex must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
-assert_contains "goose configure" "$OUT"
+assert_contains "codex login" "$OUT"
 assert_not_contains "claude" "$OUT"
-assert_not_contains "codex" "$OUT"
-write_goose_config
-
-begin "preflight: an invalid Goose config (no provider) is treated as unconfigured"
-printf 'model: llama3.1\n' >"$home/.config/goose/config.yaml"
-run_recipe review-container GH_READY=1
-assert_nonzero_status "$STATUS" "a provider-less goose config must fail the launch"
-assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
-assert_contains "goose configure" "$OUT"
-write_goose_config
-
-begin "preflight: Goose's current active_provider config counts as configured"
-# Goose >= 1.45 records the selection as 'active_provider:' beside a
-# 'providers:' map; the launcher must accept it or every launch dies on
-# "Goose has no usable provider configuration" after Goose migrates the
-# host config. A passing preflight reaches the fake runner, which always
-# exits non-zero.
-cat >"$home/.config/goose/config.yaml" <<'EOF'
-providers:
-  github_copilot:
-    enabled: true
-    model: kimi-k3
-    configured: true
-active_provider: github_copilot
-EOF
-run_recipe review-container GH_READY=1
-assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
-assert_not_contains "Goose has no usable provider configuration" "$OUT"
-write_goose_config
-
-begin "preflight: unsupported GOOSE_PROVIDER yields one actionable Copilot-only error"
-run_recipe review-container GH_READY=1 GOOSE_PROVIDER=openai
-assert_nonzero_status "$STATUS" "an unsupported provider must fail the launch"
-assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
-assert_contains "GOOSE_PROVIDER=openai is not supported" "$OUT"
-assert_contains "GOOSE_PROVIDER=github_copilot" "$OUT"
-
+write_codex_auth
 # ══ 2. TOOL handling: selected backends ════════════════════════════════════
-begin "TOOL=claude is rejected with a Goose-only error"
+begin "TOOL=claude is rejected with a Codex-only error"
 run_recipe review-container GH_READY=1 TOOL=claude
-assert_nonzero_status "$STATUS" "a non-Goose TOOL must be a hard error"
+assert_nonzero_status "$STATUS" "an unsupported TOOL must be a hard error"
 assert_contains "TOOL=claude is not supported" "$OUT"
-assert_contains "review supports Goose and Codex" "$OUT"
+assert_contains "review supports Codex only" "$OUT"
 assert_not_contains "auto-detected" "$OUT"
 assert_not_contains "Multiple AI CLIs" "$OUT"
 
-begin "TOOL=goose is accepted"
-# A passing TOOL check reaches the fake runner, which always exits non-zero.
+begin "TOOL=goose is rejected the same as any unsupported tool"
 run_recipe review-container GH_READY=1 TOOL=goose
-assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
-assert_not_contains "is not supported" "$OUT"
-assert_not_contains "Unset TOOL" "$OUT"
+assert_nonzero_status "$STATUS" "an unsupported TOOL must be a hard error"
+assert_contains "TOOL=goose is not supported" "$OUT"
+assert_contains "review supports Codex only" "$OUT"
 
 begin "TOOL=pi is rejected before container launch"
 reset_logs
-run_recipe review-container GH_READY=1 TOOL=pi PI_API_KEY=pi-test-key
+run_recipe review-container GH_READY=1 TOOL=pi
 assert_nonzero_status "$STATUS" "Pi must be unsupported"
 assert_contains "is not supported" "$OUT"
 assert_file_not_contains "run --rm" "$runner_log"
 
-begin "TOOL=codex uses subscription auth without Goose or Copilot"
+begin "TOOL=codex uses subscription auth without Copilot"
 reset_logs
-rm -f "$home/.config/goose/config.yaml"
-mkdir -p "$home/.codex"
-printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
-chmod 0400 "$home/.codex/auth.json"
 run_recipe review-container GH_READY=1 TOOL=codex
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
-assert_not_contains "Goose has no usable provider configuration" "$OUT"
 assert_not_contains "Copilot" "$OUT"
 assert_file_contains "--env AGENT_BACKEND=codex" "$runner_log"
 codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
@@ -646,63 +601,51 @@ assert_file_not_contains "codex-test-secret" "$runner_log"
 assert_file_not_contains "codex-test-secret" "$OUT"
 assert_file_not_exists "$codex_auth_mount"
 assert_file_contains "codex-test-secret" "$home/.codex/auth.json"
-rm -f "$home/.codex/auth.json"
-rmdir "$home/.codex"
-write_goose_config
 
-begin "selection: default Gemini model is noninteractive"
+begin "selection: default profile prints its model and effort noninteractively"
 reset_logs
 run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
-assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
-assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
+assert_contains "✓ model gemini-3.8-flash, reasoning effort max." "$OUT"
 assert_file_not_exists "$cfg_dir/last-selections.env"
 assert_file_not_exists "$cfg_dir/secrets.env"
 assert_eq "$(wc -c <"$gum_log")" 0 "gum must not be invoked"
 
 begin "review-container: thinking-effort overrides are passed through"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
-  GOOSE_THINKING_EFFORT=medium
-assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
+RECIPE_ARGS=(gemini medium)
+run_recipe review-container GH_READY=1
+assert_contains "✓ model gemini-3.8-flash, reasoning effort medium." "$OUT"
 
-begin "review-container: no profile is gemini at max with the provider's own context"
+begin "review-container: no profile is gemini at max effort"
 reset_logs
 run_recipe review-container GH_READY=1
-assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
-assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
+assert_contains "✓ model gemini-3.8-flash, reasoning effort max." "$OUT"
 assert_eq "$(wc -c <"$gum_log")" 0 "a headless run must not invoke gum"
 
-begin "review-container: the opus profile clamps the context window"
+begin "review-container: the opus5 profile is high effort"
 reset_logs
-RECIPE_ARGS=(opus5 high)
+RECIPE_ARGS=(opus5)
 run_recipe review-container GH_READY=1
-assert_file_contains "--env GOOSE_MODEL=claude-opus-5" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
-assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
+assert_contains "✓ model claude-opus-5, reasoning effort high." "$OUT"
 
-begin "review-container: the k3 profile is max effort with a clamped context"
+begin "review-container: the k3 profile is max effort"
 reset_logs
 RECIPE_ARGS=(k3)
 run_recipe review-container GH_READY=1
-assert_file_contains "--env GOOSE_MODEL=kimi-k3" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
-assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
+assert_contains "✓ model kimi-k3, reasoning effort max." "$OUT"
 
-begin "review-container: the sol profile is medium effort with provider context"
+begin "review-container: the sol profile is medium effort"
 reset_logs
-RECIPE_ARGS=(gpt-sol)
+RECIPE_ARGS=(sol)
 run_recipe review-container GH_READY=1
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
-assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
+assert_contains "✓ model gpt-5.6-sol, reasoning effort medium." "$OUT"
 
-begin "review-container: an effort argument overrides the profile default"reset_logs
+begin "review-container: an effort argument overrides the profile default"
+reset_logs
 RECIPE_ARGS=(opus5 max)
 run_recipe review-container GH_READY=1
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
+assert_contains "✓ model claude-opus-5, reasoning effort max." "$OUT"
 
 begin "review-container: an unknown profile is one actionable error"
 reset_logs
@@ -729,14 +672,12 @@ RECIPE_ARGS=("" high)
 run_recipe review-container GH_READY=1 \
   GUM_CHOOSE_RESPONSE=opus5
 assert_eq "$(wc -c <"$gum_log")" 0 "the launcher must never prompt for a model"
-assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
+assert_contains "✓ model gemini-3.8-flash, reasoning effort high." "$OUT"
 
 begin "review-container: maintainer backend choice never changes Hive selection"
 reset_logs
 run_recipe review-container GH_READY=1 BLUEFIN_REVIEW_BACKEND=codex
-assert_file_contains "--env AGENT_BACKEND=goose" "$runner_log"
-assert_file_not_contains "BLUEFIN_REVIEW_BACKEND" "$runner_log"
+assert_file_contains "--env AGENT_BACKEND=codex" "$runner_log"
 
 # ══ 2b. Dashboard: optional Hive URL, GH_TOKEN required, args pass through ═
 begin "review-queue: launches the dashboard without Hive when none is configured"
@@ -748,7 +689,6 @@ mv "$home/.config/hive.saved" "$home/.config/hive"
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--name review-queue" "$runner_log"
 assert_file_contains "queue --repo bluefin" "$runner_log"
-assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
 assert_file_not_contains "BLUEFIN_REVIEW_BACKEND" "$runner_log"
 assert_file_not_contains ".config/hive" "$runner_log"
 assert_file_not_contains "HIVE_HUB" "$runner_log"
@@ -1246,7 +1186,7 @@ begin "review-container cluster: missing Copilot token leaves the Secret unchang
 reset_logs
 RECIPE_ARGS=(cluster)
 run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
-  FAKE_KEYRING_COPILOT_TOKEN=
+  GITHUB_COPILOT_TOKEN=
 assert_nonzero_status "$STATUS" "cluster scale-out without a Copilot token must fail"
 assert_contains "cluster Secret without a Copilot credential" "$OUT"
 assert_file_not_contains "create namespace bluefin-system" "$kubectl_log"
@@ -1302,15 +1242,13 @@ assert_contains "! rollout still progressing after 15s; workers will continue pu
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
 reset_logs
-mv "$home/.config/goose/config.yaml" "$home/.config/goose/config.yaml.saved"
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   BLUEFIN_REVIEW_BACKEND=codex
-mv "$home/.config/goose/config.yaml.saved" "$home/.config/goose/config.yaml"
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--env BLUEFIN_REVIEW_BACKEND=codex" "$runner_log"
-assert_file_not_contains "GOOSE_PROVIDER" "$runner_log"
+
 assert_file_not_contains "GITHUB_COPILOT_TOKEN" "$runner_log"
-assert_not_contains "Goose has no usable provider configuration" "$OUT"
+
 assert_not_contains "Copilot credential" "$OUT"
 
 begin "review-queue: an invalid review backend starts nothing"
@@ -1346,8 +1284,9 @@ reset_logs
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   BLUEFIN_REVIEW_BACKEND=codex
 assert_file_not_contains "/home/dev/.codex" "$runner_log"
-assert_contains "Codex subscription login unavailable" "$OUT"
+assert_contains "Codex subscription login is unavailable" "$OUT"
 
+write_codex_auth
 begin "review-queue: no GitHub token is one actionable error"
 reset_logs
 run_recipe review-queue GH_READY=1
@@ -1367,11 +1306,8 @@ begin "review-queue: a leading profile and effort set the model, flags pass thro
 reset_logs
 RECIPE_ARGS=(k3 high --repo bluefin)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
-assert_file_contains "--env GOOSE_MODEL=kimi-k3" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
-assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
-assert_file_contains "queue --repo bluefin" "$runner_log"
-assert_file_not_contains "queue kimi" "$runner_log"
+assert_file_contains "--env AGENT_MODEL=kimi-k3" "$runner_log"
+assert_file_contains "--env AGENT_REASONING_EFFORT=high" "$runner_log"
 
 begin "review-queue: owner/repo is forwarded as the live repository"
 reset_logs
@@ -1384,7 +1320,7 @@ reset_logs
 RECIPE_ARGS=(gpt-sol medium acme/widgets)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
 assert_file_contains "queue --live-repo acme/widgets" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
+assert_file_contains "--env AGENT_REASONING_EFFORT=medium" "$runner_log"
 
 begin "review-queue: an unknown profile is one actionable error, nothing launches"
 reset_logs
@@ -1399,34 +1335,32 @@ begin "review-queue: flags first means no profile, defaults to gemini at max eff
 reset_logs
 RECIPE_ARGS=(--all)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
-assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
+assert_file_contains "--env AGENT_MODEL=gemini-3.8-flash" "$runner_log"
+assert_file_contains "--env AGENT_REASONING_EFFORT=max" "$runner_log"
 assert_file_contains "queue --all" "$runner_log"
 
 begin "review-queue: explicit sol profile selects structured triage"
 reset_logs
 RECIPE_ARGS=(sol --all)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
-assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
+assert_file_contains "--env AGENT_MODEL=gpt-5.6-sol" "$runner_log"
+assert_file_contains "--env AGENT_REASONING_EFFORT=medium" "$runner_log"
 assert_file_contains "queue --all" "$runner_log"
 
 # ══ 3. Doctor: no failure on a fully provisioned host ═════════════════════
 begin "review-doctor: fully provisioned host exits 0"
 reset_logs
 run_recipe review-doctor GH_READY=1 \
-  FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'repo', 'read:org'" \
-  FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
+  FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'repo', 'read:org'"
 assert_zero_status "$STATUS" "a fully provisioned doctor run must exit 0"
 assert_contains "a GitHub token is available for the container-only agent" "$OUT"
-assert_contains "a Copilot credential is available" "$OUT"
+assert_contains "=== Agent backend (Codex) ===" "$OUT"
 assert_contains "0 failed." "$OUT"
 
 # ══ 4. Container recipe ═══════════════════════════════════════════════════
 begin "review-container: exactly one foreground podman run, hive mounts only"
 reset_logs
-run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-test
+run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
 assert_eq "$(wc -l <"$runner_log")" 1 "expected exactly one podman invocation"
 assert_file_contains "run --rm --interactive --tty --replace --name review-container" "$runner_log"
@@ -1436,9 +1370,7 @@ assert_file_contains "run --rm --interactive --tty --replace --name review-conta
 # anything else from that directory.
 assert_file_not_contains "--volume ${home}/.config/hive:/home/dev/.config/hive" "$runner_log"
 assert_file_contains "--volume ${home}/.config/hive/contributor.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
-assert_file_contains "--env AGENT_BACKEND=goose" "$runner_log"
-assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
-assert_file_contains "--env GOOSE_MODEL=gpt-test" "$runner_log"
+assert_file_contains "--env AGENT_BACKEND=codex" "$runner_log"
 assert_file_contains "ghcr.io/projectbluefin/review" "$runner_log"
 assert_file_not_contains " -d " "$runner_log"
 assert_file_not_contains "--detach" "$runner_log"
@@ -1461,7 +1393,10 @@ begin "contribute: launches the worker in the foreground"
 reset_logs
 run_recipe contribute GH_READY=1
 assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
-assert_file_contains "run --rm --interactive --tty --replace --name review-container" "$runner_log"
+assert_file_contains "run --rm --interactive --tty --replace --name contribute" "$runner_log"
+assert_file_contains "keep-id:uid=65532,gid=65532" "$runner_log"
+assert_file_contains "/home/bluefin/.config/hive/contributor.env:ro,z" "$runner_log"
+assert_file_contains "ghcr.io/projectbluefin/contribute:stable" "$runner_log"
 assert_file_not_contains "--detach" "$runner_log"
 
 begin "review-container: REVIEW_DETACH=1 is rejected"
@@ -1555,7 +1490,7 @@ codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
 assert_nonzero_status "$STATUS" "failed foreground launch must fail"
 assert_file_not_exists "$codex_auth_mount"
 rm -f "$home/.codex/auth.json"
-rmdir "$home/.codex"
+write_codex_auth
 
 begin "review-stop: stops cluster workers by default"
 reset_logs
@@ -1611,14 +1546,14 @@ HIVE_REGISTRATION_TOKEN=named-secret-token
 HIVE_HUB=wss://named-hive.invalid/contribute
 CONTRIBUTOR_ID=test-contributor-named
 CONTRIBUTOR_USERNAME=test-user
-AGENT_BACKEND=goose
+AGENT_BACKEND=codex
 EOF
 chmod 600 "$home/.config/hive/contributor.${repo_registration}.env"
 named_hive_hash="$(sha256sum "$home/.config/hive/contributor.${repo_registration}.env")"
 named_hive_mode="$(stat -c '%a' "$home/.config/hive/contributor.${repo_registration}.env")"
 named_hive_uid="$(stat -c '%u' "$home/.config/hive/contributor.${repo_registration}.env")"
 named_hive_gid="$(stat -c '%g' "$home/.config/hive/contributor.${repo_registration}.env")"
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
+run_recipe review-container GH_READY=1
 assert_file_contains "--volume ${home}/.config/hive/contributor.${repo_registration}.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$home/.config/hive/contributor.env"
 assert_eq "$(sha256sum "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_hash" "selected Hive registration content changed during launch construction"
@@ -1632,7 +1567,7 @@ assert_not_contains "super-secret-registration-token" "$OUT"
 assert_not_contains "named-secret-token" "$OUT"
 assert_file_not_contains "named-secret-token" "$runner_log"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test REVIEW_CONTAINER_NAME=review-container-2
+run_recipe review-container GH_READY=1 REVIEW_CONTAINER_NAME=review-container-2
 assert_file_contains "--replace --name review-container-2 " "$runner_log"
 assert_file_contains "--volume ${home}/.config/hive/contributor.${repo_registration}.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$home/.config/hive/contributor.env"
@@ -1645,14 +1580,14 @@ cp "$default_hive_backup" "$home/.config/hive/contributor.env"
 
 begin "hive selection: no repo registration falls back to the default and says so"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
+run_recipe review-container GH_READY=1
 assert_file_contains "--volume ${home}/.config/hive/contributor.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_contains "hive: wss://example.invalid/contribute (default registration)" "$OUT"
 assert_contains "REVIEW_HIVE=${repo_root##*/}" "$OUT"
 
 begin "hive selection: fallback guidance names a checkout not called review"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
+run_recipe review-container GH_READY=1 \
   FAKE_GIT_TOPLEVEL=/home/maintainer/checkouts/not-review
 assert_contains "hive: wss://example.invalid/contribute (default registration)" "$OUT"
 assert_contains "REVIEW_HIVE=not-review" "$OUT"
@@ -1663,70 +1598,32 @@ reset_logs
 cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.otherhive.env"
 sed -i 's|wss://example.invalid/contribute|wss://other-hive.invalid/contribute|' \
   "$home/.config/hive/contributor.otherhive.env"
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test REVIEW_HIVE=otherhive
+run_recipe review-container GH_READY=1 REVIEW_HIVE=otherhive
 assert_file_contains "--volume ${home}/.config/hive/contributor.otherhive.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_contains "hive: wss://other-hive.invalid/contribute (registration 'otherhive')" "$OUT"
 rm -f "$home/.config/hive/contributor.otherhive.env"
 
 begin "hive selection: an invalid REVIEW_HIVE is one actionable error"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test REVIEW_HIVE='bad;name'
+run_recipe review-container GH_READY=1 REVIEW_HIVE='bad;name'
 assert_nonzero_status "$STATUS" "an invalid REVIEW_HIVE must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "REVIEW_HIVE='bad;name' is not a valid registration name" "$OUT"
 
 begin "hive selection: an unregistered REVIEW_HIVE names the fix when unattended"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test REVIEW_HIVE=unregistered
+run_recipe review-container GH_READY=1 REVIEW_HIVE=unregistered
 assert_nonzero_status "$STATUS" "an unregistered REVIEW_HIVE cannot register without a terminal"
 assert_contains "no hive registration named 'unregistered'" "$OUT"
 assert_contains "REVIEW_HIVE=unregistered just review-container" "$OUT"
 assert_file_not_exists "$home/.config/hive/contributor.unregistered.env"
-
-begin "review-container: the Copilot credential is passed, never a gh token"
-# Without this the agent starts a fresh device flow on every launch and the
-# pane sits on "enter code XXXX-XXXX" until a human types one in.
-reset_logs
-run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-4o \
-  GITHUB_COPILOT_TOKEN=ghu-test-token
-assert_contains "Copilot credential passed" "$OUT"
-assert_file_contains "--env GITHUB_COPILOT_TOKEN" "$runner_log"
-assert_file_not_contains "GITHUB_COPILOT_TOKEN=ghu-test-token" "$runner_log"
-assert_file_contains "GITHUB_COPILOT_TOKEN:present" "$credential_log"
-
-begin "review-container: the credential is read from the login keyring when unexported"
-reset_logs
-run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-4o \
-  FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
-assert_contains "Copilot credential passed" "$OUT"
-assert_file_contains "--env GITHUB_COPILOT_TOKEN" "$runner_log"
-assert_file_not_contains "GITHUB_COPILOT_TOKEN=ghu-keyring-token" "$runner_log"
-assert_file_contains "GITHUB_COPILOT_TOKEN:present" "$credential_log"
-assert_not_contains "ghu-keyring-token" "$OUT"
-
-begin "review-container: no credential refuses the launch and names the fix"
-reset_logs
-run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-4o \
-  FAKE_KEYRING_COPILOT_TOKEN=
-assert_nonzero_status "$STATUS" "a credential-less contributor launch must refuse"
-assert_contains "no Copilot credential found" "$OUT"
-assert_contains "Provider is not configured" "$OUT"
-assert_contains "gh auth token' is NOT a substitute" "$OUT"
-assert_contains "goose configure" "$OUT"
-assert_file_not_contains "GITHUB_COPILOT_TOKEN=" "$runner_log"
-# Refusal means refusal: no contributor container may start only to have
-# every claimed Hive task die on an unconfigured provider.
-assert_file_not_contains "run" "$runner_log"
 
 begin "review-container: a GitHub identity is inherited, never mounted"
 # Without GH_TOKEN the agent picks up a task, runs gh, is told to 'gh auth
 # login' (which the Hive wrapper blocks in contributor mode) and stops.
 reset_logs
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-4o \
+  \
   FAKE_GH_TOKEN=gho-test-token
 assert_contains "GitHub identity passed to the agent" "$OUT"
 assert_file_contains "--env GH_TOKEN" "$runner_log"
@@ -1740,7 +1637,7 @@ assert_not_contains "gho-test-token" "$OUT"
 begin "review-container: the blast radius is named, the token is not"
 reset_logs
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-4o \
+  \
   FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'admin:org', 'repo', 'workflow'"
 assert_contains "admin:org" "$OUT"
 assert_contains "REVIEW_GH_TOKEN" "$OUT"
@@ -1749,7 +1646,7 @@ assert_not_contains "gho-test-token" "$OUT"
 begin "review-container: an explicit scoped PAT beats the desktop login"
 reset_logs
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-4o \
+  \
   FAKE_GH_TOKEN=gho-desktop-token REVIEW_GH_TOKEN=gho-scoped-pat
 assert_file_contains "--env GH_TOKEN" "$runner_log"
 assert_file_not_contains "GH_TOKEN=gho-scoped-pat" "$runner_log"
@@ -1758,8 +1655,8 @@ assert_file_not_contains "gho-desktop-token" "$runner_log"
 
 begin "review-container: no GitHub token says so plainly and names the fix"
 reset_logs
-run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-4o
+run_recipe review-container GH_READY=1
+
 assert_contains "no GitHub token found" "$OUT"
 assert_contains "gh auth login" "$OUT"
 assert_file_not_contains "GH_TOKEN=" "$runner_log"
@@ -1767,7 +1664,7 @@ assert_file_not_contains "GH_TOKEN=" "$runner_log"
 begin "review-container: an unobtainable image is one actionable error"
 reset_logs
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-test \
+  \
   FAKE_PODMAN_IMAGE_MISSING=1
 assert_nonzero_status "$STATUS" "an unobtainable contributor image must fail the run"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR line"
@@ -1782,7 +1679,7 @@ begin "review-container: an immutable reference is not re-pulled"
 # work on every launch; only moving tags need the pull.
 reset_logs
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-test \
+  \
   REVIEW_CONTRIBUTOR_IMAGE=ghcr.io/projectbluefin/review-contributor:sha-deadbeef
 assert_file_contains "image exists" "$image_log"
 assert_file_not_contains "pull" "$image_log"
@@ -1792,7 +1689,7 @@ begin "review-container: an orphaned run is reclaimed without a second command"
 # the launch takes the name back instead of demanding manual cleanup.
 reset_logs
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-test \
+  \
   FAKE_PODMAN_RUNNING=1
 assert_contains "reclaiming" "$OUT"
 assert_not_contains "ERROR:" "$OUT"
@@ -1809,7 +1706,7 @@ boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
 
 begin "review-container: every launch records an ownership marker"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
+run_recipe review-container GH_READY=1
 assert_file_contains "--label review.owner=${boot_id}:" "$runner_log"
 
 begin "review-container: a marked run with a live owner is never replaced"
@@ -1821,7 +1718,7 @@ reset_logs
 bash -c 'trap "exit 0" TERM; sleep 30' --name review-container &
 owner_pid=$!
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-test \
+  \
   FAKE_PODMAN_RUNNING=1 \
   "FAKE_PODMAN_OWNER_LABEL=${boot_id}:${owner_pid}"
 kill "$owner_pid" 2>/dev/null || true
@@ -1842,7 +1739,7 @@ begin "review-container: a marked run whose owner is gone is reclaimed"
 reset_logs
 dead_owner="$(bash -c 'echo $$')"
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-test \
+  \
   FAKE_PODMAN_RUNNING=1 \
   "FAKE_PODMAN_OWNER_LABEL=${boot_id}:${dead_owner}"
 assert_contains "reclaiming" "$OUT"
@@ -1852,7 +1749,7 @@ assert_file_contains "--replace --name review-container" "$runner_log"
 begin "review-container: a marker from a previous boot is never trusted"
 reset_logs
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-test \
+  \
   FAKE_PODMAN_RUNNING=1 \
   "FAKE_PODMAN_OWNER_LABEL=00000000-0000-0000-0000-000000000000:1"
 assert_contains "reclaiming" "$OUT"
@@ -1865,7 +1762,7 @@ begin "review-container: an unmarked running container is an orphan, never a liv
 # unmarked container cannot have survived this boot with an owner.
 reset_logs
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-test \
+  \
   FAKE_PODMAN_RUNNING=1
 assert_contains "reclaiming" "$OUT"
 assert_not_contains "press Ctrl-C in the terminal that owns it." "$OUT"
@@ -1877,14 +1774,14 @@ assert_not_contains "press Ctrl-C in the terminal that owns it." "$OUT"
 
 begin "review-container: the default name is unchanged when the override is unset"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
+run_recipe review-container GH_READY=1
 assert_file_contains "--replace --name review-container " "$runner_log"
 assert_file_contains "--env REVIEW_CONTAINER_NAME=review-container" "$runner_log"
 assert_contains "podman exec -it review-container tmux attach" "$OUT"
 
 begin "review-container: REVIEW_CONTAINER_NAME runs a second, differently-named instance"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
+run_recipe review-container GH_READY=1 \
   REVIEW_CONTAINER_NAME=review-container-2
 assert_eq "$(wc -l <"$runner_log")" 1 "expected exactly one podman invocation"
 assert_file_contains "--replace --name review-container-2 " "$runner_log"
@@ -1897,7 +1794,7 @@ assert_contains "podman exec -it review-container-2 tmux attach" "$OUT"
 
 begin "review-container: an invalid REVIEW_CONTAINER_NAME is one actionable error"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
+run_recipe review-container GH_READY=1 \
   'REVIEW_CONTAINER_NAME=-bad name; rm -rf /'
 assert_nonzero_status "$STATUS" "an invalid container name must stop the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
@@ -1906,7 +1803,7 @@ assert_eq "$(wc -c <"$runner_log")" 0 "an invalid name must never reach podman"
 
 begin "review-container: orphan reclaim is per-name"
 reset_logs
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
+run_recipe review-container GH_READY=1 \
   REVIEW_CONTAINER_NAME=review-container-2 \
   FAKE_PODMAN_RUNNING=1
 assert_contains "reclaiming review-container-2" "$OUT"
@@ -1919,7 +1816,7 @@ begin "review-container: a named instance with a live owner is never replaced"
 reset_logs
 bash -c 'trap "exit 0" TERM; sleep 30' --name review-container-2 &
 named_owner_pid=$!
-run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
+run_recipe review-container GH_READY=1 \
   REVIEW_CONTAINER_NAME=review-container-2 \
   FAKE_PODMAN_RUNNING=1 \
   "FAKE_PODMAN_OWNER_LABEL=${boot_id}:${named_owner_pid}"
@@ -1933,57 +1830,32 @@ assert_contains "pid ${named_owner_pid}" "$OUT"
 assert_eq "$(wc -c <"$runner_log")" 0 "a live session must never be replaced"
 
 # ══ Doctor is read-only ═══════════════════════════════════════════════════
-begin "review-doctor: read-only, Goose-only diagnostics"
+begin "review-doctor: read-only, Codex diagnostics"
 reset_logs
 run_recipe review-doctor GH_READY=1
-assert_contains "Agent backend (Goose)" "$OUT"
+assert_contains "Agent backend (Codex)" "$OUT"
 assert_not_contains "claude" "$OUT"
-assert_not_contains "Agent backend (Codex)" "$OUT"
 
 assert_file_not_contains "run --rm" "$runner_log"
-
-begin "review-doctor: rejects an unsupported provider"
-reset_logs
-run_recipe review-doctor GH_READY=1 GOOSE_PROVIDER=ollama
-assert_nonzero_status "$STATUS" "an unsupported provider must fail doctor"
-assert_contains "GOOSE_PROVIDER=ollama is not supported" "$OUT"
-begin "review-doctor: reports a usable Copilot credential without printing it"
-reset_logs
-run_recipe review-doctor GH_READY=1 \
-  FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
-assert_contains "Copilot credential" "$OUT"
-assert_contains "a Copilot credential is available" "$OUT"
-assert_not_contains "ghu-keyring-token" "$OUT"
-
-assert_file_not_contains "run --rm" "$runner_log"
-
-begin "review-doctor: a missing Copilot credential is a failed check with the fix"
-reset_logs
-run_recipe review-doctor GH_READY=1 FAKE_KEYRING_COPILOT_TOKEN=
-assert_nonzero_status "$STATUS" "a missing Copilot credential must fail the doctor"
-assert_contains "no Copilot credential is available" "$OUT"
-assert_contains "gh auth token' is NOT a substitute" "$OUT"
-assert_contains "goose configure" "$OUT"
 
 begin "review-doctor: a stale AGENT_BACKEND is a warning, and the file is left alone"
-# Harmless (the launcher passes AGENT_BACKEND=goose itself) but misleading to
-# anyone who reads contributor.env, so it is reported, never rewritten.
+# Harmless (the launcher always selects AGENT_BACKEND=codex itself) but
+# misleading to anyone who reads contributor.env, so it is reported, never
+# rewritten.
 reset_logs
 backend_backup="$scratch/contributor.env.bak"
 cp "$home/.config/hive/contributor.env" "$backend_backup"
 sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=copilot/' "$home/.config/hive/contributor.env"
-run_recipe review-doctor GH_READY=1 \
-  FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
+run_recipe review-doctor GH_READY=1
 assert_contains "AGENT_BACKEND=copilot" "$OUT"
-assert_contains "selected backend is goose" "$OUT"
+assert_contains "selected backend is codex" "$OUT"
 assert_contains "will not rewrite Hive's saved backend selection" "$OUT"
 assert_file_contains "AGENT_BACKEND=copilot" "$home/.config/hive/contributor.env"
 cp "$backend_backup" "$home/.config/hive/contributor.env"
 
 begin "review-doctor: a matching AGENT_BACKEND raises no warning"
 reset_logs
-run_recipe review-doctor GH_READY=1 \
-  FAKE_KEYRING_COPILOT_TOKEN=ghu-keyring-token
+run_recipe review-doctor GH_READY=1
 assert_not_contains "selected backend is" "$OUT"
 
 begin "review-doctor: reports the agent's GitHub token and its scopes, not its value"
@@ -2030,10 +1902,10 @@ fi
 if grep -nE '(^|[^[:alnum:]_])(nohup|setsid)([^[:alnum:]_]|$)' "$code"; then
   fail "nohup/setsid must never appear on a launch path"
 fi
-assert_eq "$(grep -cE 'podman run --rm --interactive --tty' "$code")" 2 \
-  "expected exactly two foreground podman run sites (contributor container and queue walk)"
+assert_eq "$(grep -cE 'podman run --rm --interactive --tty' "$code")" 3 \
+  "expected three foreground podman run sites (compatibility contributor, contribute, queue)"
 # A stale container from a hard-killed terminal must never block a relaunch.
-assert_eq "$(grep -cE 'podman run --rm --interactive --tty --replace --name' "$code")" 2 \
+assert_eq "$(grep -cE 'podman run --rm --interactive --tty --replace --name' "$code")" 3 \
   "every named foreground run must reclaim its name with --replace"
 begin "static: a launch cannot detach through an option form or a second line"
 # The greps above read one physical line at a time and only recognise a
@@ -2175,7 +2047,7 @@ fi
 grep -q 'must be a full 40-character commit SHA' "$code" ||
   fail "the Hive checkout must remain pinned to a full commit SHA"
 begin "static: no legacy backends survive in the launcher"
-for legacy in copilot_live_models 'Multiple AI CLIs' LAST_TOOL AGENT_MODEL=; do
+for legacy in copilot_live_models 'Multiple AI CLIs' LAST_TOOL; do
   if grep -Fn -- "$legacy" "$code"; then
     fail "legacy backend leftover found: $legacy"
   fi
@@ -2207,7 +2079,7 @@ grep -Fq 'id -u' <<<"$cleanup_body" ||
   fail "Codex cleanup must compare ownership with the invoking UID"
 
 begin "static: cluster scale-out validates Hive before mutation and scrubs secret metadata"
-cluster_body="$(sed -n '/^scale_cluster_contributors()/,/^stop_cluster_contributors()/p' "$code")"
+cluster_body="$(sed -n '/^scale_cluster_contributors()/,/^}/p' "$code")"
 hub_guard_line="$(grep -nF "if ! valid_hive_hub \"\$hub\"; then" <<<"$cluster_body" | cut -d: -f1)"
 namespace_line="$(grep -nF 'kubectl create namespace bluefin-system' <<<"$cluster_body" | cut -d: -f1)"
 if [[ -z "$hub_guard_line" || -z "$namespace_line" || "$hub_guard_line" -ge "$namespace_line" ]]; then

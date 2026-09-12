@@ -15,7 +15,7 @@ import { GLYPH, SPINNER_TICK_MS, type Painter, formatDuration, statusIcon, statu
 import type { QueueItem } from "./github.ts";
 import { type KeyMatcher, canonicalKey, rawKeyMatcher } from "./keys.ts";
 import { type ReviewMode, ciGlyph } from "./mode.ts";
-import { type RailKey, keymapBar, orderSourceLabel, priorityChip } from "./rail.ts";
+import { type RailKey, keymapBar, orderSourceLabel, priorityChip, tmuxReviewStatusBar } from "./rail.ts";
 import { type RenderedRow, type Span, findSpan, hasChildren, renderSpanTree, visibleSpanIds } from "./trace.ts";
 import { fitToWidth, truncateToWidth } from "./width.ts";
 import { BLUEFIN_RAPTOR_BANNER, renderRaptorGlyph } from "./mascot.ts";
@@ -33,23 +33,23 @@ export type DashboardAction =
 	| { kind: "leaderboard" };
 
 export const DASHBOARD_KEYS: readonly RailKey[] = [
+	{ chord: "s", label: "autoslay" },
+	{ chord: "r/enter", label: "review" },
+	{ chord: "a", label: "approve" },
 	{ chord: "space", label: "select" },
+	{ chord: "A", label: "all" },
 	{ chord: "x", label: "clear" },
 	{ chord: "j/k", label: "move" },
-	{ chord: "A", label: "select all" },
 	{ chord: "tab", label: "pane" },
 	{ chord: "h/l", label: "fold" },
 	{ chord: "i", label: "prs/issues" },
-	{ chord: "H", label: "hive-only" },
-	{ chord: "L", label: "hive stage" },
-	{ chord: "enter/r", label: "review" },
+	{ chord: "H", label: "hive" },
+	{ chord: "L", label: "stage" },
 	{ chord: "d", label: "diff" },
 	{ chord: "D", label: "docs" },
-	{ chord: "a", label: "approve" },
 	{ chord: "f", label: "fix" },
-	{ chord: "s", label: "slay" },
 	{ chord: "y", label: "cite" },
-	{ chord: "*", label: "leaderboard" },
+	{ chord: "*", label: "leaders" },
 	{ chord: "o", label: "repo" },
 	{ chord: "/", label: "filter" },
 	{ chord: "q", label: "close" },
@@ -69,7 +69,8 @@ const HELP: readonly string[] = [
 	"  L                step through Hive's triage stages, then back to all",
 	"  o                review another repository (owner/repo)",
 	"  u                refetch the queue now",
-	"  /                filter by title, repo, author, label, number",
+	"  /                search/filter by title, repo, author, label, number",
+	"                   (in search: type to live-filter, tab/space to select, A to select all)",
 	"  enter / r        review the selected pull request",
 	"  d                inspect its bounded diff",
 	"  D                update documentation enforcing agentic docs system",
@@ -280,15 +281,23 @@ export class ReviewDashboard {
 			case "f":
 				this.done({ kind: "fix", item, items });
 				return;
-			case "s":
-				this.done({ kind: "slay", item, items });
+			case "s": {
+				const slayable = this.mode.slayableItems();
+				const batch = chosenItems.length > 0 ? chosenItems : (slayable.length > 0 ? slayable.slice(0, 7) : undefined);
+				const targetItem = batch && batch.length > 0 ? batch[0]! : activeItem;
+				this.done({ kind: "slay", item: targetItem, items: batch && batch.length > 1 ? batch : undefined });
 				return;
+			}
 			case "y":
 				this.done({ kind: "reference", item, items });
 				return;
 			default:
 				break;
 		}
+	}
+
+	private activeItems(): QueueItem[] {
+		return this.mode.visibleItems();
 	}
 
 	private handleFilterInput(key: string, data: string): void {
@@ -302,13 +311,35 @@ export class ReviewDashboard {
 			this.queueScroll = 0;
 			return;
 		}
+		if (key === "tab") {
+			// Tab in search mode toggles selection on the currently highlighted item
+			this.toggleSelection();
+			return;
+		}
+		if (key === "down") {
+			this.move(1);
+			return;
+		}
+		if (key === "up") {
+			this.move(-1);
+			return;
+		}
+		if (key === "A") {
+			this.mode.selectAllVisible();
+			return;
+		}
 		if (key === "backspace") {
 			this.filterDraft = this.filterDraft.slice(0, -1);
 			return;
 		}
-		if (data.length === 1 && data.charCodeAt(0) >= 32) this.filterDraft += data;
+		if (data === " " || key === "space") {
+			this.filterDraft += " ";
+			return;
+		}
+		if (data.length === 1 && data.charCodeAt(0) >= 32) {
+			this.filterDraft += data;
+		}
 	}
-
 	private move(delta: number): void {
 		if (this.pane === "queue") {
 			this.mode.move(delta);
@@ -374,7 +405,7 @@ export class ReviewDashboard {
 	}
 
 	private queueRows(width: number, height: number): string[] {
-		const items = this.mode.visibleItems();
+		const items = this.activeItems();
 		const rows: string[] = [];
 		if (items.length === 0) {
 			let emptyMsg: string;
@@ -390,8 +421,19 @@ export class ReviewDashboard {
 		}
 
 		this.queueScroll = clampScroll(this.mode.cursor, this.queueScroll, height);
+		let lastRepo: string | undefined;
 		for (let i = this.queueScroll; i < Math.min(items.length, this.queueScroll + height); i++) {
 			const item = items[i]!;
+			// For issue queues or multi-repo queues, delineate transitions between repositories
+			if (item.repo !== lastRepo) {
+				if (lastRepo !== undefined && rows.length < height) {
+					const divider = `─── ${item.repo} `.padEnd(width, "─");
+					rows.push(truncateToWidth(this.painter.fg("dim", divider), width));
+				}
+				lastRepo = item.repo;
+			}
+			if (rows.length >= height) break;
+
 			const active = i === this.mode.cursor;
 			const isChecked = this.mode.selectedKeys.has(`${item.repo}#${item.id}`);
 			const check = isChecked ? this.painter.fg("accent", "☒") : this.painter.fg("dim", "☐");
@@ -482,7 +524,14 @@ export class ReviewDashboard {
 				),
 			);
 		}
-		if (work && !work.pr && answering.length === 0) {
+		if (item.type === "issue" && item.closedByPrs && item.closedByPrs.length > 0) {
+			rows.push(
+				truncateToWidth(
+					`  ${this.painter.fg("accent", "merged PR:")} ${this.painter.fg("warning", item.closedByPrs.join(", "))} ${this.painter.fg("dim", "(slay to verify and close)")}`,
+					width,
+				),
+			);
+		} else if (work && !work.pr && answering.length === 0) {
 			rows.push(truncateToWidth(this.painter.fg("dim", "  no open change closes this yet"), width));
 		}
 		rows.push("");
@@ -574,17 +623,14 @@ export class ReviewDashboard {
 			lines.push(...this.traceRows(width, bodyHeight - queueHeight - 2, now));
 		}
 		if (this.filtering) {
-			lines.push(
-				truncateToWidth(
-					`${this.painter.fg("accent", "filter")} ${this.painter.fg("text", this.filterDraft)}${this.painter.inverse(" ")}`,
-					width,
-				),
-			);
+			const searchPrompt = `${this.painter.fg("accent", "search")} ${this.painter.fg("text", this.filterDraft)}${this.painter.inverse(" ")}`;
+			const hints = this.painter.fg("dim", "  (tab/space: select · ↑/↓: navigate · A: select all · enter: done · esc: cancel)");
+			lines.push(truncateToWidth(`${searchPrompt}${hints}`, width));
 		} else if (this.mode.filter) {
-			lines.push(truncateToWidth(this.painter.fg("dim", `filter: ${this.mode.filter}  (/ to change)`), width));
+			lines.push(truncateToWidth(this.painter.fg("dim", `filter: ${this.mode.filter}  (/ to search · esc/clear to reset)`), width));
 		}
-
 		lines.push(keymapBar(this.painter, DASHBOARD_KEYS, width));
+		lines.push(tmuxReviewStatusBar(this.mode, this.painter, width, now));
 		return lines;
 	}
 

@@ -17,7 +17,7 @@ from tui.review_result import ReviewResult
 from tui.review_run import ReviewRun
 
 
-def make_run(base="a" * 40, head="b" * 40, model="gemini-3.8-flash", backend="goose", effort="high", pr=372):
+def make_run(base="a" * 40, head="b" * 40, model="gemini-3.8-flash", backend="omp", effort="high", pr=372):
     request = ReviewRequest(
         "projectbluefin", "review", pr, base, head,
         "maintainer", "review", generated_at="test",

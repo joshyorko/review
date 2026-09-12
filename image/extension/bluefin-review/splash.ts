@@ -122,16 +122,15 @@ export class BluefinAnsiSplash {
 		}
 
 		rows.push(padRow(""));
-		rows.push(padRow(`  ${DIM}SYNC:${RST} ${ACC}${busFill}${RST}  ${DIM}CONNECTING TO HIVE...${RST}`));
+		rows.push(padRow(`  ${TXT}KEYBOARD SHORTCUTS:${RST}`));
+		rows.push(padRow(`    ${ACC}alt+s${RST} ${DIM}autoslay (Hive priority)${RST}  ${ACC}alt+b${RST} ${DIM}dashboard${RST}`));
+		rows.push(padRow(`    ${ACC}alt+j/k${RST} ${DIM}next / prev${RST}              ${ACC}alt+x${RST} ${DIM}toggle select${RST}`));
+		rows.push(padRow(`    ${ACC}alt+i${RST} ${DIM}prs <-> issues${RST}            ${ACC}alt+u${RST} ${DIM}refresh queue${RST}`));
+		rows.push(padRow(`    ${ACC}alt+y${RST} ${DIM}cite selection${RST}            ${ACC}alt+o${RST} ${DIM}scope repo${RST}`));
 		rows.push(padRow(""));
-		rows.push(padRow(`  ${DIM}Press any key to enter...${RST}`));
+		rows.push(padRow(`  ${DIM}SYNC:${RST} ${ACC}${busFill}${RST}  ${DIM}CONNECTING TO HIVE...${RST}`));
+		rows.push(padRow(`  ${DIM}Press any key or wait to open dashboard...${RST}`));
 		rows.push(`${BRD}╰${"─".repeat(innerW + 2)}╯${RST}`);
-		rows.push(padRow("", 0));
-		rows.push(padRow(`  ${DIM}SYNC:${RST} ${ACC}${busFill}${RST}  ${DIM}CONNECTING TO HIVE...${RST}`, 44));
-		rows.push(padRow("", 0));
-		rows.push(padRow(`  ${DIM}Press any key to enter...${RST}`, 27));
-		rows.push(`${BRD}╰${"─".repeat(innerW + 2)}╯${RST}`);
-
 		return rows.map((line) => truncateToWidth(line, width));
 	}
 

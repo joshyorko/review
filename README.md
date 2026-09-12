@@ -7,14 +7,34 @@ Bluefin Review brings the evidence and actions into one dashboard. You choose
 what to review and what to merge; GitHub permissions and branch protections
 still apply.
 
-[Quick start](#quick-start) · [Using the dashboard](#using-the-dashboard) · [Run a worker](#run-a-worker) · [Guides](#guides)
+## Installation
+
+Install `bluefin-contributor-tools` in one command from the [Universal Blue experimental tap](https://github.com/ublue-os/homebrew-experimental-tap), which automatically trusts the formula:
+
+```bash
+brew install ublue-os/experimental-tap/bluefin-contributor-tools
+```
+
+This installs the `bluefin` CLI with both `review` and `contribute` subcommands (as well as `bluefin-contribute`):
+
+```bash
+# Review pull requests and inspect CI failures
+bluefin review
+
+# Run an isolated Hive contributor worker
+bluefin contribute
+```
+
+> **Note:** `bluefin` requires [Apptainer](https://apptainer.org/docs/admin/main/installation.html) and the corresponding container SIF images (`BLUEFIN_REVIEW_SIF` and `BLUEFIN_CONTRIBUTE_SIF`).
+
+[Installation](#installation) · [Quick start](#quick-start) · [Using the dashboard](#using-the-dashboard) · [Run a worker](#run-a-worker) · [Guides](#guides)
 
 ## Quick start
 
 You need **Linux, rootless Podman, Git, `just`, and GitHub CLI (`gh`)**.
-For the default Goose backend, the launcher requires `goose` installed on your
-host (`goose configure` with GitHub Copilot). Codex uses host credential storage
-(`codex login`). In contrast, the distroless appliance recipes
+For `review-container` (Codex-only), the launcher requires host credential storage
+(`codex login`). For `review-queue`, OMP is the default review backend.
+In contrast, the distroless appliance recipes
 (`just review-appliance`, `just review-appliance-build`) need nothing on the host
 besides the container engine and Git credentials.
 
@@ -27,11 +47,9 @@ gh auth login --web --hostname github.com --scopes repo,read:org
 ```
 
 ### 2. Choose one review backend
+**OMP — the review-queue default**
 
-**Goose + GitHub Copilot — the default**
-
-If you have not configured it, install Goose on your host and run
-`goose configure`, selecting GitHub Copilot. Then launch:
+OMP runs directly inside the container:
 
 ```bash
 just review-queue
@@ -45,10 +63,15 @@ Complete `codex login` on your host using file credential storage, then launch:
 BLUEFIN_REVIEW_BACKEND=codex just review-queue
 ```
 
-Codex selection does not require Goose or a Copilot credential on the host.
+For running a compatibility contributor worker, `review-container` uses Codex:
+
+```bash
+just review-container
+```
+
 A GitHub CLI login alone does **not** authenticate either review backend.
 See the [launcher guide](docs/skills/launcher.md) for authentication setup,
-model profiles, and troubleshooting. For the default Goose setup,
+model profiles, and troubleshooting.
 `just review-doctor` checks readiness without starting an agent.
 
 **Bluefin Review appliance — one container, nothing else**
@@ -116,7 +139,7 @@ also ships the `bluefin-doctrine` and `bluefin-ci-triage` task agents.
 
 The commands above open the whole Project Bluefin queue. To narrow it, append
 a repository—for example, `just review-queue projectbluefin/review`.
-The Goose and Codex launchers pull `ghcr.io/projectbluefin/review-contributor:stable`,
+The launcher pulls `ghcr.io/projectbluefin/review-contributor:stable`,
 the contributor image that carries the Textual dashboard and the Hive worker; no
 local image build is required. Opening the dashboard does not start a review.
 
@@ -151,12 +174,26 @@ dispatches—not agents already running. See [batch landing](docs/skills/landing
 
 ## Run a worker
 
-This is a separate mode: **Hive assigns contributor work; the dashboard is for
-human review.** Choose one worker backend:
+This is a separate mode: **Hive assigns contributor work; the dashboard is for human review.** The isolated OMP worker uses an explicit OMP model profile:
 
 ```bash
-just contribute                         # default Goose worker (TOOL=goose)
-TOOL=codex just review-container         # Codex contributor worker
+CONTRIBUTE_IMAGE=contribute:stable just contribute          # GitHub Copilot Gemini
+CONTRIBUTE_IMAGE=contribute:stable just contribute luna     # GPT-5.6 Luna
+CONTRIBUTE_IMAGE=contribute:stable just contribute opus5    # Claude Opus 5
+CONTRIBUTE_IMAGE=contribute:stable just contribute sol      # GPT-5.6 Sol
+```
+
+`review-container` remains the compatibility Codex worker path.
+
+Run the locally built SIF without binding the host home; `--writable-tmpfs` provides the disposable runtime state OMP, tmux, and Hive need:
+
+```bash
+export AGENT_MODEL=github-copilot/gpt-5.6-luna
+export COPILOT_GITHUB_TOKEN
+export GH_TOKEN
+apptainer run --writable-tmpfs --no-home \
+  --bind "$HOME/.config/hive/contributor.env:/home/bluefin/.config/hive/contributor.env:ro" \
+  ./bluefin-contribute.sif
 ```
 
 Keep the launching terminal open. **Ctrl-C stops the attended worker.**
@@ -188,7 +225,7 @@ is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 <details>
 <summary>Image provenance</summary>
 
-The image layers the pinned Hive runtime at `eb37e0a7db5f1526632f399f395b2c3eabe040ed`.
+The compatibility image layers the pinned Hive runtime at `ebd5db6adf95c2eceb77c1a4376f137af0836d4b`. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker; the review appliance remains the maintainer-facing OMP image.
 See [image architecture and validation](docs/image-and-development.md).
 
 </details>

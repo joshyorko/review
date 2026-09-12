@@ -23,7 +23,7 @@ import { EMPTY_HIVE, buildRankMap, fetchHive, resolveHub } from "../image/extens
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode } from "../image/extension/bluefin-review/mode.ts";
 import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts";
-import { STALE_AFTER_MS, queueAge, renderHitlist, renderRail, statusSegment } from "../image/extension/bluefin-review/rail.ts";
+import { STALE_AFTER_MS, queueAge, renderHitlist, renderRail, statusSegment, tmuxReviewStatusBar } from "../image/extension/bluefin-review/rail.ts";
 import { SessionTrace } from "../image/extension/bluefin-review/session.ts";
 import { BluefinAnsiSplash } from "../image/extension/bluefin-review/splash.ts";
 import { STATE_ENTRY, actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
@@ -280,11 +280,15 @@ function fakeCtx() {
 		statuses,
 		widgets,
 		overlays,
+		footers: [] as Array<unknown>,
 		pasted: [],
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
 			setStatus: (key, value) => statuses.set(key, value),
 			setWidget: (key, content) => widgets.set(key, content),
+			setFooter(factory) {
+				this.parent.footers.push(factory);
+			},
 			setTitle: () => {},
 			pasteToEditor(text) {
 				this.parent.pasted.push(text);
@@ -653,6 +657,45 @@ test("scope refresh discards stale Hive backfill responses", async () => {
 });
 
 
+test("issue queue fetch maps merged closedByPullRequestsReferences into closedByPrs", async () => {
+	const issueFetch = async () => ({
+		ok: true,
+		status: 200,
+		statusText: "OK",
+		json: async () => ({
+			data: {
+				search: {
+					pageInfo: { hasNextPage: false, endCursor: null },
+					nodes: [
+						{
+							number: 1130,
+							title: "Cache Maintenance fails on jq syntax error",
+							url: "https://github.com/projectbluefin/bluefin/issues/1130",
+							updatedAt: new Date(NOW - 1000).toISOString(),
+							author: { login: "hive" },
+							repository: { nameWithOwner: "projectbluefin/bluefin" },
+							labels: { nodes: [] },
+							closedByPullRequestsReferences: {
+								nodes: [
+									{
+										number: 1203,
+										state: "MERGED",
+										merged: true,
+										repository: { nameWithOwner: "projectbluefin/bluefin" },
+									},
+								],
+							},
+						},
+					],
+				},
+			},
+		}),
+	});
+	const res = await fetchQueue("issues", { token: "t", fetchImpl: issueFetch });
+	assert.equal(res.items.length, 1);
+	assert.deepEqual(res.items[0].closedByPrs, ["projectbluefin/bluefin#1203"]);
+});
+
 test("diff fetch is bounded but honest about it", async () => {
 	const diff = await fetchDiff("projectbluefin/review", 42, { token: "t", fetchImpl: fakeFetch([]), maxPatchChars: 100 });
 	assert.equal(diff.totalFiles, 2);
@@ -728,6 +771,11 @@ test("mode ranks, filters, moves, and keeps the selection across a refetch", asy
 	mode.setFilter("fix-ci");
 	assert.equal(mode.selected().id, 42, "the category is part of the filter surface");
 	mode.setFilter("");
+	mode.skipRepos.add("other");
+	assert.equal(mode.visibleItems().length, 1);
+	assert.equal(mode.selected().id, 42, "skipped repo items are filtered out");
+	mode.skipRepos.clear();
+	assert.equal(mode.visibleItems().length, 2);
 
 	assert.deepEqual(mode.ciTally(), { success: 1, failure: 1, pending: 0, unknown: 0 });
 });
@@ -749,13 +797,22 @@ test("rail renders the queue, the pipeline, and the keymap within width", (t) =>
 	assert.ok(multiRows[0].includes("⬢ bluefin"));
 	assert.ok(multiRows[1].includes("projectbluefin/review#42"));
 	assert.ok(multiRows.some((row) => row.includes("landing")), "the rail shows live pipeline stages");
-	assert.ok(multiRows[multiRows.length - 1].includes("alt+b"));
+	assert.ok(multiRows.some((row) => row.includes("alt+b")));
+	assert.ok(multiRows[multiRows.length - 1].includes("BLUEFIN"), "tmux status bar is at the very bottom");
 	for (const row of multiRows) assert.ok(visibleWidth(row) <= 100);
 
 	assert.match(statusSegment(mode, PLAIN_PAINTER, NOW), /PR 1\/1 #42/);
 	mode.selectedKeys.add("projectbluefin/review#42");
 	assert.match(statusSegment(mode, PLAIN_PAINTER, NOW), /PR \[1 sel\] 1\/1 #42/);
 	mode.selectedKeys.clear();
+
+	mode.hive = { ...mode.hive, workers: "2/15", reviewers: "2/15" };
+	const tmuxBar = tmuxReviewStatusBar(mode, PLAIN_PAINTER, 150, NOW);
+	assert.ok(tmuxBar.includes("BLUEFIN") && tmuxBar.includes("review"));
+	assert.ok(tmuxBar.includes("Task:") && tmuxBar.includes("#42"));
+	assert.ok(tmuxBar.includes("Issues:") && tmuxBar.includes("PRs:"));
+	assert.ok(tmuxBar.includes("Workers:") && tmuxBar.includes("2/15"));
+	assert.ok(tmuxBar.includes("Reviewers:") && tmuxBar.includes("2/15"));
 });
 test("hitlist renders window of items around cursor above the editor", (t) => {
 	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: join(tmpdir(), "nope") });
@@ -902,6 +959,37 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	dashboard.handleInput("?");
 	assert.ok(frame().some((row) => row.includes("slay")), "help lists the action keys");
 });
+test("dashboard interactive search live-filters and selects items by title", (t) => {
+	const root = stateTree();
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: root });
+	mode.items = [
+		queueItem({ id: 7, repo: "projectbluefin/other", title: "token exchange fix", ciStatus: "success" }),
+		queueItem({ id: 42, repo: "projectbluefin/review", title: "second item", ciStatus: "failure" }),
+	];
+	mode.refreshState();
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 20);
+	t.after(() => dashboard.dispose());
+
+	// Open search input with '/'
+	dashboard.handleInput("/");
+	assert.ok(dashboard.render(100).some((line) => line.includes("search")));
+
+	// Type search query for title "token"
+	for (const ch of "token") dashboard.handleInput(ch);
+	dashboard.handleInput("\r");
+
+	// The rendered queue shows only the matching item
+	const renderedSearch = dashboard.render(100);
+	assert.ok(renderedSearch.some((line) => line.includes("#7") && line.includes("token exchange fix")));
+	assert.ok(!renderedSearch.some((line) => line.includes("#42") && line.includes("second item")));
+
+	// Select it with Tab or Space
+	dashboard.handleInput(" ");
+	assert.ok(mode.selectedKeys.has("projectbluefin/other#7"), "selected item via search input");
+	assert.equal(mode.selectedKeys.size, 1);
+	assert.ok(mode.selectedKeys.has("projectbluefin/other#7"));
+});
 test("dashboard supports multi-selection with space, x to clear, and batch action dispatch", (t) => {
 	const root = stateTree();
 	t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -1009,6 +1097,39 @@ test("without a hub the queue takes the maintainer's order", () => {
 		"triage",
 	);
 });
+test("issue queue is organized by repo and delineated with dividers", () => {
+	const now = NOW;
+	const items = [
+		queueItem({ id: 201, type: "issue", repo: "projectbluefin/server", title: "server issue", updatedAt: now - 100 }),
+		queueItem({ id: 101, type: "issue", repo: "projectbluefin/actions", title: "actions issue", updatedAt: now - 50 }),
+		queueItem({ id: 202, type: "issue", repo: "projectbluefin/server", title: "another server issue", updatedAt: now - 10 }),
+		queueItem({ id: 102, type: "issue", repo: "projectbluefin/actions", title: "second actions issue", updatedAt: now - 20 }),
+	];
+	const ranked = prioritize(items, { hive: EMPTY_HIVE, hasFindings: () => false, now });
+	// Must group by repository first so cohorts stay within repository borders
+	assert.deepEqual(
+		ranked.items.map((it) => `${it.repo}#${it.id}`),
+		[
+			"projectbluefin/actions#102",
+			"projectbluefin/actions#101",
+			"projectbluefin/server#202",
+			"projectbluefin/server#201",
+		],
+	);
+
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: "/nonexistent" });
+	mode.items = items;
+	mode.queueMode = "issues";
+	mode.reprioritize();
+
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	const lines = dashboard.render(80);
+	dashboard.dispose();
+
+	// Divider row between projectbluefin/actions and projectbluefin/server
+	assert.ok(lines.some((line) => line.includes("─── projectbluefin/server")), "dashboard delineates repo transitions with horizontal dividers");
+});
+
 
 test("with a hub the order is Hive's, including through a closing reference", () => {
 	const hive = {
@@ -1234,8 +1355,8 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
 
 	assert.deepEqual(pi.labels, ["Bluefin Review"]);
-	assert.deepEqual([...pi.shortcuts.keys()].sort(), ["alt+b", "alt+i", "alt+j", "alt+k", "alt+o", "alt+u", "alt+x", "alt+y"]);
-	assert.deepEqual([...pi.flags.keys()].sort(), ["all", "issues", "pr", "repo", "splash"]);
+	assert.deepEqual([...pi.shortcuts.keys()].sort(), ["alt+b", "alt+i", "alt+j", "alt+k", "alt+o", "alt+s", "alt+u", "alt+x", "alt+y"]);
+	assert.deepEqual([...pi.flags.keys()].sort(), ["all", "autoslay", "issues", "pr", "repo", "skip-repo", "splash"]);
 	assert.deepEqual([...pi.tools.keys()].sort(), [
 		"bluefin_hive_lookup",
 		"bluefin_review_diff",
@@ -1255,7 +1376,10 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.ok(ctx.statuses.get("bluefin_queue")?.includes("#7"), ctx.statuses.get("bluefin_queue"));
 	assert.equal(typeof ctx.widgets.get("bluefin-rail"), "function", "the rail is a component, not capped strings");
 	assert.equal(ctx.widgets.get("bluefin-hitlist"), undefined, "hitlist widget is removed to avoid editor crowding");
-
+	assert.equal(ctx.footers.length, 1, "footer is registered as the lower status line");
+	const footerComp = (ctx.footers[0] as (tui: unknown, theme: unknown) => { render(w: number): string[] })({}, ctx.ui.theme);
+	const footerRows = footerComp.render(120);
+	assert.ok(footerRows[0].includes("BLUEFIN"), "footer renders tmux status bar as very bottom row");
 	const diff = await pi.tools.get("bluefin_review_diff").execute("id", { pull_request: 42 });
 	assert.match(diff.content[0].text, /image\/entrypoint\.sh/);
 	assert.equal(diff.details.pull_request, 42);
@@ -1287,6 +1411,47 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.equal(ctx.overlays.length, 1, "startup opens exactly one dashboard");
 	await pi.shortcuts.get("alt+b").handler(ctx);
 	assert.equal(ctx.overlays.length, 1, "alt+b on an open dashboard opens nothing new");
+
+	// alt+s triggers autoslay directly in Hive priority order
+	await pi.shortcuts.get("alt+s").handler(ctx);
+	assert.ok(pi.messages.length > 0, "alt+s must dispatch autoslay user message in Hive priority order");
+});
+
+test("autoslay falls back to unranked PR batch review and slaying with 7 subagents and K3 review when no Hive-ranked items exist", async () => {
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	await review.whenStarted();
+
+	// Populate unranked open PRs with Hive configured/online so hiveOnly would normally show 0
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: join(tmpdir(), "nope") });
+	mode.hive = {
+		...EMPTY_HIVE,
+		configured: true,
+		online: true,
+		hub: "https://hive.example",
+	};
+	const prs = [
+		prItem({ id: 101, repo: "projectbluefin/review", title: "first unranked pr" }),
+		prItem({ id: 102, repo: "projectbluefin/review", title: "second unranked pr" }),
+		prItem({ id: 103, repo: "projectbluefin/review", title: "third unranked pr" }),
+	];
+	mode.items = prs;
+	mode.reprioritize();
+
+	// hiveOnly hides them from visibleItems
+	assert.equal(mode.visibleItems().length, 0);
+	// slayableItems falls back to the unranked PR batch
+	const slayable = mode.slayableItems();
+	assert.equal(slayable.length, 3);
+	assert.equal(slayable[0].id, 101);
+
+	// The actionPrompt for the batch must include the 7-subagent cap and k3-final-review
+	const prompt = actionPrompt({ kind: "slay", item: slayable[0], items: slayable });
+	assert.match(prompt, /ONE subagent per issue\/PR/);
+	assert.match(prompt, /capped at a maximum of 7 concurrent subagents/);
+	assert.match(prompt, /k3-final-review/);
+	assert.match(prompt, /Execute the full fix-and-merge landing pass/);
 });
 
 // The timeout is the assertion: a handler that waits on its own work never
@@ -1499,6 +1664,10 @@ test("action prompts name the evidence and refuse to merge red checks", () => {
 	assert.match(batchPrompt, /Repository `projectbluefin\/other`/);
 	assert.match(batchPrompt, /cross-repository contract compatibility/);
 	assert.equal(actionPrompt({ kind: "close" }), undefined);
+	assert.match(batchPrompt, /Never ask the user for confirmation/);
+	assert.match(batchPrompt, /execute all actions end-to-end autonomously/);
+	assert.match(batchPrompt, /immediately request the next assignment/);
+	assert.match(actionPrompt({ kind: "review", item }), /Never ask the user for confirmation/);
 });
 
 test("slaying an issue ships a pull request for someone else to merge", () => {
@@ -1507,23 +1676,26 @@ test("slaying an issue ships a pull request for someone else to merge", () => {
 	assert.match(prompt, /open a pull request/);
 	assert.match(prompt, /Closes projectbluefin\/documentation#936/);
 	assert.match(prompt, /never merge your own/);
+	assert.match(prompt, /gh issue close/);
+	assert.match(prompt, /already been resolved or closed/);
 	assert.doesNotMatch(prompt, /review the diff/, "an issue has no diff to land");
 
 	// A pull request still gets the landing pass; the key means two things.
 	const landing = actionPrompt({ kind: "slay", item: queueItem() });
-	assert.match(landing, /Run the full landing pass/);
-	assert.match(landing, /Do not merge without green checks/);
-
+	assert.match(landing, /fix-and-merge landing pass/);
+	assert.match(landing, /approve and land the pull request/);
+	assert.match(landing, /gh run rerun/);
+	assert.match(landing, /failing tests or defects/);
 	// A batch of issues is still one pull request per issue, not one for the lot.
 	const batch = [issue, queueItem({ id: 941, type: "issue", repo: "projectbluefin/documentation" })];
 	const batchPrompt = actionPrompt({ kind: "slay", item: issue, items: batch });
 	assert.match(batchPrompt, /one pull request per issue/);
 	assert.match(batchPrompt, /never merge your own/);
 	assert.match(batchPrompt, /report an evidenced finding/);
-
+	assert.match(batchPrompt, /gh issue close/);
 	// A mixed selection cannot be both, so it keeps the landing pass it had.
 	const mixed = actionPrompt({ kind: "slay", item: issue, items: [issue, queueItem()] });
-	assert.match(mixed, /Run the full landing pass/);
+	assert.match(mixed, /fix-and-merge landing pass/);
 });
 
 test("hive work the search never returned is still admitted to the queue", async () => {
@@ -1686,12 +1858,11 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	dashboard.handleInput("A");
 	assert.equal(mode.selectedKeys.size, narrowed, "A is bound to the slice selection");
 
-	// The dispatched prompt must fan out. A batch worked top to bottom is a list.
+	// The dispatched prompt fans out one subagent per issue/PR, capped at 7.
 	const batch = mode.chosenItems();
 	const prompt = actionPrompt({ kind: "slay", item: batch[0], items: batch });
-	assert.match(prompt, /concurrently/);
-	assert.match(prompt, /one agent per item/);
-	assert.match(prompt, /Do not process the list sequentially/);
-	assert.match(prompt, /name every item that failed/);
-	assert.doesNotMatch(prompt, /repository sequence/);
+	assert.match(prompt, /ONE subagent per issue\/PR/);
+	assert.match(prompt, /capped at a maximum of 7 concurrent subagents/);
+	assert.match(prompt, /k3-final-review/);
+	assert.match(prompt, /lands them all in one PR per repository/);
 });

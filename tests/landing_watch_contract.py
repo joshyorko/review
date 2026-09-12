@@ -32,7 +32,7 @@ class LandingWatchContractTests(unittest.TestCase):
             command = landing.landing_command(task)
             self.assertIsInstance(command, list)
             self.assertTrue(all(isinstance(arg, str) for arg in command))
-            self.assertIn(str(prompt), command)
+            self.assertTrue(any(str(prompt) in arg for arg in command))
             self.assertNotIn(" ".join(command), {"sh", "bash"})
 
     def test_landing_command_preserves_quoted_template_arguments(self) -> None:

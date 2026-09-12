@@ -6,8 +6,8 @@
 # It derives from Project Bluefin's distroless FSDK base — glibc, CA
 # certificates, tzdata, and the full terminfo database, no shell and no package
 # manager — and adds exactly four fetched artifacts (omp, node, pi, gh) plus the
-# smallest closure of FSDK binaries the agent genuinely needs to work: a shell
-# and git. Nothing else. There is no python, no perl, no distro userland, and
+# smallest closure of FSDK binaries the agent genuinely needs to work: a shell,
+# git, and python. Nothing else. There is no perl, no distro userland, and
 # nothing that can install one.
 #
 # A shell is present deliberately and is the single documented deviation from
@@ -20,16 +20,16 @@
 # what Renovate can compare against, and a pin no tool can track is a stale pin.
 
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/base
-ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08.0@sha256:497c31303ce95290dbcb08c667d5cacdda7d3e026e5f1194655af675da80ee1b
+ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:1e5b5437116d78176d68a05e053ac750ca11b36c7da46bfa85d48c184201414c
 # The builder is the shell-enabled sibling of the same FSDK series, so the
 # binaries staged out of it link against the base's own glibc.
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/lab-runner
 ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:2c07034a167fec3296605ab1b1287f6c2d14f90d745b7686fab3e19e67fcb899
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
-ARG OMP_VERSION=18.1.16
-ARG OMP_X86_64_SHA256=efebefb74359d20362e07341f01a65fc0a259e7bc79454ef08b0ebf5232ab897
-ARG OMP_AARCH64_SHA256=d8612389c7af3cf3b69609c9149bff3cf07dcb65774b231d9dc4966b176b9720
+ARG OMP_VERSION=18.1.18
+ARG OMP_X86_64_SHA256=45421f9a5f112bc47cb9f77c4b4d7927631f8ff859624f821287ec854eb239fc
+ARG OMP_AARCH64_SHA256=1ae8273c231ceb88cebc9971901cf7f5d97ed4149cdc740a814f629cd2b4dcb2
 # renovate: datasource=npm depName=@earendil-works/pi-coding-agent
 ARG PI_VERSION=0.85.1
 # node exists in this image only to run pi; omp embeds its own Bun runtime.
@@ -175,7 +175,7 @@ COPY --chmod=0755 bin/dinosay /out/usr/bin/dinosay
 # Fail the build here rather than in a maintainer's terminal: every staged
 # binary must resolve its interpreter and libraries against the staged closure.
 RUN set -eu; \
-    for binary in /out/usr/bin/omp /out/usr/bin/node /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash; do \
+    for binary in /out/usr/bin/omp /out/usr/bin/node /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash /out/usr/bin/python3; do \
       test -x "$binary" || { echo "missing $binary" >&2; exit 1; }; \
     done; \
     test -e /out/usr/share/bluefin/review/extension/index.ts; \

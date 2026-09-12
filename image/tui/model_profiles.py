@@ -7,10 +7,10 @@ import re
 
 # Reviewing is the expensive judgement; fixing is mechanical. Gemini is the
 # automatic default, while K3 fixes every policy's findings.
-GEMINI_TRIPLE = ("goose", "gemini-3.8-flash", "max")
-SOL_TRIPLE = ("goose", "gpt-5.6-sol", "medium")
-OPUS_TRIPLE = ("goose", "claude-opus-5", "high")
-KIMI_TRIPLE = ("goose", "kimi-k3", "high")  # alias K3
+GEMINI_TRIPLE = ("omp", "gemini-3.8-flash", "max")
+SOL_TRIPLE = ("omp", "gpt-5.6-sol", "medium")
+OPUS_TRIPLE = ("omp", "claude-opus-5", "high")
+KIMI_TRIPLE = ("omp", "kimi-k3", "high")  # alias K3
 
 HIGH_ASSURANCE_MODELS = frozenset({
     "gpt-5.6-sol",
@@ -92,9 +92,8 @@ def escalation_triple(policy: str = "automatic", classification: str = "mixed") 
 def final_triple(policy: str, classification: str, phase: str) -> tuple:
     """The (backend, model, effort) a round runs with.
 
-    Explicit, per round, and never inherited: the launcher's GOOSE_MODEL is
-    whatever the maintainer picked for the dashboard, so a round that relies
-    on the ambient environment silently reviews with the wrong model.
+    Explicit, per round, and never inherited: a stale ambient model pick
+    would otherwise leak into a round that never asked for it.
     """
     if phase in ("fixing", "cleanup"):
         return KIMI_TRIPLE
@@ -114,19 +113,16 @@ def final_triple(policy: str, classification: str, phase: str) -> tuple:
 def final_environment(triple: tuple, backend: str = "") -> dict:
     """The environment overlay one round runs with.
 
-    Goose reads its model from GOOSE_MODEL/GOOSE_THINKING_EFFORT, so those
-    are set explicitly. Codex takes its model on the command line instead —
-    setting Goose variables for a Codex round would silently do nothing —
-    so a Codex session gets its selection through the command and the
-    environment carries only the backend marker.
+    Neither Codex nor OMP read their model from the environment — Codex
+    takes it on the command line, and a final round's OMP argv passes
+    --model/--thinking explicitly for the same reason (final_command in
+    landing.py). This overlay carries the backend and final-round model/
+    effort markers for display and provenance only.
     """
     kind, model, effort = triple
     active = backend or os.environ.get("BLUEFIN_REVIEW_BACKEND", kind)
-    overlay = {"BLUEFIN_REVIEW_BACKEND": active}
-    if active == "codex":
-        overlay["BLUEFIN_REVIEW_FINAL_MODEL"] = model
-        overlay["BLUEFIN_REVIEW_FINAL_EFFORT"] = effort
-        return overlay
-    overlay["GOOSE_MODEL"] = model
-    overlay["GOOSE_THINKING_EFFORT"] = effort
-    return overlay
+    return {
+        "BLUEFIN_REVIEW_BACKEND": active,
+        "BLUEFIN_REVIEW_FINAL_MODEL": model,
+        "BLUEFIN_REVIEW_FINAL_EFFORT": effort,
+    }

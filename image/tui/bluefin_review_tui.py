@@ -2,7 +2,7 @@
 
 GitHub supplies the queue and the live evidence — one paginated GraphQL
 search over the organization's open pull requests, never a static snapshot.
-Goose supplies the review, and every state-changing command runs through
+OMP supplies the review, and every state-changing command runs through
 exactly one confirmation gate that makes the maintainer type the pull request
 number. GitHub stays authoritative for pull-request state; Hive is never asked
 for work here.
@@ -64,14 +64,13 @@ except ModuleNotFoundError:  # minimal non-Textual import contracts
 
 # image/ is the single import root: every sibling is spelled tui.*/harness.*.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from tui.review_result import ReviewResult, adapt_current_engine
+from tui.review_result import ReviewResult
 from tui.semantic_view import DecisionState, build_decision_card
 from tui import action_plan
 from tui import landing
 from tui import lab_client
 from tui import hive_api
 from harness.codex import CodexHarness
-from harness.goose import GooseHarness
 from harness.omp import OmpHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
@@ -200,7 +199,7 @@ PERSISTED_PR_KEY_PATTERN = re.compile(
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
 MAX_CONCURRENT_LANDINGS = int(
-    os.environ.get("BLUEFIN_REVIEW_CONCURRENT_LANDINGS", "6")
+    os.environ.get("BLUEFIN_REVIEW_CONCURRENT_LANDINGS", "7")
 )
 HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
@@ -483,8 +482,8 @@ def action_rank(action: str) -> int:
 # The review engine. It produces a Review Draft and has no approve, merge,
 # comment, or close path of its own, so running it can never mutate GitHub.
 REVIEW_COMMAND = os.environ.get("BLUEFIN_REVIEW_COMMAND", "bluefin-review")
-ACTIVE_BACKEND = os.environ.get("BLUEFIN_REVIEW_BACKEND", "goose")
-if ACTIVE_BACKEND not in {"goose", "codex", "omp"}:
+ACTIVE_BACKEND = os.environ.get("BLUEFIN_REVIEW_BACKEND", "omp")
+if ACTIVE_BACKEND not in {"codex", "omp"}:
     raise RuntimeError(f"unsupported review backend: {ACTIVE_BACKEND}")
 REVIEW_SCOPE = os.environ.get(
     "BLUEFIN_REVIEW_SCOPE_ROOT", "/opt/bluefin/review-scope"
@@ -500,7 +499,7 @@ LIVE_PR_FIELDS = (
 )
 
 # bluefin-review's exit status for a review whose checks did not all return a
-# verdict. 'goose review' exits 0 in that case and still prints a finding
+# verdict. The selected backend still exits 0 in that case and prints a
 # count, so the count would otherwise read as a clean review.
 REVIEW_INCOMPLETE = 65
 
@@ -1939,7 +1938,7 @@ def classify_routability(stop: Stop, record: RunRecord | None = None) -> str | N
                 if isinstance(r, dict):
                     author = r.get("author") or {}
                     login = author.get("login") if isinstance(author, dict) else str(author)
-                    if login and not (login.endswith("[bot]") or login.endswith("-bot") or login in {"goose", "github-actions", "copilot"}):
+                    if login and not (login.endswith("[bot]") or login.endswith("-bot") or login in {"github-actions", "copilot"}):
                         st = str(r.get("state") or "").upper()
                         if st in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}:
                             has_human = True
@@ -3041,7 +3040,6 @@ class ReviewBody(ModalScreen[str | None]):
         error = ""
         try:
             registry = HarnessRegistry()
-            registry.register(GooseHarness())
             registry.register(CodexHarness(availability=CodexHarness.probe()))
             registry.register(OmpHarness(availability=OmpHarness.probe()))
             adapter = registry.require_ready(ACTIVE_BACKEND)
@@ -3713,7 +3711,7 @@ class HelpScreen(ModalScreen[None]):
 
 
 class ReviewScreen(Screen):
-    """One Goose review, streamed live.
+    """One review, streamed live.
 
     The review is the reason this tool exists, so it gets the whole screen and
     reports its own outcome. ``bluefin-review`` distinguishes a review that
@@ -3856,9 +3854,9 @@ class ReviewScreen(Screen):
                 text=True,
                 bufsize=1,
                 env=environment,
-                # Its own process group. A review is a shell that runs Goose,
-                # which runs a subprocess per check: signalling only the shell
-                # leaves those children alive holding the pipe open, and the
+                # Its own process group. A review runs the selected agent as
+                # a subprocess: signalling only the shell leaves it alive
+                # holding the pipe open, and the
                 # read loop below would never end.
                 start_new_session=True,
             )
@@ -3935,15 +3933,25 @@ class ReviewScreen(Screen):
                     self.overlap_snapshot, live_context, result.raw_evidence,
                 )
         else:
-            result = adapt_current_engine(
-                "\n".join(self.output), code,
-                {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
-                 "model": os.environ.get("GOOSE_MODEL", "gemini-3.8-flash"),
-                 "repository": stop.repository, "pull_request": stop.number},
-                verification=live_review_verification(self.live_snapshot),
-                overlap=self.overlap_snapshot,
-                live=live_context,
-            )
+            base_sha = str(self.live_snapshot.get("baseRefOid") or "")
+            head_sha = str(self.live_snapshot.get("headRefOid") or "")
+            if len(base_sha) != 40 or len(head_sha) != 40:
+                result = ReviewResult(1, "failed", provenance={"backend": "omp"})
+            else:
+                result = OmpHarness(availability=Availability.READY).convert(
+                    "\n".join(self.output),
+                    ReviewRequest(
+                        *stop.repository.split("/", 1), stop.number, base_sha, head_sha,
+                        actor="maintainer", tenant="review", generated_at="dashboard",
+                    ),
+                    code or 0,
+                    model=self.selection.model, effort=self.selection.effort,
+                )
+                result = ReviewResult(
+                    result.version, result.state, result.counts, result.findings,
+                    live_review_verification(self.live_snapshot), result.provenance,
+                    self.overlap_snapshot, live_context, result.raw_evidence,
+                )
         result.provenance.setdefault("base_sha", str(self.live_snapshot.get("baseRefOid") or ""))
         result.provenance.setdefault("head_sha", str(self.live_snapshot.get("headRefOid") or ""))
         if ACTIVE_BACKEND == "codex" and len(str(self.live_snapshot.get("baseRefOid") or "")) == 40 and len(str(self.live_snapshot.get("headRefOid") or "")) == 40:
@@ -4830,7 +4838,7 @@ class ReviewDashboard(App):
         return (
             lowered.endswith("[bot]")
             or lowered.endswith("-bot")
-            or lowered in {"goose", "github-actions", "copilot"}
+            or lowered in {"github-actions", "copilot"}
         )
 
     @staticmethod
@@ -5061,9 +5069,6 @@ class ReviewDashboard(App):
             if result.availability is Availability.READY:
                 model = str(getattr(selected.harness, "model", "") or result.model or "").strip()
                 effort = str(getattr(selected.harness, "effort", "") or "").strip()
-                if selected.harness.branding.harness_id == "goose":
-                    model = os.environ.get("GOOSE_MODEL", model).strip()
-                    effort = os.environ.get("GOOSE_THINKING_EFFORT", effort).strip()
                 model = model or "unknown"
                 effort = effort if effort in {"low", "medium", "high", "max"} else "unknown"
                 label.update(
@@ -7128,8 +7133,12 @@ class ReviewDashboard(App):
             pause = self.query_one("#landing-pause", Button)
         except (NoMatches, ScreenStackError):
             return
+        # Review / phase tasks (like k3-final-review or final rounds) do not count
+        # against worker concurrency slots or display as consuming the worker cap.
         active = [
-            task for task in self.landing_queue if self._landing_task_active(task)
+            task
+            for task in self.landing_queue
+            if self._landing_task_active(task) and not task.phase
         ]
         queued = [
             task
@@ -7138,6 +7147,7 @@ class ReviewDashboard(App):
                 not self._landing_task_active(task)
                 and task.process is None
                 and task.returncode is None
+                and not task.phase
             )
         ]
         state = "PAUSED" if self.landing_paused else "RUNNING"
@@ -7155,11 +7165,15 @@ class ReviewDashboard(App):
         # again would show every landed pull request twice while the round
         # runs (a race the pilot caught on fast machines), so a round is one
         # batch-level line and per-PR rows come from landing tasks alone.
-        rounds = [task for task in (*active, *queued) if task.phase]
+        rounds = [
+            task
+            for task in self.landing_queue
+            if task.phase and (self._landing_task_active(task) or task.process is not None or (task.returncode is None and task.process is None))
+        ]
         for task in rounds:
-            round_state = "running" if task in active else "queued"
+            round_state = "running" if (self._landing_task_active(task) or task.process is not None) else "queued"
             model = task.model or os.environ.get(
-                "GOOSE_MODEL", "gemini-3.8-flash"
+                "AGENT_MODEL", "gemini-3.8-flash"
             )
             lines.append(
                 f"final {task.phase} round {task.round}"
@@ -7184,7 +7198,7 @@ class ReviewDashboard(App):
                     "finished" if task.returncode == 0 else "failed"
                 )
             model = task.model or os.environ.get(
-                "GOOSE_MODEL", "gemini-3.8-flash"
+                "AGENT_MODEL", "gemini-3.8-flash"
             )
             for stop in task.stops:
                 if visible >= MAX_LANDING_CONTROL_ROWS:
@@ -7683,11 +7697,6 @@ class ReviewDashboard(App):
         return f"{age // 86400}d"
 
     def review_profile(self, repository: str) -> tuple[str, str]:
-        if ACTIVE_BACKEND == "goose":
-            return (
-                os.environ.get("GOOSE_MODEL", "gemini-3.8-flash"),
-                os.environ.get("GOOSE_THINKING_EFFORT", "max"),
-            )
         if getattr(self, "_repaint_profile_cache", None) is not None and repository in self._repaint_profile_cache:
             return self._repaint_profile_cache[repository]
 
@@ -9897,31 +9906,41 @@ class ReviewDashboard(App):
                 with self._landing_condition:
                     if self.landing_paused:
                         return
-                    active = [
+                    # Issue and PR workers count toward landing concurrency.
+                    # Review and landing agents (phase tasks like final-review) do NOT count
+                    # against the concurrency cap so they can take their time without starving worker slots.
+                    active_workers = [
+                        task
+                        for task in self.landing_queue
+                        if self._landing_task_active(task) and not task.phase
+                    ]
+                    active_all = [
                         task
                         for task in self.landing_queue
                         if self._landing_task_active(task)
                     ]
                     running_repos: set[str] = set()
-                    for task in active:
+                    for task in active_all:
                         running_repos.update(self._landing_repositories(task))
-                    slots = self.landing_concurrency - len(active)
+                    slots = self.landing_concurrency - len(active_workers)
                     for task in self.landing_queue:
-                        if slots <= 0:
-                            break
                         if (
                             task.process is not None
                             or task.returncode is not None
                             or id(task) in self._landing_active
                         ):
                             continue
+                        if not task.phase and slots <= 0:
+                            continue
                         task_repos = self._landing_repositories(task)
-                        if not task_repos.isdisjoint(running_repos):
+                        if not task.phase and not task_repos.isdisjoint(running_repos):
                             continue
                         self._landing_active.add(id(task))
-                        active.append(task)
-                        running_repos.update(task_repos)
-                        slots -= 1
+                        active_all.append(task)
+                        if not task.phase:
+                            running_repos.update(task_repos)
+                            slots -= 1
+                            active_workers.append(task)
                         worker = threading.Thread(
                             target=self.run_landing_task,
                             args=(task,),
@@ -9946,7 +9965,7 @@ class ReviewDashboard(App):
                                 severity="error",
                             )
                             self.call_from_thread(self.landing_finished, task)
-                    if not pending() and not active:
+                    if not pending() and not active_all:
                         return
                     self._landing_condition.wait()
         finally:
@@ -9979,7 +9998,7 @@ class ReviewDashboard(App):
                             start_new_session=True,
                             # A final-review round runs with the model its phase
                             # chose, passed explicitly (#378): the launch-time
-                            # GOOSE_MODEL is whatever the maintainer picked
+                            # AGENT_MODEL is whatever the maintainer picked
                             # for the dashboard, so inheriting it silently
                             # reviews with the wrong model. A landing task
                             # carries no overlay and inherits the environment

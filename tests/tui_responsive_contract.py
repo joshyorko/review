@@ -24,7 +24,7 @@ from tui import bluefin_review_tui as tui  # noqa: E402
 from tui import worker_status  # noqa: E402
 from harness.autopilot import Discovery, HarnessOption  # noqa: E402
 from harness.codex import CodexHarness  # noqa: E402
-from harness.goose import GooseHarness  # noqa: E402
+from harness.omp import OmpHarness  # noqa: E402
 from tui.display_brand import display_brand, display_title  # noqa: E402
 import tui.display_brand as display_brand_module  # noqa: E402
 
@@ -57,7 +57,7 @@ def review_stop() -> tui.Stop:
             "pull_request": 7,
             "base_sha": base,
             "head_sha": head,
-            "backend": "goose",
+            "backend": "omp",
             "model": "gemini-3.8-flash",
         },
     )
@@ -116,26 +116,26 @@ class ResponsiveTuiContractTests(unittest.TestCase):
         label = mock.MagicMock()
         app.query_one = lambda *_args, **_kwargs: label
         app.refresh_rows = lambda: None
-        goose = HarnessOption(
-            GooseHarness(model="gpt-5.6-sol", effort="high"),
-            Discovery("goose", "ready", "ready", "ready", "gpt-5.6-sol", "high", tui.Availability.READY),
+        omp = HarnessOption(
+            OmpHarness(model="gpt-5.6-sol", effort="high"),
+            Discovery("omp", "ready", "ready", "ready", "gpt-5.6-sol", "high", tui.Availability.READY),
         )
         codex = HarnessOption(
             CodexHarness(model="claude-opus-5", effort="medium", availability=tui.Availability.READY),
             Discovery("codex", "ready", "ready", "ready", "claude-opus-5", "medium", tui.Availability.READY),
         )
-        with mock.patch.object(tui, "ACTIVE_BACKEND", "goose"), mock.patch.dict(
+        with mock.patch.object(tui, "ACTIVE_BACKEND", "omp"), mock.patch.dict(
             os.environ,
-            {"GOOSE_MODEL": "gpt-5.6-sol", "GOOSE_THINKING_EFFORT": "high"},
+            {"AGENT_MODEL": "gpt-5.6-sol", "AGENT_REASONING_EFFORT": "high"},
             clear=False,
         ):
-            app.harness_loaded([goose, codex])
-        self.assertIn("Goose / gpt-5.6-sol", label.update.call_args.args[0])
+            app.harness_loaded([omp, codex])
+        self.assertIn("Omp / gpt-5.6-sol", label.update.call_args.args[0])
         self.assertIn("effort: high", label.update.call_args.args[0])
 
         label.reset_mock()
         with mock.patch.object(tui, "ACTIVE_BACKEND", "codex"):
-            app.harness_loaded([goose, codex])
+            app.harness_loaded([omp, codex])
         self.assertIn("Codex / claude-opus-5", label.update.call_args.args[0])
         self.assertIn("effort: medium", label.update.call_args.args[0])
 
