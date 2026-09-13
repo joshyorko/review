@@ -11,7 +11,7 @@
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, parseScope, resolveToken } from "./github.ts";
+import { DEFAULT_ORG, fetchIssueAdmission, parseScope, resolveToken } from "./github.ts";
 import type { Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { themePainter } from "./paint.ts";
@@ -90,6 +90,28 @@ function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
 	return latest;
 }
 
+export const REVIEW_REPO = "projectbluefin/review";
+export const ADMISSION_LABEL = "3-clanker-queue";
+export const HOLD_LABEL = "hold";
+export const BLOCKED_LABEL = "blocked";
+
+/**
+ * Classify whether a DashboardAction constitutes an implementation action.
+ * Write-capable issue actions ('slay', 'fix', 'docs') must be gated on admission.
+ * Read-only actions ('review', 'diff', 'reference', 'scope', 'close',
+ * 'leaderboard', 'snapshot') and merge actions ('approve') do not implement
+ * issue changes and are not gated by this admission check.
+ */
+export function isImplementationAction(action: DashboardAction): boolean {
+	switch (action.kind) {
+		case "slay":
+		case "fix":
+		case "docs":
+			return true;
+		default:
+			return false;
+	}
+}
 /**
  * Prompts the action keys send. Each one names the evidence the agent must use.
  *
@@ -219,6 +241,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeDashboardDone: ((action: DashboardAction) => void) | undefined;
 	let activeCtx: CtxLike | undefined;
 	let started: Promise<void> = Promise.resolve();
+	let dispatchGeneration = 0;
 	pi.setLabel("Bluefin Review");
 	pi.registerFlag("pr", { description: "Preselect a pull request or issue number", type: "string" });
 	pi.registerFlag("issues", { description: "Start in issues mode instead of pull requests", type: "boolean", default: false });
@@ -295,7 +318,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return true;
 	};
 
-	const dispatch = async (ctx: CtxLike, action: DashboardAction, options?: { deliverAs?: "steer" | "followUp" }): Promise<void> => {
+	const dispatch = async (
+		ctx: CtxLike,
+		action: DashboardAction,
+		deliveryOptions?: { deliverAs?: "steer" | "followUp" },
+	): Promise<void> => {
 		if (action.kind === "close") {
 			autoReopenDashboard = false;
 			return;
@@ -310,7 +337,64 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.pasteToEditor(text);
 			return;
 		}
-		const count = "items" in action && action.items && action.items.length > 1 ? action.items.length : 1;
+
+		// Capture identities before the admission read can yield to UI activity.
+		const capturedItems: QueueItem[] =
+			"items" in action && action.items && action.items.length > 0 ? [...action.items] : [action.item];
+
+		const isImpl = isImplementationAction(action);
+		const reviewIssues = isImpl
+			? capturedItems.filter((it) => it.type === "issue" && it.repo === REVIEW_REPO)
+			: [];
+
+		if (reviewIssues.length > 0) {
+			const generation = ++dispatchGeneration;
+			const [reviewOwner, reviewName] = REVIEW_REPO.split("/") as [string, string];
+			const targets = reviewIssues.map((it) => ({
+				owner: reviewOwner,
+				repo: reviewName,
+				number: it.id,
+			}));
+
+			const token = mode.tokenOptions().token ?? resolveToken(env);
+			const result = await fetchIssueAdmission(targets, {
+				token,
+				fetchImpl: options.fetchImpl,
+			});
+
+			if (generation !== dispatchGeneration) return;
+
+			if (result.error) {
+				ctx.ui.notify(`Admission check failed: ${result.error}`, "error");
+				return;
+			}
+
+			for (const admitted of result.issues) {
+				const key = `${admitted.owner}/${admitted.repo}#${admitted.number}`;
+				if (admitted.closed) {
+					ctx.ui.notify(`Cannot dispatch ${key}: issue is closed`, "error");
+					return;
+				}
+				if (admitted.labelsTruncated) {
+					ctx.ui.notify(`Cannot dispatch ${key}: incomplete label evidence`, "error");
+					return;
+				}
+				if (admitted.labels.includes(HOLD_LABEL)) {
+					ctx.ui.notify(`Cannot dispatch ${key}: issue has hold label`, "error");
+					return;
+				}
+				if (admitted.labels.includes(BLOCKED_LABEL)) {
+					ctx.ui.notify(`Cannot dispatch ${key}: issue has blocked label`, "error");
+					return;
+				}
+				if (!admitted.labels.includes(ADMISSION_LABEL)) {
+					ctx.ui.notify(`Cannot dispatch ${key}: missing explicit admission label '${ADMISSION_LABEL}'`, "error");
+					return;
+				}
+			}
+		}
+
+		const count = capturedItems.length;
 		const priority = action.kind === "snapshot" ? undefined : mode.priorityFor(action.item);
 		const prompt = actionPrompt(action, priority);
 		if (!prompt) return;
@@ -319,7 +403,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		activeCtx = ctx;
 		autoReopenDashboard = !autoslayActive;
 		mode.clearSelected();
-		pi.sendUserMessage(prompt, options?.deliverAs ? { deliverAs: options.deliverAs } : undefined);
+		pi.sendUserMessage(prompt, deliveryOptions?.deliverAs ? { deliverAs: deliveryOptions.deliverAs } : undefined);
 	};
 	const openLeaderboard = async (ctx: CtxLike) => {
 		if (!ctx.hasUI) return;
@@ -360,6 +444,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				},
 				{ overlay: false },
 			);
+			dashboardOpen = false;
 			if (action.kind === "slay") {
 				autoslayActive = true;
 			}
