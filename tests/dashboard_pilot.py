@@ -2091,7 +2091,14 @@ async def main() -> int:
             "final final-review round 1" in control_rows,
             f"a running round must appear as one batch-level line, got {control_rows!r}",
         )
-        app.landing_queue.remove(landed_round)
+        with app._landing_condition:
+            app.landing_queue.remove(landed_round)
+            app.landing_queue.remove(final_round)
+            app._landing_condition.notify_all()
+        check(
+            await wait_until(lambda: not app.landing_draining, pilot),
+            "phase-display fixtures must release the landing dispatcher before teardown",
+        )
 
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:

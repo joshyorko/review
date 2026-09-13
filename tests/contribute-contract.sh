@@ -170,6 +170,10 @@ second_launch_out="$(env -i PATH="$launcher_scratch/bin:/usr/bin:/bin" \
   "$root/bin/bluefin" review owner/repo 1284 2>&1 || true)"
 [[ "$second_launch_out" != *"Deploying Raptor Containment with KVM"* ]] || fail "second launch must not repeat first launch message"
 echo "contribute-contract: bin/bluefin-contribute GH_TOKEN handling holds"
+
+# --- scripts/generate-contribute-sbom.py unit contract ------------------------
+python3 "$root/tests/contribute_sbom_contract.py" || fail "tests/contribute_sbom_contract.py failed"
+
 if [[ -z "$image" ]]; then
   echo "contribute-contract: static contract holds"
   exit 0

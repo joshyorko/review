@@ -215,6 +215,322 @@ class SlayStateMachineContractTests(unittest.TestCase):
         stops.sort(key=lambda s: (0 if app.stop_lacks_my_review(s) else 1, s.number))
         self.assertEqual(stops, [stop_unreviewed, stop_reviewed])
 
+    def test_landing_ruleset_blocker_holds_prs_short_of_required_reviews(self):
+        """#514: a 2-review ruleset with one approval blocks landing dispatch."""
+        app = tui.ReviewDashboard()
+        app.self_login = "jorge"
+        stop = tui.Stop(
+            repository="projectbluefin/common",
+            number=1080,
+            action="review",
+            title="needs a second review",
+            author="alice",
+        )
+        one_approval = {"reviews": [
+            {"author": {"login": "alice"}, "state": "APPROVED"},
+        ]}
+        two_approvals = {"reviews": [
+            {"author": {"login": "alice"}, "state": "APPROVED"},
+            {"author": {"login": "bob"}, "state": "APPROVED"},
+        ]}
+        with mock.patch.object(
+            tui, "repo_review_policy",
+            return_value={"approvals": 2, "code_owners": False,
+                          "last_push_approval": False, "merge_queue": False,
+                          "source": "ruleset"},
+        ):
+            # One human approval under a two-review ruleset: held, not dispatched.
+            blocker = app.landing_ruleset_blocker(stop, one_approval)
+            self.assertIn("projectbluefin/common", blocker)
+            self.assertIn("2 write-access review(s)", blocker)
+            # Two human approvals: the ruleset's requirement is met.
+            self.assertEqual(app.landing_ruleset_blocker(stop, two_approvals), "")
+            # A ruleset that requires no reviews never blocks on approvals.
+            with mock.patch.object(
+                tui, "repo_review_policy",
+                return_value={"approvals": 0, "code_owners": False,
+                              "last_push_approval": False, "merge_queue": False,
+                              "source": "fallback"},
+            ):
+                self.assertEqual(app.landing_ruleset_blocker(stop, one_approval), "")
+
+    def test_landing_ruleset_blocker_flags_own_pr_and_invalidated_approval(self):
+        """#514: an own-authored PR and require_last_push_approval are held."""
+        app = tui.ReviewDashboard()
+        app.self_login = "jorge"
+        app.is_fixer_head = lambda repo, num, head: True
+        own = tui.Stop(
+            repository="projectbluefin/common",
+            number=5,
+            action="review",
+            title="my pull request",
+            author="jorge",
+        )
+        self_approval = {"reviews": [
+            {"author": {"login": "jorge"}, "state": "APPROVED"},
+        ]}
+        with mock.patch.object(
+            tui, "repo_review_policy",
+            return_value={"approvals": 1, "code_owners": False,
+                          "last_push_approval": False, "merge_queue": False,
+                          "source": "ruleset"},
+        ):
+            # The author's own approval satisfies the count; policy still bars it.
+            blocker = app.landing_ruleset_blocker(own, self_approval)
+            self.assertIn("own pull request", blocker)
+        with mock.patch.object(
+            tui, "repo_review_policy",
+            return_value={"approvals": 1, "code_owners": False,
+                          "last_push_approval": True, "merge_queue": False,
+                          "source": "ruleset"},
+        ):
+            # A foreign approval counts, but our own pushed head invalidates it.
+            foreign = {"headRefOid": _sha("d"), "reviews": [
+                {"author": {"login": "jorge"}, "state": "APPROVED"},
+            ]}
+            blocker = app.landing_ruleset_blocker(own, foreign)
+            self.assertIn("require_last_push_approval", blocker)
+
+    def test_plan_landing_preflight_holds_ruleset_blocked_prs(self):
+        """#514: the batch dispatch excludes PRs a ruleset would block on."""
+        class _FakeTask:
+            def __init__(self, stops):
+                self.stops = stops
+                self.policy = None
+
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+            app.final_policy = "automatic"
+            enqueued = []
+            app.enqueue_landing = enqueued.append
+
+            def fake_fetch_live_pr(repository, number, force=False):
+                if number == 1080:
+                    return {"headRefOid": _sha("b"), "reviews": [
+                        {"author": {"login": "alice"}, "state": "APPROVED"}]}
+                return {"headRefOid": _sha("c"), "reviews": [
+                    {"author": {"login": "alice"}, "state": "APPROVED"},
+                    {"author": {"login": "bob"}, "state": "APPROVED"}]}
+
+            app.fetch_live_pr = fake_fetch_live_pr
+            pushed = {}
+
+            def capture_push_screen(screen, finish=None):
+                pushed["screen"] = screen
+                if finish:
+                    finish(True)
+                return None
+
+            app.push_screen = capture_push_screen
+            with mock.patch.object(
+                tui, "repo_review_policy",
+                return_value={"approvals": 2, "code_owners": False,
+                              "last_push_approval": False, "merge_queue": False,
+                              "source": "ruleset"},
+            ), mock.patch.object(tui.landing, "new_task",
+                                 side_effect=lambda stops, login: _FakeTask(stops)):
+                pr1080 = tui.Stop(
+                    repository="projectbluefin/common", number=1080,
+                    action="review", title="blocked PR", author="alice",
+                    selected=True,
+                )
+                pr970 = tui.Stop(
+                    repository="projectbluefin/common", number=970,
+                    action="review", title="clean PR", author="alice",
+                    selected=True,
+                )
+                app.plan_landing([pr1080, pr970])
+
+            # The blocked PR is held with a visible note and removed from
+            # selection so the batch loop does not spin on it.
+            self.assertFalse(pr1080.selected)
+            self.assertTrue(pr1080.failure.startswith("awaiting-reviewers:"))
+            # Only the PR the ruleset will actually land was dispatched.
+            self.assertEqual(len(enqueued), 1)
+            self.assertEqual(enqueued[0].stops, [pr970])
+
+    def test_landing_branch_blocker_holds_wrong_target_and_conflicts(self):
+        """#517: a wrong target branch and a conflicting merge base block.
+
+        projectbluefin/bluefin lands from `testing`; a PR cut from `main`
+        was dispatched pass after pass, each agent rediscovering the same
+        ~176-file drift before dying on the conflict. The pre-flight names
+        that drift and refuses the dispatch. Absent evidence never blocks.
+        """
+        app = tui.ReviewDashboard()
+        stop = tui.Stop(
+            repository="projectbluefin/bluefin",
+            number=1238,
+            action="review",
+            title="cut from main instead of testing",
+            author="alice",
+        )
+        with mock.patch.object(
+            tui.landing, "branch_target_drift", return_value=176
+        ):
+            # Wrong base and a conflicting merge base: both named, wrong
+            # target first.
+            blocker = app.landing_branch_blocker(
+                stop,
+                {"baseRefName": "main", "mergeable": "CONFLICTING",
+                 "mergeStateStatus": "DIRTY"},
+            )
+            self.assertIn("wrong target branch: base main, testing required", blocker)
+            self.assertIn("176 files drifted", blocker)
+            self.assertIn("merge base conflicting", blocker)
+            # The right branch with a clean merge base never blocks.
+            self.assertEqual(
+                app.landing_branch_blocker(
+                    stop,
+                    {"baseRefName": "testing", "mergeable": "MERGEABLE",
+                     "mergeStateStatus": "CLEAN"},
+                ),
+                "",
+            )
+        # A repository with no landing policy blocks on conflicts alone.
+        common = tui.Stop(
+            repository="projectbluefin/common", number=7,
+            action="review", title="chore: bump digest", author="alice",
+        )
+        self.assertEqual(
+            app.landing_branch_blocker(
+                common,
+                {"baseRefName": "main", "mergeable": "MERGEABLE",
+                 "mergeStateStatus": "CLEAN"},
+            ),
+            "",
+        )
+        self.assertIn(
+            "merge base conflicting",
+            app.landing_branch_blocker(
+                common,
+                {"baseRefName": "main", "mergeable": "CONFLICTING",
+                 "mergeStateStatus": "DIRTY"},
+            ),
+        )
+        # Absent evidence is a pass: no base named, nothing conflicting.
+        self.assertEqual(
+            app.landing_branch_blocker(stop, {"mergeable": "MERGEABLE"}),
+            "",
+        )
+        # A compare that cannot answer costs the note its drift count,
+        # never the verdict.
+        with mock.patch.object(tui.landing, "branch_target_drift", return_value=None):
+            blocker = app.landing_branch_blocker(
+                stop,
+                {"baseRefName": "main", "mergeable": "MERGEABLE",
+                 "mergeStateStatus": "CLEAN"},
+            )
+        self.assertIn("wrong target branch: base main, testing required", blocker)
+        self.assertNotIn("files drifted", blocker)
+
+    def test_plan_landing_preflight_holds_wrong_target_prs(self):
+        """#517: the batch dispatch excludes PRs aimed at the wrong branch."""
+        class _FakeTask:
+            def __init__(self, stops):
+                self.stops = stops
+                self.policy = None
+
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+            app.final_policy = "automatic"
+            enqueued = []
+            app.enqueue_landing = enqueued.append
+
+            def fake_fetch_live_pr(repository, number, force=False):
+                if number == 1238:
+                    return {"headRefOid": _sha("b"), "baseRefName": "main",
+                            "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+                            "reviews": []}
+                return {"headRefOid": _sha("c"), "baseRefName": "testing",
+                        "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+                        "reviews": []}
+
+            app.fetch_live_pr = fake_fetch_live_pr
+
+            def capture_push_screen(screen, finish=None):
+                if finish:
+                    finish(True)
+                return None
+
+            app.push_screen = capture_push_screen
+            with mock.patch.object(
+                tui, "repo_review_policy",
+                return_value={"approvals": 0, "code_owners": False,
+                              "last_push_approval": False, "merge_queue": False,
+                              "source": "fallback"},
+            ), mock.patch.object(
+                tui.landing, "branch_target_drift", return_value=176,
+            ), mock.patch.object(
+                tui.landing, "new_task",
+                side_effect=lambda stops, login: _FakeTask(stops),
+            ):
+                wrong = tui.Stop(
+                    repository="projectbluefin/bluefin", number=1238,
+                    action="review", title="cut from main", author="alice",
+                    selected=True,
+                )
+                right = tui.Stop(
+                    repository="projectbluefin/bluefin", number=1240,
+                    action="review", title="targets testing", author="alice",
+                    selected=True,
+                )
+                app.plan_landing([wrong, right])
+
+            # The wrong-target PR is deselected with the reason on its row,
+            # so no later pass re-selects and re-dispatches the same drift.
+            self.assertFalse(wrong.selected)
+            self.assertIn("wrong target branch", wrong.failure)
+            self.assertIn("176 files drifted", wrong.failure)
+            # Only the PR that targets the policy branch was dispatched.
+            self.assertEqual(len(enqueued), 1)
+            self.assertEqual(enqueued[0].stops, [right])
+
+    def test_plan_landing_preflight_holds_conflicted_prs(self):
+        """#517: CONFLICTING/DIRTY merge bases stay out of landing queues."""
+        class _FakeTask:
+            def __init__(self, stops):
+                self.stops = stops
+                self.policy = None
+
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+            app.final_policy = "automatic"
+            enqueued = []
+            app.enqueue_landing = enqueued.append
+            app.fetch_live_pr = lambda repo, num, force=False: {
+                "headRefOid": _sha("b"), "baseRefName": "main",
+                "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY",
+                "reviews": [],
+            }
+            pushed = []
+
+            def capture_push_screen(screen, finish=None):
+                pushed.append(screen)
+                return None
+
+            app.push_screen = capture_push_screen
+            with mock.patch.object(
+                tui, "repo_review_policy",
+                return_value={"approvals": 0, "code_owners": False,
+                              "last_push_approval": False, "merge_queue": False,
+                              "source": "fallback"},
+            ):
+                conflicted = tui.Stop(
+                    repository="projectbluefin/common", number=451,
+                    action="review", title="conflicting history", author="alice",
+                    selected=True,
+                )
+                app.plan_landing([conflicted])
+
+            self.assertFalse(conflicted.selected)
+            self.assertIn("merge base conflicting", conflicted.failure)
+            self.assertEqual(enqueued, [])
+            self.assertEqual(
+                pushed, [],
+                "a fully conflicted selection must never reach the batch gate",
+            )
+
     def _setup_app(self, store_dir):
         app = tui.ReviewDashboard()
         app.self_login = "jorge"

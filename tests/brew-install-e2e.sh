@@ -37,7 +37,7 @@ apptainer exec --cleanenv --home "$scratch/home" \
 set -euo pipefail
 
 echo "==> Installing Homebrew from scratch in clean container..."
-CI=1 NONINTERACTIVE=1 /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+CI=1 NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 echo "==> Configuring shell environment..."
 eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
@@ -50,7 +50,7 @@ mkdir -p "$(brew --repository)/Library/Taps/ublue-os"
 git clone --depth=1 https://github.com/ublue-os/homebrew-experimental-tap.git "$(brew --repository)/Library/Taps/ublue-os/homebrew-experimental-tap"
 
 echo "==> Installing bluefin-contributor-tools..."
-brew install --ignore-dependencies ublue-os/experimental-tap/bluefin-contributor-tools
+brew install ublue-os/experimental-tap/bluefin-contributor-tools
 
 echo "==> Verifying installed executables..."
 test -x "$(brew --prefix)/bin/bluefin"

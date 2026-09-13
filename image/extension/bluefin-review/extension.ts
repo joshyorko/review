@@ -11,7 +11,7 @@
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, parseScope, resolveToken } from "./github.ts";
+import { DEFAULT_ORG, fetchIssueAdmission, parseScope, resolveToken } from "./github.ts";
 import type { Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { themePainter } from "./paint.ts";
@@ -20,6 +20,19 @@ import type { KeyMatcher } from "./keys.ts";
 import { type ToolHost, registerTools } from "./tools.ts";
 import { BluefinAnsiSplash } from "./splash.ts";
 import { HiveLeaderboardComponent } from "./leaderboard.ts";
+export {
+	type MutationKind,
+	type MutationCapability,
+	type MutationRequest,
+	type MutationPlan,
+	type RetryClassification,
+	type MergeAuthorityCheckItem,
+	type MergeAuthorityResult,
+	MutationCapabilityPolicy,
+	generateNativeCommand,
+	mutationSignature,
+	checkMergeAuthority,
+} from "./mutations.ts";
 export const STATE_ENTRY = "com.projectbluefin.review.selection";
 
 /** Queue refetch cadence. GitHub search is rate limited; the state poll is local. */
@@ -90,6 +103,28 @@ function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
 	return latest;
 }
 
+export const REVIEW_REPO = "projectbluefin/review";
+export const ADMISSION_LABEL = "3-clanker-queue";
+export const HOLD_LABEL = "hold";
+export const BLOCKED_LABEL = "blocked";
+
+/**
+ * Classify whether a DashboardAction constitutes an implementation action.
+ * Write-capable issue actions ('slay', 'fix', 'docs') must be gated on admission.
+ * Read-only actions ('review', 'diff', 'reference', 'scope', 'close',
+ * 'leaderboard', 'snapshot') and merge actions ('approve') do not implement
+ * issue changes and are not gated by this admission check.
+ */
+export function isImplementationAction(action: DashboardAction): boolean {
+	switch (action.kind) {
+		case "slay":
+		case "fix":
+		case "docs":
+			return true;
+		default:
+			return false;
+	}
+}
 /**
  * Prompts the action keys send. Each one names the evidence the agent must use.
  *
@@ -100,6 +135,7 @@ function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
  */
 export function actionPrompt(action: DashboardAction, priority?: Priority): string | undefined {
 	const autonomousRule = "This is an automated review and landing tool: execute all actions end-to-end autonomously in a continuous loop. Never ask the user for confirmation, permission, or interactive prompts to proceed. Once a batch or queue item is complete, immediately request the next assignment from the queue or advance to the next item so the loop runs continuously without stopping.";
+	const mutationRule = "Typed GitHub mutations prefer native/gh/API tools. Browser is bounded fallback for UI-only work; equivalent preferred attempts are not repeated indefinitely. Preserved human confirmation and merge authority: stop and report instead of merging if any check is failing or pending.";
 	const hive = priority?.hiveRank === undefined ? ` ${autonomousRule}` : ` This is Hive-prioritized work (${priority.reason}); keep the linked issue's intent in view and reference it in what you report. ${autonomousRule}`;
 	const cite = (item: QueueItem) => `${item.repo}#${item.id} (${item.title})`;
 	const batch = "items" in action && action.items && action.items.length > 1 ? action.items : undefined;
@@ -141,7 +177,7 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 
 		const auditInstruction = `When issues/PRs are worked, repository clumping happens at the review agent level: for each repository (e.g. all items in \`${[...repoGroups.keys()].join("`, `")}\`), dispatch the review agent to audit and land changes together, which lands them all in one PR per repository, verifying cross-repository contract compatibility, shared schema and dependency alignment, doctrine invariants, and simplicity.`;
 		const autonomousRule = "This is an automated review and landing tool: execute all actions end-to-end autonomously in a continuous loop. Never ask the user for confirmation, permission, or interactive prompts to proceed. Once a batch or queue item is complete, immediately request the next assignment from the queue or advance to the next item so the loop runs continuously without stopping.";
-		const protocol = `${fanOut}\n\n${auditInstruction}\n\n${autonomousRule}`;
+		const protocol = `${fanOut}\n\n${auditInstruction}\n\n${mutationRule}\n\n${autonomousRule}`;
 		switch (action.kind) {
 			case "review":
 				return `Review the following ${batch.length} selected items grouped by repository for efficiency:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each repository group: read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not.\n\n${protocol}`;
@@ -171,9 +207,9 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		case "docs":
 			return `Update and align documentation for ${cite(action.item)}. Enforce the projectbluefin/common agentic documentation system with brutal alignment: inspect the actual diff and changed surface, update the closest matching docs/skills/*.md file or core contract (AGENTS.md, docs/factory/agentic-model.md, docs/SKILL.md), eliminate any grandfathering/speculative filler, enforce token efficiency (descriptions <= 256 chars, skill documents <= 200 lines soft max), and run \`bash scripts/check-skill-frontmatter.sh --write\` to ensure docs/skills/index.json is synchronized perfectly for token-efficient agent ingestion. ${autonomousRule}`;
 		case "approve":
-			return `For ${cite(action.item)}: confirm every required check is green with \`gh pr checks ${action.item.id} --repo ${action.item.repo}\`, restate the merge risk in one line, then approve with \`gh pr review ${action.item.id} --repo ${action.item.repo} --approve\`. Attempt squash merge with \`gh pr merge ${action.item.id} --repo ${action.item.repo} --squash\`; if the repository uses a merge queue or ruleset, enable auto-merge (\`gh pr merge ${action.item.id} --repo ${action.item.repo} --auto --squash\`) and ensure the \`lgtm\` label is present (\`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-label lgtm\`). Stop and report instead of merging if any check is failing or pending. ${autonomousRule}`;
+			return `For ${cite(action.item)}: confirm every required check is green with \`gh pr checks ${action.item.id} --repo ${action.item.repo}\`, restate the merge risk in one line, then approve with \`gh pr review ${action.item.id} --repo ${action.item.repo} --approve\`. Attempt squash merge with \`gh pr merge ${action.item.id} --repo ${action.item.repo} --squash\`; if the repository uses a merge queue or ruleset, enable auto-merge (\`gh pr merge ${action.item.id} --repo ${action.item.repo} --auto --squash\`) and ensure the \`lgtm\` label is present (\`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-label lgtm\`). Stop and report instead of merging if any check is failing or pending. ${mutationRule} ${autonomousRule}`;
 		case "fix":
-			return `Fix the findings recorded for ${cite(action.item)}. Read them with bluefin_review_trace, address each one at its source, run the smallest contract test that covers the changed surface, and prepare one clean commit. Do not suppress a finding you cannot fix — report it.${hive}`;
+			return `Fix the findings recorded for ${cite(action.item)}. Read them with bluefin_review_trace, address each one at its source, run the smallest contract test that covers the changed surface, and prepare one clean commit. Typed GitHub mutations prefer native/gh/API tools. When repairing defects such as invalid PR titles or labels (e.g. repairing PR title like #440), prefer native gh commands first (\`gh pr edit ${action.item.id} --repo ${action.item.repo} --title "<title>"\` or \`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-label <label>\`). Browser is bounded fallback for UI-only work; equivalent preferred attempts are not repeated indefinitely. Do not suppress a finding you cannot fix — report it.${hive}`;
 		case "slay":
 			// Issues have no diff to land. Slaying one means producing the change it
 			// asked for and handing it to a human as a pull request.
@@ -217,6 +253,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeDashboardDone: ((action: DashboardAction) => void) | undefined;
 	let activeCtx: CtxLike | undefined;
 	let started: Promise<void> = Promise.resolve();
+	let dispatchGeneration = 0;
 	pi.setLabel("Bluefin Review");
 	pi.registerFlag("pr", { description: "Preselect a pull request or issue number", type: "string" });
 	pi.registerFlag("issues", { description: "Start in issues mode instead of pull requests", type: "boolean", default: false });
@@ -294,7 +331,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return true;
 	};
 
-	const dispatch = async (ctx: CtxLike, action: DashboardAction, options?: { deliverAs?: "steer" | "followUp" }): Promise<void> => {
+	const dispatch = async (
+		ctx: CtxLike,
+		action: DashboardAction,
+		deliveryOptions?: { deliverAs?: "steer" | "followUp" },
+	): Promise<void> => {
 		if (action.kind === "close") {
 			autoReopenDashboard = false;
 			return;
@@ -309,7 +350,64 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.pasteToEditor(text);
 			return;
 		}
-		const count = "items" in action && action.items && action.items.length > 1 ? action.items.length : 1;
+
+		// Capture identities before the admission read can yield to UI activity.
+		const capturedItems: QueueItem[] =
+			"items" in action && action.items && action.items.length > 0 ? [...action.items] : [action.item];
+
+		const isImpl = isImplementationAction(action);
+		const reviewIssues = isImpl
+			? capturedItems.filter((it) => it.type === "issue" && it.repo === REVIEW_REPO)
+			: [];
+
+		if (reviewIssues.length > 0) {
+			const generation = ++dispatchGeneration;
+			const [reviewOwner, reviewName] = REVIEW_REPO.split("/") as [string, string];
+			const targets = reviewIssues.map((it) => ({
+				owner: reviewOwner,
+				repo: reviewName,
+				number: it.id,
+			}));
+
+			const token = mode.tokenOptions().token ?? resolveToken(env);
+			const result = await fetchIssueAdmission(targets, {
+				token,
+				fetchImpl: options.fetchImpl,
+			});
+
+			if (generation !== dispatchGeneration) return;
+
+			if (result.error) {
+				ctx.ui.notify(`Admission check failed: ${result.error}`, "error");
+				return;
+			}
+
+			for (const admitted of result.issues) {
+				const key = `${admitted.owner}/${admitted.repo}#${admitted.number}`;
+				if (admitted.closed) {
+					ctx.ui.notify(`Cannot dispatch ${key}: issue is closed`, "error");
+					return;
+				}
+				if (admitted.labelsTruncated) {
+					ctx.ui.notify(`Cannot dispatch ${key}: incomplete label evidence`, "error");
+					return;
+				}
+				if (admitted.labels.includes(HOLD_LABEL)) {
+					ctx.ui.notify(`Cannot dispatch ${key}: issue has hold label`, "error");
+					return;
+				}
+				if (admitted.labels.includes(BLOCKED_LABEL)) {
+					ctx.ui.notify(`Cannot dispatch ${key}: issue has blocked label`, "error");
+					return;
+				}
+				if (!admitted.labels.includes(ADMISSION_LABEL)) {
+					ctx.ui.notify(`Cannot dispatch ${key}: missing explicit admission label '${ADMISSION_LABEL}'`, "error");
+					return;
+				}
+			}
+		}
+
+		const count = capturedItems.length;
 		const priority = action.kind === "snapshot" ? undefined : mode.priorityFor(action.item);
 		const prompt = actionPrompt(action, priority);
 		if (!prompt) return;
@@ -318,7 +416,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		activeCtx = ctx;
 		autoReopenDashboard = !autoslayActive;
 		mode.clearSelected();
-		pi.sendUserMessage(prompt, options?.deliverAs ? { deliverAs: options.deliverAs } : undefined);
+		pi.sendUserMessage(prompt, deliveryOptions?.deliverAs ? { deliverAs: deliveryOptions.deliverAs } : undefined);
 	};
 	const openLeaderboard = async (ctx: CtxLike) => {
 		if (!ctx.hasUI) return;
@@ -359,6 +457,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				},
 				{ overlay: false },
 			);
+			dashboardOpen = false;
 			if (action.kind === "slay") {
 				autoslayActive = true;
 			}

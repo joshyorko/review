@@ -512,6 +512,13 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app.discover_harness = lambda: None
             app.load_issues = lambda: None
             app.enqueue_landing = lambda task: app.landing_queue.append(task)
+            app.fetch_live_pr = lambda *_args, **_kwargs: {
+                "headRefOid": "b" * 40,
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "reviews": [{"author": {"login": "maintainer"}, "state": "APPROVED"}],
+            }
             notices = []
 
             async def exercise():
@@ -552,7 +559,10 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                     self.assertIn("last dispatched", visible_status)
                     self.assertIn("review queue remains open | [I]", visible_status)
 
-            asyncio.run(exercise())
+            with mock.patch.object(tui, "repo_review_policy", return_value={
+                "approvals": 1, "last_push_approval": False,
+            }):
+                asyncio.run(exercise())
 
     def test_dashboard_mounts_at_compact_and_desktop_sizes_with_queue_focus(self):
         async def exercise(size):

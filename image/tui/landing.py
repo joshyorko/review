@@ -23,6 +23,7 @@ import math
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 import urllib.error
@@ -911,6 +912,90 @@ def new_fix_task(
     return task
 
 
+# ── the branch-target pre-flight (#517) ─────────────────────────────────
+# Some repositories land on a non-default branch: projectbluefin/bluefin and
+# projectbluefin/bluefin-lts cut their release stream from `testing`, so a
+# pull request aimed at `main` is an unmergeable configuration no review
+# cycle can repair. Today's landing passes dispatched those pull requests
+# again and again, each agent rediscovering the same drift (176 files
+# between main and testing) before dying on the conflict. The pre-flight
+# answers it once, deterministically, before an agent is dispatched: GitHub's
+# own account of the base branch and mergeability, judged against the policy
+# below. Absent evidence never blocks — a base branch the query could not
+# name passes, exactly as an UNKNOWN mergeability does — because a
+# deterministic gate must never read a missing answer as a verdict.
+
+BRANCH_TARGET_POLICY = {
+    "projectbluefin/bluefin": "testing",
+    "projectbluefin/bluefin-lts": "testing",
+}
+
+
+def branch_target_block(
+    repository: str,
+    base_ref: str,
+    mergeable: str,
+    merge_state: str,
+    drift_files: int | None = None,
+) -> str | None:
+    """The blocking note for a pull request that may not enter the landing
+    cycle, or None when it may proceed.
+
+    Pure, so the dashboard's pre-flight and the unit tests feed it the same
+    live evidence GitHub reports. Two conditions block, either one alone:
+    the pull request targets a branch its repository's policy forbids (a
+    release stream cut from the wrong base), or the merge base itself is
+    CONFLICTING/DIRTY. Both are states no repair inside the pull request's
+    own branch can fix, and both cost a full agent dispatch to rediscover —
+    the pull request is blocked and deselected instead. If both apply the
+    note names both; the wrong-target reason leads.
+    """
+    required = BRANCH_TARGET_POLICY.get(str(repository or "").lower())
+    base_ref = str(base_ref or "").strip()
+    mergeable = str(mergeable or "").upper()
+    merge_state = str(merge_state or "").upper()
+    wrong_target = required is not None and base_ref not in ("", required)
+    conflicting = mergeable == "CONFLICTING" or merge_state == "DIRTY"
+    if not wrong_target and not conflicting:
+        return None
+    reasons: list[str] = []
+    if wrong_target:
+        drift = f", {drift_files} files drifted" if drift_files is not None else ""
+        reasons.append(
+            f"wrong target branch: base {base_ref}, {required} required{drift}"
+        )
+    if conflicting:
+        reasons.append("merge base conflicting; rebase before landing")
+    return "; ".join(reasons)
+
+
+def branch_target_drift(repository: str, required: str, base_ref: str) -> int | None:
+    """How many files differ between the required target and the found base.
+
+    Best-effort evidence for the blocker note: the compare endpoint reports
+    the same file count the landing passes kept rediscovering by hand. A
+    failed, timed-out, or unparseable answer never changes the verdict — it
+    only means the note says less.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "api",
+                f"repos/{repository}/compare/{required}...{base_ref}",
+                "--jq", "{files: (.files | length)}",
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return None
+        files = json.loads(result.stdout).get("files")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(files, bool) or not isinstance(files, int) or files < 0:
+        return None
+    return files
+
+
 # fsdk-containers#164 ships skopeo in the base; it deletes the anonymous
 # registry check in step 5 below.
 def landing_prompt(task: LandingTask) -> str:
@@ -938,6 +1023,17 @@ For each pull request, in order:
 
 1. Inspect it with repository-qualified commands: `gh pr view <number> --repo <owner>/<repo>`
    and `gh pr checks <number> --repo <owner>/<repo>`.
+   Before anything else, verify the target branch against the repository's
+   landing policy: `gh pr view <number> --repo <owner>/<repo> --json baseRefName,mergeable,mergeStateStatus`.
+   `projectbluefin/bluefin` and `projectbluefin/bluefin-lts` land only from
+   `testing` — a pull request whose base is anything else (typically `main`)
+   is an unmergeable configuration no repair inside its own branch can fix.
+   Report it `blocked` immediately, naming the base you found and the
+   required target, and move to the next pull request without diagnosing,
+   fixing, or waiting on its checks. A CONFLICTING or DIRTY merge base is
+   the same kind of blocker: report `blocked` naming it and move on. The
+   dispatch pre-flight already deselected these; this rule covers evidence
+   that arrives after dispatch.
 2. Repair mechanical CI failures only — a stale sha256 after a version bump,
    a lockfile, formatting. If applying fixes, operate in a scratch workdir:
    `WORKDIR=$(mktemp -d /tmp/landing-XXXXXX) && gh repo clone <owner>/<repo> "$WORKDIR" && cd "$WORKDIR" && gh pr checkout <number> --repo <owner>/<repo>`.
@@ -968,6 +1064,13 @@ For each pull request, in order:
    contradicts the queue's own `merge_method`, and never bypass the queue with a
    direct merge. Only when no merge queue applies, merge directly using a method
    the ruleset's `allowed_merge_methods` permits.
+   The maintainer's batch already excludes, up front, any pull request its
+   repository's ruleset would block on approvals or self-approval: such a PR
+   is held `awaiting-reviewers` and removed from the batch rather than
+   dispatched, so do not try to land a PR that lacks the write-access
+   reviews its ruleset requires, and never bypass branch protection or
+   review requirements to force a merge — report it `blocked` with the
+   exact approval shortfall instead.
    Never approve or merge a pull request authored by @{task.login}: Bluefin
    policy requires review by a different contributor, so an own-authored
    pull request in this batch is reported `blocked` with the note

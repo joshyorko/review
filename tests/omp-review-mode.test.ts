@@ -26,7 +26,15 @@ import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts"
 import { STALE_AFTER_MS, queueAge, renderHitlist, renderRail, statusSegment, tmuxReviewStatusBar } from "../image/extension/bluefin-review/rail.ts";
 import { SessionTrace } from "../image/extension/bluefin-review/session.ts";
 import { BluefinAnsiSplash } from "../image/extension/bluefin-review/splash.ts";
-import { STATE_ENTRY, actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
+import {
+	STATE_ENTRY,
+	actionPrompt,
+	createReviewExtension,
+	MutationCapabilityPolicy,
+	checkMergeAuthority,
+	generateNativeCommand,
+	mutationSignature,
+} from "../image/extension/bluefin-review/extension.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -274,14 +282,15 @@ function fakeCtx() {
 	const statuses = new Map();
 	const widgets = new Map();
 	const overlays = [];
-	return {
+	const pasted = [];
+	const ctx = {
 		hasUI: true,
 		notifications,
 		statuses,
 		widgets,
 		overlays,
 		footers: [] as Array<unknown>,
-		pasted: [],
+		pasted,
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
 			setStatus: (key, value) => statuses.set(key, value),
@@ -291,7 +300,7 @@ function fakeCtx() {
 			},
 			setTitle: () => {},
 			pasteToEditor(text) {
-				this.parent.pasted.push(text);
+				pasted.push(text);
 			},
 			custom(factory) {
 				const { promise, resolve } = Promise.withResolvers();
@@ -302,6 +311,7 @@ function fakeCtx() {
 		},
 		sessionManager: { getBranch: () => [] },
 	};
+	return ctx;
 }
 
 // ---------------------------------------------------------------- vocabulary
@@ -1886,4 +1896,763 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	assert.match(prompt, /capped at a maximum of 7 concurrent subagents/);
 	assert.match(prompt, /dispatch the review agent/);
 	assert.match(prompt, /lands them all in one PR per repository/);
+});
+
+test("RED: unlabeled open projectbluefin/review issue is rejected and NOT sent to sendUserMessage", async () => {
+	const pi = fakeHost();
+	const issueFetch = (url, init) => {
+		if (String(url).includes("/graphql")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					data: {
+						search: {
+							pageInfo: { hasNextPage: false, endCursor: null },
+							nodes: [
+								{
+									number: 485,
+									title: "gate issue admission",
+									url: "https://github.com/projectbluefin/review/issues/485",
+									updatedAt: new Date(NOW - 1000).toISOString(),
+									author: { login: "someone" },
+									repository: { nameWithOwner: "projectbluefin/review" },
+									labels: { nodes: [] },
+								},
+							],
+						},
+					},
+				}),
+			};
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueFetch, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	pi.flagValues.set("splash", false);
+	pi.flagValues.set("issues", true);
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	assert.equal(ctx.overlays.length, 1);
+	const dashboard = ctx.overlays[0];
+
+	pi.messages.length = 0;
+
+	// Slay the unlabeled projectbluefin/review issue
+	dashboard.handleInput("s");
+	await Promise.resolve(); // allow microtasks to flush
+
+	// In unpatched code: pi.messages has length 1 (dispatched without admission).
+	// For the RED test, assert that messages.length === 0 and an admission error notification was emitted.
+	// This will FAIL on current unpatched main!
+	assert.equal(pi.messages.length, 0, "unlabeled projectbluefin/review issue must NOT reach sendUserMessage");
+});
+
+test("issue admission gate handles positive admission, negative cases, and invariants", async () => {
+	const setup = async (issueAttrs, options = {}) => {
+		const pi = fakeHost();
+		const issues = Array.isArray(issueAttrs) ? issueAttrs : [issueAttrs];
+		const issueFetch = (url, init) => {
+			const target = String(url);
+			if (target.includes("/graphql")) {
+				const body = JSON.parse(String(init?.body ?? "{}"));
+				// Distinguish search query vs admission query
+				if (body.variables?.search !== undefined) {
+					return {
+						ok: true,
+						status: 200,
+						statusText: "OK",
+						json: async () => ({
+							data: {
+								search: {
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: issues.map((it) => ({
+										number: it.number ?? 485,
+										title: it.title ?? "test issue",
+										url: `https://github.com/${it.repo ?? "projectbluefin/review"}/${it.type === "pr" ? "pull" : "issues"}/${it.number ?? 485}`,
+										updatedAt: new Date(NOW - 1000).toISOString(),
+										isDraft: false,
+										mergeable: "MERGEABLE",
+										reviewDecision: "REVIEW_REQUIRED",
+										author: { login: "someone" },
+										repository: { nameWithOwner: it.repo ?? "projectbluefin/review" },
+										labels: { nodes: (it.labels ?? []).map((l) => ({ name: l })) },
+									})),
+								},
+							},
+						}),
+					};
+				}
+
+				// If options.fetchError is provided, simulate request failure on admission
+				if (options.networkError) {
+					throw new Error("network connection reset");
+				}
+				if (options.httpStatus) {
+					return { ok: false, status: options.httpStatus, statusText: "Error", json: async () => ({}) };
+				}
+				if (options.graphqlErrors) {
+					return { ok: true, status: 200, statusText: "OK", json: async () => ({ errors: options.graphqlErrors }) };
+				}
+
+
+				// Admission query by alias: parse targets from the query
+				const data = {};
+				const aliasRegex = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*nameWithOwner\s*issue\(number: (\d+)\)/g;
+				for (const [, alias, owner, repo, numberStr] of body.query.matchAll(aliasRegex)) {
+					const num = Number(numberStr);
+					const fullRepo = `${owner}/${repo}`;
+					const it = issues.find((i) => (i.number ?? 485) === num && (i.repo ?? "projectbluefin/review") === fullRepo) ?? {
+						number: num,
+						repo: fullRepo,
+						labels: [],
+					};
+					if (options.missingNode) {
+						data[alias] = { nameWithOwner: fullRepo, issue: null };
+						continue;
+					}
+					const returnedRepo = options.wrongRepo ? "projectbluefin/wrong" : fullRepo;
+					const returnedNumber = options.wrongNumber ? 999 : num;
+					data[alias] = {
+						nameWithOwner: returnedRepo,
+						issue: {
+							number: returnedNumber,
+							closed: options.missingClosed ? undefined : it.closed === true,
+							repository: { nameWithOwner: returnedRepo },
+							labels: options.missingLabelPageInfo
+								? { nodes: (it.admissionLabels ?? it.labels ?? []).map((l) => ({ name: l })) }
+								: {
+										pageInfo: { hasNextPage: options.labelsTruncated === true },
+										nodes: (it.admissionLabels ?? it.labels ?? []).map((l) => ({ name: l })),
+									},
+						},
+					};
+				}
+				return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+			}
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		};
+
+		const review = createReviewExtension(pi, {
+			org: "projectbluefin",
+			fetchImpl: options.customFetch ?? issueFetch,
+			env: ISOLATED_ENV,
+		});
+		const ctx = fakeCtx();
+		ctx.ui.parent = ctx;
+		pi.flagValues.set("splash", false);
+		if (!options.isPr) pi.flagValues.set("issues", true);
+		await pi.events.get("session_start")({}, ctx);
+		await review.whenStarted();
+		const dashboard = ctx.overlays[0];
+		const turn = async () => {
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+		};
+		return { pi, ctx, dashboard, mode: review, turn };
+	};
+
+	// 1. Positive exact-label admission with exactly one dispatch
+	{
+		const { pi, dashboard, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 1, "admitted issue dispatches exactly once");
+		assert.match(pi.messages[0], /Close out projectbluefin\/review#485/);
+	}
+
+	// Autoslay must recheck admission on each repository-grouped continuation.
+	for (const event of ["turn_end", "agent_settled"]) {
+		const issue = { number: 485, labels: ["3-clanker-queue"], admissionLabels: ["3-clanker-queue"] };
+		const { pi, ctx, turn } = await setup([
+			issue,
+			{ number: 486, labels: ["3-clanker-queue"] },
+		]);
+		await pi.shortcuts.get("alt+s").handler(ctx);
+		await turn();
+		assert.equal(pi.messages.length, 1, `${event}: admitted batch starts once`);
+		assert.match(pi.messages[0], /projectbluefin\/review#485/);
+		assert.match(pi.messages[0], /projectbluefin\/review#486/);
+		assert.match(pi.messages[0], /dispatch the review agent/);
+		issue.admissionLabels = [];
+		await pi.events.get(event)({}, ctx);
+		await turn();
+		assert.equal(pi.messages.length, 1, `${event}: revoked admission blocks the next batch`);
+		assert.ok(ctx.notifications.some((notice) => notice.level === "error" && notice.message.includes("missing explicit admission label")));
+		pi.events.get("session_shutdown")();
+	}
+
+	// 2. No label
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "no label -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 3. Only 3-human-queue
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-human-queue"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "3-human-queue only -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 4. Only hive/* or agent/* provenance
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["hive/triage", "agent/task", "area/image"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "hive/agent labels only -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 5. hold label present (even if 3-clanker-queue is present)
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue", "hold"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "hold label -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("hold label")));
+	}
+
+	// 6. blocked label present (even if 3-clanker-queue is present)
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue", "blocked"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "blocked label -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("blocked label")));
+	}
+
+	// 7. closed issue
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"], closed: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "closed issue -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue is closed")));
+	}
+
+	// 8. Admission removed between display and dispatch
+	{
+		// Queue showed 3-clanker-queue, but admission check returns labels: []
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"], admissionLabels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "label removed between display and dispatch -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 9. Request failure (network error / HTTP error / GraphQL partial errors)
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { networkError: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "network error -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("Admission check failed")));
+	}
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { graphqlErrors: [{ message: "rate limited" }] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "graphql error -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("rate limited")));
+	}
+
+	// 10. Incomplete label evidence (labelsTruncated)
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { labelsTruncated: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "truncated labels -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("incomplete label evidence")));
+	}
+	// Missing freshness evidence fails closed.
+	{
+		const { pi, dashboard, ctx, turn } = await setup(
+			{ number: 485, labels: ["3-clanker-queue"] },
+			{ missingClosed: true },
+		);
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "missing open-state evidence -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue is closed")));
+	}
+	{
+		const { pi, dashboard, ctx, turn } = await setup(
+			{ number: 485, labels: ["3-clanker-queue"] },
+			{ missingLabelPageInfo: true },
+		);
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "missing label pagination evidence -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("incomplete label evidence")));
+	}
+
+	// 11. Wrong returned repository or issue identity
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { wrongRepo: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "wrong repo returned -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("repository mismatch")));
+	}
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { wrongNumber: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "wrong issue number returned -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue number mismatch")));
+	}
+
+	// 12. Missing node
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { missingNode: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "missing node -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("not found")));
+	}
+
+	// 13. Mixed batch containing one ineligible Review issue: zero dispatches (do not silently shrink)
+	{
+		const items = [
+			{ number: 485, repo: "projectbluefin/review", labels: ["3-clanker-queue"] }, // eligible
+			{ number: 486, repo: "projectbluefin/review", labels: ["hold"] }, // ineligible
+		];
+		const { pi, dashboard, ctx, turn } = await setup(items);
+		// Select all items using 'A'
+		dashboard.handleInput("A");
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "batch with one ineligible item yields zero dispatches");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue has hold label")));
+	}
+
+	// 14. Mixed batch containing Review issue and other repo issue: if Review issue is ineligible, zero dispatches
+	{
+		const items = [
+			{ number: 10, repo: "projectbluefin/other", labels: [] },
+			{ number: 485, repo: "projectbluefin/review", labels: [] },
+		];
+		const { pi, dashboard, ctx, turn } = await setup(items);
+		dashboard.handleInput("A");
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "mixed-repo batch with ineligible review issue yields zero dispatches");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 15. Unrelated repository issue: no admission read needed, still dispatches as before
+	{
+		const { pi, dashboard, turn } = await setup({ number: 936, repo: "projectbluefin/documentation", labels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 1, "unrelated repository issue dispatches without requiring 3-clanker-queue");
+		assert.match(pi.messages[0], /projectbluefin\/documentation#936/);
+	}
+
+	// 16. Read-only actions (diff, reference), PR actions, and other issue implementation actions ('fix', 'docs')
+	{
+		const { pi, dashboard, turn } = await setup({ number: 485, labels: [] });
+		pi.messages.length = 0;
+		// 'd' for diff
+		dashboard.handleInput("d");
+		await turn();
+		assert.equal(pi.messages.length, 1, "diff is read-only and dispatches without admission gate");
+		assert.match(pi.messages[0], /Call bluefin_review_diff/);
+	}
+	{
+		const { dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
+		dashboard.handleInput("y");
+		await turn();
+		assert.ok(ctx.pasted.length > 0, "cite/reference is read-only");
+	}
+	// fix on an unadmitted Review issue dispatches zero messages and notifies
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("f");
+		await turn();
+		assert.equal(pi.messages.length, 0, "fix on unadmitted Review issue dispatches zero messages");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+	// docs on an unadmitted Review issue dispatches zero messages and notifies
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("D");
+		await turn();
+		assert.equal(pi.messages.length, 0, "docs on unadmitted Review issue dispatches zero messages");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+	// fix on a projectbluefin/review PR is unchanged (no admission read, dispatches)
+	{
+		const { pi, dashboard, turn } = await setup({ number: 42, type: "pr", repo: "projectbluefin/review", labels: [] }, { isPr: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("f");
+		await turn();
+		assert.equal(pi.messages.length, 1, "fix on Review PR dispatches unchanged without admission read");
+		assert.match(pi.messages[0], /Fix the findings recorded for projectbluefin\/review#42/);
+	}
+
+	// 17. Selection changes during the read: no retargeting
+	{
+		const { promise, resolve } = Promise.withResolvers();
+		const customFetch = (url, init) => {
+			const target = String(url);
+			if (target.includes("/graphql")) {
+				const body = JSON.parse(String(init?.body ?? "{}"));
+				if (body.variables?.search !== undefined) {
+					return {
+						ok: true,
+						status: 200,
+						statusText: "OK",
+						json: async () => ({
+							data: {
+								search: {
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: [
+										{
+											number: 485,
+											title: "first issue",
+											url: "https://github.com/projectbluefin/review/issues/485",
+											updatedAt: new Date(NOW - 1000).toISOString(),
+											author: { login: "someone" },
+											repository: { nameWithOwner: "projectbluefin/review" },
+											labels: { nodes: [{ name: "3-clanker-queue" }] },
+										},
+										{
+											number: 486,
+											title: "second issue",
+											url: "https://github.com/projectbluefin/review/issues/486",
+											updatedAt: new Date(NOW - 2000).toISOString(),
+											author: { login: "someone" },
+											repository: { nameWithOwner: "projectbluefin/review" },
+											labels: { nodes: [] },
+										},
+									],
+								},
+							},
+						}),
+					};
+				}
+				return promise;
+			}
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		};
+
+		const { pi, dashboard, turn } = await setup([], { customFetch });
+		pi.messages.length = 0;
+		dashboard.handleInput(" ");
+		// Trigger dispatch for the explicitly selected item 485.
+		dashboard.handleInput("s");
+
+		// While admission read is pending, navigate to item 486
+		dashboard.handleInput("j");
+
+		// Now resolve the admission read
+		resolve({
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({
+				data: {
+					iss0: {
+						nameWithOwner: "projectbluefin/review",
+						issue: {
+							number: 485,
+							closed: false,
+							repository: { nameWithOwner: "projectbluefin/review" },
+							labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: "3-clanker-queue" }] },
+						},
+					},
+				},
+			}),
+		});
+		await turn();
+		assert.equal(pi.messages.length, 1);
+		assert.match(pi.messages[0], /projectbluefin\/review#485/, "prompt must dispatch for captured item 485, not navigated item 486");
+	}
+
+	// 18. Superseded dispatch generation discard: stale in-flight admission resolution produces no dispatch
+	{
+		let resolveFirst;
+		let resolveSecond;
+		let requestCount = 0;
+		const { promise: p1, resolve: r1 } = Promise.withResolvers();
+		const { promise: p2, resolve: r2 } = Promise.withResolvers();
+		resolveFirst = r1;
+		resolveSecond = r2;
+
+		const customFetch = (url, init) => {
+			const target = String(url);
+			if (target.includes("/graphql")) {
+				const body = JSON.parse(String(init?.body ?? "{}"));
+				if (body.variables?.search !== undefined) {
+					return {
+						ok: true,
+						status: 200,
+						statusText: "OK",
+						json: async () => ({
+							data: {
+								search: {
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: [
+										{
+											number: 485,
+											title: "first issue",
+											url: "https://github.com/projectbluefin/review/issues/485",
+											updatedAt: new Date(NOW - 1000).toISOString(),
+											author: { login: "someone" },
+											repository: { nameWithOwner: "projectbluefin/review" },
+											labels: { nodes: [{ name: "3-clanker-queue" }] },
+										},
+										{
+											number: 486,
+											title: "second issue",
+											url: "https://github.com/projectbluefin/review/issues/486",
+											updatedAt: new Date(NOW - 2000).toISOString(),
+											author: { login: "someone" },
+											repository: { nameWithOwner: "projectbluefin/review" },
+											labels: { nodes: [{ name: "3-clanker-queue" }] },
+										},
+									],
+								},
+							},
+						}),
+					};
+				}
+
+				requestCount++;
+				if (requestCount === 1) {
+					return p1;
+				}
+				return p2;
+			}
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		};
+
+		const { pi, dashboard, ctx, turn } = await setup([], { customFetch });
+		pi.messages.length = 0;
+
+		// Dispatch 1 on explicitly selected item 485 (pending on p1).
+		dashboard.handleInput(" ");
+		dashboard.handleInput("s");
+		await Promise.resolve();
+
+		// Move to item 486 and start Dispatch 2 (superseding Dispatch 1).
+		await pi.shortcuts.get("alt+b").handler(ctx);
+		const dashboard2 = ctx.overlays[1];
+		dashboard2.handleInput("x");
+		dashboard2.handleInput("j");
+		dashboard2.handleInput(" ");
+		dashboard2.handleInput("s");
+		await Promise.resolve();
+		// Resolve Dispatch 2 first
+		resolveSecond({
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({
+				data: {
+					iss0: {
+						nameWithOwner: "projectbluefin/review",
+						issue: {
+							number: 486,
+							closed: false,
+							repository: { nameWithOwner: "projectbluefin/review" },
+							labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: "3-clanker-queue" }] },
+						},
+					},
+				},
+			}),
+		});
+		await turn();
+
+		assert.equal(pi.messages.length, 1, "Dispatch 2 sends exactly one user message");
+		assert.match(pi.messages[0], /projectbluefin\/review#486/);
+
+		// Now let Dispatch 1 resolve late (superseded generation)
+		resolveFirst({
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({
+				data: {
+					iss0: {
+						nameWithOwner: "projectbluefin/review",
+						issue: {
+							number: 485,
+							closed: false,
+							repository: { nameWithOwner: "projectbluefin/review" },
+							labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: "3-clanker-queue" }] },
+						},
+					},
+				},
+			}),
+		});
+		await turn();
+
+		// The stale generation must NOT authorize work or emit an extra message
+		assert.equal(pi.messages.length, 1, "stale generation produced zero extra messages; total dispatches across both requests remains 1");
+		assert.match(pi.messages[0], /projectbluefin\/review#486/);
+	}
+});
+
+// P2 — prefer bounded native GitHub mutations before browser automation (#469)
+// Fixture proves native title edit first, bounded browser fallback for unsupported work,
+// no repeated equivalent attempts, and preserved human confirmation/merge authority.
+test("typed GitHub mutations prefer native tools, bound browser fallback, prevent repeated attempts, and preserve merge authority", () => {
+	const policy = new MutationCapabilityPolicy({ maxEquivalentAttempts: 1, maxBrowserFallbacks: 1 });
+
+	// 1. Title mutation prefers native first (gh pr edit / gh issue edit)
+	const titleReq = {
+		kind: "title" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { title: "test: contract for scripts/check-skill-frontmatter.sh" },
+	};
+	const titlePlan = policy.selectCapability(titleReq);
+	assert.equal(titlePlan.capability, "native", "title edit must prefer native first");
+	assert.match(titlePlan.command!, /^gh pr edit 440 --repo projectbluefin\/review --title /);
+	assert.match(titlePlan.command!, /check-skill-frontmatter\.sh/);
+	assert.equal(titlePlan.fallbackAvailable, true);
+	assert.equal(titlePlan.bounded, true);
+
+	// 2. Label mutation prefers native first
+	const labelReq = {
+		kind: "label" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { addLabels: ["lgtm"], removeLabels: ["hold"] },
+	};
+	const labelPlan = policy.selectCapability(labelReq);
+	assert.equal(labelPlan.capability, "native", "label mutation must prefer native first");
+	assert.match(labelPlan.command!, /^gh pr edit 440 --repo projectbluefin\/review/);
+	assert.match(labelPlan.command!, /--add-label "lgtm"/);
+	assert.match(labelPlan.command!, /--remove-label "hold"/);
+
+	// 3. Review mutation prefers native first
+	const reviewReq = {
+		kind: "review" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { event: "APPROVE" as const, body: "Approved by reviewer" },
+	};
+	const reviewPlan = policy.selectCapability(reviewReq);
+	assert.equal(reviewPlan.capability, "native", "review mutation must prefer native first");
+	assert.match(reviewPlan.command!, /^gh pr review 440 --repo projectbluefin\/review --approve --body/);
+
+	// 4. Comment mutation prefers native first
+	const commentReq = {
+		kind: "comment" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { body: "Observed test passing" },
+	};
+	const commentPlan = policy.selectCapability(commentReq);
+	assert.equal(commentPlan.capability, "native", "comment mutation must prefer native first");
+	assert.match(commentPlan.command!, /^gh pr comment 440 --repo projectbluefin\/review --body/);
+
+	// 5. Bounded browser fallback for unsupported work (UI-only work)
+	const uiOnlyReq = {
+		kind: "title" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { title: "title requires browser-only UI interaction" },
+		unsupportedNative: true,
+	};
+	const uiOnlyPlan = policy.selectCapability(uiOnlyReq);
+	assert.equal(uiOnlyPlan.capability, "browser", "unsupported native work selects browser fallback");
+	assert.match(uiOnlyPlan.reason, /bounded browser fallback/);
+	assert.equal(uiOnlyPlan.bounded, true);
+
+	// 6. Native attempt failure falls back to bounded browser, not indefinite retry
+	policy.recordAttempt({
+		signature: mutationSignature(titleReq),
+		capability: "native",
+		timestamp: Date.now(),
+		success: false,
+		error: "connection timeout",
+	});
+	const fallbackPlan = policy.selectCapability(titleReq);
+	assert.equal(fallbackPlan.capability, "browser", "after native attempt failure, falls back to browser");
+	assert.match(fallbackPlan.reason, /bounded browser fallback/);
+
+	// 7. No repeated equivalent attempts: once browser fallback fails as well, equivalent attempts halt
+	policy.recordAttempt({
+		signature: mutationSignature(titleReq),
+		capability: "browser",
+		timestamp: Date.now(),
+		success: false,
+		error: "browser navigation error",
+	});
+	const exhaustedPlan = policy.selectCapability(titleReq);
+	assert.equal(exhaustedPlan.blocked, true, "equivalent attempts must not repeat indefinitely");
+	assert.match(exhaustedPlan.reason, /equivalent preferred attempts are not repeated indefinitely/);
+
+	// 8. Retry classification distinguishes fresh, retryable, browser fallback, and exhausted
+	const freshReq = {
+		kind: "comment" as const,
+		repo: "projectbluefin/review",
+		number: 999,
+		params: { body: "fresh note" },
+	};
+	assert.equal(policy.classifyAttempt(freshReq, "native"), "fresh");
+	assert.equal(policy.classifyAttempt(titleReq, "native"), "equivalent_attempt_exhausted");
+
+	// 9. Preserved human confirmation / merge authority
+	// Green PR allows merge
+	assert.deepEqual(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", reviewState: "APPROVED" }), { allowed: true });
+	// Failing check blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "failure" }).allowed, false);
+	assert.match(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "failure" }).reason!, /check is failing/);
+	// Pending check blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "pending" }).allowed, false);
+	assert.match(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "pending" }).reason!, /check is pending/);
+	// Hold label blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", labels: ["hold"] }).allowed, false);
+	assert.match(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", labels: ["hold"] }).reason!, /hold/);
+	// Blocked label blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", labels: ["blocked"] }).allowed, false);
+	// Changes requested blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", reviewState: "CHANGES_REQUESTED" }).allowed, false);
+	// Own pull request requires another contributor's review
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", author: "jorge" }, "jorge").allowed, false);
+
+	// 10. Action prompts explicitly preserve authority and state the native mutation invariant
+	const item = queueItem({ id: 440, repo: "projectbluefin/review" });
+	const fixPrompt = actionPrompt({ kind: "fix", item });
+	assert.match(fixPrompt!, /Typed GitHub mutations prefer native\/gh\/API tools/);
+	assert.match(fixPrompt!, /Browser is bounded fallback for UI-only work/);
+	assert.match(fixPrompt!, /equivalent preferred attempts are not repeated indefinitely/);
+	assert.match(fixPrompt!, /gh pr edit 440 --repo projectbluefin\/review --title/);
+	const approvePrompt = actionPrompt({ kind: "approve", item });
+	assert.match(approvePrompt!, /Stop and report instead of merging/);
+	assert.match(approvePrompt!, /Preserved human confirmation and merge authority/);
 });
