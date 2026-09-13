@@ -1,6 +1,6 @@
 ---
 name: landing-batches
-version: "1.3"
+version: "1.4"
 last_updated: 2026-09-13
 id: landing-batches
 one_line_purpose: Manage multi-PR landing batches and automated fix-and-land agents.
@@ -166,8 +166,8 @@ prints is re-sent every later turn, and one measured run spent 91% of its tokens
 it ships the queue's own read inline per item, says read state once with a minimal `--json` set and list
 changes with `--name-only`, and keeps the stale-read caveat inside the brackets — subagent rules ship as
 a delimited verbatim block because a parent copies item lines and drops the prose around them. Scratch
-uses `mktemp -d -t <prefix>.XXXXXX`: an absolute template makes mktemp ignore `TMPDIR`, so it cannot
-move off a small `/tmp`, and 43 abandoned clones once filled a 16G tmpfs. The brief names `rm -rf "$WORKDIR"`, since "clean up" was never obeyed.
+uses `mktemp -d -t <prefix>.XXXXXX` and cleans up via `rm -rf "$WORKDIR"`.
+When local verification tooling is unavailable in the environment, completed implementation must not be discarded or left as an anonymous dirty tree; slay pushes the branch and opens a draft PR naming the unverified gates so repository CI can verify.
 
 ## Common Rationalizations
 

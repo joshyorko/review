@@ -803,8 +803,14 @@ For each issue, in order:
 4. Push under your own account and open the pull request. If you lack push
    permission, fork first: `gh repo fork <owner>/<repo> --remote`. Then:
    git push --set-upstream <remote> fix/issue-<number>
+   If focused verification succeeded, open a standard pull request:
    gh pr create --repo <owner>/<repo> --title "<conventional title>" \\
      --body "<what and why>\n\nFixes <owner>/<repo>#<number>"
+   If implementation is complete but repository verification tooling is
+   unavailable in the environment (e.g. missing Python/Rust/Node runtimes),
+   do not discard completed work; open a draft pull request:
+   gh pr create --repo <owner>/<repo> --draft --title "<conventional title>" \\
+     --body "<what and why>\n\nFixes <owner>/<repo>#<number>\n\n## Verification\nVerification tooling unavailable locally; deferred to repository CI."
    Report the outcome with the PR URL in the note:
    {reporter} report --status {status} event --pr "<owner/repo#N>" --state "pr-opened" --note "<pr url>"
    Then clean up: cd / && rm -rf "$WORKDIR".

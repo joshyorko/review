@@ -2068,6 +2068,14 @@ test("slaying an issue ships a pull request for someone else to merge", () => {
 	// A mixed selection cannot be both, so it keeps the landing pass it had.
 	const mixed = actionPrompt({ kind: "slay", item: issue, items: [issue, queueItem()] });
 	assert.match(mixed, /fix-and-merge landing pass/);
+
+	// If verification tooling is unavailable locally, do not discard completed work; open draft PR
+	assert.match(prompt, /draft pull request/);
+	assert.match(prompt, /gh pr create --draft/);
+	assert.match(prompt, /verification tooling is unavailable/);
+	assert.match(batchPrompt, /draft pull request/);
+	assert.match(batchPrompt, /gh pr create --draft/);
+	assert.match(batchPrompt, /verification tooling is unavailable/);
 });
 
 test("hive work the search never returned is still admitted to the queue", async () => {
