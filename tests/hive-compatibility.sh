@@ -37,7 +37,7 @@ grep -qF 'source /usr/local/etc/hive/backends.conf' <<<"$agent" || {
 # Assert membership, not exact equality: upstream may append backends (muse,
 # omp, ...) between pins, and one literal cannot track two revisions. The
 # guard that matters is the interface shrinking below what review relies on.
-for backend in codex omp; do
+for backend in codex pi; do
   grep -q "KNOWN_BACKENDS=\"[^\"]*\b${backend}\b" <<<"$backends" || {
     echo "::error::pinned Hive backend interface changed (missing: $backend)" >&2
     exit 1
