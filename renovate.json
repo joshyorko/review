@@ -7,10 +7,10 @@
     {
       "description": "Track hivecommons/hive origin/v4 as a pinned commit SHA. The SHA is duplicated in the launcher, the image, and the README, and tests/image-contract.sh plus validate.yml require all three to agree, so one depName keeps every match in a single Renovate branch and PR.",
       "customType": "regex",
-      "fileMatch": [
-        "(^|/)justfile$",
-        "(^|/)image/Containerfile$",
-        "(^|/)README\\.md$"
+      "managerFilePatterns": [
+        "/(^|/)justfile$/",
+        "/(^|/)image/Containerfile$/",
+        "/(^|/)README\\.md$/"
       ],
       "matchStrings": [
         "hive_commit := \"(?<currentDigest>[0-9a-f]{40})\"",
@@ -25,8 +25,8 @@
     {
       "description": "Track requirements-ci.lock, a pip-compile (--require-hashes) lockfile of pre-commit and its dependency tree. The file uses a non-standard .lock name and a custom header, so a regex manager matches each pkg==version line directly; pypi resolves the newest version and CI regenerates the hashes with `uv pip compile --generate-hashes`.",
       "customType": "regex",
-      "fileMatch": [
-        "(^|/)requirements-ci\\.lock$"
+      "managerFilePatterns": [
+        "/(^|/)requirements-ci\\.lock$/"
       ],
       "matchStrings": [
         "(?<depName>[a-zA-Z0-9._-]+)==(?<currentValue>[0-9][a-zA-Z0-9._!*+-]*)"
