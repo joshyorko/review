@@ -104,10 +104,46 @@ function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
 	return latest;
 }
 
-export const REVIEW_REPO = "projectbluefin/review";
-export const ADMISSION_LABEL = "3-clanker-queue";
-export const HOLD_LABEL = "hold";
-export const BLOCKED_LABEL = "blocked";
+/**
+ * A managed repository and its own admission vocabulary.
+ *
+ * Admission is a per-repository policy, not a single hardcoded special case:
+ * each enrolled repository names the labels that admit an issue and the labels
+ * that deny it. The set of enrolled repositories is exact — `owner/repo` match
+ * only, no org-wide enrollment, no wildcards, no repository-local config.
+ */
+export interface ManagedRepoPolicy {
+	/** Exact `owner/repo`. Enrollment is by exact match only. */
+	repository: string;
+	/** Labels that must all be present for an issue to be admitted. */
+	requiredLabels: readonly string[];
+	/** Labels that deny admission whenever present. */
+	deniedLabels: readonly string[];
+}
+
+/**
+ * The explicit set of repositories whose issue implementation is gated on a
+ * fresh fail-closed admission read.
+ *
+ * Exactly enrolled by `owner/repo`; every other repository keeps today's
+ * explicit-human behavior (no admission read). V1 ships the single repository
+ * #485 commissioned plus one further managed repository with a different
+ * vocabulary, so the policy is exercised as a policy rather than a constant.
+ */
+export const MANAGED_REPOSITORIES: readonly ManagedRepoPolicy[] = [
+	{ repository: "projectbluefin/review", requiredLabels: ["3-clanker-queue"], deniedLabels: ["hold", "blocked"] },
+	{ repository: "projectbluefin/documentation", requiredLabels: ["3-docs-queue"], deniedLabels: ["hold"] },
+];
+
+/**
+ * The admission policy for a repository, or undefined when it is unmanaged.
+ *
+ * Enrollment is exact, so an unmanaged repository — including one whose name is
+ * a prefix of a managed one — returns no policy and keeps the human path.
+ */
+export function managedPolicyFor(repo: string): ManagedRepoPolicy | undefined {
+	return MANAGED_REPOSITORIES.find((policy) => policy.repository === repo);
+}
 
 /**
  * Classify whether a DashboardAction constitutes an implementation action.
@@ -385,17 +421,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		const isImpl = isImplementationAction(action);
 		const reviewIssues = isImpl
-			? capturedItems.filter((it) => it.type === "issue" && it.repo === REVIEW_REPO)
+			? capturedItems.filter((it) => it.type === "issue" && managedPolicyFor(it.repo))
 			: [];
 
 		if (reviewIssues.length > 0) {
 			const generation = ++dispatchGeneration;
-			const [reviewOwner, reviewName] = REVIEW_REPO.split("/") as [string, string];
-			const targets = reviewIssues.map((it) => ({
-				owner: reviewOwner,
-				repo: reviewName,
-				number: it.id,
-			}));
+			const targets = reviewIssues.map((it) => {
+				const [owner, repo] = it.repo.split("/") as [string, string];
+				return { owner, repo, number: it.id };
+			});
 
 			const token = mode.tokenOptions().token ?? resolveToken(env);
 			const result = await fetchIssueAdmission(targets, {
@@ -412,6 +446,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 			for (const admitted of result.issues) {
 				const key = `${admitted.owner}/${admitted.repo}#${admitted.number}`;
+				// Only managed items were targeted, so a policy always exists; the
+				// guard keeps an unexpected read from slipping an unmanaged item
+				// through the human path.
+				const policy = managedPolicyFor(`${admitted.owner}/${admitted.repo}`);
+				if (!policy) {
+					ctx.ui.notify(`Cannot dispatch ${key}: no managed-repository policy`, "error");
+					return;
+				}
 				if (admitted.closed) {
 					ctx.ui.notify(`Cannot dispatch ${key}: issue is closed`, "error");
 					return;
@@ -420,17 +462,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					ctx.ui.notify(`Cannot dispatch ${key}: incomplete label evidence`, "error");
 					return;
 				}
-				if (admitted.labels.includes(HOLD_LABEL)) {
-					ctx.ui.notify(`Cannot dispatch ${key}: issue has hold label`, "error");
-					return;
+				for (const denied of policy.deniedLabels) {
+					if (admitted.labels.includes(denied)) {
+						ctx.ui.notify(`Cannot dispatch ${key}: issue has ${denied} label`, "error");
+						return;
+					}
 				}
-				if (admitted.labels.includes(BLOCKED_LABEL)) {
-					ctx.ui.notify(`Cannot dispatch ${key}: issue has blocked label`, "error");
-					return;
-				}
-				if (!admitted.labels.includes(ADMISSION_LABEL)) {
-					ctx.ui.notify(`Cannot dispatch ${key}: missing explicit admission label '${ADMISSION_LABEL}'`, "error");
-					return;
+				for (const required of policy.requiredLabels) {
+					if (!admitted.labels.includes(required)) {
+						ctx.ui.notify(`Cannot dispatch ${key}: missing explicit admission label '${required}'`, "error");
+						return;
+					}
 				}
 			}
 		}

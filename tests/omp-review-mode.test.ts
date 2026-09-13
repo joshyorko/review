@@ -2410,14 +2410,14 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
 	}
 
-	// 15. Unrelated repository issue: no admission read needed, still dispatches as before
+	// 15. Unmanaged repository issue: no admission read needed, still dispatches as before
 	{
-		const { pi, dashboard, turn } = await setup({ number: 936, repo: "projectbluefin/documentation", labels: [] });
+		const { pi, dashboard, turn } = await setup({ number: 936, repo: "projectbluefin/utah", labels: [] });
 		pi.messages.length = 0;
 		dashboard.handleInput("s");
 		await turn();
-		assert.equal(pi.messages.length, 1, "unrelated repository issue dispatches without requiring 3-clanker-queue");
-		assert.match(pi.messages[0], /projectbluefin\/documentation#936/);
+		assert.equal(pi.messages.length, 1, "unmanaged repository issue dispatches without any admission read");
+		assert.match(pi.messages[0], /projectbluefin\/utah#936/);
 	}
 
 	// 16. Read-only actions (diff, reference), PR actions, and other issue implementation actions ('fix', 'docs')
@@ -2462,6 +2462,46 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		await turn();
 		assert.equal(pi.messages.length, 1, "fix on Review PR dispatches unchanged without admission read");
 		assert.match(pi.messages[0], /Fix the findings recorded for projectbluefin\/review#42/);
+	}
+
+	// 16b. Managed-repository policy is per repository, each with its own vocabulary
+	{
+		// projectbluefin/documentation is managed with a different admission label
+		// and a narrower denied set than projectbluefin/review.
+		const { pi, dashboard, turn } = await setup({ number: 21, repo: "projectbluefin/documentation", labels: ["3-docs-queue"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 1, "documentation issue admitted on its own queue label");
+		assert.match(pi.messages[0], /projectbluefin\/documentation#21/);
+	}
+	{
+		// A review vocabulary label does not admit a documentation issue.
+		const { pi, dashboard, ctx, turn } = await setup({ number: 21, repo: "projectbluefin/documentation", labels: ["3-clanker-queue"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "review queue label does not admit a documentation issue");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+	{
+		// A review denied label (blocked) is not in the documentation policy, so it
+		// does not block; documentation's own denied label (hold) does.
+		const { pi, dashboard, ctx, turn } = await setup({ number: 21, repo: "projectbluefin/documentation", labels: ["3-docs-queue", "hold"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "documentation hold label blocks its own dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue has hold label")));
+	}
+	{
+		// Negative fixture in the review repository: hold blocks there too.
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, repo: "projectbluefin/review", labels: ["3-clanker-queue", "hold"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "review hold label blocks its own dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue has hold label")));
 	}
 
 	// 17. Selection changes during the read: no retargeting
