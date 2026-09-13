@@ -29,7 +29,7 @@ def prepare(bundles: Path, output: Path):
              '  desc "Personal development builds of Bluefin Review"',
              '  homepage "https://github.com/joshyorko/review"',
              f'  version "{version}"', '  license "Apache-2.0"',
-             '  depends_on :linux', '  depends_on "apptainer"', '  depends_on "gh"',
+             '  depends_on :linux', '  depends_on "apptainer"', '  depends_on "squashfuse"', '  depends_on "gh"',
              '  conflicts_with "bluefin-contributor-tools", because: "both provide bluefin"']
     if len(arches) == 1:
         lines.append('  depends_on arch: :' + ('x86_64' if arches[0] == 'x86_64' else 'arm64'))

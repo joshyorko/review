@@ -116,6 +116,7 @@ class FormulaContract(unittest.TestCase):
         self.assertIn("on_intel do", formula)
         self.assertIn("on_arm do", formula)
         self.assertIn('depends_on "gh"', formula)
+        self.assertIn('depends_on "squashfuse"', formula)
         self.assertEqual((self.output / "sha").read_text().strip(), "a" * 40)
         self.assertEqual(formula.count("version "), 1)
         self.assertNotIn("projectbluefin/review/releases", formula)
