@@ -43,23 +43,31 @@ or cluster scale-out (`cluster-workers.md`).
    the batch dispatches only PRs the ruleset will actually land. This is what
    stops the same blocked PR being re-spawned and re-blocked pass after pass
    (see `[#514](https://github.com/projectbluefin/review/issues/514)`).
-3. **Multi-Repository Partitioning:** Multi-repo selections partition into
+3. **Branch-Target Pre-Flight:** The same gate also judges the branch
+   target itself (#517): `projectbluefin/bluefin` and `bluefin-lts` land
+   only from `testing`, so a PR aimed at `main` — or any PR whose merge
+   base is `CONFLICTING`/`DIRTY` — is held with a note naming the base
+   found, the required target, and the file drift between them, and is
+   deselected so no later pass re-selects it. Absent evidence never
+   blocks. The landing brief states the same rule, so an agent also
+   fast-fails rather than repairing an unmergeable configuration.
+4. **Multi-Repository Partitioning:** Multi-repo selections partition into
    independent per-repository `LandingTask` lanes.
-4. **Concurrent Execution:** Up to `BLUEFIN_REVIEW_CONCURRENT_LANDINGS`
+5. **Concurrent Execution:** Up to `BLUEFIN_REVIEW_CONCURRENT_LANDINGS`
    (default 7) run concurrently across disjoint repository sets.
-5. **Fix & Land:** `[$]` ("slay") executes the pipeline end-to-end and owns
+6. **Fix & Land:** `[$]` ("slay") executes the pipeline end-to-end and owns
    fix dispatch: a review with evidenced findings seeds a fixer
    (`new_fix_task`) behind slay's own gates. The standalone `[f]`/`[F]`
    ReviewScreen lane is deleted — it dispatched the same fixer with no
    confirmation, no blocked-reason check, no head revalidation, and no
    durable run record. See below: `[$]` is a durable per-pull-request state
    machine, not a sequence of dispatches.
-6. **State Directory:** State persists at `${XDG_STATE_HOME}/bluefin-review/landings/`.
+7. **State Directory:** State persists at `${XDG_STATE_HOME}/bluefin-review/landings/`.
    Each batch receives `.jsonl` events, `.log` output, and `.prompt.md`.
    Filenames qualify with `BLUEFIN_REVIEW_INSTANCE` to avoid cross-session collisions.
-7. **Reporting Seam:** The landing agent never writes status directly; it calls:
+8. **Reporting Seam:** The landing agent never writes status directly; it calls:
    `/opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/landing.py report ...`
-8. **Process Termination:** The agent runs in its own process group; `[x]` on
+9. **Process Termination:** The agent runs in its own process group; `[x]` on
    the batch screen stops it cleanly via `SIGTERM`.
 
 The landing module is the status writer and command boundary. It builds argv

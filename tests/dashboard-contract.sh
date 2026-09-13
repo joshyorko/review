@@ -166,6 +166,21 @@ grep -q 'path-filtered' "$landing_py" ||
 grep -q 'no publication of it exists' "$landing_py" ||
   fail "the landing brief must not fail a merge that owes no publication"
 
+# The branch-target pre-flight fast-fails what no landing cycle can land
+# before an agent is dispatched (#517): the policy and its judge live in
+# the landing module, the batch and slay gates run it, and the brief
+# states the rule. A wrong target branch (bluefin lands from `testing`,
+# never `main`) and a CONFLICTING/DIRTY merge base are unmergeable
+# configurations the landing passes kept rediscovering one agent at a time.
+grep -q 'BRANCH_TARGET_POLICY' "$landing_py" ||
+  fail "the landing module must own the branch-target policy"
+grep -q 'def branch_target_block' "$landing_py" ||
+  fail "the landing module must ship the deterministic branch-target judge"
+grep -q 'def landing_branch_blocker' "$tui" ||
+  fail "the landing gate must judge the branch target before dispatch"
+grep -q 'land only from' "$landing_py" ||
+  fail "the landing brief must state the branch-target policy"
+
 # The status record has exactly one writer: the landing module's report CLI.
 # It serializes under flock, writes a terminal state once, and closes the
 # batch only when every selected pull request has a terminal outcome (#377).
