@@ -21,6 +21,17 @@
       "depNameTemplate": "hivecommons/hive",
       "packageNameTemplate": "https://github.com/hivecommons/hive",
       "datasourceTemplate": "git-refs"
+    },
+    {
+      "description": "Track requirements-ci.lock, a pip-compile (--require-hashes) lockfile of pre-commit and its dependency tree. The file uses a non-standard .lock name and a custom header, so a regex manager matches each pkg==version line directly; pypi resolves the newest version and CI regenerates the hashes with `uv pip compile --generate-hashes`.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^requirements-ci\\.lock$/"
+      ],
+      "matchStrings": [
+        "(?<depName>[a-zA-Z0-9._-]+)==(?<currentValue>[0-9][a-zA-Z0-9._!*+-]*)"
+      ],
+      "datasourceTemplate": "pypi"
     }
   ],
   "packageRules": [
