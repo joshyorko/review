@@ -211,6 +211,8 @@ run '
   node --version >/dev/null
   gh --version >/dev/null
   git --version >/dev/null
+  python3 --version >/dev/null
+  python --version >/dev/null
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
 ' >/dev/null || fail "a bundled binary failed to execute"
 

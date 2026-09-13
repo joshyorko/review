@@ -22,16 +22,13 @@ mkdir -p "$(dirname "$exclude_file")" 2>/dev/null || exit 0
 
 # Keep generated skill projections out of `git status` and therefore out of any
 # commit the agent makes. This is repository-local and never committed itself.
-for pattern in '/.agents/skills/' '/.goose/skills/'; do
-	if ! grep -qxF "$pattern" "$exclude_file" 2>/dev/null; then
-		printf '%s\n' "$pattern" >>"$exclude_file" 2>/dev/null || true
-	fi
-done
+pattern='/.agents/skills/'
+if ! grep -qxF "$pattern" "$exclude_file" 2>/dev/null; then
+	printf '%s\n' "$pattern" >>"$exclude_file" 2>/dev/null || true
+fi
 
-# Surface the repository's own skills so the agent knows they exist. Goose
-# discovers skills at session start in /home/dev, long before this clone
-# existed, so these can never be registered natively -- reading the manifest is
-# the supported path.
+# Surface the repository's own skills so the agent knows they exist.
+# Discovering skills via the manifest is the supported path.
 if [ -f "${toplevel}/docs/skills/index.json" ]; then
 	printf 'review: %s has repository skills; read docs/skills/index.json and open only the matching entry_point.\n' \
 		"$(basename "$toplevel")" >&2

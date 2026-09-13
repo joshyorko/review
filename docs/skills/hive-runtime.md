@@ -45,10 +45,9 @@ credential handling ([`launcher.md`](launcher.md)).
 
 1. Let Hive own the WebSocket protocol, assignment selection, `contributor`
    tmux session, prompt injection, and result capture. Context7 reaches the
-   agent twice: the hub queries it server-side
+   agent via the hub, which queries it server-side
    (`src/pkg/knowledge/context7.go`) and delivers assigned-task context through
-   its knowledge export, and the image's controlled Goose config enables the
-   `context7` extension for on-demand lookups (see `goose-context.md`).
+   its knowledge export. Note that `review-container` is Codex-only.
    review starts the runtime and does not reproduce Hive's jobs. Authenticated
    reads use `Authorization: Bearer ${GH_TOKEN}` over HTTPS to `/api/v1/status`,
    `/api/v1/me`, `/api/v1/contributors`, `/api/v1/knowledge`, `/api/contribute/queue`,
@@ -102,15 +101,7 @@ credential handling ([`launcher.md`](launcher.md)).
    informational. The relay reports its runtime posture during authentication,
    and Hive stores and surfaces it without routing or gating assignments on it.
    Do not add downstream capability-based task selection.
-8. Expect the interactive delivery mode. The pinned runtime reads
-   `CONTRIBUTOR_MODE`, which selects between `interactive` (the default: a
-   live tmux pane the relay types the prompt into) and `headless` (no tmux
-   session at all — the relay drives a one-shot CLI per task and writes
-   lifecycle state to `HIVE_HEADLESS_STATUS_FILE`). review sets neither and
-   runs interactive, which is what `just review-container` attaches to and
-   what the entrypoint's `tmux has-session -t contributor` readiness check
-   requires. Headless exists for an unattended Kubernetes contributor; do not
-   set it here expecting the same attachable session.
+8. Expect interactive delivery from `just contribute` and `just review-container`. The pinned runtime reads `CONTRIBUTOR_MODE`, which selects between `interactive` (the default: a live tmux pane the relay types the prompt into) and `headless` (no tmux session at all — the relay drives a one-shot CLI per task and writes lifecycle state to `HIVE_HEADLESS_STATUS_FILE`). The isolated OMP contributor is interactive-only; its Kubernetes manifest retains tmux probes but must not select a headless OMP path until upstream proves one-shot semantics. Do not set headless expecting the same attachable session.
 
 ### Hive runtime contract
 

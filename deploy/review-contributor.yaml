@@ -35,9 +35,9 @@ spec:
           image: ghcr.io/projectbluefin/review-contributor:stable
           imagePullPolicy: Always
           env:
-            - name: GOOSE_MODEL
+            - name: AGENT_MODEL
               value: "gemini-3.8-flash"
-            - name: GOOSE_THINKING_EFFORT
+            - name: AGENT_REASONING_EFFORT
               value: "max"
             - name: GH_TOKEN
               valueFrom:

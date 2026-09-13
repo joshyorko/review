@@ -24,10 +24,10 @@ from tui.model_profiles import (
 
 class ModelProfilesContractTests(unittest.TestCase):
     def test_triple_constants(self):
-        self.assertEqual(GEMINI_TRIPLE, ("goose", "gemini-3.8-flash", "max"))
-        self.assertEqual(SOL_TRIPLE, ("goose", "gpt-5.6-sol", "medium"))
-        self.assertEqual(OPUS_TRIPLE, ("goose", "claude-opus-5", "high"))
-        self.assertEqual(KIMI_TRIPLE, ("goose", "kimi-k3", "high"))
+        self.assertEqual(GEMINI_TRIPLE, ("omp", "gemini-3.8-flash", "max"))
+        self.assertEqual(SOL_TRIPLE, ("omp", "gpt-5.6-sol", "medium"))
+        self.assertEqual(OPUS_TRIPLE, ("omp", "claude-opus-5", "high"))
+        self.assertEqual(KIMI_TRIPLE, ("omp", "kimi-k3", "high"))
 
     def test_explicit_policies_choose_expected_review_triple(self):
         cases = {
@@ -77,24 +77,21 @@ class ModelProfilesContractTests(unittest.TestCase):
         )
         self.assertEqual(classify_batch([]), "mixed")
 
-    def test_final_environment_sets_goose_variables_only_for_goose_rounds(self):
+    def test_final_environment_sets_backend_and_markers_for_both_backends(self):
         default_env = final_environment(OPUS_TRIPLE)
-        self.assertEqual(default_env["BLUEFIN_REVIEW_BACKEND"], "goose")
-        self.assertEqual(default_env["GOOSE_MODEL"], "claude-opus-5")
-        self.assertEqual(default_env["GOOSE_THINKING_EFFORT"], "high")
+        self.assertEqual(default_env["BLUEFIN_REVIEW_BACKEND"], "omp")
+        self.assertEqual(default_env["BLUEFIN_REVIEW_FINAL_MODEL"], "claude-opus-5")
+        self.assertEqual(default_env["BLUEFIN_REVIEW_FINAL_EFFORT"], "high")
 
-        goose_env = final_environment(OPUS_TRIPLE, "goose")
-        self.assertEqual(goose_env["BLUEFIN_REVIEW_BACKEND"], "goose")
-        self.assertEqual(goose_env["GOOSE_MODEL"], "claude-opus-5")
-        self.assertEqual(goose_env["GOOSE_THINKING_EFFORT"], "high")
+        omp_env = final_environment(OPUS_TRIPLE, "omp")
+        self.assertEqual(omp_env["BLUEFIN_REVIEW_BACKEND"], "omp")
+        self.assertEqual(omp_env["BLUEFIN_REVIEW_FINAL_MODEL"], "claude-opus-5")
+        self.assertEqual(omp_env["BLUEFIN_REVIEW_FINAL_EFFORT"], "high")
 
         codex_env = final_environment(OPUS_TRIPLE, "codex")
         self.assertEqual(codex_env["BLUEFIN_REVIEW_BACKEND"], "codex")
         self.assertEqual(codex_env["BLUEFIN_REVIEW_FINAL_MODEL"], "claude-opus-5")
         self.assertEqual(codex_env["BLUEFIN_REVIEW_FINAL_EFFORT"], "high")
-        self.assertNotIn("GOOSE_MODEL", codex_env)
-        self.assertNotIn("GOOSE_THINKING_EFFORT", codex_env)
-
     def test_high_assurance_and_cheap_classification(self):
         self.assertTrue(is_high_assurance(SOL_TRIPLE))
         self.assertTrue(is_high_assurance(OPUS_TRIPLE))

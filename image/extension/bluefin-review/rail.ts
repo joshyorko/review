@@ -25,6 +25,53 @@ export function keymapBar(painter: Painter, keys: readonly RailKey[], width: num
 }
 
 /**
+ * Retro tmux status bar styled like the contribute runtime's lower-third bar:
+ * [🦖 BLUEFIN] [review] [🐝 HIVE/LOCAL] | Task: #123 (repo) | Issues: X | PRs: Y | Workers: Z/ZZ | Reviewers: X/XX | HH:MM
+ */
+export function tmuxReviewStatusBar(mode: ReviewMode, painter: Painter, width: number, now: number): string {
+	// Colors matching image/contribute/entrypoint.sh & image/tmux.conf:
+	// left: #[bg=#1d4ed8,fg=#ffffff,bold] 🦖 BLUEFIN #[bg=#2563eb,fg=#ffffff,nobold] review #[bg=#1e40af,fg=#bfdbfe] 🐝 ${mode} #[default]
+	// status-style: bg=#1e293b,fg=#93c5fd
+	const hive = mode.hive;
+	const hiveMode = hive.online ? "HIVE" : (hive.configured ? "OFFLINE" : "LOCAL");
+
+	const blueBg = "\x1b[48;2;30;41;59m"; // #1e293b
+	const bluefinBadge = "\x1b[48;2;29;78;216m\x1b[38;2;255;255;255m\x1b[1m 🦖 BLUEFIN \x1b[0m";
+	const reviewBadge = "\x1b[48;2;37;99;235m\x1b[38;2;255;255;255m review \x1b[0m";
+	const hiveBadge = `\x1b[48;2;30;64;175m\x1b[38;2;191;219;254m 🐝 ${hiveMode} \x1b[0m`;
+
+	const item = mode.selected();
+	let activeTaskStr = "";
+	if (item) {
+		const kind = item.type === "pr" ? "PR" : "ISSUE";
+		const repo = item.repo.includes("/") ? item.repo.split("/")[1] : item.repo;
+		activeTaskStr = `${blueBg}\x1b[38;2;96;165;250mTask: \x1b[1m\x1b[38;2;255;255;255m${kind} #${item.id}\x1b[0m${blueBg}\x1b[38;2;147;197;253m (${repo}) \x1b[38;2;59;130;246m| `;
+	}
+
+	const tally = mode.ciTally();
+	const issuesCount = mode.queueMode === "issues" ? mode.visibleItems().length : (hive.actionableItems ?? "-");
+	const prsCount = mode.queueMode === "prs" ? mode.visibleItems().length : tally.success + tally.failure + tally.pending;
+
+	let stats = `${blueBg}\x1b[38;2;147;197;253mIssues: \x1b[1m\x1b[38;2;255;255;255m${issuesCount}\x1b[0m${blueBg}\x1b[38;2;147;197;253m \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mPRs: \x1b[1m\x1b[38;2;255;255;255m${prsCount}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
+	if (hive.workers) {
+		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mWorkers: \x1b[1m\x1b[38;2;255;255;255m${hive.workers}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
+	}
+	if (hive.reviewers) {
+		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mReviewers: \x1b[1m\x1b[38;2;255;255;255m${hive.reviewers}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
+	}
+	const date = new Date(now);
+	const hours = String(date.getHours()).padStart(2, "0");
+	const minutes = String(date.getMinutes()).padStart(2, "0");
+	const timeStr = `\x1b[38;2;59;130;246m| \x1b[38;2;191;219;254m${hours}:${minutes}\x1b[0m`;
+
+	const content = `${bluefinBadge}${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}\x1b[0m`;
+	const contentWidth = visibleWidth(content);
+	const fillSpaces = Math.max(0, width - contentWidth);
+	const bar = `${bluefinBadge}${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}${" ".repeat(fillSpaces)}\x1b[0m`;
+	return truncateToWidth(bar, width);
+}
+
+/**
  * Age of the queue data, shown only once it is old enough to matter.
  *
  * A live "3.1s ago" counter forces a repaint every tick and tells you nothing you
@@ -211,6 +258,7 @@ export function renderRail(
 	if (live) rows.push(truncateToWidth(live, width));
 
 	rows.push(keymapBar(painter, keys, width));
+	rows.push(tmuxReviewStatusBar(mode, painter, width, now));
 	return rows;
 }
 /**
@@ -254,8 +302,16 @@ export function renderHitlist(
 		start = Math.max(0, end - maxItems);
 	}
 
+	let lastRepo: string | undefined;
 	for (let i = start; i < end; i++) {
 		const item = items[i]!;
+		if (item.repo !== lastRepo) {
+			if (lastRepo !== undefined && rows.length < maxItems + 2) {
+				const divider = `─── ${item.repo} `.padEnd(width, "─");
+				rows.push(truncateToWidth(painter.fg("dim", divider), width));
+			}
+			lastRepo = item.repo;
+		}
 		const active = i === cursor;
 		const isChecked = mode.selectedKeys.has(`${item.repo}#${item.id}`);
 		const check = isChecked ? painter.fg("accent", "☒") : painter.fg("dim", "☐");
@@ -362,12 +418,14 @@ export class ReviewRail {
 	private readonly painter: Painter;
 	private readonly mode: ReviewMode;
 	private readonly keys: readonly RailKey[];
+	private readonly isHidden?: () => boolean;
 
-	constructor(tui: TuiLike, painter: Painter, mode: ReviewMode, keys: readonly RailKey[]) {
+	constructor(tui: TuiLike, painter: Painter, mode: ReviewMode, keys: readonly RailKey[], isHidden?: () => boolean) {
 		this.tui = tui;
 		this.painter = painter;
 		this.mode = mode;
 		this.keys = keys;
+		this.isHidden = isHidden;
 	}
 
 	private shouldAnimate(): boolean {
@@ -398,6 +456,7 @@ export class ReviewRail {
 	}
 
 	render(width: number): string[] {
+		if (this.isHidden?.()) return [];
 		this.syncTimer();
 		const now = Date.now();
 		const rows = renderRail(this.mode, this.painter, width, now, this.frame, this.keys);

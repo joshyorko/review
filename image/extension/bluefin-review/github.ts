@@ -37,11 +37,15 @@ export interface QueueItem {
 	changedFiles?: number;
 	/** `owner/repo#number` of every issue this pull request closes. */
 	closingIssues?: string[];
+	/** `owner/repo#number` of merged PRs that reference or close this issue. */
+	closedByPrs?: string[];
 }
 
 export interface QueueResult {
 	items: QueueItem[];
 	error?: string;
+	/** The caller canceled this request; it is not a queue failure. */
+	cancelled?: boolean;
 	fetchedAt: number;
 	/** More open items exist than `limit` allowed; the queue is a prefix. */
 	truncated?: boolean;
@@ -73,6 +77,18 @@ const PR_ITEM_FIELDS = `
 	}
 `;
 
+/** What an issue carries beyond the shared queue fields. */
+const ISSUE_ITEM_FIELDS = `
+	closedByPullRequestsReferences(first: 5) {
+		nodes {
+			number
+			state
+			merged
+			repository { nameWithOwner }
+		}
+	}
+`;
+
 export const PR_QUEUE_QUERY = `
 query($search: String!, $cursor: String) {
 	search(query: $search, type: ISSUE, first: 50, after: $cursor) {
@@ -93,6 +109,7 @@ query($search: String!, $cursor: String) {
 		nodes {
 			... on Issue {
 				${QUEUE_FIELDS}
+				${ISSUE_ITEM_FIELDS}
 			}
 		}
 	}
@@ -181,6 +198,14 @@ interface SearchNode {
 	labels?: { nodes?: Array<{ name?: string }> } | null;
 	commits?: { nodes?: Array<{ commit?: { statusCheckRollup?: { state?: string } | null } }> } | null;
 	closingIssuesReferences?: { nodes?: Array<{ number?: number; repository?: { nameWithOwner?: string } | null }> } | null;
+	closedByPullRequestsReferences?: {
+		nodes?: Array<{
+			number?: number;
+			state?: string;
+			merged?: boolean;
+			repository?: { nameWithOwner?: string } | null;
+		}>;
+	} | null;
 }
 
 function toCiStatus(state?: string): CiStatus | undefined {
@@ -247,6 +272,14 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 					: "",
 			)
 			.filter(Boolean),
+		closedByPrs: (node.closedByPullRequestsReferences?.nodes ?? [])
+			.filter((pr) => pr.merged === true || pr.state?.toUpperCase() === "MERGED")
+			.map((pr) =>
+				pr.repository?.nameWithOwner && typeof pr.number === "number"
+					? `${pr.repository.nameWithOwner}#${pr.number}`
+					: "",
+			)
+			.filter(Boolean),
 	};
 }
 
@@ -284,8 +317,8 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 	const deadline = deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal);
 	const items: QueueItem[] = [];
 	let cursor: string | undefined;
-
 	if (!token) {
+		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		return { items, error: "no GitHub credential (set GH_TOKEN or run gh auth login)", fetchedAt: Date.now() };
 	}
 
@@ -324,7 +357,7 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 		// counter cannot read as "this is everything open".
 		return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: true };
 	} catch (error) {
-		if (signal?.aborted) return { items, error: "aborted", fetchedAt: Date.now() };
+		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		// The deadline expired mid-walk. Keep the pages that did land: a partial
 		// queue in priority order still beats an empty one, as long as it says so.
 		if (deadline.aborted) {
@@ -365,6 +398,7 @@ export async function fetchItemsByKey(
 	const items: QueueItem[] = [];
 	if (keys.length === 0) return { items, fetchedAt: Date.now() };
 	if (!token) {
+		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		return { items, error: "no GitHub credential (set GH_TOKEN or run gh auth login)", fetchedAt: Date.now() };
 	}
 
@@ -378,7 +412,7 @@ export async function fetchItemsByKey(
 	if (targets.length === 0) return { items, fetchedAt: Date.now() };
 
 	const wanted = mode === "prs" ? "PullRequest" : "Issue";
-	const extras = mode === "prs" ? PR_ITEM_FIELDS : "";
+	const extras = mode === "prs" ? PR_ITEM_FIELDS : ISSUE_ITEM_FIELDS;
 	const query = `query {\n${targets
 		.map(
 			({ alias, owner, name, number }) =>
@@ -417,7 +451,7 @@ export async function fetchItemsByKey(
 			: undefined;
 		return { items, error: failed, fetchedAt: Date.now() };
 	} catch (error) {
-		if (signal?.aborted) return { items, error: "aborted", fetchedAt: Date.now() };
+		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		return { items, error: error instanceof Error ? error.message : String(error), fetchedAt: Date.now() };
 	}
 }
@@ -488,6 +522,7 @@ export async function fetchIssueAdmission(
 		)
 		.join("\n")}\n}`;
 
+
 	try {
 		const response = await doFetch("https://api.github.com/graphql", {
 			method: "POST",
@@ -547,12 +582,13 @@ export async function fetchIssueAdmission(
 				};
 			}
 			const labels = (issueNode.labels?.nodes ?? []).map((l) => l.name ?? "").filter(Boolean);
-			const labelsTruncated = issueNode.labels?.pageInfo?.hasNextPage === true;
+			// Missing freshness fields are unreadable evidence and must fail closed.
+			const labelsTruncated = issueNode.labels?.pageInfo?.hasNextPage !== false;
 			issues.push({
 				owner: t.owner,
 				repo: t.repo,
 				number: t.number,
-				closed: issueNode.closed === true,
+				closed: issueNode.closed !== false,
 				labels,
 				labelsTruncated,
 			});

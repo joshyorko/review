@@ -129,14 +129,14 @@ class SemanticViewContractTests(unittest.TestCase):
             "Request changes or comment on the cited finding.",
         )
 
-    def test_decision_card_binds_landed_goose_live_full_head(self):
+    def test_decision_card_binds_landed_omp_live_full_head(self):
         result = ReviewResult.from_dict({
             "version": 1,
             "state": "complete",
             "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
             "findings": [],
             "provenance": {
-                "backend": "goose",
+                "backend": "omp",
                 "model": "gpt-5.6-luna",
                 "repository": "projectbluefin/review",
                 "pull_request": 196,
@@ -158,7 +158,7 @@ class SemanticViewContractTests(unittest.TestCase):
         self.assertEqual(card.ci.label, "CI GREEN")
         self.assertEqual(card.mergeability.label, "MERGEABLE")
 
-    def test_decision_card_fails_closed_for_disagreeing_goose_live_head(self):
+    def test_decision_card_fails_closed_for_disagreeing_omp_live_head(self):
         reviewed_full = "0123456789ab" + "c" * 28
         current_full = "0123456789ab" + "d" * 28
         for live_head in (reviewed_full[:12], reviewed_full):
@@ -169,7 +169,7 @@ class SemanticViewContractTests(unittest.TestCase):
                     "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
                     "findings": [],
                     "provenance": {
-                        "backend": "goose",
+                        "backend": "omp",
                         "model": "gpt-5.6-luna",
                         "repository": "projectbluefin/review",
                         "pull_request": 196,

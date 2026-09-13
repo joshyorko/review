@@ -34,7 +34,7 @@ class ReceiptContractTests(unittest.TestCase):
         )
         self.run = ReviewRun.from_request(
             self.request,
-            backend="goose",
+            backend="omp",
             model="gemini-3.8-flash",
             effort="high",
         )
@@ -52,24 +52,23 @@ class ReceiptContractTests(unittest.TestCase):
             ["raw line"],
         )
 
-    def test_goose_receipt_round_trips_and_strips_mutable_evidence(self):
+    def test_omp_receipt_round_trips_and_strips_mutable_evidence(self):
         receipt = ReviewReceipt.from_result(
             self.run,
-            self.result("goose"),
-            ["goose check line"] * 300,
+            self.result("omp"),
+            ["omp check line"] * 300,
             "scope-v7",
             {"headroom_status_line": "DIRECT", "headroom_state": "DIRECT"},
         )
         encoded = json.loads(receipt.to_json())
         restored = ReviewReceipt.from_json(receipt.to_json())
         self.assertEqual(encoded["version"], 1)
-        self.assertEqual(restored.identity.backend, "goose")
+        self.assertEqual(restored.identity.backend, "omp")
         self.assertEqual(restored.identity.run_identity, self.run.identity)
         self.assertLessEqual(len(restored.transcript), 200)
         self.assertEqual(restored.analysis_result().live, {})
         self.assertEqual(restored.analysis_result().overlap, {})
         self.assertEqual(restored.provenance["headroom_state"], "DIRECT")
-
     def test_codex_receipt_round_trips_with_a_distinct_canonical_identity(self):
         codex_run = ReviewRun.from_request(
             self.request,
@@ -106,7 +105,7 @@ class ReceiptContractTests(unittest.TestCase):
 
     def test_invalid_receipt_is_rejected(self):
         payload = json.loads(
-            ReviewReceipt.from_result(self.run, self.result("goose"), [], "scope-v7").to_json()
+            ReviewReceipt.from_result(self.run, self.result("omp"), [], "scope-v7").to_json()
         )
         payload["identity"]["head_sha"] = "c" * 40
         with self.assertRaises(ValueError):
@@ -138,7 +137,7 @@ class ReceiptContractTests(unittest.TestCase):
             {"critical": 0, "high": 1, "medium": 0, "low": 0},
             [{"severity": "high", "file": "x.py", "line": 7, "title": "unsafe path"}],
             [{"name": "correctness", "state": "verified", "evidence": "one finding"}],
-            {"backend": "goose", "model": "gemini-3.8-flash", **mutable_evidence},
+            {"backend": "omp", "model": "gemini-3.8-flash", **mutable_evidence},
             {"duplicates": [9]},
             {"ci": "failure"},
             ["raw line"],
@@ -146,7 +145,7 @@ class ReceiptContractTests(unittest.TestCase):
         receipt = ReviewReceipt.from_result(
             self.run,
             tainted_result,
-            ["goose check line"],
+            ["omp check line"],
             "scope-v7",
             provenance=mutable_evidence,
         )
@@ -184,7 +183,7 @@ class ReceiptContractTests(unittest.TestCase):
         lines = ["x" * 10_000 for _ in range(10)]
         receipt = ReviewReceipt.from_result(
             self.run,
-            self.result("goose"),
+            self.result("omp"),
             lines,
             "scope-v7",
         )
@@ -194,7 +193,7 @@ class ReceiptContractTests(unittest.TestCase):
 
     def test_harness_registry_preserves_both_backends_without_fork(self):
         registry = default_harness_registry()
-        self.assertEqual(set(registry.names()), {"goose", "codex"})
+        self.assertEqual(set(registry.names()), {"omp", "codex"})
 
         class MockHarness:
             def __init__(self, name: str, state: str = "complete"):
@@ -203,14 +202,13 @@ class ReceiptContractTests(unittest.TestCase):
                 self.state = state
                 self.streamed_args = None
 
-            def stream(self, binding, *, prompt, on_line, model=None, effort=None, steer=None, extra_args=()):
+            def stream(self, binding, *, prompt, on_line, model=None, effort=None, steer=None):
                 self.streamed_args = {
                     "binding": binding,
                     "prompt": prompt,
                     "model": model,
                     "effort": effort,
                     "steer": steer,
-                    "extra_args": extra_args,
                 }
                 on_line(f"{self.name} output")
                 return ReviewResult(
@@ -229,12 +227,12 @@ class ReceiptContractTests(unittest.TestCase):
                 return 0 if result.state == "complete" else 1
 
         mock_registry = HarnessRegistry()
-        goose_mock = MockHarness("goose")
+        omp_mock = MockHarness("omp")
         codex_mock = MockHarness("codex")
-        mock_registry.register(goose_mock)
+        mock_registry.register(omp_mock)
         mock_registry.register(codex_mock)
 
-        for backend in ("goose", "codex"):
+        for backend in ("omp", "codex"):
             with self.subTest(backend=backend):
                 receipt, exit_code = run_receipt(
                     "projectbluefin/review",
@@ -246,21 +244,58 @@ class ReceiptContractTests(unittest.TestCase):
                     "high",
                     "",
                     "scope-v7",
-                    check_scope="/tmp/check-scope",
+                    check_scope="",
                     registry=mock_registry,
                 )
                 self.assertEqual(receipt.identity.backend, backend)
                 self.assertEqual(exit_code, 0)
                 self.assertEqual(receipt.transcript, (f"{backend} output",))
                 self.assertIn(
-                    f"{self.request.base_sha}...{self.request.head_sha}",
-                    mock_registry.get(backend).streamed_args["extra_args"],
-                )
-                self.assertIn(
                     f"git diff {self.request.base_sha}...{self.request.head_sha}",
                     mock_registry.get(backend).streamed_args["prompt"],
                 )
 
+    def test_review_scope_doctrine_folds_into_prompt(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agents_dir = Path(tmpdir) / ".agents"
+            checks_dir = agents_dir / "checks"
+            checks_dir.mkdir(parents=True)
+            (agents_dir / "REVIEW.md").write_text("Doctrine review instructions", encoding="utf-8")
+            (checks_dir / "01-doctrine.md").write_text("Check 1 details", encoding="utf-8")
+
+            class MockHarness:
+                def __init__(self):
+                    self.name = "omp"
+                    self.availability = Availability.READY
+                    self.streamed_args = None
+
+                def stream(self, binding, *, prompt, on_line, model=None, effort=None, steer=None):
+                    self.streamed_args = {"prompt": prompt}
+                    return ReviewResult(1, "complete", {"critical": 0, "high": 0, "medium": 0, "low": 0}, [], [], {"backend": "omp", "model": "m"}, {}, {}, [])
+
+                def terminal_status(self, result):
+                    return 0
+
+            mock_registry = HarnessRegistry()
+            mock_harness = MockHarness()
+            mock_registry.register(mock_harness)
+
+            receipt, exit_code = run_receipt(
+                "projectbluefin/review",
+                372,
+                "a" * 40,
+                "b" * 40,
+                "omp",
+                "test-model",
+                "high",
+                "",
+                "scope-v7",
+                check_scope=tmpdir,
+                registry=mock_registry,
+            )
+            self.assertIn("Doctrine review instructions", mock_harness.streamed_args["prompt"])
+            self.assertIn("Check 1 details", mock_harness.streamed_args["prompt"])
 
 if __name__ == "__main__":
     unittest.main()

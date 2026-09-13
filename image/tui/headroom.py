@@ -39,7 +39,7 @@ CAVEMAN_INSTRUCTIONS = (
     "where brevity would create ambiguity."
 )
 
-_BACKEND_NAMES = {"goose": "Goose/GitHub Copilot", "codex": "Codex"}
+_BACKEND_NAMES = {"omp": "OMP", "codex": "Codex"}
 
 
 class HeadroomError(Exception):

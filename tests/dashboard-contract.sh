@@ -264,10 +264,10 @@ grep -q 'is outside 1\.\.' "$landing_py" ||
   fail "the record itself must refuse a round past the limit"
 grep -q 'already review-blocked\|already {rounds\[-1\]' "$landing_py" ||
   fail "nothing may be written after the final phase closes"
-grep -q 'GOOSE_MODEL' "$landing_py" "$model_profiles_py" 2>/dev/null ||
-  fail "a Goose round must carry its model explicitly"
+grep -q '"--model", model' "$landing_py" ||
+  fail "a final round must carry its model explicitly on the command line"
 grep -q 'BLUEFIN_REVIEW_FINAL_MODEL' "$landing_py" "$model_profiles_py" 2>/dev/null ||
-  fail "a Codex round must not be handed Goose variables that do nothing"
+  fail "the environment overlay must still carry the final model for display/provenance"
 # shellcheck disable=SC2016 # single quotes are intentional for literal markdown backticks
 grep -q 'never force-push, never remove a hold' "$landing_py" ||
   fail "a fix round must be told never to bypass branch protection"

@@ -59,11 +59,12 @@ a model and grants no authority.
 
 Every round is a fresh process: asking one long-lived agent to review the work
 it just wrote is how a review becomes a rubber stamp. The model rides in
-explicitly — `final_environment` sets `GOOSE_MODEL`/`GOOSE_THINKING_EFFORT`
-for Goose and, for Codex, whose model is a command-line flag rather than an
-environment variable, `final_command` carries it instead. The launch-time
-model is the maintainer's dashboard choice and is never a round's choice.
-
+explicitly: `final_environment()` sets `BLUEFIN_REVIEW_FINAL_MODEL` and
+`BLUEFIN_REVIEW_FINAL_EFFORT` for display and provenance metadata, and
+`final_command()` passes the model and effort as explicit argv flags for both
+backends (`--model`/`--thinking` for OMP, `--model`/`--config model_reasoning_effort=`
+for Codex) since neither backend reads its model from the environment.
+The launch-time model is the maintainer's dashboard choice and is never a round's choice.
 Rounds are `LandingTask`s with a `phase`, drained by the existing
 repository-aware dispatcher: same status file, log, process group, and `[x]`.
 There is no second queue and no second selection authority. One dispatcher

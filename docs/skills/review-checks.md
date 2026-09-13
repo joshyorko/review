@@ -3,31 +3,30 @@ name: review-checks
 version: "1.1"
 last_updated: 2026-09-09
 id: review-checks
-one_line_purpose: Maintain the five review check subagents and Goose review scope.
+one_line_purpose: Maintain the five review check specifications and consolidated review scope.
 entry_point: docs/skills/review-checks.md
 category: ci-ops
 status: active
-tags: [checks, review, goose, subagents, doctrine]
-description: "Maintains the five image-owned review check subagents (bluefin-doctrine, security, correctness, test-coverage, simplicity) and Goose review scope. Use when changing review checks or review thread concurrency."
+tags: [checks, review, subagents, doctrine]
+description: "Maintains the five image-owned review check definitions (bluefin-doctrine, security, correctness, test-coverage, simplicity) and review scope. Use when changing review checks or review doctrine."
 metadata:
   type: reference
-  context7-sources: [/aaif-goose/goose, /addyosmani/agent-skills]
+  context7-sources: [/addyosmani/agent-skills]
 ---
 
 # Review Checks
 
-> The container ships five specialized review check subagents under
-> `/opt/bluefin/review-scope/.agents/checks/`. Goose executes them concurrently.
+> The container ships five specialized review check definitions under
+> `/opt/bluefin/review-scope/.agents/checks/`. They are folded into a single consolidated prompt.
 
 ## When to Use
 
-Load this when editing, adding, or evaluating review check subagents in
-`image/review-scope/checks/`, or when tuning review thread concurrency.
+Load this when editing, adding, or evaluating review check definitions in
+`image/review-scope/checks/`.
 
 ## When Not to Use
 
-Do not load this for Goose runtime configuration (`goose-context.md`) or
-maintainer TUI cockpit navigation (`review-dashboard.md`).
+Do not load this for maintainer TUI cockpit navigation (`review-dashboard.md`).
 
 ## The Five Specialized Checks
 
@@ -41,17 +40,20 @@ The review scope deploys five distinct check subagents:
 | `test-coverage` | Flags changed behavior lacking deterministic regression, negative, boundary, fidelity, or isolation test coverage. |
 | `simplicity` | Enforces the Ponytail / YAGNI doctrine: flags premature abstractions, dead code, hand-rolled standard tools, and diff bloat. |
 
-## Concurrency and Orchestration
+## Review Scope and Prompt Consolidation
 
-1. Goose's native orchestrator dispatches check definitions found in
-   `.agents/checks/*.md` as concurrent `goose run` subprocesses (capped at 4).
-2. Wall-clock review time is governed by the slowest individual check rather
-   than the serial sum of all passes.
-3. `bluefin-review` sets up a per-review scratch scope copying the static
-   checks, plus per-stop `cluster-resolution` or `maintainer-steering` when
-   present.
-4. `--check-scope <DIR>` replaces repo-root discovery, ensuring Bluefin review
-   doctrine applies cleanly without modifying the target repository checkout.
+1. Unlike older orchestrators that spawned concurrent subprocesses per check
+   file, current backends (Codex and OMP) use a consolidated single-pass review.
+2. `image/bin/bluefin-review`'s `run_review()` and `review_instructions()` (and
+   `image/tui/review_receipt.py`'s `_review_scope_doctrine()`) read
+   `/opt/bluefin/review-scope/.agents/REVIEW.md` and all `.agents/checks/*.md`
+   definitions directly and fold their text into one consolidated prompt sent
+   to the selected backend.
+3. This architecture change replaces subprocess orchestration with a single
+   evidenced review pass that evaluates all five check criteria against the
+   diff in unified context.
+4. Bluefin review doctrine is supplied without modifying the target repository
+   checkout.
 5. In the maintainer cockpit, evidenced findings are remediated through
    `[$]` (slay), which dispatches the fixer behind its typed gate and
    durable run record.
@@ -67,14 +69,13 @@ The review scope deploys five distinct check subagents:
 
 | Rationalization | Reality |
 |---|---|
-| "One large check is simpler." | Monolithic checks serialize evaluation and lose multi-threaded concurrency. |
+| "Checks should run as separate background agents." | A single consolidated prompt evaluates all criteria in unified context without the overhead of external subprocess orchestration. |
 | "Style issues belong in checks." | Linters handle style. Review checks focus on high-confidence correctness, security, and doctrine. |
-
 ## Red Flags
 
-- Omitting check files from container builds, reducing reviews to single-threaded execution.
+- Omitting check files from container builds.
 - Checks that produce unevidenced recommendations without line citations.
-- Replacing `--check-scope` with repository-local file mutation.
+- Modifying repository-local files to inject check doctrine.
 
 ## Verification
 

@@ -15,7 +15,6 @@ it scopes every task, so read it alongside the matching skill.
 | Investigate the contributor runtime, task delivery, or token lifetime | [`hive-runtime.md`](skills/hive-runtime.md) |
 | Investigate an assigned-task or connection problem | [`hive-triage.md`](skills/hive-triage.md) |
 | Report evidence to or follow up on a `hivecommons/hive` issue | [`upstream-hive.md`](skills/upstream-hive.md) |
-| Change Goose configuration or skill loading | [`goose-context.md`](skills/goose-context.md) |
 | Maintain the five review check subagents and review scope | [`review-checks.md`](skills/review-checks.md) |
 | Change the contributor image Containerfile or pinned inputs | [`image-build.md`](skills/image-build.md) |
 | Audit image composition, SBOM manifests, SLSA, or publishing | [`image-audit.md`](skills/image-audit.md) |
