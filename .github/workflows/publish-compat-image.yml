@@ -96,7 +96,7 @@ jobs:
           set -euo pipefail
           just --justfile justfile --list
 
-      - name: Guided Goose onboarding behavior
+      - name: Guided onboarding behavior
         run: |
           set -euo pipefail
           bash tests/just-onboarding.sh
@@ -143,32 +143,6 @@ jobs:
           grep -Fq 'review-entrypoint' image/Containerfile
           grep -Fq 'ghcr.io/projectbluefin/review-contributor:stable' README.md
           grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
-
-  resolve-goose:
-    needs: validate
-    runs-on: ubuntu-latest
-    outputs:
-      x86_64_sha256: ${{ steps.goose.outputs.x86_64_sha256 }}
-      aarch64_sha256: ${{ steps.goose.outputs.aarch64_sha256 }}
-    steps:
-      - name: Resolve official Goose canary asset identities
-        id: goose
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          release="$(gh api repos/aaif-goose/goose/releases/tags/canary)"
-          asset_digest() {
-            jq -er --arg name "$1" \
-              '.assets[] | select(.name == $name) | .digest |
-               select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")' \
-              <<<"$release"
-          }
-          {
-            echo "x86_64_sha256=$(asset_digest goose-x86_64-unknown-linux-musl.tar.gz)"
-            echo "aarch64_sha256=$(asset_digest goose-aarch64-unknown-linux-musl.tar.gz)"
-          } >>"$GITHUB_OUTPUT"
 
   # One source of truth for every OCI value in this run. The native builds
   # stamp these as config labels and the index carries the identical set as
@@ -270,7 +244,7 @@ jobs:
   # is cross-built: the runner's own CPU produces the layers, runs the smoke
   # checks, and the audit measures a container it can actually execute.
   build:
-    needs: [resolve-goose, metadata]
+    needs: [metadata]
     strategy:
       fail-fast: false
       matrix:
@@ -310,8 +284,6 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GOOSE_X86_64_SHA256: ${{ needs.resolve-goose.outputs.x86_64_sha256 }}
-          GOOSE_AARCH64_SHA256: ${{ needs.resolve-goose.outputs.aarch64_sha256 }}
           CREATED: ${{ needs.metadata.outputs.created }}
           BASE_NAME: ${{ needs.metadata.outputs.base_name }}
           BASE_DIGEST: ${{ needs.metadata.outputs.base_digest }}
@@ -327,9 +299,6 @@ jobs:
           printf '%s' "$GITHUB_TOKEN" > "$secret_file"
           podman build \
             --format oci \
-            --build-arg GOOSE_REFRESH="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --build-arg GOOSE_X86_64_SHA256="$GOOSE_X86_64_SHA256" \
-            --build-arg GOOSE_AARCH64_SHA256="$GOOSE_AARCH64_SHA256" \
             --build-arg REVIEW_REVISION="${GITHUB_SHA}" \
             --secret id=github_token,src="$secret_file" \
             --label "org.opencontainers.image.title=Bluefin review contributor" \
@@ -371,7 +340,7 @@ jobs:
           container_arch="$(podman run --rm --entrypoint /usr/bin/uname review:smoke -m)"
           test "$container_arch" = "$EXPECTED_UNAME"
           podman run --rm --entrypoint /usr/local/bin/bluefin-review review:smoke --help
-          podman run --rm --entrypoint /usr/local/bin/goose review:smoke --version
+          podman run --rm --entrypoint /usr/local/bin/omp review:smoke --version
           podman run --rm --entrypoint /usr/local/bin/codex review:smoke --version
           podman run --rm --entrypoint /usr/local/bin/codex-code-mode-host review:smoke --help
           podman run --rm --entrypoint /opt/bluefin/tui/.venv/bin/python review:smoke \

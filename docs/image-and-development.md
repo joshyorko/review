@@ -2,21 +2,28 @@
 
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
 layers the pinned Hive runtime (the tracked revision is in the [README](../README.md)),
-the current Goose canary snapshot, the pinned official Codex CLI, GitHub CLI,
-tmux, uv with the Textual
-dashboard runtime, hooks, and generated
-organization skills. Goose
-publishes that snapshot from its active `main`
-branch; each archive is verified against GitHub's signed build provenance
-before installation.
+the pinned OMP release, the pinned official Codex CLI, GitHub CLI,
+tmux, uv with the Textual dashboard runtime, hooks, and generated organization
+skills.
 
 The relay uses the root `package-lock.json` to install only the exact `ws`
 dependency with `npm ci --omit=dev --ignore-scripts`. The official,
 checksum-verified Node archive remains intact as a JavaScript runtime: `node`,
 `npm`, and `corepack` stay available. Only its headers, documentation, and the
 now-unused npm download cache are removed. Those fixed Node, CLI, tmux, and
-relay inputs are built before the mutable Goose refresh layer, so a Goose-only
-refresh reuses them.
+relay inputs are built before the agent layers.
+
+`ghcr.io/projectbluefin/review-contributor` remains the compatibility image for
+the maintainer dashboard and legacy `review-container` path.
+`ghcr.io/projectbluefin/contribute` is a separate distroless Hive worker: it
+carries only OMP, Node with the locked `ws` module, GitHub CLI, tmux, the
+upstream Hive runtime, and the FSDK shell/git/python closure. It contains no
+Codex, Pi, dashboard, review scope, or generated skills. Its embedded
+SPDX manifest records exactly those artifacts, `ws`, and pinned Hive files; the
+registration is mounted at `/home/bluefin/.config/hive/contributor.env` and
+provider credentials are inherited environment names only.
+
+`contribute` is OMP-only by contract. Its entrypoint rejects any external `AGENT_BACKEND` other than `omp`, so a stale registration cannot reactivate another Hive backend. This is a product boundary rather than a launcher default: the image defines the entire contributor experience, while Hive retains registration, assignment, tmux lifecycle, prompt injection, retries, and result capture.
 
 That Hive SHA is load-bearing, not decorative. It is the third of three copies
 of the same pin: `hive_commit` in the `justfile`, `ARG HIVE_COMMIT` in
@@ -24,20 +31,16 @@ of the same pin: `hive_commit` in the `justfile`, `ARG HIVE_COMMIT` in
 fails if they disagree. Renovate proposes them as a single change, so take its
 pull request whole rather than editing any copy by hand.
 
-Goose's `canary` name is mutable, so it is not an artifact identity. CI
-resolves the official `unknown-linux-musl` archive digest for each architecture
-immediately before building; the image checks that digest and Goose's signed
-attestation, then records both digests in its configuration and build
-provenance. A moved canary archive therefore fails the build rather than
-silently changing an image. Use an immutable contributor image digest or
-`sha-<commit>` image tag when a fixed artifact is required.
-
+OMP installs from official GitHub releases with architecture-specific SHA256
+checksums (`OMP_VERSION`, `OMP_X86_64_SHA256`, `OMP_AARCH64_SHA256`).
+Use an immutable contributor image digest or `sha-<commit>` image tag when a
+fixed artifact is required.
 Every published contributor digest carries review-specific OCI title,
 description, project URL/source, revision, version, creation time, license,
 and exact FSDK base name/digest metadata in both platform labels and manifest
 annotations. Publishing attaches a signed SLSA provenance bundle and a signed
 SPDX SBOM to the published index digest, verifiable with `gh attestation
-verify`. The SBOM covers the archive-installed components — Goose, the GitHub
+verify`. The SBOM covers the archive-installed components — OMP, the GitHub
 CLI, tmux, Codex, ripgrep, the pinned Hive runtime files, the skill bundles,
 and the review git hooks — because the image carries a build-time SPDX
 manifest of them (`/opt/bluefin/sbom/review-components.spdx.json`, generated
@@ -58,19 +61,13 @@ under emulation. The generated per-architecture audit reports in the GitHub
 Actions step summary are the acceptance artifact; local single-architecture
 validation cannot supply that evidence.
 
-The pinned Hive runtime preserves an existing `~/.config/goose/config.yaml`.
-The image still uses `GOOSE_PATH_ROOT=/opt/bluefin/goose` to keep controlled
-Goose policy, data, and state separate from Hive's runtime-owned config. Hive
-now links its refreshed knowledge export to Goose-native `AGENTS.md` and
-`.goosehints`, so no filename compatibility override is needed.
-
+The pinned Hive runtime provides the contributor environment. No static
+image-owned agent configuration file is required for OMP.
 Organization skills are generated at image build time from
-`projectbluefin/common`'s `docs/skills/index.json` into Goose's global skill
-directory. Compatible community skills installed from `skills.sh` or another
-open catalog use that same `~/.agents/skills/` session layer. Repositories may
+`projectbluefin/common`'s `docs/skills/index.json`. Repositories may
 route agents to their own skill catalog, but per-repository skills are not
 automatically discovered at session startup, and no session-layer skill becomes
-a `goose review` check unless it is authored separately in the image-owned
+a review check unless it is authored separately in the image-owned
 review scope.
 
 The base image ships the full ncurses terminfo database, so the caller's
@@ -90,11 +87,8 @@ destroying fresh agent output. Both shims are gone. Use the tools the image
 ships; if one is missing, fix it at the FSDK seam rather than reimplementing
 it here.
 
-Context7 serves the agent through two seams: the Hive hub queries it
-server-side and folds the result into its knowledge export, and the image's
-controlled Goose config enables the `context7` extension against the keyless
-public endpoint for on-demand documentation lookups. The agent policy routes
-external API questions through it before memory.
+Context7 serves the agent: the Hive hub queries it
+server-side and folds the result into its knowledge export.
 
 `worktree-guard` (at `/usr/local/bin/worktree-guard`) runs an agent command
 in an ephemeral git worktree and enforces hygiene: a run that leaves the
@@ -114,9 +108,7 @@ have under the same immutable tag CI mints for it:
 
 ```bash
 ref="ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
-GH_TOKEN="$(gh auth token)" podman build \
-  --secret id=github_token,env=GH_TOKEN \
-  --build-arg GOOSE_REFRESH="$(date +%s)" \
+podman build \
   -f image/Containerfile -t "$ref" .
 ```
 
@@ -132,12 +124,8 @@ in the image, which a made-up local name cannot.
 After the change is ready, commit it and use the normal publish workflow; CI
 publishes immutable `sha-<commit>` and version tags and advances `:stable`
 from `main`.
-The build secret exists only while GitHub CLI verifies Goose's signed
-provenance and is never included in an image layer. The checked-in checksums
-make this local command use the known canary snapshot; to refresh it, resolve
-the two official release-asset digests and pass
-`GOOSE_X86_64_SHA256` and `GOOSE_AARCH64_SHA256` as build arguments.
-
+The checked-in checksums make this local command use the known pinned OMP release;
+to update it, update `OMP_VERSION`, `OMP_X86_64_SHA256`, and `OMP_AARCH64_SHA256`.
 ### Validation
 
 CI enforces the complete contract suite in `.github/workflows/validate.yml`. To run the local portion of the suite (everything preceding container image builds and registry calls):

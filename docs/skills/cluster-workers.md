@@ -78,6 +78,8 @@ boundary.
 - Leaking credentials in `kubectl.kubernetes.io/last-applied-configuration`.
 - Halting maintainer review triage because of cluster connection timeouts.
 
+`just contribute cluster [N]` targets `deploy/contribute.yaml` and `contribute-secret`; `just review-container cluster [N]` remains on `deploy/review-contributor.yaml`. Both paths synchronize credentials with `--from-file`, never literals or argv values.
+
 ## Verification
 
 ```bash

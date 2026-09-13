@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Project skill sources into Goose's native Agent Skills layout.
+"""Project skill sources into the Agent Skills layout the image ships.
 
 The org keeps skills as ``docs/skills/<id>.md`` plus a generated
-``docs/skills/index.json`` manifest. Goose discovers skills only as directories
-containing a ``SKILL.md``, under fixed roots such as ``~/.agents/skills``.
+``docs/skills/index.json`` manifest. Agents discover skills only as
+directories containing a ``SKILL.md``, under fixed roots such as
+``~/.agents/skills``.
 
 This script accepts factory manifests plus local or remote community
 ``SKILL.md`` sources and writes ``<out>/<id>/SKILL.md`` for each active skill.
@@ -13,13 +14,13 @@ Local community directories retain their standard sibling ``scripts``,
 
 Manifest-backed skills emit only ``name``, ``description`` and a nested
 ``metadata`` block. The factory frontmatter carries a further ten top-level
-keys that Goose has no use for; regenerating rather than copying keeps them
-away from Goose's parser entirely. Direct community sources retain their
-standard frontmatter.
+keys the runtime has no use for; regenerating rather than copying keeps them
+out of its parser entirely. Direct community sources retain their standard
+frontmatter.
 
-Goose loads only ``name`` and ``description`` into the system prompt at session
-start, then fetches a body on demand via ``load_skill`` -- so the description is
-what actually drives selection, and it is copied verbatim.
+The runtime loads only ``name`` and ``description`` into the system prompt at
+session start, then fetches a body on demand -- so the description is what
+actually drives selection, and it is copied verbatim.
 """
 
 from __future__ import annotations
@@ -44,8 +45,9 @@ DEFAULT_RAW_BASE = (
     f"{DEFAULT_COMMON_COMMIT}/"
 )
 
-# Goose's own guidance is that fewer tools and shorter always-on context perform
-# better; every skill costs name+description tokens in every request.
+# Agent guidance generally holds that fewer tools and shorter always-on
+# context perform better; every skill costs name+description tokens in every
+# request.
 MAX_DESCRIPTION = 256
 SKILL_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 

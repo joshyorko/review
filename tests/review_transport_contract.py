@@ -151,7 +151,7 @@ class ReviewTransportContractTests(unittest.TestCase):
             with patch("subprocess.run", side_effect=intercept_run):
                 result = engine.run_sync(
                     BatchSnapshot(items, {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -254,7 +254,7 @@ class ReviewTransportContractTests(unittest.TestCase):
             with patch("subprocess.run", side_effect=intercept_run):
                 result = engine.run_sync(
                     BatchSnapshot(items, {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",
@@ -328,7 +328,7 @@ class ReviewTransportContractTests(unittest.TestCase):
             with patch("subprocess.run", side_effect=intercept_run):
                 result = engine.run_sync(
                     BatchSnapshot(items, {}),
-                    "goose",
+                    "omp",
                     "gemini-3.8-flash",
                     "high",
                     "scope-v7",

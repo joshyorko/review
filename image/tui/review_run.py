@@ -67,7 +67,7 @@ class ReviewRun:
     base_sha: str
     head_sha: str
     evidence_id: str  # derived from the reviewed base and head
-    backend: str      # harness name (e.g. "goose", "codex")
+    backend: str      # harness name (e.g. "omp", "codex")
     model: str
     effort: str
 
@@ -76,7 +76,7 @@ class ReviewRun:
         cls,
         request: ReviewRequest,
         *,
-        backend: str = "goose",
+        backend: str = "omp",
         model: str = "gemini-3.8-flash",
         effort: str = "max",
     ) -> ReviewRun:

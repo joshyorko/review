@@ -59,7 +59,7 @@ class ReviewExecContractTests(unittest.TestCase):
                 "number": 372,
                 "base_sha": "a" * 40,
                 "head_sha": "b" * 40,
-                "backend": "goose",
+                "backend": "omp",
                 "model": "gemini-3.8-flash",
                 "effort": "high",
             },

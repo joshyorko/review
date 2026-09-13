@@ -37,8 +37,8 @@ export interface ReviewModeOptions {
 	token?: string;
 	fetchImpl?: typeof fetch;
 	env?: NodeJS.ProcessEnv;
+	skipRepos?: readonly string[];
 }
-
 /**
  * Most items one dispatch may carry.
  *
@@ -89,6 +89,7 @@ export class ReviewMode {
 	private hiveMissing = 0;
 	private snapshotSignature = "";
 	private ranked: PrioritizedQueue = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
+	skipRepos: Set<string>;
 
 	constructor(options: ReviewModeOptions) {
 		this.org = options.org;
@@ -97,6 +98,12 @@ export class ReviewMode {
 		this.token = options.token;
 		this.fetchImpl = options.fetchImpl;
 		this.env = options.env ?? process.env;
+		const envSkip = (this.env.BLUEFIN_REVIEW_SKIP_REPOS ?? "")
+			.split(",")
+			.map((s) => s.trim().toLowerCase())
+			.filter(Boolean);
+		const optionsSkip = (options.skipRepos ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean);
+		this.skipRepos = new Set([...envSkip, ...optionsSkip]);
 		this.snapshot = { root: this.stateRoot, runs: [], reviewEvents: [], landingEvents: [], receipts: new Map() };
 	}
 
@@ -118,12 +125,19 @@ export class ReviewMode {
 		return this.scope.value;
 	}
 
-	/** Point the queue at an organization or one repository. */
+	/** Point the queue at another organization or repository. */
 	setScope(scope: QueueScope): void {
+		this.inflight?.abort();
+		this.inflight = undefined;
+		this.loading = false;
 		this.scope = scope;
 		this.cursor = 0;
 		this.items = [];
 		this.ranked = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
+		this.queueError = undefined;
+		this.queueTruncated = false;
+		this.fetchedAt = 0;
+		this.hiveMissing = 0;
 	}
 
 	/** Why this item sits where it sits. */
@@ -207,10 +221,17 @@ export class ReviewMode {
 
 	/** Items in priority order, after hive-only, level, and substring filters. */
 	visibleItems(): QueueItem[] {
-		const ordered = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		if (this.skipRepos.size > 0) {
+			base = base.filter((item) => {
+				const repoLower = item.repo.toLowerCase();
+				const shortName = repoLower.includes("/") ? repoLower.split("/")[1]! : repoLower;
+				return !this.skipRepos.has(repoLower) && !this.skipRepos.has(shortName);
+			});
+		}
 		let candidates = this.hiveOnly && this.hive.online
-			? ordered.filter((item) => this.priorityFor(item)?.category === "hive")
-			: ordered;
+			? base.filter((item) => this.priorityFor(item)?.category === "hive")
+			: base;
 		if (this.hiveLevel !== undefined) {
 			const level = this.hiveLevel;
 			candidates = candidates.filter((item) => this.hiveWorkFor(item)?.level === level);
@@ -313,6 +334,27 @@ export class ReviewMode {
 	}
 
 	/**
+	 * Items available for slay execution: visible items first, falling back to
+	 * unranked items in local priority order when no Hive-ranked items exist.
+	 */
+	slayableItems(): QueueItem[] {
+		const chosen = this.chosenItems();
+		if (chosen.length > 0) return chosen;
+		const visible = this.visibleItems();
+		if (visible.length > 0) return visible;
+		// Fallback: when Hive-only filter leaves 0 items, fall back to unranked items
+		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		if (this.skipRepos.size > 0) {
+			base = base.filter((item) => {
+				const repoLower = item.repo.toLowerCase();
+				const shortName = repoLower.includes("/") ? repoLower.split("/")[1]! : repoLower;
+				return !this.skipRepos.has(repoLower) && !this.skipRepos.has(shortName);
+			});
+		}
+		return base;
+	}
+
+	/**
 	 * Re-read durable appliance state.
 	 *
 	 * Returns whether anything actually changed, so a poll that finds the same
@@ -368,20 +410,31 @@ export class ReviewMode {
 				fetchImpl: this.fetchImpl,
 			};
 			const result = await fetchQueue(this.queueMode, options);
-			if (controller.signal.aborted) return result;
+			if (result.cancelled || this.inflight !== controller || controller.signal.aborted) {
+				return { items: result.items, cancelled: true, fetchedAt: result.fetchedAt };
+			}
+
+			if (result.error && result.items.length === 0) {
+				this.queueError = result.error;
+				this.queueTruncated = result.truncated === true;
+				this.fetchedAt = result.fetchedAt;
+				return result;
+			}
+
+			const missing = await this.missingHiveWork(result.items, options, controller);
+			if (this.inflight !== controller || controller.signal.aborted) {
+				return { items: result.items, cancelled: true, fetchedAt: result.fetchedAt };
+			}
 
 			this.queueError = result.error;
 			this.queueTruncated = result.truncated === true;
 			this.fetchedAt = result.fetchedAt;
-			if (!result.error || result.items.length > 0) {
-				const previousKey = this.selectedKey();
-				this.items = [...result.items, ...(await this.missingHiveWork(result.items, options))];
-				if (controller.signal.aborted) return result;
-				this.reprioritize();
-				if (previousKey) {
-					const index = this.visibleItems().findIndex((item) => queueKey(item.repo, item.id) === previousKey);
-					this.cursor = index >= 0 ? index : Math.min(this.cursor, Math.max(0, this.visibleItems().length - 1));
-				}
+			const previousKey = this.selectedKey();
+			this.items = [...result.items, ...missing];
+			this.reprioritize();
+			if (previousKey) {
+				const index = this.visibleItems().findIndex((item) => queueKey(item.repo, item.id) === previousKey);
+				this.cursor = index >= 0 ? index : Math.min(this.cursor, Math.max(0, this.visibleItems().length - 1));
 			}
 			return result;
 		} finally {
@@ -398,13 +451,24 @@ export class ReviewMode {
 	 * Scope is respected: a repository-scoped queue stays that repository's, so
 	 * asking for one project never drags in another project's Hive work.
 	 */
-	private async missingHiveWork(fetched: readonly QueueItem[], options: FetchOptions): Promise<QueueItem[]> {
-		this.hiveMissing = 0;
-		if (!this.hive.online) return [];
+	private async missingHiveWork(
+		fetched: readonly QueueItem[],
+		options: FetchOptions,
+		controller: AbortController,
+	): Promise<QueueItem[]> {
+		if (this.inflight !== controller || controller.signal.aborted) return [];
+		if (!this.hive.online) {
+			this.hiveMissing = 0;
+			return [];
+		}
 		const present = new Set(fetched.map(itemKey));
 		const wanted = [...this.hive.ranks.keys()].filter((key) => !present.has(key) && this.inScope(key));
-		if (wanted.length === 0) return [];
+		if (wanted.length === 0) {
+			this.hiveMissing = 0;
+			return [];
+		}
 		const result = await fetchItemsByKey(wanted, this.queueMode, options);
+		if (this.inflight !== controller || controller.signal.aborted) return [];
 		this.hiveMissing = wanted.length - result.items.length;
 		return result.items;
 	}

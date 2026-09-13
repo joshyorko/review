@@ -196,6 +196,15 @@ export function prioritize(items: readonly QueueItem[], context: PrioritizeConte
 			if (b.hiveRank === undefined) return -1;
 			if (a.hiveRank !== b.hiveRank) return a.hiveRank - b.hiveRank;
 		}
+
+		// When sorting issues (triage category or issue type), clump items by repository
+		// so contributors work within repository borders for each reviewable cohort.
+		const isIssueCohort = left.type === "issue" && right.type === "issue";
+		if (isIssueCohort) {
+			const repoCmp = left.repo.localeCompare(right.repo);
+			if (repoCmp !== 0) return repoCmp;
+		}
+
 		const byCategory = MAINTAINER_ORDER[a.category] - MAINTAINER_ORDER[b.category];
 		if (byCategory !== 0) return byCategory;
 		if (a.demotion !== b.demotion) return a.demotion - b.demotion;

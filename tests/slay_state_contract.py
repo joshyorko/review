@@ -66,7 +66,7 @@ def _identity(number: int, head: str | None = None) -> RunIdentity:
         pull_request=number,
         base_sha=_sha("a"),
         head_sha=head or f"{number:040x}"[-40:],
-        backend="goose",
+        backend="omp",
         model="gemini-3.8-flash",
         effort="high",
         check_scope_version="image-v1",
@@ -88,7 +88,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-        # The dispatch preflight refuses the real headless-goose command when
+        # The dispatch preflight refuses the real headless-omp command when
         # no Copilot credential is present. These tests never run the agent
         # (drain_landings is stubbed), so they opt out with the same override
         # every stubbed-agent test uses.
@@ -164,7 +164,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
         # Bot reviews only
         bot_live = {
             "reviews": [
-                {"author": {"login": "goose"}, "state": "APPROVED"},
+                {"author": {"login": "ci-runner[bot]"}, "state": "APPROVED"},
                 {"author": {"login": "github-actions[bot]"}, "state": "APPROVED"},
                 {"author": {"login": "renovate-bot"}, "state": "COMMENTED"},
             ]
@@ -214,6 +214,140 @@ class SlayStateMachineContractTests(unittest.TestCase):
         stops = [stop_reviewed, stop_unreviewed]
         stops.sort(key=lambda s: (0 if app.stop_lacks_my_review(s) else 1, s.number))
         self.assertEqual(stops, [stop_unreviewed, stop_reviewed])
+
+    def test_landing_ruleset_blocker_holds_prs_short_of_required_reviews(self):
+        """#514: a 2-review ruleset with one approval blocks landing dispatch."""
+        app = tui.ReviewDashboard()
+        app.self_login = "jorge"
+        stop = tui.Stop(
+            repository="projectbluefin/common",
+            number=1080,
+            action="review",
+            title="needs a second review",
+            author="alice",
+        )
+        one_approval = {"reviews": [
+            {"author": {"login": "alice"}, "state": "APPROVED"},
+        ]}
+        two_approvals = {"reviews": [
+            {"author": {"login": "alice"}, "state": "APPROVED"},
+            {"author": {"login": "bob"}, "state": "APPROVED"},
+        ]}
+        with mock.patch.object(
+            tui, "repo_review_policy",
+            return_value={"approvals": 2, "code_owners": False,
+                          "last_push_approval": False, "merge_queue": False,
+                          "source": "ruleset"},
+        ):
+            # One human approval under a two-review ruleset: held, not dispatched.
+            blocker = app.landing_ruleset_blocker(stop, one_approval)
+            self.assertIn("projectbluefin/common", blocker)
+            self.assertIn("2 write-access review(s)", blocker)
+            # Two human approvals: the ruleset's requirement is met.
+            self.assertEqual(app.landing_ruleset_blocker(stop, two_approvals), "")
+            # A ruleset that requires no reviews never blocks on approvals.
+            with mock.patch.object(
+                tui, "repo_review_policy",
+                return_value={"approvals": 0, "code_owners": False,
+                              "last_push_approval": False, "merge_queue": False,
+                              "source": "fallback"},
+            ):
+                self.assertEqual(app.landing_ruleset_blocker(stop, one_approval), "")
+
+    def test_landing_ruleset_blocker_flags_own_pr_and_invalidated_approval(self):
+        """#514: an own-authored PR and require_last_push_approval are held."""
+        app = tui.ReviewDashboard()
+        app.self_login = "jorge"
+        app.is_fixer_head = lambda repo, num, head: True
+        own = tui.Stop(
+            repository="projectbluefin/common",
+            number=5,
+            action="review",
+            title="my pull request",
+            author="jorge",
+        )
+        self_approval = {"reviews": [
+            {"author": {"login": "jorge"}, "state": "APPROVED"},
+        ]}
+        with mock.patch.object(
+            tui, "repo_review_policy",
+            return_value={"approvals": 1, "code_owners": False,
+                          "last_push_approval": False, "merge_queue": False,
+                          "source": "ruleset"},
+        ):
+            # The author's own approval satisfies the count; policy still bars it.
+            blocker = app.landing_ruleset_blocker(own, self_approval)
+            self.assertIn("own pull request", blocker)
+        with mock.patch.object(
+            tui, "repo_review_policy",
+            return_value={"approvals": 1, "code_owners": False,
+                          "last_push_approval": True, "merge_queue": False,
+                          "source": "ruleset"},
+        ):
+            # A foreign approval counts, but our own pushed head invalidates it.
+            foreign = {"headRefOid": _sha("d"), "reviews": [
+                {"author": {"login": "jorge"}, "state": "APPROVED"},
+            ]}
+            blocker = app.landing_ruleset_blocker(own, foreign)
+            self.assertIn("require_last_push_approval", blocker)
+
+    def test_plan_landing_preflight_holds_ruleset_blocked_prs(self):
+        """#514: the batch dispatch excludes PRs a ruleset would block on."""
+        class _FakeTask:
+            def __init__(self, stops):
+                self.stops = stops
+                self.policy = None
+
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+            app.final_policy = "automatic"
+            enqueued = []
+            app.enqueue_landing = enqueued.append
+
+            def fake_fetch_live_pr(repository, number, force=False):
+                if number == 1080:
+                    return {"headRefOid": _sha("b"), "reviews": [
+                        {"author": {"login": "alice"}, "state": "APPROVED"}]}
+                return {"headRefOid": _sha("c"), "reviews": [
+                    {"author": {"login": "alice"}, "state": "APPROVED"},
+                    {"author": {"login": "bob"}, "state": "APPROVED"}]}
+
+            app.fetch_live_pr = fake_fetch_live_pr
+            pushed = {}
+
+            def capture_push_screen(screen, finish=None):
+                pushed["screen"] = screen
+                if finish:
+                    finish(True)
+                return None
+
+            app.push_screen = capture_push_screen
+            with mock.patch.object(
+                tui, "repo_review_policy",
+                return_value={"approvals": 2, "code_owners": False,
+                              "last_push_approval": False, "merge_queue": False,
+                              "source": "ruleset"},
+            ), mock.patch.object(tui.landing, "new_task",
+                                 side_effect=lambda stops, login: _FakeTask(stops)):
+                pr1080 = tui.Stop(
+                    repository="projectbluefin/common", number=1080,
+                    action="review", title="blocked PR", author="alice",
+                    selected=True,
+                )
+                pr970 = tui.Stop(
+                    repository="projectbluefin/common", number=970,
+                    action="review", title="clean PR", author="alice",
+                    selected=True,
+                )
+                app.plan_landing([pr1080, pr970])
+
+            # The blocked PR is held with a visible note and removed from
+            # selection so the batch loop does not spin on it.
+            self.assertFalse(pr1080.selected)
+            self.assertTrue(pr1080.failure.startswith("awaiting-reviewers:"))
+            # Only the PR the ruleset will actually land was dispatched.
+            self.assertEqual(len(enqueued), 1)
+            self.assertEqual(enqueued[0].stops, [pr970])
 
     def _setup_app(self, store_dir):
         app = tui.ReviewDashboard()
@@ -323,7 +457,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                 pull_request=501,
                 base_sha=_sha("a"),
                 head_sha=_sha("5"),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
                 check_scope_version="image-v1",
@@ -354,7 +488,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                 pull_request=502,
                 base_sha=_sha("a"),
                 head_sha=_sha("6"),
-                backend="goose",
+                backend="omp",
                 model="gemini-3.8-flash",
                 effort="high",
                 check_scope_version="image-v1",
@@ -666,7 +800,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             counts={"critical": 0, "high": 1, "medium": 0, "low": 0},
             findings=[{"severity": "high", "file": "a.py", "line": 1, "title": "risk"}],
             provenance={
-                "backend": "goose",
+                "backend": "omp",
                 "model": "gpt-5.6-sol",
                 "repository": "projectbluefin/review",
                 "pull_request": 154,
@@ -734,7 +868,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             result.state,
             result.counts,
             result.findings,
-            provenance={"backend": "goose", "model": "gpt-5.6-sol", "head_sha": _sha("7")},
+            provenance={"backend": "omp", "model": "gpt-5.6-sol", "head_sha": _sha("7")},
         )
         self.assertEqual(
             tui.classify_review_action(
@@ -975,7 +1109,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                 base_sha,
                 head_sha,
                 base_sha[:12] + head_sha[:12],
-                "goose",
+                "omp",
                 "gemini-3.8-flash",
                 "max",
             )
@@ -987,7 +1121,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                     {"critical": 0, "high": 0, "medium": 0, "low": 0},
                     [],
                     [],
-                    {"backend": "goose", "model": "gemini-3.8-flash"},
+                    {"backend": "omp", "model": "gemini-3.8-flash"},
                 ),
                 ["transcript"],
                 app.review_scope_version,
@@ -1033,7 +1167,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                 base_sha,
                 head_sha,
                 base_sha[:12] + head_sha[:12],
-                "goose",
+                "omp",
                 "gemini-3.8-flash",
                 "max",
             )
@@ -1045,7 +1179,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
                     {"critical": 0, "high": 0, "medium": 0, "low": 0},
                     [],
                     [],
-                    {"backend": "goose", "model": "gemini-3.8-flash"},
+                    {"backend": "omp", "model": "gemini-3.8-flash"},
                 ),
                 ["transcript"],
                 app.review_scope_version,
@@ -1868,7 +2002,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             orig_esc_profile = app.escalation_profile
             def custom_esc_profile(stop):
                 if stop.repository == "projectbluefin/other":
-                    return ("goose", "claude-opus-5", "high")
+                    return ("omp", "claude-opus-5", "high")
                 return orig_esc_profile(stop)
             app.escalation_profile = custom_esc_profile
 

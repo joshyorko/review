@@ -42,14 +42,16 @@ from tui.model_profiles import (
     final_triple,
 )
 
-# One-shot agent invocation. Goose's documented non-interactive entry point
-# is `run --no-session -i <file>` (the same headless shape Hive's relay
-# uses), so the batch agent needs no session state, reads its brief from the
-# prompt file directly — no shell, the confirmation gate shows the real
-# argv — and exits when the batch is done. Tests and maintainers override
-# the whole command with BLUEFIN_REVIEW_LANDING_COMMAND; @PROMPT marks where
-# the prompt file path goes.
-DEFAULT_LANDING_COMMAND = "goose run --no-session -i @PROMPT"
+# One-shot agent invocation. OMP's non-interactive entry point is
+# `-p --no-session --auto-approve @<file>` (the message argument's own
+# `@`-file convention), so the batch agent needs no session state, reads its
+# brief from the prompt file directly — no shell, the confirmation gate shows
+# the real argv — and exits when the batch is done. Tests and maintainers
+# override the whole command with BLUEFIN_REVIEW_LANDING_COMMAND; @PROMPT
+# marks where the prompt file path goes, and the template's literal `@`
+# immediately before it is what OMP's own file-argument syntax needs (the
+# substitution below drops "@PROMPT" itself, not the character ahead of it).
+DEFAULT_LANDING_COMMAND = "omp --no-session -p --auto-approve @@PROMPT"
 
 # The states the agent may report, in the vocabulary the screen renders.
 # "blocked" and "failed" differ: blocked means the rules forbid landing
@@ -873,7 +875,7 @@ def new_fix_task(
     steer: str = "",
     root: str = "",
     command: str = "",
-    backend: str = "goose",
+    backend: str = "omp",
 ) -> LandingTask:
     _validate_stop(stop)
     directory = root or landing_state_dir()
@@ -966,6 +968,13 @@ For each pull request, in order:
    contradicts the queue's own `merge_method`, and never bypass the queue with a
    direct merge. Only when no merge queue applies, merge directly using a method
    the ruleset's `allowed_merge_methods` permits.
+   The maintainer's batch already excludes, up front, any pull request its
+   repository's ruleset would block on approvals or self-approval: such a PR
+   is held `awaiting-reviewers` and removed from the batch rather than
+   dispatched, so do not try to land a PR that lacks the write-access
+   reviews its ruleset requires, and never bypass branch protection or
+   review requirements to force a merge — report it `blocked` with the
+   exact approval shortfall instead.
    Never approve or merge a pull request authored by @{task.login}: Bluefin
    policy requires review by a different contributor, so an own-authored
    pull request in this batch is reported `blocked` with the note
@@ -1183,13 +1192,13 @@ def landing_command(task: LandingTask) -> list[str]:
 def dispatch_blocker() -> str:
     """Why a dispatched agent would die at startup, or "" when it can run.
 
-    Headless `goose run --no-session` exits immediately with "Provider is
-    not configured" when the github_copilot provider has no credential; the
-    launcher passes GITHUB_COPILOT_TOKEN for exactly this. Checking before
-    every dispatch turns an instant, silent agent death — surfaced only as
-    a died-mid-batch hole in the report — into a refusal that names the
-    cause. An overridden landing command or a non-Copilot backend owns its
-    own runtime and is never blocked here.
+    Headless `omp -p --no-session` exits immediately without a usable model
+    when the github-copilot provider has no credential; the launcher passes
+    GITHUB_COPILOT_TOKEN for exactly this. Checking before every dispatch
+    turns an instant, silent agent death — surfaced only as a died-mid-batch
+    hole in the report — into a refusal that names the cause. An overridden
+    landing command or a non-Copilot backend owns its own runtime and is
+    never blocked here.
     """
     template = os.environ.get(
         "BLUEFIN_REVIEW_LANDING_COMMAND", DEFAULT_LANDING_COMMAND
@@ -1198,14 +1207,12 @@ def dispatch_blocker() -> str:
         return ""
     if os.environ.get("BLUEFIN_REVIEW_BACKEND", "") == "codex":
         return ""
-    if os.environ.get("GOOSE_PROVIDER", "github_copilot") != "github_copilot":
-        return ""
     if os.environ.get("GITHUB_COPILOT_TOKEN", "").strip():
         return ""
     return (
-        "no Copilot credential (GITHUB_COPILOT_TOKEN unset): headless goose "
-        "exits with 'Provider is not configured'; run goose configure on the "
-        "host and relaunch"
+        "no Copilot credential (GITHUB_COPILOT_TOKEN unset): headless omp "
+        "exits immediately without a usable model; export "
+        "GITHUB_COPILOT_TOKEN or select a non-Copilot model and relaunch"
     )
 
 
@@ -1839,22 +1846,25 @@ FINAL_KEY = "final"
 FINAL_OUTCOME_NOTE_LIMIT = 320
 
 def final_command(prompt_path: str, triple: tuple, backend: str = "") -> list[str]:
-    """The argv for one round. Goose reads the prompt from a file exactly as
-    the landing agent does; Codex takes the model and effort as flags,
-    because its model does not come from the environment."""
+    """The argv for one round. Neither Codex nor OMP reads its model from the
+    environment, so each backend gets its model/effort passed explicitly
+    rather than through BLUEFIN_REVIEW_FINAL_MODEL/EFFORT, which is display
+    and provenance metadata only (model_profiles.final_environment)."""
     template = os.environ.get(
         "BLUEFIN_REVIEW_LANDING_COMMAND", DEFAULT_LANDING_COMMAND
     )
     argv = [arg.replace("@PROMPT", prompt_path) for arg in shlex.split(template)]
     _, model, effort = triple
     active = backend or os.environ.get("BLUEFIN_REVIEW_BACKEND", triple[0])
-    if active == "codex" and template == DEFAULT_LANDING_COMMAND:
+    if template != DEFAULT_LANDING_COMMAND:
+        return argv
+    if active == "codex":
         return [
             "codex", "exec", "--ignore-user-config", "--model", model,
             "--config", f"model_reasoning_effort={effort}",
             "-", prompt_path,
         ]
-    return argv
+    return [*argv, "--model", model, "--thinking", effort]
 
 
 def final_rounds(status_path: str) -> list[dict]:

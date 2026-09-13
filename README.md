@@ -1,13 +1,32 @@
 # Bluefin Review
 
-enslaving the oppressors since 2026
+Enslaving the oppressors since 2026
 
 **Review pull requests, inspect CI failures, and land changes from your terminal.**
 Bluefin Review brings the evidence and actions into one dashboard. You choose
 what to review and what to merge; GitHub permissions and branch protections
 still apply.
 
-[Quick start](#quick-start) · [Using the dashboard](#using-the-dashboard) · [Run a worker](#run-a-worker) · [Guides](#guides)
+## Installation
+
+Install `bluefin-contributor-tools` in one command from the [Universal Blue experimental tap](https://github.com/ublue-os/homebrew-experimental-tap), which automatically trusts the formula:
+
+```bash
+brew install ublue-os/experimental-tap/bluefin-contributor-tools
+bluefin-contribute
+```
+
+This installs the `bluefin` CLI with both `review` and `contribute` subcommands (as well as `bluefin-contribute`):
+
+Maintainers:
+```bash
+# Review pull requests and inspect CI failures
+bluefin-review
+```
+
+> **Note:** `bluefin` requires [Apptainer](https://apptainer.org/docs/admin/main/installation.html) and the corresponding container SIF images (`BLUEFIN_REVIEW_SIF` and `BLUEFIN_CONTRIBUTE_SIF`).
+
+[Installation](#installation) · [Quick start](#quick-start) · [Using the dashboard](#using-the-dashboard) · [Run a worker](#run-a-worker) · [Guides](#guides)
 
 ## Quick start
 
@@ -16,8 +35,8 @@ The primary maintainer product is the distroless review appliance
 (`just review-appliance`, `just review-appliance-build`) or the local OMP mode
 (`bin/omp-review`), needing only a container engine and Git credentials.
 The retained compatibility recipes (`just review-queue`) provide a Textual
-dashboard via Goose (`goose configure` with GitHub Copilot) or Codex
-(`codex login`).
+dashboard via OMP (default) or Codex (`codex login`), while `review-container`
+runs the isolated Hive contributor worker.
 ### 1. Get the launcher and sign in to GitHub
 
 ```bash
@@ -57,26 +76,28 @@ The same mode runs against a locally installed `omp` with `bin/omp-review`,
 which takes the same shortcuts: `bin/omp-review owner/repo`, `bin/omp-review 1284`,
 `bin/omp-review issues`.
 
-**Compatibility Textual dashboard — Goose or Codex**
+**Compatibility Textual dashboard — OMP or Codex**
 
 The retained Textual maintainer dashboard runs against `ghcr.io/projectbluefin/review-contributor:stable`:
 
-- **Goose + GitHub Copilot (default compatibility backend)**:
-  Install Goose on your host, run `goose configure` with GitHub Copilot, and launch:
+- **OMP (default review-queue backend)**:
+  OMP runs directly inside the container:
   ```bash
   just review-queue
   ```
-  For the default Goose setup, `just review-doctor` checks readiness without starting an agent.
 
 - **Codex subscription (alternative compatibility backend)**:
   Complete `codex login` on your host using file credential storage, then launch:
   ```bash
   BLUEFIN_REVIEW_BACKEND=codex just review-queue
   ```
-  Codex selection does not require Goose or a Copilot credential on the host.
+  For running a compatibility contributor worker, `review-container` uses Codex:
+  ```bash
+  just review-container
+  ```
   A GitHub CLI login alone does **not** authenticate either review backend.
   See the [launcher guide](docs/skills/launcher.md) for authentication setup,
-  model profiles, and troubleshooting.
+  model profiles, and troubleshooting. `just review-doctor` checks readiness without starting an agent.
 **Hive orders the queue when a project uses Hive.** With `HIVE_HUB` set or a
 contributor registration on the machine, the queue is Hive's work queue in
 Hive's positions, and a pull request that closes queued work inherits that
@@ -113,7 +134,7 @@ also ships the `bluefin-doctrine` and `bluefin-ci-triage` task agents.
 
 The commands above open the whole Project Bluefin queue. To narrow it, append
 a repository—for example, `just review-queue projectbluefin/review`.
-The Goose and Codex launchers pull `ghcr.io/projectbluefin/review-contributor:stable`,
+The launcher pulls `ghcr.io/projectbluefin/review-contributor:stable`,
 the contributor image that carries the Textual dashboard and the Hive worker; no
 local image build is required. Opening the dashboard does not start a review.
 
@@ -148,12 +169,26 @@ dispatches—not agents already running. See [batch landing](docs/skills/landing
 
 ## Run a worker
 
-This is a separate mode: **Hive assigns contributor work; the dashboard is for
-human review.** Choose one worker backend:
+This is a separate mode: **Hive assigns contributor work; the dashboard is for human review.** The isolated OMP worker uses an explicit OMP model profile:
 
 ```bash
-just contribute                         # default Goose worker (TOOL=goose)
-TOOL=codex just review-container         # Codex contributor worker
+CONTRIBUTE_IMAGE=contribute:stable just contribute          # GitHub Copilot Gemini
+CONTRIBUTE_IMAGE=contribute:stable just contribute luna     # GPT-5.6 Luna
+CONTRIBUTE_IMAGE=contribute:stable just contribute opus5    # Claude Opus 5
+CONTRIBUTE_IMAGE=contribute:stable just contribute sol      # GPT-5.6 Sol
+```
+
+`review-container` remains the compatibility Codex worker path.
+
+Run the locally built SIF without binding the host home; `--writable-tmpfs` provides the disposable runtime state OMP, tmux, and Hive need:
+
+```bash
+export AGENT_MODEL=github-copilot/gpt-5.6-luna
+export COPILOT_GITHUB_TOKEN
+export GH_TOKEN
+apptainer run --writable-tmpfs --no-home \
+  --bind "$HOME/.config/hive/contributor.env:/home/bluefin/.config/hive/contributor.env:ro" \
+  ./bluefin-contribute.sif
 ```
 
 Keep the launching terminal open. **Ctrl-C stops the attended worker.**
@@ -185,7 +220,7 @@ is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 <details>
 <summary>Image provenance</summary>
 
-The image layers the pinned Hive runtime at `d0fc9ccf1796c408c43dc6be6d6315df00850781`.
+The compatibility image layers the pinned Hive runtime at `ebd5db6adf95c2eceb77c1a4376f137af0836d4b`. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker; the review appliance remains the maintainer-facing OMP image.
 See [image architecture and validation](docs/image-and-development.md).
 
 </details>

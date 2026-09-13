@@ -42,16 +42,18 @@ require image/Containerfile \
   'ARG GH_VERSION=' \
   'ARG TMUX_VERSION=' \
   'ARG CODEX_VERSION=' \
-  'ARG GOOSE_CHANNEL=canary' \
+  'ARG OMP_VERSION=' \
   'COPY package.json package-lock.json /opt/hive/' \
   'COPY --chmod=0755 image/bin/bluefin-review /usr/local/bin/bluefin-review' \
   'COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint' \
   'PYTHONPATH=/opt/bluefin' \
   'COPY image/tmux.conf /etc/tmux.conf' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
-  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.js' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/lib/pane-classifier.js' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf' \
-  '/usr/local/bin/goose --version' \
+  '/usr/local/bin/omp --version' \
   'tmux -V' \
   'codex --version' \
   'ARG REVIEW_REVISION=unknown' \
@@ -135,11 +137,10 @@ fi
 for path in \
   image/entrypoint.sh \
   image/bin/bluefin-review \
-  image/config/goose.yaml \
   image/tmux.conf \
   image/tui/bluefin_review_tui.py \
   image/tui/observability.py \
-  image/harness/goose.py \
+  image/harness/omp.py \
   package.json \
   package-lock.json; do
   [[ -e "$path" ]] || {

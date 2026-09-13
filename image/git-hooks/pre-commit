@@ -44,7 +44,7 @@ while IFS= read -r -d '' file; do
 		;;
 	esac
 
-	# Generated Goose skill projections are never committed. They are produced
+	# Generated skill projections are never committed. They are produced
 	# from docs/skills/index.json and belong only to the running container.
 	case "$file" in
 	.agents/skills/*)

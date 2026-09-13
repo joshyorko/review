@@ -177,9 +177,12 @@ Batch landings partition across independent repository lanes via background agen
 - Headless tests verify logic; Pilot verifies live interaction and state transitions.
 ## Verification
 
+Harness-selection contracts patch binary probes to cover READY, remembered unavailable, and no-READY choices without installed agent binaries.
+
 ```bash
 bash tests/omp-review-mode.sh          # OMP extension unit & contract tests
 bash tests/dashboard-contract.sh       # static contract + Textual pilot
+python3 tests/autopilot-contract.py
 python3 tests/review_result_contract.py
 bash tests/image-contract.sh
 pre-commit run --all-files
