@@ -128,6 +128,10 @@ export class BluefinAnsiSplash {
 		rows.push(padRow(`    ${ACC}alt+i${RST} ${DIM}prs <-> issues${RST}            ${ACC}alt+u${RST} ${DIM}refresh queue${RST}`));
 		rows.push(padRow(`    ${ACC}alt+y${RST} ${DIM}cite selection${RST}            ${ACC}alt+o${RST} ${DIM}scope repo${RST}`));
 		rows.push(padRow(""));
+		rows.push(padRow(`  ${TXT}Use this prompt to generate issues about this app:${RST}`));
+		rows.push(padRow(`    ${ACC}Inspect this app, diagnose defects/UX issues, and file findings${RST}`));
+		rows.push(padRow(`    ${ACC}to https://github.com/projectbluefin/review/issues${RST}`));
+		rows.push(padRow(""));
 		rows.push(padRow(`  ${DIM}SYNC:${RST} ${ACC}${busFill}${RST}  ${DIM}CONNECTING TO HIVE...${RST}`));
 		rows.push(padRow(`  ${DIM}Press any key or wait to open dashboard...${RST}`));
 		rows.push(`${BRD}╰${"─".repeat(innerW + 2)}╯${RST}`);

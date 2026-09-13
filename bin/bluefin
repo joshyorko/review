@@ -8,7 +8,7 @@ repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
 
 case "$command_name" in
   contribute)
-    exec "${repo_root}/bin/bluefin-contribute"
+    exec "${repo_root}/bin/bluefin-contribute" "$@"
     ;;
   review)
     if [[ "$(uname -s)" == "Darwin" ]]; then

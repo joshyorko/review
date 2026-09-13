@@ -92,6 +92,10 @@ const HELP: readonly string[] = [
 	"positions, never recomputed here. Without a hub the queue is",
 	"categorized locally: ready, findings, blocked, waiting, deps,",
 	"draft, stale. The header always names which one ran.",
+	"",
+	"Use this prompt to generate issues about this app:",
+	"  Inspect this app, diagnose defects/UX issues, and file findings",
+	"  to https://github.com/projectbluefin/review/issues",
 ];
 
 interface TuiLike {
@@ -282,8 +286,7 @@ export class ReviewDashboard {
 				this.done({ kind: "fix", item, items });
 				return;
 			case "s": {
-				const slayable = this.mode.slayableItems();
-				const batch = chosenItems.length > 0 ? chosenItems : (slayable.length > 0 ? slayable.slice(0, 7) : undefined);
+				const batch = chosenItems.length > 0 ? chosenItems : this.mode.autoslayBatch(7);
 				const targetItem = batch && batch.length > 0 ? batch[0]! : activeItem;
 				this.done({ kind: "slay", item: targetItem, items: batch && batch.length > 1 ? batch : undefined });
 				return;
@@ -593,7 +596,10 @@ export class ReviewDashboard {
 			lines.push(keymapBar(this.painter, [{ chord: "?", label: "back" }], width));
 			return lines;
 		}
-		const bodyHeight = Math.max(4, this.rows - 4);
+		const termRows = typeof process !== "undefined" && process.stdout?.rows ? process.stdout.rows : this.rows;
+		const activeRows = Math.max(14, Math.min(this.rows, termRows - 2));
+		const extraLines = (this.filtering || this.mode.filter) ? 5 : 4;
+		const bodyHeight = Math.max(4, activeRows - extraLines);
 		const item = this.mode.selected();
 		const traceTitle = item ? `TRACE ${item.repo}#${item.id}` : "TRACE";
 
@@ -613,14 +619,21 @@ export class ReviewDashboard {
 				lines.push(truncateToWidth(`${leftCell} ${separator} ${rightCell}`, width));
 			}
 		} else {
-			const queueHeight = Math.max(3, Math.floor((bodyHeight - 2) / 2));
 			const queueTitle = this.mode.selectedKeys.size > 0
 				? `QUEUE ${this.mode.position()} (${this.mode.selectedKeys.size} selected)`
 				: `QUEUE ${this.mode.position()}`;
+			const queueHeight = Math.max(1, Math.floor((bodyHeight - 2) / 2));
+			const traceHeight = Math.max(1, bodyHeight - queueHeight - 2);
+			const qRows = this.queueRows(width, queueHeight);
+			const tRows = this.traceRows(width, traceHeight, now);
 			lines.push(this.paneTitle("queue", queueTitle, width));
-			lines.push(...this.queueRows(width, queueHeight));
+			for (let i = 0; i < queueHeight; i++) {
+				lines.push(fitToWidth(qRows[i] ?? "", width));
+			}
 			lines.push(this.paneTitle("trace", traceTitle, width));
-			lines.push(...this.traceRows(width, bodyHeight - queueHeight - 2, now));
+			for (let i = 0; i < traceHeight; i++) {
+				lines.push(fitToWidth(tRows[i] ?? "", width));
+			}
 		}
 		if (this.filtering) {
 			const searchPrompt = `${this.painter.fg("accent", "search")} ${this.painter.fg("text", this.filterDraft)}${this.painter.inverse(" ")}`;

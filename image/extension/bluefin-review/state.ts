@@ -20,7 +20,7 @@ import { GLYPH, type SpanStatus } from "./glyphs.ts";
 /** Bytes read from the tail of a JSONL log. */
 const TAIL_BYTES = 64 * 1024;
 /** Most recent JSONL logs consulted per directory. */
-const MAX_LOGS = 12;
+const MAX_LOGS = 100;
 
 export interface RunRecord {
 	repository: string;
@@ -389,6 +389,16 @@ export function hasRecordedFindings(snapshot: StateSnapshot, key: string): boole
 		const event = snapshot.reviewEvents[index]!;
 		if (event.key !== key) continue;
 		return event.state === "findings";
+	}
+	return false;
+}
+
+/** True when durable landing state recorded a blocked outcome for this pull request. */
+export function hasLandingBlocked(snapshot: StateSnapshot, key: string): boolean {
+	for (let index = snapshot.landingEvents.length - 1; index >= 0; index--) {
+		const event = snapshot.landingEvents[index]!;
+		if (event.pullRequestKey !== key) continue;
+		return event.state === "blocked";
 	}
 	return false;
 }

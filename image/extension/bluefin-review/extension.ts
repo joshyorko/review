@@ -261,6 +261,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const refreshQueue = async (ctx: CtxLike) => {
 		syncStatus(ctx);
+		mode.refreshState();
 		const result = await mode.refreshQueue();
 		if (result.error && !result.cancelled && result.items.length === 0 && ctx.hasUI) {
 			ctx.ui.notify(`Bluefin queue: ${result.error}`, "error");
@@ -427,8 +428,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const flagAutoslay = pi.getFlag("autoslay");
 		if (flagAutoslay === true) {
 			autoslayActive = true;
-			const slayable = mode.slayableItems();
-			const items = (slayable.length > 0 ? slayable.slice(0, 7) : [mode.selected()].filter(Boolean)) as QueueItem[];
+			const items = mode.autoslayBatch(7);
 			if (items.length > 0) {
 				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
 				void dispatch(ctx, action);
@@ -527,6 +527,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		started = startSession(ctx, persisted).catch((error: unknown) => {
 			ctx.ui.notify(`Bluefin review startup: ${error instanceof Error ? error.message : String(error)}`, "error");
 		});
+		if (ctx.hasUI) {
+			ctx.ui.notify("Use this prompt to generate issues about this app: Inspect this app, diagnose defects/UX issues, and file findings to https://github.com/projectbluefin/review/issues", "info");
+		}
 	});
 
 	pi.on("session_shutdown", () => {
@@ -545,9 +548,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
 		if (autoslayActive && ctxToUse) {
 			await refreshQueue(ctxToUse);
-			const nextBatch = mode.slayableItems();
+			const nextBatch = mode.autoslayBatch(7);
 			if (nextBatch.length > 0) {
-				const items = nextBatch.slice(0, 7);
+				const items = nextBatch;
 				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
 				void dispatch(ctxToUse, action, { deliverAs: "followUp" });
 				return;
@@ -567,9 +570,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
 		if (autoslayActive && ctxToUse) {
 			await refreshQueue(ctxToUse);
-			const nextBatch = mode.slayableItems();
+			const nextBatch = mode.autoslayBatch(7);
 			if (nextBatch.length > 0) {
-				const items = nextBatch.slice(0, 7);
+				const items = nextBatch;
 				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
 				void dispatch(ctxToUse, action);
 				return;
@@ -664,8 +667,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			// Autoslay runs directly in strict Hive priority order across the queue,
 			// cycling continuously through assignments without requiring manual intervention.
 			autoslayActive = true;
-			const slayable = mode.slayableItems();
-			const items = (slayable.length > 0 ? slayable.slice(0, 7) : [mode.selected()].filter(Boolean)) as QueueItem[];
+			const items = mode.autoslayBatch(7);
 			if (items.length === 0) {
 				autoslayActive = false;
 				if (ctx.hasUI) ctx.ui.notify("No queue items available to slay", "warning");

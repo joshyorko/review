@@ -28,7 +28,7 @@ if [[ ! -e "${BLUEFIN_KVM_DEVICE:-/dev/kvm}" ]]; then
 fi
 if [[ ! -x "$sif" ]]; then
   mkdir -p "$runtime_home"
-  image_uri="${BLUEFIN_CONTRIBUTE_IMAGE:-docker://ghcr.io/projectbluefin/review-contributor:stable}"
+  image_uri="${BLUEFIN_CONTRIBUTE_IMAGE:-docker://ghcr.io/projectbluefin/contribute:stable}"
   echo "bluefin-contribute: pulling contributor image (${image_uri}) to ${sif} ..." >&2
   if ! apptainer pull --force "$sif" "$image_uri"; then
     echo "ERROR: failed to pull contributor image from ${image_uri}." >&2
@@ -146,4 +146,4 @@ fi
 exec apptainer run \
   --home "${runtime_home}:/home/bluefin" \
   ${bind_args[@]+"${bind_args[@]}"} \
-  "$sif"
+  "$sif" "$@"

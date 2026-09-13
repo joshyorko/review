@@ -1453,6 +1453,28 @@ test("autoslay falls back to unranked PR batch review and slaying with 7 subagen
 	assert.match(prompt, /dispatch the review agent/);
 	assert.match(prompt, /Execute the full fix-and-merge landing pass/);
 });
+test("autoslayBatch clumps unranked items by repository for faster batching", () => {
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: join(tmpdir(), "nope") });
+	mode.hive = EMPTY_HIVE;
+	mode.items = [
+		prItem({ id: 1, repo: "projectbluefin/server", title: "server 1", updatedAt: 100 }),
+		prItem({ id: 2, repo: "projectbluefin/actions", title: "actions 1", updatedAt: 200 }),
+		prItem({ id: 3, repo: "projectbluefin/server", title: "server 2", updatedAt: 300 }),
+		prItem({ id: 4, repo: "projectbluefin/actions", title: "actions 2", updatedAt: 400 }),
+		prItem({ id: 5, repo: "projectbluefin/common", title: "common 1", updatedAt: 500 }),
+	];
+	mode.reprioritize();
+
+	const batch = mode.autoslayBatch(4);
+	assert.equal(batch.length, 4);
+	// Primary repo of first item should be grouped together first
+	const primaryRepo = batch[0].repo;
+	const sameRepoCount = batch.filter((it) => it.repo === primaryRepo).length;
+	assert.equal(sameRepoCount, 2);
+	// Subsequent items come from the next repo cohort
+	assert.equal(batch[0].repo, batch[1].repo);
+	assert.equal(batch[2].repo, batch[3].repo);
+});
 
 // The timeout is the assertion: a handler that waits on its own work never
 // returns here, and node:test turns that into a failure instead of a hung suite.

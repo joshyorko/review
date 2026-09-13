@@ -44,6 +44,16 @@
         "ghcr.io/projectbluefin/lab-runner"
       ],
       "pinDigests": true
+    },
+    {
+      "description": "Group OMP (can1357/oh-my-pi) updates across containerfiles into a single PR and build to validate",
+      "matchPackageNames": [
+        "can1357/oh-my-pi"
+      ],
+      "groupName": "can1357/oh-my-pi",
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
     }
   ]
 }

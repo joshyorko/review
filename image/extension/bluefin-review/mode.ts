@@ -22,6 +22,7 @@ import { type PrioritizedQueue, type Priority, itemKey, prioritize } from "./pri
 import {
 	type StateSnapshot,
 	buildPipelineSpans,
+	hasLandingBlocked,
 	hasRecordedFindings,
 	queueKey,
 	readStateSnapshot,
@@ -222,6 +223,9 @@ export class ReviewMode {
 	/** Items in priority order, after hive-only, level, and substring filters. */
 	visibleItems(): QueueItem[] {
 		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		if (this.queueMode === "prs") {
+			base = base.filter((item) => !hasLandingBlocked(this.snapshot, itemKey(item)));
+		}
 		if (this.skipRepos.size > 0) {
 			base = base.filter((item) => {
 				const repoLower = item.repo.toLowerCase();
@@ -342,8 +346,12 @@ export class ReviewMode {
 		if (chosen.length > 0) return chosen;
 		const visible = this.visibleItems();
 		if (visible.length > 0) return visible;
-		// Fallback: when Hive-only filter leaves 0 items, fall back to unranked items
+		// Fallback: when Hive-only filter leaves 0 items, fall back to unranked items,
+		// skipping pull requests whose latest durable landing state is blocked.
 		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		if (this.queueMode === "prs") {
+			base = base.filter((item) => !hasLandingBlocked(this.snapshot, itemKey(item)));
+		}
 		if (this.skipRepos.size > 0) {
 			base = base.filter((item) => {
 				const repoLower = item.repo.toLowerCase();
@@ -352,6 +360,42 @@ export class ReviewMode {
 			});
 		}
 		return base;
+	}
+
+	/**
+	 * Optimal batch for autoslay execution (up to maxCount, default 7).
+	 * When running unranked (hiveOnly = false or fallback), clumps items by repository
+	 * starting with the highest-priority item's repo so subagents and reviews batch faster.
+	 */
+	autoslayBatch(maxCount = 7): QueueItem[] {
+		const chosen = this.chosenItems();
+		if (chosen.length > 0) return chosen;
+		const slayable = this.slayableItems();
+		if (slayable.length === 0) return [];
+
+		// When items are Hive-ranked, maintain strict Hive ranking order
+		const isHiveOrdered = this.hiveOnly && this.hive.online && slayable.some((it) => this.priorityFor(it)?.category === "hive");
+		if (isHiveOrdered) {
+			return slayable.slice(0, maxCount);
+		}
+
+		// Without Hive ordering, optimize by repository cohort for faster batching:
+		// Group slayable items by repository, pick the repository with the most items
+		// (ties broken by appearance order in slayable), then fill remaining slots with
+		// subsequent repository cohorts so review and landing agents can consolidate per repo.
+		const byRepo = new Map<string, QueueItem[]>();
+		for (const it of slayable) {
+			const list = byRepo.get(it.repo) ?? [];
+			list.push(it);
+			byRepo.set(it.repo, list);
+		}
+		const sortedRepos = [...byRepo.entries()].sort((a, b) => b[1].length - a[1].length);
+		const clumped: QueueItem[] = [];
+		for (const [, repoItems] of sortedRepos) {
+			clumped.push(...repoItems);
+			if (clumped.length >= maxCount) break;
+		}
+		return clumped.slice(0, maxCount);
 	}
 
 	/**
