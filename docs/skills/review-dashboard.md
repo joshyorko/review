@@ -42,8 +42,8 @@ review mode. The extension provides:
    `bluefin-security`, `bluefin-correctness`, `bluefin-test-coverage`,
    `bluefin-simplicity`, `bluefin-ci-triage`).
 4. **Inspection tools**: Registered tools in `tools.ts` (`bluefin_review_status`,
-   `bluefin_review_queue`, `bluefin_review_diff`, `bluefin_review_trace`,
-   `bluefin_hive_lookup`) returning real structured data.
+   `bluefin_review_queue`, `bluefin_review_diff`, `bluefin_review_file`,
+   `bluefin_review_trace`, `bluefin_hive_lookup`) returning real structured data.
 5. **Hive context**: When configured, Hive positions order the queue (read-only).
    Otherwise, the queue is classified from live GitHub evidence into the action
    vocabulary (`ready-for-human-merge`, `review`, `resolve-conflicts`, `fix-ci`,

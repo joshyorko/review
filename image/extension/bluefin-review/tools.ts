@@ -5,7 +5,7 @@
  * fetched a diff and returns prose is worse than no tool: the model believes it.
  */
 
-import { diffToText, fetchDiff } from "./github.ts";
+import { diffToText, fetchDiff, fetchFileContents } from "./github.ts";
 import { fetchHiveMe, hiveFailureStatus } from "./hive.ts";
 import { fetchHiveLeaderboard, getTierInfo } from "./leaderboard.ts";
 import { queueKey } from "./state.ts";
@@ -244,6 +244,47 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 					error: diff.error ?? null,
 				},
 				isError: Boolean(diff.error),
+			};
+		},
+	});
+	pi.registerTool({
+		name: "bluefin_review_file",
+		label: "Review File",
+		description:
+			"Fetch one bounded source file directly from the selected repository and ref; use this for precise code inspection instead of inferring source from a summary.",
+		parameters: z.object({
+			path: z.string().describe("Repository-relative source path").optional(),
+			repo: z.string().describe("owner/repo; defaults to the selected item's repository").optional(),
+			ref: z.string().describe("Commit, branch, or tag; defaults to the repository default branch").optional(),
+			max_bytes: z.number().describe("Maximum UTF-8 bytes to return (default 64000)").optional(),
+		}),
+		async execute(_id, params) {
+			const path = typeof params.path === "string" ? params.path.trim() : "";
+			if (!path) return { content: text("path is required"), isError: true };
+			const repo = resolveRepo(mode, params);
+			if (!repo) {
+				return { content: text("no repository: pass repo as owner/name, or select a queue item first"), isError: true };
+			}
+			const result = await fetchFileContents(repo, path, {
+				...mode.tokenOptions(),
+				ref: typeof params.ref === "string" ? params.ref : undefined,
+				maxBytes: typeof params.max_bytes === "number" ? Math.max(1, Math.min(256_000, params.max_bytes)) : undefined,
+			});
+			return {
+				content: text(
+					result.error
+						? `file unavailable for ${result.repo}:${result.path}: ${result.error}`
+						: `${result.repo}:${result.path}${result.ref ? ` @ ${result.ref}` : ""}${result.truncated ? " (bounded)" : ""}\n\n${result.content ?? ""}`,
+				),
+				details: {
+					repo: result.repo,
+					path: result.path,
+					ref: result.ref ?? null,
+					size: result.size ?? null,
+					truncated: result.truncated ?? false,
+					error: result.error ?? null,
+				},
+				isError: Boolean(result.error),
 			};
 		},
 	});

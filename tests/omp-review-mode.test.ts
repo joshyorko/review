@@ -217,6 +217,19 @@ function fakeFetch(calls, known = {}) {
 				}),
 			};
 		}
+		if (String(url).includes("/contents/")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					type: "file",
+					encoding: "utf-8",
+					content: "export const answer = 42;\n",
+					size: 25,
+				}),
+			};
+		}
 		return {
 			ok: true,
 			status: 200,
@@ -1530,6 +1543,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.deepEqual([...pi.tools.keys()].sort(), [
 		"bluefin_hive_lookup",
 		"bluefin_review_diff",
+		"bluefin_review_file",
 		"bluefin_review_queue",
 		"bluefin_review_status",
 		"bluefin_review_trace",
@@ -1541,6 +1555,12 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	ctx.ui.parent = ctx;
 	pi.flagValues.set("splash", false);
 	await pi.events.get("session_start")({}, ctx);
+	const file = await pi.tools.get("bluefin_review_file").execute("id", { path: "src/main.ts", repo: "projectbluefin/review" });
+	assert.match(file.content[0].text, /export const answer = 42/);
+	assert.equal(file.details.path, "src/main.ts");
+	assert.equal(file.details.size, 25);
+	const missingPath = await pi.tools.get("bluefin_review_file").execute("id", {});
+	assert.equal(missingPath.isError, true);
 	await review.whenStarted();
 	// Ranked, not fetched-order: #7 is green and landable, #42 is failing.
 	assert.ok(ctx.statuses.get("bluefin_queue")?.includes("#7"), ctx.statuses.get("bluefin_queue"));

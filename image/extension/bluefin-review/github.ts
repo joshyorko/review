@@ -718,3 +718,91 @@ export function diffToText(diff: DiffResult): string {
 	}
 	return lines.join("\n");
 }
+
+export interface FileContentResult {
+	repo: string;
+	path: string;
+	ref?: string;
+	content?: string;
+	size?: number;
+	truncated?: boolean;
+	error?: string;
+}
+
+export interface FileContentOptions extends FetchOptions {
+	ref?: string;
+	maxBytes?: number;
+}
+
+/**
+ * Fetch real bounded source file contents from GitHub REST API.
+ */
+export async function fetchFileContents(
+	repo: string,
+	path: string,
+	options: FileContentOptions = {},
+): Promise<FileContentResult> {
+	const { token, signal, ref, maxBytes = 64_000 } = options;
+	const doFetch = options.fetchImpl ?? fetch;
+	const cleanPath = path.replace(/^\/+/, "");
+	const url = new URL(`https://api.github.com/repos/${repo}/contents/${cleanPath}`);
+	if (ref) url.searchParams.set("ref", ref);
+
+	try {
+		const response = await doFetch(url.toString(), {
+			headers: headers(token),
+			signal,
+			redirect: "error",
+		});
+		if (!response.ok) {
+			return {
+				repo,
+				path: cleanPath,
+				ref,
+				error: `GitHub REST ${response.status} ${response.statusText}`,
+			};
+		}
+		const payload = (await response.json()) as {
+			type?: string;
+			encoding?: string;
+			content?: string;
+			size?: number;
+			name?: string;
+		};
+		if (payload.type && payload.type !== "file") {
+			return {
+				repo,
+				path: cleanPath,
+				ref,
+				error: `Target is not a regular file (type: ${payload.type})`,
+			};
+		}
+		let decoded = "";
+		if (payload.encoding === "base64" && typeof payload.content === "string") {
+			decoded = Buffer.from(payload.content.replace(/\s+/g, ""), "base64").toString("utf8");
+		} else if (typeof payload.content === "string") {
+			decoded = payload.content;
+		}
+		const size = typeof payload.size === "number" ? payload.size : decoded.length;
+		let truncated = false;
+		if (decoded.length > maxBytes) {
+			decoded = `${decoded.slice(0, maxBytes)}\n… file content truncated …`;
+			truncated = true;
+		}
+		return {
+			repo,
+			path: cleanPath,
+			ref,
+			content: decoded,
+			size,
+			truncated,
+		};
+	} catch (error) {
+		return {
+			repo,
+			path: cleanPath,
+			ref,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
