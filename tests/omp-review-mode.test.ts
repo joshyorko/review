@@ -1441,6 +1441,59 @@ test("scoping the queue to one repository refetches and persists", async () => {
 	assert.deepEqual(mode.toPersisted().scope, { kind: "repo", value: "owner/repo" });
 });
 
+test("CLI flags forward parsed scope and preselected item to mode", async () => {
+	const pi = fakeHost();
+	const scopedFetch = async (url: string, init?: { body?: string }) => {
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (body.variables?.search !== undefined) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					data: {
+						search: {
+							pageInfo: { hasNextPage: false, endCursor: null },
+							nodes: [
+								{
+									number: 42,
+									title: "fix(launcher): resolve HIVE_HUB before mutating",
+									url: "https://github.com/projectbluefin/review/pull/42",
+									updatedAt: new Date(NOW - 1000).toISOString(),
+									isDraft: false,
+									mergeable: "MERGEABLE",
+									reviewDecision: "REVIEW_REQUIRED",
+									additions: 42,
+									deletions: 7,
+									changedFiles: 3,
+									author: { login: "jorge" },
+									repository: { nameWithOwner: "projectbluefin/review" },
+									labels: { nodes: [{ name: "launcher" }] },
+									commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
+								},
+							],
+						},
+					},
+				}),
+			};
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: {} }) };
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: scopedFetch, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	pi.flagValues.set("splash", false);
+	pi.flagValues.set("repo", "projectbluefin/review");
+	pi.flagValues.set("pr", "42");
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	const status = await pi.tools.get("bluefin_review_status").execute("id", {});
+	assert.equal(status.details.scope.kind, "repo");
+	assert.equal(status.details.scope.value, "projectbluefin/review");
+	assert.equal(status.details.selected.id, 42);
+});
+
 // ---------------------------------------------------------------- session trace
 
 test("tool executions become spans on the current turn", () => {

@@ -118,28 +118,13 @@ fi
 
 # Positional shortcuts, so the common cases need no flags. A leading number
 # preselects that queue item, `owner/repo` scopes the queue to one repository,
-# and `issues` starts on issues. Everything after is passed to omp untouched.
-ARGS=()
-if [[ "${1:-}" =~ ^#?[0-9]+$ ]]; then
-  ARGS+=(--pr "${1#\#}")
-  shift
-elif [[ "${1:-}" =~ ^(https://github\.com/)?[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ || "${1:-}" =~ ^org:[A-Za-z0-9._-]+$ ]]; then
-  ARGS+=(--repo "$1")
-  shift
-  if [[ "${1:-}" =~ ^#?[0-9]+$ ]]; then
-    ARGS+=(--pr "${1#\#}")
-    shift
-  fi
-fi
-if [[ "${1:-}" == "issues" ]]; then
-  ARGS+=(--issues)
-  shift
-elif [[ "${1:-}" == "all" ]]; then
-  ARGS+=(--all)
-  shift
-elif [[ "${1:-}" == "autoslay" || "${1:-}" == "slay" ]]; then
-  ARGS+=(--autoslay)
-  shift
+# and `issues` starts on issues. Everything is parsed into canonical flags.
+if [[ -f "$SCRIPT_DIR/scripts/parse-review-args.sh" ]]; then
+  # shellcheck source=scripts/parse-review-args.sh
+  source "$SCRIPT_DIR/scripts/parse-review-args.sh"
+  parse_review_args "$@"
+else
+  PARSED_REVIEW_ARGS=("$@")
 fi
 
-exec omp --profile review --extension "$EXTENSION_PATH" ${ARGS[@]+"${ARGS[@]}"} "$@"
+exec omp --profile review --extension "$EXTENSION_PATH" ${PARSED_REVIEW_ARGS[@]+"${PARSED_REVIEW_ARGS[@]}"}
