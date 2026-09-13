@@ -2486,8 +2486,10 @@ class LandingScreen(Screen):
                 )
             if done:
                 note = escape(str(done.get("note", "")))
+                done_head = str(done.get("head") or "")
+                done_head_badge = f"  head {escape(done_head[:7])}" if FULL_SHA.fullmatch(done_head) else ""
                 lines.append(
-                    f"  {ui_span(ui_glyph('✔', '+') + ' done', ui_style('bold $text-success'))}"
+                    f"  {ui_span(ui_glyph('✔', '+') + ' done', ui_style('bold $text-success'))}{done_head_badge}"
                     + (f" — {note}" if note else "")
                 )
             # The final review-and-fix phase (#378): which round, which
@@ -10263,9 +10265,10 @@ class ReviewDashboard(App):
         done = events.get("", {}).get("state") == landing.TASK_DONE
         log_tail = "" if done else self._landing_log_tail(task)
         counts: Counter[str] = Counter()
+        done_event = events.get("", {})
         for stop in task.stops:
             event = events.get(stop.key, {})
-            head_sha = str(event.get("head") or "")
+            head_sha = str(event.get("head") or done_event.get("head") or "")
             if FULL_SHA.fullmatch(head_sha):
                 self.record_fixer_head(stop.repository, stop.number, head_sha)
             state = event.get("state")

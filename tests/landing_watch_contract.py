@@ -95,6 +95,20 @@ class LandingWatchContractTests(unittest.TestCase):
             parsed = landing.parse_status(path)["org/repo#7"]
             self.assertEqual(parsed["note"], "x\nstate")
             self.assertEqual(parsed["head"], "a" * 40)
+    def test_report_done_records_and_validates_head_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = str(Path(root) / "events.jsonl")
+            self.assertEqual(landing.report_event(path, "org/repo#7", "merged", "ok", head_sha="a" * 40), 0)
+            self.assertNotEqual(landing.report_done(path, ["org/repo#7"], "done note", head_sha="bad-sha"), 0)
+            self.assertEqual(landing.report_done(path, ["org/repo#7"], "done note", head_sha="b" * 40), 0)
+            parsed = landing.parse_status(path)[""]
+            self.assertEqual(parsed["note"], "done note")
+            self.assertEqual(parsed["head"], "b" * 40)
+            # Idempotent call with matching head succeeds
+            self.assertEqual(landing.report_done(path, ["org/repo#7"], "done note", head_sha="b" * 40), 0)
+            # Conflicting head or note refused
+            self.assertNotEqual(landing.report_done(path, ["org/repo#7"], "done note", head_sha="c" * 40), 0)
+            self.assertNotEqual(landing.report_done(path, ["org/repo#7"], "other note", head_sha="b" * 40), 0)
     def test_watch_target_round_trips_and_matches_exact_identity(self) -> None:
         target = landing.WatchTarget(
             repository="org/repo",

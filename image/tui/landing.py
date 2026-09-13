@@ -753,8 +753,8 @@ Execute the following end-to-end loop:
    If this repository publishes an image package (convention :stable or :latest), report `awaiting-stable`
    and watch for the publication. Once verified, report:
    {reporter} report --status {status} event --pr {pr} --state "merged" --note "fixed, verified, and landed"
-   Finally report task done:
-   {reporter} report --status {status} done --note "PR {pr} fix-and-land run complete"
+   Finally report task done with the resulting head SHA:
+   {reporter} report --status {status} done --head "$HEAD_SHA" --note "PR {pr} fix-and-land run complete"
 """
 
 
@@ -1569,7 +1569,7 @@ def report_watch(status_path: str, target: WatchTarget, note: str) -> int:
     return 0
 
 
-def report_done(status_path: str, expect: list[str], note: str) -> int:
+def report_done(status_path: str, expect: list[str], note: str, head_sha: str = "") -> int:
     """Close the batch once every expected pull request has a terminal
     state. Expected is the selection seeded at dispatch plus the call's
     --expect keys, so the gate holds even when the agent under-names its
@@ -1577,6 +1577,9 @@ def report_done(status_path: str, expect: list[str], note: str) -> int:
     Returns the process exit status."""
     if not all(PULL_REQUEST.fullmatch(str(key)) for key in expect):
         print("error: invalid expected pull request", file=sys.stderr)
+        return 1
+    if head_sha and not FULL_SHA.fullmatch(head_sha):
+        print(f"error: --head must be a 40-character head sha, got {head_sha!r}", file=sys.stderr)
         return 1
     try:
         note = _bounded_text(note, field="note", limit=MAX_NOTE, allow_newlines=True)
@@ -1614,7 +1617,7 @@ def report_done(status_path: str, expect: list[str], note: str) -> int:
             None,
         )
         if recorded is not None:
-            if recorded.get("note", "") == note:
+            if recorded.get("note", "") == note and recorded.get("head", "") == head_sha:
                 print(json.dumps(recorded, separators=(",", ":")))
                 return 0
             print(
@@ -1623,7 +1626,10 @@ def report_done(status_path: str, expect: list[str], note: str) -> int:
                 file=sys.stderr,
             )
             return 1
-        line = _append_event(handle, _stamp({"state": TASK_DONE, "note": note}))
+        done_event = {"state": TASK_DONE, "note": note}
+        if head_sha:
+            done_event["head"] = head_sha
+        line = _append_event(handle, _stamp(done_event))
     print(line)
     return 0
 
@@ -1849,6 +1855,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="KEY",
         help="every selected pull request key",
     )
+    done.add_argument("--head", default="", metavar="SHA", help="resulting 40-character commit sha")
     done.add_argument("--note", required=True)
     final = kinds.add_parser("final", help="report one final review-and-fix round")
     final.add_argument("--round", required=True, type=int)
@@ -1910,7 +1917,7 @@ def main(argv: list[str] | None = None) -> int:
             args.input_head,
             args.output_head,
         )
-    return report_done(args.status, args.expect, args.note)
+    return report_done(args.status, args.expect, args.note, getattr(args, "head", ""))
 
 
 # ── the final review-and-fix rounds (#378) ───────────────────────────────
