@@ -149,7 +149,7 @@ The loop is narrow, select, dispatch, and it is three keys:
 A dispatched slice is worked **concurrently clumped by repository** — one agent
 per repository lane, not one agent per item or one item per turn, so multiple
 agents do not race or conflict on the same branch. Each repository agent reviews
-and prepares its repository's items, and `k3-final-review` consolidates and
+and prepares its repository's items, and the review agent consolidates and
 lands all changes in one pull request per repository. Twenty-five is the ceiling
 because the wave is real concurrency across repositories, not a longer list.
 

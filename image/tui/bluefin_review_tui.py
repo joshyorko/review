@@ -7133,7 +7133,7 @@ class ReviewDashboard(App):
             pause = self.query_one("#landing-pause", Button)
         except (NoMatches, ScreenStackError):
             return
-        # Review / phase tasks (like k3-final-review or final rounds) do not count
+        # Review / phase tasks (like final rounds or repo auditors) do not count
         # against worker concurrency slots or display as consuming the worker cap.
         active = [
             task

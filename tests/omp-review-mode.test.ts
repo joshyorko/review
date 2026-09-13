@@ -1417,7 +1417,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.ok(pi.messages.length > 0, "alt+s must dispatch autoslay user message in Hive priority order");
 });
 
-test("autoslay falls back to unranked PR batch review and slaying with 7 subagents and K3 review when no Hive-ranked items exist", async () => {
+test("autoslay falls back to unranked PR batch review and slaying with 7 subagents and review agent when no Hive-ranked items exist", async () => {
 	const pi = fakeHost();
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
 	const ctx = fakeCtx();
@@ -1446,11 +1446,11 @@ test("autoslay falls back to unranked PR batch review and slaying with 7 subagen
 	assert.equal(slayable.length, 3);
 	assert.equal(slayable[0].id, 101);
 
-	// The actionPrompt for the batch must include the 7-subagent cap and k3-final-review
+	// The actionPrompt for the batch must include the 7-subagent cap and review agent
 	const prompt = actionPrompt({ kind: "slay", item: slayable[0], items: slayable });
 	assert.match(prompt, /ONE subagent per issue\/PR/);
 	assert.match(prompt, /capped at a maximum of 7 concurrent subagents/);
-	assert.match(prompt, /k3-final-review/);
+	assert.match(prompt, /dispatch the review agent/);
 	assert.match(prompt, /Execute the full fix-and-merge landing pass/);
 });
 
@@ -1658,8 +1658,7 @@ test("action prompts name the evidence and refuse to merge red checks", () => {
 	assert.match(docs, /check-skill-frontmatter\.sh/);
 	const batchAction = { kind: "review", item, items: [item, queueItem({ id: 7, repo: "projectbluefin/other" })] };
 	const batchPrompt = actionPrompt(batchAction);
-	assert.match(batchPrompt, /k3-final-review/);
-	assert.match(batchPrompt, /Kimi K3 at max effort/);
+	assert.match(batchPrompt, /dispatch the review agent/);
 	assert.match(batchPrompt, /Repository `projectbluefin\/review`/);
 	assert.match(batchPrompt, /Repository `projectbluefin\/other`/);
 	assert.match(batchPrompt, /cross-repository contract compatibility/);
@@ -1863,6 +1862,6 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	const prompt = actionPrompt({ kind: "slay", item: batch[0], items: batch });
 	assert.match(prompt, /ONE subagent per issue\/PR/);
 	assert.match(prompt, /capped at a maximum of 7 concurrent subagents/);
-	assert.match(prompt, /k3-final-review/);
+	assert.match(prompt, /dispatch the review agent/);
 	assert.match(prompt, /lands them all in one PR per repository/);
 });

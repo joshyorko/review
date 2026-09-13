@@ -120,6 +120,55 @@ set -e
 grep -q '^GH_TOKEN=faketoken1234567890faketoken1234567890$' "$launcher_scratch/env" || fail "resolved GH_TOKEN must reach the contained process"
 grep -q '^GITHUB_TOKEN=faketoken1234567890faketoken1234567890$' "$launcher_scratch/env" || fail "resolved GITHUB_TOKEN must reach the contained process"
 grep -q -- '--env' "$launcher_scratch/argv" && fail "credential values must never be passed as --env arguments"
+# KVM presence requirement: bin/bluefin-contribute and bin/bluefin review must fail fast when KVM is absent
+set +e
+no_kvm_out="$(env -i PATH="$launcher_scratch/bin:/usr/bin:/bin" "${launcher_env[@]}" \
+  BLUEFIN_KVM_DEVICE="$launcher_scratch/nonexistent-kvm" \
+  "$root/bin/bluefin-contribute" 2>&1)"
+no_kvm_status=$?
+set -e
+((no_kvm_status != 0)) || fail "bin/bluefin-contribute must fail if KVM device is missing"
+[[ "$no_kvm_out" == *"KVM is required for sandboxing"* ]] || fail "missing KVM device error must be explicit"
+
+set +e
+no_kvm_bluefin_out="$(env -i PATH="$launcher_scratch/bin:/usr/bin:/bin" \
+  BLUEFIN_REVIEW_SIF="$launcher_scratch/sif" \
+  BLUEFIN_KVM_DEVICE="$launcher_scratch/nonexistent-kvm" \
+  "$root/bin/bluefin" review 2>&1)"
+no_kvm_bluefin_status=$?
+set -e
+((no_kvm_bluefin_status != 0)) || fail "bin/bluefin review must fail if KVM device is missing"
+[[ "$no_kvm_bluefin_out" == *"KVM is required for sandboxing"* ]] || fail "missing KVM device error in bin/bluefin must be explicit"
+# Verify positional shortcut argument parsing in bin/bluefin review
+rm -f "$launcher_scratch/argv"
+touch "$launcher_scratch/kvm"
+env -i PATH="$launcher_scratch/bin:/usr/bin:/bin" \
+  BLUEFIN_REVIEW_SIF="$launcher_scratch/sif" \
+  BLUEFIN_KVM_DEVICE="$launcher_scratch/kvm" \
+  APPTAINER_CALL_ARGV="$launcher_scratch/argv" \
+  "$root/bin/bluefin" review owner/repo 1284 >/dev/null 2>&1 || true
+[[ -e "$launcher_scratch/argv" ]] || fail "bin/bluefin review with shortcuts must invoke apptainer"
+grep -q -- '--repo' "$launcher_scratch/argv" || fail "bin/bluefin review must map owner/repo to --repo"
+grep -q -- '--pr' "$launcher_scratch/argv" || fail "bin/bluefin review must map issue/pr number to --pr"
+# First-launch message test: displays raptor containment with KVM
+first_launch_dir="$launcher_scratch/fresh-runtime-home"
+first_launch_out="$(env -i PATH="$launcher_scratch/bin:/usr/bin:/bin" \
+  BLUEFIN_REVIEW_SIF="$launcher_scratch/sif" \
+  BLUEFIN_KVM_DEVICE="$launcher_scratch/kvm" \
+  XDG_STATE_HOME="$first_launch_dir" \
+  APPTAINER_CALL_ARGV="$launcher_scratch/argv" \
+  "$root/bin/bluefin" review owner/repo 1284 2>&1 || true)"
+[[ "$first_launch_out" == *"Deploying Raptor Containment with KVM. It's the only way to be sure ..."* ]] || fail "first launch must display raptor containment message"
+[[ "$first_launch_out" == *"KVM sandbox verified"* ]] || fail "first launch must display KVM verification"
+
+# Second launch with existing state must not repeat the first-launch banner
+second_launch_out="$(env -i PATH="$launcher_scratch/bin:/usr/bin:/bin" \
+  BLUEFIN_REVIEW_SIF="$launcher_scratch/sif" \
+  BLUEFIN_KVM_DEVICE="$launcher_scratch/kvm" \
+  XDG_STATE_HOME="$first_launch_dir" \
+  APPTAINER_CALL_ARGV="$launcher_scratch/argv" \
+  "$root/bin/bluefin" review owner/repo 1284 2>&1 || true)"
+[[ "$second_launch_out" != *"Deploying Raptor Containment with KVM"* ]] || fail "second launch must not repeat first launch message"
 echo "contribute-contract: bin/bluefin-contribute GH_TOKEN handling holds"
 if [[ -z "$image" ]]; then
   echo "contribute-contract: static contract holds"

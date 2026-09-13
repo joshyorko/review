@@ -115,6 +115,10 @@ class CapacityContractTests(unittest.TestCase):
             self.assertEqual(governor.cap, 6)
             self.assertEqual(governor.per_review_budget_mb, 2048)
             self.assertEqual(governor.reserve_mb, 1024)
+            # Unset env defaults to DEFAULT_REVIEW_CAP (7)
+            del os.environ[BLUEFIN_REVIEW_CONCURRENT_REVIEWS]
+            self.assertEqual(CapacityGovernor().cap, 7)
+            os.environ[BLUEFIN_REVIEW_CONCURRENT_REVIEWS] = "6"
 
             os.environ[BLUEFIN_REVIEW_CONCURRENT_REVIEWS] = "invalid"
             with self.assertRaises(CapacityError):

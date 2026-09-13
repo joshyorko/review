@@ -3,37 +3,44 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hmac
 import json
 import os
 import re
-import signal
-import socketserver
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 1
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from broker_protocol import (
+    MAX_REQUEST_BYTES,
+    MAX_RESPONSE_BYTES,
+    PROTOCOL_VERSION,
+    READ_TIMEOUT_SECONDS,
+    WRITE_TIMEOUT_SECONDS,
+    BrokerHandler,
+    BrokerServer as BaseBrokerServer,
+    Rejected,
+    bounded_response,
+    decode_request as proto_decode_request,
+    error_payload,
+    ok_payload,
+    prepare_socket_path,
+    read_request_line,
+)
+
 ACTIONS = ("status", "submit", "logs", "cancel")
 NAMESPACE = "bluefin-system"
 JOB_DEADLINE_SECONDS = 3600
 JOB_TTL_SECONDS = 3600
-MAX_REQUEST_BYTES = 65536
-MAX_RESPONSE_BYTES = 262144
-READ_TIMEOUT_SECONDS = 30.0
-WRITE_TIMEOUT_SECONDS = 30.0
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 BACKENDS = frozenset({"omp", "codex"})
 EFFORTS = frozenset({"low", "medium", "high", "max"})
 
 
-class Rejected(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -121,21 +128,7 @@ def sanitize_label(value: str) -> str:
 
 
 def decode_request(raw: bytes, context: BrokerContext) -> dict:
-    if len(raw) > MAX_REQUEST_BYTES:
-        raise Rejected("bad-request", "request is too large")
-    try:
-        request = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
-        raise Rejected("bad-request", "request is not JSON") from error
-    if not isinstance(request, dict) or request.get("version") != PROTOCOL_VERSION:
-        raise Rejected("bad-request", "version is missing or unsupported")
-    if request.get("action") not in ACTIONS:
-        raise Rejected("unknown-action", "actions are status, submit, logs, cancel")
-    if not isinstance(request.get("session"), str) or not hmac.compare_digest(
-        request["session"], context.session
-    ):
-        raise Rejected("wrong-session", "request session does not match the broker")
-    return request
+    return proto_decode_request(raw, context.session, ACTIONS)
 
 
 def job_manifest(context: BrokerContext, request: dict) -> dict:
@@ -302,77 +295,17 @@ def dispatch(context: BrokerContext, raw: bytes) -> dict:
             return handle_logs(context, request)
         return handle_cancel(context, request)
     except Rejected as error:
-        return {"version": PROTOCOL_VERSION, "ok": False, "error": error.code, "detail": error.detail}
+        return error_payload(error.code, error.detail)
     except Exception as error:
-        return {"version": PROTOCOL_VERSION, "ok": False, "error": "unavailable", "detail": type(error).__name__}
+        return error_payload("unavailable", type(error).__name__)
 
-
-def read_request_line(sock) -> bytes | None:
-    buffer = bytearray()
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            return None
-        buffer.extend(chunk)
-        if b"\n" in buffer:
-            line, _ = buffer.split(b"\n", 1)
-            return bytes(line)
-        if len(buffer) > MAX_REQUEST_BYTES:
-            raise Rejected("bad-request", "request line is too long")
-
-
-def bounded_response(payload: dict) -> bytes:
-    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    if len(data) > MAX_RESPONSE_BYTES:
-        data = json.dumps(
-            {
-                "version": PROTOCOL_VERSION,
-                "ok": False,
-                "error": "response-too-large",
-                "detail": "response exceeded byte cap",
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
-    return data + b"\n"
-
-
-class BrokerHandler(socketserver.BaseRequestHandler):
-    def handle(self) -> None:
-        connection = self.request
-        try:
-            connection.settimeout(READ_TIMEOUT_SECONDS)
-            raw = read_request_line(connection)
-        except OSError:
-            return
-        if raw is None:
-            return
-        payload = dispatch(self.server.context, raw)
-        line = bounded_response(payload)
-        try:
-            connection.settimeout(WRITE_TIMEOUT_SECONDS)
-            connection.sendall(line)
-        except OSError:
-            return
-
-
-class BrokerServer(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-    allow_reuse_address = False
-
+class BrokerServer(BaseBrokerServer):
     def __init__(self, path: str, context: BrokerContext) -> None:
         self.context = context
         super().__init__(path, BrokerHandler)
 
-    def handle_error(self, request, client_address) -> None:
-        return
-
-
-def prepare_socket_path(path: str) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    if os.path.exists(path):
-        with contextlib.suppress(OSError):
-            os.unlink(path)
+    def dispatch_request(self, raw: bytes) -> dict:
+        return dispatch(self.context, raw)
 
 
 def serve(path: str, context: BrokerContext) -> int:

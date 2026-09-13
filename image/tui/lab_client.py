@@ -16,11 +16,14 @@ review silently loses its evidence and reports something it never checked.
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 
-PROTOCOL_VERSION = 1
+from tui.broker_protocol import (
+    MAX_RESPONSE_BYTES,
+    PROTOCOL_VERSION,
+    send_client_request,
+)
 
 # The dashboard polls status coarsely (30s) and a health snapshot runs while
 # a maintainer waits, so the timeouts differ: the poll must never wedge the
@@ -29,11 +32,6 @@ PROTOCOL_VERSION = 1
 STATUS_TIMEOUT = 5.0
 HEALTH_TIMEOUT = 30.0
 SUBMIT_TIMEOUT = 30.0
-
-# The broker bounds its own response; this bounds what a compromised or
-# confused peer can make the container allocate.
-MAX_RESPONSE_BYTES = 262_144
-
 # The launcher passes these two and nothing else. Their absence IS the
 # off state: no socket, no session, no lab.
 SOCKET_ENV = "BLUEFIN_REVIEW_LAB_SOCKET"
@@ -83,39 +81,18 @@ def request(payload: dict, timeout: float) -> dict:
     path = lab_socket()
     if not path:
         return {"ok": False, "state": LAB_OFF, "error": "off", "detail": "no lab socket"}
-    body = json.dumps(
-        {"version": PROTOCOL_VERSION, "session": lab_session(), **payload},
-        separators=(",", ":"),
-    ).encode("utf-8")
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(timeout)
-            client.connect(path)
-            client.sendall(body + b"\n")
-            # The broker answers one line and closes; read until it does or
-            # until the bound is hit, so a peer that never stops talking
-            # cannot exhaust this process.
-            chunks: list[bytes] = []
-            size = 0
-            while True:
-                chunk = client.recv(65_536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                size += len(chunk)
-                if size > MAX_RESPONSE_BYTES:
-                    return _degraded("broker answer exceeded the response bound")
-                if b"\n" in chunk:
-                    break
+        answer = send_client_request(
+            path,
+            lab_session(),
+            payload,
+            timeout=timeout,
+            max_response_bytes=MAX_RESPONSE_BYTES,
+        )
     except (OSError, socket.timeout) as error:
         return _degraded(f"{type(error).__name__}: {error}")
-    raw = b"".join(chunks).split(b"\n", 1)[0]
-    try:
-        answer = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
-        return _degraded(f"unparseable broker answer: {error}")
-    if not isinstance(answer, dict):
-        return _degraded("broker answer was not an object")
+    except RuntimeError as error:
+        return _degraded(str(error))
     if answer.get("version") != PROTOCOL_VERSION:
         return _degraded(f"unsupported broker protocol {answer.get('version')!r}")
     if not answer.get("ok"):

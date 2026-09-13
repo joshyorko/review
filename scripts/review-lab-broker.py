@@ -44,7 +44,25 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from broker_protocol import (
+    MAX_DRAIN_BYTES,
+    MAX_REQUEST_BYTES,
+    MAX_RESPONSE_BYTES,
+    PROTOCOL_VERSION,
+    READ_TIMEOUT_SECONDS,
+    RECV_CHUNK_BYTES,
+    WRITE_TIMEOUT_SECONDS,
+    BrokerHandler,
+    BrokerServer as BaseBrokerServer,
+    Rejected,
+    decode_request as proto_decode_request,
+    json_line,
+    prepare_socket_path,
+    read_request_line,
+)
 PROTOCOL_VERSION = 1
 
 # Three actions, and no fourth. An earlier draft carried a `capabilities`
@@ -238,13 +256,6 @@ REDACTIONS = (
 )
 
 
-class Rejected(Exception):
-    """A request the protocol refuses. Carries the wire error code."""
-
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
 
 
 class BrokerContext:
@@ -554,33 +565,7 @@ def require_profile(request: dict) -> str:
 
 
 def decode_request(raw: bytes, context: BrokerContext) -> dict:
-    if len(raw) > MAX_REQUEST_BYTES:
-        raise Rejected("bad-request", f"request exceeds {MAX_REQUEST_BYTES} bytes")
-    try:
-        request = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise Rejected("bad-request", "request is not valid JSON")
-    if not isinstance(request, dict):
-        raise Rejected("bad-request", "request is not a JSON object")
-    version = request.get("version")
-    if not isinstance(version, int) or isinstance(version, bool):
-        raise Rejected("bad-request", "version is missing or not an integer")
-    if version != PROTOCOL_VERSION:
-        raise Rejected("unsupported-version", f"this broker speaks version {PROTOCOL_VERSION}")
-    action = request.get("action")
-    if not isinstance(action, str) or not action:
-        raise Rejected("bad-request", "action is missing or not a string")
-    if action not in ACTIONS:
-        raise Rejected("unknown-action", "actions are status, health, submit")
-    session = request.get("session")
-    if not isinstance(session, str) or not session:
-        raise Rejected("bad-request", "session is missing or not a string")
-    # The session id is the only thing distinguishing this container's
-    # requests from another's on a shared host, so it is compared without a
-    # timing signal.
-    if not hmac.compare_digest(session, context.session):
-        raise Rejected("wrong-session", "request session does not match this broker")
-    return request
+    return proto_decode_request(raw, context.session, ACTIONS)
 
 
 def handle_status(context: BrokerContext, request: dict) -> dict:
@@ -1337,42 +1322,16 @@ def read_request_line(connection) -> bytes:
             return bytes(buffer)
 
 
-class BrokerHandler(socketserver.BaseRequestHandler):
-    def handle(self) -> None:
-        connection = self.request
-        try:
-            connection.settimeout(READ_TIMEOUT_SECONDS)
-            raw = read_request_line(connection)
-        except OSError:
-            return
-        if raw is None:
-            return
-        payload = dispatch(self.server.context, raw)
-        line = bounded_response(payload)
-        try:
-            # Gathering evidence can outlast the read timeout, so the write
-            # deadline is its own budget rather than the one the request
-            # arrived under.
-            connection.settimeout(WRITE_TIMEOUT_SECONDS)
-            connection.sendall(line)
-        except OSError:
-            return
-
-
-class BrokerServer(socketserver.ThreadingUnixStreamServer):
-    # A slow or absent handler must not stall the next caller: the dashboard
-    # polls `status` while a `health` call is still gathering evidence.
-    daemon_threads = True
-    allow_reuse_address = False
-
+class BrokerServer(BaseBrokerServer):
     def __init__(self, path: str, context: BrokerContext) -> None:
         self.context = context
         super().__init__(path, BrokerHandler)
 
-    def handle_error(self, request, client_address) -> None:
-        # Handlers already answer with a protocol error; nothing about a
-        # connection belongs on the maintainer's terminal.
-        return
+    def dispatch_request(self, raw: bytes) -> dict:
+        return dispatch(self.context, raw)
+
+    def bound_response(self, payload: dict) -> bytes:
+        return bounded_response(payload)
 
 
 def prepare_socket_path(path: str) -> None:

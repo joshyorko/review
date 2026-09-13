@@ -135,13 +135,11 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		// Dispatch one subagent per individual issue or PR, capped at a maximum of 7 concurrent
 		// subagents at any time (queue remaining items and dispatch as running slots free up).
 		// Review agents do not count toward this cap so they can take their time.
-		// When subagents complete, the review agent (k3-final-review) clumps by repository:
-		// for each repository cohort (e.g. 10 issues in bluefin), it waits for that repo's queue
-		// to finish, then audits, consolidates all changes, and lands them together into ONE PR per repo.
+		// When subagents complete, review and landing happens per repository cohort:
+		// for each repository cohort (e.g. 10 issues in bluefin), review and land items together into ONE PR per repo.
 		const fanOut = `Work all ${batch.length} items with ONE subagent per issue/PR, capped at a maximum of 7 concurrent subagents at any time (queue remaining items and dispatch as running subagents complete; review/landing agents do not count against the 7 cap). Each subagent owns exactly its assigned item. Tell every subagent to skip formatters, linters, and project-wide suites and run only the smallest existing test covering what changed. Report per item — what you did, the evidence, and the outcome.`;
 
-		const auditInstruction = `When issues/PRs are worked, repository clumping happens at the review agent level: for each repository (e.g. all items in \`${[...repoGroups.keys()].join("`, `")}\`), dispatch one \`k3-final-review\` subagent (Kimi K3 at max effort; review agents do not consume the 7 cap). If the review agent has to wait for that repository's queue to finish through the 7-subagent cap, it waits. Once that repository cohort finishes, the review agent audits, consolidates all changes, and lands them all in one PR per repository, verifying cross-repository contract compatibility, shared schema and dependency alignment, doctrine invariants, and simplicity.`;
-
+		const auditInstruction = `When issues/PRs are worked, repository clumping happens at the review agent level: for each repository (e.g. all items in \`${[...repoGroups.keys()].join("`, `")}\`), dispatch the review agent to audit and land changes together, which lands them all in one PR per repository, verifying cross-repository contract compatibility, shared schema and dependency alignment, doctrine invariants, and simplicity.`;
 		const autonomousRule = "This is an automated review and landing tool: execute all actions end-to-end autonomously in a continuous loop. Never ask the user for confirmation, permission, or interactive prompts to proceed. Once a batch or queue item is complete, immediately request the next assignment from the queue or advance to the next item so the loop runs continuously without stopping.";
 		const protocol = `${fanOut}\n\n${auditInstruction}\n\n${autonomousRule}`;
 		switch (action.kind) {
