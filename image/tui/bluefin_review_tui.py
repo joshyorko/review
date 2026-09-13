@@ -7970,7 +7970,12 @@ class ReviewDashboard(App):
                     )
             ci_triage_block = "\n" + "\n".join(lines_ci)
 
-        self.query_one("#details", Static).update(
+        try:
+            details_widget = self.query_one("#details", Static)
+        except (NoMatches, ScreenStackError):
+            return
+
+        details_widget.update(
             f"[b]{link(stop.key, pr_url(stop.repository, stop.number))}[/b] — "
             f"{escape(stop.title)}\n"
             f"queue says: {escape(stop.action)}\n"
