@@ -1,0 +1,51 @@
+name: Renovate
+
+# Renovate runs with a Mergeraptor GitHub App installation token, not the
+# default GITHUB_TOKEN. Pushes and pull requests made with GITHUB_TOKEN do not
+# trigger other workflows, so Renovate's PRs used to arrive with no checks at all
+# while renovate.json asked for them to be auto-merged. With an app token the
+# pull-request gate runs, and Renovate's own automerge merges once checks are green.
+#
+# Mergeraptor is an org-level app whose permissions are already granted across
+# projectbluefin repositories (consuming MERGERAPTOR_APP_ID / MERGERAPTOR_PRIVATE_KEY).
+
+on:
+  schedule:
+    - cron: '15 2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Log only; create or update nothing
+        type: boolean
+        default: false
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  renovate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Get mergeraptor token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.MERGERAPTOR_APP_ID }}
+          private-key: ${{ secrets.MERGERAPTOR_PRIVATE_KEY }}
+
+      - uses: renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab # v46.2.6
+        with:
+          configurationFile: renovate.json
+          token: ${{ steps.app-token.outputs.token }}
+        env:
+          RENOVATE_DRY_RUN: ${{ inputs.dry_run == true && 'full' || '' }}

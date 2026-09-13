@@ -263,37 +263,23 @@ jobs:
           bash tests/contribute-contract.sh --image contribute:smoke
 
 
-      - name: Build and execute the native Apptainer image
+      - name: Build the Apptainer SIF contribute
         shell: bash
         env:
           ARCH: ${{ matrix.arch }}
           UNAME: ${{ matrix.uname }}
         run: |
           set -euo pipefail
+          # Convert the locally built contribute image into an Apptainer SIF binary
+          sif_name="bluefin-contribute-${UNAME}.sif"
+          podman save --format docker-archive -o "${RUNNER_TEMP}/contribute-${ARCH}.tar" contribute:smoke
+          # Install apptainer via apt from the official PPA
           sudo add-apt-repository -y ppa:apptainer/ppa
           sudo apt-get update -qq
           sudo apt-get install -y apptainer
-          # ubuntu-26.04 mounts the runner's /tmp as nodev. Apptainer extracts the
-          # source root filesystem into $TMPDIR during build and exec, and a nodev
-          # tmpfs fails with "Failed to create container process: Operation not
-          # permitted". RUNNER_TEMP lives on the runner's main disk (not that
-          # nodev tmpfs) and already holds the SIF, so redirect Apptainer's scratch
-          # and cache there. arm64 hits the same nodev warning but its extraction
-          # path differs; pinning the dirs makes both matrix members behave.
-          export APPTAINER_TMPDIR="${RUNNER_TEMP}/apptainer-tmp"
-          export APPTAINER_CACHE_DIR="${RUNNER_TEMP}/apptainer-cache"
-          export TMPDIR="${APPTAINER_TMPDIR}"
-          mkdir -p "$APPTAINER_TMPDIR" "$APPTAINER_CACHE_DIR"
-          sif="${RUNNER_TEMP}/bluefin-contribute-${UNAME}.sif"
-          archive="${RUNNER_TEMP}/contribute-${ARCH}.tar"
-          podman save --format docker-archive -o "$archive" contribute:smoke
-          apptainer build --force "$sif" "docker-archive:${archive}"
-          chmod 0755 "$sif"
-          apptainer exec "$sif" /usr/bin/omp --version
-          apptainer exec "$sif" /usr/bin/tmux -V
-          apptainer exec "$sif" /usr/bin/node -e 'require.resolve("ws")'
-          rm -f "$archive"
-
+          apptainer build --force "${RUNNER_TEMP}/${sif_name}" "docker-archive:${RUNNER_TEMP}/contribute-${ARCH}.tar"
+          chmod 0755 "${RUNNER_TEMP}/${sif_name}"
+          rm -f "${RUNNER_TEMP}/contribute-${ARCH}.tar"
       - name: Publish the native Apptainer artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

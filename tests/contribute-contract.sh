@@ -66,7 +66,8 @@ trap 'rm -rf "$launcher_scratch"' EXIT
 mkdir -p "$launcher_scratch/bin"
 touch "$launcher_scratch/sif" && chmod +x "$launcher_scratch/sif"
 touch "$launcher_scratch/contributor.env" && chmod 0644 "$launcher_scratch/contributor.env"
-mkdir -p "$launcher_scratch/omp-state"
+touch "$launcher_scratch/kvm" && chmod 0666 "$launcher_scratch/kvm"
+mkdir -p "$launcher_scratch/omp-state" "$launcher_scratch/home"
 
 cat >"$launcher_scratch/bin/apptainer" <<'EOF'
 #!/usr/bin/env bash
@@ -77,6 +78,8 @@ EOF
 chmod +x "$launcher_scratch/bin/apptainer"
 
 launcher_env=(
+  HOME="$launcher_scratch/home"
+  BLUEFIN_KVM_DEVICE="$launcher_scratch/kvm"
   BLUEFIN_CONTRIBUTE_SIF="$launcher_scratch/sif"
   HIVE_CONTRIBUTOR_ENV="$launcher_scratch/contributor.env"
   BLUEFIN_OMP_STATE="$launcher_scratch/omp-state"
