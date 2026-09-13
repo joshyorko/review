@@ -35,8 +35,8 @@ The primary maintainer product is the distroless review appliance
 (`just review-appliance`, `just review-appliance-build`) or the local OMP mode
 (`bin/omp-review`), needing only a container engine and Git credentials.
 The retained compatibility recipes (`just review-queue`) provide a Textual
-dashboard via Goose (`goose configure` with GitHub Copilot) or Codex
-(`codex login`).
+dashboard via OMP (default) or Codex (`codex login`), while `review-container`
+runs the isolated Hive contributor worker.
 ### 1. Get the launcher and sign in to GitHub
 
 ```bash
@@ -76,26 +76,28 @@ The same mode runs against a locally installed `omp` with `bin/omp-review`,
 which takes the same shortcuts: `bin/omp-review owner/repo`, `bin/omp-review 1284`,
 `bin/omp-review issues`.
 
-**Compatibility Textual dashboard — Goose or Codex**
+**Compatibility Textual dashboard — OMP or Codex**
 
 The retained Textual maintainer dashboard runs against `ghcr.io/projectbluefin/review-contributor:stable`:
 
-- **Goose + GitHub Copilot (default compatibility backend)**:
-  Install Goose on your host, run `goose configure` with GitHub Copilot, and launch:
+- **OMP (default review-queue backend)**:
+  OMP runs directly inside the container:
   ```bash
   just review-queue
   ```
-  For the default Goose setup, `just review-doctor` checks readiness without starting an agent.
 
 - **Codex subscription (alternative compatibility backend)**:
   Complete `codex login` on your host using file credential storage, then launch:
   ```bash
   BLUEFIN_REVIEW_BACKEND=codex just review-queue
   ```
-  Codex selection does not require Goose or a Copilot credential on the host.
+  For running a compatibility contributor worker, `review-container` uses Codex:
+  ```bash
+  just review-container
+  ```
   A GitHub CLI login alone does **not** authenticate either review backend.
   See the [launcher guide](docs/skills/launcher.md) for authentication setup,
-  model profiles, and troubleshooting.
+  model profiles, and troubleshooting. `just review-doctor` checks readiness without starting an agent.
 **Hive orders the queue when a project uses Hive.** With `HIVE_HUB` set or a
 contributor registration on the machine, the queue is Hive's work queue in
 Hive's positions, and a pull request that closes queued work inherits that

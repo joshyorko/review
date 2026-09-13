@@ -17,7 +17,7 @@ metadata:
 # Pull Request Labels
 
 > Workflows own state; humans provide intent. Project Bluefin standardizes factory
-> lifecycle labels, admission and routing labels, and the repository automation label.
+> lifecycle labels, admission and routing queues, and repository automation labels.
 
 ## When to Use
 
@@ -39,7 +39,7 @@ The repository defines seven core lifecycle and queue labels:
 | `3-clanker-queue` | Explicit agent admission: reconciled OMP slice, clear dependencies, single writer. Sole positive marker for automated issue pickup; hosted runtime enforcement is owned by #169 and remains unverified until proven. |
 | `3-human-queue` | Work admitted to the human-maintained queue; human routing only, never agent admission. |
 | `4-review` | A pull request is awaiting review. |
-| `blocked` | Work is blocked on human input or an external dependency. |
+| `blocked` | Progress halted on external dependency or missing infra. |
 | `hold` | Work is intentionally paused. |
 
 ### Queue Admission (Stage 3)

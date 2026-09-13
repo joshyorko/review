@@ -180,6 +180,8 @@ Batch landings partition across independent repository lanes via background agen
 Harness-selection contracts patch binary probes to cover READY, remembered unavailable, and no-READY choices without installed agent binaries.
 
 ```bash
+bash tests/omp-review-mode.sh          # OMP extension unit & contract tests
+bash tests/dashboard-contract.sh       # static contract + Textual pilot
 python3 tests/autopilot-contract.py
 bash tests/omp-review-mode.sh          # OMP extension unit & contract tests
 bash tests/dashboard-contract.sh       # static contract + Textual pilot

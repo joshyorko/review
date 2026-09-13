@@ -4,8 +4,8 @@
 mode for Oh My Pi shipped in a distroless appliance image, and a launcher.
 The primary maintainer review product runs via the OMP extension entrypoints:
 in source via `bin/omp-review` or packaged via `just review-appliance` and
-`image/appliance/Containerfile`. The `review-container` recipe runs the Hive
-contributor worker, and `review-queue` runs the retained Textual maintainer
+`image/appliance/Containerfile`. The `review-container` recipe runs the isolated
+`contribute` Hive worker, and `review-queue` runs the retained Textual maintainer
 compatibility dashboard. Review owns the appliance image, extension, launcher
 credential handoff, and review context; Hive owns its contributor protocol, task
 selection, tmux session, prompt injection, and output capture.
@@ -71,12 +71,12 @@ The review mode in `image/extension/bluefin-review/` equips OMP with companion
 review agents (`bluefin-doctrine`, `bluefin-reviewer`, `bluefin-security`,
 `bluefin-correctness`, `bluefin-test-coverage`, `bluefin-simplicity`,
 `bluefin-ci-triage`) and LLM-callable inspection tools.
-The compatibility `goose review` flow does not consume `~/.agents/skills/`;
-it supplies the image-owned `/opt/bluefin/review-scope/.agents/` overlay
-through `--check-scope`. Skills generated from the Bluefin catalog, or
-installed from `skills.sh` and other compatible open catalogs, belong under
-`~/.agents/skills/` for interactive contributor sessions and do not become
-review checks automatically. See [`docs/skills/review-checks.md`](docs/skills/review-checks.md).
+The compatibility maintainer flow in `image/bin/bluefin-review` supplies the
+image-owned `/opt/bluefin/review-scope/.agents/` overlay directly by folding
+its `REVIEW.md` and check definitions into prompts sent to the selected backend.
+Skills generated from the Bluefin catalog, or installed from `skills.sh` and
+other compatible open catalogs, belong under `~/.agents/skills/` for interactive
+contributor sessions and do not become review checks automatically. See [`docs/skills/review-checks.md`](docs/skills/review-checks.md).
 
 Opening the maintainer dashboard never starts a contributor worker. Scaling
 cluster workers is an explicit, separate choice — `just review-container
@@ -189,9 +189,6 @@ labels. Never add a local workaround for an accepted upstream gap. See
 - `docs/` contains the skill router and catalog.
 - [`docs/appliance.md`](docs/appliance.md) provides detailed appliance
   installation and configuration guidance.
-Hive rewrites `~/.config/goose/config.yaml`. Keep the controlled Goose
-configuration under `GOOSE_PATH_ROOT=/opt/bluefin/goose`; do not write it to
-the Hive-managed path.
 
 ## Permitted changes
 
