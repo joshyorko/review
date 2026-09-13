@@ -108,7 +108,7 @@ contribute_image := env("CONTRIBUTE_IMAGE", "ghcr.io/projectbluefin/contribute:s
 # this in one place instead of duplicating it per-recipe is the only
 # concession to DRY here — it never leaves the Justfile as a file of its own.
 shared_functions := '''
-GITHUB_LOGIN_COMMAND="gh auth login --web --hostname github.com --scopes repo,read:org"
+GITHUB_LOGIN_COMMAND="gh auth login --web --hostname github.com --scopes repo,read:org,workflow"
 
 github_auth_ready() {
   command -v gh &>/dev/null && gh auth status --hostname github.com &>/dev/null
@@ -447,7 +447,12 @@ report_gh_token_blast_radius() {
   local source="$1" scopes
   echo "✓ GitHub identity passed to the agent as GH_TOKEN (from ${source}; value not shown)."
   scopes="$(gh_token_scopes)"
-  [[ -n "$scopes" ]] && echo "  The agent can do anything this token can: ${scopes}"
+  if [[ -n "$scopes" ]]; then
+    echo "  The agent can do anything this token can: ${scopes}"
+    if [[ ",${scopes//[[:space:]]/}," != *",workflow,"* && ",${scopes//[[:space:]]/}," != *"'workflow'"* ]]; then
+      echo "  ! Note: Token lacks 'workflow' scope; pushing tasks that modify .github/workflows/* will fail."
+    fi
+  fi
   echo "  Narrow that with: REVIEW_GH_TOKEN=<scoped PAT> (public_repo or repo is enough to fork and open a PR)."
   return 0
 }
@@ -456,7 +461,7 @@ report_missing_gh_token() {
   echo "  It cannot fork, clone, push or open a pull request, and will stop on" >&2
   echo "  'To get started with GitHub CLI, please run: gh auth login' — which it" >&2
   echo "  is not allowed to run. Every assigned task will die on arrival." >&2
-  echo "  Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org" >&2
+  echo "  Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org,workflow" >&2
   echo "  Or export REVIEW_GH_TOKEN with a scoped PAT." >&2
   return 0
 }
@@ -1854,7 +1859,12 @@ review-doctor:
     if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then
       echo "  ✓ a GitHub token is available for the container-only agent (from ${GH_TOKEN_SOURCE}; not shown)"
       DOCTOR_GH_SCOPES="$(gh_token_scopes)"
-      [[ -n "$DOCTOR_GH_SCOPES" ]] && echo "    The agent will be able to do anything this token can: ${DOCTOR_GH_SCOPES}"
+      if [[ -n "$DOCTOR_GH_SCOPES" ]]; then
+        echo "    The agent will be able to do anything this token can: ${DOCTOR_GH_SCOPES}"
+        if [[ ",${DOCTOR_GH_SCOPES//[[:space:]]/}," != *",workflow,"* && ",${DOCTOR_GH_SCOPES//[[:space:]]/}," != *"'workflow'"* ]]; then
+          echo "    ! Token lacks 'workflow' scope: tasks modifying .github/workflows/* cannot be pushed or merged."
+        fi
+      fi
       echo "    Narrow that with REVIEW_GH_TOKEN=<scoped PAT> if that is wider than you want."
       pass=$((pass+1))
     else

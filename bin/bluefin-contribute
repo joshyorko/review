@@ -74,7 +74,7 @@ if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]]; then
   echo "ERROR: no GitHub token available; the agent would have no GitHub identity." >&2
   echo "  It cannot fork, clone, push, or open a pull request, and would hang at an" >&2
   echo "  interactive 'gh auth login' device-code prompt nobody can answer." >&2
-  echo "  Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org" >&2
+  echo "  Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org,workflow" >&2
   echo "  Or export GH_TOKEN with a scoped PAT." >&2
   exit 1
 fi

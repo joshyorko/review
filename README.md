@@ -42,7 +42,7 @@ besides the container engine and Git credentials.
 ```bash
 git clone https://github.com/projectbluefin/review.git
 cd review
-gh auth login --web --hostname github.com --scopes repo,read:org
+gh auth login --web --hostname github.com --scopes repo,read:org,workflow
 ```
 
 ### 2. Choose one review backend
