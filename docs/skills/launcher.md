@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.8"
-last_updated: 2026-09-08
+version: "3.9"
+last_updated: 2026-09-13
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -184,3 +184,17 @@ The recipe list must match the documented public recipes. Doctor must not start 
 ## Sources
 
 - Podman environment inheritance: Context7 `/websites/podman_io_en`
+
+## Personal Brew development channel
+
+Linux: `brew install joshyorko/review-dev/bluefin-review-dev`, then
+`bluefin review owner/repo`. Uninstall `bluefin-contributor-tools` first.
+Startup reports its bundled launcher/SIF ref and SHA. Push a branch containing `.github/workflows/review-dev.yml` to Josh's fork;
+after it succeeds, run `brew update && brew upgrade bluefin-review-dev`.
+CI builds both native architectures. For another committed ref: `./scripts/brew-dev build REF OUTPUT_DIRECTORY`,
+then `./scripts/brew-dev publish OUTPUT_DIRECTORY` after pushing the commit.
+Build requires Git, Python 3, Podman, Apptainer and tar; publish requires `gh`
+and Git SSH authentication. Local builds cover only their native architecture.
+Revision labels and hashes are verified; release URLs are immutable.
+Return to UBlue with `brew uninstall bluefin-review-dev`,
+`brew untap joshyorko/review-dev`, then the official Brew install command.

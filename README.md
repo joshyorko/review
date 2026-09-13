@@ -29,6 +29,8 @@ bluefin contribute
 
 [Installation](#installation) · [Quick start](#quick-start) · [Using the dashboard](#using-the-dashboard) · [Run a worker](#run-a-worker) · [Guides](#guides)
 
+For the personal development channel, see [Brew development builds](docs/skills/launcher.md#personal-brew-development-channel).
+
 ## Quick start
 
 You need **Linux, rootless Podman, Git, `just`, and GitHub CLI (`gh`)**.

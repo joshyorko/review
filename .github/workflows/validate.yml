@@ -91,6 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/just-onboarding.sh
+          python3 tests/brew_dev_contract.py
 
       - name: Recipe bodies are valid bash
         run: |
