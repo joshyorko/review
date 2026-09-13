@@ -26,7 +26,15 @@ import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts"
 import { STALE_AFTER_MS, queueAge, renderHitlist, renderRail, statusSegment, tmuxReviewStatusBar } from "../image/extension/bluefin-review/rail.ts";
 import { SessionTrace } from "../image/extension/bluefin-review/session.ts";
 import { BluefinAnsiSplash } from "../image/extension/bluefin-review/splash.ts";
-import { STATE_ENTRY, actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
+import {
+	STATE_ENTRY,
+	actionPrompt,
+	createReviewExtension,
+	MutationCapabilityPolicy,
+	checkMergeAuthority,
+	generateNativeCommand,
+	mutationSignature,
+} from "../image/extension/bluefin-review/extension.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -2472,4 +2480,137 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		assert.equal(pi.messages.length, 1, "stale generation produced zero extra messages; total dispatches across both requests remains 1");
 		assert.match(pi.messages[0], /projectbluefin\/review#486/);
 	}
+});
+
+// P2 — prefer bounded native GitHub mutations before browser automation (#469)
+// Fixture proves native title edit first, bounded browser fallback for unsupported work,
+// no repeated equivalent attempts, and preserved human confirmation/merge authority.
+test("typed GitHub mutations prefer native tools, bound browser fallback, prevent repeated attempts, and preserve merge authority", () => {
+	const policy = new MutationCapabilityPolicy({ maxEquivalentAttempts: 1, maxBrowserFallbacks: 1 });
+
+	// 1. Title mutation prefers native first (gh pr edit / gh issue edit)
+	const titleReq = {
+		kind: "title" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { title: "test: contract for scripts/check-skill-frontmatter.sh" },
+	};
+	const titlePlan = policy.selectCapability(titleReq);
+	assert.equal(titlePlan.capability, "native", "title edit must prefer native first");
+	assert.match(titlePlan.command!, /^gh pr edit 440 --repo projectbluefin\/review --title /);
+	assert.match(titlePlan.command!, /check-skill-frontmatter\.sh/);
+	assert.equal(titlePlan.fallbackAvailable, true);
+	assert.equal(titlePlan.bounded, true);
+
+	// 2. Label mutation prefers native first
+	const labelReq = {
+		kind: "label" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { addLabels: ["lgtm"], removeLabels: ["hold"] },
+	};
+	const labelPlan = policy.selectCapability(labelReq);
+	assert.equal(labelPlan.capability, "native", "label mutation must prefer native first");
+	assert.match(labelPlan.command!, /^gh pr edit 440 --repo projectbluefin\/review/);
+	assert.match(labelPlan.command!, /--add-label "lgtm"/);
+	assert.match(labelPlan.command!, /--remove-label "hold"/);
+
+	// 3. Review mutation prefers native first
+	const reviewReq = {
+		kind: "review" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { event: "APPROVE" as const, body: "Approved by reviewer" },
+	};
+	const reviewPlan = policy.selectCapability(reviewReq);
+	assert.equal(reviewPlan.capability, "native", "review mutation must prefer native first");
+	assert.match(reviewPlan.command!, /^gh pr review 440 --repo projectbluefin\/review --approve --body/);
+
+	// 4. Comment mutation prefers native first
+	const commentReq = {
+		kind: "comment" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { body: "Observed test passing" },
+	};
+	const commentPlan = policy.selectCapability(commentReq);
+	assert.equal(commentPlan.capability, "native", "comment mutation must prefer native first");
+	assert.match(commentPlan.command!, /^gh pr comment 440 --repo projectbluefin\/review --body/);
+
+	// 5. Bounded browser fallback for unsupported work (UI-only work)
+	const uiOnlyReq = {
+		kind: "title" as const,
+		repo: "projectbluefin/review",
+		number: 440,
+		params: { title: "title requires browser-only UI interaction" },
+		unsupportedNative: true,
+	};
+	const uiOnlyPlan = policy.selectCapability(uiOnlyReq);
+	assert.equal(uiOnlyPlan.capability, "browser", "unsupported native work selects browser fallback");
+	assert.match(uiOnlyPlan.reason, /bounded browser fallback/);
+	assert.equal(uiOnlyPlan.bounded, true);
+
+	// 6. Native attempt failure falls back to bounded browser, not indefinite retry
+	policy.recordAttempt({
+		signature: mutationSignature(titleReq),
+		capability: "native",
+		timestamp: Date.now(),
+		success: false,
+		error: "connection timeout",
+	});
+	const fallbackPlan = policy.selectCapability(titleReq);
+	assert.equal(fallbackPlan.capability, "browser", "after native attempt failure, falls back to browser");
+	assert.match(fallbackPlan.reason, /bounded browser fallback/);
+
+	// 7. No repeated equivalent attempts: once browser fallback fails as well, equivalent attempts halt
+	policy.recordAttempt({
+		signature: mutationSignature(titleReq),
+		capability: "browser",
+		timestamp: Date.now(),
+		success: false,
+		error: "browser navigation error",
+	});
+	const exhaustedPlan = policy.selectCapability(titleReq);
+	assert.equal(exhaustedPlan.blocked, true, "equivalent attempts must not repeat indefinitely");
+	assert.match(exhaustedPlan.reason, /equivalent preferred attempts are not repeated indefinitely/);
+
+	// 8. Retry classification distinguishes fresh, retryable, browser fallback, and exhausted
+	const freshReq = {
+		kind: "comment" as const,
+		repo: "projectbluefin/review",
+		number: 999,
+		params: { body: "fresh note" },
+	};
+	assert.equal(policy.classifyAttempt(freshReq, "native"), "fresh");
+	assert.equal(policy.classifyAttempt(titleReq, "native"), "equivalent_attempt_exhausted");
+
+	// 9. Preserved human confirmation / merge authority
+	// Green PR allows merge
+	assert.deepEqual(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", reviewState: "APPROVED" }), { allowed: true });
+	// Failing check blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "failure" }).allowed, false);
+	assert.match(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "failure" }).reason!, /check is failing/);
+	// Pending check blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "pending" }).allowed, false);
+	assert.match(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "pending" }).reason!, /check is pending/);
+	// Hold label blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", labels: ["hold"] }).allowed, false);
+	assert.match(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", labels: ["hold"] }).reason!, /hold/);
+	// Blocked label blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", labels: ["blocked"] }).allowed, false);
+	// Changes requested blocks merge
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", reviewState: "CHANGES_REQUESTED" }).allowed, false);
+	// Own pull request requires another contributor's review
+	assert.equal(checkMergeAuthority({ id: 42, repo: "projectbluefin/review", ciStatus: "success", author: "jorge" }, "jorge").allowed, false);
+
+	// 10. Action prompts explicitly preserve authority and state the native mutation invariant
+	const item = queueItem({ id: 440, repo: "projectbluefin/review" });
+	const fixPrompt = actionPrompt({ kind: "fix", item });
+	assert.match(fixPrompt!, /Typed GitHub mutations prefer native\/gh\/API tools/);
+	assert.match(fixPrompt!, /Browser is bounded fallback for UI-only work/);
+	assert.match(fixPrompt!, /equivalent preferred attempts are not repeated indefinitely/);
+	assert.match(fixPrompt!, /gh pr edit 440 --repo projectbluefin\/review --title/);
+	const approvePrompt = actionPrompt({ kind: "approve", item });
+	assert.match(approvePrompt!, /Stop and report instead of merging/);
+	assert.match(approvePrompt!, /Preserved human confirmation and merge authority/);
 });
