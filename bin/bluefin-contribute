@@ -130,6 +130,12 @@ bind_args=(
   --bind "${registration}:/home/bluefin/.config/hive/contributor.env:ro"
   --bind "${omp_state}:/home/bluefin/.omp:rw"
 )
+# Minimal devcontainer hosts may omit Apptainer's default bind sources.
+for host_file in /etc/localtime /etc/hosts; do
+  if ! test -e "$host_file"; then
+    bind_args+=(--no-mount "$host_file")
+  fi
+done
 # Forward host gh config into contributor container automatically
 host_gh_cfg="${HOME:-/no-such-home}/.config/gh"
 if [[ -e "$host_gh_cfg" ]]; then

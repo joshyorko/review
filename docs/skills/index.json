@@ -209,7 +209,7 @@
         "kubernetes"
       ],
       "description": "Maintains the review launcher recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.9",
+      "version": "3.11",
       "last_updated": "2026-09-13",
       "doc_type": "runbook"
     },

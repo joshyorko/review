@@ -1,6 +1,6 @@
 ---
 name: launcher
-version: "3.9"
+version: "3.11"
 last_updated: 2026-09-13
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
@@ -198,3 +198,13 @@ and Git SSH authentication. Local builds cover only their native architecture.
 Revision labels and hashes are verified; release URLs are immutable.
 Return to UBlue with `brew uninstall bluefin-review-dev`,
 `brew untap joshyorko/review-dev`, then the official Brew install command.
+
+## Minimal Linux hosts
+
+Both packaged launchers suppress Apptainer's default `/etc/localtime` and
+`/etc/hosts` binds only when the corresponding host path is absent, including
+a dangling symlink. Existing files and explicit configuration binds remain in
+place. A missing destination inside the SIF is a separate Apptainer warning.
+The personal Brew package supplies `squashfuse` for direct SIF mounting.
+Room's documented privileged devcontainer configuration exposes `/dev/fuse`;
+validate the actual direct-mount path when testing minimal-host compatibility.
