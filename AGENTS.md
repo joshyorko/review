@@ -22,7 +22,9 @@ task selection and assignment remain Hive-owned.
 
 ## Boundaries
 
-Keep this repository focused: it ships the maintainer-facing review appliance and the isolated `contribute` Hive worker. `contribute` is not a general agent distribution: OMP is its only selectable agent surface, Hive remains the sole task authority, and the registration file plus inherited provider credentials are its only runtime inputs.
+Keep this repository focused: it ships the review appliance and nothing
+beside it. Persistent state stays limited to launcher configuration and the
+review-queue landing record the launcher mounts for the dashboard.
 
 The interactive recipes run the image runtime in the foreground of the
 terminal that launched them, and Ctrl-C stops them. Detached contributor
@@ -46,12 +48,10 @@ contributor credential; never loosen that file's permissions as a workaround.
 That rule scopes how the launcher starts the container; it is not a ban
 on `&` anywhere in the repository. Backgrounding is required where it is what
 preserves signal responsiveness. Bash defers a trap handler while it waits on
-a foreground child, so `image/contribute/entrypoint.sh` runs the contributor
-agent and `tmux attach-session` as background jobs it `wait`s on, and
-`image/entrypoint.sh` runs the contributor agent and its passive
-`worker_status.py` companion the same way — keeping PID 1 signal-responsive
-in both; a foreground attach or companion swallowed SIGTERM for the whole
-session and forced podman's ten-second SIGKILL. Do not "fix" that.
+a foreground child, so `image/entrypoint.sh` runs the contributor agent and
+`tmux attach-session` as background jobs it `wait`s on, keeping PID 1
+signal-responsive; a foreground attach swallowed SIGTERM for the whole session
+and forced podman's ten-second SIGKILL. Do not "fix" that.
 
 `podman run --rm -it` does not bind a container's lifetime to its client:
 `conmon` supervises the container, survives the client, and reparents to the
@@ -70,7 +70,7 @@ Keep review checks and interactive skills as separate layers.
 The review mode in `image/extension/bluefin-review/` equips OMP with companion
 review agents (`bluefin-doctrine`, `bluefin-reviewer`, `bluefin-security`,
 `bluefin-correctness`, `bluefin-test-coverage`, `bluefin-simplicity`,
-`bluefin-ci-triage`, `k3-final-review`) and LLM-callable inspection tools.
+`bluefin-ci-triage`) and LLM-callable inspection tools.
 The compatibility maintainer flow in `image/bin/bluefin-review` supplies the
 image-owned `/opt/bluefin/review-scope/.agents/` overlay directly by folding
 its `REVIEW.md` and check definitions into prompts sent to the selected backend.

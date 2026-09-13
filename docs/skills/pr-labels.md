@@ -3,12 +3,12 @@ name: pr-labels
 version: "1.1"
 last_updated: 2026-09-13
 id: pr-labels
-one_line_purpose: Enforce projectbluefin's lifecycle, queue, and automation label taxonomy.
+one_line_purpose: Enforce the canonical factory lifecycle, admission, and automation label contract.
 entry_point: docs/skills/pr-labels.md
 category: meta
 status: active
 tags: [labels, factory, triage, automation, workflow]
-description: "Defines projectbluefin's lifecycle label taxonomy, queue structure (3-clanker-queue, 3-human-queue), and automation labels (lgtm, automerge). Use when managing labels or triage."
+description: "Defines projectbluefin's lifecycle labels, 3-clanker-queue admission, 3-human-queue routing, and the lgtm approval flag. Use when managing labels or triage."
 metadata:
   type: policy
   context7-sources: [/pre-commit/pre-commit]
@@ -45,7 +45,7 @@ The repository defines seven core lifecycle and queue labels:
 ### Queue Admission (Stage 3)
 
 Stage 3 branches work into two separate queues depending on execution authority:
-- `3-clanker-queue`: Autonomous agent queue. Scoped for unattended or agent-assisted execution with clear boundaries and a reconciled slice. Sole positive marker for automated issue pickup; hosted runtime enforcement is owned by #169 and remains unverified until proven.
+- `3-clanker-queue`: Autonomous agent queue. Scoped for unattended or agent-assisted execution with clear boundaries, single writer, and a reconciled slice.
 - `3-human-queue`: Human maintainer queue. Complex, design-heavy, or non-automatable work reserved for human contributors. Human routing only, never agent admission.
 
 Never use obsolete stage-3 or stage-4 labels like `3-ready` or `4-working`.
@@ -53,7 +53,7 @@ Never use obsolete stage-3 or stage-4 labels like `3-ready` or `4-working`.
 ### Review and Blocked States
 
 - `4-review`: Code changes are complete and awaiting maintainer or automated review (replaces the obsolete `5-review`).
-- `blocked`: Progress is halted by an external blocker or missing prerequisite.
+- `blocked`: Progress is halted on external dependency or missing infra.
 - `hold`: Work is intentionally paused by a maintainer. Agents must never remove a hold.
 - Terminal resolution (done) is tracked directly through issue/PR closure or merge, not a `6-done` label.
 
@@ -90,13 +90,13 @@ The repository also maintains domain qualification and agent assignment labels:
    provenance and must remain intact on issues and PRs; they do not grant
    admission.
 5. **No self-admission**: Agents and workers never apply `3-clanker-queue` or
-   `3-human-queue` to issues, or manipulate labels to cherry-pick tasks. Hive
-   and human maintainers are the sole admission authorities.
+   `3-human-queue` to issues or manipulate labels to claim work. Hive and human
+   maintainers are the sole admission authorities.
 6. **Verification before action**: Label changes reflect verified state
    transitions, not speculative intentions. Apply `lgtm` only when human
    review criteria are satisfied. Maintainers, not agents, own `lgtm`.
-7. **Hold and blocked**: Agents never remove `hold` or `blocked` before the
-   blocking or pause condition is genuinely resolved.
+7. **Hold and blocked discipline**: Agents never remove `hold` or `blocked`
+   before the blocking condition is genuinely resolved.
 
 ## Red Flags
 

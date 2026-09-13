@@ -4935,6 +4935,40 @@ class ReviewDashboard(App):
             )
         return ""
 
+    def landing_branch_blocker(self, stop: Stop, live: dict) -> str:
+        """Why the branch target itself forbids landing (#517), or "".
+
+        The same deterministic pre-flight family as the ruleset blocker:
+        some repositories land on a non-default branch — projectbluefin/
+        bluefin and bluefin-lts land from `testing`, never `main` — so a
+        pull request aimed at the wrong base is an unmergeable
+        configuration no review cycle can repair. A CONFLICTING/DIRTY merge
+        base is the same class of blocker: the landing passes dispatched
+        exactly these pull requests again and again, each agent
+        rediscovering the ~176-file drift before dying on the conflict.
+        The wrong-target note names the drift the compare endpoint reports.
+        Absent evidence never blocks: a base branch GitHub did not name
+        passes, like an UNKNOWN mergeability.
+        """
+        if stop.is_issue:
+            return ""
+        base_ref = str(live.get("baseRefName") or "").strip()
+        mergeable = live.get("mergeable")
+        merge_state = live.get("mergeStateStatus")
+        note = landing.branch_target_block(
+            stop.repository, base_ref, mergeable, merge_state
+        )
+        if not note:
+            return ""
+        required = landing.BRANCH_TARGET_POLICY.get(str(stop.repository).lower())
+        if required and base_ref and base_ref != required:
+            drift = landing.branch_target_drift(stop.repository, required, base_ref)
+            if drift is not None:
+                note = landing.branch_target_block(
+                    stop.repository, base_ref, mergeable, merge_state, drift
+                ) or note
+        return note
+
     def stop_lacks_my_review(self, stop: Stop) -> bool:
         if stop.is_issue or not self.self_login:
             return False
@@ -7184,7 +7218,7 @@ class ReviewDashboard(App):
             pause = self.query_one("#landing-pause", Button)
         except (NoMatches, ScreenStackError):
             return
-        # Review / phase tasks (like k3-final-review or final rounds) do not count
+        # Review / phase tasks (such as final review or fix rounds) do not count
         # against worker concurrency slots or display as consuming the worker cap.
         active = [
             task
@@ -8645,6 +8679,14 @@ class ReviewDashboard(App):
                 self.notify(f"[$] {stop.key} cannot be slayed: {reason}", severity="warning")
                 continue
 
+            branch_blocker = self.landing_branch_blocker(stop, stop.live)
+            if branch_blocker:
+                # #517: a wrong target branch or conflicting merge base is
+                # unmergeable however green the checks are — refuse before
+                # the review/fix cycle spends its budget on it.
+                self.notify(f"[$] {stop.key} cannot be slayed: {branch_blocker}", severity="warning")
+                continue
+
             live_head_sha = str(stop.live.get("headRefOid") or live_data.get("headRefOid") or "")
             if not FULL_SHA.fullmatch(live_head_sha):
                 live_head_sha = reviewed_head if (has_review and reviewed_head) else stop.head_identity
@@ -8842,6 +8884,17 @@ class ReviewDashboard(App):
             )
             return
 
+        branch_blocker = self.landing_branch_blocker(stop, live_data)
+        if branch_blocker:
+            # #517: a wrong target branch or a conflicting merge base is
+            # unmergeable however green the checks are; slaying it would
+            # only end in an agent-reported blocked verdict.
+            self.notify(
+                f"[$] {stop.key} cannot be slayed: {branch_blocker}",
+                severity="warning",
+            )
+            return
+
         record = self.run_store.get(identity)
         if record is None:
             record = self.run_store.create(identity)
@@ -9035,7 +9088,8 @@ class ReviewDashboard(App):
         live = self.gh_client.read(
             "pr", "view", str(number), "--repo", repository,
             "--json",
-            "author,state,baseRefOid,headRefOid,isDraft,mergeable,mergeStateStatus,"
+            "author,state,baseRefName,baseRefOid,headRefOid,isDraft,mergeable,"
+            "mergeStateStatus,"
             "reviewDecision,additions,deletions,changedFiles,updatedAt,body,"
             "closingIssuesReferences,statusCheckRollup,labels,reviews,title",
         )
@@ -9823,13 +9877,15 @@ class ReviewDashboard(App):
 
             self.push_screen(FinalPolicyScreen(), chosen)
             return
-        # Pre-flight ruleset gate (#514): a PR its repository's own ruleset
-        # will block on approvals or self-approval must not be dispatched — it
-        # only spends a GitHub API round-trip and an agent run that ends
-        # blocked, and the batch loop then re-selects and re-dispatches it.
-        # Check the live approval count against the ruleset up front, hold
-        # those PRs as awaiting-reviewers with a visible note, and dispatch
-        # only what the ruleset will actually land.
+        # Pre-flight landing gate (#514, #517): a PR its repository's own
+        # ruleset will block on approvals or self-approval, and a PR whose
+        # branch target the landing policy forbids (or whose merge base is
+        # conflicting), must not be dispatched — dispatching only spends a
+        # GitHub API round-trip and an agent run that ends blocked, and the
+        # batch loop then re-selects and re-dispatches it. Check the live
+        # approval count, the base branch, and the mergeability up front,
+        # hold the blockers with a visible note, and dispatch only what can
+        # actually land.
         dispatchable: list[Stop] = []
         held: list[Stop] = []
         for stop in batch:
@@ -9851,20 +9907,30 @@ class ReviewDashboard(App):
                 stop.failure = f"awaiting-reviewers: {blocker}"
                 held.append(stop)
             else:
-                dispatchable.append(stop)
+                branch_blocker = self.landing_branch_blocker(stop, live_data)
+                if branch_blocker:
+                    # #517: the branch target itself is the blocker — a
+                    # wrong base or a conflicting merge base is unmergeable
+                    # however green the checks are. Deselected so no later
+                    # pass re-selects and re-dispatches the same drift.
+                    stop.selected = False
+                    stop.failure = branch_blocker
+                    held.append(stop)
+                else:
+                    dispatchable.append(stop)
 
         if held:
             self.notify(
                 "held " + str(len(held)) + " PR(s) out of this landing batch "
-                "awaiting a second write-access review before their ruleset will "
-                "land them: " + ", ".join(s.key for s in held),
+                "before dispatch — the ruleset or branch target forbids "
+                "landing: " + "; ".join(f"{s.key} ({s.failure})" for s in held),
                 severity="warning",
             )
             self.refresh_rows()
         if not dispatchable:
             self.notify(
-                "nothing to land — every selected PR is awaiting a second "
-                "write-access review",
+                "nothing to land — every selected PR was held by the "
+                "landing pre-flight (ruleset approvals or branch target)",
                 severity="warning",
             )
             return

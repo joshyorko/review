@@ -1720,6 +1720,15 @@ run_recipe review-container GH_READY=1 \
   FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'admin:org', 'repo', 'workflow'"
 assert_contains "admin:org" "$OUT"
 assert_contains "REVIEW_GH_TOKEN" "$OUT"
+assert_not_contains "Token lacks 'workflow' scope" "$OUT"
+assert_not_contains "gho-test-token" "$OUT"
+
+begin "review-container: blast radius warns when workflow scope is missing"
+reset_logs
+run_recipe review-container GH_READY=1 \
+  \
+  FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'repo', 'read:org'"
+assert_contains "Token lacks 'workflow' scope" "$OUT"
 assert_not_contains "gho-test-token" "$OUT"
 
 begin "review-container: an explicit scoped PAT beats the desktop login"
@@ -1943,6 +1952,18 @@ run_recipe review-doctor GH_READY=1 \
   FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'admin:org', 'repo'"
 assert_contains "a GitHub token is available for the container-only agent" "$OUT"
 assert_contains "admin:org" "$OUT"
+assert_contains "Token lacks 'workflow' scope" "$OUT"
+assert_not_contains "gho-test-token" "$OUT"
+
+assert_file_not_contains "run --rm" "$runner_log"
+
+begin "review-doctor: reports no workflow scope warning when workflow scope is present"
+reset_logs
+run_recipe review-doctor GH_READY=1 \
+  FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'admin:org', 'repo', 'workflow'"
+assert_contains "a GitHub token is available for the container-only agent" "$OUT"
+assert_contains "workflow" "$OUT"
+assert_not_contains "Token lacks 'workflow' scope" "$OUT"
 assert_not_contains "gho-test-token" "$OUT"
 
 assert_file_not_contains "run --rm" "$runner_log"

@@ -42,7 +42,7 @@ runs the isolated Hive contributor worker.
 ```bash
 git clone https://github.com/projectbluefin/review.git
 cd review
-gh auth login --web --hostname github.com --scopes repo,read:org
+gh auth login --web --hostname github.com --scopes repo,read:org,workflow
 ```
 
 ### 2. Choose your review entrypoint
@@ -220,7 +220,7 @@ is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 <details>
 <summary>Image provenance</summary>
 
-The compatibility image layers the pinned Hive runtime at `ebd5db6adf95c2eceb77c1a4376f137af0836d4b`. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker; the review appliance remains the maintainer-facing OMP image.
+The compatibility image layers the pinned Hive runtime at `2f22a223e2bedd1477ab5d21097109637688e300`. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker; the review appliance remains the maintainer-facing OMP image.
 See [image architecture and validation](docs/image-and-development.md).
 
 </details>

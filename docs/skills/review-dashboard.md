@@ -40,7 +40,7 @@ review mode. The extension provides:
 3. **Companion review agents**: Specialized task agents under
    `image/extension/bluefin-review/agents/` (`bluefin-doctrine`, `bluefin-reviewer`,
    `bluefin-security`, `bluefin-correctness`, `bluefin-test-coverage`,
-   `bluefin-simplicity`, `bluefin-ci-triage`, `k3-final-review`).
+   `bluefin-simplicity`, `bluefin-ci-triage`).
 4. **Inspection tools**: Registered tools in `tools.ts` (`bluefin_review_status`,
    `bluefin_review_queue`, `bluefin_review_diff`, `bluefin_review_trace`,
    `bluefin_hive_lookup`) returning real structured data.
@@ -183,6 +183,8 @@ Harness-selection contracts patch binary probes to cover READY, remembered unava
 bash tests/omp-review-mode.sh          # OMP extension unit & contract tests
 bash tests/dashboard-contract.sh       # static contract + Textual pilot
 python3 tests/autopilot-contract.py
+bash tests/omp-review-mode.sh          # OMP extension unit & contract tests
+bash tests/dashboard-contract.sh       # static contract + Textual pilot
 python3 tests/review_result_contract.py
 bash tests/image-contract.sh
 pre-commit run --all-files
