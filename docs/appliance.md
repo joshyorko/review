@@ -215,3 +215,7 @@ metadata, and every component here arrived as a release archive, so without it
 the attested SBOM would describe an image whose load-bearing parts are invisible.
 The publish workflow ingests it through syft's `sbom-cataloger` and attaches the
 result as an attestation.
+
+On minimal Linux hosts, the packaged launcher automatically skips missing host
+timezone and hosts files when preparing runtime mounts; no root access, fake
+files, or manual Apptainer options are required.

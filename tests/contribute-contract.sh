@@ -2,6 +2,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+python3 tests/apptainer_host_files_contract.py
 image=""
 smaller_than=""
 while (($#)); do

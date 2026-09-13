@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.8"
-last_updated: 2026-09-08
+version: "3.10"
+last_updated: 2026-09-13
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -184,3 +184,13 @@ The recipe list must match the documented public recipes. Doctor must not start 
 ## Sources
 
 - Podman environment inheritance: Context7 `/websites/podman_io_en`
+
+## Minimal Linux hosts
+
+Both packaged launchers suppress Apptainer's default `/etc/localtime` and
+`/etc/hosts` binds only when the corresponding host path is absent, including
+a dangling symlink. Existing files and explicit configuration binds remain in
+place. A missing destination inside the SIF is a separate Apptainer warning.
+The personal Brew package supplies `squashfuse` for direct SIF mounting.
+Room's documented privileged devcontainer configuration exposes `/dev/fuse`;
+validate the actual direct-mount path when testing minimal-host compatibility.

@@ -102,6 +102,12 @@ if os.path.exists(db_path):
     # `--cleanenv`/`--no-env` opt out), so the exported token above already
     # reaches the contained process without putting its value in this argv.
     bind_args=()
+    # Minimal devcontainer hosts may omit Apptainer's default bind sources.
+    for host_file in /etc/localtime /etc/hosts; do
+      if ! test -e "$host_file"; then
+        bind_args+=(--no-mount "$host_file")
+      fi
+    done
     # Forward host configs into container automatically
     for cfg in "${HOME:-/no-such-home}/.gitconfig:/home/bluefin/.gitconfig:ro" \
                "${HOME:-/no-such-home}/.config/hive:/home/bluefin/.config/hive:ro" \
