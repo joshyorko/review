@@ -77,6 +77,24 @@ const QUEUE_POLL_MS = 60_000;
 // queue's cadence keeps one hub request per refresh instead of one per repaint.
 const HIVE_POLL_MS = 120_000;
 
+function slayBashBlockReason(command: string): string | undefined {
+	if (/\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i.test(command)) {
+		return "credentials in URL userinfo would be exposed through process arguments";
+	}
+	for (const segment of command.split(/\r?\n|&&|\|\||;/)) {
+		if (/\bgh\s+pr\s+merge\b/.test(segment) && /(?:^|\s)--admin(?:[=\s]|$)/.test(segment)) {
+			return "admin merge bypass is forbidden; use GitHub's ordinary rules";
+		}
+		if (
+			/\bgit(?:\s+(?!push(?:\s|$))\S+)*\s+push(?:\s|$)/.test(segment)
+			&& /(?:^|\s)(?:-f|--force(?:-with-lease)?)(?:=[^\s]+)?(?:\s|$)/.test(segment)
+		) {
+			return "force-pushing a slay target is forbidden";
+		}
+	}
+	return undefined;
+}
+
 export const RAIL_KEYS: readonly RailKey[] = [
 	{ chord: "alt+b", label: "workbench" },
 	{ chord: "alt+s", label: "autoslay" },
@@ -838,6 +856,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
 		if (ctxToUse) await advanceRepositoryBatch(ctxToUse);
 	});
+	pi.on("tool_call", (event) => {
+		if (
+			activeBatch?.kind !== "slay"
+			|| (activeBatch.state !== "running" && activeBatch.state !== "paused")
+		) return;
+		const { toolName, input } = event as { toolName?: string; input?: { command?: unknown } };
+		if (toolName !== "bash") return;
+		const reason = slayBashBlockReason(String(input?.command ?? ""));
+		if (reason) return { block: true, reason: `Hive workbench slay guard: ${reason}` };
+	});
+
 	pi.on("tool_execution_start", (event) => {
 		const { toolCallId, toolName, args } = event as { toolCallId: string; toolName: string; args: unknown };
 		mode.session.startTool(toolCallId, toolName, args, Date.now());

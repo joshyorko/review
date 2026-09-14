@@ -121,6 +121,9 @@ Immediately before mutation, fetch live targets and repository rules again and
 reject missing, changed, held, review-blocked, or type-mismatched targets.
 Execute `gh` with an argument array, never a shell-composed command. Only a
 maintainer-confirmed slay batch carries merge authority.
+During an active slay, the extension's pre-execution `tool_call` guard rejects
+admin merge bypasses, force pushes, and credential-bearing URL arguments even
+when the coordinator ignores its prompt contract.
 
 ## Policy seam
 

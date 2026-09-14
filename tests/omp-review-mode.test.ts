@@ -1498,6 +1498,28 @@ test("--autoslay starts the review-repair-land lifecycle on launch", async () =>
 	assert.match(pi.messages[0], /gh pr merge <n> --repo <r> --auto --squash/);
 });
 
+test("active slay blocks privileged and credential-bearing bash mutations", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	const guard = pi.events.get("tool_call");
+	const call = (command) => guard({ toolName: "bash", input: { command } }, ctx);
+
+	assert.match((await call("gh pr merge 42 --repo projectbluefin/review --admin --squash")).reason, /admin merge bypass/);
+	assert.match((await call("git push origin repair --force-with-lease")).reason, /force-pushing/);
+	assert.match(
+		(await call("git push https://x-access-token:${GH_TOKEN}@github.com/projectbluefin/review.git repair")).reason,
+		/credentials in URL userinfo/,
+	);
+	assert.equal(await call("gh pr merge 42 --repo projectbluefin/review --auto --squash"), undefined);
+});
+
 test("--autoslay falls back to unranked items when Hive-only filter has 0 ranked items", async () => {
 	const hubEnv = { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" };
 	const hubFetch = async (url, init) => {
