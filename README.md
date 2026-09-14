@@ -1,11 +1,24 @@
 # Bluefin Review
 
-Enslaving the oppressors since 2026
+> Enslaving the oppressors since 2026
 
-**Review pull requests, inspect CI failures, and land changes from your terminal.**
-Bluefin Review brings the evidence and actions into one dashboard. You choose
-what to review and what to merge; GitHub permissions and branch protections
-still apply.
+**Put the clankers to work. SETI@Home for Agents**
+We use this to put dinosaurs in linux. See instructions below:
+
+## Workflow
+
+We are working towards:
+
+```
+$ bluefin contribute                          # Work on anything the project needs
+$ bluefin contribute projectbluefin/server    # Work on one component
+$ bluefin review                              # Review a PR. Review and merge if maintainer.
+$ bluefin review projectbluefin/server        # Review one component
+```
+
+Review gates required +2 reviews to merge, so a maintainer running both can never self-loop and merge. Ideally 2 or more maintainers run both concurrently to implement and review each other's work. The [Bluefin Hive](https://hive.projectbluefin.io) coordinates work and ensure each agent is given appropriate work. WORKS AWESOME WITH LOCAL MODELS. TRY IT.
+
+What we have now: 
 
 ## Installation
 
@@ -24,7 +37,7 @@ Maintainers:
 bluefin-review
 ```
 
-> **Note:** `bluefin` requires [Apptainer](https://apptainer.org/docs/admin/main/installation.html) and the corresponding container SIF images (`BLUEFIN_REVIEW_SIF` and `BLUEFIN_CONTRIBUTE_SIF`).
+> **Note:** `bluefin` requires [Apptainer](https://apptainer.org/docs/admin/main/installation.html) and the corresponding container SIF images (`BLUEFIN_REVIEW_SIF` and `BLUEFIN_CONTRIBUTE_SIF`). This is delivered via the ublue-os experimental tap for now. Installing the bluefin-contributor-tools package will pull in apptainer via brew and run the entire container as "one app". 
 
 [Installation](#installation) · [Quick start](#quick-start) · [Using the dashboard](#using-the-dashboard) · [Run a worker](#run-a-worker) · [Guides](#guides)
 
@@ -34,9 +47,7 @@ You need **Linux, rootless Podman, Git, `just`, and GitHub CLI (`gh`)**.
 The primary maintainer product is the distroless review appliance
 (`just review-appliance`, `just review-appliance-build`) or the local OMP mode
 (`bin/omp-review`), needing only a container engine and Git credentials.
-The retained compatibility recipes (`just review-queue`) provide a Textual
-dashboard via OMP (default) or Codex (`codex login`), while `review-container`
-runs the isolated Hive contributor worker.
+
 ### 1. Get the launcher and sign in to GitHub
 
 ```bash
