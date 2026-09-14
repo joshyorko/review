@@ -133,6 +133,9 @@ when the coordinator ignores its prompt contract.
 Generic queue and execution code must not know Bluefin labels or review rules.
 Bluefin action vocabulary lives in `policy.ts`; review doctrine lives in the
 companion agents under `image/extension/bluefin-review/agents/`.
+Every top-level TypeScript module in the extension must remain reachable from
+`index.ts`; delete disconnected implementations and their tests instead of
+keeping a second, unwired behavior model.
 
 The registered inspection tools are `hive_workbench_status`,
 `hive_workbench_queue`, `hive_workbench_diff`, `hive_workbench_trace`, and

@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -43,6 +43,26 @@ const NOW = 1_800_000_000_000;
 // No hub, no home: these tests must not read the developer's own Hive
 // registration and must never open a socket.
 const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent" };
+
+test("every review extension module is reachable from its package entrypoint", () => {
+	const directory = join(process.cwd(), "image/extension/bluefin-review");
+	const modules = new Set(readdirSync(directory).filter((name) => name.endsWith(".ts")));
+	const reachable = new Set<string>();
+	const pending = ["index.ts"];
+	const importPattern = /(?:from\s+|import\s*)(["'])(\.\/[^"']+)\1/g;
+	while (pending.length > 0) {
+		const name = pending.pop();
+		if (!name || reachable.has(name)) continue;
+		reachable.add(name);
+		const source = readFileSync(join(directory, name), "utf8");
+		for (const match of source.matchAll(importPattern)) {
+			const dependency = match[2]!.slice(2);
+			if (modules.has(dependency) && !reachable.has(dependency)) pending.push(dependency);
+		}
+	}
+
+	assert.deepEqual([...modules].filter((name) => !reachable.has(name)).sort(), []);
+});
 
 // ---------------------------------------------------------------- fixtures
 

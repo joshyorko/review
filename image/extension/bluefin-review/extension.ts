@@ -257,8 +257,6 @@ export function actionPrompt(
 			return item.type === "issue"
 				? `Implement ${cite(item)} in an isolated workspace. Diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes ${item.repo}#${item.id}\`. ${workflow} ${authority} ${reviewFinish}`
 				: `Fix ${cite(item)} in an isolated workspace. Re-read the live diff and failing checks, diagnose each root cause, run focused verification, and push one clean commit for independent review. ${workflow} ${authority} ${reviewFinish}`;
-		case "ci_mode":
-			return `Activate CI monitor and repair mode. Ingest failing GitHub Actions workflow runs across configured repositories, cluster failures by root cause, batch repairs by repository starting with base image prerequisites, and monitor verification runs.`;
 		case "request_reviewer":
 			return `Request review on ${cite(action.item)} from repository collaborators. Use \`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-reviewer <reviewer>\` to assign reviewers and prioritize in their maintainer queue.`;
 	}

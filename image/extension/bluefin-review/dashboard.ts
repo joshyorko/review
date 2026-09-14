@@ -28,7 +28,6 @@ export type DashboardAction =
 	| { kind: "reference"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "scope" }
 	| { kind: "read_pr"; item: QueueItem }
-	| { kind: "ci_mode" }
 	| { kind: "request_reviewer"; item: QueueItem; items?: QueueItem[] };
 
 export const DASHBOARD_KEYS: readonly RailKey[] = [
