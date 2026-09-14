@@ -81,6 +81,7 @@ export class ReviewMode {
 	fetchedAt = 0;
 	loading = false;
 	selectedKeys = new Set<string>();
+	viewMode: "default" | "ci" = "default";
 	isBlueberry = false;
 	paused = false;
 	batchProgress?: WorkbenchBatchProgress;
@@ -296,6 +297,10 @@ export class ReviewMode {
 		this.cursor = 0;
 		this.selectedKeys.clear();
 		return this.queueMode;
+	}
+	toggleViewMode(): "default" | "ci" {
+		this.viewMode = this.viewMode === "default" ? "ci" : "default";
+		return this.viewMode;
 	}
 	setBlueberry(isBlueberry: boolean): void {
 		this.isBlueberry = isBlueberry;

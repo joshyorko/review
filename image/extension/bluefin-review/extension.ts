@@ -227,6 +227,7 @@ export function actionPrompt(
 			}
 			return `Review ${cite(action.item)}. Read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence, covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not. ${authority} ${finish}`;
 		case "slay":
+		case "slay":
 			return `Slay ${cite(item)} through autoreview. Use hive_workbench_diff and hive_workbench_trace, then report findings by severity with file:line evidence. ${workflow} ${authority} ${finish}`;
 		case "diff":
 			return `Call hive_workbench_diff for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${authority} ${finish}`;
@@ -234,6 +235,8 @@ export function actionPrompt(
 			return item.type === "issue"
 				? `Implement ${cite(item)} in an isolated workspace. Diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes ${item.repo}#${item.id}\`. ${workflow} ${authority} ${finish}`
 				: `Fix ${cite(item)} in an isolated workspace. Re-read the live diff and failing checks, diagnose each root cause, run focused verification, and push one clean commit for independent review. ${workflow} ${authority} ${finish}`;
+		case "ci_mode":
+			return `Activate CI monitor and repair mode. Ingest failing GitHub Actions workflow runs across configured repositories, cluster failures by root cause, batch repairs by repository starting with base image prerequisites, and monitor verification runs.`;
 	}
 }
 
