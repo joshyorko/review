@@ -51,7 +51,7 @@ require_fallback() {
 }
 prepare_apptainer_environment() {
   local name
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY HIVE_HUB BLUEFIN_REVIEW_ORG TERM COLORTERM; do
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY HIVE_HUB BLUEFIN_REVIEW_ORG TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   return 0
@@ -90,10 +90,11 @@ resolve_tokens() {
   if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] && command -v python3 >/dev/null 2>&1; then
     GH_TOKEN="$(python3 -c '
 import sqlite3, os, json
-path = os.path.expanduser("~/.omp/agent/agent.db")
-if os.path.exists(path):
+state_dir = os.environ.get("BLUEFIN_OMP_STATE") or os.path.expanduser("~/.omp")
+db_path = os.path.join(state_dir, "agent/agent.db")
+if os.path.exists(db_path):
     try:
-        connection = sqlite3.connect(path)
+        connection = sqlite3.connect(db_path)
         for provider in ("github-copilot", "github"):
             row = connection.execute("SELECT data FROM auth_credentials WHERE provider = ?", (provider,)).fetchone()
             if row:
@@ -170,6 +171,7 @@ run_review() {
       --volume "${workspace}:/workspace:rw,z" \
       --env GH_TOKEN --env GITHUB_TOKEN \
       --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN \
+      --env COPILOT_INTEGRATION_ID \
       --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN \
       --env OPENAI_API_KEY --env GEMINI_API_KEY \
       --env HIVE_HUB --env BLUEFIN_REVIEW_ORG \
@@ -222,6 +224,7 @@ run_contribute() {
       --env AGENT_BACKEND=omp \
       --env GH_TOKEN --env GITHUB_TOKEN \
       --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN \
+      --env COPILOT_INTEGRATION_ID \
       --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN \
       --env OPENAI_API_KEY --env GEMINI_API_KEY \
       --env "HIVE_CONTAINER_NAME=${name}" --env HIVE_CONTAINER_RUNTIME=podman \

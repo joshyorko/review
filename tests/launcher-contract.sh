@@ -311,4 +311,61 @@ for case in "${test_cases[@]}"; do
   assert_omp_review "$input" "$expected"
 done
 
+# --- 6. Credential-resolution parity across launchers -------------------------
+
+launchers=(bluefin omp-review)
+
+extract_keyring_reader() {
+  awk '/state_dir = os.environ.get\("BLUEFIN_OMP_STATE"\)/,/^'"'"' 2>\/dev\/null/' "$1" |
+    sed -e '$d' -e 's/[[:space:]]*$//'
+}
+
+for name in "${launchers[@]}"; do
+  block="$(extract_keyring_reader "${repo_root}/bin/${name}")"
+  [[ -n "$block" ]] || fail "bin/${name}: no omp-keyring reader found"
+  grep -qF 'BLUEFIN_OMP_STATE' <<<"$block" ||
+    fail "bin/${name}: omp-keyring reader ignores the BLUEFIN_OMP_STATE override"
+done
+
+# Functional test: verify BLUEFIN_OMP_STATE is honored when GH_TOKEN is unset
+custom_state="$scratch/custom-omp-state"
+mkdir -p "$custom_state/agent"
+python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('$custom_state/agent/agent.db')
+conn.execute('CREATE TABLE auth_credentials (provider TEXT, data TEXT)')
+conn.execute('INSERT INTO auth_credentials VALUES (?, ?)', ('github-copilot', json.dumps({'access_token': 'custom-omp-token'})))
+conn.commit()
+conn.close()
+"
+
+mock_cred_bin="$scratch/cred-bin"
+mkdir -p "$mock_cred_bin"
+cat >"$mock_cred_bin/podman" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == info ]]; then exit 0; fi
+echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"
+exit 0
+EOF
+chmod +x "$mock_cred_bin/podman"
+
+cat >"$mock_cred_bin/krun" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$mock_cred_bin/krun"
+
+cat >"$mock_cred_bin/omp" <<'EOF'
+#!/usr/bin/env bash
+echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"
+exit 0
+EOF
+chmod +x "$mock_cred_bin/omp"
+
+bluefin_cred_out="$(env -i PATH="$mock_cred_bin:/usr/bin:/bin" HOME="$scratch/home" BLUEFIN_OMP_STATE="$custom_state" REVIEW_TEST_KVM_DEVICE="$kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>/dev/null)" || fail "bin/bluefin credential test failed"
+assert_eq "$bluefin_cred_out" "custom-omp-token copilot-developer-cli" "bin/bluefin resolves BLUEFIN_OMP_STATE and COPILOT_INTEGRATION_ID"
+
+omp_cred_out="$(env -i PATH="$mock_cred_bin:/usr/bin:/bin" HOME="$scratch/home" BLUEFIN_OMP_STATE="$custom_state" "${repo_root}/bin/omp-review" projectbluefin/review 2>/dev/null)" || fail "bin/omp-review credential test failed"
+assert_eq "$omp_cred_out" "custom-omp-token copilot-developer-cli" "bin/omp-review resolves BLUEFIN_OMP_STATE and COPILOT_INTEGRATION_ID"
+
 echo "launcher-contract: all shorthand forms and launcher parity assertions passed"
