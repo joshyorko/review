@@ -4,6 +4,12 @@
 startup:
   checkUpdate: false
 
+modelRoles:
+  advisor: "@default"
+advisor:
+  syncBacklog: 1
+
+
 eval:
   workpool:
     freshAgents: true

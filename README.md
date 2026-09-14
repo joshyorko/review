@@ -116,8 +116,8 @@ slash commands.
 | `j` / `k` | Next / previous queue item |
 | `space` | Select / deselect the focused item |
 | `A` / `x` | Select the filtered slice / clear selection |
-| `s` | Slay selected items through mass autoreview |
-| `alt+s` | Slay the selected or visible slice from anywhere |
+| `s` | Slay selected pull requests through review, repair, and landing |
+| `alt+s` | Autoslay the selected or visible slice through the same lifecycle |
 | `alt+b` | Select / clear the focused repository group |
 | `f` | Fix selected items in isolated workspaces |
 | `d` | Inspect bounded diff evidence |
@@ -153,11 +153,16 @@ single-screen workbench.
 ## Using the OMP workbench
 
 The queue and execution trace remain visible beside the prompt. Navigate and
-select work with the keys above; `s` slays the selected repository waves through
-workflowz, and `--autoslay` starts the visible slice immediately. Slay is mass
-autoreview: it reports findings but never approves or merges. Comments, issue
-changes, and fixes remain distinct actions. The
+select work with the keys above; `s` slays the selected repository waves, and
+`--autoslay` starts the visible slice immediately. A slay is one maintainer-
+authorized lifecycle: review the exact head, repair findings in isolation,
+review the repaired head afresh, then approve and ask GitHub to squash-merge
+when its live rules permit. Reviewer agents remain read-only; the coordinator
+owns landing. Autoslay also enables OMP's advisor on the coordinator session,
+resolving its model through `modelRoles.advisor` → `@default` so it follows the
+maintainer's selected model without pinning a provider. The
 [workbench guide](docs/skills/review-dashboard.md) documents the authority model.
+
 
 ## Run a worker
 

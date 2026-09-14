@@ -769,7 +769,7 @@ test("rail explains an empty queue instead of pretending to load forever", () =>
 	assert.match(rows[0], /401/);
 });
 
-test("rail and dashboard clarify when queue is empty because of hive-only filter", () => {
+test("rail and dashboard clarify an explicitly enabled empty Hive-only filter", () => {
 	const mode = new ReviewMode({ org: "projectbluefin" });
 	mode.hive = {
 		...EMPTY_HIVE,
@@ -779,8 +779,8 @@ test("rail and dashboard clarify when queue is empty because of hive-only filter
 	};
 	mode.items = [queueItem({ id: 10, title: "Unranked item" })];
 	mode.reprioritize();
+	mode.toggleHiveOnly();
 
-	// In default hive-only view, visibleItems is empty because item 10 is unranked
 	assert.equal(mode.hiveOnly, true);
 	assert.equal(mode.visibleItems().length, 0);
 
@@ -1183,7 +1183,7 @@ test("with a hub the order is Hive's, including through a closing reference", ()
 	assert.match(ranked.priorities.get("projectbluefin/review#11").reason, /hive ready #1 via projectbluefin\/docs#900/);
 	assert.equal(ranked.priorities.get("projectbluefin/review#3").source, "local");
 });
-test("mode defaults to a hive-only view when hub is online, toggled with H", () => {
+test("mode defaults to the complete queue and H narrows it to Hive-ranked work", () => {
 	const hive = {
 		...EMPTY_HIVE,
 		configured: true,
@@ -1200,17 +1200,17 @@ test("mode defaults to a hive-only view when hub is online, toggled with H", () 
 	];
 	mode.reprioritize();
 
-	assert.equal(mode.hiveOnly, true, "default view is hive-only");
+	assert.equal(mode.hiveOnly, false, "default view includes the review queue");
+	assert.equal(mode.visibleItems().length, 2);
+
+	mode.toggleHiveOnly();
+	assert.equal(mode.hiveOnly, true);
 	assert.equal(mode.visibleItems().length, 1);
 	assert.equal(mode.visibleItems()[0]?.id, 11);
 
 	mode.toggleHiveOnly();
 	assert.equal(mode.hiveOnly, false);
 	assert.equal(mode.visibleItems().length, 2);
-
-	mode.toggleHiveOnly();
-	assert.equal(mode.hiveOnly, true);
-	assert.equal(mode.visibleItems().length, 1);
 });
 
 
@@ -1481,7 +1481,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.ok(!ctx.notifications.some((notification) => /browse-only mode disables dispatch/.test(notification.message)));
 });
 
-test("--autoslay starts mass autoreview on launch", async () => {
+test("--autoslay starts the review-repair-land lifecycle on launch", async () => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
@@ -1494,7 +1494,8 @@ test("--autoslay starts mass autoreview on launch", async () => {
 
 	assert.equal(pi.messages.length, 1);
 	assert.match(pi.messages[0], /bluefin-reviewer/);
-	assert.match(pi.messages[0], /Never approve or merge/);
+	assert.match(pi.messages[0], /review, repair, and landing/);
+	assert.match(pi.messages[0], /gh pr merge <n> --repo <r> --auto --squash/);
 });
 
 test("--autoslay falls back to unranked items when Hive-only filter has 0 ranked items", async () => {
@@ -1622,8 +1623,8 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	await new Promise((resolve) => setImmediate(resolve));
 
 	assert.equal(pi.messages.length, 1);
-	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through mass autoreview:/m);
-	assert.match(pi.messages[0], /workflowz this repository wave/);
+	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through review, repair, and landing:/m);
+	assert.match(pi.messages[0], /workflowz the review stage/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/b/);
 
@@ -1730,21 +1731,24 @@ test("restart blocks interrupted slays and never replays confirmed comments", as
 	assert.ok(ctx.overlays[0].render(240).some((line) => line.includes("BLOCKED")));
 });
 
-test("slay prompts invoke bluefin-reviewer workpools with bounded evidence", () => {
+test("slay prompts define bounded review, isolated repair, and live-rule landing", () => {
 	const item = queueItem();
 	const sibling = queueItem({ id: 7, repo: item.repo });
 	const slay = actionPrompt({ kind: "slay", item, items: [item, sibling] });
 	const fix = actionPrompt({ kind: "fix", item, items: [item, sibling] });
 	for (const prompt of [slay, fix]) {
-		assert.match(prompt, /workflowz this repository wave/);
 		assert.match(prompt, /Never sleep or poll/);
 		assert.match(prompt, /Evidence is bounded and read once/);
 		assert.match(prompt, /--name-only/);
 		assert.doesNotMatch(prompt, /--json [\w,]*\bbody\b/);
-		assert.doesNotMatch(prompt, /maximum of 7|approve and merge|fix-and-merge/);
 	}
-	assert.match(slay, /fresh bluefin-reviewer workpool item per issue or pull request/);
+	assert.match(slay, /fresh bluefin-reviewer workpool item per pull request/);
+	assert.match(slay, /fresh isolated fixer/);
+	assert.match(slay, /reviewed head must equal the live head/i);
+	assert.match(slay, /gh pr merge <n> --repo <r> --auto --squash/);
+	assert.match(slay, /Never use `--admin`/);
 	assert.match(fix, /fresh isolated agent\(\) handle per issue or pull request/);
+	assert.match(fix, /Never approve or merge/);
 });
 
 test("fix waves repair conflicts without landing them", () => {
@@ -2049,7 +2053,7 @@ test("a hive-only session with a broken hub still fails visibly and concisely", 
 });
 
 
-test("action prompts use bounded evidence without granting landing authority", () => {
+test("action prompts reserve landing authority for slay", () => {
 	const item = queueItem();
 	assert.match(actionPrompt({ kind: "slay", item }), /hive_workbench_diff/);
 	assert.match(actionPrompt({ kind: "slay", item }), /hive_workbench_trace/);
@@ -2057,9 +2061,10 @@ test("action prompts use bounded evidence without granting landing authority", (
 	assert.match(actionPrompt({ kind: "fix", item }), /Never approve or merge/);
 	const slayAction = { kind: "slay", item, items: [item, queueItem({ id: 7, repo: item.repo })] };
 	const slayPrompt = actionPrompt(slayAction);
-	assert.match(slayPrompt, /workflowz this repository wave/);
+	assert.match(slayPrompt, /workflowz the review stage/);
+	assert.match(slayPrompt, /review, repair, and landing/);
 	assert.match(slayPrompt, /Report one terminal outcome per item/);
-	assert.match(slayPrompt, /Never approve or merge/);
+	assert.doesNotMatch(slayPrompt, /requires? (?:two|2) approvals?/i);
 	assert.equal(actionPrompt({ kind: "close" }), undefined);
 });
 

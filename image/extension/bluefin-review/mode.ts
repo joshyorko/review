@@ -73,7 +73,7 @@ export class ReviewMode {
 	items: QueueItem[] = [];
 	cursor = 0;
 	filter = "";
-	hiveOnly = true;
+	hiveOnly = false;
 	/** Hive triage stage the queue is drilled into; undefined is all of it. */
 	hiveLevel?: string;
 	queueError?: string;

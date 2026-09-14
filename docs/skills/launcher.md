@@ -1,6 +1,6 @@
 ---
 name: launcher
-version: "5.1"
+version: "5.2"
 last_updated: 2026-09-14
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
@@ -82,6 +82,10 @@ Kubernetes worker deployment.
 
 `scripts/parse-review-args.sh` is the single parser for OMP review scope.
 Repository, `--pr`, and `--issues` arguments must reach the appliance unchanged.
+`autoslay` / `--autoslay` also passes OMP's built-in `--advisor` flag exactly
+once. The packaged entrypoint repeats that normalization for direct image
+launches, while the appliance configuration maps `modelRoles.advisor` to
+`@default` rather than selecting a provider.
 The optional contributor argument names an isolated instance and its
 `contributor.<org-repo>.env`; Hive still selects work. OMP owns model choice.
 

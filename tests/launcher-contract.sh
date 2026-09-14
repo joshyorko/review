@@ -66,12 +66,12 @@ test_cases=(
   "--issues|--issues"
   "all|--all"
   "--all|--all"
-  "autoslay|--autoslay"
-  "--autoslay|--autoslay"
-  "projectbluefin/review autoslay|--repo projectbluefin/review --autoslay"
-  "projectbluefin/review --autoslay|--repo projectbluefin/review --autoslay"
-  "autoslay projectbluefin/review|--autoslay --repo projectbluefin/review"
-  "--autoslay projectbluefin/review|--autoslay --repo projectbluefin/review"
+  "autoslay|--autoslay --advisor"
+  "--autoslay|--autoslay --advisor"
+  "projectbluefin/review autoslay|--repo projectbluefin/review --autoslay --advisor"
+  "projectbluefin/review --autoslay|--repo projectbluefin/review --autoslay --advisor"
+  "autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
+  "--autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
   "bluefin|--repo bluefin"
   "bluefin #123|--repo bluefin --pr 123"
   "bluefin#123|--repo bluefin --pr 123"
@@ -237,6 +237,7 @@ assert_bluefin_review "projectbluefin/review #463" "--repo projectbluefin/review
 assert_bluefin_review "projectbluefin/review#463" "--repo projectbluefin/review --pr 463"
 assert_bluefin_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
 assert_bluefin_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
+assert_bluefin_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
 
 # --- 3. Hermetic test of bin/omp-review (Source launcher) ----------------------
 
@@ -275,6 +276,7 @@ assert_omp_review "projectbluefin/review #463" "--repo projectbluefin/review --p
 assert_omp_review "projectbluefin/review#463" "--repo projectbluefin/review --pr 463"
 assert_omp_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
 assert_omp_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
+assert_omp_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
 
 # --- 4. Contributor aliases launch independent KVM appliances -----------------
 mkdir -p "$HOME/.config/hive"

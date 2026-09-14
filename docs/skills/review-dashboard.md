@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "4.2"
+version: "4.3"
 last_updated: 2026-09-14
 id: review-dashboard
 one_line_purpose: Maintain the single-screen OMP review workbench.
@@ -40,7 +40,8 @@ doctrine, and `hive-runtime.md` for contributor assignment behavior.
 ## Core Process
 
 1. Trace the key or flag from `dashboard.ts` through `extension.ts` to its prompt.
-2. Keep review-only slay separate from write-capable fix and confirmed mutations.
+2. Keep reviewer agents read-only; one explicit slay action authorizes the
+   coordinator's bounded review, repair, re-review, and landing state machine.
 3. Add a headless interaction test, then exercise the real foreground workbench.
 
 ## Authority
@@ -70,8 +71,8 @@ palette and warm issue palette.
 | `Space` | Toggle the focused item |
 | `A` / `x` | Select the filtered slice / clear selection |
 | `Alt-B` | Select or clear the focused repository group |
-| `s` | Slay selected items through mass autoreview |
-| `Alt-S` | Start mass autoreview (autoslay) on the visible queue |
+| `s` | Slay selected pull requests through review, repair, and landing |
+| `Alt-S` | Autoslay the visible queue through the same lifecycle |
 | `f` | Fix selected items in isolated workspaces |
 | `d` | Inspect bounded diff evidence |
 | `p` | Pause or resume later wave admission |
@@ -89,10 +90,18 @@ palette and warm issue palette.
 
 ## Slay execution
 
-Slay is autonomous mass review, not merge authority. Each selected item runs in
-a fresh `bluefin-reviewer` workpool item; reviewers report findings but never
-approve or merge. `--autoslay` starts the visible bounded slice on launch, and
-`Alt-S` starts it from the active workbench.
+Slay is a maintainer-authorized review, repair, and landing lifecycle. Each
+selected pull request first runs in a fresh `bluefin-reviewer` workpool item;
+reviewers report findings and never mutate, approve, or merge. Findings dispatch
+isolated fixers, and a fixed head receives a fresh reviewer before the
+coordinator may approve and ask GitHub to squash-merge it. Live repository rules
+remain authoritative; slay never removes holds, uses admin bypass, fabricates
+reviewers, force-pushes, or lands a head different from the reviewed head.
+`--autoslay` starts the visible bounded slice on launch and enables OMP's advisor
+on the coordinator session. The advisor role maps to `@default`, so it follows
+the maintainer's selected model without pinning a provider. `Alt-S` starts the
+same lifecycle from the active workbench without changing advisor state.
+
 
 Preserve Hive order by partitioning contiguous repository runs; an interleaved
 repository returns in a later wave rather than jumping ahead. Ask workflowz to
@@ -108,9 +117,10 @@ dispatch. Never replay a confirmed mutation.
 ## Mutations
 
 Capture repository, item number, entity type, and PR head SHA before preview.
-Immediately before mutation, fetch live targets again and reject missing,
-changed, or type-mismatched targets. Execute `gh` with an argument array, never
-a shell-composed command. The extension has no implicit merge authority.
+Immediately before mutation, fetch live targets and repository rules again and
+reject missing, changed, held, review-blocked, or type-mismatched targets.
+Execute `gh` with an argument array, never a shell-composed command. Only a
+maintainer-confirmed slay batch carries merge authority.
 
 ## Policy seam
 
@@ -124,16 +134,20 @@ The registered inspection tools are `hive_workbench_status`,
 
 ## Common Rationalizations
 
-- “Batch is a neutral label.” It hides the product action; call mass autoreview
-  `slay` consistently at every user-facing seam.
+- “Slay is just autoreview.” Review without repair and landing is an incomplete
+  slay; reviewer agents stay read-only while the confirmed coordinator owns the
+  complete lifecycle.
 - “Review needs Hive admission.” Review is read-only and must still work from
   GitHub evidence when Hive is absent; write-capable fix keeps its gates.
 
 ## Red Flags
 
-- A slay prompt uses the default task agent instead of `bluefin-reviewer`.
+- A slay prompt uses the default task agent instead of `bluefin-reviewer` for
+  the review stages.
 - `s`, `Alt-S`, and `--autoslay` enter different execution paths.
-- Review-only slay can approve, merge, push, label, assign, or close.
+- A reviewer agent approves, merges, or edits instead of returning evidence to
+  the coordinator.
+- Slay lands without revalidating the exact reviewed head and live GitHub rules.
 - A repository wave advances before its OMP jobs settle.
 
 ## Verification

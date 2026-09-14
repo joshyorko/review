@@ -146,6 +146,14 @@ parse_review_args() {
       ;;
     esac
   done
+  local has_autoslay=false has_advisor=false parsed
+  for parsed in "${out_args[@]}"; do
+    [[ "$parsed" == --autoslay ]] && has_autoslay=true
+    [[ "$parsed" == --advisor ]] && has_advisor=true
+  done
+  if [[ "$has_autoslay" == true && "$has_advisor" == false ]]; then
+    out_args+=(--advisor)
+  fi
 
   PARSED_REVIEW_ARGS=("${out_args[@]}")
 }

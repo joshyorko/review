@@ -160,12 +160,17 @@ The loop is select, group, and dispatch:
    stages; `/` filters by title, repository, author, label, or number.
 2. `Space` toggles one item, `Alt-B` selects the focused repository group, and
    `A` selects the filtered slice up to the bounded slay limit.
-3. `s` slays the selection through mass autoreview. The extension preserves Hive
-   order, partitions by repository, and asks workflowz to run one bounded
-   `bluefin-reviewer` workpool per repository. `--autoslay` starts that flow on
-   launch.
+3. `s` slays the selection through review, repair, and landing. The extension
+   preserves Hive order, partitions by repository, and asks workflowz to run one
+   bounded `bluefin-reviewer` workpool per repository. Findings dispatch isolated
+   fixers, and every changed head receives a fresh review before the coordinator
+   asks GitHub to squash-merge it under live repository rules. `--autoslay`
+   starts that flow on launch and enables OMP's advisor on the coordinator
+   session; the advisor resolves through `@default`, following the maintainer's
+   selected model.
 4. `p` pauses admission of later repository waves without pretending to suspend
    agents already running.
+
 
 Issue implementation in managed repositories is gated on a fresh GitHub read
 of the policy layer's admission and denial labels. Any closed, unadmitted,
