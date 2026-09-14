@@ -3163,5 +3163,76 @@ test("bounded fallback repairs by name, observes live checks, and never merges",
 	const queue2 = await pi.tools.get("hive_workbench_queue").execute("id", {});
 	const occurrences = queue2.content[0].text.match(/projectbluefin\/review#936/g) ?? [];
 	assert.equal(occurrences.length, 1, "a refresh does not re-add a repaired row");
+});
 
+test("fix button dispatches workflowz wave for selected issues without requiring Hive", async () => {
+	const issues = [
+		{ number: 101, title: "first bug", repo: "projectbluefin/unmanaged" },
+		{ number: 102, title: "second bug", repo: "projectbluefin/unmanaged" },
+	];
+	const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
+		const target = String(url);
+		if (target.includes("/graphql")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					data: {
+						search: {
+							pageInfo: { hasNextPage: false, endCursor: null },
+							nodes: issues.map((it) => ({
+								number: it.number,
+								title: it.title,
+								url: `https://github.com/${it.repo}/issues/${it.number}`,
+								updatedAt: new Date(NOW - 1000).toISOString(),
+								author: { login: "someone" },
+								repository: { nameWithOwner: it.repo },
+								labels: { nodes: [] },
+							})),
+						},
+					},
+				}),
+			};
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+	};
+
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: fetchImpl as unknown as typeof fetch,
+		env: ISOLATED_ENV, // No HIVE_HUB -> Hive is not configured / offline
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	const dashboard = ctx.overlays[0] as unknown as ReviewDashboard;
+
+	// Select both issues using Space on row 0, Down, Space on row 1
+	dashboard.handleInput(" ");
+	dashboard.handleInput("j");
+	dashboard.handleInput(" ");
+
+	// Press 'f' to fix all selected issues
+	pi.messages.length = 0;
+	dashboard.handleInput("f");
+
+	// Yield event loop
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+
+	assert.equal(pi.messages.length, 1, "selected issues dispatched without requiring Hive");
+	assert.match(pi.messages[0], /Implement this repository wave for projectbluefin\/unmanaged/);
+	assert.match(pi.messages[0], /workflowz this repository wave with one fresh isolated agent\(\) handle/);
+	assert.match(pi.messages[0], /one review-ready pull request per issue/);
+	assert.match(pi.messages[0], /SUBAGENT-RULES/);
+	assert.match(pi.messages[0], /Never merge or approve your own pull request/);
+	assert.equal(
+		ctx.notifications.some((n) => n.message.includes("Hive is unavailable")),
+		false,
+		"must not block with 'Hive is unavailable'",
+	);
 });

@@ -201,16 +201,18 @@ export function actionPrompt(
 			: action.kind === "slay"
 				? "workflowz this repository wave with one fresh bluefin-reviewer workpool item per issue or pull request. Do not reuse a worker across repositories."
 				: "workflowz this repository wave with one fresh workpool item per issue or pull request. Do not reuse a worker across repositories.";
+		const issueEvidence = "Evidence is bounded and read once. Inspect the issue description, examine relevant source files and tests, and cite file:line evidence. Never sleep or poll. In a clean workspace, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains `Closes <owner/repo>#<number>`. Never merge or approve your own pull request.";
 		const rules = `<<<SUBAGENT-RULES\n${evidence} ${finish}\nSUBAGENT-RULES>>>`;
+		const issueRules = `<<<SUBAGENT-RULES\n${issueEvidence} ${finish}\nSUBAGENT-RULES>>>`;
 		switch (action.kind) {
 			case "slay":
 				return `Slay this repository wave for ${repository} through mass autoreview:\n\n${list}\n\n${workflow} Use the bluefin-reviewer agent and report findings by severity with file:line evidence. Copy this block verbatim into every worker prompt:\n${rules}`;
 			case "diff":
-				return `Inspect this Hive-ranked repository wave for ${repository}:\n\n${list}\n\n${workflow} Use hive_workbench_diff and report the changed files and concrete risks. Copy this block verbatim into every worker prompt:\n${rules}`;
+				return `Inspect this repository wave for ${repository}:\n\n${list}\n\n${workflow} Use hive_workbench_diff and report the changed files and concrete risks. Copy this block verbatim into every worker prompt:\n${rules}`;
 			case "fix":
 				return selected.every((item) => item.type === "issue")
-					? `Implement this Hive-ranked repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\n${workflow} Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${rules}`
-					: `Fix this Hive-ranked repository wave for ${repository}:\n\n${list}\n\n${workflow} Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${rules}`;
+					? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\n${workflow} Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${issueRules}`
+					: `Fix this repository wave for ${repository}:\n\n${list}\n\n${workflow} Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${rules}`;
 		}
 	}
 
@@ -354,10 +356,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const batchBlocker = async (kind: RepositoryBatchKind, items: readonly QueueItem[]): Promise<string | undefined> => {
 		if (kind === "slay" || kind === "diff") return undefined;
-		const hive = await mode.refreshHive();
-		if (!hive.online) return "Hive is unavailable; browse-only mode disables dispatch";
-		const unranked = items.find((item) => mode.priorityFor(item)?.hiveRank === undefined);
-		if (unranked) return `Hive did not rank ${unranked.repo}#${unranked.id}; browse-only mode disables dispatch`;
 		const claimed = items.find((item) => mode.claimFor(item));
 		if (claimed) return `${claimed.repo}#${claimed.id} is already claimed by ${mode.claimFor(claimed)}`;
 		if (kind !== "fix") return undefined;
