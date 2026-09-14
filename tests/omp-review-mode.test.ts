@@ -1151,13 +1151,12 @@ test("dashboard supports multi-selection with space, x to clear, and batch actio
 	// Select item 42 directly without pressing j
 	dashboard.handleInput(" ");
 	assert.ok(dashboard.render(120).some((row) => row.includes("2 selected")));
-	// Pressing r dispatches with both items in items array
+	// Pressing r on multiple selected items natively dispatches autoslay (slay) mode with both items
 	dashboard.handleInput("r");
-	assert.equal(action.kind, "review");
+	assert.equal(action.kind, "slay");
 	assert.equal(action.items.length, 2);
 	assert.equal(action.items[0].id, 7);
 	assert.equal(action.items[1].id, 42);
-
 	// Clear with x
 	dashboard.handleInput("x");
 	assert.ok(!dashboard.render(120).some((row) => row.includes("selected)")));

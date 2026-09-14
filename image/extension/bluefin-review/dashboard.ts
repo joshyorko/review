@@ -71,7 +71,7 @@ const HELP: readonly string[] = [
 	"  u                refetch the queue now",
 	"  /                search/filter by title, repo, author, label, number",
 	"                   (in search: type to live-filter, tab/space to select, A to select all)",
-	"  enter / r        review the selected pull request",
+	"  enter / r        review selected pull request (autoslay mode on batch selection)",
 	"  d                inspect its bounded diff",
 	"  D                update documentation enforcing agentic docs system",
 	"  a                verify checks, approve, squash merge",
@@ -796,7 +796,12 @@ export class ReviewDashboard {
 			case "r":
 			case "return":
 			case "enter":
-				this.done({ kind: "review", item, items });
+				// With multiple items selected, batch review natively operates in autoslay mode
+				if (items && items.length > 1) {
+					this.done({ kind: "slay", item, items });
+				} else {
+					this.done({ kind: "review", item, items });
+				}
 				return;
 			case "d":
 				this.done({ kind: "diff", item, items });
