@@ -71,6 +71,7 @@ palette and warm issue palette.
 | `A` / `x` | Select the filtered slice / clear selection |
 | `Alt-B` | Select or clear the focused repository group |
 | `s` | Slay selected items through mass autoreview |
+| `Alt-S` | Start mass autoreview (autoslay) on the visible queue |
 | `f` | Fix selected items in isolated workspaces |
 | `d` | Inspect bounded diff evidence |
 | `p` | Pause or resume later wave admission |

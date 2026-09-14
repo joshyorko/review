@@ -212,6 +212,9 @@ run_just review-queue --issues
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
 log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-review-' "$podman_log"
 log_contains 'ghcr.io/projectbluefin/review:stable --issues' "$podman_log"
+run_just review-queue autoslay
+[[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
+log_contains 'ghcr.io/projectbluefin/review:stable --autoslay' "$podman_log"
 
 scenario="review repositories use independent microVM state"
 run_just review-queue owner/repo

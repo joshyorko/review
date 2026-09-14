@@ -475,8 +475,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const startSlay = async (ctx: CtxLike) => {
-		const chosen = mode.chosenItems();
-		const items = (chosen.length > 0 ? chosen : mode.visibleItems()).slice(0, BATCH_LIMIT);
+		const items = mode.slayableItems(BATCH_LIMIT);
 		if (items.length === 0) {
 			ctx.ui.notify("No queue items available to slay", "warning");
 			return;
@@ -666,7 +665,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`${hiveFailureStatus(hive.error)}; browse-only mode`, "warning");
 		}
 		await refreshQueue(ctx);
-		mode.restore(persisted);
+		if (persisted?.id) mode.selectById(persisted.repo, persisted.id);
 
 		const recoveredBatch = readPersistedBatch(ctx);
 		if (recoveredBatch) {

@@ -21,6 +21,7 @@ import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression } 
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
+import { RAW_KEYS, canonicalKey, rawKeyMatcher } from "../image/extension/bluefin-review/keys.ts";
 import { ReviewDashboard, parseMouseEvent } from "../image/extension/bluefin-review/dashboard.ts";
 import { STALE_AFTER_MS, queueAge, renderRail, statusSegment } from "../image/extension/bluefin-review/rail.ts";
 import { SessionTrace } from "../image/extension/bluefin-review/session.ts";
@@ -947,6 +948,43 @@ test("workbench Tab switches entity mode and Alt+B selects one repository group"
 	assert.match(dashboard.render(120).join("\n"), /HIVE WORKBENCH/);
 });
 
+test("dashboard Alt-S triggers autoslay on visible items or chosen selection", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const mode = new ReviewMode({ org: "projectbluefin" });
+	mode.items = [
+		queueItem({ id: 1, repo: "projectbluefin/a", ciStatus: "success" }),
+		queueItem({ id: 2, repo: "projectbluefin/b", ciStatus: "failure" }),
+	];
+	mode.reprioritize();
+	let emittedAction: DashboardAction | undefined;
+	const dashboard = new ReviewDashboard(
+		{ requestRender() {} },
+		PLAIN_PAINTER,
+		mode,
+		(action) => { emittedAction = action; },
+		() => {},
+		20,
+	);
+	t.after(() => dashboard.dispose());
+
+	// Alt-S with no prior selection slays all visible items
+	dashboard.handleInput("alt+s");
+	assert.ok(emittedAction);
+	assert.equal(emittedAction.kind, "slay");
+	assert.equal(emittedAction.item.id, 1);
+	assert.equal(emittedAction.items?.length, 2);
+
+	// Alt-S with specific chosen item slays only chosen items
+	emittedAction = undefined;
+	mode.toggleSelected("projectbluefin/b#2");
+	dashboard.handleInput("\u001bs"); // legacy escape code
+	assert.ok(emittedAction);
+	assert.equal(emittedAction.kind, "slay");
+	assert.equal(emittedAction.item.id, 2);
+	assert.equal(emittedAction.items?.length, 1);
+});
+
 test("repository waves preserve interleaved Hive order and pause survives session persistence", () => {
 	const mode = new ReviewMode({ org: "projectbluefin" });
 	mode.items = [
@@ -1457,6 +1495,45 @@ test("--autoslay starts mass autoreview on launch", async () => {
 	assert.equal(pi.messages.length, 1);
 	assert.match(pi.messages[0], /bluefin-reviewer/);
 	assert.match(pi.messages[0], /Never approve or merge/);
+});
+
+test("--autoslay falls back to unranked items when Hive-only filter has 0 ranked items", async () => {
+	const hubEnv = { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" };
+	const hubFetch = async (url, init) => {
+		const target = String(url);
+		if (target.includes("/graphql")) return fakeFetch([])(url, init);
+		const path = target.replace("https://hive.example", "");
+		const body =
+			path === "/api/v1/status"
+				? { hub: "online", actionable_items: 0 }
+				: path === "/api/contribute/queue"
+					? { queue: [] }
+					: { groups: [] };
+		return { ok: true, status: 200, statusText: "OK", json: async () => body };
+	};
+
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: hubFetch,
+		env: hubEnv,
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1, "autoslay should dispatch on unranked items when hive-only has 0 items");
+	assert.match(pi.messages[0], /bluefin-reviewer/);
+});
+
+test("RAW_KEYS normalizes Alt-S and Alt-B chords", () => {
+	assert.equal(canonicalKey("\u001bs", rawKeyMatcher), "alt+s");
+	assert.equal(canonicalKey("\u001bb", rawKeyMatcher), "alt+b");
+	assert.equal(canonicalKey("\u001bu", rawKeyMatcher), "alt+u");
 });
 
 test("comment action previews once, revalidates live state, executes argv, and persists a receipt", async () => {
