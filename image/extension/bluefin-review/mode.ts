@@ -81,6 +81,7 @@ export class ReviewMode {
 	fetchedAt = 0;
 	loading = false;
 	selectedKeys = new Set<string>();
+	isBlueberry = false;
 	paused = false;
 	batchProgress?: WorkbenchBatchProgress;
 
@@ -296,6 +297,10 @@ export class ReviewMode {
 		this.selectedKeys.clear();
 		return this.queueMode;
 	}
+	setBlueberry(isBlueberry: boolean): void {
+		this.isBlueberry = isBlueberry;
+	}
+
 
 	toggleSelected(key?: string): boolean {
 		const targetKey = key ?? this.selectedKey();

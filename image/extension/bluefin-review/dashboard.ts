@@ -744,6 +744,7 @@ export class ReviewDashboard {
 			case "c":
 				this.emitAction({ kind: "comment", item, items });
 				return;
+				return;
 			case "f":
 				this.emitAction({ kind: "fix", item, items });
 				return;

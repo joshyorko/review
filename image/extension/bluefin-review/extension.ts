@@ -15,6 +15,7 @@ import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
 import { type ToolHost, registerTools } from "./tools.ts";
 import { hiveFailureStatus } from "./hive.ts";
+import { BLUEBERRY_WELCOME_MESSAGE, assertBlueberryActionAllowed, checkBlueberryPermission } from "./blueberry.ts";
 import { GENERIC_WORKBENCH_POLICY, managedPolicyFor, type WorkbenchPolicy } from "./policy.ts";
 import {
 	commentInvocation,
@@ -165,7 +166,11 @@ export function isImplementationAction(action: DashboardAction): boolean {
  * the review contributes to what the project decided matters, and an agent that
  * is not told the link cannot honor it.
  */
-export function actionPrompt(action: DashboardAction, priority?: Priority): string | undefined {
+export function actionPrompt(
+	action: DashboardAction,
+	priority?: Priority,
+	options?: { isBlueberry?: boolean; model?: string },
+): string | undefined {
 	if (action.kind === "close" || action.kind === "scope" || action.kind === "comment" || action.kind === "reference") {
 		return undefined;
 	}
@@ -216,6 +221,11 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 			? "Use workflowz with one fresh bluefin-reviewer agent for this item."
 			: "Use workflowz with one fresh workpool item for this item.";
 	switch (action.kind) {
+		case "review":
+			if (options?.isBlueberry) {
+				return `Review ${cite(action.item)} in Blueberry advisory mode. Read the bounded diff with bluefin_review_diff and the recorded pipeline with bluefin_review_trace before judging. As a non-maintainer Blueberry contributor, donate your review to the project as an advisory submission. Format your review with \`[Blueberry Advisory Review | Model: ${options.model ?? "default"}]\` and submit it as a GitHub pull request comment or advisory review (\`gh pr review ${action.item.id} --repo ${action.item.repo} --comment -b "..."\`). Never approve, merge, or apply landing labels. ${authority} ${finish}`;
+			}
+			return `Review ${cite(action.item)}. Read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence, covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not. ${authority} ${finish}`;
 		case "slay":
 			return `Slay ${cite(item)} through autoreview. Use hive_workbench_diff and hive_workbench_trace, then report findings by severity with file:line evidence. ${workflow} ${authority} ${finish}`;
 		case "diff":
@@ -509,6 +519,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		const capturedItems = action.items && action.items.length > 0 ? [...action.items] : [action.item];
 
+		if (mode.isBlueberry) {
+			const guard = assertBlueberryActionAllowed(action.kind, true);
+			if (!guard.allowed) {
+				ctx.ui.notify(guard.reason ?? "Action restricted in Blueberry Mode", "warning");
+				return;
+			}
+		}
+
 		if (action.kind === "comment") {
 			if (commentInFlight) {
 				ctx.ui.notify("A comment action is already in progress", "warning");
@@ -588,7 +606,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			return;
 		}
-
 
 		if (action.kind === "slay" || action.kind === "fix" || action.kind === "diff") {
 			activeCtx = ctx;
