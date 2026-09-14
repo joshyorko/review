@@ -81,6 +81,7 @@ export class ReviewMode {
 	fetchedAt = 0;
 	loading = false;
 	selectedKeys = new Set<string>();
+	currentUserLogin?: string;
 	viewMode: "default" | "ci" = "default";
 	isBlueberry = false;
 	paused = false;
@@ -162,7 +163,11 @@ export class ReviewMode {
 	 * refetch, a hub poll, a new receipt on disk — ends by calling it.
 	 */
 	reprioritize(now = Date.now()): void {
-		this.ranked = prioritize(this.items, { hive: this.hive, now });
+		this.ranked = prioritize(this.items, {
+			hive: this.hive,
+			now,
+			currentUserLogin: this.currentUserLogin,
+		});
 	}
 
 	/**

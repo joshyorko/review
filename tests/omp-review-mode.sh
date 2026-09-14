@@ -28,5 +28,5 @@ if ((node_major < 24)); then
   exit 1
 fi
 
-node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts tests/ci_mode.test.ts
+node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts tests/ci_mode.test.ts tests/reviewer_requests.test.ts
 bash tests/launcher-contract.sh

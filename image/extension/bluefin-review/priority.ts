@@ -12,13 +12,13 @@ import type { HiveSnapshot } from "./hive.ts";
 
 export type PriorityCategory =
 	| "hive"
+	| "personal_request"
 	| "ready-for-human-merge"
 	| "review"
 	| "resolve-conflicts"
 	| "fix-ci"
 	| "investigate"
 	| "triage";
-
 export interface Priority {
 	category: PriorityCategory;
 	source: "hive" | "local";
@@ -33,8 +33,8 @@ export interface Priority {
 export interface PrioritizeContext {
 	hive: HiveSnapshot;
 	now: number;
+	currentUserLogin?: string;
 }
-
 export interface PrioritizedQueue {
 	items: QueueItem[];
 	priorities: ReadonlyMap<string, Priority>;
@@ -51,12 +51,13 @@ export interface PrioritizedQueue {
  */
 const MAINTAINER_ORDER: Record<PriorityCategory, number> = {
 	hive: 0,
-	"ready-for-human-merge": 1,
-	review: 2,
-	"resolve-conflicts": 3,
-	"fix-ci": 4,
-	investigate: 5,
-	triage: 6,
+	personal_request: 1,
+	"ready-for-human-merge": 2,
+	review: 3,
+	"resolve-conflicts": 4,
+	"fix-ci": 5,
+	investigate: 6,
+	triage: 7,
 };
 
 const STALE_AFTER_MS = 21 * 24 * 60 * 60 * 1000;
@@ -91,6 +92,9 @@ export function isDependencyBump(item: QueueItem): boolean {
  */
 export function categorize(item: QueueItem, context: PrioritizeContext): { category: PriorityCategory; reason: string } {
 	if (item.type === "issue") return { category: "triage", reason: "issue awaiting triage" };
+	if (context.currentUserLogin && item.requestedReviewers && item.requestedReviewers.includes(context.currentUserLogin)) {
+		return { category: "personal_request", reason: "review requested from you" };
+	}
 	if (item.draft) return { category: "investigate", reason: "draft, waiting on its author" };
 	if (item.ciStatus === "failure") return { category: "fix-ci", reason: "checks failing" };
 	if (item.mergeState === "dirty") return { category: "resolve-conflicts", reason: "conflicts with the base" };
@@ -200,4 +204,19 @@ export function prioritize(items: readonly QueueItem[], context: PrioritizeConte
 		source: "hive",
 		hiveRanked,
 	};
+}
+/** Counts per category, for the headline. */
+export function categoryTally(priorities: ReadonlyMap<string, Priority>): Record<PriorityCategory, number> {
+	const tally: Record<PriorityCategory, number> = {
+		hive: 0,
+		personal_request: 0,
+		"ready-for-human-merge": 0,
+		review: 0,
+		"resolve-conflicts": 0,
+		"fix-ci": 0,
+		investigate: 0,
+		triage: 0,
+	};
+	for (const priority of priorities.values()) tally[priority.category] += 1;
+	return tally;
 }

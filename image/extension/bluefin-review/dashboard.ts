@@ -28,7 +28,8 @@ export type DashboardAction =
 	| { kind: "reference"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "scope" }
 	| { kind: "read_pr"; item: QueueItem }
-	| { kind: "ci_mode" };
+	| { kind: "ci_mode" }
+	| { kind: "request_reviewer"; item: QueueItem; items?: QueueItem[] };
 
 export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "s", label: "slay" },
@@ -799,6 +800,9 @@ export class ReviewDashboard {
 			case "C":
 				this.mode.toggleViewMode();
 				this.tui.requestRender();
+				return;
+			case "R":
+				this.done({ kind: "request_reviewer", item, items });
 				return;
 			default:
 				break;
