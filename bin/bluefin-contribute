@@ -106,7 +106,9 @@ fi
 # arguments would put credential values in this process's argv instead.
 export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 export GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-
+export COPILOT_GITHUB_TOKEN="${COPILOT_GITHUB_TOKEN:-${GH_TOKEN:-}}"
+export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-${COPILOT_GITHUB_TOKEN:-}}"
+export COPILOT_INTEGRATION_ID="${COPILOT_INTEGRATION_ID:-copilot-developer-cli}"
 first_launch=0
 if [[ ! -d "$runtime_home" ]]; then
   first_launch=1

@@ -72,7 +72,8 @@ mkdir -p "$launcher_scratch/omp-state" "$launcher_scratch/home"
 cat >"$launcher_scratch/bin/apptainer" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"$APPTAINER_CALL_ARGV"
-printf 'GH_TOKEN=%s\nGITHUB_TOKEN=%s\n' "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" >"$APPTAINER_CALL_ENV"
+printf 'GH_TOKEN=%s\nGITHUB_TOKEN=%s\nCOPILOT_INTEGRATION_ID=%s\nCOPILOT_GITHUB_TOKEN=%s\n' \
+  "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${COPILOT_INTEGRATION_ID:-}" "${COPILOT_GITHUB_TOKEN:-}" >"$APPTAINER_CALL_ENV"
 exit 0
 EOF
 chmod +x "$launcher_scratch/bin/apptainer"
@@ -123,6 +124,8 @@ set -e
 [[ -e "$launcher_scratch/argv" ]] || fail "bin/bluefin-contribute must invoke apptainer once a token resolves"
 grep -q '^GH_TOKEN=faketoken1234567890faketoken1234567890$' "$launcher_scratch/env" || fail "resolved GH_TOKEN must reach the contained process"
 grep -q '^GITHUB_TOKEN=faketoken1234567890faketoken1234567890$' "$launcher_scratch/env" || fail "resolved GITHUB_TOKEN must reach the contained process"
+grep -q '^COPILOT_INTEGRATION_ID=copilot-developer-cli$' "$launcher_scratch/env" || fail "COPILOT_INTEGRATION_ID must reach the contained process to prevent model filtering"
+grep -q '^COPILOT_GITHUB_TOKEN=faketoken1234567890faketoken1234567890$' "$launcher_scratch/env" || fail "COPILOT_GITHUB_TOKEN must reach the contained process"
 grep -q -- '--env' "$launcher_scratch/argv" && fail "credential values must never be passed as --env arguments"
 echo "contribute-contract: bin/bluefin-contribute GH_TOKEN handling holds"
 

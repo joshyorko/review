@@ -12,6 +12,9 @@ if [[ -n "${AGENT_BACKEND:-}" && "${AGENT_BACKEND}" != omp ]]; then
   exit 64
 fi
 export AGENT_BACKEND=omp
+export COPILOT_INTEGRATION_ID="${COPILOT_INTEGRATION_ID:-copilot-developer-cli}"
+export COPILOT_GITHUB_TOKEN="${COPILOT_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-${COPILOT_GITHUB_TOKEN:-}}"
 
 # The attach client must describe the terminal that actually renders tmux.
 # The base ships the full terminfo database, so the caller's TERM normally
