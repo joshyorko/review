@@ -187,10 +187,10 @@ export function actionPrompt(
 		return parts.length > 0 ? ` [queue read: ${parts.join(" ")} — revalidate live before mutating]` : "";
 	};
 	const authority = priority?.hiveRank === undefined
-		? "Hive did not rank this item; do not infer priority."
-		: `Hive ranked this work (${priority.reason}); preserve that intent.`;
+		? ""
+		: `Hive ranked this work (${priority.reason}); preserve that intent. `;
 	const evidence = "Evidence is bounded and read once. Start with `gh pr diff <n> --repo <r> --name-only`; inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Treat `merge=dirty` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose `--ours`/`--theirs` wholesale. Revalidate live state before any comment, label, assignment, close, or push.";
-	const finish = "Report one terminal outcome per item, then stop. The Hive workbench owns the next repository wave. Never approve or merge.";
+	const finish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
 
 	if (selected.length > 1) {
 		const repository = selected[0]!.repo;
