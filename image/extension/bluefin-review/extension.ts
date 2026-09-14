@@ -34,6 +34,18 @@ export {
 	mutationSignature,
 	checkMergeAuthority,
 } from "./mutations.ts";
+export {
+	type SlayDeliveryState,
+	type VerificationStatus,
+	type SlayDeliveryResult,
+	type SlayDeliveryOptions,
+	SLAY_DELIVERY_STATES,
+	VERIFICATION_STATUSES,
+	classifyVerificationOutcome,
+	resolveSlayDelivery,
+	formatSlayFinalResponse,
+	formatDraftPrBody,
+} from "./state.ts";
 export const STATE_ENTRY = "com.projectbluefin.review.selection";
 
 /** Queue refetch cadence. GitHub search is rate limited; the state poll is local. */
@@ -146,6 +158,15 @@ export function managedPolicyFor(repo: string): ManagedRepoPolicy | undefined {
 }
 
 /**
+ * Slay delivery invariant (#475): Never strand completed implementation in
+ * an anonymous dirty working tree because repository verification tooling is
+ * unavailable in the Review appliance. Classify missing tooling separately from
+ * a failing test.
+ */
+export const SLAY_DELIVERY_RULE =
+	"Every Slay run that modifies a repository must terminate in a durable, discoverable delivery state. Completed implementation must never be left only as an anonymous dirty working tree because repository-local verification tooling is unavailable. Classify verification into three states: VERIFICATION_PASSED (focused test executed and passed), VERIFICATION_FAILED (test executed and returned failure; never downgrade a real test failure to unavailable), and VERIFICATION_UNAVAILABLE (required toolchain or runtime is missing, e.g. python, pytest, poetry, uv, cargo, rustc, ruby, bundle, mvn, gradle, or node command not found; a missing executable is not evidence that tests fail). Inability to execute local verification because the appliance lacks the runtime does NOT mean implementation is unfinished. Outcomes: (1) If implementation is complete and verification passed: commit scoped changes, push, and open a normal pull request against the default branch (PR_OPENED_VERIFIED). (2) If implementation is complete but repository verification tooling is unavailable: commit scoped changes, push, and open a draft pull request with --draft (DRAFT_PR_OPENED_VERIFICATION_UNAVAILABLE). The draft PR body must explicitly state what verification succeeded (e.g. git diff --check), what verification was not run and why (naming the missing runtime/tool), state that repository CI will provide authoritative verification, include Closes <owner/repo>#<number>, and must never claim unexecuted tests passed or be auto-merged. If repository policy forbids opening unverified draft PRs, preserve the branch and commit durably and report that policy as the blocker. (3) If implementation is genuinely incomplete or unsafe: do not represent it as complete; if no useful implementation exists, report no changes and an evidenced blocker (BLOCKED_NO_CHANGES); if useful partial work exists but cannot safely be proposed as a PR, preserve a named branch and commit durably (PARTIAL_WORK_PRESERVED) and report its exact location. The final response must always explicitly report: repository, workspace path, branch, commit SHA, PR URL, verification performed, verification unavailable or failed, remaining blocker, and whether the working tree is clean.";
+
+/**
  * Classify whether a DashboardAction constitutes an implementation action.
  * Write-capable issue actions ('slay', 'fix', 'docs') must be gated on admission.
  * Read-only actions ('review', 'diff', 'reference', 'scope', 'close',
@@ -243,7 +264,7 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		// Observed live: the parent copied each item line but dropped the surrounding
 		// rules, so seven subagents ran without them. A rule a parent must paraphrase
 		// is a rule that does not arrive; give it a delimited block to copy instead.
-		const subagentBrief = `${evidenceRule} ${noPollRule} ${conflictRule} Skip formatters, linters, and project-wide suites; run only the smallest existing test covering what changed. The bracketed queue read travels with your item: it is triage evidence, and you revalidate head and checks live before any approve, merge, label, or push.`;
+		const subagentBrief = `${evidenceRule} ${noPollRule} ${conflictRule} Skip formatters, linters, and project-wide suites; run only the smallest existing test covering what changed. ${SLAY_DELIVERY_RULE} The bracketed queue read travels with your item: it is triage evidence, and you revalidate head and checks live before any approve, merge, label, or push.`;
 		const fanOut = `Work all ${batch.length} items with ONE subagent per issue/PR, capped at a maximum of 7 concurrent subagents at any time (queue remaining items and dispatch as running subagents complete; review/landing agents do not count against the 7 cap). Each subagent owns exactly its assigned item and its bracketed queue read. A subagent that stops instead of waiting frees its concurrency slot. Every subagent prompt MUST end with the block between the markers below, copied verbatim — do not summarise or omit it:\n<<<SUBAGENT-RULES\n${subagentBrief}\nSUBAGENT-RULES>>>\nReport per item — what you did, the evidence, and the outcome.`;
 
 		const protocol = `${snapshotRule}\n\n${conflictRule}\n\n${fanOut}\n\n${mutationRule}\n\n${autonomousRule}`;
@@ -262,7 +283,7 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 				// Issues have no diff to land. Slaying one means producing the change
 				// it asked for and handing it to a human as a pull request.
 				return batch.every((entry) => entry.type === "issue")
-					? `Close out the following ${batch.length} queued issues by shipping the work, one pull request per issue:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each issue: do not dismiss or conclude no_work_needed if there is an actionable bug, missing test, broken script, or underlying root cause to address. Diagnose the root cause, implement the fix, run the smallest existing test covering the changed surface, and open a pull request that closes it with \`Closes <owner/repo>#<number>\` in the body. Someone else reviews and merges: never merge your own, never approve. Only if an issue has genuinely already been merged by an earlier PR on the default branch: confirm that commit and close the issue directly with \`gh issue close <number> --repo <owner/repo> --reason completed --comment "<evidence of prior merged PR>"\`. Where an issue cannot be finished as asked, open no pull request for it and report an evidenced finding instead, naming what blocked you.\n\n${protocol}`
+					? `Close out the following ${batch.length} queued issues by shipping the work, one pull request per issue:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each issue: do not dismiss or conclude no_work_needed if there is an actionable bug, missing test, broken script, or underlying root cause to address. Diagnose the root cause, implement the fix, run the smallest existing test covering the changed surface, and open a pull request that closes it with \`Closes <owner/repo>#<number>\` in the body. Someone else reviews and merges: never merge your own, never approve. Only if an issue has genuinely already been merged by an earlier PR on the default branch: confirm that commit and close the issue directly with \`gh issue close <number> --repo <owner/repo> --reason completed --comment "<evidence of prior merged PR>"\`. Where an issue cannot be finished as asked, open no pull request for it and report an evidenced finding instead, naming what blocked you. ${SLAY_DELIVERY_RULE}\n\n${protocol}`
 					: `Execute the full fix-and-merge landing pass on the following ${batch.length} selected items:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each PR: review the diff, patch defects directly at source, fix failing tests, verify with focused contract tests, re-kick flaky CI checks (\`gh run rerun <run-id> --failed\`), and once checks are green, approve and squash-merge the pull request with \`gh pr review <id> --repo <repo> --approve\` and \`gh pr merge <id> --repo <repo> --squash\` (or \`--auto --squash\` plus \`lgtm\` label if governed by a merge queue ruleset). Do not leave actionable PRs unmerged once green. Once landed or blocked, immediately proceed to the next assignment.\n\n${protocol}`;
 			default:
 				break;
@@ -283,7 +304,7 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 			// Issues have no diff to land. Slaying one means producing the change it
 			// asked for and handing it to a human as a pull request.
 			return action.item.type === "issue"
-				? `Close out ${cite(action.item)} by implementing and shipping the solution. Do not dismiss or conclude with no_work_needed if there is any actionable bug, test failure, code change, documentation fix, or underlying root cause to address. Inspect the code, diagnose the problem, implement the fix, run the smallest existing test that covers the changed surface, then open a pull request against the default branch whose body contains \`Closes ${action.item.repo}#${action.item.id}\`. Someone else reviews and merges it: never merge your own, never approve it. Only if the issue has already been resolved or closed by an existing merged PR or commit on the default branch: confirm the evidence and close the issue directly with \`gh issue close ${action.item.id} --repo ${action.item.repo} --reason completed --comment "<evidence of live resolution or commit>"\`. Otherwise implement what it asks for and open the PR.${hive}`
+				? `Close out ${cite(action.item)} by implementing and shipping the solution. Do not dismiss or conclude with no_work_needed if there is any actionable bug, test failure, code change, documentation fix, or underlying root cause to address. Inspect the code, diagnose the problem, implement the fix, run the smallest existing test that covers the changed surface, then open a pull request against the default branch whose body contains \`Closes ${action.item.repo}#${action.item.id}\`. Someone else reviews and merges it: never merge your own, never approve it. Only if the issue has already been resolved or closed by an existing merged PR or commit on the default branch: confirm the evidence and close the issue directly with \`gh issue close ${action.item.id} --repo ${action.item.repo} --reason completed --comment "<evidence of live resolution or commit>"\`. Otherwise implement what it asks for and open the PR. ${SLAY_DELIVERY_RULE}${hive}`
 				: `Execute the full fix-and-merge landing pass on ${cite(action.item)}${stateOf(action.item)}: review the diff, patch what is broken, fix and commit any failing tests or defects, ensure contract tests pass, re-kick transient CI failures (\`gh run rerun <run-id> --failed\`), and when checks are already green, approve and land the pull request: approve with \`gh pr review ${action.item.id} --repo ${action.item.repo} --approve\`, squash-merge with \`gh pr merge ${action.item.id} --repo ${action.item.repo} --squash\` (or enable auto-merge \`gh pr merge ${action.item.id} --repo ${action.item.repo} --auto --squash\` if using a merge queue), and apply \`lgtm\` label if required by branch protection/rulesets (\`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-label lgtm\`). ${snapshotRule} ${conflictRule} ${evidenceRule} ${noPollRule} Once merged or if blocked by policy, advance immediately to the next queue assignment.${hive}`;
 		case "snapshot":
 			return `Submit the Argo workflow in deploy/argo-review-fsdk-build.yaml to build and push a container snapshot of the current tree, then report the workflow name and how to watch it.`;

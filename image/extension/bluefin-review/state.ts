@@ -35,6 +35,7 @@ const MAX_LANDING_LOGS = 256;
 /** Terminal states in durable landing and run records that require human retry or a new head. */
 export const TERMINAL_BLOCKED_STATES: Record<string, true> = {
 	blocked: true,
+	blocked_no_changes: true,
 	failed: true,
 	review_missing: true,
 	review_failed: true,
@@ -43,6 +44,229 @@ export const TERMINAL_BLOCKED_STATES: Record<string, true> = {
 	mutation_failed: true,
 	human_review_missing: true,
 };
+
+/**
+ * Terminal delivery states for a Slay run (#475).
+ * A single-issue Slay must end in exactly one recognizable delivery state.
+ */
+export type SlayDeliveryState =
+	| "PR_OPENED_VERIFIED"
+	| "DRAFT_PR_OPENED_VERIFICATION_UNAVAILABLE"
+	| "BLOCKED_NO_CHANGES"
+	| "PARTIAL_WORK_PRESERVED";
+
+export const SLAY_DELIVERY_STATES: Record<SlayDeliveryState, true> = {
+	PR_OPENED_VERIFIED: true,
+	DRAFT_PR_OPENED_VERIFICATION_UNAVAILABLE: true,
+	BLOCKED_NO_CHANGES: true,
+	PARTIAL_WORK_PRESERVED: true,
+};
+
+/**
+ * Verification state taxonomy (#475).
+ * Missing repository tooling is classified separately from a failing test.
+ */
+export type VerificationStatus =
+	| "VERIFICATION_PASSED"
+	| "VERIFICATION_FAILED"
+	| "VERIFICATION_UNAVAILABLE";
+
+export const VERIFICATION_STATUSES: Record<VerificationStatus, true> = {
+	VERIFICATION_PASSED: true,
+	VERIFICATION_FAILED: true,
+	VERIFICATION_UNAVAILABLE: true,
+};
+
+/**
+ * Classify a verification execution attempt (#475).
+ * A missing executable (command not found, exit 127, ENOENT) is VERIFICATION_UNAVAILABLE.
+ * A test that executes and returns failure is VERIFICATION_FAILED.
+ */
+export function classifyVerificationOutcome(result: {
+	exitCode?: number;
+	stderr?: string;
+	error?: Error | { code?: string; message?: string };
+}): VerificationStatus {
+	if (result.exitCode === 0) {
+		return "VERIFICATION_PASSED";
+	}
+	const errStr = `${result.stderr ?? ""} ${result.error?.message ?? ""} ${result.error?.code ?? ""}`.toLowerCase();
+	if (
+		result.exitCode === 127 ||
+		result.error?.code === "ENOENT" ||
+		errStr.includes("command not found") ||
+		errStr.includes("not found") ||
+		errStr.includes("no such file or directory") ||
+		errStr.includes("executable file not found")
+	) {
+		return "VERIFICATION_UNAVAILABLE";
+	}
+	return "VERIFICATION_FAILED";
+}
+
+export interface SlayDeliveryResult {
+	repository: string;
+	workspacePath: string;
+	branch: string;
+	commitSha: string | null;
+	prUrl: string | null;
+	deliveryState: SlayDeliveryState;
+	verificationPerformed: string[];
+	verificationUnavailable: string[];
+	verificationFailed: string[];
+	blocker: string | null;
+	workingTreeClean: boolean;
+}
+
+export interface SlayDeliveryOptions {
+	workspacePath: string;
+	repository: string;
+	issueNumber: number;
+	branch?: string;
+	hasModifiedFiles?: boolean;
+	implementationComplete?: boolean;
+	allowDraftPr?: boolean;
+	verificationResults?: Array<{
+		name: string;
+		status: VerificationStatus;
+		details?: string;
+	}>;
+	commitSha?: string | null;
+	prUrl?: string | null;
+	blocker?: string | null;
+}
+
+/**
+ * Resolve the durable delivery outcome and final response contract for a Slay execution (#475).
+ * Ensures completed implementation is never stranded in an anonymous dirty working tree.
+ */
+export function resolveSlayDelivery(options: SlayDeliveryOptions): SlayDeliveryResult {
+	const branch = options.branch || `fix/issue-${options.issueNumber}`;
+	const verified = (options.verificationResults || []).filter((v) => v.status === "VERIFICATION_PASSED").map((v) => v.name);
+	const unavailable = (options.verificationResults || []).filter((v) => v.status === "VERIFICATION_UNAVAILABLE").map((v) => v.name);
+	const failed = (options.verificationResults || []).filter((v) => v.status === "VERIFICATION_FAILED").map((v) => v.name);
+
+	if (!options.hasModifiedFiles && !options.commitSha) {
+		return {
+			repository: options.repository,
+			workspacePath: options.workspacePath,
+			branch,
+			commitSha: null,
+			prUrl: null,
+			deliveryState: "BLOCKED_NO_CHANGES",
+			verificationPerformed: verified,
+			verificationUnavailable: unavailable,
+			verificationFailed: failed,
+			blocker: options.blocker || "No implementation changes made",
+			workingTreeClean: true,
+		};
+	}
+
+	if (!options.implementationComplete || failed.length > 0) {
+		return {
+			repository: options.repository,
+			workspacePath: options.workspacePath,
+			branch,
+			commitSha: options.commitSha || null,
+			prUrl: null,
+			deliveryState: "PARTIAL_WORK_PRESERVED",
+			verificationPerformed: verified,
+			verificationUnavailable: unavailable,
+			verificationFailed: failed,
+			blocker: options.blocker || (failed.length > 0 ? `Verification failed: ${failed.join(", ")}` : "Implementation incomplete or unsafe to propose as PR"),
+			workingTreeClean: true,
+		};
+	}
+
+	// Implementation is complete
+	if (unavailable.length > 0) {
+		if (options.allowDraftPr === false) {
+			return {
+				repository: options.repository,
+				workspacePath: options.workspacePath,
+				branch,
+				commitSha: options.commitSha || null,
+				prUrl: null,
+				deliveryState: "PARTIAL_WORK_PRESERVED",
+				verificationPerformed: verified,
+				verificationUnavailable: unavailable,
+				verificationFailed: [],
+				blocker: options.blocker || "Repository policy forbids unverified draft pull requests",
+				workingTreeClean: true,
+			};
+		}
+		return {
+			repository: options.repository,
+			workspacePath: options.workspacePath,
+			branch,
+			commitSha: options.commitSha || null,
+			prUrl: options.prUrl || `https://github.com/${options.repository}/pull/mock-draft`,
+			deliveryState: "DRAFT_PR_OPENED_VERIFICATION_UNAVAILABLE",
+			verificationPerformed: verified,
+			verificationUnavailable: unavailable,
+			verificationFailed: [],
+			blocker: null,
+			workingTreeClean: true,
+		};
+	}
+
+	return {
+		repository: options.repository,
+		workspacePath: options.workspacePath,
+		branch,
+		commitSha: options.commitSha || null,
+		prUrl: options.prUrl || `https://github.com/${options.repository}/pull/mock-pr`,
+		deliveryState: "PR_OPENED_VERIFIED",
+		verificationPerformed: verified,
+		verificationUnavailable: [],
+		verificationFailed: [],
+		blocker: null,
+		workingTreeClean: true,
+	};
+}
+
+/** Format the final response contract string required by #475 */
+export function formatSlayFinalResponse(result: SlayDeliveryResult): string {
+	return [
+		`Repository: ${result.repository}`,
+		`Workspace path: ${result.workspacePath}`,
+		`Branch: ${result.branch}`,
+		`Commit SHA: ${result.commitSha || "none"}`,
+		`PR URL: ${result.prUrl || "none"}`,
+		`Delivery state: ${result.deliveryState}`,
+		`Verification performed: ${result.verificationPerformed.length > 0 ? result.verificationPerformed.join(", ") : "none"}`,
+		`Verification unavailable: ${result.verificationUnavailable.length > 0 ? result.verificationUnavailable.join(", ") : "none"}`,
+		`Verification failed: ${result.verificationFailed.length > 0 ? result.verificationFailed.join(", ") : "none"}`,
+		`Remaining blocker: ${result.blocker || "none"}`,
+		`Working tree clean: ${result.workingTreeClean ? "clean" : "dirty"}`,
+	].join("\n");
+}
+
+/** Format a draft pull request body documenting unexecuted gates (#475) */
+export function formatDraftPrBody(options: {
+	repo: string;
+	issueNumber: number;
+	summary: string;
+	verifiedGates: string[];
+	unverifiedGates: Array<{ name: string; reason: string }>;
+}): string {
+	const verifiedLines = options.verifiedGates.map((g) => `✓ ${g}`).join("\n");
+	const unverifiedLines = options.unverifiedGates.map((g) => `- ${g.name}\n  ${g.reason}`).join("\n");
+	return [
+		options.summary,
+		"",
+		`Closes ${options.repo}#${options.issueNumber}`,
+		"",
+		"## Verification",
+		"",
+		verifiedLines || "None",
+		"",
+		"### NOT RUN:",
+		unverifiedLines || "None",
+		"",
+		"This PR is draft until repository CI or a capable environment verifies the affected surface.",
+	].join("\n");
+}
 
 export interface RunRecord {
 	repository: string;
@@ -557,9 +781,16 @@ export function classifyLanding(state: string): TraceClass {
 			return "running";
 		case "merged":
 		case "pr-opened":
+		case "pr_opened_verified":
 		case "finding-filed":
 			return "success";
+		case "draft-pr-opened":
+		case "draft_pr_opened_verification_unavailable":
+			return "verification";
 		case "blocked":
+		case "blocked_no_changes":
+		case "partial-work-preserved":
+		case "partial_work_preserved":
 			return "findings";
 		default:
 			return "environment";

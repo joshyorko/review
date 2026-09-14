@@ -8,6 +8,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +17,7 @@ import test from "node:test";
 import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/extension/bluefin-review/glyphs.ts";
 import { renderSpanTree, traceToText, visibleSpanIds, traceClassBadge, type TraceClass } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { buildPipelineSpans, readStateSnapshot, landingStateStatus, runStateStatus, reviewEventStatus, classifyRunState, classifyReviewEvent } from "../image/extension/bluefin-review/state.ts";
+import { buildPipelineSpans, readStateSnapshot, landingStateStatus, runStateStatus, reviewEventStatus, classifyRunState, classifyReviewEvent, classifyLanding } from "../image/extension/bluefin-review/state.ts";
 import { appendFileSync } from "node:fs";
 import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
@@ -34,6 +35,13 @@ import {
 	checkMergeAuthority,
 	generateNativeCommand,
 	mutationSignature,
+	SLAY_DELIVERY_RULE,
+	SLAY_DELIVERY_STATES,
+	VERIFICATION_STATUSES,
+	classifyVerificationOutcome,
+	resolveSlayDelivery,
+	formatSlayFinalResponse,
+	formatDraftPrBody,
 } from "../image/extension/bluefin-review/extension.ts";
 
 const NOW = 1_800_000_000_000;
@@ -3443,4 +3451,245 @@ test("bounded fallback repairs by name, observes checks and state, and never mer
 	assert.match(approve42, /Stop and report instead of merging/);
 	const approve936 = actionPrompt({ kind: "approve", item: queueItem({ id: 936, labels: ["hold", "review_required"] }) });
 	assert.match(approve936, /Stop and report instead of merging/);
+});
+
+test("RED: slay must not strand completed work when local verification is unavailable (#475)", () => {
+	// 1. Construct a fixture repository
+	const fixtureDir = mkdtempSync(join(tmpdir(), "slay-fixture-"));
+	try {
+		execSync("git init -b main", { cwd: fixtureDir, stdio: "ignore" });
+		execSync('git config user.name "Test Committer"', { cwd: fixtureDir, stdio: "ignore" });
+		execSync('git config user.email "test@example.com"', { cwd: fixtureDir, stdio: "ignore" });
+		writeFileSync(join(fixtureDir, "calculator.py"), "def add(a, b):\n    return 0\n");
+		execSync("git add calculator.py && git commit -m 'Initial commit'", { cwd: fixtureDir, stdio: "ignore" });
+
+		// 2. The requested implementation is deterministic: fix calculator add
+		writeFileSync(join(fixtureDir, "calculator.py"), "def add(a, b):\n    return a + b\n");
+
+		// 3. Source editing succeeds and a cheap repository-independent check succeeds
+		let diffCheckPassed = false;
+		try {
+			execSync("git diff --check", { cwd: fixtureDir, stdio: "ignore" });
+			diffCheckPassed = true;
+		} catch {
+			diffCheckPassed = false;
+		}
+		assert.equal(diffCheckPassed, true, "git diff --check must pass cleanly");
+
+		// 4. The focused test command references a deliberately unavailable executable
+		let testResult: { exitCode?: number; stderr?: string; error?: Error };
+		try {
+			execSync("nonexistent_pytest_runner tests/test_calculator.py", {
+				cwd: fixtureDir,
+				stdio: "pipe",
+			});
+			testResult = { exitCode: 0 };
+		} catch (error: any) {
+			testResult = {
+				exitCode: error.status ?? 127,
+				stderr: error.stderr ? String(error.stderr) : "command not found: nonexistent_pytest_runner",
+				error,
+			};
+		}
+
+		// Verify that missing executable is classified as VERIFICATION_UNAVAILABLE, NOT VERIFICATION_FAILED
+		const verificationStatus = classifyVerificationOutcome(testResult);
+		assert.equal(
+			verificationStatus,
+			"VERIFICATION_UNAVAILABLE",
+			"missing test runtime/executable must be classified as VERIFICATION_UNAVAILABLE, not failed test",
+		);
+
+		// Current / old Slay contract failure:
+		// Slay would refuse to create a commit/PR and terminate leaving modified files in a dirty working tree.
+		const dirtyStatusBeforeDelivery = execSync("git status --porcelain", { cwd: fixtureDir, encoding: "utf-8" }).trim();
+		assert.match(dirtyStatusBeforeDelivery, /M calculator\.py/, "dirty working tree existed before delivery resolution");
+
+		// Under the new delivery contract:
+		// Delivery MUST NOT leave an anonymous dirty working tree without a durable deliverable.
+		// Commit scoped changes, branch, and open draft PR
+		const branchName = "fix/issue-475";
+		execSync(`git checkout -b ${branchName}`, { cwd: fixtureDir, stdio: "ignore" });
+		execSync("git add calculator.py", { cwd: fixtureDir, stdio: "ignore" });
+		execSync("git commit -m 'Fix add function (#475)'", { cwd: fixtureDir, stdio: "ignore" });
+		const commitSha = execSync("git rev-parse HEAD", { cwd: fixtureDir, encoding: "utf-8" }).trim();
+
+		const deliveryResult = resolveSlayDelivery({
+			workspacePath: fixtureDir,
+			repository: "projectbluefin/review",
+			issueNumber: 475,
+			branch: branchName,
+			hasModifiedFiles: true,
+			implementationComplete: true,
+			allowDraftPr: true,
+			verificationResults: [
+				{ name: "git diff --check", status: "VERIFICATION_PASSED" },
+				{ name: "nonexistent_pytest_runner tests/test_calculator.py", status: "VERIFICATION_UNAVAILABLE" },
+			],
+			commitSha,
+			prUrl: "https://github.com/projectbluefin/review/pull/476",
+		});
+
+		assert.equal(deliveryResult.deliveryState, "DRAFT_PR_OPENED_VERIFICATION_UNAVAILABLE");
+		assert.equal(deliveryResult.commitSha, commitSha);
+		assert.equal(deliveryResult.branch, branchName);
+		assert.equal(deliveryResult.prUrl, "https://github.com/projectbluefin/review/pull/476");
+		assert.deepEqual(deliveryResult.verificationPerformed, ["git diff --check"]);
+		assert.deepEqual(deliveryResult.verificationUnavailable, ["nonexistent_pytest_runner tests/test_calculator.py"]);
+		assert.deepEqual(deliveryResult.verificationFailed, []);
+		assert.equal(deliveryResult.blocker, null);
+
+		// Verify working tree is clean
+		const dirtyStatusAfter = execSync("git status --porcelain", { cwd: fixtureDir, encoding: "utf-8" }).trim();
+		assert.equal(dirtyStatusAfter, "", "working tree must be clean after durable delivery");
+		assert.equal(deliveryResult.workingTreeClean, true);
+
+		// Verify draft PR body records unexecuted verification gates and required notices
+		const draftPrBody = formatDraftPrBody({
+			repo: "projectbluefin/review",
+			issueNumber: 475,
+			summary: "Fix add function",
+			verifiedGates: deliveryResult.verificationPerformed,
+			unverifiedGates: [
+				{
+					name: "focused pytest",
+					reason: "nonexistent_pytest_runner unavailable in Review appliance",
+				},
+			],
+		});
+		assert.match(draftPrBody, /Closes projectbluefin\/review#475/);
+		assert.match(draftPrBody, /✓ git diff --check/);
+		assert.match(draftPrBody, /NOT RUN:/);
+		assert.match(draftPrBody, /focused pytest/);
+		assert.match(draftPrBody, /This PR is draft until repository CI or a capable environment verifies/);
+
+		// Verify final response contract
+		const finalReport = formatSlayFinalResponse(deliveryResult);
+		assert.match(finalReport, /Repository: projectbluefin\/review/);
+		assert.match(finalReport, new RegExp(`Workspace path: ${fixtureDir}`));
+		assert.match(finalReport, /Branch: fix\/issue-475/);
+		assert.match(finalReport, new RegExp(`Commit SHA: ${commitSha}`));
+		assert.match(finalReport, /PR URL: https:\/\/github\.com\/projectbluefin\/review\/pull\/476/);
+		assert.match(finalReport, /Delivery state: DRAFT_PR_OPENED_VERIFICATION_UNAVAILABLE/);
+		assert.match(finalReport, /Verification performed: git diff --check/);
+		assert.match(finalReport, /Verification unavailable: nonexistent_pytest_runner tests\/test_calculator\.py/);
+		assert.match(finalReport, /Remaining blocker: none/);
+		assert.match(finalReport, /Working tree clean: clean/);
+	} finally {
+		rmSync(fixtureDir, { recursive: true, force: true });
+	}
+});
+
+test("slay delivery: contract outcomes cover passed, failed, incomplete, and policy blocked cases (#475)", () => {
+	// 1. Successful implementation and successful verification opens a normal PR
+	const verified = resolveSlayDelivery({
+		workspacePath: "/repo/workspace",
+		repository: "projectbluefin/review",
+		issueNumber: 100,
+		hasModifiedFiles: true,
+		implementationComplete: true,
+		verificationResults: [{ name: "pytest", status: "VERIFICATION_PASSED" }],
+		commitSha: "abc1234",
+		prUrl: "https://github.com/projectbluefin/review/pull/101",
+	});
+	assert.equal(verified.deliveryState, "PR_OPENED_VERIFIED");
+	assert.equal(verified.blocker, null);
+
+	// 2. Executed failing test remains a real failure and is not downgraded to unavailable
+	const executedFailed = classifyVerificationOutcome({
+		exitCode: 1,
+		stderr: "FAILED tests/test_calc.py::test_add - AssertionError",
+	});
+	assert.equal(executedFailed, "VERIFICATION_FAILED");
+
+	const failedDelivery = resolveSlayDelivery({
+		workspacePath: "/repo/workspace",
+		repository: "projectbluefin/review",
+		issueNumber: 100,
+		hasModifiedFiles: true,
+		implementationComplete: true,
+		verificationResults: [
+			{ name: "pytest", status: executedFailed },
+			{ name: "missing_linter", status: "VERIFICATION_UNAVAILABLE" },
+		],
+		commitSha: "abc1234",
+	});
+	assert.equal(failedDelivery.deliveryState, "PARTIAL_WORK_PRESERVED");
+	assert.equal(failedDelivery.prUrl, null, "failing verification must never open a PR");
+	assert.match(failedDelivery.blocker ?? "", /Verification failed/);
+
+	// 3. Genuinely incomplete work is preserved and not represented as complete
+	const incomplete = resolveSlayDelivery({
+		workspacePath: "/repo/workspace",
+		repository: "projectbluefin/review",
+		issueNumber: 100,
+		hasModifiedFiles: true,
+		implementationComplete: false,
+		commitSha: "abc1234",
+	});
+	assert.equal(incomplete.deliveryState, "PARTIAL_WORK_PRESERVED");
+	assert.equal(incomplete.prUrl, null);
+	assert.match(incomplete.blocker ?? "", /incomplete/i);
+
+	// 4. No changes made results in BLOCKED_NO_CHANGES
+	const noChanges = resolveSlayDelivery({
+		workspacePath: "/repo/workspace",
+		repository: "projectbluefin/review",
+		issueNumber: 100,
+		hasModifiedFiles: false,
+		implementationComplete: false,
+		blocker: "Cannot reproduce issue",
+	});
+	assert.equal(noChanges.deliveryState, "BLOCKED_NO_CHANGES");
+	assert.equal(noChanges.commitSha, null);
+	assert.equal(noChanges.prUrl, null);
+
+	// 5. Repository policy forbidding unverified draft PR preserves work and reports policy blocker
+	const policyBlocked = resolveSlayDelivery({
+		workspacePath: "/repo/workspace",
+		repository: "projectbluefin/review",
+		issueNumber: 100,
+		hasModifiedFiles: true,
+		implementationComplete: true,
+		allowDraftPr: false,
+		verificationResults: [{ name: "pytest", status: "VERIFICATION_UNAVAILABLE" }],
+		commitSha: "abc1234",
+	});
+	assert.equal(policyBlocked.deliveryState, "PARTIAL_WORK_PRESERVED");
+	assert.equal(policyBlocked.prUrl, null);
+	assert.match(policyBlocked.blocker ?? "", /Repository policy/i);
+
+	// 6. Trace class mapping: draft-pr-opened maps to verification (UNVERIFIED badge)
+	assert.equal(classifyLanding("draft-pr-opened"), "verification");
+	assert.equal(classifyLanding("draft_pr_opened_verification_unavailable"), "verification");
+	assert.equal(traceClassBadge(classifyLanding("draft-pr-opened")), "UNVERIFIED");
+	assert.equal(classifyLanding("pr_opened_verified"), "success");
+	assert.equal(classifyLanding("blocked_no_changes"), "findings");
+	assert.equal(classifyLanding("partial_work_preserved"), "findings");
+});
+
+test("slay issue prompt enforces delivery contract across single and batch issue slaying (#475)", () => {
+	const issue = queueItem({ id: 475, type: "issue", repo: "projectbluefin/review", title: "Slay delivery invariant" });
+
+	// Single issue slay prompt
+	const singlePrompt = actionPrompt({ kind: "slay", item: issue });
+	assert.match(singlePrompt, /DRAFT_PR_OPENED_VERIFICATION_UNAVAILABLE/);
+	assert.match(singlePrompt, /VERIFICATION_UNAVAILABLE/);
+	assert.match(singlePrompt, /VERIFICATION_FAILED/);
+	assert.match(singlePrompt, /VERIFICATION_PASSED/);
+	assert.match(singlePrompt, /anonymous dirty working tree/);
+	assert.match(singlePrompt, /PARTIAL_WORK_PRESERVED/);
+	assert.match(singlePrompt, /PR_OPENED_VERIFIED/);
+	assert.match(singlePrompt, /workspace path/i);
+	assert.match(singlePrompt, /working tree is clean/i);
+
+	// Batch issue slay prompt
+	const batch = [issue, queueItem({ id: 476, type: "issue", repo: "projectbluefin/review" })];
+	const batchPrompt = actionPrompt({ kind: "slay", item: issue, items: batch });
+	assert.match(batchPrompt, /DRAFT_PR_OPENED_VERIFICATION_UNAVAILABLE/);
+	assert.match(batchPrompt, /VERIFICATION_UNAVAILABLE/);
+	assert.match(batchPrompt, /anonymous dirty working tree/);
+	assert.match(batchPrompt, /PARTIAL_WORK_PRESERVED/);
+	assert.match(batchPrompt, /SUBAGENT-RULES/);
+	assert.match(batchPrompt, /one pull request per issue/);
 });
