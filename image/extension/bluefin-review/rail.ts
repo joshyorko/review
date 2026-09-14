@@ -104,14 +104,14 @@ export function workbenchProgressBar(mode: ReviewMode, painter: Painter, width: 
 	const selected = painter.fg("text", `${mode.selectedKeys.size} selected`);
 	const pause = mode.paused ? painter.fg("warning", "PAUSED") : painter.fg("success", "RUNNING");
 	const progress = mode.batchProgress;
-	const batch = progress
+	const slay = progress
 		? painter.fg(
 				progress.state === "blocked" ? "error" : progress.state === "paused" ? "warning" : "accent",
 				`${progress.state.toUpperCase()} ${progress.completedItems}/${progress.totalItems} terminal · ${progress.runningJobs} active · ${progress.failedJobs} failed · wave ${progress.wave}/${progress.waves} ${progress.repository}`,
 			)
-		: painter.fg("dim", "no active batch");
+		: painter.fg("dim", "no active slay");
 	return truncateToWidth(
-		`${connection} ${painter.fg("dim", GLYPH.dot)} ${painter.fg(source.role, source.text)} ${painter.fg("dim", GLYPH.dot)} ${selected} ${painter.fg("dim", GLYPH.dot)} ${pause} ${painter.fg("dim", GLYPH.dot)} ${batch}`,
+		`${connection} ${painter.fg("dim", GLYPH.dot)} ${painter.fg(source.role, source.text)} ${painter.fg("dim", GLYPH.dot)} ${selected} ${painter.fg("dim", GLYPH.dot)} ${pause} ${painter.fg("dim", GLYPH.dot)} ${slay}`,
 		width,
 	);
 }

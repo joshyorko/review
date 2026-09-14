@@ -107,7 +107,7 @@ The OMP extension is one permanent workbench, not a second dashboard layered
 over the prompt. Its queue and live Dagger-style execution trace stay on the
 same screen. The top gauge shows mode, queue position, repository, outcomes,
 freshness, Hive ordering, and actionable count; the bottom gauge shows Hive
-connectivity, selection count, and the active workflowz batch. It registers no
+connectivity, selection count, and the active workflowz slay. It registers no
 slash commands.
 
 | Key | Action |
@@ -116,8 +116,9 @@ slash commands.
 | `j` / `k` | Next / previous queue item |
 | `space` | Select / deselect the focused item |
 | `A` / `x` | Select the filtered slice / clear selection |
-| `b` | Dispatch selected items in repository waves |
-| `alt+b` | Select / clear the focused repository batch |
+| `s` | Slay selected items through mass autoreview |
+| `alt+s` | Slay the selected or visible slice from anywhere |
+| `alt+b` | Select / clear the focused repository group |
 | `f` | Fix selected items in isolated workspaces |
 | `d` | Inspect bounded diff evidence |
 | `p` | Pause / resume starting later repository waves |
@@ -133,9 +134,9 @@ slash commands.
 | `?` | Show the in-app key guide |
 | `q` / `Esc` | Close the workbench |
 
-Batch dispatch preserves Hive order, partitions selected work by repository,
-and asks OMP workflowz to run each repository as one bounded workpool. Later
-repository waves do not start until the prior repository settles, avoiding
+Slay preserves Hive order, partitions selected work by repository, and asks OMP
+workflowz to run each repository as one bounded `bluefin-reviewer` workpool.
+Later repository waves do not start until the prior repository settles, avoiding
 cross-repository context churn. OMP owns agent execution, workpool concurrency,
 task state, tools, sessions, and cancellation; the extension only owns Hive's
 queue projection, durable intent, GitHub mutation guards, and presentation.
@@ -152,9 +153,10 @@ single-screen workbench.
 ## Using the OMP workbench
 
 The queue and execution trace remain visible beside the prompt. Navigate and
-select work with the keys above; `b` dispatches the selected repository waves
-through workflowz. Review, comments, issue changes, and fixes are distinct
-actions. A clean review is not permission to merge. The
+select work with the keys above; `s` slays the selected repository waves through
+workflowz, and `--autoslay` starts the visible slice immediately. Slay is mass
+autoreview: it reports findings but never approves or merges. Comments, issue
+changes, and fixes remain distinct actions. The
 [workbench guide](docs/skills/review-dashboard.md) documents the authority model.
 
 ## Run a worker

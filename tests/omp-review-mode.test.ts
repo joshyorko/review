@@ -859,8 +859,8 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	dashboard.handleInput("r");
 	assert.equal(refreshes, 1);
 
-	dashboard.handleInput("b");
-	assert.equal(action.kind, "review");
+	dashboard.handleInput("s");
+	assert.equal(action.kind, "slay");
 	assert.equal(action.item.id, 7);
 
 	dashboard.handleInput("\r");
@@ -876,7 +876,7 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 
 	dashboard.handleInput("?");
 	assert.ok(frame().some((row) => row.includes("comment")), "help lists supported actions");
-	assert.ok(!frame().some((row) => row.includes("slay")), "landing actions are absent");
+	assert.ok(frame().some((row) => row.includes("slay")), "help exposes mass autoreview");
 });
 test("dashboard interactive search live-filters and selects items by title", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
@@ -996,7 +996,7 @@ test("comment plans reject pull requests without a preview head", () => {
 	assert.equal(validateCommentActionPlan(plan, [target]).valid, false);
 	assert.equal(validateCommentActionPlan({ ...plan, targets: [target] }, [target]).valid, false);
 });
-test("dashboard supports multi-selection with space, x to clear, and batch action dispatch", (t) => {
+test("dashboard supports multi-selection with space, x to clear, and slay dispatch", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const mode = new ReviewMode({ org: "projectbluefin" });
@@ -1032,9 +1032,9 @@ test("dashboard supports multi-selection with space, x to clear, and batch actio
 	// Select item 42 directly without pressing j
 	dashboard.handleInput(" ");
 	assert.ok(dashboard.render(120).some((row) => row.includes("2 selected")));
-	// Review stays review for a batch; it never escalates into landing.
-	dashboard.handleInput("b");
-	assert.equal(action.kind, "review");
+	// Slay sends every selected item through mass autoreview.
+	dashboard.handleInput("s");
+	assert.equal(action.kind, "slay");
 	assert.equal(action.items.length, 2);
 	assert.equal(action.items[0].id, 7);
 	assert.equal(action.items[1].id, 42);
@@ -1388,8 +1388,8 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
 
 	assert.deepEqual(pi.labels, ["Hive Workbench"]);
-	assert.deepEqual([...pi.shortcuts.keys()].sort(), ["alt+b", "alt+u"]);
-	assert.deepEqual([...pi.flags.keys()].sort(), ["all", "issues", "pr", "repo", "skip-repo"]);
+	assert.deepEqual([...pi.shortcuts.keys()].sort(), ["alt+b", "alt+s", "alt+u"]);
+	assert.deepEqual([...pi.flags.keys()].sort(), ["all", "autoslay", "issues", "pr", "repo", "skip-repo"]);
 	assert.deepEqual([...pi.tools.keys()].sort(), [
 		"hive_workbench_diff",
 		"hive_workbench_lookup",
@@ -1435,10 +1435,28 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.equal(ctx.overlays.length, 1, "Alt+B does not stack an already-open workbench");
 	assert.equal(pi.messages.length, 0, "opening the workbench never dispatches work");
 	const workbench = ctx.overlays[0];
-	workbench.handleInput("b");
+	workbench.handleInput("A");
+	workbench.handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(pi.messages.length, 0, "unranked GitHub evidence cannot be dispatched");
-	assert.ok(ctx.notifications.some((notification) => /browse-only mode disables dispatch/.test(notification.message)));
+	assert.equal(pi.messages.length, 1, "slay dispatches without requiring Hive ranking");
+	assert.match(pi.messages[0], /bluefin-reviewer/);
+	assert.ok(!ctx.notifications.some((notification) => /browse-only mode disables dispatch/.test(notification.message)));
+});
+
+test("--autoslay starts mass autoreview on launch", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /bluefin-reviewer/);
+	assert.match(pi.messages[0], /Never approve or merge/);
 });
 
 test("comment action previews once, revalidates live state, executes argv, and persists a receipt", async () => {
@@ -1523,11 +1541,11 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	await review.whenStarted();
 	const dashboard = ctx.overlays[0];
 	dashboard.handleInput("A");
-	dashboard.handleInput("b");
+	dashboard.handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 
 	assert.equal(pi.messages.length, 1);
-	assert.match(pi.messages[0], /^Review this Hive-ranked repository wave for projectbluefin\/a:/m);
+	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through mass autoreview:/m);
 	assert.match(pi.messages[0], /workflowz this repository wave/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/b/);
@@ -1578,17 +1596,17 @@ test("a failed workflowz job blocks later repository waves", async () => {
 	await review.whenStarted();
 	const dashboard = ctx.overlays[0];
 	dashboard.handleInput("A");
-	dashboard.handleInput("b");
+	dashboard.handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	ctx.asyncJobs.recent = [{ id: "failed-worker", status: "failed", startTime: Date.now() + 1 }];
 	await pi.events.get("agent_end")({}, ctx);
 
 	assert.equal(pi.messages.length, 1, "a failed wave never advances to the next repository");
-	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	assert.equal(batch.state, "blocked");
-	assert.match(batch.error, /workflowz job.*failed/);
+	const slay = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(slay.state, "blocked");
+	assert.match(slay.error, /workflowz job.*failed/);
 });
-test("restart blocks interrupted batches and never replays confirmed comments", async () => {
+test("restart blocks interrupted slays and never replays confirmed comments", async () => {
 	const item = { id: 42, repo: "projectbluefin/review", title: "recover safely", headSha: "a".repeat(40) };
 	const commentPlan = createCommentActionPlan([
 		{ repo: item.repo, number: item.id, type: "pull_request", headSha: item.headSha },
@@ -1604,8 +1622,8 @@ test("restart blocks interrupted batches and never replays confirmed comments", 
 				customType: BATCH_ENTRY,
 				data: {
 					version: 1,
-					id: "batch-old",
-					kind: "review",
+					id: "slay-old",
+					kind: "slay",
 					waves: [{ repo: item.repo, items: [{ ...item, type: "pr" }] }],
 					currentWave: 0,
 					completedItems: 0,
@@ -1635,12 +1653,12 @@ test("restart blocks interrupted batches and never replays confirmed comments", 
 	assert.ok(ctx.overlays[0].render(240).some((line) => line.includes("BLOCKED")));
 });
 
-test("repository-wave prompts invoke workflowz with bounded evidence", () => {
+test("slay prompts invoke bluefin-reviewer workpools with bounded evidence", () => {
 	const item = queueItem();
 	const sibling = queueItem({ id: 7, repo: item.repo });
-	const review = actionPrompt({ kind: "review", item, items: [item, sibling] });
+	const slay = actionPrompt({ kind: "slay", item, items: [item, sibling] });
 	const fix = actionPrompt({ kind: "fix", item, items: [item, sibling] });
-	for (const prompt of [review, fix]) {
+	for (const prompt of [slay, fix]) {
 		assert.match(prompt, /workflowz this repository wave/);
 		assert.match(prompt, /Never sleep or poll/);
 		assert.match(prompt, /Evidence is bounded and read once/);
@@ -1648,7 +1666,7 @@ test("repository-wave prompts invoke workflowz with bounded evidence", () => {
 		assert.doesNotMatch(prompt, /--json [\w,]*\bbody\b/);
 		assert.doesNotMatch(prompt, /maximum of 7|approve and merge|fix-and-merge/);
 	}
-	assert.match(review, /fresh workpool item per issue or pull request/);
+	assert.match(slay, /fresh bluefin-reviewer workpool item per issue or pull request/);
 	assert.match(fix, /fresh isolated agent\(\) handle per issue or pull request/);
 });
 
@@ -1956,14 +1974,15 @@ test("a hive-only session with a broken hub still fails visibly and concisely", 
 
 test("action prompts use bounded evidence without granting landing authority", () => {
 	const item = queueItem();
-	assert.match(actionPrompt({ kind: "review", item }), /hive_workbench_diff/);
-	assert.match(actionPrompt({ kind: "review", item }), /hive_workbench_trace/);
+	assert.match(actionPrompt({ kind: "slay", item }), /hive_workbench_diff/);
+	assert.match(actionPrompt({ kind: "slay", item }), /hive_workbench_trace/);
+	assert.match(actionPrompt({ kind: "slay", item }), /bluefin-reviewer/);
 	assert.match(actionPrompt({ kind: "fix", item }), /Never approve or merge/);
-	const batchAction = { kind: "review", item, items: [item, queueItem({ id: 7, repo: item.repo })] };
-	const batchPrompt = actionPrompt(batchAction);
-	assert.match(batchPrompt, /workflowz this repository wave/);
-	assert.match(batchPrompt, /Report one terminal outcome per item/);
-	assert.match(batchPrompt, /Never approve or merge/);
+	const slayAction = { kind: "slay", item, items: [item, queueItem({ id: 7, repo: item.repo })] };
+	const slayPrompt = actionPrompt(slayAction);
+	assert.match(slayPrompt, /workflowz this repository wave/);
+	assert.match(slayPrompt, /Report one terminal outcome per item/);
+	assert.match(slayPrompt, /Never approve or merge/);
 	assert.equal(actionPrompt({ kind: "close" }), undefined);
 });
 
@@ -2878,14 +2897,14 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 
 	// 6. Every visible keymap action has mouse parity.
 	const lines = dashboard.render(400);
-	const keymapLineIdx = lines.findIndex((line) => line.includes("batch") && line.includes("comment"));
+	const keymapLineIdx = lines.findIndex((line) => line.includes("slay") && line.includes("comment"));
 	assert.ok(keymapLineIdx > 0, "keymap bar rendered");
 	const keymapText = lines[keymapLineIdx];
 
-	const bPos = keymapText.indexOf("b batch");
-	assert.ok(bPos > 0);
-	dashboard.handleClick(bPos + 1, keymapLineIdx);
-	assert.equal(lastAction?.kind, "review", "clicking batch dispatches review only");
+	const sPos = keymapText.indexOf("s slay");
+	assert.ok(sPos > 0);
+	dashboard.handleClick(sPos + 1, keymapLineIdx);
+	assert.equal(lastAction?.kind, "slay", "clicking slay dispatches autoreview");
 
 	const cPos = keymapText.indexOf("c comment");
 	assert.ok(cPos > 0);
@@ -2963,8 +2982,8 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 	assert.equal(mode.cursor, 0, "active turn allows click row selection");
 	dashboard.handleClick(250, 4);
 	assert.equal(dashboard.currentPane, "trace", "active turn allows pane focus");
-	dashboard.handleClick(bPos + 1, keymapLineIdx);
-	assert.equal(lastAction?.kind, "review", "active turn allows action click dispatch");
+	dashboard.handleClick(sPos + 1, keymapLineIdx);
+	assert.equal(lastAction?.kind, "slay", "active turn allows slay dispatch");
 	mode.session.endTool("active-turn-tool", { content: [{ type: "text", text: "done" }] }, false, NOW + 100);
 	mode.session.endTurn(NOW + 200);
 

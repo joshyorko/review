@@ -20,7 +20,7 @@ import { type RenderedRow, type Span, defaultExpanded, findSpan, hasChildren, re
 import { fitToWidth, truncateToWidth, visibleWidth } from "./width.ts";
 export type DashboardAction =
 	| { kind: "close" }
-	| { kind: "review"; item: QueueItem; items?: QueueItem[] }
+	| { kind: "slay"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "diff"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "comment"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "fix"; item: QueueItem; items?: QueueItem[] }
@@ -28,7 +28,7 @@ export type DashboardAction =
 	| { kind: "scope" }
 
 export const DASHBOARD_KEYS: readonly RailKey[] = [
-	{ chord: "b", label: "batch" },
+	{ chord: "s", label: "slay" },
 	{ chord: "c", label: "comment" },
 	{ chord: "f", label: "fix" },
 	{ chord: "space", label: "select" },
@@ -63,7 +63,7 @@ const HELP: readonly string[] = [
 	"  H / L            toggle Hive-only / step Hive stages",
 	"  o / r            change repository / refetch",
 	"  /                filter by title, repo, author, label, or number",
-	"  b                review selected item(s) as repository waves",
+	"  s                slay selected item(s) through mass autoreview",
 	"  c                comment on selected item(s)",
 	"  f                fix selected item(s) in isolated workspaces",
 	"  d                inspect bounded diff evidence",
@@ -550,8 +550,8 @@ export class ReviewDashboard {
 
 	private triggerChordAction(chord: string, col: number, startCol: number, chordWidth: number): void {
 		switch (chord) {
-			case "b":
-				this.executeKey("b");
+			case "s":
+				this.executeKey("s");
 				break;
 			case "c":
 				this.executeKey("c");
@@ -738,8 +738,8 @@ export class ReviewDashboard {
 		const items = chosenItems.length > 0 ? chosenItems : undefined;
 		const item = items ? items[0]! : activeItem;
 		switch (key) {
-			case "b":
-				this.emitAction({ kind: "review", item, items });
+			case "s":
+				this.emitAction({ kind: "slay", item, items });
 				return;
 			case "c":
 				this.emitAction({ kind: "comment", item, items });

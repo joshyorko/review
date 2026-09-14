@@ -83,7 +83,7 @@ published.
 ## Running it
 
 State lives under `/home/bluefin`: OMP sessions, logs, caches, provider
-credentials, and workbench batch intent. The launcher derives a persistent
+credentials, and workbench slay intent. The launcher derives a persistent
 volume from the selected repository and a unique container name per invocation,
 so `bluefin review org/repo` and `bluefin review org/repo2` can run concurrently
 without sharing session or workspace state. Set `BLUEFIN_INSTANCE` to split the
@@ -155,18 +155,20 @@ The loop is select, group, and dispatch:
 
 1. `Tab` switches pull-request and issue mode. `L` steps through Hive's own
    stages; `/` filters by title, repository, author, label, or number.
-2. `Space` toggles one item, `Alt-B` selects the focused repository, and `A`
-   selects the filtered slice up to the bounded batch limit.
-3. `b` dispatches the selection. The extension preserves Hive order, partitions
-   by repository, and asks workflowz to run one bounded workpool per repository.
+2. `Space` toggles one item, `Alt-B` selects the focused repository group, and
+   `A` selects the filtered slice up to the bounded slay limit.
+3. `s` slays the selection through mass autoreview. The extension preserves Hive
+   order, partitions by repository, and asks workflowz to run one bounded
+   `bluefin-reviewer` workpool per repository. `--autoslay` starts that flow on
+   launch.
 4. `p` pauses admission of later repository waves without pretending to suspend
    agents already running.
 
 Issue implementation in managed repositories is gated on a fresh GitHub read
 of the policy layer's admission and denial labels. Any closed, unadmitted,
-held, blocked, unreadable, or incompletely read issue rejects the whole batch.
-The dispatched agents may prepare changes and pull requests, but they never
-approve or merge.
+held, blocked, unreadable, or incompletely read issue rejects the whole
+selection. The dispatched agents may prepare changes and pull requests, but they
+never approve or merge.
 
 Credentials are inherited by name (`--env GH_TOKEN`), never passed as arguments
 and never baked into a layer. The mode resolves a token from `GH_TOKEN`,

@@ -9,7 +9,7 @@ import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
 import type { Priority } from "./priority.ts";
-import { ReviewMode, type PersistedSelection } from "./mode.ts";
+import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
@@ -45,7 +45,7 @@ export const STATE_ENTRY = "com.hive.workbench.selection";
 export const BATCH_ENTRY = "com.hive.workbench.batch";
 export const COMMENT_ENTRY = "com.hive.workbench.comment";
 
-export type RepositoryBatchKind = "review" | "fix" | "diff";
+export type RepositoryBatchKind = "slay" | "fix" | "diff";
 export type RepositoryBatchState = "running" | "paused" | "blocked" | "complete";
 
 export interface PersistedRepositoryBatch {
@@ -78,6 +78,7 @@ const HIVE_POLL_MS = 120_000;
 
 export const RAIL_KEYS: readonly RailKey[] = [
 	{ chord: "alt+b", label: "workbench" },
+	{ chord: "alt+s", label: "autoslay" },
 	{ chord: "alt+u", label: "refresh" },
 ];
 
@@ -150,7 +151,7 @@ function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined 
 
 
 /**
- * Fix is the only workbench action that can modify a checkout. Review and diff
+ * Fix is the only workbench action that can modify a checkout. Slay and diff
  * are read-only; comment is executed through its own confirmed mutation plan.
  */
 export function isImplementationAction(action: DashboardAction): boolean {
@@ -192,11 +193,13 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 		const list = selected.map((item) => `- ${cite(item)}: ${item.url}${stateOf(item)}`).join("\n");
 		const workflow = action.kind === "fix"
 			? "workflowz this repository wave with one fresh isolated agent() handle per issue or pull request. Do not share a checkout or conversation between write-capable items."
-			: "workflowz this repository wave with one fresh workpool item per issue or pull request. Do not reuse a worker across repositories.";
+			: action.kind === "slay"
+				? "workflowz this repository wave with one fresh bluefin-reviewer workpool item per issue or pull request. Do not reuse a worker across repositories."
+				: "workflowz this repository wave with one fresh workpool item per issue or pull request. Do not reuse a worker across repositories.";
 		const rules = `<<<SUBAGENT-RULES\n${evidence} ${finish}\nSUBAGENT-RULES>>>`;
 		switch (action.kind) {
-			case "review":
-				return `Review this Hive-ranked repository wave for ${repository}:\n\n${list}\n\n${workflow} Report findings by severity with file:line evidence. Copy this block verbatim into every worker prompt:\n${rules}`;
+			case "slay":
+				return `Slay this repository wave for ${repository} through mass autoreview:\n\n${list}\n\n${workflow} Use the bluefin-reviewer agent and report findings by severity with file:line evidence. Copy this block verbatim into every worker prompt:\n${rules}`;
 			case "diff":
 				return `Inspect this Hive-ranked repository wave for ${repository}:\n\n${list}\n\n${workflow} Use hive_workbench_diff and report the changed files and concrete risks. Copy this block verbatim into every worker prompt:\n${rules}`;
 			case "fix":
@@ -209,10 +212,12 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 	const item = selected[0]!;
 	const workflow = action.kind === "fix"
 		? "Use workflowz with one fresh isolated agent() handle for this item."
-		: "Use workflowz with one fresh workpool item for this item.";
+		: action.kind === "slay"
+			? "Use workflowz with one fresh bluefin-reviewer agent for this item."
+			: "Use workflowz with one fresh workpool item for this item.";
 	switch (action.kind) {
-		case "review":
-			return `Review ${cite(item)}. Use hive_workbench_diff and hive_workbench_trace, then report findings by severity with file:line evidence. ${workflow} ${authority} ${finish}`;
+		case "slay":
+			return `Slay ${cite(item)} through autoreview. Use hive_workbench_diff and hive_workbench_trace, then report findings by severity with file:line evidence. ${workflow} ${authority} ${finish}`;
 		case "diff":
 			return `Call hive_workbench_diff for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${authority} ${finish}`;
 		case "fix":
@@ -258,6 +263,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.registerFlag("all", { description: "Show all queue items instead of defaulting to Hive-only", type: "boolean", default: false });
 	pi.registerFlag("repo", { description: "Review one repository: owner/repo, or org:name for a whole organization", type: "string" });
 	pi.registerFlag("skip-repo", { description: "Comma-separated repositories to skip", type: "string" });
+	pi.registerFlag("autoslay", { description: "Start mass autoreview immediately", type: "boolean", default: false });
 	registerTools(pi as unknown as ToolHost, mode, () => started);
 
 	const repaint = () => tui?.requestRender();
@@ -333,7 +339,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const batchBlocker = async (kind: RepositoryBatchKind, items: readonly QueueItem[]): Promise<string | undefined> => {
-		if (kind === "diff") return undefined;
+		if (kind === "slay" || kind === "diff") return undefined;
 		const hive = await mode.refreshHive();
 		if (!hive.online) return "Hive is unavailable; browse-only mode disables dispatch";
 		const unranked = items.find((item) => mode.priorityFor(item)?.hiveRank === undefined);
@@ -395,7 +401,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const wave = activeBatch.waves[activeBatch.currentWave];
 		if (!wave) {
 			persistBatch(ctx, { ...activeBatch, state: "complete" });
-			ctx.ui.notify("Repository batch complete", "info");
+			ctx.ui.notify(activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
 			return;
 		}
 		if (!prevalidated) {
@@ -425,7 +431,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const startRepositoryBatch = async (ctx: CtxLike, kind: RepositoryBatchKind, items: readonly QueueItem[]) => {
 		const generation = ++batchRequestGeneration;
 		if (activeBatch?.state === "running" || activeBatch?.state === "paused") {
-			ctx.ui.notify(`Batch ${activeBatch.id} is already ${activeBatch.state}`, "warning");
+			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
 			return;
 		}
 		const blocker = await batchBlocker(kind, items);
@@ -454,6 +460,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		persist();
 		persistBatch(ctx, batch);
 		await dispatchCurrentWave(ctx, undefined, true);
+	};
+
+	const startSlay = async (ctx: CtxLike) => {
+		const chosen = mode.chosenItems();
+		const items = (chosen.length > 0 ? chosen : mode.visibleItems()).slice(0, BATCH_LIMIT);
+		if (items.length === 0) {
+			ctx.ui.notify("No queue items available to slay", "warning");
+			return;
+		}
+		await startRepositoryBatch(ctx, "slay", items);
 	};
 
 	/**
@@ -574,7 +590,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 
 
-		if (action.kind === "review" || action.kind === "fix" || action.kind === "diff") {
+		if (action.kind === "slay" || action.kind === "fix" || action.kind === "diff") {
 			activeCtx = ctx;
 			await startRepositoryBatch(ctx, action.kind, capturedItems);
 		}
@@ -655,6 +671,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 		}
 		syncStatus(ctx);
+		if (pi.getFlag("autoslay") === true) await startSlay(ctx);
 		void openDashboard(ctx);
 	};
 
@@ -684,7 +701,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const completedItems = activeBatch.completedItems + wave.items.length;
 		if (nextWave >= activeBatch.waves.length) {
 			persistBatch(ctx, { ...activeBatch, currentWave: nextWave, completedItems, state: "complete" });
-			ctx.ui.notify("Repository batch complete", "info");
+			ctx.ui.notify(activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
 			return;
 		}
 		persistBatch(ctx, {
@@ -822,6 +839,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.registerShortcut("alt+b", {
 		description: "Open the Hive workbench",
 		handler: (ctx) => void openDashboard(ctx),
+	});
+	pi.registerShortcut("alt+s", {
+		description: "Slay the selected or visible queue through mass autoreview",
+		handler: (ctx) => void startSlay(ctx),
 	});
 	pi.registerShortcut("alt+u", {
 		description: "Refetch the Hive workbench queue",

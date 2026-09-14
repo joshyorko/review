@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "4.1"
+version: "4.2"
 last_updated: 2026-09-14
 id: review-dashboard
 one_line_purpose: Maintain the single-screen OMP review workbench.
@@ -27,6 +27,22 @@ extension from `image/appliance/Containerfile`.
 The Hive contributor runtime has no maintainer UI. It attaches the terminal
 directly to the OMP session Hive created.
 
+## When to Use
+
+Use this skill for the OMP queue, dashboard controls, workflowz dispatch,
+durable slay state, or review action prompts.
+
+## When NOT to Use
+
+Use `launcher.md` for container launch mechanics, `review-checks.md` for review
+doctrine, and `hive-runtime.md` for contributor assignment behavior.
+
+## Core Process
+
+1. Trace the key or flag from `dashboard.ts` through `extension.ts` to its prompt.
+2. Keep review-only slay separate from write-capable fix and confirmed mutations.
+3. Add a headless interaction test, then exercise the real foreground workbench.
+
 ## Authority
 
 - GitHub owns repository state.
@@ -42,7 +58,7 @@ directly to the OMP session Hive created.
 The queue, focused item, Dagger-style execution trace, and prompt share one
 screen. The top gauge reports mode, position, repository, outcomes, freshness,
 Hive ordering, and actionable count. The bottom gauge reports Hive connectivity,
-selection count, and the active workflowz batch.
+selection count, and the active workflowz slay.
 
 `Tab` switches PR/issue mode and every semantic accent between the cool PR
 palette and warm issue palette.
@@ -53,8 +69,8 @@ palette and warm issue palette.
 | `j` / `k` | Move through the queue |
 | `Space` | Toggle the focused item |
 | `A` / `x` | Select the filtered slice / clear selection |
-| `Alt-B` | Select or clear the focused repository batch |
-| `b` | Dispatch selected repository waves |
+| `Alt-B` | Select or clear the focused repository group |
+| `s` | Slay selected items through mass autoreview |
 | `f` | Fix selected items in isolated workspaces |
 | `d` | Inspect bounded diff evidence |
 | `p` | Pause or resume later wave admission |
@@ -70,7 +86,12 @@ palette and warm issue palette.
 | `?` | Show the key guide |
 | `q` / `Esc` | Close the workbench |
 
-## Batch execution
+## Slay execution
+
+Slay is autonomous mass review, not merge authority. Each selected item runs in
+a fresh `bluefin-reviewer` workpool item; reviewers report findings but never
+approve or merge. `--autoslay` starts the visible bounded slice on launch, and
+`Alt-S` starts it from the active workbench.
 
 Preserve Hive order by partitioning contiguous repository runs; an interleaved
 repository returns in a later wave rather than jumping ahead. Ask workflowz to
@@ -79,8 +100,8 @@ worker pool, retry loop, task scheduler, or agent lifecycle. Advance on OMP's
 `agent_end` only when `willContinue` is false and the wave's jobs have settled.
 Pausing stops new waves; it does not pretend to suspend an agent already running.
 
-Persist batch intent, item identity, wave position, and terminal outcomes.
-Interrupted batches remain blocked after restart and require an explicit new
+Persist slay intent, item identity, wave position, and terminal outcomes.
+Interrupted slays remain blocked after restart and require an explicit new
 dispatch. Never replay a confirmed mutation.
 
 ## Mutations
@@ -99,6 +120,20 @@ companion agents under `image/extension/bluefin-review/agents/`.
 The registered inspection tools are `hive_workbench_status`,
 `hive_workbench_queue`, `hive_workbench_diff`, `hive_workbench_trace`, and
 `hive_workbench_lookup`.
+
+## Common Rationalizations
+
+- “Batch is a neutral label.” It hides the product action; call mass autoreview
+  `slay` consistently at every user-facing seam.
+- “Review needs Hive admission.” Review is read-only and must still work from
+  GitHub evidence when Hive is absent; write-capable fix keeps its gates.
+
+## Red Flags
+
+- A slay prompt uses the default task agent instead of `bluefin-reviewer`.
+- `s`, `Alt-S`, and `--autoslay` enter different execution paths.
+- Review-only slay can approve, merge, push, label, assign, or close.
+- A repository wave advances before its OMP jobs settle.
 
 ## Verification
 
