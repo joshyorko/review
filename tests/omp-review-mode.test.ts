@@ -154,6 +154,7 @@ function hiveBackedFetch(items, calls = []) {
 		mergeable: "MERGEABLE",
 		reviewDecision: "REVIEW_REQUIRED",
 		headRefOid: item.headSha ?? String(item.id).padStart(40, "0"),
+		autoMergeRequest: item.autoMergeEnabled ? { enabledAt: new Date(NOW).toISOString() } : null,
 		author: { login: "reviewer" },
 		repository: { nameWithOwner: item.repo },
 		labels: { nodes: [] },
@@ -1625,9 +1626,9 @@ test("comment batches revalidate later heads and retain partial receipts", async
 
 test("pinned OMP agent_end advances repository waves only after final settlement", async () => {
 	const items = [
-		{ id: 1, repo: "projectbluefin/a", title: "a one", headSha: "1".repeat(40) },
-		{ id: 2, repo: "projectbluefin/a", title: "a two", headSha: "2".repeat(40) },
-		{ id: 3, repo: "projectbluefin/b", title: "b one", headSha: "3".repeat(40) },
+		{ id: 1, repo: "projectbluefin/a", title: "a one", headSha: "1".repeat(40), autoMergeEnabled: true },
+		{ id: 2, repo: "projectbluefin/a", title: "a two", headSha: "2".repeat(40), autoMergeEnabled: true },
+		{ id: 3, repo: "projectbluefin/b", title: "b one", headSha: "3".repeat(40), autoMergeEnabled: true },
 	];
 	const pi = fakeHost();
 	const ctx = fakeCtx();
@@ -1674,6 +1675,29 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.equal(batches.at(-1).state, "complete");
 	assert.equal(batches.at(-1).completedItems, 3);
 	assert.ok(dashboard.render(120).some((line) => line.includes("3/3 terminal")));
+});
+
+test("a slay wave blocks when review jobs leave pull requests open", async () => {
+	const item = { id: 42, repo: "projectbluefin/review", title: "reviewed but not landed", headSha: "a".repeat(40) };
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: hiveBackedFetch([item]),
+		env: { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute" },
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	ctx.asyncJobs.recent = [{ id: "review-only", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("agent_end")({}, ctx);
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "blocked");
+	assert.match(batch.error, /projectbluefin\/review#42/);
+	assert.ok(ctx.notifications.some((notification) => /remain open without auto-merge/.test(notification.message)));
 });
 
 

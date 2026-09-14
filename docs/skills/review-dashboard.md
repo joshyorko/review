@@ -113,6 +113,9 @@ Pausing stops new waves; it does not pretend to suspend an agent already running
 Persist slay intent, item identity, wave position, and terminal outcomes.
 Interrupted slays remain blocked after restart and require an explicit new
 dispatch. Never replay a confirmed mutation.
+A pull-request wave is terminal only when every target is closed or GitHub has
+accepted it into auto-merge. Settled reviewer jobs alone never advance a slay;
+open targets without auto-merge block the batch for explicit redispatch.
 
 ## Mutations
 

@@ -730,6 +730,26 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`Repository wave stopped: ${error}`, "error");
 			return;
 		}
+		if (activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr")) {
+			const live = await fetchItemsByKey(
+				wave.items.map((item) => `${item.repo}#${item.id}`),
+				"prs",
+				mode.tokenOptions(),
+			);
+			if (live.error) {
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error: live.error });
+				ctx.ui.notify(`Slay wave stopped: ${live.error}`, "error");
+				return;
+			}
+			const unfinished = live.items.filter((item) => item.autoMergeEnabled !== true);
+			if (unfinished.length > 0) {
+				const targets = unfinished.map((item) => `${item.repo}#${item.id}`).join(", ");
+				const error = `slay review jobs settled but targets remain open without auto-merge: ${targets}`;
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error });
+				ctx.ui.notify(`Slay wave stopped: ${error}`, "error");
+				return;
+			}
+		}
 		const refreshed = await refreshQueue(ctx);
 		if (refreshed.error) {
 			persistBatch(ctx, { ...activeBatch, state: "blocked", error: refreshed.error });
