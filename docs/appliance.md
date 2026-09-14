@@ -24,11 +24,12 @@ image: glibc, CA certificates, tzdata, and the full terminfo database including
 
 On top of it sit exactly two fetched artifacts and one staged closure:
 
-| Component | Why it is here |
+| Component | Why it is present |
 | --- | --- |
-| `omp` | The agent. A single Bun executable with its own embedded runtime; the image's entrypoint. |
+| `omp` | The sole agent runtime and extension host. |
 | `gh` | The appliance reviews, approves and merges through it. |
-| `bash`, `git`, `python3`, and eleven utilities | The shell `omp`'s `bash` tool spawns, Python runtime, and what a shell one-liner assumes exists. |
+| `bash`, `git`, `python3`, and core shell utilities | The shell `omp` spawns and the minimal execution substrate for repository inspection. |
+| `actionlint`, `shellcheck`, `yq`, `jq`, `just` | Review-time validators already shipped by the pinned FSDK builder and staged into the appliance explicitly. |
 
 Every fetched artifact is verified against a SHA-256 recorded in the
 Containerfile before it is allowed to become executable, and the two FSDK images
@@ -39,10 +40,10 @@ Renovate can compare against.
 
 A shell is present, deliberately. `omp`'s `bash` tool spawns one, and an agent
 that cannot run `gh pr checks` is not a review appliance. FSDK's own container
-standard treats a shell as the named exception rather than a contradiction; this
-image keeps that exception down to one binary and a dozen small utilities
-(`grep`, `sed`, `gawk`, `find`, `xargs`, `tar`, `gzip`, `diff`, `less`, `curl`, `python3`)
-instead of a userland. Nothing inside can install anything: there is no `dnf`,
+standard treats a shell as the named exception rather than a contradiction. The
+appliance stages the common shell utilities plus the builder's existing
+`actionlint`, `shellcheck`, `yq`, `jq`, and `just` binaries; it does not install a
+second package set. Nothing inside can install anything: there is no `dnf`,
 `apt`, `apk`, `pip`, or `npm`, and `tests/appliance-contract.sh` fails the build
 if one appears.
 

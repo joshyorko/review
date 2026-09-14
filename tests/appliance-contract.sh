@@ -99,6 +99,10 @@ require "$containerfile" \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"'
 require image/appliance/config.yml 'advisor: "@default"' 'syncBacklog: 1'
+for tool in actionlint shellcheck yq jq just; do
+  grep -qF "/usr/sbin/${tool}" "$containerfile" ||
+    fail "${tool} must be staged from the pinned FSDK builder"
+done
 
 # The point of a distroless appliance is that nothing inside it can install
 # anything. Not one of these may appear, in any stage that reaches the image.
@@ -247,6 +251,11 @@ run '
   git --version >/dev/null
   python3 --version >/dev/null
   python --version >/dev/null
+  actionlint -version >/dev/null
+  shellcheck --version >/dev/null
+  yq --version >/dev/null
+  jq --version >/dev/null
+  just --version >/dev/null
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
 ' >/dev/null || fail "a bundled binary failed to execute"
 

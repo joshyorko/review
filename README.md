@@ -71,9 +71,11 @@ just review-queue --issues        # start on issues
 ```
 
 `ghcr.io/projectbluefin/review` carries the OMP review extension, `omp`, `gh`,
-and `git`. The launcher uses `podman run --runtime=krun`, a unique container
+`git`, Python, and the review validators `actionlint`, `shellcheck`, `yq`, `jq`,
+and `just`. The launcher uses `podman run --runtime=krun`, a unique container
 name, and target-specific persistent state. Two repository invocations therefore
 run concurrently without replacing or sharing each other's OMP sessions.
+
 
 Without a checkout, the same thing is one `podman run`:
 

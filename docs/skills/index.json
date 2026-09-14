@@ -113,7 +113,7 @@
         "hive"
       ],
       "description": "Use when maintaining the distroless OMP review appliance or the OMP Hive contributor image.",
-      "version": "3.0",
+      "version": "3.1",
       "last_updated": "2026-09-14",
       "doc_type": "procedure"
     },
