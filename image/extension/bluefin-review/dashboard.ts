@@ -18,6 +18,7 @@ import { type ReviewMode, ciGlyph } from "./mode.ts";
 import { type RailKey, keymapBar, orderSourceLabel, priorityChip, workbenchProgressBar } from "./rail.ts";
 import { type RenderedRow, type Span, defaultExpanded, findSpan, hasChildren, renderSpanTree, visibleSpanIds } from "./trace.ts";
 import { fitToWidth, truncateToWidth, visibleWidth } from "./width.ts";
+import { PrDetailCache, sanitizeMarkdown } from "./reader.ts";
 export type DashboardAction =
 	| { kind: "close" }
 	| { kind: "slay"; item: QueueItem; items?: QueueItem[] }
@@ -26,6 +27,7 @@ export type DashboardAction =
 	| { kind: "fix"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "reference"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "scope" }
+	| { kind: "read_pr"; item: QueueItem };
 
 export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "s", label: "slay" },
@@ -157,6 +159,9 @@ export class ReviewDashboard {
 	private lastWidth = 120;
 	private queueRowItems: (number | "divider")[] = [];
 	private traceRowSpans: (string | "hive" | undefined)[] = [];
+	private showReader = false;
+	private readerScroll = 0;
+	private prDetailCache = new PrDetailCache(50);
 
 	private readonly tui: TuiLike;
 	private readonly painter: Painter;
@@ -640,6 +645,36 @@ export class ReviewDashboard {
 	}
 
 	private executeKey(key: string): void {
+		if (this.showReader) {
+			if (key === "escape" || key === "q") {
+				this.showReader = false;
+				this.tui.requestRender();
+				return;
+			}
+			if (key === "j" || key === "down") {
+				this.readerScroll += 1;
+				this.tui.requestRender();
+				return;
+			}
+			if (key === "k" || key === "up") {
+				this.readerScroll = Math.max(0, this.readerScroll - 1);
+				this.tui.requestRender();
+				return;
+			}
+			if (key === "n") {
+				this.mode.move(1);
+				this.readerScroll = 0;
+				this.tui.requestRender();
+				return;
+			}
+			if (key === "p") {
+				this.mode.move(-1);
+				this.readerScroll = 0;
+				this.tui.requestRender();
+				return;
+			}
+		}
+
 		switch (key) {
 			case "escape":
 			case "q":
@@ -754,6 +789,11 @@ export class ReviewDashboard {
 			case "return":
 			case "enter":
 				this.emitAction({ kind: "reference", item, items });
+				return;
+			case "p":
+				this.showReader = true;
+				this.readerScroll = 0;
+				this.tui.requestRender();
 				return;
 			default:
 				break;
@@ -1080,6 +1120,24 @@ export class ReviewDashboard {
 		}
 		const bodyHeight = Math.max(4, this.rows - 4);
 		const item = this.mode.selected();
+
+		if (this.showReader && item) {
+			lines.push(this.painter.bold(this.painter.fg("accent", `PR READER: ${item.repo}#${item.id} — ${item.title}`)));
+			lines.push(this.painter.fg("dim", `Author: @${item.author} · Head: ${item.headSha ? item.headSha.slice(0, 7) : "unknown"} · URL: ${item.url}`));
+			lines.push(this.painter.fg("border", "─".repeat(width)));
+			const sanitizedBody = sanitizeMarkdown(item.title);
+			lines.push(truncateToWidth(this.painter.fg("text", sanitizedBody), width));
+			lines.push("");
+			lines.push(this.painter.fg("dim", "Conversation & Reviews:"));
+			lines.push(truncateToWidth(this.painter.fg("dim", `  Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`), width));
+			const readerKeys: RailKey[] = [
+				{ chord: "j/k", label: "scroll" },
+				{ chord: "n/p", label: "next/prev" },
+				{ chord: "q/esc", label: "back" },
+			];
+			lines.push(keymapBar(this.painter, readerKeys, width));
+			return lines;
+		}
 		const traceTitle = item ? `TRACE ${item.repo}#${item.id}` : "TRACE";
 
 		if (width >= SPLIT_MIN_WIDTH) {
