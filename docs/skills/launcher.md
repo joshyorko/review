@@ -66,7 +66,9 @@ Kubernetes worker deployment.
   mounts. Never put values in arguments, logs, image layers, socket paths, SSH
   targets, or committed files.
 - Preserve `--userns keep-id` for the `0600` contributor registration.
-- The OMP appliance receives GitHub/provider credentials by inherited name.
+- The OMP appliance receives GitHub/provider credentials by inherited name and,
+  when `HIVE_HUB` is unset, resolves the hub from the host's default
+  `~/.config/hive/contributor.env` without mounting its registration token.
 - Apptainer's contained environment receives only the explicit credential and
   runtime allowlist through `APPTAINERENV_` variables. Keep `--no-eval` so
   credential and argument values remain literal inside the container.

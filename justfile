@@ -697,6 +697,15 @@ review-appliance *appliance_args:
       echo "WARNING: no GitHub credential found; the queue will load empty." >&2
       echo "  Run 'gh auth login' or export GH_TOKEN." >&2
     fi
+    if [[ -z "${HIVE_HUB:-}" && -f "${HOME}/.config/hive/contributor.env" ]]; then
+      HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.env"
+      HIVE_HUB="$(read_hive_value HIVE_HUB)"
+      if valid_hive_hub "$HIVE_HUB"; then
+        export HIVE_HUB
+      else
+        unset HIVE_HUB
+      fi
+    fi
 
     source scripts/parse-review-args.sh
     parse_review_args "$@"

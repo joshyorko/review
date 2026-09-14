@@ -109,7 +109,9 @@ podman run --runtime=krun --rm -it \
 
 `just review-appliance` passes `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`,
 `GITHUB_COPILOT_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `HIVE_HUB`
-through by name, and resolves `GH_TOKEN` from `gh auth token` when it is unset.
+through by name, resolves `GH_TOKEN` from `gh auth token` when it is unset, and
+resolves an unset `HIVE_HUB` from the host's default
+`$HOME/.config/hive/contributor.env` without exposing the registration token.
 
 The appliance uses its own `bluefin-review-appliance` OMP profile. Host OMP
 configuration is not mounted by default, so host MCP entries cannot make the
@@ -133,9 +135,10 @@ choices to the user's active OMP configuration.
 
 ### Hive decides the order
 
-With `HIVE_HUB` set — or a registration mounted at
-`$HOME/.config/hive/contributor.env` — the queue is ordered by Hive's own work
-queue and triage view, in Hive's positions. The appliance only reads: it never
+With `HIVE_HUB` set — or present in the host's default
+`$HOME/.config/hive/contributor.env` — the launcher passes the endpoint into the
+appliance, and the queue is ordered by Hive's own work queue and triage view, in
+Hive's positions. The appliance only reads: it never
 assigns, completes, or reprioritizes anything, because that is Hive's job and
 the maintainer's. Without a hub the queue is classified from live GitHub
 evidence using the policy layer's action vocabulary. The header always names

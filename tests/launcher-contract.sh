@@ -111,7 +111,10 @@ assert_eq "$standalone_out" "--repo projectbluefin/review --pr 463 --issues" "st
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
-mkdir -p "$scratch/bin" "$scratch/home"
+mkdir -p "$scratch/bin" "$scratch/home/.config/hive"
+cat >"$scratch/home/.config/hive/contributor.env" <<'EOF'
+HIVE_HUB=https://hive.example.test
+EOF
 mock_podman_log="$scratch/podman.log"
 kvm="$scratch/kvm"
 touch "$kvm"
@@ -150,6 +153,9 @@ if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
     source_name="APPTAINERENV_\${name}"
     [[ -v "\$source_name" ]] && injected+=("\$name=\${!source_name}")
   done
+  if [[ "\${EXPECT_APPTAINER_HIVE:-}" == 1 ]]; then
+    [[ "\${APPTAINERENV_HIVE_HUB:-}" == https://hive.example.test ]] || exit 19
+  fi
   env -i "\${injected[@]}" /bin/bash -c '
     [[ "\$GH_TOKEN" == mock-token && "\$OPENAI_API_KEY" == test-provider-token ]]
   ' || exit 19
@@ -201,7 +207,7 @@ assert_bluefin_review() {
 
 mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
-fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
+fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
 [[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "review fallback warning is missing"
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment"
