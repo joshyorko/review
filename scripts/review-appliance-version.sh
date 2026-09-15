@@ -31,7 +31,11 @@ if [[ ! "$base_tag" =~ ^([0-9]{2}\.[0-9]{2}) ]]; then
 fi
 series="${BASH_REMATCH[1]}"
 
-revision="$(tr -d '[:space:]' <"$revision_file")"
+if [[ ! -r "$revision_file" ]]; then
+  echo "review-version: missing or unreadable REVISION file ${revision_file}" >&2
+  exit 1
+fi
+revision="$(<"$revision_file")"
 if [[ ! "$revision" =~ ^[0-9]+$ ]]; then
   echo "review-version: ${revision_file} must contain a single integer, got '${revision}'" >&2
   exit 1

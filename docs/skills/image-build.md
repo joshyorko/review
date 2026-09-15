@@ -51,6 +51,8 @@ model-specific runtime. Both OCI images leave model and effort selection to OMP.
    Do not fork or locally patch its runtime files.
 10. Generate SPDX manifests from resolved build arguments and keep build-only
     generators out of the final filesystem.
+11. Version derivation rejects malformed or missing revision/base inputs,
+    preserves decimal `08`/`09` revisions, and keeps both image series aligned.
 
 ## Pin maintenance
 
@@ -65,6 +67,7 @@ bash tests/appliance-contract.sh
 bash tests/contribute-contract.sh
 python3 tests/appliance_sbom_contract.py
 python3 tests/contribute_sbom_contract.py
+bash tests/version-derivation.sh
 git diff --check
 ```
 
