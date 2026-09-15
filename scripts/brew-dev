@@ -70,7 +70,7 @@ PY
     cat > "$work/payload/bluefin" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
+root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../libexec" && pwd)"
 if [[ "${1:-}" == review ]]; then
   export BLUEFIN_REVIEW_SIF="$root/launcher/bluefin-review.sif"
   cat "$root/build.txt"

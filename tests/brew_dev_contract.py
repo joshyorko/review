@@ -90,10 +90,48 @@ class BrewDevContract(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
 
-    def test_package_carries_parser_and_resolves_its_libexec_root(self):
+    def test_installed_homebrew_layout_resolves_the_libexec_root(self):
+        script = SCRIPT.read_text()
+        wrapper = script.split('cat > "$work/payload/bluefin" <<\'EOF\'\n', 1)[1].split("\nEOF\n", 1)[0] + "\n"
+        package = self.root / "Cellar/bluefin-review-dev/0.20260915034611"
+        launcher = package / "libexec/launcher/bin/bluefin"
+        launcher.parent.mkdir(parents=True)
+        (package / "libexec/launcher/bluefin-review.sif").write_bytes(b"sif")
+        (package / "libexec/build.json").write_text('{"sha":"fixture"}\n')
+        (package / "libexec/build.txt").write_text("Bluefin Review dev: main @ fixture\n")
+        launcher.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'delegated:%s\\nsif=%s\\n' \"$*\" \"$(printenv BLUEFIN_REVIEW_SIF)\"\n"
+        )
+        launcher.chmod(0o755)
+        outer = package / "bin/bluefin"
+        outer.parent.mkdir()
+        outer.write_text(wrapper)
+        outer.chmod(0o755)
+
+        expected = [
+            package / "bin/bluefin",
+            package / "libexec/build.txt",
+            package / "libexec/build.json",
+            package / "libexec/launcher/bluefin-review.sif",
+            package / "libexec/launcher/bin/bluefin",
+        ]
+        for path in expected:
+            self.assertTrue(path.is_file(), path)
+
+        result = subprocess.run(
+            [str(outer), "review", "--repo", "projectbluefin/review"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Bluefin Review dev: main @ fixture", result.stdout)
+        self.assertIn("delegated:review --repo projectbluefin/review", result.stdout)
+        self.assertIn(f"sif={package}/libexec/launcher/bluefin-review.sif", result.stdout)
+
+    def test_package_carries_parser_and_headroom_runtime(self):
         script = SCRIPT.read_text()
         self.assertIn("parse-review-args.sh", script)
-        self.assertIn('")/../.."', script)
         self.assertIn("/usr/bin/headroom", script)
 
     def test_personal_workflow_builds_the_default_branch(self):
@@ -133,6 +171,8 @@ class FormulaContract(unittest.TestCase):
         self.assertEqual((self.output / "sha").read_text().strip(), "a" * 40)
         self.assertEqual(formula.count("version "), 1)
         self.assertNotIn("projectbluefin/review/releases", formula)
+        self.assertIn('libexec.install "launcher", "build.json", "build.txt"', formula)
+        self.assertIn('bin.install "bluefin"', formula)
 
     def test_mixed_source_commits_cannot_be_published_together(self):
         self.bundle("x86_64")
