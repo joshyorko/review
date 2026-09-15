@@ -330,16 +330,16 @@ set -e
   fail "packaged review missing-image diagnostic was not actionable: $offline_output"
 ! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image acquisition failed"
 
-  # An installed personal bundle points krun at its immutable OCI image.
-  : >"$mock_podman_log"
-  BLUEFIN_REVIEW_IMAGE="ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890" \
-    "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
-    fail "personal OCI review launch failed"
-  oci_call="$(grep '^run ' "$mock_podman_log")"
-  [[ "$oci_call" == *"ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890"* ]] ||
-    fail "personal OCI review launch used the wrong image"
+# An installed personal bundle points krun at its immutable OCI image.
+: >"$mock_podman_log"
+BLUEFIN_REVIEW_IMAGE="ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890" \
+  "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "personal OCI review launch failed"
+oci_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$oci_call" == *"ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890"* ]] ||
+  fail "personal OCI review launch used the wrong image"
 
-  mv "$scratch/bin/krun" "$scratch/krun"
+mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
 fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 \
   COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token \
@@ -353,9 +353,9 @@ fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/review:stable --repo projectbluefin/review"* ]] || fail "review fallback used the wrong image or scope"
 [[ "$fallback_call" == *":/workspace,"*":/tmp"* ]] || fail "review fallback did not bind workspace and instance-backed scratch together"
 [[ "$fallback_call" != *mock-token* && "$fallback_call" != *test-copilot-token* &&
-   "$fallback_call" != *test-github-copilot-token* && "$fallback_call" != *test-copilot-integration* &&
-   "$fallback_call" != *test-anthropic-key* && "$fallback_call" != *test-anthropic-oauth* &&
-   "$fallback_call" != *test-provider-token* && "$fallback_call" != *test-gemini-key* ]] ||
+  "$fallback_call" != *test-github-copilot-token* && "$fallback_call" != *test-copilot-integration* &&
+  "$fallback_call" != *test-anthropic-key* && "$fallback_call" != *test-anthropic-oauth* &&
+  "$fallback_call" != *test-provider-token* && "$fallback_call" != *test-gemini-key* ]] ||
   fail "fallback leaked credentials into argv"
 mv "$scratch/krun" "$scratch/bin/krun"
 : >"$mock_podman_log"
