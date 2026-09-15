@@ -66,7 +66,7 @@ require_fallback() {
 }
 prepare_apptainer_environment() {
   local name host_file
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY HIVE_HUB BLUEFIN_REVIEW_ORG TERM COLORTERM; do
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY HIVE_HUB BLUEFIN_REVIEW_ORG BLUEFIN_REVIEW_INHERIT_OMP_CONFIG TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   APPTAINER_HOST_ARGS=()
@@ -74,6 +74,44 @@ prepare_apptainer_environment() {
     test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
   done
   return 0
+}
+
+detect_review_audio() {
+  local runtime_dir="${REVIEW_TEST_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}}"
+  local pulse_socket="${runtime_dir}/pulse/native"
+  local snd_device="${REVIEW_TEST_SND_DEVICE:-/dev/snd}"
+  local pulse_cookie="${PULSE_COOKIE:-${XDG_CONFIG_HOME:-${HOME:-/no-such-home}/.config}/pulse/cookie}"
+
+  REVIEW_AUDIO_PULSE_SOCKET=""
+  REVIEW_AUDIO_PULSE_SERVER=""
+  REVIEW_AUDIO_PULSE_COOKIE=""
+  REVIEW_AUDIO_SND_DEVICE=""
+  REVIEW_AUDIO_WARNING=""
+
+  if [[ -S "$pulse_socket" ]]; then
+    REVIEW_AUDIO_PULSE_SOCKET="$pulse_socket"
+    REVIEW_AUDIO_PULSE_SERVER="unix:/run/bluefin/pulse/native"
+    [[ -r "$pulse_cookie" ]] && REVIEW_AUDIO_PULSE_COOKIE="$pulse_cookie"
+    return 0
+  fi
+  if [[ -d "$snd_device" ]]; then
+    REVIEW_AUDIO_SND_DEVICE="$snd_device"
+    return 0
+  fi
+  REVIEW_AUDIO_WARNING="WARNING: no host audio transport was detected; Review starts normally, but Ctrl+L live voice needs a PulseAudio socket or /dev/snd."
+}
+
+prepare_review_omp_mount() {
+  REVIEW_OMP_CONFIG_VOLUME=""
+  REVIEW_OMP_WARNING=""
+  if [[ "${BLUEFIN_REVIEW_INHERIT_OMP_CONFIG:-0}" == 1 ]]; then
+    local host_omp="${HOME:-/no-such-home}/.omp"
+    if [[ -d "$host_omp" ]]; then
+      REVIEW_OMP_CONFIG_VOLUME="$host_omp:/home/bluefin/.omp:rw"
+    else
+      REVIEW_OMP_WARNING="WARNING: BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 was requested, but ${host_omp} is absent; using appliance-owned OMP state."
+    fi
+  fi
 }
 
 image_ref_is_moving() {
@@ -217,44 +255,101 @@ run_review() {
     previous="$arg"
   done
 
-  local key root home workspace name image
+  local key root home workspace name image sif
   key="$(slugify "${BLUEFIN_INSTANCE:-review-$scope}")"
   root="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${key}"
   home="${root}/home"
   workspace="${root}/workspace"
   name="bluefin-review-${key}-$(date +%s)-$$"
   image="${BLUEFIN_REVIEW_IMAGE:-ghcr.io/projectbluefin/review:stable}"
-  mkdir -p "$home" "$workspace"
+  sif="${BLUEFIN_REVIEW_SIF:-}"
+  mkdir -p "$home/.omp" "$home/.config/pulse" "$workspace"
+  detect_review_audio
+  prepare_review_omp_mount
+  [[ -z "$REVIEW_AUDIO_WARNING" ]] || echo "$REVIEW_AUDIO_WARNING" >&2
+  [[ -z "$REVIEW_OMP_WARNING" ]] || echo "$REVIEW_OMP_WARNING" >&2
+
+  if [[ -n "$sif" ]]; then
+    command -v apptainer >/dev/null 2>&1 || fail "Apptainer is required for the packaged Review SIF."
+    [[ -x "$sif" ]] || fail "review SIF is missing or not executable: ${sif}"
+    KVM_FAILURE="the packaged Review SIF was selected"
+    require_fallback
+    prepare_apptainer_environment
+    [[ -z "$REVIEW_AUDIO_PULSE_SERVER" ]] ||
+      export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
+    local -a sif_args=(run --containall --no-eval)
+    sif_args+=("${APPTAINER_HOST_ARGS[@]}")
+    sif_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace")
+    if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
+      sif_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
+      [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
+        sif_args+=(--bind "${REVIEW_AUDIO_PULSE_COOKIE}:/home/bluefin/.config/pulse/cookie:ro")
+    elif [[ -n "$REVIEW_AUDIO_SND_DEVICE" ]]; then
+      sif_args+=(--bind "${REVIEW_AUDIO_SND_DEVICE}:/dev/snd")
+    fi
+    [[ -z "$REVIEW_OMP_CONFIG_VOLUME" ]] ||
+      sif_args+=(--bind "$REVIEW_OMP_CONFIG_VOLUME")
+    sif_args+=("$sif")
+    sif_args+=("${PARSED_REVIEW_ARGS[@]}")
+    exec apptainer "${sif_args[@]}"
+  fi
 
   if kvm_runtime_ready; then
     ensure_image "$image" "review appliance" "image/appliance/Containerfile" "BLUEFIN_REVIEW_IMAGE"
     report_podman_image_identity "$image" "review appliance"
-    exec "$engine" run --runtime=krun --rm --interactive --tty \
-      --name "$name" \
-      --userns keep-id:uid=65532,gid=65532 \
-      --volume "${home}:/home/bluefin:rw,z" \
-      --volume "${workspace}:/workspace:rw,z" \
-      --env GH_TOKEN --env GITHUB_TOKEN \
-      --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN \
-      --env COPILOT_INTEGRATION_ID \
-      --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN \
-      --env OPENAI_API_KEY --env GEMINI_API_KEY \
-      --env HIVE_HUB --env BLUEFIN_REVIEW_ORG \
-      --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}" \
-      "$image" ${PARSED_REVIEW_ARGS[@]+"${PARSED_REVIEW_ARGS[@]}"}
+    local -a podman_args=(
+      run --runtime=krun --rm --interactive --tty
+      --name "$name"
+      --userns keep-id:uid=65532,gid=65532
+      --volume "${home}:/home/bluefin:rw,z"
+      --volume "${workspace}:/workspace:rw,z"
+      --env GH_TOKEN --env GITHUB_TOKEN
+      --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN
+      --env COPILOT_INTEGRATION_ID
+      --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN
+      --env OPENAI_API_KEY --env GEMINI_API_KEY
+      --env HIVE_HUB --env BLUEFIN_REVIEW_ORG
+      --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}"
+    )
+    [[ -v BLUEFIN_REVIEW_INHERIT_OMP_CONFIG ]] &&
+      podman_args+=(--env BLUEFIN_REVIEW_INHERIT_OMP_CONFIG)
+    if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
+      podman_args+=(--volume "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native:rw")
+      [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
+        podman_args+=(--volume "${REVIEW_AUDIO_PULSE_COOKIE}:/home/bluefin/.config/pulse/cookie:ro")
+      podman_args+=(--env "PULSE_SERVER=${REVIEW_AUDIO_PULSE_SERVER}")
+    elif [[ -n "$REVIEW_AUDIO_SND_DEVICE" ]]; then
+      podman_args+=(--device "$REVIEW_AUDIO_SND_DEVICE")
+    fi
+    [[ -z "$REVIEW_OMP_CONFIG_VOLUME" ]] ||
+      podman_args+=(--volume "$REVIEW_OMP_CONFIG_VOLUME")
+    podman_args+=("$image")
+    podman_args+=("${PARSED_REVIEW_ARGS[@]}")
+    exec "$engine" "${podman_args[@]}"
   fi
 
   require_fallback
   local apptainer_image="$image"
   [[ "$apptainer_image" == *://* ]] || apptainer_image="docker://${apptainer_image}"
   prepare_apptainer_environment
-  exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" \
-    --home "${home}:/home/bluefin" \
-    --pwd /workspace \
-    --bind "${workspace}:/workspace" \
-    "$apptainer_image" ${PARSED_REVIEW_ARGS[@]+"${PARSED_REVIEW_ARGS[@]}"}
+  [[ -z "$REVIEW_AUDIO_PULSE_SERVER" ]] ||
+    export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
+  local -a apptainer_args=(run --containall --no-eval)
+  apptainer_args+=("${APPTAINER_HOST_ARGS[@]}")
+  apptainer_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace")
+  if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
+    apptainer_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
+    [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
+      apptainer_args+=(--bind "${REVIEW_AUDIO_PULSE_COOKIE}:/home/bluefin/.config/pulse/cookie:ro")
+  elif [[ -n "$REVIEW_AUDIO_SND_DEVICE" ]]; then
+    apptainer_args+=(--bind "${REVIEW_AUDIO_SND_DEVICE}:/dev/snd")
+  fi
+  [[ -z "$REVIEW_OMP_CONFIG_VOLUME" ]] ||
+    apptainer_args+=(--bind "$REVIEW_OMP_CONFIG_VOLUME")
+  apptainer_args+=("$apptainer_image")
+  apptainer_args+=("${PARSED_REVIEW_ARGS[@]}")
+  exec apptainer "${apptainer_args[@]}"
 }
-
 run_contribute() {
   resolve_tokens
   [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] || fail "no GitHub token available; run 'gh auth login' or export GH_TOKEN."

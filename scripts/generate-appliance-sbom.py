@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Write the SPDX manifest for the review appliance's fetched components.
 
-The appliance fetches the omp binary and GitHub CLI directly. syft only
-inventories package-manager metadata, so without this document those two
-load-bearing components would be invisible.
+The appliance fetches omp, Headroom, and GitHub CLI directly. syft only
+inventories package-manager metadata, so without this document those load-
+bearing components would be invisible.
 
 This runs inside the build, where every pin is a resolved build argument, and
 writes SPDX 2.3 JSON to ``/usr/share/bluefin/review/sbom.spdx.json``. The publish
@@ -84,9 +84,11 @@ def per_arch(args: argparse.Namespace, prefix: str, arch: str) -> str:
 
 def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     omp_version = require_non_empty(args.omp_version, "omp version")
+    headroom_version = require_non_empty(args.headroom_version, "headroom version")
     gh_version = require_non_empty(args.gh_version, "gh version")
 
     omp_sha = per_arch(args, "omp_sha256", arch)
+    headroom_sha = per_arch(args, "headroom_sha256", arch)
     gh_sha = per_arch(args, "gh_sha256", arch)
 
     return [
@@ -101,6 +103,17 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             " verified against the release SHA256SUMS before the file is made"
             " executable. Installed to /usr/bin/omp.",
             omp_sha,
+        ),
+        package(
+            "headroom",
+            headroom_version,
+            f"https://pypi.org/project/headroom-ai/{headroom_version}/",
+            f"pkg:pypi/headroom-ai@{headroom_version}",
+            "Headroom's MCP runtime. The architecture-specific manylinux wheel"
+            " is verified against its pinned SHA-256 before installation, and"
+            " the [mcp] dependency closure is installed into the appliance."
+            " The executable is /usr/bin/headroom.",
+            headroom_sha,
         ),
         package(
             "gh",
@@ -134,6 +147,9 @@ def main() -> int:
     parser.add_argument("--omp-version", required=True)
     parser.add_argument("--omp-sha256-x86-64", required=True)
     parser.add_argument("--omp-sha256-aarch64", required=True)
+    parser.add_argument("--headroom-version", required=True)
+    parser.add_argument("--headroom-sha256-x86-64", required=True)
+    parser.add_argument("--headroom-sha256-aarch64", required=True)
     parser.add_argument("--gh-version", required=True)
     parser.add_argument("--gh-sha256-x86-64", required=True)
     parser.add_argument("--gh-sha256-aarch64", required=True)
