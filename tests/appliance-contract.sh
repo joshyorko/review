@@ -100,6 +100,7 @@ require "$containerfile" \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"'
 grep -qE '^ARG AUDIO_BUILDER_IMAGE=registry\.fedoraproject\.org/fedora-minimal:[^@[:space:]]+@sha256:[0-9a-f]{64}$' "$containerfile" ||
   fail "AUDIO_BUILDER_IMAGE must be pinned as tag@sha256 digest"
+# shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
 require "$containerfile" \
   'FROM ${AUDIO_BUILDER_IMAGE} AS audio' \
   'microdnf --assumeyes' \
@@ -304,6 +305,7 @@ run '
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run 'set -eu; test -w "$HOME"; test "$HOME" = /home/bluefin' >/dev/null ||
   fail "HOME must exist and be writable by the nonroot user"
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
   case "$(uname -m)" in
@@ -325,6 +327,7 @@ run '
   ldd "/usr/lib/${audio_triplet}/libasound.so.2" | grep -q "not found" && exit 1
 ' >/dev/null || fail "the review mode, Headroom MCP, SBOM, or audio closure is missing from the image"
 
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
   profile="$HOME/.omp/profiles/bluefin-review-appliance/agent/mcp.json"

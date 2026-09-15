@@ -4,12 +4,18 @@ set -euo pipefail
 
 dest="${1:?usage: stage-audio <destdir> <library>...}"
 shift
-(($# > 0)) || { echo 'stage-audio: at least one library is required' >&2; exit 1; }
+(($# > 0)) || {
+  echo 'stage-audio: at least one library is required' >&2
+  exit 1
+}
 
 case "$(uname -m)" in
-  x86_64) triplet=x86_64-linux-gnu ;;
-  aarch64) triplet=aarch64-linux-gnu ;;
-  *) echo "stage-audio: unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+x86_64) triplet=x86_64-linux-gnu ;;
+aarch64) triplet=aarch64-linux-gnu ;;
+*)
+  echo "stage-audio: unsupported architecture: $(uname -m)" >&2
+  exit 1
+  ;;
 esac
 
 target_libdir="${dest}/usr/lib/${triplet}"

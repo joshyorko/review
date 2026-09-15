@@ -297,20 +297,20 @@ run_review() {
   if kvm_runtime_ready; then
     ensure_image "$image" "review appliance" "image/appliance/Containerfile" "BLUEFIN_REVIEW_IMAGE"
     report_podman_image_identity "$image" "review appliance"
-    local -a podman_args=(
-      run --runtime=krun --rm --interactive --tty
-      --name "$name"
-      --userns keep-id:uid=65532,gid=65532
-      --volume "${home}:/home/bluefin:rw,z"
-      --volume "${workspace}:/workspace:rw,z"
-      --env GH_TOKEN --env GITHUB_TOKEN
-      --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN
-      --env COPILOT_INTEGRATION_ID
-      --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN
-      --env OPENAI_API_KEY --env GEMINI_API_KEY
-      --env HIVE_HUB --env BLUEFIN_REVIEW_ORG
-      --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}"
-    )
+    local -a podman_args=()
+    podman_args+=(run --runtime=krun --rm --interactive --tty)
+    podman_args+=(--name "$name")
+    podman_args+=(--userns "keep-id:uid=65532,gid=65532")
+    podman_args+=(--volume "${home}:/home/bluefin:rw,z")
+    podman_args+=(--volume "${workspace}:/workspace:rw,z")
+    podman_args+=(--env GH_TOKEN --env GITHUB_TOKEN)
+    podman_args+=(--env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN)
+    podman_args+=(--env COPILOT_INTEGRATION_ID)
+    podman_args+=(--env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN)
+    podman_args+=(--env OPENAI_API_KEY --env GEMINI_API_KEY)
+    podman_args+=(--env HIVE_HUB --env BLUEFIN_REVIEW_ORG)
+    podman_args+=(--env "TERM=${TERM:-xterm-256color}")
+    podman_args+=(--env "COLORTERM=${COLORTERM:-truecolor}")
     [[ -v BLUEFIN_REVIEW_INHERIT_OMP_CONFIG ]] &&
       podman_args+=(--env BLUEFIN_REVIEW_INHERIT_OMP_CONFIG)
     if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
