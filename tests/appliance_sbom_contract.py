@@ -43,6 +43,8 @@ OMP_X86 = "a" * 64
 OMP_ARM = "b" * 64
 GH_X86 = "e" * 64
 GH_ARM = "f" * 64
+HEADROOM_X86 = "c" * 64
+HEADROOM_ARM = "d" * 64
 
 BASE_ARGS = {
     "--version": "26.08.03",
@@ -50,6 +52,9 @@ BASE_ARGS = {
     "--omp-version": "1.2.3",
     "--omp-sha256-x86-64": OMP_X86,
     "--omp-sha256-aarch64": OMP_ARM,
+    "--headroom-version": "0.37.0",
+    "--headroom-sha256-x86-64": HEADROOM_X86,
+    "--headroom-sha256-aarch64": HEADROOM_ARM,
     "--gh-version": "2.80.1",
     "--gh-sha256-x86-64": GH_X86,
     "--gh-sha256-aarch64": GH_ARM,
@@ -107,22 +112,24 @@ class PerArchitectureDigests(unittest.TestCase):
     def test_x86_64_carries_only_the_x86_64_digests(self):
         found = packages_by_name(generate(self, "x86_64"))
         self.assertEqual(found["omp"]["checksums"][0]["checksumValue"], OMP_X86)
+        self.assertEqual(found["headroom"]["checksums"][0]["checksumValue"], HEADROOM_X86)
         self.assertEqual(found["gh"]["checksums"][0]["checksumValue"], GH_X86)
         serialised = json.dumps(found)
-        for foreign in (OMP_ARM, GH_ARM):
+        for foreign in (OMP_ARM, HEADROOM_ARM, GH_ARM):
             self.assertNotIn(foreign, serialised, "an aarch64 digest reached an x86_64 SBOM")
 
     def test_aarch64_carries_only_the_aarch64_digests(self):
         found = packages_by_name(generate(self, "aarch64"))
         self.assertEqual(found["omp"]["checksums"][0]["checksumValue"], OMP_ARM)
+        self.assertEqual(found["headroom"]["checksums"][0]["checksumValue"], HEADROOM_ARM)
         self.assertEqual(found["gh"]["checksums"][0]["checksumValue"], GH_ARM)
         serialised = json.dumps(found)
-        for foreign in (OMP_X86, GH_X86):
+        for foreign in (OMP_X86, HEADROOM_X86, GH_X86):
             self.assertNotIn(foreign, serialised, "an x86_64 digest reached an aarch64 SBOM")
 
     def test_only_verified_components_declare_a_checksum(self):
         found = packages_by_name(generate(self, "x86_64"))
-        for name in ("omp", "gh"):
+        for name in ("omp", "headroom", "gh"):
             self.assertEqual(found[name]["checksums"][0]["algorithm"], "SHA256")
         for name in ("bluefin-review-mode",):
             self.assertNotIn(
@@ -165,7 +172,11 @@ class DigestValidation(unittest.TestCase):
         )
 
     def test_empty_versions_are_refused_by_name(self):
-        for flag, label in (("--omp-version", "omp version"), ("--gh-version", "gh version")):
+        for flag, label in (
+            ("--omp-version", "omp version"),
+            ("--headroom-version", "headroom version"),
+            ("--gh-version", "gh version"),
+        ):
             with self.subTest(flag=flag):
                 self.assert_rejected(f"{label} must not be empty", **{flag: ""})
 
@@ -189,6 +200,10 @@ class DownloadLocations(unittest.TestCase):
             found["gh"]["downloadLocation"],
             "https://github.com/cli/cli/releases/download/v2.80.1/gh_2.80.1_linux_amd64.tar.gz",
         )
+        self.assertEqual(
+            found["headroom"]["downloadLocation"],
+            "https://pypi.org/project/headroom-ai/0.37.0/",
+        )
 
     def test_aarch64_download_urls(self):
         found = packages_by_name(generate(self, "aarch64"))
@@ -211,13 +226,14 @@ class DownloadLocations(unittest.TestCase):
 
 
 class PackageIdentity(unittest.TestCase):
-    def test_the_three_load_bearing_components_are_present(self):
+    def test_the_four_load_bearing_components_are_present(self):
         found = packages_by_name(generate(self, "x86_64"))
-        self.assertEqual(sorted(found), ["bluefin-review-mode", "gh", "omp"])
+        self.assertEqual(sorted(found), ["bluefin-review-mode", "gh", "headroom", "omp"])
 
     def test_versions_are_recorded(self):
         found = packages_by_name(generate(self, "x86_64"))
         self.assertEqual(found["omp"]["versionInfo"], "1.2.3")
+        self.assertEqual(found["headroom"]["versionInfo"], "0.37.0")
         self.assertEqual(found["gh"]["versionInfo"], "2.80.1")
         self.assertEqual(found["bluefin-review-mode"]["versionInfo"], "26.08.03")
 
@@ -238,6 +254,10 @@ class PackageIdentity(unittest.TestCase):
             locator("omp"), f"pkg:github/can1357/oh-my-pi@v1.2.3?checksum=sha256:{OMP_ARM}"
         )
         self.assertEqual(locator("gh"), f"pkg:github/cli/cli@v2.80.1?checksum=sha256:{GH_ARM}")
+        self.assertEqual(
+            locator("headroom"),
+            f"pkg:pypi/headroom-ai@0.37.0?checksum=sha256:{HEADROOM_ARM}",
+        )
         self.assertEqual(
             locator("bluefin-review-mode"),
             f"pkg:github/projectbluefin/review@{BASE_ARGS['--revision']}",

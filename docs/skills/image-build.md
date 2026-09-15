@@ -25,8 +25,9 @@ The repository ships two images:
 | `ghcr.io/projectbluefin/review` | `image/appliance/Containerfile` | OMP maintainer workbench and extension |
 | `ghcr.io/projectbluefin/contribute` | `image/contribute/Containerfile` | Hive-assigned OMP worker |
 
-There is no `review-contributor` image, SIF package, alternate agent harness, or
-model-specific runtime. Both OCI images leave model and effort selection to OMP.
+There is no `review-contributor` image or alternate agent harness. The personal
+Brew workflow also emits a native Review SIF from the same exact source commit;
+both OCI images leave model and effort selection to OMP.
 
 ## Rules
 
@@ -59,6 +60,19 @@ model-specific runtime. Both OCI images leave model and effort selection to OMP.
 Hive's source pin appears in `justfile` and `image/contribute/Containerfile`.
 Move both together from Hive's `v4` branch. The review and contribute image
 revision files are separate product revisions.
+
+The review appliance also carries the bounded `headroom-ai[mcp]` runtime from
+its pinned manylinux wheel and exact dependency versions in
+`image/appliance/headroom-requirements.txt`. Its profile config is provisioned
+under the persistent appliance home at first launch, so no host Codex or OMP
+configuration is needed to discover Headroom.
+
+The FSDK builder does not provide Linux audio libraries. The pinned Fedora
+minimal build stage installs only `pulseaudio-libs` and `alsa-lib`, copies
+their resolved shared-library closure plus `/usr/share/alsa`, and contributes
+no package manager to the final image. The appliance contract must execute
+`headroom mcp serve --help` and verify both `libpulse-simple.so.0` and
+`libasound.so.2` resolve in a built image.
 
 ## Verification
 

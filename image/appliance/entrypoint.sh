@@ -10,6 +10,14 @@ profile="bluefin-review-appliance"
 if [ "${BLUEFIN_REVIEW_INHERIT_OMP_CONFIG:-0}" = 1 ]; then
   profile="review"
 fi
+if [ "$profile" = bluefin-review-appliance ]; then
+  appliance_mcp_dir="$HOME/.omp/profiles/$profile/agent"
+  appliance_mcp_config="$appliance_mcp_dir/mcp.json"
+  if [ ! -e "$appliance_mcp_config" ] && [ -f /usr/share/bluefin/review/appliance-mcp.json ]; then
+    mkdir -p "$appliance_mcp_dir"
+    cp /usr/share/bluefin/review/appliance-mcp.json "$appliance_mcp_config"
+  fi
+fi
 
 case "${1:-}" in
 update)

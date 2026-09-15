@@ -128,7 +128,7 @@ assert_eq "$standalone_out" "--repo projectbluefin/review --pr 463 --issues" "st
 # --- 2. Hermetic test of bin/bluefin review (KVM OCI launcher) ----------------
 
 scratch="$(mktemp -d)"
-trap 'rm -rf "$scratch"' EXIT
+trap '[[ -z "${audio_pid:-}" ]] || kill "$audio_pid" 2>/dev/null || true; rm -rf "$scratch"' EXIT
 
 mkdir -p "$scratch/bin" "$scratch/home/.config/hive"
 host_fixture="$scratch/host"
@@ -224,6 +224,9 @@ export HOME="$scratch/home"
 export REVIEW_TEST_KVM_DEVICE="$kvm"
 export GH_TOKEN=mock-token GITHUB_TOKEN=mock-token
 unset HIVE_HUB
+export REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime"
+export REVIEW_TEST_SND_DEVICE="$scratch/no-snd"
+unset BLUEFIN_REVIEW_SIF
 
 assert_bluefin_review() {
   local input="$1"
@@ -239,6 +242,10 @@ assert_bluefin_review() {
   [[ "$podman_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "review did not use the krun OCI runtime: $podman_call"
   [[ "$podman_call" == *"--name bluefin-review-"* ]] || fail "review did not use an isolated instance name: $podman_call"
   [[ "$podman_call" == *":/home/bluefin:rw"* ]] || fail "review did not use target-specific state: $podman_call"
+  local state_volume state_home
+  state_volume="$(arg_after "$podman_call" --volume)"
+  state_home="${state_volume%%:*}"
+  [[ -d "$state_home/.omp" ]] || fail "review did not create persistent appliance OMP state"
 
   grep -qFx "pull ghcr.io/projectbluefin/review:stable" "$mock_podman_log" ||
     fail "bin/bluefin review did not refresh the moving stable tag"
@@ -304,6 +311,77 @@ assert_bluefin_review "projectbluefin/review#463" "--repo projectbluefin/review 
 assert_bluefin_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
 assert_bluefin_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
 assert_bluefin_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
+
+# The appliance-owned OMP directory is persistent state, not a host bind.
+default_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$default_review_call" != *".omp:/home/bluefin/.omp"* ]] ||
+  fail "review imported host ~/.omp without the explicit opt-in"
+
+mkdir -p "$HOME/.omp"
+: >"$mock_podman_log"
+BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "review host-config opt-in failed"
+inherited_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$inherited_review_call" == *"$HOME/.omp:/home/bluefin/.omp:rw"* ]] ||
+  fail "review host-config opt-in did not add the requested host ~/.omp bind"
+unset BLUEFIN_REVIEW_INHERIT_OMP_CONFIG
+
+# A real Pulse socket is the preferred transport, and only that socket is
+# projected; the containing runtime directory never crosses the boundary.
+audio_runtime="$scratch/audio-runtime"
+audio_socket="$audio_runtime/pulse/native"
+mkdir -p "$(dirname "$audio_socket")"
+python3 -c 'import socket,sys,time; server=socket.socket(socket.AF_UNIX); server.bind(sys.argv[1]); time.sleep(30)' "$audio_socket" &
+audio_pid=$!
+for _ in $(seq 1 50); do
+  [[ -S "$audio_socket" ]] && break
+  sleep 0.1
+done
+[[ -S "$audio_socket" ]] || fail "test Pulse socket was not created"
+: >"$mock_podman_log"
+REVIEW_TEST_RUNTIME_DIR="$audio_runtime" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "review Pulse projection failed"
+pulse_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$pulse_review_call" == *"$audio_socket:/run/bluefin/pulse/native:rw"* ]] ||
+  fail "review did not bind the detected Pulse socket"
+[[ "$pulse_review_call" == *"--env PULSE_SERVER=unix:/run/bluefin/pulse/native"* ]] ||
+  fail "review did not set the contained Pulse server endpoint"
+[[ "$pulse_review_call" != *"$audio_runtime:/run"* ]] ||
+  fail "review projected the entire runtime directory for audio"
+kill "$audio_pid" 2>/dev/null || true
+audio_pid=""
+
+# With no Pulse socket, an explicitly present ALSA device is the narrow
+# fallback. With neither, startup stays successful and passes no audio bind.
+snd_device="$scratch/snd"
+mkdir -p "$snd_device"
+: >"$mock_podman_log"
+REVIEW_TEST_SND_DEVICE="$snd_device" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "review ALSA projection failed"
+alsa_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$alsa_review_call" == *"--device $snd_device"* ]] ||
+  fail "review did not project the explicit ALSA device fallback"
+: >"$mock_podman_log"
+REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime" REVIEW_TEST_SND_DEVICE="$scratch/no-snd" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "headless review launch failed"
+headless_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$headless_review_call" != *"--device"* && "$headless_review_call" != *"/run/bluefin/pulse/native"* ]] ||
+  fail "headless review projected an unavailable audio transport"
+
+# The personal Brew bundle selects its native SIF explicitly and keeps the
+# same isolated state/config/audio rules as the OCI path.
+sif="$scratch/bluefin-review.sif"
+touch "$sif"
+chmod 0755 "$sif"
+: >"$mock_apptainer_log"
+BLUEFIN_REVIEW_SIF="$sif" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "packaged SIF review launch failed"
+sif_call="$(cat "$mock_apptainer_log")"
+[[ "$sif_call" == *"run --containall"* && "$sif_call" == *"$sif"* ]] ||
+  fail "packaged SIF did not use the selected immutable image"
+[[ "$sif_call" != *".omp:/home/bluefin/.omp"* ]] ||
+  fail "packaged SIF imported host ~/.omp without the explicit opt-in"
+unset BLUEFIN_REVIEW_SIF
 
 # --- 3. Hermetic test of bin/omp-review (Source launcher) ----------------------
 

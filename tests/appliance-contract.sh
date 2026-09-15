@@ -80,7 +80,7 @@ grep -qE '^ARG FSDK_BUILDER_IMAGE=ghcr\.io/projectbluefin/lab-runner:[^@[:space:
 
 # Every fetched artifact carries a per-architecture digest. A download this
 # build cannot verify is a download it must not execute.
-for pin in OMP_X86_64_SHA256 OMP_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256; do
+for pin in OMP_X86_64_SHA256 OMP_AARCH64_SHA256 HEADROOM_X86_64_SHA256 HEADROOM_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256 PIP_SHA256; do
   grep -qE "^ARG ${pin}=[0-9a-f]{64}$" "$containerfile" ||
     fail "ARG ${pin} must be a lowercase sha256 digest"
 done
@@ -98,6 +98,27 @@ require "$containerfile" \
   'io.projectbluefin.review.appliance="true"' \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"'
+grep -qE '^ARG AUDIO_BUILDER_IMAGE=registry\.fedoraproject\.org/fedora-minimal:[^@[:space:]]+@sha256:[0-9a-f]{64}$' "$containerfile" ||
+  fail "AUDIO_BUILDER_IMAGE must be pinned as tag@sha256 digest"
+# shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
+require "$containerfile" \
+  'FROM ${AUDIO_BUILDER_IMAGE} AS audio' \
+  'microdnf --assumeyes' \
+  'COPY --from=audio /audio-out/ /out/' \
+  'HEADROOM_VERSION' \
+  'headroom-requirements.txt' \
+  'io.projectbluefin.review.headroom.version=' \
+  'io.projectbluefin.review.audio.source='
+require image/appliance/stage-audio.sh \
+  'libpulse-simple.so.0' \
+  'libasound.so.2' \
+  '/usr/share/alsa' \
+  'ldd'
+require image/appliance/appliance-mcp.json \
+  '"headroom"' \
+  '"/usr/bin/headroom"' \
+  '"mcp"' \
+  '"serve"'
 require image/appliance/config.yml 'advisor: "@default"' 'syncBacklog: 1'
 for tool in actionlint shellcheck yq jq just; do
   grep -qF "/usr/sbin/${tool}" "$containerfile" ||
@@ -110,7 +131,6 @@ forbid "$containerfile" \
   'dnf install' \
   'apt-get' \
   'apk add' \
-  'pip install' \
   'RUN curl | ' \
   'curl -sL |'
 forbid "$containerfile" 'PI_VERSION' 'NODE_VERSION' 'pi-coding-agent' '/usr/bin/pi' '/usr/bin/node'
@@ -204,6 +224,7 @@ inspect() {
 run() {
   "$engine" run --rm --entrypoint /usr/bin/bash "$image" -c "$1"
 }
+trap 'printf "appliance-contract: runtime command failed: %s\n" "$BASH_COMMAND" >&2' ERR
 
 test "$(inspect '{{.Config.User}}')" = "65532:65532" ||
   fail "image must run as the numeric nonroot uid; kubelet rejects named users under runAsNonRoot"
@@ -216,7 +237,9 @@ test "$(inspect '{{.ManifestType}}')" = "application/vnd.oci.image.manifest.v1+j
 image_version="$(inspect '{{index .Labels "org.opencontainers.image.version"}}')"
 test "$image_version" = "$version" ||
   fail "image label version '${image_version}' does not match derived '${version}'"
-test "$(inspect '{{index .Labels "io.projectbluefin.review.appliance"}}')" = "true"
+headroom_version="$(sed -nE 's/^ARG HEADROOM_VERSION=([^[:space:]]+)$/\1/p' "$containerfile")"
+test "$(inspect '{{index .Labels "io.projectbluefin.review.headroom.version"}}')" = "$headroom_version"
+test "$(inspect '{{index .Labels "io.projectbluefin.review.audio.packages"}}')" = "pulseaudio-libs,alsa-lib"
 
 # Sum the layer sizes rather than reading `.Size`: podman's inspect field
 # double-counts files a later layer replaces, and the number a maintainer sees
@@ -257,6 +280,9 @@ run '
   jq --version >/dev/null
   just --version >/dev/null
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
+  headroom --version >/dev/null
+  headroom mcp serve --help >/dev/null
+  printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"contract\",\"version\":\"1\"}}}" | headroom mcp serve | grep -q "\"serverInfo\""
 ' >/dev/null || fail "a bundled binary failed to execute"
 
 # git is here to land fixes, which means it has to be able to commit and to
@@ -281,22 +307,63 @@ run '
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run 'set -eu; test -w "$HOME"; test "$HOME" = /home/bluefin' >/dev/null ||
   fail "HOME must exist and be writable by the nonroot user"
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+run '
+  set -eu
+  check() {
+    "$@" || {
+      printf "appliance-contract: runtime check failed: %s\n" "$*" >&2
+      exit 1
+    }
+  }
+  case "$(uname -m)" in
+    x86_64) audio_triplet=x86_64-linux-gnu ;;
+    aarch64) audio_triplet=aarch64-linux-gnu ;;
+    *) exit 1 ;;
+  esac
+  check test -x /usr/bin/bluefin-review-appliance
+  check grep -q "checkUpdate: false" /usr/share/bluefin/review/appliance-config.yml
+  check test -f /usr/share/bluefin/review/appliance-mcp.json
+  check test -f /usr/share/bluefin/review/extension/index.ts
+  check test -d /usr/share/bluefin/review/extension/agents
+  check test -f /usr/share/bluefin/review/sbom.spdx.json
+  check test -e "/usr/lib/${audio_triplet}/libpulse-simple.so.0"
+  check test -e "/usr/lib/${audio_triplet}/libasound.so.2"
+  check test -e /usr/share/alsa/alsa.conf
+  check test -d /run/bluefin/pulse
+  pulse_deps="$(ldd "/usr/lib/${audio_triplet}/libpulse-simple.so.0")" || {
+    printf "appliance-contract: ldd failed for libpulse-simple.so.0\n" >&2
+    exit 1
+  }
+  [[ "$pulse_deps" != *"not found"* ]] || {
+    printf "%s\n" "$pulse_deps" >&2
+    exit 1
+  }
+  alsa_deps="$(ldd "/usr/lib/${audio_triplet}/libasound.so.2")" || {
+    printf "appliance-contract: ldd failed for libasound.so.2\n" >&2
+    exit 1
+  }
+  [[ "$alsa_deps" != *"not found"* ]] || {
+    printf "%s\n" "$alsa_deps" >&2
+    exit 1
+  }
+' || fail "the review mode, Headroom MCP, SBOM, or audio closure is missing from the image"
 
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
-  test -x /usr/bin/bluefin-review-appliance
-  grep -q "checkUpdate: false" /usr/share/bluefin/review/appliance-config.yml
-  test -f /usr/share/bluefin/review/extension/index.ts
-  test -d /usr/share/bluefin/review/extension/agents
-  test -f /usr/share/bluefin/review/sbom.spdx.json
-' >/dev/null || fail "the review mode or its SBOM is missing from the image"
+  profile="$HOME/.omp/profiles/bluefin-review-appliance/agent/mcp.json"
+  rm -f "$profile"
+  bluefin-review-appliance --version >/dev/null
+  test -f "$profile"
+  grep -q "/usr/bin/headroom" "$profile"
+' || fail "the appliance did not provision its Headroom MCP profile"
 
 # Nothing inside may install anything.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
-  for forbidden in dnf apt apt-get apk rpm yum pip pip3 npm; do
+  for forbidden in dnf microdnf apt apt-get apk rpm yum pip pip3 npm; do
     if command -v "$forbidden" >/dev/null 2>&1; then
       echo "found package manager: $forbidden" >&2
       exit 1
@@ -309,7 +376,7 @@ import json,sys
 document = json.load(sys.stdin)
 print(" ".join(sorted(package["name"] for package in document["packages"])))
 ')"
-for component in omp gh bluefin-review-mode; do
+for component in omp headroom gh bluefin-review-mode; do
   grep -qF -- "$component" <<<"$sbom_packages" ||
     fail "the in-image SBOM does not record ${component}"
 done
