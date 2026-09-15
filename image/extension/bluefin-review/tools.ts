@@ -5,8 +5,10 @@
  * fetched a diff and returns prose is worse than no tool: the model believes it.
  */
 
-import { diffToText, fetchDiff } from "./github.ts";
+import { diffToText, fetchDiff, fetchIssueDetail } from "./github.ts";
 import { hiveFailureStatus } from "./hive.ts";
+import type { ReviewMode } from "./mode.ts";
+import { sanitizeMarkdown } from "./reader.ts";
 import { traceToText } from "./trace.ts";
 
 interface ToolContent {
@@ -41,13 +43,40 @@ function text(value: string): ToolContent[] {
 	return [{ type: "text", text: value }];
 }
 
+type ToolDefinition = Parameters<ToolHost["registerTool"]>[0];
+
 /** Resolve the repository for a tool call: explicit, else the selection, else org default. */
-function resolveRepo(mode: ReviewMode, params: Record<string, unknown>): string | undefined {
+function resolveRepo(mode: ReviewMode, params: Record<string, unknown>, field: "pull_request" | "issue" = "pull_request"): string | undefined {
 	const explicit = typeof params.repo === "string" ? params.repo : undefined;
 	if (explicit) return explicit.includes("/") ? explicit : `${mode.org}/${explicit}`;
-	const number = typeof params.pull_request === "number" ? params.pull_request : undefined;
+	const number = typeof params[field] === "number" ? params[field] : undefined;
 	const match = number === undefined ? mode.selected() : mode.items.find((item) => item.id === number);
 	return match?.repo;
+}
+
+function issueDetailToText(detail: Awaited<ReturnType<typeof fetchIssueDetail>>["detail"]): string {
+	if (!detail) return "issue unavailable";
+	const clean = (value: string): string => sanitizeMarkdown(value);
+	const lines = [
+		`${clean(detail.repo)}#${detail.number}: ${clean(detail.title)} [${clean(detail.state)}]`,
+		`author @${clean(detail.author)} labels=${detail.labels.map(clean).join(",") || "none"}`,
+		clean(detail.url),
+		"",
+		clean(detail.body) || "(no description)",
+	];
+	if (detail.comments.length > 0) {
+		lines.push("", "comments:");
+		for (const comment of detail.comments) {
+			lines.push(`@${clean(comment.author)} ${clean(comment.createdAt)}`, clean(comment.body) || "(comment)", "");
+		}
+	}
+	if (detail.linkedPullRequests.length > 0) {
+		lines.push("linked pull requests:");
+		for (const pull of detail.linkedPullRequests) {
+			lines.push(`${clean(pull.repo)}#${pull.number} [${clean(pull.state)}] ${clean(pull.title)} ${clean(pull.url)}`);
+		}
+	}
+	return lines.join("\n");
 }
 
 
@@ -61,10 +90,14 @@ function resolveRepo(mode: ReviewMode, params: Record<string, unknown>): string 
 function orderLine(mode: ReviewMode): string {
 	const hive = mode.hive;
 	if (!hive.configured) {
-		return "order: unranked — no hive hub configured; GitHub evidence is browse-only";
+		return mode.isPersonalMode()
+			? "order: GitHub/local — Hive: not configured"
+			: "order: unranked — no hive hub configured; GitHub evidence is browse-only";
 	}
 	if (!hive.online) {
-		return `order: unavailable — ${hiveFailureStatus(hive.error)}; GitHub evidence is browse-only`;
+		return mode.isPersonalMode()
+			? `order: GitHub/local — Hive: ${hiveFailureStatus(hive.error)}`
+			: `order: unavailable — ${hiveFailureStatus(hive.error)}; GitHub evidence is browse-only`;
 	}
 	const actionable = hive.actionableItems === undefined ? "" : `, ${hive.actionableItems} actionable overall`;
 	const coverage = mode.hiveCoverage();
@@ -82,8 +115,19 @@ function orderLine(mode: ReviewMode): string {
  */
 export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => Promise<void>): void {
 	const z = pi.zod;
+	const registerTool = (definition: ToolDefinition, aliases: readonly string[] = []): void => {
+		pi.registerTool(definition);
+		if (!mode.isPersonalMode()) return;
+		for (const name of aliases) {
+			pi.registerTool({
+				...definition,
+				name,
+				description: definition.description.replaceAll("Hive", "Review"),
+			});
+		}
+	};
 
-	pi.registerTool({
+	registerTool({
 		name: "hive_workbench_status",
 		label: "Workbench Status",
 		description:
@@ -145,9 +189,9 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 				},
 			};
 		},
-	});
+	}, ["review_workbench_status"]);
 
-	pi.registerTool({
+	registerTool({
 		name: "hive_workbench_queue",
 		label: "Workbench Queue",
 		description:
@@ -199,9 +243,9 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 				},
 			};
 		},
-	});
+	}, ["review_workbench_queue"]);
 
-	pi.registerTool({
+	registerTool({
 		name: "hive_workbench_diff",
 		label: "Review Diff",
 		description:
@@ -240,9 +284,37 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 				isError: Boolean(diff.error),
 			};
 		},
-	});
+	}, ["review_workbench_diff"]);
 
-	pi.registerTool({
+	if (mode.isPersonalMode()) {
+		registerTool({
+			name: "review_workbench_issue",
+			label: "Review Issue",
+			description: "Fetch the issue body, comments, labels, state, and linked pull requests from GitHub.",
+			parameters: z.object({
+				issue: z.number().describe("Issue number to inspect"),
+				repo: z.string().describe("owner/repo; required in child sessions, otherwise defaults to the selected item's repository").optional(),
+			}),
+			async execute(_id, params) {
+				const issue = typeof params.issue === "number" ? params.issue : Number.NaN;
+				if (!Number.isInteger(issue) || issue < 1) {
+					return { content: text("issue must be a positive integer"), isError: true };
+				}
+				const repo = resolveRepo(mode, params, "issue");
+				if (!repo) {
+					return { content: text("no repository: pass repo as owner/name, or select a queue item first"), isError: true };
+				}
+				const result = await fetchIssueDetail(repo, issue, mode.tokenOptions());
+				return {
+					content: text(result.detail ? issueDetailToText(result.detail) : `issue unavailable for ${repo}#${issue}: ${result.error ?? "unknown error"}`),
+					details: { repo, issue, issue_detail: result.detail ?? null, error: result.error ?? null },
+					isError: Boolean(result.error),
+				};
+			},
+		});
+	}
+
+	registerTool({
 		name: "hive_workbench_trace",
 		label: "Review Trace",
 		description: "Render the current OMP session and workflowz execution trace.",
@@ -255,7 +327,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 				details: { has_state: spans.length > 0 },
 			};
 		},
-	});
+	}, ["review_workbench_trace"]);
 	pi.registerTool({
 		name: "hive_workbench_lookup",
 		label: "Hive Lookup",

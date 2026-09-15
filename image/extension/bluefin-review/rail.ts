@@ -151,7 +151,7 @@ export function workbenchProgressBar(mode: ReviewMode, painter: Painter, width: 
 		? painter.fg("success", "HIVE LIVE")
 		: mode.hive.configured
 			? painter.fg("error", "HIVE OFFLINE")
-			: painter.fg("warning", "HIVE UNCONFIGURED");
+			: painter.fg("warning", mode.isPersonalMode() ? "LOCAL" : "HIVE UNCONFIGURED");
 	const selected = painter.fg("text", `${mode.selectedKeys.size} selected`);
 	const pause = mode.paused ? painter.fg("warning", "PAUSED") : painter.fg("success", "RUNNING");
 	const progress = mode.batchProgress;
@@ -189,7 +189,8 @@ export function renderRail(
 			: mode.loading
 				? `${spinner} ${painter.fg("warning", reasonText)}`
 				: painter.fg("dim", `${statusIcon("pending")} ${reasonText}`);
-		return [truncateToWidth(`${painter.fg("accent", `${GLYPH.hex} hive`)} ${reason}  │  ${painter.fg("dim", "alt+b: workbench")}`, width)];
+	const surface = mode.isPersonalMode() ? "review" : "hive";
+	return [truncateToWidth(`${painter.fg("accent", `${GLYPH.hex} ${surface}`)} ${reason}  │  ${painter.fg("dim", "alt+b: workbench")}`, width)];
 	}
 	const ci = ciGlyph(item.ciStatus);
 	const priority = mode.priorityFor(item);
@@ -207,7 +208,7 @@ export function renderRail(
 	const live = liveLine(mode, painter, now, frame);
 	if (live && mode.session.active()) return [truncateToWidth(live, width)];
 	const source = orderSourceLabel(mode);
-	const connection = mode.hive.online ? "HIVE LIVE" : mode.hive.configured ? "HIVE OFFLINE" : "HIVE UNCONFIGURED";
+	const connection = mode.hive.online ? "HIVE LIVE" : mode.hive.configured ? "HIVE OFFLINE" : mode.isPersonalMode() ? "LOCAL" : "HIVE UNCONFIGURED";
 	const leftParts = [check, number, title, author, chip, icon].filter(Boolean);
 	const status = [painter.fg(source.role, `${connection} ${source.text}`), ageBadge].filter(Boolean).join(` ${painter.fg("dim", GLYPH.dot)} `);
 	const itemLine = `${leftParts.join(" ")}  │  ${painter.fg("dim", "alt+b: workbench")} ${pos}`;

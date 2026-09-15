@@ -396,6 +396,7 @@ export class ReviewDashboard {
 			return;
 		}
 		if (col > 36 && col < width - 20) {
+			if (this.mode.isPersonalMode()) return;
 			if (this.mode.hiveLevel !== undefined) {
 				this.mode.cycleHiveLevel();
 			} else {
@@ -645,6 +646,7 @@ export class ReviewDashboard {
 
 	private handleStatusBarClick(col: number, _width: number): void {
 		if (col < 30) {
+			if (this.mode.isPersonalMode()) return;
 			this.mode.toggleHiveOnly();
 			this.tui.requestRender();
 			return;
@@ -752,7 +754,11 @@ export class ReviewDashboard {
 			case "\u001bs": {
 				const items = this.mode.slayableItems(BATCH_LIMIT);
 				if (items.length === 0) return;
-				this.emitAction({ kind: "slay", item: items[0]!, items: items.length > 0 ? items : undefined });
+				this.emitAction({
+					kind: this.mode.queueMode === "issues" ? "fix" : "slay",
+					item: items[0]!,
+					items: items.length > 0 ? items : undefined,
+				});
 				return;
 			}
 			case "/":
@@ -799,10 +805,12 @@ export class ReviewDashboard {
 				this.tui.requestRender();
 				return;
 			case "H":
+				if (this.mode.isPersonalMode()) return;
 				this.mode.toggleHiveOnly();
 				this.tui.requestRender();
 				return;
 			case "L":
+				if (this.mode.isPersonalMode()) return;
 				this.mode.cycleHiveLevel();
 				this.tui.requestRender();
 				return;
@@ -823,7 +831,7 @@ export class ReviewDashboard {
 		const item = items ? items[0]! : activeItem;
 		switch (key) {
 			case "s":
-				this.emitAction({ kind: "slay", item, items });
+				this.emitAction({ kind: this.mode.queueMode === "issues" ? "fix" : "slay", item, items });
 				return;
 			case "c":
 				this.emitAction({ kind: "comment", item, items });
@@ -989,7 +997,7 @@ export class ReviewDashboard {
 	private headerRow(width: number, now: number): string {
 		const tally = this.mode.ciTally();
 		const parts = [
-			this.painter.bold(this.painter.fg("accent", `${GLYPH.hex} HIVE WORKBENCH`)),
+			this.painter.bold(this.painter.fg("accent", `${GLYPH.hex} ${this.mode.isPersonalMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH"}`)),
 			this.painter.fg("dim", GLYPH.logDashed.trim()),
 			this.painter.bold(
 				this.painter.fg(
@@ -1219,15 +1227,46 @@ export class ReviewDashboard {
 		return truncateToWidth(`${marker} ${label}`, width);
 	}
 
+	private dashboardKeys(): RailKey[] {
+		return DASHBOARD_KEYS
+			.filter((key) => !this.mode.isPersonalMode() || (key.chord !== "H" && key.chord !== "L"))
+			.map((key) => {
+				if (this.mode.queueMode !== "issues") return key;
+				if (key.chord === "s") return { ...key, label: "implement" };
+				if (key.chord === "alt+s") return { ...key, label: "implement all" };
+				if (key.chord === "d") return { ...key, label: "inspect issue" };
+				return key;
+			});
+	}
+
+	private helpLines(): string[] {
+		const lines = HELP
+			.filter((line) => !this.mode.isPersonalMode() || (!line.startsWith("  H / L") && !line.startsWith("Hive supplies")))
+			.map((line) => line);
+		lines[0] = this.mode.isPersonalMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH";
+		if (this.mode.queueMode === "issues") {
+			const replace = new Map([
+				["  s                review, repair, and land selected pull requests", "  s                implement selected issues and open review-ready PRs"],
+				["  alt+s            autoslay the visible queue through review, repair, and landing", "  alt+s            implement the visible issue queue"],
+				["  d                inspect bounded diff evidence", "  d                inspect issue body, comments, and linked PRs"],
+			]);
+			for (let index = 0; index < lines.length; index++) lines[index] = replace.get(lines[index]!) ?? lines[index]!;
+		}
+		if (this.mode.isPersonalMode()) {
+			lines.push("GitHub supplies repository evidence. Hive adds ordering and claims when configured.");
+		}
+		return lines;
+	}
+
 	render(width: number): string[] {
 		this.lastWidth = width;
 		const now = Date.now();
 		const lines: string[] = [this.headerRow(width, now), this.painter.fg("border", "─".repeat(width))];
 
 		if (this.showHelp) {
-			lines.push(this.painter.bold(this.painter.fg("accent", "HIVE WORKBENCH")));
+			lines.push(this.painter.bold(this.painter.fg("accent", this.mode.isPersonalMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH")));
 			lines.push("");
-			for (const line of HELP) lines.push(truncateToWidth(this.painter.fg(line.startsWith("  ") ? "dim" : "text", line), width));
+			for (const line of this.helpLines()) lines.push(truncateToWidth(this.painter.fg(line.startsWith("  ") ? "dim" : "text", line), width));
 			lines.push(keymapBar(this.painter, [{ chord: "?", label: "back" }], width));
 			return lines;
 		}
@@ -1298,7 +1337,7 @@ export class ReviewDashboard {
 		} else if (this.mode.filter) {
 			lines.push(truncateToWidth(this.painter.fg("dim", `filter: ${this.mode.filter}  (/ to search · esc/clear to reset)`), width));
 		}
-		lines.push(keymapBar(this.painter, DASHBOARD_KEYS, width));
+		lines.push(keymapBar(this.painter, this.dashboardKeys(), width));
 		lines.push(workbenchProgressBar(this.mode, this.painter, width));
 		return lines;
 	}

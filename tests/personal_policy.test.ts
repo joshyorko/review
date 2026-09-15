@@ -2,8 +2,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BATCH_ENTRY, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
+import { BATCH_ENTRY, actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
+import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts";
+import { PLAIN_PAINTER } from "../image/extension/bluefin-review/glyphs.ts";
+import { fetchQueue } from "../image/extension/bluefin-review/github.ts";
+import { EMPTY_HIVE } from "../image/extension/bluefin-review/hive.ts";
 import { ReviewMode } from "../image/extension/bluefin-review/mode.ts";
+import { renderRail } from "../image/extension/bluefin-review/rail.ts";
+import { registerTools } from "../image/extension/bluefin-review/tools.ts";
 
 const NOW = 1_800_000_000_000;
 const ENV = {
@@ -11,6 +17,7 @@ const ENV = {
 	HOME: "/nonexistent",
 	XDG_CONFIG_HOME: "/nonexistent",
 	BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY: "1",
+	BLUEFIN_REVIEW_PERSONAL_MODE: "1",
 };
 
 function workflowNode() {
@@ -31,12 +38,19 @@ function workflowNode() {
 			pageInfo: { hasNextPage: false },
 			nodes: [{ path: ".github/workflows/deploy.yml" }],
 		},
-		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+		commits: {
+			nodes: [{
+				commit: {
+					statusCheckRollup: { state: "SUCCESS" },
+					checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "COMPLETED", conclusion: "SUCCESS" }] },
+				},
+			}],
+		},
 		closingIssuesReferences: { nodes: [] },
 	};
 }
 
-function makeFetch(scopes = "repo, workflow") {
+function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40)) {
 	return (url: string | URL | Request, init?: RequestInit) => {
 		const target = String(url);
 		if (target === "https://api.github.com/") {
@@ -60,7 +74,11 @@ function makeFetch(scopes = "repo, workflow") {
 					}),
 				});
 			}
-			return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({ data: {} }) });
+			const data: Record<string, unknown> = {};
+			for (const [, alias] of body.query.matchAll(/(\w+): repository\(owner: "[^"]+", name: "[^"]+"\)/g)) {
+				data[alias] = { issueOrPullRequest: { ...workflowNode(), headRefOid: liveHeadSha } };
+			}
+			return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({ data }) });
 		}
 		if (target.includes("/repos/example/repo/pulls/42/files")) {
 			return Promise.resolve({
@@ -166,4 +184,335 @@ test("personal workflow slay still fails closed when classic OAuth scope is know
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data as { state?: string; error?: string } | undefined;
 	assert.equal(batch?.state, "blocked");
 	assert.match(batch?.error ?? "", /\.github\/workflows\/deploy\.yml/);
+});
+
+test("Issue s and Alt-S dispatch issue implementation, while d requests issue evidence", () => {
+	const mode = new ReviewMode({ org: "example", env: ENV });
+	mode.queueMode = "issues";
+	const issue = {
+		id: 933,
+		type: "issue" as const,
+		repo: "example/repo",
+		title: "issue work",
+		author: "josh",
+		url: "https://github.com/example/repo/issues/933",
+		updatedAt: NOW,
+		draft: false,
+		mergeState: "unknown" as const,
+		reviewState: "unknown" as const,
+		labels: [],
+	};
+	mode.items = [issue];
+	mode.reprioritize();
+	const actions: any[] = [];
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, action => actions.push(action), () => {});
+	try {
+		dashboard.handleInput("s");
+		dashboard.handleInput("alt+s");
+		dashboard.handleInput("d");
+		assert.deepEqual(actions.map(action => action.kind), ["fix", "fix", "diff"]);
+		assert.doesNotMatch(actionPrompt(actions[2]), /hive_workbench_diff/);
+		assert.match(actionPrompt(actions[2]), /review_workbench_issue/);
+	} finally {
+		dashboard.dispose();
+	}
+});
+
+test("Issue inspection uses issue evidence and never calls the PR diff endpoint", async () => {
+	const calls: string[] = [];
+	const fetchImpl = async (url: string | URL | Request) => {
+		const target = String(url);
+		calls.push(target);
+		if (target.endsWith("/issues/933/comments?per_page=100")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => [{ user: { login: "maintainer" }, body: "Please investigate", created_at: "2026-09-15T00:00:00Z" }] };
+		}
+		if (target.endsWith("/issues/933/timeline?per_page=100")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		}
+		if (target.endsWith("/issues/933")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					number: 933,
+					title: "issue work",
+					body: "Investigate the failure",
+					state: "open",
+					user: { login: "reporter" },
+					labels: [{ name: "bug" }],
+					html_url: "https://github.com/example/repo/issues/933",
+				}),
+			};
+		}
+		throw new Error(`unexpected GitHub request: ${target}`);
+	};
+	const pi = fakeHost();
+	const mode = new ReviewMode({ org: "example", fetchImpl: fetchImpl as typeof fetch, env: ENV });
+	mode.setToken("t");
+	registerTools(pi as any, mode, async () => {});
+	const result = await pi.tools.get("review_workbench_issue").execute("id", { repo: "example/repo", issue: 933 });
+	assert.equal(result.isError, false, JSON.stringify(result));
+	assert.match(result.content[0].text, /issue work/);
+	assert.match(result.content[0].text, /Please investigate/);
+	assert.equal(calls.some(call => call.includes("/pulls/933")), false, calls.join("\n"));
+});
+
+test("non-Hive status is actionable and generic tool aliases are registered", async () => {
+	const pi = fakeHost();
+	const mode = new ReviewMode({ org: "example", env: ENV });
+	mode.hive = EMPTY_HIVE;
+	mode.items = [{
+		id: 933,
+		type: "issue",
+		repo: "example/repo",
+		title: "issue work",
+		author: "josh",
+		url: "https://github.com/example/repo/issues/933",
+		updatedAt: NOW,
+		draft: false,
+		mergeState: "unknown",
+		reviewState: "unknown",
+		labels: [],
+	}];
+	mode.reprioritize();
+	registerTools(pi as any, mode, async () => {});
+	for (const name of ["review_workbench_status", "review_workbench_queue", "review_workbench_diff", "review_workbench_trace"]) {
+		assert.ok(pi.tools.has(name), name);
+	}
+	assert.ok(pi.tools.has("hive_workbench_lookup"));
+	const status = await pi.tools.get("review_workbench_status").execute("id", {});
+	assert.match(status.content[0].text, /Hive: not configured/);
+	assert.doesNotMatch(status.content[0].text, /browse-only/);
+});
+
+test("personal UI presents a local Review surface without Hive-only controls", () => {
+	const mode = new ReviewMode({ org: "example", env: ENV });
+	mode.queueMode = "issues";
+	mode.items = [{
+		id: 933,
+		type: "issue",
+		repo: "example/repo",
+		title: "issue work",
+		author: "josh",
+		url: "https://github.com/example/repo/issues/933",
+		updatedAt: NOW,
+		draft: false,
+		mergeState: "unknown",
+		reviewState: "unknown",
+		labels: [],
+	}];
+	mode.reprioritize();
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	try {
+		const frame = dashboard.render(160).join("\n");
+		assert.match(frame, /REVIEW WORKBENCH/);
+		assert.doesNotMatch(frame, /HIVE WORKBENCH/);
+		assert.match(frame, /implement/);
+		dashboard.handleInput("?");
+		const help = dashboard.render(160).join("\n");
+		assert.match(help, /REVIEW WORKBENCH/);
+		assert.equal(help.includes("H / L"), false);
+		assert.doesNotMatch(help, /Hive supplies priority/);
+		dashboard.handleInput("H");
+		assert.equal(mode.hiveOnly, false);
+		assert.match(renderRail(mode, PLAIN_PAINTER, 160, NOW, 0, []).join("\n"), /LOCAL/);
+	} finally {
+		dashboard.dispose();
+	}
+});
+
+test("personal reviewer selection is generic outside Project Bluefin", () => {
+	const generic = {
+		...workflowNode(),
+		type: "pr" as const,
+		id: 42,
+		repo: "example/repo",
+		repository: { nameWithOwner: "example/repo" },
+		url: "https://github.com/example/repo/pull/42",
+	};
+	const bluefin = { ...workflowNode(), type: "pr" as const, id: 42, repo: "projectbluefin/review" };
+	assert.match(actionPrompt({ kind: "slay", item: generic as any }) ?? "", /generic-reviewer/);
+	assert.doesNotMatch(actionPrompt({ kind: "slay", item: generic as any }) ?? "", /bluefin-reviewer/);
+	assert.match(actionPrompt({ kind: "slay", item: bluefin as any }) ?? "", /bluefin-reviewer/);
+});
+
+function ciNode(rollup: string | null, checkSuites: unknown) {
+	return {
+		...workflowNode(),
+		commits: {
+			nodes: [{
+				commit: {
+					statusCheckRollup: rollup === null ? null : { state: rollup },
+					checkSuites,
+				},
+			}],
+		},
+	};
+}
+
+function ciFetch(node: unknown) {
+	return async (url: string | URL | Request, init?: RequestInit) => {
+		const target = String(url);
+		if (target.includes("/graphql")) {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			if (body.variables?.search !== undefined) {
+				return {
+					ok: true,
+					status: 200,
+					statusText: "OK",
+					json: async () => ({
+						data: {
+							search: {
+								pageInfo: { hasNextPage: false, endCursor: null },
+								nodes: [node],
+							},
+						},
+					}),
+				};
+			}
+		}
+		throw new Error("unexpected CI fixture request: " + target);
+	};
+}
+
+test("authoritative successful rollup wins over queued ambient enterprise suites", async () => {
+	const result = await fetchQueue("prs", {
+		token: "t",
+		fetchImpl: ciFetch(ciNode("SUCCESS", {
+			pageInfo: { hasNextPage: false },
+			nodes: [
+				{ status: "QUEUED", conclusion: null, app: { name: "Azure Pipelines" } },
+				{ status: "QUEUED", conclusion: null, app: { name: "Veracode Workflow App" } },
+				{ status: "QUEUED", conclusion: null, app: { name: "Tenable Cloud Security" } },
+			],
+		})) as typeof fetch,
+	});
+	assert.equal(result.items[0]?.ciStatus, "success");
+});
+
+test("successful rollup stays successful with terminal successful suite conclusions", async () => {
+	const result = await fetchQueue("prs", {
+		token: "t",
+		fetchImpl: ciFetch(ciNode("SUCCESS", {
+			pageInfo: { hasNextPage: false },
+			nodes: [
+				{ status: "COMPLETED", conclusion: "SUCCESS" },
+				{ status: "COMPLETED", conclusion: "NEUTRAL" },
+				{ status: "COMPLETED", conclusion: "SKIPPED" },
+			],
+		})) as typeof fetch,
+	});
+	assert.equal(result.items[0]?.ciStatus, "success");
+});
+
+test("failed rollup wins over unrelated suite noise", async () => {
+	const result = await fetchQueue("prs", {
+		token: "t",
+		fetchImpl: ciFetch(ciNode("FAILURE", {
+			pageInfo: { hasNextPage: false },
+			nodes: [{ status: "QUEUED", conclusion: null }],
+		})) as typeof fetch,
+	});
+	assert.equal(result.items[0]?.ciStatus, "failure");
+});
+
+test("completed failing suites provide failure evidence when rollup is absent", async () => {
+	const result = await fetchQueue("prs", {
+		token: "t",
+		fetchImpl: ciFetch(ciNode(null, {
+			pageInfo: { hasNextPage: false },
+			nodes: [{ status: "COMPLETED", conclusion: "FAILURE" }],
+		})) as typeof fetch,
+	});
+	assert.equal(result.items[0]?.ciStatus, "failure");
+});
+
+test("active suites provide pending fallback evidence when rollup is absent", async () => {
+	const result = await fetchQueue("prs", {
+		token: "t",
+		fetchImpl: ciFetch(ciNode(null, {
+			pageInfo: { hasNextPage: false },
+			nodes: [{ status: "IN_PROGRESS", conclusion: null }],
+		})) as typeof fetch,
+	});
+	assert.equal(result.items[0]?.ciStatus, "pending");
+});
+
+test("terminal successful suites are nonblocking when rollup is absent", async () => {
+	const result = await fetchQueue("prs", {
+		token: "t",
+		fetchImpl: ciFetch(ciNode(null, {
+			pageInfo: { hasNextPage: false },
+			nodes: [
+				{ status: "COMPLETED", conclusion: "SUCCESS" },
+				{ status: "COMPLETED", conclusion: "NEUTRAL" },
+				{ status: "COMPLETED", conclusion: "SKIPPED" },
+			],
+		})) as typeof fetch,
+	});
+	assert.equal(result.items[0]?.ciStatus, "success");
+});
+
+test("incomplete fallback suite evidence is explicit unknown state", async () => {
+	const result = await fetchQueue("prs", {
+		token: "t",
+		fetchImpl: ciFetch(ciNode(null, {
+			pageInfo: { hasNextPage: true },
+			nodes: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+		})) as typeof fetch,
+	});
+	assert.equal(result.items[0]?.ciStatus, undefined);
+	assert.equal(result.items[0]?.ciEvidenceComplete, false);
+});
+
+test("live PR revalidation reconciles current mutable state into ReviewMode", () => {
+	const mode = new ReviewMode({ org: "example", env: ENV });
+	const previous = {
+		id: 42,
+		type: "pr" as const,
+		repo: "example/repo",
+		title: "workflow change",
+		author: "josh",
+		url: "https://github.com/example/repo/pull/42",
+		updatedAt: NOW,
+		draft: false,
+		ciStatus: "pending" as const,
+		mergeState: "unknown" as const,
+		reviewState: "review_required" as const,
+		labels: ["old"],
+		headSha: "4".repeat(40),
+	};
+	mode.items = [previous];
+	mode.reprioritize();
+	mode.reconcileItems([{
+		...previous,
+		headSha: "5".repeat(40),
+		ciStatus: "success",
+		mergeState: "clean",
+		reviewState: "approved",
+		labels: ["new"],
+	}]);
+	assert.equal(mode.items[0]?.headSha, "5".repeat(40));
+	assert.equal(mode.items[0]?.ciStatus, "success");
+	assert.equal(mode.items[0]?.mergeState, "clean");
+	assert.equal(mode.items[0]?.reviewState, "approved");
+	assert.deepEqual(mode.items[0]?.labels, ["new"]);
+});
+
+test("live head changes still block the captured workflow PR", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as any, {
+		org: "example",
+		fetchImpl: makeFetch("repo, workflow", "5".repeat(40)) as typeof fetch,
+		env: ENV,
+	});
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((entry) => /pull request head changed/.test(entry.message)));
 });

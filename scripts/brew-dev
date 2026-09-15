@@ -33,6 +33,10 @@ case "$action" in
     git -C "$repo" archive "$sha" | tar -xf - -C "$work/source"
     [[ -f "$work/source/bin/bluefin" && -f "$work/source/image/appliance/Containerfile" ]] || fail 'ref lacks the Review launcher or appliance'
     version="$(cd "$work/source" && bash scripts/review-appliance-version.sh)"
+    oci_repository="${BLUEFIN_REVIEW_OCI_REPOSITORY:-ghcr.io/joshyorko/review-appliance}"
+    oci_image="${oci_repository}:sha-${sha}"
+    oci_arch_image="${oci_image}-${arch}"
+    oci_digest=""
     image="localhost/bluefin-review-dev:${sha:0:12}-$arch-$$"
     (
       cd "$work/source"
@@ -42,6 +46,13 @@ case "$action" in
         --label "io.projectbluefin.review.dev.branch=$source_ref" \
         -f image/appliance/Containerfile -t "$image" .
     )
+    if [[ "${BLUEFIN_REVIEW_OCI_PUSH:-0}" == 1 ]]; then
+      [[ -n "${REGISTRY_AUTH_FILE:-}" && -r "${REGISTRY_AUTH_FILE}" ]] || fail "REGISTRY_AUTH_FILE must name a readable registry auth file when OCI push is enabled"
+      podman_args=(--format oci --digestfile "$work/oci-digest" --authfile "${REGISTRY_AUTH_FILE}")
+      podman push "${podman_args[@]}" "$image" "docker://${oci_arch_image}"
+      oci_digest="$(< "$work/oci-digest")"
+      [[ "$oci_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "personal OCI push returned an invalid digest"
+    fi
     podman save --format docker-archive -o "$work/review.tar" "$image"
     APPTAINER_CACHEDIR="$work/apptainer-cache" apptainer build \
       "$work/payload/launcher/bluefin-review.sif" "docker-archive:$work/review.tar"

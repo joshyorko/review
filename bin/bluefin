@@ -256,7 +256,7 @@ run_review() {
     previous="$arg"
   done
 
-  local key root home workspace scratch name image sif
+  local key root home workspace scratch name image sif fallback_sif
   key="$(slugify "${BLUEFIN_INSTANCE:-review-$scope}")"
   root="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${key}"
   home="${root}/home"
@@ -265,14 +265,16 @@ run_review() {
   name="bluefin-review-${key}-$(date +%s)-$$"
   image="${BLUEFIN_REVIEW_IMAGE:-ghcr.io/projectbluefin/review:stable}"
   sif="${BLUEFIN_REVIEW_SIF:-}"
+  fallback_sif="${BLUEFIN_REVIEW_FALLBACK_SIF:-}"
   mkdir -p "$home/.omp" "$home/.config/pulse" "$workspace" "$scratch"
   detect_review_audio
   prepare_review_omp_mount
   [[ -z "$REVIEW_OMP_WARNING" ]] || echo "$REVIEW_OMP_WARNING" >&2
 
-  if [[ -n "$sif" ]]; then
+  launch_sif() {
+    local selected_sif="$1"
     command -v apptainer >/dev/null 2>&1 || fail "Apptainer is required for the packaged Review SIF."
-    [[ -x "$sif" ]] || fail "review SIF is missing or not executable: ${sif}"
+    [[ -x "$selected_sif" ]] || fail "review SIF is missing or not executable: ${selected_sif}"
     KVM_FAILURE="the packaged Review SIF was selected"
     require_fallback
     prepare_apptainer_environment
@@ -290,9 +292,13 @@ run_review() {
     fi
     [[ -z "$REVIEW_OMP_CONFIG_VOLUME" ]] ||
       sif_args+=(--bind "$REVIEW_OMP_CONFIG_VOLUME")
-    sif_args+=("$sif")
+    sif_args+=("$selected_sif")
     sif_args+=("${PARSED_REVIEW_ARGS[@]}")
     exec apptainer "${sif_args[@]}"
+  }
+
+  if [[ -n "$sif" ]]; then
+    launch_sif "$sif"
   fi
 
   if kvm_runtime_ready; then
@@ -330,6 +336,9 @@ run_review() {
     exec "$engine" "${podman_args[@]}"
   fi
 
+  if [[ -n "$fallback_sif" ]]; then
+    launch_sif "$fallback_sif"
+  fi
   require_fallback
   local apptainer_image="$image"
   [[ "$apptainer_image" == *://* ]] || apptainer_image="docker://${apptainer_image}"

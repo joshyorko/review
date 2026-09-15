@@ -30,6 +30,8 @@ export interface QueueItem {
 	updatedAt: number;
 	draft: boolean;
 	ciStatus?: CiStatus;
+	/** Whether fallback check-suite evidence was complete at read time. */
+	ciEvidenceComplete?: boolean;
 	mergeState: MergeState;
 	reviewState: ReviewState;
 	labels: string[];
@@ -203,6 +205,30 @@ function headers(token?: string): Record<string, string> {
 	return value;
 }
 
+/**
+ * Read classic OAuth scope metadata when GitHub provides it.
+ *
+ * Fine-grained and app tokens may omit this header. Omission is unknown, not
+ * evidence that the token has no scopes.
+ */
+export async function fetchOAuthScopes(options: FetchOptions = {}): Promise<readonly string[] | undefined> {
+	const { token, signal } = options;
+	if (!token) return undefined;
+	try {
+		const response = await (options.fetchImpl ?? fetch)("https://api.github.com/", {
+			headers: headers(token),
+			signal: deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal),
+			redirect: "error",
+		});
+		if (!response.ok) return undefined;
+		const raw = response.headers?.get?.("x-oauth-scopes");
+		if (raw === null || raw === undefined) return undefined;
+		return raw.split(",").map((scope) => scope.trim().toLowerCase()).filter(Boolean);
+	} catch {
+		return undefined;
+	}
+}
+
 
 interface SearchNode {
 	number?: number;
@@ -243,23 +269,37 @@ interface SearchNode {
 	} | null;
 }
 
-function toCiStatus(
+export interface CiClassification {
+	status?: CiStatus;
+	complete: boolean;
+}
+
+export function classifyCi(
 	state?: string,
 	checkSuites?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ status?: string; conclusion?: string | null }> } | null,
-): CiStatus | undefined {
+): CiClassification {
 	const rollup = state?.toUpperCase();
 	const suites = checkSuites?.nodes ?? [];
+	const suitesComplete = checkSuites !== undefined && checkSuites !== null && checkSuites.pageInfo?.hasNextPage === false;
+	const explicitSuccess = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+	const explicitFailure = new Set(["FAILURE", "ERROR", "STARTUP_FAILURE", "CANCELLED", "TIMED_OUT"]);
+	const explicitPending = new Set(["PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "ACTION_REQUIRED"]);
+
+	if (rollup && explicitSuccess.has(rollup)) return { status: "success", complete: true };
+	if (rollup && explicitFailure.has(rollup)) return { status: "failure", complete: true };
+	if (rollup && explicitPending.has(rollup)) return { status: "pending", complete: true };
+
+	if (!suitesComplete) return { status: undefined, complete: false };
 	const failedSuite = suites.some((suite) => {
 		if (suite.status?.toUpperCase() !== "COMPLETED") return false;
 		const conclusion = suite.conclusion?.toUpperCase();
-		return conclusion !== undefined && !["SUCCESS", "NEUTRAL", "SKIPPED"].includes(conclusion);
+		return conclusion !== undefined && !explicitSuccess.has(conclusion);
 	});
-	if (failedSuite || rollup === "FAILURE" || rollup === "ERROR") return "failure";
-	const pendingSuite = checkSuites?.pageInfo?.hasNextPage === true
-		|| suites.some((suite) => suite.status?.toUpperCase() !== "COMPLETED" || !suite.conclusion);
-	if (pendingSuite || (rollup !== undefined && rollup !== "SUCCESS")) return "pending";
-	if (rollup === "SUCCESS" || suites.length > 0) return "success";
-	return undefined;
+	if (failedSuite) return { status: "failure", complete: true };
+	const pendingSuite = suites.some((suite) => suite.status?.toUpperCase() !== "COMPLETED" || !suite.conclusion);
+	if (pendingSuite) return { status: "pending", complete: true };
+	if (suites.length > 0) return { status: "success", complete: true };
+	return { status: undefined, complete: true };
 }
 
 function toMergeState(value?: string | null): MergeState {
@@ -289,6 +329,8 @@ function toReviewState(value?: string | null): ReviewState {
 function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 	if (typeof node.number !== "number" || !node.repository?.nameWithOwner) return undefined;
 	const updated = node.updatedAt ? Date.parse(node.updatedAt) : Number.NaN;
+	const commit = node.commits?.nodes?.[0]?.commit;
+	const ci = classifyCi(commit?.statusCheckRollup?.state, commit?.checkSuites);
 	return {
 		id: node.number,
 		type: mode === "prs" ? "pr" : "issue",
@@ -298,10 +340,8 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 		url: node.url ?? "",
 		updatedAt: Number.isNaN(updated) ? 0 : updated,
 		draft: node.isDraft === true,
-		ciStatus: toCiStatus(
-			node.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state,
-			node.commits?.nodes?.[0]?.commit?.checkSuites,
-		),
+		ciStatus: ci.status,
+		ciEvidenceComplete: mode === "prs" ? ci.complete : undefined,
 		mergeState: toMergeState(node.mergeable),
 		reviewState: toReviewState(node.reviewDecision),
 		labels: (node.labels?.nodes ?? []).map((label) => label.name ?? "").filter(Boolean),
@@ -925,5 +965,131 @@ export async function fetchPrDetail(
 			comments.payload,
 			reviews.payload,
 		),
+	};
+}
+
+export interface LinkedPullRequest {
+	repo: string;
+	number: number;
+	title: string;
+	state: string;
+	url: string;
+}
+
+export interface IssueDetail {
+	repo: string;
+	number: number;
+	title: string;
+	body: string;
+	author: string;
+	state: string;
+	labels: string[];
+	url: string;
+	comments: PrComment[];
+	linkedPullRequests: LinkedPullRequest[];
+}
+
+export interface IssueDetailResult {
+	detail?: IssueDetail;
+	error?: string;
+	cancelled?: boolean;
+}
+
+/**
+ * Fetch the bounded reading surface of one GitHub issue.
+ *
+ * Issues use their own API and timeline rather than the pull-request files
+ * endpoint. Timeline cross-references provide linked pull requests when GitHub
+ * exposes them.
+ */
+export async function fetchIssueDetail(
+	repo: string,
+	issueNumber: number,
+	options: FetchOptions = {},
+): Promise<IssueDetailResult> {
+	const { token, signal } = options;
+	const doFetch = options.fetchImpl ?? fetch;
+	if (!token) {
+		return { detail: undefined, error: "no GitHub credential (set GH_TOKEN or run gh auth login)" };
+	}
+	const deadline = deadlineSignal(options.timeoutMs ?? 15_000, signal);
+	const readJson = async <T>(url: string): Promise<{ payload?: T; error?: string }> => {
+		try {
+			const response = await doFetch(url, { headers: headers(token), signal: deadline, redirect: "error" });
+			if (!response.ok) return { error: "GitHub REST " + response.status + " " + response.statusText };
+			return { payload: (await response.json()) as T };
+		} catch (error) {
+			if (signal?.aborted) return { error: "cancelled" };
+			return { error: error instanceof Error ? error.message : String(error) };
+		}
+	};
+
+	const base = "https://api.github.com/repos/" + repo;
+	type IssueTimelineEvent = {
+		source?: {
+			issue?: {
+				number?: number;
+				title?: string;
+				html_url?: string;
+				repository?: { full_name?: string };
+				pull_request?: unknown;
+				state?: string;
+			};
+		};
+	};
+	const [issue, comments, timeline] = await Promise.all([
+		readJson<{
+			number?: number;
+			title?: string;
+			body?: string | null;
+			state?: string;
+			html_url?: string;
+			user?: { login?: string } | null;
+			labels?: Array<{ name?: string }>;
+		}>(base + "/issues/" + issueNumber),
+		readJson<Array<{ user?: { login?: string } | null; created_at?: string; body?: string | null }>>(
+			base + "/issues/" + issueNumber + "/comments?per_page=100",
+		),
+		readJson<IssueTimelineEvent[]>(base + "/issues/" + issueNumber + "/timeline?per_page=100"),
+	]);
+
+	const firstError = [issue.error, comments.error, timeline.error].find(Boolean);
+	if (firstError) return { detail: undefined, error: firstError };
+	if (!issue.payload) return { detail: undefined, error: "GitHub returned an empty issue payload" };
+	if (!Array.isArray(comments.payload)) return { detail: undefined, error: "GitHub returned malformed issue comments payload" };
+	if (!Array.isArray(timeline.payload)) return { detail: undefined, error: "GitHub returned malformed issue timeline payload" };
+
+	const linked = new Map<string, LinkedPullRequest>();
+	for (const event of timeline.payload) {
+		const source = event.source?.issue;
+		if (!source?.pull_request || typeof source.number !== "number") continue;
+		const linkedRepo = source.repository?.full_name ?? repo;
+		const key = linkedRepo + "#" + source.number;
+		linked.set(key, {
+			repo: linkedRepo,
+			number: source.number,
+			title: source.title ?? "(untitled)",
+			state: source.state ?? "unknown",
+			url: source.html_url ?? "https://github.com/" + linkedRepo + "/pull/" + source.number,
+		});
+	}
+
+	return {
+		detail: {
+			repo,
+			number: issue.payload.number ?? issueNumber,
+			title: issue.payload.title ?? "(untitled)",
+			body: issue.payload.body ?? "",
+			author: issue.payload.user?.login ?? "unknown",
+			state: issue.payload.state ?? "unknown",
+			labels: (issue.payload.labels ?? []).map((label) => label.name ?? "").filter(Boolean),
+			url: issue.payload.html_url ?? "https://github.com/" + repo + "/issues/" + issueNumber,
+			comments: comments.payload.slice(0, 50).map((comment) => ({
+				author: comment.user?.login ?? "?",
+				body: comment.body ?? "",
+				createdAt: comment.created_at ?? "",
+			})),
+			linkedPullRequests: [...linked.values()],
+		},
 	};
 }

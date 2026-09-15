@@ -136,6 +136,11 @@ export class ReviewMode {
 		return this.scope.value;
 	}
 
+	/** The personal package opts into the generic local Review surface. */
+	isPersonalMode(): boolean {
+		return this.env.BLUEFIN_REVIEW_PERSONAL_MODE === "1";
+	}
+
 	/** Point the queue at another organization or repository. */
 	setScope(scope: QueueScope): void {
 		this.inflight?.abort();
@@ -159,11 +164,18 @@ export class ReviewMode {
 		this.reprioritize();
 	}
 
+	private allowsWorkflowSlay(): boolean {
+		return this.env.BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY === "1";
+	}
+
 	private excludeUnsupportedPullRequests(items: readonly QueueItem[]): QueueItem[] {
 		if (this.queueMode !== "prs") return [...items];
 		const supported: QueueItem[] = [];
 		for (const item of items) {
-			if ((item.workflowFiles?.length ?? 0) > 0 || item.changedFilesComplete === false) {
+			if (
+				!this.allowsWorkflowSlay()
+				&& ((item.workflowFiles?.length ?? 0) > 0 || item.changedFilesComplete === false)
+			) {
 				this.excludedKeys.add(itemKey(item));
 				continue;
 			}
@@ -184,6 +196,21 @@ export class ReviewMode {
 	/** Which provider ordered the queue: Hive's priority, or local categories. */
 	orderSource(): "hive" | "local" {
 		return this.ranked.source;
+	}
+
+	/** Reconcile a successful live read into the canonical queue model. */
+	reconcileItems(updates: readonly QueueItem[]): void {
+		if (updates.length === 0) return;
+		const byKey = new Map(updates.map((item) => [itemKey(item), item]));
+		let changed = false;
+		this.items = this.items.map((item) => {
+			const update = byKey.get(itemKey(item));
+			if (!update || update.type !== item.type) return item;
+			Object.assign(item, update);
+			changed = true;
+			return item;
+		});
+		if (changed) this.reprioritize();
 	}
 
 	hiveRankedCount(): number {

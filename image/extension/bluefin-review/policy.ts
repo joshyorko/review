@@ -22,3 +22,7 @@ export const BLUEFIN_POLICY: WorkbenchPolicy = {
 export function managedPolicyFor(repo: string, policy: WorkbenchPolicy): ManagedRepoPolicy | undefined {
 	return policy.managedRepositories.find((candidate) => candidate.repository === repo);
 }
+
+export function isProjectBluefinRepository(repo: string): boolean {
+	return repo.toLowerCase().startsWith("projectbluefin/");
+}
