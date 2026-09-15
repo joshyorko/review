@@ -594,9 +594,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				const diff = await fetchDiff(item.repo, item.id, { ...requestOptions, maxPatchFiles: 0, maxPatchChars: 0 });
 				if (diff.error) return { item, reason: diff.error };
 				const workflow = diff.files.find((file) => file.path.startsWith(".github/workflows/"));
-					if (workflow && env.BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY !== "1") {
-						return { item, reason: `changes ${workflow.path}`, exclude: true };
-					}
+				if (workflow) {
+					return { item, reason: `changes ${workflow.path}`, exclude: env.BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS !== "1" };
+				}
 				if (item.changedFiles === undefined || diff.files.length < item.changedFiles) {
 					return { item, reason: "complete changed-file list unavailable" };
 				}

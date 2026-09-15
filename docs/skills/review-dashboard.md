@@ -113,9 +113,9 @@ the maintainer's selected model without pinning a provider. `Alt-S` starts the
 same lifecycle from the active workbench without changing advisor state.
 The upstream queue filters workflow-changing and incomplete-file-list pull
 requests before reviewer selection. The personal Brew package opts into keeping
-those pull requests visible and selectable; its Slay preflight checks the
-classic OAuth `workflow` scope when GitHub reports it, while missing scope
-metadata remains unknown.
+those pull requests visible and selectable for inspection, while its Slay
+preflight always refuses workflow-changing pull requests regardless of OAuth
+scope; incomplete file lists remain blocked until a complete read succeeds.
 CI uses one classifier for queue reads and live revalidation. An explicit
 successful or failed status rollup wins over raw CheckSuites, while raw suites
 are fallback evidence only when the rollup is absent or indeterminate.

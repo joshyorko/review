@@ -164,16 +164,13 @@ export class ReviewMode {
 		this.reprioritize();
 	}
 
-	private allowsWorkflowSlay(): boolean {
-		return this.env.BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY === "1";
-	}
 
 	private excludeUnsupportedPullRequests(items: readonly QueueItem[]): QueueItem[] {
 		if (this.queueMode !== "prs") return [...items];
 		const supported: QueueItem[] = [];
 		for (const item of items) {
 			if (
-				!this.allowsWorkflowSlay()
+				this.env.BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS !== "1"
 				&& ((item.workflowFiles?.length ?? 0) > 0 || item.changedFilesComplete === false)
 			) {
 				this.excludedKeys.add(itemKey(item));
