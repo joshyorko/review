@@ -43,6 +43,10 @@ export interface QueueItem {
 	closingIssues?: string[];
 	/** `owner/repo#number` of merged PRs that reference or close this issue. */
 	closedByPrs?: string[];
+	/** Changed workflow files reported by GitHub for exclusion from slay/review. */
+	workflowFiles?: string[];
+	/** Whether GitHub returned the complete changed-file list. */
+	changedFilesComplete?: boolean;
 }
 
 export interface QueueResult {
@@ -76,6 +80,10 @@ const PR_ITEM_FIELDS = `
 	deletions
 	changedFiles
 	headRefOid
+	files(first: 100) {
+		pageInfo { hasNextPage }
+		nodes { path }
+	}
 	autoMergeRequest { enabledAt }
 	commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 	closingIssuesReferences(first: 5) {
@@ -201,6 +209,7 @@ interface SearchNode {
 	author?: { login?: string } | null;
 	repository?: { nameWithOwner?: string } | null;
 	labels?: { nodes?: Array<{ name?: string }> } | null;
+	files?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ path?: string }> } | null;
 	commits?: { nodes?: Array<{ commit?: { statusCheckRollup?: { state?: string } | null } }> } | null;
 	closingIssuesReferences?: { nodes?: Array<{ number?: number; repository?: { nameWithOwner?: string } | null }> } | null;
 	closedByPullRequestsReferences?: {
@@ -272,6 +281,15 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 		changedFiles: node.changedFiles,
 		headSha: node.headRefOid,
 		autoMergeEnabled: Boolean(node.autoMergeRequest?.enabledAt),
+		workflowFiles:
+			mode === "prs"
+				? (node.files?.nodes ?? []).map((file) => file.path ?? "").filter((path) => path.startsWith(".github/workflows/"))
+				: undefined,
+		changedFilesComplete:
+			mode === "prs" && node.files
+				? node.files.pageInfo?.hasNextPage !== true
+					&& (node.changedFiles === undefined || (node.files.nodes ?? []).length >= node.changedFiles)
+				: undefined,
 		closingIssues: (node.closingIssuesReferences?.nodes ?? [])
 			.map((reference) =>
 				reference.repository?.nameWithOwner && typeof reference.number === "number"
