@@ -134,10 +134,13 @@ class BrewDevContract(unittest.TestCase):
         self.assertIn("parse-review-args.sh", script)
         self.assertIn("/usr/bin/headroom", script)
 
-    def test_personal_workflow_builds_the_default_branch(self):
+    def test_personal_workflow_builds_the_self_hosted_branch(self):
         workflow = (SCRIPT.parents[1] / ".github/workflows/review-dev.yml").read_text()
-        self.assertIn("default: main", workflow)
-        self.assertNotIn("feat/brew-dev-dogfood", workflow)
+        self.assertIn("default: self-hosted", workflow)
+        self.assertEqual(workflow.count("ref: self-hosted"), 2)
+        self.assertIn("SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}", workflow)
+        self.assertIn("BLUEFIN_REVIEW_SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}", workflow)
+        self.assertNotIn("dev/package-main", workflow)
 
 
 class FormulaContract(unittest.TestCase):

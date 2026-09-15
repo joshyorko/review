@@ -7,7 +7,7 @@ on:
         description: Existing Git ref or SHA in this fork to package
         required: false
         type: string
-        default: main
+        default: self-hosted
 
 concurrency:
   group: personal-review-brew
@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: main
+          ref: self-hosted
           fetch-depth: 0
       - name: Test the packaging contracts
         run: python3 tests/brew_dev_contract.py
@@ -42,8 +42,8 @@ jobs:
           sudo apt-get install -y apptainer
       - name: Build committed launcher and matching native SIF
         env:
-          SOURCE_REF: ${{ inputs.source_ref || 'dev/package-main' }}
-          BLUEFIN_REVIEW_SOURCE_REF: ${{ inputs.source_ref || 'dev/package-main' }}
+          SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}
+          BLUEFIN_REVIEW_SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}
         run: ./scripts/brew-dev build "$SOURCE_REF" "$RUNNER_TEMP/bundles"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -59,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: main
+          ref: self-hosted
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: review-dev-*

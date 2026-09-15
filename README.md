@@ -49,6 +49,22 @@ brew install joshyorko/review-dev/bluefin-review-dev
 bluefin review
 ```
 
+Personal Brew builds run from the fork's `self-hosted` branch:
+
+```bash
+gh workflow run review-dev.yml --repo joshyorko/review --ref self-hosted -f source_ref=self-hosted
+```
+
+To sync the fork, push `upstream/main` to the mirror branch, then merge it
+into `self-hosted` before publishing the next personal build:
+
+```bash
+git fetch upstream
+git push origin upstream/main:main
+git switch self-hosted
+git merge upstream/main
+```
+
 Review keeps its OMP sessions, provider auth, Headroom state, and MCP
 configuration under its appliance-owned state home. Host `~/.omp` is not
 inherited; set `BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1` only when deliberately
