@@ -282,6 +282,7 @@ run '
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
   headroom --version >/dev/null
   headroom mcp serve --help >/dev/null
+  printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"contract\",\"version\":\"1\"}}}" | headroom mcp serve | grep -q "\"serverInfo\""
 ' >/dev/null || fail "a bundled binary failed to execute"
 
 # git is here to land fixes, which means it has to be able to commit and to
