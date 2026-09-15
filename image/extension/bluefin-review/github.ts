@@ -11,6 +11,7 @@
 
 import { execFileSync } from "node:child_process";
 import { deadlineSignal } from "./deadline.ts";
+import type { PrDetail, PrComment, PrReview } from "./reader.ts";
 
 export type QueueMode = "prs" | "issues";
 export type CiStatus = "success" | "failure" | "pending";
@@ -810,4 +811,119 @@ export function diffToText(diff: DiffResult): string {
 		if (file.patch) lines.push(file.patch, "");
 	}
 	return lines.join("\n");
+}
+
+/** The empty conversation a PR without comments or reviews renders from. */
+const NO_COMMENTS: PrComment[] = [];
+const NO_REVIEWS: PrReview[] = [];
+
+/** Map the raw REST payloads for a pull request into a `PrDetail` (issue #547). */
+export function parsePrDetail(
+	repo: string,
+	number: number,
+	headSha: string,
+	pull: Partial<{
+		title?: string;
+		body?: string | null;
+		user?: { login?: string } | null;
+		head?: { sha?: string };
+	}>,
+	comments: ReadonlyArray<Partial<{ user?: { login?: string } | null; created_at?: string; body?: string | null }>> = [],
+	reviews: ReadonlyArray<Partial<{ user?: { login?: string } | null; state?: string; body?: string | null }>> = [],
+): PrDetail {
+	const conversation: PrComment[] = comments.slice(0, 50).map((comment) => ({
+		author: comment.user?.login || "?",
+		body: comment.body ?? "",
+		createdAt: comment.created_at ?? "",
+	}));
+	const reviewList: PrReview[] = reviews.slice(0, 50).map((review) => ({
+		author: review.user?.login || "?",
+		state: review.state ?? "unknown",
+		body: review.body ?? undefined,
+	}));
+	return {
+		repo,
+		number,
+		headSha: headSha || (pull.head?.sha ?? ""),
+		title: pull.title ?? "(untitled)",
+		body: pull.body ?? "",
+		author: pull.user?.login ?? "unknown",
+		comments: conversation.length > 0 ? conversation : NO_COMMENTS,
+		reviews: reviewList.length > 0 ? reviewList : NO_REVIEWS,
+	};
+}
+
+export interface PrDetailResult {
+	detail?: PrDetail;
+	error?: string;
+	cancelled?: boolean;
+}
+
+/**
+ * Fetch the reading surface of one pull request: its body, conversation
+ * comments, and top-level reviews, for the PR Reader (issue #547).
+ *
+ * Three bounded REST reads are fanned out so the body and the conversation
+ * arrive together; any failing read fails the detail rather than rendering a
+ * half-truth on a maintainer's screen. The dashboard serves this through its
+ * PR-detail cache, so re-reading a pinned pull request is a cache hit and this
+ * network only happens once per ``headSha``.
+ */
+export async function fetchPrDetail(
+	repo: string,
+	pullRequest: number,
+	options: FetchOptions = {},
+): Promise<PrDetailResult> {
+	const { token, signal } = options;
+	const doFetch = options.fetchImpl ?? fetch;
+	if (!token) {
+		return { detail: undefined, error: "no GitHub credential (set GH_TOKEN or run gh auth login)" };
+	}
+	const deadline = deadlineSignal(options.timeoutMs ?? 15_000, signal);
+	const readJson = async <T>(url: string): Promise<{ payload?: T; error?: string }> => {
+		try {
+			const response = await doFetch(url, { headers: headers(token), signal: deadline, redirect: "error" });
+			if (!response.ok) {
+				return { error: `GitHub REST ${response.status} ${response.statusText}` };
+			}
+			return { payload: (await response.json()) as T };
+		} catch (error) {
+			if (signal?.aborted) return { error: "cancelled" };
+			return { error: error instanceof Error ? error.message : String(error) };
+		}
+	};
+
+	const base = `https://api.github.com/repos/${repo}`;
+	const [pull, comments, reviews] = await Promise.all([
+		readJson<{ title?: string; body?: string | null; user?: { login?: string } | null; head?: { sha?: string } }>(
+			`${base}/pulls/${pullRequest}`,
+		),
+		readJson<Array<{ user?: { login?: string } | null; created_at?: string; body?: string | null }>>(
+			`${base}/issues/${pullRequest}/comments?per_page=100`,
+		),
+		readJson<Array<{ user?: { login?: string } | null; state?: string; body?: string | null }>>(
+			`${base}/pulls/${pullRequest}/reviews?per_page=100`,
+		),
+	]);
+
+	const firstError = [pull.error, comments.error, reviews.error].find(Boolean);
+	if (firstError) {
+		return { detail: undefined, error: firstError };
+	}
+	if (comments.payload && !Array.isArray(comments.payload)) {
+		return { detail: undefined, error: "GitHub returned malformed comments payload" };
+	}
+	if (reviews.payload && !Array.isArray(reviews.payload)) {
+		return { detail: undefined, error: "GitHub returned malformed reviews payload" };
+	}
+	return {
+		detail: parsePrDetail(
+			repo,
+			pullRequest,
+			"",
+			pull.payload ?? {},
+			comments.payload,
+			reviews.payload,
+		),
+	};
 }

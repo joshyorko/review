@@ -11,10 +11,12 @@ import test from "node:test";
 import {
 	PrDetailCache,
 	getNextPrKey,
+	prDetailToLines,
 	sanitizeMarkdown,
 	type PrDetail,
 	type ReaderState,
 } from "../image/extension/bluefin-review/reader.ts";
+import { fetchPrDetail, parsePrDetail } from "../image/extension/bluefin-review/github.ts";
 
 test("sanitizeMarkdown strips ANSI escape codes", () => {
 	const rawWithAnsi = "\u001B[31mRed Alert\u001B[0m and \u001B[1;32mBold Green\u001B[0m text";
@@ -193,4 +195,87 @@ test("getNextPrKey handles missing or edge currentKey", () => {
 	// empty keys
 	assert.equal(getNextPrKey([], "repo#10", "next"), "repo#10");
 	assert.equal(getNextPrKey([], "repo#10", "prev"), "repo#10");
+});
+
+test("prDetailToLines renders the body and a sanitized conversation", () => {
+	const detail: PrDetail = {
+		repo: "projectbluefin/review",
+		number: 547,
+		headSha: "a".repeat(40),
+		title: "PR reader",
+		body: "# The fix\n\nAdds a reader.\u001B[31m(bold)\u001B[0m",
+		author: "jorge",
+		comments: [
+			{ author: "ada\u001B[31m", createdAt: "2026-01-01\nforged", body: "Nice.\n\n<script>alert(1)</script>" },
+			{ author: "bob", createdAt: "2026-01-02", body: "Disagree" },
+		],
+		reviews: [{ author: "carol\u001B[31m", state: "APPROVED\nforged", body: "LGTM" }],
+	};
+
+	const lines = prDetailToLines(detail);
+
+	const joined = lines.join("\n");
+	assert.ok(joined.includes("Adds a reader."), "body is rendered");
+	assert.ok(!joined.includes("\u001B["), "ANSI escapes are stripped from all remote fields");
+	assert.ok(joined.includes("@ada · 2026-01-01 forged"), "comment metadata stays on one sanitized line");
+	assert.ok(!joined.includes("<script>"), "script injection is stripped from comments");
+	assert.ok(joined.includes("@ada"), "the first comment author appears");
+	assert.ok(joined.includes("Disagree"), "the second comment body appears");
+	assert.ok(joined.includes("[APPROVED forged] @carol"), "review metadata appears safely");
+	assert.ok(!joined.includes("PR reader"), "the plain body is not mistaken for the title");
+});
+
+test("parsePrDetail maps REST comment and review payloads", () => {
+	const detail = parsePrDetail(
+		"projectbluefin/review",
+		547,
+		"",
+		{ title: "PR reader", body: "Body", user: { login: "jorge" }, head: { sha: "b".repeat(40) } },
+		[{ user: { login: "ada" }, created_at: "2026-01-01", body: "hello" }],
+		[{ user: { login: "carol" }, state: "APPROVED", body: "LGTM" }],
+	);
+	assert.equal(detail.repo, "projectbluefin/review");
+	assert.equal(detail.number, 547);
+	assert.equal(detail.headSha, "b".repeat(40), "head sha comes from the pull payload when not passed");
+	assert.equal(detail.author, "jorge");
+	assert.equal(detail.comments[0].author, "ada");
+	assert.equal(detail.reviews[0].state, "APPROVED");
+});
+
+test("fetchPrDetail fans out pulls, comments, and reviews", async () => {
+	const calls: string[] = [];
+	const fake = async (url: string) => {
+		calls.push(String(url));
+		const json = () => {
+			if (String(url).includes("/pulls/547") && !String(url).includes("/reviews")) {
+				return { title: "PR reader", body: "Body", user: { login: "jorge" }, head: { sha: "c".repeat(40) } };
+			}
+			if (String(url).includes("/comments")) {
+				return [{ user: { login: "ada" }, created_at: "2026-01-01", body: "hello" }];
+			}
+			return [{ user: { login: "carol" }, state: "APPROVED", body: "LGTM" }];
+		};
+		return { ok: true, status: 200, statusText: "OK", json };
+	};
+
+	const result = await fetchPrDetail("projectbluefin/review", 547, { token: "t", fetchImpl: fake });
+	assert.equal(result.error, undefined);
+	assert.equal(result.detail?.title, "PR reader");
+	assert.equal(result.detail?.headSha, "c".repeat(40));
+	assert.equal(result.detail?.comments.length, 1);
+	assert.equal(result.detail?.reviews[0].state, "APPROVED");
+	assert.equal(calls.length, 3);
+});
+
+test("fetchPrDetail reports a failing read instead of a half-detail", async () => {
+	const fake = async () => ({ ok: false, status: 401, statusText: "Unauthorized", json: async () => ({}) });
+	const result = await fetchPrDetail("projectbluefin/review", 547, { token: "t", fetchImpl: fake });
+	assert.equal(result.detail, undefined);
+	assert.ok(result.error, "an error is reported");
+});
+
+test("fetchPrDetail needs a credential", async () => {
+	const result = await fetchPrDetail("projectbluefin/review", 547, { fetchImpl: async () => ({ ok: false, status: 401, statusText: "x", json: async () => ({}) }) });
+	assert.equal(result.detail, undefined);
+	assert.match(String(result.error), /no GitHub credential/);
 });

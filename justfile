@@ -663,7 +663,7 @@ contribute mode="" count="":
       ensure_image "$CONTRIBUTOR_IMAGE" "contributor" "image/contribute/Containerfile" "CONTRIBUTE_IMAGE"
       report_podman_image_identity "$CONTRIBUTOR_IMAGE" "contributor"
       CONTAINER_ARGS=(podman run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME" --userns "keep-id:uid=65532,gid=65532")
-      CONTAINER_ARGS+=(--volume "${CONTRIBUTOR_VOLUME}:/home/bluefin:rw" --volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env COLORTERM --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman)
+      CONTAINER_ARGS+=(--volume "${CONTRIBUTOR_VOLUME}:/home/bluefin:rw" --volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}")
       for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
         [[ -n "${!name:-}" ]] && CONTAINER_ARGS+=(--env "$name")
       done
@@ -741,7 +741,8 @@ review-appliance *appliance_args:
     INSTANCE_ROOT="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${INSTANCE_KEY}"
     INSTANCE_HOME="${INSTANCE_ROOT}/home"
     INSTANCE_WORKSPACE="${INSTANCE_ROOT}/workspace"
-    mkdir -p "$INSTANCE_HOME" "$INSTANCE_WORKSPACE"
+    INSTANCE_TMP="${INSTANCE_ROOT}/tmp"
+    mkdir -p "$INSTANCE_HOME" "$INSTANCE_WORKSPACE" "$INSTANCE_TMP"
     CONTAINER_NAME="bluefin-review-${INSTANCE_KEY}-$(date +%s)-$$"
     KVM_FAILURE=""
     if kvm_runtime_ready; then
@@ -752,6 +753,7 @@ review-appliance *appliance_args:
       ARGS+=(
         --volume "bluefin-review-${INSTANCE_KEY}-home:/home/bluefin:rw"
         --volume "bluefin-review-${INSTANCE_KEY}-workspace:/workspace:rw"
+        --volume "bluefin-review-${INSTANCE_KEY}-tmp:/tmp:rw"
         --env GH_TOKEN --env GITHUB_TOKEN --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN
         --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN --env OPENAI_API_KEY --env GEMINI_API_KEY
         --env HIVE_HUB --env BLUEFIN_REVIEW_ORG
@@ -765,7 +767,7 @@ review-appliance *appliance_args:
     APPTAINER_IMAGE="$IMAGE"; [[ "$APPTAINER_IMAGE" == *://* ]] || APPTAINER_IMAGE="docker://${APPTAINER_IMAGE}"
     prepare_apptainer_environment
     exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /workspace \
-      --bind "${INSTANCE_WORKSPACE}:/workspace" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
+      --bind "${INSTANCE_WORKSPACE}:/workspace,${INSTANCE_TMP}:/tmp" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
 
 # Build the appliance from this checkout and hold it to its contract. The
 # version is derived, never typed: FSDK series from the pinned base, revision

@@ -1,6 +1,6 @@
 ---
 name: image-build
-version: "3.1"
+version: "3.2"
 last_updated: 2026-09-14
 id: image-build
 one_line_purpose: Build and pin the OMP review and contributor images.
@@ -54,6 +54,12 @@ both OCI images leave model and effort selection to OMP.
     generators out of the final filesystem.
 11. Version derivation rejects malformed or missing revision/base inputs,
     preserves decimal `08`/`09` revisions, and keeps both image series aligned.
+12. Execute every staged command in the built image. If an allowlisted path is
+    a wrapper, stage and verify its real executable target as part of the same
+    closure; file presence is not runtime evidence.
+13. Give Apptainer workloads instance-scoped disk-backed scratch storage.
+    `--containall` otherwise supplies a 64 MiB `/tmp`, which is too small for
+    repository clones and archive inspection.
 
 ## Pin maintenance
 

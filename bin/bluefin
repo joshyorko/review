@@ -256,15 +256,16 @@ run_review() {
     previous="$arg"
   done
 
-  local key root home workspace name image sif
+  local key root home workspace scratch name image sif
   key="$(slugify "${BLUEFIN_INSTANCE:-review-$scope}")"
   root="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${key}"
   home="${root}/home"
   workspace="${root}/workspace"
+  scratch="${root}/tmp"
   name="bluefin-review-${key}-$(date +%s)-$$"
   image="${BLUEFIN_REVIEW_IMAGE:-ghcr.io/projectbluefin/review:stable}"
   sif="${BLUEFIN_REVIEW_SIF:-}"
-  mkdir -p "$home/.omp" "$home/.config/pulse" "$workspace"
+  mkdir -p "$home/.omp" "$home/.config/pulse" "$workspace" "$scratch"
   detect_review_audio
   prepare_review_omp_mount
   [[ -z "$REVIEW_OMP_WARNING" ]] || echo "$REVIEW_OMP_WARNING" >&2
@@ -279,7 +280,7 @@ run_review() {
       export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
     local -a sif_args=(run --containall --no-eval)
     sif_args+=("${APPTAINER_HOST_ARGS[@]}")
-    sif_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace")
+    sif_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp")
     if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
       sif_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
       [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
@@ -303,6 +304,7 @@ run_review() {
     podman_args+=(--userns "keep-id:uid=65532,gid=65532")
     podman_args+=(--volume "${home}:/home/bluefin:rw,z")
     podman_args+=(--volume "${workspace}:/workspace:rw,z")
+    podman_args+=(--volume "${scratch}:/tmp:rw,z")
     podman_args+=(--env GH_TOKEN --env GITHUB_TOKEN)
     podman_args+=(--env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN)
     podman_args+=(--env COPILOT_INTEGRATION_ID)
@@ -336,7 +338,7 @@ run_review() {
     export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
   local -a apptainer_args=(run --containall --no-eval)
   apptainer_args+=("${APPTAINER_HOST_ARGS[@]}")
-  apptainer_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace")
+  apptainer_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp")
   if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
     apptainer_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
     [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||

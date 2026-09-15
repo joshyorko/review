@@ -37,6 +37,8 @@ binaries=(
   /usr/bin/gawk
   /usr/bin/grep
   /usr/bin/gzip
+  # FSDK's gzip command is a wrapper that execs this implementation.
+  /usr/bin/gzip.bin
   /usr/bin/less
   /usr/bin/sed
   /usr/bin/tar

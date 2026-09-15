@@ -5,6 +5,7 @@
  * workflowz execution. This file only joins those seams to the workbench UI.
  */
 
+import { execFileSync } from "node:child_process";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, fetchDiff, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
@@ -180,6 +181,23 @@ function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined 
 }
 
 
+/**
+ * Open a pull request or issue in the local browser (PR Reader `o`).
+ *
+ * The reader header already shows the URL, so a failure to find a browser is
+ * not catastrophic: the shortcut is best-effort and never silently blocks.
+ */
+function openBrowser(item: QueueItem): void {
+	try {
+		execFileSync("gh", [item.type === "pr" ? "pr" : "issue", "view", String(item.id), "--repo", item.repo, "--web"], {
+			stdio: "ignore",
+			timeout: 15_000,
+		});
+	} catch {
+		// No browser / no `gh`: the URL remains visible in the reader header.
+	}
+}
+
 /** Slay and fix may change pull-request heads; slay may also land reviewed heads. */
 export function isImplementationAction(action: DashboardAction): boolean {
 	return action.kind === "fix" || action.kind === "slay";
@@ -215,9 +233,9 @@ export function actionPrompt(
 	const authority = priority?.hiveRank === undefined
 		? ""
 		: `Hive ranked this work (${priority.reason}); preserve that intent. `;
-	const evidence = "Evidence is bounded and read once. Start with `gh pr diff <n> --repo <r> --name-only`; inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Treat `merge=dirty` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose `--ours`/`--theirs` wholesale. Revalidate live state before any comment, label, assignment, close, push, approval, or merge.";
+	const evidence = "Evidence is bounded and read once. Start with `hive_workbench_diff` using both `pull_request` and explicit `repo`; child agents do not inherit the coordinator's selected repository. Use `gh pr diff <n> --repo <r> --name-only` only to confirm filenames, inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Never assume a checkout exists. Check a repository-specific validator once; if the minimal appliance lacks that toolchain, use hosted check evidence and report the local verification gap instead of installing packages or retrying the absent command. Treat `merge=dirty` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose `--ours`/`--theirs` wholesale. Revalidate live state before any comment, label, assignment, close, push, approval, or merge.";
 	const reviewFinish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
-	const slayFinish = "The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh bluefin-reviewer. If it has findings, dispatch one fresh isolated fixer, push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and repository rules. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run `gh pr merge <n> --repo <r> --auto --squash`; GitHub rules remain authoritative and may leave it queued. Never use `--admin`, remove holds, weaken rules, force-push, or put a token in an argument or URL. A blocked PR gets an exact reason, not a bypass. Report one terminal outcome per item, then stop.";
+	const slayFinish = "The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh bluefin-reviewer. If it has findings, dispatch one fresh isolated fixer with the exact repository, pull-request number, and head. Fixers use `gh repo clone` and `gh pr checkout` under `$HOME/worktrees`; never assume the working directory is a checkout, clone into `/tmp`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via `gh api repos/<owner>/<repo>/rules/branches/<branch>`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run `gh pr merge <n> --repo <r> --auto --squash`; GitHub rules remain authoritative and may leave it queued. Never use `--admin`, remove holds, weaken protections, or force-push. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.";
 
 	if (selected.length > 1) {
 		const repository = selected[0]!.repo;
@@ -587,6 +605,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const dispatch = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
 		if (action.kind === "close") return;
+		if (action.kind === "open_browser") {
+			openBrowser(action.item);
+			return;
+		}
 		if (action.kind === "scope") {
 			await promptForScope(ctx);
 			return;

@@ -2104,9 +2104,16 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 	}
 	assert.match(slay, /fresh bluefin-reviewer workpool item per pull request/);
 	assert.match(slay, /fresh isolated fixer/);
+	assert.match(slay, /both `pull_request` and explicit `repo`/);
+	assert.match(slay, /\$HOME\/worktrees/);
+	assert.match(slay, /rules\/branches\/<branch>/);
 	assert.match(slay, /reviewed head must equal the live head/i);
 	assert.match(slay, /gh pr merge <n> --repo <r> --auto --squash/);
 	assert.match(slay, /Never use `--admin`/);
+	const reviewerPrompt = readFileSync("image/extension/bluefin-review/agents/bluefin-reviewer.md", "utf8");
+	assert.match(reviewerPrompt, /hive_workbench_diff\(pull_request: <number>, repo: "<owner\/name>"\)/);
+	assert.match(reviewerPrompt, /Do not assume a local checkout exists/);
+	assert.match(reviewerPrompt, /do not install packages or retry the absent command/i);
 	assert.match(fix, /fresh isolated agent\(\) handle per issue or pull request/);
 	assert.match(fix, /Never approve or merge/);
 });
