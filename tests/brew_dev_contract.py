@@ -90,11 +90,19 @@ class BrewDevContract(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
 
+    def test_generated_wrapper_defers_libexec_root_resolution_until_execution(self):
+        script = SCRIPT.read_text()
+        self.assertIn(
+            r'root="\$(cd "\$(dirname "\$(readlink -f "\${BASH_SOURCE[0]}")")/../libexec" && pwd)"',
+            script,
+        )
+
     def test_installed_homebrew_layout_resolves_the_libexec_root(self):
         script = SCRIPT.read_text()
         wrapper = script.split('cat > "$work/payload/bluefin" <<EOF\n', 1)[1].split("\nEOF\n", 1)[0]
         wrapper = (
             wrapper
+            .replace(r"\$(", "$(")
             .replace(r"\${", "${")
             .replace(r"\$root", "$root")
             .replace(r"\$@", "$@")
