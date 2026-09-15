@@ -36,7 +36,11 @@ is_base_provided() {
 }
 
 stage_libraries() {
-  local binary="$1" soname arrow resolved _address
+  local binary="$1" soname arrow resolved _address dependencies
+  dependencies="$(ldd "$binary" 2>/dev/null)" || {
+    echo "stage-audio: could not resolve dependencies of ${binary}" >&2
+    return 1
+  }
   while read -r soname arrow resolved _address; do
     [[ "$soname" == linux-vdso.so.* ]] && continue
     if [[ "$arrow" == '=>' ]]; then
@@ -58,7 +62,7 @@ stage_libraries() {
     if [[ ! -e "${target_libdir}/${soname}" ]]; then
       install -D -m 0755 "$resolved" "${target_libdir}/${soname}"
     fi
-  done < <(ldd "$binary" 2>/dev/null)
+  done <<<"$dependencies"
 }
 
 install -d -m 0755 "$target_libdir"
