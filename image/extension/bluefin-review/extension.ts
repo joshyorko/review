@@ -496,19 +496,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const filterUnsupportedSlayItems = async (ctx: CtxLike, items: readonly QueueItem[]): Promise<QueueItem[]> => {
 		const requestOptions = { token: mode.tokenOptions().token ?? resolveToken(env), fetchImpl: options.fetchImpl };
-		const inspected = await Promise.all(
+		const inspected: Array<{ item: QueueItem; reason?: string; exclude?: boolean }> = await Promise.all(
 			items.map(async (item) => {
 				if (item.type !== "pr") return { item };
 				const diff = await fetchDiff(item.repo, item.id, { ...requestOptions, maxPatchFiles: 0, maxPatchChars: 0 });
 				if (diff.error) return { item, reason: diff.error };
 				const workflow = diff.files.find((file) => file.path.startsWith(".github/workflows/"));
-				if (workflow) return { item, reason: `changes ${workflow.path}` };
+				if (workflow) return { item, reason: `changes ${workflow.path}`, exclude: true };
 				if (item.changedFiles === undefined || diff.files.length < item.changedFiles) {
 					return { item, reason: "complete changed-file list unavailable" };
 				}
 				return { item };
 			}),
 		);
+		mode.excludeItems(inspected.filter((entry) => entry.exclude === true).map((entry) => entry.item));
 		for (const skipped of inspected) {
 			if (skipped.reason) {
 				ctx.ui.notify(`Skipping ${skipped.item.repo}#${skipped.item.id}: ${skipped.reason}`, "warning");

@@ -478,6 +478,51 @@ test("queue fetch maps CI rollup and reports auth failure", async () => {
 	});
 	assert.match(denied.error ?? "", /401/, "a failed queue must say why, not render empty");
 });
+
+test("pull request queue omits workflow changes before reviewer selection", async () => {
+	const fetchImpl = async (_url, init) => {
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		assert.match(body.query, /files\(first: 100\)/);
+		return {
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({
+				data: {
+					search: {
+						pageInfo: { hasNextPage: false, endCursor: null },
+						nodes: [
+							{
+								number: 1,
+								title: "workflow change",
+								url: "https://github.com/projectbluefin/review/pull/1",
+								updatedAt: new Date(NOW).toISOString(),
+								repository: { nameWithOwner: "projectbluefin/review" },
+								changedFiles: 1,
+								files: { pageInfo: { hasNextPage: false }, nodes: [{ path: ".github/workflows/validate.yml" }] },
+							},
+							{
+								number: 2,
+								title: "ordinary change",
+								url: "https://github.com/projectbluefin/review/pull/2",
+								updatedAt: new Date(NOW).toISOString(),
+								repository: { nameWithOwner: "projectbluefin/review" },
+								changedFiles: 1,
+								files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
+							},
+						],
+					},
+				},
+			}),
+		};
+	};
+	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	mode.setToken("t");
+	await mode.refreshQueue();
+
+	assert.deepEqual(mode.items.map((item) => `${item.repo}#${item.id}`), ["projectbluefin/review#2"]);
+	assert.equal(mode.selectById("projectbluefin/review", 1), false);
+});
 test("queue cancellation is classified separately from failures", async () => {
 	const controller = new AbortController();
 	controller.abort();
@@ -1569,6 +1614,9 @@ test("--autoslay skips workflow changes and dispatches eligible pull requests", 
 	assert.equal(pi.messages.length, 1);
 	assert.match(pi.messages[0], /projectbluefin\/other#7/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#42/);
+	const queue = await pi.tools.get("hive_workbench_queue").execute("id", {});
+	assert.doesNotMatch(queue.content[0].text, /projectbluefin\/review#42/);
+	assert.match(queue.content[0].text, /projectbluefin\/other#7/);
 	assert.ok(ctx.notifications.some((notification) => /Skipping projectbluefin\/review#42: changes \.github\/workflows\/validate\.yml/.test(notification.message)));
 });
 
@@ -1601,6 +1649,8 @@ test("--autoslay skips a selection containing only workflow changes", async () =
 
 	assert.equal(pi.messages.length, 0, "workflow-only selections dispatch no agent work");
 	assert.equal(ctx.notifications.filter((notification) => /Skipping .*: changes \.github\/workflows\/validate\.yml/.test(notification.message)).length, 2);
+	const queue = await pi.tools.get("hive_workbench_queue").execute("id", {});
+	assert.doesNotMatch(queue.content[0].text, /projectbluefin\/(?:review#42|other#7)/);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0, "skipped items never enter durable batch state");
 });
 
