@@ -23,6 +23,14 @@ def test_personal_workflow_publishes_matching_oci_before_tap_update():
     assert "podman manifest" in workflow
 
 
+def test_personal_workflow_adds_arch_images_by_immutable_repository_digest():
+    workflow = WORKFLOW.read_text()
+    assert 'arch_repository="${arch_image%%:*}"' in workflow
+    assert 'podman manifest add "$image" "$arch_repository@$digest"' in workflow
+    assert 'podman manifest add "$image" "docker://$arch_image@$digest"' not in workflow
+
+
 if __name__ == "__main__":
     test_wrapper_prefers_personal_oci_and_keeps_sif_as_fallback()
     test_personal_workflow_publishes_matching_oci_before_tap_update()
+    test_personal_workflow_adds_arch_images_by_immutable_repository_digest()

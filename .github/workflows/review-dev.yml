@@ -99,10 +99,14 @@ jobs:
           for record in "${manifests[@]}"; do
             test "$(jq -r '.sha' "$record")" = "$sha"
             arch_image="$(jq -r '.oci_arch_image' "$record")"
+            arch="$(jq -r '.arch' "$record")"
+            test "$arch_image" = "$image-$arch"
+            arch_repository="${arch_image%%:*}"
+            test "$arch_repository" = "ghcr.io/joshyorko/review-appliance"
             digest="$(jq -r '.oci_arch_digest' "$record")"
             test "$digest" != null
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            podman manifest add "$image" "docker://$arch_image@$digest"
+            podman manifest add "$image" "$arch_repository@$digest"
           done
           podman manifest push --all --format oci --authfile "$authfile" \
             --digestfile "$RUNNER_TEMP/oci-index-digest" "$image" "docker://$image"
