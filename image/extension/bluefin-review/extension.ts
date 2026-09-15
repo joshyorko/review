@@ -242,10 +242,10 @@ export function actionPrompt(
 		if (selected.some((item) => item.repo !== repository)) return undefined;
 		const list = selected.map((item) => `- ${cite(item)}: ${item.url}${stateOf(item)}`).join("\n");
 		const workflow = action.kind === "fix"
-			? "workflowz this repository wave with one fresh isolated agent() handle per issue or pull request. Do not share a checkout or conversation between write-capable items."
+			? "Use the `task` tool once with one fresh isolated item per issue or pull request. Do not share a checkout or conversation between write-capable items."
 			: action.kind === "slay"
-				? "workflowz the review stage with one fresh bluefin-reviewer workpool item per pull request. Keep repair agents isolated, and never reuse a reviewer for the post-fix head."
-				: "workflowz this repository wave with one fresh workpool item per issue or pull request. Do not reuse a worker across repositories.";
+				? "Use the `task` tool once with one fresh bluefin-reviewer item per pull request. Do not use eval workpool: its generated boolean output schema is rejected by the current Copilot provider. Keep repair agents isolated, and never reuse a reviewer for the post-fix head."
+				: "Use the `task` tool once with one fresh item per issue or pull request. Do not reuse a worker across repositories.";
 		const issueEvidence = "Evidence is bounded and read once. Inspect the issue description, examine relevant source files and tests, and cite file:line evidence. Never sleep or poll. In a clean workspace, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains `Closes <owner/repo>#<number>`. Never merge or approve your own pull request.";
 		const reviewRules = `<<<SUBAGENT-RULES\n${evidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
 		const slayRules = `<<<SUBAGENT-RULES\n${evidence} ${slayFinish}\nSUBAGENT-RULES>>>`;
@@ -266,10 +266,10 @@ export function actionPrompt(
 
 	const item = selected[0]!;
 	const workflow = action.kind === "fix"
-		? "Use workflowz with one fresh isolated agent() handle for this item."
+		? "Use the `task` tool with one fresh isolated item for this target."
 		: action.kind === "slay"
-			? "Use workflowz with one fresh bluefin-reviewer agent for this item."
-			: "Use workflowz with one fresh workpool item for this item.";
+			? "Use the `task` tool with one fresh bluefin-reviewer item for this target; do not use eval workpool."
+			: "Use the `task` tool with one fresh item for this target.";
 	switch (action.kind) {
 		case "review":
 			if (options?.isBlueberry) {

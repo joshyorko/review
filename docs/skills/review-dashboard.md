@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "4.9"
+version: "5.0"
 last_updated: 2026-09-14
 id: review-dashboard
 one_line_purpose: Maintain the single-screen OMP review workbench.
@@ -97,10 +97,11 @@ palette and warm issue palette.
 ## Slay execution
 
 Slay is a maintainer-authorized review, repair, and landing lifecycle. Each
-selected pull request first runs in a fresh `bluefin-reviewer` workpool item;
-reviewers report findings and never mutate, approve, or merge. Findings dispatch
-isolated fixers, and a fixed head receives a fresh reviewer before the
-coordinator may approve and ask GitHub to squash-merge it. Live repository rules
+selected pull request first runs as a fresh `bluefin-reviewer` item in one OMP
+`task` batch. Reviewer agents have no shell or write tool and report findings;
+they never comment, approve, enqueue, or merge. Findings dispatch isolated
+fixers, and a fixed head receives a fresh reviewer before the coordinator may
+approve and ask GitHub to squash-merge it. Live repository rules
 remain authoritative; slay never removes holds, uses admin bypass, fabricates
 reviewers, force-pushes, or lands a head different from the reviewed head.
 `--autoslay` starts the visible bounded slice on launch and enables OMP's advisor

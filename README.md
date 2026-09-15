@@ -137,11 +137,12 @@ slash commands.
 | `q` / `Esc` | Close the workbench |
 
 Slay preserves Hive order, partitions selected work by repository, and asks OMP
-workflowz to run each repository as one bounded `bluefin-reviewer` workpool.
-Later repository waves do not start until the prior repository settles, avoiding
-cross-repository context churn. OMP owns agent execution, workpool concurrency,
-task state, tools, sessions, and cancellation; the extension only owns Hive's
-queue projection, durable intent, GitHub mutation guards, and presentation.
+workflowz to run one bounded `task` batch with a fresh `bluefin-reviewer` item
+per pull request. Later repository waves do not start until the prior repository
+settles, avoiding cross-repository context churn. OMP owns agent execution, task
+concurrency, task state, tools, sessions, and cancellation; the extension only
+owns Hive's queue projection, durable intent, GitHub mutation guards, and
+presentation.
 The mode also ships the `bluefin-doctrine` and `bluefin-ci-triage` task agents.
 
 ### 3. Start with one repository, or browse the organization
