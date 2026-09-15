@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "4.9"
+version: "5.1"
 last_updated: 2026-09-14
 id: review-dashboard
 one_line_purpose: Maintain the single-screen OMP review workbench.
@@ -97,12 +97,16 @@ palette and warm issue palette.
 ## Slay execution
 
 Slay is a maintainer-authorized review, repair, and landing lifecycle. Each
-selected pull request first runs in a fresh `bluefin-reviewer` workpool item;
-reviewers report findings and never mutate, approve, or merge. Findings dispatch
-isolated fixers, and a fixed head receives a fresh reviewer before the
-coordinator may approve and ask GitHub to squash-merge it. Live repository rules
+selected pull request first runs as a fresh `bluefin-reviewer` item in one OMP
+`task` batch. Reviewer agents have no shell or write tool and report findings;
+they never comment, approve, enqueue, or merge. Findings dispatch isolated
+fixers, and a fixed head receives a fresh reviewer before the coordinator may
+approve and ask GitHub to squash-merge it. Live repository rules
 remain authoritative; slay never removes holds, uses admin bypass, fabricates
 reviewers, force-pushes, or lands a head different from the reviewed head.
+This boundary does not make the appliance read-only. The explicit slay action
+delegates approval and merge execution to the coordinator; only the evidence-
+producing reviewer subagents are capability-limited.
 `--autoslay` starts the visible bounded slice on launch and enables OMP's advisor
 on the coordinator session. The advisor role maps to `@default`, so it follows
 the maintainer's selected model without pinning a provider. `Alt-S` starts the
@@ -117,19 +121,12 @@ workflow startup failure with zero jobs remains visible. Slay excludes known
 failing or pending CI before reviewer dispatch, rechecks it before each wave,
 and blocks approval or merge commands if the active queue state turns red or
 pending.
-Fresh reviewer sessions do not inherit the coordinator's selected repository or
-a checkout. Their prompts must pass both `repo` and `pull_request` to
-`hive_workbench_diff` and keep review reads repository-qualified. Repair agents
-create checkouts with `gh repo clone` and `gh pr checkout` under
-`$HOME/worktrees`, never the small container `/tmp`, and inspect effective
-branch rules through `repos/<owner>/<repo>/rules/branches/<branch>` rather than
-assuming the legacy branch-protection endpoint exists.
-The appliance intentionally does not carry every repository's development
-toolchain. Reviewers check a validator once, then use hosted check evidence and
-report the local gap instead of installing packages or repeatedly invoking an
-absent command.
-
-
+Fresh reviewers inherit neither a selected repository nor checkout; prompts
+pass both `repo` and `pull_request` to `hive_workbench_diff`. Repair agents use
+`gh repo clone` and `gh pr checkout` under `$HOME/worktrees`, never `/tmp`, and
+read effective rules through `repos/<owner>/<repo>/rules/branches/<branch>`.
+The minimal appliance omits repository-specific toolchains; reviewers use
+hosted evidence and report local gaps instead of retrying absent commands.
 
 Preserve Hive order by partitioning contiguous repository runs; an interleaved
 repository returns in a later wave rather than jumping ahead. Ask workflowz to
@@ -141,9 +138,12 @@ Pausing stops new waves; it does not pretend to suspend an agent already running
 Persist slay intent, item identity, wave position, and terminal outcomes.
 Interrupted slays remain blocked after restart and require an explicit new
 dispatch. Never replay a confirmed mutation.
-A pull-request wave is terminal only when every target is closed or GitHub has
-accepted it into auto-merge. Settled reviewer jobs alone never advance a slay;
-open targets without auto-merge block the batch for explicit redispatch.
+A pull-request wave is terminal when every target is closed or GitHub accepts
+auto-merge. It may remain blocked on additional required human approvals;
+report that gate and move on. The merge queue's effective squash rule overrides
+the `autoMergeRequest.mergeMethod` display; never disable and re-arm solely
+because that field says `MERGE`. Settled reviewer jobs alone never advance a
+slay, and open targets without auto-merge block explicit redispatch.
 
 ## Mutations
 

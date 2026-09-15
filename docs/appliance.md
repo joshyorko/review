@@ -193,14 +193,21 @@ The loop is select, group, and dispatch:
    `A` selects the filtered slice up to the bounded slay limit.
 3. `s` slays the selection through review, repair, and landing. The extension
    preserves Hive order, partitions by repository, and asks workflowz to run one
-   bounded `bluefin-reviewer` workpool per repository. Findings dispatch isolated
-   fixers, and every changed head receives a fresh review before the coordinator
-   asks GitHub to squash-merge it under live repository rules. `--autoslay`
+   bounded `task` batch with a fresh `bluefin-reviewer` item per pull request.
+   Findings dispatch isolated fixers, and every changed head receives a fresh
+   review before the coordinator asks GitHub to squash-merge it under live
+   repository rules. `--autoslay`
    starts that flow on launch and enables OMP's advisor on the coordinator
    session; the advisor resolves through `@default`, following the maintainer's
    selected model.
 4. `p` pauses admission of later repository waves without pretending to suspend
    agents already running.
+
+The appliance is a review-and-landing product, not a read-only report viewer.
+The maintainer's `s`/`Alt-S`/`--autoslay` action delegates approval and merge
+execution to the coordinator. Reviewer subagents deliberately lack mutation
+tools: they produce independent evidence, while the coordinator revalidates the
+live head and repository rules before using the appliance's GitHub authority.
 
 
 Issue implementation in managed repositories is gated on a fresh GitHub read

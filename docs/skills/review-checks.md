@@ -1,6 +1,6 @@
 ---
 name: review-checks
-version: "2.0"
+version: "2.1"
 last_updated: 2026-09-14
 id: review-checks
 one_line_purpose: Maintain the OMP workbench review agents and policy seam.
@@ -40,12 +40,16 @@ policy belong here or in `policy.ts`; OMP owns agent execution and workflowz.
 
 1. Agent definitions omit provider, model, and effort. OMP resolves the user's
    active choice for every companion agent.
-2. Review agents read evidence and return findings. They never approve or merge.
-3. The coordinator must preserve specialist evidence and surface uncertainty;
+2. Review agents read evidence and return findings. They never comment, submit
+   reviews, approve, enqueue, push, or merge. Enforce that boundary in their
+   tool allowlist: a prompt prohibition alone is not a capability boundary.
+3. Verdict labels such as `clean` are recommendations returned to the
+   coordinator, never authorization for the reviewer to mutate GitHub.
+4. The coordinator must preserve specialist evidence and surface uncertainty;
    it must not turn absence of evidence into approval.
-4. Prompts reference live queue items and bounded diffs, never static queue
+5. Prompts reference live queue items and bounded diffs, never static queue
    snapshots.
-5. Delete a specialist when its responsibility is fully duplicated by OMP or
+6. Delete a specialist when its responsibility is fully duplicated by OMP or
    another agent; do not preserve wrappers for compatibility.
 
 ## Verification

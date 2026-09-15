@@ -1961,7 +1961,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 
 	assert.equal(pi.messages.length, 1);
 	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through review, repair, and landing:/m);
-	assert.match(pi.messages[0], /workflowz the review stage/);
+	assert.match(pi.messages[0], /Use the `task` tool once with one fresh bluefin-reviewer item per pull request/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/b/);
 
@@ -2102,7 +2102,8 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 		assert.match(prompt, /--name-only/);
 		assert.doesNotMatch(prompt, /--json [\w,]*\bbody\b/);
 	}
-	assert.match(slay, /fresh bluefin-reviewer workpool item per pull request/);
+	assert.match(slay, /`task` tool once with one fresh bluefin-reviewer item per pull request/);
+	assert.match(slay, /Do not use eval workpool/);
 	assert.match(slay, /fresh isolated fixer/);
 	assert.match(slay, /both `pull_request` and explicit `repo`/);
 	assert.match(slay, /\$HOME\/worktrees/);
@@ -2110,11 +2111,18 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 	assert.match(slay, /reviewed head must equal the live head/i);
 	assert.match(slay, /gh pr merge <n> --repo <r> --auto --squash/);
 	assert.match(slay, /Never use `--admin`/);
+	assert.match(slay, /do not disable and re-arm auto-merge/);
+	assert.match(slay, /report the outstanding approval gate and move on/);
 	const reviewerPrompt = readFileSync("image/extension/bluefin-review/agents/bluefin-reviewer.md", "utf8");
 	assert.match(reviewerPrompt, /hive_workbench_diff\(pull_request: <number>, repo: "<owner\/name>"\)/);
 	assert.match(reviewerPrompt, /Do not assume a local checkout exists/);
-	assert.match(reviewerPrompt, /do not install packages or retry the absent command/i);
-	assert.match(fix, /fresh isolated agent\(\) handle per issue or pull request/);
+	const reviewerTools = reviewerPrompt.match(/^tools: (.+)$/m)?.[1] ?? "";
+	assert.doesNotMatch(reviewerTools, /\b(?:bash|yield)\b/);
+	assert.match(reviewerPrompt, /strictly read-only/);
+	assert.match(reviewerPrompt, /A `clean` verdict is\s+evidence/);
+	assert.doesNotMatch(reviewerPrompt, /\*\*`approve`\*\*/);
+	assert.match(reviewerPrompt, /Never claim a validator is absent/);
+	assert.match(fix, /`task` tool once with one fresh isolated item per issue or pull request/);
 	assert.match(fix, /Never approve or merge/);
 });
 
@@ -2123,7 +2131,7 @@ test("fix waves repair conflicts without landing them", () => {
 	const sibling = queueItem({ id: 7, repo: dirty.repo, mergeState: "dirty" });
 	const batch = actionPrompt({ kind: "fix", item: dirty, items: [dirty, sibling] });
 	assert.match(batch, /merge=dirty/);
-	assert.match(batch, /fresh isolated agent\(\) handle/);
+	assert.match(batch, /`task` tool once with one fresh isolated item/);
 	assert.match(batch, /Never approve or merge/);
 });
 
@@ -2428,7 +2436,7 @@ test("action prompts reserve landing authority for slay", () => {
 	assert.match(actionPrompt({ kind: "fix", item }), /Never approve or merge/);
 	const slayAction = { kind: "slay", item, items: [item, queueItem({ id: 7, repo: item.repo })] };
 	const slayPrompt = actionPrompt(slayAction);
-	assert.match(slayPrompt, /workflowz the review stage/);
+	assert.match(slayPrompt, /Use the `task` tool once with one fresh bluefin-reviewer item per pull request/);
 	assert.match(slayPrompt, /review, repair, and landing/);
 	assert.match(slayPrompt, /Report one terminal outcome per item/);
 	assert.doesNotMatch(slayPrompt, /requires? (?:two|2) approvals?/i);
@@ -2598,8 +2606,8 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 
 	const batch = mode.chosenItems();
 	const prompt = actionPrompt({ kind: "fix", item: batch[0], items: batch });
-	assert.match(prompt, /workflowz this repository wave/);
-	assert.match(prompt, /fresh isolated agent\(\) handle per issue or pull request/);
+	assert.match(prompt, /Use the `task` tool once/);
+	assert.match(prompt, /`task` tool once with one fresh isolated item per issue or pull request/);
 	assert.doesNotMatch(prompt, /maximum of 7|fix-and-merge|approve and merge/);
 });
 
@@ -3684,7 +3692,7 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 
 	assert.equal(pi.messages.length, 1, "selected issues dispatched without requiring Hive");
 	assert.match(pi.messages[0], /Implement this repository wave for projectbluefin\/unmanaged/);
-	assert.match(pi.messages[0], /workflowz this repository wave with one fresh isolated agent\(\) handle/);
+	assert.match(pi.messages[0], /Use the `task` tool once with one fresh isolated item/);
 	assert.match(pi.messages[0], /one review-ready pull request per issue/);
 	assert.match(pi.messages[0], /SUBAGENT-RULES/);
 	assert.match(pi.messages[0], /Never merge or approve your own pull request/);

@@ -169,11 +169,12 @@ slash commands.
 | `q` / `Esc` | Close the workbench |
 
 Slay preserves Hive order, partitions selected work by repository, and asks OMP
-workflowz to run each repository as one bounded `bluefin-reviewer` workpool.
-Later repository waves do not start until the prior repository settles, avoiding
-cross-repository context churn. OMP owns agent execution, workpool concurrency,
-task state, tools, sessions, and cancellation; the extension only owns Hive's
-queue projection, durable intent, GitHub mutation guards, and presentation.
+workflowz to run one bounded `task` batch with a fresh `bluefin-reviewer` item
+per pull request. Later repository waves do not start until the prior repository
+settles, avoiding cross-repository context churn. OMP owns agent execution, task
+concurrency, task state, tools, sessions, and cancellation; the extension only
+owns Hive's queue projection, durable intent, GitHub mutation guards, and
+presentation.
 The mode also ships the `bluefin-doctrine` and `bluefin-ci-triage` task agents.
 
 ### 3. Start with one repository, or browse the organization
@@ -188,14 +189,16 @@ single-screen workbench.
 
 The queue and execution trace remain visible beside the prompt. Navigate and
 select work with the keys above; `s` slays the selected repository waves, and
-`--autoslay` starts the visible slice immediately. A slay is one maintainer-
-authorized lifecycle: review the exact head, repair findings in isolation,
-review the repaired head afresh, then approve and ask GitHub to squash-merge
-when its live rules permit. Reviewer agents remain read-only; the coordinator
-owns landing. Autoslay also enables OMP's advisor on the coordinator session,
-resolving its model through `modelRoles.advisor` → `@default` so it follows the
-maintainer's selected model without pinning a provider. The
-[workbench guide](docs/skills/review-dashboard.md) documents the authority model.
+`--autoslay` starts the visible slice immediately. The appliance exists to
+review **and land** code changes. A slay is one maintainer-authorized lifecycle:
+review the exact head, repair findings in isolation, review the repaired head
+afresh, then approve and ask GitHub to squash-merge when its live rules permit.
+Reviewer subagents remain read-only so the verdict and mutation authorities are
+separate; the appliance's coordinator owns approval and landing. Autoslay also
+enables OMP's advisor on the coordinator session, resolving its model through
+`modelRoles.advisor` → `@default` so it follows the maintainer's selected model
+without pinning a provider. The [workbench guide](docs/skills/review-dashboard.md)
+documents the authority model.
 
 
 ## Run a worker
