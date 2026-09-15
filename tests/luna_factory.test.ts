@@ -30,7 +30,7 @@ import { renderCompletionReceipt } from "../image/extension/luna-factory/core/re
 import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
 import { artifactRefError, changedPathError, parseCandidate, parseReceipt } from "../image/extension/luna-factory/core/schema.ts";
 import { buildDispatchPrompt, dispatchMarker, RECEIPT_CONTRACT } from "../image/extension/luna-factory/omp/adapter.ts";
-import { DISPATCH_COVERAGE, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
+import { DISPATCH_COVERAGE, coverageFor, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
 import { renderStatus, renderStatusDetail, renderWhy } from "../image/extension/luna-factory/ui/status.ts";
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 
@@ -580,10 +580,11 @@ test("a diagnosed, exhausted plateau is reported as a blocker with no silent ret
 
 // -------------------------------------------------------------- capabilities
 
-test("exactly one execution path is enforced, and every other path is marked unenforced", () => {
-	assert.deepEqual(enforcedPaths(), ["factory.admitted-dispatch"]);
-	assert.ok(unsupportedPaths().includes("native.task"));
+test("probed execution paths are classified, and every other path stays conservative", () => {
+	assert.deepEqual(enforcedPaths(), ["factory.admitted-dispatch", "native.task"]);
+	assert.equal(unsupportedPaths().includes("native.task"), false);
 	assert.ok(unsupportedPaths().includes("eval.agent"));
+	assert.equal(coverageFor("child.tools")?.status, "observed");
 	for (const entry of DISPATCH_COVERAGE) {
 		assert.ok(entry.reason.length > 20, `${entry.path} needs a real reason`);
 		if (entry.status !== "enforced") assert.ok(entry.upstream !== undefined || entry.seam.length > 0, entry.path);
@@ -592,7 +593,7 @@ test("exactly one execution path is enforced, and every other path is marked une
 
 test("an unproven execution path is refused rather than routed through silently", () => {
 	const run = runningTask();
-	const refused = buildDispatchPrompt(run, "T1" as TaskId, "T1-a1", "native.task");
+	const refused = buildDispatchPrompt(run, "T1" as TaskId, "T1-a1", "eval.agent");
 	assert.equal(refused.ok, false);
 	assert.match(refused.ok ? "" : refused.error, /is unsupported, not enforced/);
 

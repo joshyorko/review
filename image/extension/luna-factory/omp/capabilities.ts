@@ -13,10 +13,10 @@
  * - `unsupported`  — no supported seam was established. The adapter refuses
  *                    rather than routing silently and pretending otherwise.
  *
- * Nothing here was probed against the pinned packaged OMP in this build: no
- * packaged binary is available in this repository's own environment. Every path
- * that would require such a probe therefore reads `unsupported`, with the reason
- * and the upstream reference recorded, exactly as the objective requires.
+ * The native task seam has been probed against the exact packaged OMP used by
+ * the personal appliance. The remaining entries stay conservative until their
+ * own executable probe exists; a successful native-task run is not evidence
+ * about eval, pools, hub steering, or child-tool policy.
  */
 
 export type CoverageStatus = "enforced" | "observed" | "unsupported";
@@ -42,11 +42,10 @@ export const DISPATCH_COVERAGE: readonly DispatchCoverage[] = [
 	},
 	{
 		path: "native.task",
-		status: "unsupported",
-		seam: "pre-execution interception of OMP's native task tool",
+		status: "enforced",
+		seam: "same-name OMP task wrapper plus ctx.invokeTool delegation",
 		reason:
-			"Not probed: no packaged OMP binary is available in this repository's environment, so a same-name task decorator delegating through ctx.invokeTool could not be established.",
-		upstream: "https://github.com/can1357/oh-my-pi/issues/2574",
+			"The wrapper refuses an unbound task and delegates only a ledger-stamped, RUNNING attempt through OMP's native task. Executed against omp/18.1.22 (source 23a5b9ae38864d3f785dc6cbc96eb6d674a1d32d; binary SHA-256 9ccddf1091e01e08fea1f8e1208f8901cc90d5d098b16581672eeab03f118b81) with the local deterministic provider; the journal correlated the returned native result identity. Background job IDs and cancellation were not exercised by the synchronous probe.",
 	},
 	{
 		path: "eval.tool-task",
@@ -83,9 +82,10 @@ export const DISPATCH_COVERAGE: readonly DispatchCoverage[] = [
 	},
 	{
 		path: "child.tools",
-		status: "unsupported",
+		status: "observed",
 		seam: "effective tool policy inherited by child tasks",
-		reason: "Not probed; a child's effective tool list and hook inheritance are unverified.",
+		reason:
+			"The packaged probe logged child provider tool rosters: one worker request had no Factory tools, while later child turns inherited the installed Factory namespace. This is observation only; no child-tool restriction is claimed.",
 	},
 	{
 		path: "session_stop",
