@@ -39,6 +39,25 @@ arg_after() {
   return 1
 }
 
+configure_host_files() {
+  local mask="$1"
+  rm -f "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+  ((mask & 1)) && touch "$host_fixture/etc/localtime"
+  ((mask & 2)) && touch "$host_fixture/etc/hosts"
+  return 0
+}
+assert_apptainer_host_files() {
+  local call="$1" mask="$2" path bit
+  for path in /etc/localtime /etc/hosts; do
+    [[ "$path" == /etc/localtime ]] && bit=1 || bit=2
+    if ((mask & bit)); then
+      [[ "$call" != *"--no-mount $path"* ]] || fail "present host file $path was suppressed: $call"
+    else
+      [[ "$call" == *"--no-mount $path"* ]] || fail "missing host file $path was not suppressed: $call"
+    fi
+  done
+}
+
 # --- 1. Parser unit tests across all forms and mixed combinations -------------
 
 test_cases=(
@@ -112,6 +131,20 @@ scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
 mkdir -p "$scratch/bin" "$scratch/home/.config/hive"
+host_fixture="$scratch/host"
+mkdir -p "$host_fixture/etc"
+touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+filesystem_hook="$scratch/filesystem.sh"
+cat >"$filesystem_hook" <<'EOF'
+test() {
+  if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
+    builtin test -e "$HOST_FIXTURE$2"
+  else
+    builtin test "$@"
+  fi
+}
+EOF
+export BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture"
 cat >"$scratch/home/.config/hive/contributor.env" <<'EOF'
 HIVE_HUB=https://hive.example.test
 EOF
@@ -314,6 +347,33 @@ fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 OPENAI_API_KEY=test-provider-t
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "contributor fallback did not use Apptainer containment"
 [[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/contribute:stable"* ]] || fail "contributor fallback used the wrong image"
+
+for mask in 0 1 2 3; do
+  configure_host_files "$mask"
+  : >"$mock_apptainer_log"
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+    fail "review fallback failed for host-file mask $mask"
+  assert_apptainer_host_files "$(cat "$mock_apptainer_log")" "$mask"
+
+  : >"$mock_apptainer_log"
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" contribute >/dev/null 2>&1 ||
+    fail "contributor fallback failed for host-file mask $mask"
+  assert_apptainer_host_files "$(cat "$mock_apptainer_log")" "$mask"
+done
+configure_host_files 2
+ln -s missing-zoneinfo "$host_fixture/etc/localtime"
+: >"$mock_apptainer_log"
+REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "review fallback failed with dangling localtime"
+assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
+: >"$mock_apptainer_log"
+REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" contribute >/dev/null 2>&1 ||
+  fail "contributor fallback failed with dangling localtime"
+assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
+: >"$mock_apptainer_log"
+REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin-contribute" >/dev/null 2>&1 ||
+  fail "contributor wrapper fallback failed with dangling localtime"
+assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
 mv "$scratch/krun" "$scratch/bin/krun"
 
 # --- 5. Parity test: KVM container and source launchers use identical flags ---

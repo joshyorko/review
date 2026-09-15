@@ -100,9 +100,13 @@ require_apptainer_fallback() {
   echo "WARNING: ${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary." >&2
 }
 prepare_apptainer_environment() {
-  local name
+  local name host_file
   for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY HIVE_HUB BLUEFIN_REVIEW_ORG TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
+  done
+  APPTAINER_HOST_ARGS=()
+  for host_file in /etc/localtime /etc/hosts; do
+    test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
   done
   return 0
 }
@@ -658,7 +662,7 @@ contribute mode="" count="":
     APPTAINER_IMAGE="$CONTRIBUTOR_IMAGE"; [[ "$APPTAINER_IMAGE" == *://* ]] || APPTAINER_IMAGE="docker://${APPTAINER_IMAGE}"
     echo "✓ starting isolated Apptainer contributor ${INSTANCE_KEY}. Choose model and effort in OMP."
     prepare_apptainer_environment
-    exec apptainer run --containall --no-eval --home "${INSTANCE_HOME}:/home/bluefin" --pwd /home/bluefin/workspace \
+    exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /home/bluefin/workspace \
       --bind "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro" "$APPTAINER_IMAGE"
 
 # Stop cluster contributor workers. Local appliances belong to their foreground
@@ -741,7 +745,7 @@ review-appliance *appliance_args:
     [[ "$IMAGE" != localhost/* ]] || { echo "ERROR: Apptainer cannot resolve local Podman image ${IMAGE}." >&2; exit 1; }
     APPTAINER_IMAGE="$IMAGE"; [[ "$APPTAINER_IMAGE" == *://* ]] || APPTAINER_IMAGE="docker://${APPTAINER_IMAGE}"
     prepare_apptainer_environment
-    exec apptainer run --containall --no-eval --home "${INSTANCE_HOME}:/home/bluefin" --pwd /workspace \
+    exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /workspace \
       --bind "${INSTANCE_WORKSPACE}:/workspace" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
 
 # Build the appliance from this checkout and hold it to its contract. The

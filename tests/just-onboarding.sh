@@ -15,6 +15,20 @@ kubectl_log="$scratch/kubectl.log"
 apptainer_log="$scratch/apptainer.log"
 kvm="$scratch/kvm"
 mkdir -p "$home/.config/hive" "$fake_bin"
+host_fixture="$scratch/host"
+mkdir -p "$host_fixture/etc"
+touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+filesystem_hook="$scratch/filesystem.sh"
+cat >"$filesystem_hook" <<'EOF'
+test() {
+  if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
+    builtin test -e "$HOST_FIXTURE$2"
+  else
+    builtin test "$@"
+  fi
+}
+EOF
+export BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture"
 touch "$kvm"
 chmod 0666 "$kvm"
 cat >"$home/.config/hive/contributor.env" <<'EOF'
@@ -120,6 +134,24 @@ log_not_contains() {
   grep -Fq -- "$1" "$2" && fail "expected $2 not to contain: $1"
   return 0
 }
+configure_host_files() {
+  local mask="$1"
+  rm -f "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+  ((mask & 1)) && touch "$host_fixture/etc/localtime"
+  ((mask & 2)) && touch "$host_fixture/etc/hosts"
+  return 0
+}
+assert_apptainer_host_files() {
+  local call="$1" mask="$2" path bit
+  for path in /etc/localtime /etc/hosts; do
+    [[ "$path" == /etc/localtime ]] && bit=1 || bit=2
+    if ((mask & bit)); then
+      [[ "$call" != *"--no-mount $path"* ]] || fail "present host file $path was suppressed: $call"
+    else
+      [[ "$call" == *"--no-mount $path"* ]] || fail "missing host file $path was not suppressed: $call"
+    fi
+  done
+}
 run_just() {
   : >"$podman_log"
   : >"$kubectl_log"
@@ -200,6 +232,45 @@ output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_lo
 status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "contributor credentials did not reach contained process: $output"
+
+for mask in 0 1 2 3; do
+  scenario="Apptainer host-file mask $mask"
+  configure_host_files "$mask"
+  : >"$apptainer_log"
+  set +e
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -eq 18 ]] || fail "review fallback failed for host-file mask $mask: $output"
+  assert_apptainer_host_files "$(cat "$apptainer_log")" "$mask"
+
+  : >"$apptainer_log"
+  set +e
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" contribute 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -eq 18 ]] || fail "contributor fallback failed for host-file mask $mask: $output"
+  assert_apptainer_host_files "$(cat "$apptainer_log")" "$mask"
+done
+configure_host_files 2
+ln -s missing-zoneinfo "$host_fixture/etc/localtime"
+scenario="review fallback suppresses dangling localtime"
+: >"$apptainer_log"
+set +e
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 18 ]] || fail "review fallback failed with dangling localtime: $output"
+assert_apptainer_host_files "$(cat "$apptainer_log")" 2
+
+scenario="contributor fallback suppresses dangling localtime"
+: >"$apptainer_log"
+set +e
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" contribute 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 18 ]] || fail "contributor fallback failed with dangling localtime: $output"
+assert_apptainer_host_files "$(cat "$apptainer_log")" 2
 
 scenario="review alias preserves argument boundaries"
 EXPECT_EXTENSION="/tmp/review extension" run_just review-queue --extension "/tmp/review extension"

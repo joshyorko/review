@@ -59,6 +59,9 @@ Every interactive microVM stays attached to its launching terminal. Do not add
 `--detach`, `-d`, `nohup`, `setsid`, systemd units, or resurrection commands.
 Ctrl-C stops only that invocation. `review-stop cluster` is reserved for the
 Kubernetes worker deployment.
+Apptainer omits its default `/etc/localtime` or `/etc/hosts` mount only when
+that host source is absent or a dangling symlink; present sources retain the
+runtime default.
 
 ## Credentials
 

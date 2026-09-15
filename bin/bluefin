@@ -50,9 +50,13 @@ require_fallback() {
   echo "WARNING: ${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary." >&2
 }
 prepare_apptainer_environment() {
-  local name
+  local name host_file
   for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY HIVE_HUB BLUEFIN_REVIEW_ORG TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
+  done
+  APPTAINER_HOST_ARGS=()
+  for host_file in /etc/localtime /etc/hosts; do
+    test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
   done
   return 0
 }
@@ -183,7 +187,7 @@ run_review() {
   local apptainer_image="$image"
   [[ "$apptainer_image" == *://* ]] || apptainer_image="docker://${apptainer_image}"
   prepare_apptainer_environment
-  exec apptainer run --containall --no-eval \
+  exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" \
     --home "${home}:/home/bluefin" \
     --pwd /workspace \
     --bind "${workspace}:/workspace" \
@@ -236,7 +240,7 @@ run_contribute() {
   local apptainer_image="$image"
   [[ "$apptainer_image" == *://* ]] || apptainer_image="docker://${apptainer_image}"
   prepare_apptainer_environment
-  exec apptainer run --containall --no-eval \
+  exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" \
     --home "${home}:/home/bluefin" \
     --pwd /home/bluefin/workspace \
     --bind "${registration}:/home/bluefin/.config/hive/contributor.env:ro" \
