@@ -157,14 +157,16 @@ single-screen workbench.
 
 The queue and execution trace remain visible beside the prompt. Navigate and
 select work with the keys above; `s` slays the selected repository waves, and
-`--autoslay` starts the visible slice immediately. A slay is one maintainer-
-authorized lifecycle: review the exact head, repair findings in isolation,
-review the repaired head afresh, then approve and ask GitHub to squash-merge
-when its live rules permit. Reviewer agents remain read-only; the coordinator
-owns landing. Autoslay also enables OMP's advisor on the coordinator session,
-resolving its model through `modelRoles.advisor` → `@default` so it follows the
-maintainer's selected model without pinning a provider. The
-[workbench guide](docs/skills/review-dashboard.md) documents the authority model.
+`--autoslay` starts the visible slice immediately. The appliance exists to
+review **and land** code changes. A slay is one maintainer-authorized lifecycle:
+review the exact head, repair findings in isolation, review the repaired head
+afresh, then approve and ask GitHub to squash-merge when its live rules permit.
+Reviewer subagents remain read-only so the verdict and mutation authorities are
+separate; the appliance's coordinator owns approval and landing. Autoslay also
+enables OMP's advisor on the coordinator session, resolving its model through
+`modelRoles.advisor` → `@default` so it follows the maintainer's selected model
+without pinning a provider. The [workbench guide](docs/skills/review-dashboard.md)
+documents the authority model.
 
 
 ## Run a worker

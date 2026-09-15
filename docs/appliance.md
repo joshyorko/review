@@ -183,6 +183,12 @@ The loop is select, group, and dispatch:
 4. `p` pauses admission of later repository waves without pretending to suspend
    agents already running.
 
+The appliance is a review-and-landing product, not a read-only report viewer.
+The maintainer's `s`/`Alt-S`/`--autoslay` action delegates approval and merge
+execution to the coordinator. Reviewer subagents deliberately lack mutation
+tools: they produce independent evidence, while the coordinator revalidates the
+live head and repository rules before using the appliance's GitHub authority.
+
 
 Issue implementation in managed repositories is gated on a fresh GitHub read
 of the policy layer's admission and denial labels. Any closed, unadmitted,
