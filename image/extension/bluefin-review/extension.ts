@@ -7,7 +7,7 @@
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
+import { DEFAULT_ORG, fetchDiff, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
 import type { Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { workbenchPainter } from "./paint.ts";
@@ -465,13 +465,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
 			return;
 		}
-		const blocker = await batchBlocker(kind, items);
-		if (generation !== batchRequestGeneration) return;
-		if (activeBatch?.state === "running" || activeBatch?.state === "paused") return;
-		if (blocker) {
-			ctx.ui.notify(blocker, "error");
-			return;
-		}
 		const waves = mode.repositoryWaves(items);
 		if (waves.length === 0) return;
 		const startedAt = Date.now();
@@ -487,18 +480,51 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			startedAt,
 			waveStartedAt: startedAt,
 		};
+		const blocker = await batchBlocker(kind, items);
+		if (generation !== batchRequestGeneration) return;
+		if (activeBatch?.state === "running" || activeBatch?.state === "paused") return;
+		if (blocker) {
+			persistBatch(ctx, { ...batch, state: "blocked", error: blocker });
+			ctx.ui.notify(blocker, "error");
+			return;
+		}
 		mode.clearSelected();
 		persist();
 		persistBatch(ctx, batch);
 		await dispatchCurrentWave(ctx, undefined, true);
 	};
 
+	const filterUnsupportedSlayItems = async (ctx: CtxLike, items: readonly QueueItem[]): Promise<QueueItem[]> => {
+		const requestOptions = { token: mode.tokenOptions().token ?? resolveToken(env), fetchImpl: options.fetchImpl };
+		const inspected = await Promise.all(
+			items.map(async (item) => {
+				if (item.type !== "pr") return { item };
+				const diff = await fetchDiff(item.repo, item.id, { ...requestOptions, maxPatchFiles: 0, maxPatchChars: 0 });
+				if (diff.error) return { item, reason: diff.error };
+				const workflow = diff.files.find((file) => file.path.startsWith(".github/workflows/"));
+				if (workflow) return { item, reason: `changes ${workflow.path}` };
+				if (item.changedFiles === undefined || diff.files.length < item.changedFiles) {
+					return { item, reason: "complete changed-file list unavailable" };
+				}
+				return { item };
+			}),
+		);
+		for (const skipped of inspected) {
+			if (skipped.reason) {
+				ctx.ui.notify(`Skipping ${skipped.item.repo}#${skipped.item.id}: ${skipped.reason}`, "warning");
+			}
+		}
+		return inspected.filter((entry) => entry.reason === undefined).map((entry) => entry.item);
+	};
+
 	const startSlay = async (ctx: CtxLike) => {
-		const items = mode.slayableItems(BATCH_LIMIT);
-		if (items.length === 0) {
+		const candidates = mode.slayableItems(BATCH_LIMIT);
+		if (candidates.length === 0) {
 			ctx.ui.notify("No queue items available to slay", "warning");
 			return;
 		}
+		const items = await filterUnsupportedSlayItems(ctx, candidates);
+		if (items.length === 0) return;
 		await startRepositoryBatch(ctx, "slay", items);
 	};
 

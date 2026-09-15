@@ -141,6 +141,7 @@ function fakeFetch(calls, known = {}) {
 									updatedAt: new Date(NOW - 5000).toISOString(),
 									mergeable: "MERGEABLE",
 									reviewDecision: "APPROVED",
+									changedFiles: 2,
 									author: { login: "ada" },
 									repository: { nameWithOwner: "projectbluefin/other" },
 									labels: { nodes: [] },
@@ -1538,10 +1539,26 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.ok(!ctx.notifications.some((notification) => /browse-only mode disables dispatch/.test(notification.message)));
 });
 
-test("--autoslay starts the review-repair-land lifecycle on launch", async () => {
+test("--autoslay skips workflow changes and dispatches eligible pull requests", async () => {
+	const calls = [];
+	const baseFetch = fakeFetch(calls);
+	const fetchImpl = async (url, init) => {
+		const target = String(url);
+		if (target.includes("/repos/projectbluefin/review/pulls/42/files")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => [
+					{ filename: ".github/workflows/validate.yml", status: "modified", additions: 1, deletions: 1 },
+				],
+			};
+		}
+		return baseFetch(url, init);
+	};
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
-	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
 
@@ -1550,9 +1567,73 @@ test("--autoslay starts the review-repair-land lifecycle on launch", async () =>
 	await new Promise((resolve) => setImmediate(resolve));
 
 	assert.equal(pi.messages.length, 1);
-	assert.match(pi.messages[0], /bluefin-reviewer/);
-	assert.match(pi.messages[0], /review, repair, and landing/);
-	assert.match(pi.messages[0], /gh pr merge <n> --repo <r> --auto --squash/);
+	assert.match(pi.messages[0], /projectbluefin\/other#7/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#42/);
+	assert.ok(ctx.notifications.some((notification) => /Skipping projectbluefin\/review#42: changes \.github\/workflows\/validate\.yml/.test(notification.message)));
+});
+
+test("--autoslay skips a selection containing only workflow changes", async () => {
+	const calls = [];
+	const baseFetch = fakeFetch(calls);
+	const fetchImpl = async (url, init) => {
+		const target = String(url);
+		if (target.includes("/pulls/") && target.includes("/files")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => [
+					{ filename: ".github/workflows/validate.yml", status: "modified", additions: 1, deletions: 1 },
+				],
+			};
+		}
+		return baseFetch(url, init);
+	};
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 0, "workflow-only selections dispatch no agent work");
+	assert.equal(ctx.notifications.filter((notification) => /Skipping .*: changes \.github\/workflows\/validate\.yml/.test(notification.message)).length, 2);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0, "skipped items never enter durable batch state");
+});
+
+test("--autoslay permits non-workflow changes", async () => {
+	const calls = [];
+	const baseFetch = fakeFetch(calls);
+	const fetchImpl = async (url, init) => {
+		if (String(url).includes("/repos/projectbluefin/review/pulls/42/files")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => [
+					{ filename: "image/entrypoint.sh", status: "modified", additions: 1, deletions: 1 },
+					{ filename: "README.md", status: "modified", additions: 1, deletions: 0 },
+					{ filename: "tests/example.sh", status: "modified", additions: 1, deletions: 0 },
+				],
+			};
+		}
+		return baseFetch(url, init);
+	};
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1);
+	assert.ok(!ctx.notifications.some((notification) => /Skipping /.test(notification.message)));
 });
 
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {
@@ -1581,7 +1662,7 @@ test("--autoslay falls back to unranked items when Hive-only filter has 0 ranked
 	const hubEnv = { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" };
 	const hubFetch = async (url, init) => {
 		const target = String(url);
-		if (target.includes("/graphql")) return fakeFetch([])(url, init);
+		if (target.startsWith("https://api.github.com/")) return fakeFetch([])(url, init);
 		const path = target.replace("https://hive.example", "");
 		const body =
 			path === "/api/v1/status"

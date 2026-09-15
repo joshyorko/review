@@ -184,6 +184,7 @@ function headers(token?: string): Record<string, string> {
 	return value;
 }
 
+
 interface SearchNode {
 	number?: number;
 	title?: string;
