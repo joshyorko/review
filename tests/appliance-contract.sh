@@ -320,15 +320,25 @@ run '
   test -e "/usr/lib/${audio_triplet}/libpulse-simple.so.0"
   test -e "/usr/lib/${audio_triplet}/libasound.so.2"
   test -e /usr/share/alsa/alsa.conf
+  test -d /run/bluefin/pulse
   ldd "/usr/lib/${audio_triplet}/libpulse-simple.so.0" | grep -q "not found" && exit 1
   ldd "/usr/lib/${audio_triplet}/libasound.so.2" | grep -q "not found" && exit 1
 ' >/dev/null || fail "the review mode, Headroom MCP, SBOM, or audio closure is missing from the image"
+
+run '
+  set -eu
+  profile="$HOME/.omp/profiles/bluefin-review-appliance/agent/mcp.json"
+  rm -f "$profile"
+  bluefin-review-appliance --version >/dev/null
+  test -f "$profile"
+  grep -q "/usr/bin/headroom" "$profile"
+' >/dev/null || fail "the appliance did not provision its Headroom MCP profile"
 
 # Nothing inside may install anything.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
-  for forbidden in dnf apt apt-get apk rpm yum pip pip3 npm; do
+  for forbidden in dnf microdnf apt apt-get apk rpm yum pip pip3 npm; do
     if command -v "$forbidden" >/dev/null 2>&1; then
       echo "found package manager: $forbidden" >&2
       exit 1

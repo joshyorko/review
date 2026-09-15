@@ -29,7 +29,7 @@ ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:5217c4e4ed
 # pinned audio stage contributes only the PulseAudio/ALSA libraries and config;
 # the build stage adds only Headroom's runtime wheel and MCP dependencies.
 # renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
-ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:42@sha256:09a2061e2cfb85ac8e7fa7f2234d0ace6ad4f2b7dfdf0f257c90405e4f07577d
+ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:44@sha256:9bb5cffe3cebf098975f05ffd78e8a1d25cd9a9e4fc5e563b56e27b9546eb0c0
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
 ARG OMP_VERSION=18.1.22
@@ -181,7 +181,7 @@ RUN arch="$(uname -m)"; \
 # distroless base ships only a root entry; a numeric-only user with no passwd
 # record breaks getpwuid(), which is exactly what a rootless runtime calls.
 RUN set -eu; \
-    install -d -m 0755 /out/etc /out/home/bluefin /out/workspace; \
+    install -d -m 0755 /out/etc /out/home/bluefin /out/workspace /out/run/bluefin/pulse; \
     printf 'root:x:0:0:root:/root:/usr/bin/bash\nbluefin:x:65532:65532:Bluefin Review:/home/bluefin:/usr/bin/bash\n' > /out/etc/passwd; \
     printf 'root:x:0:\nbluefin:x:65532:\n' > /out/etc/group; \
     chown -R 65532:65532 /out/home/bluefin /out/workspace

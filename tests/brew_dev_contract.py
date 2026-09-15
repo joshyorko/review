@@ -22,6 +22,8 @@ class BrewDevContract(unittest.TestCase):
         self.git("config", "user.email", "fixture@example.invalid")
         (self.repo / "scripts").mkdir()
         shutil.copy2(SCRIPT, self.repo / "scripts/brew-dev")
+        (self.repo / "scripts/parse-review-args.sh").write_text("#!/bin/sh\n")
+        (self.repo / "scripts/review-appliance-version.sh").write_text("#!/bin/sh\nprintf '26.08.07\\n'\n")
         (self.repo / "bin").mkdir()
         (self.repo / "bin/bluefin").write_text("#!/bin/sh\necho committed-launcher\n")
         (self.repo / "image/appliance").mkdir(parents=True)
@@ -87,6 +89,17 @@ class BrewDevContract(unittest.TestCase):
         result = self.run_cli("publish", str(self.root / "missing-bundle"))
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
+
+    def test_package_carries_parser_and_resolves_its_libexec_root(self):
+        script = SCRIPT.read_text()
+        self.assertIn("parse-review-args.sh", script)
+        self.assertIn('")/../.."', script)
+        self.assertIn("/usr/bin/headroom", script)
+
+    def test_personal_workflow_builds_the_default_branch(self):
+        workflow = (SCRIPT.parents[1] / ".github/workflows/review-dev.yml").read_text()
+        self.assertIn("default: main", workflow)
+        self.assertNotIn("feat/brew-dev-dogfood", workflow)
 
 
 class FormulaContract(unittest.TestCase):

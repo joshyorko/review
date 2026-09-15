@@ -242,6 +242,10 @@ assert_bluefin_review() {
   [[ "$podman_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "review did not use the krun OCI runtime: $podman_call"
   [[ "$podman_call" == *"--name bluefin-review-"* ]] || fail "review did not use an isolated instance name: $podman_call"
   [[ "$podman_call" == *":/home/bluefin:rw"* ]] || fail "review did not use target-specific state: $podman_call"
+  local state_volume state_home
+  state_volume="$(arg_after "$podman_call" --volume)"
+  state_home="${state_volume%%:*}"
+  [[ -d "$state_home/.omp" ]] || fail "review did not create persistent appliance OMP state"
 
   grep -qFx "pull ghcr.io/projectbluefin/review:stable" "$mock_podman_log" ||
     fail "bin/bluefin review did not refresh the moving stable tag"
@@ -348,7 +352,7 @@ kill "$audio_pid" 2>/dev/null || true
 audio_pid=""
 
 # With no Pulse socket, an explicitly present ALSA device is the narrow
-# fallback; with neither, startup remains successful and explains live voice.
+# fallback. With neither, startup stays successful and passes no audio bind.
 snd_device="$scratch/snd"
 mkdir -p "$snd_device"
 : >"$mock_podman_log"
@@ -358,10 +362,11 @@ alsa_review_call="$(grep '^run ' "$mock_podman_log")"
 [[ "$alsa_review_call" == *"--device $snd_device"* ]] ||
   fail "review did not project the explicit ALSA device fallback"
 : >"$mock_podman_log"
-headless_output="$(REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime" REVIEW_TEST_SND_DEVICE="$scratch/no-snd" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime" REVIEW_TEST_SND_DEVICE="$scratch/no-snd" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
   fail "headless review launch failed"
-[[ "$headless_output" == *"no host audio transport was detected"* ]] ||
-  fail "headless review did not provide a live-voice diagnostic"
+headless_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$headless_review_call" != *"--device"* && "$headless_review_call" != *"/run/bluefin/pulse/native"* ]] ||
+  fail "headless review projected an unavailable audio transport"
 
 # The personal Brew bundle selects its native SIF explicitly and keeps the
 # same isolated state/config/audio rules as the OCI path.

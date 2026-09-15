@@ -81,12 +81,14 @@ detect_review_audio() {
   local pulse_socket="${runtime_dir}/pulse/native"
   local snd_device="${REVIEW_TEST_SND_DEVICE:-/dev/snd}"
   local pulse_cookie="${PULSE_COOKIE:-${XDG_CONFIG_HOME:-${HOME:-/no-such-home}/.config}/pulse/cookie}"
+  if [[ "${PULSE_SERVER:-}" == unix:* && -S "${PULSE_SERVER#unix:}" ]]; then
+    pulse_socket="${PULSE_SERVER#unix:}"
+  fi
 
   REVIEW_AUDIO_PULSE_SOCKET=""
   REVIEW_AUDIO_PULSE_SERVER=""
   REVIEW_AUDIO_PULSE_COOKIE=""
   REVIEW_AUDIO_SND_DEVICE=""
-  REVIEW_AUDIO_WARNING=""
 
   if [[ -S "$pulse_socket" ]]; then
     REVIEW_AUDIO_PULSE_SOCKET="$pulse_socket"
@@ -98,7 +100,6 @@ detect_review_audio() {
     REVIEW_AUDIO_SND_DEVICE="$snd_device"
     return 0
   fi
-  REVIEW_AUDIO_WARNING="WARNING: no host audio transport was detected; Review starts normally, but Ctrl+L live voice needs a PulseAudio socket or /dev/snd."
 }
 
 prepare_review_omp_mount() {
@@ -266,7 +267,6 @@ run_review() {
   mkdir -p "$home/.omp" "$home/.config/pulse" "$workspace"
   detect_review_audio
   prepare_review_omp_mount
-  [[ -z "$REVIEW_AUDIO_WARNING" ]] || echo "$REVIEW_AUDIO_WARNING" >&2
   [[ -z "$REVIEW_OMP_WARNING" ]] || echo "$REVIEW_OMP_WARNING" >&2
 
   if [[ -n "$sif" ]]; then

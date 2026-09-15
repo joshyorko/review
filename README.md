@@ -39,6 +39,22 @@ bluefin review
 
 > **Note:** `bluefin` prefers rootless Podman with the `krun` OCI runtime. If Podman, `krun`, or `/dev/kvm` is unavailable, it reports why and falls back to isolated Apptainer execution; the Linux Homebrew formula declares Apptainer as a dependency.
 
+For personal dogfood builds, the `bluefin-review-dev` Homebrew package carries
+the matching native Review SIF and launcher from one exact commit. It does not
+require a host OMP, Node, or Python install:
+
+```bash
+brew tap joshyorko/review-dev
+brew install joshyorko/review-dev/bluefin-review-dev
+bluefin review
+```
+
+Review keeps its OMP sessions, provider auth, Headroom state, and MCP
+configuration under its appliance-owned state home. Host `~/.omp` is not
+inherited; set `BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1` only when deliberately
+projecting host OMP configuration, and ensure every referenced command/path
+exists inside the SIF.
+
 [Installation](#installation) · [Quick start](#quick-start) · [Using the OMP workbench](#using-the-omp-workbench) · [Run a worker](#run-a-worker) · [Guides](#guides)
 
 ## Quick start

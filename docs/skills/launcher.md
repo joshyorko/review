@@ -95,6 +95,19 @@ rather than inferred.
   launcher uses local Apptainer when Podman selects a remote engine; it never
   sends client-side credential bind paths to that engine.
 
+## Personal SIF and audio
+
+The personal Brew bundle sets `BLUEFIN_REVIEW_SIF` so the packaged `bluefin`
+launcher uses its native immutable SIF through Apptainer while keeping the same
+target-specific `/home/bluefin` state boundary. The SIF contains Headroom's
+MCP runtime and the OMP Linux voice closure.
+
+For Review voice, the packaged launcher binds only a detected
+`$XDG_RUNTIME_DIR/pulse/native` socket and sets the contained `PULSE_SERVER`.
+It binds the host Pulse cookie read-only when present. Without that socket it
+binds `/dev/snd` only when the device exists; it never binds the entire runtime
+directory, host home, or `.codex`. Missing audio never prevents Review startup.
+
 ## Arguments
 
 `scripts/parse-review-args.sh` is the single parser for OMP review scope.

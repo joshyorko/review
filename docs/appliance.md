@@ -128,13 +128,13 @@ the appliance and its agents impose no model mapping or filtering.
 
 ### Voice and Headroom
 
-The appliance carries OMP live voice and Headroom's MCP server. On Linux, the
-launcher projects only `$XDG_RUNTIME_DIR/pulse/native` when that PulseAudio
-compatibility socket exists, and sets a contained `PULSE_SERVER` for it. When
-the socket is absent, it projects `/dev/snd` only when that device exists. It
-never mounts the whole runtime directory; on a headless host, Review still
-starts and reports that live voice needs a PulseAudio socket or `/dev/snd` when
-voice is invoked.
+The appliance carries OMP live voice and Headroom's MCP server. The packaged
+`bluefin` launcher projects only `$XDG_RUNTIME_DIR/pulse/native` when that
+PulseAudio compatibility socket exists, and sets a contained `PULSE_SERVER` for
+it. When the socket is absent, it projects `/dev/snd` only when that device
+exists. It never mounts the whole runtime directory; on a headless host, Review
+still starts and reports that live voice needs a PulseAudio socket or `/dev/snd`
+when voice is invoked.
 
 The first default-profile launch writes the appliance-owned Headroom definition
 to `/home/bluefin/.omp/profiles/bluefin-review-appliance/agent/mcp.json`.
