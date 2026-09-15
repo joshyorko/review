@@ -51,6 +51,13 @@ assert_provider_env_names() {
     [[ "$call" == *"--env $name"* ]] || fail "$context did not preserve $name forwarding: $call"
   done
 }
+assert_personal_policy_env_names() {
+  local call="$1" context="${2:-launcher}"
+  for name in BLUEFIN_REVIEW_PERSONAL_MODE BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS; do
+    [[ "$call" == *"--env $name"* ]] || fail "$context did not forward $name by name: $call"
+  done
+  [[ "$call" != *"=1"* ]] || fail "$context exposed personal policy values in argv/log output: $call"
+}
 
 configure_host_files() {
   local mask="$1"
@@ -204,6 +211,10 @@ for arg in "\$@"; do
   fi
   previous="\$arg"
 done
+if [[ "\${EXPECT_APPTAINER_PERSONAL_POLICY:-}" == 1 ]]; then
+  [[ "\${APPTAINERENV_BLUEFIN_REVIEW_PERSONAL_MODE:-}" == 1 ]] || exit 19
+  [[ "\${APPTAINERENV_BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS:-}" == 1 ]] || exit 19
+fi
 if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
   for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
@@ -333,15 +344,18 @@ set -e
 # An installed personal bundle points krun at its immutable OCI image.
 : >"$mock_podman_log"
 BLUEFIN_REVIEW_IMAGE="ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890" \
+  BLUEFIN_REVIEW_PERSONAL_MODE=1 BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS=1 \
   "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
   fail "personal OCI review launch failed"
 oci_call="$(grep '^run ' "$mock_podman_log")"
 [[ "$oci_call" == *"ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890"* ]] ||
   fail "personal OCI review launch used the wrong image"
+assert_personal_policy_env_names "$oci_call" "Podman review personal policy"
 
 mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
-fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 \
+fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 EXPECT_APPTAINER_PERSONAL_POLICY=1 \
+  BLUEFIN_REVIEW_PERSONAL_MODE=1 BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS=1 \
   COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token \
   COPILOT_INTEGRATION_ID=test-copilot-integration ANTHROPIC_API_KEY=test-anthropic-key \
   ANTHROPIC_OAUTH_TOKEN=test-anthropic-oauth OPENAI_API_KEY=test-provider-token \

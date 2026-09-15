@@ -1,8 +1,8 @@
-/** Personal self-hosted policy: workflow PRs remain visible and may be slayed when GitHub permits it. */
+/** Personal self-hosted policy: workflow PRs remain visible but never slayable. */
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BATCH_ENTRY, actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
+import { actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
 import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts";
 import { PLAIN_PAINTER } from "../image/extension/bluefin-review/glyphs.ts";
 import { fetchQueue } from "../image/extension/bluefin-review/github.ts";
@@ -16,11 +16,11 @@ const ENV = {
 	GH_TOKEN: "t",
 	HOME: "/nonexistent",
 	XDG_CONFIG_HOME: "/nonexistent",
-	BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY: "1",
+	BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS: "1",
 	BLUEFIN_REVIEW_PERSONAL_MODE: "1",
 };
 
-function workflowNode() {
+function workflowNode(workflow = true) {
 	return {
 		number: 42,
 		title: "workflow change",
@@ -36,7 +36,7 @@ function workflowNode() {
 		labels: { nodes: [] },
 		files: {
 			pageInfo: { hasNextPage: false },
-			nodes: [{ path: ".github/workflows/deploy.yml" }],
+			nodes: [{ path: workflow ? ".github/workflows/deploy.yml" : "README.md" }],
 		},
 		commits: {
 			nodes: [{
@@ -50,7 +50,7 @@ function workflowNode() {
 	};
 }
 
-function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40)) {
+function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40), workflow = true) {
 	return (url: string | URL | Request, init?: RequestInit) => {
 		const target = String(url);
 		if (target === "https://api.github.com/") {
@@ -70,13 +70,13 @@ function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40)) {
 					status: 200,
 					statusText: "OK",
 					json: async () => ({
-						data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode()] } },
+						data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode(workflow)] } },
 					}),
 				});
 			}
 			const data: Record<string, unknown> = {};
 			for (const [, alias] of body.query.matchAll(/(\w+): repository\(owner: "[^"]+", name: "[^"]+"\)/g)) {
-				data[alias] = { issueOrPullRequest: { ...workflowNode(), headRefOid: liveHeadSha } };
+				data[alias] = { issueOrPullRequest: { ...workflowNode(workflow), headRefOid: liveHeadSha } };
 			}
 			return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({ data }) });
 		}
@@ -86,7 +86,7 @@ function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40)) {
 				status: 200,
 				statusText: "OK",
 				json: async () => [
-					{ filename: ".github/workflows/deploy.yml", status: "modified", additions: 1, deletions: 1 },
+					{ filename: workflow ? ".github/workflows/deploy.yml" : "README.md", status: "modified", additions: 1, deletions: 1 },
 				],
 			});
 		}
@@ -150,29 +150,10 @@ test("workflow-changing pull requests stay visible in the personal queue", async
 	assert.equal(mode.selectById("example/repo", 42), true);
 });
 
-test("autoslay dispatches a workflow-changing PR when OAuth has workflow scope", async (t) => {
+test("personal autoslay refuses a workflow-changing PR even with OAuth workflow scope", async (t) => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
-	const review = createReviewExtension(pi as any, { org: "example", fetchImpl: makeFetch() as typeof fetch, env: ENV });
-	const ctx = fakeCtx();
-	await pi.events.get("session_start")({}, ctx);
-	await review.whenStarted();
-	await new Promise((resolve) => setImmediate(resolve));
-	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
-
-	assert.equal(pi.messages.length, 1, JSON.stringify(ctx.notifications));
-	assert.match(pi.messages[0]!, /example\/repo#42/);
-	assert.equal(ctx.notifications.some((entry) => /Skipping .*workflow/.test(entry.message)), false);
-});
-
-test("personal workflow slay still fails closed when classic OAuth scope is known missing", async (t) => {
-	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
-	const review = createReviewExtension(pi as any, {
-		org: "example",
-		fetchImpl: makeFetch("repo, read:org") as typeof fetch,
-		env: ENV,
-	});
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch() as typeof fetch, env: ENV });
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
@@ -180,10 +161,7 @@ test("personal workflow slay still fails closed when classic OAuth scope is know
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((entry) => /lacks 'workflow' scope/.test(entry.message)));
-	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data as { state?: string; error?: string } | undefined;
-	assert.equal(batch?.state, "blocked");
-	assert.match(batch?.error ?? "", /\.github\/workflows\/deploy\.yml/);
+	assert.ok(ctx.notifications.some((notification) => /Skipping .*: changes \.github\/workflows\/deploy\.yml/.test(notification.message)));
 });
 
 test("Issue s and Alt-S dispatch issue implementation, while d requests issue evidence", () => {
@@ -500,12 +478,12 @@ test("live PR revalidation reconciles current mutable state into ReviewMode", ()
 	assert.deepEqual(mode.items[0]?.labels, ["new"]);
 });
 
-test("live head changes still block the captured workflow PR", async (t) => {
+test("live head changes still block the captured pull request", async (t) => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
-	const review = createReviewExtension(pi as any, {
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
 		org: "example",
-		fetchImpl: makeFetch("repo, workflow", "5".repeat(40)) as typeof fetch,
+		fetchImpl: makeFetch("repo, workflow", "5".repeat(40), false) as typeof fetch,
 		env: ENV,
 	});
 	const ctx = fakeCtx();
