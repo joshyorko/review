@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "4.4"
+version: "4.5"
 last_updated: 2026-09-14
 id: review-dashboard
 one_line_purpose: Maintain the single-screen OMP review workbench.
@@ -107,6 +107,11 @@ reviewers, force-pushes, or lands a head different from the reviewed head.
 on the coordinator session. The advisor role maps to `@default`, so it follows
 the maintainer's selected model without pinning a provider. `Alt-S` starts the
 same lifecycle from the active workbench without changing advisor state.
+Before dispatch, slay inspects classic OAuth scope metadata and the captured
+diff. A known-missing `workflow` scope blocks a wave that changes
+`.github/workflows/`; absent scope metadata remains unknown and does not reject
+fine-grained or app tokens.
+
 
 
 Preserve Hive order by partitioning contiguous repository runs; an interleaved

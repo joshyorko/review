@@ -7,7 +7,7 @@
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
+import { DEFAULT_ORG, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, parseScope, resolveToken } from "./github.ts";
 import type { Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { workbenchPainter } from "./paint.ts";
@@ -374,7 +374,26 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const batchBlocker = async (kind: RepositoryBatchKind, items: readonly QueueItem[]): Promise<string | undefined> => {
-		if (kind === "slay" || kind === "diff") return undefined;
+		if (kind === "diff") return undefined;
+		if (kind === "slay") {
+			const pullRequests = items.filter((item) => item.type === "pr");
+			if (pullRequests.length === 0) return undefined;
+			const token = mode.tokenOptions().token ?? resolveToken(env);
+			const requestOptions = { token, fetchImpl: options.fetchImpl };
+			const scopes = await fetchOAuthScopes(requestOptions);
+			if (scopes === undefined || scopes.includes("workflow")) return undefined;
+			const diffs = await Promise.all(
+				pullRequests.map(async (item) => ({ item, diff: await fetchDiff(item.repo, item.id, requestOptions) })),
+			);
+			for (const { item, diff } of diffs) {
+				if (diff.error) continue;
+				const workflow = diff.files.find((file) => file.path.startsWith(".github/workflows/"));
+				if (workflow) {
+					return `Cannot dispatch ${item.repo}#${item.id}: GitHub OAuth token lacks 'workflow' scope required for ${workflow.path}; re-authenticate with gh auth login --web --hostname github.com --scopes repo,read:org,workflow`;
+				}
+			}
+			return undefined;
+		}
 		const claimed = items.find((item) => mode.claimFor(item));
 		if (claimed) return `${claimed.repo}#${claimed.id} is already claimed by ${mode.claimFor(claimed)}`;
 		if (kind !== "fix") return undefined;
@@ -465,13 +484,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
 			return;
 		}
-		const blocker = await batchBlocker(kind, items);
-		if (generation !== batchRequestGeneration) return;
-		if (activeBatch?.state === "running" || activeBatch?.state === "paused") return;
-		if (blocker) {
-			ctx.ui.notify(blocker, "error");
-			return;
-		}
 		const waves = mode.repositoryWaves(items);
 		if (waves.length === 0) return;
 		const startedAt = Date.now();
@@ -487,6 +499,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			startedAt,
 			waveStartedAt: startedAt,
 		};
+		const blocker = await batchBlocker(kind, items);
+		if (generation !== batchRequestGeneration) return;
+		if (activeBatch?.state === "running" || activeBatch?.state === "paused") return;
+		if (blocker) {
+			persistBatch(ctx, { ...batch, state: "blocked", error: blocker });
+			ctx.ui.notify(blocker, "error");
+			return;
+		}
 		mode.clearSelected();
 		persist();
 		persistBatch(ctx, batch);
