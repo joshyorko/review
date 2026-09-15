@@ -18,7 +18,8 @@ import { BATCH_LIMIT, type ReviewMode, ciGlyph } from "./mode.ts";
 import { type RailKey, keymapBar, orderSourceLabel, priorityChip, workbenchProgressBar } from "./rail.ts";
 import { type RenderedRow, type Span, defaultExpanded, findSpan, hasChildren, renderSpanTree, visibleSpanIds } from "./trace.ts";
 import { fitToWidth, truncateToWidth, visibleWidth } from "./width.ts";
-import { PrDetailCache, sanitizeMarkdown } from "./reader.ts";
+import { PrDetailCache, prDetailToLines, sanitizeMarkdown, type PrDetail } from "./reader.ts";
+import { fetchPrDetail } from "./github.ts";
 export type DashboardAction =
 	| { kind: "close" }
 	| { kind: "slay"; item: QueueItem; items?: QueueItem[] }
@@ -28,6 +29,8 @@ export type DashboardAction =
 	| { kind: "reference"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "scope" }
 	| { kind: "read_pr"; item: QueueItem }
+	| { kind: "open_browser"; item: QueueItem }
+	| { kind: "ci_mode" }
 	| { kind: "request_reviewer"; item: QueueItem; items?: QueueItem[] };
 
 export const DASHBOARD_KEYS: readonly RailKey[] = [
@@ -47,6 +50,7 @@ export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "H", label: "hive" },
 	{ chord: "L", label: "stage" },
 	{ chord: "d", label: "diff" },
+	{ chord: "v", label: "read" },
 	{ chord: "enter", label: "cite" },
 	{ chord: "o", label: "repo" },
 	{ chord: "/", label: "filter" },
@@ -62,6 +66,7 @@ const HELP: readonly string[] = [
 	"  tab              toggle pull requests and issues",
 	"  t                switch between queue and trace panes",
 	"  p                pause or resume future repository waves",
+	"  v                read the highlighted pull request",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
 	"  H / L            toggle Hive-only / step Hive stages",
@@ -164,6 +169,10 @@ export class ReviewDashboard {
 	private traceRowSpans: (string | "hive" | undefined)[] = [];
 	private showReader = false;
 	private readerScroll = 0;
+	private readerDetail: PrDetail | undefined;
+	private readerLoading = false;
+	private readerError = "";
+	private readerRequestGeneration = 0;
 	private prDetailCache = new PrDetailCache(50);
 
 	private readonly tui: TuiLike;
@@ -614,6 +623,9 @@ export class ReviewDashboard {
 			case "d":
 				this.executeKey("d");
 				break;
+			case "v":
+				this.executeKey("v");
+				break;
 			case "enter":
 				this.executeKey("enter");
 				break;
@@ -652,8 +664,10 @@ export class ReviewDashboard {
 
 	private executeKey(key: string): void {
 		if (this.showReader) {
+			const pageStep = Math.max(1, this.rows - 4);
 			if (key === "escape" || key === "q") {
 				this.showReader = false;
+				this.readerDetail = undefined;
 				this.tui.requestRender();
 				return;
 			}
@@ -667,16 +681,38 @@ export class ReviewDashboard {
 				this.tui.requestRender();
 				return;
 			}
+			if (key === "ctrl+d" || key === "pagedown") {
+				this.readerScroll += pageStep;
+				this.tui.requestRender();
+				return;
+			}
+			if (key === "ctrl+u" || key === "pageup") {
+				this.readerScroll = Math.max(0, this.readerScroll - pageStep);
+				this.tui.requestRender();
+				return;
+			}
 			if (key === "n") {
 				this.mode.move(1);
 				this.readerScroll = 0;
-				this.tui.requestRender();
+				this.loadSelectedReaderDetail();
 				return;
 			}
 			if (key === "p") {
 				this.mode.move(-1);
 				this.readerScroll = 0;
-				this.tui.requestRender();
+				this.loadSelectedReaderDetail();
+				return;
+			}
+			if (key === "u") {
+				const item = this.mode.selected();
+				if (item) this.prDetailCache.clear();
+				this.readerScroll = 0;
+				this.loadSelectedReaderDetail();
+				return;
+			}
+			if (key === "o") {
+				const item = this.mode.selected();
+				if (item) this.emitAction({ kind: "open_browser", item });
 				return;
 			}
 		}
@@ -802,10 +838,11 @@ export class ReviewDashboard {
 			case "enter":
 				this.emitAction({ kind: "reference", item, items });
 				return;
-			case "p":
+			case "v":
+				if (item.type !== "pr") return;
 				this.showReader = true;
 				this.readerScroll = 0;
-				this.tui.requestRender();
+				this.loadSelectedReaderDetail();
 				return;
 			case "C":
 				this.mode.toggleViewMode();
@@ -825,6 +862,54 @@ export class ReviewDashboard {
 		} else {
 			this.done(action);
 		}
+	}
+
+	private readerCacheKey(item: QueueItem): string {
+		return `${item.repo}#${item.id}@${item.headSha ?? ""}`;
+	}
+
+	/** Load the selected item's reading surface through the PR-detail cache. */
+	private loadSelectedReaderDetail(): void {
+		const item = this.mode.selected();
+		if (!item) {
+			this.readerDetail = undefined;
+			this.readerError = "";
+			this.readerLoading = false;
+			this.tui.requestRender();
+			return;
+		}
+		this.readerRequestGeneration += 1;
+		const generation = this.readerRequestGeneration;
+		this.readerDetail = undefined;
+		this.readerError = "";
+		this.readerLoading = true;
+		this.tui.requestRender();
+		void this.fetchReaderDetail(item, generation);
+	}
+
+	private async fetchReaderDetail(item: QueueItem, generation: number): Promise<void> {
+		const key = this.readerCacheKey(item);
+		const cached = this.prDetailCache.get(key);
+		if (cached !== undefined) {
+			if (generation === this.readerRequestGeneration) {
+				this.readerDetail = cached;
+				this.readerLoading = false;
+				this.tui.requestRender();
+			}
+			return;
+		}
+		const result = await fetchPrDetail(item.repo, item.id, this.mode.tokenOptions());
+		if (generation !== this.readerRequestGeneration) return;
+		if (result.detail) {
+			this.prDetailCache.set(key, result.detail);
+			this.readerDetail = result.detail;
+			this.readerError = "";
+		} else {
+			this.readerDetail = undefined;
+			this.readerError = result.error ?? "could not read PR";
+		}
+		this.readerLoading = false;
+		this.tui.requestRender();
 	}
 
 	private activeItems(): QueueItem[] {
@@ -1150,17 +1235,30 @@ export class ReviewDashboard {
 		const item = this.mode.selected();
 
 		if (this.showReader && item) {
-			lines.push(this.painter.bold(this.painter.fg("accent", `PR READER: ${item.repo}#${item.id} — ${item.title}`)));
-			lines.push(this.painter.fg("dim", `Author: @${item.author} · Head: ${item.headSha ? item.headSha.slice(0, 7) : "unknown"} · URL: ${item.url}`));
+			lines.push(this.painter.bold(this.painter.fg("accent", `PR READER: ${item.repo}#${item.id} — ${sanitizeMarkdown(item.title)}`)));
+			lines.push(this.painter.fg("dim", `Author: @${sanitizeMarkdown(item.author)} · Head: ${item.headSha ? item.headSha.slice(0, 7) : "unknown"} · URL: ${item.url}`));
 			lines.push(this.painter.fg("border", "─".repeat(width)));
-			const sanitizedBody = sanitizeMarkdown(item.title);
-			lines.push(truncateToWidth(this.painter.fg("text", sanitizedBody), width));
-			lines.push("");
-			lines.push(this.painter.fg("dim", "Conversation & Reviews:"));
-			lines.push(truncateToWidth(this.painter.fg("dim", `  Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`), width));
+			lines.push(truncateToWidth(this.painter.fg("dim", `Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`), width));
+			const detailLines = prDetailToLines(this.readerDetail);
+			let linesToShow = detailLines;
+			if (this.readerError) {
+				linesToShow = [`(could not read PR: ${this.readerError})`];
+			} else if (this.readerLoading) {
+				linesToShow = ["(loading description and conversation…)"];
+			}
+			const available = Math.max(2, bodyHeight - 2);
+			const slice = linesToShow.slice(this.readerScroll, this.readerScroll + available);
+			for (const line of slice) {
+				lines.push(truncateToWidth(this.painter.fg("text", line), width));
+			}
+			while (lines.length < bodyHeight) lines.push("");
 			const readerKeys: RailKey[] = [
 				{ chord: "j/k", label: "scroll" },
+				{ chord: "ctrl+d/u", label: "page" },
 				{ chord: "n/p", label: "next/prev" },
+				{ chord: "u", label: "refresh" },
+				{ chord: "c", label: "reply" },
+				{ chord: "o", label: "browser" },
 				{ chord: "q/esc", label: "back" },
 			];
 			lines.push(keymapBar(this.painter, readerKeys, width));

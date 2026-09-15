@@ -109,6 +109,53 @@ export class PrDetailCache {
 }
 
 /**
+ * Render a cached PR detail as readable lines for the reader pane (issue #547).
+ * The body and each conversation comment / review summary are sanitized so
+ * remote content cannot inject terminal controls, HTML, or shell through the
+ * viewer. Headings and block text become plain lines; the data still reads.
+ */
+export function prDetailToLines(detail: PrDetail | undefined): string[] {
+	if (!detail) return ["(no PR selected)"];
+	const lines: string[] = [];
+	const inline = (value: string): string => sanitizeMarkdown(value).replace(/[\r\n]+/g, " ").trim();
+	const body = sanitizeMarkdown(detail.body);
+	if (body) {
+		lines.push(...body.split("\n"));
+	} else {
+		lines.push("_(no description)_");
+	}
+	if (detail.comments.length > 0) {
+		lines.push("", "── Conversation ──", "");
+		for (const comment of detail.comments) {
+			const author = inline(comment.author);
+			const who = author ? `@${author}` : "?";
+			const stamp = comment.createdAt ? ` · ${inline(comment.createdAt)}` : "";
+			lines.push(`${who}${stamp}`);
+			const bodyText = sanitizeMarkdown(comment.body);
+			lines.push(bodyText ? bodyText : "_(comment)_");
+			lines.push("");
+		}
+	} else {
+		lines.push("", "── No comments yet ──");
+	}
+	if (detail.reviews.length > 0) {
+		lines.push("── Reviews ──", "");
+		for (const review of detail.reviews) {
+			const author = inline(review.author);
+			const who = author ? `@${author}` : "?";
+			const state = inline(review.state) || "unknown";
+			lines.push(`[${state}] ${who}`);
+			if (review.body) {
+				const bodyText = sanitizeMarkdown(review.body);
+				lines.push(bodyText ? bodyText : "_(no body)_");
+				lines.push("");
+			}
+		}
+	}
+	return lines;
+}
+
+/**
  * Navigation helper across filtered PR keys.
  * Bounded or wrapped navigation across filtered PR keys.
  */

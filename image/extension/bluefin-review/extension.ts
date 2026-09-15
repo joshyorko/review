@@ -5,6 +5,7 @@
  * workflowz execution. This file only joins those seams to the workbench UI.
  */
 
+import { execFileSync } from "node:child_process";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, fetchDiff, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
@@ -179,6 +180,23 @@ function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined 
 	return readLatestCustom<PersistedCommentResult>(ctx, COMMENT_ENTRY);
 }
 
+
+/**
+ * Open a pull request or issue in the local browser (PR Reader `o`).
+ *
+ * The reader header already shows the URL, so a failure to find a browser is
+ * not catastrophic: the shortcut is best-effort and never silently blocks.
+ */
+function openBrowser(item: QueueItem): void {
+	try {
+		execFileSync("gh", [item.type === "pr" ? "pr" : "issue", "view", String(item.id), "--repo", item.repo, "--web"], {
+			stdio: "ignore",
+			timeout: 15_000,
+		});
+	} catch {
+		// No browser / no `gh`: the URL remains visible in the reader header.
+	}
+}
 
 /** Slay and fix may change pull-request heads; slay may also land reviewed heads. */
 export function isImplementationAction(action: DashboardAction): boolean {
@@ -587,6 +605,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const dispatch = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
 		if (action.kind === "close") return;
+		if (action.kind === "open_browser") {
+			openBrowser(action.item);
+			return;
+		}
 		if (action.kind === "scope") {
 			await promptForScope(ctx);
 			return;
