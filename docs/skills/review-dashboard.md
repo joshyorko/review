@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "4.7"
+version: "4.8"
 last_updated: 2026-09-14
 id: review-dashboard
 one_line_purpose: Maintain the single-screen OMP review workbench.
@@ -112,6 +112,11 @@ omits pull requests that change `.github/workflows/` before reviewer selection.
 Incomplete file lists are omitted rather than assumed safe. Slay rechecks the
 selected candidates before constructing durable repository waves, removes any
 workflow-changing item from the live queue, and continues with eligible items.
+CI state combines status-rollup contexts with check-suite conclusions so a
+workflow startup failure with zero jobs remains visible. Slay excludes known
+failing or pending CI before reviewer dispatch, rechecks it before each wave,
+and blocks approval or merge commands if the active queue state turns red or
+pending.
 
 
 

@@ -95,6 +95,17 @@ function slayBashBlockReason(command: string): string | undefined {
 	return undefined;
 }
 
+function slayCiBlockReason(command: string, items: readonly QueueItem[]): string | undefined {
+	const mutatesLanding = command.split(/\r?\n|&&|\|\||;/).some((segment) =>
+		/\bgh\s+pr\s+merge\b/.test(segment)
+		|| (/\bgh\s+pr\s+review\b/.test(segment) && /(?:^|\s)--approve(?:[=\s]|$)/.test(segment)),
+	);
+	if (!mutatesLanding) return undefined;
+	const blocked = items.find((item) => item.type === "pr" && (item.ciStatus === "failure" || item.ciStatus === "pending"));
+	if (!blocked) return undefined;
+	return `${blocked.repo}#${blocked.id} CI is ${blocked.ciStatus}; refresh and wait for successful checks before approval or merge`;
+}
+
 export const RAIL_KEYS: readonly RailKey[] = [
 	{ chord: "alt+b", label: "workbench" },
 	{ chord: "alt+s", label: "autoslay" },
@@ -374,7 +385,26 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const batchBlocker = async (kind: RepositoryBatchKind, items: readonly QueueItem[]): Promise<string | undefined> => {
-		if (kind === "slay" || kind === "diff") return undefined;
+		if (kind === "slay") {
+			const pullRequests = items.filter((item) => item.type === "pr");
+			if (pullRequests.length !== items.length) return "Slay only accepts pull requests";
+			const live = await fetchItemsByKey(
+				pullRequests.map((item) => `${item.repo}#${item.id}`),
+				"prs",
+				mode.tokenOptions(),
+			);
+			if (live.error) return `Live pull-request check failed: ${live.error}`;
+			for (const item of pullRequests) {
+				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
+				if (!current.headSha || current.headSha !== item.headSha) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+				if (current.ciStatus === "failure" || current.ciStatus === "pending") {
+					return `Cannot dispatch ${item.repo}#${item.id}: CI is ${current.ciStatus}`;
+				}
+			}
+			return undefined;
+		}
+		if (kind === "diff") return undefined;
 		const claimed = items.find((item) => mode.claimFor(item));
 		if (claimed) return `${claimed.repo}#${claimed.id} is already claimed by ${mode.claimFor(claimed)}`;
 		if (kind !== "fix") return undefined;
@@ -505,6 +535,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (workflow) return { item, reason: `changes ${workflow.path}`, exclude: true };
 				if (item.changedFiles === undefined || diff.files.length < item.changedFiles) {
 					return { item, reason: "complete changed-file list unavailable" };
+				}
+				if (item.ciStatus === "failure" || item.ciStatus === "pending") {
+					return { item, reason: `CI is ${item.ciStatus}`, exclude: true };
 				}
 				return { item };
 			}),
@@ -908,8 +941,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		) return;
 		const { toolName, input } = event as { toolName?: string; input?: { command?: unknown } };
 		if (toolName !== "bash") return;
-		const reason = slayBashBlockReason(String(input?.command ?? ""));
+		const command = String(input?.command ?? "");
+		const reason = slayBashBlockReason(command);
 		if (reason) return { block: true, reason: `Hive workbench slay guard: ${reason}` };
+		const wave = activeBatch.waves[activeBatch.currentWave];
+		const visible = mode.visibleItems();
+		const currentItems = (wave?.items ?? []).map((item) =>
+			visible.find((candidate) => candidate.repo === item.repo && candidate.id === item.id) ?? item,
+		);
+		const ciReason = slayCiBlockReason(command, currentItems);
+		if (ciReason) return { block: true, reason: `Hive workbench slay guard: ${ciReason}` };
 	});
 
 	pi.on("tool_execution_start", (event) => {

@@ -104,11 +104,47 @@ function fakeFetch(calls, known = {}) {
 				const data = {};
 				const alias = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
 				for (const [, name, owner, repo, number] of body.query.matchAll(alias)) {
-					data[name] = { issueOrPullRequest: known[`${owner}/${repo}#${number}`] ?? null };
+					const key = `${owner}/${repo}#${number}`;
+					const fallback = key === "projectbluefin/review#42"
+						? {
+							number: 42,
+							title: "fix(launcher): resolve HIVE_HUB before mutating",
+							url: "https://github.com/projectbluefin/review/pull/42",
+							updatedAt: new Date(NOW - 1000).toISOString(),
+							isDraft: false,
+							mergeable: "MERGEABLE",
+							reviewDecision: "REVIEW_REQUIRED",
+							headRefOid: "4".repeat(40),
+							author: { login: "jorge" },
+							repository: { nameWithOwner: "projectbluefin/review" },
+							labels: { nodes: [{ name: "launcher" }] },
+							commits: { nodes: [{ commit: {
+								statusCheckRollup: null,
+								checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "COMPLETED", conclusion: "FAILURE" }] },
+							} }] },
+						}
+						: key === "projectbluefin/other#7"
+							? {
+								number: 7,
+								title: "feat(ui): dagger rail",
+								url: "https://github.com/projectbluefin/other/pull/7",
+								updatedAt: new Date(NOW - 5000).toISOString(),
+								isDraft: false,
+								mergeable: "MERGEABLE",
+								reviewDecision: "APPROVED",
+								headRefOid: "7".repeat(40),
+								author: { login: "ada" },
+								repository: { nameWithOwner: "projectbluefin/other" },
+								labels: { nodes: [] },
+								commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+							}
+							: null;
+					data[name] = { issueOrPullRequest: Object.hasOwn(known, key) ? known[key] : fallback };
 				}
 				return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
 			}
 			assert.match(body.variables.search, /org:projectbluefin/);
+			if (body.variables.search.includes("is:pr")) assert.match(body.query, /checkSuites/);
 			return {
 				ok: true,
 				status: 200,
@@ -130,19 +166,25 @@ function fakeFetch(calls, known = {}) {
 									deletions: 7,
 									changedFiles: 3,
 									author: { login: "jorge" },
+									headRefOid: "4".repeat(40),
 									repository: { nameWithOwner: "projectbluefin/review" },
 									labels: { nodes: [{ name: "launcher" }] },
-									commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
+									commits: { nodes: [{ commit: {
+										statusCheckRollup: null,
+										checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "COMPLETED", conclusion: "FAILURE" }] },
+									} }] },
 								},
 								{
 									number: 7,
 									title: "feat(ui): dagger rail",
 									url: "https://github.com/projectbluefin/other/pull/7",
 									updatedAt: new Date(NOW - 5000).toISOString(),
+									isDraft: false,
 									mergeable: "MERGEABLE",
 									reviewDecision: "APPROVED",
 									changedFiles: 2,
 									author: { login: "ada" },
+									headRefOid: "7".repeat(40),
 									repository: { nameWithOwner: "projectbluefin/other" },
 									labels: { nodes: [] },
 									commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
@@ -175,11 +217,12 @@ function hiveBackedFetch(items, calls = []) {
 		mergeable: "MERGEABLE",
 		reviewDecision: "REVIEW_REQUIRED",
 		headRefOid: item.headSha ?? String(item.id).padStart(40, "0"),
+		changedFiles: item.changedFiles,
 		autoMergeRequest: item.autoMergeEnabled ? { enabledAt: new Date(NOW).toISOString() } : null,
 		author: { login: "reviewer" },
 		repository: { nameWithOwner: item.repo },
 		labels: { nodes: [] },
-		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: (item.ciStatus ?? "success").toUpperCase() } } }] },
 	}));
 	return async (url, init) => {
 		const target = String(url);
@@ -477,6 +520,40 @@ test("queue fetch maps CI rollup and reports auth failure", async () => {
 		fetchImpl: async () => ({ ok: false, status: 401, statusText: "Unauthorized", json: async () => ({}) }),
 	});
 	assert.match(denied.error ?? "", /401/, "a failed queue must say why, not render empty");
+});
+
+test("check suites surface failures and pending runs without rollup contexts", async () => {
+	const fetchImpl = async (_url, init) => {
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		assert.match(body.query, /checkSuites\(first: 50\)/);
+		const node = (number, checkSuites) => ({
+			number,
+			title: `suite ${number}`,
+			url: `https://github.com/projectbluefin/review/pull/${number}`,
+			updatedAt: new Date(NOW).toISOString(),
+			repository: { nameWithOwner: "projectbluefin/review" },
+			commits: { nodes: [{ commit: { statusCheckRollup: null, checkSuites } }] },
+		});
+		return {
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({ data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+				node(1, { pageInfo: { hasNextPage: false }, nodes: [
+					{ status: "COMPLETED", conclusion: "FAILURE" },
+					{ status: "IN_PROGRESS", conclusion: null },
+				] }),
+				node(2, { pageInfo: { hasNextPage: false }, nodes: [{ status: "IN_PROGRESS", conclusion: null }] }),
+				node(3, { pageInfo: { hasNextPage: false }, nodes: [
+					{ status: "COMPLETED", conclusion: "SUCCESS" },
+					{ status: "COMPLETED", conclusion: "NEUTRAL" },
+					{ status: "COMPLETED", conclusion: "SKIPPED" },
+				] }),
+			] } } }),
+		};
+	};
+	const result = await fetchQueue("prs", { token: "t", fetchImpl });
+	assert.deepEqual(result.items.map((item) => item.ciStatus), ["failure", "pending", "success"]);
 });
 
 test("pull request queue omits workflow changes before reviewer selection", async () => {
@@ -1576,7 +1653,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.equal(ctx.overlays.length, 1, "Alt+B does not stack an already-open workbench");
 	assert.equal(pi.messages.length, 0, "opening the workbench never dispatches work");
 	const workbench = ctx.overlays[0];
-	workbench.handleInput("A");
+	workbench.handleInput("j");
 	workbench.handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 1, "slay dispatches without requiring Hive ranking");
@@ -1656,7 +1733,14 @@ test("--autoslay skips a selection containing only workflow changes", async () =
 
 test("--autoslay permits non-workflow changes", async () => {
 	const calls = [];
-	const baseFetch = fakeFetch(calls);
+	const baseFetch = hiveBackedFetch([{
+		id: 42,
+		repo: "projectbluefin/review",
+		title: "ordinary change",
+		headSha: "4".repeat(40),
+		ciStatus: "success",
+		changedFiles: 3,
+	}], calls);
 	const fetchImpl = async (url, init) => {
 		if (String(url).includes("/repos/projectbluefin/review/pulls/42/files")) {
 			return {
@@ -1689,6 +1773,7 @@ test("--autoslay permits non-workflow changes", async () => {
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
+	pi.flagValues.set("pr", "7");
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
@@ -1705,7 +1790,49 @@ test("active slay blocks privileged and credential-bearing bash mutations", asyn
 		(await call("git push https://x-access-token:${GH_TOKEN}@github.com/projectbluefin/review.git repair")).reason,
 		/credentials in URL userinfo/,
 	);
-	assert.equal(await call("gh pr merge 42 --repo projectbluefin/review --auto --squash"), undefined);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	batch.waves[0].items[0].ciStatus = "failure";
+	assert.match((await call("gh pr review 7 --repo projectbluefin/other --approve")).reason, /CI is failure/);
+	batch.waves[0].items[0].ciStatus = "pending";
+	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /CI is pending/);
+	batch.waves[0].items[0].ciStatus = "success";
+	assert.equal(await call("gh pr merge 7 --repo projectbluefin/other --auto --squash"), undefined);
+});
+
+test("autoslay blocks failed CI before reviewer dispatch", async () => {
+	const item = {
+		id: 42,
+		repo: "projectbluefin/review",
+		title: "zero-job workflow failure",
+		headSha: "4".repeat(40),
+		ciStatus: "failure",
+		changedFiles: 1,
+	};
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const baseFetch = hiveBackedFetch([item]);
+	const fetchImpl = async (url, init) => {
+		if (String(url).includes("/repos/projectbluefin/review/pulls/42/files")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => [{ filename: "image/entrypoint.sh", status: "modified", additions: 1, deletions: 1 }],
+			};
+		}
+		return baseFetch(url, init);
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 0, "failed CI never reaches a reviewer");
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0);
+	assert.ok(ctx.notifications.some((notification) => /Skipping projectbluefin\/review#42: CI is failure/.test(notification.message)));
 });
 
 test("--autoslay falls back to unranked items when Hive-only filter has 0 ranked items", async () => {

@@ -85,7 +85,17 @@ const PR_ITEM_FIELDS = `
 		nodes { path }
 	}
 	autoMergeRequest { enabledAt }
-	commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+	commits(last: 1) {
+		nodes {
+			commit {
+				statusCheckRollup { state }
+				checkSuites(first: 50) {
+					pageInfo { hasNextPage }
+					nodes { status conclusion }
+				}
+			}
+		}
+	}
 	closingIssuesReferences(first: 5) {
 		nodes { number repository { nameWithOwner } }
 	}
@@ -210,7 +220,17 @@ interface SearchNode {
 	repository?: { nameWithOwner?: string } | null;
 	labels?: { nodes?: Array<{ name?: string }> } | null;
 	files?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ path?: string }> } | null;
-	commits?: { nodes?: Array<{ commit?: { statusCheckRollup?: { state?: string } | null } }> } | null;
+	commits?: {
+		nodes?: Array<{
+			commit?: {
+				statusCheckRollup?: { state?: string } | null;
+				checkSuites?: {
+					pageInfo?: { hasNextPage?: boolean };
+					nodes?: Array<{ status?: string; conclusion?: string | null }>;
+				} | null;
+			};
+		}>;
+	} | null;
 	closingIssuesReferences?: { nodes?: Array<{ number?: number; repository?: { nameWithOwner?: string } | null }> } | null;
 	closedByPullRequestsReferences?: {
 		nodes?: Array<{
@@ -222,18 +242,23 @@ interface SearchNode {
 	} | null;
 }
 
-function toCiStatus(state?: string): CiStatus | undefined {
-	switch (state?.toUpperCase()) {
-		case "SUCCESS":
-			return "success";
-		case "FAILURE":
-		case "ERROR":
-			return "failure";
-		case undefined:
-			return undefined;
-		default:
-			return "pending";
-	}
+function toCiStatus(
+	state?: string,
+	checkSuites?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ status?: string; conclusion?: string | null }> } | null,
+): CiStatus | undefined {
+	const rollup = state?.toUpperCase();
+	const suites = checkSuites?.nodes ?? [];
+	const failedSuite = suites.some((suite) => {
+		if (suite.status?.toUpperCase() !== "COMPLETED") return false;
+		const conclusion = suite.conclusion?.toUpperCase();
+		return conclusion !== undefined && !["SUCCESS", "NEUTRAL", "SKIPPED"].includes(conclusion);
+	});
+	if (failedSuite || rollup === "FAILURE" || rollup === "ERROR") return "failure";
+	const pendingSuite = checkSuites?.pageInfo?.hasNextPage === true
+		|| suites.some((suite) => suite.status?.toUpperCase() !== "COMPLETED" || !suite.conclusion);
+	if (pendingSuite || (rollup !== undefined && rollup !== "SUCCESS")) return "pending";
+	if (rollup === "SUCCESS" || suites.length > 0) return "success";
+	return undefined;
 }
 
 function toMergeState(value?: string | null): MergeState {
@@ -272,7 +297,10 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 		url: node.url ?? "",
 		updatedAt: Number.isNaN(updated) ? 0 : updated,
 		draft: node.isDraft === true,
-		ciStatus: toCiStatus(node.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state),
+		ciStatus: toCiStatus(
+			node.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state,
+			node.commits?.nodes?.[0]?.commit?.checkSuites,
+		),
 		mergeState: toMergeState(node.mergeable),
 		reviewState: toReviewState(node.reviewDecision),
 		labels: (node.labels?.nodes ?? []).map((label) => label.name ?? "").filter(Boolean),
