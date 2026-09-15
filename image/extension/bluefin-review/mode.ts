@@ -36,6 +36,16 @@ export interface ReviewModeOptions {
  */
 export const BATCH_LIMIT = 25;
 
+const GITHUB_PULL_URL = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)(?:[/?#]|$)/;
+
+function pullRequestKey(item: HiveWorkItem): string | undefined {
+	const direct = GITHUB_PULL_URL.exec(item.url);
+	if (direct) return `${direct[1]}#${direct[2]}`;
+	if (!item.pr || item.pr.state.toLowerCase() !== "open") return undefined;
+	const linked = GITHUB_PULL_URL.exec(item.pr.url);
+	return linked ? `${linked[1]}#${linked[2]}` : `${item.repo}#${item.pr.number}`;
+}
+
 /** A contiguous slice of work targeting a single repository. */
 export interface RepositoryWave {
 	readonly repo: string;
@@ -505,6 +515,20 @@ export class ReviewMode {
 	 * Scope is respected: a repository-scoped queue stays that repository's, so
 	 * asking for one project never drags in another project's Hive work.
 	 */
+	private hiveKeysForMode(): string[] {
+		const keys = new Set<string>();
+		for (const item of this.hive.items) {
+			if (this.queueMode === "issues") {
+				if (!GITHUB_PULL_URL.test(item.url) && this.inScope(item.key)) keys.add(item.key);
+				continue;
+			}
+
+			const key = pullRequestKey(item);
+			if (key && this.inScope(key)) keys.add(key);
+		}
+		return [...keys];
+	}
+
 	private async missingHiveWork(
 		fetched: readonly QueueItem[],
 		options: FetchOptions,
@@ -512,7 +536,7 @@ export class ReviewMode {
 	): Promise<QueueItem[]> {
 		if (this.inflight !== controller || controller.signal.aborted || !this.hive.online) return [];
 		const present = new Set(fetched.map(itemKey));
-		const wanted = [...this.hive.ranks.keys()].filter((key) => !present.has(key) && this.inScope(key));
+		const wanted = this.hiveKeysForMode().filter((key) => !present.has(key));
 		if (wanted.length === 0) return [];
 		const result = await fetchItemsByKey(wanted, this.queueMode, options);
 		if (this.inflight !== controller || controller.signal.aborted) return [];
@@ -525,16 +549,18 @@ export class ReviewMode {
 	}
 
 	/**
-	 * How much of Hive's queue this session can actually act on.
+	 * How much of Hive's mode-matching queue this session can actually act on.
 	 *
-	 * `total` counts the work Hive ranked for this scope; `present` counts what
-	 * reached the queue. A gap is real — a closed item, another kind, a
-	 * repository the token cannot read — and saying so is the difference between
-	 * a short queue and a queue that lost work.
+	 * Issue mode covers Hive's issue keys. Pull-request mode covers direct Hive
+	 * pull requests, explicit open linked pull requests, and pull requests the
+	 * GitHub search already linked to ranked issues through closing references.
 	 */
 	hiveCoverage(): { present: number; total: number } {
-		const total = [...this.hive.ranks.keys()].filter((key) => this.inScope(key)).length;
-		return { present: this.hiveRankedCount(), total };
+		const expected = new Set(this.hiveKeysForMode());
+		for (const item of this.items) {
+			if (this.priorityFor(item)?.source === "hive") expected.add(itemKey(item));
+		}
+		return { present: this.hiveRankedCount(), total: expected.size };
 	}
 
 

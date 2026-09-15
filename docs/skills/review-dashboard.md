@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "4.3"
+version: "4.4"
 last_updated: 2026-09-14
 id: review-dashboard
 one_line_purpose: Maintain the single-screen OMP review workbench.
@@ -60,6 +60,12 @@ The queue, focused item, Dagger-style execution trace, and prompt share one
 screen. The top gauge reports mode, position, repository, outcomes, freshness,
 Hive ordering, and actionable count. The bottom gauge reports Hive connectivity,
 selection count, and the active workflowz slay.
+Hive coverage is mode-aware: issue mode counts Hive issue identities, while PR
+mode counts direct Hive pull requests and explicit open linked pull requests.
+Pull requests discovered through GitHub closing references still inherit the
+rank of their Hive issue. Never probe an issue identity as a pull request or
+report issue-only backlog as missing PR evidence.
+
 
 `Tab` switches PR/issue mode and every semantic accent between the cool PR
 palette and warm issue palette.

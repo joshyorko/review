@@ -614,7 +614,7 @@ test("scope refresh discards stale Hive backfill responses", async () => {
 		configured: true,
 		online: true,
 		hub: "https://hive.example",
-		items: [{ key: oldKey, repo: "owner/old", number: 9, title: "old", url: "", labels: [] }],
+		items: [{ key: oldKey, repo: "owner/old", number: 9, title: "old", url: "https://github.com/owner/old/pull/9", labels: [] }],
 		ranks: new Map([[oldKey, 0]]),
 	};
 
@@ -640,6 +640,42 @@ test("scope refresh discards stale Hive backfill responses", async () => {
 });
 
 
+
+test("Hive coverage counts only work matching the active queue mode", () => {
+	const mode = new ReviewMode({ org: "projectbluefin", env: ISOLATED_ENV });
+	mode.hive = {
+		...EMPTY_HIVE,
+		configured: true,
+		online: true,
+		hub: "https://hive.example",
+		items: [
+			{ key: "projectbluefin/review#1", repo: "projectbluefin/review", number: 1, title: "issue", url: "https://github.com/projectbluefin/review/issues/1", labels: [] },
+			{ key: "projectbluefin/review#2", repo: "projectbluefin/review", number: 2, title: "pull", url: "https://github.com/projectbluefin/review/pull/2", labels: [] },
+			{ key: "projectbluefin/review#3", repo: "projectbluefin/review", number: 3, title: "linked", url: "https://github.com/projectbluefin/review/issues/3", labels: [], pr: { number: 4, url: "https://github.com/projectbluefin/review/pull/4", state: "open" } },
+			{ key: "projectbluefin/review#5", repo: "projectbluefin/review", number: 5, title: "merged", url: "https://github.com/projectbluefin/review/issues/5", labels: [], pr: { number: 6, url: "https://github.com/projectbluefin/review/pull/6", state: "merged" } },
+		],
+		ranks: new Map([
+			["projectbluefin/review#1", 0],
+			["projectbluefin/review#2", 1],
+			["projectbluefin/review#3", 2],
+			["projectbluefin/review#5", 3],
+		]),
+	};
+
+	mode.queueMode = "prs";
+	mode.items = [queueItem({ id: 4, closingIssues: ["projectbluefin/review#3"] })];
+	mode.reprioritize();
+	assert.deepEqual(mode.hiveCoverage(), { present: 1, total: 2 });
+
+	mode.queueMode = "issues";
+	mode.items = [
+		queueItem({ id: 1, type: "issue" }),
+		queueItem({ id: 3, type: "issue" }),
+		queueItem({ id: 5, type: "issue" }),
+	];
+	mode.reprioritize();
+	assert.deepEqual(mode.hiveCoverage(), { present: 3, total: 3 });
+});
 test("issue queue fetch maps merged closedByPullRequestsReferences into closedByPrs", async () => {
 	const issueFetch = async () => ({
 		ok: true,
@@ -3169,14 +3205,14 @@ test("bounded fallback repairs by name, observes live checks, and never merges",
 		(readdirSync(root, { recursive: true }) as string[]).sort();
 	const before = listState();
 
-	// Search only surfaces the one nearby PR. Hive's blocked item sits outside the
-	// recency window and can only arrive by the native by-name lookup; a third item
-	// is closed, so it is a real shortfall, not a missing row.
+	// Search only surfaces one nearby PR. Hive's issue-only work must not be
+	// looked up as a pull request, while its explicit open linked PR can still
+	// arrive by identity. A direct Hive PR that is closed remains a shortfall.
 	const byName = {
-		"projectbluefin/review#936": {
-			number: 936,
+		"projectbluefin/review#937": {
+			number: 937,
 			title: "hold: gate the release behind soak",
-			url: "https://github.com/projectbluefin/review/issues/936",
+			url: "https://github.com/projectbluefin/review/pull/937",
 			updatedAt: new Date(NOW - 5 * 24 * 3600 * 1000).toISOString(),
 			isDraft: false,
 			mergeable: "MERGEABLE",
@@ -3187,8 +3223,12 @@ test("bounded fallback repairs by name, observes live checks, and never merges",
 			repository: { nameWithOwner: "projectbluefin/review" },
 			labels: { nodes: [{ name: "hold" }, { name: "review_required" }] },
 			commits: { nodes: [{ commit: { statusCheckRollup: { state: "PENDING" } } }] },
+			closingIssuesReferences: {
+				nodes: [{ number: 936, repository: { nameWithOwner: "projectbluefin/review" } }],
+			},
 		},
 	};
+	const lookupQueries: string[] = [];
 
 	const fetchImpl = async (url, init) => {
 		const target = String(url);
@@ -3226,6 +3266,7 @@ test("bounded fallback repairs by name, observes live checks, and never merges",
 					}),
 				};
 			}
+			lookupQueries.push(body.query);
 			// Native gh repair: one aliased by-name lookup for what search missed.
 			const data = {};
 			const lookup = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
@@ -3246,7 +3287,7 @@ test("bounded fallback repairs by name, observes live checks, and never merges",
 				json: async () => ({
 					queue: [
 						{ repo: "projectbluefin/review", number: 42, title: "fix(launcher)", url: "https://github.com/projectbluefin/review/pull/42", updatedAt: new Date(NOW - 1000).toISOString(), author: { login: "jorge" }, repository: { nameWithOwner: "projectbluefin/review" }, labels: { nodes: [] }, closed: false },
-						{ repo: "projectbluefin/review", number: 936, title: "hold: gate the release", url: "https://github.com/projectbluefin/review/issues/936", updatedAt: new Date(NOW - 5 * 24 * 3600 * 1000).toISOString(), author: { login: "castrojo" }, repository: { nameWithOwner: "projectbluefin/review" }, labels: { nodes: [] }, closed: false },
+						{ repo: "projectbluefin/review", number: 936, title: "hold: gate the release", url: "https://github.com/projectbluefin/review/issues/936", updatedAt: new Date(NOW - 5 * 24 * 3600 * 1000).toISOString(), author: { login: "castrojo" }, repository: { nameWithOwner: "projectbluefin/review" }, labels: { nodes: [] }, closed: false, pr: { number: 937, url: "https://github.com/projectbluefin/review/pull/937", state: "open" } },
 						{ repo: "projectbluefin/review", number: 470, title: "ship the launcher", url: "https://github.com/projectbluefin/review/pull/470", updatedAt: new Date(NOW - 2 * 24 * 3600 * 1000).toISOString(), author: { login: "ada" }, repository: { nameWithOwner: "projectbluefin/review" }, labels: { nodes: [] }, closed: true },
 					],
 				}),
@@ -3276,13 +3317,17 @@ test("bounded fallback repairs by name, observes live checks, and never merges",
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 
-	// The fallback repaired the queue by name: the nearby PR and the item search
-	// missed are both present; the closed third item is reported as a shortfall,
-	// not silently dropped from a list that looks complete.
+	// The fallback repairs only mode-matching identities: the nearby PR and the
+	// linked PR are present, the issue-only key was never queried as a PR, and
+	// the closed direct PR is reported as a shortfall.
 	const queue = await pi.tools.get("hive_workbench_queue").execute("id", {});
 	assert.match(queue.content[0].text, /projectbluefin\/review#42/);
-	assert.match(queue.content[0].text, /projectbluefin\/review#936/, "the out-of-window item arrives by native repair");
-	assert.doesNotMatch(queue.content[0].text, /#470/, "a closed item is a shortfall, not a row");
+	assert.match(queue.content[0].text, /projectbluefin\/review#937/, "the linked PR arrives by native repair");
+	assert.doesNotMatch(queue.content[0].text, /#936/, "the source issue is not rendered as a pull request");
+	assert.doesNotMatch(queue.content[0].text, /#470/, "the closed pull request is a shortfall, not a row");
+	assert.equal(lookupQueries.length, 1);
+	assert.doesNotMatch(lookupQueries[0]!, /number: 936/, "issue-only keys are not queried as pull requests");
+	assert.match(lookupQueries[0]!, /number: 937/, "the explicit open linked pull request is queried");
 	assert.equal(queue.details.order_source, "hive");
 
 	// Queue repair is in-memory only: it writes no files.
@@ -3303,13 +3348,13 @@ test("bounded fallback repairs by name, observes live checks, and never merges",
 	assert.match(status.content[0].text, /missing from this queue/, "the unresolved item is reported, not hidden");
 	assert.equal(status.details.order_source, "hive");
 	assert.equal(status.details.hive.queued.present, 2);
-	assert.equal(status.details.hive.queued.total, 3, "the closed item is counted as a shortfall");
+	assert.equal(status.details.hive.queued.total, 3, "only mode-matching Hive work contributes to coverage");
 
 	// The queue refreshes without duplicating the repaired rows.
 	(pi.shortcuts.get("alt+u") as { handler: (ctx: unknown) => void }).handler(ctx);
 	await review.whenStarted();
 	const queue2 = await pi.tools.get("hive_workbench_queue").execute("id", {});
-	const occurrences = queue2.content[0].text.match(/projectbluefin\/review#936/g) ?? [];
+	const occurrences = queue2.content[0].text.match(/projectbluefin\/review#937/g) ?? [];
 	assert.equal(occurrences.length, 1, "a refresh does not re-add a repaired row");
 });
 
