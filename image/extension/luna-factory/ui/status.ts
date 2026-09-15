@@ -59,6 +59,7 @@ export function renderStatusDetail(ledger: Ledger, width = 120, verdict: RunVerd
 	if (ledger.goal.nonGoals.length > 0) lines.push(`non-goals: ${ledger.goal.nonGoals.join("; ")}`);
 	lines.push(`subject: ${ledger.subject.repo}@${ledger.subject.head ?? ledger.subject.base}`);
 	lines.push(`permitted effects: ${ledger.goal.permittedEffects.join(", ") || "read only"}`);
+	lines.push(`finish authority: ${ledger.goal.finishAuthority}`);
 	lines.push(`appetite: ${ledger.goal.appetite.tasks} tasks, ${ledger.goal.appetite.attemptsPerTask} attempts each`);
 	for (const criterion of ledger.criteria) {
 		const task = ledger.tasks.find((candidate) => candidate.criterionId === criterion.id && candidate.state === "DONE");

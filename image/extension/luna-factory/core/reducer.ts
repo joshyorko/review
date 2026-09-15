@@ -16,7 +16,7 @@
  *   certifying an integrated change it never saw.
  */
 
-import { admit } from "./admission.ts";
+import { admit, attemptsRemaining } from "./admission.ts";
 import { receiptAcceptable, reconcileReceipt } from "./evidence.ts";
 import type {
 	Attempt,
@@ -94,11 +94,38 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 		case "start_attempt": {
 			const task = findTask(ledger, event.taskId);
 			if (task === undefined) return { ok: false, error: `unknown task ${event.taskId}` };
-			if (task.state !== "READY") {
-				return { ok: false, error: `task ${task.id} is ${task.state}; only READY tasks may start` };
-			}
 			if (task.attempts.some((attempt) => attempt.id === event.attemptId)) {
 				return { ok: false, error: `attempt ${event.attemptId} already exists on ${task.id}` };
+			}
+			if (subjectChanged(event.subject, ledger.subject)) {
+				return {
+					ok: false,
+					error: `attempt subject ${event.subject.repo}@${event.subject.head ?? event.subject.base} is not the current run subject`,
+				};
+			}
+			if (task.state !== "READY" && task.state !== "VERIFY") {
+				return { ok: false, error: `task ${task.id} is ${task.state}; only READY or VERIFY tasks may start` };
+			}
+			if (task.decision !== "ADMIT") {
+				return { ok: false, error: `task ${task.id} has no ADMIT decision` };
+			}
+			if (attemptsRemaining(ledger, task) <= 0) {
+				return { ok: false, error: `task ${task.id} has exhausted its attempt appetite` };
+			}
+			if (task.state === "VERIFY") {
+				const previous = lastReturned(task);
+				if (previous?.receipt === undefined) {
+					return { ok: false, error: `task ${task.id} is VERIFY without a returned receipt to repair` };
+				}
+				const reconciliation = reconcileReceipt(ledger, previous.receipt, {
+					taskId: task.id,
+					attemptId: previous.id,
+					subject: ledger.subject,
+					artifactRoots: context.artifactRoots,
+				});
+				if (reconciliation.status === "proven" && (task.effect !== "write" || previous.integrated)) {
+					return { ok: false, error: `task ${task.id} already has current proven evidence; finish it before another attempt` };
+				}
 			}
 			const attempt: Attempt = {
 				id: event.attemptId,
@@ -108,6 +135,7 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 				subject: event.subject,
 				state: "started",
 				nativeJobIds: [],
+				nativeResultIds: [],
 				integrated: false,
 			};
 			return bump(replaceTask(ledger, task.id, (current) => ({ ...current, state: "RUNNING", attempts: [...current.attempts, attempt] })));
@@ -119,11 +147,30 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (task === undefined || attempt === undefined) {
 				return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
 			}
-			if (attempt.nativeJobIds.includes(event.jobId)) return { ok: true, ledger };
+			const resultIds = event.resultIds ?? [];
+			if (attempt.nativeJobIds.includes(event.jobId) && resultIds.every((id) => attempt.nativeResultIds.includes(id))) {
+				return { ok: true, ledger };
+		}
 			return bump(
 				replaceAttempt(ledger, task.id, attempt.id, (current) => ({
 					...current,
-					nativeJobIds: [...current.nativeJobIds, event.jobId as NativeJobId],
+					nativeJobIds: current.nativeJobIds.includes(event.jobId) ? current.nativeJobIds : [...current.nativeJobIds, event.jobId as NativeJobId],
+					nativeResultIds: [...current.nativeResultIds, ...resultIds.filter((id) => !current.nativeResultIds.includes(id))],
+				})),
+			);
+		}
+
+		case "record_native_result": {
+			const task = findTask(ledger, event.taskId);
+			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
+			if (task === undefined || attempt === undefined) {
+				return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
+			}
+			if (attempt.nativeResultIds.includes(event.resultId)) return { ok: true, ledger };
+			return bump(
+				replaceAttempt(ledger, task.id, attempt.id, (current) => ({
+					...current,
+					nativeResultIds: [...current.nativeResultIds, event.resultId],
 				})),
 			);
 		}
@@ -136,6 +183,9 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 
 			const unacceptable = receiptAcceptable(ledger, event.receipt);
 			if (unacceptable !== undefined) return { ok: false, error: unacceptable };
+			if (task.state !== "RUNNING" || attempt.state !== "started") {
+				return { ok: false, error: `attempt ${attempt.id} is not an active dispatched attempt` };
+			}
 
 			const authorized = attempt.subject;
 			const superseded = subjectChanged(authorized, ledger.subject);

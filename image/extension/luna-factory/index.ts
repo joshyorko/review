@@ -7,22 +7,20 @@
  * authority. Loading the extension does none of that: it registers a surface and
  * waits. Execution is opt-in behind `LUNA_FACTORY_ENABLED=1`.
  *
- * The command surface the objective describes is exposed as LLM-callable tools
- * rather than slash commands. The appliance's pinned OMP host slice registers
- * flags, shortcuts, tools, and events — not commands — so a `/factory` command
- * is not a supported seam here. Advertising one would be exactly the invented
- * API the objective forbids; the tool names are the supported equivalent and the
- * README records the gap.
+ * The command surface is registered when the host exposes OMP's native command
+ * seam. The same package also keeps namespaced tools for headless and older-host
+ * callers; loading either surface starts no work.
  */
 
 import { evaluateRun } from "./core/convergence.ts";
 import { emptyLedger } from "./core/model.ts";
-import type { Criterion, Ledger, ReduceResult, RunId, Subject, TaskId } from "./core/model.ts";
+import { DEFAULT_FINISH_AUTHORITY } from "./core/model.ts";
+import type { Appetite, Criterion, Effect, Ledger, NativeJobId, ReduceResult, RunId, Subject, TaskId } from "./core/model.ts";
 import { findTask } from "./core/model.ts";
 import { renderCompletionReceipt } from "./core/receipt.ts";
 import { reduce } from "./core/reducer.ts";
 import { parseCandidate, parseReceipt } from "./core/schema.ts";
-import { buildDispatchPrompt } from "./omp/adapter.ts";
+import { buildDispatchPrompt, DISPATCH_MARKER, dispatchMarker } from "./omp/adapter.ts";
 import { coverageFor, enforcedPaths, unsupportedPaths } from "./omp/capabilities.ts";
 import { type SessionCtx, loadRun, saveRun } from "./omp/session.ts";
 import { renderStatusDetail, renderWhy, truncatePlain } from "./ui/status.ts";
@@ -38,6 +36,18 @@ interface ToolResult {
 	isError?: boolean;
 }
 
+interface ToolUpdate {
+	readonly content?: readonly ToolContent[];
+	readonly [key: string]: unknown;
+}
+
+interface NativeInvokeContext extends FactoryCtx {
+	invokeTool?<TDetails = unknown>(
+		params: Record<string, unknown>,
+		options?: { signal?: AbortSignal; onUpdate?: (update: ToolUpdate) => void },
+	): Promise<ToolResult & { details?: TDetails }>;
+}
+
 interface ZodLike {
 	object(shape: Record<string, unknown>): unknown;
 	string(): { optional(): unknown; describe(text: string): { optional(): unknown } };
@@ -49,7 +59,15 @@ export interface FactoryToolDefinition {
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: unknown;
-	execute(toolCallId: string, params: Record<string, unknown>): Promise<ToolResult>;
+	readonly defaultInactive?: boolean;
+	readonly loadMode?: "essential" | "discoverable";
+	execute(
+		toolCallId: string,
+		params: Record<string, unknown>,
+		signal?: AbortSignal,
+		onUpdate?: (update: ToolUpdate) => void,
+		ctx?: NativeInvokeContext,
+	): Promise<ToolResult>;
 }
 
 /** What the entry point returns to the host. */
@@ -60,10 +78,17 @@ export interface LunaFactoryExtension {
 
 export interface FactoryHost {
 	zod: ZodLike;
+	/** OMP's native schema builder; required to register a same-name task wrapper. */
+	arktype?(definition: unknown): unknown;
 	registerTool(definition: FactoryToolDefinition): void;
+	/** OMP 18.x tool activation seam. Optional for older/headless test hosts. */
+	getActiveTools?(): string[];
+	setActiveTools?(toolNames: string[]): Promise<void> | void;
+	registerCommand?(name: string, definition: { description: string; handler(args: string, ctx: FactoryCtx): unknown }): void;
 	appendEntry(customType: string, data?: unknown): void;
 	setLabel(label: string): void;
 	on(event: string, handler: (event: unknown, ctx: FactoryCtx) => unknown): void;
+	sendUserMessage?(content: string, options?: { deliverAs?: string }): void;
 }
 
 interface FactoryCtx extends SessionCtx {
@@ -80,6 +105,19 @@ export interface FactoryOptions {
 
 const ENABLE_FLAG = "LUNA_FACTORY_ENABLED";
 
+const FACTORY_TOOL_NAMES = [
+	"luna_factory_status",
+	"luna_factory_open",
+	"luna_factory_candidate",
+	"luna_factory_attempt",
+	"luna_factory_dispatch",
+	"luna_factory_receipt",
+	"luna_factory_finish",
+	"luna_factory_why",
+	"luna_factory_control",
+	"luna_factory_completion",
+] as const;
+
 function text(value: string): ToolContent[] {
 	return [{ type: "text", text: value }];
 }
@@ -95,9 +133,155 @@ function parseArgument(params: Record<string, unknown>): { readonly ok: true; re
 	}
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface OpenContract {
+	readonly nonGoals: readonly string[];
+	readonly permittedEffects: readonly Effect[];
+	readonly finishAuthority: string;
+	readonly appetite: Appetite;
+}
+
+type OpenContractResult = { readonly ok: true; readonly value: OpenContract } | { readonly ok: false; readonly error: string };
+
+function optionValue(payload: Record<string, unknown>, options: Record<string, unknown>, name: string): unknown {
+	return options[name] === undefined ? payload[name] : options[name];
+}
+
+function boundedOptionText(value: unknown, field: string): { readonly ok: true; readonly value: string } | { readonly ok: false; readonly error: string } {
+	if (typeof value !== "string" || value.trim().length === 0) return { ok: false, error: `${field} must be a non-empty string` };
+	if (value.length > 2_000) return { ok: false, error: `${field} exceeds 2000 characters` };
+	return { ok: true, value };
+}
+
+function optionStringList(value: unknown, field: string): { readonly ok: true; readonly value: readonly string[] } | { readonly ok: false; readonly error: string } {
+	if (!Array.isArray(value)) return { ok: false, error: `${field} must be an array of non-empty strings` };
+	if (value.length > 64) return { ok: false, error: `${field} exceeds 64 entries` };
+	const values: string[] = [];
+	for (const [index, entry] of value.entries()) {
+		const parsed = boundedOptionText(entry, `${field}[${index}]`);
+		if (!parsed.ok) return parsed;
+		values.push(parsed.value);
+	}
+	return { ok: true, value: values };
+}
+
+function optionEffects(value: unknown): { readonly ok: true; readonly value: readonly Effect[] } | { readonly ok: false; readonly error: string } {
+	if (!Array.isArray(value)) return { ok: false, error: "permittedEffects must be an array containing only read and write" };
+	if (value.length > 2) return { ok: false, error: "permittedEffects may contain at most read and write" };
+	const effects: Effect[] = [];
+	for (const entry of value) {
+		if (entry !== "read" && entry !== "write") return { ok: false, error: "permittedEffects may contain only read and write" };
+		if (effects.includes(entry)) return { ok: false, error: `permittedEffects contains duplicate '${entry}'` };
+		effects.push(entry);
+	}
+	return { ok: true, value: effects };
+}
+
+function optionAppetite(value: unknown): { readonly ok: true; readonly value: Appetite } | { readonly ok: false; readonly error: string } {
+	if (value === undefined) return { ok: true, value: { tasks: 8, attemptsPerTask: 2 } };
+	if (!isRecord(value)) return { ok: false, error: "appetite must be {tasks, attemptsPerTask}" };
+	const tasks = value.tasks;
+	const attemptsPerTask = value.attemptsPerTask;
+	if (!Number.isInteger(tasks) || !Number.isInteger(attemptsPerTask) || tasks < 1 || attemptsPerTask < 1 || tasks > 64 || attemptsPerTask > 64) {
+		return { ok: false, error: "appetite.tasks and appetite.attemptsPerTask must be integers from 1 through 64" };
+	}
+	return { ok: true, value: { tasks, attemptsPerTask } };
+}
+
+function parseOpenContract(payload: Record<string, unknown>): OpenContractResult {
+	const rawOptions = payload.options;
+	const options = rawOptions === undefined ? {} : rawOptions;
+	if (!isRecord(options)) return { ok: false, error: "options must be an object when supplied" };
+
+	const rawNonGoals = optionValue(payload, options, "nonGoals");
+	const nonGoals = rawNonGoals === undefined ? { ok: true as const, value: [] as readonly string[] } : optionStringList(rawNonGoals, "nonGoals");
+	if (!nonGoals.ok) return nonGoals;
+
+	const rawEffects = optionValue(payload, options, "permittedEffects");
+	const permittedEffects = rawEffects === undefined ? { ok: true as const, value: ["read"] as readonly Effect[] } : optionEffects(rawEffects);
+	if (!permittedEffects.ok) return permittedEffects;
+
+	const rawFinish = optionValue(payload, options, "finishAuthority") ?? optionValue(payload, options, "finishDeliverable");
+	const finishAuthority = rawFinish === undefined ? { ok: true as const, value: DEFAULT_FINISH_AUTHORITY } : boundedOptionText(rawFinish, "finishAuthority");
+	if (!finishAuthority.ok) return finishAuthority;
+
+	const appetite = optionAppetite(optionValue(payload, options, "appetite"));
+	if (!appetite.ok) return appetite;
+
+	return { ok: true, value: { nonGoals: nonGoals.value, permittedEffects: permittedEffects.value, finishAuthority: finishAuthority.value, appetite: appetite.value } };
+}
+
+interface NativeTaskBinding {
+	readonly taskId: TaskId;
+	readonly attemptId: string;
+	readonly index: number;
+}
+
+const NATIVE_IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const DISPATCH_MARKER_RE = new RegExp(
+	`${DISPATCH_MARKER}\\s+task=([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\\s+attempt=([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\\s+generation=([A-Za-z0-9][A-Za-z0-9._:-]{0,127})`,
+);
+
+function nativeTaskBindings(params: Record<string, unknown>, current: Ledger): { readonly ok: true; readonly bindings: readonly NativeTaskBinding[] } | { readonly ok: false; readonly error: string } {
+	const rawItems: unknown[] = Array.isArray(params.tasks) ? params.tasks : [params];
+	if (rawItems.length === 0) return { ok: false, error: "native task call must contain at least one assignment" };
+	const bindings: NativeTaskBinding[] = [];
+	for (const [index, rawItem] of rawItems.entries()) {
+		if (!isRecord(rawItem) || typeof rawItem.task !== "string" || rawItem.task.trim().length === 0) {
+			return { ok: false, error: `native task item ${index + 1} has no assignment` };
+		}
+		const match = rawItem.task.match(DISPATCH_MARKER_RE);
+		if (match === null) {
+			return { ok: false, error: `native task item ${index + 1} must carry a ledger-stamped ${dispatchMarker("task", "attempt", "generation")} assignment` };
+		}
+		const [, taskId, attemptId, generation] = match;
+		if (generation !== current.generation) return { ok: false, error: `native task item ${index + 1} is for stale generation ${generation}` };
+		const task = findTask(current, taskId as TaskId);
+		const attempt = task?.attempts.find((candidate) => candidate.id === attemptId);
+		if (task === undefined || attempt === undefined) return { ok: false, error: `native task item ${index + 1} names an unknown Factory task or attempt` };
+		if (current.control !== "active") return { ok: false, error: `run is ${current.control}; native task admission is closed` };
+		if (task.state !== "RUNNING" || task.decision !== "ADMIT" || attempt.state !== "started") {
+			return { ok: false, error: `native task item ${index + 1} is not bound to an admitted running attempt` };
+		}
+		if (attempt.subject.repo !== current.subject.repo || attempt.subject.base !== current.subject.base || attempt.subject.head !== current.subject.head) {
+			return { ok: false, error: `native task item ${index + 1} is bound to a stale Factory subject` };
+		}
+		bindings.push({ taskId: task.id, attemptId: attempt.id, index });
+	}
+	return { ok: true, bindings };
+}
+
+interface NativeTaskIdentities {
+	readonly jobId?: NativeJobId;
+	readonly resultIdsByIndex: ReadonlyMap<number, NativeJobId>;
+	readonly unindexedResultIds: readonly NativeJobId[];
+}
+
+function nativeTaskIdentities(details: unknown): NativeTaskIdentities {
+	if (!isRecord(details)) return { resultIdsByIndex: new Map(), unindexedResultIds: [] };
+	let jobId: NativeJobId | undefined;
+	if (isRecord(details.async) && typeof details.async.jobId === "string" && NATIVE_IDENTITY_RE.test(details.async.jobId)) {
+		jobId = details.async.jobId as NativeJobId;
+	}
+	const resultIdsByIndex = new Map<number, NativeJobId>();
+	const unindexedResultIds: NativeJobId[] = [];
+	if (Array.isArray(details.results)) {
+		for (const result of details.results) {
+			if (!isRecord(result) || typeof result.id !== "string" || !NATIVE_IDENTITY_RE.test(result.id)) continue;
+			const id = result.id as NativeJobId;
+			if (typeof result.index === "number" && Number.isInteger(result.index) && result.index >= 0) resultIdsByIndex.set(result.index, id);
+			else unindexedResultIds.push(id);
+		}
+	}
+	return { jobId, resultIdsByIndex, unindexedResultIds };
+}
+
 export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOptions = {}): LunaFactoryExtension {
 	const env = options.env ?? process.env;
-	const artifactRoots = options.artifactRoots ?? [];
+	const artifactRoots = options.artifactRoots ?? ["artifact://"];
 	let ledger: Ledger | undefined;
 	let loadProblem: string | undefined;
 
@@ -113,8 +297,94 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	const jsonParameters = z.object({ input: z.string().describe("JSON payload for this command") });
 
 	const registerTool = (definition: FactoryToolDefinition): void => {
-		host.registerTool({ ...definition, parameters: jsonParameters });
+		host.registerTool({
+		...definition,
+		parameters: jsonParameters,
+		defaultInactive: !enabled(),
+		loadMode: "essential",
+	});
 	};
+
+	/**
+	 * Shadow OMP's native task tool only when the host gives us its native schema
+	 * builder. `ctx.invokeTool` is same-name delegation: OMP remains the owner of
+	 * scheduling, isolation, cancellation, and result assembly; Factory owns the
+	 * admission check immediately before that call.
+	 */
+	const nativeTaskParameters = host.arktype?.("object");
+	if (enabled() && nativeTaskParameters !== undefined) {
+		host.registerTool({
+			name: "task",
+			label: "Task",
+			description: "Run an OMP task that is already bound to an admitted Luna Factory attempt.",
+			parameters: nativeTaskParameters,
+			async execute(_toolCallId, params, signal, onUpdate, rawContext) {
+				const context = rawContext as NativeInvokeContext | undefined;
+				if (ledger === undefined || !enabled()) {
+					if (context?.invokeTool === undefined) {
+						return { content: text("native task delegation is unavailable on this OMP host"), isError: true };
+					}
+					return context.invokeTool(params, { signal, onUpdate });
+				}
+				const bindings = nativeTaskBindings(params, ledger);
+				if (!bindings.ok) return { content: text(bindings.error), isError: true };
+				if (context?.invokeTool === undefined) {
+					return { content: text("native task is unsupported: OMP did not expose same-name ctx.invokeTool"), isError: true };
+				}
+				let result: ToolResult & { details?: unknown };
+				try {
+					result = await context.invokeTool(params, { signal, onUpdate });
+				} catch (error) {
+					return { content: text(`native task failed before a result could be correlated: ${error instanceof Error ? error.message : String(error)}`), isError: true };
+				}
+
+				const identities = nativeTaskIdentities(result.details);
+				for (const binding of bindings.bindings) {
+					const indexed = identities.resultIdsByIndex.get(binding.index);
+					const resultIds = indexed === undefined
+						? bindings.bindings.length === 1
+							? [...identities.unindexedResultIds, ...identities.resultIdsByIndex.values()]
+							: []
+						: [indexed];
+					const current = ledger;
+					if (current === undefined) break;
+					const event: LedgerEvent | undefined =
+						identities.jobId === undefined
+							? undefined
+							: {
+									kind: "record_native_job",
+									expectedRevision: current.revision,
+									taskId: binding.taskId,
+									attemptId: binding.attemptId,
+									jobId: identities.jobId,
+									resultIds,
+								  };
+					const correlated = event === undefined
+						? resultIds.reduce<ReduceResult>(
+							(currentResult, resultId) =>
+								currentResult.ok
+									? reduce(
+											currentResult.ledger,
+											{
+												kind: "record_native_result",
+												expectedRevision: currentResult.ledger.revision,
+												taskId: binding.taskId,
+												attemptId: binding.attemptId,
+												resultId,
+											},
+											{ artifactRoots },
+										)
+									: currentResult,
+							{ ok: true, ledger: current },
+						  )
+						: reduce(current, event, { artifactRoots });
+					if (correlated.ok) commit(correlated.ledger);
+					else host.appendEntry("com.joshyorko.luna-factory.native-correlation", { taskId: binding.taskId, attemptId: binding.attemptId, error: correlated.error });
+				}
+				return result;
+			},
+		});
+	}
 
 	/** Every mutating command runs through here so the gate and the journal cannot drift apart. */
 	const mutate = (
@@ -133,27 +403,108 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		return { content: text(describe(result.ledger)) };
 	};
 
+	const statusText = (): string => {
+		if (ledger === undefined) {
+			const lines = [loadProblem ?? "no Factory run is open"];
+			lines.push(`execution: ${enabled() ? "enabled" : `idle (${ENABLE_FLAG}=1 to enable)`}`);
+			lines.push(`enforced: ${enforcedPaths().join(", ")}`);
+			lines.push(`unsupported: ${unsupportedPaths().join(", ")}`);
+			return lines.join("\n");
+		}
+		return [
+			...renderStatusDetail(ledger),
+			"",
+			`execution: ${enabled() ? "enabled" : `idle (${ENABLE_FLAG}=1 to enable)`}`,
+			`enforced: ${enforcedPaths().join(", ")}`,
+			`observed/unsupported: ${unsupportedPaths().join(", ")}`,
+		].join("\n");
+	};
+
+	const notifyCommand = (ctx: FactoryCtx, message: string, level: string = "info"): void => {
+		if (ctx.ui?.notify !== undefined) {
+			ctx.ui.notify(message, level);
+			return;
+		}
+		// Headless callers already have the namespaced tools. Do not start a model
+		// turn merely to print a read-only command result.
+		host.appendEntry("com.joshyorko.luna-factory.command", { command: "factory", message });
+	};
+
+	const controlSummary = (control: "active" | "paused" | "interrupted", next: Ledger): string => {
+		if (control !== "interrupted") return `run is ${next.control}`;
+		const jobs = next.tasks
+			.filter((task) => task.state === "RUNNING" || task.state === "VERIFY")
+			.flatMap((task) => task.attempts.flatMap((attempt) => attempt.nativeJobIds));
+		const lines = ["run is interrupted; no new admission will start."];
+		lines.push(
+			jobs.length === 0
+				? "no recorded native job ids to cancel; reconcile with luna_factory_status before resuming. no external effect is rolled back."
+				: `recorded native job ids to cancel through OMP: ${jobs.join(", ")}. Factory does not cancel them itself, and no external effect is rolled back.`,
+		);
+		return lines.join("\n");
+	};
+
+	if (host.registerCommand !== undefined) {
+		host.registerCommand("factory", {
+			description: "Open or inspect the opt-in Luna Factory run",
+			handler: async (rawArgs, ctx) => {
+				const args = rawArgs.trim();
+				if (args.length === 0 || args === "status") {
+					notifyCommand(ctx, statusText());
+					return;
+				}
+				if (args === "help") {
+					notifyCommand(ctx, "usage: /factory <objective> | status | why <task-id> | pause | resume | abort | -- <literal objective>");
+					return;
+				}
+				if (args.startsWith("why ")) {
+					const taskId = args.slice(4).trim();
+					if (ledger === undefined) {
+						notifyCommand(ctx, loadProblem ?? "no Factory run is open", "warning");
+						return;
+					}
+					if (taskId.length === 0) {
+						notifyCommand(ctx, "usage: /factory why <task-id>", "warning");
+						return;
+					}
+					notifyCommand(ctx, renderWhy(ledger, taskId as TaskId).join("\n"));
+					return;
+				}
+				const requestedControl = args === "pause" ? "paused" : args === "resume" ? "active" : args === "abort" ? "interrupted" : undefined;
+				if (requestedControl !== undefined) {
+					const result = mutate(
+						(current) => reduce(current, { kind: "set_control", expectedRevision: current.revision, control: requestedControl }, { artifactRoots }),
+						(next) => controlSummary(requestedControl, next),
+					);
+					notifyCommand(ctx, result.content[0]!.text, result.isError === true ? "error" : "warning");
+					return;
+				}
+				const objective = args.startsWith("--") ? args.slice(2).trim() : args;
+				if (objective.length === 0) {
+					notifyCommand(ctx, "a literal objective after /factory -- must be non-empty", "warning");
+					return;
+				}
+				if (host.sendUserMessage === undefined) {
+					notifyCommand(ctx, "this OMP host has no prompt handoff; use luna_factory_open with an explicit JSON contract", "error");
+					return;
+				}
+				host.sendUserMessage(
+					"The explicit operator objective for Luna Factory is:\n" +
+						objective +
+						"\nCapture the agreed generation, mandatory criteria, non-goals, permitted effects, finish authority, appetite, and exact repository subject before calling luna_factory_open. Do not infer write or merge authority; use the Factory tools and keep ordinary Review ownership unchanged.",
+					{ deliverAs: "steer" },
+				);
+			},
+		});
+	}
+
 	registerTool({
 		name: "luna_factory_status",
 		label: "Factory Status",
 		description:
 			"Report the current Luna Factory run: proven criteria, owned activity, blockers, dependencies, and routing. Reading status never starts work or changes a model.",
 		async execute() {
-			if (ledger === undefined) {
-				const lines = [loadProblem ?? "no Factory run is open"];
-				lines.push(`execution: ${enabled() ? "enabled" : `idle (${ENABLE_FLAG}=1 to enable)`}`);
-				lines.push(`enforced: ${enforcedPaths().join(", ")}`);
-				lines.push(`unsupported: ${unsupportedPaths().join(", ")}`);
-				return { content: text(lines.join("\n")) };
-			}
-			const detail = renderStatusDetail(ledger);
-			const boundary = [
-				"",
-				`execution: ${enabled() ? "enabled" : `idle (${ENABLE_FLAG}=1 to enable)`}`,
-				`enforced: ${enforcedPaths().join(", ")}`,
-				`observed/unsupported: ${unsupportedPaths().join(", ")}`,
-			];
-			return { content: text([...detail, ...boundary].join("\n")) };
+			return { content: text(statusText()) };
 		},
 	});
 
@@ -168,19 +519,13 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			if (!enabled()) {
 				return { content: text(`${ENABLE_FLAG}=1 is required to open a Factory run.`), isError: true };
 			}
-			const payload = parsed.value as {
-				objective?: unknown;
-				criteria?: unknown;
-				repo?: unknown;
-				base?: unknown;
-				head?: unknown;
-				replace?: unknown;
-				appetite?: unknown;
-			};
+			if (!isRecord(parsed.value)) return { content: text("Factory open input must be a JSON object"), isError: true };
+			const payload = parsed.value;
 			if (typeof payload.objective !== "string" || payload.objective.trim().length === 0) {
 				return { content: text("objective must be a non-empty string"), isError: true };
 			}
-			if (!Array.isArray(payload.criteria) || payload.criteria.length === 0) {
+			const rawCriteria = payload.criteria;
+			if (!Array.isArray(rawCriteria) || rawCriteria.length === 0) {
 				return { content: text("criteria must be a non-empty array of {id, statement, mandatory}"), isError: true };
 			}
 			if (typeof payload.repo !== "string" || typeof payload.base !== "string") {
@@ -194,8 +539,11 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					isError: true,
 				};
 			}
+			const contract = parseOpenContract(payload);
+			if (!contract.ok) return { content: text(contract.error), isError: true };
+
 			const criteria: Criterion[] = [];
-			for (const entry of payload.criteria as unknown[]) {
+			for (const entry of rawCriteria) {
 				if (typeof entry !== "object" || entry === null) {
 					return { content: text("each criterion must be an object"), isError: true };
 				}
@@ -209,19 +557,16 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					mandatory: record.mandatory !== false,
 				});
 			}
-			const appetite = (payload.appetite ?? {}) as { tasks?: unknown; attemptsPerTask?: unknown };
 			const subject: Subject =
 				typeof payload.head === "string"
 					? { repo: payload.repo, base: payload.base, head: payload.head }
 					: { repo: payload.repo, base: payload.base };
 			const next = emptyLedger(`lf-${Date.now().toString(36)}` as RunId, {
 				statement: payload.objective,
-				nonGoals: [],
-				permittedEffects: ["read", "write"],
-				appetite: {
-					tasks: typeof appetite.tasks === "number" ? appetite.tasks : 8,
-					attemptsPerTask: typeof appetite.attemptsPerTask === "number" ? appetite.attemptsPerTask : 2,
-				},
+				nonGoals: contract.value.nonGoals,
+				permittedEffects: contract.value.permittedEffects,
+				finishAuthority: contract.value.finishAuthority,
+				appetite: contract.value.appetite,
 			}, criteria, subject);
 			commit(next);
 			return { content: text(`Factory run open: ${renderStatusDetail(next)[0]}`) };
@@ -397,18 +742,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			if (control === undefined) return { content: text("action must be pause, resume, or abort"), isError: true };
 			const result = mutate(
 				(current) => reduce(current, { kind: "set_control", expectedRevision: current.revision, control }, { artifactRoots }),
-				(next) => {
-					const owned = next.tasks.filter((task) => task.state === "RUNNING" || task.state === "VERIFY");
-					const jobs = owned.flatMap((task) => task.attempts.flatMap((attempt) => attempt.nativeJobIds));
-					if (control !== "interrupted") return `run is ${next.control}`;
-					const lines = ["run is interrupted; no new admission will start."];
-					lines.push(
-						jobs.length === 0
-							? "no recorded native job ids to cancel; reconcile with luna_factory_status before resuming."
-							: `recorded native job ids to cancel through OMP: ${jobs.join(", ")}. Factory does not cancel them itself, and no external effect is rolled back.`,
-					);
-					return lines.join("\n");
-				},
+				(next) => controlSummary(control, next),
 			);
 			return result;
 		},
@@ -424,6 +758,24 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			return { content: text(renderCompletionReceipt(ledger, evaluateRun(ledger))) };
 		},
 	});
+
+	// Discoverable extension tools are not guaranteed to be in OMP's initial
+	// active set. Activate them from session_start, after OMP has initialized the
+	// runtime action methods. The host's setter waits for OMP's registration
+	// barrier, so the first model turn sees the complete Factory surface.
+	const activateFactoryTools = async (): Promise<void> => {
+		if (!enabled() || host.getActiveTools === undefined || host.setActiveTools === undefined) return;
+		const activeTools = host.getActiveTools();
+		const nativeNames = nativeTaskParameters === undefined ? [] : ["task"];
+		const nextActiveTools = [...new Set([...activeTools, ...FACTORY_TOOL_NAMES, ...nativeNames])];
+		try {
+			await host.setActiveTools(nextActiveTools);
+		} catch (error) {
+			host.appendEntry("com.joshyorko.luna-factory.activation", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	};
 
 	const settle = (ctx: FactoryCtx): void => {
 		if (ledger === undefined) return;
@@ -445,13 +797,14 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	};
 
 	host.setLabel("Luna Factory");
-	host.on("session_start", (_event, ctx) => {
+	host.on("session_start", async (_event, ctx) => {
 		const loaded = loadRun(ctx);
 		ledger = loaded.ledger;
 		loadProblem = loaded.problem;
 		if (loaded.problem !== undefined && ctx.hasUI) {
 			ctx.ui?.notify?.(`Factory journal is unreadable: ${loaded.problem}`, "error");
 		}
+		await activateFactoryTools();
 	});
 	host.on("session_stop", (_event, ctx) => settle(ctx));
 
@@ -460,4 +813,9 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			return;
 		},
 	};
+}
+
+/** Native OMP package entrypoint. The pure/core adapter remains directly testable. */
+export default function lunaFactoryExtension(pi: FactoryHost): void {
+	createLunaFactoryExtension(pi);
 }

@@ -12,7 +12,8 @@
  */
 
 import { isRecord } from "./guard.ts";
-import type { Criterion, CriterionId, GenerationId, Ledger, RunId, Subject, TaskId, TaskRecord } from "./model.ts";
+import { DEFAULT_FINISH_AUTHORITY } from "./model.ts";
+import type { Attempt, Criterion, CriterionId, GenerationId, Ledger, RunId, Subject, TaskId, TaskRecord } from "./model.ts";
 
 /** Namespaced custom entry. A new key means a different shape, not a migration. */
 export const JOURNAL_ENTRY = "com.joshyorko.luna-factory.run";
@@ -67,6 +68,40 @@ function parseTask(value: unknown): TaskRecord | undefined {
 		return undefined;
 	}
 	if (value.effect !== "read" && value.effect !== "write") return undefined;
+	const attempts: Attempt[] = [];
+	for (const rawAttempt of value.attempts) {
+		if (!isRecord(rawAttempt)) return undefined;
+		if (
+			typeof rawAttempt.id !== "string" ||
+			typeof rawAttempt.lineage !== "number" ||
+			!Number.isInteger(rawAttempt.lineage) ||
+			typeof rawAttempt.taskId !== "string" ||
+			typeof rawAttempt.generation !== "string" ||
+			!isRecord(rawAttempt.subject) ||
+			typeof rawAttempt.state !== "string" ||
+			!Array.isArray(rawAttempt.nativeJobIds) ||
+			(rawAttempt.nativeResultIds !== undefined && !Array.isArray(rawAttempt.nativeResultIds)) ||
+			typeof rawAttempt.integrated !== "boolean"
+		) return undefined;
+		const parsedSubject = parseSubject(rawAttempt.subject);
+		if (parsedSubject === undefined) return undefined;
+		if (rawAttempt.state !== "started" && rawAttempt.state !== "returned" && rawAttempt.state !== "abandoned") return undefined;
+		if (!rawAttempt.nativeJobIds.every((id) => typeof id === "string")) return undefined;
+		const nativeResultIds = rawAttempt.nativeResultIds === undefined ? [] : rawAttempt.nativeResultIds;
+		if (!nativeResultIds.every((id) => typeof id === "string")) return undefined;
+		attempts.push({
+			id: rawAttempt.id as Attempt["id"],
+			lineage: rawAttempt.lineage,
+			taskId: rawAttempt.taskId as TaskId,
+			generation: rawAttempt.generation as GenerationId,
+			subject: parsedSubject,
+			state: rawAttempt.state,
+				nativeJobIds: rawAttempt.nativeJobIds as Attempt["nativeJobIds"],
+				nativeResultIds: nativeResultIds as Attempt["nativeResultIds"],
+			...(rawAttempt.receipt === undefined ? {} : { receipt: rawAttempt.receipt as Attempt["receipt"] }),
+			integrated: rawAttempt.integrated,
+		});
+	}
 	return {
 		id: value.id as TaskId,
 		generation: value.generation as GenerationId,
@@ -75,8 +110,8 @@ function parseTask(value: unknown): TaskRecord | undefined {
 		deps: value.deps as readonly TaskId[],
 		effect: value.effect,
 		owner: value.owner,
-		state: value.state as TaskRecord["state"],
-		attempts: value.attempts as TaskRecord["attempts"],
+			state: value.state as TaskRecord["state"],
+			attempts,
 		decision: value.decision as TaskRecord["decision"],
 		decisionReason: value.decisionReason,
 	};
@@ -103,6 +138,9 @@ export function parseJournal(value: unknown): JournalRead {
 	}
 	if (!isRecord(value.goal) || typeof value.goal.statement !== "string" || !Array.isArray(value.goal.permittedEffects)) {
 		return { ok: false, reason: "journal goal is unreadable" };
+	}
+	if (value.goal.finishAuthority !== undefined && (typeof value.goal.finishAuthority !== "string" || value.goal.finishAuthority.trim().length === 0)) {
+		return { ok: false, reason: "journal finish authority is unreadable" };
 	}
 	if (!isRecord(value.goal.appetite) || typeof value.goal.appetite.tasks !== "number" || typeof value.goal.appetite.attemptsPerTask !== "number") {
 		return { ok: false, reason: "journal appetite is unreadable" };
@@ -139,6 +177,8 @@ export function parseJournal(value: unknown): JournalRead {
 				permittedEffects: (value.goal.permittedEffects as unknown[]).filter(
 					(effect): effect is "read" | "write" => effect === "read" || effect === "write",
 				),
+				finishAuthority:
+					typeof value.goal.finishAuthority === "string" ? value.goal.finishAuthority : DEFAULT_FINISH_AUTHORITY,
 				appetite: { tasks: value.goal.appetite.tasks, attemptsPerTask: value.goal.appetite.attemptsPerTask },
 			},
 			criteria,

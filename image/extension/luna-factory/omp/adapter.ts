@@ -21,6 +21,13 @@ export type DispatchPlan =
 	| { readonly ok: true; readonly prompt: string }
 	| { readonly ok: false; readonly error: string };
 
+/** Stable marker copied into the native task assignment before OMP is invoked. */
+export const DISPATCH_MARKER = "LUNA_FACTORY_DISPATCH";
+
+export function dispatchMarker(taskId: string, attemptId: string, generation: string): string {
+	return `${DISPATCH_MARKER} task=${taskId} attempt=${attemptId} generation=${generation}`;
+}
+
 /** The receipt contract every dispatched worker is asked to return. */
 export const RECEIPT_CONTRACT = [
 	"Return one structured receipt with exactly these keys:",
@@ -56,11 +63,17 @@ export function buildDispatchPrompt(
 
 	const task = findTask(ledger, taskId);
 	if (task === undefined) return { ok: false, error: `unknown task ${taskId}` };
-	if (task.state !== "READY") {
-		return { ok: false, error: `task ${task.id} is ${task.state}; only an admitted READY task may be dispatched` };
-	}
 	if (ledger.control !== "active") {
 		return { ok: false, error: `run is ${ledger.control}; admission is closed and admitted work is only drained` };
+	}
+	if (task.state !== "RUNNING") {
+		return {
+			ok: false,
+			error:
+				task.state === "READY"
+					? `task ${task.id} is READY; start_attempt must persist an attempt before dispatch`
+					: `task ${task.id} is ${task.state}; only an admitted RUNNING task may be dispatched`,
+		};
 	}
 	const attempt = task.attempts.find((candidate) => candidate.id === attemptId);
 	if (attempt === undefined) {
@@ -68,6 +81,13 @@ export function buildDispatchPrompt(
 	}
 	if (attempt.state !== "started") {
 		return { ok: false, error: `attempt ${attemptId} is ${attempt.state} and cannot be dispatched` };
+	}
+	if (
+		attempt.subject.repo !== ledger.subject.repo ||
+		attempt.subject.base !== ledger.subject.base ||
+		attempt.subject.head !== ledger.subject.head
+	) {
+		return { ok: false, error: `attempt ${attemptId} is bound to a stale subject and cannot be dispatched` };
 	}
 
 	const criterion = ledger.criteria.find((candidate) => candidate.id === task.criterionId);
@@ -78,8 +98,11 @@ export function buildDispatchPrompt(
 		`generation ${ledger.generation} · revision ${ledger.revision} · subject ${subject.repo}@${subject.head ?? subject.base}`,
 		`criterion ${task.criterionId}${criterion ? `: ${criterion.statement}` : ""} (unproven)`,
 		`permitted effect: ${task.effect}`,
-		`run status: ${verdict.control} · ${verdict.provenMandatory}/${verdict.totalMandatory} mandatory criteria proven`,
-		"",
+		`finish authority: ${ledger.goal.finishAuthority}`,
+		`non-goals: ${ledger.goal.nonGoals.length > 0 ? ledger.goal.nonGoals.join("; ") : "none recorded"}`,
+			`run status: ${verdict.control} · ${verdict.provenMandatory}/${verdict.totalMandatory} mandatory criteria proven`,
+			`native task binding: ${dispatchMarker(task.id, attempt.id, ledger.generation)}`,
+			"",
 		"Work only this task. Do not create successor tasks or missions.",
 		"Do not approve, merge, publish, or push to a protected branch.",
 		"",

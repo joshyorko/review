@@ -7,7 +7,7 @@
  * adversarial cases in the regression matrix can be driven directly.
  */
 
-import { artifactRefError } from "./schema.ts";
+import { artifactRefError, changedPathError } from "./schema.ts";
 import type { CriterionId, EvidenceReceipt, Ledger, Subject, TaskId } from "./model.ts";
 
 export type EvidenceStatus = "proven" | "unproved" | "failed" | "contradicted";
@@ -58,8 +58,12 @@ export function reconcileReceipt(ledger: Ledger, receipt: EvidenceReceipt, bindi
 		};
 	}
 
-	for (const reference of [...receipt.evidence, ...receipt.changed]) {
+	for (const reference of receipt.evidence) {
 		const error = artifactRefError(reference, binding.artifactRoots);
+		if (error !== undefined) reasons.push(`${error}: ${reference}`);
+	}
+	for (const reference of receipt.changed) {
+		const error = changedPathError(reference);
 		if (error !== undefined) reasons.push(`${error}: ${reference}`);
 	}
 	for (const claim of receipt.tests) {

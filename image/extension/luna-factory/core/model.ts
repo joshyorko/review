@@ -48,6 +48,10 @@ export type RunControl = "active" | "paused" | "draining" | "interrupted" | "qui
 /** The only effects a candidate may request. Nothing here grants merge or deploy authority. */
 export type Effect = "read" | "write";
 
+/** Safe default when an objective does not grant an external finish action. */
+export const DEFAULT_FINISH_AUTHORITY =
+	"report the verified result; no merge, deploy, publish, or protected-branch authority";
+
 export type AdmissionDecision = "ADMIT" | "DEFER" | "DISMISS" | "ESCALATE";
 
 export interface Criterion {
@@ -69,6 +73,8 @@ export interface Goal {
 	readonly nonGoals: readonly string[];
 	/** Effects the objective permits. Absent means read-only. */
 	readonly permittedEffects: readonly Effect[];
+	/** The explicitly authorized deliverable at the end of this run. */
+	readonly finishAuthority: string;
 	readonly appetite: Appetite;
 }
 
@@ -144,6 +150,8 @@ export interface Attempt {
 	readonly subject: Subject;
 	readonly state: "started" | "returned" | "abandoned";
 	readonly nativeJobIds: readonly NativeJobId[];
+	/** Native result/agent identities correlated with the recorded job. */
+	readonly nativeResultIds: readonly NativeJobId[];
 	readonly receipt?: EvidenceReceipt;
 	/** Integration is an explicit owner act; auto-apply is never assumed. */
 	readonly integrated: boolean;
@@ -206,6 +214,14 @@ export type LedgerEvent =
 			readonly taskId: TaskId;
 			readonly attemptId: AttemptId;
 			readonly jobId: NativeJobId;
+			readonly resultIds?: readonly NativeJobId[];
+		}
+	| {
+			readonly kind: "record_native_result";
+			readonly expectedRevision: number;
+			readonly taskId: TaskId;
+			readonly attemptId: AttemptId;
+			readonly resultId: NativeJobId;
 		}
 	| {
 			readonly kind: "record_receipt";

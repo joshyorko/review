@@ -1,0 +1,94 @@
+# Local-only model routing for the executable OMP probe. The probe server
+# accepts no network connections outside 127.0.0.1.
+modelRoles:
+  default: local-probe/deterministic
+  task: local-probe/deterministic
+  smol: local-probe/deterministic
+  tiny: local-probe/deterministic
+  advisor: local-probe/deterministic
+advisor:
+  enabled: false
+async:
+  enabled: false
+task:
+  agentModelOverrides:
+    task: local-probe/deterministic
+
+# Keep startup and child-session catalog discovery off every built-in provider.
+# The only usable model in this run is the configured local-probe provider.
+disabledProviders:
+  - abliteration
+  - aiand
+  - aimlapi
+  - alibaba-coding-plan
+  - alibaba-token-plan
+  - amazon-bedrock
+  - anthropic
+  - azure
+  - baseten
+  - bedrock-mantle
+  - cerebras
+  - charm-hyper
+  - cline-pass
+  - cloudflare-ai-gateway
+  - commandcode
+  - coreweave
+  - cursor
+  - deepinfra
+  - deepseek
+  - devin
+  - firepass
+  - fireworks
+  - gitlab-duo
+  - gitlab-duo-agent
+  - github-copilot
+  - gmi-cloud
+  - google
+  - google-antigravity
+  - google-gemini-cli
+  - google-vertex
+  - groq
+  - huggingface
+  - kilo
+  - kimi-code
+  - litellm
+  - lm-studio
+  - meta
+  - minimax
+  - minimax-code
+  - minimax-code-cn
+  - mistral
+  - moonshot
+  - muse-code
+  - nanogpt
+  - nvidia
+  - novita
+  - ollama
+  - ollama-cloud
+  - openai
+  - openai-codex
+  - opencode-go
+  - opencode-zen
+  - openrouter
+  - qianfan
+  - qwen-portal
+  - sakana
+  - siliconflow
+  - siliconflow-cn
+  - synthetic
+  - together
+  - umans
+  - venice
+  - vercel-ai-gateway
+  - vllm
+  - wafer-serverless
+  - xai
+  - xai-oauth
+  - xiaomi
+  - xiaomi-token-plan-ams
+  - xiaomi-token-plan-cn
+  - xiaomi-token-plan-sgp
+  - yolo-auto
+  - zai
+  - zenmux
+  - zhipu-coding-plan

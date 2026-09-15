@@ -287,3 +287,28 @@ export function artifactRefError(reference: string, roots: readonly string[]): s
 	}
 	return `artifact reference is outside the run's artifact roots (${roots.join(", ")})`;
 }
+
+/**
+ * Changed files are repository paths, not Factory artifacts.
+ *
+ * They are still untrusted receipt data: keep them relative to the bound
+ * repository and reject path forms that could escape that boundary or be
+ * interpreted differently by another host. The subject binding supplied to
+ * reconciliation identifies which repository owns the path.
+ */
+export function changedPathError(reference: string): string | undefined {
+	if (reference.length === 0) return "changed path must be non-empty and repository-relative";
+	if (reference.includes("\u0000")) return "changed path contains a NUL byte";
+	if (HTTP_URL_RE.test(reference)) return "remote changed paths are not repository-relative";
+	if (reference.startsWith("~")) return "changed path must not depend on a home-directory expansion";
+	if (reference.startsWith("/") || /^[A-Za-z]:[\\/]/.test(reference)) {
+		return "changed path must be repository-relative, not absolute";
+	}
+	if (reference.includes("\\")) return "changed path uses unsupported path separators; use repository-relative POSIX paths";
+	const segments = reference.split("/");
+	if (segments.some((segment) => segment === "..")) return "changed path escapes the repository root";
+	if (segments.some((segment) => segment.length === 0 || segment === ".")) {
+		return "changed path must not contain empty or current-directory segments";
+	}
+	return undefined;
+}

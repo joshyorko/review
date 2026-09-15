@@ -28,11 +28,11 @@ import type {
 } from "../image/extension/luna-factory/core/model.ts";
 import { renderCompletionReceipt } from "../image/extension/luna-factory/core/receipt.ts";
 import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
-import { artifactRefError, parseCandidate, parseReceipt } from "../image/extension/luna-factory/core/schema.ts";
-import { buildDispatchPrompt, RECEIPT_CONTRACT } from "../image/extension/luna-factory/omp/adapter.ts";
+import { artifactRefError, changedPathError, parseCandidate, parseReceipt } from "../image/extension/luna-factory/core/schema.ts";
+import { buildDispatchPrompt, dispatchMarker, RECEIPT_CONTRACT } from "../image/extension/luna-factory/omp/adapter.ts";
 import { DISPATCH_COVERAGE, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
 import { renderStatus, renderStatusDetail, renderWhy } from "../image/extension/luna-factory/ui/status.ts";
-import { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
+import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 
 const ROOTS = ["/artifacts"];
 const REDUCE = { artifactRoots: ROOTS };
@@ -45,6 +45,7 @@ function ledger(): Ledger {
 			statement: "ship the small fix",
 			nonGoals: ["no new dashboard"],
 			permittedEffects: ["read", "write"],
+			finishAuthority: "report the verified result",
 			appetite: { tasks: 8, attemptsPerTask: 2 },
 		},
 		[
@@ -154,9 +155,13 @@ test("a dependency cycle escalates instead of dispatching a tangle", () => {
 		expectedRevision: revision,
 		candidate: candidate({ taskId: "T2" as TaskId, deps: ["T0" as TaskId] }),
 	}));
-	const verdict = admit(chained, candidate({ taskId: "T0" as TaskId, deps: ["T2" as TaskId] }));
+	const cyclic = {
+		...chained,
+		tasks: chained.tasks.map((task) => (task.id === ("T2" as TaskId) ? { ...task, deps: ["T3" as TaskId] } : task)),
+	};
+	const verdict = admit(cyclic, candidate({ taskId: "T3" as TaskId, deps: ["T2" as TaskId] }));
 	assert.equal(verdict.decision, "ESCALATE");
-	assert.match(verdict.reason, /already in the ledger|depends on itself/);
+	assert.match(verdict.reason, /depends on itself/);
 });
 
 test("an effect the objective does not permit escalates", () => {
@@ -187,7 +192,7 @@ test("an exhausted objective appetite defers further admission", () => {
 		SUBJECT,
 	);
 	const taken = step(tight, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
-	const verdict = admit(taken, candidate({ taskId: "T2" as TaskId, criterionId: "A2" as CriterionId }));
+	const verdict = admit(taken, candidate({ taskId: "T2" as TaskId, criterionId: "A1" as CriterionId }));
 	assert.equal(verdict.decision, "DEFER");
 	assert.match(verdict.reason, /appetite of 1 admitted tasks is exhausted/);
 });
@@ -242,6 +247,11 @@ test("artifact references outside the run's roots are rejected, not followed", (
 	assert.match(artifactRefError("/tmp/log", ROOTS) ?? "", /outside the run's artifact roots/);
 	assert.equal(artifactRefError("/artifacts/run.log", ROOTS), undefined);
 	assert.equal(artifactRefError("/artifacts", ROOTS), undefined);
+	assert.equal(changedPathError("src/x.ts"), undefined);
+	assert.match(changedPathError("../outside.ts") ?? "", /escapes the repository root/);
+	assert.match(changedPathError("/etc/passwd") ?? "", /repository-relative/);
+	assert.match(changedPathError("https://example.test/log") ?? "", /remote/);
+	assert.match(changedPathError("src/..\\secret") ?? "", /path separators/);
 });
 
 // ------------------------------------------------------------------ evidence
@@ -323,7 +333,7 @@ test("only a READY task may start, and an attempt id is not reused", () => {
 	}));
 	const again = reduce(started, { kind: "start_attempt", expectedRevision: started.revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }, REDUCE);
 	assert.equal(again.ok, false);
-	assert.match(again.ok ? "" : again.error, /only READY tasks may start/);
+	assert.match(again.ok ? "" : again.error, /only READY or VERIFY tasks may start/);
 
 	const duplicate = reduce(admitted, { kind: "start_attempt", expectedRevision: admitted.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
 	assert.equal(duplicate.ok, true);
@@ -331,6 +341,25 @@ test("only a READY task may start, and an attempt id is not reused", () => {
 	const reused = reduce(started, { kind: "start_attempt", expectedRevision: started.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
 	assert.equal(reused.ok, false);
 	assert.match(reused.ok ? "" : reused.error, /already exists/);
+});
+
+test("an unproven VERIFY task can open one bounded retry on the same lineage", () => {
+	const returned = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt({ unresolved: ["still broken"] }),
+	}));
+	const retry = step(returned, (revision) => ({
+		kind: "start_attempt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a2",
+		subject: SUBJECT,
+	}));
+	assert.equal(findTask(retry, "T1" as TaskId)?.state, "RUNNING");
+	assert.deepEqual(findTask(retry, "T1" as TaskId)?.attempts.map((attempt) => attempt.lineage), [1, 2]);
 });
 
 test("a returned worker moves to VERIFY and never straight to DONE", () => {
@@ -386,26 +415,18 @@ test("a task cannot certify a criterion it never targeted", () => {
 });
 
 test("integrating a moved head demotes proof taken against the old subject", () => {
-	const writer = candidate({ effect: "write" });
-	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
-	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
-	const recorded = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
-	const integrated = step(recorded, (revision) => ({
+	const firstRecorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const firstFinished = step(firstRecorded, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+	const writer = candidate({ taskId: "T2" as TaskId, criterionId: "A2" as CriterionId, effect: "write" });
+	const admitted = step(firstFinished, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
+	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", subject: SUBJECT }));
+	const recorded = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", receipt: receipt({ taskId: "T2" as TaskId, attemptId: "T2-a1" }) }));
+	const moved = step(recorded, (revision) => ({
 		kind: "integrate_attempt",
 		expectedRevision: revision,
-		taskId: "T1" as TaskId,
-		attemptId: "T1-a1",
+		taskId: "T2" as TaskId,
+		attemptId: "T2-a1",
 		subject: { ...SUBJECT, head: "c".repeat(40) },
-	}));
-	const finished = step(integrated, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
-	assert.equal(findTask(finished, "T1" as TaskId)?.state, "DONE");
-
-	const moved = step(finished, (revision) => ({
-		kind: "integrate_attempt",
-		expectedRevision: revision,
-		taskId: "T1" as TaskId,
-		attemptId: "T1-a1",
-		subject: { ...SUBJECT, head: "d".repeat(40) },
 	}));
 	assert.equal(findTask(moved, "T1" as TaskId)?.state, "VERIFY");
 	assert.equal(criterionProven(moved, "A1" as CriterionId), false);
@@ -467,12 +488,16 @@ test("reopening requires new evidence and replanning requires a diagnosed platea
 test("one bounded replan is allowed after a plateau, and only once", () => {
 	let current = runningTask();
 	for (const attempt of ["T1-a1", "T1-a2"]) {
-		current = step(current, (revision) =>
-			attempt === "T1-a1"
-				? { kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: attempt, receipt: receipt({ unresolved: ["still broken"] }) }
-				: { kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: attempt, receipt: receipt({ unresolved: ["still broken"] }) },
-		);
-		if (attempt === "T1-a2") break;
+		if (attempt === "T1-a2") {
+			current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: attempt, subject: SUBJECT }));
+		}
+		current = step(current, (revision) => ({
+			kind: "record_receipt",
+			expectedRevision: revision,
+			taskId: "T1" as TaskId,
+			attemptId: attempt,
+			receipt: receipt({ attemptId: attempt, unresolved: ["still broken"] }),
+		}));
 	}
 	assert.equal(current.noProgressAttempts, 2);
 
@@ -496,6 +521,7 @@ test("a new generation reconciles in-flight work and keeps lineage", () => {
 			statement: "narrowed objective",
 			nonGoals: [],
 			permittedEffects: ["read", "write"],
+			finishAuthority: "report the narrowed result",
 			appetite: { tasks: 8, attemptsPerTask: 2 },
 		},
 		criteria: [{ id: "A1" as CriterionId, statement: "the narrowed fix is proven", mandatory: true }],
@@ -544,7 +570,8 @@ test("a user pause is never overridden by a converged verdict", () => {
 test("a diagnosed, exhausted plateau is reported as a blocker with no silent retry", () => {
 	let current = runningTask();
 	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ unresolved: ["still broken"] }) }));
-	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a2", receipt: receipt({ unresolved: ["still broken"] }) }));
+	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }));
+	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a2", receipt: receipt({ attemptId: "T1-a2", unresolved: ["still broken"] }) }));
 	current = step(current, (revision) => ({ kind: "use_replan", expectedRevision: revision, taskId: "T1" as TaskId }));
 	const verdict = evaluateRun(current);
 	assert.equal(verdict.plateau, true);
@@ -578,9 +605,19 @@ test("dispatch refuses a task that is not admitted and running", () => {
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
 	const notStarted = buildDispatchPrompt(admitted, "T1" as TaskId, "T1-a1");
 	assert.equal(notStarted.ok, false);
-	assert.match(notStarted.ok ? "" : notStarted.error, /only an admitted READY task|not recorded/);
+	assert.match(notStarted.ok ? "" : notStarted.error, /start_attempt must persist an attempt/);
 
-	const deferred = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ deps: ["T9" as TaskId] }) }));
+	const started = step(admitted, (revision) => ({
+		kind: "start_attempt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		subject: SUBJECT,
+	}));
+	const dispatched = buildDispatchPrompt(started, "T1" as TaskId, "T1-a1");
+	assert.equal(dispatched.ok, true);
+
+	const deferred = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ taskId: "T2" as TaskId, deps: ["T9" as TaskId] }) }));
 	const blocked = buildDispatchPrompt(deferred, "T2" as TaskId, "T2-a1");
 	assert.equal(blocked.ok, false);
 	assert.match(blocked.ok ? "" : blocked.error, /is DEFERRED/);
@@ -698,20 +735,25 @@ test("a converged receipt states its scope and disclaims merge authority", () =>
 
 // ------------------------------------------------------------ extension host
 
-function fakeHost() {
-	const tools = new Map<string, { name: string; execute(id: string, params: Record<string, unknown>): Promise<{ content: Array<{ text: string }>; isError?: boolean }> }>();
+function fakeHost(options: { nativeTask?: boolean } = {}) {
+	const tools = new Map<string, { name: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }>();
 	const events = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const commands = new Map<string, { description?: string; handler(args: string, ctx: unknown): unknown }>();
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	const notifications: string[] = [];
+	const sentMessages: Array<{ content: string; options?: unknown }> = [];
 	const leaf = (): unknown => ({ optional: () => leaf(), describe: () => leaf() });
 	return {
 		tools,
 		events,
+		commands,
 		entries,
 		notifications,
+		sentMessages,
 		zod: { object: () => ({}), string: leaf },
+		arktype: options.nativeTask ? ((schema: unknown) => schema) : undefined,
 		setLabel() {},
-		registerTool(definition: { name: string; execute(id: string, params: Record<string, unknown>): Promise<{ content: Array<{ text: string }>; isError?: boolean }> }) {
+			registerTool(definition: { name: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }) {
 			tools.set(definition.name, definition);
 		},
 		appendEntry(customType: string, data: unknown) {
@@ -719,6 +761,12 @@ function fakeHost() {
 		},
 		on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
 			events.set(name, handler);
+		},
+		registerCommand(name: string, definition: { description?: string; handler(args: string, ctx: unknown): unknown }) {
+			commands.set(name, definition);
+		},
+		sendUserMessage(content: string, options?: unknown) {
+			sentMessages.push({ content, options });
 		},
 		notify(message: string) {
 			notifications.push(message);
@@ -761,6 +809,65 @@ test("loading the extension registers its surface and starts no work", async () 
 	assert.equal(host.notifications.length, 0, "loading is silent");
 });
 
+test("the package exports a native OMP factory and its command is a bounded control surface", async () => {
+	const host = fakeHost();
+	const result = lunaFactoryExtension(host as never);
+	assert.equal(result, undefined);
+	assert.equal(typeof host.commands.get("factory")?.handler, "function");
+	await host.commands.get("factory")!.handler("status", startCtx(host));
+	assert.match(host.notifications.join("\n"), /no Factory run is open/);
+	await host.commands.get("factory")!.handler("inspect the failure", startCtx(host));
+	assert.match(host.sentMessages[0]!.content, /explicit operator objective/);
+	assert.match(host.sentMessages[0]!.content, /luna_factory_open/);
+});
+
+test("the native task seam admits only a ledger-stamped assignment and journals OMP identities", async () => {
+	let nativeCalls = 0;
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "prove the fix",
+		criteria: [{ id: "A1", statement: "the fix is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "fix it",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+
+	const task = host.tools.get("task");
+	assert.ok(task, "a host with native task support gets a same-name wrapper");
+	const invoke = async () => {
+		nativeCalls += 1;
+		return {
+			content: [{ type: "text", text: "native task completed" }],
+			details: { async: { state: "completed", jobId: "job-1", type: "task" }, results: [{ id: "agent-1" }] },
+		};
+	};
+	const context = { invokeTool: invoke };
+	const refused = await task.execute("call", { task: "unbound work" }, undefined, undefined, context);
+	assert.equal(refused.isError, true);
+	assert.match(refused.content[0]!.text, /ledger-stamped/);
+	assert.equal(nativeCalls, 0);
+
+	const marker = dispatchMarker("T1", "T1-a1", "G1");
+	const accepted = await task.execute("call", { task: `do the work\n${marker}` }, undefined, undefined, context);
+	assert.equal(accepted.isError, undefined);
+	assert.equal(nativeCalls, 1);
+	const record = host.entries.at(-1)!.data as { tasks: Array<{ attempts: Array<{ nativeJobIds: string[]; nativeResultIds: string[] }> }> };
+	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeJobIds, ["job-1"]);
+	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeResultIds, ["agent-1"]);
+});
+
 test("status works while idle and reports the enforced boundary", async () => {
 	const host = fakeHost();
 	createLunaFactoryExtension(host as never, { env: {}, artifactRoots: ROOTS });
@@ -793,6 +900,58 @@ test("an open run is not silently replaced by a new objective", async () => {
 	assert.match(replaced.content[0]!.text, /already open for 'one'/);
 	const explicit = await callTool(host, "luna_factory_open", { ...payload, objective: "two", replace: true });
 	assert.equal(explicit.isError, undefined);
+});
+
+test("opening captures explicit authority and never defaults a read-only run to writes", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	const opened = await callTool(host, "luna_factory_open", {
+		objective: "inspect the failure",
+		criteria: [{ id: "A1", statement: "the failure is explained" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+		options: {
+			nonGoals: ["do not edit source"],
+			permittedEffects: ["read"],
+			finishAuthority: "report findings only",
+			appetite: { tasks: 3, attemptsPerTask: 1 },
+		},
+	});
+	assert.equal(opened.isError, undefined);
+	const record = host.entries.at(-1)!.data as { goal: { nonGoals: string[]; permittedEffects: string[]; finishAuthority: string; appetite: { tasks: number; attemptsPerTask: number } } };
+	assert.deepEqual(record.goal.nonGoals, ["do not edit source"]);
+	assert.deepEqual(record.goal.permittedEffects, ["read"]);
+	assert.equal(record.goal.finishAuthority, "report findings only");
+	assert.deepEqual(record.goal.appetite, { tasks: 3, attemptsPerTask: 1 });
+
+	const write = await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "edit source",
+		deps: [],
+		effect: "write",
+		owner: "luna",
+		necessity: "the failure is unproven",
+	});
+	assert.equal(write.isError, undefined);
+	assert.match(write.content[0]!.text, /ESCALATE/);
+});
+
+test("opening without options records a safe read-only authority", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "inspect only",
+		criteria: [{ id: "A1", statement: "the report is complete" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	const record = host.entries.at(-1)!.data as { goal: { permittedEffects: string[]; finishAuthority: string } };
+	assert.deepEqual(record.goal.permittedEffects, ["read"]);
+	assert.match(record.goal.finishAuthority, /no merge|report/i);
 });
 
 test("the admitted vertical runs end to end and finishes on proof", async () => {
