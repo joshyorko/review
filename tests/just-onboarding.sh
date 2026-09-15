@@ -53,6 +53,12 @@ cat >"$fake_bin/podman" <<'EOF'
 set -eu
 [[ "${1:-}" == info ]] && { [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]]; exit; }
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
+if [[ "${1:-}" == run && "${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
+  [[ "${AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
+  [[ "${AWS_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "${AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "$*" != *test-bedrock-bearer* && "$*" != *us-east-1* ]] || exit 19
+fi
 if [[ "${1:-}" == run && -n "${EXPECT_EXTENSION:-}" ]]; then
   previous=""
   found=0
@@ -103,6 +109,12 @@ if [[ "${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
        "$OPENAI_API_KEY" == "test-provider-token" &&
        "$HIVE_HUB" == https://hive.example.test ]]
   ' || exit 19
+fi
+if [[ "${EXPECT_APPTAINER_AWS_FORWARDING:-}" == 1 ]]; then
+  [[ "${APPTAINERENV_AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
+  [[ "${APPTAINERENV_AWS_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "${APPTAINERENV_AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "$*" != *test-bedrock-bearer* && "$*" != *us-east-1* ]] || exit 19
 fi
 exit 18
 EOF
@@ -258,6 +270,30 @@ status=$?
 set -e
 [[ "$status" -ne 0 ]] || fail "detached launch must fail"
 contains 'detached contributor containers are not supported' "$output"
+
+scenario="review forwards Bedrock and region credentials to KVM"
+export AWS_BEARER_TOKEN_BEDROCK=test-bedrock-bearer AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_PODMAN_AWS_FORWARDING=1
+run_just review-queue owner/repo
+[[ "$status" -eq 17 ]] || fail "review did not forward Bedrock credentials to Podman: $output"
+log_contains '--env AWS_BEARER_TOKEN_BEDROCK' "$podman_log"
+log_contains '--env AWS_REGION' "$podman_log"
+log_contains '--env AWS_DEFAULT_REGION' "$podman_log"
+log_contains '--env COPILOT_INTEGRATION_ID' "$podman_log"
+log_not_contains 'test-bedrock-bearer' "$podman_log"
+log_not_contains 'us-east-1' "$podman_log"
+unset EXPECT_PODMAN_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION
+
+scenario="review forwards Bedrock and region credentials to Apptainer"
+export AWS_BEARER_TOKEN_BEDROCK=test-bedrock-bearer AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_APPTAINER_AWS_FORWARDING=1
+: >"$apptainer_log"
+set +e
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 18 ]] || fail "review did not forward Bedrock credentials to Apptainer: $output"
+log_not_contains 'test-bedrock-bearer' "$apptainer_log"
+log_not_contains 'us-east-1' "$apptainer_log"
+unset EXPECT_APPTAINER_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION
 
 scenario="KVM preflight failure falls back to Apptainer"
 : >"$apptainer_log"

@@ -8,9 +8,9 @@ WORKFLOW = ROOT / ".github/workflows/review-dev.yml"
 
 def test_wrapper_prefers_personal_oci_and_keeps_sif_as_fallback():
     script = SCRIPT.read_text()
-    wrapper = script.split('cat > "$work/payload/bluefin" <<\'EOF\'\n', 1)[1].split("\nEOF\n", 1)[0]
+    wrapper = script.split('cat > "$work/payload/bluefin" <<EOF\n', 1)[1].split("\nEOF\n", 1)[0]
     assert "BLUEFIN_REVIEW_IMAGE" in wrapper
-    assert "ghcr.io/joshyorko/review-appliance:sha-" in wrapper
+    assert "ghcr.io/joshyorko/review-appliance:sha-" in script
     assert "BLUEFIN_REVIEW_FALLBACK_SIF" in wrapper
     assert 'export BLUEFIN_REVIEW_SIF="$root/launcher/bluefin-review.sif"' not in wrapper
 

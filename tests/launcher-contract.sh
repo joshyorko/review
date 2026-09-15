@@ -39,6 +39,19 @@ arg_after() {
   return 1
 }
 
+assert_aws_env_names() {
+  local call="$1" context="${2:-launcher}" name
+  for name in AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION; do
+    [[ "$call" == *"--env $name"* ]] || fail "$context did not forward $name by name: $call"
+  done
+}
+assert_provider_env_names() {
+  local call="$1" context="${2:-launcher}" name
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
+    [[ "$call" == *"--env $name"* ]] || fail "$context did not preserve $name forwarding: $call"
+  done
+}
+
 configure_host_files() {
   local mask="$1"
   rm -f "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
@@ -160,6 +173,12 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
   exit 0
 fi
 printf '%s\n' "\$*" >>"$mock_podman_log"
+if [[ "\${1:-}" == run && "\${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
+  [[ "\${AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
+  [[ "\${AWS_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "\${AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "\$*" != *test-bedrock-bearer* && "\$*" != *us-east-1* ]] || exit 19
+fi
 [[ -z "\${FAKE_PODMAN_DELAY:-}" ]] || sleep "\$FAKE_PODMAN_DELAY"
 case "\${1:-} \${2:-}" in
   "pull "*) [[ "\${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
@@ -187,7 +206,7 @@ for arg in "\$@"; do
 done
 if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
-  for name in GH_TOKEN OPENAI_API_KEY; do
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
     source_name="APPTAINERENV_\${name}"
     [[ -v "\$source_name" ]] && injected+=("\$name=\${!source_name}")
   done
@@ -195,8 +214,22 @@ if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
     [[ "\${APPTAINERENV_HIVE_HUB:-}" == https://hive.example.test ]] || exit 19
   fi
   env -i "\${injected[@]}" /bin/bash -c '
-    [[ "\$GH_TOKEN" == mock-token && "\$OPENAI_API_KEY" == test-provider-token ]]
+    [[ "\$GH_TOKEN" == mock-token &&
+       "\$GITHUB_TOKEN" == mock-token &&
+       "\$COPILOT_GITHUB_TOKEN" == test-copilot-token &&
+       "\$GITHUB_COPILOT_TOKEN" == test-github-copilot-token &&
+       "\$COPILOT_INTEGRATION_ID" == test-copilot-integration &&
+       "\$ANTHROPIC_API_KEY" == test-anthropic-key &&
+       "\$ANTHROPIC_OAUTH_TOKEN" == test-anthropic-oauth &&
+       "\$OPENAI_API_KEY" == test-provider-token &&
+       "\$GEMINI_API_KEY" == test-gemini-key ]]
   ' || exit 19
+fi
+if [[ "\${EXPECT_APPTAINER_AWS_FORWARDING:-}" == 1 ]]; then
+  [[ "\${APPTAINERENV_AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
+  [[ "\${APPTAINERENV_AWS_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "\${APPTAINERENV_AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "\$*" != *test-bedrock-bearer* && "\$*" != *us-east-1* ]] || exit 19
 fi
 exit 0
 EOF
@@ -261,6 +294,25 @@ assert_bluefin_review() {
   fi
 }
 
+bedrock_token="test-bedrock-bearer"
+: >"$mock_podman_log"
+AWS_BEARER_TOKEN_BEDROCK="$bedrock_token" AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_PODMAN_AWS_FORWARDING=1 \
+  "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "bin/bluefin did not forward Bedrock credentials to Podman"
+bedrock_podman_call="$(grep '^run ' "$mock_podman_log")"
+assert_aws_env_names "$bedrock_podman_call" "Podman review"
+assert_provider_env_names "$bedrock_podman_call" "Podman review"
+[[ "$bedrock_podman_call" != *"$bedrock_token"* && "$bedrock_podman_call" != *us-east-1* ]] ||
+  fail "Podman review exposed Bedrock credentials in argv/log output"
+
+: >"$mock_apptainer_log"
+AWS_BEARER_TOKEN_BEDROCK="$bedrock_token" AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_APPTAINER_AWS_FORWARDING=1 \
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "bin/bluefin did not forward Bedrock credentials to Apptainer fallback"
+bedrock_fallback_call="$(cat "$mock_apptainer_log")"
+[[ "$bedrock_fallback_call" != *"$bedrock_token"* && "$bedrock_fallback_call" != *us-east-1* ]] ||
+  fail "Apptainer fallback exposed Bedrock credentials in argv/log output"
+
 : >"$mock_podman_log"
 offline_output="$(FAKE_PULL_FAIL=1 "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
   fail "packaged review did not use its cached image after refresh failure"
@@ -278,15 +330,33 @@ set -e
   fail "packaged review missing-image diagnostic was not actionable: $offline_output"
 ! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image acquisition failed"
 
-mv "$scratch/bin/krun" "$scratch/krun"
+  # An installed personal bundle points krun at its immutable OCI image.
+  : >"$mock_podman_log"
+  BLUEFIN_REVIEW_IMAGE="ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890" \
+    "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+    fail "personal OCI review launch failed"
+  oci_call="$(grep '^run ' "$mock_podman_log")"
+  [[ "$oci_call" == *"ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890"* ]] ||
+    fail "personal OCI review launch used the wrong image"
+
+  mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
-fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
+fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 \
+  COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token \
+  COPILOT_INTEGRATION_ID=test-copilot-integration ANTHROPIC_API_KEY=test-anthropic-key \
+  ANTHROPIC_OAUTH_TOKEN=test-anthropic-oauth OPENAI_API_KEY=test-provider-token \
+  GEMINI_API_KEY=test-gemini-key REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" \
+  "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
 [[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "review fallback warning is missing"
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment"
 [[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/review:stable --repo projectbluefin/review"* ]] || fail "review fallback used the wrong image or scope"
 [[ "$fallback_call" == *":/workspace,"*":/tmp"* ]] || fail "review fallback did not bind workspace and instance-backed scratch together"
-[[ "$fallback_call" != *mock-token* && "$fallback_call" != *test-provider-token* ]] || fail "fallback leaked credentials into argv"
+[[ "$fallback_call" != *mock-token* && "$fallback_call" != *test-copilot-token* &&
+   "$fallback_call" != *test-github-copilot-token* && "$fallback_call" != *test-copilot-integration* &&
+   "$fallback_call" != *test-anthropic-key* && "$fallback_call" != *test-anthropic-oauth* &&
+   "$fallback_call" != *test-provider-token* && "$fallback_call" != *test-gemini-key* ]] ||
+  fail "fallback leaked credentials into argv"
 mv "$scratch/krun" "$scratch/bin/krun"
 : >"$mock_podman_log"
 : >"$mock_apptainer_log"
@@ -383,7 +453,25 @@ sif_call="$(cat "$mock_apptainer_log")"
   fail "packaged SIF did not use the selected immutable image"
 [[ "$sif_call" != *".omp:/home/bluefin/.omp"* ]] ||
   fail "packaged SIF imported host ~/.omp without the explicit opt-in"
+
+: >"$mock_apptainer_log"
+AWS_BEARER_TOKEN_BEDROCK="$bedrock_token" AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_APPTAINER_AWS_FORWARDING=1 \
+  BLUEFIN_REVIEW_SIF="$sif" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "packaged SIF did not forward Bedrock credentials to Apptainer"
+sif_credential_call="$(cat "$mock_apptainer_log")"
+[[ "$sif_credential_call" == *"$sif"* ]] || fail "packaged SIF credential test used the wrong image"
+[[ "$sif_credential_call" != *"$bedrock_token"* && "$sif_credential_call" != *us-east-1* ]] ||
+  fail "packaged SIF exposed Bedrock credentials in argv/log output"
 unset BLUEFIN_REVIEW_SIF
+
+: >"$mock_apptainer_log"
+BLUEFIN_REVIEW_FALLBACK_SIF="$sif" REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" \
+  "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "personal packaged SIF fallback launch failed"
+fallback_sif_call="$(cat "$mock_apptainer_log")"
+[[ "$fallback_sif_call" == *"$sif"* && "$fallback_sif_call" != *"docker://ghcr.io/projectbluefin/review:stable"* ]] ||
+  fail "personal fallback did not use the bundled SIF"
+unset BLUEFIN_REVIEW_FALLBACK_SIF
 
 # --- 3. Hermetic test of bin/omp-review (Source launcher) ----------------------
 
@@ -460,7 +548,11 @@ second_contribute_call="${concurrent_contribute_calls[1]}"
 
 mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
-fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 OPENAI_API_KEY=test-provider-token "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)" || fail "contributor Apptainer fallback lost credentials"
+fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 \
+  COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token \
+  COPILOT_INTEGRATION_ID=test-copilot-integration ANTHROPIC_API_KEY=test-anthropic-key \
+  ANTHROPIC_OAUTH_TOKEN=test-anthropic-oauth OPENAI_API_KEY=test-provider-token \
+  GEMINI_API_KEY=test-gemini-key "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)" || fail "contributor Apptainer fallback lost credentials"
 [[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "contributor fallback warning is missing"
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "contributor fallback did not use Apptainer containment"

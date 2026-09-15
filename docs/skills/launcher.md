@@ -86,6 +86,17 @@ rather than inferred.
 - The OMP appliance receives GitHub/provider credentials by inherited name and,
   when `HIVE_HUB` is unset, resolves the hub from the host's default
   `~/.config/hive/contributor.env` without mounting its registration token.
+- The explicit provider environment contract is:
+  - GitHub: `GH_TOKEN`, `GITHUB_TOKEN`.
+  - Copilot: `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_TOKEN`,
+    `COPILOT_INTEGRATION_ID`.
+  - Anthropic: `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`.
+  - OpenAI and Gemini: `OPENAI_API_KEY`, `GEMINI_API_KEY`.
+  - Amazon Bedrock: `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`,
+    `AWS_DEFAULT_REGION`.
+  This same allowlist is used by Podman's `--env` forwarding and Apptainer's
+  `APPTAINERENV_` forwarding. The launcher does not pass the broader AWS
+  credential or configuration environment.
 - Apptainer's contained environment receives only the explicit credential and
   runtime allowlist through `APPTAINERENV_` variables. Keep `--no-eval` so
   credential and argument values remain literal inside the container.
@@ -97,10 +108,13 @@ rather than inferred.
 
 ## Personal SIF and audio
 
-The personal Brew bundle sets `BLUEFIN_REVIEW_SIF` so the packaged `bluefin`
-launcher uses its native immutable SIF through Apptainer while keeping the same
-target-specific `/home/bluefin` state boundary. The SIF contains Headroom's
-MCP runtime and the OMP Linux voice closure.
+The personal Brew bundle carries a full-commit personal OCI reference and a
+native immutable SIF built from the same source. The generated `bluefin`
+wrapper selects the OCI image through Podman/krun when KVM is ready and sets
+the bundled SIF as the Apptainer fallback. An explicit `BLUEFIN_REVIEW_SIF`
+still forces a SIF. The target-specific `/home/bluefin` state boundary remains
+the same on both paths. The SIF contains Headroom's MCP runtime and the OMP
+Linux voice closure.
 
 For Review voice, the packaged launcher binds only a detected
 `$XDG_RUNTIME_DIR/pulse/native` socket and sets the contained `PULSE_SERVER`.

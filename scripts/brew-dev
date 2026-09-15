@@ -33,8 +33,7 @@ case "$action" in
     git -C "$repo" archive "$sha" | tar -xf - -C "$work/source"
     [[ -f "$work/source/bin/bluefin" && -f "$work/source/image/appliance/Containerfile" ]] || fail 'ref lacks the Review launcher or appliance'
     version="$(cd "$work/source" && bash scripts/review-appliance-version.sh)"
-    oci_repository="${BLUEFIN_REVIEW_OCI_REPOSITORY:-ghcr.io/joshyorko/review-appliance}"
-    oci_image="${oci_repository}:sha-${sha}"
+    oci_image="ghcr.io/joshyorko/review-appliance:sha-${sha}"
     oci_arch_image="${oci_image}-${arch}"
     oci_digest=""
     image="localhost/bluefin-review-dev:${sha:0:12}-$arch-$$"
@@ -70,23 +69,28 @@ PY
     mkdir -p "$work/payload/launcher/scripts"
     cp "$work/source/scripts/parse-review-args.sh" \
       "$work/payload/launcher/scripts/parse-review-args.sh"
-    python3 - "$work/payload" "$source_ref" "$sha" "$arch" <<'PY'
+    python3 - "$work/payload" "$source_ref" "$sha" "$arch" "$oci_image" "$oci_arch_image" "$oci_digest" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
-p=Path(sys.argv[1]);ref,sha,arch=sys.argv[2:]
-meta={'ref':ref,'sha':sha,'arch':arch,'launcher_sha256':hashlib.sha256((p/'launcher/bin/bluefin').read_bytes()).hexdigest(),'sif_sha256':hashlib.sha256((p/'launcher/bluefin-review.sif').read_bytes()).hexdigest()}
+p=Path(sys.argv[1]);ref,sha,arch,oci_image,oci_arch_image,oci_digest=sys.argv[2:]
+meta={'ref':ref,'sha':sha,'arch':arch,'oci_image':oci_image,'oci_arch_image':oci_arch_image,'launcher_sha256':hashlib.sha256((p/'launcher/bin/bluefin').read_bytes()).hexdigest(),'sif_sha256':hashlib.sha256((p/'launcher/bluefin-review.sif').read_bytes()).hexdigest()}
+if oci_digest:
+    meta['oci_arch_digest']=oci_digest
 (p/'build.json').write_text(json.dumps(meta,indent=2)+'\n')
 (p/'build.txt').write_text(f'Bluefin Review dev: {ref} @ {sha}\n')
 PY
-    cat > "$work/payload/bluefin" <<'EOF'
+    cat > "$work/payload/bluefin" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../libexec" && pwd)"
-if [[ "${1:-}" == review ]]; then
-  export BLUEFIN_REVIEW_SIF="$root/launcher/bluefin-review.sif"
-  cat "$root/build.txt"
+if [[ "\${1:-}" == review ]]; then
+  export BLUEFIN_REVIEW_PERSONAL_MODE=1
+  export BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY=1
+  export BLUEFIN_REVIEW_IMAGE="\${BLUEFIN_REVIEW_IMAGE:-$oci_image}"
+  export BLUEFIN_REVIEW_FALLBACK_SIF="\${BLUEFIN_REVIEW_FALLBACK_SIF:-\$root/launcher/bluefin-review.sif}"
+  cat "\$root/build.txt"
 fi
-exec "$root/launcher/bin/bluefin" "$@"
+exec "\$root/launcher/bin/bluefin" "\$@"
 EOF
     chmod 0755 "$work/payload/bluefin"
     tar -czf "$work/bluefin-review-dev-$arch.tar.gz" -C "$work/payload" .

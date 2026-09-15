@@ -92,7 +92,15 @@ class BrewDevContract(unittest.TestCase):
 
     def test_installed_homebrew_layout_resolves_the_libexec_root(self):
         script = SCRIPT.read_text()
-        wrapper = script.split('cat > "$work/payload/bluefin" <<\'EOF\'\n', 1)[1].split("\nEOF\n", 1)[0] + "\n"
+        wrapper = script.split('cat > "$work/payload/bluefin" <<EOF\n', 1)[1].split("\nEOF\n", 1)[0]
+        wrapper = (
+            wrapper
+            .replace(r"\${", "${")
+            .replace(r"\$root", "$root")
+            .replace(r"\$@", "$@")
+            .replace("$oci_image", f"ghcr.io/joshyorko/review-appliance:sha-{self.sha}")
+            + "\n"
+        )
         package = self.root / "Cellar/bluefin-review-dev/0.20260915034611"
         launcher = package / "libexec/launcher/bin/bluefin"
         launcher.parent.mkdir(parents=True)
@@ -127,7 +135,7 @@ class BrewDevContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Bluefin Review dev: main @ fixture", result.stdout)
         self.assertIn("delegated:review --repo projectbluefin/review", result.stdout)
-        self.assertIn(f"sif={package}/libexec/launcher/bluefin-review.sif", result.stdout)
+        self.assertIn("sif=\n", result.stdout)
 
     def test_package_carries_parser_and_headroom_runtime(self):
         script = SCRIPT.read_text()
@@ -137,7 +145,7 @@ class BrewDevContract(unittest.TestCase):
     def test_personal_workflow_builds_the_self_hosted_branch(self):
         workflow = (SCRIPT.parents[1] / ".github/workflows/review-dev.yml").read_text()
         self.assertIn("default: self-hosted", workflow)
-        self.assertEqual(workflow.count("ref: self-hosted"), 2)
+        self.assertEqual(workflow.count("ref: self-hosted"), 1)
         self.assertIn("SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}", workflow)
         self.assertIn("BLUEFIN_REVIEW_SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}", workflow)
         self.assertNotIn("dev/package-main", workflow)

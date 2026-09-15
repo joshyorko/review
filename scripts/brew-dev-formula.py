@@ -17,6 +17,13 @@ def prepare(bundles: Path, output: Path):
     sha, ref = records[0]['sha'], records[0]['ref']
     if not re.fullmatch('[0-9a-f]{40}', sha):
         raise ValueError('source SHA must be a full commit')
+    default_oci = f'ghcr.io/joshyorko/review-appliance:sha-{sha}'
+    oci_images = {r.get('oci_image', default_oci) for r in records}
+    if len(oci_images) != 1:
+        raise ValueError('bundles must share one OCI image reference')
+    oci_image = oci_images.pop()
+    if not re.fullmatch(r'ghcr\.io/joshyorko/review-appliance:sha-[0-9a-f]{40}', oci_image):
+        raise ValueError('OCI image must use the personal full-commit reference')
     arches = [r['arch'] for r in records]
     if len(set(arches)) != len(arches) or any(a not in ('x86_64', 'aarch64') for a in arches):
         raise ValueError('invalid or repeated architecture')
@@ -35,6 +42,9 @@ def prepare(bundles: Path, output: Path):
         lines.append('  depends_on arch: :' + ('x86_64' if arches[0] == 'x86_64' else 'arm64'))
     for r in records:
         name = f"bluefin-review-dev-{r['arch']}.tar.gz"
+        expected_oci_arch = f'{oci_image}-{r["arch"]}'
+        if r.get('oci_arch_image', expected_oci_arch) != expected_oci_arch:
+            raise ValueError('OCI architecture reference does not match source image')
         actual = hashlib.sha256((bundles/name).read_bytes()).hexdigest()
         if actual != r['archive_sha256']:
             raise ValueError('archive checksum differs from manifest')
@@ -49,7 +59,7 @@ def prepare(bundles: Path, output: Path):
     (output/'bluefin-review-dev.rb').write_text('\n'.join(lines))
     (output/'sha').write_text(sha+'\n')
     (output/'tag').write_text(tag+'\n')
-    (output/'notes').write_text(f'Source: {ref}\nCommit: {sha}\nNative Linux launcher and SIF from the same commit.\n')
+    (output/'notes').write_text(f'Source: {ref}\nCommit: {sha}\nOCI: {oci_image}\nNative Linux launcher and SIF from the same commit.\n')
 
 
 if __name__ == '__main__':

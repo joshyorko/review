@@ -40,8 +40,10 @@ bluefin review
 > **Note:** `bluefin` prefers rootless Podman with the `krun` OCI runtime. If Podman, `krun`, or `/dev/kvm` is unavailable, it reports why and falls back to isolated Apptainer execution; the Linux Homebrew formula declares Apptainer as a dependency.
 
 For personal dogfood builds, the `bluefin-review-dev` Homebrew package carries
-the matching native Review SIF and launcher from one exact commit. It does not
-require a host OMP, Node, or Python install:
+the matching personal OCI reference, packaged Review SIF, and launcher from one
+exact commit. It prefers the OCI image through Podman/krun and uses the packaged
+SIF when KVM is unavailable. An explicit `BLUEFIN_REVIEW_SIF` still forces a SIF.
+It does not require a host OMP, Node, or Python install:
 
 ```bash
 brew tap joshyorko/review-dev

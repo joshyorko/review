@@ -116,7 +116,7 @@ require_apptainer_fallback() {
 }
 prepare_apptainer_environment() {
   local name host_file
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY HIVE_HUB BLUEFIN_REVIEW_ORG TERM COLORTERM; do
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION HIVE_HUB BLUEFIN_REVIEW_ORG TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   APPTAINER_HOST_ARGS=()
@@ -664,7 +664,7 @@ contribute mode="" count="":
       report_podman_image_identity "$CONTRIBUTOR_IMAGE" "contributor"
       CONTAINER_ARGS=(podman run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME" --userns "keep-id:uid=65532,gid=65532")
       CONTAINER_ARGS+=(--volume "${CONTRIBUTOR_VOLUME}:/home/bluefin:rw" --volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}")
-      for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
+      for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION; do
         [[ -n "${!name:-}" ]] && CONTAINER_ARGS+=(--env "$name")
       done
       [[ -n "${GH_TOKEN_VALUE:-}" ]] && CONTAINER_ARGS+=(--env GH_TOKEN)
@@ -755,7 +755,9 @@ review-appliance *appliance_args:
         --volume "bluefin-review-${INSTANCE_KEY}-workspace:/workspace:rw"
         --volume "bluefin-review-${INSTANCE_KEY}-tmp:/tmp:rw"
         --env GH_TOKEN --env GITHUB_TOKEN --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN
+        --env COPILOT_INTEGRATION_ID
         --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN --env OPENAI_API_KEY --env GEMINI_API_KEY
+        --env AWS_BEARER_TOKEN_BEDROCK --env AWS_REGION --env AWS_DEFAULT_REGION
         --env HIVE_HUB --env BLUEFIN_REVIEW_ORG
         --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}"
       )

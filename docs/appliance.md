@@ -220,6 +220,12 @@ Credentials are inherited by name (`--env GH_TOKEN`), never passed as arguments
 and never baked into a layer. The mode resolves a token from `GH_TOKEN`,
 `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, or `gh auth token` in that order.
 
+The launcher forwards an explicit provider allowlist across both Podman and
+contained Apptainer runs: GitHub/Copilot credentials, Anthropic credentials,
+`OPENAI_API_KEY`, `GEMINI_API_KEY`, and Amazon Bedrock's
+`AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, and `AWS_DEFAULT_REGION`. It does not
+forward the general AWS credential or configuration environment.
+
 Arguments reach `omp` directly, so the mode's flags work as documented:
 
 ```bash

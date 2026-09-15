@@ -111,16 +111,17 @@ producing reviewer subagents are capability-limited.
 on the coordinator session. The advisor role maps to `@default`, so it follows
 the maintainer's selected model without pinning a provider. `Alt-S` starts the
 same lifecycle from the active workbench without changing advisor state.
-The PR queue reads complete changed-file names with its GitHub projection and
-omits pull requests that change `.github/workflows/` before reviewer selection.
-Incomplete file lists are omitted rather than assumed safe. Slay rechecks the
-selected candidates before constructing durable repository waves, removes any
-workflow-changing item from the live queue, and continues with eligible items.
-CI state combines status-rollup contexts with check-suite conclusions so a
-workflow startup failure with zero jobs remains visible. Slay excludes known
-failing or pending CI before reviewer dispatch, rechecks it before each wave,
-and blocks approval or merge commands if the active queue state turns red or
-pending.
+The upstream queue filters workflow-changing and incomplete-file-list pull
+requests before reviewer selection. The personal Brew package opts into keeping
+those pull requests visible and selectable; its Slay preflight checks the
+classic OAuth `workflow` scope when GitHub reports it, while missing scope
+metadata remains unknown.
+CI uses one classifier for queue reads and live revalidation. An explicit
+successful or failed status rollup wins over raw CheckSuites, while raw suites
+are fallback evidence only when the rollup is absent or indeterminate.
+Incomplete fallback evidence is unknown and blocks approval or merge until a
+fresh complete read succeeds. Slay revalidates the current head, CI, and live
+repository rules before every mutation.
 Fresh reviewers inherit neither a selected repository nor checkout; prompts
 pass both `repo` and `pull_request` to `hive_workbench_diff`. Repair agents use
 `gh repo clone` and `gh pr checkout` under `$HOME/worktrees`, never `/tmp`, and
@@ -167,7 +168,10 @@ keeping a second, unwired behavior model.
 
 The registered inspection tools are `hive_workbench_status`,
 `hive_workbench_queue`, `hive_workbench_diff`, `hive_workbench_trace`, and
-`hive_workbench_lookup`.
+`hive_workbench_lookup`. The personal package also registers the generic
+`review_workbench_status`, `review_workbench_queue`, `review_workbench_diff`,
+`review_workbench_trace`, and `review_workbench_issue` names. The Hive lookup
+tool remains Hive-specific.
 
 ## Common Rationalizations
 
