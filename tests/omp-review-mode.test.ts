@@ -141,6 +141,7 @@ function fakeFetch(calls, known = {}) {
 									updatedAt: new Date(NOW - 5000).toISOString(),
 									mergeable: "MERGEABLE",
 									reviewDecision: "APPROVED",
+									changedFiles: 2,
 									author: { login: "ada" },
 									repository: { nameWithOwner: "projectbluefin/other" },
 									labels: { nodes: [] },
@@ -1538,14 +1539,11 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.ok(!ctx.notifications.some((notification) => /browse-only mode disables dispatch/.test(notification.message)));
 });
 
-test("--autoslay starts the review-repair-land lifecycle with workflow scope", async () => {
+test("--autoslay skips workflow changes and dispatches eligible pull requests", async () => {
 	const calls = [];
 	const baseFetch = fakeFetch(calls);
 	const fetchImpl = async (url, init) => {
 		const target = String(url);
-		if (target === "https://api.github.com/") {
-			return { ok: true, status: 200, statusText: "OK", headers: new Headers({ "x-oauth-scopes": "repo, workflow" }) };
-		}
 		if (target.includes("/repos/projectbluefin/review/pulls/42/files")) {
 			return {
 				ok: true,
@@ -1569,20 +1567,17 @@ test("--autoslay starts the review-repair-land lifecycle with workflow scope", a
 	await new Promise((resolve) => setImmediate(resolve));
 
 	assert.equal(pi.messages.length, 1);
-	assert.match(pi.messages[0], /bluefin-reviewer/);
-	assert.match(pi.messages[0], /review, repair, and landing/);
-	assert.match(pi.messages[0], /gh pr merge <n> --repo <r> --auto --squash/);
+	assert.match(pi.messages[0], /projectbluefin\/other#7/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#42/);
+	assert.ok(ctx.notifications.some((notification) => /Skipping projectbluefin\/review#42: changes \.github\/workflows\/validate\.yml/.test(notification.message)));
 });
 
-test("--autoslay blocks workflow changes when OAuth scope is known missing", async () => {
+test("--autoslay skips a selection containing only workflow changes", async () => {
 	const calls = [];
 	const baseFetch = fakeFetch(calls);
 	const fetchImpl = async (url, init) => {
 		const target = String(url);
-		if (target === "https://api.github.com/") {
-			return { ok: true, status: 200, statusText: "OK", headers: new Headers({ "x-oauth-scopes": "repo, read:org" }) };
-		}
-		if (target.includes("/repos/projectbluefin/review/pulls/42/files")) {
+		if (target.includes("/pulls/") && target.includes("/files")) {
 			return {
 				ok: true,
 				status: 200,
@@ -1604,19 +1599,26 @@ test("--autoslay blocks workflow changes when OAuth scope is known missing", asy
 	await review.whenStarted();
 	await new Promise((resolve) => setImmediate(resolve));
 
-	assert.equal(pi.messages.length, 0, "known-impossible workflow changes dispatch no agent work");
-	assert.ok(ctx.notifications.some((notification) => /lacks 'workflow' scope/.test(notification.message)));
-	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	assert.equal(batch.state, "blocked");
-	assert.match(batch.error, /\.github\/workflows\/validate\.yml/);
+	assert.equal(pi.messages.length, 0, "workflow-only selections dispatch no agent work");
+	assert.equal(ctx.notifications.filter((notification) => /Skipping .*: changes \.github\/workflows\/validate\.yml/.test(notification.message)).length, 2);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0, "skipped items never enter durable batch state");
 });
 
-test("--autoslay permits non-workflow changes without workflow scope", async () => {
+test("--autoslay permits non-workflow changes", async () => {
 	const calls = [];
 	const baseFetch = fakeFetch(calls);
 	const fetchImpl = async (url, init) => {
-		if (String(url) === "https://api.github.com/") {
-			return { ok: true, status: 200, statusText: "OK", headers: new Headers({ "x-oauth-scopes": "repo, read:org" }) };
+		if (String(url).includes("/repos/projectbluefin/review/pulls/42/files")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => [
+					{ filename: "image/entrypoint.sh", status: "modified", additions: 1, deletions: 1 },
+					{ filename: "README.md", status: "modified", additions: 1, deletions: 0 },
+					{ filename: "tests/example.sh", status: "modified", additions: 1, deletions: 0 },
+				],
+			};
 		}
 		return baseFetch(url, init);
 	};
@@ -1631,7 +1633,7 @@ test("--autoslay permits non-workflow changes without workflow scope", async () 
 	await new Promise((resolve) => setImmediate(resolve));
 
 	assert.equal(pi.messages.length, 1);
-	assert.ok(!ctx.notifications.some((notification) => /lacks 'workflow' scope/.test(notification.message)));
+	assert.ok(!ctx.notifications.some((notification) => /Skipping /.test(notification.message)));
 });
 
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {
@@ -1660,7 +1662,7 @@ test("--autoslay falls back to unranked items when Hive-only filter has 0 ranked
 	const hubEnv = { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" };
 	const hubFetch = async (url, init) => {
 		const target = String(url);
-		if (target.includes("/graphql")) return fakeFetch([])(url, init);
+		if (target.startsWith("https://api.github.com/")) return fakeFetch([])(url, init);
 		const path = target.replace("https://hive.example", "");
 		const body =
 			path === "/api/v1/status"

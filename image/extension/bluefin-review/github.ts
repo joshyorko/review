@@ -184,32 +184,6 @@ function headers(token?: string): Record<string, string> {
 	return value;
 }
 
-/**
- * OAuth scopes reported by GitHub for the active token.
- *
- * Fine-grained and app tokens may omit this header; absence is unknown rather
- * than an empty permission set, so callers must not fail closed on it.
- */
-export async function fetchOAuthScopes(options: FetchOptions = {}): Promise<readonly string[] | undefined> {
-	const { token, signal } = options;
-	if (!token) return undefined;
-	try {
-		const response = await (options.fetchImpl ?? fetch)("https://api.github.com/", {
-			headers: headers(token),
-			signal: deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal),
-			redirect: "error",
-		});
-		if (!response.ok) return undefined;
-		const raw = response.headers?.get?.("x-oauth-scopes");
-		if (raw === null || raw === undefined) return undefined;
-		return raw
-			.split(",")
-			.map((scope) => scope.trim().toLowerCase())
-			.filter(Boolean);
-	} catch {
-		return undefined;
-	}
-}
 
 interface SearchNode {
 	number?: number;
