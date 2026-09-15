@@ -2,11 +2,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
+import { BATCH_ENTRY, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
 import { ReviewMode } from "../image/extension/bluefin-review/mode.ts";
 
 const NOW = 1_800_000_000_000;
-const ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent" };
+const ENV = {
+	GH_TOKEN: "t",
+	HOME: "/nonexistent",
+	XDG_CONFIG_HOME: "/nonexistent",
+	BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY: "1",
+};
 
 function workflowNode() {
 	return {
@@ -31,42 +36,44 @@ function workflowNode() {
 	};
 }
 
-function fetchImpl(url: string | URL | Request, init?: RequestInit) {
-	const target = String(url);
-	if (target === "https://api.github.com/") {
-		return Promise.resolve({
-			ok: true,
-			status: 200,
-			statusText: "OK",
-			headers: { get: (name: string) => name.toLowerCase() === "x-oauth-scopes" ? "repo, workflow" : null },
-			json: async () => ({}),
-		});
-	}
-	if (target.includes("/graphql")) {
-		const body = JSON.parse(String(init?.body ?? "{}"));
-		if (body.variables?.search !== undefined) {
+function makeFetch(scopes = "repo, workflow") {
+	return (url: string | URL | Request, init?: RequestInit) => {
+		const target = String(url);
+		if (target === "https://api.github.com/") {
 			return Promise.resolve({
 				ok: true,
 				status: 200,
 				statusText: "OK",
-				json: async () => ({
-					data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode()] } },
-				}),
+				headers: { get: (name: string) => name.toLowerCase() === "x-oauth-scopes" ? scopes : null },
+				json: async () => ({}),
 			});
 		}
-		return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({ data: {} }) });
-	}
-	if (target.includes("/repos/example/repo/pulls/42/files")) {
-		return Promise.resolve({
-			ok: true,
-			status: 200,
-			statusText: "OK",
-			json: async () => [
-				{ filename: ".github/workflows/deploy.yml", status: "modified", additions: 1, deletions: 1 },
-			],
-		});
-	}
-	return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({}) });
+		if (target.includes("/graphql")) {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			if (body.variables?.search !== undefined) {
+				return Promise.resolve({
+					ok: true,
+					status: 200,
+					statusText: "OK",
+					json: async () => ({
+						data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode()] } },
+					}),
+				});
+			}
+			return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({ data: {} }) });
+		}
+		if (target.includes("/repos/example/repo/pulls/42/files")) {
+			return Promise.resolve({
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => [
+					{ filename: ".github/workflows/deploy.yml", status: "modified", additions: 1, deletions: 1 },
+				],
+			});
+		}
+		return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({}) });
+	};
 }
 
 function fakeHost() {
@@ -118,7 +125,7 @@ function fakeCtx() {
 }
 
 test("workflow-changing pull requests stay visible in the personal queue", async () => {
-	const mode = new ReviewMode({ org: "example", fetchImpl: fetchImpl as typeof fetch, env: ENV });
+	const mode = new ReviewMode({ org: "example", fetchImpl: makeFetch() as typeof fetch, env: ENV });
 	mode.setToken("t");
 	await mode.refreshQueue();
 	assert.deepEqual(mode.items.map((item) => `${item.repo}#${item.id}`), ["example/repo#42"]);
@@ -128,7 +135,7 @@ test("workflow-changing pull requests stay visible in the personal queue", async
 test("autoslay dispatches a workflow-changing PR when OAuth has workflow scope", async (t) => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
-	const review = createReviewExtension(pi as any, { org: "example", fetchImpl: fetchImpl as typeof fetch, env: ENV });
+	const review = createReviewExtension(pi as any, { org: "example", fetchImpl: makeFetch() as typeof fetch, env: ENV });
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
@@ -138,4 +145,25 @@ test("autoslay dispatches a workflow-changing PR when OAuth has workflow scope",
 	assert.equal(pi.messages.length, 1, JSON.stringify(ctx.notifications));
 	assert.match(pi.messages[0]!, /example\/repo#42/);
 	assert.equal(ctx.notifications.some((entry) => /Skipping .*workflow/.test(entry.message)), false);
+});
+
+test("personal workflow slay still fails closed when classic OAuth scope is known missing", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as any, {
+		org: "example",
+		fetchImpl: makeFetch("repo, read:org") as typeof fetch,
+		env: ENV,
+	});
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((entry) => /lacks 'workflow' scope/.test(entry.message)));
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data as { state?: string; error?: string } | undefined;
+	assert.equal(batch?.state, "blocked");
+	assert.match(batch?.error ?? "", /\.github\/workflows\/deploy\.yml/);
 });
