@@ -23,7 +23,27 @@ export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-${COPILOT_GITHUB_TOKEN:-}}"
 # fallback; without it tmux downsamples every pane color to 256 and OMP
 # renders the wrong colors.
 tmux_fallback_term=xterm-256color
-if command -v infocmp >/dev/null 2>&1 && ! infocmp "${TERM:-}" >/dev/null 2>&1; then
+has_terminfo() {
+  local term="${1:-}"
+  [[ -n "$term" ]] || return 1
+  if command -v infocmp >/dev/null 2>&1; then
+    infocmp "$term" >/dev/null 2>&1
+    return $?
+  fi
+  local first="${term:0:1}"
+  local hex_first
+  printf -v hex_first '%x' "'$first"
+  local dir
+  for dir in "${TERMINFO:-}" "$HOME/.terminfo" /etc/terminfo /lib/terminfo /usr/share/terminfo /usr/lib/terminfo; do
+    [[ -n "$dir" ]] || continue
+    if [[ -e "$dir/$first/$term" || -e "$dir/$hex_first/$term" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! has_terminfo "${TERM:-}"; then
   case "${COLORTERM:-}" in
   truecolor | 24bit) tmux_fallback_term=xterm-direct ;;
   esac
@@ -50,6 +70,16 @@ wait_for_exit() {
   done
 }
 
+reset_terminal() {
+  # Restore cursor visibility, disable mouse tracking (1000/1002/1003/1006),
+  # disable bracketed paste (2004), leave alternate screen (1049), and reset SGR.
+  if [ -t 1 ]; then
+    printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[?1049l\033[?25h\033[0m' || true
+  elif [ -t 2 ]; then
+    printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[?1049l\033[?25h\033[0m' >&2 || true
+  fi
+}
+
 cleanup() {
   status=$?
   # A second signal during teardown would re-enter this handler and restart
@@ -57,6 +87,9 @@ cleanup() {
   trap '' HUP INT TERM
   if [ -n "$attach_pid" ] && kill -0 "$attach_pid" 2>/dev/null; then
     kill "$attach_pid" 2>/dev/null || true
+    wait_for_exit "$attach_pid" 10
+    kill -KILL "$attach_pid" 2>/dev/null || true
+    wait "$attach_pid" 2>/dev/null || true
   fi
   if [ -n "$agent_pid" ] && kill -0 "$agent_pid" 2>/dev/null; then
     kill -TERM "$agent_pid" 2>/dev/null || true
@@ -69,6 +102,7 @@ cleanup() {
     wait "$agent_pid" 2>/dev/null || true
   fi
   tmux kill-session -t contributor 2>/dev/null || true
+  reset_terminal
   exit "$status"
 }
 trap cleanup EXIT HUP INT TERM
@@ -115,6 +149,7 @@ if [ -t 0 ] && [ -t 1 ]; then
   wait "$attach_pid" || true
   attach_pid=
   exec 3<&-
+  reset_terminal
   note 'tmux detached; the agent remains foreground in this terminal. Press Ctrl-C or close this terminal to stop it.'
   wait "$agent_pid"
 else

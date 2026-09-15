@@ -174,7 +174,7 @@ run_just() {
   : >"$podman_log"
   : >"$kubectl_log"
   set +e
-  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
   status=$?
   set -e
 }
@@ -222,8 +222,8 @@ log_contains '--userns keep-id:uid=65532,gid=65532' "$podman_log"
 log_contains "$home/.config/hive/contributor.env:/home/bluefin/.config/hive/contributor.env:ro,z" "$podman_log"
 log_contains ':/home/bluefin:rw' "$podman_log"
 log_contains '--env AGENT_BACKEND=omp' "$podman_log"
-log_contains '--env TERM=' "$podman_log"
-log_contains '--env COLORTERM=' "$podman_log"
+log_contains '--env TERM=xterm-256color' "$podman_log"
+log_contains '--env COLORTERM=truecolor' "$podman_log"
 log_contains 'ghcr.io/projectbluefin/contribute:stable' "$podman_log"
 log_not_contains 'AGENT_MODEL' "$podman_log"
 log_not_contains 'AGENT_REASONING_EFFORT' "$podman_log"
@@ -268,6 +268,8 @@ set -e
 [[ "$status" -eq 18 ]] || fail "expected fake Apptainer exit 18, got $status"
 contains 'using the isolated Apptainer fallback' "$output"
 log_contains 'run --containall' "$apptainer_log"
+log_contains ':/workspace,' "$apptainer_log"
+log_contains ':/tmp' "$apptainer_log"
 log_not_contains 'test-gh-token' "$apptainer_log"
 log_not_contains 'test-provider-token' "$apptainer_log"
 
@@ -325,6 +327,7 @@ EXPECT_EMPTY_SCOPE=1 run_just review-queue
 
 log_contains 'pull ghcr.io/projectbluefin/review:stable' "$podman_log"
 contains 'review appliance image ghcr.io/projectbluefin/review:stable: version=26.08.07 revision=0123456789abcdef digest=sha256:deadbeef' "$output"
+log_contains ':/tmp:rw' "$podman_log"
 
 scenario="offline review launch reports stale moving tag"
 FAKE_PULL_FAIL=1 run_just review-queue owner/repo

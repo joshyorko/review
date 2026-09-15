@@ -253,7 +253,7 @@ run_review() {
   exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" \
     --home "${home}:/home/bluefin" \
     --pwd /workspace \
-    --bind "${workspace}:/workspace" "${scratch}:/tmp" \
+    --bind "${workspace}:/workspace,${scratch}:/tmp" \
     "$apptainer_image" ${PARSED_REVIEW_ARGS[@]+"${PARSED_REVIEW_ARGS[@]}"}
 }
 
