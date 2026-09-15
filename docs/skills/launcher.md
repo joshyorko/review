@@ -69,6 +69,10 @@ The doctor checks both published images through reachable Podman or `skopeo`.
 If Apptainer is the only runtime and no read-only registry probe exists, it
 reports image resolution as deferred to launch instead of misclassifying the
 remote reference as a missing local SIF.
+On the Podman path, every mutable image tag is refreshed before launch. A
+registry outage may use an existing local copy only with an explicit stale-image
+warning; a missing local copy fails before `podman run`. Digest and `sha-*`
+references remain immutable and are not refreshed.
 
 ## Credentials
 

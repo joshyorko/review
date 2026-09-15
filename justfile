@@ -173,17 +173,10 @@ image_ref_is_moving() {
   esac
   ! podman image exists "localhost/$1"
 }
-ensure_contributor_image() {
-  # A missing tag otherwise surfaces as a bare 'manifest unknown' from
-  # podman at launch time, which says nothing about what to do next.
-  #
-  # A moving tag is re-pulled every launch. Treating 'present locally' as
-  # good enough is what silently pinned contributors to whatever copy they
-  # first pulled while the tag moved on underneath them -- the launcher
-  # looked healthy and ran stale code. Best-effort by design: if the registry
-  # is unreachable, an existing local copy still starts, so being offline
-  # degrades to 'possibly stale' rather than 'cannot work'.
-  local ref="$1"
+ensure_image() {
+  # Moving tags are refreshed on every launch. If the registry is unavailable,
+  # an existing local copy remains usable but the launcher says it may be stale.
+  local ref="$1" product="$2" containerfile="$3" override="$4"
   if image_ref_is_moving "$ref"; then
     podman pull "$ref" && return 0
     if podman image exists "$ref"; then
@@ -191,26 +184,18 @@ ensure_contributor_image() {
       return 0
     fi
   fi
-  # Local presence is the postcondition every caller depends on: the isolation
-  # probe runs with --pull=never, so 'resolvable in the registry' is not good
-  # enough. Accepting a registry-only image here made a missing pull surface
-  # as a false isolation failure.
   podman image exists "$ref" && return 0
-  # 'localhost/' is podman's local-storage namespace, never a registry host.
-  # Pulling it dials https://localhost/v2/ and fails three times with a
-  # connection-refused error that reads like a network fault, so a deleted
-  # local build looked like a broken registry. Say the real thing instead.
   case "$ref" in
     localhost/*)
       echo "ERROR: ${ref} is a locally built image and it is not in local storage." >&2
-      echo "  Build it: podman build -f image/contribute/Containerfile -t ${ref#localhost/} ." >&2
-      echo "  Or drop the override to use the published default: unset CONTRIBUTE_IMAGE" >&2
+      echo "  Build it: podman build -f ${containerfile} -t ${ref#localhost/} ." >&2
+      echo "  Or drop the override to use the published default: unset ${override}" >&2
       return 1
       ;;
   esac
   podman pull "$ref" && return 0
-  echo "ERROR: cannot obtain contributor image ${ref}." >&2
-  echo "  Set CONTRIBUTE_IMAGE to a published tag/digest or build image/contribute/Containerfile." >&2
+  echo "ERROR: cannot obtain ${product} image ${ref}." >&2
+  echo "  Set ${override} to a published tag or digest, or build ${containerfile}." >&2
   return 1
 }
 
@@ -663,7 +648,7 @@ contribute mode="" count="":
       REMOTE_HIVE_TARGET=""; REMOTE_HIVE_DIR=""; REMOTE_HIVE_ENV=""; REMOTE_HIVE_SSH_ARGS=()
       trap 'cleanup_remote_hive_registration' EXIT
       stage_hive_registration_for_remote_podman
-      ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+      ensure_image "$CONTRIBUTOR_IMAGE" "contributor" "image/contribute/Containerfile" "CONTRIBUTE_IMAGE"
       CONTAINER_ARGS=(podman run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME" --userns "keep-id:uid=65532,gid=65532")
       CONTAINER_ARGS+=(--volume "${CONTRIBUTOR_VOLUME}:/home/bluefin:rw" --volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env COLORTERM --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman)
       for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
@@ -747,6 +732,7 @@ review-appliance *appliance_args:
     CONTAINER_NAME="bluefin-review-${INSTANCE_KEY}-$(date +%s)-$$"
     KVM_FAILURE=""
     if kvm_runtime_ready; then
+      ensure_image "$IMAGE" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
       ARGS=(run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME")
       ARGS+=(--userns "keep-id:uid=65532,gid=65532")
       ARGS+=(

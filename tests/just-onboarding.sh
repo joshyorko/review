@@ -72,8 +72,8 @@ case "${1:-} ${2:-} ${3:-}" in
   "system connection list")
     [[ "${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\tidentity\ttrue\n'
     exit 0 ;;
-  "image exists "*) exit 0 ;;
-  "pull "*) exit 0 ;;
+  "image exists "*) [[ "${FAKE_IMAGE_MISSING:-0}" != 1 ]]; exit ;;
+  "pull "*) [[ "${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
   "inspect --format "*) printf 'false\n'; exit 0 ;;
   "container exists "*) exit 1 ;;
   "run "*) exit 17 ;;
@@ -173,7 +173,7 @@ run_just() {
   : >"$podman_log"
   : >"$kubectl_log"
   set +e
-  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
   status=$?
   set -e
 }
@@ -319,6 +319,17 @@ EXPECT_EXTENSION="/tmp/review extension" run_just review-queue --extension "/tmp
 EXPECT_EMPTY_SCOPE=1 run_just review-queue
 [[ "$status" -eq 17 ]] || fail "zero review arguments acquired an empty prompt: $output"
 
+log_contains 'pull ghcr.io/projectbluefin/review:stable' "$podman_log"
+
+scenario="offline review launch reports stale moving tag"
+FAKE_PULL_FAIL=1 run_just review-queue owner/repo
+[[ "$status" -eq 17 ]] || fail "cached review image did not start after refresh failure: $output"
+contains 'using the local copy, which may be out of date' "$output"
+
+scenario="missing review image fails after refresh failure"
+FAKE_PULL_FAIL=1 FAKE_IMAGE_MISSING=1 run_just review-queue owner/repo
+[[ "$status" -ne 0 ]] || fail "missing review image reached podman run"
+contains 'cannot obtain review appliance image' "$output"
 scenario="review-queue delegates to the OMP appliance"
 run_just review-queue --issues
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"

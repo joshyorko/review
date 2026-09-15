@@ -161,6 +161,10 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
 fi
 printf '%s\n' "\$*" >>"$mock_podman_log"
 [[ -z "\${FAKE_PODMAN_DELAY:-}" ]] || sleep "\$FAKE_PODMAN_DELAY"
+case "\${1:-} \${2:-}" in
+  "pull "*) [[ "\${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
+  "image exists") [[ "\${FAKE_IMAGE_MISSING:-0}" != 1 ]]; exit ;;
+esac
 exit 0
 EOF
 chmod +x "$scratch/bin/podman"
@@ -230,11 +234,13 @@ assert_bluefin_review() {
 
   [[ -f "$mock_podman_log" ]] || fail "bin/bluefin review did not invoke podman for: $input"
   local podman_call
-  podman_call="$(cat "$mock_podman_log")"
+  podman_call="$(grep '^run ' "$mock_podman_log")"
   [[ "$podman_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "review did not use the krun OCI runtime: $podman_call"
   [[ "$podman_call" == *"--name bluefin-review-"* ]] || fail "review did not use an isolated instance name: $podman_call"
   [[ "$podman_call" == *":/home/bluefin:rw"* ]] || fail "review did not use target-specific state: $podman_call"
 
+  grep -qFx "pull ghcr.io/projectbluefin/review:stable" "$mock_podman_log" ||
+    fail "bin/bluefin review did not refresh the moving stable tag"
   local image="ghcr.io/projectbluefin/review:stable" passed_flags
   passed_flags="${podman_call#*"$image"}"
   passed_flags="$(echo "$passed_flags" | xargs)"
@@ -243,6 +249,23 @@ assert_bluefin_review() {
     fail "shorthand reached the appliance as prompt text: $passed_flags"
   fi
 }
+
+: >"$mock_podman_log"
+offline_output="$(FAKE_PULL_FAIL=1 "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "packaged review did not use its cached image after refresh failure"
+[[ "$offline_output" == *"using the local copy, which may be out of date"* ]] ||
+  fail "packaged review did not report its stale cached image"
+grep -q '^run ' "$mock_podman_log" || fail "packaged review did not launch its cached image"
+
+: >"$mock_podman_log"
+set +e
+offline_output="$(FAKE_PULL_FAIL=1 FAKE_IMAGE_MISSING=1 "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+offline_status=$?
+set -e
+[[ "$offline_status" -ne 0 ]] || fail "packaged review launched without an obtainable image"
+[[ "$offline_output" == *"cannot obtain review appliance image"* ]] ||
+  fail "packaged review missing-image diagnostic was not actionable: $offline_output"
+! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image acquisition failed"
 
 mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
@@ -266,8 +289,9 @@ review_one_pid=$!
 FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/bluefin" review projectbluefin/repo2 >/dev/null 2>&1 &
 review_two_pid=$!
 wait "$review_one_pid" "$review_two_pid"
-mapfile -t concurrent_review_calls <"$mock_podman_log"
+mapfile -t concurrent_review_calls < <(grep '^run ' "$mock_podman_log")
 assert_eq "${#concurrent_review_calls[@]}" "2" "concurrent review launch count"
+assert_eq "$(grep -cFx 'pull ghcr.io/projectbluefin/review:stable' "$mock_podman_log")" "2" "concurrent review refresh count"
 first_repo_call="${concurrent_review_calls[0]}"
 second_repo_call="${concurrent_review_calls[1]}"
 [[ "$(arg_after "$first_repo_call" --name)" != "$(arg_after "$second_repo_call" --name)" ]] || fail "concurrent reviews collided on container name"
@@ -330,6 +354,8 @@ export GH_TOKEN=mock-token
 contribute_alias_call="$(cat "$mock_podman_log")"
 [[ "$contribute_alias_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "contribute alias did not use krun"
 [[ "$contribute_alias_call" == *"ghcr.io/projectbluefin/contribute:stable"* ]] || fail "contribute alias used the wrong image"
+grep -qFx "pull ghcr.io/projectbluefin/contribute:stable" "$mock_podman_log" ||
+  fail "bin/bluefin contribute did not refresh the moving stable tag"
 
 : >"$mock_podman_log"
 FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/bluefin" contribute owner/repo >/dev/null 2>&1 &
@@ -337,8 +363,9 @@ contribute_one_pid=$!
 FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/bluefin" contribute owner/repo2 >/dev/null 2>&1 &
 contribute_two_pid=$!
 wait "$contribute_one_pid" "$contribute_two_pid"
-mapfile -t concurrent_contribute_calls <"$mock_podman_log"
+mapfile -t concurrent_contribute_calls < <(grep '^run ' "$mock_podman_log")
 assert_eq "${#concurrent_contribute_calls[@]}" "2" "concurrent contribute launch count"
+assert_eq "$(grep -cFx 'pull ghcr.io/projectbluefin/contribute:stable' "$mock_podman_log")" "2" "concurrent contributor refresh count"
 first_contribute_call="${concurrent_contribute_calls[0]}"
 second_contribute_call="${concurrent_contribute_calls[1]}"
 [[ "$(arg_after "$first_contribute_call" --name)" != "$(arg_after "$second_contribute_call" --name)" ]] || fail "contributor appliances must have unique container names"
@@ -439,8 +466,10 @@ mock_cred_bin="$scratch/cred-bin"
 mkdir -p "$mock_cred_bin"
 cat >"$mock_cred_bin/podman" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$1" == info ]]; then exit 0; fi
-echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"
+case "${1:-} ${2:-}" in
+  "info "|"pull "*|"image exists") exit 0 ;;
+  "run "*) echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"; exit 0 ;;
+esac
 exit 0
 EOF
 chmod +x "$mock_cred_bin/podman"
