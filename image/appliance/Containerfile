@@ -92,7 +92,8 @@ RUN /usr/local/libexec/stage-runtime /out \
     /usr/sbin/shellcheck \
     /usr/sbin/yq \
     /usr/sbin/jq \
-    /usr/sbin/just
+    /usr/sbin/just \
+    /usr/sbin/openssl
 
 # The in-image SBOM. syft can only see package-manager metadata, and every
 # component of this image arrived as a release archive, so the archive
@@ -150,6 +151,9 @@ ENV HOME=/home/bluefin \
     XDG_CACHE_HOME=/home/bluefin/.cache \
     XDG_DATA_HOME=/home/bluefin/.local/share \
     XDG_STATE_HOME=/home/bluefin/.local/state \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=credential.https://github.com.helper \
+    GIT_CONFIG_VALUE_0="!/usr/bin/gh auth git-credential" \
     PATH=/usr/bin:/bin \
     SHELL=/usr/bin/bash \
     TERM=xterm-256color \

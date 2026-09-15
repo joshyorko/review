@@ -217,14 +217,15 @@ run_review() {
     previous="$arg"
   done
 
-  local key root home workspace name image
+  local key root home workspace scratch name image
   key="$(slugify "${BLUEFIN_INSTANCE:-review-$scope}")"
   root="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${key}"
   home="${root}/home"
   workspace="${root}/workspace"
+  scratch="${root}/tmp"
   name="bluefin-review-${key}-$(date +%s)-$$"
   image="${BLUEFIN_REVIEW_IMAGE:-ghcr.io/projectbluefin/review:stable}"
-  mkdir -p "$home" "$workspace"
+  mkdir -p "$home" "$workspace" "$scratch"
 
   if kvm_runtime_ready; then
     ensure_image "$image" "review appliance" "image/appliance/Containerfile" "BLUEFIN_REVIEW_IMAGE"
@@ -234,6 +235,7 @@ run_review() {
       --userns keep-id:uid=65532,gid=65532 \
       --volume "${home}:/home/bluefin:rw,z" \
       --volume "${workspace}:/workspace:rw,z" \
+      --volume "${scratch}:/tmp:rw,z" \
       --env GH_TOKEN --env GITHUB_TOKEN \
       --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN \
       --env COPILOT_INTEGRATION_ID \
@@ -251,7 +253,7 @@ run_review() {
   exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" \
     --home "${home}:/home/bluefin" \
     --pwd /workspace \
-    --bind "${workspace}:/workspace" \
+    --bind "${workspace}:/workspace" "${scratch}:/tmp" \
     "$apptainer_image" ${PARSED_REVIEW_ARGS[@]+"${PARSED_REVIEW_ARGS[@]}"}
 }
 

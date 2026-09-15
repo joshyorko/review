@@ -205,10 +205,10 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 		name: "hive_workbench_diff",
 		label: "Review Diff",
 		description:
-			"Fetch the bounded diff for a pull request from the GitHub API: every changed file with add/delete counts, and patch text for the first files up to a character budget.",
+			"Fetch the bounded diff for a pull request from the GitHub API. Pass repo explicitly in child sessions because they do not inherit the parent selection.",
 		parameters: z.object({
 			pull_request: z.number().describe("Pull request number to inspect"),
-			repo: z.string().describe("owner/repo; defaults to the selected item's repository").optional(),
+			repo: z.string().describe("owner/repo; required in child sessions, otherwise defaults to the selected item's repository").optional(),
 			max_files: z.number().describe("files whose patch text is included (default 20)").optional(),
 		}),
 		async execute(_id, params) {

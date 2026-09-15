@@ -741,7 +741,8 @@ review-appliance *appliance_args:
     INSTANCE_ROOT="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${INSTANCE_KEY}"
     INSTANCE_HOME="${INSTANCE_ROOT}/home"
     INSTANCE_WORKSPACE="${INSTANCE_ROOT}/workspace"
-    mkdir -p "$INSTANCE_HOME" "$INSTANCE_WORKSPACE"
+    INSTANCE_TMP="${INSTANCE_ROOT}/tmp"
+    mkdir -p "$INSTANCE_HOME" "$INSTANCE_WORKSPACE" "$INSTANCE_TMP"
     CONTAINER_NAME="bluefin-review-${INSTANCE_KEY}-$(date +%s)-$$"
     KVM_FAILURE=""
     if kvm_runtime_ready; then
@@ -752,6 +753,7 @@ review-appliance *appliance_args:
       ARGS+=(
         --volume "bluefin-review-${INSTANCE_KEY}-home:/home/bluefin:rw"
         --volume "bluefin-review-${INSTANCE_KEY}-workspace:/workspace:rw"
+        --volume "bluefin-review-${INSTANCE_KEY}-tmp:/tmp:rw"
         --env GH_TOKEN --env GITHUB_TOKEN --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN
         --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN --env OPENAI_API_KEY --env GEMINI_API_KEY
         --env HIVE_HUB --env BLUEFIN_REVIEW_ORG
@@ -765,7 +767,7 @@ review-appliance *appliance_args:
     APPTAINER_IMAGE="$IMAGE"; [[ "$APPTAINER_IMAGE" == *://* ]] || APPTAINER_IMAGE="docker://${APPTAINER_IMAGE}"
     prepare_apptainer_environment
     exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /workspace \
-      --bind "${INSTANCE_WORKSPACE}:/workspace" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
+      --bind "${INSTANCE_WORKSPACE}:/workspace" "${INSTANCE_TMP}:/tmp" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
 
 # Build the appliance from this checkout and hold it to its contract. The
 # version is derived, never typed: FSDK series from the pinned base, revision

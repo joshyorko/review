@@ -239,6 +239,7 @@ assert_bluefin_review() {
   [[ "$podman_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "review did not use the krun OCI runtime: $podman_call"
   [[ "$podman_call" == *"--name bluefin-review-"* ]] || fail "review did not use an isolated instance name: $podman_call"
   [[ "$podman_call" == *":/home/bluefin:rw"* ]] || fail "review did not use target-specific state: $podman_call"
+  [[ "$podman_call" == *":/tmp:rw,z"* ]] || fail "review did not use instance-backed scratch storage: $podman_call"
 
   grep -qFx "pull ghcr.io/projectbluefin/review:stable" "$mock_podman_log" ||
     fail "bin/bluefin review did not refresh the moving stable tag"
@@ -277,6 +278,7 @@ fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 OPENAI
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment"
 [[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/review:stable --repo projectbluefin/review"* ]] || fail "review fallback used the wrong image or scope"
+[[ "$fallback_call" == *":/tmp"* ]] || fail "review fallback did not bind instance-backed scratch storage"
 [[ "$fallback_call" != *mock-token* && "$fallback_call" != *test-provider-token* ]] || fail "fallback leaked credentials into argv"
 mv "$scratch/krun" "$scratch/bin/krun"
 : >"$mock_podman_log"

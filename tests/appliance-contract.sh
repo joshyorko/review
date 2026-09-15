@@ -99,7 +99,11 @@ require "$containerfile" \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"'
 require image/appliance/config.yml 'advisor: "@default"' 'syncBacklog: 1'
-for tool in actionlint shellcheck yq jq just; do
+require image/appliance/stage-runtime.sh '/usr/bin/gzip.bin'
+require "$containerfile" \
+  'GIT_CONFIG_KEY_0=credential.https://github.com.helper' \
+  'GIT_CONFIG_VALUE_0="!/usr/bin/gh auth git-credential"'
+for tool in actionlint shellcheck yq jq just openssl; do
   grep -qF "/usr/sbin/${tool}" "$containerfile" ||
     fail "${tool} must be staged from the pinned FSDK builder"
 done
@@ -256,6 +260,8 @@ run '
   yq --version >/dev/null
   jq --version >/dev/null
   just --version >/dev/null
+  gzip --version >/dev/null
+  test "$(git config --get credential.https://github.com.helper)" = "!/usr/bin/gh auth git-credential"
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
 ' >/dev/null || fail "a bundled binary failed to execute"
 

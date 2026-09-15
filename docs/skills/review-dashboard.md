@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "4.8"
+version: "4.9"
 last_updated: 2026-09-14
 id: review-dashboard
 one_line_purpose: Maintain the single-screen OMP review workbench.
@@ -117,6 +117,17 @@ workflow startup failure with zero jobs remains visible. Slay excludes known
 failing or pending CI before reviewer dispatch, rechecks it before each wave,
 and blocks approval or merge commands if the active queue state turns red or
 pending.
+Fresh reviewer sessions do not inherit the coordinator's selected repository or
+a checkout. Their prompts must pass both `repo` and `pull_request` to
+`hive_workbench_diff` and keep review reads repository-qualified. Repair agents
+create checkouts with `gh repo clone` and `gh pr checkout` under
+`$HOME/worktrees`, never the small container `/tmp`, and inspect effective
+branch rules through `repos/<owner>/<repo>/rules/branches/<branch>` rather than
+assuming the legacy branch-protection endpoint exists.
+The appliance intentionally does not carry every repository's development
+toolchain. Reviewers check a validator once, then use hosted check evidence and
+report the local gap instead of installing packages or repeatedly invoking an
+absent command.
 
 
 
