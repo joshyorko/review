@@ -308,24 +308,44 @@ run 'set -eu; test -w "$HOME"; test "$HOME" = /home/bluefin' >/dev/null ||
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
+  check() {
+    "$@" || {
+      printf "appliance-contract: runtime check failed: %s\n" "$*" >&2
+      exit 1
+    }
+  }
   case "$(uname -m)" in
     x86_64) audio_triplet=x86_64-linux-gnu ;;
     aarch64) audio_triplet=aarch64-linux-gnu ;;
     *) exit 1 ;;
   esac
-  test -x /usr/bin/bluefin-review-appliance
-  grep -q "checkUpdate: false" /usr/share/bluefin/review/appliance-config.yml
-  test -f /usr/share/bluefin/review/appliance-mcp.json
-  test -f /usr/share/bluefin/review/extension/index.ts
-  test -d /usr/share/bluefin/review/extension/agents
-  test -f /usr/share/bluefin/review/sbom.spdx.json
-  test -e "/usr/lib/${audio_triplet}/libpulse-simple.so.0"
-  test -e "/usr/lib/${audio_triplet}/libasound.so.2"
-  test -e /usr/share/alsa/alsa.conf
-  test -d /run/bluefin/pulse
-  ldd "/usr/lib/${audio_triplet}/libpulse-simple.so.0" | grep -q "not found" && exit 1
-  ldd "/usr/lib/${audio_triplet}/libasound.so.2" | grep -q "not found" && exit 1
-' >/dev/null || fail "the review mode, Headroom MCP, SBOM, or audio closure is missing from the image"
+  check test -x /usr/bin/bluefin-review-appliance
+  check grep -q "checkUpdate: false" /usr/share/bluefin/review/appliance-config.yml
+  check test -f /usr/share/bluefin/review/appliance-mcp.json
+  check test -f /usr/share/bluefin/review/extension/index.ts
+  check test -d /usr/share/bluefin/review/extension/agents
+  check test -f /usr/share/bluefin/review/sbom.spdx.json
+  check test -e "/usr/lib/${audio_triplet}/libpulse-simple.so.0"
+  check test -e "/usr/lib/${audio_triplet}/libasound.so.2"
+  check test -e /usr/share/alsa/alsa.conf
+  check test -d /run/bluefin/pulse
+  pulse_deps="$(ldd "/usr/lib/${audio_triplet}/libpulse-simple.so.0")" || {
+    printf "appliance-contract: ldd failed for libpulse-simple.so.0\n" >&2
+    exit 1
+  }
+  [[ "$pulse_deps" != *"not found"* ]] || {
+    printf "%s\n" "$pulse_deps" >&2
+    exit 1
+  }
+  alsa_deps="$(ldd "/usr/lib/${audio_triplet}/libasound.so.2")" || {
+    printf "appliance-contract: ldd failed for libasound.so.2\n" >&2
+    exit 1
+  }
+  [[ "$alsa_deps" != *"not found"* ]] || {
+    printf "%s\n" "$alsa_deps" >&2
+    exit 1
+  }
+' || fail "the review mode, Headroom MCP, SBOM, or audio closure is missing from the image"
 
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
@@ -335,7 +355,7 @@ run '
   bluefin-review-appliance --version >/dev/null
   test -f "$profile"
   grep -q "/usr/bin/headroom" "$profile"
-' >/dev/null || fail "the appliance did not provision its Headroom MCP profile"
+' || fail "the appliance did not provision its Headroom MCP profile"
 
 # Nothing inside may install anything.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
