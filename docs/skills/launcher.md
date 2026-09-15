@@ -62,6 +62,9 @@ Kubernetes worker deployment.
 Apptainer omits its default `/etc/localtime` or `/etc/hosts` mount only when
 that host source is absent or a dangling symlink; present sources retain the
 runtime default.
+Fallback also requires `squashfuse_ll` or `squashfuse` and a readable,
+writable character device at `/dev/fuse`; `review-doctor` reports each missing
+prerequisite separately before launch.
 
 ## Credentials
 

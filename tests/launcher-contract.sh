@@ -195,6 +195,12 @@ if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
 fi
 exit 0
 EOF
+cat >"$scratch/bin/squashfuse_ll" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$scratch/bin/squashfuse_ll"
+export REVIEW_TEST_FUSE_DEVICE=/dev/null
 chmod +x "$scratch/bin/apptainer"
 chmod +x "$scratch/bin/krun"
 
@@ -374,6 +380,22 @@ assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
 REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin-contribute" >/dev/null 2>&1 ||
   fail "contributor wrapper fallback failed with dangling localtime"
 assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
+
+mv "$scratch/bin/squashfuse_ll" "$scratch/squashfuse_ll"
+set +e
+fallback_output="$(env PATH="$scratch/bin:/usr/bin:/bin" HOME="$HOME" GH_TOKEN="$GH_TOKEN" GITHUB_TOKEN="$GITHUB_TOKEN" BASH_ENV="$BASH_ENV" HOST_FIXTURE="$HOST_FIXTURE" REVIEW_TEST_FUSE_DEVICE="$REVIEW_TEST_FUSE_DEVICE" REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+fallback_status=$?
+set -e
+[[ "$fallback_status" -ne 0 ]] || fail "review fallback accepted missing squashfuse"
+[[ "$fallback_output" == *"squashfuse"* ]] || fail "missing squashfuse diagnostic was not actionable: $fallback_output"
+mv "$scratch/squashfuse_ll" "$scratch/bin/squashfuse_ll"
+
+set +e
+fallback_output="$(REVIEW_TEST_FUSE_DEVICE="$scratch/missing-fuse" REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" contribute 2>&1)"
+fallback_status=$?
+set -e
+[[ "$fallback_status" -ne 0 ]] || fail "contributor fallback accepted a missing FUSE device"
+[[ "$fallback_output" == *"FUSE device"* ]] || fail "missing FUSE diagnostic was not actionable: $fallback_output"
 mv "$scratch/krun" "$scratch/bin/krun"
 
 # --- 5. Parity test: KVM container and source launchers use identical flags ---

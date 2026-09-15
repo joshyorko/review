@@ -45,8 +45,23 @@ kvm_runtime_ready() {
   return 0
 }
 
+apptainer_fallback_ready() {
+  local fuse_device="${REVIEW_TEST_FUSE_DEVICE:-/dev/fuse}"
+  command -v apptainer >/dev/null 2>&1 || { APPTAINER_FAILURE="Apptainer fallback is unavailable; install Apptainer"; return 1; }
+  { command -v squashfuse_ll >/dev/null 2>&1 || command -v squashfuse >/dev/null 2>&1; } || {
+    APPTAINER_FAILURE="squashfuse userland is unavailable; install squashfuse"
+    return 1
+  }
+  test -e "$fuse_device" || { APPTAINER_FAILURE="FUSE device ${fuse_device} is missing"; return 1; }
+  test -c "$fuse_device" || { APPTAINER_FAILURE="FUSE device ${fuse_device} is not a character device"; return 1; }
+  if ! test -r "$fuse_device" || ! test -w "$fuse_device"; then
+    APPTAINER_FAILURE="FUSE device ${fuse_device} is not readable and writable"
+    return 1
+  fi
+  return 0
+}
 require_fallback() {
-  command -v apptainer >/dev/null 2>&1 || fail "${KVM_FAILURE}; Apptainer fallback is unavailable. Install Apptainer or configure Podman with krun."
+  apptainer_fallback_ready || fail "${KVM_FAILURE}; ${APPTAINER_FAILURE}."
   echo "WARNING: ${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary." >&2
 }
 prepare_apptainer_environment() {
