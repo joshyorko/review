@@ -224,6 +224,7 @@ inspect() {
 run() {
   "$engine" run --rm --entrypoint /usr/bin/bash "$image" -c "$1"
 }
+trap 'printf "appliance-contract: runtime command failed: %s\n" "$BASH_COMMAND" >&2' ERR
 
 test "$(inspect '{{.Config.User}}')" = "65532:65532" ||
   fail "image must run as the numeric nonroot uid; kubelet rejects named users under runAsNonRoot"
