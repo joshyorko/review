@@ -238,7 +238,7 @@ image_version="$(inspect '{{index .Labels "org.opencontainers.image.version"}}')
 test "$image_version" = "$version" ||
   fail "image label version '${image_version}' does not match derived '${version}'"
 headroom_version="$(sed -nE 's/^ARG HEADROOM_VERSION=([^[:space:]]+)$/\1/p' "$containerfile")"
-test "$(inspect '{{index .Labels "org.projectbluefin.review.headroom.version"}}')" = "$headroom_version"
+test "$(inspect '{{index .Labels "io.projectbluefin.review.headroom.version"}}')" = "$headroom_version"
 test "$(inspect '{{index .Labels "io.projectbluefin.review.audio.packages"}}')" = "pulseaudio-libs,alsa-lib"
 
 # Sum the layer sizes rather than reading `.Size`: podman's inspect field
