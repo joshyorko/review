@@ -107,6 +107,19 @@ ensure_image() {
   return 1
 }
 
+report_podman_image_identity() {
+  local ref="$1" product="$2" identity version revision digest
+  identity="$("$engine" image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}|{{ index .Config.Labels "org.opencontainers.image.revision" }}|{{ .Digest }}' "$ref" 2>/dev/null)" || {
+    echo "! ${product} image identity unavailable for ${ref}." >&2
+    return 0
+  }
+  IFS='|' read -r version revision digest <<<"$identity"
+  [[ -n "$version" && "$version" != "<no value>" ]] || version=unknown
+  [[ -n "$revision" && "$revision" != "<no value>" ]] || revision=unknown
+  [[ -n "$digest" && "$digest" != "<no value>" ]] || digest=unknown
+  echo "✓ ${product} image ${ref}: version=${version} revision=${revision} digest=${digest}" >&2
+}
+
 
 slugify() {
   local value="$1" slug digest
@@ -215,6 +228,7 @@ run_review() {
 
   if kvm_runtime_ready; then
     ensure_image "$image" "review appliance" "image/appliance/Containerfile" "BLUEFIN_REVIEW_IMAGE"
+    report_podman_image_identity "$image" "review appliance"
     exec "$engine" run --runtime=krun --rm --interactive --tty \
       --name "$name" \
       --userns keep-id:uid=65532,gid=65532 \
@@ -268,6 +282,7 @@ run_contribute() {
 
   if kvm_runtime_ready; then
     ensure_image "$image" "contributor" "image/contribute/Containerfile" "BLUEFIN_CONTRIBUTE_IMAGE"
+    report_podman_image_identity "$image" "contributor"
     exec "$engine" run --runtime=krun --rm --interactive --tty \
       --name "$name" \
       --userns keep-id:uid=65532,gid=65532 \

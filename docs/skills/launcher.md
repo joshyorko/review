@@ -73,6 +73,9 @@ On the Podman path, every mutable image tag is refreshed before launch. A
 registry outage may use an existing local copy only with an explicit stale-image
 warning; a missing local copy fails before `podman run`. Digest and `sha-*`
 references remain immutable and are not refreshed.
+After Podman resolves an image, the launcher reports its OCI version, source
+revision, and digest before execution; missing labels are shown as `unknown`
+rather than inferred.
 
 ## Credentials
 

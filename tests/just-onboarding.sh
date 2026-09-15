@@ -75,6 +75,7 @@ case "${1:-} ${2:-} ${3:-}" in
   "image exists "*) [[ "${FAKE_IMAGE_MISSING:-0}" != 1 ]]; exit ;;
   "pull "*) [[ "${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
   "inspect --format "*) printf 'false\n'; exit 0 ;;
+  "image inspect --format") printf '26.08.07|0123456789abcdef|sha256:deadbeef\n'; exit 0 ;;
   "container exists "*) exit 1 ;;
   "run "*) exit 17 ;;
 esac
@@ -215,6 +216,7 @@ contains 'ghcr.io/projectbluefin/contribute:stable resolution deferred to Apptai
 scenario="contribute launches the OMP worker"
 run_just contribute
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
+contains 'contributor image ghcr.io/projectbluefin/contribute:stable: version=26.08.07 revision=0123456789abcdef digest=sha256:deadbeef' "$output"
 log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-contribute-' "$podman_log"
 log_contains '--userns keep-id:uid=65532,gid=65532' "$podman_log"
 log_contains "$home/.config/hive/contributor.env:/home/bluefin/.config/hive/contributor.env:ro,z" "$podman_log"
@@ -320,6 +322,7 @@ EXPECT_EMPTY_SCOPE=1 run_just review-queue
 [[ "$status" -eq 17 ]] || fail "zero review arguments acquired an empty prompt: $output"
 
 log_contains 'pull ghcr.io/projectbluefin/review:stable' "$podman_log"
+contains 'review appliance image ghcr.io/projectbluefin/review:stable: version=26.08.07 revision=0123456789abcdef digest=sha256:deadbeef' "$output"
 
 scenario="offline review launch reports stale moving tag"
 FAKE_PULL_FAIL=1 run_just review-queue owner/repo

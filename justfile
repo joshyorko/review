@@ -198,6 +198,18 @@ ensure_image() {
   echo "  Set ${override} to a published tag or digest, or build ${containerfile}." >&2
   return 1
 }
+report_podman_image_identity() {
+  local ref="$1" product="$2" identity version revision digest
+  identity="$(podman image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}|{{ index .Config.Labels "org.opencontainers.image.revision" }}|{{ .Digest }}' "$ref" 2>/dev/null)" || {
+    echo "! ${product} image identity unavailable for ${ref}." >&2
+    return 0
+  }
+  IFS='|' read -r version revision digest <<<"$identity"
+  [[ -n "$version" && "$version" != "<no value>" ]] || version=unknown
+  [[ -n "$revision" && "$revision" != "<no value>" ]] || revision=unknown
+  [[ -n "$digest" && "$digest" != "<no value>" ]] || digest=unknown
+  echo "✓ ${product} image ${ref}: version=${version} revision=${revision} digest=${digest}" >&2
+}
 
 
 resolve_gh_token() {
@@ -649,6 +661,7 @@ contribute mode="" count="":
       trap 'cleanup_remote_hive_registration' EXIT
       stage_hive_registration_for_remote_podman
       ensure_image "$CONTRIBUTOR_IMAGE" "contributor" "image/contribute/Containerfile" "CONTRIBUTE_IMAGE"
+      report_podman_image_identity "$CONTRIBUTOR_IMAGE" "contributor"
       CONTAINER_ARGS=(podman run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME" --userns "keep-id:uid=65532,gid=65532")
       CONTAINER_ARGS+=(--volume "${CONTRIBUTOR_VOLUME}:/home/bluefin:rw" --volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env COLORTERM --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman)
       for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
@@ -733,6 +746,7 @@ review-appliance *appliance_args:
     KVM_FAILURE=""
     if kvm_runtime_ready; then
       ensure_image "$IMAGE" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
+      report_podman_image_identity "$IMAGE" "review appliance"
       ARGS=(run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME")
       ARGS+=(--userns "keep-id:uid=65532,gid=65532")
       ARGS+=(

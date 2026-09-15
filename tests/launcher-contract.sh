@@ -164,6 +164,7 @@ printf '%s\n' "\$*" >>"$mock_podman_log"
 case "\${1:-} \${2:-}" in
   "pull "*) [[ "\${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
   "image exists") [[ "\${FAKE_IMAGE_MISSING:-0}" != 1 ]]; exit ;;
+  "image inspect") printf '26.08.07|0123456789abcdef|sha256:deadbeef\n'; exit 0 ;;
 esac
 exit 0
 EOF
@@ -241,6 +242,8 @@ assert_bluefin_review() {
 
   grep -qFx "pull ghcr.io/projectbluefin/review:stable" "$mock_podman_log" ||
     fail "bin/bluefin review did not refresh the moving stable tag"
+  grep -q '^image inspect --format ' "$mock_podman_log" ||
+    fail "bin/bluefin review did not inspect the resolved image identity"
   local image="ghcr.io/projectbluefin/review:stable" passed_flags
   passed_flags="${podman_call#*"$image"}"
   passed_flags="$(echo "$passed_flags" | xargs)"
@@ -356,6 +359,8 @@ contribute_alias_call="$(cat "$mock_podman_log")"
 [[ "$contribute_alias_call" == *"ghcr.io/projectbluefin/contribute:stable"* ]] || fail "contribute alias used the wrong image"
 grep -qFx "pull ghcr.io/projectbluefin/contribute:stable" "$mock_podman_log" ||
   fail "bin/bluefin contribute did not refresh the moving stable tag"
+grep -q '^image inspect --format ' "$mock_podman_log" ||
+  fail "bin/bluefin contribute did not inspect the resolved image identity"
 
 : >"$mock_podman_log"
 FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/bluefin" contribute owner/repo >/dev/null 2>&1 &
