@@ -162,6 +162,8 @@ test("personal autoslay refuses a workflow-changing PR even with OAuth workflow 
 
 	assert.equal(pi.messages.length, 0);
 	assert.ok(ctx.notifications.some((notification) => /Skipping .*: changes \.github\/workflows\/deploy\.yml/.test(notification.message)));
+	const queue = await pi.tools.get("review_workbench_queue").execute("id", {});
+	assert.match(queue.content[0].text, /example\/repo#42/);
 });
 
 test("Issue s and Alt-S dispatch issue implementation, while d requests issue evidence", () => {

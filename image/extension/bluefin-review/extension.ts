@@ -595,7 +595,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (diff.error) return { item, reason: diff.error };
 				const workflow = diff.files.find((file) => file.path.startsWith(".github/workflows/"));
 				if (workflow) {
-					return { item, reason: `changes ${workflow.path}`, exclude: true };
+					return { item, reason: `changes ${workflow.path}` };
 				}
 				if (item.changedFiles === undefined || diff.files.length < item.changedFiles) {
 					return { item, reason: "complete changed-file list unavailable" };
