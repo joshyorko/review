@@ -15,6 +15,7 @@ it scopes every task, so read it alongside the matching skill.
 | Investigate an assigned-task or connection problem | [`hive-triage.md`](skills/hive-triage.md) |
 | Report evidence to or follow up on a `hivecommons/hive` issue | [`upstream-hive.md`](skills/upstream-hive.md) |
 | Maintain the OMP workbench review agents and policy seam | [`review-checks.md`](skills/review-checks.md) |
+| Maintain the opt-in Luna Factory extension | [`luna-factory.md`](skills/luna-factory.md) |
 | Change the contributor image Containerfile or pinned inputs | [`image-build.md`](skills/image-build.md) |
 | Change the OMP maintainer workbench or its action seams | [`review-dashboard.md`](skills/review-dashboard.md) |
 | Monitor running OMP workbenches or contributor workers | [`review-monitoring.md`](skills/review-monitoring.md) |

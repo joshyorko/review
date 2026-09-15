@@ -25,7 +25,7 @@ fi
 node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
 if ((node_major < 24)); then
   if command -v bun >/dev/null 2>&1; then
-    bun test tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts tests/personal_policy.test.ts
+    bun test tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts tests/personal_policy.test.ts tests/luna_factory.test.ts
     python3 tests/personal_brew_oci_contract.py
     bash tests/launcher-contract.sh
     exit 0
@@ -34,6 +34,6 @@ if ((node_major < 24)); then
   exit 1
 fi
 
-node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts tests/personal_policy.test.ts
+node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts tests/personal_policy.test.ts tests/luna_factory.test.ts
 python3 tests/personal_brew_oci_contract.py
 bash tests/launcher-contract.sh

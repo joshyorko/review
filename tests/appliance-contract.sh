@@ -158,6 +158,8 @@ grep -qE '^[0-9]+$' image/appliance/REVISION || fail "image/appliance/REVISION m
 # The mode the image exists to run has to be in the build context.
 [[ -f image/extension/bluefin-review/index.ts ]] || fail "the review mode entry point is missing"
 [[ -d image/extension/bluefin-review/agents ]] || fail "the companion agents are missing"
+[[ -f image/extension/luna-factory/index.ts ]] || fail "the Luna Factory extension entry point is missing"
+[[ -d image/extension/luna-factory/agents ]] || fail "the Luna Factory companion agents are missing"
 grep -qF '!scripts/generate-appliance-sbom.py' .dockerignore ||
   fail ".dockerignore must let the appliance SBOM generator into the build context"
 
@@ -332,6 +334,8 @@ run '
   check test -f /usr/share/bluefin/review/appliance-mcp.json
   check test -f /usr/share/bluefin/review/extension/index.ts
   check test -d /usr/share/bluefin/review/extension/agents
+  check test -f /usr/share/bluefin/review/luna-factory/index.ts
+  check test -d /usr/share/bluefin/review/luna-factory/agents
   check test -f /usr/share/bluefin/review/sbom.spdx.json
   check test -e "/usr/lib/${audio_triplet}/libpulse-simple.so.0"
   check test -e "/usr/lib/${audio_triplet}/libasound.so.2"

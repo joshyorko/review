@@ -1,0 +1,921 @@
+/**
+ * Contract tests for the Luna Factory extension.
+ *
+ * The pure core is driven directly, because the decisions this package exists to
+ * make — admission, evidence binding, convergence, repair lineage — are exactly
+ * the ones that must not depend on a terminal, a model, or a live OMP process.
+ * The extension surface is driven against a fake host for the same reason.
+ */
+
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { admit } from "../image/extension/luna-factory/core/admission.ts";
+import { evaluateRun } from "../image/extension/luna-factory/core/convergence.ts";
+import { criterionProven, reconcileReceipt } from "../image/extension/luna-factory/core/evidence.ts";
+import { JOURNAL_ENTRY, durabilityOf, journalRecord, parseJournal, readJournal } from "../image/extension/luna-factory/core/journal.ts";
+import { emptyLedger, findTask } from "../image/extension/luna-factory/core/model.ts";
+import type {
+	Candidate,
+	CriterionId,
+	EvidenceReceipt,
+	GenerationId,
+	Ledger,
+	LedgerEvent,
+	RunId,
+	Subject,
+	TaskId,
+} from "../image/extension/luna-factory/core/model.ts";
+import { renderCompletionReceipt } from "../image/extension/luna-factory/core/receipt.ts";
+import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
+import { artifactRefError, parseCandidate, parseReceipt } from "../image/extension/luna-factory/core/schema.ts";
+import { buildDispatchPrompt, RECEIPT_CONTRACT } from "../image/extension/luna-factory/omp/adapter.ts";
+import { DISPATCH_COVERAGE, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
+import { renderStatus, renderStatusDetail, renderWhy } from "../image/extension/luna-factory/ui/status.ts";
+import { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
+
+const ROOTS = ["/artifacts"];
+const REDUCE = { artifactRoots: ROOTS };
+const SUBJECT: Subject = { repo: "example/repo", base: "a".repeat(40) };
+
+function ledger(): Ledger {
+	return emptyLedger(
+		"lf-test" as RunId,
+		{
+			statement: "ship the small fix",
+			nonGoals: ["no new dashboard"],
+			permittedEffects: ["read", "write"],
+			appetite: { tasks: 8, attemptsPerTask: 2 },
+		},
+		[
+			{ id: "A1" as CriterionId, statement: "the fix is proven", mandatory: true },
+			{ id: "A2" as CriterionId, statement: "docs mention it", mandatory: false },
+		],
+		SUBJECT,
+	);
+}
+
+function candidate(overrides: Partial<Candidate> = {}): Candidate {
+	return {
+		taskId: "T1" as TaskId,
+		generation: "G1" as GenerationId,
+		criterionId: "A1" as CriterionId,
+		title: "fix it",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+		...overrides,
+	};
+}
+
+function receipt(overrides: Partial<EvidenceReceipt> = {}): EvidenceReceipt {
+	const base: EvidenceReceipt = {
+		version: 1,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		generation: "G1" as GenerationId,
+		subject: SUBJECT,
+		result: "fixed",
+		changed: ["src/x.ts"],
+		evidence: ["/artifacts/run.log"],
+		tests: [{ command: "bash tests/x.sh", outcome: "pass", artifact: "/artifacts/x.log" }],
+		cleanEnvironment: true,
+		unresolved: [],
+		next: "none",
+		confidence: "high",
+		routing: { requested: "lf-worker", verified: false },
+		exitCode: 0,
+		aborted: false,
+		truncated: false,
+	};
+	return { ...base, ...overrides };
+}
+
+/** Apply one event, failing the test if the ledger rejects it. */
+function step(current: Ledger, build: (revision: number) => LedgerEvent): Ledger {
+	const result = reduce(current, build(current.revision), REDUCE);
+	assert.equal(result.ok, true, result.ok ? "" : result.error);
+	return result.ok ? result.ledger : current;
+}
+
+/** An admitted, running task with one attempt already opened. */
+function runningTask(): Ledger {
+	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
+	return step(admitted, (revision) => ({
+		kind: "start_attempt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		subject: SUBJECT,
+	}));
+}
+
+// ----------------------------------------------------------------- admission
+
+test("a candidate tied to an unproven criterion with satisfied dependencies is admitted", () => {
+	const verdict = admit(ledger(), candidate());
+	assert.equal(verdict.decision, "ADMIT");
+	assert.match(verdict.reason, /A1/);
+});
+
+test("a candidate that proves an unknown criterion escalates rather than admitting", () => {
+	const verdict = admit(ledger(), candidate({ criterionId: "A9" as CriterionId }));
+	assert.equal(verdict.decision, "ESCALATE");
+	assert.match(verdict.reason, /unknown criterion A9/);
+});
+
+test("a candidate for an already-proven criterion is dismissed", () => {
+	const proven = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const finished = step(proven, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+	const verdict = admit(finished, candidate({ taskId: "T2" as TaskId }));
+	assert.equal(verdict.decision, "DISMISS");
+	assert.match(verdict.reason, /already holds current proof/);
+});
+
+test("a candidate whose dependency is unknown defers, and whose dependency is unproven also defers", () => {
+	const unknown = admit(ledger(), candidate({ deps: ["T9" as TaskId] }));
+	assert.equal(unknown.decision, "DEFER");
+	assert.match(unknown.reason, /not in the ledger/);
+
+	const pending = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ taskId: "T0" as TaskId }) }));
+	const dependent = admit(pending, candidate({ taskId: "T2" as TaskId, deps: ["T0" as TaskId] }));
+	assert.equal(dependent.decision, "DEFER");
+	assert.match(dependent.reason, /T0 is READY, not proven/);
+});
+
+test("a dependency cycle escalates instead of dispatching a tangle", () => {
+	const nested = step(
+		ledger(),
+		(revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ taskId: "T0" as TaskId }) }),
+	);
+	const chained = step(nested, (revision) => ({
+		kind: "record_candidate",
+		expectedRevision: revision,
+		candidate: candidate({ taskId: "T2" as TaskId, deps: ["T0" as TaskId] }),
+	}));
+	const verdict = admit(chained, candidate({ taskId: "T0" as TaskId, deps: ["T2" as TaskId] }));
+	assert.equal(verdict.decision, "ESCALATE");
+	assert.match(verdict.reason, /already in the ledger|depends on itself/);
+});
+
+test("an effect the objective does not permit escalates", () => {
+	const readOnly = emptyLedger(
+		"lf-test" as RunId,
+		{ statement: "inspect only", nonGoals: [], permittedEffects: ["read"], appetite: { tasks: 4, attemptsPerTask: 1 } },
+		[{ id: "A1" as CriterionId, statement: "report", mandatory: true }],
+		SUBJECT,
+	);
+	const verdict = admit(readOnly, candidate({ effect: "write" }));
+	assert.equal(verdict.decision, "ESCALATE");
+	assert.match(verdict.reason, /does not permit 'write'/);
+});
+
+test("a second active writer on the same subject defers", () => {
+	const writer = candidate({ taskId: "T1" as TaskId, effect: "write" });
+	const first = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
+	const second = admit(first, candidate({ taskId: "T2" as TaskId, criterionId: "A2" as CriterionId, effect: "write" }));
+	assert.equal(second.decision, "DEFER");
+	assert.match(second.reason, /conflicting writer T1/);
+});
+
+test("an exhausted objective appetite defers further admission", () => {
+	const tight = emptyLedger(
+		"lf-test" as RunId,
+		{ statement: "one small thing", nonGoals: [], permittedEffects: ["read"], appetite: { tasks: 1, attemptsPerTask: 1 } },
+		[{ id: "A1" as CriterionId, statement: "prove it", mandatory: true }],
+		SUBJECT,
+	);
+	const taken = step(tight, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
+	const verdict = admit(taken, candidate({ taskId: "T2" as TaskId, criterionId: "A2" as CriterionId }));
+	assert.equal(verdict.decision, "DEFER");
+	assert.match(verdict.reason, /appetite of 1 admitted tasks is exhausted/);
+});
+
+test("a candidate for an older generation escalates to the owner", () => {
+	const verdict = admit(ledger(), candidate({ generation: "G2" as GenerationId }));
+	assert.equal(verdict.decision, "ESCALATE");
+	assert.match(verdict.reason, /only the owner may change the objective/);
+});
+
+// -------------------------------------------------------------------- schema
+
+test("receipt shape is validated, and a valid one round-trips", () => {
+	const parsed = parseReceipt(receipt());
+	assert.equal(parsed.ok, true);
+	assert.equal(parsed.ok ? parsed.value.taskId : "", "T1");
+});
+
+test("receipt parsing rejects a wrong version, bad enums, and a non-integer exit code", () => {
+	const badVersion = parseReceipt({ ...receipt(), version: 2 });
+	assert.equal(badVersion.ok, false);
+	assert.match(badVersion.ok ? "" : badVersion.errors.join(";"), /version must be 1/);
+
+	const badOutcome = parseReceipt({ ...receipt(), tests: [{ command: "x", outcome: "maybe" }] });
+	assert.equal(badOutcome.ok, false);
+	assert.match(badOutcome.ok ? "" : badOutcome.errors.join(";"), /outcome must be pass, fail, or not-run/);
+
+	const badExit = parseReceipt({ ...receipt(), exitCode: 1.5 });
+	assert.equal(badExit.ok, false);
+	assert.match(badExit.ok ? "" : badExit.errors.join(";"), /exitCode must be an integer/);
+});
+
+test("receipt parsing rejects an unbounded payload", () => {
+	const oversized = parseReceipt({ ...receipt(), result: "x".repeat(3_000) });
+	assert.equal(oversized.ok, false);
+	assert.match(oversized.ok ? "" : oversized.errors.join(";"), /exceeds 2000 characters/);
+});
+
+test("candidate parsing rejects an unknown effect and a malformed dependency identity", () => {
+	const badEffect = parseCandidate({ ...candidate(), effect: "deploy" });
+	assert.equal(badEffect.ok, false);
+
+	const badDep = parseCandidate({ ...candidate(), deps: ["not a task id!"] });
+	assert.equal(badDep.ok, false);
+	assert.match(badDep.ok ? "" : badDep.errors.join(";"), /not a bounded identity/);
+});
+
+test("artifact references outside the run's roots are rejected, not followed", () => {
+	assert.match(artifactRefError("https://example.test/log", ROOTS) ?? "", /remote artifact references/);
+	assert.match(artifactRefError("/artifacts/../etc/passwd", ROOTS) ?? "", /escapes its artifact root/);
+	assert.match(artifactRefError("~/secrets", ROOTS) ?? "", /home-directory expansion/);
+	assert.match(artifactRefError("/tmp/log", ROOTS) ?? "", /outside the run's artifact roots/);
+	assert.equal(artifactRefError("/artifacts/run.log", ROOTS), undefined);
+	assert.equal(artifactRefError("/artifacts", ROOTS), undefined);
+});
+
+// ------------------------------------------------------------------ evidence
+
+test("a clean, complete receipt at the certified identity reconciles as proven", () => {
+	const result = reconcileReceipt(ledger(), receipt(), { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS });
+	assert.equal(result.status, "proven");
+	assert.deepEqual(result.reasons, []);
+});
+
+test("a receipt for another task, attempt, generation, or subject is contradicted, not merely weak", () => {
+	const wrongTask = reconcileReceipt(ledger(), receipt({ taskId: "T2" as TaskId }), { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS });
+	assert.equal(wrongTask.status, "contradicted");
+
+	const wrongAttempt = reconcileReceipt(ledger(), receipt({ attemptId: "T1-a2" }), { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS });
+	assert.equal(wrongAttempt.status, "contradicted");
+
+	const wrongGeneration = reconcileReceipt(ledger(), receipt({ generation: "G2" as GenerationId }), { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS });
+	assert.equal(wrongGeneration.status, "contradicted");
+
+	const wrongSubject = reconcileReceipt(ledger(), receipt({ subject: { ...SUBJECT, head: "b".repeat(40) } }), { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS });
+	assert.equal(wrongSubject.status, "contradicted");
+});
+
+test("a nonzero exit contradicts claimed passing verification and fails an unclaimed one", () => {
+	const contradicted = reconcileReceipt(ledger(), receipt({ exitCode: 1 }), { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS });
+	assert.equal(contradicted.status, "contradicted");
+
+	const failed = reconcileReceipt(ledger(), receipt({ exitCode: 1, tests: [{ command: "bash tests/x.sh", outcome: "not-run" }] }), {
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		subject: SUBJECT,
+		artifactRoots: ROOTS,
+	});
+	assert.equal(failed.status, "failed");
+});
+
+test("aborted, truncated, unresolved, or unclean receipts are unproved rather than successful", () => {
+	for (const patch of [{ aborted: true }, { truncated: true }, { unresolved: ["could not run the suite"] }, { cleanEnvironment: "unknown" as const }]) {
+		const result = reconcileReceipt(ledger(), receipt(patch), { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS });
+		assert.equal(result.status, "unproved", JSON.stringify(patch));
+		assert.ok(result.reasons.length > 0, JSON.stringify(patch));
+	}
+});
+
+test("a receipt claiming verification with no evidence reference is unproved", () => {
+	const result = reconcileReceipt(ledger(), receipt({ evidence: [], changed: [] }), { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS });
+	assert.equal(result.status, "unproved");
+	assert.match(result.reasons.join(";"), /no evidence reference/);
+});
+
+test("a receipt referencing an artifact outside the roots fails", () => {
+	const result = reconcileReceipt(ledger(), receipt({ evidence: ["/tmp/other.log"] }), {
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		subject: SUBJECT,
+		artifactRoots: ROOTS,
+	});
+	assert.equal(result.status, "failed");
+});
+
+// ------------------------------------------------------------------- reducer
+
+test("a stale revision is rejected instead of overwriting a newer decision", () => {
+	const current = runningTask();
+	const stale = reduce(current, { kind: "set_control", expectedRevision: current.revision - 1, control: "paused" }, REDUCE);
+	assert.equal(stale.ok, false);
+	assert.match(stale.ok ? "" : stale.error, /stale revision/);
+});
+
+test("only a READY task may start, and an attempt id is not reused", () => {
+	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
+	const started = step(admitted, (revision) => ({
+		kind: "start_attempt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		subject: SUBJECT,
+	}));
+	const again = reduce(started, { kind: "start_attempt", expectedRevision: started.revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }, REDUCE);
+	assert.equal(again.ok, false);
+	assert.match(again.ok ? "" : again.error, /only READY tasks may start/);
+
+	const duplicate = reduce(admitted, { kind: "start_attempt", expectedRevision: admitted.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
+	assert.equal(duplicate.ok, true);
+
+	const reused = reduce(started, { kind: "start_attempt", expectedRevision: started.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
+	assert.equal(reused.ok, false);
+	assert.match(reused.ok ? "" : reused.error, /already exists/);
+});
+
+test("a returned worker moves to VERIFY and never straight to DONE", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	assert.equal(findTask(recorded, "T1" as TaskId)?.state, "VERIFY");
+	assert.equal(criterionProven(recorded, "A1" as CriterionId), false);
+});
+
+test("a receipt may only be recorded once per attempt", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const repeat = reduce(recorded, { kind: "record_receipt", expectedRevision: recorded.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }, REDUCE);
+	assert.equal(repeat.ok, false);
+	assert.match(repeat.ok ? "" : repeat.error, /already has a recorded receipt/);
+});
+
+test("a write task cannot complete before its attempt is integrated", () => {
+	const writer = candidate({ effect: "write" });
+	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
+	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	const recorded = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const finish = reduce(recorded, { kind: "finish_task", expectedRevision: recorded.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }, REDUCE);
+	assert.equal(finish.ok, false);
+	assert.match(finish.ok ? "" : finish.error, /must be integrated/);
+});
+
+test("proven evidence completes a task and converges the run", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const finished = step(recorded, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+	assert.equal(findTask(finished, "T1" as TaskId)?.state, "DONE");
+	const verdict = evaluateRun(finished);
+	assert.equal(verdict.converged, true);
+	assert.equal(verdict.provenMandatory, 1);
+});
+
+test("unproven evidence is refused at completion", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt({ unresolved: ["the suite could not run"] }),
+	}));
+	const finish = reduce(recorded, { kind: "finish_task", expectedRevision: recorded.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }, REDUCE);
+	assert.equal(finish.ok, false);
+	assert.match(finish.ok ? "" : finish.error, /evidence is unproved/);
+});
+
+test("a task cannot certify a criterion it never targeted", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const finish = reduce(recorded, { kind: "finish_task", expectedRevision: recorded.revision, taskId: "T1" as TaskId, criterionId: "A2" as CriterionId }, REDUCE);
+	assert.equal(finish.ok, false);
+	assert.match(finish.ok ? "" : finish.error, /proves criterion A1, not A2/);
+});
+
+test("integrating a moved head demotes proof taken against the old subject", () => {
+	const writer = candidate({ effect: "write" });
+	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
+	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	const recorded = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const integrated = step(recorded, (revision) => ({
+		kind: "integrate_attempt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		subject: { ...SUBJECT, head: "c".repeat(40) },
+	}));
+	const finished = step(integrated, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+	assert.equal(findTask(finished, "T1" as TaskId)?.state, "DONE");
+
+	const moved = step(finished, (revision) => ({
+		kind: "integrate_attempt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		subject: { ...SUBJECT, head: "d".repeat(40) },
+	}));
+	assert.equal(findTask(moved, "T1" as TaskId)?.state, "VERIFY");
+	assert.equal(criterionProven(moved, "A1" as CriterionId), false);
+});
+
+test("proof at an older subject cannot be completed", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const moved = { ...recorded, subject: { ...SUBJECT, head: "e".repeat(40) } };
+	const finish = reduce(moved, { kind: "finish_task", expectedRevision: moved.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }, REDUCE);
+	assert.equal(finish.ok, false);
+	assert.match(finish.ok ? "" : finish.error, /older subject/);
+});
+
+test("a receipt arriving for a superseded subject is unproved, not accepted late", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		jobId: "job-1",
+	}));
+	const moved = { ...recorded, subject: { ...SUBJECT, head: "f".repeat(40) } };
+	const result = reduce(moved, { kind: "record_receipt", expectedRevision: moved.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }, REDUCE);
+	assert.equal(result.ok, true);
+	assert.equal(findTask(result.ok ? result.ledger : moved, "T1" as TaskId)?.state, "VERIFY");
+	assert.equal(result.ok ? result.ledger.noProgressAttempts : -1, 1);
+});
+
+test("native job ids are recorded once and are the only correlation key", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		jobId: "job-1",
+	}));
+	const again = reduce(recorded, { kind: "record_native_job", expectedRevision: recorded.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", jobId: "job-1" }, REDUCE);
+	assert.equal(again.ok, true);
+	assert.equal(again.ok ? again.ledger.revision : -1, recorded.revision, "a duplicate observation does not advance the ledger");
+	assert.deepEqual(findTask(recorded, "T1" as TaskId)?.attempts[0]?.nativeJobIds, ["job-1"]);
+});
+
+test("reopening requires new evidence and replanning requires a diagnosed plateau", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const finished = step(recorded, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+
+	const unexplained = reduce(finished, { kind: "reopen_task", expectedRevision: finished.revision, taskId: "T1" as TaskId, reason: "   " }, REDUCE);
+	assert.equal(unexplained.ok, false);
+	assert.match(unexplained.ok ? "" : unexplained.error, /must name the new evidence/);
+
+	const reopened = step(finished, (revision) => ({ kind: "reopen_task", expectedRevision: revision, taskId: "T1" as TaskId, reason: "reproduced data loss" }));
+	assert.equal(findTask(reopened, "T1" as TaskId)?.state, "VERIFY");
+
+	const replan = reduce(reopened, { kind: "use_replan", expectedRevision: reopened.revision, taskId: "T1" as TaskId }, REDUCE);
+	assert.equal(replan.ok, false);
+	assert.match(replan.ok ? "" : replan.error, /not diagnosed/);
+});
+
+test("one bounded replan is allowed after a plateau, and only once", () => {
+	let current = runningTask();
+	for (const attempt of ["T1-a1", "T1-a2"]) {
+		current = step(current, (revision) =>
+			attempt === "T1-a1"
+				? { kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: attempt, receipt: receipt({ unresolved: ["still broken"] }) }
+				: { kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: attempt, receipt: receipt({ unresolved: ["still broken"] }) },
+		);
+		if (attempt === "T1-a2") break;
+	}
+	assert.equal(current.noProgressAttempts, 2);
+
+	const replanned = step(current, (revision) => ({ kind: "use_replan", expectedRevision: revision, taskId: "T1" as TaskId }));
+	assert.equal(replanned.replans, 1);
+	assert.equal(replanned.noProgressAttempts, 2, "the plateau count survives the replan");
+	assert.equal(findTask(replanned, "T1" as TaskId)?.state, "READY");
+
+	const second = reduce(replanned, { kind: "use_replan", expectedRevision: replanned.revision, taskId: "T1" as TaskId }, REDUCE);
+	assert.equal(second.ok, false);
+	assert.match(second.ok ? "" : second.error, /already been used/);
+});
+
+test("a new generation reconciles in-flight work and keeps lineage", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const next = step(recorded, (revision) => ({
+		kind: "new_generation",
+		expectedRevision: revision,
+		generation: "G2" as GenerationId,
+		goal: {
+			statement: "narrowed objective",
+			nonGoals: [],
+			permittedEffects: ["read", "write"],
+			appetite: { tasks: 8, attemptsPerTask: 2 },
+		},
+		criteria: [{ id: "A1" as CriterionId, statement: "the narrowed fix is proven", mandatory: true }],
+	}));
+	const task = findTask(next, "T1" as TaskId);
+	assert.equal(task?.state, "CANDIDATE");
+	assert.equal(task?.attempts.length, 1, "lineage survives the objective change");
+	assert.equal(criterionProven(next, "A1" as CriterionId), false);
+	assert.equal(evaluateRun(next).converged, false);
+});
+
+test("an interrupted run cannot be reactivated by a status write", () => {
+	const interrupted = step(runningTask(), (revision) => ({ kind: "set_control", expectedRevision: revision, control: "interrupted" }));
+	const resume = reduce(interrupted, { kind: "set_control", expectedRevision: interrupted.revision, control: "active" }, REDUCE);
+	assert.equal(resume.ok, false);
+	assert.match(resume.ok ? "" : resume.error, /must be reconciled/);
+});
+
+// --------------------------------------------------------------- convergence
+
+test("convergence requires current proof for every mandatory criterion", () => {
+	const base = ledger();
+	const verdict = evaluateRun(base);
+	assert.equal(verdict.converged, false);
+	assert.deepEqual(verdict.remaining, ["A1"]);
+	assert.equal(verdict.provenMandatory, 0);
+});
+
+test("an empty queue is quiescent, not successful, and names the resumption condition", () => {
+	const verdict = evaluateRun(ledger());
+	assert.equal(verdict.converged, false);
+	assert.equal(verdict.quiescent, true);
+	assert.match(verdict.resumption ?? "", /admit or advertise work for A1/);
+});
+
+test("a user pause is never overridden by a converged verdict", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const finished = step(recorded, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+	const paused = step(finished, (revision) => ({ kind: "set_control", expectedRevision: revision, control: "paused" }));
+	const verdict = evaluateRun(paused);
+	assert.equal(verdict.converged, true);
+	assert.equal(verdict.control, "paused");
+	assert.equal(verdict.quiescent, false);
+});
+
+test("a diagnosed, exhausted plateau is reported as a blocker with no silent retry", () => {
+	let current = runningTask();
+	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ unresolved: ["still broken"] }) }));
+	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a2", receipt: receipt({ unresolved: ["still broken"] }) }));
+	current = step(current, (revision) => ({ kind: "use_replan", expectedRevision: revision, taskId: "T1" as TaskId }));
+	const verdict = evaluateRun(current);
+	assert.equal(verdict.plateau, true);
+	assert.match(verdict.resumption ?? "", /no bounded progress remains/);
+});
+
+// -------------------------------------------------------------- capabilities
+
+test("exactly one execution path is enforced, and every other path is marked unenforced", () => {
+	assert.deepEqual(enforcedPaths(), ["factory.admitted-dispatch"]);
+	assert.ok(unsupportedPaths().includes("native.task"));
+	assert.ok(unsupportedPaths().includes("eval.agent"));
+	for (const entry of DISPATCH_COVERAGE) {
+		assert.ok(entry.reason.length > 20, `${entry.path} needs a real reason`);
+		if (entry.status !== "enforced") assert.ok(entry.upstream !== undefined || entry.seam.length > 0, entry.path);
+	}
+});
+
+test("an unproven execution path is refused rather than routed through silently", () => {
+	const run = runningTask();
+	const refused = buildDispatchPrompt(run, "T1" as TaskId, "T1-a1", "native.task");
+	assert.equal(refused.ok, false);
+	assert.match(refused.ok ? "" : refused.error, /is unsupported, not enforced/);
+
+	const unknown = buildDispatchPrompt(run, "T1" as TaskId, "T1-a1", "made.up");
+	assert.equal(unknown.ok, false);
+	assert.match(unknown.ok ? "" : unknown.error, /unknown execution path/);
+});
+
+test("dispatch refuses a task that is not admitted and running", () => {
+	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
+	const notStarted = buildDispatchPrompt(admitted, "T1" as TaskId, "T1-a1");
+	assert.equal(notStarted.ok, false);
+	assert.match(notStarted.ok ? "" : notStarted.error, /only an admitted READY task|not recorded/);
+
+	const deferred = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ deps: ["T9" as TaskId] }) }));
+	const blocked = buildDispatchPrompt(deferred, "T2" as TaskId, "T2-a1");
+	assert.equal(blocked.ok, false);
+	assert.match(blocked.ok ? "" : blocked.error, /is DEFERRED/);
+});
+
+test("a closed run admits no new dispatch", () => {
+	const paused = step(runningTask(), (revision) => ({ kind: "set_control", expectedRevision: revision, control: "paused" }));
+	const refused = buildDispatchPrompt(paused, "T1" as TaskId, "T1-a1");
+	assert.equal(refused.ok, false);
+	assert.match(refused.ok ? "" : refused.error, /admission is closed/);
+});
+
+test("the dispatched prompt carries the ledger's identity, never a caller-supplied one", () => {
+	const plan = buildDispatchPrompt(runningTask(), "T1" as TaskId, "T1-a1");
+	assert.equal(plan.ok, true);
+	const prompt = plan.ok ? plan.prompt : "";
+	assert.match(prompt, /task T1 \(attempt T1-a1, lineage 1\)/);
+	assert.match(prompt, /generation G1 · revision \d+ · subject example\/repo@a{40}/);
+	assert.match(prompt, /criterion A1/);
+	assert.match(prompt, /Do not create successor tasks or missions/);
+	assert.match(prompt, /Do not approve, merge, publish/);
+	assert.ok(prompt.includes(RECEIPT_CONTRACT));
+});
+
+// -------------------------------------------------------------------- journal
+
+test("a journal record round-trips through the versioned entry", () => {
+	const run = runningTask();
+	const read = parseJournal(journalRecord(run));
+	assert.equal(read.ok, true);
+	assert.equal(read.ok ? read.ledger.runId : "", run.runId);
+	assert.equal(read.ok ? read.ledger.revision : -1, run.revision);
+	assert.deepEqual(read.ok ? read.ledger.subject : {}, run.subject);
+});
+
+test("an unknown journal version or a corrupt record fails safely and says why", () => {
+	const wrongVersion = parseJournal({ ...journalRecord(ledger()), version: 99 });
+	assert.equal(wrongVersion.ok, false);
+	assert.match(wrongVersion.ok ? "" : wrongVersion.reason, /not readable by this build/);
+
+	const corrupt = parseJournal({ version: 1, revision: 3 });
+	assert.equal(corrupt.ok, false);
+	assert.match(corrupt.ok ? "" : corrupt.reason, /run or generation identity/);
+});
+
+test("reading prefers the newest record and reports an unreadable one instead of skipping it", () => {
+	const run = runningTask();
+	const entries = [
+		{ type: "custom", customType: JOURNAL_ENTRY, data: journalRecord(run) },
+		{ type: "custom", customType: JOURNAL_ENTRY, data: { version: 7 } },
+	];
+	const read = readJournal(entries);
+	assert.equal(read?.ok, false);
+	assert.match(read && !read.ok ? read.reason : "", /version 7/);
+
+	assert.equal(readJournal([]), undefined);
+	assert.equal(readJournal(undefined), undefined);
+});
+
+test("durability is unavailable when the session exposes no history", () => {
+	assert.equal(durabilityOf(undefined), "unavailable");
+	assert.equal(durabilityOf([]), "durable");
+});
+
+// ------------------------------------------------------------------------- ui
+
+test("the status indicator is namespaced and reports gates without a dashboard", () => {
+	const line = renderStatus(ledger());
+	assert.match(line, /^Factory G1 · 0\/1 proven · 0 running · 0 blocked$/);
+
+	const detail = renderStatusDetail(ledger());
+	assert.match(detail[0]!, /^Factory G1/);
+	assert.ok(detail.some((row) => /\[mandatory\] A1: the fix is proven — unproven/.test(row)));
+	assert.ok(detail.some((row) => /non-goals: no new dashboard/.test(row)));
+});
+
+test("status detail marks unread routing as unverified rather than assuming a model", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const detail = renderStatusDetail(recorded);
+	assert.ok(detail.some((row) => /routing: requested lf-worker · effective unverified/.test(row)));
+});
+
+test("why explains the decision, the dependencies, and the recorded evidence", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const lines = renderWhy(recorded, "T1" as TaskId);
+	assert.ok(lines.some((row) => /decision ADMIT — necessary for unproven criterion A1/.test(row)));
+	assert.ok(lines.some((row) => /test pass: bash tests\/x\.sh/.test(row)));
+	assert.ok(lines.some((row) => /evidence \/artifacts\/run\.log/.test(row)));
+	assert.deepEqual(renderWhy(recorded, "T9" as TaskId), ["T9 is not in the ledger"]);
+});
+
+test("narrow output degrades by truncation, not by losing the line", () => {
+	const line = renderStatus(ledger(), 18);
+	assert.equal(line.length, 18);
+	assert.ok(line.endsWith("…"));
+});
+
+// -------------------------------------------------------------- completion
+
+test("the completion receipt is explicit about a run that has not converged", () => {
+	const text = renderCompletionReceipt(ledger());
+	assert.match(text, /^FACTORY NOT CONVERGED/);
+	assert.match(text, /mandatory criteria proven: 0\/1/);
+	assert.match(text, /not a completion/i);
+	assert.doesNotMatch(text, /objective met/);
+});
+
+test("a converged receipt states its scope and disclaims merge authority", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const finished = step(recorded, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+	const text = renderCompletionReceipt(finished);
+	assert.match(text, /^FACTORY VERIFIED — objective met/);
+	assert.match(text, /no merge or deploy authority/);
+});
+
+// ------------------------------------------------------------ extension host
+
+function fakeHost() {
+	const tools = new Map<string, { name: string; execute(id: string, params: Record<string, unknown>): Promise<{ content: Array<{ text: string }>; isError?: boolean }> }>();
+	const events = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const entries: Array<{ customType: string; data: unknown }> = [];
+	const notifications: string[] = [];
+	const leaf = (): unknown => ({ optional: () => leaf(), describe: () => leaf() });
+	return {
+		tools,
+		events,
+		entries,
+		notifications,
+		zod: { object: () => ({}), string: leaf },
+		setLabel() {},
+		registerTool(definition: { name: string; execute(id: string, params: Record<string, unknown>): Promise<{ content: Array<{ text: string }>; isError?: boolean }> }) {
+			tools.set(definition.name, definition);
+		},
+		appendEntry(customType: string, data: unknown) {
+			entries.push({ customType, data });
+		},
+		on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
+			events.set(name, handler);
+		},
+		notify(message: string) {
+			notifications.push(message);
+		},
+	};
+}
+
+function startCtx(host: ReturnType<typeof fakeHost>) {
+	return { hasUI: true, ui: { notify: (message: string) => host.notify(message) }, sessionManager: { getBranch: () => [] } };
+}
+
+async function callTool(host: ReturnType<typeof fakeHost>, name: string, input: unknown) {
+	const tool = host.tools.get(name);
+	assert.ok(tool !== undefined, `${name} is not registered`);
+	return tool.execute("call", { input: JSON.stringify(input) });
+}
+
+const FULL_ENV = { LUNA_FACTORY_ENABLED: "1" };
+
+test("loading the extension registers its surface and starts no work", async () => {
+	const host = fakeHost();
+	const extension = createLunaFactoryExtension(host as never, { env: {}, artifactRoots: ROOTS });
+	await extension.whenStarted();
+	assert.deepEqual(
+		[...host.tools.keys()].sort(),
+		[
+			"luna_factory_attempt",
+			"luna_factory_candidate",
+			"luna_factory_completion",
+			"luna_factory_control",
+			"luna_factory_dispatch",
+			"luna_factory_finish",
+			"luna_factory_open",
+			"luna_factory_receipt",
+			"luna_factory_status",
+			"luna_factory_why",
+		],
+	);
+	assert.equal(host.entries.length, 0, "loading writes no journal record");
+	assert.equal(host.notifications.length, 0, "loading is silent");
+});
+
+test("status works while idle and reports the enforced boundary", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: {}, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	const result = await callTool(host, "luna_factory_status", {});
+	assert.equal(result.isError, undefined);
+	assert.match(result.content[0]!.text, /no Factory run is open/);
+	assert.match(result.content[0]!.text, /LUNA_FACTORY_ENABLED=1 to enable/);
+	assert.match(result.content[0]!.text, /enforced: factory\.admitted-dispatch/);
+});
+
+test("execution is refused while the opt-in flag is absent", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: {}, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	const opened = await callTool(host, "luna_factory_open", { objective: "x", criteria: [{ id: "A1", statement: "y" }], repo: "example/repo", base: "a".repeat(40) });
+	assert.equal(opened.isError, true);
+	assert.match(opened.content[0]!.text, /LUNA_FACTORY_ENABLED=1/);
+	assert.equal(host.entries.length, 0);
+});
+
+test("an open run is not silently replaced by a new objective", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	const payload = { objective: "one", criteria: [{ id: "A1", statement: "prove one" }], repo: "example/repo", base: "a".repeat(40) };
+	await callTool(host, "luna_factory_open", payload);
+	const replaced = await callTool(host, "luna_factory_open", { ...payload, objective: "two" });
+	assert.equal(replaced.isError, true);
+	assert.match(replaced.content[0]!.text, /already open for 'one'/);
+	const explicit = await callTool(host, "luna_factory_open", { ...payload, objective: "two", replace: true });
+	assert.equal(explicit.isError, undefined);
+});
+
+test("the admitted vertical runs end to end and finishes on proof", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+
+	await callTool(host, "luna_factory_open", {
+		objective: "prove the fix",
+		criteria: [{ id: "A1", statement: "the fix is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	const admitted = await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "fix it",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	assert.match(admitted.content[0]!.text, /T1: ADMIT/);
+
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const dispatched = await callTool(host, "luna_factory_dispatch", { taskId: "T1", attemptId: "T1-a1" });
+	assert.equal(dispatched.isError, undefined);
+	assert.match(dispatched.content[0]!.text, /admission boundary: enforced/);
+
+	const recorded = await callTool(host, "luna_factory_receipt", {
+		...receipt(),
+		taskId: "T1",
+		attemptId: "T1-a1",
+		generation: "G1",
+		subject: { repo: "example/repo", base: "a".repeat(40) },
+	});
+	assert.equal(recorded.isError, undefined);
+	assert.match(recorded.content[0]!.text, /not acceptance proof/);
+
+	const finished = await callTool(host, "luna_factory_finish", { taskId: "T1" });
+	assert.equal(finished.isError, undefined);
+	assert.match(finished.content[0]!.text, /^FACTORY VERIFIED — objective met/);
+
+	const completion = await callTool(host, "luna_factory_completion", {});
+	assert.match(completion.content[0]!.text, /no merge or deploy authority/);
+	assert.ok(host.entries.some((entry) => entry.customType === JOURNAL_ENTRY), "the ledger is journalled");
+});
+
+test("dispatch through an unproven path is refused at the tool boundary", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "prove the fix",
+		criteria: [{ id: "A1", statement: "the fix is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "fix it",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const refused = await callTool(host, "luna_factory_dispatch", { taskId: "T1", attemptId: "T1-a1", path: "workpool.push" });
+	assert.equal(refused.isError, true);
+	assert.match(refused.content[0]!.text, /workpool\.push' is unsupported/);
+});
+
+test("abort records the owned native jobs and claims no rollback", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "prove the fix",
+		criteria: [{ id: "A1", statement: "the fix is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "fix it",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const aborted = await callTool(host, "luna_factory_control", { action: "abort" });
+	assert.match(aborted.content[0]!.text, /interrupted/);
+	assert.match(aborted.content[0]!.text, /no external effect is rolled back/);
+	const resumed = await callTool(host, "luna_factory_control", { action: "resume" });
+	assert.equal(resumed.isError, true);
+	assert.match(resumed.content[0]!.text, /reconciled/);
+});
+
+test("an unreadable journal is surfaced instead of being started over", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, {
+		hasUI: true,
+		ui: { notify: (message: string) => host.notify(message) },
+		sessionManager: { getBranch: () => [{ type: "custom", customType: JOURNAL_ENTRY, data: { version: 4 } }] },
+	});
+	assert.ok(host.notifications.some((message) => /journal is unreadable/.test(message)));
+	const status = await callTool(host, "luna_factory_status", {});
+	assert.match(status.content[0]!.text, /version 4 is not readable/);
+});
+
+test("session settlement records a verdict and never dispatches", () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	host.events.get("session_stop")!({}, startCtx(host));
+	assert.equal(host.notifications.some((message) => /no Factory run is open/.test(message)), false);
+	host.events.get("session_stop")!({}, { hasUI: false, sessionManager: { getBranch: () => [] } });
+	assert.equal(host.entries.filter((entry) => entry.customType === "com.joshyorko.luna-factory.settlement").length, 0, "an idle session settles nothing");
+});
