@@ -10,6 +10,7 @@
 #   --repo owner/repo
 #   --issues / issues
 #   --all / all
+#   --autoslay / autoslay
 #   and any mixed combination.
 #
 # Populates PARSED_REVIEW_ARGS array with the resulting arguments.
@@ -87,6 +88,14 @@ parse_review_args() {
       out_args+=(--all)
       i=$((i + 1))
       ;;
+    --autoslay)
+      out_args+=(--autoslay)
+      i=$((i + 1))
+      ;;
+    autoslay)
+      out_args+=(--autoslay)
+      i=$((i + 1))
+      ;;
     --skip-repo | --profile | --extension | --model | --effort)
       if ((i + 1 < len)); then
         out_args+=("$arg" "${in_args[i + 1]}")
@@ -137,6 +146,14 @@ parse_review_args() {
       ;;
     esac
   done
+  local has_autoslay=false has_advisor=false parsed
+  for parsed in "${out_args[@]}"; do
+    [[ "$parsed" == --autoslay ]] && has_autoslay=true
+    [[ "$parsed" == --advisor ]] && has_advisor=true
+  done
+  if [[ "$has_autoslay" == true && "$has_advisor" == false ]]; then
+    out_args+=(--advisor)
+  fi
 
   PARSED_REVIEW_ARGS=("${out_args[@]}")
 }

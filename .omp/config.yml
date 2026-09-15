@@ -24,3 +24,7 @@ task:
 modelRoles:
   review: github-copilot/gemini-3.8-flash:high
   fast: github-copilot/gemini-3.8-flash
+  advisor: "@default"
+
+advisor:
+  syncBacklog: 1

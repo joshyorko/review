@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -21,6 +21,7 @@ import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression } 
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
+import { RAW_KEYS, canonicalKey, rawKeyMatcher } from "../image/extension/bluefin-review/keys.ts";
 import { ReviewDashboard, parseMouseEvent } from "../image/extension/bluefin-review/dashboard.ts";
 import { STALE_AFTER_MS, queueAge, renderRail, statusSegment } from "../image/extension/bluefin-review/rail.ts";
 import { SessionTrace } from "../image/extension/bluefin-review/session.ts";
@@ -42,6 +43,26 @@ const NOW = 1_800_000_000_000;
 // No hub, no home: these tests must not read the developer's own Hive
 // registration and must never open a socket.
 const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent" };
+
+test("every review extension module is reachable from its package entrypoint", () => {
+	const directory = join(process.cwd(), "image/extension/bluefin-review");
+	const modules = new Set(readdirSync(directory).filter((name) => name.endsWith(".ts")));
+	const reachable = new Set<string>();
+	const pending = ["index.ts"];
+	const importPattern = /(?:from\s+|import\s*)(["'])(\.\/[^"']+)\1/g;
+	while (pending.length > 0) {
+		const name = pending.pop();
+		if (!name || reachable.has(name)) continue;
+		reachable.add(name);
+		const source = readFileSync(join(directory, name), "utf8");
+		for (const match of source.matchAll(importPattern)) {
+			const dependency = match[2]!.slice(2);
+			if (modules.has(dependency) && !reachable.has(dependency)) pending.push(dependency);
+		}
+	}
+
+	assert.deepEqual([...modules].filter((name) => !reachable.has(name)).sort(), []);
+});
 
 // ---------------------------------------------------------------- fixtures
 
@@ -153,6 +174,7 @@ function hiveBackedFetch(items, calls = []) {
 		mergeable: "MERGEABLE",
 		reviewDecision: "REVIEW_REQUIRED",
 		headRefOid: item.headSha ?? String(item.id).padStart(40, "0"),
+		autoMergeRequest: item.autoMergeEnabled ? { enabledAt: new Date(NOW).toISOString() } : null,
 		author: { login: "reviewer" },
 		repository: { nameWithOwner: item.repo },
 		labels: { nodes: [] },
@@ -768,7 +790,7 @@ test("rail explains an empty queue instead of pretending to load forever", () =>
 	assert.match(rows[0], /401/);
 });
 
-test("rail and dashboard clarify when queue is empty because of hive-only filter", () => {
+test("rail and dashboard clarify an explicitly enabled empty Hive-only filter", () => {
 	const mode = new ReviewMode({ org: "projectbluefin" });
 	mode.hive = {
 		...EMPTY_HIVE,
@@ -778,8 +800,8 @@ test("rail and dashboard clarify when queue is empty because of hive-only filter
 	};
 	mode.items = [queueItem({ id: 10, title: "Unranked item" })];
 	mode.reprioritize();
+	mode.toggleHiveOnly();
 
-	// In default hive-only view, visibleItems is empty because item 10 is unranked
 	assert.equal(mode.hiveOnly, true);
 	assert.equal(mode.visibleItems().length, 0);
 
@@ -945,6 +967,43 @@ test("workbench Tab switches entity mode and Alt+B selects one repository group"
 	assert.deepEqual(modes, ["issues"]);
 	assert.equal(refreshes, 1);
 	assert.match(dashboard.render(120).join("\n"), /HIVE WORKBENCH/);
+});
+
+test("dashboard Alt-S triggers autoslay on visible items or chosen selection", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const mode = new ReviewMode({ org: "projectbluefin" });
+	mode.items = [
+		queueItem({ id: 1, repo: "projectbluefin/a", ciStatus: "success" }),
+		queueItem({ id: 2, repo: "projectbluefin/b", ciStatus: "failure" }),
+	];
+	mode.reprioritize();
+	let emittedAction: DashboardAction | undefined;
+	const dashboard = new ReviewDashboard(
+		{ requestRender() {} },
+		PLAIN_PAINTER,
+		mode,
+		(action) => { emittedAction = action; },
+		() => {},
+		20,
+	);
+	t.after(() => dashboard.dispose());
+
+	// Alt-S with no prior selection slays all visible items
+	dashboard.handleInput("alt+s");
+	assert.ok(emittedAction);
+	assert.equal(emittedAction.kind, "slay");
+	assert.equal(emittedAction.item.id, 1);
+	assert.equal(emittedAction.items?.length, 2);
+
+	// Alt-S with specific chosen item slays only chosen items
+	emittedAction = undefined;
+	mode.toggleSelected("projectbluefin/b#2");
+	dashboard.handleInput("\u001bs"); // legacy escape code
+	assert.ok(emittedAction);
+	assert.equal(emittedAction.kind, "slay");
+	assert.equal(emittedAction.item.id, 2);
+	assert.equal(emittedAction.items?.length, 1);
 });
 
 test("repository waves preserve interleaved Hive order and pause survives session persistence", () => {
@@ -1145,7 +1204,7 @@ test("with a hub the order is Hive's, including through a closing reference", ()
 	assert.match(ranked.priorities.get("projectbluefin/review#11").reason, /hive ready #1 via projectbluefin\/docs#900/);
 	assert.equal(ranked.priorities.get("projectbluefin/review#3").source, "local");
 });
-test("mode defaults to a hive-only view when hub is online, toggled with H", () => {
+test("mode defaults to the complete queue and H narrows it to Hive-ranked work", () => {
 	const hive = {
 		...EMPTY_HIVE,
 		configured: true,
@@ -1162,17 +1221,17 @@ test("mode defaults to a hive-only view when hub is online, toggled with H", () 
 	];
 	mode.reprioritize();
 
-	assert.equal(mode.hiveOnly, true, "default view is hive-only");
+	assert.equal(mode.hiveOnly, false, "default view includes the review queue");
+	assert.equal(mode.visibleItems().length, 2);
+
+	mode.toggleHiveOnly();
+	assert.equal(mode.hiveOnly, true);
 	assert.equal(mode.visibleItems().length, 1);
 	assert.equal(mode.visibleItems()[0]?.id, 11);
 
 	mode.toggleHiveOnly();
 	assert.equal(mode.hiveOnly, false);
 	assert.equal(mode.visibleItems().length, 2);
-
-	mode.toggleHiveOnly();
-	assert.equal(mode.hiveOnly, true);
-	assert.equal(mode.visibleItems().length, 1);
 });
 
 
@@ -1443,7 +1502,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.ok(!ctx.notifications.some((notification) => /browse-only mode disables dispatch/.test(notification.message)));
 });
 
-test("--autoslay starts mass autoreview on launch", async () => {
+test("--autoslay starts the review-repair-land lifecycle on launch", async () => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
@@ -1456,7 +1515,69 @@ test("--autoslay starts mass autoreview on launch", async () => {
 
 	assert.equal(pi.messages.length, 1);
 	assert.match(pi.messages[0], /bluefin-reviewer/);
-	assert.match(pi.messages[0], /Never approve or merge/);
+	assert.match(pi.messages[0], /review, repair, and landing/);
+	assert.match(pi.messages[0], /gh pr merge <n> --repo <r> --auto --squash/);
+});
+
+test("active slay blocks privileged and credential-bearing bash mutations", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	const guard = pi.events.get("tool_call");
+	const call = (command) => guard({ toolName: "bash", input: { command } }, ctx);
+
+	assert.match((await call("gh pr merge 42 --repo projectbluefin/review --admin --squash")).reason, /admin merge bypass/);
+	assert.match((await call("git push origin repair --force-with-lease")).reason, /force-pushing/);
+	assert.match(
+		(await call("git push https://x-access-token:${GH_TOKEN}@github.com/projectbluefin/review.git repair")).reason,
+		/credentials in URL userinfo/,
+	);
+	assert.equal(await call("gh pr merge 42 --repo projectbluefin/review --auto --squash"), undefined);
+});
+
+test("--autoslay falls back to unranked items when Hive-only filter has 0 ranked items", async () => {
+	const hubEnv = { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" };
+	const hubFetch = async (url, init) => {
+		const target = String(url);
+		if (target.includes("/graphql")) return fakeFetch([])(url, init);
+		const path = target.replace("https://hive.example", "");
+		const body =
+			path === "/api/v1/status"
+				? { hub: "online", actionable_items: 0 }
+				: path === "/api/contribute/queue"
+					? { queue: [] }
+					: { groups: [] };
+		return { ok: true, status: 200, statusText: "OK", json: async () => body };
+	};
+
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: hubFetch,
+		env: hubEnv,
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1, "autoslay should dispatch on unranked items when hive-only has 0 items");
+	assert.match(pi.messages[0], /bluefin-reviewer/);
+});
+
+test("RAW_KEYS normalizes Alt-S and Alt-B chords", () => {
+	assert.equal(canonicalKey("\u001bs", rawKeyMatcher), "alt+s");
+	assert.equal(canonicalKey("\u001bb", rawKeyMatcher), "alt+b");
+	assert.equal(canonicalKey("\u001bu", rawKeyMatcher), "alt+u");
 });
 
 test("comment action previews once, revalidates live state, executes argv, and persists a receipt", async () => {
@@ -1525,9 +1646,9 @@ test("comment batches revalidate later heads and retain partial receipts", async
 
 test("pinned OMP agent_end advances repository waves only after final settlement", async () => {
 	const items = [
-		{ id: 1, repo: "projectbluefin/a", title: "a one", headSha: "1".repeat(40) },
-		{ id: 2, repo: "projectbluefin/a", title: "a two", headSha: "2".repeat(40) },
-		{ id: 3, repo: "projectbluefin/b", title: "b one", headSha: "3".repeat(40) },
+		{ id: 1, repo: "projectbluefin/a", title: "a one", headSha: "1".repeat(40), autoMergeEnabled: true },
+		{ id: 2, repo: "projectbluefin/a", title: "a two", headSha: "2".repeat(40), autoMergeEnabled: true },
+		{ id: 3, repo: "projectbluefin/b", title: "b one", headSha: "3".repeat(40), autoMergeEnabled: true },
 	];
 	const pi = fakeHost();
 	const ctx = fakeCtx();
@@ -1545,8 +1666,8 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	await new Promise((resolve) => setImmediate(resolve));
 
 	assert.equal(pi.messages.length, 1);
-	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through mass autoreview:/m);
-	assert.match(pi.messages[0], /workflowz this repository wave/);
+	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through review, repair, and landing:/m);
+	assert.match(pi.messages[0], /workflowz the review stage/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/b/);
 
@@ -1574,6 +1695,29 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.equal(batches.at(-1).state, "complete");
 	assert.equal(batches.at(-1).completedItems, 3);
 	assert.ok(dashboard.render(120).some((line) => line.includes("3/3 terminal")));
+});
+
+test("a slay wave blocks when review jobs leave pull requests open", async () => {
+	const item = { id: 42, repo: "projectbluefin/review", title: "reviewed but not landed", headSha: "a".repeat(40) };
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: hiveBackedFetch([item]),
+		env: { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute" },
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	ctx.asyncJobs.recent = [{ id: "review-only", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("agent_end")({}, ctx);
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "blocked");
+	assert.match(batch.error, /projectbluefin\/review#42/);
+	assert.ok(ctx.notifications.some((notification) => /remain open without auto-merge/.test(notification.message)));
 });
 
 
@@ -1653,21 +1797,24 @@ test("restart blocks interrupted slays and never replays confirmed comments", as
 	assert.ok(ctx.overlays[0].render(240).some((line) => line.includes("BLOCKED")));
 });
 
-test("slay prompts invoke bluefin-reviewer workpools with bounded evidence", () => {
+test("slay prompts define bounded review, isolated repair, and live-rule landing", () => {
 	const item = queueItem();
 	const sibling = queueItem({ id: 7, repo: item.repo });
 	const slay = actionPrompt({ kind: "slay", item, items: [item, sibling] });
 	const fix = actionPrompt({ kind: "fix", item, items: [item, sibling] });
 	for (const prompt of [slay, fix]) {
-		assert.match(prompt, /workflowz this repository wave/);
 		assert.match(prompt, /Never sleep or poll/);
 		assert.match(prompt, /Evidence is bounded and read once/);
 		assert.match(prompt, /--name-only/);
 		assert.doesNotMatch(prompt, /--json [\w,]*\bbody\b/);
-		assert.doesNotMatch(prompt, /maximum of 7|approve and merge|fix-and-merge/);
 	}
-	assert.match(slay, /fresh bluefin-reviewer workpool item per issue or pull request/);
+	assert.match(slay, /fresh bluefin-reviewer workpool item per pull request/);
+	assert.match(slay, /fresh isolated fixer/);
+	assert.match(slay, /reviewed head must equal the live head/i);
+	assert.match(slay, /gh pr merge <n> --repo <r> --auto --squash/);
+	assert.match(slay, /Never use `--admin`/);
 	assert.match(fix, /fresh isolated agent\(\) handle per issue or pull request/);
+	assert.match(fix, /Never approve or merge/);
 });
 
 test("fix waves repair conflicts without landing them", () => {
@@ -1972,7 +2119,7 @@ test("a hive-only session with a broken hub still fails visibly and concisely", 
 });
 
 
-test("action prompts use bounded evidence without granting landing authority", () => {
+test("action prompts reserve landing authority for slay", () => {
 	const item = queueItem();
 	assert.match(actionPrompt({ kind: "slay", item }), /hive_workbench_diff/);
 	assert.match(actionPrompt({ kind: "slay", item }), /hive_workbench_trace/);
@@ -1980,9 +2127,10 @@ test("action prompts use bounded evidence without granting landing authority", (
 	assert.match(actionPrompt({ kind: "fix", item }), /Never approve or merge/);
 	const slayAction = { kind: "slay", item, items: [item, queueItem({ id: 7, repo: item.repo })] };
 	const slayPrompt = actionPrompt(slayAction);
-	assert.match(slayPrompt, /workflowz this repository wave/);
+	assert.match(slayPrompt, /workflowz the review stage/);
+	assert.match(slayPrompt, /review, repair, and landing/);
 	assert.match(slayPrompt, /Report one terminal outcome per item/);
-	assert.match(slayPrompt, /Never approve or merge/);
+	assert.doesNotMatch(slayPrompt, /requires? (?:two|2) approvals?/i);
 	assert.equal(actionPrompt({ kind: "close" }), undefined);
 });
 

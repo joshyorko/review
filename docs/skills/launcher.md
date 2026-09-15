@@ -1,6 +1,6 @@
 ---
 name: launcher
-version: "5.1"
+version: "5.2"
 last_updated: 2026-09-14
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
@@ -59,6 +59,23 @@ Every interactive microVM stays attached to its launching terminal. Do not add
 `--detach`, `-d`, `nohup`, `setsid`, systemd units, or resurrection commands.
 Ctrl-C stops only that invocation. `review-stop cluster` is reserved for the
 Kubernetes worker deployment.
+Apptainer omits its default `/etc/localtime` or `/etc/hosts` mount only when
+that host source is absent or a dangling symlink; present sources retain the
+runtime default.
+Fallback also requires `squashfuse_ll` or `squashfuse` and a readable,
+writable character device at `/dev/fuse`; `review-doctor` reports each missing
+prerequisite separately before launch.
+The doctor checks both published images through reachable Podman or `skopeo`.
+If Apptainer is the only runtime and no read-only registry probe exists, it
+reports image resolution as deferred to launch instead of misclassifying the
+remote reference as a missing local SIF.
+On the Podman path, every mutable image tag is refreshed before launch. A
+registry outage may use an existing local copy only with an explicit stale-image
+warning; a missing local copy fails before `podman run`. Digest and `sha-*`
+references remain immutable and are not refreshed.
+After Podman resolves an image, the launcher reports its OCI version, source
+revision, and digest before execution; missing labels are shown as `unknown`
+rather than inferred.
 
 ## Credentials
 
@@ -66,7 +83,9 @@ Kubernetes worker deployment.
   mounts. Never put values in arguments, logs, image layers, socket paths, SSH
   targets, or committed files.
 - Preserve `--userns keep-id` for the `0600` contributor registration.
-- The OMP appliance receives GitHub/provider credentials by inherited name.
+- The OMP appliance receives GitHub/provider credentials by inherited name and,
+  when `HIVE_HUB` is unset, resolves the hub from the host's default
+  `~/.config/hive/contributor.env` without mounting its registration token.
 - Apptainer's contained environment receives only the explicit credential and
   runtime allowlist through `APPTAINERENV_` variables. Keep `--no-eval` so
   credential and argument values remain literal inside the container.
@@ -80,6 +99,10 @@ Kubernetes worker deployment.
 
 `scripts/parse-review-args.sh` is the single parser for OMP review scope.
 Repository, `--pr`, and `--issues` arguments must reach the appliance unchanged.
+`autoslay` / `--autoslay` also passes OMP's built-in `--advisor` flag exactly
+once. The packaged entrypoint repeats that normalization for direct image
+launches, while the appliance configuration maps `modelRoles.advisor` to
+`@default` rather than selecting a provider.
 The optional contributor argument names an isolated instance and its
 `contributor.<org-repo>.env`; Hive still selects work. OMP owns model choice.
 

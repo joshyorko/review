@@ -35,6 +35,8 @@ review-exec broker, or Kubernetes maintainer Pod.
    `contributor` tmux session, and the selected backend process.
 5. Treat an attended process as user-owned. Never stop, restart, or replace it
    merely to gather evidence.
+6. Inspect the active session transcript as well as the process log. A forbidden
+   tool call can succeed cleanly and leave no error-level log entry.
 
 Queue truth comes from live GitHub and Hive reads. Do not create or consult a
 static queue snapshot. OMP's state volume may be inspected for session and

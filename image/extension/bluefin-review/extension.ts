@@ -77,6 +77,24 @@ const QUEUE_POLL_MS = 60_000;
 // queue's cadence keeps one hub request per refresh instead of one per repaint.
 const HIVE_POLL_MS = 120_000;
 
+function slayBashBlockReason(command: string): string | undefined {
+	if (/\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i.test(command)) {
+		return "credentials in URL userinfo would be exposed through process arguments";
+	}
+	for (const segment of command.split(/\r?\n|&&|\|\||;/)) {
+		if (/\bgh\s+pr\s+merge\b/.test(segment) && /(?:^|\s)--admin(?:[=\s]|$)/.test(segment)) {
+			return "admin merge bypass is forbidden; use GitHub's ordinary rules";
+		}
+		if (
+			/\bgit(?:\s+(?!push(?:\s|$))\S+)*\s+push(?:\s|$)/.test(segment)
+			&& /(?:^|\s)(?:-f|--force(?:-with-lease)?)(?:=[^\s]+)?(?:\s|$)/.test(segment)
+		) {
+			return "force-pushing a slay target is forbidden";
+		}
+	}
+	return undefined;
+}
+
 export const RAIL_KEYS: readonly RailKey[] = [
 	{ chord: "alt+b", label: "workbench" },
 	{ chord: "alt+s", label: "autoslay" },
@@ -151,12 +169,9 @@ function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined 
 }
 
 
-/**
- * Fix is the only workbench action that can modify a checkout. Slay and diff
- * are read-only; comment is executed through its own confirmed mutation plan.
- */
+/** Slay and fix may change pull-request heads; slay may also land reviewed heads. */
 export function isImplementationAction(action: DashboardAction): boolean {
-	return action.kind === "fix";
+	return action.kind === "fix" || action.kind === "slay";
 }
 /**
  * Prompts the action keys send. Each one names the evidence the agent must use.
@@ -187,10 +202,11 @@ export function actionPrompt(
 		return parts.length > 0 ? ` [queue read: ${parts.join(" ")} — revalidate live before mutating]` : "";
 	};
 	const authority = priority?.hiveRank === undefined
-		? "Hive did not rank this item; do not infer priority."
-		: `Hive ranked this work (${priority.reason}); preserve that intent.`;
-	const evidence = "Evidence is bounded and read once. Start with `gh pr diff <n> --repo <r> --name-only`; inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Treat `merge=dirty` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose `--ours`/`--theirs` wholesale. Revalidate live state before any comment, label, assignment, close, or push.";
-	const finish = "Report one terminal outcome per item, then stop. The Hive workbench owns the next repository wave. Never approve or merge.";
+		? ""
+		: `Hive ranked this work (${priority.reason}); preserve that intent. `;
+	const evidence = "Evidence is bounded and read once. Start with `gh pr diff <n> --repo <r> --name-only`; inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Treat `merge=dirty` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose `--ours`/`--theirs` wholesale. Revalidate live state before any comment, label, assignment, close, push, approval, or merge.";
+	const reviewFinish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
+	const slayFinish = "The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh bluefin-reviewer. If it has findings, dispatch one fresh isolated fixer, push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and repository rules. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run `gh pr merge <n> --repo <r> --auto --squash`; GitHub rules remain authoritative and may leave it queued. Never use `--admin`, remove holds, weaken rules, force-push, or put a token in an argument or URL. A blocked PR gets an exact reason, not a bypass. Report one terminal outcome per item, then stop.";
 
 	if (selected.length > 1) {
 		const repository = selected[0]!.repo;
@@ -199,20 +215,23 @@ export function actionPrompt(
 		const workflow = action.kind === "fix"
 			? "workflowz this repository wave with one fresh isolated agent() handle per issue or pull request. Do not share a checkout or conversation between write-capable items."
 			: action.kind === "slay"
-				? "workflowz this repository wave with one fresh bluefin-reviewer workpool item per issue or pull request. Do not reuse a worker across repositories."
+				? "workflowz the review stage with one fresh bluefin-reviewer workpool item per pull request. Keep repair agents isolated, and never reuse a reviewer for the post-fix head."
 				: "workflowz this repository wave with one fresh workpool item per issue or pull request. Do not reuse a worker across repositories.";
 		const issueEvidence = "Evidence is bounded and read once. Inspect the issue description, examine relevant source files and tests, and cite file:line evidence. Never sleep or poll. In a clean workspace, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains `Closes <owner/repo>#<number>`. Never merge or approve your own pull request.";
-		const rules = `<<<SUBAGENT-RULES\n${evidence} ${finish}\nSUBAGENT-RULES>>>`;
-		const issueRules = `<<<SUBAGENT-RULES\n${issueEvidence} ${finish}\nSUBAGENT-RULES>>>`;
+		const reviewRules = `<<<SUBAGENT-RULES\n${evidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
+		const slayRules = `<<<SUBAGENT-RULES\n${evidence} ${slayFinish}\nSUBAGENT-RULES>>>`;
+		const issueRules = `<<<SUBAGENT-RULES\n${issueEvidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
 		switch (action.kind) {
 			case "slay":
-				return `Slay this repository wave for ${repository} through mass autoreview:\n\n${list}\n\n${workflow} Use the bluefin-reviewer agent and report findings by severity with file:line evidence. Copy this block verbatim into every worker prompt:\n${rules}`;
+				return selected.every((item) => item.type === "pr")
+					? `Slay this repository wave for ${repository} through review, repair, and landing:\n\n${list}\n\n${workflow} Coordinate the complete lifecycle after the review workers return. Copy this block verbatim into every worker prompt:\n${slayRules}`
+					: `Review this issue wave for ${repository}:\n\n${list}\n\n${workflow} Issue review does not authorize merging. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 			case "diff":
-				return `Inspect this repository wave for ${repository}:\n\n${list}\n\n${workflow} Use hive_workbench_diff and report the changed files and concrete risks. Copy this block verbatim into every worker prompt:\n${rules}`;
+				return `Inspect this repository wave for ${repository}:\n\n${list}\n\n${workflow} Use hive_workbench_diff and report the changed files and concrete risks. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 			case "fix":
 				return selected.every((item) => item.type === "issue")
 					? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\n${workflow} Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${issueRules}`
-					: `Fix this repository wave for ${repository}:\n\n${list}\n\n${workflow} Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${rules}`;
+					: `Fix this repository wave for ${repository}:\n\n${list}\n\n${workflow} Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 		}
 	}
 
@@ -225,19 +244,19 @@ export function actionPrompt(
 	switch (action.kind) {
 		case "review":
 			if (options?.isBlueberry) {
-				return `Review ${cite(action.item)} in Blueberry advisory mode. Read the bounded diff with bluefin_review_diff and the recorded pipeline with bluefin_review_trace before judging. As a non-maintainer Blueberry contributor, donate your review to the project as an advisory submission. Format your review with \`[Blueberry Advisory Review | Model: ${options.model ?? "default"}]\` and submit it as a GitHub pull request comment or advisory review (\`gh pr review ${action.item.id} --repo ${action.item.repo} --comment -b "..."\`). Never approve, merge, or apply landing labels. ${authority} ${finish}`;
+				return `Review ${cite(action.item)} in Blueberry advisory mode. Read the bounded diff with bluefin_review_diff and the recorded pipeline with bluefin_review_trace before judging. As a non-maintainer Blueberry contributor, donate your review to the project as an advisory submission. Format your review with \`[Blueberry Advisory Review | Model: ${options.model ?? "default"}]\` and submit it as a GitHub pull request comment or advisory review (\`gh pr review ${action.item.id} --repo ${action.item.repo} --comment -b "..."\`). Never approve, merge, or apply landing labels. ${authority} ${reviewFinish}`;
 			}
-			return `Review ${cite(action.item)}. Read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence, covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not. ${authority} ${finish}`;
+			return `Review ${cite(action.item)}. Read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence, covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not. ${authority} ${reviewFinish}`;
 		case "slay":
-			return `Slay ${cite(item)} through autoreview. Use hive_workbench_diff and hive_workbench_trace, then report findings by severity with file:line evidence. ${workflow} ${authority} ${finish}`;
+			return item.type === "pr"
+				? `Slay ${cite(item)} through review, repair, and landing. Use hive_workbench_diff and hive_workbench_trace, then run the complete lifecycle with fresh review and isolated fix agents. ${workflow} ${authority} ${slayFinish}`
+				: `Review ${cite(item)} as an issue; issue slay does not authorize a merge. ${workflow} ${authority} ${reviewFinish}`;
 		case "diff":
-			return `Call hive_workbench_diff for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${authority} ${finish}`;
+			return `Call hive_workbench_diff for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${authority} ${reviewFinish}`;
 		case "fix":
 			return item.type === "issue"
-				? `Implement ${cite(item)} in an isolated workspace. Diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes ${item.repo}#${item.id}\`. ${workflow} ${authority} ${finish}`
-				: `Fix ${cite(item)} in an isolated workspace. Re-read the live diff and failing checks, diagnose each root cause, run focused verification, and push one clean commit for independent review. ${workflow} ${authority} ${finish}`;
-		case "ci_mode":
-			return `Activate CI monitor and repair mode. Ingest failing GitHub Actions workflow runs across configured repositories, cluster failures by root cause, batch repairs by repository starting with base image prerequisites, and monitor verification runs.`;
+				? `Implement ${cite(item)} in an isolated workspace. Diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes ${item.repo}#${item.id}\`. ${workflow} ${authority} ${reviewFinish}`
+				: `Fix ${cite(item)} in an isolated workspace. Re-read the live diff and failing checks, diagnose each root cause, run focused verification, and push one clean commit for independent review. ${workflow} ${authority} ${reviewFinish}`;
 		case "request_reviewer":
 			return `Request review on ${cite(action.item)} from repository collaborators. Use \`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-reviewer <reviewer>\` to assign reviewers and prioritize in their maintainer queue.`;
 	}
@@ -279,7 +298,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.registerFlag("all", { description: "Show all queue items instead of defaulting to Hive-only", type: "boolean", default: false });
 	pi.registerFlag("repo", { description: "Review one repository: owner/repo, or org:name for a whole organization", type: "string" });
 	pi.registerFlag("skip-repo", { description: "Comma-separated repositories to skip", type: "string" });
-	pi.registerFlag("autoslay", { description: "Start mass autoreview immediately", type: "boolean", default: false });
+	pi.registerFlag("autoslay", { description: "Review, repair, and land the visible queue", type: "boolean", default: false });
 	registerTools(pi as unknown as ToolHost, mode, () => started);
 
 	const repaint = () => tui?.requestRender();
@@ -475,8 +494,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const startSlay = async (ctx: CtxLike) => {
-		const chosen = mode.chosenItems();
-		const items = (chosen.length > 0 ? chosen : mode.visibleItems()).slice(0, BATCH_LIMIT);
+		const items = mode.slayableItems(BATCH_LIMIT);
 		if (items.length === 0) {
 			ctx.ui.notify("No queue items available to slay", "warning");
 			return;
@@ -666,7 +684,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`${hiveFailureStatus(hive.error)}; browse-only mode`, "warning");
 		}
 		await refreshQueue(ctx);
-		mode.restore(persisted);
+		if (persisted?.id) mode.selectById(persisted.repo, persisted.id);
 
 		const recoveredBatch = readPersistedBatch(ctx);
 		if (recoveredBatch) {
@@ -710,6 +728,26 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`Repository wave stopped: ${error}`, "error");
 			return;
 		}
+		if (activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr")) {
+			const live = await fetchItemsByKey(
+				wave.items.map((item) => `${item.repo}#${item.id}`),
+				"prs",
+				mode.tokenOptions(),
+			);
+			if (live.error) {
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error: live.error });
+				ctx.ui.notify(`Slay wave stopped: ${live.error}`, "error");
+				return;
+			}
+			const unfinished = live.items.filter((item) => item.autoMergeEnabled !== true);
+			if (unfinished.length > 0) {
+				const targets = unfinished.map((item) => `${item.repo}#${item.id}`).join(", ");
+				const error = `slay review jobs settled but targets remain open without auto-merge: ${targets}`;
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error });
+				ctx.ui.notify(`Slay wave stopped: ${error}`, "error");
+				return;
+			}
+		}
 		const refreshed = await refreshQueue(ctx);
 		if (refreshed.error) {
 			persistBatch(ctx, { ...activeBatch, state: "blocked", error: refreshed.error });
@@ -745,6 +783,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		const flagAll = pi.getFlag("all");
 		if (flagAll === true) mode.hiveOnly = false;
+		if (pi.getFlag("autoslay") === true) mode.hiveOnly = false;
 		// An explicit scope beats a remembered one: you asked for it on the
 		// command line, this run.
 		const flagRepo = pi.getFlag("repo");
@@ -835,6 +874,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
 		if (ctxToUse) await advanceRepositoryBatch(ctxToUse);
 	});
+	pi.on("tool_call", (event) => {
+		if (
+			activeBatch?.kind !== "slay"
+			|| (activeBatch.state !== "running" && activeBatch.state !== "paused")
+		) return;
+		const { toolName, input } = event as { toolName?: string; input?: { command?: unknown } };
+		if (toolName !== "bash") return;
+		const reason = slayBashBlockReason(String(input?.command ?? ""));
+		if (reason) return { block: true, reason: `Hive workbench slay guard: ${reason}` };
+	});
+
 	pi.on("tool_execution_start", (event) => {
 		const { toolCallId, toolName, args } = event as { toolCallId: string; toolName: string; args: unknown };
 		mode.session.startTool(toolCallId, toolName, args, Date.now());
@@ -860,7 +910,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		handler: (ctx) => void openDashboard(ctx),
 	});
 	pi.registerShortcut("alt+s", {
-		description: "Slay the selected or visible queue through mass autoreview",
+		description: "Slay the selected or visible queue through review, repair, and landing",
 		handler: (ctx) => void startSlay(ctx),
 	});
 	pi.registerShortcut("alt+u", {

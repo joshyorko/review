@@ -39,6 +39,25 @@ arg_after() {
   return 1
 }
 
+configure_host_files() {
+  local mask="$1"
+  rm -f "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+  ((mask & 1)) && touch "$host_fixture/etc/localtime"
+  ((mask & 2)) && touch "$host_fixture/etc/hosts"
+  return 0
+}
+assert_apptainer_host_files() {
+  local call="$1" mask="$2" path bit
+  for path in /etc/localtime /etc/hosts; do
+    [[ "$path" == /etc/localtime ]] && bit=1 || bit=2
+    if ((mask & bit)); then
+      [[ "$call" != *"--no-mount $path"* ]] || fail "present host file $path was suppressed: $call"
+    else
+      [[ "$call" == *"--no-mount $path"* ]] || fail "missing host file $path was not suppressed: $call"
+    fi
+  done
+}
+
 # --- 1. Parser unit tests across all forms and mixed combinations -------------
 
 test_cases=(
@@ -66,6 +85,12 @@ test_cases=(
   "--issues|--issues"
   "all|--all"
   "--all|--all"
+  "autoslay|--autoslay --advisor"
+  "--autoslay|--autoslay --advisor"
+  "projectbluefin/review autoslay|--repo projectbluefin/review --autoslay --advisor"
+  "projectbluefin/review --autoslay|--repo projectbluefin/review --autoslay --advisor"
+  "autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
+  "--autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
   "bluefin|--repo bluefin"
   "bluefin #123|--repo bluefin --pr 123"
   "bluefin#123|--repo bluefin --pr 123"
@@ -105,7 +130,24 @@ assert_eq "$standalone_out" "--repo projectbluefin/review --pr 463 --issues" "st
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
-mkdir -p "$scratch/bin" "$scratch/home"
+mkdir -p "$scratch/bin" "$scratch/home/.config/hive"
+host_fixture="$scratch/host"
+mkdir -p "$host_fixture/etc"
+touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+filesystem_hook="$scratch/filesystem.sh"
+cat >"$filesystem_hook" <<'EOF'
+test() {
+  if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
+    builtin test -e "$HOST_FIXTURE$2"
+  else
+    builtin test "$@"
+  fi
+}
+EOF
+export BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture"
+cat >"$scratch/home/.config/hive/contributor.env" <<'EOF'
+HIVE_HUB=https://hive.example.test
+EOF
 mock_podman_log="$scratch/podman.log"
 kvm="$scratch/kvm"
 touch "$kvm"
@@ -119,6 +161,11 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
 fi
 printf '%s\n' "\$*" >>"$mock_podman_log"
 [[ -z "\${FAKE_PODMAN_DELAY:-}" ]] || sleep "\$FAKE_PODMAN_DELAY"
+case "\${1:-} \${2:-}" in
+  "pull "*) [[ "\${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
+  "image exists") [[ "\${FAKE_IMAGE_MISSING:-0}" != 1 ]]; exit ;;
+  "image inspect") printf '26.08.07|0123456789abcdef|sha256:deadbeef\n'; exit 0 ;;
+esac
 exit 0
 EOF
 chmod +x "$scratch/bin/podman"
@@ -144,12 +191,21 @@ if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
     source_name="APPTAINERENV_\${name}"
     [[ -v "\$source_name" ]] && injected+=("\$name=\${!source_name}")
   done
+  if [[ "\${EXPECT_APPTAINER_HIVE:-}" == 1 ]]; then
+    [[ "\${APPTAINERENV_HIVE_HUB:-}" == https://hive.example.test ]] || exit 19
+  fi
   env -i "\${injected[@]}" /bin/bash -c '
     [[ "\$GH_TOKEN" == mock-token && "\$OPENAI_API_KEY" == test-provider-token ]]
   ' || exit 19
 fi
 exit 0
 EOF
+cat >"$scratch/bin/squashfuse_ll" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$scratch/bin/squashfuse_ll"
+export REVIEW_TEST_FUSE_DEVICE=/dev/null
 chmod +x "$scratch/bin/apptainer"
 chmod +x "$scratch/bin/krun"
 
@@ -179,11 +235,15 @@ assert_bluefin_review() {
 
   [[ -f "$mock_podman_log" ]] || fail "bin/bluefin review did not invoke podman for: $input"
   local podman_call
-  podman_call="$(cat "$mock_podman_log")"
+  podman_call="$(grep '^run ' "$mock_podman_log")"
   [[ "$podman_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "review did not use the krun OCI runtime: $podman_call"
   [[ "$podman_call" == *"--name bluefin-review-"* ]] || fail "review did not use an isolated instance name: $podman_call"
   [[ "$podman_call" == *":/home/bluefin:rw"* ]] || fail "review did not use target-specific state: $podman_call"
 
+  grep -qFx "pull ghcr.io/projectbluefin/review:stable" "$mock_podman_log" ||
+    fail "bin/bluefin review did not refresh the moving stable tag"
+  grep -q '^image inspect --format ' "$mock_podman_log" ||
+    fail "bin/bluefin review did not inspect the resolved image identity"
   local image="ghcr.io/projectbluefin/review:stable" passed_flags
   passed_flags="${podman_call#*"$image"}"
   passed_flags="$(echo "$passed_flags" | xargs)"
@@ -193,9 +253,26 @@ assert_bluefin_review() {
   fi
 }
 
+: >"$mock_podman_log"
+offline_output="$(FAKE_PULL_FAIL=1 "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "packaged review did not use its cached image after refresh failure"
+[[ "$offline_output" == *"using the local copy, which may be out of date"* ]] ||
+  fail "packaged review did not report its stale cached image"
+grep -q '^run ' "$mock_podman_log" || fail "packaged review did not launch its cached image"
+
+: >"$mock_podman_log"
+set +e
+offline_output="$(FAKE_PULL_FAIL=1 FAKE_IMAGE_MISSING=1 "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+offline_status=$?
+set -e
+[[ "$offline_status" -ne 0 ]] || fail "packaged review launched without an obtainable image"
+[[ "$offline_output" == *"cannot obtain review appliance image"* ]] ||
+  fail "packaged review missing-image diagnostic was not actionable: $offline_output"
+! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image acquisition failed"
+
 mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
-fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
+fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
 [[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "review fallback warning is missing"
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment"
@@ -215,8 +292,9 @@ review_one_pid=$!
 FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/bluefin" review projectbluefin/repo2 >/dev/null 2>&1 &
 review_two_pid=$!
 wait "$review_one_pid" "$review_two_pid"
-mapfile -t concurrent_review_calls <"$mock_podman_log"
+mapfile -t concurrent_review_calls < <(grep '^run ' "$mock_podman_log")
 assert_eq "${#concurrent_review_calls[@]}" "2" "concurrent review launch count"
+assert_eq "$(grep -cFx 'pull ghcr.io/projectbluefin/review:stable' "$mock_podman_log")" "2" "concurrent review refresh count"
 first_repo_call="${concurrent_review_calls[0]}"
 second_repo_call="${concurrent_review_calls[1]}"
 [[ "$(arg_after "$first_repo_call" --name)" != "$(arg_after "$second_repo_call" --name)" ]] || fail "concurrent reviews collided on container name"
@@ -225,6 +303,7 @@ assert_bluefin_review "projectbluefin/review #463" "--repo projectbluefin/review
 assert_bluefin_review "projectbluefin/review#463" "--repo projectbluefin/review --pr 463"
 assert_bluefin_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
 assert_bluefin_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
+assert_bluefin_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
 
 # --- 3. Hermetic test of bin/omp-review (Source launcher) ----------------------
 
@@ -263,6 +342,7 @@ assert_omp_review "projectbluefin/review #463" "--repo projectbluefin/review --p
 assert_omp_review "projectbluefin/review#463" "--repo projectbluefin/review --pr 463"
 assert_omp_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
 assert_omp_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
+assert_omp_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
 
 # --- 4. Contributor aliases launch independent KVM appliances -----------------
 mkdir -p "$HOME/.config/hive"
@@ -277,6 +357,10 @@ export GH_TOKEN=mock-token
 contribute_alias_call="$(cat "$mock_podman_log")"
 [[ "$contribute_alias_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "contribute alias did not use krun"
 [[ "$contribute_alias_call" == *"ghcr.io/projectbluefin/contribute:stable"* ]] || fail "contribute alias used the wrong image"
+grep -qFx "pull ghcr.io/projectbluefin/contribute:stable" "$mock_podman_log" ||
+  fail "bin/bluefin contribute did not refresh the moving stable tag"
+grep -q '^image inspect --format ' "$mock_podman_log" ||
+  fail "bin/bluefin contribute did not inspect the resolved image identity"
 
 : >"$mock_podman_log"
 FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/bluefin" contribute owner/repo >/dev/null 2>&1 &
@@ -284,8 +368,9 @@ contribute_one_pid=$!
 FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/bluefin" contribute owner/repo2 >/dev/null 2>&1 &
 contribute_two_pid=$!
 wait "$contribute_one_pid" "$contribute_two_pid"
-mapfile -t concurrent_contribute_calls <"$mock_podman_log"
+mapfile -t concurrent_contribute_calls < <(grep '^run ' "$mock_podman_log")
 assert_eq "${#concurrent_contribute_calls[@]}" "2" "concurrent contribute launch count"
+assert_eq "$(grep -cFx 'pull ghcr.io/projectbluefin/contribute:stable' "$mock_podman_log")" "2" "concurrent contributor refresh count"
 first_contribute_call="${concurrent_contribute_calls[0]}"
 second_contribute_call="${concurrent_contribute_calls[1]}"
 [[ "$(arg_after "$first_contribute_call" --name)" != "$(arg_after "$second_contribute_call" --name)" ]] || fail "contributor appliances must have unique container names"
@@ -300,6 +385,49 @@ fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 OPENAI_API_KEY=test-provider-t
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "contributor fallback did not use Apptainer containment"
 [[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/contribute:stable"* ]] || fail "contributor fallback used the wrong image"
+
+for mask in 0 1 2 3; do
+  configure_host_files "$mask"
+  : >"$mock_apptainer_log"
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+    fail "review fallback failed for host-file mask $mask"
+  assert_apptainer_host_files "$(cat "$mock_apptainer_log")" "$mask"
+
+  : >"$mock_apptainer_log"
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" contribute >/dev/null 2>&1 ||
+    fail "contributor fallback failed for host-file mask $mask"
+  assert_apptainer_host_files "$(cat "$mock_apptainer_log")" "$mask"
+done
+configure_host_files 2
+ln -s missing-zoneinfo "$host_fixture/etc/localtime"
+: >"$mock_apptainer_log"
+REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "review fallback failed with dangling localtime"
+assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
+: >"$mock_apptainer_log"
+REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" contribute >/dev/null 2>&1 ||
+  fail "contributor fallback failed with dangling localtime"
+assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
+: >"$mock_apptainer_log"
+REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin-contribute" >/dev/null 2>&1 ||
+  fail "contributor wrapper fallback failed with dangling localtime"
+assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
+
+mv "$scratch/bin/squashfuse_ll" "$scratch/squashfuse_ll"
+set +e
+fallback_output="$(env PATH="$scratch/bin:/usr/bin:/bin" HOME="$HOME" GH_TOKEN="$GH_TOKEN" GITHUB_TOKEN="$GITHUB_TOKEN" BASH_ENV="$BASH_ENV" HOST_FIXTURE="$HOST_FIXTURE" REVIEW_TEST_FUSE_DEVICE="$REVIEW_TEST_FUSE_DEVICE" REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+fallback_status=$?
+set -e
+[[ "$fallback_status" -ne 0 ]] || fail "review fallback accepted missing squashfuse"
+[[ "$fallback_output" == *"squashfuse"* ]] || fail "missing squashfuse diagnostic was not actionable: $fallback_output"
+mv "$scratch/squashfuse_ll" "$scratch/bin/squashfuse_ll"
+
+set +e
+fallback_output="$(REVIEW_TEST_FUSE_DEVICE="$scratch/missing-fuse" REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" contribute 2>&1)"
+fallback_status=$?
+set -e
+[[ "$fallback_status" -ne 0 ]] || fail "contributor fallback accepted a missing FUSE device"
+[[ "$fallback_output" == *"FUSE device"* ]] || fail "missing FUSE diagnostic was not actionable: $fallback_output"
 mv "$scratch/krun" "$scratch/bin/krun"
 
 # --- 5. Parity test: KVM container and source launchers use identical flags ---
@@ -343,8 +471,10 @@ mock_cred_bin="$scratch/cred-bin"
 mkdir -p "$mock_cred_bin"
 cat >"$mock_cred_bin/podman" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$1" == info ]]; then exit 0; fi
-echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"
+case "${1:-} ${2:-}" in
+  "info "|"pull "*|"image exists") exit 0 ;;
+  "run "*) echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"; exit 0 ;;
+esac
 exit 0
 EOF
 chmod +x "$mock_cred_bin/podman"

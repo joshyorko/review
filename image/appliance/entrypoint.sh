@@ -35,7 +35,17 @@ EOF
   exit 0
   ;;
 esac
+args=("$@")
+autoslay=false
+advisor=false
+for arg in "${args[@]}"; do
+  [ "$arg" = --autoslay ] && autoslay=true
+  [ "$arg" = --advisor ] && advisor=true
+done
+if [ "$autoslay" = true ] && [ "$advisor" = false ]; then
+  args+=(--advisor)
+fi
 
 exec omp --profile "$profile" \
   --config /usr/share/bluefin/review/appliance-config.yml \
-  --extension /usr/share/bluefin/review/extension "$@"
+  --extension /usr/share/bluefin/review/extension "${args[@]}"

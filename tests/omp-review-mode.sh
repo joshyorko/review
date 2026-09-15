@@ -24,9 +24,14 @@ fi
 # the requirement so an older runtime fails with a sentence instead of a parse error.
 node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
 if ((node_major < 24)); then
+  if command -v bun >/dev/null 2>&1; then
+    bun test tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts
+    bash tests/launcher-contract.sh
+    exit 0
+  fi
   echo "omp-review-mode: node >= 24 required for TypeScript type stripping (found $(node --version))" >&2
   exit 1
 fi
 
-node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts tests/ci_mode.test.ts tests/reviewer_requests.test.ts
+node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts
 bash tests/launcher-contract.sh

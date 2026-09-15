@@ -73,7 +73,7 @@ export class ReviewMode {
 	items: QueueItem[] = [];
 	cursor = 0;
 	filter = "";
-	hiveOnly = true;
+	hiveOnly = false;
 	/** Hive triage stage the queue is drilled into; undefined is all of it. */
 	hiveLevel?: string;
 	queueError?: string;
@@ -395,6 +395,27 @@ export class ReviewMode {
 	chosenItems(): QueueItem[] {
 		if (this.selectedKeys.size === 0) return [];
 		return this.visibleItems().filter((item) => this.selectedKeys.has(`${item.repo}#${item.id}`));
+	}
+
+	/**
+	 * Items available for slay execution: chosen items first, then visible items,
+	 * falling back to unranked items in local priority order when the Hive-only
+	 * filter leaves zero items.
+	 */
+	slayableItems(limit = BATCH_LIMIT): QueueItem[] {
+		const chosen = this.chosenItems();
+		if (chosen.length > 0) return chosen.slice(0, limit);
+		const visible = this.visibleItems();
+		if (visible.length > 0) return visible.slice(0, limit);
+		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		if (this.skipRepos.size > 0) {
+			base = base.filter((item) => {
+				const repoLower = item.repo.toLowerCase();
+				const shortName = repoLower.includes("/") ? repoLower.split("/")[1]! : repoLower;
+				return !this.skipRepos.has(repoLower) && !this.skipRepos.has(shortName);
+			});
+		}
+		return base.slice(0, limit);
 	}
 
 

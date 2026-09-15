@@ -83,10 +83,16 @@ RUN set -eu; \
     \
     rm -rf "$workdir"
 
-# The shell, git, and their library closure, staged out of the builder by an
-# explicit allowlist. Nothing is installed into the final image; it is assembled.
+# The shell, git, review validators, and their library closure are staged from
+# the pinned FSDK builder by an explicit allowlist. Nothing is installed into
+# the final image; it is assembled from binaries already present at that seam.
 COPY --chmod=0755 image/appliance/stage-runtime.sh /usr/local/libexec/stage-runtime
-RUN /usr/local/libexec/stage-runtime /out
+RUN /usr/local/libexec/stage-runtime /out \
+    /usr/sbin/actionlint \
+    /usr/sbin/shellcheck \
+    /usr/sbin/yq \
+    /usr/sbin/jq \
+    /usr/sbin/just
 
 # The in-image SBOM. syft can only see package-manager metadata, and every
 # component of this image arrived as a release archive, so the archive

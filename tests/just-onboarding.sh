@@ -15,6 +15,26 @@ kubectl_log="$scratch/kubectl.log"
 apptainer_log="$scratch/apptainer.log"
 kvm="$scratch/kvm"
 mkdir -p "$home/.config/hive" "$fake_bin"
+host_fixture="$scratch/host"
+mkdir -p "$host_fixture/etc"
+touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+filesystem_hook="$scratch/filesystem.sh"
+cat >"$filesystem_hook" <<'EOF'
+test() {
+  if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
+    builtin test -e "$HOST_FIXTURE$2"
+  else
+    builtin test "$@"
+  fi
+}
+command() {
+  if [[ "${FAKE_NO_SKOPEO:-0}" == 1 && "${1:-}" == -v && "${2:-}" == skopeo ]]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+EOF
+export BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture"
 touch "$kvm"
 chmod 0666 "$kvm"
 cat >"$home/.config/hive/contributor.env" <<'EOF'
@@ -52,9 +72,10 @@ case "${1:-} ${2:-} ${3:-}" in
   "system connection list")
     [[ "${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\tidentity\ttrue\n'
     exit 0 ;;
-  "image exists "*) exit 0 ;;
-  "pull "*) exit 0 ;;
+  "image exists "*) [[ "${FAKE_IMAGE_MISSING:-0}" != 1 ]]; exit ;;
+  "pull "*) [[ "${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
   "inspect --format "*) printf 'false\n'; exit 0 ;;
+  "image inspect --format") printf '26.08.07|0123456789abcdef|sha256:deadbeef\n'; exit 0 ;;
   "container exists "*) exit 1 ;;
   "run "*) exit 17 ;;
 esac
@@ -102,6 +123,17 @@ cat >"$fake_bin/krun" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+cat >"$fake_bin/squashfuse_ll" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$fake_bin/squashfuse_ll"
+export REVIEW_TEST_FUSE_DEVICE=/dev/null
+cat >"$fake_bin/skopeo" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$fake_bin/skopeo"
 chmod +x "$fake_bin/gh" "$fake_bin/podman" "$fake_bin/kubectl" "$fake_bin/krun" "$fake_bin/apptainer"
 
 failures=0
@@ -120,11 +152,29 @@ log_not_contains() {
   grep -Fq -- "$1" "$2" && fail "expected $2 not to contain: $1"
   return 0
 }
+configure_host_files() {
+  local mask="$1"
+  rm -f "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+  ((mask & 1)) && touch "$host_fixture/etc/localtime"
+  ((mask & 2)) && touch "$host_fixture/etc/hosts"
+  return 0
+}
+assert_apptainer_host_files() {
+  local call="$1" mask="$2" path bit
+  for path in /etc/localtime /etc/hosts; do
+    [[ "$path" == /etc/localtime ]] && bit=1 || bit=2
+    if ((mask & bit)); then
+      [[ "$call" != *"--no-mount $path"* ]] || fail "present host file $path was suppressed: $call"
+    else
+      [[ "$call" == *"--no-mount $path"* ]] || fail "missing host file $path was not suppressed: $call"
+    fi
+  done
+}
 run_just() {
   : >"$podman_log"
   : >"$kubectl_log"
   set +e
-  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
   status=$?
   set -e
 }
@@ -139,9 +189,34 @@ scenario="doctor verifies the KVM runtime"
 run_just review-doctor
 [[ "$status" -eq 0 ]] || fail "review-doctor failed: $output"
 contains 'Podman krun KVM runtime ready' "$output"
+contains '=== Review image ===' "$output"
+contains 'ghcr.io/projectbluefin/review:stable is resolvable' "$output"
+contains '=== Contributor image ===' "$output"
+contains 'ghcr.io/projectbluefin/contribute:stable is resolvable' "$output"
+
+scenario="doctor diagnoses missing squashfuse"
+mv "$fake_bin/squashfuse_ll" "$scratch/squashfuse_ll"
+FAKE_PODMAN_INFO_FAIL=1 run_just review-doctor
+[[ "$status" -ne 0 ]] || fail "doctor accepted an Apptainer fallback without squashfuse"
+contains 'squashfuse userland is unavailable' "$output"
+mv "$scratch/squashfuse_ll" "$fake_bin/squashfuse_ll"
+
+scenario="doctor diagnoses missing FUSE device"
+REVIEW_TEST_FUSE_DEVICE="$scratch/missing-fuse" FAKE_PODMAN_INFO_FAIL=1 run_just review-doctor
+[[ "$status" -ne 0 ]] || fail "doctor accepted an Apptainer fallback without a FUSE device"
+contains 'FUSE device' "$output"
+
+scenario="doctor defers remote image resolution without registry tooling"
+FAKE_NO_SKOPEO=1 FAKE_PODMAN_INFO_FAIL=1 run_just review-doctor
+[[ "$status" -eq 0 ]] || fail "doctor treated unavailable non-mutating registry probes as launch failure: $output"
+contains '=== Review image ===' "$output"
+contains 'ghcr.io/projectbluefin/review:stable resolution deferred to Apptainer launch' "$output"
+contains '=== Contributor image ===' "$output"
+contains 'ghcr.io/projectbluefin/contribute:stable resolution deferred to Apptainer launch' "$output"
 scenario="contribute launches the OMP worker"
 run_just contribute
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
+contains 'contributor image ghcr.io/projectbluefin/contribute:stable: version=26.08.07 revision=0123456789abcdef digest=sha256:deadbeef' "$output"
 log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-contribute-' "$podman_log"
 log_contains '--userns keep-id:uid=65532,gid=65532' "$podman_log"
 log_contains "$home/.config/hive/contributor.env:/home/bluefin/.config/hive/contributor.env:ro,z" "$podman_log"
@@ -185,7 +260,7 @@ contains 'detached contributor containers are not supported' "$output"
 scenario="KVM preflight failure falls back to Apptainer"
 : >"$apptainer_log"
 set +e
-output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token HIVE_HUB=https://hive.example.test EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token HIVE_HUB= EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
 status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "expected fake Apptainer exit 18, got $status"
@@ -201,17 +276,71 @@ status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "contributor credentials did not reach contained process: $output"
 
+for mask in 0 1 2 3; do
+  scenario="Apptainer host-file mask $mask"
+  configure_host_files "$mask"
+  : >"$apptainer_log"
+  set +e
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -eq 18 ]] || fail "review fallback failed for host-file mask $mask: $output"
+  assert_apptainer_host_files "$(cat "$apptainer_log")" "$mask"
+
+  : >"$apptainer_log"
+  set +e
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" contribute 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -eq 18 ]] || fail "contributor fallback failed for host-file mask $mask: $output"
+  assert_apptainer_host_files "$(cat "$apptainer_log")" "$mask"
+done
+configure_host_files 2
+ln -s missing-zoneinfo "$host_fixture/etc/localtime"
+scenario="review fallback suppresses dangling localtime"
+: >"$apptainer_log"
+set +e
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 18 ]] || fail "review fallback failed with dangling localtime: $output"
+assert_apptainer_host_files "$(cat "$apptainer_log")" 2
+
+scenario="contributor fallback suppresses dangling localtime"
+: >"$apptainer_log"
+set +e
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" contribute 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 18 ]] || fail "contributor fallback failed with dangling localtime: $output"
+assert_apptainer_host_files "$(cat "$apptainer_log")" 2
+
 scenario="review alias preserves argument boundaries"
 EXPECT_EXTENSION="/tmp/review extension" run_just review-queue --extension "/tmp/review extension"
 [[ "$status" -eq 17 ]] || fail "extension argument was split: $output"
 EXPECT_EMPTY_SCOPE=1 run_just review-queue
 [[ "$status" -eq 17 ]] || fail "zero review arguments acquired an empty prompt: $output"
 
+log_contains 'pull ghcr.io/projectbluefin/review:stable' "$podman_log"
+contains 'review appliance image ghcr.io/projectbluefin/review:stable: version=26.08.07 revision=0123456789abcdef digest=sha256:deadbeef' "$output"
+
+scenario="offline review launch reports stale moving tag"
+FAKE_PULL_FAIL=1 run_just review-queue owner/repo
+[[ "$status" -eq 17 ]] || fail "cached review image did not start after refresh failure: $output"
+contains 'using the local copy, which may be out of date' "$output"
+
+scenario="missing review image fails after refresh failure"
+FAKE_PULL_FAIL=1 FAKE_IMAGE_MISSING=1 run_just review-queue owner/repo
+[[ "$status" -ne 0 ]] || fail "missing review image reached podman run"
+contains 'cannot obtain review appliance image' "$output"
 scenario="review-queue delegates to the OMP appliance"
 run_just review-queue --issues
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
 log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-review-' "$podman_log"
 log_contains 'ghcr.io/projectbluefin/review:stable --issues' "$podman_log"
+run_just review-queue autoslay
+[[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
+log_contains 'ghcr.io/projectbluefin/review:stable --autoslay --advisor' "$podman_log"
 
 scenario="review repositories use independent microVM state"
 run_just review-queue owner/repo

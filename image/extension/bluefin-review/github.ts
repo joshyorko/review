@@ -37,6 +37,8 @@ export interface QueueItem {
 	changedFiles?: number;
 	/** Exact head of the pull request at queue-read time. */
 	headSha?: string;
+	/** GitHub accepted this pull request into its auto-merge lifecycle. */
+	autoMergeEnabled?: boolean;
 	/** `owner/repo#number` of every issue this pull request closes. */
 	closingIssues?: string[];
 	/** `owner/repo#number` of merged PRs that reference or close this issue. */
@@ -74,6 +76,7 @@ const PR_ITEM_FIELDS = `
 	deletions
 	changedFiles
 	headRefOid
+	autoMergeRequest { enabledAt }
 	commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 	closingIssuesReferences(first: 5) {
 		nodes { number repository { nameWithOwner } }
@@ -193,6 +196,7 @@ interface SearchNode {
 	deletions?: number;
 	closed?: boolean;
 	changedFiles?: number;
+	autoMergeRequest?: { enabledAt?: string } | null;
 	author?: { login?: string } | null;
 	repository?: { nameWithOwner?: string } | null;
 	labels?: { nodes?: Array<{ name?: string }> } | null;
@@ -266,6 +270,7 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 		deletions: node.deletions,
 		changedFiles: node.changedFiles,
 		headSha: node.headRefOid,
+		autoMergeEnabled: Boolean(node.autoMergeRequest?.enabledAt),
 		closingIssues: (node.closingIssuesReferences?.nodes ?? [])
 			.map((reference) =>
 				reference.repository?.nameWithOwner && typeof reference.number === "number"

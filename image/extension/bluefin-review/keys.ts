@@ -20,6 +20,9 @@ export const RAW_KEYS: Record<string, readonly string[]> = {
 	right: ["\u001b[C"],
 	left: ["\u001b[D"],
 	backspace: ["\u007f", "\b"],
+	"alt+b": ["\u001bb"],
+	"alt+s": ["\u001bs"],
+	"alt+u": ["\u001bu"],
 };
 
 export const rawKeyMatcher: KeyMatcher = (data, key) => (RAW_KEYS[key] ?? [key]).includes(data);

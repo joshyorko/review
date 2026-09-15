@@ -98,6 +98,11 @@ require "$containerfile" \
   'io.projectbluefin.review.appliance="true"' \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"'
+require image/appliance/config.yml 'advisor: "@default"' 'syncBacklog: 1'
+for tool in actionlint shellcheck yq jq just; do
+  grep -qF "/usr/sbin/${tool}" "$containerfile" ||
+    fail "${tool} must be staged from the pinned FSDK builder"
+done
 
 # The point of a distroless appliance is that nothing inside it can install
 # anything. Not one of these may appear, in any stage that reaches the image.
@@ -160,6 +165,11 @@ grep -qx 'bluefin-review-appliance' <<<"$default_args" ||
 inherited_args="$(BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'review' <<<"$inherited_args" ||
   fail "the explicit host omp configuration opt-in did not select the review profile"
+autoslay_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --autoslay)"
+[[ "$(grep -cx -- '--advisor' <<<"$autoslay_args")" -eq 1 ]] ||
+  fail "autoslay did not enable exactly one OMP advisor"
+grep -qx -- '--autoslay' <<<"$autoslay_args" ||
+  fail "autoslay flag did not reach the review extension"
 if PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh update >"$entrypoint_tmp/update.out" 2>&1; then
   fail "the immutable appliance accepted an in-place update"
 fi
@@ -241,6 +251,11 @@ run '
   git --version >/dev/null
   python3 --version >/dev/null
   python --version >/dev/null
+  actionlint -version >/dev/null
+  shellcheck --version >/dev/null
+  yq --version >/dev/null
+  jq --version >/dev/null
+  just --version >/dev/null
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
 ' >/dev/null || fail "a bundled binary failed to execute"
 

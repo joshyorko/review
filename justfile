@@ -95,14 +95,33 @@ kvm_runtime_ready() {
   fi
   return 0
 }
+apptainer_fallback_ready() {
+  local fuse_device="${REVIEW_TEST_FUSE_DEVICE:-/dev/fuse}"
+  command -v apptainer &>/dev/null || { APPTAINER_FAILURE="Apptainer fallback is unavailable; install Apptainer"; return 1; }
+  { command -v squashfuse_ll &>/dev/null || command -v squashfuse &>/dev/null; } || {
+    APPTAINER_FAILURE="squashfuse userland is unavailable; install squashfuse"
+    return 1
+  }
+  test -e "$fuse_device" || { APPTAINER_FAILURE="FUSE device ${fuse_device} is missing"; return 1; }
+  test -c "$fuse_device" || { APPTAINER_FAILURE="FUSE device ${fuse_device} is not a character device"; return 1; }
+  if ! test -r "$fuse_device" || ! test -w "$fuse_device"; then
+    APPTAINER_FAILURE="FUSE device ${fuse_device} is not readable and writable"
+    return 1
+  fi
+  return 0
+}
 require_apptainer_fallback() {
-  command -v apptainer &>/dev/null || { echo "ERROR: ${KVM_FAILURE}; Apptainer fallback is unavailable. Install Apptainer or configure Podman with krun." >&2; return 1; }
+  apptainer_fallback_ready || { echo "ERROR: ${KVM_FAILURE}; ${APPTAINER_FAILURE}." >&2; return 1; }
   echo "WARNING: ${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary." >&2
 }
 prepare_apptainer_environment() {
-  local name
+  local name host_file
   for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY HIVE_HUB BLUEFIN_REVIEW_ORG TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
+  done
+  APPTAINER_HOST_ARGS=()
+  for host_file in /etc/localtime /etc/hosts; do
+    test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
   done
   return 0
 }
@@ -121,7 +140,7 @@ preflight_github() {
     return 1
   }
 }
-contributor_image_available() {
+image_available() {
   local ref="$1"
   if command -v podman &>/dev/null && podman info &>/dev/null; then
     podman image exists "$ref" &>/dev/null && return 0
@@ -129,10 +148,14 @@ contributor_image_available() {
     podman manifest inspect "$ref" &>/dev/null
     return
   fi
-  command -v apptainer &>/dev/null || return 1
   case "$ref" in localhost/*) return 1 ;; esac
-  [[ "$ref" == *://* ]] || ref="docker://${ref}"
-  apptainer inspect "$ref" &>/dev/null
+  if command -v skopeo &>/dev/null; then
+    [[ "$ref" == *://* ]] || ref="docker://${ref}"
+    skopeo inspect "$ref" &>/dev/null
+    return
+  fi
+  command -v apptainer &>/dev/null && return 2
+  return 1
 }
 image_ref_is_moving() {
   # A digest is immutable and an 'sha-<commit>' tag is minted once per build,
@@ -150,17 +173,10 @@ image_ref_is_moving() {
   esac
   ! podman image exists "localhost/$1"
 }
-ensure_contributor_image() {
-  # A missing tag otherwise surfaces as a bare 'manifest unknown' from
-  # podman at launch time, which says nothing about what to do next.
-  #
-  # A moving tag is re-pulled every launch. Treating 'present locally' as
-  # good enough is what silently pinned contributors to whatever copy they
-  # first pulled while the tag moved on underneath them -- the launcher
-  # looked healthy and ran stale code. Best-effort by design: if the registry
-  # is unreachable, an existing local copy still starts, so being offline
-  # degrades to 'possibly stale' rather than 'cannot work'.
-  local ref="$1"
+ensure_image() {
+  # Moving tags are refreshed on every launch. If the registry is unavailable,
+  # an existing local copy remains usable but the launcher says it may be stale.
+  local ref="$1" product="$2" containerfile="$3" override="$4"
   if image_ref_is_moving "$ref"; then
     podman pull "$ref" && return 0
     if podman image exists "$ref"; then
@@ -168,27 +184,31 @@ ensure_contributor_image() {
       return 0
     fi
   fi
-  # Local presence is the postcondition every caller depends on: the isolation
-  # probe runs with --pull=never, so 'resolvable in the registry' is not good
-  # enough. Accepting a registry-only image here made a missing pull surface
-  # as a false isolation failure.
   podman image exists "$ref" && return 0
-  # 'localhost/' is podman's local-storage namespace, never a registry host.
-  # Pulling it dials https://localhost/v2/ and fails three times with a
-  # connection-refused error that reads like a network fault, so a deleted
-  # local build looked like a broken registry. Say the real thing instead.
   case "$ref" in
     localhost/*)
       echo "ERROR: ${ref} is a locally built image and it is not in local storage." >&2
-      echo "  Build it: podman build -f image/contribute/Containerfile -t ${ref#localhost/} ." >&2
-      echo "  Or drop the override to use the published default: unset CONTRIBUTE_IMAGE" >&2
+      echo "  Build it: podman build -f ${containerfile} -t ${ref#localhost/} ." >&2
+      echo "  Or drop the override to use the published default: unset ${override}" >&2
       return 1
       ;;
   esac
   podman pull "$ref" && return 0
-  echo "ERROR: cannot obtain contributor image ${ref}." >&2
-  echo "  Set CONTRIBUTE_IMAGE to a published tag/digest or build image/contribute/Containerfile." >&2
+  echo "ERROR: cannot obtain ${product} image ${ref}." >&2
+  echo "  Set ${override} to a published tag or digest, or build ${containerfile}." >&2
   return 1
+}
+report_podman_image_identity() {
+  local ref="$1" product="$2" identity version revision digest
+  identity="$(podman image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}|{{ index .Config.Labels "org.opencontainers.image.revision" }}|{{ .Digest }}' "$ref" 2>/dev/null)" || {
+    echo "! ${product} image identity unavailable for ${ref}." >&2
+    return 0
+  }
+  IFS='|' read -r version revision digest <<<"$identity"
+  [[ -n "$version" && "$version" != "<no value>" ]] || version=unknown
+  [[ -n "$revision" && "$revision" != "<no value>" ]] || revision=unknown
+  [[ -n "$digest" && "$digest" != "<no value>" ]] || digest=unknown
+  echo "✓ ${product} image ${ref}: version=${version} revision=${revision} digest=${digest}" >&2
 }
 
 
@@ -640,7 +660,8 @@ contribute mode="" count="":
       REMOTE_HIVE_TARGET=""; REMOTE_HIVE_DIR=""; REMOTE_HIVE_ENV=""; REMOTE_HIVE_SSH_ARGS=()
       trap 'cleanup_remote_hive_registration' EXIT
       stage_hive_registration_for_remote_podman
-      ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+      ensure_image "$CONTRIBUTOR_IMAGE" "contributor" "image/contribute/Containerfile" "CONTRIBUTE_IMAGE"
+      report_podman_image_identity "$CONTRIBUTOR_IMAGE" "contributor"
       CONTAINER_ARGS=(podman run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME" --userns "keep-id:uid=65532,gid=65532")
       CONTAINER_ARGS+=(--volume "${CONTRIBUTOR_VOLUME}:/home/bluefin:rw" --volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env COLORTERM --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman)
       for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
@@ -658,7 +679,7 @@ contribute mode="" count="":
     APPTAINER_IMAGE="$CONTRIBUTOR_IMAGE"; [[ "$APPTAINER_IMAGE" == *://* ]] || APPTAINER_IMAGE="docker://${APPTAINER_IMAGE}"
     echo "✓ starting isolated Apptainer contributor ${INSTANCE_KEY}. Choose model and effort in OMP."
     prepare_apptainer_environment
-    exec apptainer run --containall --no-eval --home "${INSTANCE_HOME}:/home/bluefin" --pwd /home/bluefin/workspace \
+    exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /home/bluefin/workspace \
       --bind "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro" "$APPTAINER_IMAGE"
 
 # Stop cluster contributor workers. Local appliances belong to their foreground
@@ -697,6 +718,15 @@ review-appliance *appliance_args:
       echo "WARNING: no GitHub credential found; the queue will load empty." >&2
       echo "  Run 'gh auth login' or export GH_TOKEN." >&2
     fi
+    if [[ -z "${HIVE_HUB:-}" && -f "${HOME}/.config/hive/contributor.env" ]]; then
+      HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.env"
+      HIVE_HUB="$(read_hive_value HIVE_HUB)"
+      if valid_hive_hub "$HIVE_HUB"; then
+        export HIVE_HUB
+      else
+        unset HIVE_HUB
+      fi
+    fi
 
     source scripts/parse-review-args.sh
     parse_review_args "$@"
@@ -715,6 +745,8 @@ review-appliance *appliance_args:
     CONTAINER_NAME="bluefin-review-${INSTANCE_KEY}-$(date +%s)-$$"
     KVM_FAILURE=""
     if kvm_runtime_ready; then
+      ensure_image "$IMAGE" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
+      report_podman_image_identity "$IMAGE" "review appliance"
       ARGS=(run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME")
       ARGS+=(--userns "keep-id:uid=65532,gid=65532")
       ARGS+=(
@@ -732,7 +764,7 @@ review-appliance *appliance_args:
     [[ "$IMAGE" != localhost/* ]] || { echo "ERROR: Apptainer cannot resolve local Podman image ${IMAGE}." >&2; exit 1; }
     APPTAINER_IMAGE="$IMAGE"; [[ "$APPTAINER_IMAGE" == *://* ]] || APPTAINER_IMAGE="docker://${APPTAINER_IMAGE}"
     prepare_apptainer_environment
-    exec apptainer run --containall --no-eval --home "${INSTANCE_HOME}:/home/bluefin" --pwd /workspace \
+    exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /workspace \
       --bind "${INSTANCE_WORKSPACE}:/workspace" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
 
 # Build the appliance from this checkout and hold it to its contract. The
@@ -774,11 +806,11 @@ review-doctor:
     if kvm_runtime_ready; then
       echo "  ✓ Podman krun KVM runtime ready"
       pass=$((pass+1))
-    elif command -v apptainer &>/dev/null; then
+    elif apptainer_fallback_ready; then
       echo "  ! ${KVM_FAILURE}; isolated Apptainer fallback ready"
       pass=$((pass+1))
     else
-      echo "  ✗ ${KVM_FAILURE}; Apptainer fallback unavailable"
+      echo "  ✗ ${KVM_FAILURE}; ${APPTAINER_FAILURE}"
       fail=$((fail+1))
     fi
     echo ""
@@ -813,17 +845,26 @@ review-doctor:
     unset GH_TOKEN_VALUE
     echo ""
 
-
-    echo "=== Contributor image ==="
-    DOCTOR_CONTRIBUTOR_IMAGE="{{contribute_image}}"
-    if contributor_image_available "$DOCTOR_CONTRIBUTOR_IMAGE"; then
-      echo "  ✓ ${DOCTOR_CONTRIBUTOR_IMAGE} is resolvable"
-      pass=$((pass+1))
-    else
-      echo "  ✗ ${DOCTOR_CONTRIBUTOR_IMAGE} cannot be resolved"
-      fail=$((fail+1))
-    fi
-    echo ""
+    doctor_image() {
+      local label="$1" ref="$2" status
+      echo "=== ${label} image ==="
+      if image_available "$ref"; then
+        echo "  ✓ ${ref} is resolvable"
+        pass=$((pass+1))
+      else
+        status=$?
+        if [[ "$status" -eq 2 ]]; then
+          echo "  - ${ref} resolution deferred to Apptainer launch"
+          pass=$((pass+1))
+        else
+          echo "  ✗ ${ref} cannot be resolved"
+          fail=$((fail+1))
+        fi
+      fi
+      echo ""
+    }
+    doctor_image "Review" "${REVIEW_APPLIANCE_IMAGE:-ghcr.io/projectbluefin/review:stable}"
+    doctor_image "Contributor" "{{contribute_image}}"
 
     echo "=== Hive contributor setup ==="
     hive_registration_name || true

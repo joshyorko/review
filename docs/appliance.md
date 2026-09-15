@@ -24,11 +24,12 @@ image: glibc, CA certificates, tzdata, and the full terminfo database including
 
 On top of it sit exactly two fetched artifacts and one staged closure:
 
-| Component | Why it is here |
+| Component | Why it is present |
 | --- | --- |
-| `omp` | The agent. A single Bun executable with its own embedded runtime; the image's entrypoint. |
+| `omp` | The sole agent runtime and extension host. |
 | `gh` | The appliance reviews, approves and merges through it. |
-| `bash`, `git`, `python3`, and eleven utilities | The shell `omp`'s `bash` tool spawns, Python runtime, and what a shell one-liner assumes exists. |
+| `bash`, `git`, `python3`, and core shell utilities | The shell `omp` spawns and the minimal execution substrate for repository inspection. |
+| `actionlint`, `shellcheck`, `yq`, `jq`, `just` | Review-time validators already shipped by the pinned FSDK builder and staged into the appliance explicitly. |
 
 Every fetched artifact is verified against a SHA-256 recorded in the
 Containerfile before it is allowed to become executable, and the two FSDK images
@@ -39,10 +40,10 @@ Renovate can compare against.
 
 A shell is present, deliberately. `omp`'s `bash` tool spawns one, and an agent
 that cannot run `gh pr checks` is not a review appliance. FSDK's own container
-standard treats a shell as the named exception rather than a contradiction; this
-image keeps that exception down to one binary and a dozen small utilities
-(`grep`, `sed`, `gawk`, `find`, `xargs`, `tar`, `gzip`, `diff`, `less`, `curl`, `python3`)
-instead of a userland. Nothing inside can install anything: there is no `dnf`,
+standard treats a shell as the named exception rather than a contradiction. The
+appliance stages the common shell utilities plus the builder's existing
+`actionlint`, `shellcheck`, `yq`, `jq`, and `just` binaries; it does not install a
+second package set. Nothing inside can install anything: there is no `dnf`,
 `apt`, `apk`, `pip`, or `npm`, and `tests/appliance-contract.sh` fails the build
 if one appears.
 
@@ -109,7 +110,9 @@ podman run --runtime=krun --rm -it \
 
 `just review-appliance` passes `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`,
 `GITHUB_COPILOT_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `HIVE_HUB`
-through by name, and resolves `GH_TOKEN` from `gh auth token` when it is unset.
+through by name, resolves `GH_TOKEN` from `gh auth token` when it is unset, and
+resolves an unset `HIVE_HUB` from the host's default
+`$HOME/.config/hive/contributor.env` without exposing the registration token.
 
 The appliance uses its own `bluefin-review-appliance` OMP profile. Host OMP
 configuration is not mounted by default, so host MCP entries cannot make the
@@ -133,9 +136,10 @@ choices to the user's active OMP configuration.
 
 ### Hive decides the order
 
-With `HIVE_HUB` set — or a registration mounted at
-`$HOME/.config/hive/contributor.env` — the queue is ordered by Hive's own work
-queue and triage view, in Hive's positions. The appliance only reads: it never
+With `HIVE_HUB` set — or present in the host's default
+`$HOME/.config/hive/contributor.env` — the launcher passes the endpoint into the
+appliance, and the queue is ordered by Hive's own work queue and triage view, in
+Hive's positions. The appliance only reads: it never
 assigns, completes, or reprioritizes anything, because that is Hive's job and
 the maintainer's. Without a hub the queue is classified from live GitHub
 evidence using the policy layer's action vocabulary. The header always names
@@ -157,12 +161,17 @@ The loop is select, group, and dispatch:
    stages; `/` filters by title, repository, author, label, or number.
 2. `Space` toggles one item, `Alt-B` selects the focused repository group, and
    `A` selects the filtered slice up to the bounded slay limit.
-3. `s` slays the selection through mass autoreview. The extension preserves Hive
-   order, partitions by repository, and asks workflowz to run one bounded
-   `bluefin-reviewer` workpool per repository. `--autoslay` starts that flow on
-   launch.
+3. `s` slays the selection through review, repair, and landing. The extension
+   preserves Hive order, partitions by repository, and asks workflowz to run one
+   bounded `bluefin-reviewer` workpool per repository. Findings dispatch isolated
+   fixers, and every changed head receives a fresh review before the coordinator
+   asks GitHub to squash-merge it under live repository rules. `--autoslay`
+   starts that flow on launch and enables OMP's advisor on the coordinator
+   session; the advisor resolves through `@default`, following the maintainer's
+   selected model.
 4. `p` pauses admission of later repository waves without pretending to suspend
    agents already running.
+
 
 Issue implementation in managed repositories is gated on a fresh GitHub read
 of the policy layer's admission and denial labels. Any closed, unadmitted,
