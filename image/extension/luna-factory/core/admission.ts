@@ -81,6 +81,12 @@ export function admit(ledger: Ledger, candidate: Candidate): Admission {
 	if (criterionProven(ledger, criterion.id)) {
 		return { decision: "DISMISS", reason: `criterion ${criterion.id} already holds current proof` };
 	}
+	if (ledger.criteria.filter((entry) => entry.mandatory).every((entry) => criterionProven(ledger, entry.id))) {
+		return { decision: "DISMISS", reason: "objective is already converged; no successor work is authorized" };
+	}
+	if (ledger.control !== "active") {
+		return { decision: "DEFER", reason: `run is ${ledger.control}; admission is closed until the run is active` };
+	}
 
 	if (reachesSelf(ledger, candidate)) {
 		return { decision: "ESCALATE", reason: `candidate depends on itself through ${candidate.deps.join(" → ")}` };

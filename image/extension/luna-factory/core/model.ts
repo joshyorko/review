@@ -224,6 +224,14 @@ export type LedgerEvent =
 			readonly resultId: NativeJobId;
 		}
 	| {
+			readonly kind: "reconcile_attempt";
+			readonly expectedRevision: number;
+			readonly taskId: TaskId;
+			readonly attemptId: AttemptId;
+			readonly outcome: "abandoned" | "unknown";
+			readonly reason: string;
+		}
+	| {
 			readonly kind: "record_receipt";
 			readonly expectedRevision: number;
 			readonly taskId: TaskId;
@@ -245,6 +253,7 @@ export type LedgerEvent =
 		}
 	| { readonly kind: "reopen_task"; readonly expectedRevision: number; readonly taskId: TaskId; readonly reason: string }
 	| { readonly kind: "use_replan"; readonly expectedRevision: number; readonly taskId: TaskId }
+	| { readonly kind: "reevaluate_candidate"; readonly expectedRevision: number; readonly taskId: TaskId }
 	| {
 			readonly kind: "set_control";
 			readonly expectedRevision: number;

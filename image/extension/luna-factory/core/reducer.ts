@@ -20,6 +20,7 @@ import { admit, attemptsRemaining } from "./admission.ts";
 import { receiptAcceptable, reconcileReceipt } from "./evidence.ts";
 import type {
 	Attempt,
+	Candidate,
 	Ledger,
 	LedgerEvent,
 	NativeJobId,
@@ -54,6 +55,56 @@ function replaceAttempt(ledger: Ledger, id: TaskId, attemptId: string, update: (
 /** The last attempt that actually reported back, which is what a verdict is about. */
 function lastReturned(task: TaskRecord): Attempt | undefined {
 	return [...task.attempts].reverse().find((attempt) => attempt.state === "returned");
+}
+
+function hasInFlightAttempt(ledger: Ledger): boolean {
+	return ledger.tasks.some((task) => task.attempts.some((attempt) => attempt.state === "started"));
+}
+
+function candidateForTask(task: TaskRecord, generation: Ledger["generation"]): Candidate {
+	return {
+		taskId: task.id,
+		generation,
+		criterionId: task.criterionId,
+		title: task.title,
+		deps: task.deps,
+		effect: task.effect,
+		owner: task.owner,
+		necessity: task.decisionReason,
+	};
+}
+
+/** Re-run the same admission rule without treating the task being refreshed as a duplicate. */
+function admissionForExisting(ledger: Ledger, task: TaskRecord) {
+	const candidate = candidateForTask(task, ledger.generation);
+	const withoutTask = { ...ledger, tasks: ledger.tasks.filter((entry) => entry.id !== task.id) };
+	return admit(withoutTask, candidate);
+}
+
+function refreshDeferred(ledger: Ledger): Ledger {
+	let next = ledger;
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const task of next.tasks) {
+			if (task.generation !== next.generation || (task.state !== "DEFERRED" && task.state !== "BLOCKED" && task.state !== "ESCALATE")) continue;
+			const verdict = admissionForExisting(next, task);
+			const state: TaskState = verdict.decision === "ADMIT" ? "READY" : verdict.decision === "ESCALATE" ? "ESCALATE" : "DEFERRED";
+			if (task.decision === verdict.decision && task.decisionReason === verdict.reason && task.state === state) continue;
+			next = replaceTask(next, task.id, (current) => ({
+				...current,
+				state,
+				decision: verdict.decision,
+				decisionReason: verdict.reason,
+			}));
+			changed = true;
+		}
+	}
+	return next;
+}
+
+function settleDraining(ledger: Ledger): Ledger {
+	return ledger.control === "draining" && !hasInFlightAttempt(ledger) ? { ...ledger, control: "paused" } : ledger;
 }
 
 function subjectChanged(from: Subject, to: Subject): boolean {
@@ -92,6 +143,9 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 		}
 
 		case "start_attempt": {
+			if (ledger.control !== "active") {
+				return { ok: false, error: `run is ${ledger.control}; admission is closed until the run is active` };
+			}
 			const task = findTask(ledger, event.taskId);
 			if (task === undefined) return { ok: false, error: `unknown task ${event.taskId}` };
 			if (task.attempts.some((attempt) => attempt.id === event.attemptId)) {
@@ -175,6 +229,37 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			);
 		}
 
+		case "reconcile_attempt": {
+			const task = findTask(ledger, event.taskId);
+			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
+			if (task === undefined || attempt === undefined) {
+				return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
+			}
+			if (event.reason.trim().length === 0) return { ok: false, error: "attempt reconciliation must name the observed outcome" };
+			if (attempt.state !== "started") {
+				return attempt.state === "abandoned"
+					? { ok: true, ledger }
+					: { ok: false, error: `attempt ${attempt.id} already returned and cannot be reconciled as ${event.outcome}` };
+			}
+			const abandoned = replaceAttempt(ledger, task.id, attempt.id, (current) => ({ ...current, state: "abandoned" }));
+			const next = replaceTask(abandoned, task.id, (current) =>
+				event.outcome === "unknown"
+					? {
+							...current,
+							state: "ESCALATE" as TaskState,
+							decision: "ESCALATE" as const,
+							decisionReason: `attempt ${attempt.id} liveness is unknown: ${event.reason}`,
+						}
+					: {
+							...current,
+							state: "READY" as TaskState,
+							decision: "ADMIT" as const,
+							decisionReason: `attempt ${attempt.id} was reconciled as abandoned: ${event.reason}`,
+						},
+			);
+			return bump(settleDraining(next));
+		}
+
 		case "record_receipt": {
 			const task = findTask(ledger, event.taskId);
 			if (task === undefined) return { ok: false, error: `unknown task ${event.taskId}` };
@@ -204,13 +289,13 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 				state: "returned",
 				receipt: event.receipt,
 			}));
-			return bump({
+			return bump(settleDraining({
 				...next,
 				tasks: next.tasks.map((candidate) =>
 					candidate.id === task.id ? { ...candidate, state: "VERIFY" as TaskState } : candidate,
 				),
 				noProgressAttempts: progressed ? 0 : ledger.noProgressAttempts + 1,
-			});
+			}));
 		}
 
 		case "integrate_attempt": {
@@ -222,8 +307,25 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (attempt.receipt === undefined) {
 				return { ok: false, error: `attempt ${attempt.id} has no receipt to integrate` };
 			}
+			if (task.effect !== "write") return { ok: false, error: `read task ${task.id} has no write integration to apply` };
+			if (task.state !== "VERIFY") return { ok: false, error: `task ${task.id} is ${task.state}; only a returned task can be integrated` };
+			if (subjectChanged(attempt.subject, ledger.subject)) {
+				return { ok: false, error: `attempt ${attempt.id} is bound to a stale subject and cannot be integrated` };
+			}
 			if (event.subject.repo !== attempt.subject.repo) {
 				return { ok: false, error: `integration subject ${event.subject.repo} is not the attempt's repository` };
+			}
+			if (event.subject.base !== attempt.subject.base) {
+				return { ok: false, error: `integration subject ${event.subject.base} is not the attempt's base` };
+			}
+			const reconciliation = reconcileReceipt(ledger, attempt.receipt, {
+				taskId: task.id,
+				attemptId: attempt.id,
+				subject: attempt.subject,
+				artifactRoots: context.artifactRoots,
+			});
+			if (reconciliation.status !== "proven") {
+				return { ok: false, error: `attempt ${attempt.id} is ${reconciliation.status}, not proven: ${reconciliation.reasons.join("; ")}` };
 			}
 
 			const integrated = replaceAttempt(ledger, task.id, attempt.id, (current) => ({ ...current, integrated: true }));
@@ -268,7 +370,7 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 				return { ok: false, error: `evidence is ${reconciliation.status}: ${reconciliation.reasons.join("; ")}` };
 			}
 			const next = replaceTask(ledger, task.id, (current) => ({ ...current, state: "DONE" as TaskState }));
-			return bump({ ...next, noProgressAttempts: 0 });
+			return bump({ ...refreshDeferred(next), noProgressAttempts: 0 });
 		}
 
 		case "reopen_task": {
@@ -296,17 +398,38 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			return bump({ ...reopened, replans: ledger.replans + 1 });
 		}
 
-		case "set_control": {
-			if (event.control === "active" && ledger.control === "interrupted") {
-				// Resuming an interrupted run is reconciliation, not a status write.
-				return { ok: false, error: "an interrupted run must be reconciled before it is active again" };
+		case "reevaluate_candidate": {
+			const task = findTask(ledger, event.taskId);
+			if (task === undefined) return { ok: false, error: `unknown task ${event.taskId}` };
+			if (task.generation !== ledger.generation) return { ok: false, error: `task ${task.id} belongs to generation ${task.generation}, not ${ledger.generation}` };
+			if (task.state !== "DEFERRED" && task.state !== "BLOCKED" && task.state !== "ESCALATE") {
+				return { ok: false, error: `task ${task.id} is ${task.state}; only deferred candidates may be reevaluated` };
 			}
-			return bump({ ...ledger, control: event.control });
+			const verdict = admissionForExisting(ledger, task);
+			const state: TaskState = verdict.decision === "ADMIT" ? "READY" : verdict.decision === "ESCALATE" ? "ESCALATE" : "DEFERRED";
+			return bump(replaceTask(ledger, task.id, (current) => ({ ...current, state, decision: verdict.decision, decisionReason: verdict.reason })));
+		}
+
+		case "set_control": {
+			if (event.control === "active") {
+				if (ledger.control === "interrupted" && hasInFlightAttempt(ledger)) {
+					// Resuming an interrupted run is reconciliation, not a status write.
+					return { ok: false, error: "an interrupted run must be reconciled before it is active again" };
+				}
+				if ((ledger.control === "paused" || ledger.control === "draining") && hasInFlightAttempt(ledger)) {
+					return { ok: false, error: "a paused run must drain its admitted attempts before it is active again" };
+				}
+			}
+			const next = { ...ledger, control: event.control };
+			return bump(event.control === "active" ? refreshDeferred(next) : next);
 		}
 
 		case "new_generation": {
 			if (event.generation === ledger.generation) {
 				return { ok: false, error: `generation ${event.generation} is already current` };
+			}
+			if (hasInFlightAttempt(ledger)) {
+				return { ok: false, error: "in-flight attempts must be reconciled before changing the goal generation" };
 			}
 			// In-flight work is reconciled rather than erased: attempts and lineage
 			// survive, but nothing carries authority into the new generation.

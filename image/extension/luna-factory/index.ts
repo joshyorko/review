@@ -112,6 +112,7 @@ const FACTORY_TOOL_NAMES = [
 	"luna_factory_attempt",
 	"luna_factory_dispatch",
 	"luna_factory_receipt",
+	"luna_factory_reconcile",
 	"luna_factory_finish",
 	"luna_factory_why",
 	"luna_factory_control",
@@ -430,7 +431,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		host.appendEntry("com.joshyorko.luna-factory.command", { command: "factory", message });
 	};
 
-	const controlSummary = (control: "active" | "paused" | "interrupted", next: Ledger): string => {
+	const controlSummary = (control: "active" | "paused" | "draining" | "interrupted", next: Ledger): string => {
 		if (control !== "interrupted") return `run is ${next.control}`;
 		const jobs = next.tasks
 			.filter((task) => task.state === "RUNNING" || task.state === "VERIFY")
@@ -454,7 +455,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					return;
 				}
 				if (args === "help") {
-					notifyCommand(ctx, "usage: /factory <objective> | status | why <task-id> | pause | resume | abort | -- <literal objective>");
+					notifyCommand(ctx, "usage: /factory <objective> | status | why <task-id> | pause | drain | resume | abort | -- <literal objective>");
 					return;
 				}
 				if (args.startsWith("why ")) {
@@ -470,7 +471,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					notifyCommand(ctx, renderWhy(ledger, taskId as TaskId).join("\n"));
 					return;
 				}
-				const requestedControl = args === "pause" ? "paused" : args === "resume" ? "active" : args === "abort" ? "interrupted" : undefined;
+				const requestedControl = args === "pause" ? "paused" : args === "drain" ? "draining" : args === "resume" ? "active" : args === "abort" ? "interrupted" : undefined;
 				if (requestedControl !== undefined) {
 					const result = mutate(
 						(current) => reduce(current, { kind: "set_control", expectedRevision: current.revision, control: requestedControl }, { artifactRoots }),
@@ -686,6 +687,44 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	});
 
 	registerTool({
+		name: "luna_factory_reconcile",
+		label: "Factory Reconcile",
+		description:
+			"Reconcile an interrupted native attempt as abandoned or liveness-unknown. This preserves native identities and retry lineage; it never invents a receipt or rolls back an external effect.",
+		async execute(_toolCallId, params) {
+			const parsed = parseArgument(params);
+			if (!parsed.ok) return { content: text(parsed.error), isError: true };
+			if (!isRecord(parsed.value)) return { content: text("reconcile input must be a JSON object"), isError: true };
+			const payload = parsed.value;
+			if (typeof payload.taskId !== "string" || typeof payload.attemptId !== "string") {
+				return { content: text("taskId and attemptId are required"), isError: true };
+			}
+			if (payload.outcome !== "abandoned" && payload.outcome !== "unknown") {
+				return { content: text("outcome must be abandoned or unknown"), isError: true };
+			}
+			if (typeof payload.reason !== "string" || payload.reason.trim().length === 0) {
+				return { content: text("reason must explain the observed native outcome"), isError: true };
+			}
+			return mutate(
+				(current) =>
+					reduce(
+						current,
+						{
+							kind: "reconcile_attempt",
+							expectedRevision: current.revision,
+							taskId: payload.taskId as TaskId,
+							attemptId: payload.attemptId,
+							outcome: payload.outcome,
+							reason: payload.reason,
+						},
+						{ artifactRoots },
+					),
+				(next) => `attempt ${payload.attemptId} reconciled as ${payload.outcome}; run remains ${next.control} until explicitly resumed`,
+			);
+		},
+	});
+
+	registerTool({
 		name: "luna_factory_finish",
 		label: "Factory Finish",
 		description:
@@ -733,13 +772,13 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		name: "luna_factory_control",
 		label: "Factory Control",
 		description:
-			"Pause admission, resume after reconciliation, or abort. Pause drains admitted work without claiming rollback; abort requests cancellation of owned work and never retracts external effects.",
+			"Pause or drain admission, resume after reconciliation, or abort. Pause drains admitted work without claiming rollback; abort requests cancellation of owned work and never retracts external effects.",
 		async execute(_toolCallId, params) {
 			const parsed = parseArgument(params);
 			if (!parsed.ok) return { content: text(parsed.error), isError: true };
 			const payload = parsed.value as { action?: unknown };
-			const control = payload.action === "pause" ? "paused" : payload.action === "resume" ? "active" : payload.action === "abort" ? "interrupted" : undefined;
-			if (control === undefined) return { content: text("action must be pause, resume, or abort"), isError: true };
+			const control = payload.action === "pause" ? "paused" : payload.action === "drain" ? "draining" : payload.action === "resume" ? "active" : payload.action === "abort" ? "interrupted" : undefined;
+			if (control === undefined) return { content: text("action must be pause, drain, resume, or abort"), isError: true };
 			const result = mutate(
 				(current) => reduce(current, { kind: "set_control", expectedRevision: current.revision, control }, { artifactRoots }),
 				(next) => controlSummary(control, next),

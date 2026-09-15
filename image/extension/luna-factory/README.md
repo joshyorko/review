@@ -40,7 +40,8 @@ revision link is the skill itself.
 ## Command surface
 
 The packaged OMP host registers `/factory`, `/factory status`, `/factory why
-<task-id>`, `/factory pause`, `/factory resume`, and `/factory abort`. Older or
+<task-id>`, `/factory pause`, `/factory drain`, `/factory resume`, and
+`/factory abort`. Older or
 headless hosts may expose only the namespaced LLM-callable tools, which remain
 the stable fallback:
 
@@ -49,8 +50,9 @@ the stable fallback:
 | `/factory <objective>` | `luna_factory_open` (refuses to silently replace an open run) |
 | `/factory status` | `luna_factory_status` |
 | `/factory why <task-id>` | `luna_factory_why` |
-| `/factory pause` / `resume` / `abort` | `luna_factory_control` |
+| `/factory pause` / `drain` / `resume` / `abort` | `luna_factory_control` |
 | (ledger input) | `luna_factory_candidate`, `luna_factory_attempt`, `luna_factory_receipt`, `luna_factory_finish` |
+| (interrupted attempt) | `luna_factory_reconcile` |
 | (verified finish) | `luna_factory_completion` |
 
 `luna_factory_dispatch` builds the bounded prompt for an admitted task. On the
@@ -102,7 +104,11 @@ than claimed.
 
 Integration moves the certified subject, which demotes proof taken against the
 old head back to VERIFY. Process-local eval handles and pools are never
-serialized and never treated as live after a restart.
+serialized and never treated as live after a restart. A paused or draining run
+does not admit new candidates or attempts; admitted work may return and an
+interrupted attempt must be explicitly reconciled as abandoned or unknown
+before resume. Deferred dependency joins are re-evaluated after their
+dependencies become proven.
 
 ## Opt-in and non-interference
 
