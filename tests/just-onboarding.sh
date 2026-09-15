@@ -27,6 +27,12 @@ test() {
     builtin test "$@"
   fi
 }
+command() {
+  if [[ "${FAKE_NO_SKOPEO:-0}" == 1 && "${1:-}" == -v && "${2:-}" == skopeo ]]; then
+    return 1
+  fi
+  builtin command "$@"
+}
 EOF
 export BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture"
 touch "$kvm"
@@ -122,6 +128,11 @@ exit 0
 EOF
 chmod +x "$fake_bin/squashfuse_ll"
 export REVIEW_TEST_FUSE_DEVICE=/dev/null
+cat >"$fake_bin/skopeo" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$fake_bin/skopeo"
 chmod +x "$fake_bin/gh" "$fake_bin/podman" "$fake_bin/kubectl" "$fake_bin/krun" "$fake_bin/apptainer"
 
 failures=0
@@ -162,7 +173,7 @@ run_just() {
   : >"$podman_log"
   : >"$kubectl_log"
   set +e
-  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
   status=$?
   set -e
 }
@@ -177,6 +188,10 @@ scenario="doctor verifies the KVM runtime"
 run_just review-doctor
 [[ "$status" -eq 0 ]] || fail "review-doctor failed: $output"
 contains 'Podman krun KVM runtime ready' "$output"
+contains '=== Review image ===' "$output"
+contains 'ghcr.io/projectbluefin/review:stable is resolvable' "$output"
+contains '=== Contributor image ===' "$output"
+contains 'ghcr.io/projectbluefin/contribute:stable is resolvable' "$output"
 
 scenario="doctor diagnoses missing squashfuse"
 mv "$fake_bin/squashfuse_ll" "$scratch/squashfuse_ll"
@@ -189,6 +204,14 @@ scenario="doctor diagnoses missing FUSE device"
 REVIEW_TEST_FUSE_DEVICE="$scratch/missing-fuse" FAKE_PODMAN_INFO_FAIL=1 run_just review-doctor
 [[ "$status" -ne 0 ]] || fail "doctor accepted an Apptainer fallback without a FUSE device"
 contains 'FUSE device' "$output"
+
+scenario="doctor defers remote image resolution without registry tooling"
+FAKE_NO_SKOPEO=1 FAKE_PODMAN_INFO_FAIL=1 run_just review-doctor
+[[ "$status" -eq 0 ]] || fail "doctor treated unavailable non-mutating registry probes as launch failure: $output"
+contains '=== Review image ===' "$output"
+contains 'ghcr.io/projectbluefin/review:stable resolution deferred to Apptainer launch' "$output"
+contains '=== Contributor image ===' "$output"
+contains 'ghcr.io/projectbluefin/contribute:stable resolution deferred to Apptainer launch' "$output"
 scenario="contribute launches the OMP worker"
 run_just contribute
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"

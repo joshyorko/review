@@ -65,6 +65,10 @@ runtime default.
 Fallback also requires `squashfuse_ll` or `squashfuse` and a readable,
 writable character device at `/dev/fuse`; `review-doctor` reports each missing
 prerequisite separately before launch.
+The doctor checks both published images through reachable Podman or `skopeo`.
+If Apptainer is the only runtime and no read-only registry probe exists, it
+reports image resolution as deferred to launch instead of misclassifying the
+remote reference as a missing local SIF.
 
 ## Credentials
 

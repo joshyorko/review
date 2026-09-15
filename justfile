@@ -140,7 +140,7 @@ preflight_github() {
     return 1
   }
 }
-contributor_image_available() {
+image_available() {
   local ref="$1"
   if command -v podman &>/dev/null && podman info &>/dev/null; then
     podman image exists "$ref" &>/dev/null && return 0
@@ -148,10 +148,14 @@ contributor_image_available() {
     podman manifest inspect "$ref" &>/dev/null
     return
   fi
-  command -v apptainer &>/dev/null || return 1
   case "$ref" in localhost/*) return 1 ;; esac
-  [[ "$ref" == *://* ]] || ref="docker://${ref}"
-  apptainer inspect "$ref" &>/dev/null
+  if command -v skopeo &>/dev/null; then
+    [[ "$ref" == *://* ]] || ref="docker://${ref}"
+    skopeo inspect "$ref" &>/dev/null
+    return
+  fi
+  command -v apptainer &>/dev/null && return 2
+  return 1
 }
 image_ref_is_moving() {
   # A digest is immutable and an 'sha-<commit>' tag is minted once per build,
@@ -841,17 +845,26 @@ review-doctor:
     unset GH_TOKEN_VALUE
     echo ""
 
-
-    echo "=== Contributor image ==="
-    DOCTOR_CONTRIBUTOR_IMAGE="{{contribute_image}}"
-    if contributor_image_available "$DOCTOR_CONTRIBUTOR_IMAGE"; then
-      echo "  ✓ ${DOCTOR_CONTRIBUTOR_IMAGE} is resolvable"
-      pass=$((pass+1))
-    else
-      echo "  ✗ ${DOCTOR_CONTRIBUTOR_IMAGE} cannot be resolved"
-      fail=$((fail+1))
-    fi
-    echo ""
+    doctor_image() {
+      local label="$1" ref="$2" status
+      echo "=== ${label} image ==="
+      if image_available "$ref"; then
+        echo "  ✓ ${ref} is resolvable"
+        pass=$((pass+1))
+      else
+        status=$?
+        if [[ "$status" -eq 2 ]]; then
+          echo "  - ${ref} resolution deferred to Apptainer launch"
+          pass=$((pass+1))
+        else
+          echo "  ✗ ${ref} cannot be resolved"
+          fail=$((fail+1))
+        fi
+      fi
+      echo ""
+    }
+    doctor_image "Review" "${REVIEW_APPLIANCE_IMAGE:-ghcr.io/projectbluefin/review:stable}"
+    doctor_image "Contributor" "{{contribute_image}}"
 
     echo "=== Hive contributor setup ==="
     hive_registration_name || true
