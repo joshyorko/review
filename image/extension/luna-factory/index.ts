@@ -19,7 +19,7 @@ import type { Appetite, Criterion, Effect, Ledger, NativeJobId, ReduceResult, Ru
 import { findTask } from "./core/model.ts";
 import { renderCompletionReceipt } from "./core/receipt.ts";
 import { reduce } from "./core/reducer.ts";
-import { parseCandidate, parseReceipt } from "./core/schema.ts";
+import { parseCandidate, parseReceipt, parseSubject } from "./core/schema.ts";
 import { buildDispatchPrompt, DISPATCH_MARKER, dispatchMarker } from "./omp/adapter.ts";
 import { coverageFor, enforcedPaths, unsupportedPaths } from "./omp/capabilities.ts";
 import { type SessionCtx, loadRun, saveRun } from "./omp/session.ts";
@@ -104,6 +104,7 @@ export interface FactoryOptions {
 }
 
 const ENABLE_FLAG = "LUNA_FACTORY_ENABLED";
+const CRITERION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 const FACTORY_TOOL_NAMES = [
 	"luna_factory_status",
@@ -112,6 +113,7 @@ const FACTORY_TOOL_NAMES = [
 	"luna_factory_attempt",
 	"luna_factory_dispatch",
 	"luna_factory_receipt",
+	"luna_factory_integrate",
 	"luna_factory_reconcile",
 	"luna_factory_finish",
 	"luna_factory_why",
@@ -299,11 +301,11 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 
 	const registerTool = (definition: FactoryToolDefinition): void => {
 		host.registerTool({
-		...definition,
-		parameters: jsonParameters,
-		defaultInactive: !enabled(),
-		loadMode: "essential",
-	});
+			...definition,
+			parameters: jsonParameters,
+			defaultInactive: !enabled(),
+			loadMode: "essential",
+		});
 	};
 
 	/**
@@ -522,13 +524,13 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			}
 			if (!isRecord(parsed.value)) return { content: text("Factory open input must be a JSON object"), isError: true };
 			const payload = parsed.value;
-			if (typeof payload.objective !== "string" || payload.objective.trim().length === 0) {
-				return { content: text("objective must be a non-empty string"), isError: true };
-			}
+			const objective = boundedOptionText(payload.objective, "objective");
+			if (!objective.ok) return { content: text(objective.error), isError: true };
 			const rawCriteria = payload.criteria;
 			if (!Array.isArray(rawCriteria) || rawCriteria.length === 0) {
 				return { content: text("criteria must be a non-empty array of {id, statement, mandatory}"), isError: true };
 			}
+			if (rawCriteria.length > 64) return { content: text("criteria exceeds 64 entries"), isError: true };
 			if (typeof payload.repo !== "string" || typeof payload.base !== "string") {
 				return { content: text("repo and base are required: evidence is bound to an exact subject"), isError: true };
 			}
@@ -544,26 +546,37 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			if (!contract.ok) return { content: text(contract.error), isError: true };
 
 			const criteria: Criterion[] = [];
+			const criterionIds = new Set<string>();
 			for (const entry of rawCriteria) {
 				if (typeof entry !== "object" || entry === null) {
 					return { content: text("each criterion must be an object"), isError: true };
 				}
 				const record = entry as Record<string, unknown>;
-				if (typeof record.id !== "string" || typeof record.statement !== "string") {
-					return { content: text("each criterion needs string id and statement"), isError: true };
+				if (typeof record.id !== "string" || !CRITERION_ID_RE.test(record.id)) {
+					return { content: text("each criterion id must be a bounded identity"), isError: true };
 				}
+				if (criterionIds.has(record.id)) return { content: text(`criterion '${record.id}' is duplicated`), isError: true };
+				const statement = boundedOptionText(record.statement, `criteria.${record.id}.statement`);
+				if (!statement.ok) return { content: text(statement.error), isError: true };
+				if (record.mandatory !== undefined && typeof record.mandatory !== "boolean") {
+					return { content: text(`criteria.${record.id}.mandatory must be boolean when supplied`), isError: true };
+				}
+				criterionIds.add(record.id);
 				criteria.push({
 					id: record.id as Criterion["id"],
-					statement: record.statement,
+					statement: statement.value,
 					mandatory: record.mandatory !== false,
 				});
 			}
-			const subject: Subject =
+			const parsedSubject = parseSubject(
 				typeof payload.head === "string"
 					? { repo: payload.repo, base: payload.base, head: payload.head }
-					: { repo: payload.repo, base: payload.base };
+					: { repo: payload.repo, base: payload.base },
+			);
+			if (!parsedSubject.ok) return { content: text(`subject rejected: ${parsedSubject.errors.join("; ")}`), isError: true };
+			const subject: Subject = parsedSubject.value;
 			const next = emptyLedger(`lf-${Date.now().toString(36)}` as RunId, {
-				statement: payload.objective,
+				statement: objective.value,
 				nonGoals: contract.value.nonGoals,
 				permittedEffects: contract.value.permittedEffects,
 				finishAuthority: contract.value.finishAuthority,
@@ -720,6 +733,39 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 						{ artifactRoots },
 					),
 				(next) => `attempt ${payload.attemptId} reconciled as ${payload.outcome}; run remains ${next.control} until explicitly resumed`,
+			);
+		},
+	});
+
+	registerTool({
+		name: "luna_factory_integrate",
+		label: "Factory Integrate",
+		description:
+			"Record the owner's explicit integration of a proven write attempt at a new repository subject. Factory never applies or rolls back the external change.",
+		async execute(_toolCallId, params) {
+			const parsed = parseArgument(params);
+			if (!parsed.ok) return { content: text(parsed.error), isError: true };
+			if (!isRecord(parsed.value)) return { content: text("integration input must be a JSON object"), isError: true };
+			const payload = parsed.value;
+			if (typeof payload.taskId !== "string" || typeof payload.attemptId !== "string") {
+				return { content: text("taskId and attemptId are required"), isError: true };
+			}
+			const parsedSubject = parseSubject(payload.subject);
+			if (!parsedSubject.ok) return { content: text(`integration subject rejected: ${parsedSubject.errors.join("; ")}`), isError: true };
+			return mutate(
+				(current) =>
+					reduce(
+						current,
+						{
+							kind: "integrate_attempt",
+							expectedRevision: current.revision,
+							taskId: payload.taskId as TaskId,
+							attemptId: payload.attemptId,
+							subject: parsedSubject.value,
+						},
+						{ artifactRoots },
+					),
+				(next) => `attempt ${payload.attemptId} integrated explicitly at ${next.subject.repo}@${next.subject.head ?? next.subject.base}; Factory applied no external change`,
 			);
 		},
 	});

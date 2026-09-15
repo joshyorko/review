@@ -52,6 +52,7 @@ the stable fallback:
 | `/factory why <task-id>` | `luna_factory_why` |
 | `/factory pause` / `drain` / `resume` / `abort` | `luna_factory_control` |
 | (ledger input) | `luna_factory_candidate`, `luna_factory_attempt`, `luna_factory_receipt`, `luna_factory_finish` |
+| (owner integration) | `luna_factory_integrate` |
 | (interrupted attempt) | `luna_factory_reconcile` |
 | (verified finish) | `luna_factory_completion` |
 
@@ -61,10 +62,12 @@ task call and delegates execution through OMP's own `ctx.invokeTool` seam.
 
 ## Execution boundary
 
-`omp/capabilities.ts` is the authoritative table. The Factory-emitted prompt and
-the packaged OMP native-task route are **enforced**; the coordinator's local
-effects, session settlement, and observed child roster are **observed**; eval,
-workpool, hub steering, and other unprobed seams remain **unsupported**.
+`omp/capabilities.ts` is the authoritative table. The Factory-emitted prompt,
+the packaged OMP native-task route, and `eval`'s `tool.task(...)` bridge in both
+shipping eval backends are **enforced**; the coordinator's local effects,
+session settlement, and observed child roster are **observed**; eval's direct
+`agent(...)`, workpool, hub steering, and other unsupported seams remain
+disabled.
 `luna_factory_dispatch` refuses unsupported paths rather than routing through
 them silently.
 
@@ -77,9 +80,14 @@ The installed package was exercised with the exact personal OMP binary
 probe used only a deterministic provider bound to `127.0.0.1`, with built-in
 remote providers disabled. It observed the complete
 `open → candidate → attempt → dispatch → native task` route and persisted a
-returned native result identity in the Factory journal. Because the probe set
-`async.enabled: false`, it intentionally records no background job ID; job
-creation and cancellation remain unverified.
+returned native result identity in the Factory journal. Additional executable
+routes exercised JavaScript and Python `eval` `tool.task(...)` with the same
+positive identity correlation and a negative unbound-call refusal. Direct
+`eval.agent(...)`, `workpool().push(...)`, and hub list/send/cancel were also
+run and remain unsupported for Factory admission/correlation. The async native
+route recorded an OMP job identity; its synchronous route recorded a native
+result identity. No receipt was fabricated: the Factory run remained active
+with the worker result unverified.
 
 The reproducible fixture is
 `tests/fixtures/luna-factory-omp-probe-server.mjs`, with the install and probe
@@ -119,12 +127,15 @@ publishes, or pushes to a protected branch, and it never infers an admission fro
 a Hive rank or a visible queue row.
 
 Review and Factory are not meant to hold the same scope at once; V1 has no
-automatic handoff, so an overlap is reported rather than resolved silently.
+automatic handoff. While an active Factory run owns the ledger, the same-name
+native-task wrapper refuses unstamped calls, including Review autoslay work;
+when Factory is inactive or has no active run, ordinary Review keeps its native
+route. An overlap is therefore reported rather than coordinated silently.
 
 ## Known gaps
 
-- No enforced interception of eval `tool.task`, eval `agent`,
-  `workpool().push`, hub steering, or child tool policy.
+- No enforced interception of eval `agent`, `workpool().push`, hub steering, or
+  child tool policy.
   [`can1357/oh-my-pi#2574`](https://github.com/can1357/oh-my-pi/issues/2574),
   [#6947](https://github.com/can1357/oh-my-pi/issues/6947),
   [#5859](https://github.com/can1357/oh-my-pi/issues/5859) are design references,

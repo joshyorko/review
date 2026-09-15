@@ -28,7 +28,7 @@ import type {
 } from "../image/extension/luna-factory/core/model.ts";
 import { renderCompletionReceipt } from "../image/extension/luna-factory/core/receipt.ts";
 import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
-import { artifactRefError, changedPathError, parseCandidate, parseReceipt } from "../image/extension/luna-factory/core/schema.ts";
+import { artifactRefError, changedPathError, parseCandidate, parseReceipt, parseSubject } from "../image/extension/luna-factory/core/schema.ts";
 import { buildDispatchPrompt, dispatchMarker, RECEIPT_CONTRACT } from "../image/extension/luna-factory/omp/adapter.ts";
 import { DISPATCH_COVERAGE, coverageFor, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
 import { renderStatus, renderStatusDetail, renderWhy } from "../image/extension/luna-factory/ui/status.ts";
@@ -287,6 +287,37 @@ test("a converged objective dismisses a post-success successor candidate", () =>
 	assert.match(successor.reason, /objective is already converged/);
 });
 
+test("three fresh matched trials keep the post-success trap closed but admit a genuine defect repair", () => {
+	for (let trial = 1; trial <= 3; trial += 1) {
+		const recorded = step(runningTask(), (revision) => ({
+			kind: "record_receipt",
+			expectedRevision: revision,
+			taskId: "T1" as TaskId,
+			attemptId: "T1-a1",
+			receipt: receipt(),
+		}));
+		const finished = step(recorded, (revision) => ({
+			kind: "finish_task",
+			expectedRevision: revision,
+			taskId: "T1" as TaskId,
+			criterionId: "A1" as CriterionId,
+		}));
+
+		const postSuccessCleanup = admit(finished, candidate({ taskId: `cleanup-${trial}` as TaskId, criterionId: "A2" as CriterionId }));
+		assert.equal(postSuccessCleanup.decision, "DISMISS", `trial ${trial} admitted successor work after convergence`);
+
+		const defect = step(finished, (revision) => ({
+			kind: "reopen_task",
+			expectedRevision: revision,
+			taskId: "T1" as TaskId,
+			reason: `trial ${trial}: reproduced a data-loss defect after the green result`,
+		}));
+		assert.equal(findTask(defect, "T1" as TaskId)?.state, "VERIFY");
+		const repair = admit(defect, candidate({ taskId: `repair-${trial}` as TaskId, criterionId: "A1" as CriterionId }));
+		assert.equal(repair.decision, "ADMIT", `trial ${trial} dismissed a legitimate defect repair`);
+	}
+});
+
 // -------------------------------------------------------------------- schema
 
 test("receipt shape is validated, and a valid one round-trips", () => {
@@ -322,6 +353,14 @@ test("candidate parsing rejects an unknown effect and a malformed dependency ide
 	const badDep = parseCandidate({ ...candidate(), deps: ["not a task id!"] });
 	assert.equal(badDep.ok, false);
 	assert.match(badDep.ok ? "" : badDep.errors.join(";"), /not a bounded identity/);
+});
+
+test("subject parsing binds a run to a repository and git object identity", () => {
+	assert.equal(parseSubject({ repo: "example/repo", base: "a".repeat(40) }).ok, true);
+	const badRepo = parseSubject({ repo: "../../outside", base: "a".repeat(40) });
+	assert.equal(badRepo.ok, false);
+	const badBase = parseSubject({ repo: "example/repo", base: "main" });
+	assert.equal(badBase.ok, false);
 });
 
 test("artifact references outside the run's roots are rejected, not followed", () => {
@@ -661,9 +700,13 @@ test("a new generation reconciles in-flight work and keeps lineage", () => {
 	}));
 	const task = findTask(next, "T1" as TaskId);
 	assert.equal(task?.state, "CANDIDATE");
+	assert.equal(task?.generation, "G2");
 	assert.equal(task?.attempts.length, 1, "lineage survives the objective change");
 	assert.equal(criterionProven(next, "A1" as CriterionId), false);
 	assert.equal(evaluateRun(next).converged, false);
+	const rechecked = reduce(next, { kind: "reevaluate_candidate", expectedRevision: next.revision, taskId: "T1" as TaskId }, REDUCE);
+	assert.equal(rechecked.ok, true);
+	assert.equal(rechecked.ok ? findTask(rechecked.ledger, "T1" as TaskId)?.state : "", "READY");
 });
 
 test("an interrupted run cannot be reactivated by a status write", () => {
@@ -714,8 +757,9 @@ test("a diagnosed, exhausted plateau is reported as a blocker with no silent ret
 // -------------------------------------------------------------- capabilities
 
 test("probed execution paths are classified, and every other path stays conservative", () => {
-	assert.deepEqual(enforcedPaths(), ["factory.admitted-dispatch", "native.task"]);
+	assert.deepEqual(enforcedPaths(), ["factory.admitted-dispatch", "native.task", "eval.tool-task"]);
 	assert.equal(unsupportedPaths().includes("native.task"), false);
+	assert.equal(unsupportedPaths().includes("eval.tool-task"), false);
 	assert.ok(unsupportedPaths().includes("eval.agent"));
 	assert.equal(coverageFor("child.tools")?.status, "observed");
 	for (const entry of DISPATCH_COVERAGE) {
@@ -795,6 +839,25 @@ test("an unknown journal version or a corrupt record fails safely and says why",
 	const corrupt = parseJournal({ version: 1, revision: 3 });
 	assert.equal(corrupt.ok, false);
 	assert.match(corrupt.ok ? "" : corrupt.reason, /run or generation identity/);
+});
+
+test("journal corruption in authority, control, or task state never resumes", () => {
+	const base = journalRecord(ledger()) as Record<string, any>;
+	const badEffects = parseJournal({ ...base, goal: { ...base.goal, permittedEffects: ["deploy"] } });
+	assert.equal(badEffects.ok, false);
+	assert.match(badEffects.ok ? "" : badEffects.reason, /permitted effects/);
+
+	const badControl = parseJournal({ ...base, control: "converged" });
+	assert.equal(badControl.ok, false);
+	assert.match(badControl.ok ? "" : badControl.reason, /control/);
+
+	const run = runningTask();
+	const badTask = parseJournal({
+		...journalRecord(run),
+		tasks: [{ ...run.tasks[0], state: "BOGUS" }],
+	});
+	assert.equal(badTask.ok, false);
+	assert.match(badTask.ok ? "" : badTask.reason, /unreadable .* task/);
 });
 
 test("reading prefers the newest record and reports an unreadable one instead of skipping it", () => {
@@ -933,6 +996,7 @@ test("loading the extension registers its surface and starts no work", async () 
 			"luna_factory_control",
 			"luna_factory_dispatch",
 			"luna_factory_finish",
+			"luna_factory_integrate",
 			"luna_factory_open",
 			"luna_factory_receipt",
 			"luna_factory_reconcile",
@@ -1001,6 +1065,70 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 	const record = host.entries.at(-1)!.data as { tasks: Array<{ attempts: Array<{ nativeJobIds: string[]; nativeResultIds: string[] }> }> };
 	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeJobIds, ["job-1"]);
 	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeResultIds, ["agent-1"]);
+});
+
+test("the native task seam validates and correlates an independent batch without partial authority", async () => {
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "inspect two independent criteria",
+		criteria: [
+			{ id: "A1", statement: "first report exists" },
+			{ id: "A2", statement: "second report exists" },
+		],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	for (const [taskId, criterionId] of [["T1", "A1"], ["T2", "A2"]]) {
+		await callTool(host, "luna_factory_candidate", {
+			taskId,
+			generation: "G1",
+			criterionId,
+			title: `inspect ${taskId}`,
+			deps: [],
+			effect: "read",
+			owner: "luna",
+			necessity: `${criterionId} is unproven`,
+		});
+		await callTool(host, "luna_factory_attempt", { taskId, attemptId: `${taskId}-a1` });
+	}
+	const task = host.tools.get("task");
+	assert.ok(task);
+	const marker1 = dispatchMarker("T1", "T1-a1", "G1");
+	const marker2 = dispatchMarker("T2", "T2-a1", "G1");
+	let calls = 0;
+	const result = await task.execute(
+		"call",
+		{ tasks: [{ agent: "task", task: `first\n${marker1}` }, { agent: "task", task: `second\n${marker2}` }] },
+		undefined,
+		undefined,
+		{
+			invokeTool: async () => {
+				calls += 1;
+				return {
+					content: [{ type: "text", text: "batch completed" }],
+					details: { async: { state: "completed", jobId: "batch-1", type: "task" }, results: [{ index: 0, id: "agent-1" }, { index: 1, id: "agent-2" }] },
+				};
+			},
+		} as never,
+	);
+	assert.equal(result.isError, undefined);
+	assert.equal(calls, 1, "one native batch owns both admitted items");
+	const record = host.entries.at(-1)!.data as { tasks: Array<{ id: string; attempts: Array<{ nativeJobIds: string[]; nativeResultIds: string[] }> }> };
+	assert.deepEqual(record.tasks.map((entry) => [entry.id, entry.attempts[0]!.nativeJobIds, entry.attempts[0]!.nativeResultIds]), [
+		["T1", ["batch-1"], ["agent-1"]],
+		["T2", ["batch-1"], ["agent-2"]],
+	]);
+	const refused = await task.execute(
+		"call",
+		{ tasks: [{ agent: "task", task: `first\n${marker1}` }, { agent: "task", task: "unbound" }] },
+		undefined,
+		undefined,
+		{ invokeTool: async () => ({ content: [{ type: "text", text: "must not run" }] }) } as never,
+	);
+	assert.equal(refused.isError, true);
+	assert.equal(calls, 1, "a partially invalid batch never reaches native OMP");
 });
 
 test("status works while idle and reports the enforced boundary", async () => {
@@ -1089,6 +1217,35 @@ test("opening without options records a safe read-only authority", async () => {
 	assert.match(record.goal.finishAuthority, /no merge|report/i);
 });
 
+test("opening rejects malformed objective and criteria before journaling", async () => {
+	const cases = [
+		{
+			objective: "x".repeat(2_001),
+			criteria: [{ id: "A1", statement: "prove one" }],
+		},
+		{
+			objective: "duplicate criteria",
+			criteria: [{ id: "A1", statement: "prove one" }, { id: "A1", statement: "prove twice" }],
+		},
+		{
+			objective: "invalid mandatory flag",
+			criteria: [{ id: "A1", statement: "prove one", mandatory: "yes" }],
+		},
+	];
+	for (const payload of cases) {
+		const host = fakeHost();
+		createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+		host.events.get("session_start")!({}, startCtx(host));
+		const opened = await callTool(host, "luna_factory_open", {
+			...payload,
+			repo: "example/repo",
+			base: "a".repeat(40),
+		});
+		assert.equal(opened.isError, true);
+		assert.equal(host.entries.length, 0, "invalid authority must not create a journal record");
+	}
+});
+
 test("the admitted vertical runs end to end and finishes on proof", async () => {
 	const host = fakeHost();
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
@@ -1134,6 +1291,44 @@ test("the admitted vertical runs end to end and finishes on proof", async () => 
 	const completion = await callTool(host, "luna_factory_completion", {});
 	assert.match(completion.content[0]!.text, /no merge or deploy authority/);
 	assert.ok(host.entries.some((entry) => entry.customType === JOURNAL_ENTRY), "the ledger is journalled");
+});
+
+test("write integration is an explicit owner event and moves the proof subject", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "apply the authorized fix",
+		criteria: [{ id: "A1", statement: "the fix is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+		options: { permittedEffects: ["read", "write"], finishAuthority: "report the verified fix" },
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "apply the fix",
+		deps: [],
+		effect: "write",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await callTool(host, "luna_factory_receipt", receipt());
+	const integrated = await callTool(host, "luna_factory_integrate", {
+		taskId: "T1",
+		attemptId: "T1-a1",
+		subject: { repo: "example/repo", base: "a".repeat(40), head: "b".repeat(40) },
+	});
+	assert.equal(integrated.isError, undefined);
+	assert.match(integrated.content[0]!.text, /integrated explicitly/);
+	const record = host.entries.at(-1)!.data as { subject: Subject; tasks: Array<{ attempts: Array<{ integrated: boolean }> }> };
+	assert.equal(record.subject.head, "b".repeat(40));
+	assert.equal(record.tasks[0]!.attempts[0]!.integrated, true);
+	const finish = await callTool(host, "luna_factory_finish", { taskId: "T1" });
+	assert.equal(finish.isError, true);
+	assert.match(finish.content[0]!.text, /older subject/);
 });
 
 test("dispatch through an unproven path is refused at the tool boundary", async () => {

@@ -204,7 +204,7 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			const resultIds = event.resultIds ?? [];
 			if (attempt.nativeJobIds.includes(event.jobId) && resultIds.every((id) => attempt.nativeResultIds.includes(id))) {
 				return { ok: true, ledger };
-		}
+			}
 			return bump(
 				replaceAttempt(ledger, task.id, attempt.id, (current) => ({
 					...current,
@@ -402,8 +402,8 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			const task = findTask(ledger, event.taskId);
 			if (task === undefined) return { ok: false, error: `unknown task ${event.taskId}` };
 			if (task.generation !== ledger.generation) return { ok: false, error: `task ${task.id} belongs to generation ${task.generation}, not ${ledger.generation}` };
-			if (task.state !== "DEFERRED" && task.state !== "BLOCKED" && task.state !== "ESCALATE") {
-				return { ok: false, error: `task ${task.id} is ${task.state}; only deferred candidates may be reevaluated` };
+			if (task.state !== "CANDIDATE" && task.state !== "DEFERRED" && task.state !== "BLOCKED" && task.state !== "ESCALATE") {
+				return { ok: false, error: `task ${task.id} is ${task.state}; only candidates may be reevaluated` };
 			}
 			const verdict = admissionForExisting(ledger, task);
 			const state: TaskState = verdict.decision === "ADMIT" ? "READY" : verdict.decision === "ESCALATE" ? "ESCALATE" : "DEFERRED";
@@ -435,6 +435,10 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			// survive, but nothing carries authority into the new generation.
 			const reconciled = ledger.tasks.map((task) => ({
 				...task,
+				// The task is re-advertised under the new goal generation, while its
+				// attempts keep their original generation identities for audit and
+				// retry lineage.
+				generation: event.generation,
 				state: "CANDIDATE" as TaskState,
 				decision: "DEFER" as const,
 				decisionReason: `awaiting advertisement against ${event.generation}`,

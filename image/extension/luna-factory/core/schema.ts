@@ -109,6 +109,13 @@ function subject(value: unknown, errors: string[]): Subject | undefined {
 	return head === undefined ? { repo, base } : { repo, base, head };
 }
 
+/** Parse the repository identity used to bind a Factory run or receipt. */
+export function parseSubject(value: unknown): ParseResult<Subject> {
+	const errors: string[] = [];
+	const parsed = subject(value, errors);
+	return parsed === undefined || errors.length > 0 ? { ok: false, errors } : { ok: true, value: parsed };
+}
+
 function routing(value: unknown, errors: string[]): Routing | undefined {
 	if (!isRecord(value)) {
 		errors.push("routing must be an object");

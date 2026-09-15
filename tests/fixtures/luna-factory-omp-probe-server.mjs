@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 
 const port = Number.parseInt(process.env.LUNA_PROBE_PORT ?? "43127", 10);
+const route = process.env.LUNA_PROBE_ROUTE ?? "native-task";
 let requestNumber = 0;
 
 function jsonBody(value) {
@@ -114,7 +115,12 @@ function textCompletion(text) {
 }
 
 function responseFor(body) {
-	if (!isFactoryRoot(body)) return textCompletion("worker result from the exact packaged OMP probe");
+	if (!isFactoryRoot(body)) {
+		if (toolNames(body).includes("yield")) {
+			return functionCall("yield", { data: { result: "deterministic worker completed", route } });
+		}
+		return textCompletion("worker result from the exact packaged OMP probe");
+	}
 	const previous = lastTool(body) ?? lastAssistantTool(body);
 	const base = "a".repeat(40);
 	if (previous === undefined) {
@@ -141,6 +147,14 @@ function responseFor(body) {
 			}),
 		});
 	}
+	if (previous === "luna_factory_candidate" && (route === "eval-tool-task-reject" || route === "eval-tool-task-py-reject")) {
+		return functionCall("eval", {
+			language: route.endsWith("-py-reject") ? "py" : "js",
+			code: route.endsWith("-py-reject")
+				? "result = await tool.task({'agent': 'task', 'task': 'Unbound work must be rejected.'}); display({'route': 'eval-tool-task-py-reject', 'result': result})"
+				: "const result = await tool.task({ agent: 'task', task: 'Unbound work must be rejected.' }); display({ route: 'eval-tool-task-reject', result });",
+		});
+	}
 	if (previous === "luna_factory_candidate") {
 		return functionCall("luna_factory_attempt", {
 			input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }),
@@ -152,12 +166,38 @@ function responseFor(body) {
 		});
 	}
 	if (previous === "luna_factory_dispatch") {
+		if (route === "eval-tool-task" || route === "eval-tool-task-py") {
+			return functionCall("eval", {
+				language: route.endsWith("-py") ? "py" : "js",
+				code: route.endsWith("-py")
+					? "result = await tool.task({'agent': 'task', 'task': 'Read the repository and report the eval tool.task result. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1'}); display({'route': 'eval-tool-task-py', 'result': result})"
+					: "const result = await tool.task({ agent: 'task', task: 'Read the repository and report the eval tool.task result. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1' }); display({ route: 'eval-tool-task', result });",
+			});
+		}
+		if (route === "eval-agent") {
+			return functionCall("eval", {
+				language: "js",
+				code: "const handle = await agent('Read the repository and report the eval agent result.', { agent: 'task', label: 'luna-eval-agent' }); const result = await handle.wait(); display({ route: 'eval-agent', id: handle.id, agent: handle.agent, result });",
+			});
+		}
+		if (route === "workpool") {
+			return functionCall("eval", {
+				language: "js",
+				code: "const pool = await workpool('task', { name: 'luna-probe-pool' }); const ids = await pool.push('Read-only pool item one', 'Read-only pool item two'); const status = await pool.status(); display({ route: 'workpool', pool: String(pool), ids, status });",
+			});
+		}
+		if (route === "hub") {
+			return functionCall("eval", {
+				language: "js",
+				code: "const handle = await agent('Wait for a steering message, then report.', { agent: 'task', label: 'luna-hub-agent' }); const peers = await tool.hub({ op: 'list' }); const send = await tool.hub({ op: 'send', to: handle.id, message: 'Luna probe steering message' }); const cancel = await tool.hub({ op: 'cancel', ids: [handle.id] }); display({ route: 'hub', id: handle.id, peers, send, cancel });",
+			});
+		}
 		return functionCall("task", {
 			agent: "task",
 			task: "Read the repository and report the native probe result. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1",
 		});
 	}
-	return textCompletion("native task route completed; worker result remains VERIFY until evidence is independently reconciled");
+	return textCompletion(`${route} route completed; worker result remains VERIFY until evidence is independently reconciled`);
 }
 
 const server = createServer(async (request, response) => {
@@ -180,6 +220,7 @@ const server = createServer(async (request, response) => {
 	console.error(
 		JSON.stringify({
 			request: requestNumber,
+			route,
 			factoryRoot: isFactoryRoot(body),
 			hasTask: names.includes("task"),
 			factoryTools: names.filter((name) => name.startsWith("luna_factory_")).sort(),

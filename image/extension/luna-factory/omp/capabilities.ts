@@ -13,10 +13,10 @@
  * - `unsupported`  — no supported seam was established. The adapter refuses
  *                    rather than routing silently and pretending otherwise.
  *
- * The native task seam has been probed against the exact packaged OMP used by
- * the personal appliance. The remaining entries stay conservative until their
- * own executable probe exists; a successful native-task run is not evidence
- * about eval, pools, hub steering, or child-tool policy.
+ * The native task and eval `tool.task` seams have been probed against the exact
+ * packaged OMP used by the personal appliance. The remaining entries stay
+ * conservative: a successful task run is not evidence about eval `agent`,
+ * pools, hub steering, or child-tool policy.
  */
 
 export type CoverageStatus = "enforced" | "observed" | "unsupported";
@@ -49,29 +49,31 @@ export const DISPATCH_COVERAGE: readonly DispatchCoverage[] = [
 	},
 	{
 		path: "eval.tool-task",
-		status: "unsupported",
+		status: "enforced",
 		seam: "eval's tool.task bridge",
-		reason: "Not probed for the same reason; whether it passes through a wrapped gate is unknown.",
+		reason:
+			"Exact packaged OMP probes exercised JavaScript and Python eval `tool.task` calls. Both passed a ledger-stamped assignment through the same-name wrapper, correlated the returned native result identity, and rejected an unbound call with the Factory stamp error before OMP spawned work. No claim is made for eval's separate `agent()` bridge.",
 	},
 	{
 		path: "eval.agent",
 		status: "unsupported",
 		seam: "eval's structured-subagent bridge",
 		reason:
-			"Not probed. Eval calls the structured-subagent path through its own host bridge, so a task-shaped hook is not evidence of coverage here.",
+			"Exact packaged OMP probe exercised the JavaScript bridge: it created and waited for a child with its own agent identity, but did not traverse the Factory task wrapper or produce a Factory ledger correlation. Python uses the same separate bridge; no supported Factory admission seam is established.",
 	},
 	{
 		path: "workpool.push",
 		status: "unsupported",
 		seam: "workpool item admission and correlation",
 		reason:
-			"Not probed. The documented workpool signature is also not an isolation API, so pool items are not treated as isolated writers.",
+			"Exact packaged OMP probe pushed two read-only items and observed process-local item IDs plus two running workers. Pool admission and result correlation are OMP-owned, and the signature is not an isolation API, so Factory does not route workpool items or treat them as isolated writers.",
 	},
 	{
 		path: "hub.steer",
 		status: "unsupported",
 		seam: "hub send/revive and Agent Hub steering",
-		reason: "Not probed; whether a redirection is task continuation or a new mission is unresolved.",
+		reason:
+			"Exact packaged OMP probe exercised hub list/send/cancel. A freshly returned eval-agent handle was cancellable as a background job, but hub list/send did not expose it as a live peer; continuation, revival, and Factory ownership therefore remain unaccounted and disabled.",
 	},
 	{
 		path: "root.local-effects",
