@@ -2111,15 +2111,17 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 	assert.match(slay, /reviewed head must equal the live head/i);
 	assert.match(slay, /gh pr merge <n> --repo <r> --auto --squash/);
 	assert.match(slay, /Never use `--admin`/);
+	assert.match(slay, /do not disable and re-arm auto-merge/);
+	assert.match(slay, /report the outstanding approval gate and move on/);
 	const reviewerPrompt = readFileSync("image/extension/bluefin-review/agents/bluefin-reviewer.md", "utf8");
 	assert.match(reviewerPrompt, /hive_workbench_diff\(pull_request: <number>, repo: "<owner\/name>"\)/);
 	assert.match(reviewerPrompt, /Do not assume a local checkout exists/);
-	assert.match(reviewerPrompt, /do not install packages or retry the absent command/i);
 	const reviewerTools = reviewerPrompt.match(/^tools: (.+)$/m)?.[1] ?? "";
 	assert.doesNotMatch(reviewerTools, /\b(?:bash|yield)\b/);
 	assert.match(reviewerPrompt, /strictly read-only/);
 	assert.match(reviewerPrompt, /A `clean` verdict is\s+evidence/);
 	assert.doesNotMatch(reviewerPrompt, /\*\*`approve`\*\*/);
+	assert.match(reviewerPrompt, /Never claim a validator is absent/);
 	assert.match(fix, /`task` tool once with one fresh isolated item per issue or pull request/);
 	assert.match(fix, /Never approve or merge/);
 });

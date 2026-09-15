@@ -20,8 +20,8 @@ revalidation.
    - Inspect the bounded diff via `hive_workbench_diff(pull_request: <number>, repo: "<owner/name>")`; child sessions do not inherit the coordinator's selected repository.
    - Inspect the current OMP execution trace via `hive_workbench_trace()`.
    - Check if the PR resolves a prioritized Hive task via `hive_workbench_lookup(target: "status")`.
-   - Do not assume a local checkout exists. Use the bounded tools and repository-qualified `gh` reads; only a separately authorized fixer creates a checkout.
-   - Check a repository-specific validator once before invoking it. If the minimal appliance does not carry that toolchain, use hosted check evidence and report the local verification gap; do not install packages or retry the absent command.
+   - Do not assume a local checkout exists. Use the bounded tools and repository-qualified reads; only a separately authorized fixer creates a checkout.
+   - Use hosted check evidence and report which verification was not run locally. Never claim a validator is absent merely because the read-only reviewer cannot invoke it.
 
 2. **Five Review Dimensions**:
    - **Doctrine & Seam Boundaries**: Does this change violate `AGENTS.md`, `docs/SKILL.md`, or the task skill? Does it introduce forbidden shims, grandfathering, or unrequested features?

@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "5.0"
+version: "5.1"
 last_updated: 2026-09-14
 id: review-dashboard
 one_line_purpose: Maintain the single-screen OMP review workbench.
@@ -121,14 +121,12 @@ workflow startup failure with zero jobs remains visible. Slay excludes known
 failing or pending CI before reviewer dispatch, rechecks it before each wave,
 and blocks approval or merge commands if the active queue state turns red or
 pending.
-Fresh reviewer sessions inherit neither a selected repository nor a checkout.
-Their prompts pass both `repo` and `pull_request` to `hive_workbench_diff` and
-keep reads repository-qualified. Repair agents use `gh repo clone` and
-`gh pr checkout` under `$HOME/worktrees`, never the small container `/tmp`, and
+Fresh reviewers inherit neither a selected repository nor checkout; prompts
+pass both `repo` and `pull_request` to `hive_workbench_diff`. Repair agents use
+`gh repo clone` and `gh pr checkout` under `$HOME/worktrees`, never `/tmp`, and
 read effective rules through `repos/<owner>/<repo>/rules/branches/<branch>`.
-The minimal appliance omits repository-specific toolchains; reviewers try a
-validator once, then use hosted evidence and report the gap instead of
-installing packages or retrying an absent command.
+The minimal appliance omits repository-specific toolchains; reviewers use
+hosted evidence and report local gaps instead of retrying absent commands.
 
 Preserve Hive order by partitioning contiguous repository runs; an interleaved
 repository returns in a later wave rather than jumping ahead. Ask workflowz to
@@ -140,11 +138,12 @@ Pausing stops new waves; it does not pretend to suspend an agent already running
 Persist slay intent, item identity, wave position, and terminal outcomes.
 Interrupted slays remain blocked after restart and require an explicit new
 dispatch. Never replay a confirmed mutation.
-A pull-request wave is terminal only when every target is closed or GitHub has
-accepted it into auto-merge. Auto-merge may remain blocked on additional
-required human approvals; report that gate and move to the next wave. Settled
-reviewer jobs alone never advance a slay, and open targets without auto-merge
-block the batch for explicit redispatch.
+A pull-request wave is terminal when every target is closed or GitHub accepts
+auto-merge. It may remain blocked on additional required human approvals;
+report that gate and move on. The merge queue's effective squash rule overrides
+the `autoMergeRequest.mergeMethod` display; never disable and re-arm solely
+because that field says `MERGE`. Settled reviewer jobs alone never advance a
+slay, and open targets without auto-merge block explicit redispatch.
 
 ## Mutations
 
