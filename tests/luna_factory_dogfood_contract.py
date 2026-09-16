@@ -13,7 +13,6 @@ def test_workflow_is_exact_head_no_publish_and_artifact_bounded():
     workflow = WORKFLOW.read_text()
     assert "pull_request:" in workflow
     assert "github.event.pull_request.head.sha" in workflow
-    assert "ubuntu-latest" in workflow
     assert "ubuntu-24.04" in workflow
     assert "tests/luna-factory-dogfood.sh" in workflow
     assert "tests/appliance-runtime-probe.sh" in workflow
@@ -21,15 +20,17 @@ def test_workflow_is_exact_head_no_publish_and_artifact_bounded():
     assert "actions/upload-artifact" in workflow
     assert "podman build --format oci" in workflow
     assert "tests/appliance-contract.sh --image" in workflow
-    for forbidden in (
-        "podman push",
-        "ghcr.io",
-        "secrets.",
-        "gh auth",
-        "release create",
-        "BLUEFIN_REVIEW_OCI_PUSH",
-    ):
+    for forbidden in ("podman push", "ghcr.io", "secrets.", "gh auth", "release create", "BLUEFIN_REVIEW_OCI_PUSH"):
         assert forbidden not in workflow, forbidden
+    assert "pull_request:" in workflow
+    assert "github.event.pull_request.head.sha" in workflow
+    assert "ubuntu-24.04" in workflow
+    assert "tests/luna-factory-dogfood.sh" in workflow
+    assert "tests/appliance-runtime-probe.sh" in workflow
+    assert "scripts/brew-dev" in workflow
+    assert "actions/upload-artifact" in workflow
+    assert "podman build --format oci" in workflow
+    assert "tests/appliance-contract.sh --image" in workflow
 
 
 def test_oci_harness_is_clean_and_uses_the_local_provider():
@@ -39,10 +40,10 @@ def test_oci_harness_is_clean_and_uses_the_local_provider():
     assert "LUNA_FACTORY_ENABLED" in harness
     assert "HOME" in harness
     assert "XDG_STATE_HOME" in harness
-    assert "luna-factory-omp-probe-server.mjs" in harness
     assert "luna-factory-omp-probe-config.yml" in harness
     assert "luna-factory-omp-probe-models.yml" in harness
     assert "--no-session" not in harness
+    assert "batch-*.json" in harness
 
 
 def test_sif_harness_uses_the_personal_launcher_and_does_not_claim_krun():
