@@ -89,12 +89,17 @@ native batch correlated two result identities, and a separate dependency-join
 route drove two receipts through VERIFY to DONE and a converged settlement. The
 async native route recorded an OMP job identity; native cancellation remains
 unsupported through the public extension context. The basic worker probe did
-not fabricate a receipt: it remained active with the worker result unverified.
+not fabricate a receipt: it remained active with the worker result unverified. A
+separate async-abort route issued Factory abort after OMP returned its job ID;
+the journal became `interrupted` and listed that owned ID without claiming
+cancellation or rollback, while settlement remained deferred around the live
+background job.
 
 The reproducible fixture is
 `tests/fixtures/luna-factory-omp-probe-server.mjs`, with the install and probe
 steps recorded in the PR verification note. A provider result is not treated as
-acceptance proof: the run ended in VERIFY, not DONE.
+acceptance proof: the basic provider-result run ended in VERIFY, not DONE; the
+separate convergence route reached DONE only after Factory receipt reconciliation.
 
 Shell, eval file and network access, child environments, and other extensions can
 have effects outside a narrowly intercepted tool, so nothing here is an OS

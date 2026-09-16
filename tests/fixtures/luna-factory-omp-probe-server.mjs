@@ -346,10 +346,19 @@ function responseFor(body) {
 				code: "const handle = await agent('Wait for a steering message, then report.', { agent: 'task', label: 'luna-hub-agent' }); const peers = await tool.hub({ op: 'list' }); const send = await tool.hub({ op: 'send', to: handle.id, message: 'Luna probe steering message' }); const cancel = await tool.hub({ op: 'cancel', ids: [handle.id] }); display({ route: 'hub', id: handle.id, peers, send, cancel });",
 			});
 		}
+		if (route === "async-abort") {
+			return functionCall("task", {
+				agent: "task",
+				task: "Run the async abort lifecycle probe. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1",
+			});
+		}
 		return functionCall("task", {
 			agent: "task",
 			task: "Read the repository and report the native probe result. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1",
 		});
+	}
+	if (previous === "task" && route === "async-abort") {
+		return functionCall("luna_factory_control", { input: JSON.stringify({ action: "abort" }) });
 	}
 	return textCompletion(`${route} route completed; worker result remains VERIFY until evidence is independently reconciled`);
 }
