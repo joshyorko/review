@@ -1,7 +1,7 @@
 ---
 name: image-build
-version: "3.2"
-last_updated: 2026-09-14
+version: "3.3"
+last_updated: 2026-09-15
 id: image-build
 one_line_purpose: Build and pin the OMP review and contributor images.
 entry_point: docs/skills/image-build.md
@@ -59,6 +59,9 @@ model-specific runtime. Both OCI images leave model and effort selection to OMP.
 13. Give Apptainer workloads instance-scoped disk-backed scratch storage.
     `--containall` otherwise supplies a 64 MiB `/tmp`, which is too small for
     repository clones and archive inspection.
+14. Bundle review-appliance MCP definitions beside the packaged review
+    extension in `.mcp.json`. Do not place them under `/home/bluefin`: the
+    launcher's persistent home volume masks image content at that path.
 
 ## Pin maintenance
 

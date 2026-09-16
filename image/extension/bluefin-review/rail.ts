@@ -92,6 +92,7 @@ export function queueAge(fetchedAt: number, now: number): string | undefined {
 
 /** Colour per category: what the eye should land on first is loudest. */
 const CATEGORY_ROLE: Record<PriorityCategory, PaintRole> = {
+	"repair-requested": "warning",
 	hive: "accent",
 	personal_request: "accent",
 	"ready-for-human-merge": "success",
@@ -104,6 +105,7 @@ const CATEGORY_ROLE: Record<PriorityCategory, PaintRole> = {
 
 /** Short forms, because a queue row is not a place for a sentence. */
 const CATEGORY_LABEL: Record<PriorityCategory, string> = {
+	"repair-requested": "repair",
 	hive: "hive",
 	personal_request: "direct-req",
 	"ready-for-human-merge": "merge",
@@ -116,8 +118,9 @@ const CATEGORY_LABEL: Record<PriorityCategory, string> = {
 
 export function priorityChip(painter: Painter, priority: Priority | undefined): string {
 	if (!priority) return "";
-	const label =
-		priority.hiveRank === undefined ? CATEGORY_LABEL[priority.category] : `hive#${priority.hiveRank + 1}`;
+	const label = priority.category === "repair-requested" || priority.hiveRank === undefined
+		? CATEGORY_LABEL[priority.category]
+		: `hive#${priority.hiveRank + 1}`;
 	return painter.fg(CATEGORY_ROLE[priority.category], label);
 }
 

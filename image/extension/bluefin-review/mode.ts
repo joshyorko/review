@@ -18,7 +18,7 @@ import {
 	orgScope,
 } from "./github.ts";
 import { type HiveSnapshot, type HiveWorkItem, EMPTY_HIVE, fetchHive, fetchHiveKnowledge, fetchHiveMe } from "./hive.ts";
-import { type PrioritizedQueue, type Priority, itemKey, prioritize } from "./priority.ts";
+import { type PrioritizedQueue, type Priority, isRepairRequested, itemKey, prioritize } from "./priority.ts";
 import { SessionTrace } from "./session.ts";
 
 export interface ReviewModeOptions {
@@ -149,21 +149,13 @@ export class ReviewMode {
 		this.queueTruncated = false;
 	}
 
-	/** Remove items the workbench cannot act on from every visible/selected view. */
-	excludeItems(items: readonly QueueItem[]): void {
-		if (items.length === 0) return;
-		const excluded = new Set(items.map(itemKey));
-		this.items = this.items.filter((item) => !excluded.has(itemKey(item)));
-		for (const key of excluded) this.selectedKeys.delete(key);
-		this.cursor = Math.min(this.cursor, Math.max(0, this.visibleItems().length - 1));
-		this.reprioritize();
-	}
 
 	private excludeUnsupportedPullRequests(items: readonly QueueItem[]): QueueItem[] {
 		if (this.queueMode !== "prs") return [...items];
 		const supported: QueueItem[] = [];
 		for (const item of items) {
-			if ((item.workflowFiles?.length ?? 0) > 0 || item.changedFilesComplete === false) {
+			const unsafeForLanding = (item.workflowFiles?.length ?? 0) > 0 || item.changedFilesComplete === false;
+			if (unsafeForLanding && !isRepairRequested(item, this.currentUserLogin)) {
 				this.excludedKeys.add(itemKey(item));
 				continue;
 			}
@@ -406,14 +398,19 @@ export class ReviewMode {
 	}
 
 	/**
-	 * Partition items into contiguous repository waves without moving any item
-	 * ahead of work Hive ranked before it.
+	 * Partition items into bounded, type-homogeneous repository waves without
+	 * moving any item ahead of work ordered before it. Returned PR repairs stay
+	 * separate from ordinary PR review/landing waves.
 	 */
 	repositoryWaves(items: readonly QueueItem[] = this.chosenItems()): RepositoryWave[] {
 		const waves: Array<{ repo: string; items: QueueItem[] }> = [];
 		for (const item of items) {
 			const previous = waves.at(-1);
-			if (previous?.repo === item.repo) {
+			const first = previous?.items[0];
+			const sameIntent = first !== undefined
+				&& first.type === item.type
+				&& isRepairRequested(first, this.currentUserLogin) === isRepairRequested(item, this.currentUserLogin);
+			if (previous?.repo === item.repo && sameIntent && previous.items.length < BATCH_LIMIT) {
 				previous.items.push(item);
 				continue;
 			}
@@ -431,6 +428,11 @@ export class ReviewMode {
 		return this.visibleItems().filter((item) => this.selectedKeys.has(`${item.repo}#${item.id}`));
 	}
 
+
+	/** Pull requests authored by the active user after a requested-changes review. */
+	repairRequestedItems(): QueueItem[] {
+		return this.visibleItems().filter((item) => isRepairRequested(item, this.currentUserLogin));
+	}
 	/**
 	 * Items available for slay execution: chosen items first, then visible items,
 	 * falling back to unranked items in local priority order when the Hive-only
@@ -518,6 +520,7 @@ export class ReviewMode {
 			this.queueError = result.error;
 			this.queueTruncated = result.truncated === true;
 			this.fetchedAt = result.fetchedAt;
+			if (result.viewerLogin) this.currentUserLogin = result.viewerLogin;
 			const previousKey = this.selectedKey();
 			this.items = this.excludeUnsupportedPullRequests([...result.items, ...missing]);
 			this.reprioritize();

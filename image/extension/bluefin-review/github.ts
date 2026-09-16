@@ -44,6 +44,8 @@ export interface QueueItem {
 	closingIssues?: string[];
 	/** `owner/repo#number` of merged PRs that reference or close this issue. */
 	closedByPrs?: string[];
+	/** `owner/repo#number` of open or merged pull requests submitted for this issue. */
+	submittedPrs?: string[];
 	/** Changed workflow files reported by GitHub for exclusion from slay/review. */
 	workflowFiles?: string[];
 	/** Whether GitHub returned the complete changed-file list. */
@@ -58,6 +60,8 @@ export interface QueueResult {
 	fetchedAt: number;
 	/** More open items exist than `limit` allowed; the queue is a prefix. */
 	truncated?: boolean;
+	/** Authenticated GitHub login that produced this queue read. */
+	viewerLogin?: string;
 }
 
 export const DEFAULT_ORG = "projectbluefin";
@@ -116,6 +120,7 @@ const ISSUE_ITEM_FIELDS = `
 
 export const PR_QUEUE_QUERY = `
 query($search: String!, $cursor: String) {
+	viewer { login }
 	search(query: $search, type: ISSUE, first: 50, after: $cursor) {
 		pageInfo { hasNextPage endCursor }
 		nodes {
@@ -129,6 +134,7 @@ query($search: String!, $cursor: String) {
 
 export const ISSUE_QUEUE_QUERY = `
 query($search: String!, $cursor: String) {
+	viewer { login }
 	search(query: $search, type: ISSUE, first: 50, after: $cursor) {
 		pageInfo { hasNextPage endCursor }
 		nodes {
@@ -334,6 +340,14 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 					: "",
 			)
 			.filter(Boolean),
+		submittedPrs: (node.closedByPullRequestsReferences?.nodes ?? [])
+			.filter((pr) => pr.merged === true || ["OPEN", "MERGED"].includes(pr.state?.toUpperCase() ?? ""))
+			.map((pr) =>
+				pr.repository?.nameWithOwner && typeof pr.number === "number"
+					? `${pr.repository.nameWithOwner}#${pr.number}`
+					: "",
+			)
+			.filter(Boolean),
 	};
 }
 
@@ -371,6 +385,7 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 	const deadline = deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal);
 	const items: QueueItem[] = [];
 	let cursor: string | undefined;
+	let viewerLogin: string | undefined;
 	if (!token) {
 		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		return { items, error: "no GitHub credential (set GH_TOKEN or run gh auth login)", fetchedAt: Date.now() };
@@ -391,9 +406,13 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 				return { items, error: `GitHub GraphQL ${response.status} ${response.statusText}`, fetchedAt: Date.now() };
 			}
 			const payload = (await response.json()) as {
-				data?: { search?: { nodes?: SearchNode[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } } };
+				data?: {
+					viewer?: { login?: string };
+					search?: { nodes?: SearchNode[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } };
+				};
 				errors?: Array<{ message?: string }>;
 			};
+			viewerLogin ??= payload.data?.viewer?.login;
 			if (payload.errors?.length) {
 				return { items, error: payload.errors.map((e) => e.message ?? "unknown").join("; "), fetchedAt: Date.now() };
 			}
@@ -403,13 +422,13 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 			}
 			const pageInfo = payload.data?.search?.pageInfo;
 			if (!pageInfo?.hasNextPage || !pageInfo.endCursor) {
-				return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: items.length > limit };
+				return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: items.length > limit, viewerLogin };
 			}
 			cursor = pageInfo.endCursor;
 		}
 		// Stopped on the ceiling rather than the end of the queue: say so, so the
 		// counter cannot read as "this is everything open".
-		return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: true };
+		return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: true, viewerLogin };
 	} catch (error) {
 		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		// The deadline expired mid-walk. Keep the pages that did land: a partial
@@ -420,9 +439,10 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 				error: `GitHub queue timed out after ${options.timeoutMs ?? QUEUE_TIMEOUT_MS}ms`,
 				fetchedAt: Date.now(),
 				truncated: items.length > 0,
+				viewerLogin,
 			};
 		}
-		return { items, error: error instanceof Error ? error.message : String(error), fetchedAt: Date.now() };
+		return { items, error: error instanceof Error ? error.message : String(error), fetchedAt: Date.now(), viewerLogin };
 	}
 }
 

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "!if [ -n \"$GH_TOKEN\" ]; then printf 'Bearer %s' \"$GH_TOKEN\"; elif [ -n \"$GITHUB_TOKEN\" ]; then printf 'Bearer %s' \"$GITHUB_TOKEN\"; fi"
+      },
+      "enabled": true
+    },
+    "bluefin": {
+      "type": "http",
+      "url": "https://mcp.projectbluefin.io/mcp",
+      "enabled": true
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "Authorization": "!if [ -n \"$CONTEXT7_API_KEY\" ]; then printf 'Bearer %s' \"$CONTEXT7_API_KEY\"; fi"
+      },
+      "enabled": true
+    }
+  }
+}

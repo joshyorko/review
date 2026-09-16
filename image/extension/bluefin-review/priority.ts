@@ -1,16 +1,17 @@
 /**
  * What to look at first.
  *
- * Hive rank is authoritative whenever the hub is online. Unranked items keep
- * their fetched GitHub order for browse-only evidence; their category is a
- * description, never a dispatch priority. This module therefore cannot select,
- * assign, or promote work independently of Hive.
+ * Pull requests returned to the authenticated author form a local repair-only
+ * lane before other work. Hive rank is authoritative within that lane and for
+ * the remaining queue. Unranked items otherwise keep their fetched GitHub order;
+ * this module never selects or assigns contributor work.
  */
 
 import type { QueueItem } from "./github.ts";
 import type { HiveSnapshot } from "./hive.ts";
 
 export type PriorityCategory =
+	| "repair-requested"
 	| "hive"
 	| "personal_request"
 	| "ready-for-human-merge"
@@ -43,22 +44,6 @@ export interface PrioritizedQueue {
 	hiveRanked: number;
 }
 
-/**
- * The order a maintainer wants, which is not the order GitHub returns.
- *
- * A queue that buries what you can land under sixty things you cannot is a queue
- * you stop reading.
- */
-const MAINTAINER_ORDER: Record<PriorityCategory, number> = {
-	hive: 0,
-	personal_request: 1,
-	"ready-for-human-merge": 2,
-	review: 3,
-	"resolve-conflicts": 4,
-	"fix-ci": 5,
-	investigate: 6,
-	triage: 7,
-};
 
 const STALE_AFTER_MS = 21 * 24 * 60 * 60 * 1000;
 
@@ -83,6 +68,14 @@ export function isDependencyBump(item: QueueItem): boolean {
 	return /^chore\(deps\)/i.test(item.title);
 }
 
+/** A pull request the authenticated author must revise before review can continue. */
+export function isRepairRequested(item: QueueItem, currentUserLogin?: string): boolean {
+	return item.type === "pr"
+		&& item.reviewState === "changes_requested"
+		&& Boolean(currentUserLogin)
+		&& item.author.toLowerCase() === currentUserLogin!.toLowerCase();
+}
+
 /**
  * The local fallback: the dashboard's classifier, first match wins.
  *
@@ -92,6 +85,9 @@ export function isDependencyBump(item: QueueItem): boolean {
  */
 export function categorize(item: QueueItem, context: PrioritizeContext): { category: PriorityCategory; reason: string } {
 	if (item.type === "issue") return { category: "triage", reason: "issue awaiting triage" };
+	if (isRepairRequested(item, context.currentUserLogin)) {
+		return { category: "repair-requested", reason: "changes requested on your pull request" };
+	}
 	if (context.currentUserLogin && item.requestedReviewers && item.requestedReviewers.includes(context.currentUserLogin)) {
 		return { category: "personal_request", reason: "review requested from you" };
 	}
@@ -150,9 +146,8 @@ function hiveReason(item: QueueItem, hive: HiveSnapshot, rank: number): string {
 }
 
 /**
- * Preserve Hive's order when it is available. Without Hive, retain GitHub's
- * fetched order for browse-only evidence; local categories remain descriptive
- * and never become dispatch authority.
+ * Put returned author work first, preserve Hive order inside each lane, and
+ * otherwise retain GitHub's fetched order.
  */
 export function prioritize(items: readonly QueueItem[], context: PrioritizeContext): PrioritizedQueue {
 	const priorities = new Map<string, Priority>();
@@ -164,6 +159,18 @@ export function prioritize(items: readonly QueueItem[], context: PrioritizeConte
 		inputOrder.set(key, inputOrder.size);
 		const demotion = demotionFor(item, context.now);
 		const rank = context.hive.online ? hiveRankFor(item, context.hive) : undefined;
+		const local = categorize(item, context);
+		if (local.category === "repair-requested") {
+			if (rank !== undefined) hiveRanked += 1;
+			priorities.set(key, {
+				category: local.category,
+				source: rank === undefined ? "local" : "hive",
+				reason: local.reason,
+				hiveRank: rank,
+				demotion: 0,
+			});
+			continue;
+		}
 		if (rank !== undefined) {
 			hiveRanked += 1;
 			priorities.set(key, {
@@ -175,28 +182,28 @@ export function prioritize(items: readonly QueueItem[], context: PrioritizeConte
 			});
 			continue;
 		}
-		const { category, reason } = categorize(item, context);
-		priorities.set(key, { category, source: "local", reason, demotion });
-	}
-
-	if (!context.hive.online) {
-		return { items: [...items], priorities, source: "local", hiveRanked: 0 };
+		priorities.set(key, { ...local, source: "local", demotion });
 	}
 
 	const ordered = [...items].sort((left, right) => {
 		const a = priorities.get(itemKey(left))!;
 		const b = priorities.get(itemKey(right))!;
+		const aRepair = a.category === "repair-requested";
+		const bRepair = b.category === "repair-requested";
+		if (aRepair !== bRepair) return aRepair ? -1 : 1;
+		if (!context.hive.online) return inputOrder.get(itemKey(left))! - inputOrder.get(itemKey(right))!;
 		if (a.hiveRank !== undefined || b.hiveRank !== undefined) {
-			// Hive-ranked work always precedes unranked work, in Hive's order.
+			// Preserve Hive's relative order inside each lane.
 			if (a.hiveRank === undefined) return 1;
 			if (b.hiveRank === undefined) return -1;
 			if (a.hiveRank !== b.hiveRank) return a.hiveRank - b.hiveRank;
 		}
-
-		// Hive supplied no relative order for either item. Preserve GitHub's
-		// fetched order; local categories are descriptive, never a second priority.
 		return inputOrder.get(itemKey(left))! - inputOrder.get(itemKey(right))!;
 	});
+
+	if (!context.hive.online) {
+		return { items: ordered, priorities, source: "local", hiveRanked: 0 };
+	}
 
 	return {
 		items: ordered,
@@ -208,6 +215,7 @@ export function prioritize(items: readonly QueueItem[], context: PrioritizeConte
 /** Counts per category, for the headline. */
 export function categoryTally(priorities: ReadonlyMap<string, Priority>): Record<PriorityCategory, number> {
 	const tally: Record<PriorityCategory, number> = {
+		"repair-requested": 0,
 		hive: 0,
 		personal_request: 0,
 		"ready-for-human-merge": 0,

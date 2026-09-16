@@ -91,6 +91,7 @@ test_cases=(
   "projectbluefin/review --autoslay|--repo projectbluefin/review --autoslay --advisor"
   "autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
   "--autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
+  "--advisor|--advisor"
   "bluefin|--repo bluefin"
   "bluefin #123|--repo bluefin --pr 123"
   "bluefin#123|--repo bluefin --pr 123"
@@ -112,18 +113,20 @@ test_cases=(
 for case in "${test_cases[@]}"; do
   input="${case%%|*}"
   expected="${case#*|}"
+  [[ "$expected" == *--advisor* ]] || expected="$expected --advisor"
   # shellcheck disable=SC2086
   parse_review_args $input
   actual="${PARSED_REVIEW_ARGS[*]:-}"
   assert_eq "$actual" "$expected" "parse_review_args '$input'"
 done
 parse_review_args "--extension=/tmp/review extension"
-assert_eq "${#PARSED_REVIEW_ARGS[@]}" "1" "single argument with whitespace"
+assert_eq "${#PARSED_REVIEW_ARGS[@]}" "2" "single argument with whitespace plus advisor"
 assert_eq "${PARSED_REVIEW_ARGS[0]}" "--extension=/tmp/review extension" "literal extension path"
+assert_eq "${PARSED_REVIEW_ARGS[1]}" "--advisor" "advisor is always enabled"
 
 # Verify standalone execution of parse-review-args.sh
 standalone_out="$("${repo_root}/scripts/parse-review-args.sh" projectbluefin/review#463 --issues | tr '\n' ' ' | sed 's/ $//')"
-assert_eq "$standalone_out" "--repo projectbluefin/review --pr 463 --issues" "standalone parse-review-args.sh"
+assert_eq "$standalone_out" "--repo projectbluefin/review --pr 463 --issues --advisor" "standalone parse-review-args.sh"
 
 # --- 2. Hermetic test of bin/bluefin review (KVM OCI launcher) ----------------
 
@@ -228,6 +231,7 @@ unset HIVE_HUB
 assert_bluefin_review() {
   local input="$1"
   local expected_flags="$2"
+  [[ "$expected_flags" == *--advisor* ]] || expected_flags="$expected_flags --advisor"
   : >"$mock_podman_log"
 
   # shellcheck disable=SC2086
@@ -320,6 +324,7 @@ chmod +x "$scratch/bin/omp"
 assert_omp_review() {
   local input="$1"
   local expected_flags="$2"
+  [[ "$expected_flags" == *--advisor* ]] || expected_flags="$expected_flags --advisor"
   rm -f "$mock_omp_log"
 
   # shellcheck disable=SC2086

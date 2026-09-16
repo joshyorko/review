@@ -28,21 +28,24 @@ relay's `ws` dependency; this is not a Node application.
 | --- | --- | --- |
 | Contribute one local Hive worker | `bluefin contribute [instance]` or `just contribute [instance]` | Foreground OMP worker; prefers a libkrun microVM and falls back to Apptainer. Hive selects and assigns tasks. |
 | Scale cluster contributors | `just contribute cluster [N]` | OMP workers independent from the maintainer workbench. |
-| Review live pull requests | `bluefin review [org/repo]` or `just review-queue [flags...]` | Foreground OMP workbench; prefers a libkrun microVM and falls back to Apptainer. |
+| Review PRs or implement issues | `bluefin review [org/repo]` or `just review-queue [flags...]` | Foreground OMP workbench; prefers a libkrun microVM and falls back to Apptainer. |
 | Develop the review extension directly | `bin/omp-review [number\|issues]` | Host OMP process; development-only, not an appliance boundary. |
 | Build the review image | `just review-appliance-build [tag]` | Produces the OCI image used by both runtimes. |
 | Stop cluster workers | `just review-stop cluster` | Explicit cluster lifecycle command. |
 | Diagnose launch readiness | `just review-doctor` | Read-only preflight; starts no agent. |
 
 Never make task selection, assignment, completion, or priority decisions for
-Hive. The maintainer owns review, approval, queueing, and merge decisions.
+Hive. The maintainer owns review, approval, queueing, and merge decisions; a
+confirmed slay delegates only their bounded execution to the coordinator.
 
-The review mode consumes Hive rather than competing with it: when a hub is
-configured it orders the queue by Hive's own positions and never recomputes
-them, and when no hub is configured it classifies the queue locally using the
-dashboard's action vocabulary (`ready-for-human-merge`, `review`,
-`resolve-conflicts`, `fix-ci`, `investigate`, `triage`). Any change that adds a
-priority signal belongs on the local side of that seam, never on Hive's.
+The review mode consumes Hive rather than competing with it. Pull requests
+authored by the authenticated user with requested changes form a local,
+repair-only lane first; they are never self-reviewed, approved, or merged.
+When a hub is configured, the remaining queue keeps Hive's positions exactly.
+Without a hub, the dashboard classifies live GitHub evidence as
+`repair-requested`, `ready-for-human-merge`, `review`, `resolve-conflicts`,
+`fix-ci`, `investigate`, or `triage`. Local repair ordering never changes Hive
+priority or contributor assignment.
 
 ## Defer model choice to OMP
 

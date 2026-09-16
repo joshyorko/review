@@ -66,7 +66,9 @@ if [[ "${1:-}" == run && -n "${EXPECT_EXTENSION:-}" ]]; then
   [[ "$found" == 1 ]] || exit 19
 fi
 if [[ "${1:-}" == run && "${EXPECT_EMPTY_SCOPE:-}" == 1 ]]; then
-  [[ "${!#}" == ghcr.io/projectbluefin/review:stable ]] || exit 19
+  args=("$@")
+  count="${#args[@]}"
+  [[ "$count" -ge 2 && "${args[count - 2]}" == ghcr.io/projectbluefin/review:stable && "${args[count - 1]}" == --advisor ]] || exit 19
 fi
 case "${1:-} ${2:-} ${3:-}" in
   "system connection list")
@@ -94,14 +96,16 @@ for arg in "$@"; do
 done
 if [[ "${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
-  for name in GH_TOKEN OPENAI_API_KEY HIVE_HUB; do
+  for name in GH_TOKEN OPENAI_API_KEY CONTEXT7_API_KEY HIVE_HUB; do
     source_name="APPTAINERENV_${name}"
     [[ -v "$source_name" ]] && injected+=("$name=${!source_name}")
   done
+  injected+=("EXPECT_CONTEXT7_CREDENTIAL=${EXPECT_CONTEXT7_CREDENTIAL:-0}")
   env -i "${injected[@]}" /bin/bash -c '
     [[ "$GH_TOKEN" == test-gh-token &&
        "$OPENAI_API_KEY" == "test-provider-token" &&
-       "$HIVE_HUB" == https://hive.example.test ]]
+       "$HIVE_HUB" == https://hive.example.test &&
+       ( "$EXPECT_CONTEXT7_CREDENTIAL" != 1 || "$CONTEXT7_API_KEY" == "test-context7-token" ) ]]
   ' || exit 19
 fi
 exit 18
@@ -262,7 +266,7 @@ contains 'detached contributor containers are not supported' "$output"
 scenario="KVM preflight failure falls back to Apptainer"
 : >"$apptainer_log"
 set +e
-output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token HIVE_HUB= EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token CONTEXT7_API_KEY=test-context7-token HIVE_HUB= EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_CONTEXT7_CREDENTIAL=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
 status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "expected fake Apptainer exit 18, got $status"
@@ -272,6 +276,7 @@ log_contains ':/workspace,' "$apptainer_log"
 log_contains ':/tmp' "$apptainer_log"
 log_not_contains 'test-gh-token' "$apptainer_log"
 log_not_contains 'test-provider-token' "$apptainer_log"
+log_not_contains 'test-context7-token' "$apptainer_log"
 
 scenario="contributor fallback preserves credentials under containment"
 set +e
@@ -323,7 +328,7 @@ scenario="review alias preserves argument boundaries"
 EXPECT_EXTENSION="/tmp/review extension" run_just review-queue --extension "/tmp/review extension"
 [[ "$status" -eq 17 ]] || fail "extension argument was split: $output"
 EXPECT_EMPTY_SCOPE=1 run_just review-queue
-[[ "$status" -eq 17 ]] || fail "zero review arguments acquired an empty prompt: $output"
+[[ "$status" -eq 17 ]] || fail "zero review scope did not add only the advisor flag: $output"
 
 log_contains 'pull ghcr.io/projectbluefin/review:stable' "$podman_log"
 contains 'review appliance image ghcr.io/projectbluefin/review:stable: version=26.08.07 revision=0123456789abcdef digest=sha256:deadbeef' "$output"
@@ -342,7 +347,8 @@ scenario="review-queue delegates to the OMP appliance"
 run_just review-queue --issues
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
 log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-review-' "$podman_log"
-log_contains 'ghcr.io/projectbluefin/review:stable --issues' "$podman_log"
+log_contains 'ghcr.io/projectbluefin/review:stable --issues --advisor' "$podman_log"
+log_contains '--env CONTEXT7_API_KEY' "$podman_log"
 run_just review-queue autoslay
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
 log_contains 'ghcr.io/projectbluefin/review:stable --autoslay --advisor' "$podman_log"
@@ -350,6 +356,7 @@ log_contains 'ghcr.io/projectbluefin/review:stable --autoslay --advisor' "$podma
 scenario="review repositories use independent microVM state"
 run_just review-queue owner/repo
 one_review_call="$(cat "$podman_log")"
+[[ "$one_review_call" == *"ghcr.io/projectbluefin/review:stable --repo owner/repo --advisor"* ]] || fail "scoped review did not enable the advisor"
 run_just review-queue owner/repo2
 two_review_call="$(cat "$podman_log")"
 [[ "$one_review_call" == *"bluefin-review-review-owner-repo-"* ]] || fail "first review instance was not scope-named"

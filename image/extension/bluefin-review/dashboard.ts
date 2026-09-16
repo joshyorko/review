@@ -23,6 +23,7 @@ import { fetchPrDetail } from "./github.ts";
 export type DashboardAction =
 	| { kind: "close" }
 	| { kind: "slay"; item: QueueItem; items?: QueueItem[] }
+	| { kind: "autoslay" }
 	| { kind: "diff"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "comment"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "fix"; item: QueueItem; items?: QueueItem[] }
@@ -72,8 +73,8 @@ const HELP: readonly string[] = [
 	"  H / L            toggle Hive-only / step Hive stages",
 	"  o / r            change repository / refetch",
 	"  /                filter by title, repo, author, label, or number",
-	"  s                review, repair, and land selected pull requests",
-	"  alt+s            autoslay the visible queue through review, repair, and landing",
+	"  s                slay selected PRs or implement selected issues",
+	"  alt+s            repair returned PRs, then implement issue waves",
 	"  c                comment on selected item(s)",
 	"  f                fix selected item(s) in isolated workspaces",
 	"  d                inspect bounded diff evidence",
@@ -749,12 +750,9 @@ export class ReviewDashboard {
 				this.tui.requestRender();
 				return;
 			case "alt+s":
-			case "\u001bs": {
-				const items = this.mode.slayableItems(BATCH_LIMIT);
-				if (items.length === 0) return;
-				this.emitAction({ kind: "slay", item: items[0]!, items: items.length > 0 ? items : undefined });
+			case "\u001bs":
+				this.emitAction({ kind: "autoslay" });
 				return;
-			}
 			case "/":
 				this.filtering = true;
 				this.filterDraft = this.mode.filter;

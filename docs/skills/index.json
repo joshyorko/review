@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-14",
+  "generated_at": "2026-09-15",
   "schema_version": "1.0",
   "skills": [
     {
@@ -113,8 +113,8 @@
         "hive"
       ],
       "description": "Use when maintaining the distroless OMP review appliance or the OMP Hive contributor image.",
-      "version": "3.2",
-      "last_updated": "2026-09-14",
+      "version": "3.3",
+      "last_updated": "2026-09-15",
       "doc_type": "procedure"
     },
     {
@@ -133,8 +133,8 @@
         "hive"
       ],
       "description": "Maintains the OMP appliance and Hive contributor launcher recipes without crossing their credential or authority boundaries.",
-      "version": "5.2",
-      "last_updated": "2026-09-14",
+      "version": "5.3",
+      "last_updated": "2026-09-15",
       "doc_type": "runbook"
     },
     {
@@ -197,7 +197,7 @@
     {
       "id": "review-dashboard",
       "name": "review-dashboard",
-      "one_line_purpose": "Maintain the single-screen OMP review workbench.",
+      "one_line_purpose": "Maintain the queue, slay lifecycles, and workflowz workbench.",
       "entry_point": "docs/skills/review-dashboard.md",
       "category": "ci-ops",
       "status": "active",
@@ -209,9 +209,9 @@
         "maintainer",
         "workflowz"
       ],
-      "description": "Maintains the OMP review workbench in image/extension/bluefin-review/. Use when editing review UI, queue projection, workflowz dispatch, or action seams.",
-      "version": "5.1",
-      "last_updated": "2026-09-14",
+      "description": "Maintains the OMP review workbench. Use for queue ordering, slay or autoslay, workflowz issue batches, durable batch state, dashboard controls, or mutation guards.",
+      "version": "5.3",
+      "last_updated": "2026-09-15",
       "doc_type": "runbook"
     },
     {
@@ -246,9 +246,9 @@
         "maintenance",
         "factory"
       ],
-      "description": "Maintains review documentation and skill contracts from local source evidence. Use when auditing docs, correcting stale guidance, or recording durable agent learning.",
-      "version": "1.1",
-      "last_updated": "2026-08-14",
+      "description": "Maintains repository documentation and skill contracts from current source evidence. Use for repo-wide documentation audits, stale guidance, skill routing, catalog changes, or durable agent learning.",
+      "version": "1.2",
+      "last_updated": "2026-09-15",
       "doc_type": "reference"
     },
     {
