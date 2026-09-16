@@ -1,6 +1,6 @@
 ---
 name: image-build
-version: "3.3"
+version: "3.4"
 last_updated: 2026-09-15
 id: image-build
 one_line_purpose: Build and pin the OMP review and contributor images.
@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [containerfile, image, digest, pinning, omp, hive]
-description: "Use when maintaining the distroless OMP review appliance or the OMP Hive contributor image."
+description: "Use when maintaining the OMP review/contributor images, release pins, SBOM inputs, or multi-architecture publication workflows."
 metadata:
   type: procedure
   context7-sources: [/websites/podman_io_en, /websites/github_en_actions]
@@ -62,16 +62,27 @@ model-specific runtime. Both OCI images leave model and effort selection to OMP.
 14. Bundle review-appliance MCP definitions beside the packaged review
     extension in `.mcp.json`. Do not place them under `/home/bluefin`: the
     launcher's persistent home volume masks image content at that path.
+15. OMP version and digest pins move as one release unit in both Containerfiles.
+    The scheduled Renovate workflow refreshes the GitHub release asset digests,
+    merges the validated OMP update, and lets the resulting `main` push publish
+    both images.
 
 ## Pin maintenance
 
-Hive's source pin appears in `justfile` and `image/contribute/Containerfile`.
-Move both together from Hive's `v4` branch. The review and contribute image
-revision files are separate product revisions.
+Hive's source pin appears in `justfile` and `image/contribute/Containerfile`;
+move both together from Hive's `v4` branch. OMP pins appear in both
+Containerfiles. `node scripts/update-omp-pins.mjs <version>` reads the published
+GitHub release asset digests and updates both files atomically. Renovate runs
+that command hourly after changing `OMP_VERSION`, then automerges only after
+repository checks pass. The merge triggers `publish-appliance.yml` and
+`publish-contribute.yml`; those workflows build and execute both native
+architectures before updating their published indexes. The review and
+contribute image revision files remain separate product revisions.
 
 ## Verification
 
 ```bash
+node --test tests/update-omp-pins.test.mjs
 bash tests/appliance-contract.sh
 bash tests/contribute-contract.sh
 python3 tests/appliance_sbom_contract.py

@@ -108,6 +108,9 @@ every pin automatically. A pin is a checkpoint the automation advances,
 never a human gate: no dependency bump may wait on manual review, an audit
 checklist, or a conditional workflow. If a bump breaks something, the fix
 is forward — a follow-up change — not a brake on the update stream.
+OMP releases move both Containerfiles through the allowlisted Renovate pin-sync
+task; the resulting `main` push publishes both images. See
+[`image-build.md`](docs/skills/image-build.md).
 
 The work the appliance produces for other repositories is toil reduction for
 under-maintained projects, not feature work: agents repair what is broken and

@@ -57,6 +57,15 @@ For repository development, `.omp/config.yml` pins subagent models and effort
 and defines model-role mappings. It leaves the interactive model to the user
 and is not copied into either runtime image.
 
+## Follow upstream OMP releases
+
+The hourly Renovate workflow tracks stable `can1357/oh-my-pi` GitHub releases.
+Its allowlisted `scripts/update-omp-pins.mjs` task synchronizes the version and
+both architecture digests across the review and contributor Containerfiles.
+After checks and OMP-specific automerge, the `main` push triggers both image
+publish workflows. Never update only one image or a version without its release
+asset digests.
+
 ## Inspect live state; preserve active work
 
 The queue is live GitHub/Hive evidence. Inspect it through the active appliance,

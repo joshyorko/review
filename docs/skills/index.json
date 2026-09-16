@@ -112,8 +112,8 @@
         "omp",
         "hive"
       ],
-      "description": "Use when maintaining the distroless OMP review appliance or the OMP Hive contributor image.",
-      "version": "3.3",
+      "description": "Use when maintaining the OMP review/contributor images, release pins, SBOM inputs, or multi-architecture publication workflows.",
+      "version": "3.4",
       "last_updated": "2026-09-15",
       "doc_type": "procedure"
     },
