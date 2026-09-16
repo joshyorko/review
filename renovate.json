@@ -5,6 +5,19 @@
   ],
   "customManagers": [
     {
+      "description": "Track the shared OMP release version in both image Containerfiles; the post-upgrade task supplies verified per-architecture digests.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/(appliance|contribute)/Containerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=github-releases depName=can1357/oh-my-pi\\nARG OMP_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "can1357/oh-my-pi",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
       "description": "Track hivecommons/hive origin/v4 as a pinned commit SHA. The SHA is duplicated in the launcher, contributor image, and README; one depName keeps every match in a single Renovate branch and PR.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -48,9 +61,6 @@
     },
     {
       "description": "Track every stable OMP GitHub release, refresh both verified binary digests, and merge after repository checks so both image publishers run from main.",
-      "matchManagers": [
-        "dockerfile"
-      ],
       "matchDatasources": [
         "github-releases"
       ],

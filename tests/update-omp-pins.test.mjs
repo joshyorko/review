@@ -83,9 +83,15 @@ test("syncOmpPins updates both shipped images from the same Renovate-selected re
 
 test("Renovate follows OMP releases and both image publishers validate the pin sync", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
+	const manager = config.customManagers.find((candidate) => candidate.depNameTemplate === "can1357/oh-my-pi");
+	assert.ok(manager, "OMP needs a regex manager for ARG OMP_VERSION");
+	assert.equal(manager.datasourceTemplate, "github-releases");
+	assert.equal(manager.versioningTemplate, "semver-coerced");
+	assert.match(manager.matchStrings[0], /ARG OMP_VERSION/);
 	const rule = config.packageRules.find((candidate) => candidate.matchPackageNames?.includes("can1357/oh-my-pi"));
 	assert.ok(rule, "OMP needs a dedicated Renovate package rule");
 	assert.deepEqual(rule.matchDatasources, ["github-releases"]);
+	assert.equal(rule.matchManagers, undefined);
 	assert.equal(rule.automerge, true);
 	assert.equal(rule.automergeType, "pr");
 	const currentPinBlock = async (path) => (await readFile(path, "utf8"))
