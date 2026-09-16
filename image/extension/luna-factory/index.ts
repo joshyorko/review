@@ -115,6 +115,7 @@ const FACTORY_TOOL_NAMES = [
 	"luna_factory_receipt",
 	"luna_factory_integrate",
 	"luna_factory_reconcile",
+	"luna_factory_replan",
 	"luna_factory_finish",
 	"luna_factory_why",
 	"luna_factory_control",
@@ -766,6 +767,29 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 						{ artifactRoots },
 					),
 				(next) => `attempt ${payload.attemptId} integrated explicitly at ${next.subject.repo}@${next.subject.head ?? next.subject.base}; Factory applied no external change`,
+			);
+		},
+	});
+
+	registerTool({
+		name: "luna_factory_replan",
+		label: "Factory Replan",
+		description:
+			"Use the one bounded materially different same-goal replan, but only after two consecutive no-progress attempts have been recorded.",
+		async execute(_toolCallId, params) {
+			const parsed = parseArgument(params);
+			if (!parsed.ok) return { content: text(parsed.error), isError: true };
+			if (!isRecord(parsed.value)) return { content: text("replan input must be a JSON object"), isError: true };
+			const payload = parsed.value;
+			if (typeof payload.taskId !== "string") return { content: text("taskId is required"), isError: true };
+			return mutate(
+				(current) =>
+					reduce(
+						current,
+						{ kind: "use_replan", expectedRevision: current.revision, taskId: payload.taskId as TaskId },
+						{ artifactRoots },
+					),
+				(next) => `task ${payload.taskId} is READY for the one bounded replan; no-progress diagnosis remains recorded at ${next.noProgressAttempts}`,
 			);
 		},
 	});

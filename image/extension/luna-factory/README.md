@@ -54,6 +54,7 @@ the stable fallback:
 | (ledger input) | `luna_factory_candidate`, `luna_factory_attempt`, `luna_factory_receipt`, `luna_factory_finish` |
 | (owner integration) | `luna_factory_integrate` |
 | (interrupted attempt) | `luna_factory_reconcile` |
+| (diagnosed plateau) | `luna_factory_replan` — one bounded same-goal replan after two no-progress attempts |
 | (verified finish) | `luna_factory_completion` |
 
 `luna_factory_dispatch` builds the bounded prompt for an admitted task. On the
@@ -94,6 +95,9 @@ separate async-abort route issued Factory abort after OMP returned its job ID;
 the journal became `interrupted` and listed that owned ID without claiming
 cancellation or rollback, while settlement remained deferred around the live
 background job.
+A plateau route also exercised two unproved receipts, the
+`luna_factory_replan` adapter, a successful third attempt, and the post-success
+successor dismissal through the packaged runtime.
 
 The reproducible fixture is
 `tests/fixtures/luna-factory-omp-probe-server.mjs`, with the install and probe

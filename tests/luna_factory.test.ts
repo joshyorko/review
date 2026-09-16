@@ -1002,6 +1002,7 @@ test("loading the extension registers its surface and starts no work", async () 
 			"luna_factory_open",
 			"luna_factory_receipt",
 			"luna_factory_reconcile",
+			"luna_factory_replan",
 			"luna_factory_status",
 			"luna_factory_why",
 		],
@@ -1331,6 +1332,47 @@ test("write integration is an explicit owner event and moves the proof subject",
 	const finish = await callTool(host, "luna_factory_finish", { taskId: "T1" });
 	assert.equal(finish.isError, true);
 	assert.match(finish.content[0]!.text, /older subject/);
+});
+
+test("the replan adapter exposes only the one diagnosed same-goal replan", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "diagnose a stalled fix",
+		criteria: [{ id: "A1", statement: "the fix is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+		options: { appetite: { tasks: 2, attemptsPerTask: 2 } },
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "diagnose the stalled fix",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await callTool(host, "luna_factory_receipt", receipt({ unresolved: ["still broken"] }));
+	const premature = await callTool(host, "luna_factory_replan", { taskId: "T1" });
+	assert.equal(premature.isError, true);
+	assert.match(premature.content[0]!.text, /not diagnosed/);
+
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a2" });
+	await callTool(host, "luna_factory_receipt", receipt({ attemptId: "T1-a2", unresolved: ["still broken differently"] }));
+	const replanned = await callTool(host, "luna_factory_replan", { taskId: "T1" });
+	assert.equal(replanned.isError, undefined);
+	assert.match(replanned.content[0]!.text, /bounded replan/);
+	const record = host.entries.at(-1)!.data as { replans: number; tasks: Array<{ state: string }> };
+	assert.equal(record.replans, 1);
+	assert.equal(record.tasks[0]!.state, "READY");
+
+	const second = await callTool(host, "luna_factory_replan", { taskId: "T1" });
+	assert.equal(second.isError, true);
+	assert.match(second.content[0]!.text, /already been used/);
 });
 
 test("dispatch through an unproven path is refused at the tool boundary", async () => {
