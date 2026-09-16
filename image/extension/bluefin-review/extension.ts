@@ -756,6 +756,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (action.kind === "reference") {
 			const items = action.items && action.items.length > 0 ? action.items : [action.item];
 			ctx.ui.pasteToEditor(items.map((item) => `${item.repo}#${item.id} — ${item.title}\n${item.url}\n`).join("\n"));
+			ctx.ui.notify(`Added ${items.length === 1 ? "item" : `${items.length} items`} to the prompt`, "info");
 			return;
 		}
 

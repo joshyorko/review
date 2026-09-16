@@ -1281,8 +1281,15 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	assert.equal(action.kind, "slay");
 	assert.equal(action.item.id, 7);
 
-	dashboard.handleInput("\r");
+	dashboard.handleInput("i");
 	assert.equal(action.kind, "reference");
+	assert.equal(action.item.id, 7);
+
+	dashboard.handleInput("\r");
+	assert.match(frame()[2], /PR READER: projectbluefin\/other#7/);
+	dashboard.handleInput("q");
+	dashboard.handleInput("v");
+	assert.equal(action.kind, "open_browser");
 	assert.equal(action.item.id, 7);
 	dashboard.handleInput("c");
 	assert.equal(action.kind, "comment");
@@ -1326,6 +1333,21 @@ test("dashboard interactive search live-filters and selects items by title", (t)
 	assert.ok(mode.selectedKeys.has("projectbluefin/other#7"), "selected item via search input");
 	assert.equal(mode.selectedKeys.size, 1);
 	assert.ok(mode.selectedKeys.has("projectbluefin/other#7"));
+});
+
+test("dashboard v opens a focused issue in the browser", (t) => {
+	const mode = new ReviewMode({ org: "projectbluefin" });
+	mode.queueMode = "issues";
+	mode.items = [queueItem({ type: "issue", id: 606, title: "keyboard actions" })];
+	let action;
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, (result) => {
+		action = result;
+	}, () => {}, 20);
+	t.after(() => dashboard.dispose());
+
+	dashboard.handleInput("v");
+	assert.equal(action.kind, "open_browser");
+	assert.equal(action.item.id, 606);
 });
 
 test("workbench Tab switches entity mode and Alt+B selects one repository group", (t) => {
@@ -3409,9 +3431,10 @@ test("issue admission gate handles positive admission, negative cases, and invar
 	}
 	{
 		const { dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
-		dashboard.handleInput("\r");
+		dashboard.handleInput("i");
 		await turn();
 		assert.ok(ctx.pasted.length > 0, "cite/reference is read-only");
+		assert.match(ctx.notifications.at(-1)?.message ?? "", /Added item to the prompt/);
 	}
 	// fix on an unadmitted Review issue dispatches zero messages and notifies
 	{
@@ -3808,9 +3831,18 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 	dashboard.handleClick(fPos + 1, keymapLineIdx);
 	assert.equal(lastAction?.kind, "fix", "clicking fix emits a non-landing work action");
 
-	const enterPos = keymapText.indexOf("enter cite");
+	const enterPos = keymapText.indexOf("enter read");
 	assert.ok(enterPos > 0);
 	dashboard.handleClick(enterPos + 1, keymapLineIdx);
+	assert.match(dashboard.render(400)[2], /PR READER:/, "clicking Enter opens the reader");
+	dashboard.handleInput("q");
+	const vPos = keymapText.indexOf("v browser");
+	assert.ok(vPos > 0);
+	dashboard.handleClick(vPos + 1, keymapLineIdx);
+	assert.equal(lastAction?.kind, "open_browser", "clicking browser opens the focused item");
+	const iPos = keymapText.indexOf("i cite");
+	assert.ok(iPos > 0);
+	dashboard.handleClick(iPos + 1, keymapLineIdx);
 	assert.equal(lastAction?.kind, "reference", "clicking cite emits a reference action");
 
 	const APos = keymapText.indexOf("A all");

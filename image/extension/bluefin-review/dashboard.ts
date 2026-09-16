@@ -51,8 +51,9 @@ export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "H", label: "hive" },
 	{ chord: "L", label: "stage" },
 	{ chord: "d", label: "diff" },
-	{ chord: "v", label: "read" },
-	{ chord: "enter", label: "cite" },
+	{ chord: "v", label: "browser" },
+	{ chord: "enter", label: "read" },
+	{ chord: "i", label: "cite" },
 	{ chord: "o", label: "repo" },
 	{ chord: "/", label: "filter" },
 	{ chord: "q", label: "close" },
@@ -67,7 +68,8 @@ const HELP: readonly string[] = [
 	"  tab              toggle pull requests and issues",
 	"  t                switch between queue and trace panes",
 	"  p                pause or resume future repository waves",
-	"  v                read the highlighted pull request",
+	"  enter            read the highlighted pull request",
+	"  v                open the highlighted item in a browser",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
 	"  H / L            toggle Hive-only / step Hive stages",
@@ -78,7 +80,7 @@ const HELP: readonly string[] = [
 	"  c                comment on selected item(s)",
 	"  f                fix selected item(s) in isolated workspaces",
 	"  d                inspect bounded diff evidence",
-	"  enter            cite the selection in the prompt",
+	"  i                cite the selection in the prompt",
 	"  ?                close this help",
 	"  q, esc           close the workbench",
 	"",
@@ -631,6 +633,9 @@ export class ReviewDashboard {
 			case "enter":
 				this.executeKey("enter");
 				break;
+			case "i":
+				this.executeKey("i");
+				break;
 			case "o":
 				this.executeKey("o");
 				break;
@@ -845,13 +850,16 @@ export class ReviewDashboard {
 				return;
 			case "return":
 			case "enter":
-				this.emitAction({ kind: "reference", item, items });
-				return;
-			case "v":
 				if (item.type !== "pr") return;
 				this.showReader = true;
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
+				return;
+			case "i":
+				this.emitAction({ kind: "reference", item, items });
+				return;
+			case "v":
+				this.emitAction({ kind: "open_browser", item });
 				return;
 			case "C":
 				this.mode.toggleViewMode();
