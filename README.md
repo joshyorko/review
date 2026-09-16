@@ -246,7 +246,7 @@ Bluefin specializes its policy.
 <details>
 <summary>Image provenance</summary>
 
-The contributor image layers the pinned Hive runtime at `feaac6859a46d22c143420102cc3ab4e8687cd65`; it contains no maintainer UI. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker, and `ghcr.io/projectbluefin/review` is the maintainer-facing OMP appliance.
+The contributor image layers the pinned Hive runtime at `67530919a135cbc466d1e0961770028842c80876`; it contains no maintainer UI. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker, and `ghcr.io/projectbluefin/review` is the maintainer-facing OMP appliance.
 See [image architecture and validation](docs/image-and-development.md).
 
 </details>
