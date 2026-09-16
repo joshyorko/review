@@ -1,7 +1,7 @@
 ---
 name: image-build
-version: "3.4"
-last_updated: 2026-09-15
+version: "3.5"
+last_updated: 2026-09-16
 id: image-build
 one_line_purpose: Build and pin the OMP review and contributor images.
 entry_point: docs/skills/image-build.md
@@ -78,13 +78,16 @@ repository checks pass. The merge triggers `publish-appliance.yml` and
 `publish-contribute.yml`; those workflows build and execute both native
 architectures before updating their published indexes. The review and
 contribute image revision files remain separate product revisions.
-[#598](https://github.com/projectbluefin/review/issues/598) owns derived-checksum
-automation for the remaining GH, Node, tmux, and Python lockfile pins.
+Derived checksum automation for GitHub CLI, Node.js, tmux, and `requirements-ci.lock`
+runs in their respective Renovate branches via `node scripts/update-gh-pins.mjs`,
+`node scripts/update-node-pins.mjs`, `node scripts/update-tmux-pins.mjs`, and
+`node scripts/update-requirements-ci-hashes.mjs`.
 
 ## Verification
 
 ```bash
 node --test tests/update-omp-pins.test.mjs
+node --test tests/update-derived-pins.test.mjs
 bash tests/appliance-contract.sh
 bash tests/contribute-contract.sh
 python3 tests/appliance_sbom_contract.py
