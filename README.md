@@ -20,6 +20,28 @@ Review gates required +2 reviews to merge, so a maintainer running both can neve
 
 What we have now:
 
+## Product boundary
+
+Review is a GitHub-first core. On any GitHub repository the operator can access,
+pull requests and issues are first-class objects, and the workbench offers only
+the actions its backend can run: PR review, diff, fix, and slay; issue
+inspection, implementation, and fix. Review owns the generic core — PRs, issues,
+queues, search, reading, inspection, review, repair, implementation, and landing
+— subject to GitHub access, operator permissions, execution requirements, and
+safety checks.
+
+When Hive is missing or unreachable, queue order falls back to GitHub, and
+review, fix, and slay remain available without Hive; the workbench is not
+browse-only. OMP owns sessions, agents, execution, and traces. [Bluefin](https://projectbluefin.io)
+adds its doctrine, specialized reviewers, labels, conventions, and repository
+admission rules. [Hive](https://hive.projectbluefin.io) adds ordering, claims,
+stages, curated knowledge, and contributor coordination through its MCP server.
+Neither integration is required for the core GitHub workflows: GitHub defines
+what work exists, Review defines what can be done with it, Hive may prioritize
+and coordinate it, and Bluefin may specialize its policy. The boundary and its
+follow-up work — including a GitHub-only mode that selects Hive or the plain
+GitHub toolchain — are tracked in [#591](https://github.com/projectbluefin/review/issues/591).
+
 ## Installation
 
 Install `bluefin-contributor-tools` in one command from the [Universal Blue experimental tap](https://github.com/ublue-os/homebrew-experimental-tap), which automatically trusts the formula:
@@ -124,7 +146,7 @@ slash commands.
 | `alt+s` | Repair returned PRs first, then implement the visible issue backlog in bounded waves |
 | `alt+b` | Select / clear the focused repository group |
 | `f` | Fix selected items in isolated workspaces |
-| `d` | Inspect bounded diff evidence |
+| `d` | Inspect bounded evidence (PR diff, issue discussion) |
 | `p` | Pause / resume starting later repository waves |
 | `r` | Refetch GitHub and Hive projections |
 | `o` | Change repository or organization scope |
@@ -228,20 +250,6 @@ unreproduced reports. Planned documentation assistance is tracked in
 [#134](https://github.com/projectbluefin/review/issues/134); the feedback loop
 is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 
-### Product boundary
-
-Review is a GitHub-first core with optional Bluefin and Hive integrations.
-[#591](https://github.com/projectbluefin/review/issues/591) decided it works for
-any GitHub repository, with Bluefin and Hive as optional additions. Review owns
-the generic core — PRs, issues, queues, search, reading, inspection, review,
-repair, implementation, and landing — and is first-class in any repository.
-OMP owns sessions, agents, execution, and traces. Bluefin adds its doctrine,
-specialized reviewers, labels, conventions, and admission rules; Hive adds
-ordering, claims, stages, and contributor context through its MCP server. The
-core requires neither: GitHub access, operator permissions, execution
-requirements, and safety checks still apply. GitHub defines what work exists;
-Review defines what can be done with it; Hive prioritizes and coordinates it;
-Bluefin specializes its policy.
 
 <details>
 <summary>Image provenance</summary>

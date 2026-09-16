@@ -1897,7 +1897,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 1, "slay dispatches without requiring Hive ranking");
 	assert.match(pi.messages[0], /bluefin-reviewer/);
-	assert.ok(!ctx.notifications.some((notification) => /browse-only mode disables dispatch/.test(notification.message)));
+	assert.match(status.content[0].text, /review, fix, and slay remain available/, "a missing Hive must not read as browse-only: authorized actions remain available");
 });
 
 test("--autoslay repairs returned pull requests before implementing issue waves", async () => {
@@ -2720,7 +2720,7 @@ test("the status tool names the authority that ordered the queue", async () => {
 		return { ok: false, status: 502, statusText: "Bad Gateway", json: async () => ({}) };
 	}, hubEnv);
 	// The header/status line is a concise fallback status, not the raw error.
-	assert.match(unreachable.content[0].text, /order: unavailable — hive unavailable; GitHub evidence is available, Hive ordering is not/);
+	assert.match(unreachable.content[0].text, /order: unavailable — hive unavailable; queue order falls back to GitHub, and review, fix, and slay remain available/);
 	// The raw diagnostic is kept behind the status, in the structured details.
 	assert.match(unreachable.details.hive.error ?? "", /502/, "the raw error stays in the status details, not the header");
 });
@@ -2810,7 +2810,7 @@ test("the status tool names all three optional-Hive states distinctly", async ()
 		},
 		hubEnv,
 	);
-	assert.match(broken.content[0].text, /order: unavailable — hive unavailable; GitHub evidence is available, Hive ordering is not/);
+	assert.match(broken.content[0].text, /order: unavailable — hive unavailable; queue order falls back to GitHub, and review, fix, and slay remain available/);
 	assert.match(broken.details.hive.error ?? "", /502/, "the raw error is the diagnostic, kept in the status details");
 	assert.equal(broken.details.hive.online, false);
 });
@@ -2830,10 +2830,10 @@ test("a hive-only session with a broken hub still fails visibly and concisely", 
 	await review.whenStarted();
 
 	assert.ok(
-		ctx.notifications.some((notification) => /hive unavailable; GitHub review still works/.test(notification.message)),
+		ctx.notifications.some((notification) => /hive unavailable; queue order falls back to GitHub/.test(notification.message)),
 		`a broken hive must fail visibly at startup, got ${JSON.stringify(ctx.notifications)}`,
 	);
-	const startupHive = ctx.notifications.find((notification) => /GitHub review still works/.test(notification.message));
+	const startupHive = ctx.notifications.find((notification) => /queue order falls back to GitHub/.test(notification.message));
 	assert.doesNotMatch(startupHive.message, /502/);
 });
 
@@ -2853,6 +2853,28 @@ test("action prompts reserve landing authority for slay", () => {
 	const issue = queueItem({ id: 8, type: "issue", reviewState: "unknown" });
 	assert.equal(actionPrompt({ kind: "slay", item, items: [item, issue] }), undefined);
 	assert.equal(actionPrompt({ kind: "close" }), undefined);
+});
+
+test("diff prompts match the object: issues inspect discussion, pull requests diff", () => {
+	// Issue #591: `d` on an issue must not send the agent to the PR-only
+	// diff tool. Issue inspection reads the body, discussion, and linked PRs.
+	const pr = queueItem();
+	const issue = queueItem({ id: 8, type: "issue", reviewState: "unknown" });
+
+	const prPrompt = actionPrompt({ kind: "diff", item: pr });
+	assert.match(prPrompt, /hive_workbench_diff/);
+
+	const issuePrompt = actionPrompt({ kind: "diff", item: issue });
+	assert.match(issuePrompt, /gh issue view 8 --repo projectbluefin\/review --comments/);
+	assert.match(issuePrompt, /linked/);
+	assert.doesNotMatch(issuePrompt, /Call hive_workbench_diff/);
+
+	const issueWave = actionPrompt({ kind: "diff", item: issue, items: [issue, queueItem({ id: 9, type: "issue", reviewState: "unknown" })] });
+	assert.match(issueWave, /Inspect this issue wave/);
+	assert.match(issueWave, /body, discussion, and linked pull requests/);
+	assert.doesNotMatch(issueWave, /Use hive_workbench_diff/);
+	const prWave = actionPrompt({ kind: "diff", item: pr, items: [pr, queueItem({ id: 7, repo: pr.repo })] });
+	assert.match(prWave, /hive_workbench_diff/);
 });
 
 
@@ -3401,11 +3423,11 @@ test("issue admission gate handles positive admission, negative cases, and invar
 	{
 		const { pi, dashboard, turn } = await setup({ number: 485, labels: [] });
 		pi.messages.length = 0;
-		// 'd' for diff
+		// 'd' for diff — on an issue it inspects the discussion, not the PR-only diff tool
 		dashboard.handleInput("d");
 		await turn();
 		assert.equal(pi.messages.length, 1, "diff is read-only and dispatches without admission gate");
-		assert.match(pi.messages[0], /Call hive_workbench_diff/);
+		assert.match(pi.messages[0], /gh issue view 485 --repo projectbluefin\/review --comments/);
 	}
 	{
 		const { dashboard, ctx, turn } = await setup({ number: 485, labels: [] });

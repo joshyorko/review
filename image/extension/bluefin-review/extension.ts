@@ -258,6 +258,7 @@ export function actionPrompt(
 	const slayFinish = "The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh bluefin-reviewer. If it has findings, dispatch one fresh isolated fixer with the exact repository, pull-request number, and head. Fixers use `gh repo clone` and `gh pr checkout` under `$HOME/worktrees`; never assume the working directory is a checkout, clone into `/tmp`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via `gh api repos/<owner>/<repo>/rules/branches/<branch>`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run `gh pr merge <n> --repo <r> --auto --squash`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because `autoMergeRequest.mergeMethod` says `MERGE`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use `--admin`, remove holds, weaken protections, or force-push. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.";
 	const repairFinish = "These pull requests were returned to their authenticated author with requested changes. Read the review threads and failing checks, diagnose every requested correction, then dispatch one fresh isolated fixer per pull request. Fixers use `gh repo clone` and `gh pr checkout` under `$HOME/worktrees`, make the smallest complete correction, run focused verification, and push a new head without force. Never review, approve, auto-merge, or merge the author's own pull request. A repair is terminal only after GitHub shows a new head SHA. Report the pushed head and pull-request URL for every item, then stop; the workbench owns the next repository wave.";
 	const issueEvidence = "Evidence is bounded and read once. Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it. Examine relevant source files and tests and cite file:line evidence. Never sleep or poll. In a clean workspace, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains `Closes <owner/repo>#<number>`. Never merge or approve your own pull request. The issue is not terminal until GitHub has accepted that pull request.";
+	const issueInspectEvidence = "Evidence is bounded and read once. Read the complete issue body and discussion with `gh issue view <n> --repo <r> --comments`, list the pull requests linked to it, and inspect only the relevant source files, citing file:line evidence. `hive_workbench_diff` is pull-request-only and must not be called for an issue. Never sleep or poll. Never assume a checkout exists. Report the request, its current state, and concrete risks.";
 	const issueWorkflow = "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh isolated item per issue through OMP workflowz. Do not share a checkout or conversation between items.";
 
 	if (selected.length > 1) {
@@ -268,6 +269,7 @@ export function actionPrompt(
 		const slayRules = `<<<SUBAGENT-RULES\n${evidence} ${slayFinish}\nSUBAGENT-RULES>>>`;
 		const repairRules = `<<<SUBAGENT-RULES\n${evidence} ${repairFinish}\nSUBAGENT-RULES>>>`;
 		const issueRules = `<<<SUBAGENT-RULES\n${issueEvidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
+		const issueInspectRules = `<<<SUBAGENT-RULES\n${issueInspectEvidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
 		switch (action.kind) {
 			case "slay":
 				if (allIssues) {
@@ -278,7 +280,9 @@ export function actionPrompt(
 				}
 				return `Slay this repository wave for ${repository} through review, repair, and landing:\n\n${list}\n\nUse the \`task\` tool once with one fresh bluefin-reviewer item per pull request through OMP workflowz. Do not use eval workpool: its generated boolean output schema is rejected by the current Copilot provider. Keep repair agents isolated, and never reuse a reviewer for the post-fix head. Coordinate the complete lifecycle after the review workers return. Copy this block verbatim into every worker prompt:\n${slayRules}`;
 			case "diff":
-				return `Inspect this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Do not reuse a worker across repositories. Use hive_workbench_diff and report the changed files and concrete risks. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
+				return allIssues
+					? `Inspect this issue wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Do not reuse a worker across repositories. Read each issue's body, discussion, and linked pull requests, and report the request, its current state, and concrete risks. Copy this block verbatim into every worker prompt:\n${issueInspectRules}`
+					: `Inspect this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Do not reuse a worker across repositories. Use hive_workbench_diff and report the changed files and concrete risks. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 			case "fix":
 				return allIssues
 					? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\nUse the \`task\` tool once with one fresh isolated item per issue through OMP workflowz. Do not share a checkout or conversation between write-capable items. Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${issueRules}`
@@ -309,7 +313,9 @@ export function actionPrompt(
 			}
 			return `Slay ${cite(item)} through review, repair, and landing. Use hive_workbench_diff and hive_workbench_trace, then run the complete lifecycle with fresh review and isolated fix agents. ${workflow} ${authority} ${slayFinish}`;
 		case "diff":
-			return `Call hive_workbench_diff for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${authority} ${reviewFinish}`;
+			return item.type === "issue"
+				? `Inspect ${cite(item)} as an issue. Read its complete body and discussion with \`gh issue view ${item.id} --repo ${item.repo} --comments\`, list the pull requests linked to it, and inspect the relevant source files. Summarize the request, its current state, and concrete risks with file:line evidence. Do not call \`hive_workbench_diff\`; it is pull-request-only. ${workflow} ${authority} ${reviewFinish}`
+				: `Call hive_workbench_diff for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${authority} ${reviewFinish}`;
 		case "fix":
 			return item.type === "issue"
 				? `Implement ${cite(item)} in an isolated workspace. Diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes ${item.repo}#${item.id}\`. ${workflow} ${authority} ${reviewFinish}`
@@ -895,7 +901,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const startSession = async (ctx: CtxLike, persisted: PersistedSelection | undefined) => {
 		const hive = await mode.refreshHive();
 		if (hive.configured && hive.error) {
-			ctx.ui.notify(`${hiveFailureStatus(hive.error)}; GitHub review still works`, "warning");
+			ctx.ui.notify(`${hiveFailureStatus(hive.error)}; queue order falls back to GitHub, and review, fix, and slay remain available`, "warning");
 		}
 		await refreshQueue(ctx);
 		if (persisted?.id) mode.selectById(persisted.repo, persisted.id);
