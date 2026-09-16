@@ -140,4 +140,12 @@ else
   PARSED_REVIEW_ARGS=("$@")
 fi
 
-exec omp --profile review "${EXTENSION_ARGS[@]}" ${PARSED_REVIEW_ARGS[@]+"${PARSED_REVIEW_ARGS[@]}"}
+advisor=false
+for arg in "${PARSED_REVIEW_ARGS[@]}"; do
+  [[ "$arg" == --advisor ]] && advisor=true
+done
+if [[ "$advisor" == false ]]; then
+  PARSED_REVIEW_ARGS+=(--advisor)
+fi
+
+exec omp --profile review --extension "$EXTENSION_PATH" ${PARSED_REVIEW_ARGS[@]+"${PARSED_REVIEW_ARGS[@]}"}

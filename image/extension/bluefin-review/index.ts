@@ -1,8 +1,8 @@
 /**
- * Bluefin policy adapter for the generic Hive Workbench core.
+ * Bluefin policy adapter for the generic Review workbench core.
  *
  * The package edge selects Bluefin repository policy. The workbench itself
- * stays generic and uses OMP for execution and Hive for queue authority.
+ * stays generic, uses OMP for execution, and adds Hive only in Hive mode.
  */
 
 import { type KeyId, matchesKey } from "@earendil-works/pi-tui";

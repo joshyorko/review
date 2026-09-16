@@ -88,16 +88,13 @@ function issueDetailToText(detail: Awaited<ReturnType<typeof fetchIssueDetail>>[
  * either ignore a priority that exists or invent one that does not.
  */
 function orderLine(mode: ReviewMode): string {
+	if (mode.isReviewMode()) return "order: GitHub/local — repository scope and filters";
 	const hive = mode.hive;
 	if (!hive.configured) {
-		return mode.isPersonalMode()
-			? "order: GitHub/local — Hive: not configured"
-			: "order: unranked — no hive hub configured; GitHub evidence is browse-only";
+		return "order: unranked — no hive hub configured; GitHub evidence is browse-only";
 	}
 	if (!hive.online) {
-		return mode.isPersonalMode()
-			? `order: GitHub/local — Hive: ${hiveFailureStatus(hive.error)}`
-			: `order: unavailable — ${hiveFailureStatus(hive.error)}; GitHub evidence is browse-only`;
+		return `order: unavailable — ${hiveFailureStatus(hive.error)}; GitHub evidence is browse-only`;
 	}
 	const actionable = hive.actionableItems === undefined ? "" : `, ${hive.actionableItems} actionable overall`;
 	const coverage = mode.hiveCoverage();
@@ -116,9 +113,14 @@ function orderLine(mode: ReviewMode): string {
 export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => Promise<void>): void {
 	const z = pi.zod;
 	const registerTool = (definition: ToolDefinition, aliases: readonly string[] = []): void => {
-		pi.registerTool(definition);
-		if (!mode.isPersonalMode()) return;
-		for (const name of aliases) {
+		if (mode.isHiveMode()) {
+			pi.registerTool(definition);
+			return;
+		}
+		const reviewNames = aliases.length > 0
+			? aliases
+			: definition.name.startsWith("review_") ? [definition.name] : [];
+		for (const name of reviewNames) {
 			pi.registerTool({
 				...definition,
 				name,
@@ -155,6 +157,8 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 					`selected ${item.repo}#${item.id} — ${item.title}`,
 					`author @${item.author}${item.draft ? " (draft)" : ""} ci=${item.ciStatus ?? "unknown"} merge=${item.mergeState} review=${item.reviewState} labels=${item.labels.join(",") || "none"}`,
 					priority ? `priority: ${priority.category} (${priority.reason}, ${priority.source})` : "priority: unranked",
+					`landing: ${mode.landingStateFor(item)}`,
+					`head: ${item.headSha ? `${item.headSha.slice(0, 12)}...${item.headSha}` : "unknown"}`,
 					item.url,
 					"",
 					traceToText(mode.session.roots(), now),
@@ -170,7 +174,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 					org: mode.org,
 					scope: mode.scope,
 					order_source: mode.orderSource(),
-					hive: {
+					...(mode.isHiveMode() ? { hive: {
 						configured: hive.configured,
 						online: hive.online,
 						hub: hive.hub || null,
@@ -179,13 +183,14 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 						actionable_items: hive.actionableItems ?? null,
 						triage: hive.triage,
 						error: hive.error ?? null,
-					},
+					} } : {}),
 					selected_priority: priority ?? null,
+				landing_state: item ? mode.landingStateFor(item) : null,
 					total_items: mode.items.length,
 					visible_items: mode.visibleItems().length,
 					queue_error: mode.queueError ?? null,
 					ci: tally,
-					selected: item ?? null,
+					selected: { ...item, head_sha: item.headSha ?? null },
 				},
 			};
 		},
@@ -279,6 +284,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 					additions: diff.additions,
 					deletions: diff.deletions,
 					truncated: diff.truncated,
+					head_sha: diff.headSha,
 					error: diff.error ?? null,
 				},
 				isError: Boolean(diff.error),
@@ -286,7 +292,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 		},
 	}, ["review_workbench_diff"]);
 
-	if (mode.isPersonalMode()) {
+	if (mode.isReviewMode()) {
 		registerTool({
 			name: "review_workbench_issue",
 			label: "Review Issue",
@@ -328,7 +334,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 			};
 		},
 	}, ["review_workbench_trace"]);
-	pi.registerTool({
+	registerTool({
 		name: "hive_workbench_lookup",
 		label: "Hive Lookup",
 		description:

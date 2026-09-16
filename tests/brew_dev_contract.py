@@ -145,10 +145,10 @@ class BrewDevContract(unittest.TestCase):
         self.assertIn("delegated:review --repo projectbluefin/review", result.stdout)
         self.assertIn("sif=\n", result.stdout)
 
-    def test_package_carries_parser_and_headroom_runtime(self):
+    def test_package_carries_parser_without_headroom_runtime(self):
         script = SCRIPT.read_text()
         self.assertIn("parse-review-args.sh", script)
-        self.assertIn("/usr/bin/headroom", script)
+        self.assertNotIn("/usr/bin/headroom", script)
 
     def test_personal_workflow_builds_the_self_hosted_branch(self):
         workflow = (SCRIPT.parents[1] / ".github/workflows/review-dev.yml").read_text()

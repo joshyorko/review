@@ -62,8 +62,15 @@ terminal; `review-stop` only manages the Kubernetes contributor deployment.
 
 Hive is the sole authority for selecting and assigning contributor tasks: do
 not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
-one permitted filter is own-work exclusion on the maintainer-facing queue
-view — a reviewer never receives their own authored pull requests to review.
+maintainer-facing queue may locally promote pull requests authored by the
+authenticated user when review requested changes, but that lane is repair-only.
+A reviewer never receives their own authored pull request to review, approve,
+or merge.
+
+An explicit maintainer slay delegates one bounded lifecycle to the workbench
+coordinator: ordinary PR review, repair, fresh review, and landing; returned-PR
+repair through a new head; or issue implementation through a submitted closing
+PR. Evidence reviewers remain read-only.
 
 The review mode in `image/extension/bluefin-review/` equips OMP with companion
 review agents (`bluefin-doctrine`, `bluefin-reviewer`, `bluefin-security`,
@@ -101,6 +108,9 @@ every pin automatically. A pin is a checkpoint the automation advances,
 never a human gate: no dependency bump may wait on manual review, an audit
 checklist, or a conditional workflow. If a bump breaks something, the fix
 is forward — a follow-up change — not a brake on the update stream.
+OMP releases move both Containerfiles through the allowlisted Renovate pin-sync
+task; the resulting `main` push publishes both images. See
+[`image-build.md`](docs/skills/image-build.md).
 
 The work the appliance produces for other repositories is toil reduction for
 under-maintained projects, not feature work: agents repair what is broken and
@@ -230,6 +240,6 @@ every main validation red.
   `hivecommons/hive` (default branch `v4`, v2 is retired; no contributing guide or issue
   templates, DCO sign-off required on pull requests).
 - Organization skills and factory rules: `projectbluefin/common`.
-- External API details: Context7 documentation. Context7 reaches agents both
-  through Hive's hub-side knowledge export and through the image's
-  configured `context7` extension (keyless public endpoint).
+- External API details: Context7 documentation. The review extension bundles
+  GitHub, the public Project Bluefin service, and Context7 as MCP servers;
+  credentials remain runtime environment inputs, never image content.

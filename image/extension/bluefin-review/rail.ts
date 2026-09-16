@@ -92,6 +92,8 @@ export function queueAge(fetchedAt: number, now: number): string | undefined {
 
 /** Colour per category: what the eye should land on first is loudest. */
 const CATEGORY_ROLE: Record<PriorityCategory, PaintRole> = {
+	blocked: "error",
+	"repair-requested": "warning",
 	hive: "accent",
 	personal_request: "accent",
 	"ready-for-human-merge": "success",
@@ -104,6 +106,8 @@ const CATEGORY_ROLE: Record<PriorityCategory, PaintRole> = {
 
 /** Short forms, because a queue row is not a place for a sentence. */
 const CATEGORY_LABEL: Record<PriorityCategory, string> = {
+	blocked: "blocked",
+	"repair-requested": "repair",
 	hive: "hive",
 	personal_request: "direct-req",
 	"ready-for-human-merge": "merge",
@@ -116,8 +120,13 @@ const CATEGORY_LABEL: Record<PriorityCategory, string> = {
 
 export function priorityChip(painter: Painter, priority: Priority | undefined): string {
 	if (!priority) return "";
-	const label =
-		priority.hiveRank === undefined ? CATEGORY_LABEL[priority.category] : `hive#${priority.hiveRank + 1}`;
+	if (priority.category === "blocked") {
+		const label = priority.reason ? `blocked · ${priority.reason}` : "blocked";
+		return painter.fg(CATEGORY_ROLE.blocked, label);
+	}
+	const label = priority.category === "repair-requested" || priority.hiveRank === undefined
+		? CATEGORY_LABEL[priority.category]
+		: `hive#${priority.hiveRank + 1}`;
 	return painter.fg(CATEGORY_ROLE[priority.category], label);
 }
 
@@ -151,7 +160,7 @@ export function workbenchProgressBar(mode: ReviewMode, painter: Painter, width: 
 		? painter.fg("success", "HIVE LIVE")
 		: mode.hive.configured
 			? painter.fg("error", "HIVE OFFLINE")
-			: painter.fg("warning", mode.isPersonalMode() ? "LOCAL" : "HIVE UNCONFIGURED");
+			: painter.fg("warning", mode.isReviewMode() ? "LOCAL" : "HIVE UNCONFIGURED");
 	const selected = painter.fg("text", `${mode.selectedKeys.size} selected`);
 	const pause = mode.paused ? painter.fg("warning", "PAUSED") : painter.fg("success", "RUNNING");
 	const progress = mode.batchProgress;
@@ -189,7 +198,7 @@ export function renderRail(
 			: mode.loading
 				? `${spinner} ${painter.fg("warning", reasonText)}`
 				: painter.fg("dim", `${statusIcon("pending")} ${reasonText}`);
-	const surface = mode.isPersonalMode() ? "review" : "hive";
+	const surface = mode.isReviewMode() ? "review" : "hive";
 	return [truncateToWidth(`${painter.fg("accent", `${GLYPH.hex} ${surface}`)} ${reason}  │  ${painter.fg("dim", "alt+b: workbench")}`, width)];
 	}
 	const ci = ciGlyph(item.ciStatus);
@@ -208,7 +217,7 @@ export function renderRail(
 	const live = liveLine(mode, painter, now, frame);
 	if (live && mode.session.active()) return [truncateToWidth(live, width)];
 	const source = orderSourceLabel(mode);
-	const connection = mode.hive.online ? "HIVE LIVE" : mode.hive.configured ? "HIVE OFFLINE" : mode.isPersonalMode() ? "LOCAL" : "HIVE UNCONFIGURED";
+	const connection = mode.hive.online ? "HIVE LIVE" : mode.hive.configured ? "HIVE OFFLINE" : mode.isReviewMode() ? "LOCAL" : "HIVE UNCONFIGURED";
 	const leftParts = [check, number, title, author, chip, icon].filter(Boolean);
 	const status = [painter.fg(source.role, `${connection} ${source.text}`), ageBadge].filter(Boolean).join(` ${painter.fg("dim", GLYPH.dot)} `);
 	const itemLine = `${leftParts.join(" ")}  │  ${painter.fg("dim", "alt+b: workbench")} ${pos}`;

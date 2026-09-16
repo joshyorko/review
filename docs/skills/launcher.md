@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "5.2"
-last_updated: 2026-09-14
+version: "5.3"
+last_updated: 2026-09-15
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -100,6 +100,12 @@ rather than inferred.
 - Apptainer's contained environment receives only the explicit credential and
   runtime allowlist through `APPTAINERENV_` variables. Keep `--no-eval` so
   credential and argument values remain literal inside the container.
+- The forwarded provider-credential allowlist names GitHub, Copilot, Anthropic,
+  OpenAI, Gemini, Hive, and terminal variables, plus the Amazon Bedrock
+  credentials `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, and `AWS_DEFAULT_REGION`.
+  Only those reach the contained process; the rest of the AWS environment stays
+  on the host. The value travels through the environment only, never in argv,
+  launcher output, test logs, image layers, or committed files.
 - The contributor worker receives exactly one selected Hive registration.
 - The checkout contributor recipe stages remote Podman registrations privately
   and deletes only its validated staging directory. The packaged `bluefin`
@@ -113,8 +119,7 @@ native immutable SIF built from the same source. The generated `bluefin`
 wrapper selects the OCI image through Podman/krun when KVM is ready and sets
 the bundled SIF as the Apptainer fallback. An explicit `BLUEFIN_REVIEW_SIF`
 still forces a SIF. The target-specific `/home/bluefin` state boundary remains
-the same on both paths. The SIF contains Headroom's MCP runtime and the OMP
-Linux voice closure.
+the same on both paths. The SIF contains OMP's Linux voice closure.
 
 For Review voice, the packaged launcher binds only a detected
 `$XDG_RUNTIME_DIR/pulse/native` socket and sets the contained `PULSE_SERVER`.
@@ -126,10 +131,11 @@ directory, host home, or `.codex`. Missing audio never prevents Review startup.
 
 `scripts/parse-review-args.sh` is the single parser for OMP review scope.
 Repository, `--pr`, and `--issues` arguments must reach the appliance unchanged.
-`autoslay` / `--autoslay` also passes OMP's built-in `--advisor` flag exactly
-once. The packaged entrypoint repeats that normalization for direct image
-launches, while the appliance configuration maps `modelRoles.advisor` to
-`@default` rather than selecting a provider.
+Every review launch passes OMP's built-in `--advisor` flag exactly once. The
+source launcher also normalizes its parser-fallback path, and the packaged
+entrypoint repeats the normalization for direct image launches. The appliance
+configuration maps `modelRoles.advisor` to `@default` rather than selecting a
+provider.
 The optional contributor argument names an isolated instance and its
 `contributor.<org-repo>.env`; Hive still selects work. OMP owns model choice.
 

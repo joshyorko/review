@@ -1,7 +1,7 @@
 ---
 name: image-build
-version: "3.2"
-last_updated: 2026-09-14
+version: "3.5"
+last_updated: 2026-09-16
 id: image-build
 one_line_purpose: Build and pin the OMP review and contributor images.
 entry_point: docs/skills/image-build.md
@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [containerfile, image, digest, pinning, omp, hive]
-description: "Use when maintaining the distroless OMP review appliance or the OMP Hive contributor image."
+description: "Use when maintaining the OMP review/contributor images, release pins, SBOM inputs, or multi-architecture publication workflows."
 metadata:
   type: procedure
   context7-sources: [/websites/podman_io_en, /websites/github_en_actions]
@@ -60,29 +60,42 @@ both OCI images leave model and effort selection to OMP.
 13. Give Apptainer workloads instance-scoped disk-backed scratch storage.
     `--containall` otherwise supplies a 64 MiB `/tmp`, which is too small for
     repository clones and archive inspection.
+14. Bundle review-appliance MCP definitions beside the packaged review
+    extension in `.mcp.json`. Do not place them under `/home/bluefin`: the
+    launcher's persistent home volume masks image content at that path.
+15. OMP version and digest pins move as one release unit in both Containerfiles.
+    The scheduled Renovate workflow refreshes the GitHub release asset digests,
+    merges the validated OMP update, and lets the resulting `main` push publish
+    both images.
 
 ## Pin maintenance
 
-Hive's source pin appears in `justfile` and `image/contribute/Containerfile`.
-Move both together from Hive's `v4` branch. The review and contribute image
-revision files are separate product revisions.
-
-The review appliance also carries the bounded `headroom-ai[mcp]` runtime from
-its pinned manylinux wheel and exact dependency versions in
-`image/appliance/headroom-requirements.txt`. Its profile config is provisioned
-under the persistent appliance home at first launch, so no host Codex or OMP
-configuration is needed to discover Headroom.
+Hive's source pin appears in `justfile` and `image/contribute/Containerfile`;
+move both together from Hive's `v4` branch. OMP pins appear in both
+Containerfiles. `node scripts/update-omp-pins.mjs <version>` reads the published
+GitHub release asset digests and updates both files atomically. Renovate runs
+that command daily after changing `OMP_VERSION`, then automerges only after
+repository checks pass. The merge triggers `publish-appliance.yml` and
+`publish-contribute.yml`; those workflows build and execute both native
+architectures before updating their published indexes. The review and
+contribute image revision files remain separate product revisions.
+Derived checksum automation for GitHub CLI, Node.js, tmux, and `requirements-ci.lock`
+runs in their respective Renovate branches via `node scripts/update-gh-pins.mjs`,
+`node scripts/update-node-pins.mjs`, `node scripts/update-tmux-pins.mjs`, and
+`node scripts/update-requirements-ci-hashes.mjs`.
 
 The FSDK builder does not provide Linux audio libraries. The pinned Fedora
 minimal build stage installs only `pulseaudio-libs` and `alsa-lib`, copies
 their resolved shared-library closure plus `/usr/share/alsa`, and contributes
-no package manager to the final image. The appliance contract must execute
-`headroom mcp serve --help` and verify both `libpulse-simple.so.0` and
-`libasound.so.2` resolve in a built image.
+no package manager to the final image. Audio is an OMP runtime dependency and
+remains independent of optional MCP services. The appliance contract verifies
+both `libpulse-simple.so.0` and `libasound.so.2` resolve in a built image.
 
 ## Verification
 
 ```bash
+node --test tests/update-omp-pins.test.mjs
+node --test tests/update-derived-pins.test.mjs
 bash tests/appliance-contract.sh
 bash tests/contribute-contract.sh
 python3 tests/appliance_sbom_contract.py

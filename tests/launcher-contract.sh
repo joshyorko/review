@@ -51,6 +51,12 @@ assert_provider_env_names() {
     [[ "$call" == *"--env $name"* ]] || fail "$context did not preserve $name forwarding: $call"
   done
 }
+assert_personal_policy_env_names() {
+  local call="$1" context="${2:-launcher}"
+  [[ "$call" == *"--env BLUEFIN_REVIEW_MODE"* ]] ||
+    fail "$context did not forward BLUEFIN_REVIEW_MODE by name: $call"
+  [[ "$call" != *"=1"* ]] || fail "$context exposed personal policy values in argv/log output: $call"
+}
 
 configure_host_files() {
   local mask="$1"
@@ -104,6 +110,7 @@ test_cases=(
   "projectbluefin/review --autoslay|--repo projectbluefin/review --autoslay --advisor"
   "autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
   "--autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
+  "--advisor|--advisor"
   "bluefin|--repo bluefin"
   "bluefin #123|--repo bluefin --pr 123"
   "bluefin#123|--repo bluefin --pr 123"
@@ -125,18 +132,20 @@ test_cases=(
 for case in "${test_cases[@]}"; do
   input="${case%%|*}"
   expected="${case#*|}"
+  [[ "$expected" == *--advisor* ]] || expected="$expected --advisor"
   # shellcheck disable=SC2086
   parse_review_args $input
   actual="${PARSED_REVIEW_ARGS[*]:-}"
   assert_eq "$actual" "$expected" "parse_review_args '$input'"
 done
 parse_review_args "--extension=/tmp/review extension"
-assert_eq "${#PARSED_REVIEW_ARGS[@]}" "1" "single argument with whitespace"
+assert_eq "${#PARSED_REVIEW_ARGS[@]}" "2" "single argument with whitespace plus advisor"
 assert_eq "${PARSED_REVIEW_ARGS[0]}" "--extension=/tmp/review extension" "literal extension path"
+assert_eq "${PARSED_REVIEW_ARGS[1]}" "--advisor" "advisor is always enabled"
 
 # Verify standalone execution of parse-review-args.sh
 standalone_out="$("${repo_root}/scripts/parse-review-args.sh" projectbluefin/review#463 --issues | tr '\n' ' ' | sed 's/ $//')"
-assert_eq "$standalone_out" "--repo projectbluefin/review --pr 463 --issues" "standalone parse-review-args.sh"
+assert_eq "$standalone_out" "--repo projectbluefin/review --pr 463 --issues --advisor" "standalone parse-review-args.sh"
 
 # --- 2. Hermetic test of bin/bluefin review (KVM OCI launcher) ----------------
 
@@ -204,9 +213,12 @@ for arg in "\$@"; do
   fi
   previous="\$arg"
 done
+if [[ "\${EXPECT_APPTAINER_PERSONAL_POLICY:-}" == 1 ]]; then
+  [[ "\${APPTAINERENV_BLUEFIN_REVIEW_MODE:-}" == review ]] || exit 19
+fi
 if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION; do
     source_name="APPTAINERENV_\${name}"
     [[ -v "\$source_name" ]] && injected+=("\$name=\${!source_name}")
   done
@@ -223,6 +235,9 @@ if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
        "\$ANTHROPIC_OAUTH_TOKEN" == test-anthropic-oauth &&
        "\$OPENAI_API_KEY" == test-provider-token &&
        "\$GEMINI_API_KEY" == test-gemini-key ]]
+    [[ -z "\$AWS_BEARER_TOKEN_BEDROCK" || "\$AWS_BEARER_TOKEN_BEDROCK" == test-bedrock-token ]] || exit 19
+    [[ -z "\$AWS_REGION" || "\$AWS_REGION" == us-west-2 ]] || exit 19
+    [[ -z "\$AWS_DEFAULT_REGION" || "\$AWS_DEFAULT_REGION" == us-west-2 ]] || exit 19
   ' || exit 19
 fi
 if [[ "\${EXPECT_APPTAINER_AWS_FORWARDING:-}" == 1 ]]; then
@@ -264,6 +279,7 @@ unset BLUEFIN_REVIEW_SIF
 assert_bluefin_review() {
   local input="$1"
   local expected_flags="$2"
+  [[ "$expected_flags" == *--advisor* ]] || expected_flags="$expected_flags --advisor"
   : >"$mock_podman_log"
 
   # shellcheck disable=SC2086
@@ -333,15 +349,19 @@ set -e
 # An installed personal bundle points krun at its immutable OCI image.
 : >"$mock_podman_log"
 BLUEFIN_REVIEW_IMAGE="ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890" \
+  BLUEFIN_REVIEW_MODE=review \
   "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
   fail "personal OCI review launch failed"
 oci_call="$(grep '^run ' "$mock_podman_log")"
 [[ "$oci_call" == *"ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890"* ]] ||
   fail "personal OCI review launch used the wrong image"
+assert_personal_policy_env_names "$oci_call" "Podman review personal policy"
 
 mv "$scratch/bin/krun" "$scratch/krun"
+export PATH="$scratch/bin:/usr/bin:/bin"
 : >"$mock_apptainer_log"
-fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 \
+fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 EXPECT_APPTAINER_PERSONAL_POLICY=1 \
+  BLUEFIN_REVIEW_MODE=review \
   COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token \
   COPILOT_INTEGRATION_ID=test-copilot-integration ANTHROPIC_API_KEY=test-anthropic-key \
   ANTHROPIC_OAUTH_TOKEN=test-anthropic-oauth OPENAI_API_KEY=test-provider-token \
@@ -357,6 +377,35 @@ fallback_call="$(cat "$mock_apptainer_log")"
   "$fallback_call" != *test-anthropic-key* && "$fallback_call" != *test-anthropic-oauth* &&
   "$fallback_call" != *test-provider-token* && "$fallback_call" != *test-gemini-key* ]] ||
   fail "fallback leaked credentials into argv"
+mv "$scratch/krun" "$scratch/bin/krun"
+: >"$mock_podman_log"
+
+# --- Bedrock bearer-token forwarding (regression coverage for #593) ---------
+# The Amazon Bedrock provider credential must reach both Review appliance
+# execution paths through the environment only, never in argv or launcher output.
+BEDROCK_TOKEN="test-bedrock-token"
+BEDROCK_REGION="us-west-2"
+
+# Podman/krun path: the named --env entries forward each Bedrock variable.
+: >"$mock_podman_log"
+bedrock_podman_output="$(AWS_BEARER_TOKEN_BEDROCK="$BEDROCK_TOKEN" AWS_REGION="$BEDROCK_REGION" AWS_DEFAULT_REGION="$BEDROCK_REGION" OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "review did not launch under KVM with Bedrock credentials set"
+bedrock_podman_call="$(grep '^run ' "$mock_podman_log")"
+for bedrock_var in AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION; do
+  [[ "$bedrock_podman_call" == *"--env $bedrock_var"* ]] || fail "review Podman/krun did not forward $bedrock_var: $bedrock_podman_call"
+done
+[[ "$bedrock_podman_call" != *"$BEDROCK_TOKEN"* ]] || fail "Bedrock bearer token reached argv in the Podman path"
+[[ "$bedrock_podman_output" != *"$BEDROCK_TOKEN"* ]] || fail "Bedrock bearer token leaked into launcher output (Podman path)"
+
+# Apptainer fallback path: APPTAINERENV_ prefixed variables reach the process.
+mv "$scratch/bin/krun" "$scratch/krun"
+: >"$mock_apptainer_log"
+bedrock_apptainer_output="$(AWS_BEARER_TOKEN_BEDROCK="$BEDROCK_TOKEN" AWS_REGION="$BEDROCK_REGION" AWS_DEFAULT_REGION="$BEDROCK_REGION" OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" EXPECT_APPTAINER_CREDENTIALS=1 "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "review Apptainer fallback lost Bedrock credentials"
+bedrock_apptainer_call="$(cat "$mock_apptainer_log")"
+[[ "$bedrock_apptainer_output" == *"using the isolated Apptainer fallback"* ]] || fail "review fallback warning is missing (Bedrock)"
+[[ "$bedrock_apptainer_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment (Bedrock)"
+[[ "$bedrock_apptainer_output" != *"$BEDROCK_TOKEN"* ]] || fail "Bedrock bearer token leaked into launcher output (Apptainer path)"
 mv "$scratch/krun" "$scratch/bin/krun"
 : >"$mock_podman_log"
 : >"$mock_apptainer_log"
@@ -486,6 +535,7 @@ chmod +x "$scratch/bin/omp"
 assert_omp_review() {
   local input="$1"
   local expected_flags="$2"
+  [[ "$expected_flags" == *--advisor* ]] || expected_flags="$expected_flags --advisor"
   rm -f "$mock_omp_log"
 
   # shellcheck disable=SC2086

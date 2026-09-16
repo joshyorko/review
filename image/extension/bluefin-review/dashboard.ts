@@ -12,17 +12,18 @@
  */
 
 import { GLYPH, SPINNER_TICK_MS, type Painter, formatDuration, statusIcon, statusRole } from "./glyphs.ts";
-import type { QueueItem, QueueMode } from "./github.ts";
+import type { IssueDetail, QueueItem, QueueMode } from "./github.ts";
 import { type KeyMatcher, canonicalKey, rawKeyMatcher } from "./keys.ts";
 import { BATCH_LIMIT, type ReviewMode, ciGlyph } from "./mode.ts";
 import { type RailKey, keymapBar, orderSourceLabel, priorityChip, workbenchProgressBar } from "./rail.ts";
 import { type RenderedRow, type Span, defaultExpanded, findSpan, hasChildren, renderSpanTree, visibleSpanIds } from "./trace.ts";
 import { fitToWidth, truncateToWidth, visibleWidth } from "./width.ts";
-import { PrDetailCache, prDetailToLines, sanitizeMarkdown, type PrDetail } from "./reader.ts";
-import { fetchPrDetail } from "./github.ts";
+import { issueDetailToLines, PrDetailCache, prDetailToLines, sanitizeMarkdown, type PrDetail } from "./reader.ts";
+import { fetchIssueDetail, fetchPrDetail } from "./github.ts";
 export type DashboardAction =
 	| { kind: "close" }
 	| { kind: "slay"; item: QueueItem; items?: QueueItem[] }
+	| { kind: "autoslay" }
 	| { kind: "diff"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "comment"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "fix"; item: QueueItem; items?: QueueItem[] }
@@ -52,6 +53,7 @@ export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "d", label: "diff" },
 	{ chord: "v", label: "read" },
 	{ chord: "enter", label: "cite" },
+	{ chord: "i", label: "cite" },
 	{ chord: "o", label: "repo" },
 	{ chord: "/", label: "filter" },
 	{ chord: "q", label: "close" },
@@ -66,18 +68,18 @@ const HELP: readonly string[] = [
 	"  tab              toggle pull requests and issues",
 	"  t                switch between queue and trace panes",
 	"  p                pause or resume future repository waves",
-	"  v                read the highlighted pull request",
+	"  v                read the highlighted pull request or issue",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
 	"  H / L            toggle Hive-only / step Hive stages",
 	"  o / r            change repository / refetch",
 	"  /                filter by title, repo, author, label, or number",
-	"  s                review, repair, and land selected pull requests",
-	"  alt+s            autoslay the visible queue through review, repair, and landing",
+	"  s                slay selected PRs or implement selected issues",
+	"  alt+s            repair returned PRs, then implement issue waves",
 	"  c                comment on selected item(s)",
 	"  f                fix selected item(s) in isolated workspaces",
 	"  d                inspect bounded diff evidence",
-	"  enter            cite the selection in the prompt",
+	"  enter / i        cite the selection in the prompt",
 	"  ?                close this help",
 	"  q, esc           close the workbench",
 	"",
@@ -170,10 +172,12 @@ export class ReviewDashboard {
 	private showReader = false;
 	private readerScroll = 0;
 	private readerDetail: PrDetail | undefined;
+	private issueReaderDetail: IssueDetail | undefined;
 	private readerLoading = false;
 	private readerError = "";
 	private readerRequestGeneration = 0;
 	private prDetailCache = new PrDetailCache(50);
+	private issueDetailCache = new Map<string, IssueDetail>();
 
 	private readonly tui: TuiLike;
 	private readonly painter: Painter;
@@ -396,7 +400,7 @@ export class ReviewDashboard {
 			return;
 		}
 		if (col > 36 && col < width - 20) {
-			if (this.mode.isPersonalMode()) return;
+			if (this.mode.isReviewMode()) return;
 			if (this.mode.hiveLevel !== undefined) {
 				this.mode.cycleHiveLevel();
 			} else {
@@ -630,6 +634,9 @@ export class ReviewDashboard {
 			case "enter":
 				this.executeKey("enter");
 				break;
+			case "i":
+				this.executeKey("i");
+				break;
 			case "o":
 				this.executeKey("o");
 				break;
@@ -646,7 +653,7 @@ export class ReviewDashboard {
 
 	private handleStatusBarClick(col: number, _width: number): void {
 		if (col < 30) {
-			if (this.mode.isPersonalMode()) return;
+			if (this.mode.isReviewMode()) return;
 			this.mode.toggleHiveOnly();
 			this.tui.requestRender();
 			return;
@@ -670,6 +677,7 @@ export class ReviewDashboard {
 			if (key === "escape" || key === "q") {
 				this.showReader = false;
 				this.readerDetail = undefined;
+				this.issueReaderDetail = undefined;
 				this.tui.requestRender();
 				return;
 			}
@@ -707,7 +715,8 @@ export class ReviewDashboard {
 			}
 			if (key === "u") {
 				const item = this.mode.selected();
-				if (item) this.prDetailCache.clear();
+				if (item?.type === "pr") this.prDetailCache.clear();
+				if (item?.type === "issue") this.issueDetailCache.clear();
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
 				return;
@@ -752,13 +761,13 @@ export class ReviewDashboard {
 				return;
 			case "alt+s":
 			case "\u001bs": {
-				const items = this.mode.slayableItems(BATCH_LIMIT);
-				if (items.length === 0) return;
-				this.emitAction({
-					kind: this.mode.queueMode === "issues" ? "fix" : "slay",
-					item: items[0]!,
-					items: items.length > 0 ? items : undefined,
-				});
+				if (this.mode.isReviewMode() && this.mode.queueMode === "issues") {
+					const items = this.mode.slayableItems(BATCH_LIMIT);
+					if (items.length === 0) return;
+					this.emitAction({ kind: "fix", item: items[0]!, items });
+				} else {
+					this.emitAction({ kind: "autoslay" });
+				}
 				return;
 			}
 			case "/":
@@ -805,12 +814,12 @@ export class ReviewDashboard {
 				this.tui.requestRender();
 				return;
 			case "H":
-				if (this.mode.isPersonalMode()) return;
+				if (this.mode.isReviewMode()) return;
 				this.mode.toggleHiveOnly();
 				this.tui.requestRender();
 				return;
 			case "L":
-				if (this.mode.isPersonalMode()) return;
+				if (this.mode.isReviewMode()) return;
 				this.mode.cycleHiveLevel();
 				this.tui.requestRender();
 				return;
@@ -844,13 +853,15 @@ export class ReviewDashboard {
 				return;
 			case "return":
 			case "enter":
-				this.emitAction({ kind: "reference", item, items });
+				this.done({ kind: "reference", item, items });
 				return;
 			case "v":
-				if (item.type !== "pr") return;
 				this.showReader = true;
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
+				return;
+			case "i":
+				this.done({ kind: "reference", item, items });
 				return;
 			case "C":
 				this.mode.toggleViewMode();
@@ -873,14 +884,15 @@ export class ReviewDashboard {
 	}
 
 	private readerCacheKey(item: QueueItem): string {
-		return `${item.repo}#${item.id}@${item.headSha ?? ""}`;
+		return item.type === "pr" ? `${item.repo}#${item.id}@${item.headSha ?? ""}` : `${item.repo}#${item.id}`;
 	}
 
-	/** Load the selected item's reading surface through the PR-detail cache. */
+	/** Load the selected item's native GitHub reading surface. */
 	private loadSelectedReaderDetail(): void {
 		const item = this.mode.selected();
 		if (!item) {
 			this.readerDetail = undefined;
+			this.issueReaderDetail = undefined;
 			this.readerError = "";
 			this.readerLoading = false;
 			this.tui.requestRender();
@@ -889,6 +901,7 @@ export class ReviewDashboard {
 		this.readerRequestGeneration += 1;
 		const generation = this.readerRequestGeneration;
 		this.readerDetail = undefined;
+		this.issueReaderDetail = undefined;
 		this.readerError = "";
 		this.readerLoading = true;
 		this.tui.requestRender();
@@ -897,6 +910,34 @@ export class ReviewDashboard {
 
 	private async fetchReaderDetail(item: QueueItem, generation: number): Promise<void> {
 		const key = this.readerCacheKey(item);
+		if (item.type === "issue") {
+			const cached = this.issueDetailCache.get(key);
+			if (cached !== undefined) {
+				if (generation === this.readerRequestGeneration) {
+					this.issueReaderDetail = cached;
+					this.readerLoading = false;
+					this.tui.requestRender();
+				}
+				return;
+			}
+			const result = await fetchIssueDetail(item.repo, item.id, this.mode.tokenOptions());
+			if (generation !== this.readerRequestGeneration) return;
+			if (result.detail) {
+				if (this.issueDetailCache.size >= 50) {
+					const oldest = this.issueDetailCache.keys().next().value;
+					if (oldest !== undefined) this.issueDetailCache.delete(oldest);
+				}
+				this.issueDetailCache.set(key, result.detail);
+				this.issueReaderDetail = result.detail;
+				this.readerError = "";
+			} else {
+				this.issueReaderDetail = undefined;
+				this.readerError = result.error ?? "could not read issue";
+			}
+			this.readerLoading = false;
+			this.tui.requestRender();
+			return;
+		}
 		const cached = this.prDetailCache.get(key);
 		if (cached !== undefined) {
 			if (generation === this.readerRequestGeneration) {
@@ -997,7 +1038,7 @@ export class ReviewDashboard {
 	private headerRow(width: number, now: number): string {
 		const tally = this.mode.ciTally();
 		const parts = [
-			this.painter.bold(this.painter.fg("accent", `${GLYPH.hex} ${this.mode.isPersonalMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH"}`)),
+			this.painter.bold(this.painter.fg("accent", `${GLYPH.hex} ${this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH"}`)),
 			this.painter.fg("dim", GLYPH.logDashed.trim()),
 			this.painter.bold(
 				this.painter.fg(
@@ -1110,15 +1151,27 @@ export class ReviewDashboard {
 		if (!item) return [];
 		const work = this.mode.hiveWorkFor(item);
 		const priority = this.mode.priorityFor(item);
-		if (!work && priority?.hiveRank === undefined) return [];
+		if (!work && priority?.hiveRank === undefined && priority?.category !== "blocked") return [];
 
 		const rows: string[] = [];
+		if (priority?.category === "blocked") {
+			rows.push(truncateToWidth(`  ${this.painter.fg("error", "BLOCKED")}${this.painter.fg("dim", ` ${GLYPH.dot} ${priority.reason}`)}`, width));
+			if (item.workflowFiles && item.workflowFiles.length > 0) {
+				for (const file of item.workflowFiles) {
+					rows.push(truncateToWidth(this.painter.fg("dim", `  changes ${file}`), width));
+				}
+			} else if (item.changedFilesComplete === false) {
+				rows.push(truncateToWidth(this.painter.fg("dim", "  complete changed-file list unavailable"), width));
+			}
+		}
 		const rank = priority?.hiveRank === undefined ? "" : `hive #${priority.hiveRank + 1}`;
 		const stage = work?.level ? ` ${GLYPH.dot} stage ${work.level}` : "";
-		rows.push(truncateToWidth(`  ${this.painter.fg("accent", rank)}${this.painter.fg("dim", stage)}`, width));
+		if (rank) {
+			rows.push(truncateToWidth(`  ${this.painter.fg("accent", rank)}${this.painter.fg("dim", stage)}`, width));
+		}
 		// The reason only earns a row when it says something the rank and stage
 		// above it do not: `hive <level> #<n>` is the same sentence twice.
-		if (priority?.reason && priority.hiveRank === undefined) {
+		if (priority?.reason && priority.hiveRank === undefined && priority.category !== "blocked") {
 			rows.push(truncateToWidth(this.painter.fg("dim", `  ${priority.reason}`), width));
 		}
 		const claimedBy = this.mode.claimFor(item);
@@ -1229,7 +1282,7 @@ export class ReviewDashboard {
 
 	private dashboardKeys(): RailKey[] {
 		return DASHBOARD_KEYS
-			.filter((key) => !this.mode.isPersonalMode() || (key.chord !== "H" && key.chord !== "L"))
+			.filter((key) => !this.mode.isReviewMode() || (key.chord !== "H" && key.chord !== "L"))
 			.map((key) => {
 				if (this.mode.queueMode !== "issues") return key;
 				if (key.chord === "s") return { ...key, label: "implement" };
@@ -1241,9 +1294,9 @@ export class ReviewDashboard {
 
 	private helpLines(): string[] {
 		const lines = HELP
-			.filter((line) => !this.mode.isPersonalMode() || (!line.startsWith("  H / L") && !line.startsWith("Hive supplies")))
+			.filter((line) => !this.mode.isReviewMode() || (!line.startsWith("  H / L") && !/hive/i.test(line)))
 			.map((line) => line);
-		lines[0] = this.mode.isPersonalMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH";
+		lines[0] = this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH";
 		if (this.mode.queueMode === "issues") {
 			const replace = new Map([
 				["  s                review, repair, and land selected pull requests", "  s                implement selected issues and open review-ready PRs"],
@@ -1252,8 +1305,8 @@ export class ReviewDashboard {
 			]);
 			for (let index = 0; index < lines.length; index++) lines[index] = replace.get(lines[index]!) ?? lines[index]!;
 		}
-		if (this.mode.isPersonalMode()) {
-			lines.push("GitHub supplies repository evidence. Hive adds ordering and claims when configured.");
+		if (this.mode.isReviewMode()) {
+			lines.push("GitHub supplies repository evidence and queue state.");
 		}
 		return lines;
 	}
@@ -1264,7 +1317,7 @@ export class ReviewDashboard {
 		const lines: string[] = [this.headerRow(width, now), this.painter.fg("border", "─".repeat(width))];
 
 		if (this.showHelp) {
-			lines.push(this.painter.bold(this.painter.fg("accent", this.mode.isPersonalMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH")));
+			lines.push(this.painter.bold(this.painter.fg("accent", this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH")));
 			lines.push("");
 			for (const line of this.helpLines()) lines.push(truncateToWidth(this.painter.fg(line.startsWith("  ") ? "dim" : "text", line), width));
 			lines.push(keymapBar(this.painter, [{ chord: "?", label: "back" }], width));
@@ -1274,14 +1327,18 @@ export class ReviewDashboard {
 		const item = this.mode.selected();
 
 		if (this.showReader && item) {
-			lines.push(this.painter.bold(this.painter.fg("accent", `PR READER: ${item.repo}#${item.id} — ${sanitizeMarkdown(item.title)}`)));
-			lines.push(this.painter.fg("dim", `Author: @${sanitizeMarkdown(item.author)} · Head: ${item.headSha ? item.headSha.slice(0, 7) : "unknown"} · URL: ${item.url}`));
+			lines.push(this.painter.bold(this.painter.fg("accent", `${item.type === "pr" ? "PR" : "ISSUE"} READER: ${item.repo}#${item.id} — ${sanitizeMarkdown(item.title)}`)));
+			lines.push(this.painter.fg("dim", item.type === "pr"
+				? `Author: @${sanitizeMarkdown(item.author)} · Head: ${item.headSha ? item.headSha.slice(0, 7) : "unknown"} · URL: ${item.url}`
+				: `Author: @${sanitizeMarkdown(item.author)} · Labels: ${item.labels.map(sanitizeMarkdown).join(", ") || "none"} · URL: ${item.url}`));
 			lines.push(this.painter.fg("border", "─".repeat(width)));
-			lines.push(truncateToWidth(this.painter.fg("dim", `Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`), width));
-			const detailLines = prDetailToLines(this.readerDetail);
+			lines.push(truncateToWidth(this.painter.fg("dim", item.type === "pr"
+				? `Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`
+				: `State: ${this.issueReaderDetail?.state ?? "unknown"}`), width));
+			const detailLines = item.type === "pr" ? prDetailToLines(this.readerDetail) : issueDetailToLines(this.issueReaderDetail);
 			let linesToShow = detailLines;
 			if (this.readerError) {
-				linesToShow = [`(could not read PR: ${this.readerError})`];
+				linesToShow = [`(could not read ${item.type === "pr" ? "PR" : "issue"}: ${this.readerError})`];
 			} else if (this.readerLoading) {
 				linesToShow = ["(loading description and conversation…)"];
 			}
