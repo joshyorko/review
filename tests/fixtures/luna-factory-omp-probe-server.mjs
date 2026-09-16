@@ -487,6 +487,12 @@ function responseFor(body) {
 				: "const result = await tool.task({ agent: 'task', task: 'Unbound work must be rejected.' }); display({ route: 'eval-tool-task-reject', result });",
 		});
 	}
+	if (previous === "luna_factory_attempt" && route === "async-abort-reconcile" && toolCallCount(body, "luna_factory_attempt") === 2) {
+		return functionCall("luna_factory_dispatch", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a2" }) });
+	}
+	if (previous === "luna_factory_dispatch" && route === "async-abort-reconcile" && toolCallCount(body, "luna_factory_dispatch") === 2) {
+		return functionCall("luna_factory_completion", { input: JSON.stringify({}) });
+	}
 	if (previous === "luna_factory_candidate") {
 		return functionCall("luna_factory_attempt", {
 			input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }),
@@ -530,6 +536,12 @@ function responseFor(body) {
 				task: "Run the async abort lifecycle probe. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1",
 			});
 		}
+		if (route === "async-abort-reconcile") {
+			return functionCall("task", {
+				agent: "task",
+				task: "Run the async abort and reconciliation lifecycle probe. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1",
+			});
+		}
 		return functionCall("task", {
 			agent: "task",
 			task: "Read the repository and report the native probe result. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1",
@@ -538,10 +550,34 @@ function responseFor(body) {
 	if (previous === "task" && route === "async-abort") {
 		return functionCall("luna_factory_control", { input: JSON.stringify({ action: "abort" }) });
 	}
+	if (previous === "task" && route === "async-abort-reconcile") {
+		return functionCall("luna_factory_control", { input: JSON.stringify({ action: "abort" }) });
+	}
+	if (previous === "luna_factory_control" && route === "async-abort-reconcile" && toolCallCount(body, "luna_factory_control") === 1) {
+		return functionCall("eval", {
+			language: "js",
+			code: "const jobs = await tool.hub({ op: 'jobs' }); const ids = Array.isArray(jobs?.details?.jobs) ? jobs.details.jobs.map((job) => job.id).filter((id) => typeof id === 'string') : []; const cancel = ids.length > 0 ? await tool.hub({ op: 'cancel', ids }) : { skipped: true, reason: 'no visible owned jobs' }; display({ route: 'async-abort-reconcile', ids, cancel });",
+		});
+	}
+	if (previous === "eval" && route === "async-abort-reconcile") {
+		return functionCall("luna_factory_reconcile", {
+			input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1", outcome: "abandoned", reason: "the packaged OMP hub cancellation probe returned; no receipt was fabricated" }),
+		});
+	}
+	if (previous === "luna_factory_reconcile" && route === "async-abort-reconcile") {
+		return functionCall("luna_factory_control", { input: JSON.stringify({ action: "resume" }) });
+	}
+	if (previous === "luna_factory_control" && route === "async-abort-reconcile" && toolCallCount(body, "luna_factory_control") === 2) {
+		return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a2" }) });
+	}
 	if (previous === "task" && route === "async-pause-drain") {
 		return functionCall("luna_factory_control", { input: JSON.stringify({ action: "pause" }) });
 	}
-	return textCompletion(`${route} route completed; worker result remains VERIFY until evidence is independently reconciled`);
+	return textCompletion(
+		route === "async-abort-reconcile"
+			? "async abort/reconcile route cancelled the observed OMP job, reconciled the attempt as abandoned, resumed the Factory run, and fabricated no receipt"
+			: `${route} route completed; worker result remains VERIFY until evidence is independently reconciled`,
+	);
 }
 
 const server = createServer(async (request, response) => {

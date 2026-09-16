@@ -105,7 +105,10 @@ explicit owner evidence reopened the proven task, and only the new repair was
 admitted. A separate async pause/drain route observed a native child job,
 paused admission, deferred a newly discovered candidate, and entered drain;
 it made no cancellation or rollback claim while the native job remained an OMP
-lifecycle concern.
+lifecycle concern. An observation-only async abort/reconcile route then used
+OMP `hub` job cancellation, reconciled the attempt as abandoned, resumed the
+Factory run, and opened a new retry lineage; cancellation remains unsupported
+as a Factory-enforced seam and no receipt was fabricated for the retried work.
 
 The reproducible fixture is
 `tests/fixtures/luna-factory-omp-probe-server.mjs`, with the install and probe
