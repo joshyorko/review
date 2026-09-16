@@ -89,6 +89,12 @@ rather than inferred.
 - Apptainer's contained environment receives only the explicit credential and
   runtime allowlist through `APPTAINERENV_` variables. Keep `--no-eval` so
   credential and argument values remain literal inside the container.
+- The forwarded provider-credential allowlist names GitHub, Copilot, Anthropic,
+  OpenAI, Gemini, Hive, and terminal variables, plus the Amazon Bedrock
+  credentials `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, and `AWS_DEFAULT_REGION`.
+  Only those reach the contained process; the rest of the AWS environment stays
+  on the host. The value travels through the environment only, never in argv,
+  launcher output, test logs, image layers, or committed files.
 - The contributor worker receives exactly one selected Hive registration.
 - The checkout contributor recipe stages remote Podman registrations privately
   and deletes only its validated staging directory. The packaged `bluefin`
