@@ -91,6 +91,7 @@ export class ReviewMode {
 	fetchedAt = 0;
 	loading = false;
 	selectedKeys = new Set<string>();
+	private selectedSnapshots = new Map<string, QueueItem>();
 	currentUserLogin?: string;
 	viewMode: "default" | "ci" = "default";
 	isBlueberry = false;
@@ -361,7 +362,6 @@ export class ReviewMode {
 		this.queueMode = this.queueMode === "prs" ? "issues" : "prs";
 		this.items = [];
 		this.cursor = 0;
-		this.selectedKeys.clear();
 		return this.queueMode;
 	}
 	toggleViewMode(): "default" | "ci" {
@@ -378,27 +378,32 @@ export class ReviewMode {
 		if (!targetKey) return false;
 		if (this.selectedKeys.has(targetKey)) {
 			this.selectedKeys.delete(targetKey);
+			this.selectedSnapshots.delete(targetKey);
 			return false;
 		}
 		this.selectedKeys.add(targetKey);
+		const item = this.items.find((candidate) => itemKey(candidate) === targetKey);
+		if (item) this.selectedSnapshots.set(targetKey, structuredClone(item));
 		return true;
 	}
 
-	/**
-	 * Take everything currently on screen, or drop it.
-	 *
-	 * Burning a backlog down means dispatching a slice at a time, and a slice is
-	 * whatever the filters have narrowed the queue to. Selecting it one row at a
-	 * time is the reason nobody does it. Returns the resulting selection size.
-	 */
+	/** Toggle the visible selection independently of Factory execution capacity. */
 	selectAllVisible(limit = BATCH_LIMIT): number {
 		const visible = this.visibleItems();
 		const everySelected = visible.length > 0 && visible.every((item) => this.selectedKeys.has(itemKey(item)));
 		if (everySelected) {
-			this.selectedKeys.clear();
-			return 0;
+			for (const item of visible) {
+				const key = itemKey(item);
+				this.selectedKeys.delete(key);
+				this.selectedSnapshots.delete(key);
+			}
+			return this.selectedKeys.size;
 		}
-		for (const item of visible.slice(0, limit)) this.selectedKeys.add(itemKey(item));
+		for (const item of visible.slice(0, limit)) {
+			const key = itemKey(item);
+			this.selectedKeys.add(key);
+			this.selectedSnapshots.set(key, structuredClone(item));
+		}
 		return this.selectedKeys.size;
 	}
 	/**

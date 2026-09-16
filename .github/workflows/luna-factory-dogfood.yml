@@ -1,0 +1,32 @@
+name: luna-factory-dogfood
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  dogfood:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Runtime capability report
+        run: tests/appliance-runtime-probe.sh "$RUNNER_TEMP/capabilities"
+      - name: Build exact-head OCI image
+        run: |
+          podman build --format oci -f image/appliance/Containerfile -t review:luna-factory-dogfood .
+          tests/appliance-contract.sh --image review:luna-factory-dogfood
+      - name: Run no-publish OCI dogfood
+        run: tests/luna-factory-dogfood.sh oci
+      - name: Build and run no-publish SIF
+        run: |
+          scripts/brew-dev build
+          BLUEFIN_REVIEW_FALLBACK_SIF="$PWD/.bluefin/review/launcher/bluefin-review.sif" tests/luna-factory-dogfood.sh sif
+      - name: Upload bounded evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/luna-factory-dogfood
+          if-no-files-found: ignore

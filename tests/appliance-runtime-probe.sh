@@ -67,57 +67,6 @@ probe squashfs-tools.mksquashfs 'mksquashfs -version'
 probe squashfs-tools.unsquashfs 'unsquashfs -version'
 probe fuse2fs.version 'fuse2fs -V'
 
-python3 - "$output" "${GITHUB_SHA:-}" <<'PY'
-import json
-import os
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-root = Path(sys.argv[1])
-probes = []
-for line in (root / "probes.tsv").read_text().splitlines():
-    name, status, command, stdout_name, stderr_name = line.split("\t", 4)
-    probes.append(
-        {
-            "name": name,
-            "exitCode": int(status),
-            "ok": int(status) == 0,
-            "command": command,
-            "stdout": (root / stdout_name).read_text(errors="replace"),
-            "stderr": (root / stderr_name).read_text(errors="replace"),
-        }
-    )
-
-safe_environment = {}
-for key in (
-    "RUNNER_OS",
-    "RUNNER_ARCH",
-    "ImageOS",
-    "ImageVersion",
-    "GITHUB_RUNNER_OS",
-    "GITHUB_RUNNER_ARCH",
-    "GITHUB_ACTIONS",
-    "CI",
-):
-    if key in os.environ:
-        safe_environment[key] = os.environ[key]
-
-manifest = {
-    "schema": 1,
-    "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
-    "commitSha": sys.argv[2],
-    "safeRunnerEnvironment": safe_environment,
-    "probes": probes,
-}
-(root / "capabilities.json").write_text(json.dumps(manifest, indent=2) + "\n")
-
-with (root / "capabilities.txt").open("w") as stream:
-    stream.write("Luna Factory packaged-runtime runner capability probe\n")
-    stream.write(f"commit: {sys.argv[2] or 'unknown'}\n")
-    for probe in probes:
-        state = "ok" if probe["ok"] else f"failed({probe['exitCode']})"
-        stream.write(f"{state:>12}  {probe['name']}: {probe['command']}\n")
-PY
+"${BUN:-bun}" "$(dirname "$0")/appliance-runtime-report.ts" "$output" "${GITHUB_SHA:-}"
 
 echo "Recorded runner capability probe in $output"

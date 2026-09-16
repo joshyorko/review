@@ -100,6 +100,8 @@ jobs:
           bash tests/appliance-contract.sh
           bash tests/contribute-contract.sh
           bash tests/version-derivation.sh
+      - name: Luna Factory dogfood contract
+        run: bun test tests/luna_factory_dogfood_contract.test.ts
 
 
       - name: Interactive launcher docs and shell stay aligned

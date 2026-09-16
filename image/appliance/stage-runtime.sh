@@ -47,6 +47,9 @@ binaries=(
 if [[ -n "$python3_real" && -x "$python3_real" ]]; then
   binaries+=("$python3_real")
 fi
+if [[ -x /usr/bin/bwrap ]]; then
+  binaries+=(/usr/bin/bwrap)
+fi
 
 # Callers may name additional absolute executables after the destination. Their
 # ELF closures are staged by the same ldd path as the appliance's fixed base.

@@ -121,7 +121,8 @@ RUN /usr/local/libexec/stage-runtime /out \
     /usr/sbin/yq \
     /usr/sbin/jq \
     /usr/sbin/just \
-    /usr/sbin/openssl
+    /usr/sbin/openssl \
+    /usr/bin/bwrap
 COPY --from=audio /audio-out/ /out/
 
 COPY image/appliance/headroom-requirements.txt /tmp/headroom-requirements.txt
