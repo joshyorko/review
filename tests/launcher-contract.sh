@@ -358,6 +358,7 @@ oci_call="$(grep '^run ' "$mock_podman_log")"
 assert_personal_policy_env_names "$oci_call" "Podman review personal policy"
 
 mv "$scratch/bin/krun" "$scratch/krun"
+export PATH="$scratch/bin:/usr/bin:/bin"
 : >"$mock_apptainer_log"
 fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 EXPECT_APPTAINER_PERSONAL_POLICY=1 \
   BLUEFIN_REVIEW_MODE=review \
