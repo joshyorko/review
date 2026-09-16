@@ -210,8 +210,8 @@
         "workflowz"
       ],
       "description": "Maintains the OMP review workbench. Use for queue ordering, slay or autoslay, workflowz issue batches, durable batch state, dashboard controls, or mutation guards.",
-      "version": "5.3",
-      "last_updated": "2026-09-15",
+      "version": "5.4",
+      "last_updated": "2026-09-16",
       "doc_type": "runbook"
     },
     {

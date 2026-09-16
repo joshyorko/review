@@ -51,6 +51,7 @@ bash tests/just-onboarding.sh
 bash tests/readme-quickstart.sh
 bash tests/test-registry.sh
 node --test tests/update-omp-pins.test.mjs
+node --test tests/update-derived-pins.test.mjs
 bash tests/omp-review-mode.sh
 bash tests/appliance-contract.sh
 bash tests/contribute-contract.sh

@@ -57,11 +57,14 @@ For repository development, `.omp/config.yml` pins subagent models and effort
 and defines model-role mappings. It leaves the interactive model to the user
 and is not copied into either runtime image.
 
-## Follow upstream OMP releases
+## Follow upstream releases and derived checksums
 
-The daily Renovate workflow tracks stable `can1357/oh-my-pi` GitHub releases.
-Its allowlisted `scripts/update-omp-pins.mjs` task synchronizes the version and
-both architecture digests across the review and contributor Containerfiles.
+The daily Renovate workflow tracks stable upstream releases (OMP, GitHub CLI,
+Node.js, and tmux) along with PyPI dependencies in `requirements-ci.lock`.
+Allowlisted tasks (`scripts/update-omp-pins.mjs`, `scripts/update-gh-pins.mjs`,
+`scripts/update-node-pins.mjs`, `scripts/update-tmux-pins.mjs`, and
+`scripts/update-requirements-ci-hashes.mjs`) synchronize version pins and verified
+per-architecture digests across Containerfiles and lockfile hashes.
 After checks and OMP-specific automerge, the `main` push triggers both image
 publish workflows. Never update only one image or a version without its release
 asset digests.

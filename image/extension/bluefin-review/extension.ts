@@ -8,7 +8,7 @@
 import { execFileSync } from "node:child_process";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, fetchDiff, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
+import { DEFAULT_ORG, exactHeadVerified, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { workbenchPainter } from "./paint.ts";
@@ -16,6 +16,7 @@ import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
 import { type ToolHost, registerTools } from "./tools.ts";
 import { hiveFailureStatus } from "./hive.ts";
+import { landingState, landingReason } from "./landing.ts";
 import { BLUEBERRY_WELCOME_MESSAGE, assertBlueberryActionAllowed, checkBlueberryPermission } from "./blueberry.ts";
 import { GENERIC_WORKBENCH_POLICY, isProjectBluefinRepository, managedPolicyFor, type WorkbenchPolicy } from "./policy.ts";
 import {
@@ -96,20 +97,26 @@ function slayBashBlockReason(command: string): string | undefined {
 	return undefined;
 }
 
-function slayCiBlockReason(command: string, items: readonly QueueItem[]): string | undefined {
+function slayLandingBlockReason(
+	command: string,
+	items: readonly QueueItem[],
+	policy?: WorkbenchPolicy,
+): string | undefined {
 	const mutatesLanding = command.split(/\r?\n|&&|\|\||;/).some((segment) =>
 		/\bgh\s+pr\s+merge\b/.test(segment)
 		|| (/\bgh\s+pr\s+review\b/.test(segment) && /(?:^|\s)--approve(?:[=\s]|$)/.test(segment)),
 	);
 	if (!mutatesLanding) return undefined;
-	const blocked = items.find(
-		(item) =>
-			item.type === "pr"
-			&& (item.ciStatus === undefined || item.ciStatus === "failure" || item.ciStatus === "pending" || item.ciEvidenceComplete === false),
-	);
-	if (!blocked) return undefined;
-	const state = blocked.ciEvidenceComplete === false ? "incomplete/unknown" : blocked.ciStatus ?? "unknown";
-	return `${blocked.repo}#${blocked.id} CI is ${state}; refresh and wait for successful checks before approval or merge`;
+	// Never approve or merge a pull request that is not genuinely ready to land:
+	// CI alone never implies ready. Every policy input blocks, so a queued hold or
+	// a requested-changes review stops the mutation just as a failing check does.
+	for (const item of items) {
+		if (item.type !== "pr") continue;
+		const state = landingState(item, policy);
+		if (state === "ready-to-land") continue;
+		return `${item.repo}#${item.id} ${landingReason(state)}; refresh and clear it before approval or merge`;
+	}
+	return undefined;
 }
 
 export const RAIL_KEYS: readonly RailKey[] = [
@@ -441,6 +448,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (kind === "slay" && !allPullRequests && !allIssues) return "Slay waves must not mix pull requests and issues";
 
 		if (kind === "slay" && allPullRequests) {
+			for (const item of items) {
+				const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+				if (!wasRepair) {
+					if ((item.workflowFiles?.length ?? 0) > 0) {
+						return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
+					}
+					if (item.changedFilesComplete === false) {
+						return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+					}
+				}
+			}
 			const live = await fetchItemsByKey(
 				items.map((item) => `${item.repo}#${item.id}`),
 				"prs",
@@ -450,7 +468,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const item of items) {
 				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
 				if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
-				if (!current.headSha || current.headSha !== item.headSha) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+				if (!exactHeadVerified(item.headSha, current.headSha)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
 				const wasRepair = isRepairRequested(item, mode.currentUserLogin);
 				if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
@@ -463,6 +481,22 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				}
 			}
 			return undefined;
+		}
+
+		if (kind === "fix") {
+			for (const item of items) {
+				if (item.type === "pr") {
+					const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+					if (!wasRepair) {
+						if ((item.workflowFiles?.length ?? 0) > 0) {
+							return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
+						}
+						if (item.changedFilesComplete === false) {
+							return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+						}
+					}
+				}
+			}
 		}
 
 		if (kind === "slay" && allIssues) {
@@ -524,7 +558,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const item of managedPullRequests) {
 				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
 				if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
-				if (!current.headSha || current.headSha !== capturedHeads.get(`${item.repo}#${item.id}`)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+				if (!exactHeadVerified(item.headSha, current.headSha)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
 				const denied = managedPolicyFor(item.repo, policy)?.deniedLabels.find((label) => current.labels.includes(label));
 				if (denied) return `Cannot dispatch ${item.repo}#${item.id}: pull request has ${denied} label`;
 			}
@@ -608,33 +642,28 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		await dispatchCurrentWave(ctx, undefined, true);
 	};
 
-	const filterUnsupportedSlayItems = async (ctx: CtxLike, items: readonly QueueItem[]): Promise<QueueItem[]> => {
-		const requestOptions = { token: mode.tokenOptions().token ?? resolveToken(env), fetchImpl: options.fetchImpl };
-		const inspected: Array<{ item: QueueItem; reason?: string; exclude?: boolean }> = await Promise.all(
-			items.map(async (item) => {
-				if (item.type !== "pr") return { item };
-				const diff = await fetchDiff(item.repo, item.id, { ...requestOptions, maxPatchFiles: 0, maxPatchChars: 0 });
-				if (diff.error) return { item, reason: diff.error };
-				const repair = isRepairRequested(item, mode.currentUserLogin);
-				const workflow = diff.files.find((file) => file.path.startsWith(".github/workflows/"));
-				if (workflow && !repair) {
-					return { item, reason: `changes ${workflow.path}`, exclude: env.BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS !== "1" };
-				}
-				if (!repair && (item.changedFiles === undefined || diff.files.length < item.changedFiles)) {
-					return { item, reason: "complete changed-file list unavailable" };
-				}
-				if (!repair && (item.ciStatus === "failure" || item.ciStatus === "pending")) {
-					return { item, reason: `CI is ${item.ciStatus}`, exclude: true };
-				}
-				return { item };
-			}),
-		);
-		for (const skipped of inspected) {
-			if (skipped.reason) {
-				ctx.ui.notify(`Skipping ${skipped.item.repo}#${skipped.item.id}: ${skipped.reason}`, "warning");
+	const filterUnsupportedSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
+		const eligible: QueueItem[] = [];
+		for (const item of items) {
+			if (item.type !== "pr") {
+				eligible.push(item);
+				continue;
 			}
+			if (isRepairRequested(item, mode.currentUserLogin)) {
+				eligible.push(item);
+				continue;
+			}
+			if ((item.workflowFiles?.length ?? 0) > 0) {
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`, "warning");
+				continue;
+			}
+			if (item.changedFilesComplete === false) {
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: complete changed-file list unavailable`, "warning");
+				continue;
+			}
+			eligible.push(item);
 		}
-		return inspected.filter((entry) => entry.reason === undefined).map((entry) => entry.item);
+		return eligible;
 	};
 
 	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
@@ -657,7 +686,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify("No queue items available to slay", "warning");
 			return;
 		}
-		const supported = await filterUnsupportedSlayItems(ctx, candidates);
+		const supported = filterUnsupportedSlayItems(ctx, candidates);
+		if (supported.length === 0) return;
 		const items = filterCompletedIssueSlayItems(ctx, supported);
 		if (items.length === 0) return;
 		await startRepositoryBatch(ctx, "slay", items);
@@ -823,10 +853,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		if (action.kind === "slay") {
 			activeCtx = ctx;
-			await startRepositoryBatch(ctx, "slay", capturedItems);
+			await startSlay(ctx, capturedItems);
 			return;
 		}
-		if (action.kind === "fix" || action.kind === "diff") {
+		if (action.kind === "fix") {
+			activeCtx = ctx;
+			const supported = filterUnsupportedSlayItems(ctx, capturedItems);
+			if (supported.length === 0) return;
+			await startRepositoryBatch(ctx, action.kind, supported);
+			return;
+		}
+		if (action.kind === "diff") {
 			activeCtx = ctx;
 			await startRepositoryBatch(ctx, action.kind, capturedItems);
 		}
@@ -1121,8 +1158,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const currentItems = (wave?.items ?? []).map((item) =>
 			visible.find((candidate) => candidate.repo === item.repo && candidate.id === item.id) ?? item,
 		);
-		const ciReason = slayCiBlockReason(command, currentItems);
-		if (ciReason) return { block: true, reason: `Hive workbench slay guard: ${ciReason}` };
+		const landingBlocker = slayLandingBlockReason(command, currentItems, policy);
+		if (landingBlocker) return { block: true, reason: `Hive workbench slay guard: ${landingBlocker}` };
 	});
 
 	pi.on("tool_execution_start", (event) => {

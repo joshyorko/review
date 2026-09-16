@@ -16,7 +16,6 @@ const ENV = {
 	GH_TOKEN: "t",
 	HOME: "/nonexistent",
 	XDG_CONFIG_HOME: "/nonexistent",
-	BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS: "1",
 	BLUEFIN_REVIEW_PERSONAL_MODE: "1",
 };
 

@@ -55,4 +55,4 @@ jobs:
           LOG_LEVEL: ${{ inputs.dry_run == true && 'debug' || 'info' }}
           RENOVATE_DRY_RUN: ${{ inputs.dry_run == true && 'full' || '' }}
           RENOVATE_REPOSITORIES: ${{ github.repository }}
-          RENOVATE_ALLOWED_COMMANDS: '["^node scripts/update-omp-pins\\.mjs$"]'
+          RENOVATE_ALLOWED_COMMANDS: '["^node scripts/update-omp-pins\\.mjs$", "^node scripts/update-gh-pins\\.mjs$", "^node scripts/update-node-pins\\.mjs$", "^node scripts/update-tmux-pins\\.mjs$", "^node scripts/update-requirements-ci-hashes\\.mjs$"]'

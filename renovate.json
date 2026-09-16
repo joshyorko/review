@@ -36,7 +36,46 @@
       "datasourceTemplate": "git-refs"
     },
     {
-      "description": "Track requirements-ci.lock package versions. CI validates its committed hashes but does not regenerate them; projectbluefin/review#598 tracks derived-hash automation before these updates can advance unattended.",
+      "description": "Track the shared GitHub CLI release version in both image Containerfiles; the post-upgrade task supplies verified per-architecture digests.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/(appliance|contribute)/Containerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=github-releases depName=cli/cli\\nARG GH_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "cli/cli",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "Track Node.js releases in the contributor image Containerfile; the post-upgrade task supplies verified per-architecture digests.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/contribute/Containerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=node-version depName=node\\nARG NODE_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "node",
+      "datasourceTemplate": "node-version",
+      "versioningTemplate": "node"
+    },
+    {
+      "description": "Track tmux static build releases in the contributor image Containerfile; the post-upgrade task supplies verified per-architecture digests.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/contribute/Containerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=github-releases depName=tmux/tmux-builds\\nARG TMUX_VERSION=(?<currentValue>[0-9]+\\.[0-9]+[a-z]?)"
+      ],
+      "depNameTemplate": "tmux/tmux-builds",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "loose"
+    },
+    {
+      "description": "Track requirements-ci.lock package versions; the post-upgrade task regenerates sha256 hashes from PyPI metadata.",
       "customType": "regex",
       "managerFilePatterns": [
         "/(^|/)requirements-ci\\.lock$/"
@@ -94,6 +133,82 @@
         "ghcr.io/projectbluefin/base"
       ],
       "pinDigests": true
+    },
+    {
+      "description": "Track GitHub CLI releases and refresh both verified binary digests.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "cli/cli"
+      ],
+      "groupName": "GitHub CLI runtime",
+      "rangeStrategy": "replace",
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-gh-pins.mjs"
+        ],
+        "fileFilters": [
+          "image/appliance/Containerfile",
+          "image/contribute/Containerfile"
+        ],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "description": "Track Node.js releases and refresh verified binary digests.",
+      "matchDatasources": [
+        "node-version"
+      ],
+      "matchPackageNames": [
+        "node"
+      ],
+      "groupName": "Node.js runtime",
+      "rangeStrategy": "replace",
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-node-pins.mjs"
+        ],
+        "fileFilters": [
+          "image/contribute/Containerfile"
+        ],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "description": "Track tmux static builds and refresh verified binary digests.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "tmux/tmux-builds"
+      ],
+      "groupName": "tmux runtime",
+      "rangeStrategy": "replace",
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-tmux-pins.mjs"
+        ],
+        "fileFilters": [
+          "image/contribute/Containerfile"
+        ],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "description": "Regenerate requirements-ci.lock sha256 hashes when managed PyPI package versions change.",
+      "matchDatasources": [
+        "pypi"
+      ],
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-requirements-ci-hashes.mjs"
+        ],
+        "fileFilters": [
+          "requirements-ci.lock"
+        ],
+        "executionMode": "branch"
+      }
     }
   ]
 }
