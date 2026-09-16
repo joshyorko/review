@@ -2,7 +2,13 @@ import { createServer } from "node:http";
 
 const port = Number.parseInt(process.env.LUNA_PROBE_PORT ?? "43127", 10);
 const route = process.env.LUNA_PROBE_ROUTE ?? "native-task";
+const phase = process.env.LUNA_PROBE_PHASE ?? "single";
+const bindAddress = process.env.LUNA_PROBE_BIND ?? "127.0.0.1";
 let requestNumber = 0;
+
+function audit(event, details = {}) {
+	console.error(JSON.stringify({ type: "audit", route, phase, event, ...details }));
+}
 
 function jsonBody(value) {
 	return JSON.stringify(value);
@@ -55,6 +61,15 @@ function assistantTools(body) {
 	});
 }
 
+function latestUserText(body) {
+	const messages = Array.isArray(body.messages) ? body.messages : [];
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (message?.role === "user") return messageText(message);
+	}
+	return "";
+}
+
 function toolCallCount(body, name) {
 	return assistantTools(body).filter((candidate) => candidate === name).length;
 }
@@ -83,6 +98,7 @@ function isFactoryRoot(body) {
 }
 
 function functionCall(name, args) {
+	audit("tool-call", { name });
 	const base = {
 		id: `probe-${requestNumber}`,
 		object: "chat.completion.chunk",
@@ -126,6 +142,12 @@ function textCompletion(text) {
 			{ index: 0, delta: { role: "assistant", content: text }, finish_reason: "stop" },
 		],
 	};
+}
+
+function responseForNormalReview(body) {
+	const previous = lastTool(body) ?? lastAssistantTool(body);
+	if (previous === undefined) return functionCall("hive_workbench_trace", {});
+	return textCompletion("ordinary Review trace completed while Luna Factory remained inactive");
 }
 
 function probeReceipt(taskId, attemptId, criterionId, overrides = {}) {
@@ -192,6 +214,7 @@ function responseForNativeBatch(body) {
 		return functionCall("luna_factory_dispatch", { input: JSON.stringify({ taskId: "T2", attemptId: "T2-a1" }) });
 	}
 	if (previous === "luna_factory_dispatch") {
+		audit("native-parallel-dispatch", { tasks: ["T1", "T2"] });
 		return functionCall("task", {
 			context: "Both items are read-only branches of the same admitted Luna Factory probe.",
 			tasks: [
@@ -235,6 +258,7 @@ function responseForDependencyJoin(body) {
 		});
 	}
 	if (previous === "luna_factory_candidate" && candidates === 2) {
+		audit("dependency-t2-deferred", { taskId: "T2", prerequisite: "T1" });
 		return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
 	}
 	if (previous === "luna_factory_attempt" && attempts === 1) {
@@ -250,6 +274,7 @@ function responseForDependencyJoin(body) {
 		return functionCall("luna_factory_finish", { input: JSON.stringify({ taskId: "T1", criterionId: "A1" }) });
 	}
 	if (previous === "luna_factory_finish" && finishes === 1) {
+		audit("dependency-t2-admitted-after-done", { taskId: "T2", prerequisite: "T1" });
 		return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T2", attemptId: "T2-a1" }) });
 	}
 	if (previous === "luna_factory_attempt") {
@@ -339,11 +364,13 @@ function responseForPlateauReplan(body) {
 		return functionCall("luna_factory_finish", { input: JSON.stringify({ taskId: "T1", criterionId: "A1" }) });
 	}
 	if (previous === "luna_factory_finish" && finishes === 1) {
+		audit("successor-cleanup-proposed", { taskId: "T2", after: "T1-DONE" });
 		return functionCall("luna_factory_candidate", {
 			input: JSON.stringify({ taskId: "T2", generation: "G1", criterionId: "A1", title: "optional cleanup after success", deps: [], effect: "read", owner: "luna", necessity: "cleanup would be convenient" }),
 		});
 	}
 	if (previous === "luna_factory_candidate" && candidates === 2) {
+		audit("successor-cleanup-rejected", { taskId: "T2", reason: "criterion already proven" });
 		return functionCall("luna_factory_completion", { input: JSON.stringify({}) });
 	}
 	return textCompletion("plateau-replan route converged after one bounded replan; successor cleanup was dismissed");
@@ -397,6 +424,7 @@ function responseForLegitimateDefect(body) {
 		});
 	}
 	if (previous === "luna_factory_candidate" && candidates === 2) {
+		audit("legitimate-defect-reopen", { taskId: "T1" });
 		return functionCall("luna_factory_reopen", { input: JSON.stringify({ taskId: "T1", reason: "reproduced a legitimate data-loss defect after the green result" }) });
 	}
 	if (previous === "luna_factory_reopen" && reopens === 1) {
@@ -423,6 +451,112 @@ function responseForLegitimateDefect(body) {
 		return functionCall("luna_factory_completion", { input: JSON.stringify({}) });
 	}
 	return textCompletion("legitimate-defect route repaired the explicit defect; post-success cleanup stayed dismissed");
+}
+
+function responseForAcceptance(body) {
+	const previous = lastTool(body) ?? lastAssistantTool(body);
+	const candidates = toolCallCount(body, "luna_factory_candidate");
+	const attempts = toolCallCount(body, "luna_factory_attempt");
+	const dispatches = toolCallCount(body, "luna_factory_dispatch");
+	const tasks = toolCallCount(body, "task");
+	const receipts = toolCallCount(body, "luna_factory_receipt");
+	const finishes = toolCallCount(body, "luna_factory_finish");
+	if (previous === undefined) {
+		return functionCall("luna_factory_open", {
+			input: JSON.stringify({
+				objective: "prove the complete packaged Factory vertical without changing the repository",
+				criteria: [{ id: "A1", statement: "the packaged native task is verified and finished" }],
+				repo: "example/repo",
+				base: "a".repeat(40),
+				nonGoals: ["do not merge, deploy, publish, or modify the target repository"],
+				permittedEffects: ["read"],
+				finishAuthority: "report the verified result only",
+			}),
+		});
+	}
+	if (previous === "luna_factory_open") {
+		return functionCall("luna_factory_candidate", {
+			input: JSON.stringify({ taskId: "T1", generation: "G1", criterionId: "A1", title: "complete packaged vertical", deps: [], effect: "read", owner: "luna", necessity: "A1 is unproven" }),
+		});
+	}
+	if (previous === "luna_factory_attempt" && attempts === 1) {
+		return functionCall("luna_factory_dispatch", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
+	}
+	if (previous === "luna_factory_dispatch" && dispatches === 1) {
+		return functionCall("task", { agent: "task", task: "Read the repository and report the complete vertical. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1" });
+	}
+	if (previous === "task" && tasks === 1) {
+		return functionCall("luna_factory_receipt", { input: JSON.stringify(probeReceipt("T1", "T1-a1", "A1")) });
+	}
+	if (previous === "luna_factory_receipt" && receipts === 1) {
+		return functionCall("luna_factory_finish", { input: JSON.stringify({ taskId: "T1", criterionId: "A1" }) });
+	}
+	if (previous === "luna_factory_finish" && finishes === 1) {
+		audit("successor-cleanup-proposed", { taskId: "T2", after: "T1-DONE" });
+		return functionCall("luna_factory_candidate", {
+			input: JSON.stringify({ taskId: "T2", generation: "G1", criterionId: "A1", title: "post-success cleanup", deps: [], effect: "read", owner: "luna", necessity: "cleanup would be convenient" }),
+		});
+	}
+	if (previous === "luna_factory_candidate" && candidates === 2) {
+		audit("successor-cleanup-rejected", { taskId: "T2", reason: "criterion already proven" });
+		return functionCall("luna_factory_completion", { input: JSON.stringify({}) });
+	}
+	if (previous === "luna_factory_candidate") {
+		return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
+	}
+	return textCompletion("acceptance route finished the worker through VERIFY and DONE; post-success cleanup was rejected and completion grants no merge or deploy authority");
+}
+
+function responseForEnabledIdle(body) {
+	const previous = lastTool(body) ?? lastAssistantTool(body);
+	if (previous === undefined) return functionCall("luna_factory_status", { input: JSON.stringify({}) });
+	return textCompletion("Factory is enabled but idle; no work starts until an explicit objective is opened");
+}
+
+function responseForRestartReload(body) {
+	const previous = lastTool(body) ?? lastAssistantTool(body);
+	if (phase === "seed") {
+		if (previous === undefined) {
+			return functionCall("luna_factory_open", {
+				input: JSON.stringify({
+					objective: "seed one durable Factory attempt for restart validation",
+					criteria: [{ id: "A1", statement: "the restart attempt can be reconciled" }],
+					repo: "example/repo",
+					base: "a".repeat(40),
+				}),
+			});
+		}
+		if (previous === "luna_factory_open") {
+			return functionCall("luna_factory_candidate", {
+				input: JSON.stringify({ taskId: "T1", generation: "G1", criterionId: "A1", title: "durable restart attempt", deps: [], effect: "read", owner: "luna", necessity: "A1 is unproven" }),
+			});
+		}
+		if (previous === "luna_factory_candidate") {
+			return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
+		}
+		return textCompletion("restart seed persisted the Factory attempt and stopped before external work");
+	}
+
+	const calls = assistantTools(body);
+	const statusCalls = calls.filter((name) => name === "luna_factory_status").length;
+	if (statusCalls === 0) return functionCall("luna_factory_status", { input: JSON.stringify({}) });
+	if (previous === "luna_factory_status") {
+		audit("restart-resume-observed", {
+			priorFactoryCalls: calls.filter((name) => name.startsWith("luna_factory_")),
+			postStatusFactoryCalls: [],
+		});
+		return functionCall("luna_factory_reconcile", {
+			input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1", outcome: "abandoned", reason: "restart reconstructed the durable attempt; no worker receipt was fabricated" }),
+		});
+	}
+	const statusIndex = calls.lastIndexOf("luna_factory_status");
+	const postStatusFactoryCalls = statusIndex < 0 ? [] : calls.slice(statusIndex + 1).filter((name) => name.startsWith("luna_factory_"));
+	audit("restart-resume-no-replay", {
+		priorFactoryCalls: calls.filter((name) => name.startsWith("luna_factory_")),
+		postStatusFactoryCalls,
+		replayedCalls: postStatusFactoryCalls.filter((name) => ["luna_factory_open", "luna_factory_candidate", "luna_factory_attempt"].includes(name)),
+	});
+	return textCompletion("restart reload reconstructed the durable Factory state, reconciled the existing attempt, and replayed no open, candidate, or attempt work");
 }
 
 function responseForIsolatedWrite(body) {
@@ -476,6 +610,10 @@ function responseForIsolatedWrite(body) {
 }
 
 function responseFor(body) {
+	if (route === "enabled-idle") return responseForEnabledIdle(body);
+	if (route === "normal-review") return responseForNormalReview(body);
+	if (route === "acceptance") return responseForAcceptance(body);
+	if (route === "restart-reload") return responseForRestartReload(body);
 	if (!isFactoryRoot(body)) {
 		if (route === "isolated-write" && toolNames(body).includes("write") && lastTool(body) !== "write" && lastAssistantTool(body) !== "write") {
 			return functionCall("write", { path: "tmp/luna-factory-isolation-probe.txt", content: "isolated Factory write probe\n" });
@@ -653,15 +791,19 @@ const server = createServer(async (request, response) => {
 	const messages = Array.isArray(body.messages) ? body.messages : [];
 	console.error(
 		JSON.stringify({
+			type: "request",
 			request: requestNumber,
 			route,
+			phase,
 			factoryRoot: isFactoryRoot(body),
 			hasTask: names.includes("task"),
 			factoryTools: names.filter((name) => name.startsWith("luna_factory_")).sort(),
+			assistantTools: assistantTools(body),
 			messageCount: messages.length,
 			lastRole: messages.at(-1)?.role ?? null,
 			lastTool: lastTool(body) ?? null,
 			lastAssistantTool: lastAssistantTool(body) ?? null,
+			latestUserMarker: latestUserText(body).slice(0, 80),
 			lastToolResult: lastToolResultSummary(body),
 		}),
 	);
@@ -672,6 +814,6 @@ const server = createServer(async (request, response) => {
 	response.end();
 });
 
-server.listen(port, "127.0.0.1", () => {
-	console.log(JSON.stringify({ ready: true, port }));
+server.listen(port, bindAddress, () => {
+	console.log(JSON.stringify({ ready: true, port, bind: bindAddress }));
 });
