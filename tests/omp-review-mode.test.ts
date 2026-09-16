@@ -3042,6 +3042,8 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	const prompt = actionPrompt({ kind: "fix", item: batch[0], items: batch });
 	assert.match(prompt, /Use the `task` tool once/);
 	assert.match(prompt, /`task` tool once with one fresh isolated item per issue through OMP workflowz/);
+	assert.match(prompt, /`gh repo clone .*under `\$HOME\/worktrees`/s);
+	assert.match(prompt, /Never assume the working directory is a checkout/);
 	assert.doesNotMatch(prompt, /maximum of 7|fix-and-merge|approve and merge/);
 });
 
