@@ -1111,7 +1111,7 @@ test("without Hive the queue stays in GitHub evidence order and remains descript
 	await mode.refreshQueue();
 	assert.equal(mode.visibleItems().length, 2);
 
-	assert.equal(mode.selected().id, 42, "browse-only mode preserves the fetched GitHub order");
+	assert.equal(mode.selected().id, 42, "unreachable-Hive mode preserves the fetched GitHub order");
 	assert.equal(mode.priorityFor(mode.selected()).category, "fix-ci", "categories remain descriptive");
 	assert.equal(mode.orderSource(), "local");
 
@@ -1251,7 +1251,7 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	assert.ok(frame()[0].includes("HIVE WORKBENCH"));
 	for (const row of frame()) assert.ok(visibleWidth(row) <= 120, row);
 
-	assert.equal(mode.selected().id, 42, "browse-only mode preserves fetched order");
+	assert.equal(mode.selected().id, 42, "unreachable-Hive mode preserves fetched order");
 	dashboard.handleInput("j");
 	assert.equal(mode.selected().id, 7);
 	dashboard.handleInput("k");
@@ -1540,7 +1540,7 @@ test("without a hub the queue remains unranked in fetched order", () => {
 	assert.equal(ranked.priorities.get("projectbluefin/review#1").demotion, 1, "descriptive metadata may still mark a dependency bump");
 	assert.equal(categorize(queueItem({ type: "issue" }), { hive: EMPTY_HIVE, now }).category, "triage");
 });
-test("browse-only issue queues preserve fetched order and delineate repository transitions", () => {
+test("unreachable-Hive issue queues preserve fetched order and delineate repository transitions", () => {
 	const now = NOW;
 	const items = [
 		queueItem({ id: 201, type: "issue", repo: "projectbluefin/server", title: "server issue", updatedAt: now - 100 }),
@@ -2720,7 +2720,7 @@ test("the status tool names the authority that ordered the queue", async () => {
 		return { ok: false, status: 502, statusText: "Bad Gateway", json: async () => ({}) };
 	}, hubEnv);
 	// The header/status line is a concise fallback status, not the raw error.
-	assert.match(unreachable.content[0].text, /order: unavailable — hive unavailable; GitHub evidence is browse-only/);
+	assert.match(unreachable.content[0].text, /order: unavailable — hive unavailable; GitHub evidence is available, Hive ordering is not/);
 	// The raw diagnostic is kept behind the status, in the structured details.
 	assert.match(unreachable.details.hive.error ?? "", /502/, "the raw error stays in the status details, not the header");
 });
@@ -2810,7 +2810,7 @@ test("the status tool names all three optional-Hive states distinctly", async ()
 		},
 		hubEnv,
 	);
-	assert.match(broken.content[0].text, /order: unavailable — hive unavailable; GitHub evidence is browse-only/);
+	assert.match(broken.content[0].text, /order: unavailable — hive unavailable; GitHub evidence is available, Hive ordering is not/);
 	assert.match(broken.details.hive.error ?? "", /502/, "the raw error is the diagnostic, kept in the status details");
 	assert.equal(broken.details.hive.online, false);
 });
@@ -2830,10 +2830,10 @@ test("a hive-only session with a broken hub still fails visibly and concisely", 
 	await review.whenStarted();
 
 	assert.ok(
-		ctx.notifications.some((notification) => /hive unavailable; browse-only mode/.test(notification.message)),
+		ctx.notifications.some((notification) => /hive unavailable; GitHub review still works/.test(notification.message)),
 		`a broken hive must fail visibly at startup, got ${JSON.stringify(ctx.notifications)}`,
 	);
-	const startupHive = ctx.notifications.find((notification) => /browse-only mode/.test(notification.message));
+	const startupHive = ctx.notifications.find((notification) => /GitHub review still works/.test(notification.message));
 	assert.doesNotMatch(startupHive.message, /502/);
 });
 

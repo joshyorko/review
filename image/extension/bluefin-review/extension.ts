@@ -895,7 +895,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const startSession = async (ctx: CtxLike, persisted: PersistedSelection | undefined) => {
 		const hive = await mode.refreshHive();
 		if (hive.configured && hive.error) {
-			ctx.ui.notify(`${hiveFailureStatus(hive.error)}; browse-only mode`, "warning");
+			ctx.ui.notify(`${hiveFailureStatus(hive.error)}; GitHub review still works`, "warning");
 		}
 		await refreshQueue(ctx);
 		if (persisted?.id) mode.selectById(persisted.repo, persisted.id);

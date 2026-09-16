@@ -228,6 +228,21 @@ unreproduced reports. Planned documentation assistance is tracked in
 [#134](https://github.com/projectbluefin/review/issues/134); the feedback loop
 is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 
+### Product boundary
+
+Review is a GitHub-first core with optional Bluefin and Hive integrations.
+[#591](https://github.com/projectbluefin/review/issues/591) decided it works for
+any GitHub repository, with Bluefin and Hive as optional additions. Review owns
+the generic core — PRs, issues, queues, search, reading, inspection, review,
+repair, implementation, and landing — and is first-class in any repository.
+OMP owns sessions, agents, execution, and traces. Bluefin adds its doctrine,
+specialized reviewers, labels, conventions, and admission rules; Hive adds
+ordering, claims, stages, and contributor context through its MCP server. The
+core requires neither: GitHub access, operator permissions, execution
+requirements, and safety checks still apply. GitHub defines what work exists;
+Review defines what can be done with it; Hive prioritizes and coordinates it;
+Bluefin specializes its policy.
+
 <details>
 <summary>Image provenance</summary>
 

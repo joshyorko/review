@@ -61,10 +61,10 @@ function resolveRepo(mode: ReviewMode, params: Record<string, unknown>): string 
 function orderLine(mode: ReviewMode): string {
 	const hive = mode.hive;
 	if (!hive.configured) {
-		return "order: unranked — no hive hub configured; GitHub evidence is browse-only";
+		return "order: unranked — no hive hub configured; GitHub evidence is available, Hive ordering is not";
 	}
 	if (!hive.online) {
-		return `order: unavailable — ${hiveFailureStatus(hive.error)}; GitHub evidence is browse-only`;
+		return `order: unavailable — ${hiveFailureStatus(hive.error)}; GitHub evidence is available, Hive ordering is not`;
 	}
 	const actionable = hive.actionableItems === undefined ? "" : `, ${hive.actionableItems} actionable overall`;
 	const coverage = mode.hiveCoverage();
