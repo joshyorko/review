@@ -16,7 +16,7 @@ const ENV = {
 	GH_TOKEN: "t",
 	HOME: "/nonexistent",
 	XDG_CONFIG_HOME: "/nonexistent",
-	BLUEFIN_REVIEW_PERSONAL_MODE: "1",
+	BLUEFIN_REVIEW_MODE: "review",
 };
 
 function workflowNode(workflow = true) {
@@ -190,8 +190,8 @@ test("Issue s and Alt-S dispatch issue implementation, while d requests issue ev
 		dashboard.handleInput("alt+s");
 		dashboard.handleInput("d");
 		assert.deepEqual(actions.map(action => action.kind), ["fix", "fix", "diff"]);
-		assert.doesNotMatch(actionPrompt(actions[2]), /hive_workbench_diff/);
-		assert.match(actionPrompt(actions[2]), /review_workbench_issue/);
+		assert.doesNotMatch(actionPrompt(actions[2], undefined, { workbenchMode: mode.workbenchMode }), /hive_workbench_diff/);
+		assert.match(actionPrompt(actions[2], undefined, { workbenchMode: mode.workbenchMode }), /review_workbench_issue/);
 	} finally {
 		dashboard.dispose();
 	}
@@ -237,7 +237,7 @@ test("Issue inspection uses issue evidence and never calls the PR diff endpoint"
 	assert.equal(calls.some(call => call.includes("/pulls/933")), false, calls.join("\n"));
 });
 
-test("non-Hive status is actionable and generic tool aliases are registered", async () => {
+test("Review mode registers only GitHub workbench tools and contains no Hive affordance", async () => {
 	const pi = fakeHost();
 	const mode = new ReviewMode({ org: "example", env: ENV });
 	mode.hive = EMPTY_HIVE;
@@ -259,10 +259,25 @@ test("non-Hive status is actionable and generic tool aliases are registered", as
 	for (const name of ["review_workbench_status", "review_workbench_queue", "review_workbench_diff", "review_workbench_trace"]) {
 		assert.ok(pi.tools.has(name), name);
 	}
-	assert.ok(pi.tools.has("hive_workbench_lookup"));
+	for (const name of pi.tools.keys()) assert.doesNotMatch(name, /^hive_/);
 	const status = await pi.tools.get("review_workbench_status").execute("id", {});
-	assert.match(status.content[0].text, /Hive: not configured/);
-	assert.doesNotMatch(status.content[0].text, /browse-only/);
+	assert.match(status.content[0].text, /order: GitHub\/local/);
+	assert.doesNotMatch(status.content[0].text, /Hive|hive|browse-only/);
+});
+
+test("Review mode never contacts Hive even when HIVE_HUB is inherited", async () => {
+	const calls: string[] = [];
+	const mode = new ReviewMode({
+		org: "example",
+		env: { ...ENV, HIVE_HUB: "https://hive.example" },
+		fetchImpl: (async (url: string | URL | Request) => {
+			calls.push(String(url));
+			throw new Error("Review mode must not fetch Hive");
+		}) as typeof fetch,
+	});
+	const hive = await mode.refreshHive();
+	assert.equal(hive.configured, false);
+	assert.deepEqual(calls, []);
 });
 
 test("personal UI presents a local Review surface without Hive-only controls", () => {
@@ -292,7 +307,7 @@ test("personal UI presents a local Review surface without Hive-only controls", (
 		const help = dashboard.render(160).join("\n");
 		assert.match(help, /REVIEW WORKBENCH/);
 		assert.equal(help.includes("H / L"), false);
-		assert.doesNotMatch(help, /Hive supplies priority/);
+		assert.doesNotMatch(help, /Hive/i);
 		dashboard.handleInput("H");
 		assert.equal(mode.hiveOnly, false);
 		assert.match(renderRail(mode, PLAIN_PAINTER, 160, NOW, 0, []).join("\n"), /LOCAL/);
@@ -314,6 +329,14 @@ test("personal reviewer selection is generic outside Project Bluefin", () => {
 	assert.match(actionPrompt({ kind: "slay", item: generic as any }) ?? "", /generic-reviewer/);
 	assert.doesNotMatch(actionPrompt({ kind: "slay", item: generic as any }) ?? "", /bluefin-reviewer/);
 	assert.match(actionPrompt({ kind: "slay", item: bluefin as any }) ?? "", /bluefin-reviewer/);
+});
+
+test("Review mode keeps Bluefin policy without exposing Hive", () => {
+	const bluefin = { ...workflowNode(), type: "pr" as const, id: 42, repo: "projectbluefin/review" };
+	const prompt = actionPrompt({ kind: "slay", item: bluefin as any }, undefined, { workbenchMode: "review" }) ?? "";
+	assert.match(prompt, /bluefin-reviewer/);
+	assert.match(prompt, /review_workbench_diff/);
+	assert.doesNotMatch(prompt, /hive_workbench|Hive/);
 });
 
 function ciNode(rollup: string | null, checkSuites: unknown) {

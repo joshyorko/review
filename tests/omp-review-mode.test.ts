@@ -1289,8 +1289,8 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	assert.match(frame()[2], /PR READER: projectbluefin\/other#7/);
 	dashboard.handleInput("q");
 	dashboard.handleInput("v");
-	assert.equal(action.kind, "open_browser");
-	assert.equal(action.item.id, 7);
+	assert.match(frame()[2], /PR READER: projectbluefin\/other#7/);
+	dashboard.handleInput("q");
 	dashboard.handleInput("c");
 	assert.equal(action.kind, "comment");
 
@@ -1335,7 +1335,7 @@ test("dashboard interactive search live-filters and selects items by title", (t)
 	assert.ok(mode.selectedKeys.has("projectbluefin/other#7"));
 });
 
-test("dashboard v opens a focused issue in the browser", (t) => {
+test("dashboard v keeps issue rows in the issue workbench", (t) => {
 	const mode = new ReviewMode({ org: "projectbluefin" });
 	mode.queueMode = "issues";
 	mode.items = [queueItem({ type: "issue", id: 606, title: "keyboard actions" })];
@@ -1346,8 +1346,8 @@ test("dashboard v opens a focused issue in the browser", (t) => {
 	t.after(() => dashboard.dispose());
 
 	dashboard.handleInput("v");
-	assert.equal(action.kind, "open_browser");
-	assert.equal(action.item.id, 606);
+	assert.equal(action, undefined);
+	assert.doesNotMatch(dashboard.render(120).join("\n"), /PR READER/);
 });
 
 test("workbench Tab switches entity mode and Alt+B selects one repository group", (t) => {
@@ -1914,12 +1914,24 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.equal(ctx.overlays.length, 1, "Alt+B does not stack an already-open workbench");
 	assert.equal(pi.messages.length, 0, "opening the workbench never dispatches work");
 	const workbench = ctx.overlays[0];
+	workbench.handleInput("v");
+	workbench.handleInput("o");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(pi.execCalls.at(-1), {
+		command: "gh",
+		args: ["pr", "view", "42", "--repo", "projectbluefin/review", "--web"],
+	});
+	assert.match(ctx.notifications.at(-1)?.message ?? "", /Opened https:\/\/github\.com\/projectbluefin\/review\/pull\/42/);
+	workbench.handleInput("q");
 	workbench.handleInput("j");
 	workbench.handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 1, "slay dispatches without requiring Hive ranking");
 	assert.match(pi.messages[0], /bluefin-reviewer/);
 	assert.ok(!ctx.notifications.some((notification) => /browse-only mode disables dispatch/.test(notification.message)));
+	workbench.handleInput("i");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.match(ctx.pasted.at(-1) ?? "", /projectbluefin\/other#7/);
 });
 
 test("--autoslay repairs returned pull requests before implementing issue waves", async () => {
@@ -3838,10 +3850,11 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 	dashboard.handleClick(enterPos + 1, keymapLineIdx);
 	assert.match(dashboard.render(400)[2], /PR READER:/, "clicking Enter opens the reader");
 	dashboard.handleInput("q");
-	const vPos = keymapText.indexOf("v browser");
+	const vPos = keymapText.indexOf("v read");
 	assert.ok(vPos > 0);
 	dashboard.handleClick(vPos + 1, keymapLineIdx);
-	assert.equal(lastAction?.kind, "open_browser", "clicking browser opens the focused item");
+	assert.match(dashboard.render(400)[2], /PR READER:/, "clicking v opens the reader");
+	dashboard.handleInput("q");
 	const iPos = keymapText.indexOf("i cite");
 	assert.ok(iPos > 0);
 	dashboard.handleClick(iPos + 1, keymapLineIdx);
@@ -4133,7 +4146,7 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 	const review = createReviewExtension(pi, {
 		org: "projectbluefin",
 		fetchImpl: fetchImpl as unknown as typeof fetch,
-		env: ISOLATED_ENV, // No HIVE_HUB -> Hive is not configured / offline
+		env: { ...ISOLATED_ENV, BLUEFIN_REVIEW_MODE: "review" },
 	});
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
@@ -4160,6 +4173,7 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 	assert.match(pi.messages[0], /one review-ready pull request per issue/);
 	assert.match(pi.messages[0], /SUBAGENT-RULES/);
 	assert.match(pi.messages[0], /Never merge or approve your own pull request/);
+	assert.doesNotMatch(pi.messages[0], /Hive|hive_workbench_lookup/);
 	assert.equal(
 		ctx.notifications.some((n) => n.message.includes("Hive is unavailable")),
 		false,

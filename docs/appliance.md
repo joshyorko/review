@@ -122,6 +122,11 @@ name, resolves `GH_TOKEN` from `gh auth token` when it is unset, and resolves an
 unset `HIVE_HUB` from the host's default `$HOME/.config/hive/contributor.env`
 without exposing the registration token.
 
+`BLUEFIN_REVIEW_MODE=hive` is the default appliance mode and adds Hive ordering,
+knowledge, stages, controls, and tools. `BLUEFIN_REVIEW_MODE=review` is strictly
+GitHub-only and ignores an inherited `HIVE_HUB`; the personal Brew package sets
+that mode explicitly.
+
 The appliance uses its own `bluefin-review-appliance` OMP profile. Host OMP
 configuration is not mounted by default, so host MCP entries cannot make the
 appliance noisy or unusable. The packaged review extension enables three

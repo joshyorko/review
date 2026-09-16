@@ -1,16 +1,15 @@
 /**
- * Hive Workbench extension wiring.
+ * Review and Hive Review workbench extension wiring.
  *
  * Hive owns queue authority and assignments. OMP owns sessions, tools, and
  * workflowz execution. This file only joins those seams to the workbench UI.
  */
 
-import { execFileSync } from "node:child_process";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, exactHeadVerified, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
-import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
+import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
@@ -199,17 +198,6 @@ function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined 
  * The reader header already shows the URL, so a failure to find a browser is
  * not catastrophic: the shortcut is best-effort and never silently blocks.
  */
-function openBrowser(item: QueueItem): void {
-	try {
-		execFileSync("gh", [item.type === "pr" ? "pr" : "issue", "view", String(item.id), "--repo", item.repo, "--web"], {
-			stdio: "ignore",
-			timeout: 15_000,
-		});
-	} catch {
-		// No browser / no `gh`: the URL remains visible in the reader header.
-	}
-}
-
 /** Slay, autoslay, and fix may change pull-request heads; PR slay may also land reviewed heads. */
 export function isImplementationAction(action: DashboardAction): boolean {
 	return action.kind === "fix" || action.kind === "slay" || action.kind === "autoslay";
@@ -225,7 +213,7 @@ export function isImplementationAction(action: DashboardAction): boolean {
 export function actionPrompt(
 	action: DashboardAction,
 	priority?: Priority,
-	options?: { isBlueberry?: boolean; model?: string },
+	options?: { isBlueberry?: boolean; model?: string; workbenchMode?: WorkbenchMode },
 ): string | undefined {
 	if (
 		action.kind === "close"
@@ -238,14 +226,13 @@ export function actionPrompt(
 	const selected = action.items && action.items.length > 0 ? action.items : [action.item];
 	const genericSurface = selected.some((item) => !isProjectBluefinRepository(item.repo));
 	const reviewerAgent = genericSurface ? "generic-reviewer" : "bluefin-reviewer";
-	const traceTool = genericSurface ? "review_workbench_trace" : "hive_workbench_trace";
+	const toolPrefix = options?.workbenchMode === "review" ? "review" : "hive";
+	const traceTool = `${toolPrefix}_workbench_trace`;
 	const evidenceTool = selected.every((item) => item.type === "issue")
-		? genericSurface
+		? toolPrefix === "review"
 			? "review_workbench_issue"
 			: "hive_workbench_diff"
-		: genericSurface
-			? "review_workbench_diff"
-			: "hive_workbench_diff";
+		: `${toolPrefix}_workbench_diff`;
 	const cite = (item: QueueItem) => `${item.repo}#${item.id} (${item.title})`;
 	const stateOf = (item: QueueItem) => {
 		const parts = [
@@ -267,8 +254,13 @@ export function actionPrompt(
 	const reviewFinish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
 	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent}. If it has findings, dispatch one fresh isolated fixer with the exact repository, pull-request number, and head. Fixers use \`gh repo clone\` and \`gh pr checkout\` under \`$HOME/worktrees\`; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --auto --squash\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
 	const repairFinish = "These pull requests were returned to their authenticated author with requested changes. Read the review threads and failing checks, diagnose every requested correction, then dispatch one fresh isolated fixer per pull request. Fixers use `gh repo clone` and `gh pr checkout` under `$HOME/worktrees`, make the smallest complete correction, run focused verification, and push a new head without force. Never review, approve, auto-merge, or merge the author's own pull request. A repair is terminal only after GitHub shows a new head SHA. Report the pushed head and pull-request URL for every item, then stop; the workbench owns the next repository wave.";
-	const issueEvidence = "Evidence is bounded and read once. Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it. Never assume the working directory is a checkout: use `gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>` to materialize one unique workspace per issue under `$HOME/worktrees`, then enter that checkout before examining relevant source files and tests. Never clone into `/tmp`. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains `Closes <owner/repo>#<number>`. Never merge or approve your own pull request. The issue is not terminal until GitHub has accepted that pull request.";
-	const issueWorkflow = "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh isolated item per issue through OMP workflowz. Do not share a checkout or conversation between items.";
+	const issueContext = options?.workbenchMode === "review"
+		? "Inspect the complete GitHub issue description before deciding how to implement it."
+		: "Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it.";
+	const issueEvidence = `Evidence is bounded and read once. ${issueContext} Never assume the working directory is a checkout: use \`gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>\` to materialize one unique workspace per issue under \`$HOME/worktrees\`, then enter that checkout before examining relevant source files and tests. Never clone into \`/tmp\`. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes <owner/repo>#<number>\`. Never merge or approve your own pull request. The issue is not terminal until GitHub has accepted that pull request.`;
+	const issueWorkflow = options?.workbenchMode === "review"
+		? "Use the `task` tool once with one fresh isolated item per issue through OMP workflowz. Do not share a checkout or conversation between items."
+		: "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh isolated item per issue through OMP workflowz. Do not share a checkout or conversation between items.";
 
 	if (selected.length > 1) {
 		const repository = selected[0]!.repo;
@@ -349,7 +341,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		fetchImpl: options.fetchImpl,
 		env,
 	});
-	const statusKey = mode.isPersonalMode() ? "review_workbench" : "hive_workbench";
+	const statusKey = mode.isReviewMode() ? "review_workbench" : "hive_workbench";
 
 	let tui: { requestRender(): void } | undefined;
 	const timers: Array<() => void> = [];
@@ -360,7 +352,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeBatch: PersistedRepositoryBatch | undefined;
 	let batchRequestGeneration = 0;
 	let commentInFlight = false;
-	pi.setLabel(mode.isPersonalMode() ? "Review Workbench" : "Hive Workbench");
+	pi.setLabel(mode.isReviewMode() ? "Review Workbench" : "Hive Workbench");
 	pi.registerFlag("pr", { description: "Preselect a pull request or issue number", type: "string" });
 	pi.registerFlag("issues", { description: "Start in issues mode instead of pull requests", type: "boolean", default: false });
 	pi.registerFlag("all", { description: "Show all queue items instead of defaulting to Hive-only", type: "boolean", default: false });
@@ -380,9 +372,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (activeItem) {
 			const kind = activeItem.type === "pr" ? "PR" : "ISSUE";
 			const repo = activeItem.repo.includes("/") ? activeItem.repo.split("/")[1] : activeItem.repo;
-			ctx.ui.setTitle(`${mode.isPersonalMode() ? "review workbench" : "hive workbench"} · ${kind} #${activeItem.id} (${repo}) ${activeItem.title}`);
+			ctx.ui.setTitle(`${mode.isReviewMode() ? "review workbench" : "hive workbench"} · ${kind} #${activeItem.id} (${repo}) ${activeItem.title}`);
 		} else {
-			ctx.ui.setTitle(`${mode.isPersonalMode() ? "review workbench" : "hive workbench"} · ${mode.queueMode} (${mode.position()})`);
+			ctx.ui.setTitle(`${mode.isReviewMode() ? "review workbench" : "hive workbench"} · ${mode.queueMode} (${mode.position()})`);
 		}
 		repaint();
 	};
@@ -403,7 +395,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		syncStatus(ctx);
 		const result = await mode.refreshQueue();
 		if (result.error && !result.cancelled && result.items.length === 0 && ctx.hasUI) {
-			ctx.ui.notify(`Hive workbench queue: ${result.error}`, "error");
+			ctx.ui.notify(`${mode.isReviewMode() ? "Review" : "Hive"} workbench queue: ${result.error}`, "error");
 		}
 		syncStatus(ctx);
 		return result;
@@ -597,7 +589,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const priority: Priority | undefined = isRepairRequested(first, mode.currentUserLogin)
 			? { category: "repair-requested", source: "local", reason: "changes requested on your pull request", demotion: 0 }
 			: mode.priorityFor(first);
-		const prompt = actionPrompt(waveAction, priority);
+		const prompt = actionPrompt(waveAction, priority, { workbenchMode: mode.workbenchMode });
 		if (!prompt) {
 			persistBatch(ctx, { ...activeBatch!, state: "blocked", error: "wave action produced no prompt" });
 			return;
@@ -698,7 +690,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			await startSlay(ctx, mode.visibleItems());
 			return;
 		}
-		if (mode.isPersonalMode()) {
+		if (mode.isReviewMode()) {
 			await startSlay(ctx);
 			return;
 		}
@@ -734,7 +726,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const dispatch = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
 		if (action.kind === "close") return;
 		if (action.kind === "open_browser") {
-			openBrowser(action.item);
+			const result = await pi.exec(
+				"gh",
+				[action.item.type === "pr" ? "pr" : "issue", "view", String(action.item.id), "--repo", action.item.repo, "--web"],
+				{ timeout: 15_000 },
+			);
+			if (result.code === 0 && !result.killed) {
+				ctx.ui.notify(`Opened ${action.item.url}`, "info");
+			} else {
+				ctx.ui.pasteToEditor(action.item.url);
+				ctx.ui.notify(`Browser unavailable; added ${action.item.url} to the prompt`, "warning");
+			}
 			return;
 		}
 		if (action.kind === "scope") {
@@ -900,10 +902,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				},
 				{ overlay: false },
 			);
-			if (action.kind === "scope") {
-				await dispatch(ctx, action);
-				reopen = true;
-			}
+			if (action.kind !== "close") await dispatch(ctx, action);
+			if (action.kind === "scope") reopen = true;
 		} catch {
 			// OMP cancellation closes the workbench without changing batch state.
 		} finally {
@@ -919,7 +919,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const hive = await mode.refreshHive();
 		if (hive.configured && hive.error) {
 			ctx.ui.notify(
-				mode.isPersonalMode()
+				mode.isReviewMode()
 					? `${hiveFailureStatus(hive.error)}; GitHub/local ordering remains available`
 					: `${hiveFailureStatus(hive.error)}; browse-only mode`,
 				"warning",
@@ -1085,7 +1085,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 
-		ctx.ui.setTitle(mode.isPersonalMode() ? "review workbench" : "hive workbench");
+		ctx.ui.setTitle(mode.isReviewMode() ? "review workbench" : "hive workbench");
 		ctx.ui.setWidget(
 			"hive-workbench-rail",
 			(hostTui: unknown, theme: unknown) => {
@@ -1108,16 +1108,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		every(QUEUE_POLL_MS, () => {
 			void refreshQueue(ctx);
 		});
-		every(HIVE_POLL_MS, () => {
-			void mode.refreshHive().then(() => {
-				syncStatus(ctx);
+		if (mode.isHiveMode()) {
+			every(HIVE_POLL_MS, () => {
+				void mode.refreshHive().then(() => {
+					syncStatus(ctx);
+				});
 			});
-		});
+		}
 
 		// Detached: nothing awaits this, so an escaping rejection would take the
 		// whole session process down with it.
 		started = startSession(ctx, persisted).catch((error: unknown) => {
-			ctx.ui.notify(`Hive workbench startup: ${error instanceof Error ? error.message : String(error)}`, "error");
+			ctx.ui.notify(`${mode.isReviewMode() ? "Review" : "Hive"} workbench startup: ${error instanceof Error ? error.message : String(error)}`, "error");
 		});
 	});
 
@@ -1184,7 +1186,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	// ---- keyboard ------------------------------------------------------------
 
 	pi.registerShortcut("alt+b", {
-		description: mode.isPersonalMode() ? "Open the Review workbench" : "Open the Hive workbench",
+		description: mode.isReviewMode() ? "Open the Review workbench" : "Open the Hive workbench",
 		handler: (ctx) => void openDashboard(ctx),
 	});
 	pi.registerShortcut("alt+s", {
@@ -1192,7 +1194,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		handler: (ctx) => void startAutoslay(ctx),
 	});
 	pi.registerShortcut("alt+u", {
-		description: mode.isPersonalMode() ? "Refetch the Review workbench queue" : "Refetch the Hive workbench queue",
+		description: mode.isReviewMode() ? "Refetch the Review workbench queue" : "Refetch the Hive workbench queue",
 		handler: (ctx) => void refreshQueue(ctx),
 	});
 

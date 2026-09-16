@@ -79,6 +79,15 @@ export interface PersistedSelection {
 	paused?: boolean;
 }
 
+export type WorkbenchMode = "review" | "hive";
+
+function workbenchMode(env: NodeJS.ProcessEnv): WorkbenchMode {
+	const value = env.BLUEFIN_REVIEW_MODE?.trim().toLowerCase();
+	if (value === undefined || value === "") return "hive";
+	if (value === "review" || value === "hive") return value;
+	throw new Error(`BLUEFIN_REVIEW_MODE must be review or hive, got ${value}`);
+}
+
 export class ReviewMode {
 	readonly org: string;
 
@@ -103,6 +112,7 @@ export class ReviewMode {
 
 	hive: HiveSnapshot = EMPTY_HIVE;
 	readonly session = new SessionTrace();
+	readonly workbenchMode: WorkbenchMode;
 
 	private token?: string;
 	private fetchImpl?: typeof fetch;
@@ -118,6 +128,7 @@ export class ReviewMode {
 		this.token = options.token;
 		this.fetchImpl = options.fetchImpl;
 		this.env = options.env ?? process.env;
+		this.workbenchMode = workbenchMode(this.env);
 		this.policy = options.policy ?? GENERIC_WORKBENCH_POLICY;
 		const envSkip = (this.env.BLUEFIN_REVIEW_SKIP_REPOS ?? "")
 			.split(",")
@@ -141,9 +152,13 @@ export class ReviewMode {
 		return this.scope.value;
 	}
 
-	/** The personal package opts into the generic local Review surface. */
-	isPersonalMode(): boolean {
-		return this.env.BLUEFIN_REVIEW_PERSONAL_MODE === "1";
+	/** Review is GitHub-only; Hive mode adds hub ordering and knowledge. */
+	isReviewMode(): boolean {
+		return this.workbenchMode === "review";
+	}
+
+	isHiveMode(): boolean {
+		return this.workbenchMode === "hive";
 	}
 
 	/** Point the queue at another organization or repository. */
@@ -482,6 +497,11 @@ export class ReviewMode {
 	 * the local categories, with the reason kept for display.
 	 */
 	async refreshHive(signal?: AbortSignal): Promise<HiveSnapshot> {
+		if (this.isReviewMode()) {
+			this.hive = EMPTY_HIVE;
+			this.reprioritize();
+			return this.hive;
+		}
 		this.hive = await fetchHive({ env: this.env, signal, fetchImpl: this.fetchImpl });
 		this.reprioritize();
 		return this.hive;
@@ -490,10 +510,12 @@ export class ReviewMode {
 	 * Programmatically fetch the authenticated Hive knowledge base markdown export.
 	 */
 	async getHiveKnowledge(signal?: AbortSignal): Promise<string | undefined> {
+		if (this.isReviewMode()) return undefined;
 		return await fetchHiveKnowledge({ env: this.env, signal, fetchImpl: this.fetchImpl });
 	}
 
 	async getHiveMe(signal?: AbortSignal): Promise<Record<string, unknown> | undefined> {
+		if (this.isReviewMode()) return undefined;
 		return await fetchHiveMe({ env: this.env, signal, fetchImpl: this.fetchImpl });
 	}
 

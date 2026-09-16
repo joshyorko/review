@@ -51,7 +51,7 @@ export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "H", label: "hive" },
 	{ chord: "L", label: "stage" },
 	{ chord: "d", label: "diff" },
-	{ chord: "v", label: "browser" },
+	{ chord: "v", label: "read" },
 	{ chord: "enter", label: "read" },
 	{ chord: "i", label: "cite" },
 	{ chord: "o", label: "repo" },
@@ -68,8 +68,7 @@ const HELP: readonly string[] = [
 	"  tab              toggle pull requests and issues",
 	"  t                switch between queue and trace panes",
 	"  p                pause or resume future repository waves",
-	"  enter            read the highlighted pull request",
-	"  v                open the highlighted item in a browser",
+	"  enter / v        read the highlighted pull request",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
 	"  H / L            toggle Hive-only / step Hive stages",
@@ -399,7 +398,7 @@ export class ReviewDashboard {
 			return;
 		}
 		if (col > 36 && col < width - 20) {
-			if (this.mode.isPersonalMode()) return;
+			if (this.mode.isReviewMode()) return;
 			if (this.mode.hiveLevel !== undefined) {
 				this.mode.cycleHiveLevel();
 			} else {
@@ -652,7 +651,7 @@ export class ReviewDashboard {
 
 	private handleStatusBarClick(col: number, _width: number): void {
 		if (col < 30) {
-			if (this.mode.isPersonalMode()) return;
+			if (this.mode.isReviewMode()) return;
 			this.mode.toggleHiveOnly();
 			this.tui.requestRender();
 			return;
@@ -758,7 +757,7 @@ export class ReviewDashboard {
 				return;
 			case "alt+s":
 			case "\u001bs": {
-				if (this.mode.isPersonalMode() && this.mode.queueMode === "issues") {
+				if (this.mode.isReviewMode() && this.mode.queueMode === "issues") {
 					const items = this.mode.slayableItems(BATCH_LIMIT);
 					if (items.length === 0) return;
 					this.emitAction({ kind: "fix", item: items[0]!, items });
@@ -811,12 +810,12 @@ export class ReviewDashboard {
 				this.tui.requestRender();
 				return;
 			case "H":
-				if (this.mode.isPersonalMode()) return;
+				if (this.mode.isReviewMode()) return;
 				this.mode.toggleHiveOnly();
 				this.tui.requestRender();
 				return;
 			case "L":
-				if (this.mode.isPersonalMode()) return;
+				if (this.mode.isReviewMode()) return;
 				this.mode.cycleHiveLevel();
 				this.tui.requestRender();
 				return;
@@ -850,16 +849,14 @@ export class ReviewDashboard {
 				return;
 			case "return":
 			case "enter":
+			case "v":
 				if (item.type !== "pr") return;
 				this.showReader = true;
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
 				return;
 			case "i":
-				this.emitAction({ kind: "reference", item, items });
-				return;
-			case "v":
-				this.emitAction({ kind: "open_browser", item });
+				this.done({ kind: "reference", item, items });
 				return;
 			case "C":
 				this.mode.toggleViewMode();
@@ -1006,7 +1003,7 @@ export class ReviewDashboard {
 	private headerRow(width: number, now: number): string {
 		const tally = this.mode.ciTally();
 		const parts = [
-			this.painter.bold(this.painter.fg("accent", `${GLYPH.hex} ${this.mode.isPersonalMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH"}`)),
+			this.painter.bold(this.painter.fg("accent", `${GLYPH.hex} ${this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH"}`)),
 			this.painter.fg("dim", GLYPH.logDashed.trim()),
 			this.painter.bold(
 				this.painter.fg(
@@ -1250,7 +1247,7 @@ export class ReviewDashboard {
 
 	private dashboardKeys(): RailKey[] {
 		return DASHBOARD_KEYS
-			.filter((key) => !this.mode.isPersonalMode() || (key.chord !== "H" && key.chord !== "L"))
+			.filter((key) => !this.mode.isReviewMode() || (key.chord !== "H" && key.chord !== "L"))
 			.map((key) => {
 				if (this.mode.queueMode !== "issues") return key;
 				if (key.chord === "s") return { ...key, label: "implement" };
@@ -1262,9 +1259,9 @@ export class ReviewDashboard {
 
 	private helpLines(): string[] {
 		const lines = HELP
-			.filter((line) => !this.mode.isPersonalMode() || (!line.startsWith("  H / L") && !line.startsWith("Hive supplies")))
+			.filter((line) => !this.mode.isReviewMode() || (!line.startsWith("  H / L") && !/hive/i.test(line)))
 			.map((line) => line);
-		lines[0] = this.mode.isPersonalMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH";
+		lines[0] = this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH";
 		if (this.mode.queueMode === "issues") {
 			const replace = new Map([
 				["  s                review, repair, and land selected pull requests", "  s                implement selected issues and open review-ready PRs"],
@@ -1273,8 +1270,8 @@ export class ReviewDashboard {
 			]);
 			for (let index = 0; index < lines.length; index++) lines[index] = replace.get(lines[index]!) ?? lines[index]!;
 		}
-		if (this.mode.isPersonalMode()) {
-			lines.push("GitHub supplies repository evidence. Hive adds ordering and claims when configured.");
+		if (this.mode.isReviewMode()) {
+			lines.push("GitHub supplies repository evidence and queue state.");
 		}
 		return lines;
 	}
@@ -1285,7 +1282,7 @@ export class ReviewDashboard {
 		const lines: string[] = [this.headerRow(width, now), this.painter.fg("border", "─".repeat(width))];
 
 		if (this.showHelp) {
-			lines.push(this.painter.bold(this.painter.fg("accent", this.mode.isPersonalMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH")));
+			lines.push(this.painter.bold(this.painter.fg("accent", this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH")));
 			lines.push("");
 			for (const line of this.helpLines()) lines.push(truncateToWidth(this.painter.fg(line.startsWith("  ") ? "dim" : "text", line), width));
 			lines.push(keymapBar(this.painter, [{ chord: "?", label: "back" }], width));

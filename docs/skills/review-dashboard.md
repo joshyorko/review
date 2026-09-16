@@ -30,6 +30,11 @@ batch state, dashboard controls, prompts, or mutation guards. Use `launcher.md`
 for launch mechanics, `review-checks.md` for doctrine, and `hive-runtime.md` for
 contributor assignment behavior.
 
+`BLUEFIN_REVIEW_MODE` has exactly two values. `review` is GitHub-only: it
+registers only `review_workbench_*` tools and never reads or mentions Hive.
+`hive` adds hub ordering, knowledge, stages, controls, and `hive_workbench_*`
+tools. Bluefin policy and Blueberry authorization are independent of this mode.
+
 ## Core Process
 
 1. Trace the key or flag from `dashboard.ts` through `extension.ts` to its prompt.
@@ -83,8 +88,7 @@ palette and warm issue palette.
 | `g` / `G` | Jump to the first / last row |
 | `h` / `l` | Collapse / expand the focused trace span |
 | `c` | Comment after confirmation and live revalidation |
-| `Enter` | Open the focused pull request in the reader |
-| `v` | Open the focused issue or pull request in the browser |
+| `Enter` / `v` | Open the focused pull request in the reader |
 | `i` | Cite the focused item in the prompt and show confirmation |
 | `?` | Show the key guide |
 | `q` / `Esc` | Close the workbench |
@@ -103,7 +107,8 @@ dispatches isolated fixers, never a self-review, self-approval, or self-merge.
 A returned PR is terminal only when GitHub shows a new head SHA.
 
 Issue slay reads the complete issue plus Hive's queue entry and curated
-knowledge before deciding and implementing. A multi-issue wave uses one
+knowledge before deciding and implementing; Review mode uses the GitHub issue
+alone. A multi-issue wave uses one
 workflowz `task` call with a fresh isolated item per issue. Each worker clones
 the target into its own path under `$HOME/worktrees`, then opens a review-ready
 PR with a closing reference. The issue is terminal only when GitHub reports
