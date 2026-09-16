@@ -167,7 +167,7 @@ printf '%s\n' "\$*" >>"$mock_podman_log"
 case "\${1:-} \${2:-}" in
   "pull "*) [[ "\${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
   "image exists") [[ "\${FAKE_IMAGE_MISSING:-0}" != 1 ]]; exit ;;
-  "image inspect") printf '26.08.07|0123456789abcdef|sha256:deadbeef\n'; exit 0 ;;
+  "image inspect"*) printf '%s|0123456789abcdef|sha256:deadbeef\n' "\${FAKE_INSPECT_VERSION:-26.08.07}"; exit 0 ;;
 esac
 exit 0
 EOF
@@ -213,6 +213,12 @@ EOF
 chmod +x "$scratch/bin/squashfuse_ll"
 export REVIEW_TEST_FUSE_DEVICE=/dev/null
 chmod +x "$scratch/bin/apptainer"
+# Keep fallback identity checks hermetic even when the host provides skopeo.
+cat >"$scratch/bin/skopeo" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$scratch/bin/skopeo"
 chmod +x "$scratch/bin/krun"
 
 cat >"$scratch/bin/gh" <<'EOF'
@@ -227,6 +233,7 @@ chmod +x "$scratch/bin/gh"
 
 export PATH="$scratch/bin:$PATH"
 export HOME="$scratch/home"
+export XDG_STATE_HOME="$scratch/home/.local/state"
 export REVIEW_TEST_KVM_DEVICE="$kvm"
 export GH_TOKEN=mock-token GITHUB_TOKEN=mock-token
 unset HIVE_HUB
@@ -278,10 +285,86 @@ set -e
   fail "packaged review missing-image diagnostic was not actionable: $offline_output"
 ! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image acquisition failed"
 
+# Incompatible review appliance image rejection
+: >"$mock_podman_log"
+set +e
+incompat_output="$(FAKE_INSPECT_VERSION="26.08.05" "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+incompat_status=$?
+set -e
+[[ "$incompat_status" -ne 0 ]] || fail "packaged review accepted incompatible image version 26.08.05"
+[[ "$incompat_output" == *"is incompatible with this launcher (requires >= 26.08.06)"* ]] ||
+  fail "incompatible image diagnostic was not actionable: $incompat_output"
+! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image compatibility check failed"
+# Documented review alias selects the same packaged launcher override path.
+: >"$mock_podman_log"
+REVIEW_APPLIANCE_IMAGE="custom/review:alias" FAKE_INSPECT_VERSION="26.08.07" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "REVIEW_APPLIANCE_IMAGE alias failed to start"
+grep -qFx "pull custom/review:alias" "$mock_podman_log" || fail "review alias was not refreshed"
+grep -q '^run .* custom/review:alias ' "$mock_podman_log" || fail "review alias was not passed to the container"
+
+# Non-unknown malformed OCI version labels must fail before execution.
+for malformed_version in 26.08.foo 26.08.06-rc; do
+  : >"$mock_podman_log"
+  set +e
+  malformed_output="$(FAKE_INSPECT_VERSION="$malformed_version" "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+  malformed_status=$?
+  set -e
+  [[ "$malformed_status" -ne 0 ]] || fail "packaged review accepted malformed image version $malformed_version"
+  [[ "$malformed_output" == *"malformed version label '$malformed_version'"* ]] ||
+    fail "malformed review version diagnostic was not actionable: $malformed_output"
+  ! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after malformed version check failed"
+done
+# Explicit image override warning
+: >"$mock_podman_log"
+override_output="$(BLUEFIN_REVIEW_IMAGE="custom/review:old" FAKE_INSPECT_VERSION="26.08.05" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "explicit review image override failed to start"
+[[ "$override_output" == *"older than recommended minimum (26.08.06); proceeding with explicit override"* ]] ||
+  fail "explicit override warning missing: $override_output"
+grep -q '^run ' "$mock_podman_log" || fail "explicit override did not launch container"
+
+# Legacy review state migration from v26.08.05
+legacy_review_dir="$scratch/home/.local/state/bluefin-review"
+mkdir -p "$legacy_review_dir/.config/review"
+touch "$legacy_review_dir/bluefin-review.sif" "$legacy_review_dir/user_session.json" "$legacy_review_dir/.config/review/config.env"
+chmod +x "$legacy_review_dir/bluefin-review.sif"
+migrate_output="$(HOME="$scratch/home" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "review with legacy cache failed"
+[[ "$migrate_output" == *"migrated user configuration from"* ]] ||
+  fail "legacy migration notice was not reported: $migrate_output"
+review_instance_home="$(find "$scratch/home/.local/state/bluefin/instances" -type d -path "*review*/home" | head -1)"
+[[ -f "$review_instance_home/user_session.json" ]] || fail "user session was not migrated to instance home"
+[[ -f "$review_instance_home/.config/review/config.env" ]] || fail "nested configuration was not migrated"
+[[ ! -e "$review_instance_home/bluefin-review.sif" ]] || fail "legacy SIF was copied into instance home"
+[[ -d "$legacy_review_dir" ]] || fail "legacy review state directory was broadly deleted"
+[[ -f "$legacy_review_dir/bluefin-review.sif" ]] || fail "legacy SIF was deleted from legacy directory"
+[[ -f "$legacy_review_dir/user_session.json" ]] || fail "original session was deleted from legacy directory"
+# A failed copy must abort migration and must not report success.
+legacy_failure_item="$legacy_review_dir/migration-failure.json"
+touch "$legacy_failure_item"
+cat >"$scratch/bin/cp" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == -a ]]; then
+  exit 1
+fi
+exec /bin/cp "$@"
+EOF
+chmod +x "$scratch/bin/cp"
+set +e
+migration_failure_output="$(PATH="$scratch/bin:$PATH" BLUEFIN_INSTANCE=migration-failure "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+migration_failure_status=$?
+set -e
+[[ "$migration_failure_status" -ne 0 ]] || fail "legacy migration continued after cp failure"
+[[ "$migration_failure_output" == *"failed to migrate legacy state item"* ]] ||
+  fail "legacy migration failure was not actionable: $migration_failure_output"
+[[ "$migration_failure_output" != *"migrated user configuration from"* ]] ||
+  fail "legacy migration claimed success after cp failure: $migration_failure_output"
+rm -f "$scratch/bin/cp"
 mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
 fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
 [[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "review fallback warning is missing"
+[[ "$fallback_output" == *"✓ bluefin launcher revision:"* ]] || fail "review fallback missing launcher revision: $fallback_output"
+[[ "$fallback_output" == *"! review appliance image identity unavailable for ghcr.io/projectbluefin/review:stable."* ]] || fail "review fallback missing identity report without registry probe: $fallback_output"
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment"
 [[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/review:stable --repo projectbluefin/review"* ]] || fail "review fallback used the wrong image or scope"
@@ -417,10 +500,64 @@ second_contribute_call="${concurrent_contribute_calls[1]}"
 [[ "$first_contribute_call$second_contribute_call" == *"contributor.owner-repo.env:/home/bluefin/.config/hive/contributor.env:ro,z"* ]] || fail "repo contributor did not select its Hive registration"
 [[ "$first_contribute_call$second_contribute_call" == *"contributor.owner-repo2.env:/home/bluefin/.config/hive/contributor.env:ro,z"* ]] || fail "repo2 contributor used the wrong registration"
 
+# Incompatible contributor image rejection
+: >"$mock_podman_log"
+set +e
+incompat_contribute_output="$(FAKE_INSPECT_VERSION="26.08.01" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)"
+incompat_contribute_status=$?
+set -e
+[[ "$incompat_contribute_status" -ne 0 ]] || fail "packaged contribute accepted incompatible image version 26.08.01"
+[[ "$incompat_contribute_output" == *"is incompatible with this launcher (requires >= 26.08.02)"* ]] ||
+  fail "incompatible contributor image diagnostic was not actionable: $incompat_contribute_output"
+! grep -q '^run ' "$mock_podman_log" || fail "packaged contribute ran after image compatibility check failed"
+# Documented contributor alias selects the same packaged launcher override path.
+: >"$mock_podman_log"
+CONTRIBUTE_IMAGE="custom/contribute:alias" FAKE_INSPECT_VERSION="26.08.07" "${repo_root}/bin/bluefin" contribute owner/repo >/dev/null 2>&1 ||
+  fail "CONTRIBUTE_IMAGE alias failed to start"
+grep -qFx "pull custom/contribute:alias" "$mock_podman_log" || fail "contributor alias was not refreshed"
+grep -q '^run .* custom/contribute:alias$' "$mock_podman_log" || fail "contributor alias was not passed to the container"
+
+# Malformed contributor labels must fail before execution as well.
+for malformed_version in 26.08.foo 26.08.06-rc; do
+  : >"$mock_podman_log"
+  set +e
+  malformed_contribute_output="$(FAKE_INSPECT_VERSION="$malformed_version" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)"
+  malformed_contribute_status=$?
+  set -e
+  [[ "$malformed_contribute_status" -ne 0 ]] || fail "packaged contribute accepted malformed image version $malformed_version"
+  [[ "$malformed_contribute_output" == *"malformed version label '$malformed_version'"* ]] ||
+    fail "malformed contributor version diagnostic was not actionable: $malformed_contribute_output"
+  ! grep -q '^run ' "$mock_podman_log" || fail "packaged contribute ran after malformed version check failed"
+done
+# Explicit contributor image override warning
+: >"$mock_podman_log"
+override_contribute_output="$(BLUEFIN_CONTRIBUTE_IMAGE="custom/contribute:old" FAKE_INSPECT_VERSION="26.08.01" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)" ||
+  fail "explicit contributor image override failed to start"
+[[ "$override_contribute_output" == *"older than recommended minimum (26.08.02); proceeding with explicit override"* ]] ||
+  fail "explicit contributor override warning missing: $override_contribute_output"
+grep -q '^run ' "$mock_podman_log" || fail "explicit contributor override did not launch container"
+
+# Legacy contribute state migration from v26.08.05
+legacy_contribute_dir="$scratch/home/.local/state/bluefin-contribute"
+mkdir -p "$legacy_contribute_dir/.config/contribute"
+touch "$legacy_contribute_dir/bluefin-contribute.sif" "$legacy_contribute_dir/contribute_session.json" "$legacy_contribute_dir/.config/contribute/config.env"
+chmod +x "$legacy_contribute_dir/bluefin-contribute.sif"
+migrate_contribute_output="$(HOME="$scratch/home" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)" ||
+  fail "contribute with legacy cache failed"
+[[ "$migrate_contribute_output" == *"migrated user configuration from"* ]] ||
+  fail "legacy contribute migration notice was not reported: $migrate_contribute_output"
+contribute_instance_home="$(find "$scratch/home/.local/state/bluefin/instances" -type d -path "*contribute-owner-repo-[0-9a-f]*/home" | head -1)"
+[[ -f "$contribute_instance_home/contribute_session.json" ]] || fail "contribute user session was not migrated to instance home"
+[[ -f "$contribute_instance_home/.config/contribute/config.env" ]] || fail "nested contribute configuration was not migrated"
+[[ ! -e "$contribute_instance_home/bluefin-contribute.sif" ]] || fail "legacy contribute SIF was copied into instance home"
+[[ -d "$legacy_contribute_dir" ]] || fail "legacy contribute state directory was broadly deleted"
+
 mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
 fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 OPENAI_API_KEY=test-provider-token "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)" || fail "contributor Apptainer fallback lost credentials"
 [[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "contributor fallback warning is missing"
+[[ "$fallback_output" == *"✓ bluefin launcher revision:"* ]] || fail "contributor fallback missing launcher revision: $fallback_output"
+[[ "$fallback_output" == *"! contributor image identity unavailable for ghcr.io/projectbluefin/contribute:stable."* ]] || fail "contributor fallback missing identity report without registry probe: $fallback_output"
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "contributor fallback did not use Apptainer containment"
 [[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/contribute:stable"* ]] || fail "contributor fallback used the wrong image"
