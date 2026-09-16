@@ -1,0 +1,78 @@
+---
+name: luna-factory
+version: "0.1"
+last_updated: 2026-09-15
+id: luna-factory
+one_line_purpose: Keep the Luna Factory protocol's mechanical decisions in tested extension code.
+entry_point: docs/skills/luna-factory.md
+category: ci-ops
+mcp_compliance_level: partial
+optimization_status: draft
+status: active
+dependencies: [review-dashboard, contribution-culture]
+tags: [omp, extension, factory, evidence, admission]
+description: "Maintains the opt-in Luna Factory extension in image/extension/luna-factory/. Use when editing admission, evidence reconciliation, convergence, or repair lineage."
+metadata:
+  type: runbook
+  context7-sources: []
+---
+
+# Luna Factory Extension
+
+`image/extension/luna-factory/` is an opt-in OMP extension that ships beside the
+Review workbench. It keeps the Luna Factory protocol and moves the mechanically
+checkable parts of it — admission, task state, evidence binding, repair lineage,
+completion — out of conversational memory and into tested code.
+
+It is not a second runtime. It adds no database, daemon, scheduler, or worker
+store, and it does not own execution: OMP does.
+
+## When to Use
+
+Use this skill for the reducer, admission rule, evidence reconciliation,
+convergence verdict, journal, capability table, or the extension's tool surface.
+
+## When NOT to Use
+
+Use `review-dashboard.md` for the Review workbench, `launcher.md` for container
+launch mechanics, and `contribution-culture.md` for scoping the change itself.
+
+## Core Process
+
+1. Decide which layer the change belongs to. `core/` is pure and must stay
+   host-free: no terminal, no clock, no model. `omp/` is the host and capability
+   boundary. `ui/` only projects the ledger.
+2. Change the rule, then drive it from `tests/luna_factory.test.ts`. The suite
+   drives the pure core directly, so a new rule needs no TUI to be exercised.
+3. Keep the capability table honest. A path that cannot be probed against the
+   packaged OMP is `unsupported`, and the adapter must refuse it rather than
+   route through it.
+
+## Invariants
+
+- A returned worker moves to VERIFY. Only `finish_task` against a receipt that
+  reconciles as proven at the current subject reaches DONE.
+- Integration moves the certified subject, which demotes proof taken against the
+  old head. Proof freshness is not optional.
+- Identity is stamped by the adapter from the ledger. A receipt naming another
+  task, attempt, generation, or subject is contradicted, not merely weak.
+- Artifact references outside the run's roots are rejected, never followed.
+- CONVERGED means mandatory acceptance has current valid proof. QUIESCENT means
+  no authorized autonomous progress remains and may be unconverged. An empty
+  queue, an exhausted budget, and a returned worker imply neither.
+- Completion creates no merge, publish, or deploy authority.
+- Loading the extension starts nothing. Execution requires
+  `LUNA_FACTORY_ENABLED=1`, and Factory never infers an admission from a Hive
+  rank or a visible queue row.
+
+## Verification
+
+```bash
+bash tests/omp-review-mode.sh
+bash tests/appliance-contract.sh
+bash tests/test-registry.sh
+git diff --check
+```
+
+`tests/luna_factory.test.ts` runs under `tests/omp-review-mode.sh` with the rest
+of the extension contracts, so a new suite is registered by naming it there.

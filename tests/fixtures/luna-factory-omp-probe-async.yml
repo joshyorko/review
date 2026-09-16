@@ -1,0 +1,4 @@
+# Overlay for the executable M0 async lifecycle probes. The base probe config
+# keeps the root route synchronous; these routes need OMP's native job manager.
+async:
+  enabled: true

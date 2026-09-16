@@ -511,7 +511,7 @@ assert_omp_review() {
 
   # omp --profile review --extension <path> [FLAGS...]
   local passed_flags
-  passed_flags="$(echo "$omp_call" | sed -E 's/^--profile review --extension [^ ]+ ?//' | xargs)"
+  passed_flags="$(echo "$omp_call" | sed -E 's/^--profile review (--extension [^ ]+ )+//' | xargs)"
 
   assert_eq "$passed_flags" "$expected_flags" "bin/omp-review $input flags"
   if [[ "$passed_flags" == *"projectbluefin/review"* && "$passed_flags" != *"--repo projectbluefin/review"* ]]; then
