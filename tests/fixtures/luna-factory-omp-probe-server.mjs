@@ -425,8 +425,61 @@ function responseForLegitimateDefect(body) {
 	return textCompletion("legitimate-defect route repaired the explicit defect; post-success cleanup stayed dismissed");
 }
 
+function responseForIsolatedWrite(body) {
+	const previous = lastTool(body) ?? lastAssistantTool(body);
+	const attempts = toolCallCount(body, "luna_factory_attempt");
+	const dispatches = toolCallCount(body, "luna_factory_dispatch");
+	const tasks = toolCallCount(body, "task");
+	const receipts = toolCallCount(body, "luna_factory_receipt");
+	const integrations = toolCallCount(body, "luna_factory_integrate");
+	if (previous === undefined) {
+		return functionCall("luna_factory_open", {
+			input: JSON.stringify({
+				objective: "probe an isolated write without automatic application",
+				criteria: [{ id: "A1", statement: "the isolated write is independently verified" }],
+				repo: "example/repo",
+				base: "a".repeat(40),
+				options: { permittedEffects: ["read", "write"], finishAuthority: "report the verified write only" },
+			}),
+		});
+	}
+	if (previous === "luna_factory_open") {
+		return functionCall("luna_factory_candidate", {
+			input: JSON.stringify({ taskId: "T1", generation: "G1", criterionId: "A1", title: "isolated write probe", deps: [], effect: "write", owner: "luna", necessity: "A1 is unproven" }),
+		});
+	}
+	if (previous === "luna_factory_candidate") {
+		return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
+	}
+	if (previous === "luna_factory_attempt" && attempts === 1) {
+		return functionCall("luna_factory_dispatch", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
+	}
+	if (previous === "luna_factory_dispatch" && dispatches === 1) {
+		return functionCall("task", {
+			agent: "task",
+			isolated: true,
+			task: "Make no external change; inspect the isolated workspace and report the write probe. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1",
+		});
+	}
+	if (previous === "task" && tasks === 1) {
+		return functionCall("luna_factory_receipt", { input: JSON.stringify(probeReceipt("T1", "T1-a1", "A1")) });
+	}
+	if (previous === "luna_factory_receipt" && receipts === 1) {
+		return functionCall("luna_factory_integrate", {
+			input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1", subject: { repo: "example/repo", base: "a".repeat(40), head: "b".repeat(40) } }),
+		});
+	}
+	if (previous === "luna_factory_integrate" && integrations === 1) {
+		return functionCall("luna_factory_completion", { input: JSON.stringify({}) });
+	}
+	return textCompletion("isolated-write route recorded a worker receipt, integrated only by explicit owner event, and left verification pending at the moved subject");
+}
+
 function responseFor(body) {
 	if (!isFactoryRoot(body)) {
+		if (route === "isolated-write" && toolNames(body).includes("write") && lastTool(body) !== "write" && lastAssistantTool(body) !== "write") {
+			return functionCall("write", { path: "tmp/luna-factory-isolation-probe.txt", content: "isolated Factory write probe\n" });
+		}
 		if (toolNames(body).includes("yield")) {
 			return functionCall("yield", { data: { result: "deterministic worker completed", route } });
 		}
@@ -436,6 +489,7 @@ function responseFor(body) {
 	if (route === "dependency-join") return responseForDependencyJoin(body);
 	if (route === "plateau-replan") return responseForPlateauReplan(body);
 	if (route === "legitimate-defect") return responseForLegitimateDefect(body);
+	if (route === "isolated-write") return responseForIsolatedWrite(body);
 	const previous = lastTool(body) ?? lastAssistantTool(body);
 	const base = "a".repeat(40);
 	if (previous === undefined) {

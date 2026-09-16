@@ -98,6 +98,7 @@ export function buildDispatchPrompt(
 		`generation ${ledger.generation} · revision ${ledger.revision} · subject ${subject.repo}@${subject.head ?? subject.base}`,
 		`criterion ${task.criterionId}${criterion ? `: ${criterion.statement}` : ""} (unproven)`,
 		`permitted effect: ${task.effect}`,
+		...(task.effect === "write" ? ["write dispatch requirement: call native task with isolated:true; auto-apply is disabled by the appliance and owner integration remains explicit"] : []),
 		`finish authority: ${ledger.goal.finishAuthority}`,
 		`non-goals: ${ledger.goal.nonGoals.length > 0 ? ledger.goal.nonGoals.join("; ") : "none recorded"}`,
 		`run status: ${verdict.control} · ${verdict.provenMandatory}/${verdict.totalMandatory} mandatory criteria proven`,

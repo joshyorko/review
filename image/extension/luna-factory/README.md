@@ -109,6 +109,11 @@ lifecycle concern. An observation-only async abort/reconcile route then used
 OMP `hub` job cancellation, reconciled the attempt as abandoned, resumed the
 Factory run, and opened a new retry lineage; cancellation remains unsupported
 as a Factory-enforced seam and no receipt was fabricated for the retried work.
+An appliance-configured isolated-write route was also run with a real child
+`write` call: the child wrote a probe file in its isolated workspace, returned
+to VERIFY, and the owner explicitly integrated a moved subject. Completion
+remained unproven after that subject move, so no automatic apply or success was
+claimed.
 
 The reproducible fixture is
 `tests/fixtures/luna-factory-omp-probe-server.mjs`, with the install and probe

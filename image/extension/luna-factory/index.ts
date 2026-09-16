@@ -247,6 +247,9 @@ function nativeTaskBindings(params: Record<string, unknown>, current: Ledger): {
 		const task = findTask(current, taskId as TaskId);
 		const attempt = task?.attempts.find((candidate) => candidate.id === attemptId);
 		if (task === undefined || attempt === undefined) return { ok: false, error: `native task item ${index + 1} names an unknown Factory task or attempt` };
+		if (task.effect === "write" && rawItem.isolated !== true) {
+			return { ok: false, error: `native task item ${index + 1} is a write task and requires isolated:true before delegation` };
+		}
 		if (current.control !== "active") return { ok: false, error: `run is ${current.control}; native task admission is closed` };
 		if (task.state !== "RUNNING" || task.decision !== "ADMIT" || attempt.state !== "started") {
 			return { ok: false, error: `native task item ${index + 1} is not bound to an admitted running attempt` };

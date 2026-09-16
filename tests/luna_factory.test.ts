@@ -1136,6 +1136,45 @@ test("the native task seam validates and correlates an independent batch without
 	assert.equal(calls, 1, "a partially invalid batch never reaches native OMP");
 });
 
+test("a write task must request native isolation before delegation", async () => {
+	let nativeCalls = 0;
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "apply the authorized isolated fix",
+		criteria: [{ id: "A1", statement: "the isolated fix is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+		options: { permittedEffects: ["read", "write"] },
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "apply the isolated fix",
+		deps: [],
+		effect: "write",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const task = host.tools.get("task");
+	assert.ok(task);
+	const marker = dispatchMarker("T1", "T1-a1", "G1");
+	const invoke = async () => {
+		nativeCalls += 1;
+		return { content: [{ type: "text", text: "isolated native task completed" }], details: { async: { state: "completed", jobId: "write-job-1", type: "task" }, results: [{ id: "write-agent-1" }] } };
+	};
+	const refused = await task.execute("call", { agent: "task", task: `write work\n${marker}` }, undefined, undefined, { invokeTool: invoke } as never);
+	assert.equal(refused.isError, true);
+	assert.match(refused.content[0]!.text, /requires isolated:true/);
+	assert.equal(nativeCalls, 0);
+	const accepted = await task.execute("call", { agent: "task", isolated: true, task: `write work\n${marker}` }, undefined, undefined, { invokeTool: invoke } as never);
+	assert.equal(accepted.isError, undefined);
+	assert.equal(nativeCalls, 1);
+});
+
 test("status works while idle and reports the enforced boundary", async () => {
 	const host = fakeHost();
 	createLunaFactoryExtension(host as never, { env: {}, artifactRoots: ROOTS });
