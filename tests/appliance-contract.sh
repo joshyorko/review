@@ -97,7 +97,13 @@ require "$containerfile" \
   'COPY image/appliance/config.yml /out/usr/share/bluefin/review/appliance-config.yml' \
   'io.projectbluefin.review.appliance="true"' \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
-  'org.opencontainers.image.revision="${REVIEW_REVISION}"'
+  'org.opencontainers.image.revision="${REVIEW_REVISION}"' \
+  'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory'
+# shellcheck disable=SC2016 # Literal launcher text, not shell expansion.
+require image/appliance/entrypoint.sh \
+  'extension_args=(--extension /usr/share/bluefin/review/extension)' \
+  'extension_args+=(--extension /usr/share/bluefin/review/luna-factory)' \
+  '"${extension_args[@]}"'
 grep -qE '^ARG AUDIO_BUILDER_IMAGE=registry\.fedoraproject\.org/fedora-minimal:[^@[:space:]]+@sha256:[0-9a-f]{64}$' "$containerfile" ||
   fail "AUDIO_BUILDER_IMAGE must be pinned as tag@sha256 digest"
 # shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.

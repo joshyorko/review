@@ -38,6 +38,7 @@ const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 /** Git object names only: a branch or tag name is not a subject. */
 const REVISION_RE = /^[0-9a-f]{7,64}$/;
 const HTTP_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const FACTORY_ARTIFACT_URI_RE = /^artifact:\/\//;
 
 function identity(value: unknown, field: string, errors: string[]): string | undefined {
 	if (typeof value !== "string") {
@@ -289,7 +290,7 @@ export function artifactRefError(reference: string, roots: readonly string[]): s
 		const normalized = root.endsWith("/") ? root.slice(0, -1) : root;
 		return absolute ? reference === normalized || reference.startsWith(`${normalized}/`) : reference === normalized || reference.startsWith(`${normalized}/`);
 	});
-	if (HTTP_URL_RE.test(reference) && !inRoot) return "remote artifact references are not followed as evidence";
+	if (HTTP_URL_RE.test(reference) && !FACTORY_ARTIFACT_URI_RE.test(reference)) return "remote artifact references are not followed as evidence";
 	if (inRoot) return undefined;
 	return `artifact reference is outside the run's artifact roots (${roots.join(", ")})`;
 }
