@@ -106,6 +106,7 @@ test("Renovate follows OMP releases and both image publishers validate the pin s
 	const renovateWorkflow = await readFile(".github/workflows/renovate.yml", "utf8");
 	assert.match(renovateWorkflow, /cron: '17 \* \* \* \*'/);
 	assert.match(renovateWorkflow, /RENOVATE_ALLOWED_COMMANDS:.*update-omp-pins/);
+	assert.match(renovateWorkflow, /RENOVATE_REPOSITORIES: \$\{\{ github\.repository \}\}/);
 	for (const path of [".github/workflows/publish-appliance.yml", ".github/workflows/publish-contribute.yml"]) {
 		const workflow = await readFile(path, "utf8");
 		assert.match(workflow, /push:\n    branches:\n      - main/);
