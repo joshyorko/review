@@ -105,7 +105,6 @@ export class ReviewMode {
 	private env: NodeJS.ProcessEnv;
 	private inflight?: AbortController;
 	private ranked: PrioritizedQueue = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
-	private excludedKeys = new Set<string>();
 	skipRepos: Set<string>;
 
 	constructor(options: ReviewModeOptions) {
@@ -147,21 +146,6 @@ export class ReviewMode {
 		this.ranked = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
 		this.queueError = undefined;
 		this.queueTruncated = false;
-	}
-
-
-	private excludeUnsupportedPullRequests(items: readonly QueueItem[]): QueueItem[] {
-		if (this.queueMode !== "prs") return [...items];
-		const supported: QueueItem[] = [];
-		for (const item of items) {
-			const unsafeForLanding = (item.workflowFiles?.length ?? 0) > 0 || item.changedFilesComplete === false;
-			if (unsafeForLanding && !isRepairRequested(item, this.currentUserLogin)) {
-				this.excludedKeys.add(itemKey(item));
-				continue;
-			}
-			supported.push(item);
-		}
-		return supported;
 	}
 
 	/** Why this item sits where it sits. */
@@ -489,7 +473,6 @@ export class ReviewMode {
 		this.inflight?.abort();
 		const controller = new AbortController();
 		this.inflight = controller;
-		this.excludedKeys.clear();
 		this.loading = true;
 
 		try {
@@ -522,7 +505,7 @@ export class ReviewMode {
 			this.fetchedAt = result.fetchedAt;
 			if (result.viewerLogin) this.currentUserLogin = result.viewerLogin;
 			const previousKey = this.selectedKey();
-			this.items = this.excludeUnsupportedPullRequests([...result.items, ...missing]);
+			this.items = [...result.items, ...missing];
 			this.reprioritize();
 			if (previousKey) {
 				const index = this.visibleItems().findIndex((item) => itemKey(item) === previousKey);
@@ -547,12 +530,12 @@ export class ReviewMode {
 		const keys = new Set<string>();
 		for (const item of this.hive.items) {
 			if (this.queueMode === "issues") {
-				if (!GITHUB_PULL_URL.test(item.url) && this.inScope(item.key) && !this.excludedKeys.has(item.key)) keys.add(item.key);
+				if (!GITHUB_PULL_URL.test(item.url) && this.inScope(item.key)) keys.add(item.key);
 				continue;
 			}
 
 			const key = pullRequestKey(item);
-			if (key && this.inScope(key) && !this.excludedKeys.has(key)) keys.add(key);
+			if (key && this.inScope(key)) keys.add(key);
 		}
 		return [...keys];
 	}
@@ -586,7 +569,7 @@ export class ReviewMode {
 	hiveCoverage(): { present: number; total: number } {
 		const expected = new Set(this.hiveKeysForMode());
 		for (const item of this.items) {
-			if (this.priorityFor(item)?.source === "hive" && !this.excludedKeys.has(itemKey(item))) expected.add(itemKey(item));
+			if (this.priorityFor(item)?.source === "hive") expected.add(itemKey(item));
 		}
 		return { present: this.hiveRankedCount(), total: expected.size };
 	}

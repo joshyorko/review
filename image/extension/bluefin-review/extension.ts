@@ -425,6 +425,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (kind === "slay" && !allPullRequests && !allIssues) return "Slay waves must not mix pull requests and issues";
 
 		if (kind === "slay" && allPullRequests) {
+			for (const item of items) {
+				const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+				if (!wasRepair) {
+					if ((item.workflowFiles?.length ?? 0) > 0) {
+						return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
+					}
+					if (item.changedFilesComplete === false) {
+						return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+					}
+				}
+			}
 			const live = await fetchItemsByKey(
 				items.map((item) => `${item.repo}#${item.id}`),
 				"prs",
@@ -444,6 +455,22 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				}
 			}
 			return undefined;
+		}
+
+		if (kind === "fix") {
+			for (const item of items) {
+				if (item.type === "pr") {
+					const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+					if (!wasRepair) {
+						if ((item.workflowFiles?.length ?? 0) > 0) {
+							return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
+						}
+						if (item.changedFilesComplete === false) {
+							return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+						}
+					}
+				}
+			}
 		}
 
 		if (kind === "slay" && allIssues) {
@@ -587,6 +614,30 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		await dispatchCurrentWave(ctx, undefined, true);
 	};
 
+	const filterUnsupportedSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
+		const eligible: QueueItem[] = [];
+		for (const item of items) {
+			if (item.type !== "pr") {
+				eligible.push(item);
+				continue;
+			}
+			if (isRepairRequested(item, mode.currentUserLogin)) {
+				eligible.push(item);
+				continue;
+			}
+			if ((item.workflowFiles?.length ?? 0) > 0) {
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`, "warning");
+				continue;
+			}
+			if (item.changedFilesComplete === false) {
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: complete changed-file list unavailable`, "warning");
+				continue;
+			}
+			eligible.push(item);
+		}
+		return eligible;
+	};
+
 	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
@@ -607,7 +658,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify("No queue items available to slay", "warning");
 			return;
 		}
-		const items = filterCompletedIssueSlayItems(ctx, candidates);
+		const supported = filterUnsupportedSlayItems(ctx, candidates);
+		if (supported.length === 0) return;
+		const items = filterCompletedIssueSlayItems(ctx, supported);
 		if (items.length === 0) return;
 		await startRepositoryBatch(ctx, "slay", items);
 	};
@@ -766,10 +819,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		if (action.kind === "slay") {
 			activeCtx = ctx;
-			await startRepositoryBatch(ctx, "slay", capturedItems);
+			await startSlay(ctx, capturedItems);
 			return;
 		}
-		if (action.kind === "fix" || action.kind === "diff") {
+		if (action.kind === "fix") {
+			activeCtx = ctx;
+			const supported = filterUnsupportedSlayItems(ctx, capturedItems);
+			if (supported.length === 0) return;
+			await startRepositoryBatch(ctx, action.kind, supported);
+			return;
+		}
+		if (action.kind === "diff") {
 			activeCtx = ctx;
 			await startRepositoryBatch(ctx, action.kind, capturedItems);
 		}
