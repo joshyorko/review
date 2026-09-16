@@ -370,6 +370,8 @@ test("artifact references outside the run's roots are rejected, not followed", (
 	assert.match(artifactRefError("/tmp/log", ROOTS) ?? "", /outside the run's artifact roots/);
 	assert.equal(artifactRefError("/artifacts/run.log", ROOTS), undefined);
 	assert.equal(artifactRefError("/artifacts", ROOTS), undefined);
+	assert.equal(artifactRefError("artifact://run.log", ["artifact://"]), undefined);
+	assert.match(artifactRefError("artifact://../outside.log", ["artifact://"]) ?? "", /escapes its artifact root/);
 	assert.equal(changedPathError("src/x.ts"), undefined);
 	assert.match(changedPathError("../outside.ts") ?? "", /escapes the repository root/);
 	assert.match(changedPathError("/etc/passwd") ?? "", /repository-relative/);

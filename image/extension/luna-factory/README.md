@@ -84,10 +84,12 @@ returned native result identity in the Factory journal. Additional executable
 routes exercised JavaScript and Python `eval` `tool.task(...)` with the same
 positive identity correlation and a negative unbound-call refusal. Direct
 `eval.agent(...)`, `workpool().push(...)`, and hub list/send/cancel were also
-run and remain unsupported for Factory admission/correlation. The async native
-route recorded an OMP job identity; its synchronous route recorded a native
-result identity. No receipt was fabricated: the Factory run remained active
-with the worker result unverified.
+run and remain unsupported for Factory admission/correlation. A context-required
+native batch correlated two result identities, and a separate dependency-join
+route drove two receipts through VERIFY to DONE and a converged settlement. The
+async native route recorded an OMP job identity; native cancellation remains
+unsupported through the public extension context. The basic worker probe did
+not fabricate a receipt: it remained active with the worker result unverified.
 
 The reproducible fixture is
 `tests/fixtures/luna-factory-omp-probe-server.mjs`, with the install and probe

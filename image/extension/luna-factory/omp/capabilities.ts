@@ -45,7 +45,7 @@ export const DISPATCH_COVERAGE: readonly DispatchCoverage[] = [
 		status: "enforced",
 		seam: "same-name OMP task wrapper plus ctx.invokeTool delegation",
 		reason:
-			"The wrapper refuses an unbound task and delegates only a ledger-stamped, RUNNING attempt through OMP's native task. Executed against omp/18.1.22 (source 23a5b9ae38864d3f785dc6cbc96eb6d674a1d32d; binary SHA-256 9ccddf1091e01e08fea1f8e1208f8901cc90d5d098b16581672eeab03f118b81) with the local deterministic provider; the journal correlated the returned native result identity. Background job IDs and cancellation were not exercised by the synchronous probe.",
+			"The wrapper refuses an unbound task and delegates only a ledger-stamped, RUNNING attempt through OMP's native task. Executed against omp/18.1.22 (source 23a5b9ae38864d3f785dc6cbc96eb6d674a1d32d; binary SHA-256 9ccddf1091e01e08fea1f8e1208f8901cc90d5d098b16581672eeab03f118b81) with the local deterministic provider: flat and context-required batched calls correlated native result identities, and the async overlay recorded a native job identity. Native cancellation remains unsupported through the public extension context.",
 	},
 	{
 		path: "eval.tool-task",

@@ -45,6 +45,20 @@ function lastAssistantTool(body) {
 	return undefined;
 }
 
+function assistantTools(body) {
+	const messages = Array.isArray(body.messages) ? body.messages : [];
+	return messages.flatMap((message) => {
+		if (message?.role !== "assistant" || !Array.isArray(message.tool_calls)) return [];
+		return message.tool_calls
+			.map((call) => call?.function?.name)
+			.filter((name) => typeof name === "string");
+	});
+}
+
+function toolCallCount(body, name) {
+	return assistantTools(body).filter((candidate) => candidate === name).length;
+}
+
 function lastToolResultSummary(body) {
 	const messages = Array.isArray(body.messages) ? body.messages : [];
 	const message = [...messages].reverse().find((candidate) => candidate?.role === "tool");
@@ -114,6 +128,144 @@ function textCompletion(text) {
 	};
 }
 
+function probeReceipt(taskId, attemptId, criterionId) {
+	return {
+		version: 1,
+		taskId,
+		attemptId,
+		generation: "G1",
+		subject: { repo: "example/repo", base: "a".repeat(40) },
+		result: `${criterionId} was verified by the deterministic packaged probe`,
+		changed: ["src/probe.ts"],
+		evidence: [`artifact://${taskId}.log`],
+		tests: [{ command: `probe ${taskId}`, outcome: "pass", artifact: `artifact://${taskId}-test.log` }],
+		cleanEnvironment: true,
+		unresolved: [],
+		next: "none",
+		confidence: "high",
+		routing: { requested: "local-probe/deterministic", effective: "local-probe/deterministic", verified: false },
+		exitCode: 0,
+		aborted: false,
+		truncated: false,
+	};
+}
+
+function responseForNativeBatch(body) {
+	const previous = lastTool(body) ?? lastAssistantTool(body);
+	const candidates = toolCallCount(body, "luna_factory_candidate");
+	const attempts = toolCallCount(body, "luna_factory_attempt");
+	const dispatches = toolCallCount(body, "luna_factory_dispatch");
+	if (previous === undefined) {
+		return functionCall("luna_factory_open", {
+			input: JSON.stringify({
+				objective: "probe native task batching",
+				criteria: [
+					{ id: "A1", statement: "first native branch is exercised" },
+					{ id: "A2", statement: "second native branch is exercised" },
+				],
+				repo: "example/repo",
+				base: "a".repeat(40),
+			}),
+		});
+	}
+	if (previous === "luna_factory_open") {
+		return functionCall("luna_factory_candidate", {
+			input: JSON.stringify({ taskId: "T1", generation: "G1", criterionId: "A1", title: "first native branch", deps: [], effect: "read", owner: "luna", necessity: "A1 is unproven" }),
+		});
+	}
+	if (previous === "luna_factory_candidate" && candidates === 1) {
+		return functionCall("luna_factory_candidate", {
+			input: JSON.stringify({ taskId: "T2", generation: "G1", criterionId: "A2", title: "second native branch", deps: [], effect: "read", owner: "luna", necessity: "A2 is unproven" }),
+		});
+	}
+	if (previous === "luna_factory_candidate") {
+		return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
+	}
+	if (previous === "luna_factory_attempt" && attempts === 1) {
+		return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T2", attemptId: "T2-a1" }) });
+	}
+	if (previous === "luna_factory_attempt") {
+		return functionCall("luna_factory_dispatch", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
+	}
+	if (previous === "luna_factory_dispatch" && dispatches === 1) {
+		return functionCall("luna_factory_dispatch", { input: JSON.stringify({ taskId: "T2", attemptId: "T2-a1" }) });
+	}
+	if (previous === "luna_factory_dispatch") {
+		return functionCall("task", {
+			context: "Both items are read-only branches of the same admitted Luna Factory probe.",
+			tasks: [
+				{ agent: "task", task: "First batched read. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1" },
+				{ agent: "task", task: "Second batched read. LUNA_FACTORY_DISPATCH task=T2 attempt=T2-a1 generation=G1" },
+			],
+		});
+	}
+	return textCompletion("native-batch route completed; both workers returned and remain VERIFY until receipts are reconciled");
+}
+
+function responseForDependencyJoin(body) {
+	const previous = lastTool(body) ?? lastAssistantTool(body);
+	const candidates = toolCallCount(body, "luna_factory_candidate");
+	const attempts = toolCallCount(body, "luna_factory_attempt");
+	const dispatches = toolCallCount(body, "luna_factory_dispatch");
+	const tasks = toolCallCount(body, "task");
+	const receipts = toolCallCount(body, "luna_factory_receipt");
+	const finishes = toolCallCount(body, "luna_factory_finish");
+	if (previous === undefined) {
+		return functionCall("luna_factory_open", {
+			input: JSON.stringify({
+				objective: "prove the dependency join in the packaged Factory",
+				criteria: [
+					{ id: "A1", statement: "the first dependency is proven" },
+					{ id: "A2", statement: "the dependent join is proven" },
+				],
+				repo: "example/repo",
+				base: "a".repeat(40),
+			}),
+		});
+	}
+	if (previous === "luna_factory_open") {
+		return functionCall("luna_factory_candidate", {
+			input: JSON.stringify({ taskId: "T1", generation: "G1", criterionId: "A1", title: "prove dependency", deps: [], effect: "read", owner: "luna", necessity: "A1 is unproven" }),
+		});
+	}
+	if (previous === "luna_factory_candidate" && candidates === 1) {
+		return functionCall("luna_factory_candidate", {
+			input: JSON.stringify({ taskId: "T2", generation: "G1", criterionId: "A2", title: "prove dependent join", deps: ["T1"], effect: "read", owner: "luna", necessity: "A2 waits for T1" }),
+		});
+	}
+	if (previous === "luna_factory_candidate" && candidates === 2) {
+		return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
+	}
+	if (previous === "luna_factory_attempt" && attempts === 1) {
+		return functionCall("luna_factory_dispatch", { input: JSON.stringify({ taskId: "T1", attemptId: "T1-a1" }) });
+	}
+	if (previous === "luna_factory_dispatch" && dispatches === 1) {
+		return functionCall("task", { agent: "task", task: "Dependency read. LUNA_FACTORY_DISPATCH task=T1 attempt=T1-a1 generation=G1" });
+	}
+	if (previous === "task" && tasks === 1) {
+		return functionCall("luna_factory_receipt", { input: JSON.stringify(probeReceipt("T1", "T1-a1", "A1")) });
+	}
+	if (previous === "luna_factory_receipt" && receipts === 1) {
+		return functionCall("luna_factory_finish", { input: JSON.stringify({ taskId: "T1", criterionId: "A1" }) });
+	}
+	if (previous === "luna_factory_finish" && finishes === 1) {
+		return functionCall("luna_factory_attempt", { input: JSON.stringify({ taskId: "T2", attemptId: "T2-a1" }) });
+	}
+	if (previous === "luna_factory_attempt") {
+		return functionCall("luna_factory_dispatch", { input: JSON.stringify({ taskId: "T2", attemptId: "T2-a1" }) });
+	}
+	if (previous === "luna_factory_dispatch") {
+		return functionCall("task", { agent: "task", task: "Dependent read. LUNA_FACTORY_DISPATCH task=T2 attempt=T2-a1 generation=G1" });
+	}
+	if (previous === "task" && tasks === 2) {
+		return functionCall("luna_factory_receipt", { input: JSON.stringify(probeReceipt("T2", "T2-a1", "A2")) });
+	}
+	if (previous === "luna_factory_receipt") {
+		return functionCall("luna_factory_finish", { input: JSON.stringify({ taskId: "T2", criterionId: "A2" }) });
+	}
+	return textCompletion("dependency-join route converged with current receipts and no successor work");
+}
+
 function responseFor(body) {
 	if (!isFactoryRoot(body)) {
 		if (toolNames(body).includes("yield")) {
@@ -121,6 +273,8 @@ function responseFor(body) {
 		}
 		return textCompletion("worker result from the exact packaged OMP probe");
 	}
+	if (route === "native-batch") return responseForNativeBatch(body);
+	if (route === "dependency-join") return responseForDependencyJoin(body);
 	const previous = lastTool(body) ?? lastAssistantTool(body);
 	const base = "a".repeat(40);
 	if (previous === undefined) {

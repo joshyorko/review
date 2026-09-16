@@ -280,18 +280,17 @@ export function parseCandidate(value: unknown): ParseResult<Candidate> {
  * traversal out of the artifact roots is rejected rather than followed.
  */
 export function artifactRefError(reference: string, roots: readonly string[]): string | undefined {
-	if (HTTP_URL_RE.test(reference)) return "remote artifact references are not followed as evidence";
 	if (reference.startsWith("~")) return "artifact reference must not depend on a home-directory expansion";
 	if (reference.includes("\u0000")) return "artifact reference contains a NUL byte";
 	if (reference.split("/").includes("..")) return "artifact reference escapes its artifact root";
 	const absolute = reference.startsWith("/");
 	if (roots.length === 0) return "no artifact root is configured for this run";
-	for (const root of roots) {
+	const inRoot = roots.some((root) => {
 		const normalized = root.endsWith("/") ? root.slice(0, -1) : root;
-		if (absolute ? reference === normalized || reference.startsWith(`${normalized}/`) : reference.startsWith(`${normalized}/`)) {
-			return undefined;
-		}
-	}
+		return absolute ? reference === normalized || reference.startsWith(`${normalized}/`) : reference === normalized || reference.startsWith(`${normalized}/`);
+	});
+	if (HTTP_URL_RE.test(reference) && !inRoot) return "remote artifact references are not followed as evidence";
+	if (inRoot) return undefined;
 	return `artifact reference is outside the run's artifact roots (${roots.join(", ")})`;
 }
 
