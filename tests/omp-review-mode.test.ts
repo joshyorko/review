@@ -17,7 +17,7 @@ import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/exten
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
 import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression } from "../image/extension/bluefin-review/github.ts";
+import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
@@ -556,6 +556,83 @@ test("check suites surface failures and pending runs without rollup contexts", a
 	};
 	const result = await fetchQueue("prs", { token: "t", fetchImpl });
 	assert.deepEqual(result.items.map((item) => item.ciStatus), ["failure", "pending", "success"]);
+});
+
+test("successful statusCheckRollup takes precedence over unrelated queued check suites (#592)", async () => {
+	const fetchImpl = async (_url, init) => {
+		const node = (number, statusCheckRollup, checkSuites) => ({
+			number,
+			title: `suite ${number}`,
+			url: `https://github.com/projectbluefin/review/pull/${number}`,
+			updatedAt: new Date(NOW).toISOString(),
+			repository: { nameWithOwner: "projectbluefin/review" },
+			commits: { nodes: [{ commit: { statusCheckRollup, checkSuites } }] },
+		});
+		return {
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({
+				data: {
+					search: {
+						pageInfo: { hasNextPage: false, endCursor: null },
+						nodes: [
+							node(
+								1,
+								{ state: "SUCCESS" },
+								{
+									pageInfo: { hasNextPage: false },
+									nodes: [
+										{ app: { name: "Azure Boards" }, status: "QUEUED", conclusion: null },
+										{ app: { name: "Veracode Workflow App" }, status: "QUEUED", conclusion: null },
+									],
+								},
+							),
+						],
+					},
+				},
+			}),
+		};
+	};
+	const result = await fetchQueue("prs", { token: "t", fetchImpl });
+	assert.equal(result.items[0].ciStatus, "success");
+});
+
+test("toCiStatus prioritizes decisive rollup and falls back to check suites (#592)", () => {
+	// Rollup precedence over check suites
+	const queuedSuites = {
+		pageInfo: { hasNextPage: false },
+		nodes: [
+			{ status: "QUEUED", conclusion: null },
+			{ status: "QUEUED", conclusion: null },
+		],
+	};
+	assert.equal(toCiStatus("SUCCESS", queuedSuites), "success");
+	assert.equal(toCiStatus("FAILURE", queuedSuites), "failure");
+	assert.equal(toCiStatus("ERROR", queuedSuites), "failure");
+	assert.equal(toCiStatus("PENDING", queuedSuites), "pending");
+
+	// Fallback when rollup is absent or indeterminate
+	assert.equal(toCiStatus(undefined, queuedSuites), "pending");
+	assert.equal(toCiStatus(undefined, { pageInfo: { hasNextPage: true }, nodes: [] }), "pending");
+	assert.equal(toCiStatus(undefined, {
+		pageInfo: { hasNextPage: false },
+		nodes: [{ status: "COMPLETED", conclusion: "FAILURE" }],
+	}), "failure");
+	assert.equal(toCiStatus(undefined, {
+		pageInfo: { hasNextPage: false },
+		nodes: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+	}), "success");
+	assert.equal(toCiStatus(undefined, {
+		pageInfo: { hasNextPage: false },
+		nodes: [
+			{ status: "COMPLETED", conclusion: "SUCCESS" },
+			{ status: "COMPLETED", conclusion: "NEUTRAL" },
+			{ status: "COMPLETED", conclusion: "SKIPPED" },
+		],
+	}), "success");
+	assert.equal(toCiStatus(undefined, null), undefined);
+	assert.equal(toCiStatus(undefined, { pageInfo: { hasNextPage: false }, nodes: [] }), undefined);
 });
 
 test("pull request queue keeps workflow changes and incomplete file lists visible but blocked", async () => {

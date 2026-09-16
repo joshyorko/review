@@ -249,22 +249,26 @@ interface SearchNode {
 	} | null;
 }
 
-function toCiStatus(
+export function toCiStatus(
 	state?: string,
 	checkSuites?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ status?: string; conclusion?: string | null }> } | null,
 ): CiStatus | undefined {
-	const rollup = state?.toUpperCase();
+	const rollup = state?.trim().toUpperCase();
+	if (rollup === "SUCCESS") return "success";
+	if (rollup === "FAILURE" || rollup === "ERROR") return "failure";
+	if (rollup) return "pending";
+
 	const suites = checkSuites?.nodes ?? [];
 	const failedSuite = suites.some((suite) => {
 		if (suite.status?.toUpperCase() !== "COMPLETED") return false;
 		const conclusion = suite.conclusion?.toUpperCase();
 		return conclusion !== undefined && !["SUCCESS", "NEUTRAL", "SKIPPED"].includes(conclusion);
 	});
-	if (failedSuite || rollup === "FAILURE" || rollup === "ERROR") return "failure";
+	if (failedSuite) return "failure";
 	const pendingSuite = checkSuites?.pageInfo?.hasNextPage === true
 		|| suites.some((suite) => suite.status?.toUpperCase() !== "COMPLETED" || !suite.conclusion);
-	if (pendingSuite || (rollup !== undefined && rollup !== "SUCCESS")) return "pending";
-	if (rollup === "SUCCESS" || suites.length > 0) return "success";
+	if (pendingSuite) return "pending";
+	if (suites.length > 0) return "success";
 	return undefined;
 }
 
