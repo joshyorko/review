@@ -113,8 +113,7 @@ native immutable SIF built from the same source. The generated `bluefin`
 wrapper selects the OCI image through Podman/krun when KVM is ready and sets
 the bundled SIF as the Apptainer fallback. An explicit `BLUEFIN_REVIEW_SIF`
 still forces a SIF. The target-specific `/home/bluefin` state boundary remains
-the same on both paths. The SIF contains Headroom's MCP runtime and the OMP
-Linux voice closure.
+the same on both paths. The SIF contains OMP's Linux voice closure.
 
 For Review voice, the packaged launcher binds only a detected
 `$XDG_RUNTIME_DIR/pulse/native` socket and sets the contained `PULSE_SERVER`.

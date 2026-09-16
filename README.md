@@ -67,8 +67,8 @@ git switch self-hosted
 git merge upstream/main
 ```
 
-Review keeps its OMP sessions, provider auth, Headroom state, and MCP
-configuration under its appliance-owned state home. Host `~/.omp` is not
+Review keeps its OMP sessions, provider auth, and MCP configuration under its
+appliance-owned state home. Host `~/.omp` is not
 inherited; set `BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1` only when deliberately
 projecting host OMP configuration, and ensure every referenced command/path
 exists inside the SIF.

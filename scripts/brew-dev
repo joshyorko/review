@@ -63,8 +63,6 @@ labels=json.load(open(sys.argv[1]))['data']['attributes']['labels']
 assert labels['org.opencontainers.image.revision']==sys.argv[2], 'SIF revision differs from checkout'
 PY
     apptainer exec "$work/payload/launcher/bluefin-review.sif" /usr/bin/omp --version
-    apptainer exec "$work/payload/launcher/bluefin-review.sif" /usr/bin/headroom --version
-    apptainer exec "$work/payload/launcher/bluefin-review.sif" /usr/bin/headroom mcp serve --help >/dev/null
     cp -a "$work/source/bin" "$work/payload/launcher/"
     mkdir -p "$work/payload/launcher/scripts"
     cp "$work/source/scripts/parse-review-args.sh" \

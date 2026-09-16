@@ -1,7 +1,7 @@
 ---
 name: image-build
-version: "3.4"
-last_updated: 2026-09-15
+version: "3.5"
+last_updated: 2026-09-16
 id: image-build
 one_line_purpose: Build and pin the OMP review and contributor images.
 entry_point: docs/skills/image-build.md
@@ -82,18 +82,12 @@ contribute image revision files remain separate product revisions.
 [#598](https://github.com/projectbluefin/review/issues/598) owns derived-checksum
 automation for the remaining GH, Node, tmux, and Python lockfile pins.
 
-The review appliance also carries the bounded `headroom-ai[mcp]` runtime from
-its pinned manylinux wheel and exact dependency versions in
-`image/appliance/headroom-requirements.txt`. Its profile config is provisioned
-under the persistent appliance home at first launch, so no host Codex or OMP
-configuration is needed to discover Headroom.
-
 The FSDK builder does not provide Linux audio libraries. The pinned Fedora
 minimal build stage installs only `pulseaudio-libs` and `alsa-lib`, copies
 their resolved shared-library closure plus `/usr/share/alsa`, and contributes
-no package manager to the final image. The appliance contract must execute
-`headroom mcp serve --help` and verify both `libpulse-simple.so.0` and
-`libasound.so.2` resolve in a built image.
+no package manager to the final image. Audio is an OMP runtime dependency and
+remains independent of optional MCP services. The appliance contract verifies
+both `libpulse-simple.so.0` and `libasound.so.2` resolve in a built image.
 
 ## Verification
 
