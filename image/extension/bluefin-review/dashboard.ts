@@ -12,14 +12,14 @@
  */
 
 import { GLYPH, SPINNER_TICK_MS, type Painter, formatDuration, statusIcon, statusRole } from "./glyphs.ts";
-import type { QueueItem, QueueMode } from "./github.ts";
+import type { IssueDetail, QueueItem, QueueMode } from "./github.ts";
 import { type KeyMatcher, canonicalKey, rawKeyMatcher } from "./keys.ts";
 import { BATCH_LIMIT, type ReviewMode, ciGlyph } from "./mode.ts";
 import { type RailKey, keymapBar, orderSourceLabel, priorityChip, workbenchProgressBar } from "./rail.ts";
 import { type RenderedRow, type Span, defaultExpanded, findSpan, hasChildren, renderSpanTree, visibleSpanIds } from "./trace.ts";
 import { fitToWidth, truncateToWidth, visibleWidth } from "./width.ts";
-import { PrDetailCache, prDetailToLines, sanitizeMarkdown, type PrDetail } from "./reader.ts";
-import { fetchPrDetail } from "./github.ts";
+import { issueDetailToLines, PrDetailCache, prDetailToLines, sanitizeMarkdown, type PrDetail } from "./reader.ts";
+import { fetchIssueDetail, fetchPrDetail } from "./github.ts";
 export type DashboardAction =
 	| { kind: "close" }
 	| { kind: "slay"; item: QueueItem; items?: QueueItem[] }
@@ -52,7 +52,7 @@ export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "L", label: "stage" },
 	{ chord: "d", label: "diff" },
 	{ chord: "v", label: "read" },
-	{ chord: "enter", label: "read" },
+	{ chord: "enter", label: "cite" },
 	{ chord: "i", label: "cite" },
 	{ chord: "o", label: "repo" },
 	{ chord: "/", label: "filter" },
@@ -68,7 +68,7 @@ const HELP: readonly string[] = [
 	"  tab              toggle pull requests and issues",
 	"  t                switch between queue and trace panes",
 	"  p                pause or resume future repository waves",
-	"  enter / v        read the highlighted pull request",
+	"  v                read the highlighted pull request or issue",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
 	"  H / L            toggle Hive-only / step Hive stages",
@@ -79,7 +79,7 @@ const HELP: readonly string[] = [
 	"  c                comment on selected item(s)",
 	"  f                fix selected item(s) in isolated workspaces",
 	"  d                inspect bounded diff evidence",
-	"  i                cite the selection in the prompt",
+	"  enter / i        cite the selection in the prompt",
 	"  ?                close this help",
 	"  q, esc           close the workbench",
 	"",
@@ -172,10 +172,12 @@ export class ReviewDashboard {
 	private showReader = false;
 	private readerScroll = 0;
 	private readerDetail: PrDetail | undefined;
+	private issueReaderDetail: IssueDetail | undefined;
 	private readerLoading = false;
 	private readerError = "";
 	private readerRequestGeneration = 0;
 	private prDetailCache = new PrDetailCache(50);
+	private issueDetailCache = new Map<string, IssueDetail>();
 
 	private readonly tui: TuiLike;
 	private readonly painter: Painter;
@@ -675,6 +677,7 @@ export class ReviewDashboard {
 			if (key === "escape" || key === "q") {
 				this.showReader = false;
 				this.readerDetail = undefined;
+				this.issueReaderDetail = undefined;
 				this.tui.requestRender();
 				return;
 			}
@@ -712,7 +715,8 @@ export class ReviewDashboard {
 			}
 			if (key === "u") {
 				const item = this.mode.selected();
-				if (item) this.prDetailCache.clear();
+				if (item?.type === "pr") this.prDetailCache.clear();
+				if (item?.type === "issue") this.issueDetailCache.clear();
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
 				return;
@@ -849,8 +853,9 @@ export class ReviewDashboard {
 				return;
 			case "return":
 			case "enter":
+				this.done({ kind: "reference", item, items });
+				return;
 			case "v":
-				if (item.type !== "pr") return;
 				this.showReader = true;
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
@@ -879,14 +884,15 @@ export class ReviewDashboard {
 	}
 
 	private readerCacheKey(item: QueueItem): string {
-		return `${item.repo}#${item.id}@${item.headSha ?? ""}`;
+		return item.type === "pr" ? `${item.repo}#${item.id}@${item.headSha ?? ""}` : `${item.repo}#${item.id}`;
 	}
 
-	/** Load the selected item's reading surface through the PR-detail cache. */
+	/** Load the selected item's native GitHub reading surface. */
 	private loadSelectedReaderDetail(): void {
 		const item = this.mode.selected();
 		if (!item) {
 			this.readerDetail = undefined;
+			this.issueReaderDetail = undefined;
 			this.readerError = "";
 			this.readerLoading = false;
 			this.tui.requestRender();
@@ -895,6 +901,7 @@ export class ReviewDashboard {
 		this.readerRequestGeneration += 1;
 		const generation = this.readerRequestGeneration;
 		this.readerDetail = undefined;
+		this.issueReaderDetail = undefined;
 		this.readerError = "";
 		this.readerLoading = true;
 		this.tui.requestRender();
@@ -903,6 +910,34 @@ export class ReviewDashboard {
 
 	private async fetchReaderDetail(item: QueueItem, generation: number): Promise<void> {
 		const key = this.readerCacheKey(item);
+		if (item.type === "issue") {
+			const cached = this.issueDetailCache.get(key);
+			if (cached !== undefined) {
+				if (generation === this.readerRequestGeneration) {
+					this.issueReaderDetail = cached;
+					this.readerLoading = false;
+					this.tui.requestRender();
+				}
+				return;
+			}
+			const result = await fetchIssueDetail(item.repo, item.id, this.mode.tokenOptions());
+			if (generation !== this.readerRequestGeneration) return;
+			if (result.detail) {
+				if (this.issueDetailCache.size >= 50) {
+					const oldest = this.issueDetailCache.keys().next().value;
+					if (oldest !== undefined) this.issueDetailCache.delete(oldest);
+				}
+				this.issueDetailCache.set(key, result.detail);
+				this.issueReaderDetail = result.detail;
+				this.readerError = "";
+			} else {
+				this.issueReaderDetail = undefined;
+				this.readerError = result.error ?? "could not read issue";
+			}
+			this.readerLoading = false;
+			this.tui.requestRender();
+			return;
+		}
 		const cached = this.prDetailCache.get(key);
 		if (cached !== undefined) {
 			if (generation === this.readerRequestGeneration) {
@@ -1292,14 +1327,18 @@ export class ReviewDashboard {
 		const item = this.mode.selected();
 
 		if (this.showReader && item) {
-			lines.push(this.painter.bold(this.painter.fg("accent", `PR READER: ${item.repo}#${item.id} — ${sanitizeMarkdown(item.title)}`)));
-			lines.push(this.painter.fg("dim", `Author: @${sanitizeMarkdown(item.author)} · Head: ${item.headSha ? item.headSha.slice(0, 7) : "unknown"} · URL: ${item.url}`));
+			lines.push(this.painter.bold(this.painter.fg("accent", `${item.type === "pr" ? "PR" : "ISSUE"} READER: ${item.repo}#${item.id} — ${sanitizeMarkdown(item.title)}`)));
+			lines.push(this.painter.fg("dim", item.type === "pr"
+				? `Author: @${sanitizeMarkdown(item.author)} · Head: ${item.headSha ? item.headSha.slice(0, 7) : "unknown"} · URL: ${item.url}`
+				: `Author: @${sanitizeMarkdown(item.author)} · Labels: ${item.labels.map(sanitizeMarkdown).join(", ") || "none"} · URL: ${item.url}`));
 			lines.push(this.painter.fg("border", "─".repeat(width)));
-			lines.push(truncateToWidth(this.painter.fg("dim", `Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`), width));
-			const detailLines = prDetailToLines(this.readerDetail);
+			lines.push(truncateToWidth(this.painter.fg("dim", item.type === "pr"
+				? `Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`
+				: `State: ${this.issueReaderDetail?.state ?? "unknown"}`), width));
+			const detailLines = item.type === "pr" ? prDetailToLines(this.readerDetail) : issueDetailToLines(this.issueReaderDetail);
 			let linesToShow = detailLines;
 			if (this.readerError) {
-				linesToShow = [`(could not read PR: ${this.readerError})`];
+				linesToShow = [`(could not read ${item.type === "pr" ? "PR" : "issue"}: ${this.readerError})`];
 			} else if (this.readerLoading) {
 				linesToShow = ["(loading description and conversation…)"];
 			}

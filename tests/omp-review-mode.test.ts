@@ -1286,8 +1286,8 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	assert.equal(action.item.id, 7);
 
 	dashboard.handleInput("\r");
-	assert.match(frame()[2], /PR READER: projectbluefin\/other#7/);
-	dashboard.handleInput("q");
+	assert.equal(action.kind, "reference");
+	assert.equal(action.item.id, 7);
 	dashboard.handleInput("v");
 	assert.match(frame()[2], /PR READER: projectbluefin\/other#7/);
 	dashboard.handleInput("q");
@@ -1335,19 +1335,37 @@ test("dashboard interactive search live-filters and selects items by title", (t)
 	assert.ok(mode.selectedKeys.has("projectbluefin/other#7"));
 });
 
-test("dashboard v keeps issue rows in the issue workbench", (t) => {
-	const mode = new ReviewMode({ org: "projectbluefin" });
+test("dashboard v reads issue body, comments, and linked pull requests without inference", async (t) => {
+	const calls: string[] = [];
+	const fetchImpl = async (url: string | URL | Request) => {
+		const target = String(url);
+		calls.push(target);
+		if (target.endsWith("/issues/606/comments?per_page=100")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => [{ user: { login: "reviewer" }, body: "A useful comment", created_at: "2026-09-16T00:00:00Z" }] };
+		}
+		if (target.endsWith("/issues/606/timeline?per_page=100")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => [{ source: { issue: { number: 607, title: "linked fix", html_url: "https://github.com/projectbluefin/review/pull/607", repository: { full_name: "projectbluefin/review" }, pull_request: {}, state: "open" } } }] };
+		}
+		if (target.endsWith("/issues/606")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ number: 606, title: "keyboard actions", body: "Issue body", state: "open", html_url: "https://github.com/projectbluefin/review/issues/606", user: { login: "author" }, labels: [{ name: "bug" }] }) };
+		}
+		return { ok: false, status: 404, statusText: "Not Found", json: async () => ({}) };
+	};
+	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl: fetchImpl as typeof fetch });
+	mode.setToken("t");
 	mode.queueMode = "issues";
 	mode.items = [queueItem({ type: "issue", id: 606, title: "keyboard actions" })];
-	let action;
-	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, (result) => {
-		action = result;
-	}, () => {}, 20);
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 20);
 	t.after(() => dashboard.dispose());
 
 	dashboard.handleInput("v");
-	assert.equal(action, undefined);
-	assert.doesNotMatch(dashboard.render(120).join("\n"), /PR READER/);
+	await new Promise((resolve) => setImmediate(resolve));
+	const rendered = dashboard.render(160).join("\n");
+	assert.match(rendered, /ISSUE READER: projectbluefin\/review#606/);
+	assert.match(rendered, /Issue body/);
+	assert.match(rendered, /A useful comment/);
+	assert.match(rendered, /projectbluefin\/review#607/);
+	assert.equal(calls.some((call) => call.includes("/pulls/606")), false);
 });
 
 test("workbench Tab switches entity mode and Alt+B selects one repository group", (t) => {
@@ -3845,11 +3863,10 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 	dashboard.handleClick(fPos + 1, keymapLineIdx);
 	assert.equal(lastAction?.kind, "fix", "clicking fix emits a non-landing work action");
 
-	const enterPos = keymapText.indexOf("enter read");
+	const enterPos = keymapText.indexOf("enter cite");
 	assert.ok(enterPos > 0);
 	dashboard.handleClick(enterPos + 1, keymapLineIdx);
-	assert.match(dashboard.render(400)[2], /PR READER:/, "clicking Enter opens the reader");
-	dashboard.handleInput("q");
+	assert.equal(lastAction?.kind, "reference", "clicking Enter cites the focused item");
 	const vPos = keymapText.indexOf("v read");
 	assert.ok(vPos > 0);
 	dashboard.handleClick(vPos + 1, keymapLineIdx);

@@ -88,8 +88,8 @@ palette and warm issue palette.
 | `g` / `G` | Jump to the first / last row |
 | `h` / `l` | Collapse / expand the focused trace span |
 | `c` | Comment after confirmation and live revalidation |
-| `Enter` / `v` | Open the focused pull request in the reader |
-| `i` | Cite the focused item in the prompt and show confirmation |
+| `v` | Open the focused pull request or issue in the reader |
+| `Enter` / `i` | Cite the focused item in the prompt and show confirmation |
 | `?` | Show the key guide |
 | `q` / `Esc` | Close the workbench |
 

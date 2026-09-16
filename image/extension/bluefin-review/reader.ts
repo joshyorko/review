@@ -155,6 +155,39 @@ export function prDetailToLines(detail: PrDetail | undefined): string[] {
 	return lines;
 }
 
+export interface IssueReaderDetail {
+	body: string;
+	comments: PrComment[];
+	linkedPullRequests: Array<{ repo: string; number: number; title: string; state: string; url: string }>;
+}
+
+/** Render one issue body, conversation, and linked pull requests. */
+export function issueDetailToLines(detail: IssueReaderDetail | undefined): string[] {
+	if (!detail) return ["(no issue selected)"];
+	const lines: string[] = [];
+	const inline = (value: string): string => sanitizeMarkdown(value).replace(/[\r\n]+/g, " ").trim();
+	const body = sanitizeMarkdown(detail.body);
+	lines.push(...(body ? body.split("\n") : ["_(no description)_"]));
+	if (detail.comments.length > 0) {
+		lines.push("", "── Conversation ──", "");
+		for (const comment of detail.comments) {
+			const author = inline(comment.author);
+			lines.push(`${author ? `@${author}` : "?"}${comment.createdAt ? ` · ${inline(comment.createdAt)}` : ""}`);
+			lines.push(sanitizeMarkdown(comment.body) || "_(comment)_", "");
+		}
+	} else {
+		lines.push("", "── No comments yet ──");
+	}
+	if (detail.linkedPullRequests.length > 0) {
+		lines.push("", "── Linked pull requests ──", "");
+		for (const pull of detail.linkedPullRequests) {
+			lines.push(`[${inline(pull.state) || "unknown"}] ${inline(pull.repo)}#${pull.number} — ${inline(pull.title)}`);
+			lines.push(inline(pull.url));
+		}
+	}
+	return lines;
+}
+
 /**
  * Navigation helper across filtered PR keys.
  * Bounded or wrapped navigation across filtered PR keys.

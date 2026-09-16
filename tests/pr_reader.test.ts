@@ -11,6 +11,7 @@ import test from "node:test";
 import {
 	PrDetailCache,
 	getNextPrKey,
+	issueDetailToLines,
 	prDetailToLines,
 	sanitizeMarkdown,
 	type PrDetail,
@@ -223,6 +224,19 @@ test("prDetailToLines renders the body and a sanitized conversation", () => {
 	assert.ok(joined.includes("Disagree"), "the second comment body appears");
 	assert.ok(joined.includes("[APPROVED forged] @carol"), "review metadata appears safely");
 	assert.ok(!joined.includes("PR reader"), "the plain body is not mistaken for the title");
+});
+
+test("issueDetailToLines renders sanitized discussion and linked pull requests", () => {
+	const lines = issueDetailToLines({
+		body: "Issue body\u001B[31m",
+		comments: [{ author: "ada", createdAt: "2026-01-01", body: "Comment<script>alert(1)</script>" }],
+		linkedPullRequests: [{ repo: "example/repo", number: 12, title: "Fix", state: "open", url: "https://github.com/example/repo/pull/12" }],
+	});
+	const joined = lines.join("\n");
+	assert.match(joined, /Issue body/);
+	assert.match(joined, /@ada · 2026-01-01/);
+	assert.match(joined, /example\/repo#12/);
+	assert.doesNotMatch(joined, /\u001B|<script>/);
 });
 
 test("parsePrDetail maps REST comment and review payloads", () => {
