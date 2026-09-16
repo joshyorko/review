@@ -108,9 +108,10 @@ A returned PR is terminal only when GitHub shows a new head SHA.
 
 Issue slay reads the complete issue plus Hive's queue entry and curated
 knowledge before deciding and implementing; Review mode uses the GitHub issue
-alone. A multi-issue wave uses one
-workflowz `task` call with a fresh isolated item per issue. Each worker clones
-the target into its own path under `$HOME/worktrees`, then opens a review-ready
+alone. A multi-issue wave uses one workflowz `task` call with a fresh item per
+issue. The appliance disables OMP parent-checkout isolation because `/workspace`
+starts empty; each worker instead clones the target into its own path under
+`$HOME/worktrees`, then opens a review-ready
 PR with a closing reference. The issue is terminal only when GitHub reports
 that submitted PR. The worker never approves or merges it.
 

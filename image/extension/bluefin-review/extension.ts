@@ -259,8 +259,8 @@ export function actionPrompt(
 		: "Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it.";
 	const issueEvidence = `Evidence is bounded and read once. ${issueContext} Never assume the working directory is a checkout: use \`gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>\` to materialize one unique workspace per issue under \`$HOME/worktrees\`, then enter that checkout before examining relevant source files and tests. Never clone into \`/tmp\`. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes <owner/repo>#<number>\`. Never merge or approve your own pull request. The issue is not terminal until GitHub has accepted that pull request.`;
 	const issueWorkflow = options?.workbenchMode === "review"
-		? "Use the `task` tool once with one fresh isolated item per issue through OMP workflowz. Do not share a checkout or conversation between items."
-		: "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh isolated item per issue through OMP workflowz. Do not share a checkout or conversation between items.";
+		? "Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items."
+		: "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items.";
 
 	if (selected.length > 1) {
 		const repository = selected[0]!.repo;
@@ -283,17 +283,17 @@ export function actionPrompt(
 				return `Inspect this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Do not reuse a worker across repositories. Use ${evidenceTool} and report the object evidence and concrete risks. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 			case "fix":
 				return allIssues
-					? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\nUse the \`task\` tool once with one fresh isolated item per issue through OMP workflowz. Do not share a checkout or conversation between write-capable items. Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${issueRules}`
-					: `Fix this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh isolated item per issue or pull request through OMP workflowz. Do not share a checkout or conversation between write-capable items. Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
+					? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Each worker must use its unique checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${issueRules}`
+					: `Fix this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Each worker must use its unique checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 		}
 	}
 
 	const item = selected[0]!;
 	const workflow = action.kind === "fix"
-		? "Use the OMP workflowz `task` tool with one fresh isolated item for this target."
+		? "Use the OMP workflowz `task` tool with one fresh item for this target."
 		: action.kind === "slay"
 			? repairWave || allIssues
-				? "Use the OMP workflowz `task` tool with one fresh isolated implementation item for this target."
+				? "Use the OMP workflowz `task` tool with one fresh implementation item for this target."
 				: `Use the OMP workflowz \`task\` tool with one fresh ${reviewerAgent} item for this target; do not use eval workpool.`
 			: "Use the OMP workflowz `task` tool with one fresh item for this target.";
 	switch (action.kind) {
@@ -314,7 +314,7 @@ export function actionPrompt(
 			return `Call ${evidenceTool} for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${authority} ${reviewFinish}`;
 		case "fix":
 			return item.type === "issue"
-				? `Implement ${cite(item)} in an isolated workspace. ${issueWorkflow} Diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes ${item.repo}#${item.id}\`. ${workflow} ${authority} ${reviewFinish}`
+				? `Implement ${cite(item)}. ${issueWorkflow} ${authority} ${issueEvidence} ${reviewFinish}`
 				: `Fix ${cite(item)} in an isolated workspace. Re-read the live diff and failing checks, diagnose each root cause, run focused verification, and push one clean commit for independent review. ${workflow} ${authority} ${reviewFinish}`;
 		case "request_reviewer":
 			return `Request review on ${cite(action.item)} from repository collaborators. Use \`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-reviewer <reviewer>\` to assign reviewers and prioritize in their maintainer queue.`;

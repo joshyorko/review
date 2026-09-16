@@ -2566,7 +2566,7 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 	assert.match(reviewerPrompt, /A `clean` verdict is\s+evidence/);
 	assert.doesNotMatch(reviewerPrompt, /\*\*`approve`\*\*/);
 	assert.match(reviewerPrompt, /Never claim a validator is absent/);
-	assert.match(fix, /`task` tool once with one fresh isolated item per issue or pull request/);
+	assert.match(fix, /`task` tool once with one fresh item per issue or pull request/);
 	assert.match(fix, /Never approve or merge/);
 });
 
@@ -2575,7 +2575,7 @@ test("fix waves repair conflicts without landing them", () => {
 	const sibling = queueItem({ id: 7, repo: dirty.repo, mergeState: "dirty" });
 	const batch = actionPrompt({ kind: "fix", item: dirty, items: [dirty, sibling] });
 	assert.match(batch, /merge=dirty/);
-	assert.match(batch, /`task` tool once with one fresh isolated item/);
+	assert.match(batch, /`task` tool once with one fresh item/);
 	assert.match(batch, /Never approve or merge/);
 });
 
@@ -3053,7 +3053,7 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	const batch = mode.chosenItems();
 	const prompt = actionPrompt({ kind: "fix", item: batch[0], items: batch });
 	assert.match(prompt, /Use the `task` tool once/);
-	assert.match(prompt, /`task` tool once with one fresh isolated item per issue through OMP workflowz/);
+	assert.match(prompt, /`task` tool once with one fresh item per issue through OMP workflowz/);
 	assert.match(prompt, /`gh repo clone .*under `\$HOME\/worktrees`/s);
 	assert.match(prompt, /Never assume the working directory is a checkout/);
 	assert.doesNotMatch(prompt, /maximum of 7|fix-and-merge|approve and merge/);
@@ -4169,7 +4169,8 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 
 	assert.equal(pi.messages.length, 1, "selected issues dispatched without requiring Hive");
 	assert.match(pi.messages[0], /Implement this repository wave for projectbluefin\/unmanaged/);
-	assert.match(pi.messages[0], /Use the `task` tool once with one fresh isolated item/);
+	assert.match(pi.messages[0], /Use the `task` tool once with one fresh item/);
+	assert.match(pi.messages[0], /gh repo clone <owner\/repo>/);
 	assert.match(pi.messages[0], /one review-ready pull request per issue/);
 	assert.match(pi.messages[0], /SUBAGENT-RULES/);
 	assert.match(pi.messages[0], /Never merge or approve your own pull request/);

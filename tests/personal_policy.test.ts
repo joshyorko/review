@@ -190,6 +190,10 @@ test("Issue s and Alt-S dispatch issue implementation, while d requests issue ev
 		dashboard.handleInput("alt+s");
 		dashboard.handleInput("d");
 		assert.deepEqual(actions.map(action => action.kind), ["fix", "fix", "diff"]);
+		const implementation = actionPrompt(actions[0], undefined, { workbenchMode: mode.workbenchMode }) ?? "";
+		assert.match(implementation, /gh repo clone <owner\/repo>/);
+		assert.match(implementation, /\$HOME\/worktrees\/<owner>-<repo>-issue-<number>/);
+		assert.doesNotMatch(implementation, /Hive|hive_workbench_lookup/);
 		assert.doesNotMatch(actionPrompt(actions[2], undefined, { workbenchMode: mode.workbenchMode }), /hive_workbench_diff/);
 		assert.match(actionPrompt(actions[2], undefined, { workbenchMode: mode.workbenchMode }), /review_workbench_issue/);
 	} finally {

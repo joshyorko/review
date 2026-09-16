@@ -127,6 +127,10 @@ knowledge, stages, controls, and tools. `BLUEFIN_REVIEW_MODE=review` is strictly
 GitHub-only and ignores an inherited `HIVE_HUB`; the personal Brew package sets
 that mode explicitly.
 
+The appliance starts with an empty `/workspace`, so OMP parent-checkout task
+isolation is disabled. Workflowz still creates a fresh agent per item, and every
+write-capable worker clones one unique checkout under `$HOME/worktrees`.
+
 The appliance uses its own `bluefin-review-appliance` OMP profile. Host OMP
 configuration is not mounted by default, so host MCP entries cannot make the
 appliance noisy or unusable. The packaged review extension enables three

@@ -98,6 +98,9 @@ require "$containerfile" \
   'io.projectbluefin.review.appliance="true"' \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"'
+require image/appliance/config.yml \
+  'enabled: false' \
+  'apply: false'
 grep -qE '^ARG AUDIO_BUILDER_IMAGE=registry\.fedoraproject\.org/fedora-minimal:[^@[:space:]]+@sha256:[0-9a-f]{64}$' "$containerfile" ||
   fail "AUDIO_BUILDER_IMAGE must be pinned as tag@sha256 digest"
 # shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
