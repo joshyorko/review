@@ -1,9 +1,9 @@
 ---
 name: review-dashboard
-version: "5.1"
-last_updated: 2026-09-14
+version: "5.3"
+last_updated: 2026-09-15
 id: review-dashboard
-one_line_purpose: Maintain the single-screen OMP review workbench.
+one_line_purpose: Maintain the queue, slay lifecycles, and workflowz workbench.
 entry_point: docs/skills/review-dashboard.md
 category: ci-ops
 mcp_compliance_level: partial
@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [omp, extension, dashboard, review, maintainer, workflowz]
-description: "Maintains the OMP review workbench in image/extension/bluefin-review/. Use when editing review UI, queue projection, workflowz dispatch, or action seams."
+description: "Maintains the OMP review workbench. Use for queue ordering, slay or autoslay, workflowz issue batches, durable batch state, dashboard controls, or mutation guards."
 metadata:
   type: runbook
   context7-sources: []
@@ -19,29 +19,22 @@ metadata:
 
 # Review Workbench
 
-The only maintainer UI is the OMP extension in
-`image/extension/bluefin-review/`. `bin/omp-review` loads it from source;
-`just review-queue` and `just review-appliance` launch the same packaged
-extension from `image/appliance/Containerfile`.
-
-The Hive contributor runtime has no maintainer UI. It attaches the terminal
-directly to the OMP session Hive created.
+The only maintainer UI is `image/extension/bluefin-review/`: `bin/omp-review`
+loads source, while `just review-queue` and `just review-appliance` launch the
+packaged extension. The Hive contributor runtime attaches to Hive's OMP session.
 
 ## When to Use
 
-Use this skill for the OMP queue, dashboard controls, workflowz dispatch,
-durable slay state, or review action prompts.
-
-## When NOT to Use
-
-Use `launcher.md` for container launch mechanics, `review-checks.md` for review
-doctrine, and `hive-runtime.md` for contributor assignment behavior.
+Use this skill for queue ordering, slay/autoslay, workflowz dispatch, durable
+batch state, dashboard controls, prompts, or mutation guards. Use `launcher.md`
+for launch mechanics, `review-checks.md` for doctrine, and `hive-runtime.md` for
+contributor assignment behavior.
 
 ## Core Process
 
 1. Trace the key or flag from `dashboard.ts` through `extension.ts` to its prompt.
-2. Keep reviewer agents read-only; one explicit slay action authorizes the
-   coordinator's bounded review, repair, re-review, and landing state machine.
+2. Keep reviewers read-only. Slay authorizes bounded PR review/repair/landing or
+   issue implementation through pull-request submission.
 3. Add a headless interaction test, then exercise the real foreground workbench.
 
 ## Authority
@@ -50,9 +43,10 @@ doctrine, and `hive-runtime.md` for contributor assignment behavior.
 - Hive owns contributor selection, assignment, prompt injection, and output
   capture. The workbench may read Hive order but never claim contributor work.
 - OMP owns sessions, agents, tasks, tools, workflowz workpools, and cancellation.
-- The extension owns queue projection, durable user intent, mutation guards,
+- The extension owns queue projection, durable human intent, mutation guards,
   and presentation.
-- Humans own approval and merge decisions.
+- Humans own approval and merge decisions; confirmed slay intent delegates the
+  bounded coordinator lifecycle that executes them.
 
 ## Screen
 
@@ -66,7 +60,6 @@ Pull requests discovered through GitHub closing references still inherit the
 rank of their Hive issue. Never probe an issue identity as a pull request or
 report issue-only backlog as missing PR evidence.
 
-
 `Tab` switches PR/issue mode and every semantic accent between the cool PR
 palette and warm issue palette.
 
@@ -77,8 +70,8 @@ palette and warm issue palette.
 | `Space` | Toggle the focused item |
 | `A` / `x` | Select the filtered slice / clear selection |
 | `Alt-B` | Select or clear the focused repository group |
-| `s` | Slay selected pull requests through review, repair, and landing |
-| `Alt-S` | Autoslay the visible queue through the same lifecycle |
+| `s` | Slay selected PRs, or implement selected issues through submitted PRs |
+| `Alt-S` | Repair returned PRs first, then implement the visible issue backlog |
 | `f` | Fix selected items in isolated workspaces |
 | `d` | Inspect bounded diff evidence |
 | `p` | Pause or resume later wave admission |
@@ -96,55 +89,61 @@ palette and warm issue palette.
 
 ## Slay execution
 
-Slay is a maintainer-authorized review, repair, and landing lifecycle. Each
-selected pull request first runs as a fresh `bluefin-reviewer` item in one OMP
-`task` batch. Reviewer agents have no shell or write tool and report findings;
-they never comment, approve, enqueue, or merge. Findings dispatch isolated
-fixers, and a fixed head receives a fresh reviewer before the coordinator may
-approve and ask GitHub to squash-merge it. Live repository rules
-remain authoritative; slay never removes holds, uses admin bypass, fabricates
-reviewers, force-pushes, or lands a head different from the reviewed head.
-This boundary does not make the appliance read-only. The explicit slay action
-delegates approval and merge execution to the coordinator; only the evidence-
-producing reviewer subagents are capability-limited.
-`--autoslay` starts the visible bounded slice on launch and enables OMP's advisor
-on the coordinator session. The advisor role maps to `@default`, so it follows
-the maintainer's selected model without pinning a provider. `Alt-S` starts the
-same lifecycle from the active workbench without changing advisor state.
-The upstream queue filters workflow-changing and incomplete-file-list pull
-requests before reviewer selection. The personal Brew package opts into keeping
-those pull requests visible and selectable for inspection, while its Slay
-preflight always refuses workflow-changing pull requests regardless of OAuth
-scope; incomplete file lists remain blocked until a complete read succeeds.
-CI uses one classifier for queue reads and live revalidation. An explicit
-successful or failed status rollup wins over raw CheckSuites, while raw suites
-are fallback evidence only when the rollup is absent or indeterminate.
-Incomplete fallback evidence is unknown and blocks approval or merge until a
-fresh complete read succeeds. Slay revalidates the current head, CI, and live
-repository rules before every mutation.
-Fresh reviewers inherit neither a selected repository nor checkout; prompts
-pass both `repo` and `pull_request` to `hive_workbench_diff`. Repair agents use
-`gh repo clone` and `gh pr checkout` under `$HOME/worktrees`, never `/tmp`, and
-read effective rules through `repos/<owner>/<repo>/rules/branches/<branch>`.
-The minimal appliance omits repository-specific toolchains; reviewers use
-hosted evidence and report local gaps instead of retrying absent commands.
+Slay has entity-specific terminal conditions. Ordinary pull requests run through
+review, isolated repair, fresh review, and landing. Each head first runs as a
+fresh `bluefin-reviewer` in one OMP workflowz `task` batch. Reviewers are
+read-only; findings dispatch isolated fixers, and a fixed head receives a fresh
+review before the coordinator may approve and request a squash merge.
 
-Preserve Hive order by partitioning contiguous repository runs; an interleaved
-repository returns in a later wave rather than jumping ahead. Ask workflowz to
-execute every wave, including a singleton. Never implement an extension-local
-worker pool, retry loop, task scheduler, or agent lifecycle. Advance on OMP's
-`agent_end` only when `willContinue` is false and the wave's jobs have settled.
-Pausing stops new waves; it does not pretend to suspend an agent already running.
+Pull requests authored by the authenticated GitHub user with requested changes
+form a `repair-requested` lane ahead of Hive-ranked review work. Workflowz
+dispatches isolated fixers, never a self-review, self-approval, or self-merge.
+A returned PR is terminal only when GitHub shows a new head SHA.
+
+Issue slay reads the complete issue plus Hive's queue entry and curated
+knowledge before deciding and implementing. A multi-issue wave uses one
+workflowz `task` call with a fresh isolated item per issue. Each worker opens a
+review-ready PR with a closing reference; the issue is terminal only when
+GitHub reports that submitted PR. The worker never approves or merges it.
+
+`--autoslay` and `Alt-S` use the same repair-first plan: unless explicitly
+started in issue mode, repair all visible returned PRs, then switch to the
+visible issue backlog. Work is partitioned into type-homogeneous,
+repository-local waves of at most 25 items. OMP's advisor is always enabled and
+resolves through `@default`, following the maintainer's selected model.
+
+The ordinary PR landing lane omits `.github/workflows/` changes and incomplete
+file lists. Returned PRs remain eligible because their lane cannot land them.
+The personal Brew package may keep those pull requests visible for inspection,
+but its Slay preflight still refuses workflow changes and incomplete file lists.
+Ordinary PR slay excludes failing or pending CI before reviewer dispatch and
+rechecks it before each wave; returned PR repair may address failing CI but
+cannot run approval or merge commands. Slay never removes holds, uses admin
+bypass, fabricates reviewers, force-pushes, or lands an unreviewed head.
+
+Fresh reviewers receive explicit `repo` and `pull_request` arguments for
+`hive_workbench_diff`. Repair agents use `gh repo clone` and `gh pr checkout`
+under `$HOME/worktrees`, never `/tmp`, and read effective rules through
+`repos/<owner>/<repo>/rules/branches/<branch>`.
+The minimal appliance omits repository-specific toolchains; reviewers use
+hosted check evidence and report local validation gaps instead of retrying
+absent commands or installing packages.
+
+Preserve Hive order inside each lane and partition contiguous repository runs.
+Ask workflowz to execute every wave, including a singleton. Never add an
+extension-local worker pool, retry loop, scheduler, or agent lifecycle. Advance
+on final `agent_end` only after all wave jobs settle. Pausing stops new waves,
+not an agent already running.
 
 Persist slay intent, item identity, wave position, and terminal outcomes.
-Interrupted slays remain blocked after restart and require an explicit new
-dispatch. Never replay a confirmed mutation.
-A pull-request wave is terminal when every target is closed or GitHub accepts
-auto-merge. It may remain blocked on additional required human approvals;
-report that gate and move on. The merge queue's effective squash rule overrides
-the `autoMergeRequest.mergeMethod` display; never disable and re-arm solely
-because that field says `MERGE`. Settled reviewer jobs alone never advance a
-slay, and open targets without auto-merge block explicit redispatch.
+Interrupted slays stay blocked and require explicit redispatch. Never replay a
+confirmed mutation. An ordinary PR wave is terminal when every target is closed
+or GitHub accepts auto-merge; open targets without auto-merge block redispatch.
+The merge queue's effective squash rule overrides the displayed
+`autoMergeRequest.mergeMethod`: never disable and re-arm auto-merge because it
+says `MERGE`. An accepted auto-merge request is terminal even when additional
+human approval remains; report that outstanding gate and move on. Settled
+workflowz jobs alone never advance any slay.
 
 ## Mutations
 
@@ -178,24 +177,27 @@ tool remains Hive-specific.
 - “Slay is just autoreview.” Review without repair and landing is an incomplete
   slay; reviewer agents stay read-only while the confirmed coordinator owns the
   complete lifecycle.
-- “Review needs Hive admission.” Review is read-only and must still work from
-  GitHub evidence when Hive is absent; write-capable fix keeps its gates.
+- “Review needs Hive admission.” Read-only review works from GitHub evidence
+  when Hive is absent; issue slay and fix still enforce fresh GitHub admission
+  and report unavailable Hive knowledge instead of inventing it.
 
 ## Red Flags
 
 - A slay prompt uses the default task agent instead of `bluefin-reviewer` for
   the review stages.
-- `s`, `Alt-S`, and `--autoslay` enter different execution paths.
+- `s`, `Alt-S`, or `--autoslay` bypasses the common wave validation machinery.
 - A reviewer agent approves, merges, or edits instead of returning evidence to
   the coordinator.
 - Slay lands without revalidating the exact reviewed head and live GitHub rules.
 - A repository wave advances before its OMP jobs settle.
+- An issue wave skips Hive queue/knowledge evidence or advances without a submitted PR.
 
 ## Verification
 
 ```bash
 bash tests/omp-review-mode.sh
 bash tests/appliance-contract.sh
+bash scripts/check-skill-frontmatter.sh
 git diff --check
 ```
 

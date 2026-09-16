@@ -120,6 +120,26 @@ require image/appliance/appliance-mcp.json \
   '"mcp"' \
   '"serve"'
 require image/appliance/config.yml 'advisor: "@default"' 'syncBacklog: 1'
+python3 - image/extension/bluefin-review/.mcp.json <<'PY' || fail "bundled MCP configuration is invalid"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    servers = json.load(stream)["mcpServers"]
+
+expected = {
+    "github": "https://api.githubcopilot.com/mcp/",
+    "bluefin": "https://mcp.projectbluefin.io/mcp",
+    "context7": "https://mcp.context7.com/mcp",
+}
+assert set(servers) == set(expected)
+for name, url in expected.items():
+    assert servers[name]["type"] == "http"
+    assert servers[name]["url"] == url
+    assert servers[name]["enabled"] is True
+assert "GH_TOKEN" in servers["github"]["headers"]["Authorization"]
+assert "CONTEXT7_API_KEY" in servers["context7"]["headers"]["Authorization"]
+PY
 require image/appliance/stage-runtime.sh '/usr/bin/gzip.bin'
 require "$containerfile" \
   'GIT_CONFIG_KEY_0=credential.https://github.com.helper' \
@@ -186,14 +206,19 @@ chmod +x "$entrypoint_tmp/omp"
 default_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'bluefin-review-appliance' <<<"$default_args" ||
   fail "the appliance entrypoint did not select its isolated profile"
+[[ "$(grep -cx -- '--advisor' <<<"$default_args")" -eq 1 ]] ||
+  fail "the appliance did not enable exactly one OMP advisor"
 inherited_args="$(BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'review' <<<"$inherited_args" ||
   fail "the explicit host omp configuration opt-in did not select the review profile"
 autoslay_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --autoslay)"
 [[ "$(grep -cx -- '--advisor' <<<"$autoslay_args")" -eq 1 ]] ||
-  fail "autoslay did not enable exactly one OMP advisor"
+  fail "autoslay duplicated the always-on OMP advisor"
 grep -qx -- '--autoslay' <<<"$autoslay_args" ||
   fail "autoslay flag did not reach the review extension"
+explicit_advisor_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --advisor)"
+[[ "$(grep -cx -- '--advisor' <<<"$explicit_advisor_args")" -eq 1 ]] ||
+  fail "the appliance duplicated an explicit OMP advisor flag"
 if PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh update >"$entrypoint_tmp/update.out" 2>&1; then
   fail "the immutable appliance accepted an in-place update"
 fi
@@ -364,6 +389,16 @@ run '
   test -f "$profile"
   grep -q "/usr/bin/headroom" "$profile"
 ' || fail "the appliance did not provision its Headroom MCP profile"
+
+run '
+  set -eu
+  test -x /usr/bin/bluefin-review-appliance
+  grep -q "checkUpdate: false" /usr/share/bluefin/review/appliance-config.yml
+  test -f /usr/share/bluefin/review/extension/index.ts
+  test -d /usr/share/bluefin/review/extension/agents
+  test -f /usr/share/bluefin/review/extension/.mcp.json
+  test -f /usr/share/bluefin/review/sbom.spdx.json
+' >/dev/null || fail "the review mode or its SBOM is missing from the image"
 
 # Nothing inside may install anything.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.

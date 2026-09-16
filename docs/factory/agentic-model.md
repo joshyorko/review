@@ -38,9 +38,9 @@ session logs, or design scratchpads as competing explanations.
 | **Maintainer/Reviewer** | A maintainer assessing an incoming pull request or issue. Active review process requiring human judgement and decision. | The human decides review, approval, and merge. |
 | **Review Evidence** | Read-only pull-request, issue, verification, trace, and merge-state context shown before a review. | Evidence informs a human; it never makes a decision. |
 | **Review Mode / Extension** | The sole maintainer workbench in `image/extension/bluefin-review/`. It provides the live queue, pipeline trace, companion agents, and inspection tools. | OMP owns execution, session, workflowz, and tool boundaries. |
-| **Managed Reviewer Client** | A foreground OMP workbench a maintainer uses to examine evidence and prepare actions. | It executes only typed, human-confirmed decisions and decides nothing itself. |
+| **Managed Reviewer Client** | A foreground OMP workbench a maintainer uses to examine evidence and dispatch bounded actions. | It executes only typed, human-authorized decisions; explicit slay intent delegates the corresponding coordinator lifecycle. |
 | **Portable Reviewer Prompt** | Markdown Review Evidence and queue instructions for a maintainer's own client. | It is context, not an assignment. |
-| **Bluefin PR Queue** | A live GitHub view of open pull requests and issues, optionally ordered by Hive positions. | GitHub is authoritative for repository state; Hive orders when configured; the queue neither assigns work nor merges. |
+| **Bluefin Work Queue** | A live GitHub view of open pull requests and issues. | GitHub owns state; returned-author repairs form a local first lane; Hive supplies the remaining relative order when configured; the queue never assigns contributor work. |
 | **Workbench Activity** | The bounded projection of active workflowz tasks, outcomes, queue state, and freshness. | It reports observed state and never assigns Hive work. |
 | **Review Draft** | Analysis, review text, or commands prepared for a Maintainer Reviewer. | A human explicitly considers and submits it. |
 
@@ -95,11 +95,12 @@ context and queue ordering for maintainers.
 
 Hive owns the contributor WebSocket protocol, task selection, assignment prompt
 injection, the `contributor` tmux session, and output capture. The launcher
-must not decline, retry, or otherwise manage assignments mid-protocol; the
-one permitted filter is own-work exclusion on the maintainer-facing queue
-view, so a reviewer never receives their own authored pull requests.
-Hive also owns contributor completion. Review may display a read-only Hive
-projection, but it never completes an assignment.
+must not decline, retry, or otherwise manage assignments mid-protocol. The
+maintainer-facing queue may put the authenticated user's pull requests with
+requested changes in a repair-only lane before Hive-ranked review work; those
+pull requests are never self-reviewed, self-approved, or self-merged. Hive also
+owns contributor completion. Review may display a read-only Hive projection,
+but it never completes an assignment.
 
 The `contribute` image defines one narrow contributor experience: it always
 launches OMP and rejects every other `AGENT_BACKEND` value before Hive starts.
@@ -107,11 +108,13 @@ Its FSDK closure contains only the tools required by OMP and Hive's interactive
 relay. The generic upstream helper files needed by that relay are implementation
 dependencies, not alternate agent surfaces. No dashboard, review extension,
 scheduler, Codex, Pi, or provider state belongs in the image.
-The human Maintainer Reviewer owns approval, queueing, and merge decisions.
-The workbench previews and confirms comments against a freshly revalidated
-target, and dispatches reviews or fixes through OMP. It has no approval,
-`lgtm` queueing, or merge control; dispatched agents must not approve or merge.
-A clean review is evidence for the maintainer, never permission to land.
+The human Maintainer Reviewer owns approval, queueing, and merge decisions. A
+confirmed slay delegates bounded execution of that decision to the coordinator:
+ordinary PR waves may repair, approve, and request auto-merge after fresh review
+and live-rule validation. Reviewer agents remain read-only. Issue and returned-
+author workers may submit changes but never approve or merge their own pull
+requests. A clean review without confirmed slay intent is evidence, not landing
+authority.
 
 The pinned FSDK base owns the contributor toolchain. `review` consumes the
 tools the image ships and does not reimplement them: a missing utility is

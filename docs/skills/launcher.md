@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "5.2"
-last_updated: 2026-09-14
+version: "5.3"
+last_updated: 2026-09-15
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -126,10 +126,11 @@ directory, host home, or `.codex`. Missing audio never prevents Review startup.
 
 `scripts/parse-review-args.sh` is the single parser for OMP review scope.
 Repository, `--pr`, and `--issues` arguments must reach the appliance unchanged.
-`autoslay` / `--autoslay` also passes OMP's built-in `--advisor` flag exactly
-once. The packaged entrypoint repeats that normalization for direct image
-launches, while the appliance configuration maps `modelRoles.advisor` to
-`@default` rather than selecting a provider.
+Every review launch passes OMP's built-in `--advisor` flag exactly once. The
+source launcher also normalizes its parser-fallback path, and the packaged
+entrypoint repeats the normalization for direct image launches. The appliance
+configuration maps `modelRoles.advisor` to `@default` rather than selecting a
+provider.
 The optional contributor argument names an isolated instance and its
 `contributor.<org-repo>.env`; Hive still selects work. OMP owns model choice.
 

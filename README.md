@@ -129,15 +129,17 @@ The same mode runs against a locally installed `omp` with `bin/omp-review`,
 which takes the same shortcuts: `bin/omp-review owner/repo`, `bin/omp-review 1284`,
 `bin/omp-review issues`.
 
-**Hive orders the queue when `HIVE_HUB` is set.** The queue uses Hive's work
-positions, and a pull request that closes queued work inherits that
-position — so reviewing through this tool contributes to what the project
-already decided matters. The mode only reads: task selection, assignment and
-priority stay with Hive, and merge decisions stay with the maintainer. Without a
+**Hive orders queued project work when `HIVE_HUB` is set.** Pull requests
+authored by the current user with requested changes form a local repair-only
+lane before that work; Hive's relative order remains unchanged behind it. The
+queue uses Hive's work and triage positions directly, without recomputing or
+writing them. Claims, assignment, contributor completion, and Hive priority
+stay with Hive; merge decisions stay with the maintainer. Without a
 hub the queue is classified from live GitHub evidence using the policy layer's
-actions — `ready-for-human-merge`, `review`, `resolve-conflicts`, `fix-ci`,
-`investigate`, `triage` — so an unorchestrated project still opens on what it
-can land instead of on whatever GitHub touched last.
+actions — `repair-requested`, `ready-for-human-merge`, `review`,
+`resolve-conflicts`, `fix-ci`, `investigate`, `triage` — so an unorchestrated
+project still opens on work that needs the maintainer instead of whatever
+GitHub touched last.
 
 The OMP extension is one permanent workbench, not a second dashboard layered
 over the prompt. Its queue and live Dagger-style execution trace stay on the
@@ -152,8 +154,8 @@ slash commands.
 | `j` / `k` | Next / previous queue item |
 | `space` | Select / deselect the focused item |
 | `A` / `x` | Select the filtered slice / clear selection |
-| `s` | Slay selected pull requests through review, repair, and landing |
-| `alt+s` | Autoslay the selected or visible slice through the same lifecycle |
+| `s` | Slay selected PRs through review/repair/landing, or implement selected issues through submitted PRs |
+| `alt+s` | Repair returned PRs first, then implement the visible issue backlog in bounded waves |
 | `alt+b` | Select / clear the focused repository group |
 | `f` | Fix selected items in isolated workspaces |
 | `d` | Inspect bounded diff evidence |
@@ -170,12 +172,15 @@ slash commands.
 | `?` | Show the in-app key guide |
 | `q` / `Esc` | Close the workbench |
 
-Slay preserves Hive order, partitions selected work by repository, and asks OMP
-workflowz to run one bounded `task` batch with a fresh `bluefin-reviewer` item
-per pull request. Later repository waves do not start until the prior repository
-settles, avoiding cross-repository context churn. OMP owns agent execution, task
-concurrency, task state, tools, sessions, and cancellation; the extension only
-owns Hive's queue projection, durable intent, GitHub mutation guards, and
+Slay preserves order and partitions work into bounded, type-homogeneous
+repository waves. Pull requests returned to the authenticated author with
+requested changes form the first repair lane and are complete when a corrected
+head is pushed; the coordinator never reviews, approves, or merges its own PR.
+Issue waves read the issue plus Hive queue and knowledge evidence, then ask OMP
+workflowz to run one isolated `task` item per issue. An issue slay is complete
+only after GitHub shows a submitted pull request for every issue. OMP owns agent
+execution, task concurrency, task state, tools, sessions, and cancellation; the
+extension owns queue projection, durable intent, GitHub mutation guards, and
 presentation.
 The mode also ships the `bluefin-doctrine` and `bluefin-ci-triage` task agents.
 
@@ -190,17 +195,19 @@ single-screen workbench.
 ## Using the OMP workbench
 
 The queue and execution trace remain visible beside the prompt. Navigate and
-select work with the keys above; `s` slays the selected repository waves, and
-`--autoslay` starts the visible slice immediately. The appliance exists to
-review **and land** code changes. A slay is one maintainer-authorized lifecycle:
-review the exact head, repair findings in isolation, review the repaired head
-afresh, then approve and ask GitHub to squash-merge when its live rules permit.
-Reviewer subagents remain read-only so the verdict and mutation authorities are
-separate; the appliance's coordinator owns approval and landing. Autoslay also
-enables OMP's advisor on the coordinator session, resolving its model through
-`modelRoles.advisor` → `@default` so it follows the maintainer's selected model
-without pinning a provider. The [workbench guide](docs/skills/review-dashboard.md)
-documents the authority model.
+select work with the keys above; `s` applies the matching PR or issue lifecycle.
+Without an explicit issue-only start, `--autoslay` first repairs every visible
+pull request authored by the current user with requested changes, then switches
+to issues and processes them in bounded workflowz batches. Ordinary PR slay
+reviews the exact head, repairs findings in isolation, reviews the repaired head
+afresh, then approves and asks GitHub to squash-merge when its live rules permit.
+Reviewer subagents remain read-only so verdict and mutation authorities stay
+separate; the coordinator executes only the maintainer-confirmed approval and
+landing lifecycle. OMP's advisor is enabled for every review session and
+resolves through `modelRoles.advisor` → `@default`, following the maintainer's
+selected model without pinning a provider.
+The [workbench guide](docs/skills/review-dashboard.md) documents the
+authority model.
 
 
 ## Run a worker

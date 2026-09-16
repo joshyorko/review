@@ -15,12 +15,12 @@ it scopes every task, so read it alongside the matching skill.
 | Investigate an assigned-task or connection problem | [`hive-triage.md`](skills/hive-triage.md) |
 | Report evidence to or follow up on a `hivecommons/hive` issue | [`upstream-hive.md`](skills/upstream-hive.md) |
 | Maintain the OMP workbench review agents and policy seam | [`review-checks.md`](skills/review-checks.md) |
-| Change the contributor image Containerfile or pinned inputs | [`image-build.md`](skills/image-build.md) |
-| Change the OMP maintainer workbench or its action seams | [`review-dashboard.md`](skills/review-dashboard.md) |
+| Change either image, OMP pins, SBOMs, or publish workflows | [`image-build.md`](skills/image-build.md) |
+| Change queue ordering, slay/autoslay, issue batches, or workbench controls | [`review-dashboard.md`](skills/review-dashboard.md) |
 | Monitor running OMP workbenches or contributor workers | [`review-monitoring.md`](skills/review-monitoring.md) |
 | Prepare a branch, commit, or pull request | [`pr-workflow.md`](skills/pr-workflow.md) |
 | Triage, label, or route an issue or pull request | [`pr-labels.md`](skills/pr-labels.md) |
-| Maintain documentation, skills, or factory compliance | [`skill-improvement.md`](skills/skill-improvement.md) |
+| Audit all docs, repair skills, or maintain factory compliance | [`skill-improvement.md`](skills/skill-improvement.md) |
 | Coordinate bounded factory continuation and writable capacity | [`factory-operations.md`](skills/factory-operations.md) |
 
 `docs/skills/index.json` is the machine-readable catalog, generated from the

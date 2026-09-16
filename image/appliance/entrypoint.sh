@@ -44,13 +44,11 @@ EOF
   ;;
 esac
 args=("$@")
-autoslay=false
 advisor=false
 for arg in "${args[@]}"; do
-  [ "$arg" = --autoslay ] && autoslay=true
   [ "$arg" = --advisor ] && advisor=true
 done
-if [ "$autoslay" = true ] && [ "$advisor" = false ]; then
+if [ "$advisor" = false ]; then
   args+=(--advisor)
 fi
 
