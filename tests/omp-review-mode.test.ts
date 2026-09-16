@@ -17,7 +17,7 @@ import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/exten
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
 import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
+import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
@@ -1001,6 +1001,67 @@ test("diff fetch is bounded but honest about it", async () => {
 	assert.ok(diff.files[0].patch, "the first patch is included");
 	assert.ok(diff.files[1].patch === undefined || diff.files[1].patch.includes("truncated"));
 	assert.equal(diff.truncated, true);
+});
+
+test("exactHeadVerified refuses unless the workspace is the exact expected head", () => {
+	const sha = "a".repeat(40);
+	assert.equal(exactHeadVerified(sha, sha), true, "an exact head match proceeds");
+	assert.equal(exactHeadVerified(sha, "b".repeat(40)), false, "a different head is refused");
+	assert.equal(exactHeadVerified(sha, undefined), false, "an unreadable workspace is refused");
+	assert.equal(exactHeadVerified(undefined, sha), false, "a diff alone does not prove the head");
+	assert.equal(exactHeadVerified(undefined, undefined), false, "nothing verifies without an expected head");
+});
+
+test("fetchDiff carries the PR head SHA so verification can materialize it exactly", async () => {
+	const head = "c".repeat(40);
+	const headFetch = (url: string | URL, init?: RequestInit) => {
+		const target = String(url);
+		if (target.includes("/pulls/42/files")) return fakeFetch([])(url, init);
+		if (target.includes("/pulls/42")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ head: { sha: head } }) };
+		}
+		return fakeFetch([])(url, init);
+	};
+	const diff = await fetchDiff("projectbluefin/review", 42, { token: "t", fetchImpl: headFetch });
+	assert.equal(diff.headSha, head, "the diff reports the exact PR head");
+	assert.equal(diff.totalFiles, 2);
+	assert.ok(exactHeadVerified(diff.headSha, head), "the reported head verifies against itself");
+});
+
+test("#440 a stale or unknown workspace head is refused before executable verification", async () => {
+	// A diff proves only what GitHub reports. If the materialized workspace is not
+	// the diff's exact head, verification must refuse rather than run against drift.
+	const diff = await fetchDiff("projectbluefin/review", 42, { token: "t", fetchImpl: fakeFetch([]) });
+	assert.equal(diff.headSha, null, "no PR payload means an unknown head");
+	assert.equal(exactHeadVerified(diff.headSha, "a".repeat(40)), false, "an unknown expected head refuses");
+
+	const head = "d".repeat(40);
+	assert.equal(exactHeadVerified(head, head), true, "a matching workspace proceeds");
+	assert.equal(exactHeadVerified(head, "e".repeat(40)), false, "a stale workspace head is refused");
+});
+
+test("the diff tool surfaces the exact head and status shows expected vs workspace SHA", async () => {
+	const head = "4".repeat(40);
+	const headFetch = (url: string | URL, init?: RequestInit) => {
+		const target = String(url);
+		if (target.includes("/pulls/42/files")) return fakeFetch([])(url, init);
+		if (target.includes("/pulls/42")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ head: { sha: head } }) };
+		}
+		return fakeFetch([])(url, init);
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: headFetch, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	const diff = await pi.tools.get("hive_workbench_diff").execute("id", { pull_request: 42 });
+	assert.equal(diff.details.head_sha, head, "the diff tool surfaces the exact PR head");
+
+	const status = await pi.tools.get("hive_workbench_status").execute("id", {});
+	assert.match(status.content[0].text, /head: 4/, "status shows the expected head SHA");
 });
 
 // ---------------------------------------------------------------- mode + ui

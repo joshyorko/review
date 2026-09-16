@@ -8,7 +8,7 @@
 import { execFileSync } from "node:child_process";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
+import { DEFAULT_ORG, exactHeadVerified, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { workbenchPainter } from "./paint.ts";
@@ -457,7 +457,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const item of items) {
 				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
 				if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
-				if (!current.headSha || current.headSha !== item.headSha) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+				if (!exactHeadVerified(item.headSha, current.headSha)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
 				const wasRepair = isRepairRequested(item, mode.currentUserLogin);
 				if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
@@ -542,7 +542,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const item of managedPullRequests) {
 				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
 				if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
-				if (!current.headSha || current.headSha !== item.headSha) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+				if (!exactHeadVerified(item.headSha, current.headSha)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
 				const denied = managedPolicyFor(item.repo, policy)?.deniedLabels.find((label) => current.labels.includes(label));
 				if (denied) return `Cannot dispatch ${item.repo}#${item.id}: pull request has ${denied} label`;
 			}
