@@ -53,9 +53,8 @@ assert_provider_env_names() {
 }
 assert_personal_policy_env_names() {
   local call="$1" context="${2:-launcher}"
-  for name in BLUEFIN_REVIEW_PERSONAL_MODE; do
-    [[ "$call" == *"--env $name"* ]] || fail "$context did not forward $name by name: $call"
-  done
+  [[ "$call" == *"--env BLUEFIN_REVIEW_PERSONAL_MODE"* ]] ||
+    fail "$context did not forward BLUEFIN_REVIEW_PERSONAL_MODE by name: $call"
   [[ "$call" != *"=1"* ]] || fail "$context exposed personal policy values in argv/log output: $call"
 }
 
