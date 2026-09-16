@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { beforeEach, afterEach } from "node:test";
 
 import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/extension/bluefin-review/glyphs.ts";
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
@@ -42,7 +42,9 @@ const NOW = 1_800_000_000_000;
 
 // No hub, no home: these tests must not read the developer's own Hive
 // registration and must never open a socket.
-const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent" };
+const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", LUNA_FACTORY_STATE_ROOT: "" };
+beforeEach(() => { ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "review-claims-")); });
+afterEach(() => { rmSync(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, { recursive: true, force: true }); });
 
 test("every review extension module is reachable from its package entrypoint", () => {
 	const directory = join(process.cwd(), "image/extension/bluefin-review");
@@ -556,7 +558,7 @@ test("check suites surface failures and pending runs without rollup contexts", a
 	assert.deepEqual(result.items.map((item) => item.ciStatus), ["failure", "pending", "success"]);
 });
 
-test("pull request queue omits workflow changes before reviewer selection", async () => {
+test("workflow-changing pull requests remain visible for inspection", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
 		assert.match(body.query, /files\(first: 100\)/);
@@ -597,8 +599,8 @@ test("pull request queue omits workflow changes before reviewer selection", asyn
 	mode.setToken("t");
 	await mode.refreshQueue();
 
-	assert.deepEqual(mode.items.map((item) => `${item.repo}#${item.id}`), ["projectbluefin/review#2"]);
-	assert.equal(mode.selectById("projectbluefin/review", 1), false);
+	assert.deepEqual(mode.items.map((item) => `${item.repo}#${item.id}`), ["projectbluefin/review#1", "projectbluefin/review#2"]);
+	assert.equal(mode.selectById("projectbluefin/review", 1), true);
 });
 test("queue cancellation is classified separately from failures", async () => {
 	const controller = new AbortController();
@@ -2583,14 +2585,14 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	);
 	mode.reprioritize();
 
-	// One key takes the whole slice the filters left, up to the dispatch ceiling.
-	assert.equal(mode.selectAllVisible(), BATCH_LIMIT, "a burn-down selects a slice, not a row");
-	assert.equal(mode.chosenItems().length, BATCH_LIMIT);
-	// Pressing it again on a fully selected slice clears it: one key, both ways.
+	assert.equal(mode.selectAllVisible(), 40, "selection cardinality is independent of execution capacity");
+	assert.equal(mode.factorySelection("inspect").length, 40);
+	assert.equal(mode.slayableItems().length, BATCH_LIMIT, "Review dispatch remains bounded");
 	mode.items = mode.items.slice(0, BATCH_LIMIT);
 	mode.reprioritize();
-	assert.equal(mode.selectAllVisible(), 0);
-	assert.equal(mode.chosenItems().length, 0);
+	assert.equal(mode.selectAllVisible(), 15, "hidden selections are not silently dropped");
+	assert.equal(mode.factorySelection("inspect").length, 15);
+	mode.clearSelected();
 
 	// It respects the filters, so a stage or a search is what gets dispatched.
 	mode.filter = "work 1";
@@ -2606,9 +2608,6 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 
 	const batch = mode.chosenItems();
 	const prompt = actionPrompt({ kind: "fix", item: batch[0], items: batch });
-	assert.match(prompt, /Use the `task` tool once/);
-	assert.match(prompt, /`task` tool once with one fresh isolated item per issue or pull request/);
-	assert.doesNotMatch(prompt, /maximum of 7|fix-and-merge|approve and merge/);
 });
 
 

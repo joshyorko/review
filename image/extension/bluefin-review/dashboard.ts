@@ -22,6 +22,7 @@ import { PrDetailCache, prDetailToLines, sanitizeMarkdown, type PrDetail } from 
 import { fetchPrDetail } from "./github.ts";
 export type DashboardAction =
 	| { kind: "close" }
+    | { kind: "factory"; action: "inspect" | "patch" | "pr-ready" }
 	| { kind: "slay"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "diff"; item: QueueItem; items?: QueueItem[] }
 	| { kind: "comment"; item: QueueItem; items?: QueueItem[] }
@@ -32,12 +33,12 @@ export type DashboardAction =
 	| { kind: "open_browser"; item: QueueItem }
 	| { kind: "ci_mode" }
 	| { kind: "request_reviewer"; item: QueueItem; items?: QueueItem[] };
-
 export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "s", label: "slay" },
 	{ chord: "alt+s", label: "autoslay" },
 	{ chord: "c", label: "comment" },
 	{ chord: "f", label: "fix" },
+	{ chord: "F", label: "factory" },
 	{ chord: "space", label: "select" },
 	{ chord: "alt+b", label: "repo group" },
 	{ chord: "A", label: "all" },
@@ -61,6 +62,7 @@ const HELP: readonly string[] = [
 	"HIVE WORKBENCH",
 	"",
 	"  space            toggle selection on the highlighted item",
+    "  F                Send selected items to Factory (inspect)",
 	"  alt+b            select or clear the current repository group",
 	"  x / A            clear selections / select the filtered slice",
 	"  tab              toggle pull requests and issues",
@@ -633,13 +635,8 @@ export class ReviewDashboard {
 			case "o":
 				this.executeKey("o");
 				break;
-			case "/":
-				this.executeKey("/");
-				break;
-			case "q":
-				this.executeKey("q");
-				break;
-			default:
+			case "F":
+				this.executeKey("F");
 				break;
 		}
 	}
@@ -824,46 +821,50 @@ export class ReviewDashboard {
 				break;
 		}
 
-		const activeItem = this.mode.selected();
-		if (!activeItem) return;
-		const chosenItems = this.chosenItems();
-		const items = chosenItems.length > 0 ? chosenItems : undefined;
-		const item = items ? items[0]! : activeItem;
-		switch (key) {
-			case "s":
-				this.emitAction({ kind: this.mode.queueMode === "issues" ? "fix" : "slay", item, items });
-				return;
-			case "c":
-				this.emitAction({ kind: "comment", item, items });
-				return;
-			case "f":
-				this.emitAction({ kind: "fix", item, items });
-				return;
-			case "d":
-				this.emitAction({ kind: "diff", item, items });
-				return;
-			case "return":
-			case "enter":
-				this.emitAction({ kind: "reference", item, items });
-				return;
-			case "v":
-				if (item.type !== "pr") return;
-				this.showReader = true;
-				this.readerScroll = 0;
-				this.loadSelectedReaderDetail();
-				return;
-			case "C":
-				this.mode.toggleViewMode();
-				this.tui.requestRender();
-				return;
-			case "R":
-				this.done({ kind: "request_reviewer", item, items });
-				return;
-			default:
-				break;
-		}
-	}
+    if (key === "F") {
+        this.emitAction({ kind: "factory", action: "inspect" });
+        return;
+    }
 
+        const activeItem = this.mode.selected();
+        if (!activeItem) return;
+        const chosenItems = this.chosenItems();
+        const items = chosenItems.length > 0 ? chosenItems : undefined;
+        const item = items ? items[0]! : activeItem;
+        switch (key) {
+            case "s":
+                this.emitAction({ kind: this.mode.queueMode === "issues" ? "fix" : "slay", item, items });
+                return;
+            case "c":
+                this.emitAction({ kind: "comment", item, items });
+                return;
+            case "f":
+                this.emitAction({ kind: "fix", item, items });
+                return;
+            case "d":
+                this.emitAction({ kind: "diff", item, items });
+                return;
+            case "return":
+            case "enter":
+                this.emitAction({ kind: "reference", item, items });
+                return;
+            case "v":
+                if (item.type !== "pr") return;
+                this.showReader = true;
+                this.readerScroll = 0;
+                this.loadSelectedReaderDetail();
+                return;
+            case "C":
+                this.mode.toggleViewMode();
+                this.tui.requestRender();
+                return;
+            case "R":
+                this.done({ kind: "request_reviewer", item, items });
+                return;
+            default:
+                return;
+        }
+    }
 	private emitAction(action: DashboardAction): void {
 		if (this.onAction) {
 			this.onAction(action);

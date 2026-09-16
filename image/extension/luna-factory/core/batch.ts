@@ -14,6 +14,7 @@ export interface SelectedItem {
 	acceptanceRevision?: string;
 	acceptance?: string;
 	base?: string;
+	baseRef?: string;
 	head?: string;
 	url?: string;
 	overlaps: string[];
@@ -28,7 +29,7 @@ export interface BatchItem {
 	workspace?: string;
 	attempts: number;
 	operation?: { id: string; phase: "worker" | "verify" | "acceptance" | "push" | "pr"; state: "intent" | "confirmed" | "unknown"; branch?: string; sha?: string; url?: string };
-	proof?: { acceptanceRevision: string; subject: string; digest: string; artifacts: string[]; stage: OutcomeStage; reviewerSession: string };
+	proof?: { acceptanceRevision: string; subject: string; tree?: string; digest: string; artifacts: string[]; stage: OutcomeStage; reviewerSession: string };
 	sessions: string[];
 }
 export interface Batch {
@@ -49,7 +50,7 @@ export interface Batch {
 }
 export function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 export function selectionIdentity(items: readonly SelectedItem[]): string {
-	return digest(JSON.stringify(items.map(({ key, action }) => ({ key, action })).sort((a, b) => a.key.localeCompare(b.key))));
+	return digest(JSON.stringify(items.map(({ repo, number, action }) => ({ key: `${repo.toLowerCase()}#${number}`, action })).sort((a, b) => a.key.localeCompare(b.key))));
 }
 export function validateDependencies(items: readonly SelectedItem[], dependencies: readonly Prerequisite[]): void {
 	const keys = new Set(items.map((item) => item.key));
@@ -71,11 +72,20 @@ export function validateDependencies(items: readonly SelectedItem[], dependencie
 }
 export function createBatch(items: SelectedItem[], options: { id: string; capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[] }): Batch {
 	if (!items.length || items.length > 100) throw new Error("select between 1 and 100 explicit items");
+	items = structuredClone(items);
+	for (const item of items) {
+		if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(item.repo) || !Number.isSafeInteger(item.number) || item.number < 1 || !["inspect", "patch", "pr-ready"].includes(item.action) || !["issue", "pr", "unknown"].includes(item.kind) || !Array.isArray(item.overlaps)) throw new Error("invalid selected identity/action; explicitly resolve selection");
+		const key = `${item.repo.toLowerCase()}#${item.number}`;
+		if (item.key.toLowerCase() !== key) throw new Error("selected key does not match repository/item identity");
+		item.repo = item.repo.toLowerCase(); item.key = key;
+		item.overlaps = item.overlaps.map((overlap) => overlap.toLowerCase());
+	}
 	if (new Set(items.map((item) => item.key)).size !== items.length) throw new Error("duplicate selected identity");
+	if (options.mode !== "once" && options.mode !== "retain") throw new Error("unsupported lifetime mode");
 	for (const [name, value] of Object.entries({ capacity: options.capacity, maxAttempts: options.maxAttempts, maxTotalAttempts: options.maxTotalAttempts })) {
 		if (!Number.isSafeInteger(value) || value < 1 || value > 1000) throw new Error(`${name} must be a positive bounded integer`);
 	}
-	const dependencies = options.dependencies ?? [];
+	const dependencies = (options.dependencies ?? []).map((edge) => ({ ...edge, item: edge.item.toLowerCase(), requires: edge.requires.toLowerCase() }));
 	validateDependencies(items, dependencies);
 	return {
 		version: 1, id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
@@ -86,7 +96,7 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 			const blocker = selected.blocker ?? (overlap ? `overlapping selected work ${overlap}; resolve scope explicitly before execution` : undefined);
 			return {
 				selected, stage: blocker ? "BLOCKED" : "QUEUED", blocker, attempts: 0, sessions: [],
-				ledger: emptyLedger(`${options.id}:${selected.key}` as RunId, {
+				ledger: emptyLedger(`${options.id}:${digest(selected.key).slice(0, 16)}` as RunId, {
 					statement: selected.acceptance ?? selected.key, nonGoals: ["unselected work", "merge", "deploy", "publish"],
 					permittedEffects: selected.action === "inspect" ? ["read"] : ["read", "write"],
 					finishAuthority: selected.action, appetite: { tasks: 1, attemptsPerTask: options.maxAttempts },
@@ -99,17 +109,18 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 }
 export function dependencyBlocker(batch: Batch, key: string): string | undefined {
 	for (const edge of batch.dependencies.filter((edge) => edge.item === key)) {
-		const prerequisite = batch.items.find((item) => item.selected.key === edge.requires)!;
+		const prerequisite = batch.items.find((item) => item.selected.key === edge.requires);
+		if (!prerequisite) return `missing prerequisite ${edge.requires}`;
 		const proof = prerequisite.proof;
 		const stages: OutcomeStage[] = ["verified-patch", "pr-ready", "merged-upstream"];
-		if (prerequisite.stage !== "DONE" || !proof || stages.indexOf(proof.stage) < stages.indexOf(edge.stage)) {
+		if (prerequisite.stage !== "DONE" || !proof || proof.acceptanceRevision !== prerequisite.selected.acceptanceRevision || proof.subject !== prerequisite.selected.head || stages.indexOf(proof.stage) < stages.indexOf(edge.stage)) {
 			return `${edge.requires} must reach ${edge.stage}${edge.stage === "merged-upstream" ? "; human/Review landing required" : ""}`;
 		}
 	}
 	return undefined;
 }
 export function batchConverged(batch: Batch): boolean {
-	return batch.scopeRevisions.length === 0 && batch.items.every((item) => item.stage === "DONE" && item.proof !== undefined);
+	return batch.items.length > 0 && batch.scopeRevisions.length === 0 && batch.items.every((item) => item.stage === "DONE" && item.proof !== undefined && item.proof.acceptanceRevision === item.selected.acceptanceRevision && item.proof.subject === item.selected.head && dependencyBlocker(batch, item.selected.key) === undefined);
 }
 export function batchSummary(batch: Batch, root: string): string {
 	const done = batch.items.filter((item) => item.stage === "DONE").length;

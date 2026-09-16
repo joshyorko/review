@@ -11,6 +11,8 @@ import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, parseScope, resolveToken } from "./github.ts";
 import type { Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
+import { registerFactorySelection, factoryCommand } from "../luna-factory/omp/batch-bridge.ts";
+import { ResourceClaims, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
@@ -347,8 +349,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.registerFlag("all", { description: "Show all queue items instead of defaulting to Hive-only", type: "boolean", default: false });
 	pi.registerFlag("repo", { description: "Review one repository: owner/repo, or org:name for a whole organization", type: "string" });
 	pi.registerFlag("skip-repo", { description: "Comma-separated repositories to skip", type: "string" });
-	pi.registerFlag("autoslay", { description: "Review, repair, and land the visible queue", type: "boolean", default: false });
+	pi.registerFlag("autoslay", { description: "Slay the selected or visible queue", type: "boolean", default: false });
 	registerTools(pi as unknown as ToolHost, mode, () => started);
+	const unregisterFactorySelection = registerFactorySelection((action) => mode.factorySelection(action));
+	let claims: ResourceClaims | undefined;
+	const resourceClaims = () => claims ??= new ResourceClaims(factoryStateRoot(env));
+	const claimItems = (items: readonly QueueItem[], owner: string): void => {
+		const resources = [...new Set(items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))];
+		const acquired: string[] = [];
+		try { for (const resource of resources) { resourceClaims().claim(resource, owner); acquired.push(resource); } }
+		catch (error) { for (const resource of acquired) resourceClaims().release(resource, owner); throw error; }
+	};
+	const releaseItems = (items: readonly QueueItem[], owner: string): void => {
+		for (const item of items) { resourceClaims().release(`item:${item.repo.toLowerCase()}#${item.id}`, owner); resourceClaims().release(`repo:${item.repo.toLowerCase()}`, owner); }
+	};
 
 	const repaint = () => tui?.requestRender();
 
@@ -547,6 +561,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			persistBatch(ctx, { ...activeBatch!, state: "blocked", error: "wave action produced no prompt" });
 			return;
 		}
+		if (activeBatch.kind !== "diff") {
+			try { claimItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`); }
+			catch (error) { persistBatch(ctx, { ...activeBatch, state: "blocked", error: String(error) }); ctx.ui.notify(String(error), "error"); return; }
+		}
 		ctx.ui.notify(`Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
 		pi.sendUserMessage(prompt, deliverAs ? { deliverAs } : undefined);
 	};
@@ -655,6 +673,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const dispatch = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
 		if (action.kind === "close") return;
+		if (action.kind === "factory") {
+			try {
+				const command = await ctx.ui.editor("Factory: start inspect|patch|pr-ready, status, resume/pause/stop <batch>, inspect/export/discard <batch>", `start ${action.action}`);
+				if (command === undefined) return;
+				if (mode.isBlueberry && /^(start|selected)\s+(patch|pr-ready)|^(run|resume|retry)\b/.test(command)) throw new Error("Blueberry mode permits Factory inspection only");
+				ctx.ui.notify(await factoryCommand(command, ctx), "info");
+			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+			return;
+		}
 		if (action.kind === "open_browser") {
 			openBrowser(action.item);
 			return;
@@ -664,13 +691,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 		if (action.kind === "reference") {
-			const items = action.items && action.items.length > 0 ? action.items : [action.item];
+			const items = action.items?.length ? action.items : [action.item];
 			ctx.ui.pasteToEditor(items.map((item) => `${item.repo}#${item.id} — ${item.title}\n${item.url}\n`).join("\n"));
 			return;
 		}
-
 		const capturedItems = action.items && action.items.length > 0 ? [...action.items] : [action.item];
-
 		if (mode.isBlueberry) {
 			const guard = assertBlueberryActionAllowed(action.kind, true);
 			if (!guard.allowed) {
@@ -687,6 +712,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			commentInFlight = true;
 			let commentPlan: CommentActionPlan | undefined;
 			const receipts: string[] = [];
+			const commentOwner = `review:comment:${Date.now()}:${Math.random()}`;
+			let claimed = false;
+			let uncertain = false;
 			try {
 				const body = await ctx.ui.editor("Comment on selected work", "");
 				if (body === undefined || !body.trim()) return;
@@ -719,6 +747,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				}));
 				const validation = validateCommentActionPlan(commentPlan, liveTargets);
 				if (!validation.valid) throw new Error(validation.errors.join("; "));
+				claimItems(capturedItems, commentOwner); claimed = true;
 				pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "confirmed", plan: commentPlan } satisfies PersistedCommentResult);
 
 				for (const target of commentPlan.targets) {
@@ -742,12 +771,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 						if (!validation.valid) throw new Error(validation.errors.join("; "));
 					}
 					const invocation = commentInvocation(target, commentPlan.body);
+					uncertain = true;
 					const result = await pi.exec(invocation.command, [...invocation.args], { timeout: 30_000 });
 					if (result.code !== 0 || result.killed) {
 						throw new Error(result.stderr.trim() || `gh comment exited ${result.code}`);
 					}
 					receipts.push(result.stdout.trim() || `${target.repo}#${target.number}`);
 					pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "confirmed", plan: commentPlan, receipts: [...receipts] } satisfies PersistedCommentResult);
+					uncertain = false;
 				}
 				pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "complete", plan: commentPlan, receipts } satisfies PersistedCommentResult);
 				ctx.ui.notify(`Posted ${receipts.length} GitHub-confirmed comment${receipts.length === 1 ? "" : "s"}`, "info");
@@ -756,6 +787,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (commentPlan) pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "failed", plan: commentPlan, receipts, error: message } satisfies PersistedCommentResult);
 				ctx.ui.notify(`Comment action stopped: ${message}`, "error");
 			} finally {
+				if (claimed && !uncertain) releaseItems(capturedItems, commentOwner);
 				commentInFlight = false;
 			}
 			return;
@@ -867,6 +899,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`Repository wave stopped: ${error}`, "error");
 			return;
 		}
+		if (activeBatch.kind !== "diff") releaseItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`);
 		if (activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr")) {
 			const live = await fetchItemsByKey(
 				wave.items.map((item) => `${item.repo}#${item.id}`),
@@ -992,6 +1025,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	});
 
 	pi.on("session_shutdown", () => {
+		unregisterFactorySelection();
 		for (const stop of timers.splice(0)) stop();
 	});
 

@@ -5,12 +5,12 @@ interface Connection<T> { nodes: T[]; pageInfo: { hasNextPage: boolean } }
 interface Link { number: number; state?: string; repository: { nameWithOwner: string } }
 interface GitHubItem {
 	id: string; __typename: string; title: string; body: string; closed: boolean; merged?: boolean; url: string;
-	baseRefOid?: string; headRefOid?: string; labels: Connection<{ name: string }>;
+	baseRefOid?: string; headRefOid?: string; baseRefName?: string; labels: Connection<{ name: string }>;
 	files?: Connection<{ path: string }>; closingIssuesReferences?: Connection<Link>;
 	timelineItems?: Connection<{ source?: Link }>;
 }
 interface SnapshotResponse {
-	data?: { repository?: { id: string; nameWithOwner: string; defaultBranchRef?: { target: { oid: string } }; issueOrPullRequest?: GitHubItem } };
+	data?: { repository?: { id: string; nameWithOwner: string; defaultBranchRef?: { name: string; target: { oid: string } }; issueOrPullRequest?: GitHubItem } };
 }
 
 /** Uses the existing Review credential, never a per-repository substitute. */
@@ -32,7 +32,7 @@ export class BatchGitHub {
 	async snapshot(selected: SelectedItem): Promise<SelectedItem> {
 		if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(selected.repo) || !Number.isSafeInteger(selected.number) || selected.number < 1 || selected.kind === "unknown") throw new Error("resolve selected canonical repository, number and kind in Review");
 		const [owner, name] = selected.repo.split("/");
-		const result = await this.request("graphql", { query: `query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ id nameWithOwner defaultBranchRef{name target{oid}} issueOrPullRequest(number:$number){ __typename ... on Issue{id title body updatedAt closed url labels(first:100){nodes{name} pageInfo{hasNextPage}} timelineItems(first:100,itemTypes:[CROSS_REFERENCED_EVENT]){nodes{... on CrossReferencedEvent{source{... on PullRequest{number state repository{nameWithOwner}}}}} pageInfo{hasNextPage}}} ... on PullRequest{id title body updatedAt closed merged url baseRefOid headRefOid headRefName baseRefName headRepository{nameWithOwner} labels(first:100){nodes{name} pageInfo{hasNextPage}} files(first:100){nodes{path} pageInfo{hasNextPage}} closingIssuesReferences(first:100){nodes{number repository{nameWithOwner}} pageInfo{hasNextPage}}}}}}`, variables: { owner, name, number: selected.number } });
+		const result = await this.request<SnapshotResponse>("graphql", { query: `query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ id nameWithOwner defaultBranchRef{name target{oid}} issueOrPullRequest(number:$number){ __typename ... on Issue{id title body closed url labels(first:100){nodes{name} pageInfo{hasNextPage}} timelineItems(first:100,itemTypes:[CROSS_REFERENCED_EVENT]){nodes{... on CrossReferencedEvent{source{... on PullRequest{number state repository{nameWithOwner}}}}} pageInfo{hasNextPage}}} ... on PullRequest{id title body closed merged url baseRefOid headRefOid baseRefName labels(first:100){nodes{name} pageInfo{hasNextPage}} files(first:100){nodes{path} pageInfo{hasNextPage}} closingIssuesReferences(first:100){nodes{number repository{nameWithOwner}} pageInfo{hasNextPage}}}}}}`, variables: { owner, name, number: selected.number } });
 		const repo = result.data?.repository;
 		const item = repo?.issueOrPullRequest;
 		if (!repo || !item) throw new Error("selected repository/item unavailable; restore access or explicitly revise scope");
@@ -44,11 +44,15 @@ export class BatchGitHub {
 		if (item.labels.pageInfo.hasNextPage || item.files?.pageInfo.hasNextPage || item.closingIssuesReferences?.pageInfo.hasNextPage || item.timelineItems?.pageInfo.hasNextPage) throw new Error("incomplete policy/overlap evidence; resolve item before dispatch");
 		if (item.labels.nodes.some((label: { name: string }) => ["hold", "blocked"].includes(label.name))) throw new Error("selected item has hold/blocked policy label");
 		if (selected.action === "pr-ready" && item.files?.nodes.some((file: { path: string }) => file.path.startsWith(".github/workflows/"))) throw new Error("workflow-changing PR remains inspectable; Factory refuses workflow push/landing");
+		const base = item.baseRefOid ?? repo.defaultBranchRef?.target.oid;
+		const head = item.headRefOid ?? repo.defaultBranchRef?.target.oid;
+		const baseRef = item.baseRefName ?? repo.defaultBranchRef?.name;
+		if (!base || !head || !baseRef || !/^[a-f0-9]{40,64}$/.test(base) || !/^[a-f0-9]{40,64}$/.test(head)) throw new Error("selected repository subject unavailable; resolve its base/head before execution");
 		const overlaps = [
 			...(item.closingIssuesReferences?.nodes ?? []).map((issue) => `${issue.repository.nameWithOwner}#${issue.number}`.toLowerCase()),
 			...(item.timelineItems?.nodes ?? []).flatMap((entry) => entry.source?.state === "OPEN" ? [`${entry.source.repository.nameWithOwner}#${entry.source.number}`.toLowerCase()] : []),
 		];
-		return { ...selected, repositoryId: repo.id, itemId: item.id, url: item.url, acceptance: `${item.title}\n\n${item.body}`, acceptanceRevision: digest(`${item.title}\n${item.body}`), base: item.baseRefOid ?? repo.defaultBranchRef?.target.oid, head: item.headRefOid ?? repo.defaultBranchRef?.target.oid, overlaps, blocker: undefined };
+		return { ...selected, repo: repo.nameWithOwner.toLowerCase(), key: `${repo.nameWithOwner.toLowerCase()}#${selected.number}`, repositoryId: repo.id, itemId: item.id, url: item.url, acceptance: `${item.title}\n\n${item.body}`, acceptanceRevision: digest(`${item.title}\n${item.body}`), base, head, baseRef, overlaps, blocker: undefined };
 	}
 	async assertFresh(selected: SelectedItem): Promise<void> {
 		const current = await this.snapshot(selected);

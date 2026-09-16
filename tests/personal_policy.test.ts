@@ -1,6 +1,9 @@
 /** Personal self-hosted policy: workflow PRs remain visible and may be slayed when GitHub permits it. */
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach, afterEach } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { BATCH_ENTRY, actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
 import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts";
@@ -18,7 +21,10 @@ const ENV = {
 	XDG_CONFIG_HOME: "/nonexistent",
 	BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY: "1",
 	BLUEFIN_REVIEW_PERSONAL_MODE: "1",
+	LUNA_FACTORY_STATE_ROOT: "",
 };
+beforeEach(() => { ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "personal-claims-")); });
+afterEach(() => { rmSync(ENV.LUNA_FACTORY_STATE_ROOT, { recursive: true, force: true }); });
 
 function workflowNode() {
 	return {

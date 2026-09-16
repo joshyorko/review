@@ -102,6 +102,10 @@ jobs:
           bash tests/version-derivation.sh
       - name: Luna Factory dogfood contract
         run: bun test tests/luna_factory_dogfood_contract.test.ts
+      - name: Packaged runtime capability report
+        run: |
+          set -euo pipefail
+          tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-capabilities"
 
 
       - name: Interactive launcher docs and shell stay aligned

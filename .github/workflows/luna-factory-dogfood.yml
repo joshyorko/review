@@ -8,24 +8,34 @@ jobs:
   dogfood:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b7d52c5d5f1a8f7f8c6c4d0e8c3b6f8f5a # v2
+      - name: Install Apptainer
+        uses: eWaterCycle/setup-apptainer@9f7b8f5f7a1c8c6b7d3e5f3e4d2a1b0c9e8f7a6b # v1
       - name: Runtime capability report
-        run: tests/appliance-runtime-probe.sh "$RUNNER_TEMP/capabilities"
+        run: tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-dogfood/capabilities"
+      - name: Require OCI capability for OCI dogfood
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/luna-factory-dogfood/capabilities/capabilities.json"
       - name: Build exact-head OCI image
         run: |
-          podman build --format oci -f image/appliance/Containerfile -t review:luna-factory-dogfood .
-          tests/appliance-contract.sh --image review:luna-factory-dogfood
+          podman build --format oci -f image/appliance/Containerfile -t "review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" .
+          tests/appliance-contract.sh --image "review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
       - name: Run no-publish OCI dogfood
+        env:
+          BLUEFIN_REVIEW_IMAGE: review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
         run: tests/luna-factory-dogfood.sh oci
       - name: Build and run no-publish SIF
         run: |
-          scripts/brew-dev build
-          BLUEFIN_REVIEW_FALLBACK_SIF="$PWD/.bluefin/review/launcher/bluefin-review.sif" tests/luna-factory-dogfood.sh sif
+          scripts/brew-dev build "${{ github.event.pull_request.head.sha }}" "$RUNNER_TEMP/bundles"
+          BLUEFIN_REVIEW_FALLBACK_SIF="$RUNNER_TEMP/bundles/launcher/bluefin-review.sif" tests/luna-factory-dogfood.sh sif
       - name: Upload bounded evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/luna-factory-dogfood

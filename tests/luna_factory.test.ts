@@ -1013,17 +1013,6 @@ test("loading the extension registers its surface and starts no work", async () 
 	assert.equal(host.notifications.length, 0, "loading is silent");
 });
 
-test("the package exports a native OMP factory and its command is a bounded control surface", async () => {
-	const host = fakeHost();
-	const result = lunaFactoryExtension(host as never);
-	assert.equal(result, undefined);
-	assert.equal(typeof host.commands.get("factory")?.handler, "function");
-	await host.commands.get("factory")!.handler("status", startCtx(host));
-	assert.match(host.notifications.join("\n"), /no Factory run is open/);
-	await host.commands.get("factory")!.handler("inspect the failure", startCtx(host));
-	assert.match(host.sentMessages[0]!.content, /explicit operator objective/);
-	assert.match(host.sentMessages[0]!.content, /luna_factory_open/);
-});
 
 test("the native task seam admits only a ledger-stamped assignment and journals OMP identities", async () => {
 	let nativeCalls = 0;

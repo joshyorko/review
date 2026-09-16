@@ -76,3 +76,17 @@ git diff --check
 
 `tests/luna_factory.test.ts` runs under `tests/omp-review-mode.sh` with the rest
 of the extension contracts, so a new suite is registered by naming it there.
+## Selected batches and runtime boundaries
+
+Factory batches use the existing OMP command bridge (`factoryCommand`) and one
+same-host state root. A run once command exits when work is complete or blocked;
+retain keeps the journal, patches, logs, and native artifacts for `inspect`,
+`resume`, `pause`, `stop`, `export`, or explicit `discard`. Stop cancellation
+does not claim rollback or release a conflicting writer until cancellation is
+confirmed. There is no detached service or nested tool runtime.
+
+The shared bound includes native Factory workers, retries, verification, and
+reviewer tasks; unrelated Review work remains usable. Resource ownership is
+keyed by the lower-case repository and item identity in the state root.
+Remote, gateway, and distributed workers are deferred, as are parent #111 gates;
+this skill does not claim dogfood or packaged-runtime success without evidence.
