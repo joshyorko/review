@@ -380,7 +380,13 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (event.reason.trim().length === 0) {
 				return { ok: false, error: "a reopen must name the new evidence that justifies it" };
 			}
-			return bump(replaceTask(ledger, task.id, (current) => ({ ...current, state: "VERIFY" as TaskState })));
+			return bump(
+				replaceTask(ledger, task.id, (current) => ({
+					...current,
+					state: "VERIFY" as TaskState,
+					decisionReason: `reopened after explicit owner evidence: ${event.reason.trim()}`,
+				})),
+			);
 		}
 
 		case "use_replan": {

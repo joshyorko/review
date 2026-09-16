@@ -55,6 +55,7 @@ the stable fallback:
 | (owner integration) | `luna_factory_integrate` |
 | (interrupted attempt) | `luna_factory_reconcile` |
 | (diagnosed plateau) | `luna_factory_replan` — one bounded same-goal replan after two no-progress attempts |
+| (explicit post-success defect) | `luna_factory_reopen` — invalidate prior proof only after owner-supplied new evidence |
 | (verified finish) | `luna_factory_completion` |
 
 `luna_factory_dispatch` builds the bounded prompt for an admitted task. On the
@@ -98,6 +99,13 @@ background job.
 A plateau route also exercised two unproved receipts, the
 `luna_factory_replan` adapter, a successful third attempt, and the post-success
 successor dismissal through the packaged runtime.
+Three fresh packaged runs also exercised the matched post-success trap and
+legitimate-defect countercase: optional cleanup was dismissed after proof,
+explicit owner evidence reopened the proven task, and only the new repair was
+admitted. A separate async pause/drain route observed a native child job,
+paused admission, deferred a newly discovered candidate, and entered drain;
+it made no cancellation or rollback claim while the native job remained an OMP
+lifecycle concern.
 
 The reproducible fixture is
 `tests/fixtures/luna-factory-omp-probe-server.mjs`, with the install and probe

@@ -116,6 +116,7 @@ const FACTORY_TOOL_NAMES = [
 	"luna_factory_integrate",
 	"luna_factory_reconcile",
 	"luna_factory_replan",
+	"luna_factory_reopen",
 	"luna_factory_finish",
 	"luna_factory_why",
 	"luna_factory_control",
@@ -790,6 +791,32 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 						{ artifactRoots },
 					),
 				(next) => `task ${payload.taskId} is READY for the one bounded replan; no-progress diagnosis remains recorded at ${next.noProgressAttempts}`,
+			);
+		},
+	});
+
+	registerTool({
+		name: "luna_factory_reopen",
+		label: "Factory Reopen",
+		description:
+			"Reopen a completed task only when the owner supplies new evidence of a legitimate defect; this invalidates its prior proof without authorizing successor work by itself.",
+		async execute(_toolCallId, params) {
+			const parsed = parseArgument(params);
+			if (!parsed.ok) return { content: text(parsed.error), isError: true };
+			if (!isRecord(parsed.value)) return { content: text("reopen input must be a JSON object"), isError: true };
+			const payload = parsed.value;
+			if (typeof payload.taskId !== "string") return { content: text("taskId is required"), isError: true };
+			if (typeof payload.reason !== "string" || payload.reason.trim().length === 0) {
+				return { content: text("reason must name the new evidence that justifies reopening the task"), isError: true };
+			}
+			return mutate(
+				(current) =>
+					reduce(
+						current,
+						{ kind: "reopen_task", expectedRevision: current.revision, taskId: payload.taskId as TaskId, reason: payload.reason },
+						{ artifactRoots },
+					),
+				(next) => `task ${payload.taskId} reopened for explicit owner evidence; prior proof is no longer current`,
 			);
 		},
 	});

@@ -653,6 +653,7 @@ test("reopening requires new evidence and replanning requires a diagnosed platea
 
 	const reopened = step(finished, (revision) => ({ kind: "reopen_task", expectedRevision: revision, taskId: "T1" as TaskId, reason: "reproduced data loss" }));
 	assert.equal(findTask(reopened, "T1" as TaskId)?.state, "VERIFY");
+	assert.match(findTask(reopened, "T1" as TaskId)?.decisionReason ?? "", /reproduced data loss/);
 
 	const replan = reduce(reopened, { kind: "use_replan", expectedRevision: reopened.revision, taskId: "T1" as TaskId }, REDUCE);
 	assert.equal(replan.ok, false);
@@ -1002,6 +1003,7 @@ test("loading the extension registers its surface and starts no work", async () 
 			"luna_factory_open",
 			"luna_factory_receipt",
 			"luna_factory_reconcile",
+			"luna_factory_reopen",
 			"luna_factory_replan",
 			"luna_factory_status",
 			"luna_factory_why",
@@ -1373,6 +1375,59 @@ test("the replan adapter exposes only the one diagnosed same-goal replan", async
 	const second = await callTool(host, "luna_factory_replan", { taskId: "T1" });
 	assert.equal(second.isError, true);
 	assert.match(second.content[0]!.text, /already been used/);
+});
+
+test("the reopen adapter records explicit post-success defect evidence", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "repair a reproduced defect without authorizing successor cleanup",
+		criteria: [
+			{ id: "A1", statement: "the defect is repaired" },
+			{ id: "A2", statement: "optional cleanup is documented", mandatory: false },
+		],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "initial repair",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await callTool(host, "luna_factory_receipt", receipt());
+	await callTool(host, "luna_factory_finish", { taskId: "T1" });
+	const cleanup = await callTool(host, "luna_factory_candidate", {
+		taskId: "T2",
+		generation: "G1",
+		criterionId: "A2",
+		title: "optional cleanup",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "cleanup would be convenient",
+	});
+	assert.match(cleanup.content[0]!.text, /dismissed/);
+	const reopened = await callTool(host, "luna_factory_reopen", { taskId: "T1", reason: "reproduced a legitimate data-loss defect after the green result" });
+	assert.equal(reopened.isError, undefined);
+	assert.match(reopened.content[0]!.text, /reopened/);
+	const repair = await callTool(host, "luna_factory_candidate", {
+		taskId: "T3",
+		generation: "G1",
+		criterionId: "A1",
+		title: "repair the reproduced defect",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "the owner reproduced a mandatory defect",
+	});
+	assert.match(repair.content[0]!.text, /T3: ADMIT/);
 });
 
 test("dispatch through an unproven path is refused at the tool boundary", async () => {
