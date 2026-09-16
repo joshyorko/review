@@ -21,6 +21,7 @@ import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression, t
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
+import { HOLD_LABELS, isLandingReady, landingReason, landingState } from "../image/extension/bluefin-review/landing.ts";
 import { RAW_KEYS, canonicalKey, rawKeyMatcher } from "../image/extension/bluefin-review/keys.ts";
 import { ReviewDashboard, parseMouseEvent } from "../image/extension/bluefin-review/dashboard.ts";
 import { STALE_AFTER_MS, priorityChip, queueAge, renderRail, statusSegment } from "../image/extension/bluefin-review/rail.ts";
@@ -2124,6 +2125,96 @@ test("active slay blocks privileged and credential-bearing bash mutations", asyn
 	assert.equal(await call("gh pr merge 7 --repo projectbluefin/other --auto --squash"), undefined);
 });
 
+
+test("slay gate refuses a blocked landing state and allows only complete readiness (review#461)", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("pr", "7");
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	const guard = pi.events.get("tool_call");
+	const call = (command) => guard({ toolName: "bash", input: { command } }, ctx);
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const target = batch.waves[0].items[0];
+
+	// Green CI but a requested-changes review blocks approval and merge.
+	target.reviewState = "changes_requested";
+	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /changes_requested/);
+	assert.match((await call("gh pr review 7 --repo projectbluefin/other --approve")).reason, /changes_requested/);
+
+	// Green CI and approved but a hold label blocks.
+	target.reviewState = "approved";
+	target.labels = ["hold"];
+	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /hold label/);
+
+	// Green, approved, unheld but a dirty merge blocks.
+	target.labels = [];
+	target.mergeState = "dirty";
+	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /conflicts/);
+
+	// Green, approved, clean but pending CI blocks.
+	target.mergeState = "clean";
+	target.ciStatus = "pending";
+	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /CI is pending/);
+
+	// A green, approved, clean, unheld pull request is the only ready-to-land state.
+	target.ciStatus = "success";
+	assert.equal(await call("gh pr merge 7 --repo projectbluefin/other --auto --squash"), undefined);
+});
+
+test("landing state evaluates CI, reviews, holds, and mergeability together", () => {
+	const ready = {
+		id: 1, repo: "projectbluefin/review", ciStatus: "success", mergeState: "clean",
+		reviewState: "approved", labels: [], type: "pr",
+	};
+	// Green, approved, clean, unheld is the only ready-to-land state.
+	assert.equal(landingState(ready), "ready-to-land");
+	// A requested-changes review blocks even with green CI and a clean merge.
+	assert.equal(landingState({ ...ready, reviewState: "changes_requested" }), "review-blocked");
+	// A hold label blocks even with green CI and an approval.
+	assert.equal(landingState({ ...ready, labels: ["hold"] }), "held");
+	assert.equal(landingState({ ...ready, labels: ["blocked"] }), "held");
+	// A hold denied by a managed policy counts, not just the standard set.
+	const policy = {
+		managedRepositories: [{ repository: "projectbluefin/review", requiredLabels: [], deniedLabels: ["release-hold"] }],
+	};
+	assert.equal(landingState({ ...ready, labels: ["release-hold"] }, policy), "held");
+	// Failing or pending CI blocks.
+	assert.equal(landingState({ ...ready, ciStatus: "failure" }), "ci-failing");
+	assert.equal(landingState({ ...ready, ciStatus: "pending" }), "ci-pending");
+	// A dirty merge blocks.
+	assert.equal(landingState({ ...ready, mergeState: "dirty" }), "conflicts");
+	// Awaiting approval is not ready.
+	assert.equal(landingState({ ...ready, reviewState: "review_required" }), "unreviewed");
+	// An issue is not a landing target.
+	assert.equal(landingState({ ...ready, type: "issue" }), "incomplete");
+	// A hold is checked before CI, so a hold never reads as merely pending CI.
+	assert.equal(landingState({ ...ready, ciStatus: "failure", labels: ["hold"] }), "held");
+	// isLandingReady is true only for the complete state.
+	assert.equal(isLandingReady(ready), true);
+	assert.equal(isLandingReady({ ...ready, reviewState: "changes_requested" }), false);
+	assert.equal(isLandingReady({ ...ready, labels: ["hold"] }), false);
+	// The standard hold set is exported for callers that need it.
+	assert.deepEqual([...HOLD_LABELS].sort(), ["blocked", "hold"]);
+});
+
+test("landing reason names the blocker for gates and the UI", () => {
+	assert.equal(landingReason("ci-failing"), "CI is failure");
+	assert.equal(landingReason("ci-pending"), "CI is pending");
+	assert.equal(landingReason("review-blocked"), "has a changes_requested review");
+	assert.equal(landingReason("held"), "has a hold label");
+	assert.equal(landingReason("conflicts"), "has conflicts with the base");
+	assert.equal(landingReason("unreviewed"), "is awaiting approval");
+	assert.equal(landingReason("incomplete"), "is not a pull request");
+	assert.equal(landingReason("ready-to-land"), "");
+});
 
 
 test("RAW_KEYS normalizes Alt-S and Alt-B chords", () => {

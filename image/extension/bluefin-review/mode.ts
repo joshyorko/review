@@ -19,6 +19,8 @@ import {
 } from "./github.ts";
 import { type HiveSnapshot, type HiveWorkItem, EMPTY_HIVE, fetchHive, fetchHiveKnowledge, fetchHiveMe } from "./hive.ts";
 import { type PrioritizedQueue, type Priority, isRepairRequested, itemKey, prioritize } from "./priority.ts";
+import { type LandingState, landingState } from "./landing.ts";
+import { GENERIC_WORKBENCH_POLICY, type WorkbenchPolicy } from "./policy.ts";
 import { SessionTrace } from "./session.ts";
 
 export interface ReviewModeOptions {
@@ -26,6 +28,8 @@ export interface ReviewModeOptions {
 	token?: string;
 	fetchImpl?: typeof fetch;
 	env?: NodeJS.ProcessEnv;
+	/** Managed-repository policy, so landing state honours the same holds as the gate. */
+	policy?: WorkbenchPolicy;
 }
 /**
  * Most items one dispatch may carry.
@@ -103,6 +107,7 @@ export class ReviewMode {
 	private token?: string;
 	private fetchImpl?: typeof fetch;
 	private env: NodeJS.ProcessEnv;
+	private policy: WorkbenchPolicy;
 	private inflight?: AbortController;
 	private ranked: PrioritizedQueue = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
 	skipRepos: Set<string>;
@@ -113,6 +118,7 @@ export class ReviewMode {
 		this.token = options.token;
 		this.fetchImpl = options.fetchImpl;
 		this.env = options.env ?? process.env;
+		this.policy = options.policy ?? GENERIC_WORKBENCH_POLICY;
 		const envSkip = (this.env.BLUEFIN_REVIEW_SKIP_REPOS ?? "")
 			.split(",")
 			.map((s) => s.trim().toLowerCase())
@@ -155,6 +161,15 @@ export class ReviewMode {
 
 	priorities(): ReadonlyMap<string, Priority> {
 		return this.ranked.priorities;
+	}
+
+	/**
+	 * Authoritative landing state for a pull request: CI, reviews, holds, and
+	 * mergeability evaluated together. Only the extension and the status tool
+	 * project this, so the UI maps to the same state the slay gate enforces.
+	 */
+	landingStateFor(item: QueueItem): LandingState {
+		return landingState(item, this.policy);
 	}
 
 	/** Which provider ordered the queue: Hive's priority, or local categories. */

@@ -16,6 +16,7 @@ import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
 import { type ToolHost, registerTools } from "./tools.ts";
 import { hiveFailureStatus } from "./hive.ts";
+import { landingState, landingReason } from "./landing.ts";
 import { BLUEBERRY_WELCOME_MESSAGE, assertBlueberryActionAllowed, checkBlueberryPermission } from "./blueberry.ts";
 import { GENERIC_WORKBENCH_POLICY, managedPolicyFor, type WorkbenchPolicy } from "./policy.ts";
 import {
@@ -96,15 +97,26 @@ function slayBashBlockReason(command: string): string | undefined {
 	return undefined;
 }
 
-function slayCiBlockReason(command: string, items: readonly QueueItem[]): string | undefined {
+function slayLandingBlockReason(
+	command: string,
+	items: readonly QueueItem[],
+	policy?: WorkbenchPolicy,
+): string | undefined {
 	const mutatesLanding = command.split(/\r?\n|&&|\|\||;/).some((segment) =>
 		/\bgh\s+pr\s+merge\b/.test(segment)
 		|| (/\bgh\s+pr\s+review\b/.test(segment) && /(?:^|\s)--approve(?:[=\s]|$)/.test(segment)),
 	);
 	if (!mutatesLanding) return undefined;
-	const blocked = items.find((item) => item.type === "pr" && (item.ciStatus === "failure" || item.ciStatus === "pending"));
-	if (!blocked) return undefined;
-	return `${blocked.repo}#${blocked.id} CI is ${blocked.ciStatus}; refresh and wait for successful checks before approval or merge`;
+	// Never approve or merge a pull request that is not genuinely ready to land:
+	// CI alone never implies ready. Every policy input blocks, so a queued hold or
+	// a requested-changes review stops the mutation just as a failing check does.
+	for (const item of items) {
+		if (item.type !== "pr") continue;
+		const state = landingState(item, policy);
+		if (state === "ready-to-land") continue;
+		return `${item.repo}#${item.id} ${landingReason(state)}; refresh and clear it before approval or merge`;
+	}
+	return undefined;
 }
 
 export const RAIL_KEYS: readonly RailKey[] = [
@@ -1118,8 +1130,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const currentItems = (wave?.items ?? []).map((item) =>
 			visible.find((candidate) => candidate.repo === item.repo && candidate.id === item.id) ?? item,
 		);
-		const ciReason = slayCiBlockReason(command, currentItems);
-		if (ciReason) return { block: true, reason: `Hive workbench slay guard: ${ciReason}` };
+		const landingBlocker = slayLandingBlockReason(command, currentItems, policy);
+		if (landingBlocker) return { block: true, reason: `Hive workbench slay guard: ${landingBlocker}` };
 	});
 
 	pi.on("tool_execution_start", (event) => {
