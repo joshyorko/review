@@ -9,13 +9,13 @@ name: Renovate
 # Mergeraptor is an org-level app whose permissions are already granted across
 # projectbluefin repositories (consuming MERGERAPTOR_APP_ID / MERGERAPTOR_PRIVATE_KEY).
 #
-# Hourly polling follows stable OMP GitHub releases. The repository package rule
+# Daily polling follows stable OMP GitHub releases. The repository package rule
 # runs one allowlisted pin synchronizer, then OMP-only automerge lets the main
 # push trigger both native image publishers.
 
 on:
   schedule:
-    - cron: '17 * * * *'
+    - cron: '15 2 * * *'
   workflow_dispatch:
     inputs:
       dry_run:

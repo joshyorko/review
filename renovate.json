@@ -36,7 +36,7 @@
       "datasourceTemplate": "git-refs"
     },
     {
-      "description": "Track requirements-ci.lock, a pip-compile (--require-hashes) lockfile of pre-commit and its dependency tree. The file uses a non-standard .lock name and a custom header, so a regex manager matches each pkg==version line directly; pypi resolves the newest version and CI regenerates the hashes with `uv pip compile --generate-hashes`.",
+      "description": "Track requirements-ci.lock package versions. CI validates its committed hashes but does not regenerate them; projectbluefin/review#598 tracks derived-hash automation before these updates can advance unattended.",
       "customType": "regex",
       "managerFilePatterns": [
         "/(^|/)requirements-ci\\.lock$/"
@@ -49,7 +49,7 @@
   ],
   "packageRules": [
     {
-      "description": "Immutable-ref housekeeping automerges by default. Other code-changing updates require review unless a later dependency-specific rule opts into validated automerge; the OMP rule below is that explicit exception. Pull-request automerge and squash are stated because branch protection rejects branch-mode automerge.",
+      "description": "Immutable-ref housekeeping automerges by default. Other code-changing updates require review under the supply-chain gate projectbluefin/review#499 unless a later dependency-specific rule opts into validated automerge; the OMP rule below is that explicit exception. Pull-request automerge and squash are stated because branch protection rejects branch-mode automerge.",
       "matchUpdateTypes": [
         "pin",
         "pinDigest"

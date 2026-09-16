@@ -59,7 +59,7 @@ and is not copied into either runtime image.
 
 ## Follow upstream OMP releases
 
-The hourly Renovate workflow tracks stable `can1357/oh-my-pi` GitHub releases.
+The daily Renovate workflow tracks stable `can1357/oh-my-pi` GitHub releases.
 Its allowlisted `scripts/update-omp-pins.mjs` task synchronizes the version and
 both architecture digests across the review and contributor Containerfiles.
 After checks and OMP-specific automerge, the `main` push triggers both image

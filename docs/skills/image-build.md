@@ -73,11 +73,13 @@ Hive's source pin appears in `justfile` and `image/contribute/Containerfile`;
 move both together from Hive's `v4` branch. OMP pins appear in both
 Containerfiles. `node scripts/update-omp-pins.mjs <version>` reads the published
 GitHub release asset digests and updates both files atomically. Renovate runs
-that command hourly after changing `OMP_VERSION`, then automerges only after
+that command daily after changing `OMP_VERSION`, then automerges only after
 repository checks pass. The merge triggers `publish-appliance.yml` and
 `publish-contribute.yml`; those workflows build and execute both native
 architectures before updating their published indexes. The review and
 contribute image revision files remain separate product revisions.
+[#598](https://github.com/projectbluefin/review/issues/598) owns derived-checksum
+automation for the remaining GH, Node, tmux, and Python lockfile pins.
 
 ## Verification
 

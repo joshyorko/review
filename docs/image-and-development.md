@@ -16,7 +16,7 @@ architecture-specific SHA-256. The contributor image installs the root
 `package-lock.json` solely for Hive's pinned `ws` dependency. Hive retains
 assignment, lease, prompt, credential, and completion authority.
 
-The hourly Renovate workflow follows stable `can1357/oh-my-pi` GitHub releases.
+The daily Renovate workflow follows stable `can1357/oh-my-pi` GitHub releases.
 Its allowlisted post-upgrade task runs `node scripts/update-omp-pins.mjs`, which
 requires both Containerfiles to name the same OMP version and replaces their
 per-architecture digests from the matching release assets. After checks pass,
