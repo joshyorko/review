@@ -66,6 +66,17 @@ model-specific runtime. Both OCI images leave model and effort selection to OMP.
     The scheduled Renovate workflow refreshes the GitHub release asset digests,
     merges the validated OMP update, and lets the resulting `main` push publish
     both images.
+16. Each image owns its OMP settings overlay, and both load it the same way:
+    `PI_CONFIG_FILES` in the image environment, the documented wrapper seam
+    that lands in the CLI-overlay layer above user and project settings. The
+    contributor cannot use `--config` at all, because Hive owns the `omp` argv
+    inside its tmux session, and `--config` is a flag of the main run, so it
+    reaches no subcommand and cannot be observed from inside the image. Both
+    overlays set `startup.checkUpdate: false`, since a read-only image cannot
+    perform the `omp update` the banner advertises, and `symbolPreset: nerd`,
+    since the default `unicode` preset draws fallback glyphs in a Bluefin
+    terminal and makes OMP ask the operator for a font the image cannot
+    install. Assert what OMP resolved, never that the file is present.
 
 ## Pin maintenance
 

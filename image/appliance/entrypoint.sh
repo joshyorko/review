@@ -22,7 +22,7 @@ EOF
 --help | -h | help)
   # OMP owns the rest of the help text. Remove its mutable-install update
   # command and replace it with the appliance contract below.
-  omp --profile "$profile" --config /usr/share/bluefin/review/appliance-config.yml \
+  omp --profile "$profile" \
     --extension /usr/share/bluefin/review/extension "$@" |
     sed '/^[[:space:]]*update[[:space:]]/d'
   cat <<'EOF'
@@ -45,5 +45,4 @@ if [ "$advisor" = false ]; then
 fi
 
 exec omp --profile "$profile" \
-  --config /usr/share/bluefin/review/appliance-config.yml \
   --extension /usr/share/bluefin/review/extension "${args[@]}"
