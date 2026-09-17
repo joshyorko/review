@@ -1900,7 +1900,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.match(status.content[0].text, /review, fix, and slay remain available/, "a missing Hive must not read as browse-only: authorized actions remain available");
 });
 
-test("--autoslay repairs returned pull requests before implementing issue waves", async () => {
+test("--autoslay works the pull-request queue, repairs first, and never switches to issues", async () => {
 	let repairHead = "a".repeat(40);
 	let issueHasPullRequest = false;
 	const repairNode = () => ({
@@ -1962,26 +1962,28 @@ test("--autoslay repairs returned pull requests before implementing issue waves"
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 	await new Promise((resolve) => setImmediate(resolve));
+	// A pull request returned to its author is the blocked work, so it leads.
 	assert.equal(pi.messages.length, 1);
 	assert.match(pi.messages[0], /Repair .*projectbluefin\/review#41/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#77/);
+	const prQueue = await pi.tools.get("hive_workbench_queue").execute("id", {});
+	assert.match(prQueue.content[0].text, /projectbluefin\/review#41/, "the queue stays on pull requests");
+	assert.doesNotMatch(prQueue.content[0].text, /projectbluefin\/review#77/, "autoslay must not move the operator onto the issue backlog");
 
 	repairHead = "b".repeat(40);
 	ctx.asyncJobs.recent = [{ id: "repair", status: "completed", startTime: Date.now() + 1 }];
 	await pi.events.get("agent_end")({}, ctx);
-	assert.equal(pi.messages.length, 2);
-	assert.match(pi.messages[1], /Implement projectbluefin\/review#77/);
-	assert.match(pi.messages[1], /hive_workbench_lookup.*queue.*knowledge/);
-	assert.match(pi.messages[1], /workflowz/);
-	assert.match(pi.messages[1], /Closes <owner\/repo>#<number>/);
-
-
-	issueHasPullRequest = true;
-	ctx.asyncJobs.recent = [{ id: "issue", status: "completed", startTime: Date.now() + 1 }];
-	await pi.events.get("agent_end")({}, ctx);
-	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	assert.equal(batch.state, "complete");
-	assert.equal(batch.completedItems, 2);
+	for (let turn = 0; turn < 8; turn += 1) {
+		const { promise, resolve } = Promise.withResolvers();
+		setImmediate(resolve);
+		await promise;
+	}
+	// The issue backlog is never implemented from a pull-request autoslay run.
+	for (const message of pi.messages) {
+		assert.doesNotMatch(message, /Implement projectbluefin\/review#77/);
+	}
+	const afterQueue = await pi.tools.get("hive_workbench_queue").execute("id", {});
+	assert.doesNotMatch(afterQueue.content[0].text, /projectbluefin\/review#77/);
 });
 test("host Alt-S uses issue autoslay and blocks without a submitted pull request", async () => {
 	const node = {
@@ -4288,6 +4290,9 @@ test("--autoslay continues past a wave blocked before dispatch", async () => {
 	};
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
+	// This fixture is an issue backlog, so the run is started on it explicitly:
+	// autoslay works the queue it was given and no longer switches modes.
+	pi.flagValues.set("issues", true);
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;

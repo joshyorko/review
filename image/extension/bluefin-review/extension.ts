@@ -743,13 +743,21 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return await startRepositoryBatch(ctx, "slay", items);
 	};
 
-	/** Candidates for one autoslay pass, in the queue mode autoslay operates on. */
-	const autoslayCandidates = async (ctx: CtxLike): Promise<QueueItem[]> => {
+	/**
+	 * Candidates for one autoslay pass.
+	 *
+	 * Autoslay works the queue you asked for and does not change modes: started
+	 * on pull requests it reviews, repairs, and lands pull requests, and only
+	 * `--issues` puts it on the issue backlog. Within the pull-request queue,
+	 * requested-changes items come first — a pull request already returned to
+	 * its author is the work that is actually blocked.
+	 */
+	const autoslayCandidates = async (_ctx: CtxLike): Promise<QueueItem[]> => {
 		if (mode.queueMode === "issues") return [...mode.visibleItems()];
 		const repairs = mode.repairRequestedItems();
-		mode.toggleMode();
-		await refreshQueue(ctx);
-		return [...repairs, ...mode.visibleItems()];
+		const repairKeys = new Set(repairs.map((item) => `${item.repo}#${item.id}`));
+		const reviewable = mode.visibleItems().filter((item) => !repairKeys.has(`${item.repo}#${item.id}`));
+		return [...repairs, ...reviewable];
 	};
 
 	const startAutoslay = async (ctx: CtxLike, continuing = false): Promise<boolean> =>
