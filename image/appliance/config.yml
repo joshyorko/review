@@ -4,6 +4,12 @@
 # an in-place update that cannot survive appliance replacement.
 startup:
   checkUpdate: false
+  # Each review target gets its own state volume, so a first launch against a
+  # new repository starts with an empty OMP home and the onboarding wizard
+  # takes the terminal instead of the queue. The appliance resolves its
+  # credentials from the launcher's environment, so there is nothing here for
+  # an operator to answer.
+  setupWizard: false
 
 # The appliance runs in a Bluefin terminal, which ships a Nerd Font. Left at
 # the `unicode` default OMP draws the fallback glyph set and then asks the
