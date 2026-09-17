@@ -39,10 +39,10 @@ grep -qF 'supports only AGENT_BACKEND=omp' image/contribute/entrypoint.sh || fai
 image_hive_commit="$(sed -n 's/^ARG HIVE_COMMIT=//p' "$containerfile")"
 launcher_hive_commit="$(sed -n 's/^hive_commit := "\([0-9a-f]\{40\}\)"$/\1/p' justfile)"
 [[ -n "$image_hive_commit" && "$image_hive_commit" == "$launcher_hive_commit" ]] || fail "launcher and contributor image must pin the same Hive commit"
-# scripts/launcher-common.sh is a source shim; bin/bluefin is the launcher, and
-# its offline fallback is the value that ships when the justfile is absent.
+# bin/bluefin is the launcher; its offline fallback is the value that ships when
+# the justfile is absent.
 grep -qF "$image_hive_commit" bin/bluefin || fail "bin/bluefin must pin the same Hive commit as the container"
-if grep -R -nE 'AGENT_MODEL|AGENT_REASONING_EFFORT' justfile scripts/launcher-common.sh image/contribute deploy/contribute.yaml; then
+if grep -R -nE 'AGENT_MODEL|AGENT_REASONING_EFFORT' justfile bin/bluefin image/contribute deploy/contribute.yaml; then
   fail "provider, model, and effort belong to OMP configuration"
 fi
 [[ ! -d image/tui ]] || fail "legacy Textual UI must not ship"

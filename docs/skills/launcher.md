@@ -31,8 +31,9 @@ metadata:
 
 The `just review-queue`, `just review-appliance`, `just review-container`,
 `just contribute`, `just review-doctor`, and `just review-stop` recipes remain
-developer-compatible entry points. They source `scripts/launcher-common.sh` but
-retain their established state-volume and remote-Podman recipe bodies. Users
+developer-compatible entry points. They carry the launcher's shared shell
+functions inline and retain their established state-volume and remote-Podman
+recipe bodies. Users
 should not need to type `just`; internally, attended Hive registration still
 executes Hive's pinned `contribute-setup` Just recipe because Hive owns the
 registration format and protocol.
