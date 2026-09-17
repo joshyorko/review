@@ -4349,3 +4349,48 @@ test("--autoslay stops when the queue is drained", async () => {
 		"the run reports why it stopped",
 	);
 });
+
+test("--autoslay drops CI-red pull requests before they cost a dispatch pass", async () => {
+	// The pre-dispatch check rejects a whole batch on its first bad item and
+	// re-reads every candidate live, so carrying a known-red pull request into
+	// the batch spends an entire pass to learn what the queue already knew.
+	const items = [
+		{ id: 10, repo: "projectbluefin/bluefin", title: "green and ready", headSha: "1".repeat(40), ciStatus: "success", changedFiles: 1, autoMergeEnabled: true },
+		{ id: 11, repo: "projectbluefin/bluefin", title: "ci is red", headSha: "2".repeat(40), ciStatus: "failure", changedFiles: 1, autoMergeEnabled: true },
+		{ id: 12, repo: "projectbluefin/bluefin", title: "ci still running", headSha: "3".repeat(40), ciStatus: "pending", changedFiles: 1, autoMergeEnabled: true },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		if (String(url).includes("/files")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => [{ filename: "README.md", status: "modified", additions: 1, deletions: 0 }],
+			};
+		}
+		return baseFetch(url, init);
+	};
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	for (let turn = 0; turn < 8; turn += 1) {
+		const { promise, resolve } = Promise.withResolvers();
+		setImmediate(resolve);
+		await promise;
+	}
+
+	assert.equal(pi.messages.length, 1, "the green pull request dispatches on the first pass");
+	assert.match(pi.messages[0], /projectbluefin\/bluefin#10/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/bluefin#11/, "a failing pull request never enters the batch");
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/bluefin#12/, "a pending pull request never enters the batch");
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).map((entry) => entry.data).at(-1);
+	assert.equal(batch.totalItems, 1, "the batch carries only dispatchable work");
+	assert.notEqual(batch.state, "blocked", "a known-red pull request must not block the batch");
+});

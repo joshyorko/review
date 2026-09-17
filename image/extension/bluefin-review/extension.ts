@@ -751,12 +751,24 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	 * `--issues` puts it on the issue backlog. Within the pull-request queue,
 	 * requested-changes items come first — a pull request already returned to
 	 * its author is the work that is actually blocked.
+	 *
+	 * Pull requests the pre-dispatch check would reject are dropped here rather
+	 * than carried into a batch. That check rejects the whole batch on the first
+	 * bad item and costs a live re-read of every candidate, so leaving them in
+	 * spends one full pass per unusable pull request before any work is
+	 * dispatched. Requested-changes items keep their red CI: repairing it is the
+	 * job.
 	 */
 	const autoslayCandidates = async (_ctx: CtxLike): Promise<QueueItem[]> => {
 		if (mode.queueMode === "issues") return [...mode.visibleItems()];
 		const repairs = mode.repairRequestedItems();
 		const repairKeys = new Set(repairs.map((item) => `${item.repo}#${item.id}`));
-		const reviewable = mode.visibleItems().filter((item) => !repairKeys.has(`${item.repo}#${item.id}`));
+		const reviewable = mode.visibleItems().filter(
+			(item) =>
+				!repairKeys.has(`${item.repo}#${item.id}`)
+				&& item.ciStatus !== "failure"
+				&& item.ciStatus !== "pending",
+		);
 		return [...repairs, ...reviewable];
 	};
 
