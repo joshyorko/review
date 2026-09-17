@@ -261,7 +261,10 @@ export function actionPrompt(
 	const issueWorkflow = options?.workbenchMode === "review"
 		? "Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items."
 		: "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items.";
-	const issueInspectEvidence = "Evidence is bounded and read once. Read the complete issue body and discussion with `gh issue view <n> --repo <r> --comments`, list the pull requests linked to it, and inspect only the relevant source files, citing file:line evidence. `hive_workbench_diff` is pull-request-only and must not be called for an issue. Never sleep or poll. Never assume a checkout exists. Report the request, its current state, and concrete risks.";
+	const issueInspectSource = toolPrefix === "review"
+		? "Call `review_workbench_issue` with explicit `issue` and `repo` to read the complete issue body, discussion, and linked pull requests."
+		: "Read the complete issue body and discussion with `gh issue view <n> --repo <r> --comments`, and list the pull requests linked to it.";
+	const issueInspectEvidence = `Evidence is bounded and read once. ${issueInspectSource} Inspect only the relevant source files, citing file:line evidence. Do not call pull-request diff tools for an issue. Never sleep or poll. Never assume a checkout exists. Report the request, its current state, and concrete risks.`;
 
 	if (selected.length > 1) {
 		const repository = selected[0]!.repo;
@@ -316,7 +319,7 @@ export function actionPrompt(
 			return `Slay ${cite(item)} through review, repair, and landing. Use ${evidenceTool} and ${traceTool}, then run the complete lifecycle with fresh review and isolated fix agents. ${workflow} ${authority} ${slayFinish}`;
 		case "diff":
 			return item.type === "issue"
-				? `Inspect ${cite(item)} as an issue. Read its complete body and discussion with \`gh issue view ${item.id} --repo ${item.repo} --comments\`, list the pull requests linked to it, and inspect the relevant source files. Summarize the request, its current state, and concrete risks with file:line evidence. Do not call \`hive_workbench_diff\`; it is pull-request-only. ${workflow} ${authority} ${reviewFinish}`
+				? `Inspect ${cite(item)} as an issue. ${issueInspectEvidence.replace("<n>", String(item.id)).replace("<r>", item.repo)} ${workflow} ${authority} ${reviewFinish}`
 				: `Call ${evidenceTool} for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${authority} ${reviewFinish}`;
 		case "fix":
 			return item.type === "issue"
@@ -925,9 +928,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const hive = await mode.refreshHive();
 		if (hive.configured && hive.error) {
 			ctx.ui.notify(
-				mode.isReviewMode()
-					? `${hiveFailureStatus(hive.error)}; queue order falls back to GitHub, and review, fix, and slay remain available`
-					: `${hiveFailureStatus(hive.error)}; browse-only mode`,
+				`${hiveFailureStatus(hive.error)}; queue order falls back to GitHub, and review, fix, and slay remain available`,
 				"warning",
 			);
 		}

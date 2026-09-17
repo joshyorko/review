@@ -35,6 +35,11 @@ registers only `review_workbench_*` tools and never reads or mentions Hive.
 `hive` adds hub ordering, knowledge, stages, controls, and `hive_workbench_*`
 tools. Bluefin policy and Blueberry authorization are independent of this mode.
 
+Issue inspection uses `review_workbench_issue` (`issue`, `repo`) in Review mode
+and `gh issue view --comments` in Hive mode, for both single items and waves;
+neither path sends issues to a pull-request diff tool. A configured Hive outage
+reports GitHub ordering fallback without claiming authorized actions are disabled.
+
 ## Core Process
 
 1. Trace the key or flag from `dashboard.ts` through `extension.ts` to its prompt.
