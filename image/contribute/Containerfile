@@ -75,6 +75,12 @@ COPY image/tmux.conf /etc/tmux.conf
 # OMP settings ride PI_CONFIG_FILES, the documented wrapper seam: it loads as a
 # CLI overlay, above user and project settings, without touching Hive's argv.
 COPY image/contribute/config.yml /usr/share/bluefin/contribute/omp-config.yml
+# LANG is load-bearing for the attended terminal, not cosmetic. Without a
+# UTF-8 locale glibc resolves to C, and tmux then treats its attach client as
+# non-UTF-8: box drawing degrades to DEC ACS escapes and every other non-ASCII
+# cell — arrows, bullets, the status-line emoji, OMP's own glyphs — is written
+# to the terminal as `_`. The base ships C.utf8 and en_US.utf8; C.UTF-8 keeps
+# byte-ordered collation and language-neutral formatting for the agent.
 ENV HOME=/home/bluefin \
     XDG_CONFIG_HOME=/home/bluefin/.config \
     XDG_STATE_HOME=/home/bluefin/.local/state \
@@ -82,6 +88,7 @@ ENV HOME=/home/bluefin \
     PATH=/usr/bin:/bin \
     SHELL=/usr/bin/bash \
     TERM=xterm-256color \
+    LANG=C.UTF-8 \
     PI_CONFIG_FILES=/usr/share/bluefin/contribute/omp-config.yml \
     AGENT_BACKEND=omp
 LABEL org.opencontainers.image.title="Bluefin Contribute" \

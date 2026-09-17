@@ -14,7 +14,7 @@ tags: [containerfile, image, digest, pinning, omp, hive]
 description: "Use when maintaining the OMP review/contributor images, release pins, SBOM inputs, or multi-architecture publication workflows."
 metadata:
   type: procedure
-  context7-sources: [/websites/podman_io_en, /websites/github_en_actions]
+  context7-sources: [/websites/podman_io_en, /websites/github_en_actions, /renovatebot/renovate]
 ---
 # Image Build
 
@@ -93,6 +93,14 @@ Derived checksum automation for GitHub CLI, Node.js, tmux, and `requirements-ci.
 runs in their respective Renovate branches via `node scripts/update-gh-pins.mjs`,
 `node scripts/update-node-pins.mjs`, `node scripts/update-tmux-pins.mjs`, and
 `node scripts/update-requirements-ci-hashes.mjs`.
+
+OMP releases are automated through the repository's existing Renovate workflow.
+Renovate runs every 15 minutes, groups the two Containerfile `OMP_VERSION`
+updates, and invokes `node scripts/update-omp-pins.mjs` as an allowlisted
+post-upgrade task. The updater reads GitHub release-asset digests and refreshes
+the x86_64 and arm64 SHA-256 pins in both images. The OMP-only Renovate PR
+automerge exception applies only after repository checks pass; its merge to
+`main` triggers both native multi-architecture publish workflows.
 
 ## Verification
 

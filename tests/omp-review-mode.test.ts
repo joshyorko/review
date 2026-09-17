@@ -4154,3 +4154,193 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 		"must not block with 'Hive is unavailable'",
 	);
 });
+
+test("a slay wave recognizes pull requests queued in GitHub mergeQueue as terminal", async () => {
+	const item = { id: 138, repo: "cncf/endusers", title: "in merge queue", headSha: "b".repeat(40), isInMergeQueue: true };
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const fetchImpl = async (url, init) => {
+		const target = String(url);
+		if (target.endsWith("/graphql")) {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			const query = body.query ?? "";
+			if (query.includes("search(query:")) {
+				return {
+					ok: true,
+					status: 200,
+					statusText: "OK",
+					json: async () => ({
+						data: {
+							search: {
+								issueCount: 1,
+								pageInfo: { hasNextPage: false },
+								nodes: [{
+									number: 138,
+									title: "in merge queue",
+									url: "https://github.com/cncf/endusers/pull/138",
+									updatedAt: new Date(NOW).toISOString(),
+									isDraft: false,
+									mergeable: "MERGEABLE",
+									reviewDecision: "APPROVED",
+									headRefOid: "b".repeat(40),
+									author: { login: "reviewer" },
+									repository: { nameWithOwner: "cncf/endusers" },
+									labels: { nodes: [] },
+									autoMergeRequest: null,
+									isInMergeQueue: true,
+									commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+								}],
+							},
+						},
+					}),
+				};
+			}
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					data: {
+						w0: {
+							issueOrPullRequest: {
+								closed: false,
+								number: 138,
+								title: "in merge queue",
+								url: "https://github.com/cncf/endusers/pull/138",
+								updatedAt: new Date(NOW).toISOString(),
+								isDraft: false,
+								mergeable: "MERGEABLE",
+								reviewDecision: "APPROVED",
+								headRefOid: "b".repeat(40),
+								author: { login: "reviewer" },
+								repository: { nameWithOwner: "cncf/endusers" },
+								labels: { nodes: [] },
+								autoMergeRequest: null,
+								isInMergeQueue: true,
+								commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+							},
+						},
+					},
+				}),
+			};
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({}) };
+	};
+	const review = createReviewExtension(pi, {
+		org: "cncf",
+		fetchImpl,
+		env: { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute" },
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	ctx.asyncJobs.recent = [{ id: "slay-mq", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("agent_end")({}, ctx);
+
+	const batches = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).map((entry) => entry.data);
+	assert.equal(batches.at(-1).error, undefined);
+	assert.equal(batches.at(-1).state, "complete");
+	assert.equal(batches.at(-1).completedItems, 1);
+});
+
+test("--autoslay continues past a wave blocked before dispatch", async () => {
+	// The first repository's issue fails the live pre-dispatch check, so its
+	// wave never reaches an agent. Unattended, that must cost one issue, not
+	// the run: the second repository still has to be dispatched.
+	const issue = (repo, number) => ({
+		number,
+		title: `work ${number}`,
+		url: `https://github.com/${repo}/issues/${number}`,
+		updatedAt: new Date(NOW - number * 1000).toISOString(),
+		author: { login: "maintainer" },
+		repository: { nameWithOwner: repo },
+		labels: { nodes: [] },
+		closedByPullRequestsReferences: { nodes: [] },
+	});
+	const stuck = issue("projectbluefin/stuck", 1);
+	const next = issue("projectbluefin/next", 2);
+	const fetchImpl = async (url, init) => {
+		if (!String(url).includes("/graphql")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		}
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (body.variables?.search !== undefined) {
+			const nodes = body.variables.search.includes("is:pr") ? [] : [stuck, next];
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({ data: { viewer: { login: "jorge" }, search: { pageInfo: { hasNextPage: false }, nodes } } }),
+			};
+		}
+		// Live re-read: the stuck issue reads back closed, which is what the
+		// pre-dispatch check rejects.
+		const data = {};
+		const aliases = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+		for (const [, alias, owner, repo, number] of body.query.matchAll(aliases)) {
+			const source = Number(number) === 1 ? stuck : next;
+			data[alias] = { issueOrPullRequest: { ...source, closed: Number(number) === 1 } };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	for (let turn = 0; turn < 8; turn += 1) {
+		const { promise, resolve } = Promise.withResolvers();
+		setImmediate(resolve);
+		await promise;
+	}
+
+	const blocked = pi.entries
+		.filter((entry) => entry.customType === BATCH_ENTRY)
+		.map((entry) => entry.data)
+		.find((batch) => batch.state === "blocked");
+	assert.ok(blocked, "the rejected wave is still recorded as blocked");
+	assert.match(blocked.error, /projectbluefin\/stuck#1/);
+	assert.equal(pi.messages.length, 1, "the run moves on instead of stopping at the blocked wave");
+	assert.match(pi.messages[0], /projectbluefin\/next#2/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/stuck#1/);
+});
+
+test("--autoslay stops when the queue is drained", async () => {
+	// Nothing is slayable, so the run must arm, find no work, report that it
+	// finished, and dispatch nothing at all.
+	const fetchImpl = async (url, init) => {
+		if (!String(url).includes("/graphql")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		}
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		const data = body.variables?.search !== undefined
+			? { viewer: { login: "jorge" }, search: { pageInfo: { hasNextPage: false }, nodes: [] } }
+			: {};
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	for (let turn = 0; turn < 8; turn += 1) {
+		const { promise, resolve } = Promise.withResolvers();
+		setImmediate(resolve);
+		await promise;
+	}
+
+	assert.equal(pi.messages.length, 0, "an empty queue dispatches no agent work");
+	assert.ok(
+		ctx.notifications.some((notification) => /Autoslay finished: \d+ queue item\(s\) attempted/.test(notification.message)),
+		"the run reports why it stopped",
+	);
+});

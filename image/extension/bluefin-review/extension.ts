@@ -265,6 +265,7 @@ export function actionPrompt(
 		const repository = selected[0]!.repo;
 		if (selected.some((item) => item.repo !== repository)) return undefined;
 		const list = selected.map((item) => `- ${cite(item)}: ${item.url}${stateOf(item)}`).join("\n");
+
 		const reviewRules = `<<<SUBAGENT-RULES\n${evidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
 		const slayRules = `<<<SUBAGENT-RULES\n${evidence} ${slayFinish}\nSUBAGENT-RULES>>>`;
 		const repairRules = `<<<SUBAGENT-RULES\n${evidence} ${repairFinish}\nSUBAGENT-RULES>>>`;
@@ -355,6 +356,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeBatch: PersistedRepositoryBatch | undefined;
 	let batchRequestGeneration = 0;
 	let commentInFlight = false;
+	// `--autoslay` is an unattended run, not a single batch: the queue is the
+	// unit of work. `autoslayAttempted` is what bounds it — every dispatched
+	// item is recorded before the wave starts, so each pass selects strictly
+	// new work and the run ends on a drained queue rather than looping on an
+	// item that can never land.
+	let autoslayContinuous = false;
+	let autoslayResuming = false;
+	const autoslayAttempted = new Set<string>();
 	pi.setLabel("Hive Workbench");
 	pi.registerFlag("pr", { description: "Preselect a pull request or issue number", type: "string" });
 	pi.registerFlag("issues", { description: "Start in issues mode instead of pull requests", type: "boolean", default: false });
@@ -375,9 +384,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (activeItem) {
 			const kind = activeItem.type === "pr" ? "PR" : "ISSUE";
 			const repo = activeItem.repo.includes("/") ? activeItem.repo.split("/")[1] : activeItem.repo;
-			ctx.ui.setTitle(`hive workbench · ${kind} #${activeItem.id} (${repo}) ${activeItem.title}`);
+			ctx.ui.setTitle(`review - ${kind} #${activeItem.id} (${repo}) ${activeItem.title}`);
 		} else {
-			ctx.ui.setTitle(`hive workbench · ${mode.queueMode} (${mode.position()})`);
+			ctx.ui.setTitle(`review - ${mode.queueMode} (${mode.position()})`);
 		}
 		repaint();
 	};
@@ -434,6 +443,33 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		activeBatch = batch;
 		pi.appendEntry(BATCH_ENTRY, batch);
 		syncBatchProgress(ctx);
+		// Every batch state change flows through here, so this is the one place
+		// that can see a slay run settle. Unattended, both terminal states mean
+		// "take the next batch": `complete` because the queue is the unit of
+		// work, and `blocked` because one unlandable pull request must not end
+		// the run. The blocked batch keeps its recorded error for the operator.
+		const settled = batch.state === "complete" || batch.state === "blocked";
+		if (autoslayContinuous && batch.kind === "slay" && settled && !autoslayResuming) {
+			// A batch that settled without dispatching a single wave was stopped by
+			// the pre-dispatch check, and would be reselected verbatim by the next
+			// pass. Every blocker names the item it rejected, so record just that
+			// one: the rest of the batch is still good work and stays eligible.
+			// Without a nameable culprit, record the whole batch — a shrinking
+			// candidate set is what stops the loop from spinning.
+			const waveItems = batch.waves.flatMap((wave) => [...wave.items]);
+			if (!waveItems.some((item) => autoslayAttempted.has(`${item.repo}#${item.id}`))) {
+				const named = waveItems.filter((item) => batch.error?.includes(`${item.repo}#${item.id}`) === true);
+				for (const item of named.length > 0 ? named : waveItems) {
+					autoslayAttempted.add(`${item.repo}#${item.id}`);
+				}
+			}
+			autoslayResuming = true;
+			queueMicrotask(() => {
+				void continueAutoslay(ctx).finally(() => {
+					autoslayResuming = false;
+				});
+			});
+		}
 	};
 
 	const batchBlocker = async (kind: RepositoryBatchKind, items: readonly QueueItem[]): Promise<string | undefined> => {
@@ -593,17 +629,23 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 		ctx.ui.notify(`Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
+		// An item counts as attempted exactly when its wave reaches the agent, so
+		// a batch abandoned mid-run leaves its undispatched waves eligible for
+		// the next pass instead of discarding them with the batch.
+		if (autoslayContinuous) {
+			for (const item of wave.items) autoslayAttempted.add(`${item.repo}#${item.id}`);
+		}
 		pi.sendUserMessage(prompt, deliverAs ? { deliverAs } : undefined);
 	};
 
-	const startRepositoryBatch = async (ctx: CtxLike, kind: RepositoryBatchKind, items: readonly QueueItem[]) => {
+	const startRepositoryBatch = async (ctx: CtxLike, kind: RepositoryBatchKind, items: readonly QueueItem[]): Promise<boolean> => {
 		const generation = ++batchRequestGeneration;
 		if (activeBatch?.state === "running" || activeBatch?.state === "paused") {
 			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
-			return;
+			return false;
 		}
 		const waves = mode.repositoryWaves(items);
-		if (waves.length === 0) return;
+		if (waves.length === 0) return false;
 		const startedAt = Date.now();
 		const batch: PersistedRepositoryBatch = {
 			version: 1,
@@ -624,12 +666,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (blocker) {
 			persistBatch(ctx, { ...batch, state: "blocked", error: blocker });
 			ctx.ui.notify(blocker, "error");
-			return;
+			return false;
 		}
 		mode.clearSelected();
 		persist();
 		persistBatch(ctx, batch);
 		await dispatchCurrentWave(ctx, undefined, true);
+		return true;
 	};
 
 	const filterUnsupportedSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
@@ -671,27 +714,67 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return eligible;
 	};
 
-	const startSlay = async (ctx: CtxLike, candidates: readonly QueueItem[] = mode.slayableItems(BATCH_LIMIT)) => {
-		if (candidates.length === 0) {
-			ctx.ui.notify("No queue items available to slay", "warning");
-			return;
+	const startSlay = async (
+		ctx: CtxLike,
+		candidates: readonly QueueItem[] = mode.slayableItems(BATCH_LIMIT),
+		continuing = false,
+	): Promise<boolean> => {
+		// Attempted work is only skipped for an unattended run. An operator
+		// pressing the slay key expects the visible queue, including anything a
+		// previous automatic pass already tried.
+		const fresh = autoslayContinuous
+			? candidates.filter((item) => !autoslayAttempted.has(`${item.repo}#${item.id}`))
+			: candidates;
+		if (fresh.length === 0) {
+			if (!continuing) ctx.ui.notify("No queue items available to slay", "warning");
+			return false;
 		}
-		const supported = filterUnsupportedSlayItems(ctx, candidates);
-		if (supported.length === 0) return;
-		const items = filterCompletedIssueSlayItems(ctx, supported);
-		if (items.length === 0) return;
-		await startRepositoryBatch(ctx, "slay", items);
+		const supported = filterUnsupportedSlayItems(ctx, fresh);
+		const items = supported.length === 0 ? [] : filterCompletedIssueSlayItems(ctx, supported);
+		// Candidates the filters rejected were still inspected this pass; an
+		// unattended run must not reselect them or it never reaches the rest of
+		// the queue. Unsupported pull requests stay visible for the operator.
+		if (autoslayContinuous) {
+			for (const item of fresh) {
+				if (!items.includes(item)) autoslayAttempted.add(`${item.repo}#${item.id}`);
+			}
+		}
+		if (items.length === 0) return false;
+		return await startRepositoryBatch(ctx, "slay", items);
 	};
 
-	const startAutoslay = async (ctx: CtxLike) => {
-		if (mode.queueMode === "issues") {
-			await startSlay(ctx, mode.visibleItems());
-			return;
-		}
+	/** Candidates for one autoslay pass, in the queue mode autoslay operates on. */
+	const autoslayCandidates = async (ctx: CtxLike): Promise<QueueItem[]> => {
+		if (mode.queueMode === "issues") return [...mode.visibleItems()];
 		const repairs = mode.repairRequestedItems();
 		mode.toggleMode();
 		await refreshQueue(ctx);
-		await startSlay(ctx, [...repairs, ...mode.visibleItems()]);
+		return [...repairs, ...mode.visibleItems()];
+	};
+
+	const startAutoslay = async (ctx: CtxLike, continuing = false): Promise<boolean> =>
+		await startSlay(ctx, await autoslayCandidates(ctx), continuing);
+
+	/**
+	 * Drive the queue after a slay run settles.
+	 *
+	 * `--autoslay` is asked to churn a queue, so a settled batch is a cue to take
+	 * the next one rather than to stop. The loop retries when a whole pass is
+	 * filtered out — every candidate unsupported or already answered — and
+	 * terminates because `autoslayAttempted` grows on every pass, so the
+	 * candidate set strictly shrinks toward empty.
+	 */
+	const continueAutoslay = async (ctx: CtxLike): Promise<void> => {
+		if (!autoslayContinuous || mode.paused) return;
+		await refreshQueue(ctx);
+		while (autoslayContinuous && !mode.paused) {
+			if (await startAutoslay(ctx, true)) return;
+			const remaining = await autoslayCandidates(ctx);
+			if (remaining.every((item) => autoslayAttempted.has(`${item.repo}#${item.id}`))) break;
+		}
+		if (mode.paused) return;
+		autoslayContinuous = false;
+		ctx.ui.notify(`Autoslay finished: ${autoslayAttempted.size} queue item(s) attempted, nothing left to slay`, "info");
 	};
 
 	/**
@@ -928,7 +1011,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 		}
 		syncStatus(ctx);
-		if (pi.getFlag("autoslay") === true) await startAutoslay(ctx);
+		if (pi.getFlag("autoslay") === true) {
+			// Arm before the first pass so its settle re-arms the next one. A pass
+			// that dispatches nothing is not the end of the queue, so hand off to
+			// the same continuation the settle path uses; it owns the outcome
+			// message, which is why the one-shot warning is suppressed here.
+			autoslayContinuous = true;
+			if (!(await startAutoslay(ctx, true))) await continueAutoslay(ctx);
+		}
 		void openDashboard(ctx);
 	};
 
@@ -1062,7 +1152,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 
-		ctx.ui.setTitle("hive workbench");
+		ctx.ui.setTitle("review - loading");
 		ctx.ui.setWidget(
 			"hive-workbench-rail",
 			(hostTui: unknown, theme: unknown) => {
