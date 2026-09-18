@@ -87,7 +87,7 @@ if [[ -n "${TYPESAFE_RUNTIME_IMAGE:-}" ]]; then
   grep -Fxq "omp/${omp_version}" <<<"$version" ||
     fail "runtime OMP version was not ${omp_version}: ${version}"
   run 'test -f /usr/share/bluefin/review/pi-typesafe/package.json'
-  run 'grep -Fq '"'"'"version": "'"'"'0.5.0'"'"' /usr/share/bluefin/review/pi-typesafe/package.json'
+  run "grep -Fq '\"version\": \"0.5.0\"' /usr/share/bluefin/review/pi-typesafe/package.json"
   run 'test ! -e /usr/bin/node && test ! -e /usr/bin/npm'
   run "test -z \"\${TYPESAFE_API_KEY:-}\""
 
