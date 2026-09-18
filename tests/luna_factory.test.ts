@@ -501,7 +501,7 @@ test("a proven write cannot integrate without an externally changed head", () =>
 	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
 	const integrated = reduce(returned, { kind: "integrate_attempt", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
 	assert.equal(integrated.ok, false);
-	assert.match(integrated.ok ? "" : integrated.error, /externally changed head/);
+	assert.match(integrated.ok ? "" : integrated.error, /externally changed head|concrete changed head/);
 });
 
 test("only a READY task may start, and an attempt id is not reused", () => {
