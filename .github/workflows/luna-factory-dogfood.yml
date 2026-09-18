@@ -85,6 +85,8 @@ jobs:
           tar -xzf "$bundle" -C "$sif_root"
           sif="$sif_root/launcher/bluefin-review.sif"
           test -e "$sif"
+          rm -f "$bundle"
+          podman system prune --all --force
           BLUEFIN_REVIEW_FALLBACK_SIF="$sif" \
             LUNA_FACTORY_HEAD_SHA="${{ github.event.pull_request.head.sha }}" \
             tests/luna-factory-dogfood.sh sif

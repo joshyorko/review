@@ -21,6 +21,8 @@ def test_workflow_is_exact_head_no_publish_and_artifact_bounded():
     assert "bluefin-review.sif" in workflow
     assert "podman image rm --ignore" in workflow
     assert "podman image prune --force" in workflow
+    assert "podman system prune --all --force" in workflow
+    assert 'rm -f "$bundle"' in workflow
     assert "actions/upload-artifact" in workflow
     assert "podman build --format oci" in workflow
     assert "tests/appliance-contract.sh --image" in workflow
