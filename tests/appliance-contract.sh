@@ -93,6 +93,7 @@ require "$containerfile" \
   'USER 65532:65532' \
   'WORKDIR /workspace' \
   'ENTRYPOINT ["/usr/bin/bluefin-review-appliance"]' \
+  'COPY image/extension/typesafe-omp-loader.mjs /out/usr/share/bluefin/review/typesafe-omp-loader.mjs' \
   'COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/bluefin-review-appliance' \
   'COPY image/appliance/config.yml /out/usr/share/bluefin/review/appliance-config.yml' \
   'io.projectbluefin.review.appliance="true"' \
@@ -186,6 +187,8 @@ python3_contract_output="$(python3 tests/appliance_sbom_contract.py 2>&1)" || {
   printf '%s\n' "$python3_contract_output" >&2
   fail "tests/appliance_sbom_contract.py failed"
 }
+
+bash tests/typesafe-appliance-contract.sh
 
 require .github/workflows/publish-appliance.yml \
   'scripts/review-appliance-version.sh' \
@@ -425,5 +428,7 @@ grep -q 'Replace it to update' <<<"$help_output" ||
   fail "appliance help does not explain replacement semantics"
 grep -q 'BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1' <<<"$help_output" ||
   fail "appliance help does not expose the explicit host-config opt-in"
+
+TYPESAFE_RUNTIME_IMAGE="$image" bash tests/typesafe-appliance-contract.sh
 
 echo "appliance-contract: runtime contract holds ($((size / 1024 / 1024)) MiB, omp ${omp_version})"
