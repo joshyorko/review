@@ -179,7 +179,7 @@ sif)
   command -v apptainer >/dev/null 2>&1 || blocked "Apptainer unavailable"
   [[ -e "$sif" ]] || blocked "generated SIF missing"
   run_command "$terminal_file" apptainer exec --containall \
-    --env HOME=/home/bluefin \
+    --home "$home:/home/bluefin" \
     --env XDG_CONFIG_HOME=/home/bluefin/.config \
     --env XDG_STATE_HOME=/home/bluefin/.local/state \
     --env XDG_CACHE_HOME=/home/bluefin/.cache \

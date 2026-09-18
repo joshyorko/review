@@ -78,6 +78,7 @@ def test_sif_harness_uses_apptainer_directly_and_does_not_claim_krun():
     harness = HARNESS.read_text()
     assert "BLUEFIN_REVIEW_FALLBACK_SIF" in harness
     assert "apptainer exec" in harness
+    assert '--home "$home:/home/bluefin"' in harness
     assert "--bind" in harness
     assert "krun" not in harness
 
