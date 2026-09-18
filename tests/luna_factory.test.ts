@@ -729,6 +729,20 @@ test("a new generation reconciles in-flight work and keeps lineage", () => {
 	assert.equal(rechecked.ok, true);
 	assert.equal(rechecked.ok ? findTask(rechecked.ledger, "T1" as TaskId)?.state : "", "READY");
 });
+test("new-generation journal round-trip preserves retained attempt lineage", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const next = step(recorded, (revision) => ({
+		kind: "new_generation",
+		expectedRevision: revision,
+		generation: "G2" as GenerationId,
+		goal: { statement: "narrowed objective", nonGoals: [], permittedEffects: ["read", "write"], finishAuthority: "report", appetite: { tasks: 8, attemptsPerTask: 2 } },
+		criteria: [{ id: "A1" as CriterionId, statement: "narrowed proof", mandatory: true }],
+	}));
+	const parsed = parseJournal(journalRecord(next));
+	assert.equal(parsed.ok, true);
+	assert.equal(parsed.ok ? parsed.ledger.tasks[0]?.generation : "", "G2");
+	assert.equal(parsed.ok ? parsed.ledger.tasks[0]?.attempts.length : -1, 1);
+});
 
 test("an interrupted run cannot be reactivated by a status write", () => {
 	const interrupted = step(runningTask(), (revision) => ({ kind: "set_control", expectedRevision: revision, control: "interrupted" }));

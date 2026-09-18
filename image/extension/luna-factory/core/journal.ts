@@ -250,8 +250,8 @@ export function parseJournal(value: unknown): JournalRead {
 		tasks.push(task);
 	}
 	for (const task of tasks) {
-		if (task.generation !== value.generation || !criterionIds.has(task.criterionId)) return { ok: false, reason: "journal task identity is inconsistent" };
-		if (!task.attempts.every((attempt) => attempt.taskId === task.id && attempt.generation === value.generation)) return { ok: false, reason: "journal attempt identity is inconsistent" };
+		if (["READY", "RUNNING", "VERIFY", "DONE"].includes(task.state) && !criterionIds.has(task.criterionId)) return { ok: false, reason: "journal task criterion is inconsistent" };
+		if (!task.attempts.every((attempt) => attempt.taskId === task.id)) return { ok: false, reason: "journal attempt identity is inconsistent" };
 		if (task.state === "DONE" && !task.attempts.some((attempt) => attempt.state === "returned" && attempt.receipt !== undefined)) return { ok: false, reason: "journal DONE task has no returned receipt" };
 	}
 
