@@ -119,6 +119,7 @@ function fakeFetch(calls, known = {}) {
 							author: { login: "jorge" },
 							repository: { nameWithOwner: "projectbluefin/review" },
 							labels: { nodes: [{ name: "launcher" }] },
+							files: { pageInfo: { hasNextPage: false }, nodes: [] },
 							commits: { nodes: [{ commit: {
 								statusCheckRollup: null,
 								checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "COMPLETED", conclusion: "FAILURE" }] },
@@ -137,6 +138,7 @@ function fakeFetch(calls, known = {}) {
 								author: { login: "ada" },
 								repository: { nameWithOwner: "projectbluefin/other" },
 								labels: { nodes: [] },
+								files: { pageInfo: { hasNextPage: false }, nodes: [] },
 								commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 							}
 							: null;
@@ -170,6 +172,7 @@ function fakeFetch(calls, known = {}) {
 									author: { login: "jorge" },
 									headRefOid: "4".repeat(40),
 									repository: { nameWithOwner: "projectbluefin/review" },
+									files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }, { path: "README.md" }, { path: "README.md" }] },
 									labels: { nodes: [{ name: "launcher" }] },
 									commits: { nodes: [{ commit: {
 										statusCheckRollup: null,
@@ -189,6 +192,7 @@ function fakeFetch(calls, known = {}) {
 									headRefOid: "7".repeat(40),
 									repository: { nameWithOwner: "projectbluefin/other" },
 									labels: { nodes: [] },
+									files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }, { path: "README.md" }] },
 									commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 								},
 							],
@@ -220,6 +224,7 @@ function hiveBackedFetch(items, calls = []) {
 		reviewDecision: "REVIEW_REQUIRED",
 		headRefOid: item.headSha ?? String(item.id).padStart(40, "0"),
 		changedFiles: item.changedFiles,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
 		autoMergeRequest: item.autoMergeEnabled ? { enabledAt: new Date(NOW).toISOString() } : null,
 		author: { login: "reviewer" },
 		repository: { nameWithOwner: item.repo },
@@ -245,6 +250,9 @@ function hiveBackedFetch(items, calls = []) {
 		}
 		if (target.endsWith("/api/v1/contributors")) {
 			return { ok: true, status: 200, statusText: "OK", json: async () => ({ contributors: [] }) };
+		}
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: (name) => name.toLowerCase() === "x-oauth-scopes" ? "repo, workflow" : null }, json: async () => ({}) };
 		}
 		if (target.includes("/graphql")) {
 			const body = JSON.parse(String(init?.body ?? "{}"));
@@ -636,7 +644,7 @@ test("toCiStatus prioritizes decisive rollup and falls back to check suites (#59
 	assert.equal(toCiStatus(undefined, { pageInfo: { hasNextPage: false }, nodes: [] }), undefined);
 });
 
-test("pull request queue keeps workflow changes and incomplete file lists visible but blocked", async () => {
+test("managed pull request queue keeps workflow changes and incomplete file lists visible but blocked", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
 		assert.match(body.query, /files\(first: 100\)/);
@@ -682,7 +690,7 @@ test("pull request queue keeps workflow changes and incomplete file lists visibl
 			}),
 		};
 	};
-	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
 	mode.setToken("t");
 	await mode.refreshQueue();
 
@@ -734,7 +742,7 @@ test("pull request queue keeps workflow changes and incomplete file lists visibl
 			},
 		}),
 	});
-	const unsupportedMode = new ReviewMode({ org: "projectbluefin", fetchImpl: unsupportedOnlyFetch, env: ISOLATED_ENV });
+	const unsupportedMode = new ReviewMode({ org: "projectbluefin", fetchImpl: unsupportedOnlyFetch, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
 	unsupportedMode.setToken("t");
 	await unsupportedMode.refreshQueue();
 
@@ -2095,7 +2103,7 @@ test("ordinary PR slay blocks failed CI before reviewer dispatch", async () => {
 	assert.ok(ctx.notifications.some((notification) => /CI is failure/.test(notification.message)));
 });
 
-test("slay and fix fail closed on unsupported pull requests and keep them visible", async () => {
+test("self-hosted slay and fix dispatch workflow pull requests while incomplete lists stay blocked", async () => {
 	const workflowPr = {
 		number: 10,
 		title: "update deploy pipeline",
@@ -2145,6 +2153,9 @@ test("slay and fix fail closed on unsupported pull requests and keep them visibl
 		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 	};
 	const fetchImpl = async (_url, init) => {
+		if (String(_url) === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: (name) => name.toLowerCase() === "x-oauth-scopes" ? "repo, workflow" : null }, json: async () => ({}) };
+		}
 		const body = JSON.parse(String(init?.body ?? "{}"));
 		if (body.variables?.search !== undefined) {
 			return {
@@ -2179,34 +2190,18 @@ test("slay and fix fail closed on unsupported pull requests and keep them visibl
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 
-	// Verify both unsupported PRs are visible in the queue tool with blocked status
+	// Workflow PRs remain visible and actionable on the self-hosted generic policy.
 	const queue = await pi.tools.get("hive_workbench_queue").execute("id", {});
-	assert.match(queue.content[0].text, /\[blocked\] projectbluefin\/review#10/);
-	assert.match(queue.content[0].text, /\[blocked\] projectbluefin\/review#20/);
-	assert.match(queue.content[0].text, /projectbluefin\/review#30/);
+	assert.doesNotMatch(queue.content[0].text, /\[blocked\] projectbluefin\/review#10/);
+	assert.match(queue.content[0].text, /projectbluefin\/review#20/);
 
-	// Try fix on workflow PR -> skipped with notification, no message
 	const dashboard = ctx.overlays[0];
 	dashboard.handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((n) => /Skipping projectbluefin\/review#10: changes \.github\/workflows\/deploy\.yml/.test(n.message)));
-
-	// Select truncated PR and try slay -> skipped with notification, no message
-	dashboard.handleInput("j");
-	dashboard.handleInput("s");
-	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((n) => /Skipping projectbluefin\/review#20: complete changed-file list unavailable/.test(n.message)));
-
-	// Select all items ("A") and slay -> unsupported PRs skipped, only eligible PR dispatched
-	dashboard.handleInput("A");
-	dashboard.handleInput("s");
-	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 1);
-	assert.match(pi.messages[0], /projectbluefin\/review#30/);
-	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#10/);
-	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#20/);
+	assert.match(pi.messages[0], /projectbluefin\/review#10/);
+	assert.equal(ctx.notifications.some((n) => /Skipping projectbluefin\/review#10/.test(n.message)), false);
+
 });
 
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {

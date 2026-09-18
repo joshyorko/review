@@ -7,7 +7,7 @@
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, exactHeadVerified, fetchIssueAdmission, fetchItemsByKey, parseScope, resolveToken } from "./github.ts";
+import { DEFAULT_ORG, exactHeadVerified, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
 import { workbenchPainter } from "./paint.ts";
@@ -349,6 +349,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		org: options.org ?? env.BLUEFIN_REVIEW_ORG ?? DEFAULT_ORG,
 		fetchImpl: options.fetchImpl,
 		env,
+		policy,
 	});
 	const statusKey = mode.isReviewMode() ? "review_workbench" : "hive_workbench";
 
@@ -451,15 +452,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (kind === "slay" && allPullRequests) {
 			for (const item of items) {
 				const wasRepair = isRepairRequested(item, mode.currentUserLogin);
-				if (!wasRepair) {
-					if ((item.workflowFiles?.length ?? 0) > 0) {
-						return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
-					}
-					if (item.changedFilesComplete === false) {
-						return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
-					}
+				if (!wasRepair && !policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
+					return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
+				}
+				if (item.changedFilesComplete === false) {
+					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
 				}
 			}
+			const workflowPermission = await workflowPermissionBlocker(items);
+			if (workflowPermission) return workflowPermission;
 			const live = await fetchItemsByKey(
 				items.map((item) => `${item.repo}#${item.id}`),
 				"prs",
@@ -488,16 +489,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const item of items) {
 				if (item.type === "pr") {
 					const wasRepair = isRepairRequested(item, mode.currentUserLogin);
-					if (!wasRepair) {
-						if ((item.workflowFiles?.length ?? 0) > 0) {
-							return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
-						}
-						if (item.changedFilesComplete === false) {
-							return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
-						}
+					if (!wasRepair && !policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
+						return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
+					}
+					if (item.changedFilesComplete === false) {
+						return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
 					}
 				}
 			}
+			const workflowPermission = await workflowPermissionBlocker(items);
+			if (workflowPermission) return workflowPermission;
 		}
 
 		if (kind === "slay" && allIssues) {
@@ -643,6 +644,19 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		await dispatchCurrentWave(ctx, undefined, true);
 	};
 
+	const workflowPermissionBlocker = async (items: readonly QueueItem[]): Promise<string | undefined> => {
+		const workflowItem = items.find((item) => item.type === "pr" && (item.workflowFiles?.length ?? 0) > 0);
+		if (!workflowItem) return undefined;
+		const scopes = await fetchOAuthScopes(mode.tokenOptions());
+		if (!scopes) {
+			return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token workflow/Actions write permission could not be verified; grant workflow scope or Actions/Contents write access`;
+		}
+		if (!scopes.includes("workflow")) {
+			return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token lacks workflow/Actions write permission; grant workflow scope or Actions/Contents write access`;
+		}
+		return undefined;
+	};
+
 	const filterUnsupportedSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
@@ -654,7 +668,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				eligible.push(item);
 				continue;
 			}
-			if ((item.workflowFiles?.length ?? 0) > 0) {
+			if ((item.workflowFiles?.length ?? 0) > 0 && !policy.allowWorkflowSlay) {
 				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`, "warning");
 				continue;
 			}

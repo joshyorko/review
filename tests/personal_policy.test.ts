@@ -1,4 +1,4 @@
-/** Personal self-hosted policy: workflow PRs remain visible but never slayable. */
+/** Personal self-hosted policy: workflow PRs are actionable when permissions allow. */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -19,7 +19,7 @@ const ENV = {
 	BLUEFIN_REVIEW_MODE: "review",
 };
 
-function workflowNode(workflow = true) {
+function workflowNode(workflow = true, includeChangedFiles = true) {
 	return {
 		number: 42,
 		title: "workflow change",
@@ -33,10 +33,10 @@ function workflowNode(workflow = true) {
 		author: { login: "josh" },
 		repository: { nameWithOwner: "example/repo" },
 		labels: { nodes: [] },
-		files: {
+		files: includeChangedFiles ? {
 			pageInfo: { hasNextPage: false },
 			nodes: [{ path: workflow ? ".github/workflows/deploy.yml" : "README.md" }],
-		},
+		} : undefined,
 		commits: {
 			nodes: [{
 				commit: {
@@ -49,14 +49,14 @@ function workflowNode(workflow = true) {
 	};
 }
 
-function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40), workflow = true) {
+function makeFetch(scopes: string | null = "repo, workflow", liveHeadSha = "4".repeat(40), workflow = true, scopeResponseOk = true, includeChangedFiles = true) {
 	return (url: string | URL | Request, init?: RequestInit) => {
 		const target = String(url);
 		if (target === "https://api.github.com/") {
 			return Promise.resolve({
-				ok: true,
-				status: 200,
-				statusText: "OK",
+				ok: scopeResponseOk,
+				status: scopeResponseOk ? 200 : 500,
+				statusText: scopeResponseOk ? "OK" : "Internal Server Error",
 				headers: { get: (name: string) => name.toLowerCase() === "x-oauth-scopes" ? scopes : null },
 				json: async () => ({}),
 			});
@@ -69,13 +69,13 @@ function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40), work
 					status: 200,
 					statusText: "OK",
 					json: async () => ({
-						data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode(workflow)] } },
+						data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode(workflow, includeChangedFiles)] } },
 					}),
 				});
 			}
 			const data: Record<string, unknown> = {};
 			for (const [, alias] of body.query.matchAll(/(\w+): repository\(owner: "[^"]+", name: "[^"]+"\)/g)) {
-				data[alias] = { issueOrPullRequest: { ...workflowNode(workflow), headRefOid: liveHeadSha } };
+				data[alias] = { issueOrPullRequest: { ...workflowNode(workflow, includeChangedFiles), headRefOid: liveHeadSha } };
 			}
 			return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({ data }) });
 		}
@@ -149,7 +149,7 @@ test("workflow-changing pull requests stay visible in the personal queue", async
 	assert.equal(mode.selectById("example/repo", 42), true);
 });
 
-test("personal autoslay refuses a workflow-changing PR even with OAuth workflow scope", async (t) => {
+test("personal autoslay dispatches a workflow-changing PR with OAuth workflow scope", async (t) => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch() as typeof fetch, env: ENV });
@@ -159,10 +159,67 @@ test("personal autoslay refuses a workflow-changing PR even with OAuth workflow 
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
-	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /Skipping .*: changes \.github\/workflows\/deploy\.yml/.test(notification.message)));
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /example\/repo#42/);
+	assert.equal(ctx.notifications.some((notification) => /Skipping .*workflow/.test(notification.message)), false);
 	const queue = await pi.tools.get("review_workbench_queue").execute("id", {});
 	assert.match(queue.content[0].text, /example\/repo#42/);
+});
+
+test("personal workflow dispatch reports missing workflow write permission", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch("repo") as typeof fetch, env: ENV });
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /lacks workflow\/Actions write permission/.test(notification.message)));
+});
+
+test("personal workflow dispatch fails closed when OAuth scopes are unavailable", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch(null) as typeof fetch, env: ENV });
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+});
+
+test("personal workflow dispatch fails closed when scope lookup fails", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch("repo", "4".repeat(40), true, false) as typeof fetch, env: ENV });
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+});
+
+test("personal workflow dispatch fails closed when changed-file evidence is unavailable", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch("repo, workflow", "4".repeat(40), true, true, false) as typeof fetch, env: ENV });
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /complete changed-file list unavailable/.test(notification.message)));
 });
 
 test("Issue s and Alt-S dispatch issue implementation, while d requests issue evidence", () => {
