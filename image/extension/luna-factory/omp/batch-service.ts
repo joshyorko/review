@@ -388,6 +388,10 @@ export class BatchService {
 			const matches = pulls.filter((pull) => pull.head.sha === operation.sha && pull.base.ref === item.selected.baseRef && pull.body?.includes(`Factory operation: ${marker}`));
 			if (matches.length !== 1) throw new Error("exact PR/effect identity unproven; inspect GitHub, do not repeat");
 			const pull = matches[0]!;
+			operation.state = "confirmed";
+			operation.url = pull.html_url;
+			operation.phase = "pr";
+			operation.id = marker;
 			item.proof!.stage = pull.merged_at ? "merged-upstream" : "pr-ready";
 			item.stage = "VERIFY";
 			item.blocker = "external effect is identified; explicit owner integration and fresh acceptance are required before completion";
