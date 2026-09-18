@@ -284,6 +284,9 @@ unset HIVE_HUB
 export REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime"
 export REVIEW_TEST_SND_DEVICE="$scratch/no-snd"
 unset BLUEFIN_REVIEW_SIF
+# Keep ambient Bedrock credentials out of fixtures that assert the other provider
+# handoff values; the Bedrock cases below set their own explicit values.
+unset AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION
 
 assert_bluefin_review() {
   local input="$1"
