@@ -636,7 +636,7 @@ test("toCiStatus prioritizes decisive rollup and falls back to check suites (#59
 	assert.equal(toCiStatus(undefined, { pageInfo: { hasNextPage: false }, nodes: [] }), undefined);
 });
 
-test("managed pull request queue keeps workflow changes and incomplete file lists visible but blocked", async () => {
+test("pull request queue keeps workflow changes and incomplete file lists visible but blocked", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
 		assert.match(body.query, /files\(first: 100\)/);
@@ -682,7 +682,7 @@ test("managed pull request queue keeps workflow changes and incomplete file list
 			}),
 		};
 	};
-	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
+	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
 	mode.setToken("t");
 	await mode.refreshQueue();
 
@@ -734,7 +734,7 @@ test("managed pull request queue keeps workflow changes and incomplete file list
 			},
 		}),
 	});
-	const unsupportedMode = new ReviewMode({ org: "projectbluefin", fetchImpl: unsupportedOnlyFetch, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
+	const unsupportedMode = new ReviewMode({ org: "projectbluefin", fetchImpl: unsupportedOnlyFetch, env: ISOLATED_ENV });
 	unsupportedMode.setToken("t");
 	await unsupportedMode.refreshQueue();
 
@@ -2095,7 +2095,7 @@ test("ordinary PR slay blocks failed CI before reviewer dispatch", async () => {
 	assert.ok(ctx.notifications.some((notification) => /CI is failure/.test(notification.message)));
 });
 
-test("self-hosted slay and fix dispatch workflow pull requests while incomplete lists stay blocked", async () => {
+test("slay and fix fail closed on unsupported pull requests and keep them visible", async () => {
 	const workflowPr = {
 		number: 10,
 		title: "update deploy pipeline",
@@ -2179,18 +2179,34 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 
-	// Workflow PRs remain visible and actionable on the self-hosted generic policy.
+	// Verify both unsupported PRs are visible in the queue tool with blocked status
 	const queue = await pi.tools.get("hive_workbench_queue").execute("id", {});
-	assert.doesNotMatch(queue.content[0].text, /\[blocked\] projectbluefin\/review#10/);
-	assert.match(queue.content[0].text, /projectbluefin\/review#20/);
+	assert.match(queue.content[0].text, /\[blocked\] projectbluefin\/review#10/);
+	assert.match(queue.content[0].text, /\[blocked\] projectbluefin\/review#20/);
+	assert.match(queue.content[0].text, /projectbluefin\/review#30/);
 
+	// Try fix on workflow PR -> skipped with notification, no message
 	const dashboard = ctx.overlays[0];
 	dashboard.handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(pi.messages.length, 1);
-	assert.match(pi.messages[0], /projectbluefin\/review#10/);
-	assert.equal(ctx.notifications.some((n) => /Skipping projectbluefin\/review#10/.test(n.message)), false);
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((n) => /Skipping projectbluefin\/review#10: changes \.github\/workflows\/deploy\.yml/.test(n.message)));
 
+	// Select truncated PR and try slay -> skipped with notification, no message
+	dashboard.handleInput("j");
+	dashboard.handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((n) => /Skipping projectbluefin\/review#20: complete changed-file list unavailable/.test(n.message)));
+
+	// Select all items ("A") and slay -> unsupported PRs skipped, only eligible PR dispatched
+	dashboard.handleInput("A");
+	dashboard.handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /projectbluefin\/review#30/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#10/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#20/);
 });
 
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {

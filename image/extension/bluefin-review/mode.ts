@@ -227,7 +227,6 @@ export class ReviewMode {
 			hive: this.hive,
 			now,
 			currentUserLogin: this.currentUserLogin,
-			allowWorkflowSlay: this.policy.allowWorkflowSlay,
 		});
 	}
 
