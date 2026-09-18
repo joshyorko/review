@@ -87,6 +87,10 @@ run_command() {
   # turn run. Closing stdin immediately after the prompt makes OMP dispose the
   # session before the Factory tool loop can begin.
   exec {writer_fd}>"$input_fifo"
+  # Feed the first frame immediately. The packaged Bun stdin reader may claim
+  # the stream before extension discovery; leaving it empty until discovery
+  # makes the process observe EOF on some container runtimes.
+  printf '%s\n' "$protocol_request" >&"$writer_fd"
 
   for _ in {1..1800}; do
     grep -Fq '"type":"available_commands_update"' "$output" && break
@@ -106,7 +110,6 @@ run_command() {
     failed "packaged OMP probe did not publish RPC command discovery; inspect $output"
   }
 
-  printf '%s\n' "$protocol_request" >&"$writer_fd"
   for _ in {1..1800}; do
     grep -Fq '"command":"negotiate_protocol"' "$output" && break
     if ! kill -0 "$command_pid" 2>/dev/null; then
