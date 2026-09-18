@@ -17,7 +17,15 @@ export type RuntimeReport = {
   generatedAtUtc: string;
   commitSha: string;
   safeRunnerEnvironment: Record<string, string>;
-  boundaries: { oci: Boundary; sifFuse: Boundary; krunKvm: Boundary };
+  boundaries: {
+    fuse: Boundary;
+    userNamespace: Boundary;
+    apptainer: Boundary;
+    kvm: Boundary;
+    krun: Boundary;
+    oci: Boundary;
+    sif: Boundary;
+  };
   probes: Probe[];
 };
 
@@ -30,19 +38,24 @@ export function reportCapabilities(
 ): RuntimeReport {
   const safeRunnerEnvironment: Record<string, string> = {};
   for (const key of ["RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion", "GITHUB_RUNNER_OS", "GITHUB_RUNNER_ARCH", "GITHUB_ACTIONS", "CI"]) {
-    if (environment[key]) safeRunnerEnvironment[key] = environment[key]!;
+    const value = environment[key];
+    if (value !== undefined) safeRunnerEnvironment[key] = value;
   }
   const has = (name: string) => probes.some((probe) => probe.name === name && probe.ok);
-  const boundary = (names: string[], reason: string): Boundary => names.every(has) ? { status: "available" } : { status: "blocked", reason };
+  const boundary = (names: readonly string[], reason: string): Boundary => names.every(has) ? { status: "available" } : { status: "blocked", reason };
   return {
     schema: 2,
     generatedAtUtc,
     commitSha,
     safeRunnerEnvironment,
     boundaries: {
+      fuse: boundary(["fuse.device", "fuse.kernel", "fuse.mount-helper"], "fuse-device-or-mount-unavailable"),
+      userNamespace: boundary(["userns.sysctl", "userns.unshare"], "user-namespace-unavailable"),
+      apptainer: boundary(["apptainer.version", "apptainer.buildcfg"], "apptainer-unavailable"),
+      kvm: boundary(["kvm.device"], "kvm-device-unavailable"),
+      krun: boundary(["krun.version"], "krun-unavailable"),
       oci: boundary(["podman.version", "podman.info"], "podman-unavailable"),
-      sifFuse: boundary(["apptainer.version", "fuse.device"], "apptainer-or-fuse-unavailable"),
-      krunKvm: boundary(["krun.version", "kvm.device"], "krun-or-kvm-unavailable"),
+      sif: boundary(["apptainer.version", "fuse.device", "podman.version", "podman.info"], "sif-build-or-runtime-unavailable"),
     },
     probes,
   };

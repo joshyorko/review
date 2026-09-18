@@ -15,6 +15,7 @@ import {
 } from "../image/extension/luna-factory/core/batch.ts";
 import { BatchStore, ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
+import { BatchGitHub } from "../image/extension/luna-factory/omp/batch-github.ts";
 
 const selected = (key: string, action: SelectedItem["action"] = "patch", extra: Partial<SelectedItem> = {}): SelectedItem => {
 	const match = /^([^#]+)#(\d+)$/.exec(key);
@@ -52,6 +53,32 @@ test("dependencies enforce verified patch, PR-ready, and merged-upstream stages"
 	done(merged, "org/a#1", "merged-upstream"); assert.equal(dependencyBlocker(merged, "org/b#2"), undefined);
 	assert.throws(() => createBatch(items, { ...options("fade"), dependencies: [{ item: "org/a#1", requires: "org/nope#9", stage: "verified-patch" }] }), /missing prerequisite/);
 	assert.throws(() => createBatch(items, { ...options("face"), dependencies: [{ item: "org/a#1", requires: "org/b#2", stage: "verified-patch" }, { item: "org/b#2", requires: "org/a#1", stage: "verified-patch" }] }), /dependency cycle/);
+});
+
+test("freshness rejects a newly introduced GitHub overlap", async () => {
+	const oid = "a".repeat(40);
+	const repository = { id: "repo-1", nameWithOwner: "org/repo", defaultBranchRef: { name: "main", target: { oid } } };
+	const issue = (withOverlap: boolean) => ({
+		id: "item-1",
+		__typename: "Issue",
+		title: "same title",
+		body: "same body",
+		closed: false,
+		url: "https://github.com/org/repo/issues/1",
+		labels: { nodes: [], pageInfo: { hasNextPage: false } },
+		timelineItems: {
+			nodes: withOverlap ? [{ source: { number: 2, state: "OPEN", repository: { nameWithOwner: "org/repo" } } }] : [],
+			pageInfo: { hasNextPage: false },
+		},
+	});
+	const responses = [issue(false), issue(true)];
+	const github = new BatchGitHub("token", (async () => ({
+		ok: true,
+		status: 200,
+		json: async () => ({ data: { repository: { ...repository, issueOrPullRequest: responses.shift() } } }),
+	})) as unknown as typeof fetch);
+	const snapshot = await github.snapshot(selected("org/repo#1", "inspect"));
+	await assert.rejects(() => github.assertFresh(snapshot), /overlap|scope|stale/i);
 });
 
 test("cancellation, exclusion, and scope revisions never falsely converge", () => {

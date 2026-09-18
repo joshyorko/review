@@ -383,7 +383,10 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			return bump(
 				replaceTask(ledger, task.id, (current) => ({
 					...current,
-					state: "VERIFY" as TaskState,
+					// Reopening invalidates the completed state while preserving the
+					// old receipt for audit. READY lets the owner start a fresh
+					// attempt; VERIFY is reserved for a worker that has just returned.
+					state: "READY" as TaskState,
 					decisionReason: `reopened after explicit owner evidence: ${event.reason.trim()}`,
 				})),
 			);

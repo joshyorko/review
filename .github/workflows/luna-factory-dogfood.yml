@@ -18,7 +18,9 @@ jobs:
       - name: Static Factory contracts
         run: python3 tests/luna_factory_dogfood_contract.py
       - name: Runtime capability report
-        run: tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-dogfood/capabilities"
+        env:
+          LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-dogfood/capabilities" "$LUNA_FACTORY_HEAD_SHA"
       - name: Classify independent runtime boundaries
         id: capabilities
         run: |

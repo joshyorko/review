@@ -98,6 +98,7 @@ require "$containerfile" \
   'io.projectbluefin.review.appliance="true"' \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"' \
+  'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
   'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory'
 # shellcheck disable=SC2016 # Literal launcher text, not shell expansion.
 require image/appliance/entrypoint.sh \
@@ -362,6 +363,8 @@ run '
   check test -d /usr/share/bluefin/review/extension/agents
   check test -f /usr/share/bluefin/review/luna-factory/index.ts
   check test -d /usr/share/bluefin/review/luna-factory/agents
+  check test -L /usr/share/bluefin/review/bluefin-review
+  check test -f /usr/share/bluefin/review/bluefin-review/github.ts
   check test -f /usr/share/bluefin/review/sbom.spdx.json
   check test -e "/usr/lib/${audio_triplet}/libpulse-simple.so.0"
   check test -e "/usr/lib/${audio_triplet}/libasound.so.2"

@@ -312,7 +312,7 @@ test("three fresh matched trials keep the post-success trap closed but admit a g
 			taskId: "T1" as TaskId,
 			reason: `trial ${trial}: reproduced a data-loss defect after the green result`,
 		}));
-		assert.equal(findTask(defect, "T1" as TaskId)?.state, "VERIFY");
+		assert.equal(findTask(defect, "T1" as TaskId)?.state, "READY");
 		const repair = admit(defect, candidate({ taskId: `repair-${trial}` as TaskId, criterionId: "A1" as CriterionId }));
 		assert.equal(repair.decision, "ADMIT", `trial ${trial} dismissed a legitimate defect repair`);
 	}
@@ -652,8 +652,17 @@ test("reopening requires new evidence and replanning requires a diagnosed platea
 	assert.match(unexplained.ok ? "" : unexplained.error, /must name the new evidence/);
 
 	const reopened = step(finished, (revision) => ({ kind: "reopen_task", expectedRevision: revision, taskId: "T1" as TaskId, reason: "reproduced data loss" }));
-	assert.equal(findTask(reopened, "T1" as TaskId)?.state, "VERIFY");
+	assert.equal(findTask(reopened, "T1" as TaskId)?.state, "READY");
 	assert.match(findTask(reopened, "T1" as TaskId)?.decisionReason ?? "", /reproduced data loss/);
+	const retry = reduce(reopened, {
+		kind: "start_attempt",
+		expectedRevision: reopened.revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a2",
+		subject: SUBJECT,
+	}, REDUCE);
+	assert.equal(retry.ok, true, retry.ok ? "" : retry.error);
+	assert.equal(retry.ok ? findTask(retry.ledger, "T1" as TaskId)?.state : undefined, "RUNNING");
 
 	const replan = reduce(reopened, { kind: "use_replan", expectedRevision: reopened.revision, taskId: "T1" as TaskId }, REDUCE);
 	assert.equal(replan.ok, false);

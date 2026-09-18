@@ -56,6 +56,8 @@ export class BatchGitHub {
 	}
 	async assertFresh(selected: SelectedItem): Promise<void> {
 		const current = await this.snapshot(selected);
-		if (current.acceptanceRevision !== selected.acceptanceRevision || current.head !== selected.head || current.base !== selected.base) throw new Error("selected head/base or acceptance changed; proof stale, explicitly rebase/reselect instead of chasing moving work");
+		const currentOverlaps = [...new Set(current.overlaps.map((overlap) => overlap.toLowerCase()))].sort();
+		const selectedOverlaps = [...new Set(selected.overlaps.map((overlap) => overlap.toLowerCase()))].sort();
+		if (current.acceptanceRevision !== selected.acceptanceRevision || current.head !== selected.head || current.base !== selected.base || JSON.stringify(currentOverlaps) !== JSON.stringify(selectedOverlaps)) throw new Error("selected head/base/acceptance or overlap scope changed; proof stale, explicitly rebase/reselect instead of chasing moving work");
 	}
 }
