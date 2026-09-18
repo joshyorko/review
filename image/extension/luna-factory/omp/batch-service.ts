@@ -120,6 +120,11 @@ export class BatchService {
 					if (item.stage === "DONE") this.release(item, owner);
 					continue;
 				}
+				if (item.stage === "VERIFY" && item.proof && item.operation?.state === "confirmed") {
+					await this.validateProof(item);
+					if (item.operation.phase === "pr") await this.reconcileEffect(item);
+					continue;
+				}
 				if (item.operation?.state === "unknown" || item.operation?.state === "intent" || item.stage === "RUNNING" || item.stage === "VERIFY") {
 					// The store has proved the previous same-host owner dead. Native file-only
 					// sessions cannot push; writes still require explicit retained-patch inspection.
@@ -331,12 +336,19 @@ export class BatchService {
 			item.stage = "QUEUED"; item.blocker = `acceptance unproved: ${reviewer.report}; repair only selected gap`;
 			this.persist(batch); return;
 		}
-		if (item.selected.action !== "inspect") this.event(item, { kind: "integrate_attempt", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId: attempt, subject: item.ledger.subject });
-		this.event(item, { kind: "finish_task", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId });
 		item.proof = { acceptanceRevision: item.selected.acceptanceRevision!, subject: item.selected.head!, tree, digest: digest(artifacts.map((path) => digest(readFileSync(path, "utf8"))).join("")), artifacts, stage: "verified-patch", reviewerSession: reviewer.session };
+		if (item.selected.action === "inspect") {
+			this.event(item, { kind: "finish_task", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId });
+			item.stage = "DONE"; item.blocker = undefined; this.persist(batch);
+			return;
+		}
+		item.stage = "VERIFY"; item.blocker = "verified patch retained; explicit owner integration is required before completion";
 		this.persist(batch);
-		if (item.selected.action === "pr-ready") await this.publish(batch, item, changed, signal);
-		item.stage = "DONE"; item.blocker = undefined; this.persist(batch);
+		if (item.selected.action === "pr-ready") {
+			await this.publish(batch, item, changed, signal);
+			item.blocker = "PR created; explicit owner integration and fresh acceptance are required before completion";
+			this.persist(batch);
+		}
 	}
 	private async publish(batch: Batch, item: BatchItem, changed: string[], signal: AbortSignal): Promise<void> {
 		if (!changed.length) throw new Error("no patch to publish; retained inspection is not PR-ready");
@@ -366,8 +378,9 @@ export class BatchService {
 			const matches = pulls.filter((pull) => pull.head.sha === operation.sha && pull.base.ref === item.selected.baseRef && pull.body?.includes(`Factory operation: ${marker}`));
 			if (matches.length !== 1) throw new Error("exact PR/effect identity unproven; inspect GitHub, do not repeat");
 			const pull = matches[0]!;
-			operation.state = "confirmed"; operation.url = pull.html_url; operation.phase = "pr"; operation.id = marker;
-			item.proof!.stage = pull.merged_at ? "merged-upstream" : "pr-ready"; item.stage = "DONE"; item.blocker = undefined;
+			item.proof!.stage = pull.merged_at ? "merged-upstream" : "pr-ready";
+			item.stage = "VERIFY";
+			item.blocker = "external effect is identified; explicit owner integration and fresh acceptance are required before completion";
 		} catch (error) { operation.state = "unknown"; item.stage = "UNKNOWN"; item.blocker = `external effect unresolved: ${message(error)}`; }
 	}
 }

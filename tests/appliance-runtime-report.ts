@@ -20,6 +20,7 @@ export type RuntimeReport = {
   boundaries: {
     fuse: Boundary;
     userNamespace: Boundary;
+    appArmor: Boundary;
     apptainer: Boundary;
     kvm: Boundary;
     krun: Boundary;
@@ -51,11 +52,12 @@ export function reportCapabilities(
     boundaries: {
       fuse: boundary(["fuse.device", "fuse.kernel", "fuse.mount-helper"], "fuse-device-or-mount-unavailable"),
       userNamespace: boundary(["userns.sysctl", "userns.unshare"], "user-namespace-unavailable"),
+      appArmor: boundary(["apparmor.status"], "apparmor-unavailable"),
       apptainer: boundary(["apptainer.version", "apptainer.buildcfg"], "apptainer-unavailable"),
       kvm: boundary(["kvm.device"], "kvm-device-unavailable"),
       krun: boundary(["krun.version"], "krun-unavailable"),
       oci: boundary(["podman.version", "podman.info"], "podman-unavailable"),
-      sif: boundary(["apptainer.version", "fuse.device", "podman.version", "podman.info"], "sif-build-or-runtime-unavailable"),
+      sif: boundary(["apptainer.version", "apptainer.buildcfg", "fuse.device", "podman.version", "podman.info", "squashfuse-ll.version", "squashfs-tools.mksquashfs", "fuse2fs.version", "userns.unshare"], "sif-build-or-runtime-unavailable"),
     },
     probes,
   };
