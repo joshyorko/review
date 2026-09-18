@@ -64,6 +64,7 @@ def test_oci_harness_is_clean_and_uses_the_local_provider():
     assert 'chmod 0777 "$home" "$state" "$config" "$cache" "$models"' in harness
     assert '"$models/models.yml"' in harness
     assert 'coproc factory_rpc' in harness
+    assert "shellcheck disable=SC2154" in harness
     assert 'ready' in harness
     assert 'available_commands_update' in harness
     assert 'agent_end' in harness

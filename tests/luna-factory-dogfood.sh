@@ -82,6 +82,8 @@ run_command() {
   # open for the full RPC session while the child receives a normal pipe on
   # stdin; this avoids FIFO/container stdin EOF behavior.
   coproc factory_rpc { timeout --signal=TERM --kill-after=10s 180s "$@" >"$output" 2>&1; }
+  # Bash creates these coprocess variables dynamically; ShellCheck cannot see them.
+  # shellcheck disable=SC2154
   command_pid=$factory_rpc_PID
   writer_fd=${factory_rpc[1]}
 
