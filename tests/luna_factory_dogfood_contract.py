@@ -56,8 +56,7 @@ def test_oci_harness_is_clean_and_uses_the_local_provider():
     assert 'chmod 0711 "$run_root"' in harness
     assert 'chmod 0777 "$home" "$state" "$config" "$cache" "$models"' in harness
     assert '"$models/models.yml"' in harness
-    assert 'mkfifo "$input_fifo"' in harness
-    assert 'exec {writer_fd}<>"$input_fifo"' in harness
+    assert 'coproc factory_rpc' in harness
     assert 'ready' in harness
     assert 'available_commands_update' in harness
     assert 'agent_end' in harness

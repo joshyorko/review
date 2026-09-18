@@ -77,21 +77,18 @@ run_command() {
   local output="$1"
   shift
   command -v timeout >/dev/null 2>&1 || blocked "timeout unavailable for bounded OMP probe"
-  local input_fifo="$run_root/omp-input"
   local command_pid writer_fd
-  mkfifo "$input_fifo"
-  # Open the FIFO read/write in this shell before starting the command. The
-  # descriptor remains attached for the whole RPC session, so the child never
-  # observes an artificial EOF between asynchronous command frames.
-  exec {writer_fd}<>"$input_fifo"
-  timeout --signal=TERM --kill-after=10s 180s "$@" <&"$writer_fd" >"$output" 2>&1 &
-  command_pid=$!
+  # Use Bash's persistent coprocess pipe. The parent keeps the writable end
+  # open for the full RPC session while the child receives a normal pipe on
+  # stdin; this avoids FIFO/container stdin EOF behavior.
+  coproc factory_rpc { timeout --signal=TERM --kill-after=10s 180s "$@" >"$output" 2>&1; }
+  command_pid=$factory_rpc_PID
+  writer_fd=${factory_rpc[1]}
 
   cleanup_command() {
     exec {writer_fd}>&- 2>/dev/null || true
     kill "$command_pid" 2>/dev/null || true
     wait "$command_pid" 2>/dev/null || true
-    rm -f "$input_fifo"
   }
 
   for _ in {1..1800}; do
@@ -141,10 +138,8 @@ run_command() {
 
   exec {writer_fd}>&-
   if ! wait "$command_pid"; then
-    rm -f "$input_fifo"
     failed "packaged OMP probe exited before completing; inspect $output"
   fi
-  rm -f "$input_fifo"
 }
 
 case "$mode" in
