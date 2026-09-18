@@ -32,7 +32,7 @@ require_arg() {
 }
 
 forbid_secret() {
-  if rg -n --hidden -g '!*lock*' -g '!*.md' \
+  if grep -RIn --exclude='*lock*' --exclude='*.md' --exclude-dir=.git \
     -e 'TYPESAFE_API_KEY[[:space:]]*=' \
     -e 'typesafe[_-]api[_-]key[[:space:]]*:[[:space:]]*[^$]' \
     -e 'ts_[A-Za-z0-9]{20,}' .; then
@@ -91,7 +91,9 @@ if [[ -n "${TYPESAFE_RUNTIME_IMAGE:-}" ]]; then
   run 'test ! -e /usr/bin/node && test ! -e /usr/bin/npm'
   run "test -z \"\${TYPESAFE_API_KEY:-}\""
 
-  commands="$(run 'set -o pipefail; printf "%s\\n" '"'"'{"id":"cmds","type":"get_available_commands"}'"'"' | env HOME=/tmp/typesafe-home XDG_CONFIG_HOME=/tmp/typesafe-home/.config XDG_DATA_HOME=/tmp/typesafe-home/.local/share XDG_STATE_HOME=/tmp/typesafe-home/.local/state /usr/bin/omp --profile typesafe-contract --no-session --no-tools --model gpt-5.2 --extension /usr/share/bluefin/review/typesafe-omp-loader.mjs --mode rpc')"
+  rpc_request='{"id":"cmds","type":"get_available_commands"}'
+  rpc_command="set -o pipefail; printf '%s\\n' '${rpc_request}' | env HOME=/tmp/typesafe-home XDG_CONFIG_HOME=/tmp/typesafe-home/.config XDG_DATA_HOME=/tmp/typesafe-home/.local/share XDG_STATE_HOME=/tmp/typesafe-home/.local/state /usr/bin/omp --profile typesafe-contract --no-session --no-tools --model gpt-5.2 --extension /usr/share/bluefin/review/typesafe-omp-loader.mjs --mode rpc"
+  commands="$(run "$rpc_command")"
   grep -Fq '"name":"typesafe"' <<<"$commands" ||
     fail "packaged OMP did not register the /typesafe command"
   grep -Fq '"source":"extension"' <<<"$commands" ||
