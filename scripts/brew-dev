@@ -63,8 +63,6 @@ labels=json.load(open(sys.argv[1]))['data']['attributes']['labels']
 assert labels['org.opencontainers.image.revision']==sys.argv[2], 'SIF revision differs from checkout'
 PY
     apptainer exec "$work/payload/launcher/bluefin-review.sif" /usr/bin/omp --version
-    apptainer exec "$work/payload/launcher/bluefin-review.sif" /usr/bin/headroom --version
-    apptainer exec "$work/payload/launcher/bluefin-review.sif" /usr/bin/headroom mcp serve --help >/dev/null
     cp -a "$work/source/bin" "$work/payload/launcher/"
     mkdir -p "$work/payload/launcher/scripts"
     cp "$work/source/scripts/parse-review-args.sh" \
@@ -84,8 +82,9 @@ PY
 set -euo pipefail
 root="\$(cd "\$(dirname "\$(readlink -f "\${BASH_SOURCE[0]}")")/../libexec" && pwd)"
 if [[ "\${1:-}" == review ]]; then
+  export BLUEFIN_REVIEW_MODE=review
   export BLUEFIN_REVIEW_PERSONAL_MODE=1
-  export BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY=1
+  export BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS=1
   export BLUEFIN_REVIEW_IMAGE="\${BLUEFIN_REVIEW_IMAGE:-$oci_image}"
   export BLUEFIN_REVIEW_FALLBACK_SIF="\${BLUEFIN_REVIEW_FALLBACK_SIF:-\$root/launcher/bluefin-review.sif}"
   cat "\$root/build.txt"

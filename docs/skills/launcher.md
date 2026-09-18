@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "5.2"
-last_updated: 2026-09-14
+version: "5.3"
+last_updated: 2026-09-15
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -73,9 +73,24 @@ On the Podman path, every mutable image tag is refreshed before launch. A
 registry outage may use an existing local copy only with an explicit stale-image
 warning; a missing local copy fails before `podman run`. Digest and `sha-*`
 references remain immutable and are not refreshed.
-After Podman resolves an image, the launcher reports its OCI version, source
-revision, and digest before execution; missing labels are shown as `unknown`
-rather than inferred.
+Before container execution, the launcher reports its own revision. After resolving
+an image, it reports the image OCI version, source revision, and digest; missing
+labels are shown as `unknown` rather than inferred. On the Apptainer fallback
+path where no read-only registry probe exists, image identity is reported as
+unavailable without blocking launch.
+The launcher enforces appliance compatibility: the review appliance requires
+series `26.08` with version >= `26.08.06`, and the contributor worker requires
+version >= `26.08.02`. Incompatible images fail before execution. Explicit image
+overrides (`BLUEFIN_REVIEW_IMAGE`, `BLUEFIN_REVIEW_SIF`, `REVIEW_APPLIANCE_IMAGE`,
+`BLUEFIN_CONTRIBUTE_IMAGE`, `BLUEFIN_CONTRIBUTE_SIF`, `CONTRIBUTE_IMAGE`) are
+honored with actionable compatibility warnings if versions differ or cannot be
+verified.
+Upgrades from `v26.08.05` migrate existing user sessions and configuration
+from legacy state directories (`~/.local/state/bluefin-review` and
+`~/.local/state/bluefin-contribute`) into instance homes without broad state
+deletion. Fixed-name legacy SIF artifacts (`bluefin-review.sif`,
+`bluefin-contribute.sif`) are superseded by the versioned OCI contract and
+cannot silently bypass validation.
 
 ## Credentials
 
@@ -100,6 +115,12 @@ rather than inferred.
 - Apptainer's contained environment receives only the explicit credential and
   runtime allowlist through `APPTAINERENV_` variables. Keep `--no-eval` so
   credential and argument values remain literal inside the container.
+- The forwarded provider-credential allowlist names GitHub, Copilot, Anthropic,
+  OpenAI, Gemini, Hive, and terminal variables, plus the Amazon Bedrock
+  credentials `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, and `AWS_DEFAULT_REGION`.
+  Only those reach the contained process; the rest of the AWS environment stays
+  on the host. The value travels through the environment only, never in argv,
+  launcher output, test logs, image layers, or committed files.
 - The contributor worker receives exactly one selected Hive registration.
 - The checkout contributor recipe stages remote Podman registrations privately
   and deletes only its validated staging directory. The packaged `bluefin`
@@ -113,8 +134,7 @@ native immutable SIF built from the same source. The generated `bluefin`
 wrapper selects the OCI image through Podman/krun when KVM is ready and sets
 the bundled SIF as the Apptainer fallback. An explicit `BLUEFIN_REVIEW_SIF`
 still forces a SIF. The target-specific `/home/bluefin` state boundary remains
-the same on both paths. The SIF contains Headroom's MCP runtime and the OMP
-Linux voice closure.
+the same on both paths. The SIF contains OMP's Linux voice closure.
 
 For Review voice, the packaged launcher binds only a detected
 `$XDG_RUNTIME_DIR/pulse/native` socket and sets the contained `PULSE_SERVER`.
@@ -126,10 +146,11 @@ directory, host home, or `.codex`. Missing audio never prevents Review startup.
 
 `scripts/parse-review-args.sh` is the single parser for OMP review scope.
 Repository, `--pr`, and `--issues` arguments must reach the appliance unchanged.
-`autoslay` / `--autoslay` also passes OMP's built-in `--advisor` flag exactly
-once. The packaged entrypoint repeats that normalization for direct image
-launches, while the appliance configuration maps `modelRoles.advisor` to
-`@default` rather than selecting a provider.
+Every review launch passes OMP's built-in `--advisor` flag exactly once. The
+source launcher also normalizes its parser-fallback path, and the packaged
+entrypoint repeats the normalization for direct image launches. The appliance
+configuration maps `modelRoles.advisor` to `@default` rather than selecting a
+provider.
 The optional contributor argument names an isolated instance and its
 `contributor.<org-repo>.env`; Hive still selects work. OMP owns model choice.
 

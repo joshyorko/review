@@ -1,11 +1,11 @@
-/** Personal self-hosted policy: workflow PRs remain visible and may be slayed when GitHub permits it. */
+/** Personal self-hosted policy: workflow PRs remain visible but never slayable. */
 import assert from "node:assert/strict";
 import test, { beforeEach, afterEach } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { BATCH_ENTRY, actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
+import { actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
 import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts";
 import { PLAIN_PAINTER } from "../image/extension/bluefin-review/glyphs.ts";
 import { fetchQueue } from "../image/extension/bluefin-review/github.ts";
@@ -22,11 +22,12 @@ const ENV = {
 	BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY: "1",
 	BLUEFIN_REVIEW_PERSONAL_MODE: "1",
 	LUNA_FACTORY_STATE_ROOT: "",
+	BLUEFIN_REVIEW_MODE: "review",
 };
 beforeEach(() => { ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "personal-claims-")); });
 afterEach(() => { rmSync(ENV.LUNA_FACTORY_STATE_ROOT, { recursive: true, force: true }); });
 
-function workflowNode() {
+function workflowNode(workflow = true) {
 	return {
 		number: 42,
 		title: "workflow change",
@@ -42,7 +43,7 @@ function workflowNode() {
 		labels: { nodes: [] },
 		files: {
 			pageInfo: { hasNextPage: false },
-			nodes: [{ path: ".github/workflows/deploy.yml" }],
+			nodes: [{ path: workflow ? ".github/workflows/deploy.yml" : "README.md" }],
 		},
 		commits: {
 			nodes: [{
@@ -56,7 +57,7 @@ function workflowNode() {
 	};
 }
 
-function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40)) {
+function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40), workflow = true) {
 	return (url: string | URL | Request, init?: RequestInit) => {
 		const target = String(url);
 		if (target === "https://api.github.com/") {
@@ -76,13 +77,13 @@ function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40)) {
 					status: 200,
 					statusText: "OK",
 					json: async () => ({
-						data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode()] } },
+						data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode(workflow)] } },
 					}),
 				});
 			}
 			const data: Record<string, unknown> = {};
 			for (const [, alias] of body.query.matchAll(/(\w+): repository\(owner: "[^"]+", name: "[^"]+"\)/g)) {
-				data[alias] = { issueOrPullRequest: { ...workflowNode(), headRefOid: liveHeadSha } };
+				data[alias] = { issueOrPullRequest: { ...workflowNode(workflow), headRefOid: liveHeadSha } };
 			}
 			return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({ data }) });
 		}
@@ -92,7 +93,7 @@ function makeFetch(scopes = "repo, workflow", liveHeadSha = "4".repeat(40)) {
 				status: 200,
 				statusText: "OK",
 				json: async () => [
-					{ filename: ".github/workflows/deploy.yml", status: "modified", additions: 1, deletions: 1 },
+					{ filename: workflow ? ".github/workflows/deploy.yml" : "README.md", status: "modified", additions: 1, deletions: 1 },
 				],
 			});
 		}
@@ -156,29 +157,10 @@ test("workflow-changing pull requests stay visible in the personal queue", async
 	assert.equal(mode.selectById("example/repo", 42), true);
 });
 
-test("autoslay dispatches a workflow-changing PR when OAuth has workflow scope", async (t) => {
+test("personal autoslay refuses a workflow-changing PR even with OAuth workflow scope", async (t) => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
-	const review = createReviewExtension(pi as any, { org: "example", fetchImpl: makeFetch() as typeof fetch, env: ENV });
-	const ctx = fakeCtx();
-	await pi.events.get("session_start")({}, ctx);
-	await review.whenStarted();
-	await new Promise((resolve) => setImmediate(resolve));
-	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
-
-	assert.equal(pi.messages.length, 1, JSON.stringify(ctx.notifications));
-	assert.match(pi.messages[0]!, /example\/repo#42/);
-	assert.equal(ctx.notifications.some((entry) => /Skipping .*workflow/.test(entry.message)), false);
-});
-
-test("personal workflow slay still fails closed when classic OAuth scope is known missing", async (t) => {
-	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
-	const review = createReviewExtension(pi as any, {
-		org: "example",
-		fetchImpl: makeFetch("repo, read:org") as typeof fetch,
-		env: ENV,
-	});
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch() as typeof fetch, env: ENV });
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
@@ -186,10 +168,9 @@ test("personal workflow slay still fails closed when classic OAuth scope is know
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((entry) => /lacks 'workflow' scope/.test(entry.message)));
-	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data as { state?: string; error?: string } | undefined;
-	assert.equal(batch?.state, "blocked");
-	assert.match(batch?.error ?? "", /\.github\/workflows\/deploy\.yml/);
+	assert.ok(ctx.notifications.some((notification) => /Skipping .*: changes \.github\/workflows\/deploy\.yml/.test(notification.message)));
+	const queue = await pi.tools.get("review_workbench_queue").execute("id", {});
+	assert.match(queue.content[0].text, /example\/repo#42/);
 });
 
 test("Issue s and Alt-S dispatch issue implementation, while d requests issue evidence", () => {
@@ -217,8 +198,12 @@ test("Issue s and Alt-S dispatch issue implementation, while d requests issue ev
 		dashboard.handleInput("alt+s");
 		dashboard.handleInput("d");
 		assert.deepEqual(actions.map(action => action.kind), ["fix", "fix", "diff"]);
-		assert.doesNotMatch(actionPrompt(actions[2]), /hive_workbench_diff/);
-		assert.match(actionPrompt(actions[2]), /review_workbench_issue/);
+		const implementation = actionPrompt(actions[0], undefined, { workbenchMode: mode.workbenchMode }) ?? "";
+		assert.match(implementation, /gh repo clone <owner\/repo>/);
+		assert.match(implementation, /\$HOME\/worktrees\/<owner>-<repo>-issue-<number>/);
+		assert.doesNotMatch(implementation, /Hive|hive_workbench_lookup/);
+		assert.doesNotMatch(actionPrompt(actions[2], undefined, { workbenchMode: mode.workbenchMode }), /hive_workbench_diff/);
+		assert.match(actionPrompt(actions[2], undefined, { workbenchMode: mode.workbenchMode }), /review_workbench_issue/);
 	} finally {
 		dashboard.dispose();
 	}
@@ -264,7 +249,7 @@ test("Issue inspection uses issue evidence and never calls the PR diff endpoint"
 	assert.equal(calls.some(call => call.includes("/pulls/933")), false, calls.join("\n"));
 });
 
-test("non-Hive status is actionable and generic tool aliases are registered", async () => {
+test("Review mode registers only GitHub workbench tools and contains no Hive affordance", async () => {
 	const pi = fakeHost();
 	const mode = new ReviewMode({ org: "example", env: ENV });
 	mode.hive = EMPTY_HIVE;
@@ -286,10 +271,25 @@ test("non-Hive status is actionable and generic tool aliases are registered", as
 	for (const name of ["review_workbench_status", "review_workbench_queue", "review_workbench_diff", "review_workbench_trace"]) {
 		assert.ok(pi.tools.has(name), name);
 	}
-	assert.ok(pi.tools.has("hive_workbench_lookup"));
+	for (const name of pi.tools.keys()) assert.doesNotMatch(name, /^hive_/);
 	const status = await pi.tools.get("review_workbench_status").execute("id", {});
-	assert.match(status.content[0].text, /Hive: not configured/);
-	assert.doesNotMatch(status.content[0].text, /browse-only/);
+	assert.match(status.content[0].text, /order: GitHub\/local/);
+	assert.doesNotMatch(status.content[0].text, /Hive|hive|browse-only/);
+});
+
+test("Review mode never contacts Hive even when HIVE_HUB is inherited", async () => {
+	const calls: string[] = [];
+	const mode = new ReviewMode({
+		org: "example",
+		env: { ...ENV, HIVE_HUB: "https://hive.example" },
+		fetchImpl: (async (url: string | URL | Request) => {
+			calls.push(String(url));
+			throw new Error("Review mode must not fetch Hive");
+		}) as typeof fetch,
+	});
+	const hive = await mode.refreshHive();
+	assert.equal(hive.configured, false);
+	assert.deepEqual(calls, []);
 });
 
 test("personal UI presents a local Review surface without Hive-only controls", () => {
@@ -319,7 +319,7 @@ test("personal UI presents a local Review surface without Hive-only controls", (
 		const help = dashboard.render(160).join("\n");
 		assert.match(help, /REVIEW WORKBENCH/);
 		assert.equal(help.includes("H / L"), false);
-		assert.doesNotMatch(help, /Hive supplies priority/);
+		assert.doesNotMatch(help, /Hive/i);
 		dashboard.handleInput("H");
 		assert.equal(mode.hiveOnly, false);
 		assert.match(renderRail(mode, PLAIN_PAINTER, 160, NOW, 0, []).join("\n"), /LOCAL/);
@@ -341,6 +341,14 @@ test("personal reviewer selection is generic outside Project Bluefin", () => {
 	assert.match(actionPrompt({ kind: "slay", item: generic as any }) ?? "", /generic-reviewer/);
 	assert.doesNotMatch(actionPrompt({ kind: "slay", item: generic as any }) ?? "", /bluefin-reviewer/);
 	assert.match(actionPrompt({ kind: "slay", item: bluefin as any }) ?? "", /bluefin-reviewer/);
+});
+
+test("Review mode keeps Bluefin policy without exposing Hive", () => {
+	const bluefin = { ...workflowNode(), type: "pr" as const, id: 42, repo: "projectbluefin/review" };
+	const prompt = actionPrompt({ kind: "slay", item: bluefin as any }, undefined, { workbenchMode: "review" }) ?? "";
+	assert.match(prompt, /bluefin-reviewer/);
+	assert.match(prompt, /review_workbench_diff/);
+	assert.doesNotMatch(prompt, /hive_workbench|Hive/);
 });
 
 function ciNode(rollup: string | null, checkSuites: unknown) {
@@ -506,12 +514,12 @@ test("live PR revalidation reconciles current mutable state into ReviewMode", ()
 	assert.deepEqual(mode.items[0]?.labels, ["new"]);
 });
 
-test("live head changes still block the captured workflow PR", async (t) => {
+test("live head changes still block the captured pull request", async (t) => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
-	const review = createReviewExtension(pi as any, {
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
 		org: "example",
-		fetchImpl: makeFetch("repo, workflow", "5".repeat(40)) as typeof fetch,
+		fetchImpl: makeFetch("repo, workflow", "5".repeat(40), false) as typeof fetch,
 		env: ENV,
 	});
 	const ctx = fakeCtx();

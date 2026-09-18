@@ -46,6 +46,8 @@ export interface QueueItem {
 	closingIssues?: string[];
 	/** `owner/repo#number` of merged PRs that reference or close this issue. */
 	closedByPrs?: string[];
+	/** `owner/repo#number` of open or merged pull requests submitted for this issue. */
+	submittedPrs?: string[];
 	/** Changed workflow files reported by GitHub for exclusion from slay/review. */
 	workflowFiles?: string[];
 	/** Whether GitHub returned the complete changed-file list. */
@@ -60,6 +62,8 @@ export interface QueueResult {
 	fetchedAt: number;
 	/** More open items exist than `limit` allowed; the queue is a prefix. */
 	truncated?: boolean;
+	/** Authenticated GitHub login that produced this queue read. */
+	viewerLogin?: string;
 }
 
 export const DEFAULT_ORG = "projectbluefin";
@@ -118,6 +122,7 @@ const ISSUE_ITEM_FIELDS = `
 
 export const PR_QUEUE_QUERY = `
 query($search: String!, $cursor: String) {
+	viewer { login }
 	search(query: $search, type: ISSUE, first: 50, after: $cursor) {
 		pageInfo { hasNextPage endCursor }
 		nodes {
@@ -131,6 +136,7 @@ query($search: String!, $cursor: String) {
 
 export const ISSUE_QUEUE_QUERY = `
 query($search: String!, $cursor: String) {
+	viewer { login }
 	search(query: $search, type: ISSUE, first: 50, after: $cursor) {
 		pageInfo { hasNextPage endCursor }
 		nodes {
@@ -278,16 +284,14 @@ export function classifyCi(
 	state?: string,
 	checkSuites?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ status?: string; conclusion?: string | null }> } | null,
 ): CiClassification {
-	const rollup = state?.toUpperCase();
+	const rollup = state?.trim().toUpperCase();
+	if (rollup === "SUCCESS") return { status: "success", complete: true };
+	if (rollup === "FAILURE" || rollup === "ERROR") return { status: "failure", complete: true };
+	if (rollup) return { status: "pending", complete: true };
+
 	const suites = checkSuites?.nodes ?? [];
 	const suitesComplete = checkSuites !== undefined && checkSuites !== null && checkSuites.pageInfo?.hasNextPage === false;
 	const explicitSuccess = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
-	const explicitFailure = new Set(["FAILURE", "ERROR", "STARTUP_FAILURE", "CANCELLED", "TIMED_OUT"]);
-	const explicitPending = new Set(["PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "ACTION_REQUIRED"]);
-
-	if (rollup && explicitSuccess.has(rollup)) return { status: "success", complete: true };
-	if (rollup && explicitFailure.has(rollup)) return { status: "failure", complete: true };
-	if (rollup && explicitPending.has(rollup)) return { status: "pending", complete: true };
 
 	if (!suitesComplete) return { status: undefined, complete: false };
 	const failedSuite = suites.some((suite) => {
@@ -300,6 +304,14 @@ export function classifyCi(
 	if (pendingSuite) return { status: "pending", complete: true };
 	if (suites.length > 0) return { status: "success", complete: true };
 	return { status: undefined, complete: true };
+}
+
+export function toCiStatus(
+	state?: string,
+	checkSuites?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ status?: string; conclusion?: string | null }> } | null,
+): CiStatus | undefined {
+	const classified = classifyCi(state, checkSuites);
+	return classified.status ?? (checkSuites?.pageInfo?.hasNextPage === true ? "pending" : undefined);
 }
 
 function toMergeState(value?: string | null): MergeState {
@@ -374,6 +386,14 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 					: "",
 			)
 			.filter(Boolean),
+		submittedPrs: (node.closedByPullRequestsReferences?.nodes ?? [])
+			.filter((pr) => pr.merged === true || ["OPEN", "MERGED"].includes(pr.state?.toUpperCase() ?? ""))
+			.map((pr) =>
+				pr.repository?.nameWithOwner && typeof pr.number === "number"
+					? `${pr.repository.nameWithOwner}#${pr.number}`
+					: "",
+			)
+			.filter(Boolean),
 	};
 }
 
@@ -411,6 +431,7 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 	const deadline = deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal);
 	const items: QueueItem[] = [];
 	let cursor: string | undefined;
+	let viewerLogin: string | undefined;
 	if (!token) {
 		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		return { items, error: "no GitHub credential (set GH_TOKEN or run gh auth login)", fetchedAt: Date.now() };
@@ -431,9 +452,13 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 				return { items, error: `GitHub GraphQL ${response.status} ${response.statusText}`, fetchedAt: Date.now() };
 			}
 			const payload = (await response.json()) as {
-				data?: { search?: { nodes?: SearchNode[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } } };
+				data?: {
+					viewer?: { login?: string };
+					search?: { nodes?: SearchNode[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } };
+				};
 				errors?: Array<{ message?: string }>;
 			};
+			viewerLogin ??= payload.data?.viewer?.login;
 			if (payload.errors?.length) {
 				return { items, error: payload.errors.map((e) => e.message ?? "unknown").join("; "), fetchedAt: Date.now() };
 			}
@@ -443,13 +468,13 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 			}
 			const pageInfo = payload.data?.search?.pageInfo;
 			if (!pageInfo?.hasNextPage || !pageInfo.endCursor) {
-				return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: items.length > limit };
+				return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: items.length > limit, viewerLogin };
 			}
 			cursor = pageInfo.endCursor;
 		}
 		// Stopped on the ceiling rather than the end of the queue: say so, so the
 		// counter cannot read as "this is everything open".
-		return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: true };
+		return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: true, viewerLogin };
 	} catch (error) {
 		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		// The deadline expired mid-walk. Keep the pages that did land: a partial
@@ -460,9 +485,10 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 				error: `GitHub queue timed out after ${options.timeoutMs ?? QUEUE_TIMEOUT_MS}ms`,
 				fetchedAt: Date.now(),
 				truncated: items.length > 0,
+				viewerLogin,
 			};
 		}
-		return { items, error: error instanceof Error ? error.message : String(error), fetchedAt: Date.now() };
+		return { items, error: error instanceof Error ? error.message : String(error), fetchedAt: Date.now(), viewerLogin };
 	}
 }
 
@@ -710,6 +736,14 @@ export interface DiffResult {
 	additions: number;
 	deletions: number;
 	truncated: boolean;
+	/**
+	 * Exact head SHA the diff was fetched against. A remote diff proves only what
+	 * GitHub says, never what is on disk, so executable verification must
+	 * materialize this exact head and refuse on any mismatch (projectbluefin
+	 * /review#471). Null when the head cannot be resolved: the files are still
+	 * returned, but verification must refuse until an exact head exists.
+	 */
+	headSha: string | null;
 	error?: string;
 }
 
@@ -788,12 +822,52 @@ export async function fetchDiff(repo: string, pullRequest: number, options: Diff
 				patch,
 			});
 		}
+		result.headSha = await fetchPrHeadSha(repo, pullRequest, { token, signal, fetchImpl: options.fetchImpl });
 		return result;
 	} catch (error) {
 		result.error = error instanceof Error ? error.message : String(error);
 		return result;
 	}
 }
+
+/**
+ * The pull request's head commit SHA, read from the PR itself rather than the
+ * file list. A diff of files says nothing about which commit is on disk, so the
+ * head is fetched from the PR that owns them.
+ */
+async function fetchPrHeadSha(
+	repo: string,
+	pullRequest: number,
+	options: FetchOptions = {},
+): Promise<string | null> {
+	const doFetch = options.fetchImpl ?? fetch;
+	try {
+		const response = await doFetch(
+			`https://api.github.com/repos/${repo}/pulls/${pullRequest}`,
+			{ headers: headers(options.token), signal: options.signal, redirect: "error" },
+		);
+		if (!response.ok) return null;
+		const payload = (await response.json()) as { head?: { sha?: string | null } | null } | null;
+		return payload?.head?.sha ?? null;
+	} catch {
+		// An unreadable PR must not sink the diff: the files are still returned and
+		// the verification gate refuses when headSha is null.
+		return null;
+	}
+}
+
+/**
+ * Exact-head verification gate for executable verification. Execution may only
+ * proceed when an exact head was expected and the materialized workspace is that
+ * very head. A missing expected head, an unreadable workspace, or any mismatch
+ * all refuse: a fetched diff does not prove the workspace contains that head
+ * (projectbluefin/review#471). Pure and side-effect free so the gate is testable
+ * in isolation from the worktree materialization that produces `workspaceSha`.
+ */
+export function exactHeadVerified(expectedSha: string | null | undefined, workspaceSha: string | null | undefined): boolean {
+	return typeof expectedSha === "string" && expectedSha === workspaceSha;
+}
+
 export interface CollaboratorPermissionResult {
 	permission?: string;
 	isCollaborator: boolean;

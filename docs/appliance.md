@@ -111,50 +111,64 @@ podman run --runtime=krun --rm -it \
   --volume bluefin-review-example-home:/home/bluefin \
   --volume bluefin-review-example-tmp:/tmp \
   --volume bluefin-review-example-workspace:/workspace \
-  --env GH_TOKEN --env ANTHROPIC_API_KEY \
+  --env GH_TOKEN --env ANTHROPIC_API_KEY --env CONTEXT7_API_KEY \
   ghcr.io/projectbluefin/review:stable
 ```
 
 `just review-appliance` passes `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`,
-`GITHUB_COPILOT_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `HIVE_HUB`
-through by name, resolves `GH_TOKEN` from `gh auth token` when it is unset, and
-resolves an unset `HIVE_HUB` from the host's default
-`$HOME/.config/hive/contributor.env` without exposing the registration token.
+`GITHUB_COPILOT_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`,
+`OPENAI_API_KEY`, `GEMINI_API_KEY`, `CONTEXT7_API_KEY`, and `HIVE_HUB` through by
+name, resolves `GH_TOKEN` from `gh auth token` when it is unset, and resolves an
+unset `HIVE_HUB` from the host's default `$HOME/.config/hive/contributor.env`
+without exposing the registration token.
+
+`BLUEFIN_REVIEW_MODE=hive` is the default appliance mode and adds Hive ordering,
+knowledge, stages, controls, and tools. `BLUEFIN_REVIEW_MODE=review` is strictly
+GitHub-only and ignores an inherited `HIVE_HUB`; the personal Brew package sets
+that mode explicitly.
+
+The appliance starts with an empty `/workspace`, so OMP parent-checkout task
+isolation is disabled. Workflowz still creates a fresh agent per item, and every
+write-capable worker clones one unique checkout under `$HOME/worktrees`.
 
 The appliance uses its own `bluefin-review-appliance` OMP profile. Host OMP
 configuration is not mounted by default, so host MCP entries cannot make the
-appliance noisy or unusable. To deliberately provide host configuration, mount
-it into the target-specific home and set `BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1`.
-The appliance never edits host configuration directly. Git HTTPS requests use
-the bundled `gh auth git-credential` helper, scoped to `github.com`; credential
+appliance noisy or unusable. The packaged review extension enables three
+Streamable HTTP MCP servers in every appliance: GitHub at
+`https://api.githubcopilot.com/mcp/`, the public read-only Project Bluefin
+service at `https://mcp.projectbluefin.io/mcp`, and Context7 at
+`https://mcp.context7.com/mcp`. GitHub uses `GH_TOKEN` or `GITHUB_TOKEN` when
+available. Context7 works keyless and uses `CONTEXT7_API_KEY` when provided for
+higher rate limits.
+
+To deliberately provide other host configuration, mount it into the
+target-specific home and set `BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1`. The
+appliance never edits host configuration directly. Git HTTPS requests use the
+bundled `gh auth git-credential` helper, scoped to `github.com`; credential
 values remain in the inherited environment and credential protocol, not image
-layers or process arguments.
-The immutable invocation overlay enables fresh workflowz agents, caps task
-concurrency at four and recursion at one, isolates task worktrees without
-auto-applying them, uses a one-hour task deadline and a bounded request budget,
-keeps tool intent traces out of model context, and selects low text verbosity.
-OMP resolves every model and effort choice from the user's active configuration;
-the appliance and its agents impose no model mapping or filtering.
+layers or process arguments. The immutable invocation overlay enables fresh
+workflowz agents, caps task concurrency at four and recursion at one, isolates
+task worktrees without auto-applying them, uses a one-hour task deadline and a
+bounded request budget, keeps tool intent traces out of model context, and
+selects low text verbosity. OMP resolves every model and effort choice from the
+user's active configuration; the appliance and its agents impose no model
+mapping or filtering.
 
-### Voice and Headroom
 
-The appliance carries OMP live voice and Headroom's MCP server. The packaged
-`bluefin` launcher projects only `$XDG_RUNTIME_DIR/pulse/native` when that
+### Voice
+
+The appliance carries OMP's Linux audio runtime. The packaged `bluefin`
+launcher projects only `$XDG_RUNTIME_DIR/pulse/native` when that
 PulseAudio compatibility socket exists, and sets a contained `PULSE_SERVER` for
 it. When the socket is absent, it projects `/dev/snd` only when that device
 exists. It never mounts the whole runtime directory; on a headless host, Review
 still starts and reports that live voice needs a PulseAudio socket or `/dev/snd`
-when voice is invoked.
-
-The first default-profile launch writes the appliance-owned Headroom definition
-to `/home/bluefin/.omp/profiles/bluefin-review-appliance/agent/mcp.json`.
-Headroom's executable and its MCP dependencies are inside the image, while its
-cache and session statistics remain under the persistent `/home/bluefin` home.
-No host `~/.codex/config.toml` or `headroom` executable is needed.
+when voice is invoked. The image does not bundle a separate voice or MCP
+service.
 
 Users who ran an older personal package with host `.omp` inheritance should
 preserve any wanted provider state separately and start the new appliance-owned
-profile; the launcher never deletes or rewrites the old state automatically.
+profile; the launcher never deletes or rewrites old state automatically.
 
 ### The agents it carries
 
@@ -164,16 +178,16 @@ correctness, security, test coverage, simplicity, CI triage, queue triage, and
 coordinated review. They deliberately omit model and effort fields, leaving both
 choices to the user's active OMP configuration.
 
-### Hive decides the order
+### Returned work first, then Hive order
 
-With `HIVE_HUB` set — or present in the host's default
-`$HOME/.config/hive/contributor.env` — the launcher passes the endpoint into the
-appliance, and the queue is ordered by Hive's own work queue and triage view, in
-Hive's positions. The appliance only reads: it never
-assigns, completes, or reprioritizes anything, because that is Hive's job and
-the maintainer's. Without a hub the queue is classified from live GitHub
-evidence using the policy layer's action vocabulary. The header always names
-which authority ordered the queue.
+Pull requests authored by the authenticated user with requested changes form a
+local repair-only lane at the top; this never changes Hive's own priorities or
+assignments. With `HIVE_HUB` set — or present in the host's default
+`$HOME/.config/hive/contributor.env` — the remaining queue follows Hive's work
+queue and triage positions exactly. The appliance only reads Hive: it never
+assigns, completes, or reprioritizes contributor work. Without a hub the queue
+is classified from live GitHub evidence using the policy layer's action
+vocabulary. The header always names which authority ordered the queue.
 
 Hive's queued work is in the queue whether or not a GitHub search would have
 found it. The search covers what is recent; anything Hive ranked is then
@@ -191,30 +205,31 @@ The loop is select, group, and dispatch:
    stages; `/` filters by title, repository, author, label, or number.
 2. `Space` toggles one item, `Alt-B` selects the focused repository group, and
    `A` selects the filtered slice up to the bounded slay limit.
-3. `s` slays the selection through review, repair, and landing. The extension
-   preserves Hive order, partitions by repository, and asks workflowz to run one
-   bounded `task` batch with a fresh `bluefin-reviewer` item per pull request.
-   Findings dispatch isolated fixers, and every changed head receives a fresh
-   review before the coordinator asks GitHub to squash-merge it under live
-   repository rules. `--autoslay`
-   starts that flow on launch and enables OMP's advisor on the coordinator
-   session; the advisor resolves through `@default`, following the maintainer's
-   selected model.
-4. `p` pauses admission of later repository waves without pretending to suspend
+3. `s` applies the selected entity's lifecycle. Ordinary pull requests go
+   through review, repair, fresh review, and landing. Issues read their Hive
+   queue and knowledge context, run one isolated workflowz `task` item per
+   issue, and finish only after a review-ready closing pull request is submitted.
+   `--autoslay` and `Alt-S` first repair pull requests returned to the
+   authenticated author, then process the visible issue backlog in bounded,
+   type-homogeneous repository waves. Returned PR repair ends at a new pushed
+   head and never self-reviews, self-approves, or self-merges.
+4. OMP's advisor is enabled for every review session and resolves through
+   `@default`, following the maintainer's selected model.
+5. `p` pauses admission of later repository waves without pretending to suspend
    agents already running.
 
-The appliance is a review-and-landing product, not a read-only report viewer.
-The maintainer's `s`/`Alt-S`/`--autoslay` action delegates approval and merge
-execution to the coordinator. Reviewer subagents deliberately lack mutation
-tools: they produce independent evidence, while the coordinator revalidates the
-live head and repository rules before using the appliance's GitHub authority.
-
+The appliance handles both review-and-landing work and issue implementation.
+The maintainer's ordinary PR slay delegates approval and merge execution to the
+coordinator. Reviewer subagents deliberately lack mutation tools: they produce
+independent evidence while the coordinator revalidates the live head and
+repository rules. Issue and returned-PR workers may push changes, but never
+approve or merge their own pull requests.
 
 Issue implementation in managed repositories is gated on a fresh GitHub read
 of the policy layer's admission and denial labels. Any closed, unadmitted,
-held, blocked, unreadable, or incompletely read issue rejects the whole
-selection. The dispatched agents may prepare changes and pull requests, but they
-never approve or merge.
+held, blocked, unreadable, or incompletely read issue rejects the batch before
+dispatch. A completed worker job is not sufficient: the workbench verifies a
+submitted closing pull request before advancing the issue wave.
 
 Credentials are inherited by name (`--env GH_TOKEN`), never passed as arguments
 and never baked into a layer. The mode resolves a token from `GH_TOKEN`,

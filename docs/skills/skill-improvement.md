@@ -1,7 +1,7 @@
 ---
 name: skill-improvement
-version: "1.1"
-last_updated: 2026-08-14
+version: "1.2"
+last_updated: 2026-09-15
 id: skill-improvement
 one_line_purpose: Keep review documentation source-backed, current, and compact.
 entry_point: docs/skills/skill-improvement.md
@@ -11,7 +11,7 @@ optimization_status: active
 status: active
 dependencies: []
 tags: [skills, documentation, maintenance, factory]
-description: "Maintains review documentation and skill contracts from local source evidence. Use when auditing docs, correcting stale guidance, or recording durable agent learning."
+description: "Maintains repository documentation and skill contracts from current source evidence. Use for repo-wide documentation audits, stale guidance, skill routing, catalog changes, or durable agent learning."
 metadata:
   type: reference
 ---
@@ -33,29 +33,33 @@ that work.
 ## Core Process
 
 1. Read `AGENTS.md`, `docs/factory/agentic-model.md`, `docs/SKILL.md`, and
-   the matching local skill first. The agentic model is the canonical
-   explanation of local roles, vocabulary, and authority boundaries.
-2. Treat the documentation, launcher, image, MCP app, and tests as one model.
-   Repair any contradiction at the nearest authoritative source; never leave
-   a legacy document to describe a second workflow or authority path.
-   This model-alignment judgment belongs in every normal implementation and
-   review loop. Explicit or periodic harvesting and gardening are secondary
-   maintenance work, not substitutes for checking the current change.
-3. Use `projectbluefin/common` as the pinned shared factory sidecar. It
-   supplements local guidance; it does not override local repository
-   boundaries or assign work.
-4. Correct stale, contradictory, or missing durable guidance in the nearest
-   user document or `docs/skills/` file. Regenerate `docs/skills/index.json`
-   with `bash scripts/check-skill-frontmatter.sh --write` when a skill
-   frontmatter field changes.
-5. Keep the repository compact. Do not commit changelogs, session notes,
-   planning scratchpads, design records, or "append here" instructions.
-   Remove obsolete records rather than preserving them as live guidance.
-6. Record only reusable, source-backed learnings. A command, API behavior, or
-   configuration fact belongs in a skill only when its source can be verified.
-7. Treat session history, issue reports, and prior agent output as leads, not
-   repository facts. Verify a project-specific claim in the current launcher,
-   image, test, workflow, or local contract before recording it.
+   every task-matching local skill first. The agentic model is the canonical
+   vocabulary and authority boundary.
+2. Inventory the documentation surface before editing. Classify every user doc,
+   agent contract, skill, router entry, and generated catalog row as relevant or
+   intentionally unchanged. “Update all docs” requires complete classification,
+   not weightless edits to unrelated files.
+3. Build an evidence chain for each behavior: current launcher/image/source,
+   focused contract test, user-facing document, agent-facing contract, and
+   matching skill. A link may be absent when that audience does not need the
+   fact; contradictory links are defects.
+4. Repair each contradiction at the nearest authoritative source. Keep one
+   detailed home for a rule and use sharp context pointers elsewhere. Remove
+   superseded wording instead of adding compatibility prose or a second model.
+5. Prune duplication, stale caches, and no-op instructions. Preserve every
+   source-backed safety invariant: a soft length or style warning is evidence to
+   remove sediment, never permission to delete live contract behavior.
+6. Use `projectbluefin/common` only as the pinned shared sidecar. It supplements
+   local guidance; it never overrides local repository boundaries or assigns
+   work.
+7. When skill frontmatter changes, regenerate `docs/skills/index.json` with
+   `bash scripts/check-skill-frontmatter.sh --write`; never edit the catalog by
+   hand. Keep changelogs, session notes, plans, and design scratchpads out of the
+   repository.
+8. Treat history, issue reports, and prior agent output as leads. Verify every
+   project-specific claim in current source, tests, workflows, or contracts.
+   Finish with a repository-wide search for superseded terminology and classify
+   every surviving match before declaring the documentation aligned.
 
 When a human must intervene to restart continuation or correct scheduling,
 classify the control failure; record the durable transition in the relevant
@@ -69,6 +73,7 @@ closest skill and verify it where practical; never create a session diary.
 | "The implementation is the only source of truth." | The implementation proves behavior; the documented model makes roles and authority legible to agents and users. Keep both aligned. |
 | "The plan is useful history." | Git history preserves completed work. A stale plan acts as a competing current contract. |
 | "This detail is too small for a skill." | If it changes how a future agent should operate, encode the timeless rule in the nearest skill. |
+| "The skill is over its soft line target, so a detailed rule must go." | Remove duplication or disclose a branch. A live safety invariant outranks a soft size warning. |
 
 ## Red Flags
 
@@ -79,6 +84,8 @@ closest skill and verify it where practical; never create a session diary.
 - Treating an old plan or design record as current behavior.
 - Updating a skill without its matching catalog entry.
 - Adding a permanent session log instead of repairing the relevant skill.
+- Touching unrelated documents so a repo-wide audit appears comprehensive.
+- Declaring alignment before every superseded-term search match is classified.
 - Changing another repository before reading its `AGENTS.md`, `CONTRIBUTING.md`
   and `docs/skills/`. Those files name the seam and forbid the shortcut, so
   the two minutes spent reading them is repaid immediately; skipping them is
@@ -93,5 +100,7 @@ closest skill and verify it where practical; never create a session diary.
 ```bash
 bash scripts/check-skill-frontmatter.sh
 bash tests/generate-skills.sh
+bash tests/test-registry.sh
+pre-commit run --all-files
 git diff --check
 ```

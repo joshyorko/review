@@ -67,6 +67,93 @@ probe squashfs-tools.mksquashfs 'mksquashfs -version'
 probe squashfs-tools.unsquashfs 'unsquashfs -version'
 probe fuse2fs.version 'fuse2fs -V'
 
-"${BUN:-bun}" "$(dirname "$0")/appliance-runtime-report.ts" "$output" "${GITHUB_SHA:-}"
+python3 - "$output" "${GITHUB_SHA:-}" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(sys.argv[1])
+probes = []
+for line in (root / "probes.tsv").read_text().splitlines():
+    name, status, command, stdout_name, stderr_name = line.split("\t", 4)
+    probes.append(
+        {
+            "name": name,
+            "exitCode": int(status),
+            "ok": int(status) == 0,
+            "command": command,
+            "stdout": (root / stdout_name).read_text(errors="replace"),
+            "stderr": (root / stderr_name).read_text(errors="replace"),
+        }
+    )
+
+safe_environment = {}
+for key in (
+    "RUNNER_OS",
+    "RUNNER_ARCH",
+    "ImageOS",
+    "ImageVersion",
+    "GITHUB_RUNNER_OS",
+    "GITHUB_RUNNER_ARCH",
+    "GITHUB_ACTIONS",
+    "CI",
+):
+    if key in os.environ:
+        safe_environment[key] = os.environ[key]
+
+ok = {probe["name"]: probe["ok"] for probe in probes}
+
+
+def boundary(names, reason):
+    return {
+        "status": "available" if all(ok.get(name, False) for name in names) else "blocked",
+        "reason": None if all(ok.get(name, False) for name in names) else reason,
+    }
+
+
+boundaries = {
+    "fuse": boundary(
+        ["fuse.device", "fuse.kernel", "fuse.mount-helper"],
+        "fuse-device-or-mount-unavailable",
+    ),
+    "userNamespace": boundary(
+        ["userns.sysctl", "userns.unshare"],
+        "user-namespace-unavailable",
+    ),
+    "apptainer": boundary(
+        ["apptainer.version", "apptainer.buildcfg"],
+        "apptainer-unavailable",
+    ),
+    "kvm": boundary(["kvm.device"], "kvm-device-unavailable"),
+    "krun": boundary(["krun.version"], "krun-unavailable"),
+    "oci": boundary(["podman.version", "podman.info"], "podman-unavailable"),
+}
+boundaries["sif"] = boundary(
+    ["apptainer.version", "fuse.device", "podman.version", "podman.info"],
+    "sif-build-or-runtime-unavailable",
+)
+
+manifest = {
+    "schema": 2,
+    "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
+    "commitSha": sys.argv[2],
+    "safeRunnerEnvironment": safe_environment,
+    "boundaries": boundaries,
+    "probes": probes,
+}
+(root / "capabilities.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+with (root / "capabilities.txt").open("w") as stream:
+    stream.write("Luna Factory packaged-runtime runner capability probe\n")
+    stream.write(f"commit: {sys.argv[2] or 'unknown'}\n")
+    for probe in probes:
+        state = "ok" if probe["ok"] else f"failed({probe['exitCode']})"
+        stream.write(f"{state:>12}  {probe['name']}: {probe['command']}\n")
+    for name, result in boundaries.items():
+        suffix = f" ({result['reason']})" if result["reason"] else ""
+        stream.write(f"{result['status']}: {name}{suffix}\n")
+PY
 
 echo "Recorded runner capability probe in $output"

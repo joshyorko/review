@@ -229,6 +229,7 @@ export class BatchService {
 					const controller = new AbortController();
 					const promise = Promise.resolve().then(() => this.execute(batch, item, controller.signal)).catch((error) => {
 						if (item.operation?.phase === "push" || item.operation?.phase === "pr") { item.stage = "UNKNOWN"; item.operation.state = "unknown"; }
+						else if (controller.signal.aborted && !message(error).includes("cancellation confirmed after native session settled")) { item.stage = "UNKNOWN"; if (item.operation) item.operation.state = "unknown"; }
 						else {
 							this.abandon(item, `native attempt settled without proof: ${message(error)}`);
 							item.stage = controller.signal.aborted ? "CANCELLED" : "BLOCKED";
@@ -251,7 +252,6 @@ export class BatchService {
 			await Promise.race([...this.running.values()].map((active) => active.promise));
 		}
 		for (const batch of this.batches.values()) {
-			for (const item of batch.items) if (item.stage === "QUEUED" && item.blocker) item.stage = "BLOCKED";
 			if (!this.fatal) this.persist(batch);
 		}
 	}

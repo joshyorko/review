@@ -80,7 +80,7 @@ grep -qE '^ARG FSDK_BUILDER_IMAGE=ghcr\.io/projectbluefin/lab-runner:[^@[:space:
 
 # Every fetched artifact carries a per-architecture digest. A download this
 # build cannot verify is a download it must not execute.
-for pin in OMP_X86_64_SHA256 OMP_AARCH64_SHA256 HEADROOM_X86_64_SHA256 HEADROOM_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256 PIP_SHA256; do
+for pin in OMP_X86_64_SHA256 OMP_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256; do
   grep -qE "^ARG ${pin}=[0-9a-f]{64}$" "$containerfile" ||
     fail "ARG ${pin} must be a lowercase sha256 digest"
 done
@@ -104,6 +104,9 @@ require image/appliance/entrypoint.sh \
   'extension_args=(--extension /usr/share/bluefin/review/extension)' \
   'extension_args+=(--extension /usr/share/bluefin/review/luna-factory)' \
   '"${extension_args[@]}"'
+require image/appliance/config.yml \
+  'enabled: false' \
+  'apply: false'
 grep -qE '^ARG AUDIO_BUILDER_IMAGE=registry\.fedoraproject\.org/fedora-minimal:[^@[:space:]]+@sha256:[0-9a-f]{64}$' "$containerfile" ||
   fail "AUDIO_BUILDER_IMAGE must be pinned as tag@sha256 digest"
 # shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
@@ -111,21 +114,36 @@ require "$containerfile" \
   'FROM ${AUDIO_BUILDER_IMAGE} AS audio' \
   'microdnf --assumeyes' \
   'COPY --from=audio /audio-out/ /out/' \
-  'HEADROOM_VERSION' \
-  'headroom-requirements.txt' \
-  'io.projectbluefin.review.headroom.version=' \
   'io.projectbluefin.review.audio.source='
+forbid "$containerfile" 'HEADROOM_' 'headroom-ai' '/usr/bin/headroom' 'headroom-requirements.txt'
 require image/appliance/stage-audio.sh \
   'libpulse-simple.so.0' \
   'libasound.so.2' \
   '/usr/share/alsa' \
   'ldd'
-require image/appliance/appliance-mcp.json \
-  '"headroom"' \
-  '"/usr/bin/headroom"' \
-  '"mcp"' \
-  '"serve"'
+test ! -e image/appliance/appliance-mcp.json || fail "the removed Headroom MCP definition still exists"
+test ! -e image/appliance/headroom-requirements.txt || fail "the removed Headroom dependency lock still exists"
 require image/appliance/config.yml 'advisor: "@default"' 'syncBacklog: 1'
+python3 - image/extension/bluefin-review/.mcp.json <<'PY' || fail "bundled MCP configuration is invalid"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    servers = json.load(stream)["mcpServers"]
+
+expected = {
+    "github": "https://api.githubcopilot.com/mcp/",
+    "bluefin": "https://mcp.projectbluefin.io/mcp",
+    "context7": "https://mcp.context7.com/mcp",
+}
+assert set(servers) == set(expected)
+for name, url in expected.items():
+    assert servers[name]["type"] == "http"
+    assert servers[name]["url"] == url
+    assert servers[name]["enabled"] is True
+assert "GH_TOKEN" in servers["github"]["headers"]["Authorization"]
+assert "CONTEXT7_API_KEY" in servers["context7"]["headers"]["Authorization"]
+PY
 require image/appliance/stage-runtime.sh '/usr/bin/gzip.bin'
 require "$containerfile" \
   'GIT_CONFIG_KEY_0=credential.https://github.com.helper' \
@@ -194,14 +212,19 @@ chmod +x "$entrypoint_tmp/omp"
 default_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'bluefin-review-appliance' <<<"$default_args" ||
   fail "the appliance entrypoint did not select its isolated profile"
+[[ "$(grep -cx -- '--advisor' <<<"$default_args")" -eq 1 ]] ||
+  fail "the appliance did not enable exactly one OMP advisor"
 inherited_args="$(BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'review' <<<"$inherited_args" ||
   fail "the explicit host omp configuration opt-in did not select the review profile"
 autoslay_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --autoslay)"
 [[ "$(grep -cx -- '--advisor' <<<"$autoslay_args")" -eq 1 ]] ||
-  fail "autoslay did not enable exactly one OMP advisor"
+  fail "autoslay duplicated the always-on OMP advisor"
 grep -qx -- '--autoslay' <<<"$autoslay_args" ||
   fail "autoslay flag did not reach the review extension"
+explicit_advisor_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --advisor)"
+[[ "$(grep -cx -- '--advisor' <<<"$explicit_advisor_args")" -eq 1 ]] ||
+  fail "the appliance duplicated an explicit OMP advisor flag"
 if PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh update >"$entrypoint_tmp/update.out" 2>&1; then
   fail "the immutable appliance accepted an in-place update"
 fi
@@ -249,8 +272,7 @@ test "$(inspect '{{.ManifestType}}')" = "application/vnd.oci.image.manifest.v1+j
 image_version="$(inspect '{{index .Labels "org.opencontainers.image.version"}}')"
 test "$image_version" = "$version" ||
   fail "image label version '${image_version}' does not match derived '${version}'"
-headroom_version="$(sed -nE 's/^ARG HEADROOM_VERSION=([^[:space:]]+)$/\1/p' "$containerfile")"
-test "$(inspect '{{index .Labels "io.projectbluefin.review.headroom.version"}}')" = "$headroom_version"
+test -z "$(inspect '{{index .Labels "io.projectbluefin.review.headroom.version"}}')"
 test "$(inspect '{{index .Labels "io.projectbluefin.review.audio.packages"}}')" = "pulseaudio-libs,alsa-lib"
 
 # Sum the layer sizes rather than reading `.Size`: podman's inspect field
@@ -294,9 +316,7 @@ run '
   gzip --version >/dev/null
   test "$(git config --get credential.https://github.com.helper)" = "!/usr/bin/gh auth git-credential"
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
-  headroom --version >/dev/null
-  headroom mcp serve --help >/dev/null
-  printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"contract\",\"version\":\"1\"}}}" | headroom mcp serve | grep -q "\"serverInfo\""
+
 ' >/dev/null || fail "a bundled binary failed to execute"
 
 # git is here to land fixes, which means it has to be able to commit and to
@@ -337,7 +357,7 @@ run '
   esac
   check test -x /usr/bin/bluefin-review-appliance
   check grep -q "checkUpdate: false" /usr/share/bluefin/review/appliance-config.yml
-  check test -f /usr/share/bluefin/review/appliance-mcp.json
+  check test ! -e /usr/share/bluefin/review/appliance-mcp.json
   check test -f /usr/share/bluefin/review/extension/index.ts
   check test -d /usr/share/bluefin/review/extension/agents
   check test -f /usr/share/bluefin/review/luna-factory/index.ts
@@ -363,17 +383,17 @@ run '
     printf "%s\n" "$alsa_deps" >&2
     exit 1
   }
-' || fail "the review mode, Headroom MCP, SBOM, or audio closure is missing from the image"
+' || fail "the review mode, SBOM, or audio closure is missing from the image"
 
-# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
-  profile="$HOME/.omp/profiles/bluefin-review-appliance/agent/mcp.json"
-  rm -f "$profile"
-  bluefin-review-appliance --version >/dev/null
-  test -f "$profile"
-  grep -q "/usr/bin/headroom" "$profile"
-' || fail "the appliance did not provision its Headroom MCP profile"
+  test -x /usr/bin/bluefin-review-appliance
+  grep -q "checkUpdate: false" /usr/share/bluefin/review/appliance-config.yml
+  test -f /usr/share/bluefin/review/extension/index.ts
+  test -d /usr/share/bluefin/review/extension/agents
+  test -f /usr/share/bluefin/review/extension/.mcp.json
+  test -f /usr/share/bluefin/review/sbom.spdx.json
+' >/dev/null || fail "the review mode or its SBOM is missing from the image"
 
 # Nothing inside may install anything.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
@@ -392,10 +412,11 @@ import json,sys
 document = json.load(sys.stdin)
 print(" ".join(sorted(package["name"] for package in document["packages"])))
 ')"
-for component in omp headroom gh bluefin-review-mode; do
+for component in omp gh bluefin-review-mode; do
   grep -qF -- "$component" <<<"$sbom_packages" ||
     fail "the in-image SBOM does not record ${component}"
 done
+grep -qF -- headroom <<<"$sbom_packages" && fail "the in-image SBOM still records Headroom"
 
 # The deliverable itself: the shipped entrypoint, with its profile and extension
 # arguments, starting under the nonroot user. Extension *behavior* is covered by

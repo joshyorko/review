@@ -21,7 +21,10 @@ task:
   softRequestBudget: 90
   agentIdleTtlMs: 300000
   isolation:
-    enabled: true
+    # The appliance starts from an empty /workspace. Each write-capable worker
+    # clones one unique checkout under $HOME/worktrees instead of asking OMP to
+    # derive an isolation from a parent checkout that does not exist.
+    enabled: false
     apply: false
 
 read:

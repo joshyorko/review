@@ -14,6 +14,7 @@ import {
 	type SelectedItem,
 } from "../image/extension/luna-factory/core/batch.ts";
 import { BatchStore, ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
+import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
 
 const selected = (key: string, action: SelectedItem["action"] = "patch", extra: Partial<SelectedItem> = {}): SelectedItem => {
 	const match = /^([^#]+)#(\d+)$/.exec(key);
@@ -85,4 +86,71 @@ test("a killed writer can be reacquired, claims overlap only by canonical resour
 		const escaped = join(outside, "artifact.txt"); await writeFile(escaped, "outside"); batch.items[0]!.workspace = escaped; store.write(batch); assert.throws(() => store.export(batch.id, join(root, "export-again")), /escapes Factory state root/); store.release();
 		const claims = new ResourceClaims(root); claims.claim("repo:Org/A", "owner-1"); assert.match(claims.conflict("repo:org/a", "owner-2")!, /owner-1/); claims.release("repo:ORG/A", "owner-1"); assert.equal(claims.conflict("repo:org/a", "owner-2"), undefined);
 	} finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
+
+test("dependency-deferred work remains queued when an unrelated prerequisite is blocked", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-service-"));
+	try {
+		const prerequisite = selected("org/a#1", "inspect");
+		const dependent = selected("org/b#2", "inspect");
+		const batch = createBatch([prerequisite, dependent], {
+			...options("feed"),
+			capacity: 1,
+			dependencies: [{ item: dependent.key, requires: prerequisite.key, stage: "verified-patch" }],
+		});
+		batch.items[0]!.stage = "BLOCKED";
+		batch.items[0]!.blocker = "selected repository is temporarily inaccessible";
+		const github = {
+			snapshot: async (item: SelectedItem) => item,
+			assertFresh: async (item: SelectedItem) => {
+				if (item.key === prerequisite.key) throw new Error("repository temporarily inaccessible");
+			},
+		};
+		const service = new BatchService(root, github as never, undefined, {} as never, 1);
+		service.store.acquire();
+		service.store.write(batch);
+		await service.resume(batch.id, {});
+		const resumed = service.store.read(batch.id);
+		assert.equal(resumed.items.find((item) => item.selected.key === prerequisite.key)?.stage, "BLOCKED");
+		const dependentState = resumed.items.find((item) => item.selected.key === dependent.key)!;
+		assert.equal(dependentState.stage, "QUEUED");
+		assert.match(dependentState.blocker!, /must reach verified-patch/);
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an unconfirmed stop keeps the item unknown and the repository claim", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-cancel-"));
+	try {
+		const item = selected("org/a#1", "inspect");
+		const batch = createBatch([item], options("cafe"));
+		const github = { snapshot: async (value: SelectedItem) => value, assertFresh: async () => {} };
+		const service = new BatchService(root, github as never, undefined, {} as never, 1);
+		service.store.acquire();
+		service.store.write(batch);
+		let startedResolve!: () => void;
+		const started = new Promise<void>((resolve) => { startedResolve = resolve; });
+		const internal = service as unknown as {
+			execute: (current: Batch, currentItem: Batch["items"][number], signal: AbortSignal) => Promise<void>;
+			persist: (current: Batch) => void;
+		};
+		internal.execute = async (current, currentItem, signal) => {
+			currentItem.operation = { id: `${current.id}:${currentItem.selected.key}:attempt`, phase: "worker", state: "intent" };
+			internal.persist(current);
+			startedResolve();
+			await new Promise<never>((_resolve, reject) => {
+				signal.addEventListener("abort", () => reject(new Error("native cancellation outcome unknown")), { once: true });
+			});
+		};
+		await service.resume(batch.id, {});
+		await started;
+		await service.control(batch.id, "stop");
+		await service.waitForIdle();
+		const stopped = service.store.read(batch.id).items[0]!;
+		assert.equal(stopped.stage, "UNKNOWN");
+		assert.equal(stopped.operation?.state, "unknown");
+		assert.match(stopped.blocker!, /cancellation outcome unknown/);
+		assert.match(service.claims.conflict("repo:org/a", "another-owner")!, /batch-cafe/);
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
 });

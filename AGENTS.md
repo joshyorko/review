@@ -26,6 +26,40 @@ Keep this repository focused: it ships the OMP review appliance and the Hive
 contributor runtime. Persistent maintainer state belongs to OMP's appliance
 home volume; no second dashboard state store is permitted.
 
+### Product boundary: GitHub-first core, optional Bluefin/Hive
+
+Review is a GitHub-first core with optional Bluefin and Hive integrations
+(decision in [#591](https://github.com/projectbluefin/review/issues/591)). It
+works for any GitHub repository; Bluefin and Hive are additive, never required.
+
+- **Review** (`image/extension/bluefin-review/`) provides the generic core:
+  PRs, issues, queues, search, reading, inspection, review, repair,
+  implementation, and landing. PRs and issues are first-class objects in any
+  repository. Actions are intended to match the object: PR
+  review/diff/fix/Slay, and issue inspect/implement/fix. Backend capability and
+  current feature support remain authoritative; the core does not promise that
+  every available control succeeds for every selected object, and never labels
+  an authorized session "browse-only" when Hive is absent — GitHub actions
+  remain available.
+- **OMP** provides sessions, agents, execution, and traces.
+- **Bluefin** adds its doctrine, specialized reviewers, labels, conventions,
+  admission rules, and organization policy. It is selected where appropriate;
+  general reviewers follow the target repository's own rules.
+- **Hive** adds ordering, claims, stages, knowledge, and contributor context
+  through the Hive MCP server when enabled. Without Hive, GitHub evidence
+  remains available, but Hive ordering and Hive-only claims, stages, knowledge,
+  and contributor context do not fall back to GitHub. It keeps ownership of
+  assignments and completion; Review does not take over Hive assignments or
+  add a scheduler.
+
+GitHub defines what work exists. Review defines what can be done with it. Hive
+may prioritize and coordinate it. Bluefin may specialize its policy. Nothing in
+the core requires Bluefin or Hive: GitHub access, operator permissions,
+execution requirements, and safety checks still apply. Safety is preserved as-is
+— current-head verification, CI checks, branch protection, token-scope
+protections, mutation guards, read-only reviewers, and explicit maintainer
+authorization. This boundary does not enable workflow mutation.
+
 The interactive recipes run the image runtime in the foreground of the
 terminal that launched them, and Ctrl-C stops them. Detached contributor
 containers are not supported; `REVIEW_DETACH=1` is rejected. No launch path may
@@ -62,8 +96,15 @@ terminal; `review-stop` only manages the Kubernetes contributor deployment.
 
 Hive is the sole authority for selecting and assigning contributor tasks: do
 not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
-one permitted filter is own-work exclusion on the maintainer-facing queue
-view — a reviewer never receives their own authored pull requests to review.
+maintainer-facing queue may locally promote pull requests authored by the
+authenticated user when review requested changes, but that lane is repair-only.
+A reviewer never receives their own authored pull request to review, approve,
+or merge.
+
+An explicit maintainer slay delegates one bounded lifecycle to the workbench
+coordinator: ordinary PR review, repair, fresh review, and landing; returned-PR
+repair through a new head; or issue implementation through a submitted closing
+PR. Evidence reviewers remain read-only.
 
 The review mode in `image/extension/bluefin-review/` equips OMP with companion
 review agents (`bluefin-doctrine`, `bluefin-reviewer`, `bluefin-security`,
@@ -101,6 +142,9 @@ every pin automatically. A pin is a checkpoint the automation advances,
 never a human gate: no dependency bump may wait on manual review, an audit
 checklist, or a conditional workflow. If a bump breaks something, the fix
 is forward — a follow-up change — not a brake on the update stream.
+OMP releases move both Containerfiles through the allowlisted Renovate pin-sync
+task; the resulting `main` push publishes both images. See
+[`image-build.md`](docs/skills/image-build.md).
 
 The work the appliance produces for other repositories is toil reduction for
 under-maintained projects, not feature work: agents repair what is broken and
@@ -230,6 +274,6 @@ every main validation red.
   `hivecommons/hive` (default branch `v4`, v2 is retired; no contributing guide or issue
   templates, DCO sign-off required on pull requests).
 - Organization skills and factory rules: `projectbluefin/common`.
-- External API details: Context7 documentation. Context7 reaches agents both
-  through Hive's hub-side knowledge export and through the image's
-  configured `context7` extension (keyless public endpoint).
+- External API details: Context7 documentation. The review extension bundles
+  GitHub, the public Project Bluefin service, and Context7 as MCP servers;
+  credentials remain runtime environment inputs, never image content.

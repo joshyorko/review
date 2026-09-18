@@ -26,7 +26,6 @@ extension_args=(--extension /usr/share/bluefin/review/extension)
 if [ -d /usr/share/bluefin/review/luna-factory ]; then
   extension_args+=(--extension /usr/share/bluefin/review/luna-factory)
 fi
-
 case "${1:-}" in
 update)
   cat >&2 <<'EOF'
@@ -52,13 +51,11 @@ EOF
   ;;
 esac
 args=("$@")
-autoslay=false
 advisor=false
 for arg in "${args[@]}"; do
-  [ "$arg" = --autoslay ] && autoslay=true
   [ "$arg" = --advisor ] && advisor=true
 done
-if [ "$autoslay" = true ] && [ "$advisor" = false ]; then
+if [ "$advisor" = false ]; then
   args+=(--advisor)
 fi
 
