@@ -79,8 +79,12 @@ run_command() {
   shift
   command -v timeout >/dev/null 2>&1 || blocked "timeout unavailable for bounded OMP probe"
   local input_fifo="$run_root/omp-input"
-  local command_pid writer_fd
+  local command_pid keepalive_pid writer_fd
   mkfifo "$input_fifo"
+  # Keep one independent writer attached to the FIFO. This avoids a runtime
+  # specific EOF race while Bun claims stdin inside the container.
+  tail -f /dev/null >"$input_fifo" 2>/dev/null &
+  keepalive_pid=$!
   timeout --signal=TERM --kill-after=10s 180s "$@" <"$input_fifo" >"$output" 2>&1 &
   command_pid=$!
   # Keep the RPC client connected while the asynchronous prompt and its model
@@ -92,39 +96,38 @@ run_command() {
   # makes the process observe EOF on some container runtimes.
   printf '%s\n' "$protocol_request" >&"$writer_fd"
 
+  cleanup_command() {
+    exec {writer_fd}>&- 2>/dev/null || true
+    kill "$command_pid" 2>/dev/null || true
+    kill "$keepalive_pid" 2>/dev/null || true
+    wait "$command_pid" 2>/dev/null || true
+    wait "$keepalive_pid" 2>/dev/null || true
+    rm -f "$input_fifo"
+  }
+
   for _ in {1..1800}; do
     grep -Fq '"type":"available_commands_update"' "$output" && break
     if ! kill -0 "$command_pid" 2>/dev/null; then
-      exec {writer_fd}>&- || true
-      rm -f "$input_fifo"
-      wait "$command_pid" 2>/dev/null || true
+      cleanup_command
       failed "packaged OMP probe exited before RPC command discovery; inspect $output"
     fi
     sleep 0.1
   done
   grep -Fq '"type":"available_commands_update"' "$output" || {
-    exec {writer_fd}>&- || true
-    kill "$command_pid" 2>/dev/null || true
-    wait "$command_pid" 2>/dev/null || true
-    rm -f "$input_fifo"
+    cleanup_command
     failed "packaged OMP probe did not publish RPC command discovery; inspect $output"
   }
 
   for _ in {1..1800}; do
     grep -Fq '"command":"negotiate_protocol"' "$output" && break
     if ! kill -0 "$command_pid" 2>/dev/null; then
-      exec {writer_fd}>&- || true
-      rm -f "$input_fifo"
-      wait "$command_pid" 2>/dev/null || true
+      cleanup_command
       failed "packaged OMP probe exited before RPC protocol negotiation; inspect $output"
     fi
     sleep 0.1
   done
   grep -Fq '"command":"negotiate_protocol"' "$output" || {
-    exec {writer_fd}>&- || true
-    kill "$command_pid" 2>/dev/null || true
-    wait "$command_pid" 2>/dev/null || true
-    rm -f "$input_fifo"
+    cleanup_command
     failed "packaged OMP probe did not acknowledge RPC protocol negotiation; inspect $output"
   }
 
@@ -137,22 +140,19 @@ run_command() {
       break
     fi
     if ! kill -0 "$command_pid" 2>/dev/null; then
-      exec {writer_fd}>&- || true
-      rm -f "$input_fifo"
-      wait "$command_pid" 2>/dev/null || true
+      cleanup_command
       failed "packaged OMP probe exited before the Factory prompt completed; inspect $output"
     fi
     sleep 0.1
   done
   awk '/"type":"agent_end"/ { last=$0 } END { if (last == "") exit 1; if (last ~ /"isTerminal":false/) exit 1; exit 0 }' "$output" || {
-    exec {writer_fd}>&- || true
-    kill "$command_pid" 2>/dev/null || true
-    wait "$command_pid" 2>/dev/null || true
-    rm -f "$input_fifo"
+    cleanup_command
     failed "packaged OMP probe did not reach a terminal agent_end; inspect $output"
   }
 
   exec {writer_fd}>&-
+  kill "$keepalive_pid" 2>/dev/null || true
+  wait "$keepalive_pid" 2>/dev/null || true
   if ! wait "$command_pid"; then
     rm -f "$input_fifo"
     failed "packaged OMP probe exited before completing; inspect $output"
