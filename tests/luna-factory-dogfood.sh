@@ -23,20 +23,21 @@ state="$run_root/state"
 home="$run_root/home"
 config="$home/.config/omp"
 cache="$home/.cache"
+models="$home/.omp/agent"
 provider_log="$run_root/provider.log"
 result_file="$run_root/result.json"
 terminal_file="$run_root/${mode}-terminal.jsonl"
-mkdir -p -- "$state" "$config" "$cache"
+mkdir -p -- "$state" "$config" "$cache" "$models"
 chmod 700 "$run_root"
 # Rootless OCI maps the image's 65532 user to a different host uid. These are
 # disposable, fixture-only directories; make the bind mounts writable without
 # changing the image or the host container-engine storage.
-chmod 0777 "$home" "$state" "$config" "$cache"
+chmod 0777 "$home" "$state" "$config" "$cache" "$models"
 export LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_PROVIDER_URL="http://127.0.0.1:43129" LUNA_PROBE_PORT=43129
 export LUNA_PROBE_ROUTE="${LUNA_PROBE_ROUTE:-native-task}"
 head_sha="${LUNA_FACTORY_HEAD_SHA:-${GITHUB_SHA:-unknown}}"
 cp "$root/tests/fixtures/luna-factory-omp-probe-config.yml" "$config/omp.yml"
-sed 's#43127#43129#g' "$root/tests/fixtures/luna-factory-omp-probe-models.yml" >"$config/models.yml"
+sed 's#43127#43129#g' "$root/tests/fixtures/luna-factory-omp-probe-models.yml" >"$models/models.yml"
 
 write_result() {
   local status="$1" reason="${2:-}" evidence="${3:-$run_root}"
