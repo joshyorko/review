@@ -56,6 +56,10 @@ def test_oci_harness_is_clean_and_uses_the_local_provider():
     assert 'chmod 0711 "$run_root"' in harness
     assert 'chmod 0777 "$home" "$state" "$config" "$cache" "$models"' in harness
     assert '"$models/models.yml"' in harness
+    assert 'mkfifo "$input_fifo"' in harness
+    assert 'available_commands_update' in harness
+    assert 'negotiate_protocol' in harness
+    assert 'agent_end' in harness
     assert "luna-factory-omp-probe-config.yml" in harness
     assert "luna-factory-omp-probe-models.yml" in harness
     assert "--no-session" not in harness

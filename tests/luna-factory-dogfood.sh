@@ -72,14 +72,89 @@ for attempt in {1..100}; do
 done
 grep -Fq '{"ready":true' "$provider_log" || failed "local fixture did not become ready"
 
-probe_request='{"type":"prompt","message":"/factory -- LUNA_FACTORY_PROBE_ROOT: exercise one bounded Factory native task and stop after its returned result"}'
+protocol_request='{"id":"protocol-1","type":"negotiate_protocol","protocolVersion":2}'
+probe_request='{"id":"factory-probe","type":"prompt","message":"/factory -- LUNA_FACTORY_PROBE_ROOT: exercise one bounded Factory native task and stop after its returned result"}'
 run_command() {
   local output="$1"
   shift
   command -v timeout >/dev/null 2>&1 || blocked "timeout unavailable for bounded OMP probe"
-  if ! timeout --signal=TERM --kill-after=10s 180s "$@" <<<"$probe_request" >"$output" 2>&1; then
+  local input_fifo="$run_root/omp-input"
+  local command_pid writer_fd
+  mkfifo "$input_fifo"
+  timeout --signal=TERM --kill-after=10s 180s "$@" <"$input_fifo" >"$output" 2>&1 &
+  command_pid=$!
+  # Keep the RPC client connected while the asynchronous prompt and its model
+  # turn run. Closing stdin immediately after the prompt makes OMP dispose the
+  # session before the Factory tool loop can begin.
+  exec {writer_fd}>"$input_fifo"
+
+  for _ in {1..1800}; do
+    grep -Fq '"type":"available_commands_update"' "$output" && break
+    if ! kill -0 "$command_pid" 2>/dev/null; then
+      exec {writer_fd}>&- || true
+      rm -f "$input_fifo"
+      wait "$command_pid" 2>/dev/null || true
+      failed "packaged OMP probe exited before RPC command discovery; inspect $output"
+    fi
+    sleep 0.1
+  done
+  grep -Fq '"type":"available_commands_update"' "$output" || {
+    exec {writer_fd}>&- || true
+    kill "$command_pid" 2>/dev/null || true
+    wait "$command_pid" 2>/dev/null || true
+    rm -f "$input_fifo"
+    failed "packaged OMP probe did not publish RPC command discovery; inspect $output"
+  }
+
+  printf '%s\n' "$protocol_request" >&"$writer_fd"
+  for _ in {1..1800}; do
+    grep -Fq '"command":"negotiate_protocol"' "$output" && break
+    if ! kill -0 "$command_pid" 2>/dev/null; then
+      exec {writer_fd}>&- || true
+      rm -f "$input_fifo"
+      wait "$command_pid" 2>/dev/null || true
+      failed "packaged OMP probe exited before RPC protocol negotiation; inspect $output"
+    fi
+    sleep 0.1
+  done
+  grep -Fq '"command":"negotiate_protocol"' "$output" || {
+    exec {writer_fd}>&- || true
+    kill "$command_pid" 2>/dev/null || true
+    wait "$command_pid" 2>/dev/null || true
+    rm -f "$input_fifo"
+    failed "packaged OMP probe did not acknowledge RPC protocol negotiation; inspect $output"
+  }
+
+  printf '%s\n' "$probe_request" >&"$writer_fd"
+  for _ in {1..1800}; do
+    # OMP 18.x marks terminal agent_end frames explicitly. The fallback for an
+    # older packaged binary accepts the final agent_end when isTerminal is
+    # omitted, but never treats an explicitly non-terminal frame as complete.
+    if awk '/"type":"agent_end"/ { last=$0 } END { if (last == "") exit 1; if (last ~ /"isTerminal":false/) exit 1; exit 0 }' "$output"; then
+      break
+    fi
+    if ! kill -0 "$command_pid" 2>/dev/null; then
+      exec {writer_fd}>&- || true
+      rm -f "$input_fifo"
+      wait "$command_pid" 2>/dev/null || true
+      failed "packaged OMP probe exited before the Factory prompt completed; inspect $output"
+    fi
+    sleep 0.1
+  done
+  awk '/"type":"agent_end"/ { last=$0 } END { if (last == "") exit 1; if (last ~ /"isTerminal":false/) exit 1; exit 0 }' "$output" || {
+    exec {writer_fd}>&- || true
+    kill "$command_pid" 2>/dev/null || true
+    wait "$command_pid" 2>/dev/null || true
+    rm -f "$input_fifo"
+    failed "packaged OMP probe did not reach a terminal agent_end; inspect $output"
+  }
+
+  exec {writer_fd}>&-
+  if ! wait "$command_pid"; then
+    rm -f "$input_fifo"
     failed "packaged OMP probe exited before completing; inspect $output"
   fi
+  rm -f "$input_fifo"
 }
 
 case "$mode" in
