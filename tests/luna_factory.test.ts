@@ -494,6 +494,15 @@ test("an unproven write cannot be integrated as if it were accepted", () => {
 	assert.equal(integrated.ok, false);
 	assert.match(integrated.ok ? "" : integrated.error, /not proven/);
 });
+test("a proven write cannot integrate without an externally changed head", () => {
+	const writer = candidate({ effect: "write" });
+	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
+	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const integrated = reduce(returned, { kind: "integrate_attempt", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
+	assert.equal(integrated.ok, false);
+	assert.match(integrated.ok ? "" : integrated.error, /externally changed head/);
+});
 
 test("only a READY task may start, and an attempt id is not reused", () => {
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
@@ -1542,8 +1551,16 @@ test("an unreadable journal is surfaced instead of being started over", async ()
 	assert.ok(host.notifications.some((message) => /journal is unreadable/.test(message)));
 	const status = await callTool(host, "luna_factory_status", {});
 	assert.match(status.content[0]!.text, /version 4 is not readable/);
+	const opened = await callTool(host, "luna_factory_open", {
+		objective: "replace the unreadable run",
+		criteria: [{ id: "A1", statement: "the replacement is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	assert.equal(opened.isError, true);
+	assert.match(opened.content[0]!.text, /preserve the original evidence/);
+	assert.equal(host.entries.length, 0, "an unreadable journal must not be overwritten");
 });
-
 test("session settlement records a verdict and never dispatches", () => {
 	const host = fakeHost();
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
