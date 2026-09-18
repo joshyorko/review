@@ -79,31 +79,36 @@ run_command() {
   shift
   command -v timeout >/dev/null 2>&1 || blocked "timeout unavailable for bounded OMP probe"
   local input_fifo="$run_root/omp-input"
-  local command_pid keepalive_pid writer_fd
+  local command_pid writer_fd
   mkfifo "$input_fifo"
-  # Keep one independent writer attached to the FIFO. This avoids a runtime
-  # specific EOF race while Bun claims stdin inside the container.
-  tail -f /dev/null >"$input_fifo" 2>/dev/null &
-  keepalive_pid=$!
-  timeout --signal=TERM --kill-after=10s 180s "$@" <"$input_fifo" >"$output" 2>&1 &
+  # Open the FIFO read/write in this shell before starting the command. The
+  # descriptor remains attached for the whole RPC session, so the child never
+  # observes an artificial EOF between asynchronous command frames.
+  exec {writer_fd}<>"$input_fifo"
+  timeout --signal=TERM --kill-after=10s 180s "$@" <&"$writer_fd" >"$output" 2>&1 &
   command_pid=$!
-  # Keep the RPC client connected while the asynchronous prompt and its model
-  # turn run. Closing stdin immediately after the prompt makes OMP dispose the
-  # session before the Factory tool loop can begin.
-  exec {writer_fd}>"$input_fifo"
-  # Feed the first frame immediately. The packaged Bun stdin reader may claim
-  # the stream before extension discovery; leaving it empty until discovery
-  # makes the process observe EOF on some container runtimes.
-  printf '%s\n' "$protocol_request" >&"$writer_fd"
 
   cleanup_command() {
     exec {writer_fd}>&- 2>/dev/null || true
     kill "$command_pid" 2>/dev/null || true
-    kill "$keepalive_pid" 2>/dev/null || true
     wait "$command_pid" 2>/dev/null || true
-    wait "$keepalive_pid" 2>/dev/null || true
     rm -f "$input_fifo"
   }
+
+  for _ in {1..1800}; do
+    grep -Fq '"type":"ready"' "$output" && break
+    if ! kill -0 "$command_pid" 2>/dev/null; then
+      cleanup_command
+      failed "packaged OMP probe exited before RPC ready; inspect $output"
+    fi
+    sleep 0.1
+  done
+  grep -Fq '"type":"ready"' "$output" || {
+    cleanup_command
+    failed "packaged OMP probe did not publish RPC ready; inspect $output"
+  }
+
+  printf '%s\n' "$protocol_request" >&"$writer_fd"
 
   for _ in {1..1800}; do
     grep -Fq '"type":"available_commands_update"' "$output" && break
@@ -151,8 +156,6 @@ run_command() {
   }
 
   exec {writer_fd}>&-
-  kill "$keepalive_pid" 2>/dev/null || true
-  wait "$keepalive_pid" 2>/dev/null || true
   if ! wait "$command_pid"; then
     rm -f "$input_fifo"
     failed "packaged OMP probe exited before completing; inspect $output"
