@@ -70,7 +70,7 @@ require image/extension/typesafe-omp-loader.mjs \
   'typeof pi.registerEntryRenderer'
 
 require "$containerfile" \
-  'io.projectbluefin.review.omp.version="${OMP_VERSION}"'
+  "io.projectbluefin.review.omp.version=\"\${OMP_VERSION}\""
 
 forbid_secret
 
@@ -89,7 +89,7 @@ if [[ -n "${TYPESAFE_RUNTIME_IMAGE:-}" ]]; then
   run 'test -f /usr/share/bluefin/review/pi-typesafe/package.json'
   run 'grep -Fq '"'"'"version": "'"'"'0.5.0'"'"' /usr/share/bluefin/review/pi-typesafe/package.json'
   run 'test ! -e /usr/bin/node && test ! -e /usr/bin/npm'
-  run 'test -z "${TYPESAFE_API_KEY:-}"'
+  run "test -z \"\${TYPESAFE_API_KEY:-}\""
 
   commands="$(run 'set -o pipefail; printf "%s\\n" '"'"'{"id":"cmds","type":"get_available_commands"}'"'"' | env HOME=/tmp/typesafe-home XDG_CONFIG_HOME=/tmp/typesafe-home/.config XDG_DATA_HOME=/tmp/typesafe-home/.local/share XDG_STATE_HOME=/tmp/typesafe-home/.local/state /usr/bin/omp --profile typesafe-contract --no-session --no-tools --model gpt-5.2 --extension /usr/share/bluefin/review/typesafe-omp-loader.mjs --mode rpc')"
   grep -Fq '"name":"typesafe"' <<<"$commands" ||
