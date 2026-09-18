@@ -465,8 +465,8 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 
 	let batchService: BatchService | undefined;
 	const batches = (): BatchService => {
-		if (!enabled()) throw new Error("Factory is disabled; explicitly enable LUNA_FACTORY_ENABLED=1");
 		if (ledger) throw new Error("A single-subject journal is open; preserve it and use a fresh native session for selected batches");
+		if (loadProblem !== undefined) throw new Error(`Factory journal is unreadable: ${loadProblem}; preserve it before starting a selected batch`);
 		if (!batchService) {
 			const capacity = Number(env.LUNA_FACTORY_CAPACITY ?? "2");
 			if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("LUNA_FACTORY_CAPACITY must be between 1 and 100");
