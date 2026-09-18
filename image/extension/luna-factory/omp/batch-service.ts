@@ -19,6 +19,11 @@ interface Running { batch: Batch; item: BatchItem; controller: AbortController; 
 export class BatchService {
 	readonly store: BatchStore;
 	readonly claims: ResourceClaims;
+	readonly root: string;
+	readonly github: BatchGitHub;
+	readonly sdk: NativeSDK | undefined;
+	readonly schema: SchemaBuilder;
+	readonly capacity: number;
 	private batches = new Map<string, Batch>();
 	private running = new Map<string, Running>();
 	private pumping?: Promise<void>;
@@ -27,7 +32,12 @@ export class BatchService {
 	private context?: NativeContext;
 	private fatal?: string;
 
-	constructor(readonly root: string, readonly github: BatchGitHub, readonly sdk: NativeSDK | undefined, readonly schema: SchemaBuilder, readonly capacity: number) {
+	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number) {
+		this.root = root;
+		this.github = github;
+		this.sdk = sdk;
+		this.schema = schema;
+		this.capacity = capacity;
 		if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("invalid shared Factory capacity");
 		this.store = new BatchStore(root);
 		this.claims = new ResourceClaims(root);

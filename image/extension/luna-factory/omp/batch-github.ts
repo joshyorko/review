@@ -15,7 +15,9 @@ interface SnapshotResponse {
 
 /** Uses the existing Review credential, never a per-repository substitute. */
 export class BatchGitHub {
-	constructor(readonly token: string | undefined, readonly fetchImpl: typeof fetch = fetch) {}
+	readonly token: string | undefined;
+	readonly fetchImpl: typeof fetch;
+	constructor(token: string | undefined, fetchImpl: typeof fetch = fetch) { this.token = token; this.fetchImpl = fetchImpl; }
 	async request<T>(path: string, body?: unknown): Promise<T> {
 		if (!this.token) throw new Error("no GitHub credential; configure the existing Review connection and resume");
 		const response = await this.fetchImpl(`https://api.github.com/${path}`, {

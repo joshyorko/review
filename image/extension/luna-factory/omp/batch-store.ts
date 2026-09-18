@@ -125,7 +125,8 @@ export class BatchStore {
 
 /** Same-host resource ownership shared with Review. Claims survive uncertain cancellation. */
 export class ResourceClaims {
-	constructor(readonly root: string) { mkdirSync(join(root, "claims"), { recursive: true, mode: 0o700 }); }
+	readonly root: string;
+	constructor(root: string) { this.root = root; mkdirSync(join(root, "claims"), { recursive: true, mode: 0o700 }); }
 	claim(resource: string, owner: string): void {
 		const file = join(this.root, "claims", `${digest(resource.toLowerCase())}.json`);
 		try {
