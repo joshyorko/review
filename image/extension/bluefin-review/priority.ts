@@ -36,6 +36,8 @@ export interface PrioritizeContext {
 	hive: HiveSnapshot;
 	now: number;
 	currentUserLogin?: string;
+	/** Personal/self-hosted policy may explicitly permit workflow PR actions. */
+	allowWorkflowSlay?: boolean;
 }
 export interface PrioritizedQueue {
 	items: QueueItem[];
@@ -78,9 +80,9 @@ export function isRepairRequested(item: QueueItem, currentUserLogin?: string): b
 }
 
 /** Why an open pull request is unsupported for automated action. */
-export function unsupportedReason(item: QueueItem): string | undefined {
+export function unsupportedReason(item: QueueItem, allowWorkflowSlay = false): string | undefined {
 	if (item.type !== "pr") return undefined;
-	if ((item.workflowFiles?.length ?? 0) > 0) {
+	if (!allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
 		return "workflow change";
 	}
 	if (item.changedFilesComplete === false) {
@@ -101,7 +103,7 @@ export function categorize(item: QueueItem, context: PrioritizeContext): { categ
 	if (isRepairRequested(item, context.currentUserLogin)) {
 		return { category: "repair-requested", reason: "changes requested on your pull request" };
 	}
-	const blockedReason = unsupportedReason(item);
+	const blockedReason = unsupportedReason(item, context.allowWorkflowSlay);
 	if (blockedReason) {
 		return { category: "blocked", reason: blockedReason };
 	}

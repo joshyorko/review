@@ -48,7 +48,7 @@ export interface QueueItem {
 	closedByPrs?: string[];
 	/** `owner/repo#number` of open or merged pull requests submitted for this issue. */
 	submittedPrs?: string[];
-	/** Changed workflow files reported by GitHub for exclusion from slay/review. */
+	/** Changed workflow files reported by GitHub for policy and permission gates. */
 	workflowFiles?: string[];
 	/** Whether GitHub returned the complete changed-file list. */
 	changedFilesComplete?: boolean;
