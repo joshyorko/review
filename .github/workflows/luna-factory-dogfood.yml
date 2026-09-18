@@ -70,8 +70,16 @@ jobs:
       - name: Build and run no-publish SIF
         if: steps.capabilities.outputs.sif == 'available'
         run: |
+          set -euo pipefail
           scripts/brew-dev build "${{ github.event.pull_request.head.sha }}" "$RUNNER_TEMP/bundles"
-          BLUEFIN_REVIEW_FALLBACK_SIF="$RUNNER_TEMP/bundles/launcher/bluefin-review.sif" \
+          bundle="$(find "$RUNNER_TEMP/bundles" -maxdepth 1 -type f -name 'bluefin-review-dev-*.tar.gz' -print -quit)"
+          test -n "$bundle"
+          sif_root="$RUNNER_TEMP/sif-bundle"
+          mkdir -p "$sif_root"
+          tar -xzf "$bundle" -C "$sif_root"
+          sif="$sif_root/launcher/bluefin-review.sif"
+          test -e "$sif"
+          BLUEFIN_REVIEW_FALLBACK_SIF="$sif" \
             LUNA_FACTORY_HEAD_SHA="${{ github.event.pull_request.head.sha }}" \
             tests/luna-factory-dogfood.sh sif
       - name: Upload bounded evidence

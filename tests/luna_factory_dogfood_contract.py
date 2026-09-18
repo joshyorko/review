@@ -17,6 +17,8 @@ def test_workflow_is_exact_head_no_publish_and_artifact_bounded():
     assert "tests/luna-factory-dogfood.sh" in workflow
     assert "tests/appliance-runtime-probe.sh" in workflow
     assert "scripts/brew-dev" in workflow
+    assert "tar -xzf" in workflow
+    assert "bluefin-review.sif" in workflow
     assert "actions/upload-artifact" in workflow
     assert "podman build --format oci" in workflow
     assert "tests/appliance-contract.sh --image" in workflow
