@@ -122,6 +122,11 @@ name, resolves `GH_TOKEN` from `gh auth token` when it is unset, and resolves an
 unset `HIVE_HUB` from the host's default `$HOME/.config/hive/contributor.env`
 without exposing the registration token.
 
+The appliance also includes the official `pi-typesafe` OMP extension. Use
+`/typesafe login`, `/typesafe test`, and `/typesafe enable` when you want to
+authenticate and enable it for a session, or provide `TYPESAFE_API_KEY` to the
+launcher. Review starts and remains usable without a TypeSafe key.
+
 `BLUEFIN_REVIEW_MODE=hive` is the default appliance mode and adds Hive ordering,
 knowledge, stages, controls, and tools. `BLUEFIN_REVIEW_MODE=review` is strictly
 GitHub-only and ignores an inherited `HIVE_HUB`; the personal Brew package sets
