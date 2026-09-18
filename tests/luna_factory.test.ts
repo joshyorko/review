@@ -501,7 +501,7 @@ test("a proven write cannot integrate without an externally changed head", () =>
 	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
 	const integrated = reduce(returned, { kind: "integrate_attempt", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
 	assert.equal(integrated.ok, false);
-	assert.match(integrated.ok ? "" : integrated.error, /externally changed head/);
+	assert.match(integrated.ok ? "" : integrated.error, /externally changed head|concrete changed head/);
 });
 
 test("only a READY task may start, and an attempt id is not reused", () => {
@@ -728,6 +728,20 @@ test("a new generation reconciles in-flight work and keeps lineage", () => {
 	const rechecked = reduce(next, { kind: "reevaluate_candidate", expectedRevision: next.revision, taskId: "T1" as TaskId }, REDUCE);
 	assert.equal(rechecked.ok, true);
 	assert.equal(rechecked.ok ? findTask(rechecked.ledger, "T1" as TaskId)?.state : "", "READY");
+});
+test("new-generation journal round-trip preserves retained attempt lineage", () => {
+	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const next = step(recorded, (revision) => ({
+		kind: "new_generation",
+		expectedRevision: revision,
+		generation: "G2" as GenerationId,
+		goal: { statement: "narrowed objective", nonGoals: [], permittedEffects: ["read", "write"], finishAuthority: "report", appetite: { tasks: 8, attemptsPerTask: 2 } },
+		criteria: [{ id: "A1" as CriterionId, statement: "narrowed proof", mandatory: true }],
+	}));
+	const parsed = parseJournal(journalRecord(next));
+	assert.equal(parsed.ok, true);
+	assert.equal(parsed.ok ? parsed.ledger.tasks[0]?.generation : "", "G2");
+	assert.equal(parsed.ok ? parsed.ledger.tasks[0]?.attempts.length : -1, 1);
 });
 
 test("an interrupted run cannot be reactivated by a status write", () => {

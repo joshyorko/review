@@ -318,6 +318,9 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (event.subject.base !== attempt.subject.base) {
 				return { ok: false, error: `integration subject ${event.subject.base} is not the attempt's base` };
 			}
+			if (event.subject.head === undefined) {
+				return { ok: false, error: `integration subject must include a concrete changed head for ${attempt.id}` };
+			}
 			if (event.subject.head === attempt.subject.head) {
 				return { ok: false, error: `integration subject must identify an externally changed head; ${attempt.id} remains on its original subject` };
 			}

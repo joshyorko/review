@@ -128,15 +128,15 @@ function parseTask(value: unknown): TaskRecord | undefined {
 			!isRecord(rawAttempt.subject) ||
 			typeof rawAttempt.state !== "string" ||
 			!Array.isArray(rawAttempt.nativeJobIds) ||
-			(rawAttempt.nativeResultIds !== undefined && !Array.isArray(rawAttempt.nativeResultIds)) ||
+			!Array.isArray(rawAttempt.nativeResultIds) ||
 			typeof rawAttempt.integrated !== "boolean"
 		) return undefined;
 		const parsedSubject = parseSubject(rawAttempt.subject);
 		if (parsedSubject === undefined || attemptIds.has(rawAttempt.id)) return undefined;
 		if (rawAttempt.state !== "started" && rawAttempt.state !== "returned" && rawAttempt.state !== "abandoned") return undefined;
 		if (!rawAttempt.nativeJobIds.every((id) => identity(id))) return undefined;
-		const nativeResultIds = rawAttempt.nativeResultIds === undefined ? [] : rawAttempt.nativeResultIds;
-		if (!Array.isArray(nativeResultIds) || !nativeResultIds.every((id) => identity(id))) return undefined;
+		const nativeResultIds = rawAttempt.nativeResultIds;
+		if (!nativeResultIds.every((id) => identity(id))) return undefined;
 		if (new Set(rawAttempt.nativeJobIds).size !== rawAttempt.nativeJobIds.length || new Set(nativeResultIds).size !== nativeResultIds.length) return undefined;
 		let receipt: Attempt["receipt"];
 		if (rawAttempt.receipt !== undefined) {
@@ -191,10 +191,10 @@ export function parseJournal(value: unknown): JournalRead {
 	if (!identity(value.runId) || !identity(value.generation)) {
 		return { ok: false, reason: "journal is missing its run or generation identity" };
 	}
-	if (!isRecord(value.goal) || !boundedText(value.goal.statement) || !Array.isArray(value.goal.permittedEffects)) {
+	if (!isRecord(value.goal) || !boundedText(value.goal.statement) || !Array.isArray(value.goal.permittedEffects) || !Array.isArray(value.goal.nonGoals) || typeof value.goal.finishAuthority !== "string" || value.goal.finishAuthority.trim().length === 0) {
 		return { ok: false, reason: "journal goal is unreadable" };
 	}
-	const nonGoals = value.goal.nonGoals === undefined ? [] : value.goal.nonGoals;
+	const nonGoals = value.goal.nonGoals;
 	if (!stringList(nonGoals)) return { ok: false, reason: "journal non-goals are unreadable" };
 	const permittedEffects = value.goal.permittedEffects;
 	if (
@@ -229,7 +229,7 @@ export function parseJournal(value: unknown): JournalRead {
 	}
 	const subject = parseSubject(value.subject);
 	if (subject === undefined) return { ok: false, reason: "journal subject is unreadable" };
-	if (!Array.isArray(value.criteria) || value.criteria.length > MAX_ITEMS || !Array.isArray(value.tasks) || value.tasks.length > MAX_ITEMS) {
+	if (!Array.isArray(value.criteria) || value.criteria.length === 0 || value.criteria.length > MAX_ITEMS || !Array.isArray(value.tasks) || value.tasks.length > MAX_ITEMS) {
 		return { ok: false, reason: "journal criteria or tasks are not arrays" };
 	}
 
@@ -248,6 +248,11 @@ export function parseJournal(value: unknown): JournalRead {
 		if (task === undefined || taskIds.has(task.id)) return { ok: false, reason: "journal holds an unreadable or duplicate task" };
 		taskIds.add(task.id);
 		tasks.push(task);
+	}
+	for (const task of tasks) {
+		if (["READY", "RUNNING", "VERIFY", "DONE"].includes(task.state) && !criterionIds.has(task.criterionId)) return { ok: false, reason: "journal task criterion is inconsistent" };
+		if (!task.attempts.every((attempt) => attempt.taskId === task.id)) return { ok: false, reason: "journal attempt identity is inconsistent" };
+		if (task.state === "DONE" && !task.attempts.some((attempt) => attempt.state === "returned" && attempt.receipt !== undefined)) return { ok: false, reason: "journal DONE task has no returned receipt" };
 	}
 
 	return {
@@ -286,7 +291,7 @@ export function readJournal(entries: readonly BranchEntry[] | undefined): Journa
 	let latest: unknown;
 	let found = false;
 	for (const entry of entries) {
-		if (entry.type !== "custom" || entry.customType !== JOURNAL_ENTRY) continue;
+		if (!isRecord(entry) || entry.type !== "custom" || entry.customType !== JOURNAL_ENTRY) continue;
 		latest = entry.data;
 		found = true;
 	}

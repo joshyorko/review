@@ -336,6 +336,9 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			parameters: nativeTaskParameters,
 			async execute(_toolCallId, params, signal, onUpdate, rawContext) {
 				const context = rawContext as NativeInvokeContext | undefined;
+				if (loadProblem !== undefined) {
+					return { content: text(`native task refused: Factory journal is unreadable: ${loadProblem}`), isError: true };
+				}
 				if (ledger === undefined || !enabled()) {
 					if (context?.invokeTool === undefined) {
 						return { content: text("native task delegation is unavailable on this OMP host"), isError: true };

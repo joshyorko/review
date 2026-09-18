@@ -31,9 +31,15 @@ ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:5217c4e4ed
 ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:44@sha256:9bb5cffe3cebf098975f05ffd78e8a1d25cd9a9e4fc5e563b56e27b9546eb0c0
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
-ARG OMP_VERSION=18.2.1
-ARG OMP_X86_64_SHA256=9c76485c4e65875678b88c7926c7e6891d488796676f359de9c4df584c886fc9
-ARG OMP_AARCH64_SHA256=01ca88eddc6fba11367259dcffc4293fd9458c918f6e5012af35d73338ee1bdd
+ARG OMP_VERSION=18.2.5
+ARG OMP_X86_64_SHA256=19a18856c308885768da69b6d3a995a8ed0a9135a887d869df26023772dee839
+ARG OMP_AARCH64_SHA256=cda1c2f9e03093c170fd770e698c680f9cad0dddc23c88d4209b87764653ecc4
+ARG TYPESAFE_VERSION=0.5.0
+ARG TYPESAFE_SHA256=5c66571a9b653fc0b6dc5af0c0151eda94a08e3d601794c6a54e045944d50e9f
+ARG TYPESAFE_SDK_VERSION=0.6.0
+ARG TYPESAFE_SDK_SHA256=ccd94517c911c58ed5284b15838a001393e304ea3b784f6e8fb5a79f6365378e
+ARG TYPESAFE_TYPEBOX_VERSION=1.3.34
+ARG TYPESAFE_TYPEBOX_SHA256=58a270296bc4e185ee3a04328447a9ffa12e22ae6abaa31a03fd3273b800c7f0
 # renovate: datasource=github-releases depName=cli/cli
 ARG GH_VERSION=2.97.0
 ARG GH_X86_64_SHA256=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112
@@ -59,6 +65,12 @@ FROM ${FSDK_BUILDER_IMAGE} AS build
 ARG OMP_VERSION
 ARG OMP_X86_64_SHA256
 ARG OMP_AARCH64_SHA256
+ARG TYPESAFE_VERSION
+ARG TYPESAFE_SHA256
+ARG TYPESAFE_SDK_VERSION
+ARG TYPESAFE_SDK_SHA256
+ARG TYPESAFE_TYPEBOX_VERSION
+ARG TYPESAFE_TYPEBOX_SHA256
 ARG GH_VERSION
 ARG GH_X86_64_SHA256
 ARG GH_AARCH64_SHA256
@@ -87,6 +99,31 @@ RUN set -eu; \
       -o "$workdir/omp"; \
     echo "${omp_sha}  $workdir/omp" | sha256sum --check --status; \
     install -m 0755 "$workdir/omp" /out/usr/bin/omp; \
+    \
+    mkdir -p /out/usr/share/bluefin/review/pi-typesafe/node_modules/@typesafe-ai/sdk \
+      /out/usr/share/bluefin/review/pi-typesafe/node_modules/typebox; \
+    curl --fail --location --show-error --silent \
+      "https://registry.npmjs.org/pi-typesafe/-/pi-typesafe-${TYPESAFE_VERSION}.tgz" \
+      -o "$workdir/pi-typesafe.tgz"; \
+    echo "${TYPESAFE_SHA256}  $workdir/pi-typesafe.tgz" | sha256sum --check --status; \
+    tar --no-same-owner --strip-components=1 -xzf "$workdir/pi-typesafe.tgz" \
+      -C /out/usr/share/bluefin/review/pi-typesafe; \
+    curl --fail --location --show-error --silent \
+      "https://registry.npmjs.org/@typesafe-ai/sdk/-/sdk-${TYPESAFE_SDK_VERSION}.tgz" \
+      -o "$workdir/typesafe-sdk.tgz"; \
+    echo "${TYPESAFE_SDK_SHA256}  $workdir/typesafe-sdk.tgz" | sha256sum --check --status; \
+    tar --no-same-owner --strip-components=1 -xzf "$workdir/typesafe-sdk.tgz" \
+      -C /out/usr/share/bluefin/review/pi-typesafe/node_modules/@typesafe-ai/sdk; \
+    curl --fail --location --show-error --silent \
+      "https://registry.npmjs.org/typebox/-/typebox-${TYPESAFE_TYPEBOX_VERSION}.tgz" \
+      -o "$workdir/typebox.tgz"; \
+    echo "${TYPESAFE_TYPEBOX_SHA256}  $workdir/typebox.tgz" | sha256sum --check --status; \
+    tar --no-same-owner --strip-components=1 -xzf "$workdir/typebox.tgz" \
+      -C /out/usr/share/bluefin/review/pi-typesafe/node_modules/typebox; \
+    test -f /out/usr/share/bluefin/review/pi-typesafe/package.json; \
+    test -f /out/usr/share/bluefin/review/pi-typesafe/extensions/index.js; \
+    test -f /out/usr/share/bluefin/review/pi-typesafe/node_modules/@typesafe-ai/sdk/package.json; \
+    test -f /out/usr/share/bluefin/review/pi-typesafe/node_modules/typebox/package.json; \
     \
     curl --fail --location --show-error --silent \
       "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz" \
@@ -145,6 +182,7 @@ COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/rev
 # source sibling layout resolvable after the two packaged extensions are split
 # into their runtime directories.
 RUN ln -s extension /out/usr/share/bluefin/review/bluefin-review
+COPY image/extension/typesafe-omp-loader.mjs /out/usr/share/bluefin/review/typesafe-omp-loader.mjs
 COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/bluefin-review-appliance
 RUN set -eu; \
     case "$(uname -m)" in \
@@ -173,6 +211,7 @@ ARG REVIEW_VERSION
 ARG REVIEW_REVISION
 ARG FSDK_BASE_IMAGE
 ARG OMP_VERSION
+ARG TYPESAFE_VERSION
 ARG AUDIO_BUILDER_IMAGE
 
 COPY --from=build /out /
@@ -204,6 +243,7 @@ LABEL org.opencontainers.image.title="Bluefin Review" \
       io.projectbluefin.review.appliance="true" \
       io.projectbluefin.review.harness="omp" \
       io.projectbluefin.review.omp.version="${OMP_VERSION}" \
+      io.projectbluefin.review.typesafe.version="${TYPESAFE_VERSION}" \
       io.projectbluefin.review.audio.source="${AUDIO_BUILDER_IMAGE}" \
       io.projectbluefin.review.audio.packages="pulseaudio-libs,alsa-lib"
 
