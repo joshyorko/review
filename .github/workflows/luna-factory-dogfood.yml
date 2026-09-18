@@ -59,6 +59,12 @@ jobs:
           BLUEFIN_REVIEW_IMAGE: localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
           LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: tests/luna-factory-dogfood.sh oci
+      - name: Reclaim OCI build storage before SIF
+        if: steps.capabilities.outputs.oci == 'available' && steps.capabilities.outputs.sif == 'available'
+        run: |
+          set -euo pipefail
+          podman image rm --ignore "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
+          podman image prune --force
       - name: Record unavailable SIF boundary
         if: steps.capabilities.outputs.sif != 'available'
         run: |
