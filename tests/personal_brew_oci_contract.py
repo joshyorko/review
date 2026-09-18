@@ -13,6 +13,8 @@ def test_wrapper_prefers_personal_oci_and_keeps_sif_as_fallback():
     assert "ghcr.io/joshyorko/review-appliance:sha-" in script
     assert "BLUEFIN_REVIEW_FALLBACK_SIF" in wrapper
     assert "export BLUEFIN_REVIEW_MODE=review" in wrapper
+    assert "export BLUEFIN_REVIEW_PERSONAL_MODE=1" in wrapper
+    assert "export BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS=1" in wrapper
     assert "BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY" not in wrapper
     assert 'export BLUEFIN_REVIEW_SIF="$root/launcher/bluefin-review.sif"' not in wrapper
 
