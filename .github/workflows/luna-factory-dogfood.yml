@@ -55,7 +55,8 @@ jobs:
             -f image/appliance/Containerfile \
             -t "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" .
           tests/appliance-contract.sh --image "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
-          test "$(podman image inspect --format '{{index .Labels \"org.opencontainers.image.revision\"}}' "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}")" = "${{ github.event.pull_request.head.sha }}"
+          label_format='{{index .Labels "org.opencontainers.image.revision"}}'
+          test "$(podman image inspect --format "$label_format" "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}")" = "${{ github.event.pull_request.head.sha }}"
       - name: Run no-publish OCI dogfood
         if: steps.capabilities.outputs.oci == 'available'
         env:
