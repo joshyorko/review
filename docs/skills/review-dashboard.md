@@ -126,12 +126,14 @@ visible issue backlog. Work is partitioned into type-homogeneous,
 repository-local waves of at most 25 items. OMP's advisor is always enabled and
 resolves through `@default`, following the maintainer's selected model.
 
-The PR queue keeps `.github/workflows/` changes and incomplete file lists visible,
-marking them blocked from automated review, repair, or landing. Returned PRs remain eligible.
-Ordinary PR slay excludes failing or pending CI before reviewer dispatch and
-rechecks it before each wave; returned PR repair may address failing CI but
-cannot run approval or merge commands. Slay never removes holds, uses admin
-bypass, fabricates reviewers, force-pushes, or lands an unreviewed head.
+The personal/self-hosted Review surface opts workflow-file PRs into the same
+review, repair, fresh-review, and landing lifecycle as ordinary PRs. The Brew
+launcher enables this with `BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY=1`; GitHub still
+requires workflow/Actions write permission, and a missing permission stops the
+dispatch with an actionable authentication error. Managed Bluefin policy keeps
+workflow PRs blocked unless an explicit policy setting enables the lane.
+Incomplete changed-file lists remain fail-closed, and returned authenticated-
+author PRs retain their repair-only lane and no-approval/no-merge boundary.
 
 Fresh reviewers receive explicit `repo` and `pull_request` arguments for
 `hive_workbench_diff`. Repair agents use `gh repo clone` and `gh pr checkout`
