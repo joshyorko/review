@@ -88,7 +88,7 @@ native)
     --config "$config/omp.yml" --extension "$extension"
   ;;
 oci)
-  image="${BLUEFIN_REVIEW_IMAGE:-review:luna-factory-dogfood}"
+  image="${BLUEFIN_REVIEW_IMAGE:-localhost/review:luna-factory-dogfood}"
   command -v podman >/dev/null 2>&1 || blocked "podman unavailable"
   podman info >/dev/null 2>&1 || blocked "podman info unavailable"
   run_command "$terminal_file" podman run --rm --network host --entrypoint /usr/bin/omp \

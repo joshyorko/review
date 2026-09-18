@@ -27,6 +27,7 @@ def test_workflow_is_exact_head_no_publish_and_artifact_bounded():
     assert "id: capabilities" in workflow
     for marker in ("steps.capabilities.outputs.oci", "steps.capabilities.outputs.sif", "REVIEW_REVISION"):
         assert marker in workflow, marker
+    assert 'localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}' in workflow
     for forbidden in ("podman push", "ghcr.io", "secrets.", "gh auth", "release create", "BLUEFIN_REVIEW_OCI_PUSH"):
         assert forbidden not in workflow, forbidden
     assert "pull_request:" in workflow

@@ -51,12 +51,12 @@ jobs:
             --build-arg "REVIEW_VERSION=$review_version" \
             --build-arg "REVIEW_REVISION=${{ github.event.pull_request.head.sha }}" \
             -f image/appliance/Containerfile \
-            -t "review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" .
-          tests/appliance-contract.sh --image "review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
+            -t "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" .
+          tests/appliance-contract.sh --image "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
       - name: Run no-publish OCI dogfood
         if: steps.capabilities.outputs.oci == 'available'
         env:
-          BLUEFIN_REVIEW_IMAGE: review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
+          BLUEFIN_REVIEW_IMAGE: localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
           LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: tests/luna-factory-dogfood.sh oci
       - name: Record unavailable SIF boundary
