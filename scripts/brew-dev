@@ -86,6 +86,7 @@ if [[ "\${1:-}" == review ]]; then
   export BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY="\${BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY:-1}"
   export BLUEFIN_REVIEW_IMAGE="\${BLUEFIN_REVIEW_IMAGE:-$oci_image}"
   export BLUEFIN_REVIEW_FALLBACK_SIF="\${BLUEFIN_REVIEW_FALLBACK_SIF:-\$root/launcher/bluefin-review.sif}"
+  cat "\$root/build.txt"
 fi
 exec "\$root/launcher/bin/bluefin" "\$@"
 EOF
