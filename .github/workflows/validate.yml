@@ -99,9 +99,16 @@ jobs:
           node --test tests/update-omp-pins.test.mjs
           node --test tests/update-derived-pins.test.mjs
           bash tests/omp-review-mode.sh
+          node --test tests/luna_factory.test.ts
+          python3 tests/luna_factory_dogfood_contract.py
+          bash tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-capabilities" "${{ github.event.pull_request.head.sha || github.sha }}"
           bash tests/appliance-contract.sh
           bash tests/contribute-contract.sh
           bash tests/version-derivation.sh
+      - name: Packaged runtime capability report
+        run: |
+          set -euo pipefail
+          tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-capabilities" "${{ github.event.pull_request.head.sha || github.sha }}"
 
 
       - name: Interactive launcher docs and shell stay aligned

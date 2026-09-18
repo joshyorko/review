@@ -108,6 +108,18 @@ if [[ ! -e "$EXTENSION_PATH" ]]; then
   exit 1
 fi
 
+# Luna Factory ships alongside Review in the personal package. It is added only
+# when its directory exists, so an upstream-source checkout keeps the
+# single-extension command line it has always had.
+EXTENSION_ARGS=(--extension "$EXTENSION_PATH")
+LUNA_FACTORY_PATH="${LUNA_FACTORY_EXTENSION_PATH:-/opt/bluefin/extensions/luna-factory}"
+if [[ ! -e "$LUNA_FACTORY_PATH" && -d "$SCRIPT_DIR/image/extension/luna-factory" ]]; then
+  LUNA_FACTORY_PATH="$SCRIPT_DIR/image/extension/luna-factory"
+fi
+if [[ -e "$LUNA_FACTORY_PATH" ]]; then
+  EXTENSION_ARGS+=(--extension "$LUNA_FACTORY_PATH")
+fi
+
 # 5. Ensure organization & repository skills are projected for agent discovery
 if [[ -f "$SCRIPT_DIR/docs/skills/index.json" && -f "$SCRIPT_DIR/scripts/generate-skills.py" ]]; then
   python3 "$SCRIPT_DIR/scripts/generate-skills.py" \

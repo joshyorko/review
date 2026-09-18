@@ -1,0 +1,103 @@
+name: luna-factory-dogfood
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  dogfood:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install Apptainer
+        uses: eWaterCycle/setup-apptainer@58d788a297b0acdec33b8979428afa78679aa711 # v1 tag target
+      - name: Static Factory contracts
+        run: python3 tests/luna_factory_dogfood_contract.py
+      - name: Runtime capability report
+        env:
+          LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-dogfood/capabilities" "$LUNA_FACTORY_HEAD_SHA"
+      - name: Classify independent runtime boundaries
+        id: capabilities
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/luna-factory-dogfood/capabilities/capabilities.json" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+
+          report = json.loads(open(sys.argv[1]).read())
+          boundaries = report["boundaries"]
+          output = open(sys.argv[2], "a")
+          for name in ("oci", "sif", "fuse", "userNamespace", "apptainer", "kvm", "krun"):
+              result = boundaries[name]
+              print(f"{name}={result['status']}", file=output)
+              print(f"{name}: {result['status']} {result.get('reason') or ''}")
+          PY
+      - name: Record unavailable OCI boundary
+        if: steps.capabilities.outputs.oci != 'available'
+        run: |
+          set -euo pipefail
+          printf '{"status":"blocked","reason":"%s"}\n' \
+            "${{ steps.capabilities.outputs.oci }}" \
+            > "$RUNNER_TEMP/luna-factory-dogfood/oci-result.json"
+          echo "OCI Factory dogfood BLOCKED by runner capability: ${{ steps.capabilities.outputs.oci }}"
+      - name: Build exact-head OCI image
+        if: steps.capabilities.outputs.oci == 'available'
+        run: |
+          review_version="$(bash scripts/review-appliance-version.sh)"
+          podman build --format oci \
+            --build-arg "REVIEW_VERSION=$review_version" \
+            --build-arg "REVIEW_REVISION=${{ github.event.pull_request.head.sha }}" \
+            -f image/appliance/Containerfile \
+            -t "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" .
+          tests/appliance-contract.sh --image "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
+          label_format='{{index .Labels "org.opencontainers.image.revision"}}'
+          test "$(podman image inspect --format "$label_format" "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}")" = "${{ github.event.pull_request.head.sha }}"
+      - name: Run no-publish OCI dogfood
+        if: steps.capabilities.outputs.oci == 'available'
+        env:
+          BLUEFIN_REVIEW_IMAGE: localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
+          LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: tests/luna-factory-dogfood.sh oci
+      - name: Reclaim OCI build storage before SIF
+        if: steps.capabilities.outputs.oci == 'available' && steps.capabilities.outputs.sif == 'available'
+        run: |
+          set -euo pipefail
+          podman image rm --ignore "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
+          podman image prune --force
+      - name: Record unavailable SIF boundary
+        if: steps.capabilities.outputs.sif != 'available'
+        run: |
+          set -euo pipefail
+          printf '{"status":"blocked","reason":"%s"}\n' \
+            "${{ steps.capabilities.outputs.sif }}" \
+            > "$RUNNER_TEMP/luna-factory-dogfood/sif-result.json"
+          echo "SIF/Apptainer Factory dogfood BLOCKED by runner capability: ${{ steps.capabilities.outputs.sif }}"
+      - name: Build and run no-publish SIF
+        if: steps.capabilities.outputs.sif == 'available'
+        run: |
+          set -euo pipefail
+          scripts/brew-dev build "${{ github.event.pull_request.head.sha }}" "$RUNNER_TEMP/bundles"
+          bundle="$(find "$RUNNER_TEMP/bundles" -maxdepth 1 -type f -name 'bluefin-review-dev-*.tar.gz' -print -quit)"
+          test -n "$bundle"
+          sif_root="$RUNNER_TEMP/sif-bundle"
+          mkdir -p "$sif_root"
+          tar -xzf "$bundle" -C "$sif_root"
+          sif="$sif_root/launcher/bluefin-review.sif"
+          test -e "$sif"
+          rm -f "$bundle"
+          podman system prune --all --force
+          BLUEFIN_REVIEW_FALLBACK_SIF="$sif" \
+            LUNA_FACTORY_HEAD_SHA="${{ github.event.pull_request.head.sha }}" \
+            tests/luna-factory-dogfood.sh sif
+      - name: Upload bounded evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/luna-factory-dogfood*
+          if-no-files-found: ignore

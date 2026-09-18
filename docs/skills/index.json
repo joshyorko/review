@@ -138,6 +138,25 @@
       "doc_type": "runbook"
     },
     {
+      "id": "luna-factory",
+      "name": "luna-factory",
+      "one_line_purpose": "Keep the Luna Factory protocol's mechanical decisions in tested extension code.",
+      "entry_point": "docs/skills/luna-factory.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "omp",
+        "extension",
+        "factory",
+        "evidence",
+        "admission"
+      ],
+      "description": "Maintains the opt-in Luna Factory extension in image/extension/luna-factory/. Use when editing admission, evidence reconciliation, convergence, or repair lineage.",
+      "version": "0.1",
+      "last_updated": "2026-09-15",
+      "doc_type": "runbook"
+    },
+    {
       "id": "pr-labels",
       "name": "pr-labels",
       "one_line_purpose": "Enforce the canonical factory lifecycle, admission, and automation label contract.",
