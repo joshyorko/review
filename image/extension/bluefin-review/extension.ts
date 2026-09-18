@@ -648,7 +648,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const workflowItem = items.find((item) => item.type === "pr" && (item.workflowFiles?.length ?? 0) > 0);
 		if (!workflowItem) return undefined;
 		const scopes = await fetchOAuthScopes(mode.tokenOptions());
-		if (scopes && !scopes.includes("workflow")) {
+		if (!scopes) {
+			return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token workflow/Actions write permission could not be verified; grant workflow scope or Actions/Contents write access`;
+		}
+		if (!scopes.includes("workflow")) {
 			return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token lacks workflow/Actions write permission; grant workflow scope or Actions/Contents write access`;
 		}
 		return undefined;

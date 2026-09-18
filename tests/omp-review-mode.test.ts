@@ -119,6 +119,7 @@ function fakeFetch(calls, known = {}) {
 							author: { login: "jorge" },
 							repository: { nameWithOwner: "projectbluefin/review" },
 							labels: { nodes: [{ name: "launcher" }] },
+							files: { pageInfo: { hasNextPage: false }, nodes: [] },
 							commits: { nodes: [{ commit: {
 								statusCheckRollup: null,
 								checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "COMPLETED", conclusion: "FAILURE" }] },
@@ -137,6 +138,7 @@ function fakeFetch(calls, known = {}) {
 								author: { login: "ada" },
 								repository: { nameWithOwner: "projectbluefin/other" },
 								labels: { nodes: [] },
+								files: { pageInfo: { hasNextPage: false }, nodes: [] },
 								commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 							}
 							: null;
@@ -170,6 +172,7 @@ function fakeFetch(calls, known = {}) {
 									author: { login: "jorge" },
 									headRefOid: "4".repeat(40),
 									repository: { nameWithOwner: "projectbluefin/review" },
+									files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }, { path: "README.md" }, { path: "README.md" }] },
 									labels: { nodes: [{ name: "launcher" }] },
 									commits: { nodes: [{ commit: {
 										statusCheckRollup: null,
@@ -189,6 +192,7 @@ function fakeFetch(calls, known = {}) {
 									headRefOid: "7".repeat(40),
 									repository: { nameWithOwner: "projectbluefin/other" },
 									labels: { nodes: [] },
+									files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }, { path: "README.md" }] },
 									commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 								},
 							],
@@ -220,6 +224,7 @@ function hiveBackedFetch(items, calls = []) {
 		reviewDecision: "REVIEW_REQUIRED",
 		headRefOid: item.headSha ?? String(item.id).padStart(40, "0"),
 		changedFiles: item.changedFiles,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
 		autoMergeRequest: item.autoMergeEnabled ? { enabledAt: new Date(NOW).toISOString() } : null,
 		author: { login: "reviewer" },
 		repository: { nameWithOwner: item.repo },
@@ -245,6 +250,9 @@ function hiveBackedFetch(items, calls = []) {
 		}
 		if (target.endsWith("/api/v1/contributors")) {
 			return { ok: true, status: 200, statusText: "OK", json: async () => ({ contributors: [] }) };
+		}
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: (name) => name.toLowerCase() === "x-oauth-scopes" ? "repo, workflow" : null }, json: async () => ({}) };
 		}
 		if (target.includes("/graphql")) {
 			const body = JSON.parse(String(init?.body ?? "{}"));
@@ -2145,6 +2153,9 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 	};
 	const fetchImpl = async (_url, init) => {
+		if (String(_url) === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: (name) => name.toLowerCase() === "x-oauth-scopes" ? "repo, workflow" : null }, json: async () => ({}) };
+		}
 		const body = JSON.parse(String(init?.body ?? "{}"));
 		if (body.variables?.search !== undefined) {
 			return {

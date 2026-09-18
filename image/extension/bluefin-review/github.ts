@@ -367,8 +367,8 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 				? (node.files?.nodes ?? []).map((file) => file.path ?? "").filter((path) => path.startsWith(".github/workflows/"))
 				: undefined,
 		changedFilesComplete:
-			mode === "prs" && node.files
-				? node.files.pageInfo?.hasNextPage !== true
+			mode === "prs"
+				? node.files?.pageInfo?.hasNextPage === false
 					&& (node.changedFiles === undefined || (node.files.nodes ?? []).length >= node.changedFiles)
 				: undefined,
 		closingIssues: (node.closingIssuesReferences?.nodes ?? [])
