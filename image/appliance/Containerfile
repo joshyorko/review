@@ -177,6 +177,7 @@ RUN set -eu; \
 
 COPY image/appliance/config.yml /out/usr/share/bluefin/review/appliance-config.yml
 COPY --chown=65532:65532 image/extension/bluefin-review /out/usr/share/bluefin/review/extension
+COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory
 COPY image/extension/typesafe-omp-loader.mjs /out/usr/share/bluefin/review/typesafe-omp-loader.mjs
 COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/bluefin-review-appliance
 RUN set -eu; \
@@ -192,7 +193,9 @@ RUN set -eu; \
     test -e "/out/usr/lib/${audio_triplet}/libasound.so.2"; \
     test -e /out/usr/share/alsa/alsa.conf; \
     test -e /out/usr/share/bluefin/review/extension/index.ts; \
-    test -d /out/usr/share/bluefin/review/extension/agents
+    test -d /out/usr/share/bluefin/review/extension/agents; \
+    test -e /out/usr/share/bluefin/review/luna-factory/index.ts; \
+    test -d /out/usr/share/bluefin/review/luna-factory/agents
 
 # ---------------------------------------------------------------- final image
 

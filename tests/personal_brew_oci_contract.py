@@ -14,6 +14,8 @@ def test_wrapper_enables_personal_workflow_actions_and_keeps_sif_fallback():
     assert "BLUEFIN_REVIEW_FALLBACK_SIF" in wrapper
     assert "export BLUEFIN_REVIEW_MODE=review" in wrapper
     assert 'export BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY="\\${BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY:-1}"' in wrapper
+    assert "export BLUEFIN_REVIEW_PERSONAL_MODE=1" in wrapper
+    assert "export BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS=1" in wrapper
     assert 'export BLUEFIN_REVIEW_SIF="$root/launcher/bluefin-review.sif"' not in wrapper
 
 
