@@ -18,7 +18,7 @@ native | oci | sif) ;;
   ;;
 esac
 
-run_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/luna-factory-dogfood-$$"
+run_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/luna-factory-dogfood-$$-${mode}"
 state="$run_root/state"
 home="$run_root/home"
 config="$home/.config/omp"
@@ -26,7 +26,11 @@ cache="$home/.cache"
 models="$home/.omp/agent"
 provider_log="$run_root/provider.log"
 result_file="$run_root/result.json"
-terminal_file="$run_root/${mode}-terminal.jsonl"
+case "$mode" in
+native) terminal_file="$run_root/native-terminal.jsonl" ;;
+oci) terminal_file="$run_root/oci-terminal.jsonl" ;;
+sif) terminal_file="$run_root/sif-terminal.jsonl" ;;
+esac
 mkdir -p -- "$state" "$config" "$cache" "$models"
 chmod 0711 "$run_root"
 # Rootless OCI maps the image's 65532 user to a different host uid. These are
@@ -35,14 +39,26 @@ chmod 0711 "$run_root"
 chmod 0777 "$home" "$state" "$config" "$cache" "$models"
 export LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_PROVIDER_URL="http://127.0.0.1:43129" LUNA_PROBE_PORT=43129
 export LUNA_PROBE_ROUTE="${LUNA_PROBE_ROUTE:-native-task}"
-head_sha="${LUNA_FACTORY_HEAD_SHA:-${GITHUB_SHA:-unknown}}"
+head_sha="${LUNA_FACTORY_HEAD_SHA:-${GITHUB_SHA:-}}"
 cp "$root/tests/fixtures/luna-factory-omp-probe-config.yml" "$config/omp.yml"
 sed 's#43127#43129#g' "$root/tests/fixtures/luna-factory-omp-probe-models.yml" >"$models/models.yml"
 
 write_result() {
   local status="$1" reason="${2:-}" evidence="${3:-$run_root}"
-  printf '{"status":"%s","mode":"%s","headSha":"%s","reason":"%s","evidence":"%s"}\n' \
-    "$status" "$mode" "$head_sha" "$reason" "$evidence" >"$result_file"
+  case "$status" in
+  passed)
+    printf '{"status":"passed","mode":"%s","headSha":"%s","reason":"%s","evidence":"%s"}\n' \
+      "$mode" "$head_sha" "$reason" "$evidence" >"$result_file"
+    ;;
+  blocked | failed)
+    printf '{"status":"%s","mode":"%s","headSha":"%s","reason":"%s","evidence":"%s"}\n' \
+      "$status" "$mode" "$head_sha" "$reason" "$evidence" >"$result_file"
+    ;;
+  *)
+    printf 'invalid dogfood result status: %s\n' "$status" >&2
+    exit 2
+    ;;
+  esac
 }
 blocked() {
   write_result blocked "$1"
@@ -54,6 +70,10 @@ failed() {
   cat "$result_file" >&2
   exit 1
 }
+
+if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  blocked "exact head identity unavailable"
+fi
 
 provider_pid=""
 cleanup() {
@@ -124,7 +144,7 @@ run_command() {
     # OMP 18.x marks terminal agent_end frames explicitly. The fallback for an
     # older packaged binary accepts the final agent_end when isTerminal is
     # omitted, but never treats an explicitly non-terminal frame as complete.
-    if awk '/"type":"agent_end"/ { last=$0 } END { if (last == "") exit 1; if (last ~ /"isTerminal":false/) exit 1; exit 0 }' "$output"; then
+    if awk '/"type":"agent_end"/ { last=$0 } END { if (last == "") exit 1; if (last ~ /"isTerminal":false/) exit 1 }' "$output"; then
       break
     fi
     if ! kill -0 "$command_pid" 2>/dev/null; then
@@ -133,7 +153,7 @@ run_command() {
     fi
     sleep 0.1
   done
-  awk '/"type":"agent_end"/ { last=$0 } END { if (last == "") exit 1; if (last ~ /"isTerminal":false/) exit 1; exit 0 }' "$output" || {
+  awk '/"type":"agent_end"/ { last=$0 } END { if (last == "") exit 1; if (last ~ /"isTerminal":false/) exit 1 }' "$output" || {
     cleanup_command
     failed "packaged OMP probe did not reach a terminal agent_end; inspect $output"
   }
