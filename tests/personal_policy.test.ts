@@ -1,4 +1,4 @@
-/** Personal self-hosted policy: workflow PRs remain visible but never slayable. */
+/** Personal self-hosted policy: workflow PRs are actionable when permissions allow. */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -149,7 +149,7 @@ test("workflow-changing pull requests stay visible in the personal queue", async
 	assert.equal(mode.selectById("example/repo", 42), true);
 });
 
-test("personal autoslay refuses a workflow-changing PR even with OAuth workflow scope", async (t) => {
+test("personal autoslay dispatches a workflow-changing PR with OAuth workflow scope", async (t) => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch() as typeof fetch, env: ENV });
@@ -159,10 +159,25 @@ test("personal autoslay refuses a workflow-changing PR even with OAuth workflow 
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
-	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /Skipping .*: changes \.github\/workflows\/deploy\.yml/.test(notification.message)));
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /example\/repo#42/);
+	assert.equal(ctx.notifications.some((notification) => /Skipping .*workflow/.test(notification.message)), false);
 	const queue = await pi.tools.get("review_workbench_queue").execute("id", {});
 	assert.match(queue.content[0].text, /example\/repo#42/);
+});
+
+test("personal workflow dispatch reports missing workflow write permission", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch("repo") as typeof fetch, env: ENV });
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /lacks workflow\/Actions write permission/.test(notification.message)));
 });
 
 test("Issue s and Alt-S dispatch issue implementation, while d requests issue evidence", () => {

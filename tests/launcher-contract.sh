@@ -55,6 +55,8 @@ assert_personal_policy_env_names() {
   local call="$1" context="${2:-launcher}"
   [[ "$call" == *"--env BLUEFIN_REVIEW_MODE"* ]] ||
     fail "$context did not forward BLUEFIN_REVIEW_MODE by name: $call"
+  [[ "$call" == *"--env BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY"* ]] ||
+    fail "$context did not forward the personal workflow policy by name: $call"
   [[ "$call" != *"=1"* ]] || fail "$context exposed personal policy values in argv/log output: $call"
 }
 
