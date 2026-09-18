@@ -44,6 +44,7 @@ def test_workflow_is_exact_head_no_publish_and_artifact_bounded():
 def test_oci_harness_is_clean_and_uses_the_local_provider():
     harness = HARNESS.read_text()
     assert "--network host" in harness
+    assert "--userns keep-id:uid=65532,gid=65532" in harness
     assert "127.0.0.1" in harness
     assert "LUNA_FACTORY_ENABLED" in harness
     assert '"type":"prompt"' in harness

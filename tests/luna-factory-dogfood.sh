@@ -96,7 +96,8 @@ oci)
   image="${BLUEFIN_REVIEW_IMAGE:-localhost/review:luna-factory-dogfood}"
   command -v podman >/dev/null 2>&1 || blocked "podman unavailable"
   podman info >/dev/null 2>&1 || blocked "podman info unavailable"
-  run_command "$terminal_file" podman run --rm --network host --entrypoint /usr/bin/omp \
+  run_command "$terminal_file" podman run --rm --network host \
+    --userns keep-id:uid=65532,gid=65532 --entrypoint /usr/bin/omp \
     --env HOME=/home/bluefin \
     --env XDG_CONFIG_HOME=/home/bluefin/.config \
     --env XDG_STATE_HOME=/home/bluefin/.local/state \
