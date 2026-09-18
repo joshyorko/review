@@ -600,6 +600,12 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			if (typeof payload.repo !== "string" || typeof payload.base !== "string") {
 				return { content: text("repo and base are required: evidence is bound to an exact subject"), isError: true };
 			}
+			if (loadProblem !== undefined) {
+				return {
+					content: text(`Factory journal is unreadable: ${loadProblem}; preserve the original evidence and repair or export it before opening a new run.`),
+					isError: true,
+				};
+			}
 			if (ledger !== undefined && payload.replace !== true) {
 				return {
 					content: text(
