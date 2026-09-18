@@ -27,7 +27,11 @@ provider_log="$run_root/provider.log"
 result_file="$run_root/result.json"
 terminal_file="$run_root/${mode}-terminal.jsonl"
 mkdir -p -- "$state" "$config" "$cache"
-chmod 700 "$run_root" "$home" "$state"
+chmod 700 "$run_root"
+# Rootless OCI maps the image's 65532 user to a different host uid. These are
+# disposable, fixture-only directories; make the bind mounts writable without
+# changing the image or the host container-engine storage.
+chmod 0777 "$home" "$state" "$config" "$cache"
 export LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_PROVIDER_URL="http://127.0.0.1:43129" LUNA_PROBE_PORT=43129
 export LUNA_PROBE_ROUTE="${LUNA_PROBE_ROUTE:-native-task}"
 head_sha="${LUNA_FACTORY_HEAD_SHA:-${GITHUB_SHA:-unknown}}"

@@ -52,6 +52,7 @@ def test_oci_harness_is_clean_and_uses_the_local_provider():
         assert marker in harness, marker
     assert "HOME" in harness
     assert "XDG_STATE_HOME" in harness
+    assert 'chmod 0777 "$home" "$state" "$config" "$cache"' in harness
     assert "luna-factory-omp-probe-config.yml" in harness
     assert "luna-factory-omp-probe-models.yml" in harness
     assert "--no-session" not in harness
