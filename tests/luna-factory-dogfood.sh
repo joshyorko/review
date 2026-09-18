@@ -31,6 +31,7 @@ native) terminal_file="$run_root/native-terminal.jsonl" ;;
 oci) terminal_file="$run_root/oci-terminal.jsonl" ;;
 sif) terminal_file="$run_root/sif-terminal.jsonl" ;;
 esac
+seed_terminal_file="$run_root/${mode}-seed.jsonl"
 mkdir -p -- "$state" "$config" "$cache" "$models"
 chmod 0711 "$run_root"
 # Rootless OCI maps the image's 65532 user to a different host uid. These are
@@ -171,61 +172,75 @@ native)
   command -v "$binary" >/dev/null 2>&1 || blocked "OMP binary unavailable"
   extension="${LUNA_FACTORY_EXTENSION_PATH:-$root/image/extension/luna-factory}"
   [[ -d "$extension" ]] || failed "Factory extension unavailable"
-  run_command "$terminal_file" "$binary" --mode rpc-ui --no-skills --no-rules --no-pty \
-    --config "$config/omp.yml" --extension "$extension"
+  if [[ "$LUNA_PROBE_ROUTE" == selected-batch ]]; then
+    export LUNA_FACTORY_PACKAGED_BATCH_PROBE=1 LUNA_FACTORY_BATCH_PROBE_PHASE=seed
+    run_command "$seed_terminal_file" "$binary" --mode rpc-ui --no-skills --no-rules --no-pty --config "$config/omp.yml" --extension "$extension"
+    export LUNA_FACTORY_BATCH_PROBE_PHASE=resume
+    run_command "$terminal_file" "$binary" --mode rpc-ui --no-skills --no-rules --no-pty --config "$config/omp.yml" --extension "$extension"
+  else
+    run_command "$terminal_file" "$binary" --mode rpc-ui --no-skills --no-rules --no-pty --config "$config/omp.yml" --extension "$extension"
+  fi
   ;;
 oci)
   image="${BLUEFIN_REVIEW_IMAGE:-localhost/review:luna-factory-dogfood}"
   command -v podman >/dev/null 2>&1 || blocked "podman unavailable"
   podman info >/dev/null 2>&1 || blocked "podman info unavailable"
-  run_command "$terminal_file" podman run --rm --interactive --network host \
-    --userns keep-id:uid=65532,gid=65532 --entrypoint /usr/bin/omp \
-    --env HOME=/home/bluefin \
-    --env XDG_CONFIG_HOME=/home/bluefin/.config \
-    --env XDG_STATE_HOME=/home/bluefin/.local/state \
-    --env XDG_CACHE_HOME=/home/bluefin/.cache \
-    --env LUNA_FACTORY_ENABLED=1 \
-    --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 \
-    --env LUNA_PROBE_PORT=43129 \
-    --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" \
-    --env LUNA_FACTORY_HEAD_SHA="$head_sha" \
-    --volume "$home:/home/bluefin:rw" \
-    --volume "$state:/home/bluefin/.local/state:rw" \
-    "$image" --mode rpc-ui --no-skills --no-rules --no-pty \
-    --config /home/bluefin/.config/omp/omp.yml \
-    --extension /usr/share/bluefin/review/luna-factory
-  ;;
+  if [[ "$LUNA_PROBE_ROUTE" == selected-batch ]]; then
+    export LUNA_FACTORY_PACKAGED_BATCH_PROBE=1 LUNA_FACTORY_BATCH_PROBE_PHASE=seed
+    run_command "$seed_terminal_file" podman run --rm --interactive --network host --userns keep-id:uid=65532,gid=65532 --entrypoint /usr/bin/omp \
+      --env HOME=/home/bluefin --env XDG_CONFIG_HOME=/home/bluefin/.config --env XDG_STATE_HOME=/home/bluefin/.local/state --env XDG_CACHE_HOME=/home/bluefin/.cache \
+      --env LUNA_FACTORY_ENABLED=1 --env LUNA_FACTORY_PACKAGED_BATCH_PROBE --env LUNA_FACTORY_BATCH_PROBE_PHASE --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 --env LUNA_PROBE_PORT=43129 --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" --env LUNA_FACTORY_HEAD_SHA="$head_sha" \
+      --volume "$home:/home/bluefin:rw" --volume "$state:/home/bluefin/.local/state:rw" "$image" --mode rpc-ui --no-skills --no-rules --no-pty --config /home/bluefin/.config/omp/omp.yml --extension /usr/share/bluefin/review/luna-factory
+    export LUNA_FACTORY_BATCH_PROBE_PHASE=resume
+    run_command "$terminal_file" podman run --rm --interactive --network host --userns keep-id:uid=65532,gid=65532 --entrypoint /usr/bin/omp \
+      --env HOME=/home/bluefin --env XDG_CONFIG_HOME=/home/bluefin/.config --env XDG_STATE_HOME=/home/bluefin/.local/state --env XDG_CACHE_HOME=/home/bluefin/.cache \
+      --env LUNA_FACTORY_ENABLED=1 --env LUNA_FACTORY_PACKAGED_BATCH_PROBE --env LUNA_FACTORY_BATCH_PROBE_PHASE --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 --env LUNA_PROBE_PORT=43129 --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" --env LUNA_FACTORY_HEAD_SHA="$head_sha" \
+      --volume "$home:/home/bluefin:rw" --volume "$state:/home/bluefin/.local/state:rw" "$image" --mode rpc-ui --no-skills --no-rules --no-pty --config /home/bluefin/.config/omp/omp.yml --extension /usr/share/bluefin/review/luna-factory
+  else
+    run_command "$terminal_file" podman run --rm --interactive --network host --userns keep-id:uid=65532,gid=65532 --entrypoint /usr/bin/omp \
+      --env HOME=/home/bluefin --env XDG_CONFIG_HOME=/home/bluefin/.config --env XDG_STATE_HOME=/home/bluefin/.local/state --env XDG_CACHE_HOME=/home/bluefin/.cache \
+      --env LUNA_FACTORY_ENABLED=1 --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 --env LUNA_PROBE_PORT=43129 --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" --env LUNA_FACTORY_HEAD_SHA="$head_sha" \
+      --volume "$home:/home/bluefin:rw" --volume "$state:/home/bluefin/.local/state:rw" "$image" --mode rpc-ui --no-skills --no-rules --no-pty --config /home/bluefin/.config/omp/omp.yml --extension /usr/share/bluefin/review/luna-factory
+	fi
+	;;
 sif)
   sif="${BLUEFIN_REVIEW_FALLBACK_SIF:-}"
   [[ -n "$sif" ]] || blocked "generated SIF path unavailable"
   command -v apptainer >/dev/null 2>&1 || blocked "Apptainer unavailable"
   [[ -e "$sif" ]] || blocked "generated SIF missing"
-  run_command "$terminal_file" apptainer exec --containall \
-    --home "$home:/home/bluefin" \
-    --env XDG_CONFIG_HOME=/home/bluefin/.config \
-    --env XDG_STATE_HOME=/home/bluefin/.local/state \
-    --env XDG_CACHE_HOME=/home/bluefin/.cache \
-    --env LUNA_FACTORY_ENABLED=1 \
-    --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 \
-    --env LUNA_PROBE_PORT=43129 \
-    --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" \
-    --env LUNA_FACTORY_HEAD_SHA="$head_sha" \
-    --bind "$home:/home/bluefin:rw" \
-    --bind "$state:/home/bluefin/.local/state:rw" \
-    "$sif" /usr/bin/omp --mode rpc-ui --no-skills --no-rules --no-pty \
-    --config /home/bluefin/.config/omp/omp.yml \
-    --extension /usr/share/bluefin/review/luna-factory
+  if [[ "$LUNA_PROBE_ROUTE" == selected-batch ]]; then
+    export LUNA_FACTORY_PACKAGED_BATCH_PROBE=1 LUNA_FACTORY_BATCH_PROBE_PHASE=seed
+    run_command "$seed_terminal_file" apptainer exec --containall --home "$home:/home/bluefin" --env XDG_CONFIG_HOME=/home/bluefin/.config --env XDG_STATE_HOME=/home/bluefin/.local/state --env LUNA_FACTORY_ENABLED=1 --env LUNA_FACTORY_PACKAGED_BATCH_PROBE --env LUNA_FACTORY_BATCH_PROBE_PHASE --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 --env LUNA_PROBE_PORT=43129 --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" --env LUNA_FACTORY_HEAD_SHA="$head_sha" --bind "$home:/home/bluefin:rw" --bind "$state:/home/bluefin/.local/state:rw" "$sif" /usr/bin/omp --mode rpc-ui --no-skills --no-rules --no-pty --config /home/bluefin/.config/omp/omp.yml --extension /usr/share/bluefin/review/luna-factory
+    export LUNA_FACTORY_BATCH_PROBE_PHASE=resume
+    run_command "$terminal_file" apptainer exec --containall --home "$home:/home/bluefin" --env XDG_CONFIG_HOME=/home/bluefin/.config --env XDG_STATE_HOME=/home/bluefin/.local/state --env LUNA_FACTORY_ENABLED=1 --env LUNA_FACTORY_PACKAGED_BATCH_PROBE --env LUNA_FACTORY_BATCH_PROBE_PHASE --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 --env LUNA_PROBE_PORT=43129 --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" --env LUNA_FACTORY_HEAD_SHA="$head_sha" --bind "$home:/home/bluefin:rw" --bind "$state:/home/bluefin/.local/state:rw" "$sif" /usr/bin/omp --mode rpc-ui --no-skills --no-rules --no-pty --config /home/bluefin/.config/omp/omp.yml --extension /usr/share/bluefin/review/luna-factory
+  else
+    run_command "$terminal_file" apptainer exec --containall --home "$home:/home/bluefin" --env XDG_CONFIG_HOME=/home/bluefin/.config --env XDG_STATE_HOME=/home/bluefin/.local/state --env LUNA_FACTORY_ENABLED=1 --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 --env LUNA_PROBE_PORT=43129 --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" --env LUNA_FACTORY_HEAD_SHA="$head_sha" --bind "$home:/home/bluefin:rw" --bind "$state:/home/bluefin/.local/state:rw" "$sif" /usr/bin/omp --mode rpc-ui --no-skills --no-pty --config /home/bluefin/.config/omp/omp.yml --extension /usr/share/bluefin/review/luna-factory
+  fi
   ;;
 esac
 
 [[ -s "$terminal_file" ]] || failed "OMP terminal evidence missing"
-grep -Fq '"factoryRoot":true' "$provider_log" || failed "OMP never entered the Factory tool surface"
-for tool in luna_factory_open luna_factory_candidate luna_factory_attempt luna_factory_dispatch task; do
-  grep -Fq "\"name\":\"$tool\"" "$provider_log" || failed "Factory tool call was not observed: $tool"
-done
-journal_file="$(find "$home" "$state" -type f -print0 2>/dev/null | xargs -0 grep -Il 'com.joshyorko.luna-factory.run' 2>/dev/null | head -n 1 || true)"
-[[ -n "$journal_file" ]] || failed "Factory journal was not persisted by the packaged OMP run"
-grep -Fq 'nativeResultIds' "$journal_file" || failed "native task returned without a persisted result identity"
+if [[ "$LUNA_PROBE_ROUTE" == selected-batch ]]; then
+  [[ -s "$seed_terminal_file" ]] || failed "seed packaged BatchService terminal evidence missing"
+  grep -Fq 'luna_factory_packaged_batch_probe' "$provider_log" || failed "packaged BatchService probe tool was not called"
+  grep -Fq 'BATCH_PROBE' "$seed_terminal_file" || failed "seed BatchService probe evidence missing"
+  grep -Fq 'BATCH_PROBE' "$terminal_file" || failed "resume BatchService probe evidence missing"
+  grep -Fq '"tracked":10' "$seed_terminal_file" || failed "selected batch did not retain ten items"
+  grep -Fq '"duplicateAttached":true' "$seed_terminal_file" || failed "duplicate submission created a second batch"
+  grep -Fq '"capacity":2' "$terminal_file" || failed "shared capacity was not two"
+  grep -Fq '"peakWorkers":2' "$terminal_file" || failed "independent repositories did not progress concurrently"
+  grep -Fq '"dependencyDone":true' "$terminal_file" || failed "dependency did not complete after prerequisite"
+  grep -Fq '"failedItemStage":"BLOCKED"' "$terminal_file" || failed "failed worker was falsely completed"
+  grep -Fq '"noExternalAuthority":true' "$terminal_file" || failed "batch acquired external authority"
+else
+  grep -Fq '"factoryRoot":true' "$provider_log" || failed "OMP never entered the Factory tool surface"
+  for tool in luna_factory_open luna_factory_candidate luna_factory_attempt luna_factory_dispatch task; do
+    grep -Fq "\"name\":\"$tool\"" "$provider_log" || failed "Factory tool call was not observed: $tool"
+  done
+  journal_file="$(find "$home" "$state" -type f -print0 2>/dev/null | xargs -0 grep -Il 'com.joshyorko.luna-factory.run' 2>/dev/null | head -n 1 || true)"
+  [[ -n "$journal_file" ]] || failed "Factory journal was not persisted by the packaged OMP run"
+  grep -Fq 'nativeResultIds' "$journal_file" || failed "native task returned without a persisted result identity"
+fi
 
 write_result passed "" "$run_root"
 cat "$result_file"

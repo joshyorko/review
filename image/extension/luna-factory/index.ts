@@ -31,6 +31,7 @@ import { registerFactoryController, selectedFactoryItems } from "./omp/batch-bri
 import type { NativeSDK, NativeContext, SchemaBuilder } from "./omp/batch-native.ts";
 import type { FactoryAction, SelectedItem } from "./core/batch.ts";
 import { resolveToken } from "../bluefin-review/github.ts";
+import { runPackagedBatchProbe } from "./omp/batch-probe.ts";
 
 interface ToolContent {
 	type: "text";
@@ -511,6 +512,17 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	};
 	const unregisterBatchController = registerFactoryController(batchCommand);
 	host.on("session_shutdown", async () => { unregisterBatchController(); await batchService?.shutdown(); });
+	registerTool({
+		name: "luna_factory_packaged_batch_probe",
+		label: "Factory Packaged Batch Probe",
+		description: "Test-only deterministic BatchService vertical; requires the packaged probe flag and never uses external GitHub or provider credentials.",
+		async execute(_toolCallId, _params) {
+			if (env.LUNA_FACTORY_PACKAGED_BATCH_PROBE !== "1") return { content: text("packaged BatchService probe is disabled"), isError: true };
+			const phase = env.LUNA_FACTORY_BATCH_PROBE_PHASE === "resume" ? "resume" : "seed";
+			const result = await runPackagedBatchProbe({ root: factoryStateRoot(env), phase });
+			return { content: text(`BATCH_PROBE ${JSON.stringify(result)}`), details: result };
+		},
+	});
 
 	if (host.registerCommand !== undefined) {
 		host.registerCommand("factory", {

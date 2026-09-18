@@ -62,7 +62,7 @@ jobs:
         env:
           BLUEFIN_REVIEW_IMAGE: localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
           LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          LUNA_PROBE_ROUTE: native-batch
+          LUNA_PROBE_ROUTE: selected-batch
         run: tests/luna-factory-dogfood.sh oci
       - name: Reclaim OCI build storage before SIF
         if: steps.capabilities.outputs.oci == 'available' && steps.capabilities.outputs.sif == 'available'
@@ -94,7 +94,8 @@ jobs:
           podman system prune --all --force
           BLUEFIN_REVIEW_FALLBACK_SIF="$sif" \
             LUNA_FACTORY_HEAD_SHA="${{ github.event.pull_request.head.sha }}" \
-            LUNA_PROBE_ROUTE=native-batch \
+            LUNA_PROBE_ROUTE=selected-batch \
+            tests/luna-factory-dogfood.sh sif
             tests/luna-factory-dogfood.sh sif
       - name: Upload bounded evidence
         if: always()

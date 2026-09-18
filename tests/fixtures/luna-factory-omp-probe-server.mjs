@@ -609,7 +609,14 @@ function responseForIsolatedWrite(body) {
 	return textCompletion("isolated-write route recorded a worker receipt, integrated only by explicit owner event, and left verification pending at the moved subject");
 }
 
+function responseForSelectedBatch(body) {
+	const previous = lastTool(body) ?? lastAssistantTool(body);
+	if (previous === undefined) return functionCall("luna_factory_packaged_batch_probe", { input: "{}" });
+	return textCompletion("packaged BatchService probe completed; inspect BATCH_PROBE evidence");
+}
+
 function responseFor(body) {
+	if (route === "selected-batch") return responseForSelectedBatch(body);
 	if (route === "enabled-idle") return responseForEnabledIdle(body);
 	if (route === "normal-review") return responseForNormalReview(body);
 	if (route === "acceptance") return responseForAcceptance(body);
