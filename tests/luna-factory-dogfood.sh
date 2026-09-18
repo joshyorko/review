@@ -28,7 +28,6 @@ result_file="$run_root/result.json"
 terminal_file="$run_root/${mode}-terminal.jsonl"
 mkdir -p -- "$state" "$config" "$cache"
 chmod 700 "$run_root" "$home" "$state"
-export HOME="$home" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$cache"
 export LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_PROVIDER_URL="http://127.0.0.1:43129" LUNA_PROBE_PORT=43129
 export LUNA_PROBE_ROUTE="${LUNA_PROBE_ROUTE:-native-task}"
 head_sha="${LUNA_FACTORY_HEAD_SHA:-${GITHUB_SHA:-unknown}}"
@@ -80,6 +79,7 @@ run_command() {
 
 case "$mode" in
 native)
+  export HOME="$home" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$cache"
   binary="${OMP_BINARY:-omp}"
   command -v "$binary" >/dev/null 2>&1 || blocked "OMP binary unavailable"
   extension="${LUNA_FACTORY_EXTENSION_PATH:-$root/image/extension/luna-factory}"
