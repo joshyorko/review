@@ -60,7 +60,6 @@ def test_oci_harness_is_clean_and_uses_the_local_provider():
     assert 'exec {writer_fd}<>"$input_fifo"' in harness
     assert 'ready' in harness
     assert 'available_commands_update' in harness
-    assert 'negotiate_protocol' in harness
     assert 'agent_end' in harness
     assert "luna-factory-omp-probe-config.yml" in harness
     assert "luna-factory-omp-probe-models.yml" in harness

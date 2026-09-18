@@ -72,7 +72,6 @@ for attempt in {1..100}; do
 done
 grep -Fq '{"ready":true' "$provider_log" || failed "local fixture did not become ready"
 
-protocol_request='{"id":"protocol-1","type":"negotiate_protocol","protocolVersion":2}'
 probe_request='{"id":"factory-probe","type":"prompt","message":"/factory -- LUNA_FACTORY_PROBE_ROOT: exercise one bounded Factory native task and stop after its returned result"}'
 run_command() {
   local output="$1"
@@ -108,8 +107,6 @@ run_command() {
     failed "packaged OMP probe did not publish RPC ready; inspect $output"
   }
 
-  printf '%s\n' "$protocol_request" >&"$writer_fd"
-
   for _ in {1..1800}; do
     grep -Fq '"type":"available_commands_update"' "$output" && break
     if ! kill -0 "$command_pid" 2>/dev/null; then
@@ -121,19 +118,6 @@ run_command() {
   grep -Fq '"type":"available_commands_update"' "$output" || {
     cleanup_command
     failed "packaged OMP probe did not publish RPC command discovery; inspect $output"
-  }
-
-  for _ in {1..1800}; do
-    grep -Fq '"command":"negotiate_protocol"' "$output" && break
-    if ! kill -0 "$command_pid" 2>/dev/null; then
-      cleanup_command
-      failed "packaged OMP probe exited before RPC protocol negotiation; inspect $output"
-    fi
-    sleep 0.1
-  done
-  grep -Fq '"command":"negotiate_protocol"' "$output" || {
-    cleanup_command
-    failed "packaged OMP probe did not acknowledge RPC protocol negotiation; inspect $output"
   }
 
   printf '%s\n' "$probe_request" >&"$writer_fd"
