@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export type Probe = {
@@ -20,6 +20,7 @@ export type RuntimeReport = {
   boundaries: {
     fuse: Boundary;
     userNamespace: Boundary;
+    appArmor: Boundary;
     apptainer: Boundary;
     kvm: Boundary;
     krun: Boundary;
@@ -28,6 +29,21 @@ export type RuntimeReport = {
   };
   probes: Probe[];
 };
+
+/** Format independent boundary results for the GitHub Actions output file. */
+export function boundaryOutputLines(manifest: RuntimeReport): string {
+  return Object.entries(manifest.boundaries)
+    .map(([name, result]) => `${name}=${result.status}`)
+    .join("\n") + "\n";
+}
+
+/** Publish only the bounded boundary classifications to a workflow step. */
+export function writeGitHubOutputs(manifest: RuntimeReport, outputPath: string): void {
+  appendFileSync(outputPath, boundaryOutputLines(manifest));
+  for (const [name, result] of Object.entries(manifest.boundaries)) {
+    console.log(`${name}: ${result.status} ${result.reason ?? ""}`.trimEnd());
+  }
+}
 
 /** Compute the report from captured probes without consulting the host. */
 export function reportCapabilities(
@@ -51,11 +67,12 @@ export function reportCapabilities(
     boundaries: {
       fuse: boundary(["fuse.device", "fuse.kernel", "fuse.mount-helper"], "fuse-device-or-mount-unavailable"),
       userNamespace: boundary(["userns.sysctl", "userns.unshare"], "user-namespace-unavailable"),
+      appArmor: boundary(["apparmor.status"], "apparmor-unavailable"),
       apptainer: boundary(["apptainer.version", "apptainer.buildcfg"], "apptainer-unavailable"),
       kvm: boundary(["kvm.device"], "kvm-device-unavailable"),
       krun: boundary(["krun.version"], "krun-unavailable"),
       oci: boundary(["podman.version", "podman.info"], "podman-unavailable"),
-      sif: boundary(["apptainer.version", "fuse.device", "podman.version", "podman.info"], "sif-build-or-runtime-unavailable"),
+      sif: boundary(["apptainer.version", "apptainer.buildcfg", "fuse.device", "podman.version", "podman.info", "squashfuse-ll.version", "squashfs-tools.mksquashfs", "fuse2fs.version", "userns.unshare"], "sif-build-or-runtime-unavailable"),
     },
     probes,
   };
@@ -82,5 +99,7 @@ export function writeRuntimeReport(root: string, commitSha = ""): RuntimeReport 
 if (import.meta.main) {
   const root = process.argv[2];
   if (!root) throw new Error("usage: appliance-runtime-report.ts OUTPUT-DIRECTORY [COMMIT]");
-  console.log(JSON.stringify(writeRuntimeReport(root, process.argv[3] ?? "")));
+  const report = writeRuntimeReport(root, process.argv[3] ?? "");
+  if (process.argv[4]) writeGitHubOutputs(report, process.argv[4]);
+  console.log(JSON.stringify(report));
 }

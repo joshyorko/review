@@ -1206,6 +1206,14 @@ test("status works while idle and reports the enforced boundary", async () => {
 	assert.match(result.content[0]!.text, /LUNA_FACTORY_ENABLED=1 to enable/);
 	assert.match(result.content[0]!.text, /enforced: factory\.admitted-dispatch/);
 });
+test("selected batch command remains opt-in", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: {}, artifactRoots: ROOTS });
+	const command = host.commands.get("factory");
+	assert.ok(command);
+	await command.handler("run {\"items\":[]}", startCtx(host));
+	assert.ok(host.notifications.some((message) => /LUNA_FACTORY_ENABLED=1|Factory is disabled/.test(message)));
+});
 
 test("execution is refused while the opt-in flag is absent", async () => {
 	const host = fakeHost();
