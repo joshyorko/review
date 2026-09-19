@@ -283,3 +283,20 @@ result as an attestation.
 The packaged launcher prefers rootless Podman's `krun` OCI runtime and
 read/write access to `/dev/kvm`. If any KVM prerequisite is unavailable, it
 reports the reason and uses the installed Apptainer fallback.
+The packaged boundary is deliberately split: OMP's native worker isolation is
+inside the image, the outer OCI container supplies filesystem/process packaging,
+Apptainer SIF adds its own containment and requires FUSE, and krun adds a KVM
+microVM. None proves the others. The launcher does not advertise detached
+survival: use the Factory state root's retain/export flow for restart.
+
+Factory's same-host state root is a single-writer journal. It includes native
+workers and reviewer tasks in one shared capacity bound while unrelated Review
+work remains available. `pause` prevents new admission, `resume` reconciles
+unfinished items, and `stop` records requested/confirmed/unknown cancellation;
+it is not rollback. `export` preserves patches and evidence; `discard` is
+explicit and destructive.
+
+Remote, gateway, distributed workers, nested tools, and always-on supervision
+are deferred options, not claims of this appliance. Parent review gates remain
+separate. Runtime capability reports record blocked OCI, SIF/FUSE, or krun/KVM
+seams rather than manufacturing a pass.

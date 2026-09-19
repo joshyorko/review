@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { beforeEach, afterEach } from "node:test";
 
 import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/extension/bluefin-review/glyphs.ts";
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
@@ -43,7 +43,9 @@ const NOW = 1_800_000_000_000;
 
 // No hub, no home: these tests must not read the developer's own Hive
 // registration and must never open a socket.
-const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent" };
+const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", LUNA_FACTORY_STATE_ROOT: "" };
+beforeEach(() => { ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "review-claims-")); });
+afterEach(() => { rmSync(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, { recursive: true, force: true }); });
 
 test("every review extension module is reachable from its package entrypoint", () => {
 	const directory = join(process.cwd(), "image/extension/bluefin-review");
@@ -3070,14 +3072,14 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	);
 	mode.reprioritize();
 
-	// One key takes the whole slice the filters left, up to the dispatch ceiling.
-	assert.equal(mode.selectAllVisible(), BATCH_LIMIT, "a burn-down selects a slice, not a row");
-	assert.equal(mode.chosenItems().length, BATCH_LIMIT);
-	// Pressing it again on a fully selected slice clears it: one key, both ways.
+	assert.equal(mode.selectAllVisible(), 40, "selection cardinality is independent of execution capacity");
+	assert.equal(mode.factorySelection("inspect").length, 40);
+	assert.equal(mode.slayableItems().length, BATCH_LIMIT, "Review dispatch remains bounded");
 	mode.items = mode.items.slice(0, BATCH_LIMIT);
 	mode.reprioritize();
-	assert.equal(mode.selectAllVisible(), 0);
-	assert.equal(mode.chosenItems().length, 0);
+	assert.equal(mode.selectAllVisible(), 15, "hidden selections are not silently dropped");
+	assert.equal(mode.factorySelection("inspect").length, 15);
+	mode.clearSelected();
 
 	// It respects the filters, so a stage or a search is what gets dispatched.
 	mode.filter = "work 1";
@@ -3239,7 +3241,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		const review = createReviewExtension(pi, {
 			org: "projectbluefin",
 			fetchImpl,
-			env: { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute" },
+			env: { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute", LUNA_FACTORY_STATE_ROOT: mkdtempSync(join(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, "admission-")) },
 			policy: BLUEFIN_POLICY,
 		});
 		const ctx = fakeCtx();

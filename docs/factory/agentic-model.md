@@ -160,5 +160,18 @@ bash tests/appliance-contract.sh
 bash tests/contribute-contract.sh
 bash tests/just-onboarding.sh
 ```
+## Selected-batch operating boundary
+
+The selected Factory batch is a finite OMP operation, not a daemon. Its one
+same-host state root is authoritative for ownership and resumable journals.
+Run-once exits at completion or an honest blocker; retained runs preserve
+patches and native artifacts for inspect/resume/export, while pause, resume,
+and stop are explicit cancellation controls. Stop never implies rollback.
+
+The capacity bound covers native Factory workers, retries, verification, and
+reviewer work; unrelated Review work must not be globally disabled. OCI,
+Apptainer SIF/FUSE, and krun/KVM are distinct containment boundaries. Remote,
+gateway, and distributed execution remain deferred and untested, and this
+model does not waive parent review gates or claim absent runtime evidence.
 [common-model]: https://github.com/projectbluefin/common/blob/main/docs/factory/agentic-model.md
 [common-onboarding]: https://github.com/projectbluefin/common/blob/main/docs/skills/factory-onboarding.md

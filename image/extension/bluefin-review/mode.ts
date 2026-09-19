@@ -22,6 +22,7 @@ import { type PrioritizedQueue, type Priority, isRepairRequested, itemKey, prior
 import { type LandingState, landingState } from "./landing.ts";
 import { GENERIC_WORKBENCH_POLICY, type WorkbenchPolicy } from "./policy.ts";
 import { SessionTrace } from "./session.ts";
+import type { FactoryAction, SelectedItem } from "../luna-factory/core/batch.ts";
 
 export interface ReviewModeOptions {
 	org: string;
@@ -47,7 +48,11 @@ function pullRequestKey(item: HiveWorkItem): string | undefined {
 	if (direct) return `${direct[1]}#${direct[2]}`;
 	if (!item.pr || item.pr.state.toLowerCase() !== "open") return undefined;
 	const linked = GITHUB_PULL_URL.exec(item.pr.url);
-	return linked ? `${linked[1]}#${linked[2]}` : `${item.repo}#${item.pr.number}`;
+	return linked ? `${linked[1]}#${item.pr.number}` : `${item.repo}#${item.pr.number}`;
+}
+
+function canonicalSelectedKey(repo: string, number: number): string {
+	return `${repo.toLowerCase()}#${number}`;
 }
 
 /** A contiguous slice of work targeting a single repository. */
@@ -77,6 +82,8 @@ export interface PersistedSelection {
 	hiveLevel?: string;
 	scope?: QueueScope;
 	paused?: boolean;
+	selected?: QueueItem[];
+	selectedKeys?: string[];
 }
 
 export type WorkbenchMode = "review" | "hive";
@@ -104,6 +111,7 @@ export class ReviewMode {
 	fetchedAt = 0;
 	loading = false;
 	selectedKeys = new Set<string>();
+	private selectedSnapshots = new Map<string, QueueItem>();
 	currentUserLogin?: string;
 	viewMode: "default" | "ci" = "default";
 	isBlueberry = false;
@@ -174,6 +182,17 @@ export class ReviewMode {
 		this.queueTruncated = false;
 	}
 
+	/** Remove items the workbench cannot act on from every visible/selected view. */
+	excludeItems(items: readonly QueueItem[]): void {
+		if (items.length === 0) return;
+		const excluded = new Set(items.map(itemKey));
+		this.items = this.items.filter((item) => !excluded.has(itemKey(item)));
+		for (const key of excluded) this.selectedKeys.delete(key);
+		this.cursor = Math.min(this.cursor, Math.max(0, this.visibleItems().length - 1));
+		this.reprioritize();
+	}
+
+
 	/** Why this item sits where it sits. */
 	priorityFor(item: QueueItem): Priority | undefined {
 		return this.ranked.priorities.get(itemKey(item));
@@ -206,6 +225,7 @@ export class ReviewMode {
 			const update = byKey.get(itemKey(item));
 			if (!update || update.type !== item.type) return item;
 			Object.assign(item, update);
+			if (this.selectedKeys.has(itemKey(item))) this.selectedSnapshots.set(itemKey(item), structuredClone(item));
 			changed = true;
 			return item;
 		});
@@ -360,7 +380,6 @@ export class ReviewMode {
 		this.queueMode = this.queueMode === "prs" ? "issues" : "prs";
 		this.items = [];
 		this.cursor = 0;
-		this.selectedKeys.clear();
 		return this.queueMode;
 	}
 	toggleViewMode(): "default" | "ci" {
@@ -377,55 +396,49 @@ export class ReviewMode {
 		if (!targetKey) return false;
 		if (this.selectedKeys.has(targetKey)) {
 			this.selectedKeys.delete(targetKey);
+			this.selectedSnapshots.delete(targetKey);
 			return false;
 		}
 		this.selectedKeys.add(targetKey);
+		const item = this.items.find((candidate) => itemKey(candidate) === targetKey);
+		if (item) this.selectedSnapshots.set(targetKey, structuredClone(item));
 		return true;
 	}
 
-	/**
-	 * Take everything currently on screen, or drop it.
-	 *
-	 * Burning a backlog down means dispatching a slice at a time, and a slice is
-	 * whatever the filters have narrowed the queue to. Selecting it one row at a
-	 * time is the reason nobody does it. Returns the resulting selection size.
-	 */
-	selectAllVisible(limit = BATCH_LIMIT): number {
+	/** Toggle the visible selection independently of Factory execution capacity. */
+	selectAllVisible(_limit = BATCH_LIMIT): number {
 		const visible = this.visibleItems();
 		const everySelected = visible.length > 0 && visible.every((item) => this.selectedKeys.has(itemKey(item)));
 		if (everySelected) {
-			this.selectedKeys.clear();
-			return 0;
-		}
-		for (const item of visible.slice(0, limit)) this.selectedKeys.add(itemKey(item));
-		return this.selectedKeys.size;
-	}
-	/**
-	 * Toggles selection of all visible items in the current selected repository.
-	 * Leaves selections in other repositories untouched.
-	 * Respects global BATCH_LIMIT.
-	 */
-	selectCurrentRepository(limit = BATCH_LIMIT): number {
-		const current = this.selected();
-		if (!current) return this.selectedKeys.size;
-		const repo = current.repo;
-		const repoVisible = this.visibleItems().filter((item) => item.repo === repo);
-		if (repoVisible.length === 0) return this.selectedKeys.size;
-		const allRepoSelected = repoVisible.every((item) => this.selectedKeys.has(itemKey(item)));
-		if (allRepoSelected) {
-			for (const item of repoVisible) {
-				this.selectedKeys.delete(itemKey(item));
+			for (const item of visible) {
+				const key = itemKey(item);
+				this.selectedKeys.delete(key);
+				this.selectedSnapshots.delete(key);
 			}
 			return this.selectedKeys.size;
 		}
-		const availableSlots = Math.max(0, limit - this.selectedKeys.size);
-		let added = 0;
+		for (const item of visible) {
+			const key = itemKey(item);
+			this.selectedKeys.add(key);
+			this.selectedSnapshots.set(key, structuredClone(item));
+		}
+		return this.selectedKeys.size;
+	}
+
+	/** Toggle all visible items in the current repository; selection is unbounded. */
+	selectCurrentRepository(_limit = BATCH_LIMIT): number {
+		const current = this.selected();
+		if (!current) return this.selectedKeys.size;
+		const repoVisible = this.visibleItems().filter((item) => item.repo.toLowerCase() === current.repo.toLowerCase());
+		const allRepoSelected = repoVisible.length > 0 && repoVisible.every((item) => this.selectedKeys.has(itemKey(item)));
 		for (const item of repoVisible) {
 			const key = itemKey(item);
-			if (!this.selectedKeys.has(key)) {
-				if (added >= availableSlots) break;
+			if (allRepoSelected) {
+				this.selectedKeys.delete(key);
+				this.selectedSnapshots.delete(key);
+			} else {
 				this.selectedKeys.add(key);
-				added += 1;
+				this.selectedSnapshots.set(key, structuredClone(item));
 			}
 		}
 		return this.selectedKeys.size;
@@ -455,11 +468,26 @@ export class ReviewMode {
 
 	clearSelected(): void {
 		this.selectedKeys.clear();
+		this.selectedSnapshots.clear();
 	}
 
 	chosenItems(): QueueItem[] {
-		if (this.selectedKeys.size === 0) return [];
-		return this.visibleItems().filter((item) => this.selectedKeys.has(`${item.repo}#${item.id}`));
+		return [...this.selectedKeys].map((key) => this.items.find((item) => itemKey(item) === key) ?? this.selectedSnapshots.get(key)).filter((item): item is QueueItem => item !== undefined);
+	}
+
+	/** The evidence provider that ordered the queue. */
+	orderSource(): "hive" | "local" { return this.ranked.source; }
+
+	factorySelection(action: FactoryAction): SelectedItem[] {
+		return [...this.selectedKeys].map((key) => {
+			const item = this.items.find((candidate) => itemKey(candidate) === key) ?? this.selectedSnapshots.get(key);
+			if (!item) return { key: key.toLowerCase(), repo: key.slice(0, key.indexOf("#")).toLowerCase(), number: Number(key.slice(key.indexOf("#") + 1)), kind: "unknown" as const, action, overlaps: [], blocker: "selected item is unavailable; refresh and inspect before execution" };
+			return {
+				key: canonicalSelectedKey(item.repo, item.id), repo: item.repo.toLowerCase(), number: item.id,
+				kind: item.type, action, head: item.headSha, overlaps: item.closingIssues ?? [],
+				url: item.url,
+			};
+		});
 	}
 
 
@@ -478,15 +506,10 @@ export class ReviewMode {
 		const visible = this.visibleItems();
 		if (visible.length > 0) return visible.slice(0, limit);
 		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
-		if (this.skipRepos.size > 0) {
-			base = base.filter((item) => {
-				const repoLower = item.repo.toLowerCase();
-				const shortName = repoLower.includes("/") ? repoLower.split("/")[1]! : repoLower;
-				return !this.skipRepos.has(repoLower) && !this.skipRepos.has(shortName);
-			});
-		}
+		if (this.skipRepos.size > 0) base = base.filter((item) => !this.skipRepos.has(item.repo.toLowerCase()) && !this.skipRepos.has(item.repo.split("/")[1]!.toLowerCase()));
 		return base.slice(0, limit);
 	}
+
 
 
 
@@ -654,27 +677,22 @@ export class ReviewMode {
 
 	toPersisted(): PersistedSelection {
 		const item = this.selected();
-		return {
-			mode: this.queueMode,
-			repo: item?.repo,
-			id: item?.id,
-			filter: this.filter || undefined,
-			hiveOnly: this.hiveOnly,
-			hiveLevel: this.hiveLevel,
-			scope: this.scope,
-			paused: this.paused ? true : undefined,
-		};
+		return { mode: this.queueMode, repo: item?.repo, id: item?.id, filter: this.filter || undefined, hiveOnly: this.hiveOnly, hiveLevel: this.hiveLevel, scope: this.scope, paused: this.paused ? true : undefined, selectedKeys: [...this.selectedKeys], selected: [...this.selectedSnapshots.values()].map((value) => structuredClone(value)) };
 	}
 
 	restore(persisted: PersistedSelection | undefined): void {
 		if (!persisted) return;
 		if (persisted.mode === "prs" || persisted.mode === "issues") this.queueMode = persisted.mode;
-		if (persisted.scope?.value && (persisted.scope.kind === "org" || persisted.scope.kind === "repo")) {
-			this.scope = persisted.scope;
-		}
+		if (persisted.scope?.value && (persisted.scope.kind === "org" || persisted.scope.kind === "repo")) this.scope = persisted.scope;
 		if (persisted.filter) this.filter = persisted.filter;
 		if (typeof persisted.hiveOnly === "boolean") this.hiveOnly = persisted.hiveOnly;
 		if (typeof persisted.hiveLevel === "string") this.hiveLevel = persisted.hiveLevel;
+		for (const key of persisted.selectedKeys ?? []) if (typeof key === "string") this.selectedKeys.add(key);
+		for (const item of persisted.selected ?? []) {
+			const key = itemKey(item);
+			this.selectedKeys.add(key);
+			this.selectedSnapshots.set(key, structuredClone(item));
+		}
 		if (typeof persisted.id === "number") this.selectById(persisted.repo, persisted.id);
 		if (typeof persisted.paused === "boolean") this.paused = persisted.paused;
 	}

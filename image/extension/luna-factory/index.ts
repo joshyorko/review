@@ -24,6 +24,14 @@ import { buildDispatchPrompt, DISPATCH_MARKER, dispatchMarker } from "./omp/adap
 import { coverageFor, enforcedPaths, unsupportedPaths } from "./omp/capabilities.ts";
 import { type SessionCtx, loadRun, saveRun } from "./omp/session.ts";
 import { renderStatusDetail, renderWhy, truncatePlain } from "./ui/status.ts";
+import { BatchService, type BatchOptions } from "./omp/batch-service.ts";
+import { BatchGitHub } from "./omp/batch-github.ts";
+import { factoryStateRoot } from "./omp/batch-store.ts";
+import { registerFactoryController, selectedFactoryItems } from "./omp/batch-bridge.ts";
+import type { NativeSDK, NativeContext, SchemaBuilder } from "./omp/batch-native.ts";
+import type { FactoryAction, SelectedItem } from "./core/batch.ts";
+import { resolveToken } from "../bluefin-review/github.ts";
+import { runPackagedBatchProbe } from "./omp/batch-probe.ts";
 
 interface ToolContent {
 	type: "text";
@@ -78,6 +86,7 @@ export interface LunaFactoryExtension {
 
 export interface FactoryHost {
 	zod: ZodLike;
+	pi?: NativeSDK;
 	/** OMP's native schema builder; required to register a same-name task wrapper. */
 	arktype?(definition: unknown): unknown;
 	registerTool(definition: FactoryToolDefinition): void;
@@ -91,7 +100,7 @@ export interface FactoryHost {
 	sendUserMessage?(content: string, options?: { deliverAs?: string }): void;
 }
 
-interface FactoryCtx extends SessionCtx {
+interface FactoryCtx extends SessionCtx, NativeContext {
 	hasUI?: boolean;
 	ui?: { notify(message: string, level?: string): void };
 }
@@ -297,8 +306,8 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 
 	/** Persist only through the journal, so every mutation survives a reload. */
 	const commit = (next: Ledger): void => {
-		ledger = next;
 		saveRun(host, next);
+		ledger = next;
 	};
 
 	const z = host.zod;
@@ -455,11 +464,77 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		return lines.join("\n");
 	};
 
+	let batchService: BatchService | undefined;
+	const batches = (): BatchService => {
+		if (!enabled()) throw new Error("Factory is disabled; explicitly enable LUNA_FACTORY_ENABLED=1");
+		if (ledger) throw new Error("A single-subject journal is open; preserve it and use a fresh native session for selected batches");
+		if (loadProblem !== undefined) throw new Error(`Factory journal is unreadable: ${loadProblem}; preserve it before starting a selected batch`);
+		if (!batchService) {
+			const capacity = Number(env.LUNA_FACTORY_CAPACITY ?? "2");
+			if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("LUNA_FACTORY_CAPACITY must be between 1 and 100");
+			batchService = new BatchService(factoryStateRoot(env), new BatchGitHub(resolveToken(env)), host.pi, host.zod as unknown as SchemaBuilder, capacity);
+		}
+		return batchService;
+	};
+	const batchCommand = async (raw: string, context: unknown): Promise<string> => {
+		const ctx = context as FactoryCtx;
+		const [verb = "status", id, ...rest] = raw.trim().split(/\s+/);
+		const service = batches();
+		if (verb === "start" || verb === "selected" || verb === "run") {
+			let items: SelectedItem[];
+			let settings: Partial<BatchOptions> = {};
+			if (verb === "run") {
+				const payload = JSON.parse(raw.trim().slice(4));
+				if (!isRecord(payload) || !Array.isArray(payload.items)) throw new Error("run requires an explicit JSON items array");
+				items = payload.items as SelectedItem[];
+				settings = payload as Partial<BatchOptions>;
+			} else {
+				if (!["inspect", "patch", "pr-ready"].includes(id ?? "")) throw new Error("choose start inspect|patch|pr-ready; selection never grants merge/deploy authority");
+				items = selectedFactoryItems(id as FactoryAction);
+			}
+			const batch = await service.submit(items, { capacity: settings.capacity ?? service.capacity, maxAttempts: settings.maxAttempts ?? 3, maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3, mode: settings.mode ?? "once", dependencies: settings.dependencies });
+			const preflight = service.status(batch.id);
+			notifyCommand(ctx, preflight);
+			await service.resume(batch.id, ctx);
+			if (!ctx.hasUI) await service.waitForIdle();
+			return service.status(batch.id);
+		}
+		if (verb === "status" || verb === "inspect") return service.status(id);
+		if (!id) throw new Error("an exact batch id is required; use /factory status");
+		if (verb === "pause" || verb === "stop") await service.control(id, verb);
+		else if (verb === "resume") { await service.resume(id, ctx); if (!ctx.hasUI) await service.waitForIdle(); }
+		else if (verb === "retry") { if (!rest[0]) throw new Error("retry requires an exact item key"); await service.retry(id, rest[0], ctx); if (!ctx.hasUI) await service.waitForIdle(); }
+		else if (verb === "exclude") service.exclude(id, rest[0] ?? "", rest.slice(1).join(" "));
+		else if (verb === "export") { if (!rest.length) throw new Error("export requires an unused destination directory"); return service.store.export(id, rest.join(" ")); }
+		else if (verb === "discard") { service.store.acquire(); service.store.discard(id); return `Archived ${id}; native logs and workspaces retained`; }
+		else throw new Error("usage: /factory start inspect|patch|pr-ready | status | inspect/resume/pause/stop <batch> | retry <batch> <item> | exclude <batch> <item> <reason> | export <batch> <directory> | discard <batch>");
+		return service.status(id);
+	};
+	const unregisterBatchController = registerFactoryController(batchCommand);
+	host.on("session_shutdown", async () => { unregisterBatchController(); await batchService?.shutdown(); });
+	if (env.LUNA_FACTORY_PACKAGED_BATCH_PROBE === "1") {
+		registerTool({
+			name: "luna_factory_packaged_batch_probe",
+			label: "Factory Packaged Batch Probe",
+			description: "Test-only deterministic BatchService vertical; requires the packaged probe flag and never uses external GitHub or provider credentials.",
+			async execute(_toolCallId, _params) {
+				const phase = env.LUNA_FACTORY_BATCH_PROBE_PHASE === "resume" ? "resume" : "seed";
+				const result = await runPackagedBatchProbe({ root: factoryStateRoot(env), phase });
+				return { content: text(`BATCH_PROBE ${JSON.stringify(result)}`), details: result };
+			},
+		});
+	}
+
 	if (host.registerCommand !== undefined) {
 		host.registerCommand("factory", {
 			description: "Open or inspect the opt-in Luna Factory run",
 			handler: async (rawArgs, ctx) => {
 				const args = rawArgs.trim();
+				if (!ledger && (args.length === 0 || /^(start|selected|run|status|inspect|pause|resume|stop|retry|exclude|export|discard)(\s|$)/.test(args))) {
+					try { notifyCommand(ctx, await batchCommand(args || "status", ctx)); }
+					catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
+					return;
+				}
 				if (args.length === 0 || args === "status") {
 					notifyCommand(ctx, statusText());
 					return;
