@@ -16,27 +16,21 @@ jobs:
       - name: Install Apptainer
         uses: eWaterCycle/setup-apptainer@58d788a297b0acdec33b8979428afa78679aa711 # v1 tag target
       - name: Static Factory contracts
-        run: python3 tests/luna_factory_dogfood_contract.py
+        run: bun test tests/luna_factory_dogfood_contract.test.ts
       - name: Runtime capability report
         env:
           LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-dogfood/capabilities" "$LUNA_FACTORY_HEAD_SHA"
       - name: Classify independent runtime boundaries
         id: capabilities
+        env:
+          LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          python3 - "$RUNNER_TEMP/luna-factory-dogfood/capabilities/capabilities.json" "$GITHUB_OUTPUT" <<'PY'
-          import json
-          import sys
-
-          report = json.loads(open(sys.argv[1]).read())
-          boundaries = report["boundaries"]
-          output = open(sys.argv[2], "a")
-          for name in ("oci", "sif", "fuse", "userNamespace", "appArmor", "apptainer", "kvm", "krun"):
-              result = boundaries[name]
-              print(f"{name}={result['status']}", file=output)
-              print(f"{name}: {result['status']} {result.get('reason') or ''}")
-          PY
+          bun tests/appliance-runtime-report.ts \
+            "$RUNNER_TEMP/luna-factory-dogfood/capabilities" \
+            "$LUNA_FACTORY_HEAD_SHA" \
+            "$GITHUB_OUTPUT"
       - name: Record unavailable OCI boundary
         if: steps.capabilities.outputs.oci != 'available'
         run: |
