@@ -201,8 +201,8 @@ oci)
       --env HOME=/home/bluefin --env XDG_CONFIG_HOME=/home/bluefin/.config --env XDG_STATE_HOME=/home/bluefin/.local/state --env XDG_CACHE_HOME=/home/bluefin/.cache \
       --env LUNA_FACTORY_ENABLED=1 --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 --env LUNA_PROBE_PORT=43129 --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" --env LUNA_FACTORY_HEAD_SHA="$head_sha" \
       --volume "$home:/home/bluefin:rw" --volume "$state:/home/bluefin/.local/state:rw" "$image" --mode rpc-ui --no-skills --no-rules --no-pty --config /home/bluefin/.config/omp/omp.yml --extension /usr/share/bluefin/review/luna-factory
-	fi
-	;;
+  fi
+  ;;
 sif)
   sif="${BLUEFIN_REVIEW_FALLBACK_SIF:-}"
   [[ -n "$sif" ]] || blocked "generated SIF path unavailable"
@@ -227,6 +227,9 @@ if [[ "$LUNA_PROBE_ROUTE" == selected-batch ]]; then
   grep -Fq 'BATCH_PROBE' "$terminal_file" || failed "resume BatchService probe evidence missing"
   grep -Fq '"tracked":10' "$seed_terminal_file" || failed "selected batch did not retain ten items"
   grep -Fq '"duplicateAttached":true' "$seed_terminal_file" || failed "duplicate submission created a second batch"
+  grep -Fq '"repositories":5' "$terminal_file" || failed "selected batch did not span five repositories"
+  grep -Fq '"blocked":2' "$terminal_file" || failed "blocked selected items were not retained"
+  grep -Fq '"unavailableItemStage":"BLOCKED"' "$terminal_file" || failed "unavailable selected item was not blocked"
   grep -Fq '"capacity":2' "$terminal_file" || failed "shared capacity was not two"
   grep -Fq '"peakWorkers":2' "$terminal_file" || failed "independent repositories did not progress concurrently"
   grep -Fq '"dependencyDone":true' "$terminal_file" || failed "dependency did not complete after prerequisite"

@@ -26,7 +26,6 @@ function selectedItems(): SelectedItem[] {
 			base: SHA,
 			head: SHA,
 			overlaps: [],
-			...(key === "probe/repo5#2" ? { blocker: "deterministic unavailable item" } : {}),
 		} satisfies SelectedItem;
 	});
 }
@@ -35,7 +34,7 @@ function fakeGitHub() {
 	return {
 		token: "probe-token",
 		async snapshot(item: SelectedItem): Promise<SelectedItem> { return { ...item }; },
-		async assertFresh(_item: SelectedItem): Promise<void> {},
+		async assertFresh(item: SelectedItem): Promise<void> { if (item.key === "probe/repo5#2") throw new Error("deterministic unavailable item"); },
 		async request<T>(_path: string, _body?: unknown): Promise<T> { throw new Error("unexpected external GitHub request in packaged probe"); },
 	};
 }
@@ -130,18 +129,34 @@ export async function runPackagedBatchProbe({ root, phase }: ProbeOptions): Prom
 	const blocked = final.items.filter((item) => item.stage === "BLOCKED");
 	const dependent = final.items.find((item) => item.selected.key === "probe/repo5#1")!;
 	const failed = final.items.find((item) => item.selected.key === "probe/repo4#2")!;
-	if (final.items.length !== 10 || final.capacity !== 2 || final.usage.peakWorkers < 2 || dependent.stage !== "DONE" || failed.stage === "DONE" || final.items.some((item) => item.operation?.phase === "push" || item.operation?.phase === "pr") || final.control === "active") throw new Error("packaged BatchService invariant failed");
+	const unavailable = final.items.find((item) => item.selected.key === "probe/repo5#2")!;
+	const repositories = new Set(final.items.map((item) => item.selected.repo));
+	if (
+		final.items.length !== 10 ||
+		repositories.size !== 5 ||
+		final.capacity !== 2 ||
+		final.usage.peakWorkers !== 2 ||
+		done.length !== 8 ||
+		blocked.length !== 2 ||
+		dependent.stage !== "DONE" ||
+		failed.stage !== "BLOCKED" ||
+		unavailable.stage !== "BLOCKED" ||
+		final.items.some((item) => item.operation?.phase === "push" || item.operation?.phase === "pr") ||
+		final.control !== "active"
+	) throw new Error("packaged BatchService invariant failed");
 	await service.shutdown();
 	return {
 		phase,
 		batchId: final.id,
 		tracked: final.items.length,
+		repositories: repositories.size,
 		capacity: final.capacity,
 		peakWorkers: final.usage.peakWorkers,
 		done: done.length,
 		blocked: blocked.length,
 		dependencyDone: dependent.stage === "DONE",
 		failedItemStage: failed.stage,
+		unavailableItemStage: unavailable.stage,
 		converged: false,
 		noExternalAuthority: final.items.every((item) => item.operation?.phase !== "push" && item.operation?.phase !== "pr"),
 	};
