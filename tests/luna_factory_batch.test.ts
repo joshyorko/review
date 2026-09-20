@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,6 +98,30 @@ test("BatchStore isolates ledgers, rejects stale revisions, and preserves corrup
 		const aa = first.read(a.id), bb = first.read(b.id); assert.notEqual(aa.items[0]!.ledger, bb.items[0]!.ledger); aa.items[0]!.ledger.runId = "mutated" as never; assert.notEqual(first.read(b.id).items[0]!.ledger.runId, "mutated");
 		assert.throws(() => second.acquire(), /owned by process/); assert.throws(() => first.write({ ...a, revision: 0 }), /stale batch revision/);
 		await writeFile(join(root, `${b.id}.json`), "{\"version\":999}"); assert.throws(() => first.read(b.id), /unsupported or corrupt/); assert.match(await readFile(join(root, `${b.id}.json`), "utf8"), /999/); first.release();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an orphaned acquisition mutex is recovered without admitting a live owner", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-recovery-"));
+	try {
+		const moduleUrl = new URL("../image/extension/luna-factory/omp/batch-store.ts", import.meta.url).href;
+		const child = spawn(process.execPath, ["-e", `import fs from "node:fs"; import { syncBuiltinESMExports } from "node:module"; import { basename } from "node:path"; const originalRename = fs.renameSync; fs.renameSync = ((source, destination) => { const result = originalRename(source, destination); if (basename(String(destination)) === ".owner-recovery") process.kill(process.pid, "SIGKILL"); return result; }); syncBuiltinESMExports(); const { BatchStore } = await import(${JSON.stringify(moduleUrl)}); const store = new BatchStore(process.argv[1]); store.acquire();`, root], { stdio: ["ignore", "ignore", "pipe"] });
+		await new Promise<void>((resolve, reject) => { child.once("error", reject); child.once("exit", (code, signal) => signal === "SIGKILL" ? resolve() : reject(new Error(`acquisition child exited with ${signal ?? code}`))); });
+		const workerCode = `import { BatchStore } from ${JSON.stringify(moduleUrl)}; const store = new BatchStore(process.argv[1]); process.send?.("ready"); process.on("message", (message) => { if (message === "go") { try { store.acquire(); process.send?.("acquired"); } catch { process.send?.("refused"); process.disconnect?.(); process.exit(0); } } else if (message === "release") { store.release(); process.disconnect?.(); process.exit(0); } });`;
+		const workers = [1, 2].map(() => spawn(process.execPath, ["-e", workerCode, root], { stdio: ["ignore", "ignore", "ignore", "ipc"] }));
+		await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => { worker.once("error", reject); worker.once("message", (message) => message === "ready" ? resolve() : reject(new Error(`worker was not ready: ${String(message)}`))); })));
+		const exits = workers.map((worker) => new Promise<void>((resolve) => worker.once("exit", () => resolve())));
+		const outcomes = workers.map((worker) => new Promise<string>((resolve, reject) => { worker.once("error", reject); worker.on("message", (message) => { if (message === "acquired" || message === "refused") resolve(message); }); }));
+		workers.forEach((worker) => worker.send("go"));
+		const settled = await Promise.all(outcomes);
+		assert.deepEqual([...settled].sort(), ["acquired", "refused"]);
+		workers.find((_, index) => settled[index] === "acquired")!.send("release");
+		await Promise.all(exits);
+		const store = new BatchStore(root); store.acquire();
+		assert.throws(() => new BatchStore(root).acquire(), /owned by process/);
+		store.release();
+		await mkdir(join(root, ".owner-recovery"));
+		const compatibility = new BatchStore(root); compatibility.acquire(); compatibility.release();
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
