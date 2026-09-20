@@ -1,7 +1,7 @@
 ---
 name: factory-operations
-version: "1.3"
-last_updated: 2026-08-14
+version: "1.4"
+last_updated: "2026-09-19"
 id: factory-operations
 one_line_purpose: Keep bounded factory work moving until it lands or is externally blocked.
 entry_point: docs/skills/factory-operations.md
@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: [contribution-culture, skill-improvement, pr-workflow]
 tags: [factory, operations, continuation, scheduling, verification]
-description: "Defines repository-neutral continuation, capacity, ownership, and evidence rules for bounded factory work."
+description: "Defines continuation, capacity, ownership, and evidence rules for bounded factory work."
 metadata:
   type: policy
 ---
@@ -81,10 +81,6 @@ Review is fast-moving, and cadence is part of correctness here.
   agent per landing batch, and Hive as the only assignment authority.
   Parallelism belongs to reading; writing stays single-writer.
 
-## Human Continuation
-
-When a human must intervene to restart continuation or correct scheduling,
-classify the control failure. Record the durable transition in the relevant
-issue or pull request. If the lesson is reusable, add the smallest preventive
-rule to the closest skill and verify it where practical; never create a
+When an unexpected blocker pauses continuation, record the concrete reason in
+the relevant tracker; park only the affected lane; never invent an uncommitted
 session diary.

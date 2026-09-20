@@ -1,151 +1,113 @@
 ---
 name: launcher
-version: "5.3"
-last_updated: 2026-09-15
+version: "5.5"
+last_updated: "2026-09-19"
 id: launcher
-one_line_purpose: Change the Bluefin application launcher without breaking its runtime contracts.
+one_line_purpose: Change the hive-contribute launcher without breaking its runtime contracts.
 entry_point: docs/skills/launcher.md
 category: ci-ops
 mcp_compliance_level: partial
 optimization_status: draft
 status: active
 dependencies: []
-tags: [just, launcher, podman, kubernetes, omp, hive]
-description: "Maintains the OMP appliance and Hive contributor launcher recipes without crossing their credential or authority boundaries."
+tags: [just, launcher, podman, apptainer, omp, hive]
+description: "Maintains the hive-contribute appliance and launcher recipes without crossing credential or authority boundaries."
 metadata:
   type: runbook
-  context7-sources: [/websites/podman_io_en, /websites/kubernetes_io]
+  context7-sources: [/websites/podman_io_en]
 ---
 
 # Launcher
 
 ## Public commands
 
+The primary launcher executable is `bin/hive-contribute`:
+
 | Command | Purpose |
 | --- | --- |
-| `bluefin review [org/repo|flags...]` | Runs `ghcr.io/projectbluefin/review`, preferring Podman `krun` and falling back to Apptainer. |
-| `bluefin contribute [instance]` | Runs the Hive-authorized OMP worker; an optional instance selects its named Hive registration. |
-| `bluefin setup [instance]` | Performs attended Hive registration through Hive's pinned upstream setup recipe. |
-| `bluefin doctor` | Read-only preflight; starts no agent and exports no credential. |
-| `bluefin cluster scale [N]` / `bluefin cluster stop` | Scales or stops independent Kubernetes Hive + OMP workers. |
+| `hive-contribute` / `hive-contribute run` | Runs the Hive-authorized OMP worker in the foreground. |
+| `hive-contribute setup` | Performs attended Hive registration through upstream Hive's setup. |
+| `hive-contribute doctor` | Read-only preflight diagnostics; starts no agent and exports no credential. |
+| `hive-contribute config` | Prints the resolved appliance configuration from the single config file. |
 
-The `just review-queue`, `just review-appliance`, `just review-container`,
-`just contribute`, `just review-doctor`, and `just review-stop` recipes remain
-developer-compatible entry points. They carry the launcher's shared shell
-functions inline and retain their established state-volume and remote-Podman
-recipe bodies. Users
-should not need to type `just`; internally, attended Hive registration still
-executes Hive's pinned `contribute-setup` Just recipe because Hive owns the
-registration format and protocol.
+The `just contribute`, `just doctor`, `just setup`, `just config`, and `just contribute-build`
+recipes are thin wrappers around `bin/hive-contribute`.
+
+## Configuration: One File
+
+All configuration lives in `${XDG_CONFIG_HOME:-~/.config}/hive-contribute.yml`.
+The file has six flat keys: `hub`, `registration`, `image`, `backend`, `memory`, and `cpus`.
+`memory` and `cpus` carry upstream's contributor workload envelope (4 GiB, 2 CPUs), with
+swap pinned to the memory ceiling; `none` or `0` removes a ceiling. They apply on the
+Podman path, where they also size the microVM — the Apptainer fallback stays unbounded
+because it can only apply a ceiling through cgroups delegation a fallback host often lacks.
+The launcher creates the file on first run, seeding `hub` from an existing
+`~/.config/hive/contributor.env` if present. Setting `HIVE_CONTRIBUTE_CONFIG` points to an
+alternate configuration file.
 
 ## Authority boundary
 
-The maintainer workbench reads live GitHub state and optional Hive ordering. It
-does not register as a Hive contributor and does not select or complete Hive
-assignments.
-
-The contributor image contains Hive's worker runtime only. Hive chooses the
+The contributor image contains Hive's worker runtime and OMP. Hive chooses the
 task, injects the prompt, owns the `contributor` tmux session, and captures the
 result. The entrypoint may validate credentials and attach the terminal; it
 must not filter, reorder, retry, or interpret assignments.
 
+OMP owns agent execution, model choice, thinking effort, and tool boundaries.
+
 ## Isolation and lifecycle
 
-Every packaged appliance command prefers `podman run --runtime=krun` when
+Every worker invocation prefers `podman run --runtime=krun` when
 Podman, `krun`, and `/dev/kvm` are available. Otherwise it reports the missing
-prerequisite and falls back to isolated Apptainer execution. Container names
-include the target and a per-process suffix, so simultaneous KVM invocations
-cannot replace one another. Persistent OMP homes are target-specific;
-`BLUEFIN_INSTANCE` explicitly separates two sessions for the same target.
+prerequisite and falls back to isolated Apptainer execution (`apptainer run --containall`).
+Container names include an instance slug derived from the hub URL and a per-process suffix.
+Persistent OMP homes are target-specific based on the hub hash.
 
-Every interactive microVM stays attached to its launching terminal. Do not add
-`--detach`, `-d`, `nohup`, `setsid`, systemd units, or resurrection commands.
-Ctrl-C stops only that invocation. `bluefin cluster stop` (or the compatible
-`just review-stop cluster`) is reserved for the Kubernetes worker deployment.
-Apptainer omits its default `/etc/localtime` or `/etc/hosts` mount only when
-that host source is absent or a dangling symlink; present sources retain the
-runtime default.
-Fallback also requires `squashfuse_ll` or `squashfuse` and a readable,
-writable character device at `/dev/fuse`; `bluefin doctor` reports each missing
+Every interactive microVM stays attached to its launching terminal in the foreground.
+Detached containers are not supported. Ctrl-C stops only that invocation.
+
+Fallback to Apptainer requires `squashfuse_ll` or `squashfuse` and a readable,
+writable character device at `/dev/fuse`; `hive-contribute doctor` reports each missing
 prerequisite separately before launch.
-The doctor checks both published images through reachable Podman or `skopeo`.
-If Apptainer is the only runtime and no read-only registry probe exists, it
-reports image resolution as deferred to launch instead of misclassifying the
-remote reference as a missing local SIF.
-On the Podman path, every mutable image tag is refreshed before launch. A
-registry outage may use an existing local copy only with an explicit stale-image
-warning; a missing local copy fails before `podman run`. Digest and `sha-*`
-references remain immutable and are not refreshed.
-Before container execution, the launcher reports its own revision. After resolving
-an image, it reports the image OCI version, source revision, and digest; missing
-labels are shown as `unknown` rather than inferred. On the Apptainer fallback
-path where no read-only registry probe exists, image identity is reported as
-unavailable without blocking launch.
-The launcher enforces appliance compatibility: the review appliance requires
-series `26.08` with version >= `26.08.06`, and the contributor worker requires
-version >= `26.08.02`. Incompatible images fail before execution. Explicit image
-overrides (`BLUEFIN_REVIEW_IMAGE`, `BLUEFIN_REVIEW_SIF`, `REVIEW_APPLIANCE_IMAGE`,
-`BLUEFIN_CONTRIBUTE_IMAGE`, `BLUEFIN_CONTRIBUTE_SIF`, `CONTRIBUTE_IMAGE`) are
-honored with actionable compatibility warnings if versions differ or cannot be
-verified.
-Upgrades from `v26.08.05` migrate existing user sessions and configuration
-from legacy state directories (`~/.local/state/bluefin-review` and
-`~/.local/state/bluefin-contribute`) into instance homes without broad state
-deletion. Fixed-name legacy SIF artifacts (`bluefin-review.sif`,
-`bluefin-contribute.sif`) are superseded by the versioned OCI contract and
-cannot silently bypass validation.
+
+Before launch, mutable image tags are refreshed. A local cached copy is used with a warning
+if registry connectivity fails.
 
 ## Credentials
 
 - Pass secrets only through inherited environment names or documented private
   mounts. Never put values in arguments, logs, image layers, socket paths, SSH
   targets, or committed files.
-- Preserve `--userns keep-id` for the `0600` contributor registration.
-- The OMP appliance receives GitHub/provider credentials by inherited name and,
-  when `HIVE_HUB` is unset, resolves the hub from the host's default
-  `~/.config/hive/contributor.env` without mounting its registration token.
+- Preserve `--userns keep-id:uid=65532,gid=65532` for the `0600` contributor registration.
 - Apptainer's contained environment receives only the explicit credential and
   runtime allowlist through `APPTAINERENV_` variables. Keep `--no-eval` so
   credential and argument values remain literal inside the container.
 - The forwarded provider-credential allowlist names GitHub, Copilot, Anthropic,
-  OpenAI, Gemini, Hive, and terminal variables, plus the Amazon Bedrock
+  OpenAI, OpenRouter, Gemini, Google, and terminal variables, plus the Amazon Bedrock
   credentials `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, and `AWS_DEFAULT_REGION`.
-  Only those reach the contained process; the rest of the AWS environment stays
-  on the host. The value travels through the environment only, never in argv,
-  launcher output, test logs, image layers, or committed files.
-- The contributor worker receives exactly one selected Hive registration. The
-  registration's `HIVE_HUB` decides which hive's work the session does, so the
-  launcher prints the resolved hub and registration filename before starting
-  the container and refuses a registration whose `HIVE_HUB` is unusable. A
-  default `~/.config/hive/contributor.env` written by an unrelated
-  `contribute-setup` run otherwise routes every bare `bluefin contribute` to
-  that other project's queue; `bluefin contribute <instance>` selects
-  `contributor.<instance>.env` instead.
-- The checkout contributor recipe stages remote Podman registrations privately
-  and deletes only its validated staging directory. The packaged `bluefin`
-  launcher uses local Apptainer when Podman selects a remote engine; it never
-  sends client-side credential bind paths to that engine.
-
-## Arguments
-
-`scripts/parse-review-args.sh` is the single parser for OMP review scope.
-Repository, `--pr`, and `--issues` arguments must reach the appliance unchanged.
-Every review launch passes OMP's built-in `--advisor` flag exactly once. The
-source launcher also normalizes its parser-fallback path, and the packaged
-entrypoint repeats the normalization for direct image launches. The appliance
-configuration maps `modelRoles.advisor` to `@default` rather than selecting a
-provider.
-The optional contributor argument names an isolated instance and its
-`contributor.<org-repo>.env`; Hive still selects work. OMP owns model choice.
+  Only those reach the contained process; host `~/.config/gh` is never mounted.
+  Inside the container that GitHub token is held by Hive's own `gh` wrapper, which
+  refuses `gh auth`, every mutating `gh api`, and every subcommand outside its
+  allowlist — so forwarding a token is not the same as handing an assigned task
+  free rein over the account it belongs to.
+- `HIVE_SESSION` is forwarded whenever it is SET, including when it is empty:
+  an explicit empty value is the relay's documented opt-out of session labeling,
+  while leaving it unset lets the relay default the label to the backend name.
+- The contributor worker receives exactly one selected Hive registration mounted read-only
+  at `/home/hive/.config/hive/contributor.env:ro`.
+- A registration token is rotated by the hub, and only the hub can say whether a
+  stored one is still accepted. This launcher does not ask: it mounts the
+  credential and lets Hive's relay authenticate. A rejected token surfaces as
+  the relay's own failure, and the repair is upstream's `contribute-move`, not
+  anything here. Do not add a downstream validator, reissue call, or relaunch
+  loop — that is Hive's protocol, and a second implementation of it drifts the
+  moment upstream changes a message.
 
 ## Verification
 
 ```bash
-bluefin doctor
+hive-contribute doctor
 just --list
 bash tests/launcher-contract.sh
-bash tests/just-onboarding.sh
-bash tests/appliance-contract.sh
 bash tests/contribute-contract.sh
 git diff --check
 ```

@@ -1,4 +1,4 @@
-# review Skill Router
+# hive-contribute Skill Router
 
 After reading [`AGENTS.md`](../AGENTS.md) and the local
 [agentic model](factory/agentic-model.md), choose the one task-specific
@@ -9,15 +9,11 @@ it scopes every task, so read it alongside the matching skill.
 | Task | Skill |
 |---|---|
 | Scope a change, size a pull request, or address a maintainer | [`contribution-culture.md`](skills/contribution-culture.md) |
-| Change a launcher recipe, launch mode, or container execution | [`launcher.md`](skills/launcher.md) |
-| Scale out contributor workers across a Kubernetes cluster | [`cluster-workers.md`](skills/cluster-workers.md) |
+| Change the launcher script or container execution | [`launcher.md`](skills/launcher.md) |
 | Investigate the contributor runtime, task delivery, or token lifetime | [`hive-runtime.md`](skills/hive-runtime.md) |
 | Investigate an assigned-task or connection problem | [`hive-triage.md`](skills/hive-triage.md) |
 | Report evidence to or follow up on a `hivecommons/hive` issue | [`upstream-hive.md`](skills/upstream-hive.md) |
-| Maintain the OMP workbench review agents and policy seam | [`review-checks.md`](skills/review-checks.md) |
-| Change either image, OMP pins, SBOMs, or publish workflows | [`image-build.md`](skills/image-build.md) |
-| Change queue ordering, slay/autoslay, issue batches, or workbench controls | [`review-dashboard.md`](skills/review-dashboard.md) |
-| Monitor running OMP workbenches or contributor workers | [`review-monitoring.md`](skills/review-monitoring.md) |
+| Change the contributor image, OMP pins, SBOMs, or publish workflows | [`image-build.md`](skills/image-build.md) |
 | Prepare a branch, commit, or pull request | [`pr-workflow.md`](skills/pr-workflow.md) |
 | Triage, label, or route an issue or pull request | [`pr-labels.md`](skills/pr-labels.md) |
 | Audit all docs, repair skills, or maintain factory compliance | [`skill-improvement.md`](skills/skill-improvement.md) |

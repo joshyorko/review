@@ -1,25 +1,7 @@
 {
-  "generated_at": "2026-09-16",
+  "generated_at": "2026-09-19",
   "schema_version": "1.0",
   "skills": [
-    {
-      "id": "cluster-workers",
-      "name": "cluster-workers",
-      "one_line_purpose": "Scale OMP contributor workers across Kubernetes clusters.",
-      "entry_point": "docs/skills/cluster-workers.md",
-      "category": "ci-ops",
-      "status": "active",
-      "tags": [
-        "kubernetes",
-        "cluster",
-        "scale",
-        "workers"
-      ],
-      "description": "Manages OMP contributor workers in bluefin-system and secret synchronization.",
-      "version": "2.1",
-      "last_updated": "2026-09-14",
-      "doc_type": "procedure"
-    },
     {
       "id": "contribution-culture",
       "name": "contribution-culture",
@@ -35,8 +17,8 @@
         "contribution"
       ],
       "description": "Defines the scope and manners of factory work: toil reduction for under-maintained projects in small, reviewable changes, never feature development. Use before deciding how large a change should be or what a task's deliverable is.",
-      "version": "1.4",
-      "last_updated": "2026-08-07",
+      "version": "1.5",
+      "last_updated": "2026-09-19",
       "doc_type": "policy"
     },
     {
@@ -53,9 +35,9 @@
         "scheduling",
         "verification"
       ],
-      "description": "Defines repository-neutral continuation, capacity, ownership, and evidence rules for bounded factory work.",
-      "version": "1.3",
-      "last_updated": "2026-08-14",
+      "description": "Defines continuation, capacity, ownership, and evidence rules for bounded factory work.",
+      "version": "1.4",
+      "last_updated": "2026-09-19",
       "doc_type": "policy"
     },
     {
@@ -74,8 +56,8 @@
         "workspace"
       ],
       "description": "Explains Hive's tmux session, workspace directory, prompt and output contract, contributor credentials, token lifetime, cooldown, and exclusive task selection. Use when operating or debugging a session.",
-      "version": "3.0",
-      "last_updated": "2026-09-14",
+      "version": "3.1",
+      "last_updated": "2026-09-19",
       "doc_type": "reference"
     },
     {
@@ -93,14 +75,14 @@
         "websocket"
       ],
       "description": "Diagnoses a contributor that connects but receives no assignment without adding client-side selection or retry behavior. Use when a ready contributor remains idle.",
-      "version": "1.5",
-      "last_updated": "2026-08-07",
+      "version": "1.6",
+      "last_updated": "2026-09-19",
       "doc_type": "runbook"
     },
     {
       "id": "image-build",
       "name": "image-build",
-      "one_line_purpose": "Build and pin the OMP review and contributor images.",
+      "one_line_purpose": "Build and pin the OMP contributor image.",
       "entry_point": "docs/skills/image-build.md",
       "category": "ci-ops",
       "status": "active",
@@ -112,15 +94,15 @@
         "omp",
         "hive"
       ],
-      "description": "Use when maintaining the OMP review/contributor images, release pins, SBOM inputs, or multi-architecture publication workflows.",
-      "version": "3.5",
-      "last_updated": "2026-09-16",
+      "description": "Use when maintaining the OMP contributor image, release pins, SBOM inputs, or multi-architecture publication workflows.",
+      "version": "3.7",
+      "last_updated": "2026-09-19",
       "doc_type": "procedure"
     },
     {
       "id": "launcher",
       "name": "launcher",
-      "one_line_purpose": "Change the Bluefin application launcher without breaking its runtime contracts.",
+      "one_line_purpose": "Change the hive-contribute launcher without breaking its runtime contracts.",
       "entry_point": "docs/skills/launcher.md",
       "category": "ci-ops",
       "status": "active",
@@ -128,13 +110,13 @@
         "just",
         "launcher",
         "podman",
-        "kubernetes",
+        "apptainer",
         "omp",
         "hive"
       ],
-      "description": "Maintains the OMP appliance and Hive contributor launcher recipes without crossing their credential or authority boundaries.",
-      "version": "5.3",
-      "last_updated": "2026-09-15",
+      "description": "Maintains the hive-contribute appliance and launcher recipes without crossing credential or authority boundaries.",
+      "version": "5.5",
+      "last_updated": "2026-09-19",
       "doc_type": "runbook"
     },
     {
@@ -151,15 +133,15 @@
         "automation",
         "workflow"
       ],
-      "description": "Defines projectbluefin's lifecycle labels, 3-clanker-queue admission, 3-human-queue routing, and the lgtm approval flag. Use when managing labels or triage.",
-      "version": "1.1",
-      "last_updated": "2026-09-13",
+      "description": "Defines the repository lifecycle labels, 3-clanker-queue admission, 3-human-queue routing, and the lgtm approval flag. Use when managing labels or triage.",
+      "version": "1.2",
+      "last_updated": "2026-09-19",
       "doc_type": "policy"
     },
     {
       "id": "pr-workflow",
       "name": "pr-workflow",
-      "one_line_purpose": "Open review pull requests that merge cleanly.",
+      "one_line_purpose": "Open pull requests that merge cleanly.",
       "entry_point": "docs/skills/pr-workflow.md",
       "category": "meta",
       "status": "active",
@@ -171,72 +153,14 @@
         "testing"
       ],
       "description": "Defines pull request, branch, title, trailer, and validation requirements, repository lifecycle and queue label taxonomy, how to reconcile a long-lived branch with squash-merged main, and why a test must run a feature.",
-      "version": "1.12",
-      "last_updated": "2026-09-13",
+      "version": "1.13",
+      "last_updated": "2026-09-19",
       "doc_type": "policy"
-    },
-    {
-      "id": "review-checks",
-      "name": "review-checks",
-      "one_line_purpose": "Maintain the OMP workbench review agents and policy seam.",
-      "entry_point": "docs/skills/review-checks.md",
-      "category": "ci-ops",
-      "status": "active",
-      "tags": [
-        "checks",
-        "review",
-        "subagents",
-        "doctrine",
-        "omp"
-      ],
-      "description": "Maintains the review agents shipped by the OMP workbench. Use when changing review doctrine, specialist responsibilities, or orchestration prompts.",
-      "version": "2.1",
-      "last_updated": "2026-09-14",
-      "doc_type": "reference"
-    },
-    {
-      "id": "review-dashboard",
-      "name": "review-dashboard",
-      "one_line_purpose": "Maintain the queue, slay lifecycles, and workflowz workbench.",
-      "entry_point": "docs/skills/review-dashboard.md",
-      "category": "ci-ops",
-      "status": "active",
-      "tags": [
-        "omp",
-        "extension",
-        "dashboard",
-        "review",
-        "maintainer",
-        "workflowz"
-      ],
-      "description": "Maintains the OMP review workbench. Use for queue ordering, slay or autoslay, workflowz issue batches, durable batch state, dashboard controls, or mutation guards.",
-      "version": "5.4",
-      "last_updated": "2026-09-16",
-      "doc_type": "runbook"
-    },
-    {
-      "id": "review-monitoring",
-      "name": "review-monitoring",
-      "one_line_purpose": "Monitor OMP workbenches and Hive contributor workers.",
-      "entry_point": "docs/skills/review-monitoring.md",
-      "category": "ci-ops",
-      "status": "active",
-      "tags": [
-        "monitoring",
-        "review",
-        "omp",
-        "hive",
-        "container"
-      ],
-      "description": "Use when observing or diagnosing a running OMP review appliance or Hive contributor worker.",
-      "version": "2.1",
-      "last_updated": "2026-09-14",
-      "doc_type": "procedure"
     },
     {
       "id": "skill-improvement",
       "name": "skill-improvement",
-      "one_line_purpose": "Keep review documentation source-backed, current, and compact.",
+      "one_line_purpose": "Keep repository documentation source-backed, current, and compact.",
       "entry_point": "docs/skills/skill-improvement.md",
       "category": "meta",
       "status": "active",
@@ -247,8 +171,8 @@
         "factory"
       ],
       "description": "Maintains repository documentation and skill contracts from current source evidence. Use for repo-wide documentation audits, stale guidance, skill routing, catalog changes, or durable agent learning.",
-      "version": "1.2",
-      "last_updated": "2026-09-15",
+      "version": "1.3",
+      "last_updated": "2026-09-19",
       "doc_type": "reference"
     },
     {
@@ -266,8 +190,8 @@
         "contribution"
       ],
       "description": "Defines how this repository reports evidence to hivecommons/hive and follows up on filed issues. Use before opening, commenting on, or responding to an upstream Hive issue or pull request.",
-      "version": "1.3",
-      "last_updated": "2026-08-07",
+      "version": "1.4",
+      "last_updated": "2026-09-19",
       "doc_type": "policy"
     }
   ]

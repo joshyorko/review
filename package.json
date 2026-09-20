@@ -1,5 +1,5 @@
 {
-  "name": "review-relay-runtime",
+  "name": "contribute-relay-runtime",
   "private": true,
   "dependencies": {
     "ws": "8.21.3"

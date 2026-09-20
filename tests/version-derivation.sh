@@ -45,24 +45,22 @@ assert_failure() {
 }
 
 case_name=0
-for spec in "review-appliance-version.sh appliance review-version" "contribute-version.sh contribute contribute-version"; do
-  read -r script image prefix <<<"$spec"
-  assert_success "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08.0@sha256:deadbeef' '7' '26.08.07'
-  assert_success "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08.0@sha256:deadbeef' '08' '26.08.08'
-  assert_success "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08.0@sha256:deadbeef' '09' '26.08.09'
-  assert_success "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:deadbeef' '12' '26.08.12'
-  assert_success "$script" "$image" $'ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08.0@sha256:first\nARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:99.99.0@sha256:second' '3' '26.08.03'
-  assert_failure "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:latest@sha256:deadbeef' '7' 'FSDK series'
-  assert_failure "$script" "$image" 'ARG OTHER=value' '7' 'ARG FSDK_BASE_IMAGE'
-  assert_failure "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08.0@sha256:deadbeef' '__missing__' 'REVISION'
-  assert_failure "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08.0@sha256:deadbeef' '3 4' 'single integer'
-done
+# One image, one derivation script: FSDK series from the base image tag plus
+# the REVISION counter, with every malformed input rejected rather than
+# silently producing a version nobody can trace back to a build input.
+script=contribute-version.sh
+image=contribute
+assert_success "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/example/base:26.08.0@sha256:deadbeef' '7' '26.08.07'
+assert_success "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/example/base:26.08.0@sha256:deadbeef' '08' '26.08.08'
+assert_success "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/example/base:26.08.0@sha256:deadbeef' '09' '26.08.09'
+assert_success "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/example/base:26.08@sha256:deadbeef' '12' '26.08.12'
+assert_success "$script" "$image" $'ARG FSDK_BASE_IMAGE=ghcr.io/example/base:26.08.0@sha256:first\nARG FSDK_BASE_IMAGE=ghcr.io/example/base:99.99.0@sha256:second' '3' '26.08.03'
+assert_failure "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/example/base:latest@sha256:deadbeef' '7' 'FSDK series'
+assert_failure "$script" "$image" 'ARG OTHER=value' '7' 'ARG FSDK_BASE_IMAGE'
+assert_failure "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/example/base:26.08.0@sha256:deadbeef' '__missing__' 'REVISION'
+assert_failure "$script" "$image" 'ARG FSDK_BASE_IMAGE=ghcr.io/example/base:26.08.0@sha256:deadbeef' '3 4' 'single integer'
 
-review_version="$(bash "$repo_root/scripts/review-appliance-version.sh")"
 contribute_version="$(bash "$repo_root/scripts/contribute-version.sh")"
-[[ "$review_version" =~ ^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]] || fail "committed review version is malformed: $review_version"
 [[ "$contribute_version" =~ ^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]] || fail "committed contributor version is malformed: $contribute_version"
-[[ "${review_version%.*}" == "${contribute_version%.*}" ]] ||
-  fail "image series diverge: review=$review_version contribute=$contribute_version"
 
-printf 'version-derivation: %d synthetic cases and committed image versions passed\n' "$case_name"
+printf 'version-derivation: %d synthetic cases and the committed image version passed\n' "$case_name"

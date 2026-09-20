@@ -13,8 +13,8 @@ startup:
   # waiting for an answer nobody is there to give.
   setupWizard: false
 
-# The attended terminal is a Bluefin terminal, which ships a Nerd Font. Left at
-# the `unicode` default OMP draws the fallback glyph set and then asks the
-# operator to "use nerdfont" on every launch, which is neither actionable
-# inside a distroless image nor true of the terminal it is running in.
+# The attended terminal ships a Nerd Font. Left at the `unicode` default OMP
+# draws the fallback glyph set and then asks the operator to "use nerdfont" on
+# every launch, which is neither actionable inside a distroless image nor true
+# of the terminal it is running in.
 symbolPreset: nerd

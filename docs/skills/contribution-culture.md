@@ -1,7 +1,7 @@
 ---
 name: contribution-culture
-version: "1.4"
-last_updated: 2026-08-07
+version: "1.5"
+last_updated: "2026-09-19"
 id: contribution-culture
 one_line_purpose: Do maintainer toil in small changes, never feature development.
 entry_point: docs/skills/contribution-culture.md
@@ -60,7 +60,7 @@ Two consequences for an agent reading this:
 - Do not treat a project's voice as a defect. Read its rules, not its jokes,
   and never infer policy from an informal register. Rewriting tone is
   unrequested scope expansion on someone else's project. This repository's
-  own cloud-native shitposting is a deliberate local example: leave it alone.
+  own cloud-native humor is a deliberate local example: leave it alone.
 
 This distinction does not relax the rules below. Every agent change stays
 limited to assigned toil; the two layers only stop those execution rules from
@@ -85,75 +85,46 @@ Kubernetes and projects like it restrict those contributions to defend their
 maintainers. That policy is correct, and this factory is designed to be its
 opposite rather than its adversary. We are not here to ship features.
 
-**In scope:** repairing what is already broken, and finishing what a project
-already decided to do.
+### Scope: What to Build
 
-**Out of scope:** new features, new dependencies, new configuration surfaces,
-architectural changes, subsystem rewrites, and opportunistic refactors. When
-an assigned task can only be completed by one of those, the deliverable is a
-written finding that says so, with the evidence — not a speculative
-implementation. This is not task selection: Hive still assigns the work, and
-the report is the completed work.
+- **Repair what is already broken.** A failing test, an unpinned dependency, a
+  stale lockfile, a drifted document, a broken build step, a bad link.
+- **Finish what the project already decided to do.** An accepted issue with an
+  agreed design, an open pull request stalled on conflicts, a deprecation whose
+  deadline passed.
+- **Add the smallest test that covers the fix.** One test that fails before the
+  change and passes after it. Not a test suite rewrite; not a framework
+  migration; not "test coverage" on unrelated code.
+- **Stop there.**
 
-## No Grandfathering
+### Scope: What Not to Build
 
-Grandfathering is an antipattern in this project. Do not mark a known-wrong
-thing as an accepted exception and move on: fix it now, or delete it.
+- **Do not add features.** If the issue asks for a feature, either it has an
+  accepted design from a maintainer — in which case implement that design and
+  only that design — or it does not, in which case the task is not ready for an
+  agent.
+- **Do not add dependencies.** A new dependency is a supply-chain commitment, a
+  license review, and a future maintenance obligation. It requires explicit
+  maintainer consent in the issue before an agent may introduce it.
+- **Do not refactor adjacent code.** Clean up what you touch to make the fix,
+  and nothing else. The commit diff must be readable in two minutes by someone
+  who has never seen your agent.
+- **Do not modernize style.** Do not reformat files you did not change. Do not
+  migrate from one idiom to another because the newer one is preferred in the
+  ecosystem. Match the style of the file you are editing.
+- **Do not rewrite documentation in "agent voice."** Do not add emoji, summary
+  cards, key takeaways, or conversational filler to technical documentation.
+  Match the existing register.
 
-An exception clause in a policy document is itself a defect. It outlives the
-condition that created it, and it silently converts "this is wrong" into "this
-is allowed." The words to refuse are *grandfathered*, *sanctioned*, *legacy
-exception*, *pre-existing*, *for now*, and *temporarily*. If the exception is
-worth writing down, the fix is worth doing instead.
+## Sizing for Review
 
-A described gap is the same defect wearing different clothes. *Known gap*,
-*documented gap*, *known limitation*, *open upstream gap*, and *tracked to
-closure* all announce a known-wrong thing and then leave it in place. Use the
-issue tracker: a gap gets an issue number, and the document gets at most one
-sentence pointing at it. Prose explaining why something is broken cannot be
-assigned or closed, so it survives the fix and becomes the reason nobody
-noticed the fix was possible.
-
-The worked example is local: Python `find` and `cmp` shims in `/usr/local/bin`
-shadowed the real GNU tools in `/usr/sbin` and got `-o` precedence wrong,
-deleting fresh agent output. Worse, a test pinned the wrong behavior, making
-the bug hard to fix without breaking CI. **A test locking in an exception
-makes the defect permanent.**
-
-The positive rule: use the tools already in the image. If a tool is missing,
-add it at the FSDK seam. Never hand-roll a local reimplementation, and never
-leave a shim standing once the seam fix lands.
-
-## Sizing A Change
-
-1. One logical change per pull request. Prefer the change a maintainer can
-   read in a single sitting over the change that is complete in one pass.
+1. Prefer the smaller, reviewable change over the complete one. Choose the diff
+   that can be read in a single sitting over the change that is complete in one pass.
 2. The reviewer's attention is the scarce resource, not the code. A change is
    too large when its diff costs more to review than the problem costs to
    live with.
 3. Split unrelated fixes noticed along the way into their own changes, or
    leave them and say what was seen.
-4. Automate only what is understood. A repair copied from a similar project
-   without understanding this project's failure scales ignorance and leaves
-   the maintainer holding it. Verify against the project's own tests and cite
-   the output.
-5. Say what was not verified and what evidence would settle it. Overstated
-   confidence is the expensive failure mode, not admitted uncertainty.
-
-## Working With Maintainers
-
-- A pull request is a request for someone's unpaid time. Match the project's
-  documented conventions instead of importing ours, and follow its stated
-  policy on agent-authored contributions, including disclosure and labels.
-- Do not argue, escalate, re-open, or re-push after a maintainer declines a
-  change. Their judgment on their project is final and needs no justification.
-- The same deference applies to an instruction you were given. Raise a concern
-  once, briefly, then implement what was asked. Deciding on their behalf that a
-  change will "land badly" substitutes your judgment for theirs.
-- Do not ask a maintainer for anything the repository already answers.
-- Non-code work counts. Issue triage, a clean reproduction, a corrected
-  document, and a passing test for existing behavior are the product here, not
-  a consolation prize for failing to write features.
 
 ## Common Rationalizations
 
@@ -163,35 +134,8 @@ leave a shim standing once the seam fix lands.
 | "The task is small, so a rewrite is the clean fix." | A rewrite transfers a maintenance burden to someone who did not ask for it. Repair the failure in place. |
 | "Adding a dependency solves this in one line." | A dependency is a permanent obligation for the maintainer. It needs their decision, not ours. |
 | "The project has no tests, so I cannot verify." | Then say that, and verify what can be verified. Silence reads as verification that never happened. |
-| "This feature obviously belongs here." | Feature direction is the maintainer's to set. Propose it as an issue if the task calls for it; do not implement it. |
-| "This document's tone contradicts the culture." | Voice is not policy. Rewriting a project's register is unrequested scope expansion; read the rules, not the jokes. |
-| "It is a known issue, so the exception is documented." | A documented exception is a defect with paperwork. Fix it or delete it. |
-
-## Red Flags
-
-- A pull request that adds a capability rather than restoring one.
-- A diff that grows because it was easier than scoping it.
-- Any refactor bundled with a fix.
-- A new dependency, configuration key, or file introduced without the project
-  having asked for it.
-- Claiming a fix works without naming the command that proved it.
-- Responding to maintainer feedback with a defense instead of a change or a
-  withdrawal.
-- Treating documentation, triage, or test work as lower-value than code.
-- Any standing exception: "grandfathered", "sanctioned", "legacy", "for now".
-- A "known gap" or "known limitation" section where an issue number belongs.
-- A test that asserts known-wrong behavior is correct.
 
 ## Verification
 
-CI enforces the complete verification suite in `.github/workflows/validate.yml` (see [`docs/image-and-development.md`](../image-and-development.md#validation) for the full local command list).
-
-For documentation, skill changes, and cultural guidelines within this repository, run:
-
-```bash
-git diff --check
-bash scripts/check-skill-frontmatter.sh
-bash tests/generate-skills.sh
-```
-For any change to an assigned repository, run that project's own validation
+Say what was verified and how. Run the relevant check, paste the invocation,
 and quote its result. When no such tooling exists, state that plainly.

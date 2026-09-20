@@ -1,0 +1,21 @@
+[extend]
+useDefault = true
+
+# The launcher's contract tests assert that credential VALUES never reach a
+# command line, a log, or a container argv. Proving that requires planting
+# values that look exactly like real credentials and then searching the
+# recorded argv for them — so the fixtures below are the test's subject, not a
+# leak. They are fake by construction:
+#
+#   secret-gh-token-abcxyz, secret-anthropic-key-777, secret-openrouter-key-555,
+#   apptainer-secret-*
+#       invented strings, asserted ABSENT from every recorded command line
+#
+# Scoped to the test files by path: a real credential committed anywhere else
+# in this repository still fails the scan.
+[allowlist]
+description = "Fake credentials used by the launcher contract tests"
+paths = [
+  '''^tests/launcher-contract\.sh$''',
+  '''^tests/contribute-contract\.sh$''',
+]

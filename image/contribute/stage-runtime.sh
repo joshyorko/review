@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage the FSDK runtime closure for the review appliance.
+# Stage the FSDK runtime closure for the contributor appliance.
 #
 # Runs inside the shell-enabled FSDK builder and copies an explicit allowlist of
 # binaries plus the shared libraries they actually resolve into a rootfs tree the

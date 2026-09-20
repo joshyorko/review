@@ -1,9 +1,9 @@
 ---
 name: skill-improvement
-version: "1.2"
-last_updated: 2026-09-15
+version: "1.3"
+last_updated: "2026-09-19"
 id: skill-improvement
-one_line_purpose: Keep review documentation source-backed, current, and compact.
+one_line_purpose: Keep repository documentation source-backed, current, and compact.
 entry_point: docs/skills/skill-improvement.md
 category: meta
 mcp_compliance_level: partial
@@ -26,7 +26,7 @@ catalog, or agent-facing repository contracts.
 ## When Not to Use
 
 Do not use this as a backlog, session log, or replacement for the
-task-specific launcher, image, Hive, MCP app, or pull-request workflow skill.
+task-specific launcher, image, Hive, or pull-request workflow skill.
 Use it alongside the matching skill when documentation maintenance is part of
 that work.
 
@@ -49,14 +49,11 @@ that work.
 5. Prune duplication, stale caches, and no-op instructions. Preserve every
    source-backed safety invariant: a soft length or style warning is evidence to
    remove sediment, never permission to delete live contract behavior.
-6. Use `projectbluefin/common` only as the pinned shared sidecar. It supplements
-   local guidance; it never overrides local repository boundaries or assigns
-   work.
-7. When skill frontmatter changes, regenerate `docs/skills/index.json` with
+6. When skill frontmatter changes, regenerate `docs/skills/index.json` with
    `bash scripts/check-skill-frontmatter.sh --write`; never edit the catalog by
    hand. Keep changelogs, session notes, plans, and design scratchpads out of the
    repository.
-8. Treat history, issue reports, and prior agent output as leads. Verify every
+7. Treat history, issue reports, and prior agent output as leads. Verify every
    project-specific claim in current source, tests, workflows, or contracts.
    Finish with a repository-wide search for superseded terminology and classify
    every surviving match before declaring the documentation aligned.
@@ -93,7 +90,7 @@ closest skill and verify it where practical; never create a session diary.
 - Diagnosing a service by guessing at endpoint names when its skill documents
   the supported read-only ones.
 - Claiming project-internal facts without checking the launcher, image, tests,
-  workflow, or pinned common source.
+  or workflow.
 
 ## Verification
 

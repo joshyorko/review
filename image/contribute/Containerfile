@@ -1,23 +1,39 @@
-# Bluefin Contribute: an isolated interactive Hive + OMP worker.
+# Hive Contribute: an isolated interactive Hive + OMP worker.
 ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:f4c4557fa9841639dfc0274d2ff014ac86e183a150a46d6e356b7731d57cc932
 ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:5217c4e4ed0d89a801e1e64d45c1191a8525ccae8aed6e234cd44382e9b3a143
-ARG HIVE_COMMIT=67530919a135cbc466d1e0961770028842c80876
+# Hive's contributor runtime is never pinned in this repository: the appliance
+# IS upstream Hive's runtime, and a stored copy is a fork with extra steps.
+#
+# HIVE_COMMIT is resolved by the CALLER — `just contribute-build`, the publish
+# workflow, and the validate workflow each read Hive's tracking branch
+# (refs/heads/v4) and pass the SHA in. That is what makes "always the latest
+# Hive" true: the value is part of the layer's cache key, so the moment
+# upstream moves, this RUN re-executes. Resolving it inside the layer instead
+# would leave a constant cache key and a build that silently reuses whatever it
+# fetched first.
+#
+# It is REQUIRED, with no branch fallback. A build that resolved the branch
+# internally could still stamp /usr/share/hive/contribute/HIVE_COMMIT, but the
+# final stage cannot see a value computed inside the builder — so the image
+# would ship a populated commit file beside an empty provenance label. Failing
+# fast beats shipping an image that cannot say what is inside it.
+ARG HIVE_COMMIT=
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
-ARG OMP_VERSION=18.2.1
-ARG OMP_X86_64_SHA256=9c76485c4e65875678b88c7926c7e6891d488796676f359de9c4df584c886fc9
-ARG OMP_AARCH64_SHA256=01ca88eddc6fba11367259dcffc4293fd9458c918f6e5012af35d73338ee1bdd
+ARG OMP_VERSION=18.2.6
+ARG OMP_X86_64_SHA256=0f38598c91e823d8cce07f151ec3999d51f213fb2cc3e07d89f1af8eef9247a2
+ARG OMP_AARCH64_SHA256=07245cbe050c3999ab5cea9babfe84e7e8819d2f4d5e49bef47c0aacb6b957e4
 # renovate: datasource=node-version depName=node
-ARG NODE_VERSION=24.18.1
-ARG NODE_X86_64_SHA256=d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0
-ARG NODE_AARCH64_SHA256=7201e3a09dc825bac57867c81913e2b8f0ef87d04cb9082af4cda82f6ff3d88c
+ARG NODE_VERSION=24.21.0
+ARG NODE_X86_64_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
+ARG NODE_AARCH64_SHA256=6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2
 # renovate: datasource=github-releases depName=cli/cli
-ARG GH_VERSION=2.97.0
-ARG GH_X86_64_SHA256=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112
-ARG GH_AARCH64_SHA256=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5
+ARG GH_VERSION=2.101.0
+ARG GH_X86_64_SHA256=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+ARG GH_AARCH64_SHA256=b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
 # renovate: datasource=github-releases depName=tmux/tmux-builds
-ARG TMUX_VERSION=3.7b
-ARG TMUX_X86_64_SHA256=f85e6c1c412750a774eb3f370f33bad05fc726fb8b6a0b174ad6f0b6d954df58
-ARG TMUX_AARCH64_SHA256=b2955782695283fbc3682a2f77d65616f53b986ee3cf3d80618d3b1cb95b91a6
+ARG TMUX_VERSION=3.7c
+ARG TMUX_X86_64_SHA256=cc56bd1cc873eb6089c615f0496b072385bda8a6d944069f38564a5d49c128aa
+ARG TMUX_AARCH64_SHA256=29dcb978da2a4b0cf6790f9e004865dac239a3ba03bbf776dddacce23d03831b
 ARG CONTRIBUTE_VERSION=0.0.0
 ARG CONTRIBUTE_REVISION=unknown
 
@@ -28,8 +44,24 @@ ARG GH_VERSION GH_X86_64_SHA256 GH_AARCH64_SHA256
 ARG TMUX_VERSION TMUX_X86_64_SHA256 TMUX_AARCH64_SHA256
 ARG CONTRIBUTE_VERSION CONTRIBUTE_REVISION
 COPY package.json package-lock.json /src/
-COPY --chmod=0755 image/appliance/stage-runtime.sh /usr/local/libexec/stage-runtime
+COPY --chmod=0755 image/contribute/stage-runtime.sh /usr/local/libexec/stage-runtime
 COPY --chmod=0755 scripts/generate-contribute-sbom.py /usr/local/libexec/contribute-sbom
+# Hive's `gh` policy layer, byte-for-byte from the same commit as the relay.
+# Upstream's contributor image installs bin/gh-wrapper.sh AS `gh`, ahead of the
+# real binary, with a root-owned /etc/hive/contributor-mode marker beside it —
+# and the wrapper's contributor branch is chosen by that marker's existence,
+# never by an environment variable the agent could set. It is what keeps an
+# assigned task from running `gh auth` against the operator's credential
+# store, from reaching GitHub through a mutating `gh api`, and from using any
+# subcommand nobody reviewed; it is also what labels a contributor's PRs
+# `contributor/<login>` and `cli/omp`. Shipping the raw binary instead left
+# this appliance's agent holding the operator's full-scope token with none of
+# that. The real binary keeps upstream's own path, /opt/hive/bin/gh-real,
+# which is the wrapper's compiled-in default (REAL_GH), so nothing is patched.
+#
+# omp-backend.js is deliberately NOT fetched: it is a HOST-side staging helper
+# for `just contribute-hive`, upstream's own contributor image does not carry
+# it, and neither contributor-agent.sh nor contributor-relay.js requires it.
 RUN set -eu; \
     arch="$(uname -m)"; \
     case "$arch" in \
@@ -38,7 +70,7 @@ RUN set -eu; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     workdir="$(mktemp -d)"; trap 'rm -rf "$workdir"' EXIT; \
-    mkdir -p /out/usr/bin /out/usr/local/bin/lib /out/usr/local/etc/hive /out/usr/lib/bluefin/hive /out/usr/share/bluefin/contribute; \
+    mkdir -p /out/usr/bin /out/usr/local/bin/lib /out/usr/local/etc/hive /out/usr/lib/hive /out/usr/share/hive/contribute /out/opt/hive/bin /out/etc/hive/restrictions; \
     curl --fail --location --show-error --silent "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/${omp_asset}" -o "$workdir/omp"; \
     printf '%s  %s\n' "$omp_sha" "$workdir/omp" | sha256sum -c --status; install -m 0755 "$workdir/omp" /out/usr/bin/omp; \
     curl --fail --location --show-error --silent "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -o "$workdir/node.tar.xz"; \
@@ -49,60 +81,70 @@ RUN set -eu; \
     curl --fail --location --show-error --silent "https://github.com/tmux/tmux-builds/releases/download/v${TMUX_VERSION}/tmux-${TMUX_VERSION}-linux-${tmux_arch}.tar.gz" -o "$workdir/tmux.tar.gz"; \
     printf '%s  %s\n' "$tmux_sha" "$workdir/tmux.tar.gz" | sha256sum -c --status; tar -xzOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > "$workdir/tmux"; chmod 0755 "$workdir/tmux"; \
     PATH="$node_root/bin:$PATH" npm --prefix /src ci --omit=dev --ignore-scripts; \
-    cp -a /src/node_modules /out/usr/lib/bluefin/hive/node_modules; \
+    cp -a /src/node_modules /out/usr/lib/hive/node_modules; \
     /usr/local/libexec/stage-runtime /out "$node_root/bin/node" "$workdir/gh" "$workdir/tmux" /usr/bin/cmp; \
-    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh" -o /out/usr/local/bin/contributor-agent.sh; \
-    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.js" -o /out/usr/local/bin/contributor-relay.js; \
-    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js" -o /out/usr/local/bin/pi-backend.js; \
-    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/lib/pane-classifier.js" -o /out/usr/local/bin/lib/pane-classifier.js; \
-    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf" -o /out/usr/local/etc/hive/backends.conf; \
-    chmod 0755 /out/usr/local/bin/contributor-agent.sh /out/usr/local/bin/contributor-relay.js /out/usr/local/bin/pi-backend.js; \
-    /usr/local/libexec/contribute-sbom --out /out/usr/share/bluefin/contribute/sbom.spdx.json --version "$CONTRIBUTE_VERSION" --revision "$CONTRIBUTE_REVISION" --hive-commit "$HIVE_COMMIT" --omp-version "$OMP_VERSION" --omp-sha256 "$omp_sha" --node-version "$NODE_VERSION" --node-sha256 "$node_sha" --gh-version "$GH_VERSION" --gh-sha256 "$gh_sha" --tmux-version "$TMUX_VERSION" --tmux-sha256 "$tmux_sha" --ws-version "$("$node_root/bin/node" -p "require('/src/node_modules/ws/package.json').version")"; \
-    python3 -m json.tool /out/usr/share/bluefin/contribute/sbom.spdx.json >/dev/null; \
-    install -d -m 0755 /out/etc /out/home/bluefin/.config/hive /out/home/bluefin/workspace /out/var/run/hive-metrics; \
-    printf 'root:x:0:0:root:/root:/usr/bin/bash\nbluefin:x:65532:65532:Bluefin:/home/bluefin:/usr/bin/bash\n' > /out/etc/passwd; \
-    printf 'root:x:0:\nbluefin:x:65532:\n' > /out/etc/group; \
-    chown -R 65532:65532 /out/home/bluefin /out/var/run/hive-metrics; \
-    for binary in /out/usr/bin/omp /out/usr/bin/node /out/usr/bin/gh /out/usr/bin/tmux /out/usr/bin/bash /out/usr/bin/git /out/usr/bin/curl /out/usr/bin/find /out/usr/bin/grep /out/usr/bin/sed /out/usr/bin/cmp /out/usr/bin/python3; do test -x "$binary"; done; \
+    mv /out/usr/bin/gh /out/opt/hive/bin/gh-real; \
+    hive_commit="${HIVE_COMMIT}"; \
+    case "$hive_commit" in \
+      "") echo "HIVE_COMMIT is required: pass --build-arg HIVE_COMMIT=<40-hex sha>. 'just contribute-build' and the workflows resolve Hive's tracking branch and pass it." >&2; exit 1 ;; \
+      *[!0-9a-f]*) echo "HIVE_COMMIT is not a commit SHA: ${hive_commit}" >&2; exit 1 ;; \
+    esac; \
+    case "${#hive_commit}" in 40) : ;; *) echo "HIVE_COMMIT must be a full 40-character SHA: ${hive_commit}" >&2; exit 1 ;; esac; \
+    for hive_file in bin/contributor-agent.sh bin/contributor-relay.js bin/pi-backend.js bin/lib/pane-classifier.js; do \
+      curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/${hive_file}" -o "/out/usr/local/bin/${hive_file#bin/}"; \
+    done; \
+    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/config/backends.conf" -o /out/usr/local/etc/hive/backends.conf; \
+    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/bin/gh-wrapper.sh" -o /out/usr/bin/gh; \
+    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/config/restrictions/contributor-default.json" -o /out/etc/hive/restrictions/contributor-default.json; \
+    : > /out/etc/hive/contributor-mode; \
+    chmod 0755 /out/usr/local/bin/contributor-agent.sh /out/usr/local/bin/contributor-relay.js /out/usr/local/bin/pi-backend.js /out/usr/bin/gh; \
+    printf '%s\n' "$hive_commit" > /out/usr/share/hive/contribute/HIVE_COMMIT; \
+    /usr/local/libexec/contribute-sbom --out /out/usr/share/hive/contribute/sbom.spdx.json --version "$CONTRIBUTE_VERSION" --revision "$CONTRIBUTE_REVISION" --hive-commit "$hive_commit" --omp-version "$OMP_VERSION" --omp-sha256 "$omp_sha" --node-version "$NODE_VERSION" --node-sha256 "$node_sha" --gh-version "$GH_VERSION" --gh-sha256 "$gh_sha" --tmux-version "$TMUX_VERSION" --tmux-sha256 "$tmux_sha" --ws-version "$("$node_root/bin/node" -p "require('/src/node_modules/ws/package.json').version")"; \
+    python3 -m json.tool /out/usr/share/hive/contribute/sbom.spdx.json >/dev/null; \
+    install -d -m 0755 /out/etc /out/home/hive/.config/hive /out/home/hive/workspace /out/var/run/hive-metrics; \
+    printf 'root:x:0:0:root:/root:/usr/bin/bash\nhive:x:65532:65532:Hive:/home/hive:/usr/bin/bash\n' > /out/etc/passwd; \
+    printf 'root:x:0:\nhive:x:65532:\n' > /out/etc/group; \
+    chown -R 65532:65532 /out/home/hive /out/var/run/hive-metrics; \
+    for binary in /out/usr/bin/omp /out/usr/bin/node /out/usr/bin/gh /out/opt/hive/bin/gh-real /out/usr/bin/tmux /out/usr/bin/bash /out/usr/bin/git /out/usr/bin/curl /out/usr/bin/find /out/usr/bin/grep /out/usr/bin/sed /out/usr/bin/cmp /out/usr/bin/python3; do test -x "$binary"; done; \
     test ! -e /out/usr/bin/npm; test ! -e /out/usr/bin/corepack
 
 FROM ${FSDK_BASE_IMAGE}
 ARG FSDK_BASE_IMAGE HIVE_COMMIT OMP_VERSION NODE_VERSION GH_VERSION TMUX_VERSION CONTRIBUTE_VERSION CONTRIBUTE_REVISION
 COPY --from=build /out /
-COPY --chmod=0755 image/contribute/entrypoint.sh /usr/local/bin/contribute-entrypoint
+COPY --chmod=0755 image/contribute/entrypoint.sh /usr/local/bin/hive-contribute
 COPY image/tmux.conf /etc/tmux.conf
 # Hive owns the `omp` command line inside its tmux session, so the image's own
 # OMP settings ride PI_CONFIG_FILES, the documented wrapper seam: it loads as a
 # CLI overlay, above user and project settings, without touching Hive's argv.
-COPY image/contribute/config.yml /usr/share/bluefin/contribute/omp-config.yml
+COPY image/contribute/config.yml /usr/share/hive/contribute/omp-config.yml
 # LANG is load-bearing for the attended terminal, not cosmetic. Without a
 # UTF-8 locale glibc resolves to C, and tmux then treats its attach client as
 # non-UTF-8: box drawing degrades to DEC ACS escapes and every other non-ASCII
 # cell — arrows, bullets, the status-line emoji, OMP's own glyphs — is written
 # to the terminal as `_`. The base ships C.utf8 and en_US.utf8; C.UTF-8 keeps
 # byte-ordered collation and language-neutral formatting for the agent.
-ENV HOME=/home/bluefin \
-    XDG_CONFIG_HOME=/home/bluefin/.config \
-    XDG_STATE_HOME=/home/bluefin/.local/state \
-    NODE_PATH=/usr/lib/bluefin/hive/node_modules \
+ENV HOME=/home/hive \
+    XDG_CONFIG_HOME=/home/hive/.config \
+    XDG_STATE_HOME=/home/hive/.local/state \
+    NODE_PATH=/usr/lib/hive/node_modules \
     PATH=/usr/bin:/bin \
     SHELL=/usr/bin/bash \
     TERM=xterm-256color \
     LANG=C.UTF-8 \
-    PI_CONFIG_FILES=/usr/share/bluefin/contribute/omp-config.yml \
+    PI_CONFIG_FILES=/usr/share/hive/contribute/omp-config.yml \
     AGENT_BACKEND=omp
-LABEL org.opencontainers.image.title="Bluefin Contribute" \
+LABEL org.opencontainers.image.title="Hive Contribute" \
       org.opencontainers.image.description="Distroless OMP contributor runtime for Hive-assigned work." \
-      org.opencontainers.image.source="https://github.com/projectbluefin/review" \
+      org.opencontainers.image.source="https://github.com/projectbluefin/contribute" \
       org.opencontainers.image.revision="${CONTRIBUTE_REVISION}" \
       org.opencontainers.image.version="${CONTRIBUTE_VERSION}" \
       org.opencontainers.image.base.name="${FSDK_BASE_IMAGE}" \
-      io.projectbluefin.contribute="true" \
-      io.projectbluefin.contribute.omp.version="${OMP_VERSION}" \
-      io.projectbluefin.contribute.hive.commit="${HIVE_COMMIT}" \
-      io.projectbluefin.contribute.node.version="${NODE_VERSION}" \
-      io.projectbluefin.contribute.gh.version="${GH_VERSION}" \
-      io.projectbluefin.contribute.tmux.version="${TMUX_VERSION}"
+      io.hivecommons.contribute="true" \
+      io.hivecommons.contribute.omp.version="${OMP_VERSION}" \
+      io.hivecommons.contribute.hive.ref="${HIVE_COMMIT}" \
+      io.hivecommons.contribute.node.version="${NODE_VERSION}" \
+      io.hivecommons.contribute.gh.version="${GH_VERSION}" \
+      io.hivecommons.contribute.tmux.version="${TMUX_VERSION}"
 USER 65532:65532
-WORKDIR /home/bluefin/workspace
-ENTRYPOINT ["/usr/local/bin/contribute-entrypoint"]
+WORKDIR /home/hive/workspace
+ENTRYPOINT ["/usr/local/bin/hive-contribute"]

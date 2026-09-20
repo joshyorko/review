@@ -1,7 +1,7 @@
 ---
 name: upstream-hive
-version: "1.3"
-last_updated: 2026-08-07
+version: "1.4"
+last_updated: "2026-09-19"
 id: upstream-hive
 one_line_purpose: File and follow up on hivecommons/hive issues as an exemplary downstream.
 entry_point: docs/skills/upstream-hive.md
@@ -30,27 +30,34 @@ decisions.
 
 ## When Not to Use
 
-Do not use this for a gap owned by this repository, by
-`projectbluefin/fsdk-containers` (base-image content), or by
-`projectbluefin/common` (org skills). Route by who owns the broken thing, not
-by which repository is easiest to file in.
+Do not use this for a gap owned by this repository or by the base image.
+Route by who owns the broken thing, not by which repository is easiest to file in.
 
 ## Common Rationalizations
 
 | Rationalization | Reality |
 |---|---|
-| "A local workaround is faster than an upstream fix." | It is, once. Then it is permanent, undocumented, and diverges at the next pin bump. Accepted upstream gaps get no local workaround. |
+| "A local workaround is faster than an upstream fix." | It is, once. Then it is permanent, undocumented, and diverges over time. Accepted upstream gaps get no local workaround. |
 | "They will not act on it, so why file?" | An unreported gap is indistinguishable from one nobody hit. Evidence with a reproduction is what makes it actionable. |
 | "I will file it and move on." | Filed issues are followed up here. An abandoned issue is a gap that stopped being tracked. |
 
 ## Upstream Facts
 
-Verified 2026-09-06 against `hivecommons/hive`:
+Verified against `hivecommons/hive`:
 
 - The default branch is `v4` (v2 is retired). Cite code there, not `main`.
-- There is no `CONTRIBUTING.md`, `AGENTS.md`, code of conduct, issue template,
-  or pull request template. Absent guidance is not permission to invent our
-  own process; follow the conventions their repository visibly practices.
+- They ship `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `SECURITY.md`. Read
+  the current copies rather than assuming; there is still no `AGENTS.md`, issue
+  template, or pull request template.
+- `CONTRIBUTING.md` states the base branch: `main` is not the active target, so
+  cut a topic branch from `origin/v4` (or whichever base its table names for
+  the kind of change) and target that.
+- **`SECURITY.md` forbids reporting a vulnerability through a public issue,
+  pull request, or discussion.** Credential exposure, token handling, and
+  sandbox-escape findings go through GitHub's private vulnerability reporting
+  (Security -> Report a vulnerability), or to a maintainer directly. Do not
+  open a public issue for one, and do not write the details into this
+  repository's documents while a report is unanswered.
 - They use Kubernetes/prow-style labels: `kind/*`, `priority/*`, `triage/*`,
   `needs-triage`, `size/*`, `lgtm`, `ai-generated`, and `dco-signoff: yes|no`.
 - Merged pull requests carry `Signed-off-by:` and use `Refs #NNNN` to link a
@@ -64,17 +71,12 @@ depends on reading both correctly.
 
 An **upstream gap** is a missing capability in Hive's contributor protocol,
 assignment flow, or contributor runtime — the surface Hive owns and we consume.
-A missing capability in the pinned base image is **not** an upstream gap. It is
-a base-image capability gap; it is filed on
-[`projectbluefin/fsdk-containers`](https://github.com/projectbluefin/fsdk-containers)
-under the same evidence discipline as this document, and it is governed by
-[`image-build.md`](image-build.md): use the tools the image already ships, and
-where one is genuinely missing, add it at the FSDK seam so every consumer is
+A missing capability in the base image is **not** an upstream gap. It is
+governed by [`image-build.md`](image-build.md): use the tools the image already ships, and
+where one is genuinely missing, add it at the base seam so every consumer is
 fixed at once. Different tracker, same rules — reproduce it, file it, reference
 the number, and never describe it in a document instead. Never hand-roll a
-local reimplementation of standard userland. There is no
-standing exception to this and no wording that creates one, so there is no
-base-image precedent to cite for shimming a protocol gap either.
+local reimplementation of standard userland.
 
 A gap is **accepted** once an upstream maintainer has responded with a
 decision — typically a `DESIGN-RESPONSE` comment, but any explicit maintainer
@@ -84,9 +86,7 @@ report is not a licence to work around the gap while we wait, and an accepted
 one is not a licence to work around a decision already made.
 
 So for a Hive protocol gap there is no state in which a downstream retry, poll,
-timeout, negotiation, fallback, or shim is correct. Moving the pin is the fix
-once upstream ships one, and until then we run with the gap and say so in the
-issue.
+timeout, negotiation, fallback, or shim is correct.
 
 ## Core Process
 
@@ -94,10 +94,10 @@ issue.
    measurements, and code citations. Offer options with tradeoffs and an
    explicit gate; let maintainers choose. Never open with a proposed patch to
    their architecture or a recommendation phrased as a requirement.
-2. **Name our own bugs first.** Where a finding is a `projectbluefin/review`
+2. **Name our own bugs first.** Where a finding is a downstream
    design consequence, say so plainly in the same comment. Retract our own
    incorrect claims explicitly rather than quietly dropping them.
-3. **Cite code by pinned permalink.** Link a specific commit SHA with line
+3. **Cite code by permalink.** Link a specific commit SHA with line
    anchors, never a branch path that will drift. Timestamp live probes in UTC
    and record the exact request and response.
 4. **File as a child of the field-notes parent.** Downstream findings open with
@@ -127,13 +127,12 @@ issue.
 ## Red Flags
 
 - Prescribing an implementation, or writing an issue as a change request.
-- Citing a branch path instead of a pinned commit SHA.
+- Citing a branch path instead of a commit SHA.
 - Labeling, assigning, prioritizing, or milestoning an upstream issue.
 - Filing a report we cannot reproduce, or omitting the timestamp of a probe.
 - Presenting a downstream design consequence as an upstream defect.
 - Building a local workaround for an upstream protocol gap, accepted or still
   awaiting a response.
-- Citing a base-image shim as precedent for a protocol workaround.
 - Reopening a direction a maintainer already decided in a `DESIGN-RESPONSE`.
 - Filing a new issue for evidence that belongs on an existing one.
 - Describing a gap in a document instead of filing it. A paragraph cannot be
@@ -141,7 +140,7 @@ issue.
 
 ## Verification
 
-- [ ] Every code claim links a pinned commit SHA with line anchors.
+- [ ] Every code claim links a commit SHA with line anchors.
 - [ ] Every live probe records its UTC timestamp, request, and response.
 - [ ] The issue offers options and a gate, not a mandated solution.
 - [ ] Ours-versus-theirs attribution is stated explicitly.
@@ -149,6 +148,5 @@ issue.
 - [ ] No corresponding workaround was added to this repository.
 
 ```bash
-gh issue view <number> --repo hivecommons/hive --comments
 bash scripts/check-skill-frontmatter.sh
 ```

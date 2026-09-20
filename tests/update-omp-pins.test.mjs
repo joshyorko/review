@@ -54,12 +54,10 @@ test("updateContainerfile replaces exactly one complete OMP pin set", () => {
 	assert.throws(() => updateContainerfile(`${OLD_CONTAINERFILE}ARG OMP_VERSION=1.0.0\n`, releasePins(RELEASE)), /expected one ARG OMP_VERSION pin/);
 });
 
-test("syncOmpPins updates both shipped images from the same Renovate-selected release", async (t) => {
+test("syncOmpPins updates contributor image from the Renovate-selected release", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "omp-pins-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
-	await mkdir(join(root, "image/appliance"), { recursive: true });
 	await mkdir(join(root, "image/contribute"), { recursive: true });
-	await writeFile(join(root, "image/appliance/Containerfile"), RENOVATED_CONTAINERFILE);
 	await writeFile(join(root, "image/contribute/Containerfile"), RENOVATED_CONTAINERFILE);
 
 	const urls = [];
@@ -73,15 +71,13 @@ test("syncOmpPins updates both shipped images from the same Renovate-selected re
 
 	assert.equal(pins.version, "18.2.1");
 	assert.deepEqual(urls, ["https://api.github.com/repos/can1357/oh-my-pi/releases/tags/v18.2.1"]);
-	const appliance = await readFile(join(root, "image/appliance/Containerfile"), "utf8");
 	const contribute = await readFile(join(root, "image/contribute/Containerfile"), "utf8");
-	assert.equal(appliance, contribute);
-	assert.match(appliance, /^ARG OMP_VERSION=18\.2\.1$/m);
-	assert.match(appliance, new RegExp(`^ARG OMP_X86_64_SHA256=${X64}$`, "m"));
-	assert.match(appliance, new RegExp(`^ARG OMP_AARCH64_SHA256=${ARM64}$`, "m"));
+	assert.match(contribute, /^ARG OMP_VERSION=18\.2\.1$/m);
+	assert.match(contribute, new RegExp(`^ARG OMP_X86_64_SHA256=${X64}$`, "m"));
+	assert.match(contribute, new RegExp(`^ARG OMP_AARCH64_SHA256=${ARM64}$`, "m"));
 });
 
-test("Renovate follows OMP releases and both image publishers validate the pin sync", async () => {
+test("Renovate follows OMP releases and contributor image publisher validates the pin sync", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
 	const manager = config.customManagers.find((candidate) => candidate.depNameTemplate === "can1357/oh-my-pi");
 	assert.ok(manager, "OMP needs a regex manager for ARG OMP_VERSION");
@@ -94,28 +90,15 @@ test("Renovate follows OMP releases and both image publishers validate the pin s
 	assert.equal(rule.matchManagers, undefined);
 	assert.equal(rule.automerge, true);
 	assert.equal(rule.automergeType, "pr");
-	const currentPinBlock = async (path) => (await readFile(path, "utf8"))
-		.split("\n")
-		.filter((line) => /^ARG OMP_(?:VERSION|X86_64_SHA256|AARCH64_SHA256)=/.test(line));
-	assert.deepEqual(
-		await currentPinBlock("image/appliance/Containerfile"),
-		await currentPinBlock("image/contribute/Containerfile"),
-		"review and contributor images must ship one OMP release",
-	);
 	assert.equal(rule.automergeStrategy, "squash");
 	assert.deepEqual(rule.postUpgradeTasks.commands, ["node scripts/update-omp-pins.mjs"]);
-	assert.deepEqual(rule.postUpgradeTasks.fileFilters.sort(), [
-		"image/appliance/Containerfile",
-		"image/contribute/Containerfile",
-	]);
+	assert.deepEqual(rule.postUpgradeTasks.fileFilters, ["image/contribute/Containerfile"]);
 
 	const renovateWorkflow = await readFile(".github/workflows/renovate.yml", "utf8");
 	assert.match(renovateWorkflow, /cron: '15 2 \* \* \*'/);
 	assert.match(renovateWorkflow, /RENOVATE_ALLOWED_COMMANDS:.*update-omp-pins/);
 	assert.match(renovateWorkflow, /RENOVATE_REPOSITORIES: \$\{\{ github\.repository \}\}/);
-	for (const path of [".github/workflows/publish-appliance.yml", ".github/workflows/publish-contribute.yml"]) {
-		const workflow = await readFile(path, "utf8");
-		assert.match(workflow, /push:\n    branches:\n      - main/);
-		assert.match(workflow, /node --test tests\/update-omp-pins\.test\.mjs/);
-	}
+	const workflow = await readFile(".github/workflows/publish-contribute.yml", "utf8");
+	assert.match(workflow, /push:\n    branches:\n      - main/);
+	assert.match(workflow, /node --test tests\/update-omp-pins\.test\.mjs/);
 });

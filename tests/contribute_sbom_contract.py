@@ -89,10 +89,10 @@ class DocumentEnvelopeContract(unittest.TestCase):
         self.assertEqual(doc["spdxVersion"], "SPDX-2.3")
         self.assertEqual(doc["dataLicense"], "CC0-1.0")
         self.assertEqual(doc["SPDXID"], "SPDXRef-DOCUMENT")
-        self.assertEqual(doc["name"], "bluefin-contribute")
+        self.assertEqual(doc["name"], "hive-contribute")
         self.assertEqual(
             doc["documentNamespace"],
-            f"https://projectbluefin.org/spdx/contribute/{BASE_ARGS['--version']}/{BASE_ARGS['--revision']}",
+            f"https://hivecommons.org/spdx/hive-contribute/{BASE_ARGS['--version']}/{BASE_ARGS['--revision']}",
         )
 
     def test_creation_info(self):
@@ -152,7 +152,7 @@ class PackageMetadataContract(unittest.TestCase):
         )
         self.assertEqual(
             pkgs["hive-contributor-runtime"]["downloadLocation"],
-            f"https://github.com/hivecommons/hive/tree/{BASE_ARGS['--hive-commit']}/bin",
+            f"https://github.com/hivecommons/hive/tree/{BASE_ARGS['--hive-commit']}",
         )
 
     def test_package_license_and_copyright_fields(self):

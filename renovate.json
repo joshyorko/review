@@ -5,10 +5,10 @@
   ],
   "customManagers": [
     {
-      "description": "Track the shared OMP release version in both image Containerfiles; the post-upgrade task supplies verified per-architecture digests.",
+      "description": "Track OMP release version in the contributor image Containerfile; the post-upgrade task supplies verified per-architecture digests.",
       "customType": "regex",
       "managerFilePatterns": [
-        "/(^|/)image/(appliance|contribute)/Containerfile$/"
+        "/(^|/)image/contribute/Containerfile$/"
       ],
       "matchStrings": [
         "# renovate: datasource=github-releases depName=can1357/oh-my-pi\\nARG OMP_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
@@ -18,28 +18,10 @@
       "versioningTemplate": "semver-coerced"
     },
     {
-      "description": "Track hivecommons/hive origin/v4 as a pinned commit SHA. The SHA is duplicated in the launcher, contributor image, and README; one depName keeps every match in a single Renovate branch and PR.",
+      "description": "Track GitHub CLI release version in the contributor image Containerfile; the post-upgrade task supplies verified per-architecture digests.",
       "customType": "regex",
       "managerFilePatterns": [
-        "/(^|/)justfile$/",
-        "/(^|/)image/contribute/Containerfile$/",
-        "/(^|/)README\\.md$/"
-      ],
-      "matchStrings": [
-        "hive_commit := \"(?<currentDigest>[0-9a-f]{40})\"",
-        "ARG HIVE_COMMIT=(?<currentDigest>[0-9a-f]{40})",
-        "layers the pinned Hive runtime at `(?<currentDigest>[0-9a-f]{40})`"
-      ],
-      "currentValueTemplate": "v4",
-      "depNameTemplate": "hivecommons/hive",
-      "packageNameTemplate": "https://github.com/hivecommons/hive",
-      "datasourceTemplate": "git-refs"
-    },
-    {
-      "description": "Track the shared GitHub CLI release version in both image Containerfiles; the post-upgrade task supplies verified per-architecture digests.",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "/(^|/)image/(appliance|contribute)/Containerfile$/"
+        "/(^|/)image/contribute/Containerfile$/"
       ],
       "matchStrings": [
         "# renovate: datasource=github-releases depName=cli/cli\\nARG GH_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
@@ -88,7 +70,7 @@
   ],
   "packageRules": [
     {
-      "description": "Immutable-ref housekeeping automerges by default. Other code-changing updates require review under the supply-chain gate projectbluefin/review#499 unless a later dependency-specific rule opts into validated automerge; the OMP rule below is that explicit exception. Pull-request automerge and squash are stated because branch protection rejects branch-mode automerge.",
+      "description": "Immutable-ref housekeeping automerges by default. Other code-changing updates require review under the supply-chain gate unless a later dependency-specific rule opts into validated automerge; the OMP rule below is that explicit exception. Pull-request automerge and squash are stated because branch protection rejects branch-mode automerge.",
       "matchUpdateTypes": [
         "pin",
         "pinDigest"
@@ -99,7 +81,18 @@
       "platformAutomerge": true
     },
     {
-      "description": "Track every stable OMP GitHub release, refresh both verified binary digests, and merge after repository checks so both image publishers run from main.",
+      "description": "Image runtime pins are never rate-limited. Renovate creates a branch before it creates a PR, and the stock config:recommended prHourlyLimit queues PR creation behind whatever else is pending. This repository receives digest updates every day, so that queue never drains: renovate/omp-runtime sat current (Renovate pushed each new OMP release to it) and never once got a PR, leaving the shipped image five releases behind while the tracking itself looked healthy. These four pins ARE the image supply chain — they must not wait behind an action digest.",
+      "matchDepNames": [
+        "can1357/oh-my-pi",
+        "cli/cli",
+        "node",
+        "tmux/tmux-builds"
+      ],
+      "prConcurrentLimit": 0,
+      "prHourlyLimit": 0
+    },
+    {
+      "description": "Track every stable OMP GitHub release, refresh verified binary digests, and merge after repository checks so the image publisher runs from main.",
       "matchDatasources": [
         "github-releases"
       ],
@@ -117,7 +110,6 @@
           "node scripts/update-omp-pins.mjs"
         ],
         "fileFilters": [
-          "image/appliance/Containerfile",
           "image/contribute/Containerfile"
         ],
         "executionMode": "branch"
@@ -135,7 +127,7 @@
       "pinDigests": true
     },
     {
-      "description": "Track GitHub CLI releases and refresh both verified binary digests.",
+      "description": "Track GitHub CLI releases and refresh verified binary digests.",
       "matchDatasources": [
         "github-releases"
       ],
@@ -149,7 +141,6 @@
           "node scripts/update-gh-pins.mjs"
         ],
         "fileFilters": [
-          "image/appliance/Containerfile",
           "image/contribute/Containerfile"
         ],
         "executionMode": "branch"

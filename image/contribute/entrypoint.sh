@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Bluefin Contribute entrypoint: Hive's pinned contributor runtime owns the
+# Hive Contribute entrypoint: Hive's pinned contributor runtime owns the
 # tmux session, prompt injection, and task selection; this only waits for
 # that session to exist and attaches this attended terminal to it, so the
 # OMP agent is visible immediately with no second terminal required.
 set -euo pipefail
 
-note() { printf 'contribute: %s\n' "$1" >&2; }
+note() { printf 'hive-contribute: %s\n' "$1" >&2; }
 
 if [[ -n "${AGENT_BACKEND:-}" && "${AGENT_BACKEND}" != omp ]]; then
   echo "ERROR: this contribute image supports only AGENT_BACKEND=omp." >&2
@@ -105,6 +105,35 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+# Hive's relay caches each task's short-lived, hub-minted GitHub token under
+# /var/run/hive-metrics, a directory this image ships. The Apptainer fallback
+# mounts the image read-only, so every assignment logs
+# `EROFS: read-only file system` and the agent works without the credential the
+# hub just issued for it. Point the relay at a writable path whenever its
+# default is not writable; an explicit HIVE_GH_TOKEN_CACHE still wins.
+if [ -z "${HIVE_GH_TOKEN_CACHE:-}" ] && [ ! -w /var/run/hive-metrics ]; then
+  HIVE_GH_TOKEN_CACHE="${TMPDIR:-/tmp}/hive-gh-token.cache"
+  export HIVE_GH_TOKEN_CACHE
+fi
+
+# Hive owns the `contributor` session and never recreates one it has lost, so
+# a vanished session is terminal: the CLI is gone, while the relay stays
+# connected and authenticated and the hub keeps this contributor on its roster
+# and assigns it work that has nowhere to run. Waiting on the agent script
+# alone cannot see that — it stays alive around a dead session — so follow the
+# session itself, from a detach and from an unattended run alike, and stop the
+# moment it disappears.
+follow_agent() {
+  while kill -0 "$agent_pid" 2>/dev/null; do
+    if ! tmux has-session -t contributor 2>/dev/null; then
+      note 'the contributor session ended; stopping rather than holding an idle registration.'
+      exit 1
+    fi
+    sleep 1
+  done
+  wait "$agent_pid"
+}
+
 /usr/local/bin/contributor-agent.sh "$@" &
 agent_pid=$!
 
@@ -148,9 +177,11 @@ if [ -t 0 ] && [ -t 1 ]; then
   attach_pid=
   exec 3<&-
   reset_terminal
-  note 'tmux detached; the agent remains foreground in this terminal. Press Ctrl-C or close this terminal to stop it.'
-  wait "$agent_pid"
+  if tmux has-session -t contributor 2>/dev/null; then
+    note 'tmux detached; the agent remains foreground in this terminal. Press Ctrl-C or close this terminal to stop it.'
+  fi
+  follow_agent
 else
   note 'no tty; following the agent without attaching'
-  wait "$agent_pid"
+  follow_agent
 fi

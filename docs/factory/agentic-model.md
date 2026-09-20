@@ -1,27 +1,21 @@
-# Bluefin Agentic Factory Feedback Loop
+# Agentic Factory Feedback Loop
 
-This document is the canonical local model for `review`. It adapts
-[`projectbluefin/common`'s Agentic Operating Model][common-model] to this
-repository's OMP workbench and Hive contributor runtimes. Read it after
+This document is the canonical local model for `contribute`. It defines how this
+repository operates as an OMP contributor runtime for Hive. Read it after
 `AGENTS.md` and before task-specific skills.
 
-The repository ships two purpose-specific runtimes:
-1. The distroless review appliance (`image/appliance/Containerfile` ->
-   `ghcr.io/projectbluefin/review`) packages the only maintainer UI: the OMP
-   extension in `image/extension/bluefin-review/`. Both `just review-queue` and
-   `just review-appliance` launch it. OMP owns agent execution, sessions, tasks,
-   workflowz, and tool boundaries.
-2. The contributor runtime (`image/contribute/Containerfile` ->
-   `ghcr.io/projectbluefin/contribute`) packages Hive's worker and OMP. Both
-   contributor convenience commands launch it; OMP owns model and effort.
+The repository ships one purpose-specific runtime:
+1. The contributor runtime (`image/contribute/Containerfile` ->
+   `ghcr.io/projectbluefin/contribute`, used as a registry location) packages Hive's worker and OMP. Both
+   `hive-contribute` and `just contribute` launch it; OMP owns model and effort.
 
-Local launchers run either OCI image through Podman's `krun` runtime. Each
+Local launchers run the OCI image through Podman's `krun` runtime. Each
 invocation is a separate foreground KVM microVM with a unique container name;
-repository or explicit instance identity selects separate persistent OMP state.
+the hub endpoint hash selects separate persistent OMP state.
 
-Hive assignment authority remains separate from the human review surface:
-Hive assigns contributor tasks, while maintainer review sessions consume Hive
-reads as optional, non-mutating context and ordering.
+Hive assignment authority remains separate:
+Hive assigns contributor tasks, while OMP owns agent execution, model choice,
+and tool boundaries.
 The model is documentation: the launcher, image, tests, skills, and
 user-facing instructions must describe the same roles and authority
 boundaries. When source evidence changes the model, update this document and
@@ -32,19 +26,12 @@ session logs, or design scratchpads as competing explanations.
 
 | Term | Meaning | Authority |
 |---|---|---|
-| **Bluefin Agentic Factory Feedback Loop** | The lifecycle that turns agent work and test feedback into reviewed Bluefin changes. | The model for this repository. |
+| **Agentic Factory Feedback Loop** | The lifecycle that turns agent work and test feedback into reviewed open-source contributions. | The model for this repository. |
 | **Toil** | Repetitive, low-novelty maintenance work an under-maintained project needs: broken CI, stale pins, drifted documentation, unreproduced reports, untriaged issues, stalled branches. | Toil is the work this factory exists to absorb. |
-| **Contributor** | A contributor using the worker configuration to receive and complete Hive-assigned work. They are treated as a contributor, they just happen to specialize in the `clanker-queue`. It's a "subclass" of contributor like a video game RPG character. Same team, different specialization. | Hive assigns work; the worker implements only its assigned scope. |
-| **Maintainer/Reviewer** | A maintainer assessing an incoming pull request or issue. Active review process requiring human judgement and decision. | The human decides review, approval, and merge. |
-| **Review Evidence** | Read-only pull-request, issue, verification, trace, and merge-state context shown before a review. | Evidence informs a human; it never makes a decision. |
-| **Review Mode / Extension** | The sole maintainer workbench in `image/extension/bluefin-review/`. It provides the live queue, pipeline trace, companion agents, and inspection tools. | OMP owns execution, session, workflowz, and tool boundaries. |
-| **Managed Reviewer Client** | A foreground OMP workbench a maintainer uses to examine evidence and dispatch bounded actions. | It executes only typed, human-authorized decisions; explicit slay intent delegates the corresponding coordinator lifecycle. |
-| **Portable Reviewer Prompt** | Markdown Review Evidence and queue instructions for a maintainer's own client. | It is context, not an assignment. |
-| **Bluefin Work Queue** | A live GitHub view of open pull requests and issues. | GitHub owns state; returned-author repairs form a local first lane; Hive supplies the remaining relative order when configured; the queue never assigns contributor work. |
-| **Workbench Activity** | The bounded projection of active workflowz tasks, outcomes, queue state, and freshness. | It reports observed state and never assigns Hive work. |
-| **Review Draft** | Analysis, review text, or commands prepared for a Maintainer Reviewer. | A human explicitly considers and submits it. |
+| **Contributor** | A contributor using the worker configuration to receive and complete Hive-assigned work. Specializes in the `clanker-queue`. Same team, different specialization. | Hive assigns work; the worker implements only its assigned scope. |
+| **Maintainer/Reviewer** | A maintainer assessing an incoming pull request or issue. Active review process requiring human judgment and decision. | The human decides review, approval, and merge. |
 
-Avoid classifying contributors by role; this isn't a class system it's the loadout a contributor chooses to use that day.
+Avoid classifying contributors by role; it is the loadout a contributor chooses to use that day.
 
 ## Two layers
 
@@ -61,7 +48,7 @@ change; projects determine it, and Hive may use it when distributing work.
 Nothing in this repository sets, scores, or automates it, and the
 `human-queue` is out of scope here.
 
-The IMPORTANT DISTINCTION in the culture is that the humans take pride in maintaining systems at the highest levels. If they are doing their jobs, they are invisible. We are designing this tool because the mental toll of that maintenance is hurting people. Amongst their peers there is a culture of respect and craftmanship. The leaderboards/contribution graphs are supposed to be a friendly way to remind maintainers that their work is recognized by their peers. This is one of the highest honors a maintainer can receive. Silent professionals.
+The important distinction in the culture is that the humans take pride in maintaining systems at the highest levels. If they are doing their jobs, they are invisible. We are designing this tool because the mental toll of that maintenance is hurting people. Amongst their peers there is a culture of respect and craftsmanship. The leaderboards/contribution graphs are supposed to be a friendly way to remind maintainers that their work is recognized by their peers. This is one of the highest honors a maintainer can receive. Silent professionals.
 
 Do not reconcile the two layers by applying agent scope rules to the human, or
 by reading the human ladder as a statement about agent output.
@@ -86,44 +73,28 @@ carries the operational form of this section.
 
 ## Repository boundary
 
-`review` ships the review appliance image, the OMP extension, the contributor
-image, credential handoff, and review context.
+`contribute` ships the contributor image, credential handoff, and contributor runtime.
 
-OMP owns agent execution, sessions, tasks, and companion review tool boundaries
-in the primary maintainer product. Hive reads remain optional, read-only
-context and queue ordering for maintainers.
+OMP owns agent execution, sessions, tasks, and tool boundaries.
 
 Hive owns the contributor WebSocket protocol, task selection, assignment prompt
 injection, the `contributor` tmux session, and output capture. The launcher
-must not decline, retry, or otherwise manage assignments mid-protocol. The
-maintainer-facing queue may put the authenticated user's pull requests with
-requested changes in a repair-only lane before Hive-ranked review work; those
-pull requests are never self-reviewed, self-approved, or self-merged. Hive also
-owns contributor completion. Review may display a read-only Hive projection,
-but it never completes an assignment.
+must not decline, retry, or otherwise manage assignments mid-protocol. Hive also
+owns contributor completion.
 
 The `contribute` image defines one narrow contributor experience: it always
 launches OMP and rejects every other `AGENT_BACKEND` value before Hive starts.
-Its FSDK closure contains only the tools required by OMP and Hive's interactive
+Its closure contains only the tools required by OMP and Hive's interactive
 relay. The generic upstream helper files needed by that relay are implementation
-dependencies, not alternate agent surfaces. No dashboard, review extension,
-scheduler, Codex, Pi, or provider state belongs in the image.
-The human Maintainer Reviewer owns approval, queueing, and merge decisions. A
-confirmed slay delegates bounded execution of that decision to the coordinator:
-ordinary PR waves may repair, approve, and request auto-merge after fresh review
-and live-rule validation. Reviewer agents remain read-only. Issue and returned-
-author workers may submit changes but never approve or merge their own pull
-requests. A clean review without confirmed slay intent is evidence, not landing
-authority.
+dependencies, not alternate agent surfaces. No dashboard, scheduler, Codex,
+Pi, or provider state belongs in the image.
 
-The pinned FSDK base owns the contributor toolchain. `review` consumes the
+The base image owns the contributor toolchain. `contribute` consumes the
 tools the image ships and does not reimplement them: a missing utility is
-fixed at the FSDK seam, and a shim is removed the moment that fix lands. A
+fixed at the base image seam, and a shim is removed the moment that fix lands. A
 local reimplementation is not a neutral stopgap — it shadows the real tool on
 `PATH` and silently substitutes its own semantics for the ones every caller
 assumes.
-
-
 
 ## Documentation discipline
 
@@ -136,15 +107,8 @@ Keep the model executable and compact:
    `docs/skills/index.json` from skill frontmatter.
 4. Delete stale changelogs, session notes, plans, design scratchpads, and
    append-only status documents. They are historical noise, not the model.
-5. Use the pinned `projectbluefin/common` catalog as a shared sidecar after
-   local documentation; it complements but does not override local authority.
-   Its [factory onboarding sequence][common-onboarding] is the shared entry
-   procedure and self-repair loop; follow it there rather than restating it
-   here.
 
 ## Verification
-
-CI enforces the complete verification suite in `.github/workflows/validate.yml` (see [`docs/image-and-development.md`](../image-and-development.md#validation) for the full local command list).
 
 For factory model, skills, and image contract changes, run the core contract checks:
 
@@ -153,12 +117,6 @@ pre-commit run --all-files
 git diff --check
 just --list
 bash scripts/check-skill-frontmatter.sh
-bash tests/generate-skills.sh
-bash tests/test-registry.sh
-bash tests/omp-review-mode.sh
-bash tests/appliance-contract.sh
+bash tests/launcher-contract.sh
 bash tests/contribute-contract.sh
-bash tests/just-onboarding.sh
 ```
-[common-model]: https://github.com/projectbluefin/common/blob/main/docs/factory/agentic-model.md
-[common-onboarding]: https://github.com/projectbluefin/common/blob/main/docs/skills/factory-onboarding.md

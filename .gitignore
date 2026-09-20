@@ -2,8 +2,6 @@
 # retain them in the source tree.
 *.sif
 .worktrees/
-image/bluefin-operations/node_modules/
-
 
 __pycache__/
 
@@ -17,3 +15,4 @@ __pycache__/
 # so a wide `git add` cannot pull one into the repository.
 .superpowers/
 docs/superpowers/
+node_modules/

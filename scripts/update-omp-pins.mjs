@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const REPOSITORY = "can1357/oh-my-pi";
-const CONTAINERFILES = ["image/appliance/Containerfile", "image/contribute/Containerfile"];
+const CONTAINERFILES = ["image/contribute/Containerfile"];
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 const DIGEST_PATTERN = /^sha256:([0-9a-f]{64})$/;
 
@@ -56,7 +56,7 @@ async function fetchRelease(requestedVersion, fetchImpl) {
 	const token = process.env.RENOVATE_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 	const headers = {
 		Accept: "application/vnd.github+json",
-		"User-Agent": "projectbluefin-review-omp-sync",
+		"User-Agent": "hive-contribute-omp-sync",
 		"X-GitHub-Api-Version": "2022-11-28",
 	};
 	if (token) headers.Authorization = `Bearer ${token}`;

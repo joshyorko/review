@@ -1,7 +1,7 @@
 ---
 name: hive-triage
-version: "1.5"
-last_updated: 2026-08-07
+version: "1.6"
+last_updated: "2026-09-19"
 id: hive-triage
 one_line_purpose: Diagnose why an attached contributor is never handed work.
 entry_point: docs/skills/hive-triage.md
@@ -47,10 +47,8 @@ issue — collect the evidence here, then follow
 2. Read the relay log first. When the hub declines to assign work it sends a
    `task_unavailable` negative-ack and the relay prints the reason before
    re-asking 30 seconds later. The reason strings are the hub's, defined in
-   `src/pkg/dashboard/contribute_ws.go`; the relay only prints `msg.reason`, and
-   its own comment naming `no_work` is stale — no such reason exists in the
-   hub. Read the constants, and take the string the relay actually printed over
-   any list, including this one:
+   `src/pkg/dashboard/contribute_ws.go`; the relay only prints `msg.reason`.
+   Read the constants:
 
    | Reason | Means |
    |---|---|
@@ -63,9 +61,7 @@ issue — collect the evidence here, then follow
    | `hourly_limit` / `daily_limit` | The tier's `max_per_hour` / `max_per_day` cap was hit. |
 
    The last four are enforced refusals aimed at this contributor; the first
-   three are hub-wide conditions no local change affects. A relay predating
-   these cases logs the message as an unknown type and then stops asking; that
-   is a pin problem, not a hub problem.
+   three are hub-wide conditions no local change affects.
 3. Read the hub's authenticated and public endpoints rather than guessing at them.
    `/api/health` and `/api/status` redirect to OAuth and tell you nothing.
 
@@ -88,7 +84,7 @@ issue — collect the evidence here, then follow
    local setup, tier, or the image.
 5. Reconnect only as the normal request retry after the relevant hub state
    changed. Do not add polling, selection logic, or an assignment retry loop
-   to review.
+   to the launcher.
 6. Escalate the observed condition to the hub operator with the time window
    and classification. Hub configuration and selection behavior are fixed
    there, not in this launcher.
@@ -97,10 +93,7 @@ issue — collect the evidence here, then follow
 
 - Treating a generic backlog count as proof that work is assignable.
 - Diagnosing a permanently idle contributor as a hub fault before confirming
-  the pinned relay handles `task_unavailable`.
-- Treating an assigned-but-idle session with no checkout on disk as a triage
-  case. That was an upstream workspace gap, fixed by `HIVE_WORKSPACE_DIR`;
-  check the pin instead.
+  the relay handles `task_unavailable`.
 - Diagnosing an account-specific failure without comparing the same time
   window for other contributors.
 - Repeatedly restarting a healthy contributor instead of checking hub state.
@@ -118,5 +111,6 @@ issue — collect the evidence here, then follow
 - [ ] No change was made to launcher or image task-selection behavior.
 
 ```bash
-bash tests/just-onboarding.sh
+hive-contribute doctor
+bash tests/launcher-contract.sh
 ```

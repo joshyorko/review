@@ -55,8 +55,8 @@ def main() -> int:
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
-        "name": "bluefin-contribute",
-        "documentNamespace": f"https://projectbluefin.org/spdx/contribute/{args.version}/{args.revision}",
+        "name": "hive-contribute",
+        "documentNamespace": f"https://hivecommons.org/spdx/hive-contribute/{args.version}/{args.revision}",
         "creationInfo": {"creators": ["Tool: generate-contribute-sbom.py"], "created": "1970-01-01T00:00:00Z"},
         "packages": [
             package("omp", args.omp_version, f"https://github.com/can1357/oh-my-pi/releases/download/v{args.omp_version}/", args.omp_sha256),
@@ -64,7 +64,10 @@ def main() -> int:
             package("gh", args.gh_version, f"https://github.com/cli/cli/releases/download/v{args.gh_version}/", args.gh_sha256),
             package("tmux", args.tmux_version, f"https://github.com/tmux/tmux-builds/releases/download/v{args.tmux_version}/", args.tmux_sha256),
             package("ws", args.ws_version, "https://registry.npmjs.org/ws"),
-            package("hive-contributor-runtime", hive, f"https://github.com/hivecommons/hive/tree/{hive}/bin"),
+            # The whole tree, not /bin: this package covers the relay and agent
+            # script under bin/ AND the backend table and contributor
+            # restrictions under config/.
+            package("hive-contributor-runtime", hive, f"https://github.com/hivecommons/hive/tree/{hive}"),
         ],
     }
     with open(args.out, "w", encoding="utf-8") as output:

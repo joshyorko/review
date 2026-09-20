@@ -56,7 +56,7 @@ async function fetchRelease(requestedVersion, fetchImpl) {
 	const token = process.env.RENOVATE_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 	const headers = {
 		Accept: "application/vnd.github+json",
-		"User-Agent": "projectbluefin-review-tmux-sync",
+		"User-Agent": "hive-contribute-tmux-sync",
 		"X-GitHub-Api-Version": "2022-11-28",
 	};
 	if (token) headers.Authorization = `Bearer ${token}`;

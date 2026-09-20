@@ -5,7 +5,7 @@
 # index.json differs from the generated content. `--write` rewrites the
 # manifest instead of comparing.
 #
-# Modelled on projectbluefin/common's scripts/check-skill-frontmatter.sh, with
+# Modelled on the skills tooling in github.com/projectbluefin/common, with
 # one difference: every skill in this repo is held to the size limits below
 # with no standing exceptions.
 #

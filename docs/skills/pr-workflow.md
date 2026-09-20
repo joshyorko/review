@@ -1,9 +1,9 @@
 ---
 name: pr-workflow
-version: "1.12"
-last_updated: 2026-09-13
+version: "1.13"
+last_updated: "2026-09-19"
 id: pr-workflow
-one_line_purpose: Open review pull requests that merge cleanly.
+one_line_purpose: Open pull requests that merge cleanly.
 entry_point: docs/skills/pr-workflow.md
 category: meta
 mcp_compliance_level: partial
@@ -80,7 +80,7 @@ repository's contribution rules, which take precedence in their own tree.
 
 ## The Factory Label Contract
 
-See [`pr-labels.md`](pr-labels.md) for projectbluefin's lifecycle label taxonomy, `3-clanker-queue` admission, `3-human-queue` routing, and repository automation labels (`lgtm`, `automerge`).
+See [`pr-labels.md`](pr-labels.md) for the repository's lifecycle label taxonomy, `3-clanker-queue` admission, `3-human-queue` routing, and repository automation labels (`lgtm`, `automerge`).
 
 ## Reconciling Long-Lived Branches
 
@@ -138,12 +138,12 @@ Write `skip-ci` without brackets.
 ## Test By Running, Not Grepping
 
 Source-text greps prove text exists, not that features work. Exercise visible
-behavior through the foreground OMP workbench; reserve grep assertions for
+behavior through the test scripts; reserve grep assertions for
 proving absence of forbidden powers.
 
 ## Verification
 
-CI enforces the complete verification suite in `.github/workflows/validate.yml` (see [`docs/image-and-development.md`](../image-and-development.md#validation) for the full local command list).
+CI enforces the complete verification suite in `.github/workflows/validate.yml`.
 
 For pull request workflow, documentation, and skill changes, run this focused surface subset:
 
@@ -152,17 +152,16 @@ pre-commit run --all-files
 git diff --check
 just --list
 bash scripts/check-skill-frontmatter.sh
-bash tests/generate-skills.sh
-bash tests/appliance-contract.sh
+bash tests/launcher-contract.sh
 bash tests/contribute-contract.sh
-bash tests/just-onboarding.sh
 ```
+
 `pre-commit run --all-files` runs all contributor hygiene checks, ShellCheck
 included: the hook uses the shellcheck-py wheel, so it needs no container
 socket and behaves identically locally and in the required `validate`
 workflow.
 
-`gh label list -R projectbluefin/review` returns the repository's lifecycle
+`gh label list` returns the repository's lifecycle
 and queue labels (`1-triage`, `2-discussing`, `3-clanker-queue`,
 `3-human-queue`, `4-review`, `blocked`, `hold`), automation labels (`lgtm`,
 `automerge`), and recognized agent/domain labels.

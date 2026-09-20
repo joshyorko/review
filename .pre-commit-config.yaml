@@ -1,4 +1,4 @@
-# Local + CI hygiene for review.
+# Local + CI hygiene for hive-contribute.
 #
 # Install with:
 #   pre-commit install --install-hooks
@@ -28,9 +28,7 @@ repos:
       - id: check-shebang-scripts-are-executable
         # image/*.sh are never executed from the work tree: the Containerfile
         # installs them with `COPY --chmod=0755`.
-        # tests/guest-bootstrap-consumer.py is always launched as
-        # `python3 "$REVIEW_TEST_CONSUMER"`, never exec'd directly.
-        exclude: ^(image/.*\.sh|tests/guest-bootstrap-consumer\.py)$
+        exclude: ^image/.*\.sh$
 
   # ------------------------------------------------------------------ shell
   - repo: https://github.com/shellcheck-py/shellcheck-py
@@ -58,7 +56,7 @@ repos:
       - id: shfmt
         name: shfmt (2 spaces)
         args: [--write, --indent=2]
-        files: ^(image|scripts|tests)/.*\.sh$
+        files: ^(bin|image|scripts|tests)/.*\.sh$
 
   # ---------------------------------------------------------------- secrets
   # This repo handles GitHub tokens and Hive registration tokens.
@@ -96,24 +94,6 @@ repos:
         language: system
         entry: bash tests/generate-skills.sh
         files: ^(scripts/generate-skills\.py|tests/generate-skills\.sh)$
-        pass_filenames: false
-      # The OMP workbench ships as loose TypeScript, so exercise it headlessly
-      # against a fake host on every related change.
-      - id: omp-review-mode
-        name: omp review mode contract
-        language: system
-        entry: bash tests/omp-review-mode.sh
-        files: ^(image/extension/|bin/omp-review|tests/omp-review-mode\.(sh|test\.ts))
-        pass_filenames: false
-      # The appliance is assembled from pinned artifacts rather than installed,
-      # so its Containerfile is the whole supply chain. The static half of the
-      # contract needs no container engine and holds the pins, the version
-      # derivation, and the "nothing can install anything" rule.
-      - id: appliance-contract
-        name: review appliance contract
-        language: system
-        entry: bash tests/appliance-contract.sh
-        files: ^(image/appliance/|scripts/(review-appliance-version|generate-appliance-sbom)|tests/appliance-contract\.sh|\.github/workflows/publish-appliance\.yml|\.dockerignore)
         pass_filenames: false
       - id: contribute-contract
         name: contribute image and SBOM contract

@@ -1,7 +1,7 @@
 ---
 name: hive-runtime
-version: "3.0"
-last_updated: 2026-09-14
+version: "3.1"
+last_updated: "2026-09-19"
 id: hive-runtime
 one_line_purpose: Operate inside Hive's tmux, token, and cooldown constraints.
 entry_point: docs/skills/hive-runtime.md
@@ -18,7 +18,7 @@ metadata:
 
 # Hive Runtime
 
-> The contributor image contains the pinned Hive relay and OMP. These
+> The contributor image contains the upstream Hive relay and OMP. These
 > procedures describe its handoff from the launcher.
 
 ## When to Use
@@ -38,18 +38,16 @@ credential handling ([`launcher.md`](launcher.md)).
 | Rationalization | Reality |
 |---|---|
 | "A local shim will unblock this now." | It outlives the gap it was written for and shadows the real tool once upstream lands the fix. Report it and wait. |
-| "Upstream is slow; we can patch our copy." | A patched copy of a pinned upstream file silently diverges at the next bump, and nothing fails to say so. |
-| "The pin is close enough to upstream." | The image consumes Hive's pinned runtime files as one set; verify their compatibility together and do not add a downstream protocol implementation. |
+| "Upstream is slow; we can patch our copy." | The appliance carries upstream's files directly; do not fork or patch them. |
+| "We should pin Hive to a known commit." | The runtime is tracked from upstream's `v4` branch, not pinned to a static commit. Setup and runtime stay aligned. |
 
 ## Core Process
 
 1. Let Hive own the WebSocket protocol, assignment selection, `contributor`
    tmux session, prompt injection, and result capture. Context7 reaches the
-   agent through Hive's server-side knowledge export. Both `contribute` and
-   `review-container` launch the same OMP-only runtime; the launcher does not
-   choose a model or implement Hive's jobs. The maintainer workbench may read
-   Hive's HTTP projections for ordering and status, but those reads never grant
-   assignment authority.
+   agent through Hive's server-side knowledge export. `hive-contribute`
+   launches the OMP-only runtime; the launcher does not choose a model or
+   implement Hive's jobs.
 2. Attach only to inspect or deliberately steer a live session:
 
    ```bash
@@ -77,41 +75,37 @@ credential handling ([`launcher.md`](launcher.md)).
    is Hive's, not ours: when the hub declines to assign work it sends
    `task_unavailable` with a reason, which the relay logs before re-asking
    30 seconds later. The reasons are defined by the *hub*, in
-   `src/pkg/dashboard/contribute_ws.go`, not by the relay — read them there.
+   `src/pkg/dashboard/contribute_ws.go`, not by the relay.
    Three are enforced refusals (`token_mint_failed`, `tier_disabled`,
    `concurrency_limit`), two are rate caps (`hourly_limit`, `daily_limit`),
    and three mean the hub simply has nothing to hand over right now
-   (`contribution_suspended`, `hub_not_ready`, `no_matching_work`). A relay
-   revision predating that case logs the message
-   as an unknown type and then has no path back to asking, because every
-   `ready` it sends is event-driven and none is timed; it wedges idle. No task
-   was assigned in that state, so nothing is held. Move the pin rather than
-   adding a downstream retry.
+   (`contribution_suspended`, `hub_not_ready`, `no_matching_work`).
 7. Treat the relay's protocol version and capability declaration as
    informational. The relay reports its runtime posture during authentication,
    and Hive stores and surfaces it without routing or gating assignments on it.
    Do not add downstream capability-based task selection.
-8. Expect interactive delivery from `just contribute` and `just review-container`. The pinned runtime reads `CONTRIBUTOR_MODE`, which selects between `interactive` (the default: a live tmux pane the relay types the prompt into) and `headless` (no tmux session at all — the relay drives a one-shot CLI per task and writes lifecycle state to `HIVE_HEADLESS_STATUS_FILE`). This OMP contributor is interactive-only; its Kubernetes manifest retains tmux probes and must not select headless mode until upstream proves equivalent one-shot semantics.
+8. Expect interactive delivery from `hive-contribute` (and `just contribute`).
+   The runtime reads `CONTRIBUTOR_MODE`, which defaults to `interactive` (a live tmux
+   pane the relay types the prompt into). This OMP contributor is interactive-only;
+   it retains tmux probes and must not select headless mode until upstream proves
+   equivalent one-shot semantics.
 
 ### Hive runtime contract
 
-Hosted deployments serve under `hivecommons.dev` (with the Project Bluefin spoke
-at `https://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev`). At Hive
-`c7a88b8518abf1163e13803b2094f2262605490b` (served SHA `55bd2bc`), the public `/api/contribute` prefix exposes read-only status, queue,
+Hosted deployments serve under `hivecommons.dev`.
+The public `/api/contribute` prefix exposes read-only status, queue,
 events, activity, fleet, limits, and triage projections. Prefix
 publicity does not make mutation handlers unauthenticated; those handlers
-still enforce their own write requirements. Review may display these
-authoritative projections, but Hive owns contributor admission and ordered
-individual assignment. Review must not reorder, retry, assign, or become a
-second scheduler.
+still enforce their own write requirements. Hive owns contributor admission
+and ordered individual assignment. Downstream launchers must not reorder,
+retry, assign, or become a second scheduler.
 
 `ReadyQueue` is a display projection; assignment eligibility remains
 `selectTask` policy. This pin exposes no assignment grouping, batching,
 dependency, or relatedness signal. Do not infer one from triage or display
-metadata. `max_concurrent` counts tasks held by contributor identities, not
-maintainer review analyses or factory writers. Issue-to-PR linkage is a
-best-effort GitHub search projection cached for about 90 seconds, not durable
-truth.
+metadata. `max_concurrent` counts tasks held by contributor identities.
+Issue-to-PR linkage is a best-effort GitHub search projection cached for about
+90 seconds, not durable truth.
 
 ### GitHub identity
 
@@ -119,12 +113,22 @@ The contributor container passes one contributor GitHub token as inherited
 `GH_TOKEN`; it does not mount the host GitHub configuration.
 Never log or persist either credential.
 
-To inspect earlier review output, enter tmux copy-mode with `Ctrl-b [`.
+`gh` inside the container is Hive's own `bin/gh-wrapper.sh`, installed as the
+agent's `gh` with the real binary behind it at `/opt/hive/bin/gh-real`.
+Contributor mode is the root-owned `/etc/hive/contributor-mode` marker, never an
+environment variable, and in that mode the wrapper keeps the contributor's own
+token (contributors fork and open PRs under their own identity), refuses the
+`gh auth` subcommand, refuses every mutating `gh api`, denies any subcommand
+outside its allowlist, and labels created issues and PRs `contributor/<login>`
+and `cli/omp`. Read-only lookups stay allowed so an agent can check for an
+existing PR before starting. Do not reimplement, relax, or shadow these gates.
+
+To inspect earlier session output, enter tmux copy-mode with `Ctrl-b [`.
 PageUp or the mouse wheel scrolls, tmux search finds text, and `q` returns to
 the live pane. Copy-mode changes only your view; Hive still owns output
 capture.
 
-When configuring a derived contributor image, preserve the attach client's
+When configuring the contributor image, preserve the attach client's
 recognized `TERM`; tmux's pane terminal is configured separately. Enable tmux
 mouse support so the wheel enters copy-mode for long output. Do not alter
 Hive's session creation to accomplish either behavior.
@@ -132,10 +136,7 @@ Hive's session creation to accomplish either behavior.
 Give the image a UTF-8 locale that it actually ships (`LANG=C.UTF-8`). tmux
 decides UTF-8 support from the client's `LANG`/`LC_ALL`/`LC_CTYPE` alone, so an
 unset or uninstalled locale leaves the attached terminal in non-UTF-8 mode:
-box drawing arrives as DEC ACS escapes and every other non-ASCII cell as `_`,
-which reads as broken fonts rather than a broken locale. No launcher forwards a
-locale, so image `ENV` is the only source for the Podman, Apptainer, and cluster
-paths alike.
+box drawing arrives as DEC ACS escapes and every other non-ASCII cell as `_`.
 
 ## Red Flags
 
@@ -149,9 +150,7 @@ paths alike.
   that ignores `task_unavailable`.
 - Reporting completion before the required artifact is independently visible.
 - Assuming an abruptly killed contributor strands its assigned task. The hub
-  releases `currentTask` in its disconnect handler and books a cooldown, and
-  its heartbeat loop closes a half-open socket, so no downstream release,
-  timeout, or slot-reclaim step belongs here.
+  releases `currentTask` in its disconnect handler and books a cooldown.
 - Mounting `~/.config/gh` or printing a token to provide agent identity.
 
 ## Verification
@@ -159,7 +158,7 @@ paths alike.
 ```bash
 podman exec -it <container> tmux ls
 podman exec -it <container> tmux attach -t contributor
-bash tests/just-onboarding.sh
+bash tests/launcher-contract.sh
 ```
 
 Confirm that `contributor` exists, the final pane lines contain the result,
@@ -167,17 +166,14 @@ and no launcher change duplicates Hive lifecycle behavior.
 
 ## Sources
 
-Cite upstream by pinned permalink, never a branch path.
-
 - Relay message cases, including `task_unavailable`:
-  [`bin/contributor-relay.sh` @ c7a88b8](https://github.com/hivecommons/hive/blob/c7a88b8518abf1163e13803b2094f2262605490b/bin/contributor-relay.sh)
+  `bin/contributor-relay.js`
 - Workspace preparation and tmux rooting:
-  [`bin/contributor-agent.sh` @ c7a88b8](https://github.com/hivecommons/hive/blob/c7a88b8518abf1163e13803b2094f2262605490b/bin/contributor-agent.sh)
+  `bin/contributor-agent.sh`
 - Task release on disconnect:
-  [`src/pkg/dashboard/contribute_ws.go` @ c7a88b8](https://github.com/hivecommons/hive/blob/c7a88b8518abf1163e13803b2094f2262605490b/src/pkg/dashboard/contribute_ws.go)
+  `src/pkg/dashboard/contribute_ws.go`
 - tmux terminal and mouse configuration: Context7 `/tmux/tmux`
-- Public contribute projections and assignment policy @ `c7a88b8`:
-  [`server.go`, `api_contribute.go`, `contribute_sse.go`, and
-  `contribute_ws.go`](https://github.com/hivecommons/hive/tree/c7a88b8518abf1163e13803b2094f2262605490b/src/pkg/dashboard)
-- PR-link projection @ `c7a88b8`:
-  [`contribute_prlink.go`](https://github.com/hivecommons/hive/blob/c7a88b8518abf1163e13803b2094f2262605490b/src/pkg/dashboard/contribute_prlink.go)
+- Public contribute projections and assignment policy:
+  `server.go`, `api_contribute.go`, `contribute_sse.go`, and `contribute_ws.go`
+- PR-link projection:
+  `contribute_prlink.go`

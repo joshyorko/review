@@ -1,8 +1,9 @@
 name: validate
 
-# justfile is the shipped launcher. This workflow validates its Bash syntax,
-# both image contracts, and mocked attended flows without requiring a live Hive
-# account or interactive terminal.
+# bin/hive-contribute is the shipped launcher (with a thin justfile wrapper).
+# This workflow validates Bash syntax, the contributor image contract, and
+# mocked attended flows without requiring a live Hive account or interactive
+# terminal.
 
 on:
   push:
@@ -59,16 +60,11 @@ jobs:
           set -euo pipefail
           just --justfile justfile --list
 
-      - name: Guided onboarding behavior
-        run: |
-          set -euo pipefail
-          bash tests/just-onboarding.sh
-
       - name: Recipe bodies are valid bash
         run: |
           set -euo pipefail
-          # Recipe headers in this file look like 'review:',
-          # 'review-doctor:' — a bare identifier + colon at column 0,
+          # Recipe headers in this file look like 'contribute:',
+          # 'doctor:' — a bare identifier + colon at column 0,
           # no parameters. Grab every indented line following one, until the
           # next non-indented, non-comment, non-blank line.
           awk '
@@ -84,42 +80,36 @@ jobs:
           set -euo pipefail
           bash tests/test-registry.sh
 
-      # The omp review mode and the appliance it ships in. The mode is the only
-      # TypeScript here and executes only inside a TUI, so it is driven
-      # headlessly against a fake host; the appliance's static contract holds
-      # its pins and its version derivation without needing a container engine.
-      - name: Review mode and appliance contracts
+      - name: Contributor and launcher contracts
         run: |
           set -euo pipefail
           node --test tests/update-omp-pins.test.mjs
           node --test tests/update-derived-pins.test.mjs
-          bash tests/omp-review-mode.sh
-          bash tests/appliance-contract.sh
+          node --test tests/renovate-tracking.test.mjs
           bash tests/contribute-contract.sh
+          bash tests/launcher-contract.sh
           bash tests/version-derivation.sh
-
 
       - name: Interactive launcher docs and shell stay aligned
         run: |
           set -euo pipefail
           bash tests/readme-quickstart.sh
-          grep -Fq 'review-container' justfile
-          grep -Fq 'review-queue' justfile
-          # The appliance is the image named 'review'; the README teaches it.
-          grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
 
-      - name: Build and execute both images
+      - name: Build and execute contributor image
         run: |
           set -euo pipefail
-          review_version="$(bash scripts/review-appliance-version.sh)"
+          # Resolve Hive's tracking branch once and pass it in, exactly as the
+          # justfile and publish workflow do. Left unset, the build resolves it
+          # inside the layer instead and the image's hive.commit label ships
+          # empty while HIVE_COMMIT inside the image holds a real SHA.
+          hive_commit="$(git ls-remote https://github.com/hivecommons/hive refs/heads/v4 | cut -f1)"
+          [[ "$hive_commit" =~ ^[0-9a-f]{40}$ ]] ||
+            { echo "could not resolve hivecommons/hive v4" >&2; exit 1; }
           podman build --format oci \
-            --build-arg REVIEW_VERSION="$review_version" \
-            --build-arg REVIEW_REVISION="$GITHUB_SHA" \
-            -f image/appliance/Containerfile -t review:test .
-          podman build --format oci -f image/contribute/Containerfile -t contribute:test .
-          bash tests/appliance-contract.sh --image review:test --expect-version "$review_version"
+            --build-arg HIVE_COMMIT="$hive_commit" \
+            -f image/contribute/Containerfile -t contribute:test .
           bash tests/contribute-contract.sh --image contribute:test
 
       # Interactive launchers prefer KVM and fall back to Apptainer. CI builds
-      # and executes both OCI images natively; both launcher branches are
+      # and executes the OCI image natively; both launcher branches are
       # exercised hermetically.

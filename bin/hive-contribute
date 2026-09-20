@@ -1,0 +1,561 @@
+#!/usr/bin/env bash
+# hive-contribute — run one Hive contributor worker in an isolated container.
+#
+# This appliance is Hive's contributor runtime (contributor-agent.sh +
+# contributor-relay.js, tracked from upstream's branch and never pinned),
+# packaged with OMP so a contributor needs no toolchain of their own. Hive owns
+# task selection, assignment, and completion; OMP owns model and effort; this
+# launcher owns exactly three things: the isolation boundary, the credentials
+# that cross it, and the one configuration file below.
+#
+#   hive-contribute            launch the worker (foreground; Ctrl-C stops it)
+#   hive-contribute doctor     read-only preflight; starts no agent
+#   hive-contribute setup      register this machine with a hive
+#   hive-contribute config     print the resolved configuration
+#
+# CONFIGURATION — ONE FILE:
+#   ${XDG_CONFIG_HOME:-~/.config}/hive-contribute.yml
+# It carries everything site-specific: which hive to join, which credential
+# file Hive wrote, which image to run, and which agent backend. Nothing
+# site-specific is compiled into this script.
+# Point HIVE_CONTRIBUTE_CONFIG at another file to run a second identity.
+set -euo pipefail
+
+fail() {
+  printf 'hive-contribute: %s\n' "$1" >&2
+  exit 1
+}
+note() { printf 'hive-contribute: %s\n' "$1" >&2; }
+
+# ── Configuration ────────────────────────────────────────────────────────────
+# A flat `key: value` subset of YAML, parsed here rather than with a YAML
+# dependency the distroless image would have to carry: the file has six keys
+# and an appliance that needs a parser to read its own config is not simpler
+# than one that does not.
+CONFIG_PATH="${HIVE_CONTRIBUTE_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/hive-contribute.yml}"
+
+# Defaults for a first run. The hub deliberately has none: joining the wrong
+# hive silently is worse than refusing to start, and `setup` fills it in.
+DEFAULT_REGISTRATION="${HOME}/.config/hive/contributor.env"
+DEFAULT_IMAGE="ghcr.io/projectbluefin/contribute:stable"
+DEFAULT_BACKEND="omp"
+# Upstream's contributor workload envelope (Justfile: contributor_memory_limit_gib
+# and contributor_cpu_limit), kept identical so a contributor lends the same
+# share of their machine here as they would running Hive's own recipe. `none`
+# or `0` removes the ceiling.
+DEFAULT_MEMORY="4g"
+DEFAULT_CPUS="2"
+# Hive's own tracking branch. Nothing here pins a commit: the appliance runs
+# upstream's current contributor runtime, and registration is performed by that
+# same branch's contribute-setup, so the two can never drift apart.
+HIVE_REF="v4"
+
+config_value() {
+  # One key, first match, comments and surrounding quotes removed, leading ~
+  # expanded. Absent key prints nothing.
+  local key="$1" raw
+  [[ -f "$CONFIG_PATH" ]] || return 0
+  raw="$(sed -nE "s/^[[:space:]]*${key}[[:space:]]*:[[:space:]]*(.*)$/\1/p" "$CONFIG_PATH" | head -1)"
+  raw="${raw%%#*}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  raw="${raw#\"}"
+  raw="${raw%\"}"
+  raw="${raw#\'}"
+  raw="${raw%\'}"
+  # shellcheck disable=SC2088 # matching a literal tilde written in the config
+  # file, not expanding one: the value is data, not a shell word.
+  [[ "$raw" == "~/"* ]] && raw="${HOME}/${raw:2}"
+  printf '%s\n' "$raw"
+}
+
+write_default_config() {
+  local hub="${1:-}"
+  mkdir -p "$(dirname "$CONFIG_PATH")"
+  cat >"$CONFIG_PATH" <<EOF
+# hive-contribute — the whole appliance configuration.
+#
+# hub          the hive this machine contributes to (wss://<host>/contribute)
+# registration Hive's own credential file, written by its contribute-setup
+# image        contributor runtime image to run
+# backend      agent CLI Hive drives inside the container
+# memory       RAM ceiling for the worker (also the microVM's size); none = no limit
+# cpus         CPU ceiling for the worker (also the microVM's vCPUs); none = no limit
+hub: ${hub}
+registration: ${DEFAULT_REGISTRATION}
+image: ${DEFAULT_IMAGE}
+backend: ${DEFAULT_BACKEND}
+memory: ${DEFAULT_MEMORY}
+cpus: ${DEFAULT_CPUS}
+EOF
+  chmod 600 "$CONFIG_PATH"
+}
+
+load_config() {
+  if [[ ! -f "$CONFIG_PATH" ]]; then
+    # Seed from an existing Hive registration when there is one: the hub is the
+    # single value this launcher cannot invent, and Hive already wrote it.
+    local seeded=""
+    [[ -f "$DEFAULT_REGISTRATION" ]] &&
+      seeded="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?HIVE_HUB[[:space:]]*=[[:space:]]*"?([^"]*)"?[[:space:]]*$/\2/p' "$DEFAULT_REGISTRATION" | head -1)"
+    write_default_config "$seeded"
+    note "wrote ${CONFIG_PATH}"
+  fi
+  HUB="$(config_value hub)"
+  REGISTRATION="$(config_value registration)"
+  IMAGE="$(config_value image)"
+  BACKEND="$(config_value backend)"
+  MEMORY="$(config_value memory)"
+  CPUS="$(config_value cpus)"
+  REGISTRATION="${REGISTRATION:-$DEFAULT_REGISTRATION}"
+  IMAGE="${IMAGE:-$DEFAULT_IMAGE}"
+  BACKEND="${BACKEND:-$DEFAULT_BACKEND}"
+  MEMORY="${MEMORY:-$DEFAULT_MEMORY}"
+  CPUS="${CPUS:-$DEFAULT_CPUS}"
+}
+
+require_hub() {
+  [[ -n "${HUB:-}" ]] ||
+    fail "no hub in ${CONFIG_PATH}. Run 'hive-contribute setup', or set 'hub: wss://<host>/contribute'."
+  [[ "$HUB" =~ ^wss://[^[:space:]/]+(/[^[:space:]]*)?$ ]] ||
+    fail "hub '${HUB}' in ${CONFIG_PATH} is not a wss:// URL."
+}
+
+instance_slug() {
+  # One state directory and one image volume per hive, derived from the hub so
+  # two configurations never share a home volume.
+  local digest
+  digest="$(printf '%s' "$HUB" | sha256sum | cut -c1-8)"
+  printf 'hive-%s\n' "$digest"
+}
+
+# ── Host preflight ───────────────────────────────────────────────────────────
+KVM_FAILURE=""
+FALLBACK_FAILURE=""
+
+podman_is_local() {
+  # A remote Podman engine would resolve bind mounts on the far side, where
+  # this machine's credential file does not exist. Apptainer stays local.
+  local connections
+  connections="$(podman system connection list --format '{{.URI}}\t{{.Default}}' 2>/dev/null || true)"
+  [[ -z "$connections" ]] && return 0
+  local uri is_default
+  while IFS=$'\t' read -r uri is_default; do
+    [[ "$is_default" == true ]] || continue
+    [[ "$uri" == unix://* || -z "$uri" ]] && return 0
+    return 1
+  done <<<"$connections"
+  return 0
+}
+
+kvm_runtime_ready() {
+  local device="${HIVE_CONTRIBUTE_TEST_KVM_DEVICE:-/dev/kvm}"
+  command -v podman &>/dev/null || { KVM_FAILURE="Podman is unavailable"; return 1; }
+  podman info &>/dev/null || { KVM_FAILURE="Podman is not reachable"; return 1; }
+  podman_is_local || { KVM_FAILURE="Podman targets a remote engine"; return 1; }
+  command -v krun &>/dev/null || { KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; }
+  [[ -r "$device" && -w "$device" ]] || { KVM_FAILURE="${device} is not readable and writable"; return 1; }
+  return 0
+}
+
+fallback_ready() {
+  local fuse="${HIVE_CONTRIBUTE_TEST_FUSE_DEVICE:-/dev/fuse}"
+  command -v apptainer &>/dev/null || { FALLBACK_FAILURE="Apptainer is unavailable; install Apptainer"; return 1; }
+  { command -v squashfuse_ll &>/dev/null || command -v squashfuse &>/dev/null; } ||
+    { FALLBACK_FAILURE="squashfuse userland is unavailable; install squashfuse"; return 1; }
+  [[ -e "$fuse" ]] || { FALLBACK_FAILURE="FUSE device ${fuse} is missing"; return 1; }
+  [[ -r "$fuse" && -w "$fuse" ]] || { FALLBACK_FAILURE="FUSE device ${fuse} is not readable and writable"; return 1; }
+  return 0
+}
+
+github_auth_ready() {
+  command -v gh &>/dev/null && gh auth status --hostname github.com &>/dev/null
+}
+
+resolve_gh_token() {
+  # By value, never by mounting ~/.config/gh: the container gets one credential
+  # for one host, and no view of any other account or enterprise login.
+  GH_TOKEN_VALUE="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  GH_TOKEN_SOURCE="environment"
+  if [[ -z "$GH_TOKEN_VALUE" ]] && command -v gh &>/dev/null; then
+    GH_TOKEN_SOURCE="gh auth token"
+    GH_TOKEN_VALUE="$(gh auth token --hostname github.com 2>/dev/null || true)"
+  fi
+  [[ -n "$GH_TOKEN_VALUE" ]] || GH_TOKEN_SOURCE=""
+  return 0
+}
+
+report_gh_token() {
+  local scopes
+  echo "✓ GitHub identity passed to the agent as GH_TOKEN (from ${GH_TOKEN_SOURCE}; value not shown)."
+  scopes="$(gh auth status --hostname github.com 2>&1 | sed -nE "s/.*[Tt]oken scopes:[[:space:]]*(.+)/\1/p" | head -1 || true)"
+  [[ -n "$scopes" ]] && echo "  The agent can do anything this token can: ${scopes}"
+  return 0
+}
+
+report_missing_gh_token() {
+  note "no GitHub token found; every assigned task dies on arrival."
+  note "Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org,workflow"
+}
+
+# ── Hive registration ────────────────────────────────────────────────────────
+registration_value() {
+  local key="$1"
+  [[ -f "$REGISTRATION" ]] || return 0
+  sed -nE "s/^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=[[:space:]]*\"?([^\"]*)\"?[[:space:]]*$/\2/p" "$REGISTRATION" | head -1
+}
+
+hive_checkout() {
+  # Registration is upstream's business: run ITS setup, from ITS current
+  # branch, rather than reimplementing a credential protocol against a frozen
+  # copy. The image tracks the same branch, so setup and runtime always agree.
+  local dir="${XDG_STATE_HOME:-${HOME}/.local/state}/hive-contribute/hive-src"
+  if [[ ! -d "$dir/.git" ]]; then
+    mkdir -p "$dir"
+    git init --quiet "$dir"
+    git -C "$dir" remote add origin "https://github.com/hivecommons/hive"
+  fi
+  git -C "$dir" fetch --depth 1 origin "$HIVE_REF" >/dev/null 2>&1 ||
+    fail "cannot fetch hivecommons/hive ${HIVE_REF}."
+  git -C "$dir" checkout --detach -f FETCH_HEAD >/dev/null 2>&1
+  printf '%s\n' "$dir"
+}
+
+run_setup() {
+  local src tmp shim
+  # Upstream's contribute-setup is a just recipe that shells out to gh, git,
+  # curl and jq, and its omp preflight runs bin/omp-backend.js with the host's
+  # node. Name every missing one here rather than let the recipe die mid-way
+  # with a bare "command not found" after it has already talked to the hub.
+  for cmd in just gh git curl jq node; do
+    command -v "$cmd" &>/dev/null || fail "'${cmd}' is required to register with a hive."
+  done
+  github_auth_ready || fail "gh is not authenticated. Run: gh auth login --web --hostname github.com --scopes repo,read:org"
+  src="$(hive_checkout)"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/hive-contribute-setup.XXXXXX")"
+  shim=""
+  if ! command -v "$BACKEND" &>/dev/null; then
+    # Upstream's registration preflight probes the HOST for the agent CLI and
+    # aborts when it is absent. On this appliance that is the normal case and
+    # not a fault: the agent runs inside ${IMAGE}, which is the whole point of
+    # packaging it. Answer the probe with the image that will actually run the
+    # work, so registration is not blocked by a toolchain nobody needs.
+    shim="$(mktemp -d "${TMPDIR:-/tmp}/hive-contribute-shim.XXXXXX")"
+    cat >"${shim}/${BACKEND}" <<EOF
+#!/usr/bin/env bash
+echo "${BACKEND} (packaged in ${IMAGE}; this host has no agent CLI by design)"
+EOF
+    chmod 0755 "${shim}/${BACKEND}"
+  fi
+  # HIVE_SKIP_VERSION_CHECK is upstream's own documented opt-out; this checkout
+  # is a detached head of the branch it compares against, exactly the case it
+  # documents.
+  #
+  # HIVE_HUB is how upstream's recipe learns which hive to register with; left
+  # unset it falls back to an interactive hive picker and registers against
+  # whatever gets chosen, which for a configured `hub:` is a silent mismatch
+  # (the config is then rewritten to match the credential below). A run that
+  # has a hub says so; one that does not gets upstream's picker on purpose.
+  # Through `env`, because an assignment that comes out of an expansion is an
+  # argument, not a prefix — bash decides which words are assignments before
+  # it expands anything.
+  PATH="${shim:+${shim}:}${PATH}" env HIVE_SKIP_VERSION_CHECK=true ${HUB:+"HIVE_HUB=${HUB}"} just \
+    --working-directory "$src" --justfile "$src/Justfile" \
+    config_dir="$tmp" contribute-setup "$BACKEND" || {
+    rm -rf "$tmp" ${shim:+"$shim"}
+    fail "upstream contribute-setup did not complete; nothing was registered."
+  }
+  [[ -z "$shim" ]] || rm -rf "$shim"
+  [[ -f "$tmp/contributor.env" ]] || { rm -rf "$tmp"; fail "contribute-setup produced no contributor.env."; }
+  mkdir -p "$(dirname "$REGISTRATION")"
+  install -m 600 "$tmp/contributor.env" "$REGISTRATION"
+  rm -rf "$tmp"
+  local hub
+  hub="$(registration_value HIVE_HUB)"
+  if [[ -n "$hub" && "$hub" != "$HUB" ]]; then
+    # The hub is the one value that must agree between config and credential.
+    sed -i -E "s|^[[:space:]]*hub[[:space:]]*:.*$|hub: ${hub}|" "$CONFIG_PATH"
+    note "hub recorded in ${CONFIG_PATH}: ${hub}"
+  fi
+  echo "✓ registered: ${REGISTRATION} (0600)"
+}
+# ── Image ────────────────────────────────────────────────────────────────────
+image_is_local_path() { [[ "$IMAGE" == *.sif || -f "$IMAGE" ]]; }
+
+ensure_image() {
+  # A moving tag must be refreshed before launch or the worker silently runs
+  # last month's runtime against this month's hub.
+  case "$IMAGE" in
+  *@sha256:*) podman image exists "$IMAGE" &>/dev/null && return 0 ;;
+  *) podman pull --quiet "$IMAGE" >/dev/null 2>&1 && return 0 ;;
+  esac
+  podman image exists "$IMAGE" &>/dev/null ||
+    fail "cannot resolve image ${IMAGE}. Set 'image:' in ${CONFIG_PATH}, or build it with 'just contribute-build'."
+  note "using the locally cached ${IMAGE}; the registry copy could not be checked."
+}
+
+local_image_sif() {
+  # `just contribute-build` writes the image into Podman's store, which
+  # Apptainer cannot read. The host that most needs the fallback is the one
+  # without krun — and without this it can build an appliance it has no way to
+  # run, so a change could only be tested after publishing it. Convert once
+  # per image ID and reuse; a rebuild produces a new ID and a new conversion.
+  local id dir archive partial
+  command -v podman &>/dev/null || fail "Podman is required to read the local image ${IMAGE}."
+  id="$(podman image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null)" ||
+    fail "no local image ${IMAGE}. Build it with 'just contribute-build'."
+  id="${id#sha256:}"
+  dir="${XDG_STATE_HOME:-${HOME}/.local/state}/hive-contribute/local"
+  LOCAL_SIF="${dir}/${id}.sif"
+  [[ -f "$LOCAL_SIF" ]] && return 0
+  mkdir -p "$dir"
+  archive="$(mktemp "${TMPDIR:-/tmp}/hive-contribute-image.XXXXXX")"
+  # Built beside the cache entry and moved into place only on success: a
+  # conversion killed halfway would otherwise leave a truncated SIF that every
+  # later launch accepts as cached and fails to boot.
+  partial="$(mktemp "${dir}/.partial.XXXXXX")"
+  note "converting ${IMAGE} for Apptainer; this runs once per build."
+  if ! podman save --format oci-archive -o "$archive" "$IMAGE" >/dev/null 2>&1 ||
+    ! apptainer build --force "$partial" "oci-archive:${archive}" >/dev/null 2>&1; then
+    rm -f "$archive" "$partial"
+    fail "could not convert ${IMAGE} for Apptainer."
+  fi
+  mv -f "$partial" "$LOCAL_SIF"
+  rm -f "$archive"
+}
+
+# ── Launch ───────────────────────────────────────────────────────────────────
+
+# Named, never valued, on the Podman path: the runtime resolves `--env NAME`
+# from this process, so a secret never appears in argv. The list is upstream's
+# contributor set (Justfile's add_provider_env) narrowed to what OMP actually
+# reads, plus the Bedrock trio.
+FORWARDED_CREDENTIALS=(
+  GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN
+  ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN
+  OPENAI_API_KEY OPENROUTER_API_KEY
+  GEMINI_API_KEY GOOGLE_API_KEY
+  AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION
+)
+
+launch_once() {
+  local slug home
+  slug="$(instance_slug)"
+  home="${XDG_STATE_HOME:-${HOME}/.local/state}/hive-contribute/${slug}"
+
+  if kvm_runtime_ready && ! image_is_local_path; then
+    ensure_image
+    local name
+    name="hive-contribute-${slug}-$(date +%s)-$$"
+    echo "✓ starting isolated KVM worker ${name}. Choose model and effort in OMP."
+    local args=(
+      podman run --runtime=krun --rm --interactive --tty
+      --name "$name"
+      --userns "keep-id:uid=65532,gid=65532"
+      --volume "hive-contribute-${slug}:/home/hive:rw"
+      --volume "${REGISTRATION}:/home/hive/.config/hive/contributor.env:ro,z"
+      --env "AGENT_BACKEND=${BACKEND}"
+      --env "HIVE_CONTAINER_NAME=${name}"
+      --env HIVE_CONTAINER_RUNTIME=podman
+      --env "TERM=${TERM:-xterm-256color}"
+      --env "COLORTERM=${COLORTERM:-truecolor}"
+    )
+    # The workload ceiling. --memory-swap pinned to --memory is what stops a
+    # contributor spilling another limit's worth into host swap; under krun the
+    # pair sizes the microVM itself rather than a cgroup.
+    [[ "$MEMORY" != none && "$MEMORY" != 0 ]] &&
+      args+=(--memory "$MEMORY" --memory-swap "$MEMORY")
+    [[ "$CPUS" != none && "$CPUS" != 0 ]] && args+=(--cpus "$CPUS")
+    # One GitHub account has one contributor identity per hub, so two relays
+    # under the same account would collide on a single task slot. HIVE_SESSION
+    # is the relay's own label for telling them apart, and an explicit EMPTY
+    # value is its documented opt-out — so forward whenever the variable is
+    # SET, empty or not, and leave it absent otherwise.
+    [[ -v HIVE_SESSION ]] && args+=(--env "HIVE_SESSION=${HIVE_SESSION}")
+    local credential
+    for credential in "${FORWARDED_CREDENTIALS[@]}"; do
+      [[ -n "${!credential:-}" ]] && args+=(--env "$credential")
+    done
+    args+=("$IMAGE")
+    "${args[@]}"
+    return $?
+  fi
+
+  fallback_ready || fail "${KVM_FAILURE}; ${FALLBACK_FAILURE}."
+  note "${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary."
+  # Only the fallback needs a host-side home: the krun path keeps its state in
+  # a named volume, and Hive's agent creates the workspace under $HOME itself.
+  # `--pwd` below still has to name an existing directory before that runs.
+  mkdir -p "$home/workspace"
+  local apptainer_image="$IMAGE"
+  if [[ "$IMAGE" == localhost/* ]]; then
+    local_image_sif
+    apptainer_image="$LOCAL_SIF"
+  elif [[ "$IMAGE" != *://* ]] && ! image_is_local_path; then
+    apptainer_image="docker://${IMAGE}"
+  fi
+  local credential
+  for credential in "${FORWARDED_CREDENTIALS[@]}" TERM COLORTERM; do
+    [[ -v "$credential" ]] && export "APPTAINERENV_${credential}=${!credential}"
+  done
+  [[ -v HIVE_SESSION ]] && export "APPTAINERENV_HIVE_SESSION=${HIVE_SESSION}"
+  export "APPTAINERENV_AGENT_BACKEND=${BACKEND}"
+  # No ceiling here: Apptainer applies one only through cgroups delegation that
+  # a fallback host frequently does not have, and a launch that dies on a
+  # missing controller is worse than an unbounded one. `hive-contribute config`
+  # reports the configured values; only the Podman path enforces them.
+  local host_args=()
+  local host_file
+  for host_file in /etc/localtime /etc/hosts; do
+    [[ -e "$host_file" ]] || host_args+=(--no-mount "$host_file")
+  done
+  echo "✓ starting isolated Apptainer worker ${slug}. Choose model and effort in OMP."
+  apptainer run --containall --no-eval "${host_args[@]}" \
+    --home "${home}:/home/hive" \
+    --pwd /home/hive/workspace \
+    --bind "${REGISTRATION}:/home/hive/.config/hive/contributor.env:ro" \
+    "$apptainer_image"
+  return $?
+}
+
+run_worker() {
+  load_config
+  # Registration comes first, and the hub check follows it. A fresh machine has
+  # neither, and demanding the hub up front turned the one command this
+  # appliance exists for into an error telling the operator to run a second
+  # one. Upstream's setup is what discovers the hive and writes the credential;
+  # it records the hub it registered against, so re-reading the config here is
+  # what lets `hive-contribute` — with no arguments, on a machine with nothing
+  # configured — end up running the worker.
+  if [[ ! -f "$REGISTRATION" ]]; then
+    note "no Hive registration at ${REGISTRATION}."
+    run_setup
+    load_config
+  fi
+  require_hub
+  echo "✓ hive: ${HUB}"
+  resolve_gh_token
+  if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then
+    export GH_TOKEN="$GH_TOKEN_VALUE"
+    report_gh_token
+  else
+    report_missing_gh_token
+  fi
+
+  launch_once
+}
+
+run_doctor() {
+  load_config
+  local pass=0 fail_count=0
+  echo "=== Configuration ==="
+  echo "  ✓ ${CONFIG_PATH}"
+  if [[ -n "${HUB:-}" ]]; then
+    echo "  ✓ hive: ${HUB}"
+    pass=$((pass + 1))
+  else
+    echo "  ✗ no hub configured; run 'hive-contribute setup'"
+    fail_count=$((fail_count + 1))
+  fi
+  echo ""
+
+  echo "=== Isolation runtime ==="
+  KVM_FAILURE=""
+  if kvm_runtime_ready; then
+    echo "  ✓ Podman krun KVM runtime ready"
+    pass=$((pass + 1))
+  elif fallback_ready; then
+    echo "  ! ${KVM_FAILURE}; isolated Apptainer fallback ready"
+    pass=$((pass + 1))
+  else
+    echo "  ✗ ${KVM_FAILURE}; ${FALLBACK_FAILURE}"
+    fail_count=$((fail_count + 1))
+  fi
+  echo ""
+
+  echo "=== GitHub ==="
+  if github_auth_ready; then
+    echo "  ✓ gh is authenticated against github.com"
+    pass=$((pass + 1))
+  else
+    echo "  ✗ gh is not authenticated against github.com"
+    fail_count=$((fail_count + 1))
+  fi
+  resolve_gh_token
+  if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then
+    echo "  ✓ a GitHub token is available for the agent (from ${GH_TOKEN_SOURCE}; not shown)"
+    pass=$((pass + 1))
+  else
+    echo "  ✗ no GitHub token is available; every assigned task would die on arrival"
+    fail_count=$((fail_count + 1))
+  fi
+  unset GH_TOKEN_VALUE
+  echo ""
+
+  echo "=== Registration ==="
+  if [[ -f "$REGISTRATION" ]]; then
+    echo "  ✓ ${REGISTRATION} exists"
+    pass=$((pass + 1))
+    # Existing is not the same as accepted: hubs rotate registration tokens, and
+    # only the hub can say whether this one still works. Hive's relay reports
+    # that when it connects; repairing it is upstream's `contribute-move`.
+    echo "    the hub decides whether it is still accepted when the relay connects"
+  else
+    echo "  ✗ ${REGISTRATION} is missing; the first run registers through upstream Hive"
+    fail_count=$((fail_count + 1))
+    # Registration is upstream's recipe running on THIS host, so it needs a
+    # host toolchain the container cannot supply. Say which piece is missing
+    # here rather than at the end of a half-finished registration.
+    local missing=()
+    local cmd
+    for cmd in just gh git curl jq node; do
+      command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+      echo "    ✓ upstream's setup can run here (just, gh, git, curl, jq, node)"
+    else
+      echo "    ✗ upstream's setup needs these on this host: ${missing[*]}"
+    fi
+  fi
+  echo ""
+
+  echo "=== Image ==="
+  if image_is_local_path; then
+    echo "  ✓ ${IMAGE} (local)"
+    pass=$((pass + 1))
+  elif command -v podman &>/dev/null && podman image exists "$IMAGE" &>/dev/null; then
+    echo "  ✓ ${IMAGE} is present locally"
+    pass=$((pass + 1))
+  else
+    echo "  - ${IMAGE} is not cached; it is pulled at launch"
+  fi
+  echo ""
+
+  echo "${pass} checks passed, ${fail_count} failed."
+  [[ "$fail_count" -eq 0 ]] || exit 1
+}
+
+run_config() {
+  load_config
+  echo "config:       ${CONFIG_PATH}"
+  echo "hub:          ${HUB:-<unset>}"
+  echo "registration: ${REGISTRATION}"
+  echo "image:        ${IMAGE}"
+  echo "backend:      ${BACKEND}"
+  echo "memory:       ${MEMORY} (Podman path; the Apptainer fallback is unbounded)"
+  echo "cpus:         ${CPUS} (Podman path; the Apptainer fallback is unbounded)"
+  echo "hive ref:     ${HIVE_REF} (tracked, never pinned)"
+}
+
+case "${1:-run}" in
+run) run_worker ;;
+doctor) run_doctor ;;
+setup)
+  load_config
+  run_setup
+  ;;
+config) run_config ;;
+-h | --help | help)
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+  ;;
+*) fail "unknown command '${1}'. Usage: hive-contribute {run|doctor|setup|config}" ;;
+esac
