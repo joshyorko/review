@@ -969,15 +969,27 @@ test("a converged receipt states its scope and disclaims merge authority", () =>
 // ------------------------------------------------------------ extension host
 
 function fakeHost(options: { nativeTask?: boolean } = {}) {
-	const tools = new Map<string, { name: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }>();
+	const tools = new Map<string, { name: string; description?: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }>();
 	const events = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const commands = new Map<string, { description?: string; handler(args: string, ctx: unknown): unknown }>();
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	const notifications: string[] = [];
 	const sentMessages: Array<{ content: string; options?: unknown }> = [];
+	const nativeTaskCalls = { count: 0 };
 	const leaf = (): unknown => ({ optional: () => leaf(), describe: () => leaf() });
+	if (options.nativeTask) {
+		tools.set("task", {
+			name: "task",
+			description: "Run an ordinary OMP workflowz task.",
+			async execute() {
+				nativeTaskCalls.count += 1;
+				return { content: [{ text: "native task completed" }] };
+			},
+		});
+	}
 	return {
 		tools,
+		nativeTaskCalls,
 		events,
 		commands,
 		entries,
@@ -986,7 +998,7 @@ function fakeHost(options: { nativeTask?: boolean } = {}) {
 		zod: { object: () => ({}), string: leaf },
 		arktype: options.nativeTask ? ((schema: unknown) => schema) : undefined,
 		setLabel() {},
-			registerTool(definition: { name: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }) {
+		registerTool(definition: { name: string; description?: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }) {
 			tools.set(definition.name, definition);
 		},
 		appendEntry(customType: string, data: unknown) {
@@ -1058,6 +1070,33 @@ test("a package that throws while loading reports the reason and still fails lou
 	assert.throws(() => lunaFactoryExtension(exploding as never), /host rejected the extension surface/);
 	assert.equal(factoryHandoffState(), "load-failed");
 	assert.match(factoryLoadDiagnostic(), /packaged but failed to load: host rejected the extension surface/);
+});
+
+test("Factory enabled but idle preserves the native workflowz task", async () => {
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	await host.events.get("session_start")!({}, startCtx(host));
+
+	const task = host.tools.get("task");
+	assert.ok(task);
+	assert.equal(task.description, "Run an ordinary OMP workflowz task.");
+	const result = await task.execute("call", { task: "ordinary Review work" });
+	assert.equal(result.isError, undefined);
+	assert.equal(host.nativeTaskCalls.count, 1);
+});
+
+test("Factory disabled leaves the native workflowz task unchanged", async () => {
+	for (const env of [{}, { LUNA_FACTORY_ENABLED: "0" }]) {
+		const host = fakeHost({ nativeTask: true });
+		createLunaFactoryExtension(host as never, { env, artifactRoots: ROOTS });
+		await host.events.get("session_start")!({}, startCtx(host));
+
+		const task = host.tools.get("task");
+		assert.ok(task);
+		assert.equal(task.description, "Run an ordinary OMP workflowz task.");
+		await task.execute("call", { task: "ordinary Review work" });
+		assert.equal(host.nativeTaskCalls.count, 1);
+	}
 });
 
 test("loading the extension registers its surface and starts no work", async () => {

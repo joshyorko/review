@@ -301,35 +301,18 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	const artifactRoots = options.artifactRoots ?? ["artifact://"];
 	let ledger: Ledger | undefined;
 	let loadProblem: string | undefined;
+	const nativeTaskParameters = host.arktype?.("object");
+	let nativeTaskWrapperRegistered = false;
 
 	const enabled = (): boolean => env[ENABLE_FLAG] === "1";
 
-	/** Persist only through the journal, so every mutation survives a reload. */
-	const commit = (next: Ledger): void => {
-		saveRun(host, next);
-		ledger = next;
-	};
-
-	const z = host.zod;
-	const jsonParameters = z.object({ input: z.string().describe("JSON payload for this command") });
-
-	const registerTool = (definition: FactoryToolDefinition): void => {
-		host.registerTool({
-			...definition,
-			parameters: jsonParameters,
-			defaultInactive: !enabled(),
-			loadMode: "essential",
-		});
-	};
-
 	/**
-	 * Shadow OMP's native task tool only when the host gives us its native schema
-	 * builder. `ctx.invokeTool` is same-name delegation: OMP remains the owner of
-	 * scheduling, isolation, cancellation, and result assembly; Factory owns the
-	 * admission check immediately before that call.
+	 * Keep the native task visible until a Factory ledger owns this session's
+	 * execution. Once registered, the same-name wrapper remains the fail-closed
+	 * boundary for the lifetime of that Factory-owned session.
 	 */
-	const nativeTaskParameters = host.arktype?.("object");
-	if (enabled() && nativeTaskParameters !== undefined) {
+	const registerNativeTaskWrapper = (): void => {
+		if (nativeTaskWrapperRegistered || !enabled() || ledger === undefined || nativeTaskParameters === undefined) return;
 		host.registerTool({
 			name: "task",
 			label: "Task",
@@ -404,7 +387,27 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				return result;
 			},
 		});
-	}
+		nativeTaskWrapperRegistered = true;
+	};
+
+	/** Persist only through the journal, so every mutation survives a reload. */
+	const commit = (next: Ledger): void => {
+		saveRun(host, next);
+		ledger = next;
+		registerNativeTaskWrapper();
+	};
+
+	const z = host.zod;
+	const jsonParameters = z.object({ input: z.string().describe("JSON payload for this command") });
+
+	const registerTool = (definition: FactoryToolDefinition): void => {
+		host.registerTool({
+			...definition,
+			parameters: jsonParameters,
+			defaultInactive: !enabled(),
+			loadMode: "essential",
+		});
+	};
 
 	/** Every mutating command runs through here so the gate and the journal cannot drift apart. */
 	const mutate = (
@@ -989,7 +992,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	const activateFactoryTools = async (): Promise<void> => {
 		if (!enabled() || host.getActiveTools === undefined || host.setActiveTools === undefined) return;
 		const activeTools = host.getActiveTools();
-		const nativeNames = nativeTaskParameters === undefined ? [] : ["task"];
+		const nativeNames = nativeTaskWrapperRegistered ? ["task"] : [];
 		const nextActiveTools = [...new Set([...activeTools, ...FACTORY_TOOL_NAMES, ...nativeNames])];
 		try {
 			await host.setActiveTools(nextActiveTools);
@@ -1027,6 +1030,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		if (loaded.problem !== undefined && ctx.hasUI) {
 			ctx.ui?.notify?.(`Factory journal is unreadable: ${loaded.problem}`, "error");
 		}
+		registerNativeTaskWrapper();
 		await activateFactoryTools();
 	});
 	host.on("session_stop", (_event, ctx) => settle(ctx));
