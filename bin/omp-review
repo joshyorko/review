@@ -118,6 +118,11 @@ if [[ ! -e "$LUNA_FACTORY_PATH" && -d "$SCRIPT_DIR/image/extension/luna-factory"
 fi
 if [[ -e "$LUNA_FACTORY_PATH" ]]; then
   EXTENSION_ARGS+=(--extension "$LUNA_FACTORY_PATH")
+else
+  # Name the cause once, here, where the package layout is actually observable.
+  # In-session, an absent package is indistinguishable from one that was never
+  # passed to omp; only the launcher can tell them apart.
+  echo "omp-review: Luna Factory extension is not packaged at ${LUNA_FACTORY_PATH}; the Factory handoff will be unavailable in this session." >&2
 fi
 
 # 5. Ensure organization & repository skills are projected for agent discovery
@@ -148,4 +153,4 @@ if [[ "$advisor" == false ]]; then
   PARSED_REVIEW_ARGS+=(--advisor)
 fi
 
-exec omp --profile review --extension "$EXTENSION_PATH" ${PARSED_REVIEW_ARGS[@]+"${PARSED_REVIEW_ARGS[@]}"}
+exec omp --profile review "${EXTENSION_ARGS[@]}" ${PARSED_REVIEW_ARGS[@]+"${PARSED_REVIEW_ARGS[@]}"}

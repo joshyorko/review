@@ -105,7 +105,8 @@ require "$containerfile" \
 require image/appliance/entrypoint.sh \
   'extension_args=(--extension /usr/share/bluefin/review/extension)' \
   'extension_args+=(--extension /usr/share/bluefin/review/luna-factory)' \
-  '"${extension_args[@]}"'
+  '"${extension_args[@]}"' \
+  'Luna Factory extension is not packaged at /usr/share/bluefin/review/luna-factory'
 require image/appliance/config.yml \
   'enabled: false' \
   'apply: false'

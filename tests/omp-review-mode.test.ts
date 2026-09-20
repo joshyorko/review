@@ -39,6 +39,9 @@ import {
 	commentInvocation,
 } from "../image/extension/bluefin-review/extension.ts";
 
+import lunaFactoryExtension from "../image/extension/luna-factory/index.ts";
+import { factoryHandoffState, registerFactoryController } from "../image/extension/luna-factory/omp/batch-bridge.ts";
+
 const NOW = 1_800_000_000_000;
 
 // No hub, no home: these tests must not read the developer's own Hive
@@ -3103,6 +3106,61 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 });
 
 
+test("a Review session that offers the Factory handoff has a registered Factory controller", async () => {
+	// Review alone first: nothing loaded the Factory package's entry, so the
+	// workbench must not offer a handoff it cannot make, and the startup
+	// diagnostic must name the cause rather than the execution flag.
+	const clearController = registerFactoryController(async () => "stub");
+	clearController();
+	assert.equal(factoryHandoffState(), "not-registered");
+
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	const alone = ctx.overlays[0];
+	assert.ok(!alone.render(200).join("\n").includes("F factory"), "an unregistered Factory is not advertised as a handoff");
+	assert.ok(
+		ctx.notifications.some((n) => /Factory handoff unavailable: .*never registered a controller/.test(n.message)),
+		"startup names the packaging/extension cause instead of blaming LUNA_FACTORY_ENABLED",
+	);
+	alone.handleInput("F");
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	assert.ok(ctx.notifications.some((n) => /Factory handoff unavailable/.test(n.message)), "a direct invocation is explained, not silent");
+	alone.handleInput("q");
+
+	// Co-load: the real package entry registers the controller in this process.
+	const factoryHost = fakeHost();
+	lunaFactoryExtension(factoryHost as never);
+	assert.equal(factoryHandoffState(), "registered");
+
+	const pi2 = fakeHost();
+	const review2 = createReviewExtension(pi2, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const ctx2 = fakeCtx();
+	ctx2.ui.parent = ctx2;
+	await pi2.events.get("session_start")({}, ctx2);
+	await review2.whenStarted();
+
+	const coLoaded = ctx2.overlays[0];
+	assert.ok(coLoaded.render(200).join("\n").includes("F factory"), "a co-loaded Factory is advertised");
+	assert.ok(!ctx2.notifications.some((n) => /Factory handoff unavailable/.test(n.message)), "a co-loaded session warns about nothing");
+	ctx2.editorResponses.push("status");
+	coLoaded.handleInput("F");
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	assert.ok(
+		ctx2.notifications.some((n) => /LUNA_FACTORY_ENABLED=1|Factory is disabled/.test(n.message)),
+		"the handoff reaches Factory, which reports the execution opt-in instead of a load failure",
+	);
+	coLoaded.handleInput("q");
+
+	// Loading Factory starts no work, and the handoff is per-session.
+	await factoryHost.events.get("session_shutdown")!();
+	assert.equal(factoryHandoffState(), "not-registered");
+});
+
 test("issue admission gate handles positive admission, negative cases, and invariants", async () => {
 	const setup = async (issueAttrs, options = {}) => {
 		const pi = fakeHost();
@@ -3928,7 +3986,10 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 	const itemsBefore = [...mode.items];
 	dashboard.handleClick(tabPos + 1, keymapLineIdx);
 	assert.notEqual(mode.queueMode, modeBefore, "clicking Tab toggles queue mode");
-	dashboard.handleClick(tabPos + 1, keymapLineIdx);
+	const issueKeymapText = dashboard.render(400)[keymapLineIdx];
+	const issueTabPos = issueKeymapText.indexOf("tab prs/issues");
+	assert.ok(issueTabPos > 0);
+	dashboard.handleClick(issueTabPos + 1, keymapLineIdx);
 	assert.equal(mode.queueMode, modeBefore);
 	mode.items = itemsBefore;
 	;

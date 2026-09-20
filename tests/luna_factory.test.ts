@@ -33,6 +33,7 @@ import { buildDispatchPrompt, dispatchMarker, RECEIPT_CONTRACT } from "../image/
 import { DISPATCH_COVERAGE, coverageFor, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
 import { renderStatus, renderStatusDetail, renderWhy } from "../image/extension/luna-factory/ui/status.ts";
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
+import { factoryCommand, factoryHandoffState, factoryLoadDiagnostic, registerFactoryController, reportFactoryLoadFailure } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const ROOTS = ["/artifacts"];
 const REDUCE = { artifactRoots: ROOTS };
@@ -1017,6 +1018,47 @@ async function callTool(host: ReturnType<typeof fakeHost>, name: string, input: 
 }
 
 const FULL_ENV = { LUNA_FACTORY_ENABLED: "1" };
+
+test("the Factory handoff distinguishes not-registered, load-failed, and registered", async () => {
+	const clearController = registerFactoryController(async () => "stub");
+	clearController();
+	assert.equal(factoryHandoffState(), "not-registered");
+	assert.match(factoryLoadDiagnostic(), /never registered a controller/);
+	assert.doesNotMatch(factoryLoadDiagnostic(), /LUNA_FACTORY_ENABLED/, "a missing package must not be blamed on the execution opt-in");
+
+	reportFactoryLoadFailure("host rejected the extension surface\nwith a second line");
+	assert.equal(factoryHandoffState(), "load-failed");
+	assert.equal(
+		factoryLoadDiagnostic(),
+		"the Luna Factory extension is packaged but failed to load: host rejected the extension surface with a second line",
+	);
+	await assert.rejects(factoryCommand("status", {}), /failed to load: host rejected the extension surface/);
+
+	const host = fakeHost();
+	lunaFactoryExtension(host as never);
+	assert.equal(factoryHandoffState(), "registered");
+	assert.equal(factoryLoadDiagnostic(), "the Luna Factory controller is registered");
+	await host.events.get("session_shutdown")!();
+	assert.equal(factoryHandoffState(), "not-registered");
+});
+
+test("a load failure reason is bounded, single-line, and secret-free", () => {
+	reportFactoryLoadFailure(`${"LUNA_FACTORY_CAPACITY=7 ".repeat(40)}tail`);
+	const diagnostic = factoryLoadDiagnostic();
+	assert.ok(diagnostic.length < 320, `diagnostic was ${diagnostic.length} characters`);
+	assert.ok(!diagnostic.includes("\n"), "a diagnostic is one line");
+	assert.ok(diagnostic.endsWith("…"), diagnostic);
+});
+
+test("a package that throws while loading reports the reason and still fails loudly", () => {
+	const exploding = fakeHost();
+	exploding.zod.object = () => {
+		throw new Error("host rejected the extension surface");
+	};
+	assert.throws(() => lunaFactoryExtension(exploding as never), /host rejected the extension surface/);
+	assert.equal(factoryHandoffState(), "load-failed");
+	assert.match(factoryLoadDiagnostic(), /packaged but failed to load: host rejected the extension surface/);
+});
 
 test("loading the extension registers its surface and starts no work", async () => {
 	const host = fakeHost();

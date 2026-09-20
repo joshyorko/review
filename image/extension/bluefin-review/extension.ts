@@ -10,7 +10,7 @@ import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
-import { registerFactorySelection, factoryCommand } from "../luna-factory/omp/batch-bridge.ts";
+import { registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
 import { ResourceClaims, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
@@ -753,6 +753,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const dispatch = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
 		if (action.kind === "close") return;
 		if (action.kind === "factory") {
+			// The dashboard hides the chord when Factory is unavailable; this is
+			// the residual path (a stale frame, or a caller that drives the action
+			// directly). Name the cause instead of reporting a bare "not loaded".
+			if (!factoryControllerRegistered()) {
+				ctx.ui.notify(`Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
+				return;
+			}
 			try {
 				const command = await ctx.ui.editor("Factory: start inspect|patch|pr-ready, status, resume/pause/stop <batch>, inspect/export/discard <batch>", `start ${action.action}`);
 				if (command === undefined) return;
@@ -938,6 +945,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 							if (!paused && activeBatch?.state === "paused") void dispatchCurrentWave(ctx, "followUp");
 							syncBatchProgress(ctx);
 						},
+						// The dashboard advertises the Factory handoff only while a
+						// controller is registered, so "Factory is not loaded" is not
+						// reachable from a key the workbench offers.
+						() => factoryControllerRegistered(),
 					);
 					return activeDashboard;
 				},
@@ -1082,6 +1093,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	pi.on("session_start", async (_event, ctx) => {
 		activeCtx = ctx;
+		// One bounded startup diagnostic, by cause. Without it a Factory handoff
+		// that cannot be reached only surfaces as a mystery on Shift+F, and the
+		// absent LUNA_FACTORY_ENABLED opt-in is blamed for a load failure.
+		if (!factoryControllerRegistered()) {
+			ctx.ui.notify(`Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
+		}
 		mode.setToken(resolveToken(env));
 		// Mode, scope and filter apply immediately; the remembered item can only be
 		// found once the queue has actually been fetched, so restore runs twice.
