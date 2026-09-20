@@ -47,9 +47,12 @@ grep -qF '/out/usr/share/hive/contribute/HIVE_COMMIT' "$containerfile" || fail "
 
 # The upstream runtime this image carries: the relay, the agent script, the
 # helpers the relay requires, the backend table, and Hive's `gh` policy layer.
+# `bin/lib/` is named as a subtree rather than by file — that is what keeps a
+# module upstream adds from going missing. The runtime closure check below
+# asserts pane-classifier.js actually landed in the built image.
 # omp-backend.js is deliberately absent — it is a host-side staging helper for
 # `just contribute-hive`, and upstream's own contributor image does not ship it.
-for path in contributor-agent.sh contributor-relay.js pi-backend.js lib/pane-classifier.js backends.conf gh-wrapper.sh contributor-default.json; do
+for path in contributor-agent.sh contributor-relay.js pi-backend.js bin/lib/ backends.conf gh-wrapper.sh contributor-default.json; do
   grep -q "${path}" "$containerfile" || fail "missing Hive runtime ${path}"
 done
 ! grep -qF 'bin/omp-backend.js' "$containerfile" ||
@@ -100,16 +103,18 @@ grep -qF 'io.hivecommons.contribute.hive.ref="${HIVE_COMMIT}"' "$containerfile" 
 grep -qE '^ARG FSDK_BASE_IMAGE HIVE_COMMIT ' "$containerfile" ||
   fail "the final stage must redeclare HIVE_COMMIT or its label ships empty"
 
-# Upstream copies the whole bin/lib/ directory into its contributor image; this
-# build names each Hive file it fetches instead. That is deliberate — the image
-# is an explicit allowlist — but it means a new upstream module would be missed
-# silently and fail at task time, inside a running contributor session. The
-# build resolves every local require() against what was actually staged, so the
-# gap becomes a failed build instead of a broken assignment.
-grep -qF 'hive_unstaged=' "$containerfile" ||
-  fail "the build must verify that every Hive require() resolves to a staged file"
-grep -qF 'Hive module not staged' "$containerfile" ||
-  fail "the module closure check must fail the build, not just warn"
+# Upstream's contributor image does `COPY bin/lib/` — the whole directory. This
+# build stages that directory from a commit-addressed archive for the same
+# reason: naming one file inside it would silently drop a module upstream added,
+# and the break would surface at task time inside a running contributor session.
+# The top-level Hive scripts stay individually named, matching upstream's own
+# per-file COPY lines, so the allowlist still says exactly what ships.
+grep -qF 'codeload.github.com/hivecommons/hive/tar.gz/${hive_commit}' "$containerfile" ||
+  fail "bin/lib/ must be staged from a commit-addressed archive, not file by file"
+grep -qF -- '--strip-components=3 --wildcards "*/bin/lib/*"' "$containerfile" ||
+  fail "the archive must be narrowed to Hive's bin/lib/ subtree"
+grep -qF 'bin/lib/ staged empty' "$containerfile" ||
+  fail "an empty bin/lib/ must fail the build rather than ship a runtime without it"
 
 # Launcher defaults and settings
 grep -qF 'DEFAULT_IMAGE="ghcr.io/projectbluefin/contribute:stable"' "$launcher" || fail "missing default image in launcher"

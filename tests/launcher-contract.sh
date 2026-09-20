@@ -530,6 +530,26 @@ EOF
   assert_contains "$run_cmd" "--no-mount /etc/localtime" "dangling localtime symlink must be suppressed"
   assert_not_contains "$run_cmd" "--no-mount /etc/hosts" "present hosts must stay mounted"
 
+  # Asymmetric: localtime present, hosts absent. Each file is decided on its
+  # own, so a guard that suppressed both together would pass the symmetric
+  # cases above and still break a host missing only one.
+  rm -f "$host_root/etc/localtime" "$host_root/etc/hosts"
+  : >"$host_root/etc/localtime"
+  _minimal_host_seed
+  "$launcher" run >/dev/null 2>&1
+  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
+  assert_contains "$run_cmd" "--no-mount /etc/hosts" "absent hosts must be suppressed on its own"
+  assert_not_contains "$run_cmd" "--no-mount /etc/localtime" "present localtime must stay mounted"
+
+  # Dangling /etc/hosts, the mirror of the localtime case.
+  rm -f "$host_root/etc/hosts"
+  ln -s /nonexistent/hosts "$host_root/etc/hosts"
+  _minimal_host_seed
+  "$launcher" run >/dev/null 2>&1
+  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
+  assert_contains "$run_cmd" "--no-mount /etc/hosts" "dangling hosts symlink must be suppressed"
+  assert_not_contains "$run_cmd" "--no-mount /etc/localtime" "present localtime must stay mounted"
+
   unset -f _minimal_host_seed
 }
 
@@ -667,10 +687,14 @@ EOF
     export FAKE_GH_TOKEN_VALUE="fake-doctor-gh-token"
   }
 
-  # Missing device: a host capability, not a package.
+  # Missing device: a host capability, not a package. A degraded fallback with
+  # no KVM path left is a failed preflight, so the status must say so too --
+  # an operator scripting `hive-contribute doctor` sees the exit code first.
   _degraded_doctor
   export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$scratch/absent-fuse"
-  output="$("$launcher" doctor 2>&1)" || true
+  local status=0
+  output="$("$launcher" doctor 2>&1)" || status=$?
+  [[ "$status" -ne 0 ]] || fail "doctor must fail when neither krun nor the Apptainer fallback is usable"
   assert_contains "$output" "FUSE device $scratch/absent-fuse is missing" "absent FUSE names the device"
   assert_not_contains "$output" "squashfuse userland is unavailable" "device failure must not blame the userland"
 
@@ -687,8 +711,10 @@ EOF
   : >"$locked"
   chmod 000 "$locked"
   export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$locked"
-  output="$("$launcher" doctor 2>&1)" || true
+  status=0
+  output="$("$launcher" doctor 2>&1)" || status=$?
   chmod 644 "$locked"
+  [[ "$status" -ne 0 ]] || fail "doctor must fail when the FUSE device is unusable"
   assert_contains "$output" "FUSE device $locked is not readable and writable" "locked FUSE names permissions"
   assert_not_contains "$output" "is missing" "permission failure must not report absence"
 
