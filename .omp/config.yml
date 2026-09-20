@@ -7,11 +7,4 @@
 # file is not copied into the runtime image.
 
 advisor:
-  # On by default: this repository's changes are load-bearing (a launcher that
-  # handles credentials, an image other people run), and a second reader that
-  # can block is worth its cost here. Session-scoped `/advisor off` still wins.
-  enabled: true
-  # Bounded catch-up, not lockstep: the primary waits only while the advisor's
-  # backlog is at or above one update, capped at 30s. Without it a fast primary
-  # finishes the work before its reviewer has seen the middle of it.
   syncBacklog: 1
