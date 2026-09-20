@@ -99,9 +99,10 @@ jobs:
         run: |
           set -euo pipefail
           # Resolve Hive's tracking branch once and pass it in, exactly as the
-          # justfile and publish workflow do. Left unset, the build resolves it
-          # inside the layer instead and the image's hive.commit label ships
-          # empty while HIVE_COMMIT inside the image holds a real SHA.
+          # justfile and publish workflow do. The build requires it: the final
+          # stage cannot see a commit resolved inside the builder, so a missing
+          # arg would ship an empty provenance label beside a populated
+          # HIVE_COMMIT file. It refuses rather than build that image.
           hive_commit="$(git ls-remote https://github.com/hivecommons/hive refs/heads/v4 | cut -f1)"
           [[ "$hive_commit" =~ ^[0-9a-f]{40}$ ]] ||
             { echo "could not resolve hivecommons/hive v4" >&2; exit 1; }

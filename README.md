@@ -126,8 +126,10 @@ in to GitHub first, since upstream's setup reads that identity:
 gh auth login --web --hostname github.com --scopes repo,read:org
 ```
 
-Once a registration exists, none of that toolchain is needed again — later runs
-go straight to the container.
+Once a registration exists, the setup-only tools (`just`, `git`, `curl`, `jq`,
+`node`) are no longer needed. Every run still needs a container runtime —
+Podman with `krun`, or Apptainer — and a GitHub token, either from `gh` or
+exported as `GH_TOKEN`.
 
 ### If something is wrong
 

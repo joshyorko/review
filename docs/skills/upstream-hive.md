@@ -46,9 +46,10 @@ Route by who owns the broken thing, not by which repository is easiest to file i
 Verified against `hivecommons/hive`:
 
 - The default branch is `v4` (v2 is retired). Cite code there, not `main`.
-- They ship `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `SECURITY.md`. Read
-  the current copies rather than assuming; there is still no `AGENTS.md`, issue
-  template, or pull request template.
+- They ship `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, a pull
+  request template, and issue templates (`bug_report`, `feature_request`,
+  `guide-gap`). Read the current copies and use the template that fits; there
+  is still no `AGENTS.md`.
 - `CONTRIBUTING.md` states the base branch: `main` is not the active target, so
   cut a topic branch from `origin/v4` (or whichever base its table names for
   the kind of change) and target that.

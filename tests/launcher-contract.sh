@@ -97,13 +97,6 @@ case "\${1:-} \${2:-}" in
     ;;
   "run "*)
     printf 'run %s\n' "\${*:2}" >>"$podman_log"
-    if [[ -n "\${FAKE_PODMAN_RUN_STATUSES:-}" ]]; then
-      read -r -a statuses <<<"\$FAKE_PODMAN_RUN_STATUSES"
-      count_file="\${FAKE_PODMAN_RUN_COUNT:?}"
-      count="\$(cat "\$count_file" 2>/dev/null || printf 0)"
-      printf '%s' "\$((count + 1))" >"\$count_file"
-      exit "\${statuses[count]:-0}"
-    fi
     exit "\${FAKE_PODMAN_RUN_STATUS:-0}"
     ;;
 esac
@@ -172,7 +165,7 @@ clean_env() {
   unset HUB REGISTRATION IMAGE BACKEND
   unset GH_TOKEN GITHUB_TOKEN
   unset FAKE_PODMAN_INFO_FAIL FAKE_PODMAN_REMOTE FAKE_PODMAN_PULL_FAIL FAKE_PODMAN_IMAGE_EXISTS
-  unset FAKE_PODMAN_RUN_STATUS FAKE_PODMAN_RUN_STATUSES FAKE_PODMAN_RUN_COUNT
+  unset FAKE_PODMAN_RUN_STATUS
   unset FAKE_APPTAINER_RUN_STATUS FAKE_GH_AUTH_STATUS_FAIL FAKE_GH_TOKEN_FAIL FAKE_GH_TOKEN_VALUE
 
   rm -rf "${fake_home:?}"
@@ -350,6 +343,11 @@ EOF
   assert_not_contains "$run_cmd" "secret-gh-token-abcxyz" "GH token value in argv"
   assert_not_contains "$run_cmd" "secret-anthropic-key-777" "Anthropic key value in argv"
   assert_not_contains "$run_cmd" "secret-openrouter-key-555" "OpenRouter key value in argv"
+
+  # Hive owns every exchange with the hub. The launcher mounts the credential
+  # and starts the container; it does not validate, reissue, or otherwise call
+  # the hub. A downstream copy of that protocol is what this asserts stays gone.
+  assert_eq "$(cat "$curl_log")" "" "the launcher must not call the hub itself"
 
   # An unset HIVE_SESSION must stay absent — the relay then defaults the label
   # to the backend name, which is not the same thing as an empty label.

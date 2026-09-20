@@ -1,21 +1,21 @@
 [extend]
 useDefault = true
 
-# The launcher's contract tests assert that credential VALUES never reach a
-# command line, a log, or a container argv. Proving that requires planting
-# values that look exactly like real credentials and then searching the
-# recorded argv for them — so the fixtures below are the test's subject, not a
-# leak. They are fake by construction:
+# The launcher contract tests plant fake credentials and then assert those
+# VALUES never reach a container argv, a log, or a command line. Proving that
+# requires literals that look like credentials, so the scanner finds them —
+# they are the test's subject, not a leak.
 #
-#   secret-gh-token-abcxyz, secret-anthropic-key-777, secret-openrouter-key-555,
-#   apptainer-secret-*
-#       invented strings, asserted ABSENT from every recorded command line
-#
-# Scoped to the test files by path: a real credential committed anywhere else
-# in this repository still fails the scan.
+# Allowlisted by VALUE, never by path. A path allowlist would switch scanning
+# off for the whole file, so a real credential pasted into a test later would
+# ship unnoticed; these entries only excuse the exact synthetic strings below,
+# every one of which the tests assert the ABSENCE of.
 [allowlist]
-description = "Fake credentials used by the launcher contract tests"
-paths = [
-  '''^tests/launcher-contract\.sh$''',
-  '''^tests/contribute-contract\.sh$''',
+description = "Synthetic credentials asserted absent by the launcher contract tests"
+regexes = [
+  '''^secret-anthropic-key-777$''',
+  '''^secret-gh-token-abcxyz$''',
+  '''^secret-openrouter-key-555$''',
+  '''^secret-registration-token-999$''',
+  '''^apptainer-secret-(gh|openai|reg)-token$''',
 ]
