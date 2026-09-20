@@ -417,10 +417,19 @@ launch_once() {
   # a fallback host frequently does not have, and a launch that dies on a
   # missing controller is worse than an unbounded one. `hive-contribute config`
   # reports the configured values; only the Podman path enforces them.
+  # Apptainer binds /etc/localtime and /etc/hosts unconditionally and fails the
+  # launch when one is absent, which minimal and devcontainer hosts routinely
+  # are. Suppress only the ones this host does not have; `-e` is false for a
+  # dangling symlink too, which is the shape a trimmed base image leaves behind.
+  # This guard was lost once already (#564) and cost a release, so the contract
+  # test drives it through HIVE_CONTRIBUTE_TEST_HOST_ROOT: the probe takes the
+  # prefix, the flag always names the real path, and an unset prefix is the
+  # production path byte for byte.
   local host_args=()
   local host_file
   for host_file in /etc/localtime /etc/hosts; do
-    [[ -e "$host_file" ]] || host_args+=(--no-mount "$host_file")
+    [[ -e "${HIVE_CONTRIBUTE_TEST_HOST_ROOT:-}${host_file}" ]] ||
+      host_args+=(--no-mount "$host_file")
   done
   echo "✓ starting isolated Apptainer worker ${slug}. Choose model and effort in OMP."
   apptainer run --containall --no-eval "${host_args[@]}" \

@@ -168,6 +168,7 @@ clean_env() {
   export HIVE_CONTRIBUTE_TEST_KVM_DEVICE="$fake_kvm"
   export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$fake_fuse"
   unset HIVE_CONTRIBUTE_CONFIG
+  unset HIVE_CONTRIBUTE_TEST_HOST_ROOT
   unset HUB REGISTRATION IMAGE BACKEND
   unset GH_TOKEN GITHUB_TOKEN
   unset FAKE_PODMAN_INFO_FAIL FAKE_PODMAN_REMOTE FAKE_PODMAN_PULL_FAIL FAKE_PODMAN_IMAGE_EXISTS FAKE_PODMAN_NO_KRUN
@@ -468,6 +469,71 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# Scenario 4b: minimal hosts (#567). Apptainer binds /etc/localtime and
+#              /etc/hosts unconditionally, so a host missing either cannot
+#              launch unless the launcher suppresses that mount. The guard was
+#              lost once in #564; this is what makes losing it again visible.
+#              Covers absent, present, and dangling-symlink shapes.
+# -----------------------------------------------------------------------------
+test_run_apptainer_minimal_host() {
+  local host_root="$scratch/minimal-host"
+
+  # Same seed as scenario 4; only the simulated host layout changes per case.
+  _minimal_host_seed() {
+    clean_env
+    export FAKE_PODMAN_NO_KRUN=1
+    export HIVE_CONTRIBUTE_TEST_HOST_ROOT="$host_root"
+    local config_file="$fake_home/.config/hive-contribute.yml"
+    mkdir -p "$fake_home/.config/hive"
+    cat >"$config_file" <<EOF
+hub: wss://hub.example.com/contribute
+registration: $fake_home/.config/hive/contributor.env
+image: ghcr.io/projectbluefin/contribute:stable
+backend: omp
+EOF
+    chmod 600 "$config_file"
+    cat >"$fake_home/.config/hive/contributor.env" <<'EOF'
+HIVE_HUB=wss://hub.example.com/contribute
+HIVE_REGISTRATION_TOKEN=not-a-real-minimal-host-token
+CONTRIBUTOR_ID=c-minimal-host
+EOF
+    chmod 600 "$fake_home/.config/hive/contributor.env"
+  }
+
+  local run_cmd
+
+  # Absent: a trimmed host has neither file, so both mounts are suppressed.
+  rm -rf "$host_root"
+  mkdir -p "$host_root/etc"
+  _minimal_host_seed
+  "$launcher" run >/dev/null 2>&1
+  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
+  assert_contains "$run_cmd" "--no-mount /etc/localtime" "absent localtime must be suppressed"
+  assert_contains "$run_cmd" "--no-mount /etc/hosts" "absent hosts must be suppressed"
+
+  # Present: an ordinary host keeps both mounts, so the guard cannot become an
+  # unconditional --no-mount that silently drops the host's timezone and DNS.
+  : >"$host_root/etc/localtime"
+  : >"$host_root/etc/hosts"
+  _minimal_host_seed
+  "$launcher" run >/dev/null 2>&1
+  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
+  assert_not_contains "$run_cmd" "--no-mount" "present host files must stay mounted"
+
+  # Dangling symlink: present as a link, resolves to nothing. Apptainer fails
+  # on it exactly as on an absent file, and `-e` is false for both.
+  rm -f "$host_root/etc/localtime"
+  ln -s /nonexistent/zoneinfo "$host_root/etc/localtime"
+  _minimal_host_seed
+  "$launcher" run >/dev/null 2>&1
+  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
+  assert_contains "$run_cmd" "--no-mount /etc/localtime" "dangling localtime symlink must be suppressed"
+  assert_not_contains "$run_cmd" "--no-mount /etc/hosts" "present hosts must stay mounted"
+
+  unset -f _minimal_host_seed
+}
+
+# -----------------------------------------------------------------------------
 # Scenario: `just contribute-build` leaves the image in Podman's store, which
 #           Apptainer cannot read. A host without krun must still be able to
 #           run the image it just built, converted once and reused.
@@ -691,6 +757,9 @@ test_krun_registered_with_podman_but_absent_from_path
 
 echo "4. Testing Apptainer fallback path..."
 test_run_apptainer_fallback
+
+echo "4b. Testing minimal hosts missing /etc/localtime or /etc/hosts..."
+test_run_apptainer_minimal_host
 
 echo "5. Testing a locally built image on the Apptainer fallback..."
 test_run_apptainer_converts_local_image
