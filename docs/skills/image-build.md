@@ -74,7 +74,21 @@ The OCI image leaves model and effort selection to OMP.
     branch stays current, no pull request is ever opened, and the shipped image
     ages while every signal reads healthy. `tests/renovate-tracking.test.mjs`
     fails if that exemption or a tracking regex is dropped, and the Renovate
-    workflow fails when a pin is behind upstream with no branch delivering it.
+    workflow fails when a pin is behind upstream with no open pull request
+    carrying the latest release.
+
+    A post-upgrade command does not inherit the workflow job's environment.
+    Renovate builds one from its own allowlist — proxy, `HOME`, `PATH`,
+    locale, CA certificates, container runtime — unless the self-hosted
+    `exposeAllEnv` is set, which it is not. Every pin synchronizer reads a
+    GitHub release, so without `RENOVATE_CUSTOM_ENV_VARIABLES` handing one a
+    token they call `api.github.com` anonymously at 60 requests an hour from
+    the runner's shared address, and a rate-limited lookup leaves the version
+    bumped beside the previous release's digests. The build then fails at
+    `sha256sum -c` rather than shipping the wrong binary, but delivery stops
+    behind a pull request that looks correct. `LOG_LEVEL` is `debug`
+    permanently for the same reason: Renovate logs post-upgrade compilation,
+    execution, and which changes survived `fileFilters` only at debug.
 14. The image loads its OMP settings overlay via `PI_CONFIG_FILES` in the image
     environment, the documented wrapper seam that lands in the CLI-overlay layer
     above user and project settings. The contributor cannot use `--config` at

@@ -4,7 +4,7 @@ Upstream Hive's contributor runtime packaged as an isolated, distroless containe
 
 This appliance packages Hive's contributor runtime (`contributor-agent.sh` + `contributor-relay.js`) with OMP as the agent CLI, so a contributor needs no agent toolchain of their own. Hive owns task selection, assignment, prompts, leases, and output capture; OMP owns agent execution, model choice, thinking effort, and tool boundaries. This repository owns the isolation boundary, the credentials that cross it, and the single configuration file.
 
-The Hive runtime inside is tracked directly from upstream's `v4` branch and is **never pinned** to a static commit in this repository. Every image build resolves the branch to a commit, stamps it into `/usr/share/hive/contribute/HIVE_COMMIT`, records it in the image labels (`io.hivecommons.contribute.hive.ref`) and SBOM, and registration clones that same branch, so setup and runtime follow one release line. They are not pinned to the same commit: `setup` reads `v4` live while the image carries the SHA resolved at its last build, so they can differ by up to one daily rebuild.
+The Hive runtime inside is tracked directly from upstream's `v4` branch and is **never pinned** to a static commit in this repository. Every image build resolves the branch to a commit, stamps it into `/usr/share/hive/contribute/HIVE_COMMIT`, records it in the image labels (`io.hivecommons.contribute.hive.ref`) and SBOM, and registration clones that same branch, so setup and runtime follow one release line. They are not pinned to the same commit: `setup` reads `v4` live while the image carries the SHA resolved at its last build, so they can differ. The daily rebuild is what bounds that gap; a failed or skipped publish widens it.
 
 ## Workflow
 

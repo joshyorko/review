@@ -110,7 +110,10 @@ jobs:
             # and an open-pull-request check passes while a blocked one sits on
             # an older version and masks everything published since.
             open="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "$branch" --state open --json number --jq 'length')"
-            carries="$(pin_on "$branch" "$arg")"
+            # `|| true`: a missing branch makes this pipeline exit non-zero, and
+            # under `set -e` that would kill the step before the diagnostic below
+            # ever printed — reporting nothing, and skipping every later pin.
+            carries="$(pin_on "$branch" "$arg" || true)"
             if [ "$open" -gt 0 ] && [ "$carries" = "$latest" ]; then
               echo "… ${name} ${current} -> ${latest} in flight, pull request open on ${branch}"
               return 0

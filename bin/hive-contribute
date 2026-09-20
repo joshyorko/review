@@ -49,7 +49,8 @@ DEFAULT_CPUS="2"
 # upstream's current contributor runtime, and registration is performed by that
 # same branch's contribute-setup, so both follow one line. They are not the
 # same commit: setup clones v4 live, while the image carries the SHA resolved
-# when it was last built, so they can differ by up to a daily rebuild.
+# when it was last built, so they can differ. The daily rebuild is meant to
+# bound that gap, not to guarantee it.
 HIVE_REF="v4"
 
 config_value() {
@@ -154,7 +155,17 @@ kvm_runtime_ready() {
   command -v podman &>/dev/null || { KVM_FAILURE="Podman is unavailable"; return 1; }
   podman info &>/dev/null || { KVM_FAILURE="Podman is not reachable"; return 1; }
   podman_is_local || { KVM_FAILURE="Podman targets a remote engine"; return 1; }
-  command -v krun &>/dev/null || { KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; }
+  # Ask Podman whether `--runtime=krun` resolves, rather than looking for a
+  # `krun` executable on PATH. The launch uses `podman run --runtime=krun`, and
+  # Podman resolves that NAME through the runtimes map in containers.conf,
+  # where a host may register krun against a differently named binary such as
+  # /usr/bin/crun-krun. `command -v krun` misses those hosts and sends a
+  # perfectly good libkrun machine to the Apptainer fallback (#618). An
+  # unregistered name fails here without starting a container:
+  #   $ podman --runtime=krun info
+  #   Error: default OCI runtime "krun" not found: invalid argument
+  podman --runtime=krun info &>/dev/null ||
+    { KVM_FAILURE="Podman cannot resolve the krun OCI runtime"; return 1; }
   [[ -r "$device" && -w "$device" ]] || { KVM_FAILURE="${device} is not readable and writable"; return 1; }
   return 0
 }

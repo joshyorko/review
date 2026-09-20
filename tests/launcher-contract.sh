@@ -66,6 +66,12 @@ chmod +x "$fake_bin/squashfuse_ll"
 cat >"$fake_bin/podman" <<EOF
 #!/usr/bin/env bash
 set -eu
+if [[ "\${1:-}" == "--runtime=krun" ]]; then
+  # Podman resolves the runtime NAME through containers.conf, so an
+  # unregistered krun fails here even when a binary exists on PATH.
+  [[ "\${FAKE_PODMAN_NO_KRUN:-0}" == 1 ]] && exit 125
+  shift
+fi
 [[ "\${1:-}" == info ]] && { [[ "\${FAKE_PODMAN_INFO_FAIL:-0}" == 1 ]] && exit 1 || exit 0; }
 if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
   [[ "\${FAKE_PODMAN_REMOTE:-0}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\tidentity\ttrue\n'
@@ -164,7 +170,7 @@ clean_env() {
   unset HIVE_CONTRIBUTE_CONFIG
   unset HUB REGISTRATION IMAGE BACKEND
   unset GH_TOKEN GITHUB_TOKEN
-  unset FAKE_PODMAN_INFO_FAIL FAKE_PODMAN_REMOTE FAKE_PODMAN_PULL_FAIL FAKE_PODMAN_IMAGE_EXISTS
+  unset FAKE_PODMAN_INFO_FAIL FAKE_PODMAN_REMOTE FAKE_PODMAN_PULL_FAIL FAKE_PODMAN_IMAGE_EXISTS FAKE_PODMAN_NO_KRUN
   unset FAKE_PODMAN_RUN_STATUS
   unset FAKE_APPTAINER_RUN_STATUS FAKE_GH_AUTH_STATUS_FAIL FAKE_GH_TOKEN_FAIL FAKE_GH_TOKEN_VALUE
 
@@ -373,8 +379,9 @@ EOF
 # -----------------------------------------------------------------------------
 test_run_apptainer_fallback() {
   clean_env
-  # Make krun unavailable by removing fake krun
-  rm -f "$fake_bin/krun"
+  # Make krun unavailable the way Podman reports it: the runtime name does
+  # not resolve. Deleting a binary from PATH no longer decides this.
+  export FAKE_PODMAN_NO_KRUN=1
 
   local config_file="$fake_home/.config/hive-contribute.yml"
   mkdir -p "$fake_home/.config/hive"
@@ -399,7 +406,7 @@ EOF
   local output
   output="$("$launcher" run 2>&1)"
 
-  assert_contains "$output" "the krun OCI runtime is unavailable; using the isolated Apptainer fallback without a KVM boundary" "fallback warning"
+  assert_contains "$output" "Podman cannot resolve the krun OCI runtime; using the isolated Apptainer fallback without a KVM boundary" "fallback warning"
   assert_contains "$output" "starting isolated Apptainer worker" "apptainer worker banner"
 
   local apptainer_calls
@@ -433,7 +440,7 @@ EOF
 # -----------------------------------------------------------------------------
 test_run_apptainer_converts_local_image() {
   clean_env
-  rm -f "$fake_bin/krun"
+  export FAKE_PODMAN_NO_KRUN=1
 
   local config_file="$fake_home/.config/hive-contribute.yml"
   mkdir -p "$fake_home/.config/hive"
