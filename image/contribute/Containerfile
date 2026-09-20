@@ -62,6 +62,12 @@ COPY --chmod=0755 scripts/generate-contribute-sbom.py /usr/local/libexec/contrib
 # omp-backend.js is deliberately NOT fetched: it is a HOST-side staging helper
 # for `just contribute-hive`, upstream's own contributor image does not carry
 # it, and neither contributor-agent.sh nor contributor-relay.js requires it.
+#
+# Every Hive file comes out of ONE commit-addressed archive. Per-file fetches
+# would be seven requests describing a snapshot instead of the snapshot itself,
+# with seven ways to fail; and `bin/lib/` has to arrive as a directory anyway,
+# because upstream's image does `COPY bin/lib/` and naming one file inside it
+# would silently drop a module upstream added.
 RUN set -eu; \
     hive_commit="${HIVE_COMMIT}"; \
     case "$hive_commit" in \
@@ -90,17 +96,18 @@ RUN set -eu; \
     cp -a /src/node_modules /out/usr/lib/hive/node_modules; \
     /usr/local/libexec/stage-runtime /out "$node_root/bin/node" "$workdir/gh" "$workdir/tmux" /usr/bin/cmp; \
     mv /out/usr/bin/gh /out/opt/hive/bin/gh-real; \
-    for hive_file in bin/contributor-agent.sh bin/contributor-relay.js bin/pi-backend.js; do \
-      curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/${hive_file}" -o "/out/usr/local/bin/${hive_file#bin/}"; \
-    done; \
     curl --fail --location --show-error --silent "https://codeload.github.com/hivecommons/hive/tar.gz/${hive_commit}" -o "$workdir/hive.tar.gz"; \
-    tar -xzf "$workdir/hive.tar.gz" -C /out/usr/local/bin/lib --strip-components=3 --wildcards "*/bin/lib/*"; \
+    mkdir -p "$workdir/hive"; \
+    tar -xzf "$workdir/hive.tar.gz" -C "$workdir/hive" --strip-components=1 --wildcards \
+      "*/bin/contributor-agent.sh" "*/bin/contributor-relay.js" "*/bin/pi-backend.js" "*/bin/lib/*" \
+      "*/bin/gh-wrapper.sh" "*/config/backends.conf" "*/config/restrictions/contributor-default.json"; \
+    install -m 0755 "$workdir/hive/bin/contributor-agent.sh" "$workdir/hive/bin/contributor-relay.js" "$workdir/hive/bin/pi-backend.js" /out/usr/local/bin/; \
+    cp -a "$workdir/hive/bin/lib/." /out/usr/local/bin/lib/; \
     [ -n "$(ls -A /out/usr/local/bin/lib)" ] || { echo "bin/lib/ staged empty from ${hive_commit}" >&2; exit 1; }; \
-    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/config/backends.conf" -o /out/usr/local/etc/hive/backends.conf; \
-    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/bin/gh-wrapper.sh" -o /out/usr/bin/gh; \
-    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/config/restrictions/contributor-default.json" -o /out/etc/hive/restrictions/contributor-default.json; \
+    install -m 0755 "$workdir/hive/bin/gh-wrapper.sh" /out/usr/bin/gh; \
+    install -m 0644 "$workdir/hive/config/backends.conf" /out/usr/local/etc/hive/backends.conf; \
+    install -m 0644 "$workdir/hive/config/restrictions/contributor-default.json" /out/etc/hive/restrictions/contributor-default.json; \
     : > /out/etc/hive/contributor-mode; \
-    chmod 0755 /out/usr/local/bin/contributor-agent.sh /out/usr/local/bin/contributor-relay.js /out/usr/local/bin/pi-backend.js /out/usr/bin/gh; \
     printf '%s\n' "$hive_commit" > /out/usr/share/hive/contribute/HIVE_COMMIT; \
     /usr/local/libexec/contribute-sbom --out /out/usr/share/hive/contribute/sbom.spdx.json --version "$CONTRIBUTE_VERSION" --revision "$CONTRIBUTE_REVISION" --hive-commit "$hive_commit" --arch "$arch" --omp-version "$OMP_VERSION" --omp-sha256 "$omp_sha" --node-version "$NODE_VERSION" --node-sha256 "$node_sha" --gh-version "$GH_VERSION" --gh-sha256 "$gh_sha" --tmux-version "$TMUX_VERSION" --tmux-sha256 "$tmux_sha" --ws-version "$("$node_root/bin/node" -p "require('/src/node_modules/ws/package.json').version")"; \
     python3 -m json.tool /out/usr/share/hive/contribute/sbom.spdx.json >/dev/null; \

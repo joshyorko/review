@@ -62,7 +62,8 @@ done
 # the real binary at upstream's own REAL_GH default, and contributor mode has
 # to be the root-owned marker file rather than an environment variable the
 # agent could set for itself.
-grep -qF -- '-o /out/usr/bin/gh;' "$containerfile" ||
+# shellcheck disable=SC2016 # matched literally against the Containerfile, not expanded here
+grep -qF -- 'install -m 0755 "$workdir/hive/bin/gh-wrapper.sh" /out/usr/bin/gh;' "$containerfile" ||
   fail "Hive's gh wrapper must be installed as the agent's gh"
 grep -qF 'mv /out/usr/bin/gh /out/opt/hive/bin/gh-real' "$containerfile" ||
   fail "the real gh binary must be staged at the wrapper's REAL_GH default"
@@ -103,17 +104,20 @@ grep -qF 'io.hivecommons.contribute.hive.ref="${HIVE_COMMIT}"' "$containerfile" 
 grep -qE '^ARG FSDK_BASE_IMAGE HIVE_COMMIT ' "$containerfile" ||
   fail "the final stage must redeclare HIVE_COMMIT or its label ships empty"
 
-# Upstream's contributor image does `COPY bin/lib/` — the whole directory. This
-# build stages that directory from a commit-addressed archive for the same
-# reason: naming one file inside it would silently drop a module upstream added,
-# and the break would surface at task time inside a running contributor session.
-# The top-level Hive scripts stay individually named, matching upstream's own
-# per-file COPY lines, so the allowlist still says exactly what ships.
+# Every Hive file comes from ONE commit-addressed archive: the image is meant
+# to BE upstream at a commit, and seven per-file requests describe a snapshot
+# rather than being one. `bin/lib/` in particular has to arrive as a directory,
+# because upstream's image does `COPY bin/lib/` and naming a file inside it
+# would silently drop a module upstream added — a break that would surface at
+# task time, inside a running contributor session.
 # shellcheck disable=SC2016 # ${hive_commit} is matched literally in the Containerfile, not expanded here
 grep -qF 'codeload.github.com/hivecommons/hive/tar.gz/${hive_commit}' "$containerfile" ||
-  fail "bin/lib/ must be staged from a commit-addressed archive, not file by file"
-grep -qF -- '--strip-components=3 --wildcards "*/bin/lib/*"' "$containerfile" ||
-  fail "the archive must be narrowed to Hive's bin/lib/ subtree"
+  fail "Hive's runtime must be staged from a commit-addressed archive"
+! grep -qF 'raw.githubusercontent.com/hivecommons/hive' "$containerfile" ||
+  fail "Hive files must come from the single archive, not per-file fetches"
+# shellcheck disable=SC2016 # matched literally against the Containerfile, not expanded here
+grep -qF -- 'cp -a "$workdir/hive/bin/lib/." /out/usr/local/bin/lib/' "$containerfile" ||
+  fail "bin/lib/ must be staged as a directory, not file by file"
 grep -qF 'bin/lib/ staged empty' "$containerfile" ||
   fail "an empty bin/lib/ must fail the build rather than ship a runtime without it"
 
