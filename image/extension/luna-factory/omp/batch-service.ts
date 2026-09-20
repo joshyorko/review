@@ -32,7 +32,7 @@ export class BatchService {
 	private context?: NativeContext;
 	private fatal?: string;
 
-	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number) {
+	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root) {
 		this.root = root;
 		this.github = github;
 		this.sdk = sdk;
@@ -40,7 +40,7 @@ export class BatchService {
 		this.capacity = capacity;
 		if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("invalid shared Factory capacity");
 		this.store = new BatchStore(root);
-		this.claims = new ResourceClaims(root);
+		this.claims = new ResourceClaims(root, claimsRoot);
 	}
 	onChange(callback: () => void): void { this.changed = callback; }
 	private persist(batch: Batch): void {
@@ -219,6 +219,8 @@ export class BatchService {
 		return this.pumping;
 	}
 	private release(item: BatchItem, owner: string): void {
+		this.claims.markSettled(`item:${item.selected.key}`, owner);
+		this.claims.markSettled(`repo:${item.selected.repo}`, owner);
 		this.claims.release(`item:${item.selected.key}`, owner);
 		this.claims.release(`repo:${item.selected.repo}`, owner);
 	}

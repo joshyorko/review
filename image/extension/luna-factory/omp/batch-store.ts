@@ -124,34 +124,84 @@ export class BatchStore {
 }
 
 /** Same-host resource ownership shared with Review. Claims survive uncertain cancellation. */
+interface ClaimRecord { version: 1; resource: string; owner: string; createdAt: string; status: "unknown" | "settled" }
+export interface ResourceClaim {
+	readonly resource: string;
+	readonly owner: string;
+	readonly createdAt: string;
+	readonly status: "unknown" | "settled";
+}
+export type ClaimReleaseStatus = "settled" | "unknown";
 export class ResourceClaims {
 	readonly root: string;
-	constructor(root: string) { this.root = root; mkdirSync(join(root, "claims"), { recursive: true, mode: 0o700 }); }
-	claim(resource: string, owner: string): void {
-		const file = join(this.root, "claims", `${digest(resource.toLowerCase())}.json`);
+	constructor(stateRoot: string, claimsRoot = join(stateRoot, "claims")) {
+		this.root = resolve(claimsRoot);
+		mkdirSync(this.root, { recursive: true, mode: 0o700 });
+	}
+	private file(resource: string): string {
+		return join(this.root, `${digest(resource.toLowerCase())}.json`);
+	}
+	private read(resource: string): ClaimRecord {
+		return JSON.parse(readFileSync(this.file(resource), "utf8")) as ClaimRecord;
+	}
+	claim(resource: string, owner: string, allowExisting = true): void {
+		const canonical = resource.toLowerCase();
+		const file = this.file(canonical);
 		try {
 			const fd = openSync(file, "wx", 0o600);
-			try { writeFileSync(fd, JSON.stringify({ resource: resource.toLowerCase(), owner })); fsyncSync(fd); }
-			finally { closeSync(fd); }
-			syncDirectory(join(this.root, "claims"));
+			try {
+				writeFileSync(fd, JSON.stringify({ version: 1, resource: canonical, owner, createdAt: new Date().toISOString(), status: "unknown" } satisfies ClaimRecord));
+				fsyncSync(fd);
+			} finally { closeSync(fd); }
+			syncDirectory(this.root);
 		}
 		catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			const current = JSON.parse(readFileSync(file, "utf8"));
+			const current = this.read(canonical);
 			if (current.owner !== owner) throw new Error(`${resource} is owned by ${current.owner}; inspect/reconcile that work before resuming`);
+			if (!allowExisting) throw new Error(`${resource} is already owned by ${current.owner}; inspect/reconcile that work before retrying`);
 		}
 	}
+	list(): ResourceClaim[] {
+		return readdirSync(this.root)
+			.filter((name) => name.endsWith(".json"))
+			.map((name) => JSON.parse(readFileSync(join(this.root, name), "utf8")) as ClaimRecord)
+			.map((claim) => ({ resource: claim.resource, owner: claim.owner, createdAt: claim.createdAt, status: claim.status }));
+	}
 	conflict(resource: string, owner?: string): string | undefined {
-		const file = join(this.root, "claims", `${digest(resource.toLowerCase())}.json`);
+		const file = this.file(resource);
 		if (!existsSync(file)) return;
-		const current = JSON.parse(readFileSync(file, "utf8"));
+		const current = this.read(resource);
 		return current.owner === owner ? undefined : `${resource} is owned by ${current.owner}`;
 	}
-	release(resource: string, owner: string): void {
-		const file = join(this.root, "claims", `${digest(resource.toLowerCase())}.json`);
-		if (existsSync(file) && JSON.parse(readFileSync(file, "utf8")).owner === owner) rmSync(file);
-		syncDirectory(join(this.root, "claims"));
+	markSettled(resource: string, owner: string): void {
+		const file = this.file(resource);
+		if (!existsSync(file)) return;
+		const current = this.read(resource);
+		if (current.owner !== owner) throw new Error(`${resource} is owned by ${current.owner}; only the logical owner may reconcile it`);
+		if (current.status === "settled") return;
+		const fd = openSync(file, "w", 0o600);
+		try { writeFileSync(fd, JSON.stringify({ ...current, status: "settled" } satisfies ClaimRecord)); fsyncSync(fd); }
+		finally { closeSync(fd); }
+		syncDirectory(this.root);
 	}
+	release(resource: string, owner: string, status: ClaimReleaseStatus = "settled"): void {
+		if (status === "unknown") return;
+		const file = this.file(resource);
+		if (existsSync(file) && this.read(resource).owner === owner) rmSync(file);
+		syncDirectory(this.root);
+	}
+	reconcile(resource: string, owner: string): void {
+		const file = this.file(resource);
+		if (!existsSync(file)) return;
+		const current = this.read(resource);
+		if (current.owner !== owner) throw new Error(`${resource} is owned by ${current.owner}; only the logical owner may reconcile it`);
+		if (current.status !== "settled") throw new Error(`${resource} remains UNKNOWN; authoritative worker/external-effect reconciliation is required before release`);
+		this.release(resource, owner);
+	}
+}
+export function factoryClaimsRoot(env: NodeJS.ProcessEnv = process.env): string {
+	return resolve(env.LUNA_FACTORY_CLAIMS_ROOT ?? join(env.XDG_STATE_HOME ?? join(env.HOME ?? ".", ".local/state"), "review/mutation-claims"));
 }
 export function factoryStateRoot(env: NodeJS.ProcessEnv = process.env): string {
 	return resolve(env.LUNA_FACTORY_STATE_ROOT ?? join(env.XDG_STATE_HOME ?? join(env.HOME ?? ".", ".local/state"), "review/factory"));

@@ -26,7 +26,7 @@ import { type SessionCtx, loadRun, saveRun } from "./omp/session.ts";
 import { renderStatusDetail, renderWhy, truncatePlain } from "./ui/status.ts";
 import { BatchService, type BatchOptions } from "./omp/batch-service.ts";
 import { BatchGitHub } from "./omp/batch-github.ts";
-import { factoryStateRoot } from "./omp/batch-store.ts";
+import { factoryClaimsRoot, factoryStateRoot, ResourceClaims } from "./omp/batch-store.ts";
 import { registerFactoryController, reportFactoryLoadFailure, selectedFactoryItems } from "./omp/batch-bridge.ts";
 import type { NativeSDK, NativeContext, SchemaBuilder } from "./omp/batch-native.ts";
 import type { FactoryAction, SelectedItem } from "./core/batch.ts";
@@ -475,13 +475,29 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		if (!batchService) {
 			const capacity = Number(env.LUNA_FACTORY_CAPACITY ?? "2");
 			if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("LUNA_FACTORY_CAPACITY must be between 1 and 100");
-			batchService = new BatchService(factoryStateRoot(env), new BatchGitHub(resolveToken(env)), host.pi, host.zod as unknown as SchemaBuilder, capacity);
+			batchService = new BatchService(factoryStateRoot(env), new BatchGitHub(resolveToken(env)), host.pi, host.zod as unknown as SchemaBuilder, capacity, factoryClaimsRoot(env));
 		}
 		return batchService;
 	};
 	const batchCommand = async (raw: string, context: unknown): Promise<string> => {
 		const ctx = context as FactoryCtx;
 		const [verb = "status", id, ...rest] = raw.trim().split(/\s+/);
+		if (verb === "claims") {
+			const claims = new ResourceClaims(factoryStateRoot(env), factoryClaimsRoot(env));
+			if (id === undefined || id === "status" || id === "inspect") {
+				const current = claims.list();
+				return current.length === 0 ? "No mutation claims." : current.map((claim) => `${claim.resource} is owned by ${claim.owner} [${claim.status}] (${claim.createdAt})`).join("\n");
+			}
+			if (id !== "reconcile") throw new Error("usage: /factory claims status | claims reconcile <owner> <resource>");
+			const owner = rest[0];
+			const resource = rest.slice(1).join(" ");
+			if (!owner || !resource) throw new Error("usage: /factory claims reconcile <owner> <resource>");
+			const verifier = (ctx as FactoryCtx & { reconcileMutationClaim?: (owner: string, resource: string) => Promise<"settled" | "unknown"> }).reconcileMutationClaim;
+			if (!verifier) throw new Error(`${resource} remains UNKNOWN; Review must provide authoritative worker/external-effect reconciliation`);
+			if (await verifier(owner, resource) !== "settled") return `Retained ${resource} for ${owner}; external effect remains UNKNOWN`;
+			claims.reconcile(resource, owner);
+			return `Reconciled ${resource} for ${owner}; claim released`;
+		}
 		const service = batches();
 		if (verb === "start" || verb === "selected" || verb === "run") {
 			let items: SelectedItem[];
@@ -533,7 +549,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			description: "Open or inspect the opt-in Luna Factory run",
 			handler: async (rawArgs, ctx) => {
 				const args = rawArgs.trim();
-				if (!ledger && (args.length === 0 || /^(start|selected|run|status|inspect|pause|resume|stop|retry|exclude|export|discard)(\s|$)/.test(args))) {
+				if (!ledger && (args.length === 0 || /^(start|selected|run|status|inspect|claims|pause|resume|stop|retry|exclude|export|discard)(\s|$)/.test(args))) {
 					try { notifyCommand(ctx, await batchCommand(args || "status", ctx)); }
 					catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
 					return;

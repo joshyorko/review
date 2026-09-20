@@ -11,7 +11,7 @@ import { DEFAULT_ORG, exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchIt
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
 import { registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
-import { ResourceClaims, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
+import { ResourceClaims, factoryClaimsRoot, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
@@ -63,7 +63,12 @@ export interface PersistedRepositoryBatch {
 	readonly state: RepositoryBatchState;
 	readonly startedAt: number;
 	readonly waveStartedAt: number;
-	readonly error?: string;
+	readonly waveIdentity?: string;
+	readonly waveToolCallIds?: readonly string[];
+	readonly waveJobBaselineIds?: readonly string[];
+	readonly waveJobIds?: readonly string[];
+	readonly waveTerminalJobStatuses?: Readonly<Record<string, "completed" | "failed" | "cancelled" | "canceled">>;
+	readonly waveEffectResources?: readonly string[];
 }
 
 export interface PersistedCommentResult {
@@ -154,8 +159,9 @@ interface CtxLike {
 	ui: UiLike;
 	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown }> };
 	getAsyncJobSnapshot?(): {
-		running: Array<{ id: string; status: string; startTime: number }>;
-		recent: Array<{ id: string; status: string; startTime: number }>;
+		running: Array<{ id: string; status: string; startTime: number; waveId?: string }>;
+		recent: Array<{ id: string; status: string; startTime: number; waveId?: string }>;
+		delivery?: { pendingJobIds: readonly string[] };
 	} | null;
 }
 
@@ -169,8 +175,8 @@ export interface ReviewExtensionHost {
 	registerFlag(name: string, options: { description?: string; type: "string" | "boolean"; default?: string | boolean }): void;
 	getFlag(name: string): string | boolean | undefined;
 	registerTool(definition: unknown): void;
-	sendUserMessage(content: string, options?: { deliverAs?: string }): void;
 	appendEntry(customType: string, data?: unknown): void;
+	sendUserMessage(content: string, options?: { deliverAs?: string; waveId?: string }): void;
 }
 
 function readLatestCustom<T>(ctx: CtxLike, customType: string): T | undefined {
@@ -191,6 +197,47 @@ function readPersistedBatch(ctx: CtxLike): PersistedRepositoryBatch | undefined 
 
 function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined {
 	return readLatestCustom<PersistedCommentResult>(ctx, COMMENT_ENTRY);
+}
+export async function reconcileBlockedRepositoryClaim(
+	claims: ResourceClaims,
+	batch: PersistedRepositoryBatch,
+	owner: string,
+	resource: string,
+	authoritative: () => Promise<"settled" | "unknown">,
+): Promise<"settled" | "unknown"> {
+	const wave = batch.waves[batch.currentWave];
+	const resources = wave ? [`repo:${wave.repo.toLowerCase()}`, ...wave.items.map((item) => `item:${item.repo.toLowerCase()}#${item.id}`)] : [];
+	if (batch.state !== "blocked" || !wave || owner !== `review:${batch.id}:${batch.currentWave}` || !resources.includes(resource.toLowerCase())) return "unknown";
+	if (await authoritative() !== "settled") return "unknown";
+	claims.markSettled(resource, owner);
+	return "settled";
+}
+export function waveWorkersSettled(
+	snapshot: { running: readonly { id: string; status: string }[]; recent: readonly { id: string; status: string }[] } | null | undefined,
+	ids: readonly string[] | undefined,
+	persisted?: Readonly<Record<string, "completed" | "failed" | "cancelled" | "canceled">>,
+): boolean {
+	if (!ids?.length) return false;
+	const observed = new Map([...(snapshot?.running ?? []), ...(snapshot?.recent ?? [])].map((job) => [job.id, job]));
+	return ids.every((id) => {
+		const job = observed.get(id);
+		if (job) return (job.status === "completed" || job.status === "failed" || job.status === "cancelled" || job.status === "canceled") && !(snapshot?.running ?? []).some((running) => running.id === id);
+		return persisted?.[id] !== undefined;
+	});
+}
+export function captureWaveJobIds(
+	snapshot: { running: readonly { id: string }[]; recent: readonly { id: string }[] } | null | undefined,
+	baseline: readonly string[] | undefined,
+): string[] {
+	if (!snapshot) return [];
+	const excluded = new Set(baseline ?? []);
+	return [...snapshot.running, ...snapshot.recent]
+		.map((job) => job.id)
+		.filter((id, index, all) => !excluded.has(id) && all.indexOf(id) === index)
+		.sort();
+}
+export function waveWorkerCoverageComplete(jobIds: readonly string[] | undefined, toolCallIds: readonly string[] | undefined): boolean {
+	return Boolean(jobIds?.length && toolCallIds?.length && JSON.stringify(jobIds) === JSON.stringify(toolCallIds));
 }
 
 
@@ -373,15 +420,29 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	registerTools(pi as unknown as ToolHost, mode, () => started);
 	const unregisterFactorySelection = registerFactorySelection((action) => mode.factorySelection(action));
 	let claims: ResourceClaims | undefined;
-	const resourceClaims = () => claims ??= new ResourceClaims(factoryStateRoot(env));
-	const claimItems = (items: readonly QueueItem[], owner: string): void => {
+	const resourceClaims = () => claims ??= new ResourceClaims(factoryStateRoot(env), factoryClaimsRoot(env));
+	const claimItems = (items: readonly QueueItem[], owner: string, allowExisting = true): void => {
 		const resources = [...new Set(items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))];
 		const acquired: string[] = [];
-		try { for (const resource of resources) { resourceClaims().claim(resource, owner); acquired.push(resource); } }
+		try { for (const resource of resources) { resourceClaims().claim(resource, owner, allowExisting); acquired.push(resource); } }
 		catch (error) { for (const resource of acquired) resourceClaims().release(resource, owner); throw error; }
 	};
 	const releaseItems = (items: readonly QueueItem[], owner: string): void => {
-		for (const item of items) { resourceClaims().release(`item:${item.repo.toLowerCase()}#${item.id}`, owner); resourceClaims().release(`repo:${item.repo.toLowerCase()}`, owner); }
+		for (const item of items) {
+			const claimsForItem = resourceClaims();
+			claimsForItem.markSettled(`item:${item.repo.toLowerCase()}#${item.id}`, owner);
+			claimsForItem.markSettled(`repo:${item.repo.toLowerCase()}`, owner);
+			claimsForItem.release(`item:${item.repo.toLowerCase()}#${item.id}`, owner);
+			claimsForItem.release(`repo:${item.repo.toLowerCase()}`, owner);
+		}
+	};
+	const reconcileMutationClaim = async (owner: string, resource: string): Promise<"settled" | "unknown"> => {
+		const batch = activeBatch;
+		const ctx = activeCtx;
+		if (!batch || !ctx) return "unknown";
+		const wave = batch.waves[batch.currentWave];
+		if (!wave) return "unknown";
+		return reconcileBlockedRepositoryClaim(resourceClaims(), batch, owner, resource, () => authoritativeReconcile(ctx, batch.id, resource, wave));
 	};
 
 	const repaint = () => tui?.requestRender();
@@ -400,6 +461,33 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.setTitle(`${mode.isReviewMode() ? "review workbench" : "hive workbench"} · ${mode.queueMode} (${mode.position()})`);
 		}
 		repaint();
+	};
+	const authoritativeReconcile = async (
+		ctx: CtxLike,
+		batchId: string,
+		resource: string,
+		wave: { repo: string; items: readonly QueueItem[] },
+	): Promise<"settled" | "unknown"> => {
+		if (!activeBatch || activeBatch.id !== batchId || activeBatch.state !== "blocked") return "unknown";
+		const expectedResources = [`repo:${wave.repo.toLowerCase()}`, ...wave.items.flatMap((item) => [`item:${item.repo.toLowerCase()}#${item.id}`])].sort();
+		if (!activeBatch.waveEffectResources || JSON.stringify(activeBatch.waveEffectResources) !== JSON.stringify(expectedResources) || !waveWorkerCoverageComplete(activeBatch.waveJobIds, activeBatch.waveToolCallIds) || !expectedResources.includes(resource.toLowerCase())) return "unknown";
+		const jobs = ctx.getAsyncJobSnapshot?.();
+		if (!waveWorkersSettled(jobs, activeBatch.waveJobIds, activeBatch.waveTerminalJobStatuses)) return "unknown";
+		if (activeBatch.kind === "diff") return "settled";
+		const groups = ["pr", "issue"] as const;
+		for (const type of groups) {
+			const items = wave.items.filter((item) => item.type === type);
+			if (items.length === 0) continue;
+			const live = await fetchItemsByKey(items.map((item) => `${item.repo}#${item.id}`), type === "pr" ? "prs" : "issues", mode.tokenOptions());
+			if (live.error) return "unknown";
+			for (const item of items) {
+				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				if (!current) return "unknown";
+				if (type === "pr" && (current.headSha !== item.headSha || current.autoMergeEnabled !== item.autoMergeEnabled || current.reviewState !== item.reviewState)) return "unknown";
+				if (type === "issue" && (current.submittedPrs?.length ?? 0) > 0) return "unknown";
+			}
+		}
+		return "settled";
 	};
 
 	const every = (intervalMs: number, work: () => void) => {
@@ -448,6 +536,32 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			failedJobs,
 		});
 		repaint();
+	};
+	const rememberWaveEvidence = (ctx: CtxLike): void => {
+		if (!activeBatch || activeBatch.state !== "running" || !activeBatch.waveIdentity) return;
+		const jobs = ctx.getAsyncJobSnapshot?.();
+		if (!jobs) return;
+		const baseline = new Set(activeBatch.waveJobBaselineIds ?? []);
+		const toolIds = new Set(activeBatch.waveToolCallIds ?? []);
+		const associated = [
+			...(jobs.delivery?.pendingJobIds ?? []).filter((id) => toolIds.has(id) && !baseline.has(id)).map((id) => ({ id })),
+			...jobs.running.filter((job) => toolIds.has(job.id)),
+			...jobs.recent.filter((job) => toolIds.has(job.id)),
+		];
+		if (associated.length === 0) return;
+		const ids = [...new Set([...(activeBatch.waveJobIds ?? []), ...associated.map((job) => job.id)])].sort();
+		const terminal = { ...(activeBatch.waveTerminalJobStatuses ?? {}) };
+		const runningIds = new Set(jobs.running.map((job) => job.id));
+		for (const id of runningIds) delete terminal[id];
+		for (const job of associated) {
+			if (!runningIds.has(job.id) && (job.status === "completed" || job.status === "failed" || job.status === "cancelled" || job.status === "canceled")) terminal[job.id] = job.status;
+		}
+		const wave = activeBatch.waves[activeBatch.currentWave];
+		const resources = activeBatch.kind === "diff" || !wave
+			? []
+			: [...new Set(wave.items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))].sort();
+		if (JSON.stringify(activeBatch.waveJobIds ?? []) === JSON.stringify(ids) && JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) === JSON.stringify(terminal) && JSON.stringify(activeBatch.waveEffectResources ?? []) === JSON.stringify(resources)) return;
+		persistBatch(ctx, { ...activeBatch, waveJobIds: ids, waveTerminalJobStatuses: terminal, waveEffectResources: resources });
 	};
 
 	const persistBatch = (ctx: CtxLike, batch: PersistedRepositoryBatch) => {
@@ -601,6 +715,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				return;
 			}
 		}
+		const retryingBlockedWave = activeBatch.state === "blocked";
 		const startedAt = Date.now();
 		persistBatch(ctx, { ...activeBatch, state: "running", waveStartedAt: startedAt, error: undefined });
 		const waveAction = {
@@ -618,17 +733,34 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 		if (activeBatch.kind !== "diff") {
-			try { claimItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`); }
+			try { claimItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`, !retryingBlockedWave); }
 			catch (error) { persistBatch(ctx, { ...activeBatch, state: "blocked", error: String(error) }); ctx.ui.notify(String(error), "error"); return; }
 		}
+		const before = ctx.getAsyncJobSnapshot?.();
+		const baseline = [...(before?.delivery?.pendingJobIds ?? [])].sort();
+		const resources = activeBatch.kind === "diff"
+			? []
+			: [...new Set(wave.items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))].sort();
+		persistBatch(ctx, { ...activeBatch, waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`, waveToolCallIds: undefined, waveJobBaselineIds: baseline, waveJobIds: undefined, waveTerminalJobStatuses: undefined, waveEffectResources: resources });
 		ctx.ui.notify(`Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
-		pi.sendUserMessage(prompt, deliverAs ? { deliverAs } : undefined);
+		pi.sendUserMessage(prompt, { ...(deliverAs ? { deliverAs } : {}), waveId: `${activeBatch.id}:${activeBatch.currentWave}` });
+		rememberWaveEvidence(ctx);
 	};
 
 	const startRepositoryBatch = async (ctx: CtxLike, kind: RepositoryBatchKind, items: readonly QueueItem[]) => {
 		const generation = ++batchRequestGeneration;
 		if (activeBatch?.state === "running" || activeBatch?.state === "paused") {
 			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
+			return;
+		}
+		if (activeBatch?.state === "blocked") {
+			const wave = activeBatch.waves[activeBatch.currentWave];
+			const requested = mode.repositoryWaves(items)[0];
+			if (activeBatch.kind !== kind || !wave || !requested || requested.repo !== wave.repo || requested.items.length !== wave.items.length || requested.items.some((item, index) => item.repo !== wave.items[index]!.repo || item.id !== wave.items[index]!.id)) {
+				ctx.ui.notify(`Run ${activeBatch.id} is blocked; inspect/reconcile its claims before dispatching another mutation`, "warning");
+				return;
+			}
+			await dispatchCurrentWave(ctx);
 			return;
 		}
 		const waves = mode.repositoryWaves(items);
@@ -749,8 +881,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		persist();
 		return true;
 	};
-
 	const dispatch = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
+
 		if (action.kind === "close") return;
 		if (action.kind === "factory") {
 			// The dashboard hides the chord when Factory is unavailable; this is
@@ -761,10 +893,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				return;
 			}
 			try {
-				const command = await ctx.ui.editor("Factory: start inspect|patch|pr-ready, status, resume/pause/stop <batch>, inspect/export/discard <batch>", `start ${action.action}`);
+				const command = await ctx.ui.editor("Factory: start inspect|patch|pr-ready, status, claims status|reconcile <owner> <resource>, resume/pause/stop <batch>, inspect/export/discard <batch>", `start ${action.action}`);
 				if (command === undefined) return;
 				if (mode.isBlueberry && /^(start|selected)\s+(patch|pr-ready)|^(run|resume|retry)\b/.test(command)) throw new Error("Blueberry mode permits Factory inspection only");
-				ctx.ui.notify(await factoryCommand(command, ctx), "info");
+				const factoryCtx = { ...ctx, reconcileMutationClaim };
+				ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
 			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 			return;
 		}
@@ -984,6 +1117,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				? { ...recoveredBatch, state: "blocked", error: "session ended before the repository wave reached a terminal state" }
 				: recoveredBatch;
 			if (recoveredBatch.state === "running") pi.appendEntry(BATCH_ENTRY, activeBatch);
+			if (recoveredBatch.state === "running") ctx.ui.notify(`Recovered blocked run ${recoveredBatch.id}; inspect claims with /factory claims status and reconcile only a settled external effect before retrying`, "warning");
 			if (activeBatch.state === "paused") mode.setPaused(true);
 			syncBatchProgress(ctx);
 		}
@@ -1009,6 +1143,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const wave = activeBatch.waves[activeBatch.currentWave];
 		if (!wave) return;
 		const jobs = ctx.getAsyncJobSnapshot?.();
+		rememberWaveEvidence(ctx);
 		if (jobs?.running.some((job) => job.startTime >= activeBatch!.waveStartedAt)) return;
 		const recent = jobs?.recent.filter((job) => job.startTime >= activeBatch!.waveStartedAt) ?? [];
 		const failed = recent.filter((job) => job.status !== "completed");
@@ -1020,7 +1155,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`Repository wave stopped: ${error}`, "error");
 			return;
 		}
-		if (activeBatch.kind !== "diff") releaseItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`);
 		if (activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr")) {
 			const live = await fetchItemsByKey(
 				wave.items.map((item) => `${item.repo}#${item.id}`),
@@ -1075,6 +1209,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`Repository wave stopped: ${refreshed.error}`, "error");
 			return;
 		}
+		if (activeBatch.kind !== "diff") releaseItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`);
 		const nextWave = activeBatch.currentWave + 1;
 		const completedItems = activeBatch.completedItems + wave.items.length;
 		if (nextWave >= activeBatch.waves.length) {
@@ -1087,6 +1222,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			currentWave: nextWave,
 			completedItems,
 			state: mode.paused ? "paused" : "running",
+			waveIdentity: undefined,
+			waveToolCallIds: undefined,
+			waveJobBaselineIds: undefined,
+			waveJobIds: undefined,
+			waveTerminalJobStatuses: undefined,
 		});
 		if (!mode.paused) await dispatchCurrentWave(ctx, "followUp");
 	};
@@ -1196,7 +1336,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.on("turn_end", (_event, eventCtx) => {
 		mode.session.endTurn(Date.now());
 		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
-		if (ctxToUse) syncBatchProgress(ctxToUse);
+		if (ctxToUse) {
+			rememberWaveEvidence(ctxToUse);
+			syncBatchProgress(ctxToUse);
+		}
 		repaint();
 	});
 	pi.on("agent_end", async (event, eventCtx) => {
@@ -1205,11 +1348,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (ctxToUse) await advanceRepositoryBatch(ctxToUse);
 	});
 	pi.on("tool_call", (event) => {
+		const { toolCallId, toolName, input } = event as { toolCallId?: string; toolName?: string; input?: { command?: unknown } };
+		if (toolName === "task" && toolCallId && activeBatch?.state === "running" && activeCtx) {
+			const ids = [...new Set([...(activeBatch.waveToolCallIds ?? []), toolCallId])].sort();
+			persistBatch(activeCtx, { ...activeBatch, waveToolCallIds: ids });
+		}
 		if (
 			activeBatch?.kind !== "slay"
 			|| (activeBatch.state !== "running" && activeBatch.state !== "paused")
 		) return;
-		const { toolName, input } = event as { toolName?: string; input?: { command?: unknown } };
 		if (toolName !== "bash") return;
 		const command = String(input?.command ?? "");
 		const reason = slayBashBlockReason(command);

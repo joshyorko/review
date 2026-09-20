@@ -39,16 +39,23 @@ import {
 	commentInvocation,
 } from "../image/extension/bluefin-review/extension.ts";
 
-import lunaFactoryExtension from "../image/extension/luna-factory/index.ts";
+import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
+import { ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { factoryHandoffState, registerFactoryController } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const NOW = 1_800_000_000_000;
 
 // No hub, no home: these tests must not read the developer's own Hive
 // registration and must never open a socket.
-const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", LUNA_FACTORY_STATE_ROOT: "" };
-beforeEach(() => { ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "review-claims-")); });
-afterEach(() => { rmSync(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, { recursive: true, force: true }); });
+const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", LUNA_FACTORY_STATE_ROOT: "", LUNA_FACTORY_CLAIMS_ROOT: "" };
+beforeEach(() => {
+	ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "review-state-"));
+	ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT = mkdtempSync(join(tmpdir(), "review-claims-"));
+});
+afterEach(() => {
+	rmSync(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, { recursive: true, force: true });
+	rmSync(ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT, { recursive: true, force: true });
+});
 
 test("every review extension module is reachable from its package entrypoint", () => {
 	const directory = join(process.cwd(), "image/extension/bluefin-review");
@@ -278,9 +285,10 @@ function fakeHost() {
 		flagValues: new Map(),
 		tools: new Map(),
 		messages: [],
+		messageOptions: [],
 		entries: [],
-		execCalls: [],
 		execResult: { stdout: "https://github.com/projectbluefin/review/issues/42#issuecomment-1\n", stderr: "", code: 0, killed: false },
+		execCalls: [],
 		zod: { object: () => ({}), string: zodLeaf, number: zodLeaf },
 		setLabel(label) {
 			this.labels.push(label);
@@ -300,8 +308,9 @@ function fakeHost() {
 		registerTool(definition) {
 			this.tools.set(definition.name, definition);
 		},
-		sendUserMessage(content) {
+		sendUserMessage(content, options) {
 			this.messages.push(content);
+			this.messageOptions.push(options);
 		},
 		async exec(command, args) {
 			this.execCalls.push({ command, args });
@@ -337,7 +346,7 @@ function fakeCtx() {
 		pasted,
 		confirmations,
 		editorResponses,
-		asyncJobs: { running: [], recent: [], delivery: { pending: 0 } },
+		asyncJobs: { running: [], recent: [], delivery: { pending: 0, pendingJobIds: [] } },
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
 			confirm: async (title, message) => {
@@ -2428,6 +2437,21 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	await new Promise((resolve) => setImmediate(resolve));
 
 	assert.equal(pi.messages.length, 1);
+	const dispatchedBatch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(pi.messageOptions[0]?.waveId, `${dispatchedBatch.id}:0`, "dispatch carries exact wave identity to OMP");
+	pi.events.get("tool_call")({ toolCallId: "worker-1", toolName: "task", input: {} }, ctx);
+	ctx.asyncJobs.delivery.pendingJobIds = ["worker-1"];
+	ctx.asyncJobs.recent = [{ id: "worker-1", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("turn_end")({}, ctx);
+	pi.events.get("tool_call")({ toolCallId: "worker-2", toolName: "task", input: {} }, ctx);
+	ctx.asyncJobs.delivery.pendingJobIds = ["worker-1", "worker-2"];
+	ctx.asyncJobs.recent = [
+		{ id: "worker-1", status: "completed", startTime: Date.now() + 1 },
+		{ id: "worker-2", status: "completed", startTime: Date.now() + 2 },
+	];
+	await pi.events.get("turn_end")({}, ctx);
+	const captured = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.deepEqual(captured.waveJobIds, ["worker-1", "worker-2"], "staggered workers are accumulated by exact wave identity");
 	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through review, repair, and landing:/m);
 	assert.match(pi.messages[0], /Use the `task` tool once with one fresh bluefin-reviewer item per pull request/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
@@ -2557,6 +2581,123 @@ test("restart blocks interrupted slays and never replays confirmed comments", as
 	assert.equal(recovered.state, "blocked");
 	assert.match(recovered.error, /session ended/);
 	assert.ok(ctx.overlays[0].render(240).some((line) => line.includes("BLOCKED")));
+});
+
+test("production Review-to-Factory reconcile releases a failed wave only after exact terminal proof", async () => {
+	const item = {
+		id: 42,
+		type: "issue",
+		repo: "projectbluefin/review",
+		title: "recover safely",
+		author: "reviewer",
+		url: "https://github.com/projectbluefin/review/issues/42",
+		updatedAt: NOW,
+		draft: false,
+		mergeState: "unknown",
+		reviewState: "unknown",
+		labels: [],
+		submittedPrs: [],
+	};
+	const owner = "review:command-wave:0";
+	const claims = new ResourceClaims(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT);
+	claims.claim("repo:projectbluefin/review", owner);
+	const pi = fakeHost();
+	const factory = fakeHost();
+	factory.commands = new Map();
+	factory.registerCommand = (name, definition) => factory.commands.set(name, definition);
+	createLunaFactoryExtension(factory as never, { env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	ctx.asyncJobs.recent = [{ id: "worker-command", status: "failed", startTime: NOW + 1 }];
+	ctx.sessionManager = {
+		getBranch: () => [{
+			type: "custom",
+			customType: BATCH_ENTRY,
+			data: {
+				version: 1,
+				id: "command-wave",
+				kind: "fix",
+				waves: [{ repo: item.repo, items: [item] }],
+				currentWave: 0,
+				completedItems: 0,
+				totalItems: 1,
+				state: "blocked",
+				startedAt: NOW,
+				waveStartedAt: NOW,
+				waveIdentity: "command-wave:0",
+				waveToolCallIds: ["worker-command"],
+				waveJobIds: ["worker-command"],
+				waveEffectResources: ["item:projectbluefin/review#42", "repo:projectbluefin/review"],
+			},
+		}],
+	};
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: hiveBackedFetch([item]),
+		env: { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute" },
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.editorResponses.push(`claims reconcile ${owner} repo:projectbluefin/review`);
+	ctx.overlays[0].handleInput("F");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(ctx.notifications.some((notification) => /claim released/.test(notification.message)));
+	assert.equal(claims.conflict("repo:projectbluefin/review", "review:other:0"), undefined);
+	const beforeRetry = pi.messages.length;
+	ctx.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(pi.messages.length > beforeRetry, "reconciled blocked wave can retry through Review");
+
+});
+test("restart uses persisted terminal evidence for one Review retry", async () => {
+	const item = { id: 42, repo: "projectbluefin/review", title: "recover safely", headSha: "a".repeat(40), type: "pr" };
+	const env = { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute" };
+	const pi1 = fakeHost();
+	const ctx1 = fakeCtx();
+	ctx1.ui.parent = ctx1;
+	const review1 = createReviewExtension(pi1, { org: "projectbluefin", fetchImpl: hiveBackedFetch([item]), env });
+	await pi1.events.get("session_start")({}, ctx1);
+	await review1.whenStarted();
+	ctx1.overlays[0].handleInput("A");
+	ctx1.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	const first = pi1.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const owner = `review:${first.id}:0`;
+	pi1.events.get("tool_call")({ toolCallId: "worker-command", toolName: "task", input: {} }, ctx1);
+	ctx1.asyncJobs.delivery.pendingJobIds = ["worker-command"];
+	ctx1.asyncJobs.recent = [{ id: "worker-command", status: "failed", startTime: Date.now() + 1 }];
+	await pi1.events.get("turn_end")({}, ctx1);
+	await pi1.events.get("agent_end")({}, ctx1);
+	const factory = fakeHost();
+	factory.commands = new Map();
+	factory.registerCommand = (name, definition) => factory.commands.set(name, definition);
+	createLunaFactoryExtension(factory as never, { env: ISOLATED_ENV });
+	const persisted = pi1.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(persisted.state, "blocked");
+	assert.deepEqual(persisted.waveTerminalJobStatuses, { "worker-command": "failed" });
+	const pi2 = fakeHost();
+	const ctx2 = fakeCtx();
+	ctx2.ui.parent = ctx2;
+		ctx2.sessionManager = { getBranch: () => [
+			{ type: "custom", customType: STATE_ENTRY, data: { mode: "prs", repo: item.repo, id: item.id } },
+			...pi1.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+		] };
+	const review2 = createReviewExtension(pi2, { org: "projectbluefin", fetchImpl: hiveBackedFetch([item]), env });
+	await pi2.events.get("session_start")({}, ctx2);
+	await review2.whenStarted();
+	ctx2.editorResponses.push(`claims reconcile ${owner} repo:projectbluefin/review`);
+	ctx2.overlays[0].handleInput("F");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(ctx2.notifications.some((notification) => /Reconciled .*repo:/.test(notification.message)));
+	ctx2.editorResponses.push(`claims reconcile ${owner} item:projectbluefin/review#42`);
+	ctx2.overlays[0].handleInput("F");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(ctx2.notifications.some((notification) => /Reconciled .*item:/.test(notification.message)));
+	const beforeRetry = pi2.messages.length;
+	ctx2.overlays[0].handleInput("A");
+	ctx2.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi2.messages.length, beforeRetry + 1);
 });
 
 test("slay prompts define bounded review, isolated repair, and live-rule landing", () => {
@@ -3299,7 +3440,12 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		const review = createReviewExtension(pi, {
 			org: "projectbluefin",
 			fetchImpl,
-			env: { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute", LUNA_FACTORY_STATE_ROOT: mkdtempSync(join(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, "admission-")) },
+			env: {
+				...ISOLATED_ENV,
+				HIVE_HUB: "wss://hive.example/contribute",
+				LUNA_FACTORY_STATE_ROOT: mkdtempSync(join(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, "admission-state-")),
+				LUNA_FACTORY_CLAIMS_ROOT: mkdtempSync(join(ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT, "admission-")),
+			},
 			policy: BLUEFIN_POLICY,
 		});
 		const ctx = fakeCtx();
