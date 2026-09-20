@@ -56,34 +56,56 @@ jobs:
           RENOVATE_DRY_RUN: ${{ inputs.dry_run == true && 'full' || '' }}
           RENOVATE_REPOSITORIES: ${{ github.repository }}
           RENOVATE_ALLOWED_COMMANDS: '["^node scripts/update-omp-pins\\.mjs$", "^node scripts/update-gh-pins\\.mjs$", "^node scripts/update-node-pins\\.mjs$", "^node scripts/update-tmux-pins\\.mjs$", "^node scripts/update-requirements-ci-hashes\\.mjs$"]'
+          # A post-upgrade command does NOT inherit this job's environment.
+          # Renovate builds that environment from its own allowlist (proxy,
+          # HOME, PATH, locale, CA certificates, container runtime) unless the
+          # self-hosted `exposeAllEnv` is set, which it is not. So every pin
+          # synchronizer read api.github.com anonymously — 60 requests an hour
+          # against the runner's shared egress address — and a rate-limited
+          # lookup leaves the version bumped beside the PREVIOUS release's
+          # digests. Hand them the app token explicitly instead of opening the
+          # whole environment; Renovate redacts this value from its logs.
+          # Diagnosis and fix from #639 (@Danathar).
+          RENOVATE_CUSTOM_ENV_VARIABLES: '{"GH_TOKEN": "${{ steps.app-token.outputs.token }}"}'
 
       # Renovate reported success for a week while the shipped OMP fell five
       # releases behind: it resolved every release and pushed each onto
       # renovate/omp-runtime, but PR creation is rate-limited and that branch
       # never reached the front of the queue. Nothing failed, so nothing said
-      # so. This step is what says so. A pin behind its upstream release is
-      # normal for a few hours; a pin behind with NO branch carrying the fix
-      # means the pipeline stopped delivering, and that is the failure.
+      # so. This step is what says so.
       - name: Shipped pins are being delivered
         if: ${{ inputs.dry_run != true }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          containerfile=image/contribute/Containerfile
-          pinned() { sed -nE "s/^ARG ${1}=(.*)$/\1/p" "$containerfile"; }
+          # Read the pin from remote main, not this checkout: automerge can
+          # land an update while this workflow is still running, and a stale
+          # local copy would report a delivery failure that already shipped.
+          pinned() {
+            gh api "repos/${GITHUB_REPOSITORY}/contents/image/contribute/Containerfile?ref=main" \
+              --jq .content | base64 -d | sed -nE "s/^ARG ${1}=(.*)\$/\1/p"
+          }
           stalled=0
           check() {
-            local name="$1" arg="$2" latest="$3" branch="$4" current
+            local name="$1" arg="$2" latest="$3" branch="$4" current open
             current="$(pinned "$arg")"
             [ "$current" = "$latest" ] && { echo "✓ ${name} ${current} is current"; return 0; }
-            # The checkout keeps no credentials, so ask the API rather than the
-            # git remote whether Renovate has the update in flight.
-            if gh api "repos/${GITHUB_REPOSITORY}/branches/${branch}" --silent >/dev/null 2>&1; then
-              echo "… ${name} ${current} -> ${latest} in flight on ${branch}"
+            # An OPEN PULL REQUEST, not merely a branch. The failure this guard
+            # exists for looked exactly like progress: Renovate pushed every new
+            # OMP release onto renovate/omp-runtime and never opened a pull
+            # request for any of them, so a branch check would have passed for
+            # the whole week the shipped image sat five releases behind.
+            open="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "$branch" --state open --json number --jq 'length')"
+            if [ "$open" -gt 0 ]; then
+              echo "… ${name} ${current} -> ${latest} in flight, pull request open on ${branch}"
               return 0
             fi
-            echo "✗ ${name} ${current} is behind ${latest} and no ${branch} carries the update" >&2
+            if gh api "repos/${GITHUB_REPOSITORY}/branches/${branch}" --silent >/dev/null 2>&1; then
+              echo "✗ ${name} ${current} is behind ${latest}: ${branch} exists but has no open pull request" >&2
+            else
+              echo "✗ ${name} ${current} is behind ${latest} and no ${branch} carries the update" >&2
+            fi
             stalled=1
           }
           release() { gh api "repos/$1/releases/latest" --jq .tag_name | sed 's/^v//'; }
@@ -99,6 +121,6 @@ jobs:
                 jq -r --arg m "v${node_major}." '[.[] | select(.version | startswith($m))][0].version' | sed 's/^v//')" \
             renovate/node.js-runtime
           if [ "$stalled" -ne 0 ]; then
-            echo "::error::a shipped runtime pin is behind upstream with no Renovate branch delivering it" >&2
+            echo "::error::a shipped runtime pin is behind upstream with no pull request delivering it" >&2
             exit 1
           fi

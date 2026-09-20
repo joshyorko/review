@@ -119,3 +119,25 @@ test("the digest refresher for each pin is a real, executable script", async () 
 		await assert.doesNotReject(readRepoFile(path), `${path} does not exist`);
 	}
 });
+
+test("post-upgrade pin synchronizers are handed a GitHub token", async () => {
+	// Renovate does not pass the workflow job's environment to a post-upgrade
+	// command; it builds one from its own allowlist unless `exposeAllEnv` is
+	// set. Every synchronizer reads a GitHub release, so without an explicit
+	// hand-off they call api.github.com anonymously — 60 requests an hour from
+	// the runner's shared address — and a rate-limited lookup leaves the
+	// version bumped beside the previous release's digests. That failure is
+	// silent: the pull request looks correct and the image ships the wrong
+	// binaries.
+	const custom = /RENOVATE_CUSTOM_ENV_VARIABLES:\s*'(?<json>\{[^\n]*\})'/.exec(workflow);
+	assert.ok(custom, "the Renovate workflow passes no customEnvVariables to post-upgrade commands");
+	const names = Object.keys(JSON.parse(custom.groups.json.replaceAll(/\$\{\{[^}]*\}\}/g, "token")));
+	assert.ok(
+		names.some((name) => /^(GH_TOKEN|GITHUB_TOKEN|RENOVATE_TOKEN)$/.test(name)),
+		`customEnvVariables hands over ${names.join(", ")}, none of which the synchronizers read`,
+	);
+	for (const script of ["scripts/update-omp-pins.mjs", "scripts/update-gh-pins.mjs", "scripts/update-tmux-pins.mjs"]) {
+		const source = await readRepoFile(script);
+		assert.match(source, /process\.env\.(RENOVATE_TOKEN|GH_TOKEN|GITHUB_TOKEN)/, `${script} reads no token`);
+	}
+});
