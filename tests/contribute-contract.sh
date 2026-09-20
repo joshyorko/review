@@ -100,6 +100,17 @@ grep -qF 'io.hivecommons.contribute.hive.ref="${HIVE_COMMIT}"' "$containerfile" 
 grep -qE '^ARG FSDK_BASE_IMAGE HIVE_COMMIT ' "$containerfile" ||
   fail "the final stage must redeclare HIVE_COMMIT or its label ships empty"
 
+# Upstream copies the whole bin/lib/ directory into its contributor image; this
+# build names each Hive file it fetches instead. That is deliberate — the image
+# is an explicit allowlist — but it means a new upstream module would be missed
+# silently and fail at task time, inside a running contributor session. The
+# build resolves every local require() against what was actually staged, so the
+# gap becomes a failed build instead of a broken assignment.
+grep -qF 'hive_unstaged=' "$containerfile" ||
+  fail "the build must verify that every Hive require() resolves to a staged file"
+grep -qF 'Hive module not staged' "$containerfile" ||
+  fail "the module closure check must fail the build, not just warn"
+
 # Launcher defaults and settings
 grep -qF 'DEFAULT_IMAGE="ghcr.io/projectbluefin/contribute:stable"' "$launcher" || fail "missing default image in launcher"
 grep -qF 'DEFAULT_BACKEND="omp"' "$launcher" || fail "missing default backend in launcher"

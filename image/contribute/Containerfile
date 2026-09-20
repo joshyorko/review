@@ -98,6 +98,14 @@ RUN set -eu; \
     curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/config/restrictions/contributor-default.json" -o /out/etc/hive/restrictions/contributor-default.json; \
     : > /out/etc/hive/contributor-mode; \
     chmod 0755 /out/usr/local/bin/contributor-agent.sh /out/usr/local/bin/contributor-relay.js /out/usr/local/bin/pi-backend.js /out/usr/bin/gh; \
+    hive_unstaged="$(for staged in /out/usr/local/bin/contributor-relay.js /out/usr/local/bin/pi-backend.js /out/usr/local/bin/lib/pane-classifier.js; do \
+      [ -f "$staged" ] || { printf "%s was never staged\n" "$staged"; continue; }; \
+      staged_dir="$(dirname "$staged")"; \
+      grep -oE "require\(.\./[^)]+\)" "$staged" | sed -E "s|require\(.\./||; s|.\)$||" | while read -r dep; do \
+        [ -e "${staged_dir}/${dep}" ] || [ -e "${staged_dir}/${dep}.js" ] || printf "%s requires %s\n" "$staged" "$dep"; \
+      done; \
+    done)"; \
+    [ -z "$hive_unstaged" ] || { printf "Hive module not staged:\n%s\n" "$hive_unstaged" >&2; exit 1; }; \
     printf '%s\n' "$hive_commit" > /out/usr/share/hive/contribute/HIVE_COMMIT; \
     /usr/local/libexec/contribute-sbom --out /out/usr/share/hive/contribute/sbom.spdx.json --version "$CONTRIBUTE_VERSION" --revision "$CONTRIBUTE_REVISION" --hive-commit "$hive_commit" --arch "$arch" --omp-version "$OMP_VERSION" --omp-sha256 "$omp_sha" --node-version "$NODE_VERSION" --node-sha256 "$node_sha" --gh-version "$GH_VERSION" --gh-sha256 "$gh_sha" --tmux-version "$TMUX_VERSION" --tmux-sha256 "$tmux_sha" --ws-version "$("$node_root/bin/node" -p "require('/src/node_modules/ws/package.json').version")"; \
     python3 -m json.tool /out/usr/share/hive/contribute/sbom.spdx.json >/dev/null; \
