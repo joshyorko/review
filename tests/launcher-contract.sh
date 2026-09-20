@@ -374,6 +374,40 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# Scenario 3b: the bug #618 reported. A host can register krun with Podman
+#              against a differently named binary (/usr/bin/crun-krun), so
+#              there is no `krun` on PATH while `podman run --runtime=krun`
+#              works perfectly. Probing PATH sent those hosts to the Apptainer
+#              fallback and gave up the KVM boundary for nothing.
+# -----------------------------------------------------------------------------
+test_krun_registered_with_podman_but_absent_from_path() {
+  clean_env
+  # No krun executable anywhere on PATH...
+  rm -f "$fake_bin/krun"
+  # ...but Podman resolves the runtime name, which is what the launch uses.
+  unset FAKE_PODMAN_NO_KRUN
+  local config_file="$fake_home/.config/hive-contribute.yml"
+  mkdir -p "$fake_home/.config/hive"
+  cat >"$config_file" <<EOF
+hub: wss://hub.example.com/contribute
+registration: $fake_home/.config/hive/contributor.env
+image: ghcr.io/projectbluefin/contribute:stable
+backend: omp
+EOF
+  chmod 600 "$config_file"
+  printf 'HIVE_HUB=wss://hub.example.com/contribute\nHIVE_REGISTRATION_TOKEN=t\nCONTRIBUTOR_ID=c\n' \
+    >"$fake_home/.config/hive/contributor.env"
+  chmod 600 "$fake_home/.config/hive/contributor.env"
+
+  local output
+  output="$("$launcher" run)"
+  assert_contains "$output" "starting isolated KVM worker" "krun registered with Podman must take the KVM path"
+  assert_eq "$(grep -c '^run ' "$podman_log" || true)" "1" "exactly one podman run"
+  assert_eq "$(cat "$apptainer_log")" "" "must not fall back to Apptainer when Podman resolves krun"
+  assert_contains "$(grep '^run ' "$podman_log")" "--runtime=krun" "launch must still request krun"
+}
+
+# -----------------------------------------------------------------------------
 # Scenario 4: Apptainer fallback: when krun/kvm unavailable, warns and runs
 #             apptainer run --containall; credentials travel as APPTAINERENV_*, never argv.
 # -----------------------------------------------------------------------------
@@ -651,6 +685,9 @@ test_zero_config_run_registers_then_launches
 
 echo "3. Testing run on krun path..."
 test_run_krun_path
+
+echo "3b. Testing krun registered with Podman but absent from PATH..."
+test_krun_registered_with_podman_but_absent_from_path
 
 echo "4. Testing Apptainer fallback path..."
 test_run_apptainer_fallback
