@@ -149,6 +149,16 @@ grep -qE '^ +PI_CONFIG_FILES=/usr/share/hive/contribute/omp-config\.yml \\$' "$c
   fail "contributor image must load its OMP settings overlay through PI_CONFIG_FILES"
 grep -qF 'symbolPreset: nerd' image/contribute/config.yml || fail "contributor overlay must select the Nerd Font symbol preset"
 grep -qF 'checkUpdate: false' image/contribute/config.yml || fail "contributor overlay must not advertise an in-place update"
+# The advisor ships enabled but unnamed. `advisor.enabled` is a workflow
+# default the image may set; the model behind it is not, so the contributor's
+# own modelRoles.advisor decides who reviews their work and who pays for it.
+# An overlay that named one would spend a stranger's quota by default.
+grep -qE '^ +enabled: true$' image/contribute/config.yml || fail "contributor overlay must enable the advisor"
+grep -qE '^ +syncBacklog: 1$' image/contribute/config.yml ||
+  fail "contributor overlay must bound how far the advisor may fall behind"
+if grep -qE '^ *(model|modelRoles|reasoningEffort|thinkingLevel) *:' image/contribute/config.yml; then
+  fail "the shipped overlay must not pin a model, role, or effort"
+fi
 if grep -qF 'xterm-direct' "$entry" || grep -qF 'tmux-direct' image/tmux.conf; then
   fail "contributor must not reintroduce direct-color TERM entries"
 fi
