@@ -37,6 +37,7 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--hive-commit", required=True)
+    parser.add_argument("--arch", required=True)
     parser.add_argument("--omp-version", required=True)
     parser.add_argument("--omp-sha256", required=True)
     parser.add_argument("--node-version", required=True)
@@ -56,7 +57,10 @@ def main() -> int:
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
         "name": "hive-contribute",
-        "documentNamespace": f"https://hivecommons.org/spdx/hive-contribute/{args.version}/{args.revision}",
+        # Unique per DOCUMENT, which SPDX requires. Two architectures carry
+        # different binary checksums, and two Hive commits different runtime
+        # sources, so version+revision alone names several distinct documents.
+        "documentNamespace": f"https://hivecommons.org/spdx/hive-contribute/{args.version}/{args.revision}/{hive}/{args.arch}",
         "creationInfo": {"creators": ["Tool: generate-contribute-sbom.py"], "created": "1970-01-01T00:00:00Z"},
         "packages": [
             package("omp", args.omp_version, f"https://github.com/can1357/oh-my-pi/releases/download/v{args.omp_version}/", args.omp_sha256),

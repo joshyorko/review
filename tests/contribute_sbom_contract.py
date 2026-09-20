@@ -40,6 +40,7 @@ SAMPLE_HIVE_COMMIT = "928e81d846a9c12e0d46da168f868e4a97319718"
 BASE_ARGS = {
     "--version": "26.08.01",
     "--revision": "fd4437560fb87eae4707070b224ab1901ab6f0c6",
+    "--arch": "x86_64",
     "--hive-commit": SAMPLE_HIVE_COMMIT,
     "--omp-version": "18.1.18",
     "--omp-sha256": SAMPLE_SHA256,
@@ -92,7 +93,8 @@ class DocumentEnvelopeContract(unittest.TestCase):
         self.assertEqual(doc["name"], "hive-contribute")
         self.assertEqual(
             doc["documentNamespace"],
-            f"https://hivecommons.org/spdx/hive-contribute/{BASE_ARGS['--version']}/{BASE_ARGS['--revision']}",
+            f"https://hivecommons.org/spdx/hive-contribute/{BASE_ARGS['--version']}/{BASE_ARGS['--revision']}"
+            f"/{BASE_ARGS['--hive-commit']}/{BASE_ARGS['--arch']}",
         )
 
     def test_creation_info(self):

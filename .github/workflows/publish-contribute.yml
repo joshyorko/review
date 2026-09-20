@@ -120,6 +120,7 @@ jobs:
       hive_commit: ${{ steps.metadata.outputs.hive_commit }}
       stable: ${{ steps.metadata.outputs.stable }}
       tags: ${{ steps.metadata.outputs.tags }}
+      sha_tag: ${{ steps.metadata.outputs.sha_tag }}
       release: ${{ steps.metadata.outputs.release }}
     steps:
       - name: Checkout
@@ -149,8 +150,16 @@ jobs:
             { echo "could not resolve hivecommons/hive v4" >&2; exit 1; }
 
           release=false
-          sha_tag="sha-${GITHUB_SHA}"
-          tags="${sha_tag}"
+          # The repo SHA alone does NOT identify this image. A scheduled
+          # rebuild runs at the same GITHUB_SHA and resolves whatever Hive's
+          # tracking branch points at that morning, so `sha-<repo sha>` would
+          # be overwritten with different contents while claiming to be
+          # immutable — and an SBOM or attestation pinned to it would describe
+          # an artifact that no longer exists. Name both halves of what went in.
+          sha_tag="sha-${GITHUB_SHA}-hive-${hive_commit}"
+          # Aliases only: the build tag itself is pushed once below, with the
+          # digestfile, so listing it here too would push the same index twice.
+          tags=""
           stable=false
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             # Release build: publish the immutable version tag and update stable pointer
@@ -172,6 +181,7 @@ jobs:
             echo "stable=${stable}"
             echo "release=${release}"
             echo "tags=${tags}"
+            echo "sha_tag=${sha_tag}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Refuse to republish an existing version tag
@@ -187,6 +197,7 @@ jobs:
             exit 1
           fi
           echo "${IMAGE}:${VERSION} is free"
+
   build:
     needs: metadata
     strategy:
@@ -276,13 +287,14 @@ jobs:
         shell: bash
         env:
           ARCH: ${{ matrix.arch }}
+          SHA_TAG: ${{ needs.metadata.outputs.sha_tag }}
         run: |
           set -euo pipefail
           # Staged in this repository's own namespace: a fork proves the image
           # with its own token, and only the guarded publish job turns these
           # digests into ':stable'.
-          staging="${IMAGE}-staging"
-          target="${staging}:sha-${GITHUB_SHA}-${ARCH}"
+          staging="ghcr.io/${GITHUB_REPOSITORY,,}-staging"
+          target="${staging}:${SHA_TAG}-${ARCH}"
           podman push --format oci --authfile "${RUNNER_TEMP}/ghcr-auth.json" \
             --digestfile "${RUNNER_TEMP}/digest-${ARCH}.txt" \
             contribute:smoke "docker://${target}"
@@ -376,9 +388,10 @@ jobs:
           BASE_NAME: ${{ needs.metadata.outputs.base_name }}
           BASE_DIGEST: ${{ needs.metadata.outputs.base_digest }}
           TAGS: ${{ needs.metadata.outputs.tags }}
+          SHA_TAG: ${{ needs.metadata.outputs.sha_tag }}
         run: |
           set -euo pipefail
-          staging="${IMAGE}-staging"
+          staging="ghcr.io/${GITHUB_REPOSITORY,,}-staging"
           amd64="$(cat "${RUNNER_TEMP}/digests/digest-amd64.txt")"
           arm64="$(cat "${RUNNER_TEMP}/digests/digest-arm64.txt")"
           for digest in "$amd64" "$arm64"; do
@@ -414,7 +427,7 @@ jobs:
           for tag in ${TAGS}; do
             buildah manifest push --all --format oci contribute:index "docker://${IMAGE}:\${tag}"
           done
-          buildah manifest push --all --format oci --digestfile /tmp/index-digest contribute:index "docker://${IMAGE}:sha-${GITHUB_SHA}"
+          buildah manifest push --all --format oci --digestfile /tmp/index-digest contribute:index "docker://${IMAGE}:${SHA_TAG}"
           cat /tmp/index-digest
           EOF
           digest="$(podman run --rm \
@@ -440,12 +453,13 @@ jobs:
           VERSION: ${{ needs.metadata.outputs.version }}
           STABLE: ${{ needs.metadata.outputs.stable }}
           DIGEST: ${{ steps.publish.outputs.digest }}
+          SHA_TAG: ${{ needs.metadata.outputs.sha_tag }}
         run: |
           set -euo pipefail
           {
             echo "## Hive Contribute"
             echo
             echo "Index digest: \`${DIGEST}\`"
-            echo "Immutable tag: \`${IMAGE}:sha-${GITHUB_SHA}\`"
+            echo "Build tag: \`${IMAGE}:${SHA_TAG}\`"
             [[ "$STABLE" == true ]] && echo "Stable alias: \`${IMAGE}:stable\`"
           } >> "$GITHUB_STEP_SUMMARY"

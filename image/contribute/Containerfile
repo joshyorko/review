@@ -99,7 +99,7 @@ RUN set -eu; \
     : > /out/etc/hive/contributor-mode; \
     chmod 0755 /out/usr/local/bin/contributor-agent.sh /out/usr/local/bin/contributor-relay.js /out/usr/local/bin/pi-backend.js /out/usr/bin/gh; \
     printf '%s\n' "$hive_commit" > /out/usr/share/hive/contribute/HIVE_COMMIT; \
-    /usr/local/libexec/contribute-sbom --out /out/usr/share/hive/contribute/sbom.spdx.json --version "$CONTRIBUTE_VERSION" --revision "$CONTRIBUTE_REVISION" --hive-commit "$hive_commit" --omp-version "$OMP_VERSION" --omp-sha256 "$omp_sha" --node-version "$NODE_VERSION" --node-sha256 "$node_sha" --gh-version "$GH_VERSION" --gh-sha256 "$gh_sha" --tmux-version "$TMUX_VERSION" --tmux-sha256 "$tmux_sha" --ws-version "$("$node_root/bin/node" -p "require('/src/node_modules/ws/package.json').version")"; \
+    /usr/local/libexec/contribute-sbom --out /out/usr/share/hive/contribute/sbom.spdx.json --version "$CONTRIBUTE_VERSION" --revision "$CONTRIBUTE_REVISION" --hive-commit "$hive_commit" --arch "$arch" --omp-version "$OMP_VERSION" --omp-sha256 "$omp_sha" --node-version "$NODE_VERSION" --node-sha256 "$node_sha" --gh-version "$GH_VERSION" --gh-sha256 "$gh_sha" --tmux-version "$TMUX_VERSION" --tmux-sha256 "$tmux_sha" --ws-version "$("$node_root/bin/node" -p "require('/src/node_modules/ws/package.json').version")"; \
     python3 -m json.tool /out/usr/share/hive/contribute/sbom.spdx.json >/dev/null; \
     install -d -m 0755 /out/etc /out/home/hive/.config/hive /out/home/hive/workspace /out/var/run/hive-metrics; \
     printf 'root:x:0:0:root:/root:/usr/bin/bash\nhive:x:65532:65532:Hive:/home/hive:/usr/bin/bash\n' > /out/etc/passwd; \
