@@ -59,9 +59,12 @@ COPY --chmod=0755 scripts/generate-contribute-sbom.py /usr/local/libexec/contrib
 # that. The real binary keeps upstream's own path, /opt/hive/bin/gh-real,
 # which is the wrapper's compiled-in default (REAL_GH), so nothing is patched.
 #
-# omp-backend.js is deliberately NOT fetched: it is a HOST-side staging helper
+# omp-backend.js is deliberately NOT STAGED: it is a HOST-side staging helper
 # for `just contribute-hive`, upstream's own contributor image does not carry
 # it, and neither contributor-agent.sh nor contributor-relay.js requires it.
+# The archive below contains it, as it contains all of Hive; what keeps it out
+# of the image is the extraction list, and the contract asserts the image, not
+# what crossed the network.
 #
 # Every Hive file comes out of ONE commit-addressed archive. Per-file fetches
 # would be seven requests describing a snapshot instead of the snapshot itself,
