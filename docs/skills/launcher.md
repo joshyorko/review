@@ -10,7 +10,7 @@ mcp_compliance_level: partial
 optimization_status: draft
 status: active
 dependencies: []
-tags: [just, launcher, podman, apptainer, omp, hive]
+tags: [just, launcher, podman, omp, hive]
 description: "Maintains the hive-contribute appliance and launcher recipes without crossing credential or authority boundaries."
 metadata:
   type: runbook
@@ -38,9 +38,7 @@ recipes are thin wrappers around `bin/hive-contribute`.
 All configuration lives in `${XDG_CONFIG_HOME:-~/.config}/hive-contribute.yml`.
 The file has six flat keys: `hub`, `registration`, `image`, `backend`, `memory`, and `cpus`.
 `memory` and `cpus` carry upstream's contributor workload envelope (4 GiB, 2 CPUs), with
-swap pinned to the memory ceiling; `none` or `0` removes a ceiling. They apply on the
-Podman path, where they also size the microVM — the Apptainer fallback stays unbounded
-because it can only apply a ceiling through cgroups delegation a fallback host often lacks.
+swap pinned to the memory ceiling; `none` or `0` removes a ceiling.
 The launcher creates the file on first run, seeding `hub` from an existing
 `~/.config/hive/contributor.env` if present. Setting `HIVE_CONTRIBUTE_CONFIG` points to an
 alternate configuration file.
@@ -57,18 +55,13 @@ OMP owns agent execution, model choice, thinking effort, and tool boundaries.
 ## Isolation and lifecycle
 
 Every worker invocation prefers `podman run --runtime=krun` when
-Podman, `krun`, and `/dev/kvm` are available. Otherwise it reports the missing
-prerequisite and falls back to isolated Apptainer execution (`apptainer run --containall`).
+Podman, `krun`, and `/dev/kvm` are available. When KVM is unavailable, it
+warns and runs standard Podman containers.
 Container names include an instance slug derived from the hub URL and a per-process suffix.
 Persistent OMP homes are target-specific based on the hub hash.
 
-Every interactive microVM stays attached to its launching terminal in the foreground.
+Every interactive container stays attached to its launching terminal in the foreground.
 Detached containers are not supported. Ctrl-C stops only that invocation.
-
-Fallback to Apptainer requires `squashfuse_ll` or `squashfuse` and a readable,
-writable character device at `/dev/fuse`; `hive-contribute doctor` reports each missing
-prerequisite separately before launch.
-
 Before launch, mutable image tags are refreshed. A local cached copy is used with a warning
 if registry connectivity fails.
 
@@ -78,9 +71,6 @@ if registry connectivity fails.
   mounts. Never put values in arguments, logs, image layers, socket paths, SSH
   targets, or committed files.
 - Preserve `--userns keep-id:uid=65532,gid=65532` for the `0600` contributor registration.
-- Apptainer's contained environment receives only the explicit credential and
-  runtime allowlist through `APPTAINERENV_` variables. Keep `--no-eval` so
-  credential and argument values remain literal inside the container.
 - The forwarded provider-credential allowlist names GitHub, Copilot, Anthropic,
   OpenAI, OpenRouter, Gemini, Google, and terminal variables, plus the Amazon Bedrock
   credentials `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, and `AWS_DEFAULT_REGION`.

@@ -46,7 +46,8 @@ done
 require_text "just contribute"
 # shellcheck disable=SC2016 # backticks are markdown, not a command substitution
 require_text '`krun`'
-
+require_text 'podman run'
+require_text 'docker run'
 if [[ "$failures" -ne 0 ]]; then
   printf '%d README onboarding assertion(s) failed.\n' "$failures" >&2
   exit 1

@@ -50,7 +50,7 @@ The OCI image leaves model and effort selection to OMP.
    and effort remain OMP configuration, never launcher or image policy.
 7. Local launchers prefer Podman's `krun` runtime. Merely checking or mounting
    `/dev/kvm` is not isolation; `--runtime=krun` is the VM boundary. Missing KVM
-   prerequisites produce a warning and select the isolated Apptainer fallback.
+   prerequisites produce a warning and run standard Podman containers.
 8. Preserve Hive's assignment, lease, prompt, credential, and output protocol.
    Do not fork or locally patch its runtime files.
 9. Generate SPDX manifests from resolved build arguments and keep build-only
@@ -60,9 +60,6 @@ The OCI image leaves model and effort selection to OMP.
 11. Execute every staged command in the built image. If an allowlisted path is
     a wrapper, stage and verify its real executable target as part of the same
     closure; file presence is not runtime evidence.
-12. Give Apptainer workloads instance-scoped disk-backed scratch storage.
-    `--containall` otherwise supplies a 64 MiB `/tmp`, which is too small for
-    repository clones and archive inspection.
 13. OMP version and digest pins are updated when OMP releases.
     The scheduled Renovate workflow refreshes the GitHub release asset digests,
     merges the validated OMP update, and lets the resulting `main` push publish

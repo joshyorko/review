@@ -29,13 +29,9 @@ containers are not supported. No launch path may
 background a container run — no `nohup`, no unlabeled `podman run -d`,
 and no job that silently outlives the terminal.
 
-Every local contribution launch prefers Podman's `krun` OCI runtime.
-When Podman, `krun`, or `/dev/kvm` is unavailable, it reports the reason and
-falls back to isolated Apptainer execution.
-Container invocations get unique container names; fallback invocations get separate
-target-specific home and workspace directories. Persistent OMP state is keyed
-by a hash of the hub endpoint, keeping separate hives isolated.
-
+Every local contribution launch uses Podman (preferring Podman's `krun` OCI runtime
+when KVM is available). Container invocations get unique container names with
+persistent OMP state keyed by a hash of the hub endpoint, keeping separate hives isolated.
 Hive is the sole authority for selecting and assigning contributor tasks: do
 not skip, reorder, prioritize, or decline a Hive assignment mid-protocol.
 

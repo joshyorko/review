@@ -38,17 +38,13 @@ trap 'rm -rf "$scratch"' EXIT
 fake_bin="$scratch/bin"
 fake_home="$scratch/home"
 fake_kvm="$scratch/dev/kvm"
-fake_fuse="$scratch/dev/fuse"
 podman_log="$scratch/podman.log"
-apptainer_log="$scratch/apptainer.log"
 curl_log="$scratch/curl.log"
 gh_log="$scratch/gh.log"
-
 mkdir -p "$fake_bin" "$fake_home" "$scratch/dev"
 
-touch "$fake_kvm" "$fake_fuse"
-chmod 0666 "$fake_kvm" "$fake_fuse"
-
+touch "$fake_kvm"
+chmod 0666 "$fake_kvm"
 # --- Fake commands -----------------------------------------------------------
 
 cat >"$fake_bin/krun" <<'EOF'
@@ -56,12 +52,6 @@ cat >"$fake_bin/krun" <<'EOF'
 exit 0
 EOF
 chmod +x "$fake_bin/krun"
-
-cat >"$fake_bin/squashfuse_ll" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-chmod +x "$fake_bin/squashfuse_ll"
 
 cat >"$fake_bin/podman" <<EOF
 #!/usr/bin/env bash
@@ -110,22 +100,6 @@ exit 0
 EOF
 chmod +x "$fake_bin/podman"
 
-cat >"$fake_bin/apptainer" <<EOF
-#!/usr/bin/env bash
-set -eu
-printf 'apptainer %s\n' "\$*" >>"$apptainer_log"
-# Dump APPTAINERENV_* environment variables
-env | grep '^APPTAINERENV_' >>"$apptainer_log" || true
-if [[ "\${1:-}" == build ]]; then
-  shift
-  while [[ "\${1:-}" == -* ]]; do shift; done
-  printf 'built\n' >"\$1"
-  exit 0
-fi
-exit "\${FAKE_APPTAINER_RUN_STATUS:-0}"
-EOF
-chmod +x "$fake_bin/apptainer"
-
 cat >"$fake_bin/gh" <<EOF
 #!/usr/bin/env bash
 set -eu
@@ -166,15 +140,13 @@ clean_env() {
   export XDG_CONFIG_HOME="$fake_home/.config"
   export XDG_STATE_HOME="$fake_home/.local/state"
   export HIVE_CONTRIBUTE_TEST_KVM_DEVICE="$fake_kvm"
-  export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$fake_fuse"
   unset HIVE_CONTRIBUTE_CONFIG
   unset HIVE_CONTRIBUTE_TEST_HOST_ROOT
   unset HUB REGISTRATION IMAGE BACKEND
   unset GH_TOKEN GITHUB_TOKEN
   unset FAKE_PODMAN_INFO_FAIL FAKE_PODMAN_REMOTE FAKE_PODMAN_PULL_FAIL FAKE_PODMAN_IMAGE_EXISTS FAKE_PODMAN_NO_KRUN
   unset FAKE_PODMAN_RUN_STATUS
-  unset FAKE_APPTAINER_RUN_STATUS FAKE_GH_AUTH_STATUS_FAIL FAKE_GH_TOKEN_FAIL FAKE_GH_TOKEN_VALUE
-
+  unset FAKE_GH_AUTH_STATUS_FAIL FAKE_GH_TOKEN_FAIL FAKE_GH_TOKEN_VALUE
   rm -rf "${fake_home:?}"
   mkdir -p "$fake_home"
   cat >"$fake_bin/krun" <<'EOF'
@@ -183,7 +155,6 @@ exit 0
 EOF
   chmod +x "$fake_bin/krun"
   : >"$podman_log"
-  : >"$apptainer_log"
   : >"$curl_log"
   : >"$gh_log"
 }
@@ -378,8 +349,7 @@ EOF
 # Scenario 3b: the bug #618 reported. A host can register krun with Podman
 #              against a differently named binary (/usr/bin/crun-krun), so
 #              there is no `krun` on PATH while `podman run --runtime=krun`
-#              works perfectly. Probing PATH sent those hosts to the Apptainer
-#              fallback and gave up the KVM boundary for nothing.
+#              works perfectly. Probing PATH gave up the KVM boundary for nothing.
 # -----------------------------------------------------------------------------
 test_krun_registered_with_podman_but_absent_from_path() {
   clean_env
@@ -404,18 +374,14 @@ EOF
   output="$("$launcher" run)"
   assert_contains "$output" "starting isolated KVM worker" "krun registered with Podman must take the KVM path"
   assert_eq "$(grep -c '^run ' "$podman_log" || true)" "1" "exactly one podman run"
-  assert_eq "$(cat "$apptainer_log")" "" "must not fall back to Apptainer when Podman resolves krun"
   assert_contains "$(grep '^run ' "$podman_log")" "--runtime=krun" "launch must still request krun"
 }
 
 # -----------------------------------------------------------------------------
-# Scenario 4: Apptainer fallback: when krun/kvm unavailable, warns and runs
-#             apptainer run --containall; credentials travel as APPTAINERENV_*, never argv.
+# Scenario 3c: Podman fallback when krun is unavailable: warns and runs standard Podman
 # -----------------------------------------------------------------------------
-test_run_apptainer_fallback() {
+test_run_podman_fallback_without_krun() {
   clean_env
-  # Make krun unavailable the way Podman reports it: the runtime name does
-  # not resolve. Deleting a binary from PATH no longer decides this.
   export FAKE_PODMAN_NO_KRUN=1
 
   local config_file="$fake_home/.config/hive-contribute.yml"
@@ -427,172 +393,41 @@ image: ghcr.io/projectbluefin/contribute:stable
 backend: omp
 EOF
   chmod 600 "$config_file"
-
-  cat >"$fake_home/.config/hive/contributor.env" <<'EOF'
-HIVE_HUB=wss://hub.example.com/contribute
-HIVE_REGISTRATION_TOKEN=not-a-real-apptainer-reg-token
-CONTRIBUTOR_ID=c-apptainer-id
-EOF
-  chmod 600 "$fake_home/.config/hive/contributor.env"
-
-  export GH_TOKEN="not-a-real-apptainer-gh-token"
-  export OPENAI_API_KEY="not-a-real-apptainer-openai-token"
-
-  local output
-  output="$("$launcher" run 2>&1)"
-
-  assert_contains "$output" "Podman cannot resolve the krun OCI runtime; using the isolated Apptainer fallback without a KVM boundary" "fallback warning"
-  assert_contains "$output" "starting isolated Apptainer worker" "apptainer worker banner"
-
-  local apptainer_calls
-  apptainer_calls="$(cat "$apptainer_log")"
-  local run_count
-  run_count="$(grep -c '^apptainer run ' "$apptainer_log" || true)"
-  assert_eq "$run_count" "1" "exactly one apptainer run recorded"
-
-  local run_cmd
-  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
-
-  assert_contains "$run_cmd" "--containall" "apptainer containall"
-  assert_contains "$run_cmd" "--bind $fake_home/.config/hive/contributor.env:/home/hive/.config/hive/contributor.env:ro" "registration ro bind"
-  assert_contains "$run_cmd" "docker://ghcr.io/projectbluefin/contribute:stable" "docker URI scheme"
-
-  # Credentials must NOT appear in argv!
-  assert_not_contains "$run_cmd" "not-a-real-apptainer-gh-token" "GH token in apptainer argv"
-  assert_not_contains "$run_cmd" "not-a-real-apptainer-openai-token" "OpenAI token in apptainer argv"
-  assert_not_contains "$run_cmd" "not-a-real-apptainer-reg-token" "registration token in apptainer argv"
-
-  # Credentials MUST travel as APPTAINERENV_* environment variables
-  assert_contains "$apptainer_calls" "APPTAINERENV_GH_TOKEN=not-a-real-apptainer-gh-token" "APPTAINERENV_GH_TOKEN"
-  assert_contains "$apptainer_calls" "APPTAINERENV_OPENAI_API_KEY=not-a-real-apptainer-openai-token" "APPTAINERENV_OPENAI_API_KEY"
-  assert_contains "$apptainer_calls" "APPTAINERENV_AGENT_BACKEND=omp" "APPTAINERENV_AGENT_BACKEND"
-}
-
-# -----------------------------------------------------------------------------
-# Scenario 4b: minimal hosts (#567). Apptainer binds /etc/localtime and
-#              /etc/hosts unconditionally, so a host missing either cannot
-#              launch unless the launcher suppresses that mount. The guard was
-#              lost once in #564; this is what makes losing it again visible.
-#              Covers absent, present, and dangling-symlink shapes.
-# -----------------------------------------------------------------------------
-test_run_apptainer_minimal_host() {
-  local host_root="$scratch/minimal-host"
-
-  # Same seed as scenario 4; only the simulated host layout changes per case.
-  _minimal_host_seed() {
-    clean_env
-    export FAKE_PODMAN_NO_KRUN=1
-    export HIVE_CONTRIBUTE_TEST_HOST_ROOT="$host_root"
-    local config_file="$fake_home/.config/hive-contribute.yml"
-    mkdir -p "$fake_home/.config/hive"
-    cat >"$config_file" <<EOF
-hub: wss://hub.example.com/contribute
-registration: $fake_home/.config/hive/contributor.env
-image: ghcr.io/projectbluefin/contribute:stable
-backend: omp
-EOF
-    chmod 600 "$config_file"
-    cat >"$fake_home/.config/hive/contributor.env" <<'EOF'
-HIVE_HUB=wss://hub.example.com/contribute
-HIVE_REGISTRATION_TOKEN=not-a-real-minimal-host-token
-CONTRIBUTOR_ID=c-minimal-host
-EOF
-    chmod 600 "$fake_home/.config/hive/contributor.env"
-  }
-
-  local run_cmd
-
-  # Absent: a trimmed host has neither file, so both mounts are suppressed.
-  rm -rf "$host_root"
-  mkdir -p "$host_root/etc"
-  _minimal_host_seed
-  "$launcher" run >/dev/null 2>&1
-  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
-  assert_contains "$run_cmd" "--no-mount /etc/localtime" "absent localtime must be suppressed"
-  assert_contains "$run_cmd" "--no-mount /etc/hosts" "absent hosts must be suppressed"
-
-  # Present: an ordinary host keeps both mounts, so the guard cannot become an
-  # unconditional --no-mount that silently drops the host's timezone and DNS.
-  : >"$host_root/etc/localtime"
-  : >"$host_root/etc/hosts"
-  _minimal_host_seed
-  "$launcher" run >/dev/null 2>&1
-  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
-  assert_not_contains "$run_cmd" "--no-mount" "present host files must stay mounted"
-
-  # Dangling symlink: present as a link, resolves to nothing. Apptainer fails
-  # on it exactly as on an absent file, and `-e` is false for both.
-  rm -f "$host_root/etc/localtime"
-  ln -s /nonexistent/zoneinfo "$host_root/etc/localtime"
-  _minimal_host_seed
-  "$launcher" run >/dev/null 2>&1
-  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
-  assert_contains "$run_cmd" "--no-mount /etc/localtime" "dangling localtime symlink must be suppressed"
-  assert_not_contains "$run_cmd" "--no-mount /etc/hosts" "present hosts must stay mounted"
-
-  # Asymmetric: localtime present, hosts absent. Each file is decided on its
-  # own, so a guard that suppressed both together would pass the symmetric
-  # cases above and still break a host missing only one.
-  rm -f "$host_root/etc/localtime" "$host_root/etc/hosts"
-  : >"$host_root/etc/localtime"
-  _minimal_host_seed
-  "$launcher" run >/dev/null 2>&1
-  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
-  assert_contains "$run_cmd" "--no-mount /etc/hosts" "absent hosts must be suppressed on its own"
-  assert_not_contains "$run_cmd" "--no-mount /etc/localtime" "present localtime must stay mounted"
-
-  # Dangling /etc/hosts, the mirror of the localtime case.
-  rm -f "$host_root/etc/hosts"
-  ln -s /nonexistent/hosts "$host_root/etc/hosts"
-  _minimal_host_seed
-  "$launcher" run >/dev/null 2>&1
-  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
-  assert_contains "$run_cmd" "--no-mount /etc/hosts" "dangling hosts symlink must be suppressed"
-  assert_not_contains "$run_cmd" "--no-mount /etc/localtime" "present localtime must stay mounted"
-
-  unset -f _minimal_host_seed
-}
-
-# -----------------------------------------------------------------------------
-# Scenario: `just contribute-build` leaves the image in Podman's store, which
-#           Apptainer cannot read. A host without krun must still be able to
-#           run the image it just built, converted once and reused.
-# -----------------------------------------------------------------------------
-test_run_apptainer_converts_local_image() {
-  clean_env
-  export FAKE_PODMAN_NO_KRUN=1
-
-  local config_file="$fake_home/.config/hive-contribute.yml"
-  mkdir -p "$fake_home/.config/hive"
-  cat >"$config_file" <<EOF
-hub: wss://hub.example.com/contribute
-registration: $fake_home/.config/hive/contributor.env
-image: localhost/hive/contribute:dev
-backend: omp
-EOF
-  chmod 600 "$config_file"
-  printf 'HIVE_HUB=wss://hub.example.com/contribute\nHIVE_REGISTRATION_TOKEN=t\nCONTRIBUTOR_ID=c-local\n' \
+  printf 'HIVE_HUB=wss://hub.example.com/contribute\nHIVE_REGISTRATION_TOKEN=t\nCONTRIBUTOR_ID=c\n' \
     >"$fake_home/.config/hive/contributor.env"
   chmod 600 "$fake_home/.config/hive/contributor.env"
 
-  "$launcher" run >/dev/null 2>&1 || fail "a locally built image must run on the Apptainer fallback"
-
-  local sif="$fake_home/.local/state/hive-contribute/local/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.sif"
-  [[ -f "$sif" ]] || fail "the local image was not converted for Apptainer"
-  local run_cmd
-  run_cmd="$(grep '^apptainer run ' "$apptainer_log")"
-  assert_contains "$run_cmd" "$sif" "converted image in apptainer run"
-  assert_not_contains "$run_cmd" "docker://" "a local image must not be resolved as a registry reference"
-
-  # A second launch reuses the conversion: it is keyed by image ID, and
-  # re-exporting a 500 MiB image on every start would make the fallback
-  # unusable.
-  : >"$apptainer_log"
-  "$launcher" run >/dev/null 2>&1 || fail "second launch failed"
-  assert_eq "$(grep -c '^apptainer build ' "$apptainer_log" || true)" "0" "conversions after the first"
+  local output
+  output="$("$launcher" run 2>&1)"
+  assert_contains "$output" "running container worker without KVM boundary" "warns about missing KVM"
+  assert_contains "$output" "starting container worker" "starts container worker"
+  assert_eq "$(grep -c '^run ' "$podman_log" || true)" "1" "exactly one podman run"
+  assert_not_contains "$(grep '^run ' "$podman_log")" "--runtime=krun" "standard podman must not request krun"
 }
 
 # -----------------------------------------------------------------------------
+# Scenario 3d: Doctor reports Podman container fallback when krun is unavailable
+# -----------------------------------------------------------------------------
+test_doctor_podman_fallback() {
+  clean_env
+  export FAKE_PODMAN_NO_KRUN=1
+  local config_file="$fake_home/.config/hive-contribute.yml"
+  mkdir -p "$fake_home/.config/hive"
+  cat >"$config_file" <<EOF
+hub: wss://hub.example.com/contribute
+registration: $fake_home/.config/hive/contributor.env
+image: ghcr.io/projectbluefin/contribute:stable
+backend: omp
+EOF
+  chmod 600 "$config_file"
+  touch "$fake_home/.config/hive/contributor.env"
+  export FAKE_GH_TOKEN_VALUE="fake-doctor-gh-token"
+
+  local output
+  output="$("$launcher" doctor)"
+  assert_contains "$output" "Podman container runtime ready" "doctor reports podman container runtime"
+  assert_contains "$output" "checks passed, 0 failed" "doctor summary passes on container fallback"
+}
 # Scenario 6: `doctor`: exits non-zero and says why when hub is unset or gh has no token;
 #             exits zero on healthy fake machine; never mounts credential (no container run).
 # -----------------------------------------------------------------------------
@@ -653,74 +488,7 @@ EOF
 
   # Never mounts credential / no container run recorded
   assert_eq "$(cat "$podman_log")" "" "doctor must never run podman"
-  assert_eq "$(cat "$apptainer_log")" "" "doctor must never run apptainer"
 }
-
-# -----------------------------------------------------------------------------
-# Scenario 6b: a degraded fallback must name its own cause (#567). Without krun
-#              the Apptainer path is all that is left, and its failure modes
-#              need different fixes: grant the host a device, or fix that
-#              device's permissions. A single generic "Apptainer unavailable"
-#              sends the operator down the wrong one.
-#
-#              The squashfuse-userland branch is deliberately not covered: the
-#              probe is `command -v`, so hiding it means controlling the whole
-#              PATH the launcher inherits. Any host with squashfuse installed
-#              would silently pass a test that pretended to remove it, which is
-#              worse than an honest gap.
-# -----------------------------------------------------------------------------
-test_doctor_distinguishes_fallback_failures() {
-  local output
-
-  _degraded_doctor() {
-    clean_env
-    export FAKE_PODMAN_NO_KRUN=1
-    mkdir -p "$fake_home/.config/hive"
-    cat >"$fake_home/.config/hive-contribute.yml" <<EOF
-hub: wss://hub.example.com/contribute
-registration: $fake_home/.config/hive/contributor.env
-image: ghcr.io/projectbluefin/contribute:stable
-backend: omp
-EOF
-    chmod 600 "$fake_home/.config/hive-contribute.yml"
-    touch "$fake_home/.config/hive/contributor.env"
-    export FAKE_GH_TOKEN_VALUE="fake-doctor-gh-token"
-  }
-
-  # Missing device: a host capability, not a package. A degraded fallback with
-  # no KVM path left is a failed preflight, so the status must say so too --
-  # an operator scripting `hive-contribute doctor` sees the exit code first.
-  _degraded_doctor
-  export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$scratch/absent-fuse"
-  local status=0
-  output="$("$launcher" doctor 2>&1)" || status=$?
-  [[ "$status" -ne 0 ]] || fail "doctor must fail when neither krun nor the Apptainer fallback is usable"
-  assert_contains "$output" "FUSE device $scratch/absent-fuse is missing" "absent FUSE names the device"
-  assert_not_contains "$output" "squashfuse userland is unavailable" "device failure must not blame the userland"
-
-  # Present but unusable: a permission problem, distinct from absence. Root
-  # bypasses the permission bits entirely, so this case is only meaningful
-  # unprivileged; skipping is honest where asserting would be theatre.
-  if [[ "$EUID" -eq 0 ]]; then
-    echo "   (skipping the unreadable-FUSE case: running as root)"
-    unset -f _degraded_doctor
-    return 0
-  fi
-  _degraded_doctor
-  local locked="$scratch/locked-fuse"
-  : >"$locked"
-  chmod 000 "$locked"
-  export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$locked"
-  status=0
-  output="$("$launcher" doctor 2>&1)" || status=$?
-  chmod 644 "$locked"
-  [[ "$status" -ne 0 ]] || fail "doctor must fail when the FUSE device is unusable"
-  assert_contains "$output" "FUSE device $locked is not readable and writable" "locked FUSE names permissions"
-  assert_not_contains "$output" "is missing" "permission failure must not report absence"
-
-  unset -f _degraded_doctor
-}
-
 # -----------------------------------------------------------------------------
 # Scenario 7: `setup` survives upstream's HOST-CLI preflight.
 #
@@ -829,33 +597,25 @@ EOF
 # --- Run all scenarios -------------------------------------------------------
 
 echo "1. Testing config creation and hub seeding..."
-test_config_seeding_and_creation
+test_config_seeding_and_creation || exit 1
 
 echo "2. Testing zero-config bare run: register through upstream, then launch..."
-test_zero_config_run_registers_then_launches
+test_zero_config_run_registers_then_launches || exit 1
 
 echo "3. Testing run on krun path..."
-test_run_krun_path
+test_run_krun_path || exit 1
 
 echo "3b. Testing krun registered with Podman but absent from PATH..."
-test_krun_registered_with_podman_but_absent_from_path
+test_krun_registered_with_podman_but_absent_from_path || exit 1
+echo "3c. Testing Podman fallback when krun is unavailable..."
+test_run_podman_fallback_without_krun || exit 1
 
-echo "4. Testing Apptainer fallback path..."
-test_run_apptainer_fallback
+echo "3d. Testing doctor preflight on Podman fallback..."
+test_doctor_podman_fallback || exit 1
 
-echo "4b. Testing minimal hosts missing /etc/localtime or /etc/hosts..."
-test_run_apptainer_minimal_host
-
-echo "5. Testing a locally built image on the Apptainer fallback..."
-test_run_apptainer_converts_local_image
-
-echo "6. Testing doctor preflight..."
-test_doctor_failures_and_success
-
-echo "6b. Testing that a degraded Apptainer fallback names its cause..."
-test_doctor_distinguishes_fallback_failures
-
-echo "7. Testing setup against upstream's host-CLI preflight..."
-test_setup_satisfies_host_cli_probe
+echo "4. Testing doctor preflight..."
+test_doctor_failures_and_success || exit 1
+echo "5. Testing setup against upstream's host-CLI preflight..."
+test_setup_satisfies_host_cli_probe || exit 1
 
 echo "launcher-contract: all tests passed."

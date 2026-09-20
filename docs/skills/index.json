@@ -110,7 +110,6 @@
         "just",
         "launcher",
         "podman",
-        "apptainer",
         "omp",
         "hive"
       ],

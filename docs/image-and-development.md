@@ -7,8 +7,7 @@ The repository ships one OMP-owned image:
 
 The image does not select a provider, model, or thinking effort. OMP resolves those
 inside the appliance. Local launchers prefer Podman's `krun` runtime and KVM,
-then fall back explicitly to isolated Apptainer execution.
-
+and run standard Podman containers when KVM is unavailable.
 The image uses FSDK base images (`ghcr.io/projectbluefin/base:26.08`, used as a build input location)
 pinned by tag and digest, and pins fetched binary release assets by
 architecture-specific SHA-256. The contributor image installs the root
@@ -38,10 +37,7 @@ just contribute-build
 
 To run that build instead of the published image, set
 `image: localhost/hive/contribute:dev` in the configuration file — or in a copy
-of it selected with `HIVE_CONTRIBUTE_CONFIG` — and run `just contribute`. A host
-without `krun` takes the Apptainer fallback, which cannot read Podman's store,
-so the launcher converts that image to a SIF once per build and reuses it.
-
+of it selected with `HIVE_CONTRIBUTE_CONFIG` — and run `just contribute`.
 Interactive runs use unique container names, target-specific persistent volumes,
 remain foreground, and stop with `Ctrl-C`.
 

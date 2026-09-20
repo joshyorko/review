@@ -133,11 +133,11 @@ instance_slug() {
 
 # ── Host preflight ───────────────────────────────────────────────────────────
 KVM_FAILURE=""
-FALLBACK_FAILURE=""
+PODMAN_FAILURE=""
 
 podman_is_local() {
   # A remote Podman engine would resolve bind mounts on the far side, where
-  # this machine's credential file does not exist. Apptainer stays local.
+  # this machine's credential file does not exist.
   local connections
   connections="$(podman system connection list --format '{{.URI}}\t{{.Default}}' 2>/dev/null || true)"
   [[ -z "$connections" ]] && return 0
@@ -150,33 +150,26 @@ podman_is_local() {
   return 0
 }
 
+podman_ready() {
+  command -v podman &>/dev/null || { PODMAN_FAILURE="Podman is unavailable"; return 1; }
+  podman info &>/dev/null || { PODMAN_FAILURE="Podman is not reachable"; return 1; }
+  podman_is_local || { PODMAN_FAILURE="Podman targets a remote engine"; return 1; }
+  return 0
+}
+
 kvm_runtime_ready() {
   local device="${HIVE_CONTRIBUTE_TEST_KVM_DEVICE:-/dev/kvm}"
-  command -v podman &>/dev/null || { KVM_FAILURE="Podman is unavailable"; return 1; }
-  podman info &>/dev/null || { KVM_FAILURE="Podman is not reachable"; return 1; }
-  podman_is_local || { KVM_FAILURE="Podman targets a remote engine"; return 1; }
+  podman_ready || { KVM_FAILURE="$PODMAN_FAILURE"; return 1; }
   # Ask Podman whether `--runtime=krun` resolves, rather than looking for a
   # `krun` executable on PATH. The launch uses `podman run --runtime=krun`, and
   # Podman resolves that NAME through the runtimes map in containers.conf,
   # where a host may register krun against a differently named binary such as
-  # /usr/bin/crun-krun. `command -v krun` misses those hosts and sends a
-  # perfectly good libkrun machine to the Apptainer fallback (#618). An
-  # unregistered name fails here without starting a container:
+  # /usr/bin/crun-krun. An unregistered name fails here without starting a container:
   #   $ podman --runtime=krun info
   #   Error: default OCI runtime "krun" not found: invalid argument
   podman --runtime=krun info &>/dev/null ||
     { KVM_FAILURE="Podman cannot resolve the krun OCI runtime"; return 1; }
   [[ -r "$device" && -w "$device" ]] || { KVM_FAILURE="${device} is not readable and writable"; return 1; }
-  return 0
-}
-
-fallback_ready() {
-  local fuse="${HIVE_CONTRIBUTE_TEST_FUSE_DEVICE:-/dev/fuse}"
-  command -v apptainer &>/dev/null || { FALLBACK_FAILURE="Apptainer is unavailable; install Apptainer"; return 1; }
-  { command -v squashfuse_ll &>/dev/null || command -v squashfuse &>/dev/null; } ||
-    { FALLBACK_FAILURE="squashfuse userland is unavailable; install squashfuse"; return 1; }
-  [[ -e "$fuse" ]] || { FALLBACK_FAILURE="FUSE device ${fuse} is missing"; return 1; }
-  [[ -r "$fuse" && -w "$fuse" ]] || { FALLBACK_FAILURE="FUSE device ${fuse} is not readable and writable"; return 1; }
   return 0
 }
 
@@ -293,7 +286,7 @@ EOF
   echo "✓ registered: ${REGISTRATION} (0600)"
 }
 # ── Image ────────────────────────────────────────────────────────────────────
-image_is_local_path() { [[ "$IMAGE" == *.sif || -f "$IMAGE" ]]; }
+image_is_local_path() { [[ -f "$IMAGE" ]]; }
 
 ensure_image() {
   # A moving tag must be refreshed before launch or the worker silently runs
@@ -305,36 +298,6 @@ ensure_image() {
   podman image exists "$IMAGE" &>/dev/null ||
     fail "cannot resolve image ${IMAGE}. Set 'image:' in ${CONFIG_PATH}, or build it with 'just contribute-build'."
   note "using the locally cached ${IMAGE}; the registry copy could not be checked."
-}
-
-local_image_sif() {
-  # `just contribute-build` writes the image into Podman's store, which
-  # Apptainer cannot read. The host that most needs the fallback is the one
-  # without krun — and without this it can build an appliance it has no way to
-  # run, so a change could only be tested after publishing it. Convert once
-  # per image ID and reuse; a rebuild produces a new ID and a new conversion.
-  local id dir archive partial
-  command -v podman &>/dev/null || fail "Podman is required to read the local image ${IMAGE}."
-  id="$(podman image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null)" ||
-    fail "no local image ${IMAGE}. Build it with 'just contribute-build'."
-  id="${id#sha256:}"
-  dir="${XDG_STATE_HOME:-${HOME}/.local/state}/hive-contribute/local"
-  LOCAL_SIF="${dir}/${id}.sif"
-  [[ -f "$LOCAL_SIF" ]] && return 0
-  mkdir -p "$dir"
-  archive="$(mktemp "${TMPDIR:-/tmp}/hive-contribute-image.XXXXXX")"
-  # Built beside the cache entry and moved into place only on success: a
-  # conversion killed halfway would otherwise leave a truncated SIF that every
-  # later launch accepts as cached and fails to boot.
-  partial="$(mktemp "${dir}/.partial.XXXXXX")"
-  note "converting ${IMAGE} for Apptainer; this runs once per build."
-  if ! podman save --format oci-archive -o "$archive" "$IMAGE" >/dev/null 2>&1 ||
-    ! apptainer build --force "$partial" "oci-archive:${archive}" >/dev/null 2>&1; then
-    rm -f "$archive" "$partial"
-    fail "could not convert ${IMAGE} for Apptainer."
-  fi
-  mv -f "$partial" "$LOCAL_SIF"
-  rm -f "$archive"
 }
 
 # ── Launch ───────────────────────────────────────────────────────────────────
@@ -352,91 +315,53 @@ FORWARDED_CREDENTIALS=(
 )
 
 launch_once() {
-  local slug home
+  local slug
   slug="$(instance_slug)"
-  home="${XDG_STATE_HOME:-${HOME}/.local/state}/hive-contribute/${slug}"
 
-  if kvm_runtime_ready && ! image_is_local_path; then
-    ensure_image
-    local name
-    name="hive-contribute-${slug}-$(date +%s)-$$"
+  podman_ready || fail "${PODMAN_FAILURE}."
+  ensure_image
+  local name
+  name="hive-contribute-${slug}-$(date +%s)-$$"
+
+  local runtime_args=()
+  if kvm_runtime_ready; then
+    runtime_args+=(--runtime=krun)
     echo "✓ starting isolated KVM worker ${name}. Choose model and effort in OMP."
-    local args=(
-      podman run --runtime=krun --rm --interactive --tty
-      --name "$name"
-      --userns "keep-id:uid=65532,gid=65532"
-      --volume "hive-contribute-${slug}:/home/hive:rw"
-      --volume "${REGISTRATION}:/home/hive/.config/hive/contributor.env:ro,z"
-      --env "AGENT_BACKEND=${BACKEND}"
-      --env "HIVE_CONTAINER_NAME=${name}"
-      --env HIVE_CONTAINER_RUNTIME=podman
-      --env "TERM=${TERM:-xterm-256color}"
-      --env "COLORTERM=${COLORTERM:-truecolor}"
-    )
-    # The workload ceiling. --memory-swap pinned to --memory is what stops a
-    # contributor spilling another limit's worth into host swap; under krun the
-    # pair sizes the microVM itself rather than a cgroup.
-    [[ "$MEMORY" != none && "$MEMORY" != 0 ]] &&
-      args+=(--memory "$MEMORY" --memory-swap "$MEMORY")
-    [[ "$CPUS" != none && "$CPUS" != 0 ]] && args+=(--cpus "$CPUS")
-    # One GitHub account has one contributor identity per hub, so two relays
-    # under the same account would collide on a single task slot. HIVE_SESSION
-    # is the relay's own label for telling them apart, and an explicit EMPTY
-    # value is its documented opt-out — so forward whenever the variable is
-    # SET, empty or not, and leave it absent otherwise.
-    [[ -v HIVE_SESSION ]] && args+=(--env "HIVE_SESSION=${HIVE_SESSION}")
-    local credential
-    for credential in "${FORWARDED_CREDENTIALS[@]}"; do
-      [[ -n "${!credential:-}" ]] && args+=(--env "$credential")
-    done
-    args+=("$IMAGE")
-    "${args[@]}"
-    return $?
+  else
+    note "${KVM_FAILURE}; running container worker without KVM boundary."
+    echo "✓ starting container worker ${name}. Choose model and effort in OMP."
   fi
 
-  fallback_ready || fail "${KVM_FAILURE}; ${FALLBACK_FAILURE}."
-  note "${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary."
-  # Only the fallback needs a host-side home: the krun path keeps its state in
-  # a named volume, and Hive's agent creates the workspace under $HOME itself.
-  # `--pwd` below still has to name an existing directory before that runs.
-  mkdir -p "$home/workspace"
-  local apptainer_image="$IMAGE"
-  if [[ "$IMAGE" == localhost/* ]]; then
-    local_image_sif
-    apptainer_image="$LOCAL_SIF"
-  elif [[ "$IMAGE" != *://* ]] && ! image_is_local_path; then
-    apptainer_image="docker://${IMAGE}"
-  fi
+  local args=(
+    podman run "${runtime_args[@]}" --rm --interactive --tty
+    --name "$name"
+    --userns "keep-id:uid=65532,gid=65532"
+    --volume "hive-contribute-${slug}:/home/hive:rw"
+    --volume "${REGISTRATION}:/home/hive/.config/hive/contributor.env:ro,z"
+    --env "AGENT_BACKEND=${BACKEND}"
+    --env "HIVE_CONTAINER_NAME=${name}"
+    --env HIVE_CONTAINER_RUNTIME=podman
+    --env "TERM=${TERM:-xterm-256color}"
+    --env "COLORTERM=${COLORTERM:-truecolor}"
+  )
+  # The workload ceiling. --memory-swap pinned to --memory is what stops a
+  # contributor spilling another limit's worth into host swap; under krun the
+  # pair sizes the microVM itself rather than a cgroup.
+  [[ "$MEMORY" != none && "$MEMORY" != 0 ]] &&
+    args+=(--memory "$MEMORY" --memory-swap "$MEMORY")
+  [[ "$CPUS" != none && "$CPUS" != 0 ]] && args+=(--cpus "$CPUS")
+  # One GitHub account has one contributor identity per hub, so two relays
+  # under the same account would collide on a single task slot. HIVE_SESSION
+  # is the relay's own label for telling them apart, and an explicit EMPTY
+  # value is its documented opt-out — so forward whenever the variable is
+  # SET, empty or not, and leave it absent otherwise.
+  [[ -v HIVE_SESSION ]] && args+=(--env "HIVE_SESSION=${HIVE_SESSION}")
   local credential
-  for credential in "${FORWARDED_CREDENTIALS[@]}" TERM COLORTERM; do
-    [[ -v "$credential" ]] && export "APPTAINERENV_${credential}=${!credential}"
+  for credential in "${FORWARDED_CREDENTIALS[@]}"; do
+    [[ -n "${!credential:-}" ]] && args+=(--env "$credential")
   done
-  [[ -v HIVE_SESSION ]] && export "APPTAINERENV_HIVE_SESSION=${HIVE_SESSION}"
-  export "APPTAINERENV_AGENT_BACKEND=${BACKEND}"
-  # No ceiling here: Apptainer applies one only through cgroups delegation that
-  # a fallback host frequently does not have, and a launch that dies on a
-  # missing controller is worse than an unbounded one. `hive-contribute config`
-  # reports the configured values; only the Podman path enforces them.
-  # Apptainer binds /etc/localtime and /etc/hosts unconditionally and fails the
-  # launch when one is absent, which minimal and devcontainer hosts routinely
-  # are. Suppress only the ones this host does not have; `-e` is false for a
-  # dangling symlink too, which is the shape a trimmed base image leaves behind.
-  # This guard was lost once already (#564) and cost a release, so the contract
-  # test drives it through HIVE_CONTRIBUTE_TEST_HOST_ROOT: the probe takes the
-  # prefix, the flag always names the real path, and an unset prefix is the
-  # production path byte for byte.
-  local host_args=()
-  local host_file
-  for host_file in /etc/localtime /etc/hosts; do
-    [[ -e "${HIVE_CONTRIBUTE_TEST_HOST_ROOT:-}${host_file}" ]] ||
-      host_args+=(--no-mount "$host_file")
-  done
-  echo "✓ starting isolated Apptainer worker ${slug}. Choose model and effort in OMP."
-  apptainer run --containall --no-eval "${host_args[@]}" \
-    --home "${home}:/home/hive" \
-    --pwd /home/hive/workspace \
-    --bind "${REGISTRATION}:/home/hive/.config/hive/contributor.env:ro" \
-    "$apptainer_image"
+  args+=("$IMAGE")
+  "${args[@]}"
   return $?
 }
 
@@ -486,11 +411,11 @@ run_doctor() {
   if kvm_runtime_ready; then
     echo "  ✓ Podman krun KVM runtime ready"
     pass=$((pass + 1))
-  elif fallback_ready; then
-    echo "  ! ${KVM_FAILURE}; isolated Apptainer fallback ready"
+  elif podman_ready; then
+    echo "  ! ${KVM_FAILURE}; Podman container runtime ready"
     pass=$((pass + 1))
   else
-    echo "  ✗ ${KVM_FAILURE}; ${FALLBACK_FAILURE}"
+    echo "  ✗ ${PODMAN_FAILURE}"
     fail_count=$((fail_count + 1))
   fi
   echo ""
@@ -564,8 +489,8 @@ run_config() {
   echo "registration: ${REGISTRATION}"
   echo "image:        ${IMAGE}"
   echo "backend:      ${BACKEND}"
-  echo "memory:       ${MEMORY} (Podman path; the Apptainer fallback is unbounded)"
-  echo "cpus:         ${CPUS} (Podman path; the Apptainer fallback is unbounded)"
+  echo "memory:       ${MEMORY}"
+  echo "cpus:         ${CPUS}"
   echo "hive ref:     ${HIVE_REF} (tracked, never pinned)"
 }
 

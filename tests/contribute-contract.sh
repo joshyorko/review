@@ -86,12 +86,6 @@ grep -qF "WORKDIR ${guest_home}/workspace" "$containerfile" || fail "wrong workd
 # shellcheck disable=SC2016 # launcher source is matched literally, not expanded
 grep -qF -- "--volume \"\${REGISTRATION}:${guest_home}/.config/hive/contributor.env:ro,z\"" "$launcher" ||
   fail "the Podman registration mount is not inside ${guest_home}"
-# shellcheck disable=SC2016 # launcher source is matched literally, not expanded
-grep -qF -- "--home \"\${home}:${guest_home}\"" "$launcher" || fail "the Apptainer home is not ${guest_home}"
-grep -qF -- "--pwd ${guest_home}/workspace" "$launcher" || fail "the Apptainer working directory is not inside ${guest_home}"
-# shellcheck disable=SC2016 # launcher source is matched literally, not expanded
-grep -qF -- "--bind \"\${REGISTRATION}:${guest_home}/.config/hive/contributor.env:ro\"" "$launcher" ||
-  fail "the Apptainer registration bind is not inside ${guest_home}"
 grep -qF 'USER 65532:65532' "$containerfile" || fail "wrong user"
 grep -qF 'NODE_PATH=/usr/lib/hive/node_modules' "$containerfile" || fail "missing NODE_PATH"
 grep -qF 'io.hivecommons.contribute="true"' "$containerfile" || fail "missing contribute label"

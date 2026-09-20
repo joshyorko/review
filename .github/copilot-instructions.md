@@ -22,7 +22,7 @@ The root `package.json` only pins the contributor relay's `ws` dependency; this 
 
 | User goal | Command | Authority and lifecycle |
 | --- | --- | --- |
-| Run the Hive contributor worker | `hive-contribute` or `just contribute` | Foreground OMP worker; prefers a libkrun microVM and falls back to Apptainer. Hive selects and assigns tasks. |
+| Run the Hive contributor worker | `hive-contribute` or `just contribute` | Foreground OMP worker; prefers a libkrun microVM with standard Podman fallback. Hive selects and assigns tasks. |
 | Perform attended Hive registration | `hive-contribute setup` or `just setup` | Attended Hive registration through upstream setup. |
 | Diagnose launch readiness | `hive-contribute doctor` or `just doctor` | Read-only preflight; starts no agent. |
 | Print appliance configuration | `hive-contribute config` or `just config` | Reads the single config file `${XDG_CONFIG_HOME:-~/.config}/hive-contribute.yml`. |
@@ -71,7 +71,7 @@ launches. Keep interactive runs foreground and signal-responsive; never stop,
 restart, kill, or reclaim an active attended instance to clear stale state.
 
 Local appliance launches prefer Podman's `krun` OCI runtime. Missing KVM
-prerequisites produce an explicit warning before falling back to Apptainer.
+prerequisites warn and run standard Podman containers.
 Each invocation has a unique container name; never restore fixed names or `--replace`.
 
 ## Keep launcher mutations explicit and credential-safe

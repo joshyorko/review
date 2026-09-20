@@ -76,14 +76,12 @@ cpus: 2
 | `memory` | RAM ceiling, swap pinned to it; `none` removes it | `4g` (upstream's contributor envelope) |
 | `cpus` | CPU ceiling; `none` removes it | `2` (upstream's contributor envelope) |
 
-`memory` and `cpus` are enforced on the Podman path, where they also size the microVM. The Apptainer fallback runs unbounded: it can only apply a ceiling through cgroups delegation that a fallback host frequently does not have.
-
+`memory` and `cpus` are enforced on Podman runs, where they size the microVM.
 ## Isolation Model
 
 Every worker invocation runs inside an isolated container:
 
-- **libkrun microVM preferred**: When Podman, `krun`, and `/dev/kvm` are available, the launcher starts a hardware-isolated KVM microVM (`podman run --runtime=krun`).
-- **Apptainer fallback**: If KVM, Podman, or `krun` is unavailable, the launcher reports why and falls back to an isolated Apptainer container (`apptainer run --containall`).
+- **libkrun microVM preferred**: When Podman, `krun`, and `/dev/kvm` are available, the launcher starts a hardware-isolated KVM microVM (`podman run --runtime=krun`). When KVM is unavailable, it runs standard Podman containers.
 - **Read-only credential mount**: Hive's `0600` registration file is mounted read-only at `/home/hive/.config/hive/contributor.env:ro`.
 - **No host home mount**: The user's host `$HOME` is never mounted. The container runs as unprivileged user `hive` (uid/gid 65532) with its own isolated home volume.
 - **Foreground attach**: The container remains attached to the terminal in the foreground. Detached runs are unsupported; Ctrl-C stops the invocation cleanly.
@@ -128,8 +126,7 @@ gh auth login --web --hostname github.com --scopes repo,read:org
 
 Once a registration exists, the setup-only tools (`just`, `git`, `curl`, `jq`,
 `node`) are no longer needed. Every run still needs a container runtime —
-Podman with `krun`, or Apptainer — and a GitHub token, either from `gh` or
-exported as `GH_TOKEN`.
+Podman with `krun` — and a GitHub token, either from `gh` or exported as `GH_TOKEN`.
 
 ### If something is wrong
 
@@ -147,6 +144,34 @@ The default contributor runtime image is published to GitHub Container Registry 
 just contribute-build
 ```
 
+### Running directly with Podman
+
+To run the container directly with `podman` (preserving host access to the `0600` registration file):
+
+```bash
+podman run --rm -it \
+  --userns keep-id:uid=65532,gid=65532 \
+  -v ~/.config/hive/contributor.env:/home/hive/.config/hive/contributor.env:ro,z \
+  -v hive-home:/home/hive:rw \
+  -e GH_TOKEN \
+  ghcr.io/projectbluefin/contribute:stable
+```
+
+### Running with Docker
+
+For environments using Docker, map your host user ID and bind-mount a dedicated host-owned directory for `/home/hive` so the container process can read the `0600` registration file and write to its home and workspace:
+
+```bash
+mkdir -p ~/.local/state/hive-contribute/home/{.config/hive,workspace}
+
+docker run --rm -it \
+  --user "$(id -u):$(id -g)" \
+  -v "${HOME}/.local/state/hive-contribute/home:/home/hive" \
+  -v "${HOME}/.config/hive/contributor.env:/home/hive/.config/hive/contributor.env:ro" \
+  -w /home/hive/workspace \
+  -e GH_TOKEN \
+  ghcr.io/projectbluefin/contribute:stable
+```
 ## Guides
 
 - **Launcher:** [`docs/skills/launcher.md`](docs/skills/launcher.md)

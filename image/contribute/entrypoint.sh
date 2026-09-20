@@ -51,7 +51,7 @@ fi
 
 agent_pid=
 attach_pid=
-# Podman/Apptainer send SIGTERM and wait before SIGKILL, so teardown has to be
+# Podman sends SIGTERM and waits before SIGKILL, so teardown has to be
 # BOUNDED: an unbounded wait on a stuck agent stalls until that deadline and
 # dies by SIGKILL, which is the "Ctrl-C stops it" promise failing in the only
 # way a user can see. Two short steps, three seconds worst case.
@@ -106,11 +106,9 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 # Hive's relay caches each task's short-lived, hub-minted GitHub token under
-# /var/run/hive-metrics, a directory this image ships. The Apptainer fallback
-# mounts the image read-only, so every assignment logs
-# `EROFS: read-only file system` and the agent works without the credential the
-# hub just issued for it. Point the relay at a writable path whenever its
-# default is not writable; an explicit HIVE_GH_TOKEN_CACHE still wins.
+# /var/run/hive-metrics, a directory this image ships. Point the relay at a
+# writable path whenever its default is not writable; an explicit
+# HIVE_GH_TOKEN_CACHE still wins.
 if [ -z "${HIVE_GH_TOKEN_CACHE:-}" ] && [ ! -w /var/run/hive-metrics ]; then
   HIVE_GH_TOKEN_CACHE="${TMPDIR:-/tmp}/hive-gh-token.cache"
   export HIVE_GH_TOKEN_CACHE

@@ -111,6 +111,5 @@ jobs:
             -f image/contribute/Containerfile -t contribute:test .
           bash tests/contribute-contract.sh --image contribute:test
 
-      # Interactive launchers prefer KVM and fall back to Apptainer. CI builds
-      # and executes the OCI image natively; both launcher branches are
-      # exercised hermetically.
+      # Interactive launchers prefer KVM microVMs. CI builds
+      # and executes the OCI image natively.

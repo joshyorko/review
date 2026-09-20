@@ -9,10 +9,9 @@ The repository ships one purpose-specific runtime:
    `ghcr.io/projectbluefin/contribute`, used as a registry location) packages Hive's worker and OMP. Both
    `hive-contribute` and `just contribute` launch it; OMP owns model and effort.
 
-Local launchers run the OCI image through Podman's `krun` runtime. Each
-invocation is a separate foreground KVM microVM with a unique container name;
-the hub endpoint hash selects separate persistent OMP state.
-
+Local launchers prefer Podman's `krun` runtime when KVM is available, falling back
+to standard Podman containers otherwise. Each invocation runs in the foreground with
+a unique container name; the hub endpoint hash selects separate persistent OMP state.
 Hive assignment authority remains separate:
 Hive assigns contributor tasks, while OMP owns agent execution, model choice,
 and tool boundaries.
