@@ -22,8 +22,10 @@ symbolPreset: nerd
 # The pane is attended — the launcher runs in the foreground and this image
 # attaches the operator's terminal to Hive's tmux session — but the work is
 # Hive's to assign and the operator is watching a stream, not reviewing each
-# step. A second reader that inspects the workspace and can raise a blocker
-# gives that operator something to act on while there is still time to act.
+# step. A second reader that inspects the workspace and can interrupt on a
+# critical finding gives that operator something to act on while there is
+# still time to act. It advises: it never approves, blocks, or mutates the
+# primary session's state.
 #
 # No model is named here, and that is the point: the advisor resolves through
 # `modelRoles.advisor` on the machine running the image, so the contributor's
