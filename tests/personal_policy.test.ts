@@ -22,10 +22,17 @@ const ENV = {
 	BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY: "1",
 	BLUEFIN_REVIEW_PERSONAL_MODE: "1",
 	LUNA_FACTORY_STATE_ROOT: "",
+	LUNA_FACTORY_CLAIMS_ROOT: "",
 	BLUEFIN_REVIEW_MODE: "review",
 };
-beforeEach(() => { ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "personal-claims-")); });
-afterEach(() => { rmSync(ENV.LUNA_FACTORY_STATE_ROOT, { recursive: true, force: true }); });
+beforeEach(() => {
+	ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "personal-state-"));
+	ENV.LUNA_FACTORY_CLAIMS_ROOT = mkdtempSync(join(tmpdir(), "personal-claims-"));
+});
+afterEach(() => {
+	rmSync(ENV.LUNA_FACTORY_STATE_ROOT, { recursive: true, force: true });
+	rmSync(ENV.LUNA_FACTORY_CLAIMS_ROOT, { recursive: true, force: true });
+});
 
 function workflowNode(workflow = true) {
 	return {

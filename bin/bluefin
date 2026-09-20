@@ -401,12 +401,14 @@ run_review() {
     previous="$arg"
   done
 
-  local key root home workspace scratch name image sif="" fallback_sif is_override=0
+  local key root home workspace scratch claims_root name image sif="" fallback_sif is_override=0
   key="$(slugify "${BLUEFIN_INSTANCE:-review-$scope}")"
   root="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${key}"
   home="${root}/home"
   workspace="${root}/workspace"
   scratch="${root}/tmp"
+  claims_root="${BLUEFIN_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
+  mkdir -p "$claims_root"
   name="bluefin-review-${key}-$(date +%s)-$$"
   if [[ -n "${REVIEW_APPLIANCE_IMAGE:-}" ]]; then
     image="$REVIEW_APPLIANCE_IMAGE"
@@ -441,7 +443,7 @@ run_review() {
       export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
     local -a sif_args=(run --containall --no-eval)
     sif_args+=("${APPTAINER_HOST_ARGS[@]}")
-    sif_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp")
+    sif_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw")
     if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
       sif_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
       [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
@@ -470,6 +472,7 @@ run_review() {
     podman_args+=(--volume "${home}:/home/bluefin:rw,z")
     podman_args+=(--volume "${workspace}:/workspace:rw,z")
     podman_args+=(--volume "${scratch}:/tmp:rw,z")
+    podman_args+=(--volume "${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw,z")
     podman_args+=(--env GH_TOKEN --env GITHUB_TOKEN)
     podman_args+=(--env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN)
     podman_args+=(--env COPILOT_INTEGRATION_ID)
@@ -516,7 +519,7 @@ run_review() {
     export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
   local -a apptainer_args=(run --containall --no-eval)
   apptainer_args+=("${APPTAINER_HOST_ARGS[@]}")
-  apptainer_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp")
+  apptainer_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw")
   if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
     apptainer_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
     [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
@@ -547,10 +550,12 @@ run_contribute() {
   fi
   [[ -r "$registration" ]] || fail "Hive registration is missing or unreadable: ${registration}"
 
-  local key root home name image is_override=0
+  local key root home claims_root name image is_override=0
   key="$(slugify "${BLUEFIN_INSTANCE:-contribute-$instance}")"
   root="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${key}"
   home="${root}/home"
+  claims_root="${BLUEFIN_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
+  mkdir -p "$claims_root"
   name="bluefin-contribute-${key}-$(date +%s)-$$"
   if [[ -n "${CONTRIBUTE_IMAGE:-}" ]]; then
     image="$CONTRIBUTE_IMAGE"
@@ -575,6 +580,8 @@ run_contribute() {
       --name "$name" \
       --userns keep-id:uid=65532,gid=65532 \
       --volume "${home}:/home/bluefin:rw,z" \
+      --volume "${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw,z" \
+      --env "LUNA_FACTORY_CLAIMS_ROOT=/home/bluefin/.local/state/review/mutation-claims" \
       --volume "${registration}:/home/bluefin/.config/hive/contributor.env:ro,z" \
       --env AGENT_BACKEND=omp \
       --env GH_TOKEN --env GITHUB_TOKEN \
@@ -596,6 +603,7 @@ run_contribute() {
   exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" \
     --home "${home}:/home/bluefin" \
     --pwd /home/bluefin/workspace \
+    --bind "${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw" \
     --bind "${registration}:/home/bluefin/.config/hive/contributor.env:ro" \
     "$apptainer_image"
 }

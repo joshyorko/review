@@ -13,7 +13,9 @@ import {
 	type Batch,
 	type SelectedItem,
 } from "../image/extension/luna-factory/core/batch.ts";
+import { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { BatchStore, ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
+import { captureWaveJobIds, reconcileBlockedRepositoryClaim, waveWorkerCoverageComplete, waveWorkersSettled } from "../image/extension/bluefin-review/extension.ts";
 import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
 import { BatchGitHub } from "../image/extension/luna-factory/omp/batch-github.ts";
 
@@ -111,8 +113,152 @@ test("a killed writer can be reacquired, claims overlap only by canonical resour
 		const artifact = join(root, "artifact.txt"); await writeFile(artifact, "proof-bytes"); batch.items[0]!.workspace = artifact; store.write(batch);
 		const destination = join(root, "exports"); assert.equal(store.export(batch.id, destination), destination); assert.equal(await readFile(join(destination, "files", "artifact.txt"), "utf8"), "proof-bytes");
 		const escaped = join(outside, "artifact.txt"); await writeFile(escaped, "outside"); batch.items[0]!.workspace = escaped; store.write(batch); assert.throws(() => store.export(batch.id, join(root, "export-again")), /escapes Factory state root/); store.release();
-		const claims = new ResourceClaims(root); claims.claim("repo:Org/A", "owner-1"); assert.match(claims.conflict("repo:org/a", "owner-2")!, /owner-1/); claims.release("repo:ORG/A", "owner-1"); assert.equal(claims.conflict("repo:org/a", "owner-2"), undefined);
+		const claims = new ResourceClaims(root); claims.claim("repo:Org/A", "owner-1"); assert.match(claims.conflict("repo:org/a", "owner-2")!, /owner-1/); claims.markSettled("repo:ORG/A", "owner-1"); claims.release("repo:ORG/A", "owner-1"); assert.equal(claims.conflict("repo:org/a", "owner-2"), undefined);
 	} finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
+
+test("mutation claims are host-wide across state roots and unknown effects remain fenced", async () => {
+	const stateA = await mkdtemp(join(tmpdir(), "factory-state-a-"));
+	const stateB = await mkdtemp(join(tmpdir(), "factory-state-b-"));
+	const claimsRoot = await mkdtemp(join(tmpdir(), "factory-claims-shared-"));
+	try {
+		const first = new ResourceClaims(stateA, claimsRoot);
+		const second = new ResourceClaims(stateB, claimsRoot);
+		first.claim("repo:Org/Review", "review:batch-a:0");
+		assert.match(second.conflict("repo:org/review", "review:batch-b:0")!, /review:batch-a:0/);
+		assert.throws(() => second.reconcile("repo:org/review", "review:batch-a:0"), /remains UNKNOWN/);
+		assert.ok(second.conflict("repo:org/review", "review:batch-b:0"));
+		second.markSettled("repo:org/review", "review:batch-a:0");
+		second.reconcile("repo:org/review", "review:batch-a:0");
+		assert.equal(second.conflict("repo:org/review", "review:batch-b:0"), undefined);
+	} finally {
+		await Promise.all([rm(stateA, { recursive: true, force: true }), rm(stateB, { recursive: true, force: true }), rm(claimsRoot, { recursive: true, force: true })]);
+	}
+});
+
+test("blocked repository wave needs authoritative proof before reconcile and retry", async () => {
+	const state = await mkdtemp(join(tmpdir(), "factory-reconcile-state-"));
+	const claimsRoot = await mkdtemp(join(tmpdir(), "factory-reconcile-claims-"));
+	try {
+		const claims = new ResourceClaims(state, claimsRoot);
+		const owner = "review:batch-reconcile:0";
+		const batch = {
+			id: "batch-reconcile",
+			currentWave: 0,
+			state: "blocked",
+			waves: [{ repo: "org/review", items: [{ repo: "org/review", id: 1 }] }],
+		} as never;
+		claims.claim("repo:org/review", owner);
+		claims.claim("item:org/review#1", owner);
+		let mutationInFlight = true;
+		const authoritative = async () => mutationInFlight ? "unknown" as const : "settled" as const;
+		assert.equal(await reconcileBlockedRepositoryClaim(claims, batch, owner, "repo:org/review", authoritative), "unknown");
+		assert.deepEqual(captureWaveJobIds({ running: [{ id: "new-wave" }], recent: [{ id: "expired-old" }, { id: "new-wave" }, { id: "unrelated" }] }, ["expired-old", "unrelated"]), ["new-wave"]);
+		assert.deepEqual(captureWaveJobIds({ running: [], recent: [{ id: "unrelated" }] }, ["new-wave"]), ["unrelated"]);
+		assert.equal(waveWorkersSettled({ running: [], recent: [{ id: "worker-a", status: "failed" }] }, ["worker-a"]), true);
+		assert.equal(waveWorkersSettled({ running: [{ id: "worker-a", status: "running" }], recent: [{ id: "worker-a", status: "failed" }] }, ["worker-a"]), false);
+		assert.equal(waveWorkersSettled({ running: [{ id: "worker-a", status: "running" }], recent: [{ id: "worker-a", status: "failed" }] }, ["worker-a"], { "worker-a": "failed" }), false);
+		assert.equal(waveWorkersSettled({ running: [], recent: [] }, ["worker-a"], { "worker-a": "failed" }), true);
+		assert.match(claims.conflict("repo:org/review", "review:other:0")!, /batch-reconcile/);
+		mutationInFlight = false;
+		assert.equal(await reconcileBlockedRepositoryClaim(claims, batch, owner, "repo:org/review", authoritative), "settled");
+		claims.reconcile("repo:org/review", owner);
+		assert.match(claims.conflict("item:org/review#1", "review:other:0")!, /batch-reconcile/);
+		assert.equal(await reconcileBlockedRepositoryClaim(claims, batch, owner, "item:org/review#1", async () => "settled"), "settled");
+		claims.reconcile("item:org/review#1", owner);
+		claims.claim("repo:org/review", "review:retry:0", false);
+	} finally {
+		await Promise.all([rm(state, { recursive: true, force: true }), rm(claimsRoot, { recursive: true, force: true })]);
+	}
+});
+
+test("crash/restart with missing runtime jobs retains the stale wave claim", async () => {
+	const state = await mkdtemp(join(tmpdir(), "factory-crash-state-"));
+	const claimsRoot = await mkdtemp(join(tmpdir(), "factory-crash-claims-"));
+	try {
+		const claims = new ResourceClaims(state, claimsRoot);
+		const owner = "review:batch-crashed:0";
+		const batch = {
+			id: "batch-crashed",
+			currentWave: 0,
+			state: "blocked",
+			waves: [{ repo: "org/review", items: [{ repo: "org/review", id: 1 }] }],
+		} as never;
+		claims.claim("repo:org/review", owner);
+		const runtimeAfterRestart = { running: [], recent: [] };
+		const proof = async () => waveWorkersSettled(runtimeAfterRestart, ["missing-worker"]) ? "settled" as const : "unknown" as const;
+		assert.equal(await reconcileBlockedRepositoryClaim(claims, batch, owner, "repo:org/review", proof), "unknown");
+		assert.match(claims.conflict("repo:org/review", "review:other:0")!, /batch-crashed/);
+	} finally {
+		await Promise.all([rm(state, { recursive: true, force: true }), rm(claimsRoot, { recursive: true, force: true })]);
+	}
+});
+test("crash/restart with persisted terminal evidence releases and retries exactly once", async () => {
+	const state = await mkdtemp(join(tmpdir(), "factory-recover-state-"));
+	const claimsRoot = await mkdtemp(join(tmpdir(), "factory-recover-claims-"));
+	try {
+		const claims = new ResourceClaims(state, claimsRoot);
+		const owner = "review:batch-recovered:0";
+		const batch = {
+			id: "batch-recovered",
+			currentWave: 0,
+			state: "blocked",
+			waves: [{ repo: "org/review", items: [{ repo: "org/review", id: 1 }] }],
+			waveToolCallIds: ["worker-recovered"],
+			waveJobIds: ["worker-recovered"],
+			waveTerminalJobStatuses: { "worker-recovered": "failed" },
+		} as never;
+		claims.claim("repo:org/review", owner);
+		const runtimeAfterRestart = { running: [], recent: [] };
+		const proof = async () => waveWorkersSettled(runtimeAfterRestart, batch.waveJobIds, batch.waveTerminalJobStatuses) ? "settled" as const : "unknown" as const;
+		assert.equal(await reconcileBlockedRepositoryClaim(claims, batch, owner, "repo:org/review", proof), "settled");
+		claims.reconcile("repo:org/review", owner);
+		claims.claim("repo:org/review", "review:retry-recovered:0", false);
+	} finally {
+		await Promise.all([rm(state, { recursive: true, force: true }), rm(claimsRoot, { recursive: true, force: true })]);
+	}
+});
+
+test("production Factory reconcile command retains UNKNOWN then permits exact retry", async () => {
+	const state = await mkdtemp(join(tmpdir(), "factory-command-state-"));
+	const claimsRoot = await mkdtemp(join(tmpdir(), "factory-command-claims-"));
+	try {
+		const claims = new ResourceClaims(state, claimsRoot);
+		const owner = "review:batch-command:0";
+		claims.claim("repo:org/review", owner);
+		const callable = () => {};
+		const leaf = new Proxy(callable, { get: () => leaf, apply: () => leaf });
+		const commands = new Map<string, { handler(raw: string, ctx: unknown): Promise<string> }>();
+		const host = {
+			zod: new Proxy({}, { get: () => leaf }),
+			registerTool() {},
+			registerCommand(name: string, definition: { handler(raw: string, ctx: unknown): Promise<string> }) { commands.set(name, definition); },
+			appendEntry() {},
+			setLabel() {},
+			on() {},
+		};
+		createLunaFactoryExtension(host as never, { env: { LUNA_FACTORY_STATE_ROOT: state, LUNA_FACTORY_CLAIMS_ROOT: claimsRoot } });
+		const command = commands.get("factory")!;
+		let runtime: { running: Array<{ id: string; status: string }>; recent: Array<{ id: string; status: string }> } = { running: [], recent: [] };
+		const notifications: string[] = [];
+		const context = {
+			ui: { notify(message: string) { notifications.push(message); } },
+			reconcileMutationClaim: async (claimOwner: string, resource: string) => {
+				if (!waveWorkersSettled(runtime, ["worker-command"])) return "unknown" as const;
+				claims.markSettled(resource, claimOwner);
+				return "settled" as const;
+			},
+		};
+		await command.handler(`claims reconcile ${owner} repo:org/review`, context);
+		assert.match(notifications.at(-1)!, /Retained .*UNKNOWN/);
+		assert.match(claims.conflict("repo:org/review", "review:other:0")!, /batch-command/);
+		runtime = { running: [], recent: [{ id: "worker-command", status: "failed" }] };
+		await command.handler(`claims reconcile ${owner} repo:org/review`, context);
+		assert.match(notifications.at(-1)!, /claim released/);
+		claims.claim("repo:org/review", "review:retry:0", false);
+	} finally {
+		await Promise.all([rm(state, { recursive: true, force: true }), rm(claimsRoot, { recursive: true, force: true })]);
+	}
 });
 
 test("dependency-deferred work remains queued when an unrelated prerequisite is blocked", async () => {

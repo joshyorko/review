@@ -779,8 +779,10 @@ contribute mode="" count="":
     INSTANCE_KEY="$(instance_key "${BLUEFIN_INSTANCE:-contribute-${INSTANCE_HINT:-${HIVE_REGISTRATION_NAME:-default}}}")"
     INSTANCE_ROOT="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${INSTANCE_KEY}"
     INSTANCE_HOME="${INSTANCE_ROOT}/home"
-    mkdir -p "$INSTANCE_HOME/workspace"
+    CLAIMS_ROOT="${BLUEFIN_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
+    mkdir -p "$CLAIMS_ROOT"
     CONTAINER_NAME="bluefin-contribute-${INSTANCE_KEY}-$(date +%s)-$$"
+    mkdir -p "$INSTANCE_HOME/workspace"
     CONTRIBUTOR_VOLUME="${BLUEFIN_CONTRIBUTE_VOLUME:-bluefin-contribute-${INSTANCE_KEY}-home}"
     IS_OVERRIDE=0
     if [[ -n "${CONTRIBUTE_IMAGE:-}" ]]; then
@@ -804,11 +806,13 @@ contribute mode="" count="":
     if kvm_runtime_ready && [[ "$CONTRIBUTOR_IMAGE" != *.sif && ! -f "$CONTRIBUTOR_IMAGE" ]]; then
       REMOTE_HIVE_TARGET=""; REMOTE_HIVE_DIR=""; REMOTE_HIVE_ENV=""; REMOTE_HIVE_SSH_ARGS=()
       trap 'cleanup_remote_hive_registration' EXIT
+      CLAIMS_MOUNT="${CLAIMS_ROOT}:/home/bluefin/.local/state/review/mutation-claims:rw"
+      if [[ "${CONTAINER_HOST:-}" == ssh://* || "${FAKE_REMOTE_DEFAULT:-}" == 1 ]]; then CLAIMS_MOUNT="bluefin-review-mutation-claims:/home/bluefin/.local/state/review/mutation-claims:rw"; fi
       stage_hive_registration_for_remote_podman
       ensure_image "$CONTRIBUTOR_IMAGE" "contributor" "image/contribute/Containerfile" "CONTRIBUTE_IMAGE"
       report_podman_image_identity "$CONTRIBUTOR_IMAGE" "contributor" "$IS_OVERRIDE" "$MIN_CONTRIBUTOR_VERSION"
       CONTAINER_ARGS=(podman run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME" --userns "keep-id:uid=65532,gid=65532")
-      CONTAINER_ARGS+=(--volume "${CONTRIBUTOR_VOLUME}:/home/bluefin:rw" --volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}")
+      CONTAINER_ARGS+=(--volume "${CONTRIBUTOR_VOLUME}:/home/bluefin:rw" --volume "${CLAIMS_MOUNT}" --volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}")
       for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION; do
         [[ -n "${!name:-}" ]] && CONTAINER_ARGS+=(--env "$name")
       done
@@ -826,6 +830,7 @@ contribute mode="" count="":
     echo "✓ starting isolated Apptainer contributor ${INSTANCE_KEY}. Choose model and effort in OMP."
     prepare_apptainer_environment
     exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /home/bluefin/workspace \
+      --bind "${CLAIMS_ROOT}:/home/bluefin/.local/state/review/mutation-claims:rw" \
       --bind "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro" "$APPTAINER_IMAGE"
 
 # Stop cluster contributor workers. Local appliances belong to their foreground
@@ -900,20 +905,25 @@ review-appliance *appliance_args:
     INSTANCE_HOME="${INSTANCE_ROOT}/home"
     INSTANCE_WORKSPACE="${INSTANCE_ROOT}/workspace"
     INSTANCE_TMP="${INSTANCE_ROOT}/tmp"
-    mkdir -p "$INSTANCE_HOME" "$INSTANCE_WORKSPACE" "$INSTANCE_TMP"
+    CLAIMS_ROOT="${BLUEFIN_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
+    mkdir -p "$CLAIMS_ROOT"
     migrate_legacy_state "${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review" "$INSTANCE_HOME" "bluefin-review.sif"
     report_launcher_identity
     CONTAINER_NAME="bluefin-review-${INSTANCE_KEY}-$(date +%s)-$$"
     KVM_FAILURE=""
     if kvm_runtime_ready && [[ "$IMAGE" != *.sif && ! -f "$IMAGE" ]]; then
       ensure_image "$IMAGE" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
+      CLAIMS_MOUNT="${CLAIMS_ROOT}:/home/bluefin/.local/state/review/mutation-claims:rw"
+      if [[ "${CONTAINER_HOST:-}" == ssh://* || "${FAKE_REMOTE_DEFAULT:-}" == 1 ]]; then CLAIMS_MOUNT="bluefin-review-mutation-claims:/home/bluefin/.local/state/review/mutation-claims:rw"; fi
       report_podman_image_identity "$IMAGE" "review appliance" "$IS_OVERRIDE" "$MIN_REVIEW_APPLIANCE_VERSION"
-      ARGS=(run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME")
-      ARGS+=(--userns "keep-id:uid=65532,gid=65532")
-      ARGS+=(
+      ARGS=(
+        run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME"
+        --userns "keep-id:uid=65532,gid=65532"
         --volume "bluefin-review-${INSTANCE_KEY}-home:/home/bluefin:rw"
         --volume "bluefin-review-${INSTANCE_KEY}-workspace:/workspace:rw"
         --volume "bluefin-review-${INSTANCE_KEY}-tmp:/tmp:rw"
+        --volume "${CLAIMS_MOUNT}"
+        --env "LUNA_FACTORY_CLAIMS_ROOT=/home/bluefin/.local/state/review/mutation-claims"
         --env GH_TOKEN --env GITHUB_TOKEN --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN
         --env COPILOT_INTEGRATION_ID
         --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN --env OPENAI_API_KEY --env GEMINI_API_KEY --env CONTEXT7_API_KEY
@@ -931,7 +941,7 @@ review-appliance *appliance_args:
     report_apptainer_image_identity "$IMAGE" "review appliance" "$IS_OVERRIDE" "$MIN_REVIEW_APPLIANCE_VERSION"
     prepare_apptainer_environment
     exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /workspace \
-      --bind "${INSTANCE_WORKSPACE}:/workspace,${INSTANCE_TMP}:/tmp" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
+      --bind "${INSTANCE_WORKSPACE}:/workspace,${INSTANCE_TMP}:/tmp,${CLAIMS_ROOT}:/home/bluefin/.local/state/review/mutation-claims:rw" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
 
 # Build the appliance from this checkout and hold it to its contract. The
 # version is derived, never typed: FSDK series from the pinned base, revision
