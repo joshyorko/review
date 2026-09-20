@@ -109,6 +109,7 @@ grep -qE '^ARG FSDK_BASE_IMAGE HIVE_COMMIT ' "$containerfile" ||
 # and the break would surface at task time inside a running contributor session.
 # The top-level Hive scripts stay individually named, matching upstream's own
 # per-file COPY lines, so the allowlist still says exactly what ships.
+# shellcheck disable=SC2016 # ${hive_commit} is matched literally in the Containerfile, not expanded here
 grep -qF 'codeload.github.com/hivecommons/hive/tar.gz/${hive_commit}' "$containerfile" ||
   fail "bin/lib/ must be staged from a commit-addressed archive, not file by file"
 grep -qF -- '--strip-components=3 --wildcards "*/bin/lib/*"' "$containerfile" ||
