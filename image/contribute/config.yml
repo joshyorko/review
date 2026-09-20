@@ -19,18 +19,20 @@ startup:
 # of the terminal it is running in.
 symbolPreset: nerd
 
-# A contributor session is unattended: Hive injects the prompt and nobody is
-# watching the pane. A second reader that can raise a blocker before the agent
-# opens a pull request is worth its cost in exactly that situation.
+# The pane is attended — the launcher runs in the foreground and this image
+# attaches the operator's terminal to Hive's tmux session — but the work is
+# Hive's to assign and the operator is watching a stream, not reviewing each
+# step. A second reader that inspects the workspace and can raise a blocker
+# gives that operator something to act on while there is still time to act.
 #
 # No model is named here, and that is the point: the advisor resolves through
 # `modelRoles.advisor` on the machine running the image, so the contributor's
 # own OMP configuration decides which model reviews their work — and what it
 # costs them. Naming one here would spend a stranger's quota by default.
-# Unresolvable simply reports `no_model` and the session runs unadvised.
+# Unresolved simply reports `no_model` and the session runs unadvised.
 advisor:
   enabled: true
-  # Bounded catch-up, capped at 30s: the primary waits only while the advisor
-  # is a full update behind. Without it the agent can finish and push before
-  # its reviewer has seen the middle of the work.
+  # Bounded catch-up, not a gate: the primary waits while the advisor is a
+  # full update behind, and continues anyway once the 30s cap expires. It
+  # buys the reviewer a chance to keep up; it cannot promise it arrives first.
   syncBacklog: 1
