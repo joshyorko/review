@@ -1,4 +1,4 @@
-import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -33,21 +33,62 @@ export class BatchStore {
 	acquire(): void {
 		if (this.held) return;
 		const recovery = join(this.root, ".owner-recovery");
-		mkdirSync(recovery, { mode: 0o700 });
-		try {
-			const file = join(this.root, "owner.json");
-			if (existsSync(file)) {
-				const previous = JSON.parse(readFileSync(file, "utf8")) as Owner;
-				if (previous.host !== hostname()) throw new Error("Factory supports one same-host local state root, not shared/network storage");
-				if (previous.start === "unavailable" || processStart(previous.pid) === previous.start) throw new Error(`Factory state is owned by process ${previous.pid}; attach with status, do not start a second writer`);
-				rmSync(file);
-			}
-			const fd = openSync(file, "wx", 0o600);
+		const file = join(this.root, "owner.json");
+		const candidate = join(this.root, `.owner-recovery.${this.owner.token}`);
+		const marker = join(candidate, this.owner.token);
+		const live = (previous: Owner): void => {
+			if (previous.host !== hostname()) throw new Error("Factory supports one same-host local state root, not shared/network storage");
+			if (previous.start === "unavailable" || processStart(previous.pid) === previous.start) throw new Error(`Factory state is owned by process ${previous.pid}; attach with status, do not start a second writer`);
+		};
+		const publishOwner = (): void => {
+			const temporary = join(this.root, `.owner.${this.owner.token}.tmp`);
+			const fd = openSync(temporary, "wx", 0o600);
 			try { writeFileSync(fd, JSON.stringify(this.owner)); fsyncSync(fd); }
 			finally { closeSync(fd); }
+			try { renameSync(temporary, file); }
+			catch (error) { try { rmSync(temporary); } catch { /* preserve the original failure */ } throw error; }
 			syncDirectory(this.root);
+		};
+		let heldRecovery = false;
+		while (!heldRecovery) {
+			mkdirSync(candidate, { mode: 0o700 });
+			const fd = openSync(marker, "wx", 0o600);
+			try { writeFileSync(fd, JSON.stringify(this.owner)); fsyncSync(fd); }
+			finally { closeSync(fd); }
+			syncDirectory(candidate);
+			try {
+				renameSync(candidate, recovery);
+				heldRecovery = true;
+			} catch (error: unknown) {
+				try { rmSync(candidate, { recursive: true, force: true }); } catch { /* another contender owns the recovery path */ }
+				const code = (error as NodeJS.ErrnoException).code;
+				if (!["EEXIST", "ENOTEMPTY", "EISDIR"].includes(code ?? "")) throw error;
+				let entries: string[];
+				try { entries = readdirSync(recovery); } catch (readError: unknown) { if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue; throw readError; }
+				if (entries.length === 0) {
+					if (existsSync(file)) live(JSON.parse(readFileSync(file, "utf8")) as Owner);
+					try { rmdirSync(recovery); } catch (removeError: unknown) { if (!["ENOENT", "ENOTEMPTY"].includes((removeError as NodeJS.ErrnoException).code ?? "")) throw removeError; }
+					continue;
+				}
+				if (entries.length !== 1) throw new Error("Factory recovery mutex has unexpected metadata");
+				const staleToken = entries[0]!;
+				const stalePath = join(recovery, staleToken);
+				const previous = JSON.parse(readFileSync(stalePath, "utf8")) as Owner;
+				if (previous.token !== staleToken) throw new Error("Factory recovery metadata token mismatch");
+				live(previous);
+				if (existsSync(file)) live(JSON.parse(readFileSync(file, "utf8")) as Owner);
+				try { unlinkSync(stalePath); } catch (removeError: unknown) { if ((removeError as NodeJS.ErrnoException).code === "ENOENT") continue; throw removeError; }
+				try { rmdirSync(recovery); } catch (removeError: unknown) { if (["ENOENT", "ENOTEMPTY"].includes((removeError as NodeJS.ErrnoException).code ?? "")) continue; throw removeError; }
+			}
+		}
+		try {
+			if (existsSync(file)) live(JSON.parse(readFileSync(file, "utf8")) as Owner);
+			publishOwner();
 			this.held = true;
-		} finally { rmSync(recovery, { recursive: true }); }
+		} finally {
+			try { unlinkSync(join(recovery, this.owner.token)); } catch { /* crash recovery may have already claimed this entry */ }
+			try { rmdirSync(recovery); } catch { /* a delayed reclaimer or next owner owns the directory */ }
+		}
 	}
 	release(): void {
 		if (!this.held) return;
