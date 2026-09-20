@@ -237,6 +237,17 @@ class InputValidationContract(unittest.TestCase):
             **{"--hive-commit": "G" * 40},
         )
 
+    def test_invalid_arch_rejected(self):
+        for bad in ("x86_64/extra", "x86 64", ""):
+            self.assert_rejected("arch must be a bare identifier", **{"--arch": bad})
+
+    def test_namespace_differs_per_architecture(self):
+        # Two architectures ship different binary checksums; SPDX requires each
+        # document to carry its own namespace.
+        first = generate(self, **{"--arch": "x86_64"})
+        second = generate(self, **{"--arch": "aarch64"})
+        self.assertNotEqual(first["documentNamespace"], second["documentNamespace"])
+
     def test_missing_required_flag_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = pathlib.Path(tmp) / "sbom.spdx.json"

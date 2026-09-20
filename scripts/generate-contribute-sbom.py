@@ -52,6 +52,11 @@ def main() -> int:
     hive = args.hive_commit
     if not re.fullmatch(r"[0-9a-f]{40}", hive):
         raise SystemExit("hive commit must be a full lowercase SHA")
+    # The architecture lands in the document namespace, which is a URI: a value
+    # carrying a slash or a space would silently produce a malformed,
+    # non-canonical namespace and defeat the uniqueness it is there to provide.
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.arch):
+        raise SystemExit("arch must be a bare identifier")
     document = {
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",

@@ -297,14 +297,14 @@ EOF
 
   cat >"$fake_home/.config/hive/contributor.env" <<'EOF'
 HIVE_HUB=wss://hub.example.com/contribute
-HIVE_REGISTRATION_TOKEN=secret-registration-token-999
+HIVE_REGISTRATION_TOKEN=not-a-real-registration-token
 CONTRIBUTOR_ID=c-test-krun
 EOF
   chmod 600 "$fake_home/.config/hive/contributor.env"
 
-  export GH_TOKEN="secret-gh-token-abcxyz"
-  export ANTHROPIC_API_KEY="secret-anthropic-key-777"
-  export OPENROUTER_API_KEY="secret-openrouter-key-555"
+  export GH_TOKEN="not-a-real-gh-token"
+  export ANTHROPIC_API_KEY="not-a-real-anthropic-key"
+  export OPENROUTER_API_KEY="not-a-real-openrouter-key"
   # Set but EMPTY: the relay's documented opt-out of session labeling, which
   # must be forwarded as an empty value rather than dropped.
   export HIVE_SESSION=""
@@ -339,10 +339,10 @@ EOF
   assert_contains "$run_cmd" "ghcr.io/projectbluefin/contribute:stable" "image name"
 
   # Crucial security assertion: NO credential value anywhere in recorded argv!
-  assert_not_contains "$run_cmd" "secret-registration-token-999" "registration token value in argv"
-  assert_not_contains "$run_cmd" "secret-gh-token-abcxyz" "GH token value in argv"
-  assert_not_contains "$run_cmd" "secret-anthropic-key-777" "Anthropic key value in argv"
-  assert_not_contains "$run_cmd" "secret-openrouter-key-555" "OpenRouter key value in argv"
+  assert_not_contains "$run_cmd" "not-a-real-registration-token" "registration token value in argv"
+  assert_not_contains "$run_cmd" "not-a-real-gh-token" "GH token value in argv"
+  assert_not_contains "$run_cmd" "not-a-real-anthropic-key" "Anthropic key value in argv"
+  assert_not_contains "$run_cmd" "not-a-real-openrouter-key" "OpenRouter key value in argv"
 
   # Hive owns every exchange with the hub. The launcher mounts the credential
   # and starts the container; it does not validate, reissue, or otherwise call
@@ -388,13 +388,13 @@ EOF
 
   cat >"$fake_home/.config/hive/contributor.env" <<'EOF'
 HIVE_HUB=wss://hub.example.com/contribute
-HIVE_REGISTRATION_TOKEN=apptainer-secret-reg-token
+HIVE_REGISTRATION_TOKEN=not-a-real-apptainer-reg-token
 CONTRIBUTOR_ID=c-apptainer-id
 EOF
   chmod 600 "$fake_home/.config/hive/contributor.env"
 
-  export GH_TOKEN="apptainer-secret-gh-token"
-  export OPENAI_API_KEY="apptainer-secret-openai-token"
+  export GH_TOKEN="not-a-real-apptainer-gh-token"
+  export OPENAI_API_KEY="not-a-real-apptainer-openai-token"
 
   local output
   output="$("$launcher" run 2>&1)"
@@ -416,13 +416,13 @@ EOF
   assert_contains "$run_cmd" "docker://ghcr.io/projectbluefin/contribute:stable" "docker URI scheme"
 
   # Credentials must NOT appear in argv!
-  assert_not_contains "$run_cmd" "apptainer-secret-gh-token" "GH token in apptainer argv"
-  assert_not_contains "$run_cmd" "apptainer-secret-openai-token" "OpenAI token in apptainer argv"
-  assert_not_contains "$run_cmd" "apptainer-secret-reg-token" "registration token in apptainer argv"
+  assert_not_contains "$run_cmd" "not-a-real-apptainer-gh-token" "GH token in apptainer argv"
+  assert_not_contains "$run_cmd" "not-a-real-apptainer-openai-token" "OpenAI token in apptainer argv"
+  assert_not_contains "$run_cmd" "not-a-real-apptainer-reg-token" "registration token in apptainer argv"
 
   # Credentials MUST travel as APPTAINERENV_* environment variables
-  assert_contains "$apptainer_calls" "APPTAINERENV_GH_TOKEN=apptainer-secret-gh-token" "APPTAINERENV_GH_TOKEN"
-  assert_contains "$apptainer_calls" "APPTAINERENV_OPENAI_API_KEY=apptainer-secret-openai-token" "APPTAINERENV_OPENAI_API_KEY"
+  assert_contains "$apptainer_calls" "APPTAINERENV_GH_TOKEN=not-a-real-apptainer-gh-token" "APPTAINERENV_GH_TOKEN"
+  assert_contains "$apptainer_calls" "APPTAINERENV_OPENAI_API_KEY=not-a-real-apptainer-openai-token" "APPTAINERENV_OPENAI_API_KEY"
   assert_contains "$apptainer_calls" "APPTAINERENV_AGENT_BACKEND=omp" "APPTAINERENV_AGENT_BACKEND"
 }
 

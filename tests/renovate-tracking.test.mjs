@@ -126,9 +126,10 @@ test("post-upgrade pin synchronizers are handed a GitHub token", async () => {
 	// set. Every synchronizer reads a GitHub release, so without an explicit
 	// hand-off they call api.github.com anonymously — 60 requests an hour from
 	// the runner's shared address — and a rate-limited lookup leaves the
-	// version bumped beside the previous release's digests. That failure is
-	// silent: the pull request looks correct and the image ships the wrong
-	// binaries.
+	// version bumped beside the previous release's digests. The build then
+	// fails at `sha256sum -c` — it never ships the wrong binary — but delivery
+	// stops with a pull request that looks correct, which is the shape of
+	// failure that went unnoticed for a week.
 	const custom = /RENOVATE_CUSTOM_ENV_VARIABLES:\s*'(?<json>\{[^\n]*\})'/.exec(workflow);
 	assert.ok(custom, "the Renovate workflow passes no customEnvVariables to post-upgrade commands");
 	const names = Object.keys(JSON.parse(custom.groups.json.replaceAll(/\$\{\{[^}]*\}\}/g, "token")));

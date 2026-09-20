@@ -52,7 +52,14 @@ jobs:
           configurationFile: renovate.json
           token: ${{ steps.app-token.outputs.token }}
         env:
-          LOG_LEVEL: ${{ inputs.dry_run == true && 'debug' || 'info' }}
+          # Debug permanently, not as a dry-run nicety. Renovate logs
+          # post-upgrade command compilation, execution, and which of the
+          # resulting file changes survived `fileFilters` only at debug; at
+          # info a synchronizer that failed is indistinguishable from one that
+          # had nothing to do. That is how a stale digest sync read as a
+          # successful no-op run after run. One scheduled run a day makes the
+          # verbosity cheap. From #639 (@Danathar).
+          LOG_LEVEL: debug
           RENOVATE_DRY_RUN: ${{ inputs.dry_run == true && 'full' || '' }}
           RENOVATE_REPOSITORIES: ${{ github.repository }}
           RENOVATE_ALLOWED_COMMANDS: '["^node scripts/update-omp-pins\\.mjs$", "^node scripts/update-gh-pins\\.mjs$", "^node scripts/update-node-pins\\.mjs$", "^node scripts/update-tmux-pins\\.mjs$", "^node scripts/update-requirements-ci-hashes\\.mjs$"]'
@@ -86,22 +93,31 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/contents/image/contribute/Containerfile?ref=main" \
               --jq .content | base64 -d | sed -nE "s/^ARG ${1}=(.*)\$/\1/p"
           }
+          # The pin on a specific ref, used to ask what an in-flight branch
+          # actually carries.
+          pin_on() {
+            gh api "repos/${GITHUB_REPOSITORY}/contents/image/contribute/Containerfile?ref=$1" \
+              --jq .content 2>/dev/null | base64 -d | sed -nE "s/^ARG ${2}=(.*)\$/\1/p"
+          }
           stalled=0
           check() {
-            local name="$1" arg="$2" latest="$3" branch="$4" current open
+            local name="$1" arg="$2" latest="$3" branch="$4" current open carries
             current="$(pinned "$arg")"
             [ "$current" = "$latest" ] && { echo "✓ ${name} ${current} is current"; return 0; }
-            # An OPEN PULL REQUEST, not merely a branch. The failure this guard
-            # exists for looked exactly like progress: Renovate pushed every new
-            # OMP release onto renovate/omp-runtime and never opened a pull
-            # request for any of them, so a branch check would have passed for
-            # the whole week the shipped image sat five releases behind.
+            # An OPEN PULL REQUEST CARRYING THE LATEST RELEASE. Each weaker
+            # test has already failed here: a branch check passes while
+            # Renovate pushes release after release and opens no pull request,
+            # and an open-pull-request check passes while a blocked one sits on
+            # an older version and masks everything published since.
             open="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "$branch" --state open --json number --jq 'length')"
-            if [ "$open" -gt 0 ]; then
+            carries="$(pin_on "$branch" "$arg")"
+            if [ "$open" -gt 0 ] && [ "$carries" = "$latest" ]; then
               echo "… ${name} ${current} -> ${latest} in flight, pull request open on ${branch}"
               return 0
             fi
-            if gh api "repos/${GITHUB_REPOSITORY}/branches/${branch}" --silent >/dev/null 2>&1; then
+            if [ "$open" -gt 0 ]; then
+              echo "✗ ${name} ${current} is behind ${latest}: the open pull request on ${branch} carries ${carries:-nothing}" >&2
+            elif gh api "repos/${GITHUB_REPOSITORY}/branches/${branch}" --silent >/dev/null 2>&1; then
               echo "✗ ${name} ${current} is behind ${latest}: ${branch} exists but has no open pull request" >&2
             else
               echo "✗ ${name} ${current} is behind ${latest} and no ${branch} carries the update" >&2

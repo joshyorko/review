@@ -50,7 +50,7 @@ tracking branch (`v4`), resolves the branch commit SHA at build time, and stamps
 - Image label `io.hivecommons.contribute.hive.ref`
 - The build SBOM at `/usr/share/hive/contribute/sbom.spdx.json`
 
-The launcher's `setup` subcommand clones that same tracking branch, preventing protocol drift.
+The launcher's `setup` subcommand clones that same tracking branch, so registration and runtime follow one release line. They are not the same commit — `setup` reads `v4` live, the image carries the SHA resolved at its last build — so the gap is bounded by the daily rebuild, not zero.
 Third-party release binaries (OMP, Node.js, GitHub CLI, tmux) remain digest-pinned and
 updated automatically by Renovate.
 

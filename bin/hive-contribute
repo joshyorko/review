@@ -47,7 +47,9 @@ DEFAULT_MEMORY="4g"
 DEFAULT_CPUS="2"
 # Hive's own tracking branch. Nothing here pins a commit: the appliance runs
 # upstream's current contributor runtime, and registration is performed by that
-# same branch's contribute-setup, so the two can never drift apart.
+# same branch's contribute-setup, so both follow one line. They are not the
+# same commit: setup clones v4 live, while the image carries the SHA resolved
+# when it was last built, so they can differ by up to a daily rebuild.
 HIVE_REF="v4"
 
 config_value() {
@@ -207,7 +209,8 @@ registration_value() {
 hive_checkout() {
   # Registration is upstream's business: run ITS setup, from ITS current
   # branch, rather than reimplementing a credential protocol against a frozen
-  # copy. The image tracks the same branch, so setup and runtime always agree.
+  # copy. The image tracks the same branch, so setup and runtime follow one
+  # release line — bounded by the daily rebuild, not identical by construction.
   local dir="${XDG_STATE_HOME:-${HOME}/.local/state}/hive-contribute/hive-src"
   if [[ ! -d "$dir/.git" ]]; then
     mkdir -p "$dir"
