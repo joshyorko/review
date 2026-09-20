@@ -63,6 +63,12 @@ COPY --chmod=0755 scripts/generate-contribute-sbom.py /usr/local/libexec/contrib
 # for `just contribute-hive`, upstream's own contributor image does not carry
 # it, and neither contributor-agent.sh nor contributor-relay.js requires it.
 RUN set -eu; \
+    hive_commit="${HIVE_COMMIT}"; \
+    case "$hive_commit" in \
+      "") echo "HIVE_COMMIT is required: pass --build-arg HIVE_COMMIT=<40-hex sha>. 'just contribute-build' and the workflows resolve Hive's tracking branch and pass it." >&2; exit 1 ;; \
+      *[!0-9a-f]*) echo "HIVE_COMMIT is not a commit SHA: ${hive_commit}" >&2; exit 1 ;; \
+    esac; \
+    case "${#hive_commit}" in 40) : ;; *) echo "HIVE_COMMIT must be a full 40-character SHA: ${hive_commit}" >&2; exit 1 ;; esac; \
     arch="$(uname -m)"; \
     case "$arch" in \
       x86_64) omp_asset=omp-linux-x64; omp_sha="$OMP_X86_64_SHA256"; node_arch=x64; node_sha="$NODE_X86_64_SHA256"; gh_arch=amd64; gh_sha="$GH_X86_64_SHA256"; tmux_arch=x86_64; tmux_sha="$TMUX_X86_64_SHA256" ;; \
@@ -84,12 +90,6 @@ RUN set -eu; \
     cp -a /src/node_modules /out/usr/lib/hive/node_modules; \
     /usr/local/libexec/stage-runtime /out "$node_root/bin/node" "$workdir/gh" "$workdir/tmux" /usr/bin/cmp; \
     mv /out/usr/bin/gh /out/opt/hive/bin/gh-real; \
-    hive_commit="${HIVE_COMMIT}"; \
-    case "$hive_commit" in \
-      "") echo "HIVE_COMMIT is required: pass --build-arg HIVE_COMMIT=<40-hex sha>. 'just contribute-build' and the workflows resolve Hive's tracking branch and pass it." >&2; exit 1 ;; \
-      *[!0-9a-f]*) echo "HIVE_COMMIT is not a commit SHA: ${hive_commit}" >&2; exit 1 ;; \
-    esac; \
-    case "${#hive_commit}" in 40) : ;; *) echo "HIVE_COMMIT must be a full 40-character SHA: ${hive_commit}" >&2; exit 1 ;; esac; \
     for hive_file in bin/contributor-agent.sh bin/contributor-relay.js bin/pi-backend.js bin/lib/pane-classifier.js; do \
       curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${hive_commit}/${hive_file}" -o "/out/usr/local/bin/${hive_file#bin/}"; \
     done; \
