@@ -637,6 +637,65 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# Scenario 6b: a degraded fallback must name its own cause (#567). Without krun
+#              the Apptainer path is all that is left, and its failure modes
+#              need different fixes: grant the host a device, or fix that
+#              device's permissions. A single generic "Apptainer unavailable"
+#              sends the operator down the wrong one.
+#
+#              The squashfuse-userland branch is deliberately not covered: the
+#              probe is `command -v`, so hiding it means controlling the whole
+#              PATH the launcher inherits. Any host with squashfuse installed
+#              would silently pass a test that pretended to remove it, which is
+#              worse than an honest gap.
+# -----------------------------------------------------------------------------
+test_doctor_distinguishes_fallback_failures() {
+  local output
+
+  _degraded_doctor() {
+    clean_env
+    export FAKE_PODMAN_NO_KRUN=1
+    mkdir -p "$fake_home/.config/hive"
+    cat >"$fake_home/.config/hive-contribute.yml" <<EOF
+hub: wss://hub.example.com/contribute
+registration: $fake_home/.config/hive/contributor.env
+image: ghcr.io/projectbluefin/contribute:stable
+backend: omp
+EOF
+    chmod 600 "$fake_home/.config/hive-contribute.yml"
+    touch "$fake_home/.config/hive/contributor.env"
+    export FAKE_GH_TOKEN_VALUE="fake-doctor-gh-token"
+  }
+
+  # Missing device: a host capability, not a package.
+  _degraded_doctor
+  export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$scratch/absent-fuse"
+  output="$("$launcher" doctor 2>&1)" || true
+  assert_contains "$output" "FUSE device $scratch/absent-fuse is missing" "absent FUSE names the device"
+  assert_not_contains "$output" "squashfuse userland is unavailable" "device failure must not blame the userland"
+
+  # Present but unusable: a permission problem, distinct from absence. Root
+  # bypasses the permission bits entirely, so this case is only meaningful
+  # unprivileged; skipping is honest where asserting would be theatre.
+  if [[ "$EUID" -eq 0 ]]; then
+    echo "   (skipping the unreadable-FUSE case: running as root)"
+    unset -f _degraded_doctor
+    return 0
+  fi
+  _degraded_doctor
+  local locked="$scratch/locked-fuse"
+  : >"$locked"
+  chmod 000 "$locked"
+  export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$locked"
+  output="$("$launcher" doctor 2>&1)" || true
+  chmod 644 "$locked"
+  assert_contains "$output" "FUSE device $locked is not readable and writable" "locked FUSE names permissions"
+  assert_not_contains "$output" "is missing" "permission failure must not report absence"
+
+  unset -f _degraded_doctor
+}
+
+# -----------------------------------------------------------------------------
 # Scenario 7: `setup` survives upstream's HOST-CLI preflight.
 #
 # Hive's contribute-setup depends on contribute-check-backend, which probes the
@@ -766,6 +825,9 @@ test_run_apptainer_converts_local_image
 
 echo "6. Testing doctor preflight..."
 test_doctor_failures_and_success
+
+echo "6b. Testing that a degraded Apptainer fallback names its cause..."
+test_doctor_distinguishes_fallback_failures
 
 echo "7. Testing setup against upstream's host-CLI preflight..."
 test_setup_satisfies_host_cli_probe
