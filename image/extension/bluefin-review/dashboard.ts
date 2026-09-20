@@ -191,6 +191,7 @@ export class ReviewDashboard {
 	private readonly onModeChange?: (mode: QueueMode) => void;
 	private readonly onAction?: (action: DashboardAction) => void;
 	private readonly onPauseChange?: (paused: boolean) => void;
+	private readonly factoryAvailable: () => boolean;
 
 	constructor(
 		tui: TuiLike,
@@ -203,6 +204,7 @@ export class ReviewDashboard {
 		onModeChange?: (mode: QueueMode) => void,
 		onAction?: (action: DashboardAction) => void,
 		onPauseChange?: (paused: boolean) => void,
+		factoryAvailable: () => boolean = () => true,
 	) {
 		this.tui = tui;
 		this.painter = painter;
@@ -214,6 +216,7 @@ export class ReviewDashboard {
 		this.onModeChange = onModeChange;
 		this.onAction = onAction;
 		this.onPauseChange = onPauseChange;
+		this.factoryAvailable = factoryAvailable;
 		this.enableMouse();
 		const handle = setInterval(() => {
 			try {
@@ -556,7 +559,10 @@ export class ReviewDashboard {
 
 	private handleKeymapClick(col: number, _width: number): void {
 		let currentOffset = 3;
-		for (const key of DASHBOARD_KEYS) {
+		// Hit-test the keymap that is actually on screen: a filtered chord that
+		// is still counted here would shift every click after it onto its
+		// neighbour.
+		for (const key of this.dashboardKeys()) {
 			const chordWidth = visibleWidth(key.chord);
 			const labelWidth = visibleWidth(key.label);
 			const itemWidth = chordWidth + 1 + labelWidth;
@@ -1287,6 +1293,9 @@ export class ReviewDashboard {
 	private dashboardKeys(): RailKey[] {
 		return DASHBOARD_KEYS
 			.filter((key) => !this.mode.isReviewMode() || (key.chord !== "H" && key.chord !== "L"))
+			// The Factory chord is advertised only while a Factory controller is
+			// registered: a key that cannot reach Factory is not a handoff.
+			.filter((key) => key.chord !== "F" || this.factoryAvailable())
 			.map((key) => {
 				if (this.mode.queueMode !== "issues") return key;
 				if (key.chord === "s") return { ...key, label: "implement" };
@@ -1299,6 +1308,7 @@ export class ReviewDashboard {
 	private helpLines(): string[] {
 		const lines = HELP
 			.filter((line) => !this.mode.isReviewMode() || (!line.startsWith("  H / L") && !/hive/i.test(line)))
+			.filter((line) => !line.startsWith("  F ") || this.factoryAvailable())
 			.map((line) => line);
 		lines[0] = this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH";
 		if (this.mode.queueMode === "issues") {

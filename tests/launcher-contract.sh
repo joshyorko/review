@@ -248,6 +248,15 @@ if [[ "\${EXPECT_APPTAINER_AWS_FORWARDING:-}" == 1 ]]; then
   [[ "\${APPTAINERENV_AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
   [[ "\$*" != *test-bedrock-bearer* && "\$*" != *us-east-1* ]] || exit 19
 fi
+if [[ "\${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
+  [[ "\${APPTAINERENV_LUNA_FACTORY_ENABLED:-}" == 1 ]] || exit 19
+  [[ "\${APPTAINERENV_LUNA_FACTORY_CAPACITY:-}" == 7 ]] || exit 19
+  # Names, never values: the appliance boundary carries the setting, not argv.
+  [[ "\$*" != *LUNA_FACTORY* && "\$*" != *" 7 "* ]] || exit 19
+fi
+if [[ "\${EXPECT_NO_FACTORY_ENV:-}" == 1 ]]; then
+  [[ ! -v APPTAINERENV_LUNA_FACTORY_ENABLED && ! -v APPTAINERENV_LUNA_FACTORY_CAPACITY ]] || exit 19
+fi
 exit 0
 EOF
 cat >"$scratch/bin/squashfuse_ll" <<'EOF'
@@ -646,6 +655,86 @@ assert_omp_review "projectbluefin/review#463" "--repo projectbluefin/review --pr
 assert_omp_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
 assert_omp_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
 assert_omp_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
+
+# Review and Luna Factory are two extensions, and the source launcher must pass
+# both. Dropping the Factory one is exactly how a Review session that offers the
+# Shift+F handoff reaches "Factory is not loaded" with no other symptom.
+factory_omp_call="$(cat "$mock_omp_log")"
+assert_eq "$(grep -o -- '--extension' <<<"$factory_omp_call" | wc -l | xargs)" "2" "bin/omp-review extension count"
+[[ "$factory_omp_call" == *"--extension ${repo_root}/image/extension/bluefin-review"* ]] ||
+  fail "bin/omp-review did not pass the Review extension: $factory_omp_call"
+[[ "$factory_omp_call" == *"--extension ${repo_root}/image/extension/luna-factory"* ]] ||
+  fail "bin/omp-review dropped the packaged Luna Factory extension: $factory_omp_call"
+
+# A source tree without the Factory package keeps the single-extension command
+# line, and says so once on stderr instead of failing later inside the session.
+source_only="$scratch/source-only"
+mkdir -p "$source_only/bin" "$source_only/image/extension/bluefin-review" "$source_only/scripts"
+cp "${repo_root}/bin/omp-review" "$source_only/bin/omp-review"
+cp "${repo_root}/scripts/parse-review-args.sh" "$source_only/scripts/parse-review-args.sh"
+chmod +x "$source_only/bin/omp-review"
+rm -f "$mock_omp_log"
+absent_stderr="$(GH_TOKEN=mock-token GITHUB_TOKEN=mock-token "${source_only}/bin/omp-review" --repo owner/repo 2>&1 >/dev/null)" ||
+  fail "bin/omp-review failed without the Factory package"
+absent_call="$(cat "$mock_omp_log")"
+assert_eq "$(grep -o -- '--extension' <<<"$absent_call" | wc -l | xargs)" "1" "bin/omp-review extension count without Factory"
+[[ "$absent_call" == *"--extension ${source_only}/image/extension/bluefin-review"* ]] ||
+  fail "bin/omp-review did not pass the Review extension without Factory: $absent_call"
+[[ "$absent_stderr" == *"Luna Factory extension is not packaged"* ]] ||
+  fail "bin/omp-review did not report the missing Factory package: $absent_stderr"
+rm -rf "$source_only"
+
+# --- 3b. Factory runtime config crosses the appliance boundary ---------------
+
+# Factory has exactly two public runtime knobs: the execution opt-in and the
+# shared capacity bound. Both are user configuration, so both must reach every
+# personal appliance path by name, and neither value may appear in argv.
+assert_factory_podman_env_names() {
+  local call="$1" context="${2:-launcher}"
+  for name in LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY; do
+    [[ "$call" == *"--env $name"* ]] || fail "$context did not forward $name by name: $call"
+  done
+  [[ "$call" != *"--env LUNA_FACTORY_ENABLED="* && "$call" != *"--env LUNA_FACTORY_CAPACITY="* ]] ||
+    fail "$context forwarded a Factory value instead of its name: $call"
+}
+
+: >"$mock_podman_log"
+LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "bin/bluefin did not launch with Factory configuration set"
+factory_podman_call="$(grep '^run ' "$mock_podman_log")"
+assert_factory_podman_env_names "$factory_podman_call" "Podman review"
+[[ "$factory_podman_call" != *"LUNA_FACTORY_ENABLED=1"* && "$factory_podman_call" != *"LUNA_FACTORY_CAPACITY=7"* ]] ||
+  fail "Podman review exposed Factory configuration values in argv: $factory_podman_call"
+
+# Absence stays absence: an unset opt-in must not become an appliance default.
+# `env -u` because this contract must not depend on the developer's own shell.
+: >"$mock_podman_log"
+env -u LUNA_FACTORY_ENABLED -u LUNA_FACTORY_CAPACITY \
+  "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 || fail "bin/bluefin did not launch without Factory configuration"
+default_podman_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$default_podman_call" != *"LUNA_FACTORY"* ]] ||
+  fail "Podman review invented Factory configuration the host never set: $default_podman_call"
+
+# The generic Apptainer fallback and the packaged SIF share one environment
+# seam, so a non-default capacity has to survive both.
+: >"$mock_apptainer_log"
+LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1 \
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "Apptainer fallback did not forward Factory configuration"
+
+factory_sif="$scratch/factory.sif"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$factory_sif"
+chmod +x "$factory_sif"
+: >"$mock_apptainer_log"
+LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1 BLUEFIN_REVIEW_SIF="$factory_sif" \
+  "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "packaged Review SIF did not forward Factory configuration"
+[[ "$(cat "$mock_apptainer_log")" == *"$factory_sif"* ]] || fail "packaged Review SIF was not the selected artifact"
+
+: >"$mock_apptainer_log"
+env -u LUNA_FACTORY_ENABLED -u LUNA_FACTORY_CAPACITY EXPECT_NO_FACTORY_ENV=1 \
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "Apptainer fallback did not launch without Factory configuration"
 
 # --- 4. Contributor aliases launch independent KVM appliances -----------------
 mkdir -p "$HOME/.config/hive"

@@ -27,7 +27,7 @@ import { renderStatusDetail, renderWhy, truncatePlain } from "./ui/status.ts";
 import { BatchService, type BatchOptions } from "./omp/batch-service.ts";
 import { BatchGitHub } from "./omp/batch-github.ts";
 import { factoryStateRoot } from "./omp/batch-store.ts";
-import { registerFactoryController, selectedFactoryItems } from "./omp/batch-bridge.ts";
+import { registerFactoryController, reportFactoryLoadFailure, selectedFactoryItems } from "./omp/batch-bridge.ts";
 import type { NativeSDK, NativeContext, SchemaBuilder } from "./omp/batch-native.ts";
 import type { FactoryAction, SelectedItem } from "./core/batch.ts";
 import { resolveToken } from "../bluefin-review/github.ts";
@@ -1044,5 +1044,12 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 
 /** Native OMP package entrypoint. The pure/core adapter remains directly testable. */
 export default function lunaFactoryExtension(pi: FactoryHost): void {
-	createLunaFactoryExtension(pi);
+	try {
+		createLunaFactoryExtension(pi);
+	} catch (error) {
+		// Review reaches this module for its handoff, so a package that loads but
+		// throws must leave a bounded reason behind instead of a bare "not loaded".
+		reportFactoryLoadFailure(error instanceof Error ? error.message : String(error));
+		throw error;
+	}
 }

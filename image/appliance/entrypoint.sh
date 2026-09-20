@@ -25,6 +25,10 @@ fi
 extension_args=(--extension /usr/share/bluefin/review/extension)
 if [ -d /usr/share/bluefin/review/luna-factory ]; then
   extension_args+=(--extension /usr/share/bluefin/review/luna-factory)
+else
+  # The image is the only place the packaged layout is observable: say which
+  # extension is missing instead of letting the handoff fail inside the session.
+  echo "bluefin-review-appliance: Luna Factory extension is not packaged at /usr/share/bluefin/review/luna-factory; the Factory handoff will be unavailable." >&2
 fi
 case "${1:-}" in
 update)

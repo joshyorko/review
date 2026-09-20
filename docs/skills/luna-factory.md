@@ -64,6 +64,16 @@ launch mechanics, and `contribution-culture.md` for scoping the change itself.
 - Loading the extension starts nothing. Execution requires
   `LUNA_FACTORY_ENABLED=1`, and Factory never infers an admission from a Hive
   rank or a visible queue row.
+- `LUNA_FACTORY_ENABLED` and `LUNA_FACTORY_CAPACITY` are the only Factory
+  runtime knobs that are user configuration; both cross the personal appliance
+  boundary by name, and neither value is ever rendered into argv. Loading
+  Factory with the opt-in absent leaves it registered and discoverable, with
+  execution disabled.
+- Review advertises its Factory handoff only while a Factory controller is
+  registered. When the handoff is unreachable, startup and the first
+  invocation report the bounded cause — package absent or not passed as an
+  `--extension` versus a packaged extension that failed to load — instead of
+  blaming the execution opt-in.
 
 ## Verification
 
