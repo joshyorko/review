@@ -2386,7 +2386,6 @@ test("generic workflow fix rejects push-only permission", async () => {
 	assert.equal(pi.messages.length, 0);
 	assert.ok(ctx.notifications.some((n) => /workflow\/Actions write permission could not be verified/.test(n.message)));
 });
-
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {
 	const pi = fakeHost();
 	pi.flagValues.set("pr", "7");
