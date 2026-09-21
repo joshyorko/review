@@ -58,7 +58,9 @@ the core requires Bluefin or Hive: GitHub access, operator permissions,
 execution requirements, and safety checks still apply. Safety is preserved as-is
 — current-head verification, CI checks, branch protection, token-scope
 protections, mutation guards, read-only reviewers, and explicit maintainer
-authorization. This boundary does not enable workflow mutation.
+authorization. Managed policy does not enable workflow mutation; an explicit
+self-hosted policy opt-in may enable it only under GitHub's workflow/Actions
+permission and the same mutation gates.
 
 The interactive recipes run the image runtime in the foreground of the
 terminal that launched them, and Ctrl-C stops them. Detached contributor

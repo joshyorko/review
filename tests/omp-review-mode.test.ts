@@ -17,7 +17,7 @@ import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/exten
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
 import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
+import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
@@ -31,6 +31,7 @@ import {
 	BATCH_ENTRY,
 	COMMENT_ENTRY,
 	BLUEFIN_POLICY,
+	GENERIC_WORKBENCH_POLICY,
 	actionPrompt,
 	createReviewExtension,
 	createCommentActionPlan,
@@ -131,6 +132,7 @@ function fakeFetch(calls, known = {}) {
 							author: { login: "jorge" },
 							repository: { nameWithOwner: "projectbluefin/review" },
 							labels: { nodes: [{ name: "launcher" }] },
+							files: { pageInfo: { hasNextPage: false }, nodes: [] },
 							commits: { nodes: [{ commit: {
 								statusCheckRollup: null,
 								checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "COMPLETED", conclusion: "FAILURE" }] },
@@ -149,6 +151,7 @@ function fakeFetch(calls, known = {}) {
 								author: { login: "ada" },
 								repository: { nameWithOwner: "projectbluefin/other" },
 								labels: { nodes: [] },
+								files: { pageInfo: { hasNextPage: false }, nodes: [] },
 								commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 							}
 							: null;
@@ -182,6 +185,7 @@ function fakeFetch(calls, known = {}) {
 									author: { login: "jorge" },
 									headRefOid: "4".repeat(40),
 									repository: { nameWithOwner: "projectbluefin/review" },
+									files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }, { path: "README.md" }, { path: "README.md" }] },
 									labels: { nodes: [{ name: "launcher" }] },
 									commits: { nodes: [{ commit: {
 										statusCheckRollup: null,
@@ -201,6 +205,7 @@ function fakeFetch(calls, known = {}) {
 									headRefOid: "7".repeat(40),
 									repository: { nameWithOwner: "projectbluefin/other" },
 									labels: { nodes: [] },
+									files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }, { path: "README.md" }] },
 									commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 								},
 							],
@@ -232,6 +237,7 @@ function hiveBackedFetch(items, calls = []) {
 		reviewDecision: "REVIEW_REQUIRED",
 		headRefOid: item.headSha ?? String(item.id).padStart(40, "0"),
 		changedFiles: item.changedFiles,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
 		autoMergeRequest: item.autoMergeEnabled ? { enabledAt: new Date(NOW).toISOString() } : null,
 		author: { login: "reviewer" },
 		repository: { nameWithOwner: item.repo },
@@ -257,6 +263,9 @@ function hiveBackedFetch(items, calls = []) {
 		}
 		if (target.endsWith("/api/v1/contributors")) {
 			return { ok: true, status: 200, statusText: "OK", json: async () => ({ contributors: [] }) };
+		}
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: (name) => name.toLowerCase() === "x-oauth-scopes" ? "repo, workflow" : null }, json: async () => ({}) };
 		}
 		if (target.includes("/graphql")) {
 			const body = JSON.parse(String(init?.body ?? "{}"));
@@ -650,7 +659,7 @@ test("toCiStatus prioritizes decisive rollup and falls back to check suites (#59
 	assert.equal(toCiStatus(undefined, { pageInfo: { hasNextPage: false }, nodes: [] }), undefined);
 });
 
-test("pull request queue keeps workflow changes and incomplete file lists visible but blocked", async () => {
+test("managed pull request queue keeps workflow changes and incomplete file lists visible but blocked", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
 		assert.match(body.query, /files\(first: 100\)/);
@@ -696,7 +705,7 @@ test("pull request queue keeps workflow changes and incomplete file lists visibl
 			}),
 		};
 	};
-	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
 	mode.setToken("t");
 	await mode.refreshQueue();
 
@@ -748,7 +757,7 @@ test("pull request queue keeps workflow changes and incomplete file lists visibl
 			},
 		}),
 	});
-	const unsupportedMode = new ReviewMode({ org: "projectbluefin", fetchImpl: unsupportedOnlyFetch, env: ISOLATED_ENV });
+	const unsupportedMode = new ReviewMode({ org: "projectbluefin", fetchImpl: unsupportedOnlyFetch, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
 	unsupportedMode.setToken("t");
 	await unsupportedMode.refreshQueue();
 
@@ -1024,6 +1033,43 @@ test("exactHeadVerified refuses unless the workspace is the exact expected head"
 	assert.equal(exactHeadVerified(sha, undefined), false, "an unreadable workspace is refused");
 	assert.equal(exactHeadVerified(undefined, sha), false, "a diff alone does not prove the head");
 	assert.equal(exactHeadVerified(undefined, undefined), false, "nothing verifies without an expected head");
+});
+
+test("workflow capability preflight fails closed when push is true without authoritative workflow permission", async () => {
+	const calls: string[] = [];
+	const fetchImpl = async (url: string | URL) => {
+		const target = String(url);
+		calls.push(target);
+		if (target === "https://api.github.com/") {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				headers: { get: () => null },
+				json: async () => ({}),
+			};
+		}
+		return {
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			headers: { get: () => null },
+			json: async () => ({ permissions: { push: true } }),
+		};
+	};
+	assert.equal(await fetchOAuthScopes({ token: "fine-grained", fetchImpl }), undefined);
+	assert.deepEqual(calls, ["https://api.github.com/"]);
+});
+
+test("workflow capability preflight accepts an authoritative OAuth workflow scope", async () => {
+	const fetchImpl = async (url: string | URL) => ({
+		ok: true,
+		status: 200,
+		statusText: "OK",
+		headers: { get: (name: string) => name.toLowerCase() === "x-oauth-scopes" ? "repo, workflow" : null },
+		json: async () => ({}),
+	});
+	assert.deepEqual(await fetchOAuthScopes({ token: "classic", fetchImpl }), ["repo", "workflow"]);
 });
 
 test("fetchDiff carries the PR head SHA so verification can materialize it exactly", async () => {
@@ -1999,7 +2045,14 @@ test("--autoslay repairs returned pull requests before implementing issue waves"
 			: [] },
 	});
 	const fetchImpl = async (url, init) => {
-		if (!String(url).includes("/graphql")) {
+		const target = String(url);
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => "workflow" }, json: async () => ({}) };
+		}
+		if (target.includes("/repos/")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ permissions: { push: true } }) };
+		}
+		if (!target.includes("/graphql")) {
 			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
 		}
 		const body = JSON.parse(String(init?.body ?? "{}"));
@@ -2109,7 +2162,7 @@ test("ordinary PR slay blocks failed CI before reviewer dispatch", async () => {
 	assert.ok(ctx.notifications.some((notification) => /CI is failure/.test(notification.message)));
 });
 
-test("slay and fix fail closed on unsupported pull requests and keep them visible", async () => {
+test("self-hosted slay and fix dispatch workflow pull requests while incomplete lists stay blocked", async () => {
 	const workflowPr = {
 		number: 10,
 		title: "update deploy pipeline",
@@ -2126,6 +2179,7 @@ test("slay and fix fail closed on unsupported pull requests and keep them visibl
 		labels: { nodes: [] },
 		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 	};
+	let staleLiveHead = false;
 	const truncatedPr = {
 		number: 20,
 		title: "massive refactor",
@@ -2159,6 +2213,12 @@ test("slay and fix fail closed on unsupported pull requests and keep them visibl
 		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 	};
 	const fetchImpl = async (_url, init) => {
+		if (String(_url) === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => "workflow" }, json: async () => ({}) };
+		}
+		if (String(_url).includes("/repos/")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ permissions: { push: true } }) };
+		}
 		const body = JSON.parse(String(init?.body ?? "{}"));
 		if (body.variables?.search !== undefined) {
 			return {
@@ -2180,7 +2240,10 @@ test("slay and fix fail closed on unsupported pull requests and keep them visibl
 		const aliases = /(\w+): repository\(owner: [^,]+, name: [^)]+\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
 		for (const [, alias, number] of body.query.matchAll(aliases)) {
 			const found = [workflowPr, truncatedPr, eligiblePr].find((n) => n.number === Number(number));
-			data[alias] = { issueOrPullRequest: found ? { ...found, closed: false } : null };
+			const live = staleLiveHead && Number(number) === 10
+				? { ...found, headRefOid: "9".repeat(40) }
+				: found;
+			data[alias] = { issueOrPullRequest: live ? { ...live, closed: false } : null };
 		}
 		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
 	};
@@ -2193,36 +2256,136 @@ test("slay and fix fail closed on unsupported pull requests and keep them visibl
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 
-	// Verify both unsupported PRs are visible in the queue tool with blocked status
+	// Workflow PRs remain visible and actionable on the self-hosted generic policy.
 	const queue = await pi.tools.get("hive_workbench_queue").execute("id", {});
-	assert.match(queue.content[0].text, /\[blocked\] projectbluefin\/review#10/);
-	assert.match(queue.content[0].text, /\[blocked\] projectbluefin\/review#20/);
-	assert.match(queue.content[0].text, /projectbluefin\/review#30/);
+	assert.doesNotMatch(queue.content[0].text, /\[blocked\] projectbluefin\/review#10/);
+	assert.match(queue.content[0].text, /projectbluefin\/review#20/);
 
-	// Try fix on workflow PR -> skipped with notification, no message
 	const dashboard = ctx.overlays[0];
 	dashboard.handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((n) => /Skipping projectbluefin\/review#10: changes \.github\/workflows\/deploy\.yml/.test(n.message)));
-
-	// Select truncated PR and try slay -> skipped with notification, no message
-	dashboard.handleInput("j");
-	dashboard.handleInput("s");
-	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((n) => /Skipping projectbluefin\/review#20: complete changed-file list unavailable/.test(n.message)));
-
-	// Select all items ("A") and slay -> unsupported PRs skipped, only eligible PR dispatched
-	dashboard.handleInput("A");
-	dashboard.handleInput("s");
-	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 1);
-	assert.match(pi.messages[0], /projectbluefin\/review#30/);
-	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#10/);
-	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#20/);
+	assert.match(pi.messages[0], /projectbluefin\/review#10/);
+	assert.equal(ctx.notifications.some((n) => /Skipping projectbluefin\/review#10/.test(n.message)), false);
+
+	// A workflow fix must reject a head that changed after the queue snapshot,
+	// even when the token's capability preflight succeeds.
+	ctx.asyncJobs.recent = [{ id: "fix", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("agent_end")({}, ctx);
+	staleLiveHead = true;
+	pi.messages.length = 0;
+	dashboard.handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 0, "stale workflow head must not dispatch a fixer");
+	assert.ok(ctx.notifications.some((n) => /pull request head changed/.test(n.message)));
+
 });
 
+test("generic PR fix revalidates every selected head and live workflow classification", async () => {
+	const head = "a".repeat(40);
+	let liveHead = head;
+	const node = (live: boolean) => ({
+		number: 10,
+		title: "transition into workflow change",
+		url: "https://github.com/projectbluefin/review/pull/10",
+		updatedAt: new Date(NOW).toISOString(),
+		isDraft: false,
+		mergeable: "MERGEABLE",
+		reviewDecision: "REVIEW_REQUIRED",
+		headRefOid: liveHead,
+		changedFiles: 1,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: live ? ".github/workflows/deploy.yml" : "README.md" }] },
+		author: { login: "contributor" },
+		repository: { nameWithOwner: "projectbluefin/review" },
+		labels: { nodes: [] },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+	});
+	const fetchImpl = async (_url, init) => {
+		const target = String(_url);
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => "workflow" }, json: async () => ({}) };
+		}
+		if (!target.includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (body.variables?.search !== undefined) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({ data: { viewer: { login: "maintainer" }, search: { pageInfo: { hasNextPage: false }, nodes: [node(false)] } } }),
+			};
+		}
+		const data = {};
+		for (const [, alias] of body.query.matchAll(/(\w+): repository\(owner: [^,]+, name: [^)]+\)\s*\{\s*issueOrPullRequest\(number: 10\)/g)) {
+			data[alias] = { issueOrPullRequest: { ...node(true), closed: false } };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	ctx.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 0, "a newly workflow-changing live PR is blocked by managed policy");
+	assert.ok(ctx.notifications.some((n) => /changes \.github\/workflows\/deploy\.yml/.test(n.message)));
+
+	liveHead = "b".repeat(40);
+	ctx.notifications.length = 0;
+	ctx.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 0, "a stale generic-fix head never dispatches");
+	assert.ok(ctx.notifications.some((n) => /pull request head changed/.test(n.message)));
+});
+
+test("generic workflow fix rejects push-only permission", async () => {
+	const node = {
+		number: 10,
+		title: "workflow change",
+		url: "https://github.com/projectbluefin/review/pull/10",
+		updatedAt: new Date(NOW).toISOString(),
+		isDraft: false,
+		mergeable: "MERGEABLE",
+		reviewDecision: "REVIEW_REQUIRED",
+		headRefOid: "a".repeat(40),
+		changedFiles: 1,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: ".github/workflows/deploy.yml" }] },
+		author: { login: "contributor" },
+		repository: { nameWithOwner: "projectbluefin/review" },
+		labels: { nodes: [] },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+	};
+	const fetchImpl = async (_url, init) => {
+		const target = String(_url);
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => null }, json: async () => ({}) };
+		}
+		if (!target.includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (body.variables?.search !== undefined) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "maintainer" }, search: { pageInfo: { hasNextPage: false }, nodes: [node] } } }) };
+		}
+		const data = {};
+		for (const [, alias] of body.query.matchAll(/(\w+): repository\(owner: [^,]+, name: [^)]+\)\s*\{\s*issueOrPullRequest\(number: 10\)/g)) {
+			data[alias] = { issueOrPullRequest: { ...node, closed: false } };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: GENERIC_WORKBENCH_POLICY });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	ctx.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((n) => /workflow\/Actions write permission could not be verified/.test(n.message)));
+});
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {
 	const pi = fakeHost();
 	pi.flagValues.set("pr", "7");
@@ -3331,6 +3494,8 @@ test("issue admission gate handles positive admission, negative cases, and invar
 									author: { login: "someone" },
 									repository: { nameWithOwner: it.repo ?? "projectbluefin/review" },
 									labels: { nodes: (it.labels ?? []).map((label) => ({ name: label })) },
+									changedFiles: it.type === "pr" ? 1 : undefined,
+									files: it.type === "pr" ? { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] } : undefined,
 									headRefOid: it.headSha ?? "a".repeat(40),
 								})),
 								},
@@ -3358,6 +3523,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 							mergeable: "MERGEABLE",
 							reviewDecision: "REVIEW_REQUIRED",
 							changedFiles: 1,
+							files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
 							headRefOid: it.headSha ?? "a".repeat(40),
 							commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 							closingIssuesReferences: { nodes: [] },
