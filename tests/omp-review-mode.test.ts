@@ -2316,7 +2316,7 @@ test("generic PR fix revalidates every selected head and live workflow classific
 			};
 		}
 		const data = {};
-		for (const [alias] of body.query.matchAll(/(\w+): repository\(owner: [^,]+, name: [^)]+\)\s*\{\s*issueOrPullRequest\(number: 10\)/g)) {
+		for (const [, alias] of body.query.matchAll(/(\w+): repository\(owner: [^,]+, name: [^)]+\)\s*\{\s*issueOrPullRequest\(number: 10\)/g)) {
 			data[alias] = { issueOrPullRequest: { ...node(true), closed: false } };
 		}
 		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
@@ -2369,7 +2369,7 @@ test("generic workflow fix rejects push-only permission", async () => {
 			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "maintainer" }, search: { pageInfo: { hasNextPage: false }, nodes: [node] } } }) };
 		}
 		const data = {};
-		for (const [alias] of body.query.matchAll(/(\w+): repository\(owner: [^,]+, name: [^)]+\)\s*\{\s*issueOrPullRequest\(number: 10\)/g)) {
+		for (const [, alias] of body.query.matchAll(/(\w+): repository\(owner: [^,]+, name: [^)]+\)\s*\{\s*issueOrPullRequest\(number: 10\)/g)) {
 			data[alias] = { issueOrPullRequest: { ...node, closed: false } };
 		}
 		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
