@@ -202,7 +202,7 @@ test("personal autoslay dispatches a workflow-changing PR with OAuth workflow sc
 	assert.match(queue.content[0].text, /example\/repo#42/);
 });
 
-test("personal workflow dispatch accepts a fine-grained token when scopes are omitted but repository push is allowed", async (t) => {
+test("personal workflow dispatch rejects push-only permission when workflow scope is omitted", async (t) => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
@@ -216,8 +216,8 @@ test("personal workflow dispatch accepts a fine-grained token when scopes are om
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
-	assert.equal(pi.messages.length, 1);
-	assert.match(pi.messages[0], /example\/repo#42/);
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
 });
 
 test("returned workflow PR repair still requires capability when scopes are omitted", async (t) => {

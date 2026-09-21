@@ -17,7 +17,7 @@ import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/exten
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
 import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchQueue, fetchRepositoryPushPermission, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
+import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
@@ -1034,7 +1034,7 @@ test("exactHeadVerified refuses unless the workspace is the exact expected head"
 	assert.equal(exactHeadVerified(undefined, undefined), false, "nothing verifies without an expected head");
 });
 
-test("workflow capability preflight accepts fine-grained tokens without OAuth scope metadata", async () => {
+test("workflow capability preflight fails closed when push is true without authoritative workflow permission", async () => {
 	const calls: string[] = [];
 	const fetchImpl = async (url: string | URL) => {
 		const target = String(url);
@@ -1057,11 +1057,18 @@ test("workflow capability preflight accepts fine-grained tokens without OAuth sc
 		};
 	};
 	assert.equal(await fetchOAuthScopes({ token: "fine-grained", fetchImpl }), undefined);
-	assert.equal(
-		await fetchRepositoryPushPermission("owner/repo", { token: "fine-grained", fetchImpl }),
-		true,
-	);
-	assert.deepEqual(calls, ["https://api.github.com/", "https://api.github.com/repos/owner/repo"]);
+	assert.deepEqual(calls, ["https://api.github.com/"]);
+});
+
+test("workflow capability preflight accepts an authoritative OAuth workflow scope", async () => {
+	const fetchImpl = async (url: string | URL) => ({
+		ok: true,
+		status: 200,
+		statusText: "OK",
+		headers: { get: (name: string) => name.toLowerCase() === "x-oauth-scopes" ? "repo, workflow" : null },
+		json: async () => ({}),
+	});
+	assert.deepEqual(await fetchOAuthScopes({ token: "classic", fetchImpl }), ["repo", "workflow"]);
 });
 
 test("fetchDiff carries the PR head SHA so verification can materialize it exactly", async () => {
@@ -2039,7 +2046,7 @@ test("--autoslay repairs returned pull requests before implementing issue waves"
 	const fetchImpl = async (url, init) => {
 		const target = String(url);
 		if (target === "https://api.github.com/") {
-			return { ok: true, status: 200, statusText: "OK", headers: { get: () => null }, json: async () => ({}) };
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => "workflow" }, json: async () => ({}) };
 		}
 		if (target.includes("/repos/")) {
 			return { ok: true, status: 200, statusText: "OK", json: async () => ({ permissions: { push: true } }) };
@@ -2206,7 +2213,7 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 	};
 	const fetchImpl = async (_url, init) => {
 		if (String(_url) === "https://api.github.com/") {
-			return { ok: true, status: 200, statusText: "OK", headers: { get: () => null }, json: async () => ({}) };
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => "workflow" }, json: async () => ({}) };
 		}
 		if (String(_url).includes("/repos/")) {
 			return { ok: true, status: 200, statusText: "OK", json: async () => ({ permissions: { push: true } }) };
@@ -2271,6 +2278,66 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 	assert.equal(pi.messages.length, 0, "stale workflow head must not dispatch a fixer");
 	assert.ok(ctx.notifications.some((n) => /pull request head changed/.test(n.message)));
 
+});
+
+test("generic PR fix revalidates every selected head and live workflow classification", async () => {
+	const head = "a".repeat(40);
+	let liveHead = head;
+	const node = (live: boolean) => ({
+		number: 10,
+		title: "transition into workflow change",
+		url: "https://github.com/projectbluefin/review/pull/10",
+		updatedAt: new Date(NOW).toISOString(),
+		isDraft: false,
+		mergeable: "MERGEABLE",
+		reviewDecision: "REVIEW_REQUIRED",
+		headRefOid: liveHead,
+		changedFiles: 1,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: live ? ".github/workflows/deploy.yml" : "README.md" }] },
+		author: { login: "contributor" },
+		repository: { nameWithOwner: "projectbluefin/review" },
+		labels: { nodes: [] },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+	});
+	const fetchImpl = async (_url, init) => {
+		const target = String(_url);
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => "workflow" }, json: async () => ({}) };
+		}
+		if (!target.includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (body.variables?.search !== undefined) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({ data: { viewer: { login: "maintainer" }, search: { pageInfo: { hasNextPage: false }, nodes: [node(false)] } } }),
+			};
+		}
+		const data = {};
+		for (const [alias] of body.query.matchAll(/(\w+): repository\(owner: [^,]+, name: [^)]+\)\s*\{\s*issueOrPullRequest\(number: 10\)/g)) {
+			data[alias] = { issueOrPullRequest: { ...node(true), closed: false } };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	ctx.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 0, "a newly workflow-changing live PR is blocked by managed policy");
+	assert.ok(ctx.notifications.some((n) => /changes \.github\/workflows\/deploy\.yml/.test(n.message)));
+
+	liveHead = "b".repeat(40);
+	ctx.notifications.length = 0;
+	ctx.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 0, "a stale generic-fix head never dispatches");
+	assert.ok(ctx.notifications.some((n) => /pull request head changed/.test(n.message)));
 });
 
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {

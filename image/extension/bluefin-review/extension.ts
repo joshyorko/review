@@ -7,7 +7,7 @@
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchRepositoryPushPermission, parseScope, resolveToken } from "./github.ts";
+import { DEFAULT_ORG, exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
 import { registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
@@ -580,7 +580,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (kind === "slay" && allPullRequests) {
 			for (const item of items) {
 				const wasRepair = isRepairRequested(item, mode.currentUserLogin);
-				if (!policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
+				if (!wasRepair && !policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
 					return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
 				}
 				if (!wasRepair && item.changedFilesComplete === false) {
@@ -614,33 +614,38 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 
 		if (kind === "fix") {
-			for (const item of items) {
-				if (item.type === "pr") {
-					const wasRepair = isRepairRequested(item, mode.currentUserLogin);
-					if (!policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
-						return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
-					}
-					if (!wasRepair && item.changedFilesComplete === false) {
-						return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
-					}
-				}
-			}
-			const workflowPermission = await workflowPermissionBlocker(items);
-			if (workflowPermission) return workflowPermission;
-			const workflowItems = items.filter((item) => item.type === "pr" && (item.workflowFiles?.length ?? 0) > 0);
-			if (workflowItems.length > 0) {
+			const pullRequests = items.filter((item): item is QueueItem & { type: "pr" } => item.type === "pr");
+			let livePullRequests: QueueItem[] = [];
+			if (pullRequests.length > 0) {
 				const live = await fetchItemsByKey(
-					workflowItems.map((item) => `${item.repo}#${item.id}`),
+					pullRequests.map((item) => `${item.repo}#${item.id}`),
 					"prs",
 					mode.tokenOptions(),
 				);
 				if (live.error) return `Live pull-request check failed: ${live.error}`;
-				for (const item of workflowItems) {
+				for (const item of pullRequests) {
 					const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
 					if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
 					if (!exactHeadVerified(item.headSha, current.headSha)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+					const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+					if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
+						return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
+					}
+					if (!wasRepair && current.changedFilesComplete === false) {
+						return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+					}
+				}
+				livePullRequests = live.items;
+				for (const item of pullRequests) {
+					const current = livePullRequests.find((candidate) => candidate.repo === item.repo && candidate.id === item.id)!;
+					const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+					if (!wasRepair && !policy.allowWorkflowSlay && (current.workflowFiles?.length ?? 0) > 0) {
+						return `Cannot dispatch ${item.repo}#${item.id}: changes ${current.workflowFiles![0]}`;
+					}
 				}
 			}
+			const workflowPermission = await workflowPermissionBlocker(livePullRequests);
+			if (workflowPermission) return workflowPermission;
 		}
 
 		if (kind === "slay" && allIssues) {
@@ -817,11 +822,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			return undefined;
 		}
-		const canPush = await fetchRepositoryPushPermission(workflowItem.repo, mode.tokenOptions());
-		if (canPush !== true) {
-			return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token workflow/Actions write permission could not be verified; grant workflow scope or Actions/Contents write access`;
-		}
-		return undefined;
+		return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token workflow/Actions write permission could not be verified; grant workflow scope or Actions/Contents write access`;
 	};
 
 	const filterUnsupportedSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
@@ -831,7 +832,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				eligible.push(item);
 				continue;
 			}
-			if ((item.workflowFiles?.length ?? 0) > 0 && !policy.allowWorkflowSlay) {
+			const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+			if (!wasRepair && (item.workflowFiles?.length ?? 0) > 0 && !policy.allowWorkflowSlay) {
 				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`, "warning");
 				continue;
 			}
