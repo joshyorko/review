@@ -7,7 +7,7 @@
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, parseScope, resolveToken } from "./github.ts";
+import { DEFAULT_ORG, exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchRepositoryPushPermission, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
 import { registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
@@ -580,7 +580,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (kind === "slay" && allPullRequests) {
 			for (const item of items) {
 				const wasRepair = isRepairRequested(item, mode.currentUserLogin);
-				if (!wasRepair && !policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
+				if (!policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
 					return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
 				}
 				if (!wasRepair && item.changedFilesComplete === false) {
@@ -617,7 +617,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const item of items) {
 				if (item.type === "pr") {
 					const wasRepair = isRepairRequested(item, mode.currentUserLogin);
-					if (!wasRepair && !policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
+					if (!policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
 						return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
 					}
 					if (!wasRepair && item.changedFilesComplete === false) {
@@ -627,6 +627,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			const workflowPermission = await workflowPermissionBlocker(items);
 			if (workflowPermission) return workflowPermission;
+			const workflowItems = items.filter((item) => item.type === "pr" && (item.workflowFiles?.length ?? 0) > 0);
+			if (workflowItems.length > 0) {
+				const live = await fetchItemsByKey(
+					workflowItems.map((item) => `${item.repo}#${item.id}`),
+					"prs",
+					mode.tokenOptions(),
+				);
+				if (live.error) return `Live pull-request check failed: ${live.error}`;
+				for (const item of workflowItems) {
+					const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+					if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
+					if (!exactHeadVerified(item.headSha, current.headSha)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+				}
+			}
 		}
 
 		if (kind === "slay" && allIssues) {
@@ -793,20 +807,19 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		persistBatch(ctx, batch);
 		await dispatchCurrentWave(ctx, undefined, true);
 	};
-
 	const workflowPermissionBlocker = async (items: readonly QueueItem[]): Promise<string | undefined> => {
-		const workflowItem = items.find((item) =>
-			item.type === "pr"
-			&& !isRepairRequested(item, mode.currentUserLogin)
-			&& (item.workflowFiles?.length ?? 0) > 0
-		);
+		const workflowItem = items.find((item) => item.type === "pr" && (item.workflowFiles?.length ?? 0) > 0);
 		if (!workflowItem) return undefined;
 		const scopes = await fetchOAuthScopes(mode.tokenOptions());
-		if (!scopes) {
-			return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token workflow/Actions write permission could not be verified; grant workflow scope or Actions/Contents write access`;
+		if (scopes !== undefined) {
+			if (!scopes.includes("workflow")) {
+				return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token lacks workflow/Actions write permission; grant workflow scope or Actions/Contents write access`;
+			}
+			return undefined;
 		}
-		if (!scopes.includes("workflow")) {
-			return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token lacks workflow/Actions write permission; grant workflow scope or Actions/Contents write access`;
+		const canPush = await fetchRepositoryPushPermission(workflowItem.repo, mode.tokenOptions());
+		if (canPush !== true) {
+			return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token workflow/Actions write permission could not be verified; grant workflow scope or Actions/Contents write access`;
 		}
 		return undefined;
 	};
@@ -815,10 +828,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
 			if (item.type !== "pr") {
-				eligible.push(item);
-				continue;
-			}
-			if (isRepairRequested(item, mode.currentUserLogin)) {
 				eligible.push(item);
 				continue;
 			}

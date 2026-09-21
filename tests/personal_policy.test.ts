@@ -34,7 +34,7 @@ afterEach(() => {
 	rmSync(ENV.LUNA_FACTORY_CLAIMS_ROOT, { recursive: true, force: true });
 });
 
-function workflowNode(workflow = true, includeChangedFiles = true) {
+function workflowNode(workflow = true, includeChangedFiles = true, requestedChanges = false) {
 	return {
 		number: 42,
 		title: "workflow change",
@@ -42,7 +42,7 @@ function workflowNode(workflow = true, includeChangedFiles = true) {
 		updatedAt: new Date(NOW).toISOString(),
 		isDraft: false,
 		mergeable: "MERGEABLE",
-		reviewDecision: "REVIEW_REQUIRED",
+		reviewDecision: requestedChanges ? "CHANGES_REQUESTED" : "REVIEW_REQUIRED",
 		changedFiles: 1,
 		headRefOid: "4".repeat(40),
 		author: { login: "josh" },
@@ -64,7 +64,15 @@ function workflowNode(workflow = true, includeChangedFiles = true) {
 	};
 }
 
-function makeFetch(scopes: string | null = "repo, workflow", liveHeadSha = "4".repeat(40), workflow = true, scopeResponseOk = true, includeChangedFiles = true) {
+function makeFetch(
+	scopes: string | null = "repo, workflow",
+	liveHeadSha = "4".repeat(40),
+	workflow = true,
+	scopeResponseOk = true,
+	includeChangedFiles = true,
+	repositoryPushPermission?: boolean,
+	requestedChanges = false,
+) {
 	return (url: string | URL | Request, init?: RequestInit) => {
 		const target = String(url);
 		if (target === "https://api.github.com/") {
@@ -84,13 +92,21 @@ function makeFetch(scopes: string | null = "repo, workflow", liveHeadSha = "4".r
 					status: 200,
 					statusText: "OK",
 					json: async () => ({
-						data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode(workflow, includeChangedFiles)] } },
+						data: {
+							viewer: { login: "josh" },
+							search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode(workflow, includeChangedFiles, requestedChanges)] },
+						},
 					}),
 				});
 			}
 			const data: Record<string, unknown> = {};
 			for (const [, alias] of body.query.matchAll(/(\w+): repository\(owner: "[^"]+", name: "[^"]+"\)/g)) {
-				data[alias] = { issueOrPullRequest: { ...workflowNode(workflow, includeChangedFiles), headRefOid: liveHeadSha } };
+				data[alias] = {
+					issueOrPullRequest: {
+						...workflowNode(workflow, includeChangedFiles, requestedChanges),
+						headRefOid: liveHeadSha,
+					},
+				};
 			}
 			return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({ data }) });
 		}
@@ -104,7 +120,12 @@ function makeFetch(scopes: string | null = "repo, workflow", liveHeadSha = "4".r
 				],
 			});
 		}
-		return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({}) });
+		return Promise.resolve({
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => repositoryPushPermission === undefined ? {} : { permissions: { push: repositoryPushPermission } },
+		});
 	};
 }
 
@@ -179,6 +200,42 @@ test("personal autoslay dispatches a workflow-changing PR with OAuth workflow sc
 	assert.equal(ctx.notifications.some((notification) => /Skipping .*workflow/.test(notification.message)), false);
 	const queue = await pi.tools.get("review_workbench_queue").execute("id", {});
 	assert.match(queue.content[0].text, /example\/repo#42/);
+});
+
+test("personal workflow dispatch accepts a fine-grained token when scopes are omitted but repository push is allowed", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
+		org: "example",
+		fetchImpl: makeFetch(null, "4".repeat(40), true, true, true, true) as typeof fetch,
+		env: ENV,
+	});
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /example\/repo#42/);
+});
+
+test("returned workflow PR repair still requires capability when scopes are omitted", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
+		org: "example",
+		fetchImpl: makeFetch(null, "4".repeat(40), true, true, true, undefined, true) as typeof fetch,
+		env: ENV,
+	});
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
 });
 
 test("personal workflow dispatch reports missing workflow write permission", async (t) => {

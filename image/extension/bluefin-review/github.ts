@@ -234,6 +234,36 @@ export async function fetchOAuthScopes(options: FetchOptions = {}): Promise<read
 		return undefined;
 	}
 }
+/**
+ * Check the authenticated token's repository push capability.
+ *
+ * Fine-grained PATs, GitHub App tokens, and GITHUB_TOKEN do not expose the
+ * classic `x-oauth-scopes` header. GitHub's repository response still reports
+ * the effective token permissions, so this read-only preflight can authorize
+ * workflow mutation without guessing from missing scope metadata.
+ */
+export async function fetchRepositoryPushPermission(
+	repo: string,
+	options: FetchOptions = {},
+): Promise<boolean | undefined> {
+	const { token, signal } = options;
+	if (!token) return undefined;
+	try {
+		const response = await (options.fetchImpl ?? fetch)(
+			`https://api.github.com/repos/${repo}`,
+			{
+				headers: headers(token),
+				signal: deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal),
+				redirect: "error",
+			},
+		);
+		if (!response.ok) return undefined;
+		const data = (await response.json()) as { permissions?: { push?: boolean } };
+		return typeof data.permissions?.push === "boolean" ? data.permissions.push : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 
 interface SearchNode {

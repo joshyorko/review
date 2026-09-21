@@ -17,7 +17,7 @@ import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/exten
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
 import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
+import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchQueue, fetchRepositoryPushPermission, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
@@ -1034,6 +1034,36 @@ test("exactHeadVerified refuses unless the workspace is the exact expected head"
 	assert.equal(exactHeadVerified(undefined, undefined), false, "nothing verifies without an expected head");
 });
 
+test("workflow capability preflight accepts fine-grained tokens without OAuth scope metadata", async () => {
+	const calls: string[] = [];
+	const fetchImpl = async (url: string | URL) => {
+		const target = String(url);
+		calls.push(target);
+		if (target === "https://api.github.com/") {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				headers: { get: () => null },
+				json: async () => ({}),
+			};
+		}
+		return {
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			headers: { get: () => null },
+			json: async () => ({ permissions: { push: true } }),
+		};
+	};
+	assert.equal(await fetchOAuthScopes({ token: "fine-grained", fetchImpl }), undefined);
+	assert.equal(
+		await fetchRepositoryPushPermission("owner/repo", { token: "fine-grained", fetchImpl }),
+		true,
+	);
+	assert.deepEqual(calls, ["https://api.github.com/", "https://api.github.com/repos/owner/repo"]);
+});
+
 test("fetchDiff carries the PR head SHA so verification can materialize it exactly", async () => {
 	const head = "c".repeat(40);
 	const headFetch = (url: string | URL, init?: RequestInit) => {
@@ -2007,7 +2037,14 @@ test("--autoslay repairs returned pull requests before implementing issue waves"
 			: [] },
 	});
 	const fetchImpl = async (url, init) => {
-		if (!String(url).includes("/graphql")) {
+		const target = String(url);
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => null }, json: async () => ({}) };
+		}
+		if (target.includes("/repos/")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ permissions: { push: true } }) };
+		}
+		if (!target.includes("/graphql")) {
 			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
 		}
 		const body = JSON.parse(String(init?.body ?? "{}"));
@@ -2134,6 +2171,7 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 		labels: { nodes: [] },
 		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 	};
+	let staleLiveHead = false;
 	const truncatedPr = {
 		number: 20,
 		title: "massive refactor",
@@ -2168,7 +2206,10 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 	};
 	const fetchImpl = async (_url, init) => {
 		if (String(_url) === "https://api.github.com/") {
-			return { ok: true, status: 200, statusText: "OK", headers: { get: (name) => name.toLowerCase() === "x-oauth-scopes" ? "repo, workflow" : null }, json: async () => ({}) };
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => null }, json: async () => ({}) };
+		}
+		if (String(_url).includes("/repos/")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ permissions: { push: true } }) };
 		}
 		const body = JSON.parse(String(init?.body ?? "{}"));
 		if (body.variables?.search !== undefined) {
@@ -2191,7 +2232,10 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 		const aliases = /(\w+): repository\(owner: [^,]+, name: [^)]+\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
 		for (const [, alias, number] of body.query.matchAll(aliases)) {
 			const found = [workflowPr, truncatedPr, eligiblePr].find((n) => n.number === Number(number));
-			data[alias] = { issueOrPullRequest: found ? { ...found, closed: false } : null };
+			const live = staleLiveHead && Number(number) === 10
+				? { ...found, headRefOid: "9".repeat(40) }
+				: found;
+			data[alias] = { issueOrPullRequest: live ? { ...live, closed: false } : null };
 		}
 		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
 	};
@@ -2215,6 +2259,17 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 	assert.equal(pi.messages.length, 1);
 	assert.match(pi.messages[0], /projectbluefin\/review#10/);
 	assert.equal(ctx.notifications.some((n) => /Skipping projectbluefin\/review#10/.test(n.message)), false);
+
+	// A workflow fix must reject a head that changed after the queue snapshot,
+	// even when the token's capability preflight succeeds.
+	ctx.asyncJobs.recent = [{ id: "fix", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("agent_end")({}, ctx);
+	staleLiveHead = true;
+	pi.messages.length = 0;
+	dashboard.handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 0, "stale workflow head must not dispatch a fixer");
+	assert.ok(ctx.notifications.some((n) => /pull request head changed/.test(n.message)));
 
 });
 
