@@ -10,8 +10,11 @@ import { type ReviewExtensionHost, createReviewExtension } from "./extension.ts"
 import { BLUEFIN_POLICY } from "./policy.ts";
 
 export default function bluefinReviewExtension(pi: ReviewExtensionHost): void {
+	const policy = process.env.BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY === "1"
+		? { ...BLUEFIN_POLICY, allowWorkflowSlay: true }
+		: BLUEFIN_POLICY;
 	createReviewExtension(pi, {
 		matchKey: (data, key) => matchesKey(data, key as KeyId),
-		policy: BLUEFIN_POLICY,
+		policy,
 	});
 }

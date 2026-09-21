@@ -48,7 +48,7 @@ export interface QueueItem {
 	closedByPrs?: string[];
 	/** `owner/repo#number` of open or merged pull requests submitted for this issue. */
 	submittedPrs?: string[];
-	/** Changed workflow files reported by GitHub for exclusion from slay/review. */
+	/** Changed workflow files reported by GitHub for policy and permission gates. */
 	workflowFiles?: string[];
 	/** Whether GitHub returned the complete changed-file list. */
 	changedFilesComplete?: boolean;
@@ -367,8 +367,8 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 				? (node.files?.nodes ?? []).map((file) => file.path ?? "").filter((path) => path.startsWith(".github/workflows/"))
 				: undefined,
 		changedFilesComplete:
-			mode === "prs" && node.files
-				? node.files.pageInfo?.hasNextPage !== true
+			mode === "prs"
+				? node.files?.pageInfo?.hasNextPage === false
 					&& (node.changedFiles === undefined || (node.files.nodes ?? []).length >= node.changedFiles)
 				: undefined,
 		closingIssues: (node.closingIssuesReferences?.nodes ?? [])

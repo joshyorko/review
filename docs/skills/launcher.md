@@ -133,8 +133,11 @@ The personal Brew bundle carries a full-commit personal OCI reference and a
 native immutable SIF built from the same source. The generated `bluefin`
 wrapper selects the OCI image through Podman/krun when KVM is ready and sets
 the bundled SIF as the Apptainer fallback. An explicit `BLUEFIN_REVIEW_SIF`
-still forces a SIF. The target-specific `/home/bluefin` state boundary remains
-the same on both paths. The SIF contains OMP's Linux voice closure.
+still forces a SIF. Review launches set `BLUEFIN_REVIEW_MODE=review` and
+`BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY=1`, opting the self-hosted policy into
+workflow-file PR actions without bypassing GitHub's workflow/Actions permission
+check. The target-specific `/home/bluefin` state boundary remains the same on
+both paths. The SIF contains OMP's Linux voice closure.
 
 For Review voice, the packaged launcher binds only a detected
 `$XDG_RUNTIME_DIR/pulse/native` socket and sets the contained `PULSE_SERVER`.
