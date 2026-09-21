@@ -26,6 +26,7 @@ import type {
 	Subject,
 	TaskId,
 } from "../image/extension/luna-factory/core/model.ts";
+import type { FactoryAction, SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
 import { renderCompletionReceipt } from "../image/extension/luna-factory/core/receipt.ts";
 import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
 import { artifactRefError, changedPathError, parseCandidate, parseReceipt, parseSubject } from "../image/extension/luna-factory/core/schema.ts";
@@ -33,7 +34,7 @@ import { buildDispatchPrompt, dispatchMarker, RECEIPT_CONTRACT } from "../image/
 import { DISPATCH_COVERAGE, coverageFor, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
 import { renderStatus, renderStatusDetail, renderWhy } from "../image/extension/luna-factory/ui/status.ts";
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
-import { factoryCommand, factoryHandoffState, factoryLoadDiagnostic, registerFactoryController, reportFactoryLoadFailure } from "../image/extension/luna-factory/omp/batch-bridge.ts";
+import { factoryCommand, factoryHandoffState, factoryLoadDiagnostic, registerFactoryController, registerFactorySelection, reportFactoryLoadFailure, selectedFactoryItems } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const ROOTS = ["/artifacts"];
 const REDUCE = { artifactRoots: ROOTS };
@@ -1052,6 +1053,54 @@ test("the Factory handoff distinguishes not-registered, load-failed, and registe
 	assert.equal(factoryLoadDiagnostic(), "the Luna Factory controller is registered");
 	await host.events.get("session_shutdown")!();
 	assert.equal(factoryHandoffState(), "not-registered");
+});
+
+test("query-suffixed bridge copies share handoff state and preserve newer registrations", async () => {
+	const reviewBridge = await import("../image/extension/luna-factory/omp/batch-bridge.ts?mtime=review");
+	const factoryBridge = await import("../image/extension/luna-factory/omp/batch-bridge.ts?mtime=factory");
+	assert.notEqual(reviewBridge, factoryBridge);
+	const item = (number: number, action: FactoryAction): SelectedItem => ({ key: `example/repo#${number}`, repo: "example/repo", number, kind: "pr", action, overlaps: [] });
+	const firstSelection = reviewBridge.registerFactorySelection(() => [item(1, "inspect")]);
+	assert.deepEqual(factoryBridge.selectedFactoryItems("inspect"), [item(1, "inspect")]);
+	const secondSelection = factoryBridge.registerFactorySelection(() => [item(2, "patch")]);
+	try {
+		assert.deepEqual(reviewBridge.selectedFactoryItems("inspect"), [item(2, "patch")]);
+		firstSelection();
+		assert.deepEqual(selectedFactoryItems("inspect"), [item(2, "patch")]);
+		secondSelection();
+		assert.throws(() => selectedFactoryItems("inspect"), /select exact items/);
+
+		let received: { command: string; context: unknown } | undefined;
+		const firstController = reviewBridge.registerFactoryController(async (command, context) => { received = { command, context }; return "first"; });
+		const secondController = factoryBridge.registerFactoryController(async (command, context) => { received = { command, context }; return "second"; });
+		try {
+			const context = { source: "bridge-test" };
+			assert.equal(reviewBridge.factoryControllerRegistered(), true);
+			assert.equal(factoryBridge.factoryControllerRegistered(), true);
+			assert.equal(await reviewBridge.factoryCommand("status", context), "second");
+			assert.deepEqual(received, { command: "status", context });
+			firstController();
+			assert.equal(await factoryBridge.factoryCommand("status", context), "second");
+		} finally {
+			secondController();
+			firstController();
+		}
+		await assert.rejects(factoryCommand("status", {}), /Factory is not loaded/);
+
+		reviewBridge.reportFactoryLoadFailure(`${"reason ".repeat(100)}tail`);
+		assert.equal(factoryBridge.factoryHandoffState(), "load-failed");
+		assert.ok(factoryBridge.factoryLoadDiagnostic().length < 320);
+		const clearController = factoryBridge.registerFactoryController(async () => "cleared");
+		try {
+			assert.equal(reviewBridge.factoryHandoffState(), "registered");
+			assert.equal(await reviewBridge.factoryCommand("status", {}), "cleared");
+		} finally {
+			clearController();
+		}
+	} finally {
+		firstSelection();
+		secondSelection();
+	}
 });
 
 test("a load failure reason is bounded, single-line, and secret-free", () => {

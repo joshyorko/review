@@ -131,6 +131,7 @@ jobs:
           podman build --format oci -f image/contribute/Containerfile -t contribute:test .
           bash tests/appliance-contract.sh --image review:test --expect-version "$review_version"
           bash tests/contribute-contract.sh --image contribute:test
+          BLUEFIN_REVIEW_IMAGE=review:test bash tests/review-factory-coload-smoke.sh
 
       # Interactive launchers prefer KVM and fall back to Apptainer. CI builds
       # and executes both OCI images natively; both launcher branches are

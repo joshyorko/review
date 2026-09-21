@@ -49,6 +49,8 @@ jobs:
             -f image/appliance/Containerfile \
             -t "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" .
           tests/appliance-contract.sh --image "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
+          BLUEFIN_REVIEW_IMAGE="localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" \
+            tests/review-factory-coload-smoke.sh
           label_format='{{index .Labels "org.opencontainers.image.revision"}}'
           test "$(podman image inspect --format "$label_format" "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}")" = "${{ github.event.pull_request.head.sha }}"
       - name: Run no-publish OCI dogfood
@@ -95,5 +97,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/luna-factory-dogfood*
+          path: |
+            ${{ runner.temp }}/luna-factory-dogfood*
+            ${{ runner.temp }}/review-factory-coload-*
           if-no-files-found: ignore

@@ -1,9 +1,17 @@
 import type { FactoryAction, SelectedItem } from "../core/batch.ts";
 
 type Controller = (command: string, context: unknown) => Promise<string>;
-let selection: ((action: FactoryAction) => SelectedItem[]) | undefined;
-let controller: Controller | undefined;
-let loadFailure: string | undefined;
+type BridgeState = {
+	selection?: (action: FactoryAction) => SelectedItem[];
+	controller?: Controller;
+	loadFailure?: string;
+};
+
+// OMP may cache explicit extensions as separate module instances. Keep the
+// handoff in one versioned global slot so those instances share identity.
+const BRIDGE_STATE_KEY = Symbol.for("projectbluefin.review.luna-factory.batch-bridge.v1");
+const bridgeGlobal = globalThis as typeof globalThis & { [BRIDGE_STATE_KEY]?: BridgeState };
+const state = bridgeGlobal[BRIDGE_STATE_KEY] ?? (bridgeGlobal[BRIDGE_STATE_KEY] = {});
 
 /**
  * Bounded, secret-free reason the Factory package recorded for a failed load.
@@ -16,30 +24,30 @@ let loadFailure: string | undefined;
 const LOAD_FAILURE_LIMIT = 240;
 
 export function registerFactorySelection(provider: (action: FactoryAction) => SelectedItem[]): () => void {
-	selection = provider;
-	return () => { if (selection === provider) selection = undefined; };
+	state.selection = provider;
+	return () => { if (state.selection === provider) state.selection = undefined; };
 }
 export function selectedFactoryItems(action: FactoryAction): SelectedItem[] {
-	if (!selection) throw new Error("Open Review and select exact items before submitting a Factory batch");
-	return selection(action);
+	if (!state.selection) throw new Error("Open Review and select exact items before submitting a Factory batch");
+	return state.selection(action);
 }
 export function registerFactoryController(handler: Controller): () => void {
-	controller = handler;
-	loadFailure = undefined;
-	return () => { if (controller === handler) controller = undefined; };
+	state.controller = handler;
+	state.loadFailure = undefined;
+	return () => { if (state.controller === handler) state.controller = undefined; };
 }
 
 /** Record why the Factory extension failed to load, for the caller's diagnostic. */
 export function reportFactoryLoadFailure(reason: string): void {
 	const collapsed = reason.replace(/\s+/g, " ").trim();
-	loadFailure = collapsed.length === 0
+	state.loadFailure = collapsed.length === 0
 		? "the extension loader reported no reason"
 		: collapsed.length > LOAD_FAILURE_LIMIT ? `${collapsed.slice(0, LOAD_FAILURE_LIMIT - 1)}…` : collapsed;
 }
 
 /** True once the Factory extension has registered its command controller. */
 export function factoryControllerRegistered(): boolean {
-	return controller !== undefined;
+	return state.controller !== undefined;
 }
 
 export type FactoryHandoffState = "registered" | "load-failed" | "not-registered";
@@ -54,8 +62,8 @@ export type FactoryHandoffState = "registered" | "load-failed" | "not-registered
  * controller exists, and it is reported by the Factory command surface itself.
  */
 export function factoryHandoffState(): FactoryHandoffState {
-	if (controller !== undefined) return "registered";
-	return loadFailure === undefined ? "not-registered" : "load-failed";
+	if (state.controller !== undefined) return "registered";
+	return state.loadFailure === undefined ? "not-registered" : "load-failed";
 }
 
 /** Bounded, secret-free description of why the Factory handoff is unavailable. */
@@ -64,13 +72,13 @@ export function factoryLoadDiagnostic(): string {
 		case "registered":
 			return "the Luna Factory controller is registered";
 		case "load-failed":
-			return `the Luna Factory extension is packaged but failed to load: ${loadFailure}`;
+			return `the Luna Factory extension is packaged but failed to load: ${state.loadFailure}`;
 		default:
 			return "the Luna Factory extension never registered a controller: it is either absent from this build or was not passed to omp as an --extension";
 	}
 }
 
 export async function factoryCommand(command: string, context: unknown): Promise<string> {
-	if (!controller) throw new Error(`Factory is not loaded; enable the packaged Luna Factory extension. ${factoryLoadDiagnostic()}`);
-	return controller(command, context);
+	if (!state.controller) throw new Error(`Factory is not loaded; enable the packaged Luna Factory extension. ${factoryLoadDiagnostic()}`);
+	return state.controller(command, context);
 }
