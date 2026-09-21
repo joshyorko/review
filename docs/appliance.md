@@ -296,6 +296,10 @@ unfinished items, and `stop` records requested/confirmed/unknown cancellation;
 it is not rollback. `export` preserves patches and evidence; `discard` is
 explicit and destructive.
 
+The Review and Factory extensions share their command handoff across
+cache-busted module copies; replacing an extension instance cannot clear a
+newer selection or controller.
+
 Remote, gateway, distributed workers, nested tools, and always-on supervision
 are deferred options, not claims of this appliance. Parent review gates remain
 separate. Runtime capability reports record blocked OCI, SIF/FUSE, or krun/KVM

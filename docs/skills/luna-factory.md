@@ -1,7 +1,7 @@
 ---
 name: luna-factory
 version: "0.1"
-last_updated: 2026-09-15
+last_updated: 2026-09-20
 id: luna-factory
 one_line_purpose: Keep the Luna Factory protocol's mechanical decisions in tested extension code.
 entry_point: docs/skills/luna-factory.md
@@ -74,6 +74,9 @@ launch mechanics, and `contribution-culture.md` for scoping the change itself.
   invocation report the bounded cause — package absent or not passed as an
   `--extension` versus a packaged extension that failed to load — instead of
   blaming the execution opt-in.
+- The Review/Factory command bridge stores selection, controller, and bounded
+  load failure state in one versioned global slot, so cache-busted extension
+  module copies retain the same handoff and identity-safe cleanup.
 
 ## Verification
 
@@ -81,6 +84,7 @@ launch mechanics, and `contribution-culture.md` for scoping the change itself.
 bash tests/omp-review-mode.sh
 bash tests/appliance-contract.sh
 bash tests/test-registry.sh
+BLUEFIN_REVIEW_IMAGE=review:test bash tests/review-factory-coload-smoke.sh
 git diff --check
 ```
 
