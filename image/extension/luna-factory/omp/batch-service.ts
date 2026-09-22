@@ -219,6 +219,7 @@ export class BatchService {
 		return this.pumping;
 	}
 	private release(item: BatchItem, owner: string): void {
+		if (item.selected.action === "inspect") return;
 		this.claims.markSettled(`item:${item.selected.key}`, owner);
 		this.claims.markSettled(`repo:${item.selected.repo}`, owner);
 		this.claims.release(`item:${item.selected.key}`, owner);
@@ -235,12 +236,15 @@ export class BatchService {
 					const dependency = dependencyBlocker(batch, item.selected.key);
 					if (dependency) { item.blocker = dependency; continue; }
 					if (item.attempts >= batch.maxAttempts || batch.items.reduce((sum, candidate) => sum + candidate.attempts, 0) >= batch.maxTotalAttempts) { item.stage = "BLOCKED"; item.blocker = "original attempt budget exhausted; retry never resets it"; this.persist(batch); continue; }
-					if ([...this.running.values()].some((active) => active.item.selected.repo === item.selected.repo)) continue;
+					const mutation = item.selected.action !== "inspect";
+					if ([...this.running.values()].some((active) => mutation && active.item.selected.repo === item.selected.repo && active.item.selected.action !== "inspect")) continue;
 					const owner = `${batch.id}:${item.selected.key}`;
 					try {
-						this.claims.claim(`repo:${item.selected.repo}`, owner);
-						try { this.claims.claim(`item:${item.selected.key}`, owner); }
-						catch (error) { this.claims.release(`repo:${item.selected.repo}`, owner); throw error; }
+						if (mutation) {
+							this.claims.claim(`repo:${item.selected.repo}`, owner);
+							try { this.claims.claim(`item:${item.selected.key}`, owner); }
+							catch (error) { this.claims.release(`repo:${item.selected.repo}`, owner); throw error; }
+						}
 					} catch (error) { item.stage = "BLOCKED"; item.blocker = message(error); this.persist(batch); continue; }
 					item.stage = "RUNNING"; item.blocker = undefined; this.persist(batch);
 					const controller = new AbortController();

@@ -319,7 +319,7 @@ test("dependency-deferred work remains queued when an unrelated prerequisite is 
 test("an unconfirmed stop keeps the item unknown and the repository claim", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-cancel-"));
 	try {
-		const item = selected("org/a#1", "inspect");
+		const item = selected("org/a#1", "patch");
 		const batch = createBatch([item], options("cafe"));
 		const github = { snapshot: async (value: SelectedItem) => value, assertFresh: async () => {} };
 		const service = new BatchService(root, github as never, undefined, {} as never, 1);
@@ -350,4 +350,120 @@ test("an unconfirmed stop keeps the item unknown and the repository claim", asyn
 		assert.match(service.claims.conflict("repo:org/a", "another-owner")!, /batch-cafe/);
 		await service.shutdown();
 	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("read-only inspection bypasses mutation claims and runs concurrently", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-inspect-"));
+	const claimsRoot = await mkdtemp(join(tmpdir(), "factory-inspect-claims-"));
+	try {
+		const items = [selected("org/a#1", "inspect"), selected("org/a#2", "inspect")];
+		const batch = createBatch(items, { ...options("reads"), capacity: 2 });
+		const github = { snapshot: async (value: SelectedItem) => value, assertFresh: async () => {} };
+		const service = new BatchService(root, github as never, undefined, {} as never, 2, claimsRoot);
+		service.store.acquire();
+		service.store.write(batch);
+		const started: string[] = [];
+		const internal = service as unknown as {
+			execute: (current: Batch, currentItem: Batch["items"][number], signal: AbortSignal) => Promise<void>;
+		};
+		internal.execute = async (_current, currentItem) => {
+			started.push(currentItem.selected.key);
+			currentItem.stage = "DONE";
+		};
+		service.claims.claim("repo:org/a", "review:writer");
+		await service.resume(batch.id, {});
+		await service.waitForIdle();
+		const resumed = service.store.read(batch.id);
+		assert.deepEqual(started.sort(), items.map((item) => item.key).sort());
+		assert.deepEqual(resumed.items.map((item) => item.stage), ["DONE", "DONE"]);
+		assert.equal(service.claims.conflict("item:org/a#1", "another-owner"), undefined);
+		assert.match(service.claims.conflict("repo:org/a", "another-owner")!, /review:writer/);
+		await service.shutdown();
+	} finally {
+		await Promise.all([rm(root, { recursive: true, force: true }), rm(claimsRoot, { recursive: true, force: true })]);
+	}
+});
+
+test("patch and pr-ready remain fenced by a conflicting repository claim", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-writes-"));
+	const claimsRoot = await mkdtemp(join(tmpdir(), "factory-writes-claims-"));
+	try {
+		const items = [selected("org/a#3", "patch"), selected("org/a#4", "pr-ready")];
+		const batch = createBatch(items, { ...options("writes"), capacity: 2 });
+		const github = { snapshot: async (value: SelectedItem) => value, assertFresh: async () => {} };
+		const service = new BatchService(root, github as never, undefined, {} as never, 2, claimsRoot);
+		service.store.acquire();
+		service.store.write(batch);
+		const internal = service as unknown as {
+			execute: () => Promise<void>;
+		};
+		internal.execute = async () => { throw new Error("writer should remain fenced"); };
+		service.claims.claim("repo:org/a", "review:writer");
+		await service.resume(batch.id, {});
+		await service.waitForIdle();
+		const resumed = service.store.read(batch.id);
+		assert.deepEqual(resumed.items.map((item) => item.stage), ["BLOCKED", "BLOCKED"]);
+		assert.match(resumed.items[0]!.blocker!, /review:writer/);
+		assert.match(resumed.items[1]!.blocker!, /review:writer/);
+		assert.equal(service.claims.conflict("item:org/a#3", "another-owner"), undefined);
+		assert.match(service.claims.conflict("repo:org/a", "another-owner")!, /review:writer/);
+		await service.shutdown();
+	} finally {
+		await Promise.all([rm(root, { recursive: true, force: true }), rm(claimsRoot, { recursive: true, force: true })]);
+	}
+});
+
+test("mixed inspection and mutation work keeps the read lane available", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-mixed-"));
+	const claimsRoot = await mkdtemp(join(tmpdir(), "factory-mixed-claims-"));
+	try {
+		const items = [selected("org/a#5", "inspect"), selected("org/a#6", "patch")];
+		const batch = createBatch(items, { ...options("mixed"), capacity: 2 });
+		const github = { snapshot: async (value: SelectedItem) => value, assertFresh: async () => {} };
+		const service = new BatchService(root, github as never, undefined, {} as never, 2, claimsRoot);
+		service.store.acquire();
+		service.store.write(batch);
+		const started: string[] = [];
+		const internal = service as unknown as {
+			execute: (current: Batch, currentItem: Batch["items"][number], signal: AbortSignal) => Promise<void>;
+		};
+		internal.execute = async (_current, currentItem) => {
+			started.push(currentItem.selected.key);
+			currentItem.stage = "DONE";
+		};
+		service.claims.claim("repo:org/a", "review:writer");
+		await service.resume(batch.id, {});
+		await service.waitForIdle();
+		const resumed = service.store.read(batch.id);
+		assert.deepEqual(started, ["org/a#5"]);
+		assert.equal(resumed.items[0]!.stage, "DONE");
+		assert.equal(resumed.items[1]!.stage, "BLOCKED");
+		assert.match(resumed.items[1]!.blocker!, /review:writer/);
+		await service.shutdown();
+	} finally {
+		await Promise.all([rm(root, { recursive: true, force: true }), rm(claimsRoot, { recursive: true, force: true })]);
+	}
+});
+
+test("failed inspection leaves no mutation claim behind", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-inspect-failure-"));
+	const claimsRoot = await mkdtemp(join(tmpdir(), "factory-inspect-failure-claims-"));
+	try {
+		const batch = createBatch([selected("org/a#7", "inspect")], options("inspect-failure"));
+		const github = { snapshot: async (value: SelectedItem) => value, assertFresh: async () => {} };
+		const service = new BatchService(root, github as never, undefined, {} as never, 1, claimsRoot);
+		service.store.acquire();
+		service.store.write(batch);
+		const internal = service as unknown as { execute: () => Promise<void> };
+		internal.execute = async () => { throw new Error("inspect failed"); };
+		await service.resume(batch.id, {});
+		await service.waitForIdle();
+		const resumed = service.store.read(batch.id).items[0]!;
+		assert.equal(resumed.stage, "BLOCKED");
+		assert.equal(service.claims.conflict("repo:org/a", "another-owner"), undefined);
+		assert.equal(service.claims.conflict("item:org/a#7", "another-owner"), undefined);
+		await service.shutdown();
+	} finally {
+		await Promise.all([rm(root, { recursive: true, force: true }), rm(claimsRoot, { recursive: true, force: true })]);
+	}
 });
