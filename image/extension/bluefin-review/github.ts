@@ -78,35 +78,49 @@ const QUEUE_FIELDS = `
 	labels(first: 20) { nodes { name } }
 `;
 
-/** What a pull request carries beyond the fields an issue shares. */
-const PR_ITEM_FIELDS = `
-	isDraft
-	mergeable
-	reviewDecision
-	additions
-	deletions
-	changedFiles
-	headRefOid
-	files(first: 100) {
-		pageInfo { hasNextPage }
-		nodes { path }
+/** Fields cheap enough to fetch for every PR in a queue search page. */
+const PR_QUEUE_FIELDS = `
+isDraft
+mergeable
+reviewDecision
+additions
+deletions
+changedFiles
+headRefOid
+autoMergeRequest { enabledAt }
+commits(last: 1) {
+	nodes {
+		commit {
+			statusCheckRollup { state }
+		}
 	}
-	autoMergeRequest { enabledAt }
-	commits(last: 1) {
-		nodes {
-			commit {
-				statusCheckRollup { state }
-				checkSuites(first: 50) {
-					pageInfo { hasNextPage }
-					nodes { status conclusion }
-				}
+}
+`;
+
+/** Expensive PR evidence fetched only by bounded, named-item reads. */
+const PR_DETAIL_FIELDS = `
+files(first: 100) {
+	pageInfo { hasNextPage }
+	nodes { path }
+}
+commits(last: 1) {
+	nodes {
+		commit {
+			statusCheckRollup { state }
+			checkSuites(first: 50) {
+				pageInfo { hasNextPage }
+				nodes { status conclusion }
 			}
 		}
 	}
-	closingIssuesReferences(first: 5) {
-		nodes { number repository { nameWithOwner } }
-	}
+}
+closingIssuesReferences(first: 5) {
+	nodes { number repository { nameWithOwner } }
+}
 `;
+
+/** Complete PR evidence for bounded named-item reads and mutation admission. */
+const PR_ITEM_FIELDS = `${PR_QUEUE_FIELDS}${PR_DETAIL_FIELDS}`;
 
 /** What an issue carries beyond the shared queue fields. */
 const ISSUE_ITEM_FIELDS = `
@@ -128,7 +142,7 @@ query($search: String!, $cursor: String) {
 		nodes {
 			... on PullRequest {
 				${QUEUE_FIELDS}
-				${PR_ITEM_FIELDS}
+				${PR_QUEUE_FIELDS}
 			}
 		}
 	}
@@ -343,6 +357,8 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 	const updated = node.updatedAt ? Date.parse(node.updatedAt) : Number.NaN;
 	const commit = node.commits?.nodes?.[0]?.commit;
 	const ci = classifyCi(commit?.statusCheckRollup?.state, commit?.checkSuites);
+	const files = node.files;
+	const closingIssues = node.closingIssuesReferences;
 	return {
 		id: node.number,
 		type: mode === "prs" ? "pr" : "issue",
@@ -363,21 +379,26 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 		headSha: node.headRefOid,
 		autoMergeEnabled: Boolean(node.autoMergeRequest?.enabledAt),
 		workflowFiles:
-			mode === "prs"
-				? (node.files?.nodes ?? []).map((file) => file.path ?? "").filter((path) => path.startsWith(".github/workflows/"))
+			mode === "prs" && files !== undefined
+				? (files?.nodes ?? []).map((file) => file.path ?? "").filter((path) => path.startsWith(".github/workflows/"))
 				: undefined,
 		changedFilesComplete:
-			mode === "prs"
-				? node.files?.pageInfo?.hasNextPage === false
-					&& (node.changedFiles === undefined || (node.files.nodes ?? []).length >= node.changedFiles)
+			mode === "prs" && files !== undefined
+				? files === null
+					? false
+					: files.pageInfo?.hasNextPage === false
+						&& (node.changedFiles === undefined || (files.nodes ?? []).length >= node.changedFiles)
 				: undefined,
-		closingIssues: (node.closingIssuesReferences?.nodes ?? [])
-			.map((reference) =>
-				reference.repository?.nameWithOwner && typeof reference.number === "number"
-					? `${reference.repository.nameWithOwner}#${reference.number}`
-					: "",
-			)
-			.filter(Boolean),
+		closingIssues:
+			closingIssues === undefined
+				? undefined
+				: (closingIssues?.nodes ?? [])
+					.map((reference) =>
+						reference.repository?.nameWithOwner && typeof reference.number === "number"
+							? `${reference.repository.nameWithOwner}#${reference.number}`
+							: "",
+					)
+					.filter(Boolean),
 		closedByPrs: (node.closedByPullRequestsReferences?.nodes ?? [])
 			.filter((pr) => pr.merged === true || pr.state?.toUpperCase() === "MERGED")
 			.map((pr) =>
@@ -564,7 +585,15 @@ export async function fetchItemsByKey(
 			// ranking work after it is closed, and a finished item is not a queue.
 			if (!node || node.closed === true) continue;
 			const item = toQueueItem(node, mode);
-			if (item) items.push(item);
+			if (item) {
+				// Named reads are the mutation boundary. Missing expensive evidence
+				// must fail closed rather than look like a clean PR.
+				items.push(
+					mode === "prs" && item.changedFilesComplete === undefined
+						? { ...item, changedFilesComplete: false }
+						: item,
+				);
+			}
 		}
 		const failed = payload.errors?.length
 			? payload.errors.map((entry) => entry.message ?? "unknown").join("; ")

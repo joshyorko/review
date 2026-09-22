@@ -603,6 +603,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
 				}
+				if (current.changedFilesComplete !== true) {
+					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+				}
 				if (!wasRepair && (current.ciEvidenceComplete === false || current.ciStatus === undefined)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: CI state is incomplete or unknown`;
 				}
@@ -610,6 +613,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					return `Cannot dispatch ${item.repo}#${item.id}: CI is ${current.ciStatus}`;
 				}
 			}
+			for (const current of live.items) {
+				const wasRepair = isRepairRequested(current, mode.currentUserLogin);
+				if (!wasRepair && !policy.allowWorkflowSlay && (current.workflowFiles?.length ?? 0) > 0) {
+					return `Cannot dispatch ${current.repo}#${current.id}: changes ${current.workflowFiles![0]}`;
+				}
+			}
+			const liveWorkflowPermission = await workflowPermissionBlocker(live.items);
+			if (liveWorkflowPermission) return liveWorkflowPermission;
 			return undefined;
 		}
 
@@ -631,7 +642,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
 						return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
 					}
-					if (!wasRepair && current.changedFilesComplete === false) {
+					if (current.changedFilesComplete !== true) {
 						return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
 					}
 				}

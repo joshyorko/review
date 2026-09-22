@@ -160,7 +160,9 @@ function fakeFetch(calls, known = {}) {
 				return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
 			}
 			assert.match(body.variables.search, /org:projectbluefin/);
-			if (body.variables.search.includes("is:pr")) assert.match(body.query, /checkSuites/);
+			if (body.variables.search.includes("is:pr")) {
+				assert.doesNotMatch(body.query, /files\(first: 100\)|checkSuites\(first: 50\)|closingIssuesReferences/);
+			}
 			return {
 				ok: true,
 				status: 200,
@@ -556,7 +558,7 @@ test("queue fetch maps CI rollup and reports auth failure", async () => {
 test("check suites surface failures and pending runs without rollup contexts", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
-		assert.match(body.query, /checkSuites\(first: 50\)/);
+		assert.doesNotMatch(body.query, /files\(first: 100\)|checkSuites\(first: 50\)|closingIssuesReferences/);
 		const node = (number, checkSuites) => ({
 			number,
 			title: `suite ${number}`,
@@ -586,6 +588,44 @@ test("check suites surface failures and pending runs without rollup contexts", a
 	const result = await fetchQueue("prs", { token: "t", fetchImpl });
 	assert.deepEqual(result.items.map((item) => item.ciStatus), ["failure", "pending", "success"]);
 });
+test("bounded named PR reads carry expensive evidence after lightweight discovery", async () => {
+	let query = "";
+	const result = await fetchItemsByKey(["owner/repo#1"], "prs", {
+		token: "t",
+		fetchImpl: async (_url, init) => {
+			query = JSON.parse(String(init?.body ?? "{}")).query;
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					data: {
+						w0: {
+							issueOrPullRequest: {
+								number: 1,
+								repository: { nameWithOwner: "owner/repo" },
+								headRefOid: "a".repeat(40),
+								files: { pageInfo: { hasNextPage: false }, nodes: [{ path: ".github/workflows/ci.yml" }] },
+								commits: { nodes: [{ commit: {
+									statusCheckRollup: null,
+									checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "COMPLETED", conclusion: "SUCCESS" }] },
+								} }] },
+								closingIssuesReferences: { nodes: [{ number: 2, repository: { nameWithOwner: "owner/repo" } }] },
+							},
+						},
+					},
+				}),
+			};
+		},
+	});
+	assert.match(query, /files\(first: 100\)/);
+	assert.match(query, /checkSuites\(first: 50\)/);
+	assert.match(query, /closingIssuesReferences\(first: 5\)/);
+	assert.equal(result.items[0]?.headSha, "a".repeat(40));
+	assert.deepEqual(result.items[0]?.workflowFiles, [".github/workflows/ci.yml"]);
+	assert.deepEqual(result.items[0]?.closingIssues, ["owner/repo#2"]);
+});
+
 
 test("successful statusCheckRollup takes precedence over unrelated queued check suites (#592)", async () => {
 	const fetchImpl = async (_url, init) => {
@@ -667,7 +707,7 @@ test("toCiStatus prioritizes decisive rollup and falls back to check suites (#59
 test("managed pull request queue keeps workflow changes and incomplete file lists visible but blocked", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
-		assert.match(body.query, /files\(first: 100\)/);
+		assert.doesNotMatch(body.query, /files\(first: 100\)|checkSuites\(first: 50\)|closingIssuesReferences/);
 		return {
 			ok: true,
 			status: 200,
@@ -3315,6 +3355,68 @@ test("hive work the search never returned is still admitted to the queue", async
 	const status = await pi.tools.get("hive_workbench_status").execute("id", {});
 	assert.equal(status.details.hive.queued.present, 1);
 	assert.equal(status.details.hive.queued.total, 3);
+});
+
+test("issue Hive backfill is not capped by PR detail bound", async () => {
+	const queued = Array.from({ length: BATCH_LIMIT + 1 }, (_, index) => ({
+		repo: "projectbluefin/lab",
+		number: 1000 + index,
+		title: `issue ${1000 + index}`,
+	}));
+	const hubFetch = async (url, init) => {
+		const target = String(url);
+		if (target.includes("/graphql")) {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			if (body.variables?.search !== undefined) {
+				return {
+					ok: true,
+					status: 200,
+					statusText: "OK",
+					json: async () => ({ data: { viewer: { login: "jorge" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } }),
+				};
+			}
+			const data = {};
+			const aliases = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+			for (const [, alias, owner, repo, number] of body.query.matchAll(aliases)) {
+				data[alias] = {
+					issueOrPullRequest: {
+						number: Number(number),
+						title: `issue ${number}`,
+						url: `https://github.com/${owner}/${repo}/issues/${number}`,
+						updatedAt: new Date(NOW).toISOString(),
+						author: { login: "reviewer" },
+						repository: { nameWithOwner: `${owner}/${repo}` },
+						labels: { nodes: [] },
+						closed: false,
+					},
+				};
+			}
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+		}
+		const path = target.replace("https://hive.example", "");
+		const body =
+			path === "/api/v1/status"
+				? { hub: "online", actionable_items: queued.length }
+				: path === "/api/contribute/queue"
+					? { queue: queued }
+					: { groups: [] };
+		return { ok: true, status: 200, statusText: "OK", json: async () => body };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: hubFetch,
+		env: { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" },
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	pi.flagValues.set("issues", true);
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	const status = await pi.tools.get("hive_workbench_status").execute("id", {});
+	assert.equal(status.details.hive.queued.present, BATCH_LIMIT + 1);
+	assert.equal(status.details.hive.queued.total, BATCH_LIMIT + 1);
 });
 
 test("the dashboard drills into Hive's queue by stage and explains each item", (t) => {

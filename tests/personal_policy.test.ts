@@ -72,6 +72,7 @@ function makeFetch(
 	includeChangedFiles = true,
 	repositoryPushPermission?: boolean,
 	requestedChanges = false,
+	searchIncludeChangedFiles = includeChangedFiles,
 ) {
 	return (url: string | URL | Request, init?: RequestInit) => {
 		const target = String(url);
@@ -94,7 +95,7 @@ function makeFetch(
 					json: async () => ({
 						data: {
 							viewer: { login: "josh" },
-							search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode(workflow, includeChangedFiles, requestedChanges)] },
+							search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [workflowNode(workflow, searchIncludeChangedFiles, requestedChanges)] },
 						},
 					}),
 				});
@@ -220,6 +221,24 @@ test("personal workflow dispatch rejects push-only permission when workflow scop
 	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
 });
 
+test("personal workflow dispatch rechecks named workflow paths when queue omits files", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
+		org: "example",
+		fetchImpl: makeFetch("repo", "4".repeat(40), true, true, true, undefined, false, false) as typeof fetch,
+		env: ENV,
+	});
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission/.test(notification.message)));
+});
+
 test("returned workflow PR repair still requires capability when scopes are omitted", async (t) => {
 	const pi = fakeHost();
 	pi.flagValues.set("autoslay", true);
@@ -236,6 +255,24 @@ test("returned workflow PR repair still requires capability when scopes are omit
 
 	assert.equal(pi.messages.length, 0);
 	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+});
+
+test("returned workflow repair fails closed without named file evidence", async (t) => {
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
+		org: "example",
+		fetchImpl: makeFetch(null, "4".repeat(40), true, true, false, undefined, true, false) as typeof fetch,
+		env: ENV,
+	});
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /complete changed-file list unavailable/.test(notification.message)));
 });
 
 test("personal workflow dispatch reports missing workflow write permission", async (t) => {
