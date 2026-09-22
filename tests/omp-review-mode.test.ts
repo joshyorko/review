@@ -160,7 +160,9 @@ function fakeFetch(calls, known = {}) {
 				return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
 			}
 			assert.match(body.variables.search, /org:projectbluefin/);
-			if (body.variables.search.includes("is:pr")) assert.match(body.query, /checkSuites/);
+			if (body.variables.search.includes("is:pr")) {
+				assert.doesNotMatch(body.query, /files\(first: 100\)|checkSuites\(first: 50\)|closingIssuesReferences/);
+			}
 			return {
 				ok: true,
 				status: 200,
@@ -556,7 +558,7 @@ test("queue fetch maps CI rollup and reports auth failure", async () => {
 test("check suites surface failures and pending runs without rollup contexts", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
-		assert.match(body.query, /checkSuites\(first: 50\)/);
+		assert.doesNotMatch(body.query, /files\(first: 100\)|checkSuites\(first: 50\)|closingIssuesReferences/);
 		const node = (number, checkSuites) => ({
 			number,
 			title: `suite ${number}`,
@@ -586,6 +588,44 @@ test("check suites surface failures and pending runs without rollup contexts", a
 	const result = await fetchQueue("prs", { token: "t", fetchImpl });
 	assert.deepEqual(result.items.map((item) => item.ciStatus), ["failure", "pending", "success"]);
 });
+test("bounded named PR reads carry expensive evidence after lightweight discovery", async () => {
+	let query = "";
+	const result = await fetchItemsByKey(["owner/repo#1"], "prs", {
+		token: "t",
+		fetchImpl: async (_url, init) => {
+			query = JSON.parse(String(init?.body ?? "{}")).query;
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					data: {
+						w0: {
+							issueOrPullRequest: {
+								number: 1,
+								repository: { nameWithOwner: "owner/repo" },
+								headRefOid: "a".repeat(40),
+								files: { pageInfo: { hasNextPage: false }, nodes: [{ path: ".github/workflows/ci.yml" }] },
+								commits: { nodes: [{ commit: {
+									statusCheckRollup: null,
+									checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "COMPLETED", conclusion: "SUCCESS" }] },
+								} }] },
+								closingIssuesReferences: { nodes: [{ number: 2, repository: { nameWithOwner: "owner/repo" } }] },
+							},
+						},
+					},
+				}),
+			};
+		},
+	});
+	assert.match(query, /files\(first: 100\)/);
+	assert.match(query, /checkSuites\(first: 50\)/);
+	assert.match(query, /closingIssuesReferences\(first: 5\)/);
+	assert.equal(result.items[0]?.headSha, "a".repeat(40));
+	assert.deepEqual(result.items[0]?.workflowFiles, [".github/workflows/ci.yml"]);
+	assert.deepEqual(result.items[0]?.closingIssues, ["owner/repo#2"]);
+});
+
 
 test("successful statusCheckRollup takes precedence over unrelated queued check suites (#592)", async () => {
 	const fetchImpl = async (_url, init) => {

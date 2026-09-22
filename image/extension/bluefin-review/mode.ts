@@ -630,7 +630,9 @@ export class ReviewMode {
 		const present = new Set(fetched.map(itemKey));
 		const wanted = this.hiveKeysForMode().filter((key) => !present.has(key));
 		if (wanted.length === 0) return [];
-		const result = await fetchItemsByKey(wanted, this.queueMode, options);
+		// Named PR reads carry expensive file/check evidence; admit only one
+		// bounded wave here so an org-wide refresh never hydrates all Hive work.
+		const result = await fetchItemsByKey(wanted.slice(0, BATCH_LIMIT), this.queueMode, options);
 		if (this.inflight !== controller || controller.signal.aborted) return [];
 		return result.items;
 	}
