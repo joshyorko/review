@@ -64,7 +64,7 @@ const HELP: readonly string[] = [
 	"HIVE WORKBENCH",
 	"",
 	"  space            toggle selection on the highlighted item",
-    "  F                Send selected items to Factory (inspect)",
+	"  F                Send selected items to Factory",
 	"  alt+b            select or clear the current repository group",
 	"  x / A            clear selections / select the filtered slice",
 	"  tab              toggle pull requests and issues",
