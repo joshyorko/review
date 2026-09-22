@@ -3357,6 +3357,68 @@ test("hive work the search never returned is still admitted to the queue", async
 	assert.equal(status.details.hive.queued.total, 3);
 });
 
+test("issue Hive backfill is not capped by PR detail bound", async () => {
+	const queued = Array.from({ length: BATCH_LIMIT + 1 }, (_, index) => ({
+		repo: "projectbluefin/lab",
+		number: 1000 + index,
+		title: `issue ${1000 + index}`,
+	}));
+	const hubFetch = async (url, init) => {
+		const target = String(url);
+		if (target.includes("/graphql")) {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			if (body.variables?.search !== undefined) {
+				return {
+					ok: true,
+					status: 200,
+					statusText: "OK",
+					json: async () => ({ data: { viewer: { login: "jorge" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } }),
+				};
+			}
+			const data = {};
+			const aliases = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+			for (const [, alias, owner, repo, number] of body.query.matchAll(aliases)) {
+				data[alias] = {
+					issueOrPullRequest: {
+						number: Number(number),
+						title: `issue ${number}`,
+						url: `https://github.com/${owner}/${repo}/issues/${number}`,
+						updatedAt: new Date(NOW).toISOString(),
+						author: { login: "reviewer" },
+						repository: { nameWithOwner: `${owner}/${repo}` },
+						labels: { nodes: [] },
+						closed: false,
+					},
+				};
+			}
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+		}
+		const path = target.replace("https://hive.example", "");
+		const body =
+			path === "/api/v1/status"
+				? { hub: "online", actionable_items: queued.length }
+				: path === "/api/contribute/queue"
+					? { queue: queued }
+					: { groups: [] };
+		return { ok: true, status: 200, statusText: "OK", json: async () => body };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: hubFetch,
+		env: { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" },
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	pi.flagValues.set("issues", true);
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	const status = await pi.tools.get("hive_workbench_status").execute("id", {});
+	assert.equal(status.details.hive.queued.present, BATCH_LIMIT + 1);
+	assert.equal(status.details.hive.queued.total, BATCH_LIMIT + 1);
+});
+
 test("the dashboard drills into Hive's queue by stage and explains each item", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));

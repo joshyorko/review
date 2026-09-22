@@ -603,7 +603,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
 				}
-				if (!wasRepair && current.changedFilesComplete !== true) {
+				if (current.changedFilesComplete !== true) {
 					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
 				}
 				if (!wasRepair && (current.ciEvidenceComplete === false || current.ciStatus === undefined)) {
@@ -642,7 +642,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
 						return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
 					}
-					if (!wasRepair && current.changedFilesComplete === false) {
+					if (current.changedFilesComplete !== true) {
 						return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
 					}
 				}
