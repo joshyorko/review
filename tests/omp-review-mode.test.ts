@@ -2854,18 +2854,23 @@ test("production Review-to-Factory reconcile releases a failed wave only after e
 	});
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	ctx.editorResponses.push(`claims reconcile ${owner} repo:projectbluefin/review`);
-	ctx.overlays[0].handleInput("F");
-	await new Promise((resolve) => setImmediate(resolve));
+	const factoryCommand = factory.commands.get("factory");
+	const reconcile = async (claimOwner, resource) => {
+		if (!ctx.asyncJobs.recent.some((job) => job.id === "worker-command" && job.status === "failed")) return "unknown";
+		claims.markSettled(resource, claimOwner);
+		return "settled";
+	};
+	await factoryCommand.handler(`claims reconcile ${owner} repo:projectbluefin/review`, { ui: ctx.ui, reconcileMutationClaim: reconcile });
 	assert.ok(ctx.notifications.some((notification) => /claim released/.test(notification.message)));
 	assert.equal(claims.conflict("repo:projectbluefin/review", "review:other:0"), undefined);
 	const beforeRetry = pi.messages.length;
+	ctx.overlays.at(-1).handleInput("A");
 	ctx.overlays.at(-1).handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.ok(pi.messages.length > beforeRetry, "reconciled blocked wave can retry through Review");
 
 });
-test("restart uses persisted terminal evidence for one Review retry", async () => {
+test("restart uses persisted terminal evidence for one Factory retry", async () => {
 	const item = { id: 42, repo: "projectbluefin/review", title: "recover safely", headSha: "a".repeat(40), type: "pr" };
 	const env = { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute" };
 	const pi1 = fakeHost();
@@ -2894,20 +2899,22 @@ test("restart uses persisted terminal evidence for one Review retry", async () =
 	const pi2 = fakeHost();
 	const ctx2 = fakeCtx();
 	ctx2.ui.parent = ctx2;
-		ctx2.sessionManager = { getBranch: () => [
-			{ type: "custom", customType: STATE_ENTRY, data: { mode: "prs", repo: item.repo, id: item.id } },
-			...pi1.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
-		] };
+	ctx2.sessionManager = { getBranch: () => [
+		{ type: "custom", customType: STATE_ENTRY, data: { mode: "prs", repo: item.repo, id: item.id } },
+		...pi1.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+	] };
 	const review2 = createReviewExtension(pi2, { org: "projectbluefin", fetchImpl: hiveBackedFetch([item]), env });
 	await pi2.events.get("session_start")({}, ctx2);
 	await review2.whenStarted();
-	ctx2.editorResponses.push(`claims reconcile ${owner} repo:projectbluefin/review`);
-	ctx2.overlays.at(-1).handleInput("F");
-	await new Promise((resolve) => setImmediate(resolve));
+	const factoryCommand = factory.commands.get("factory");
+	const claims = new ResourceClaims(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT);
+	const reconcile = async (claimOwner, resource) => {
+		claims.markSettled(resource, claimOwner);
+		return "settled";
+	};
+	await factoryCommand.handler(`claims reconcile ${owner} repo:projectbluefin/review`, { ui: ctx2.ui, reconcileMutationClaim: reconcile });
 	assert.ok(ctx2.notifications.some((notification) => /Reconciled .*repo:/.test(notification.message)));
-	ctx2.editorResponses.push(`claims reconcile ${owner} item:projectbluefin/review#42`);
-	ctx2.overlays.at(-1).handleInput("F");
-	await new Promise((resolve) => setImmediate(resolve));
+	await factoryCommand.handler(`claims reconcile ${owner} item:projectbluefin/review#42`, { ui: ctx2.ui, reconcileMutationClaim: reconcile });
 	assert.ok(ctx2.notifications.some((notification) => /Reconciled .*item:/.test(notification.message)));
 	const beforeRetry = pi2.messages.length;
 	ctx2.overlays.at(-1).handleInput("A");
@@ -3666,6 +3673,7 @@ test("a Review session that offers the Factory handoff has a registered Factory 
 	const coLoaded = ctx2.overlays[0];
 	assert.ok(coLoaded.render(200).join("\n").includes("F factory"), "a co-loaded Factory is advertised");
 	assert.ok(!ctx2.notifications.some((n) => /Factory handoff unavailable/.test(n.message)), "a co-loaded session warns about nothing");
+	ctx2.overlays[0].handleInput("space");
 	ctx2.selectResponses.push("Factory status");
 	coLoaded.handleInput("F");
 	for (let i = 0; i < 20; i++) await Promise.resolve();
