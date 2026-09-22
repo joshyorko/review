@@ -3666,7 +3666,7 @@ test("a Review session that offers the Factory handoff has a registered Factory 
 	const coLoaded = ctx2.overlays[0];
 	assert.ok(coLoaded.render(200).join("\n").includes("F factory"), "a co-loaded Factory is advertised");
 	assert.ok(!ctx2.notifications.some((n) => /Factory handoff unavailable/.test(n.message)), "a co-loaded session warns about nothing");
-	ctx2.editorResponses.push("status");
+	ctx2.selectResponses.push("Factory status");
 	coLoaded.handleInput("F");
 	for (let i = 0; i < 20; i++) await Promise.resolve();
 	assert.ok(
