@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "5.4"
-last_updated: 2026-09-16
+version: "5.5"
+last_updated: 2026-09-22
 id: review-dashboard
 one_line_purpose: Maintain the queue, slay lifecycles, and workflowz workbench.
 entry_point: docs/skills/review-dashboard.md
@@ -83,6 +83,7 @@ palette and warm issue palette.
 | `s` | Slay selected PRs, or implement selected issues through submitted PRs |
 | `Alt-S` | Repair returned PRs first, then implement the visible issue backlog |
 | `f` | Fix selected items in isolated workspaces |
+| `F` | Open the Factory command prompt when Factory is loaded |
 | `d` | Inspect bounded evidence (PR diff, issue discussion) |
 | `p` | Pause or resume later wave admission |
 | `r` | Refetch GitHub and Hive projections |
@@ -97,6 +98,11 @@ palette and warm issue palette.
 | `Enter` / `i` | Cite the focused item in the prompt and show confirmation |
 | `?` | Show the key guide |
 | `q` / `Esc` | Close the workbench |
+
+Factory command entry uses OMP’s prompt-style editor with the selected action
+prefilled: Enter submit · Shift+Enter newline · Esc cancel. The workbench closes
+before opening this prompt and reopens after success, error, or cancellation.
+Explicit workbench `q`/`Esc` still closes it.
 
 ## Slay execution
 

@@ -145,7 +145,7 @@ interface UiLike {
 	notify(message: string, level?: "info" | "warning" | "error"): void;
 	input(title: string, placeholder?: string): Promise<string | undefined>;
 	confirm(title: string, message: string): Promise<boolean>;
-	editor(title: string, prefill?: string): Promise<string | undefined>;
+	editor(title: string, prefill?: string, options?: unknown, editorOptions?: { promptStyle?: boolean }): Promise<string | undefined>;
 	setStatus(key: string, value: string | undefined): void;
 	setWidget(key: string, content: unknown, options?: { placement?: string }): void;
 	setTitle(title: string): void;
@@ -922,7 +922,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				return;
 			}
 			try {
-				const command = await ctx.ui.editor("Factory: start inspect|patch|pr-ready, status, claims status|reconcile <owner> <resource>, resume/pause/stop <batch>, inspect/export/discard <batch>", `start ${action.action}`);
+				const command = await ctx.ui.editor("Factory: start inspect|patch|pr-ready, status, claims status|reconcile <owner> <resource>, resume/pause/stop <batch>, inspect/export/discard <batch>", `start ${action.action}`, undefined, { promptStyle: true });
 				if (command === undefined) return;
 				if (mode.isBlueberry && /^(start|selected)\s+(patch|pr-ready)|^(run|resume|retry)\b/.test(command)) throw new Error("Blueberry mode permits Factory inspection only");
 				const factoryCtx = { ...ctx, reconcileMutationClaim };
@@ -1117,7 +1117,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				{ overlay: false },
 			);
 			if (action.kind !== "close") await dispatch(ctx, action);
-			if (action.kind === "scope") reopen = true;
+			if (action.kind === "scope" || action.kind === "factory") reopen = true;
 		} catch {
 			// OMP cancellation closes the workbench without changing batch state.
 		} finally {
