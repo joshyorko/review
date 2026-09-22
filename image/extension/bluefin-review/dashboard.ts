@@ -840,7 +840,7 @@ export class ReviewDashboard {
 		}
 
 	if (key === "F") {
-		this.emitAction({ kind: "factory", action: "inspect" });
+		this.done({ kind: "factory", action: "inspect" });
 		return;
 	}
 		const activeItem = this.mode.selected();

@@ -346,6 +346,7 @@ function fakeCtx() {
 	const pasted = [];
 	const confirmations = [];
 	const editorResponses = [];
+	const editorCalls = [];
 	const ctx = {
 		hasUI: true,
 		notifications,
@@ -355,6 +356,7 @@ function fakeCtx() {
 		pasted,
 		confirmations,
 		editorResponses,
+		editorCalls,
 		asyncJobs: { running: [], recent: [], delivery: { pending: 0, pendingJobIds: [] } },
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
@@ -362,7 +364,10 @@ function fakeCtx() {
 				confirmations.push({ title, message });
 				return true;
 			},
-			editor: async () => editorResponses.shift(),
+			editor: async (...args) => {
+				editorCalls.push(args);
+				return editorResponses.shift();
+			},
 			setStatus: (key, value) => statuses.set(key, value),
 			setWidget: (key, content) => widgets.set(key, content),
 			setTitle: () => {},
@@ -2807,7 +2812,7 @@ test("production Review-to-Factory reconcile releases a failed wave only after e
 	assert.ok(ctx.notifications.some((notification) => /claim released/.test(notification.message)));
 	assert.equal(claims.conflict("repo:projectbluefin/review", "review:other:0"), undefined);
 	const beforeRetry = pi.messages.length;
-	ctx.overlays[0].handleInput("f");
+	ctx.overlays.at(-1).handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.ok(pi.messages.length > beforeRetry, "reconciled blocked wave can retry through Review");
 
@@ -2853,12 +2858,12 @@ test("restart uses persisted terminal evidence for one Review retry", async () =
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.ok(ctx2.notifications.some((notification) => /Reconciled .*repo:/.test(notification.message)));
 	ctx2.editorResponses.push(`claims reconcile ${owner} item:projectbluefin/review#42`);
-	ctx2.overlays[0].handleInput("F");
+	ctx2.overlays.at(-1).handleInput("F");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.ok(ctx2.notifications.some((notification) => /Reconciled .*item:/.test(notification.message)));
 	const beforeRetry = pi2.messages.length;
-	ctx2.overlays[0].handleInput("A");
-	ctx2.overlays[0].handleInput("f");
+	ctx2.overlays.at(-1).handleInput("A");
+	ctx2.overlays.at(-1).handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi2.messages.length, beforeRetry + 1);
 });
@@ -3434,7 +3439,7 @@ test("a Review session that offers the Factory handoff has a registered Factory 
 	alone.handleInput("F");
 	for (let i = 0; i < 20; i++) await Promise.resolve();
 	assert.ok(ctx.notifications.some((n) => /Factory handoff unavailable/.test(n.message)), "a direct invocation is explained, not silent");
-	alone.handleInput("q");
+	ctx.overlays.at(-1).handleInput("q");
 
 	// Co-load: the real package entry registers the controller in this process.
 	const factoryHost = fakeHost();
@@ -3458,12 +3463,98 @@ test("a Review session that offers the Factory handoff has a registered Factory 
 		ctx2.notifications.some((n) => /LUNA_FACTORY_ENABLED=1|Factory is disabled/.test(n.message)),
 		"the handoff reaches Factory, which reports the execution opt-in instead of a load failure",
 	);
-	coLoaded.handleInput("q");
+	ctx2.overlays.at(-1).handleInput("q");
 
 	// Loading Factory starts no work, and the handoff is per-session.
 	await factoryHost.events.get("session_shutdown")!();
 	assert.equal(factoryHandoffState(), "not-registered");
 });
+
+for (const outcome of ["success", "error", "cancellation"]) {
+	test(`Factory F prompt reopens exactly once after ${outcome}, never while pending`, async (t) => {
+		const pi = fakeHost();
+		const ctx = fakeCtx();
+		ctx.ui.parent = ctx;
+		const editor = Promise.withResolvers<string | undefined>();
+		const command = Promise.withResolvers<string>();
+		const commands: string[] = [];
+		const unregister = registerFactoryController(async (input) => {
+			commands.push(input);
+			return command.promise;
+		});
+		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+		const turn = () => {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			return promise;
+		};
+		t.after(async () => {
+			editor.resolve(undefined);
+			command.resolve("finished");
+			await turn();
+			ctx.overlays.at(-1)?.handleInput("q");
+			await turn();
+			for (const dashboard of ctx.overlays) dashboard.dispose();
+			await pi.events.get("session_shutdown")();
+			unregister();
+		});
+		ctx.editorResponses.push(editor.promise);
+		await pi.events.get("session_start")({}, ctx);
+		await review.whenStarted();
+		const original = ctx.overlays[0];
+		original.handleInput("F");
+		await turn();
+
+		assert.equal(ctx.editorCalls.length, 1);
+		const [, prefill, options, promptOptions] = ctx.editorCalls[0];
+		assert.equal(prefill, "start inspect");
+		assert.equal(options, undefined);
+		assert.deepEqual(promptOptions, { promptStyle: true });
+		assert.deepEqual(commands, [], "editing is not Factory command submission");
+		const openWorkbench = () => pi.shortcuts.get("alt+b").handler(ctx);
+		openWorkbench();
+		openWorkbench();
+		await turn();
+		assert.equal(ctx.overlays.length, 1, "pending editor prevents another workbench");
+
+		if (outcome === "cancellation") {
+			editor.resolve(undefined);
+		} else {
+			editor.resolve("status");
+			await turn();
+			assert.deepEqual(commands, ["status"]);
+			openWorkbench();
+			await turn();
+			assert.equal(ctx.overlays.length, 1, "Factory must finish before the workbench reopens");
+			assert.ok(!ctx.notifications.some((n) => n.message === "Factory result" || n.message === "Factory failed"));
+			if (outcome === "error") command.reject(new Error("Factory failed"));
+			else command.resolve("Factory result");
+		}
+		await turn();
+
+		assert.deepEqual(commands, outcome === "cancellation" ? [] : ["status"]);
+		if (outcome !== "cancellation") {
+			assert.ok(ctx.notifications.some((n) => n.message === (outcome === "error" ? "Factory failed" : "Factory result")
+				&& n.level === (outcome === "error" ? "error" : "info")));
+		}
+		assert.equal(ctx.overlays.length, 2, "completion opens exactly one replacement workbench");
+		assert.notEqual(ctx.overlays.at(-1), original);
+		openWorkbench();
+		openWorkbench();
+		await turn();
+		assert.equal(ctx.overlays.length, 2, "the replacement is tracked as the current workbench");
+
+		const closeKey = outcome === "error" ? RAW_KEYS.escape[0] : "q";
+		ctx.overlays.at(-1).handleInput(closeKey);
+		await turn();
+		await turn();
+		assert.equal(ctx.overlays.length, 2, `${closeKey === "q" ? "q" : "Esc"} closes without reopening`);
+		openWorkbench();
+		await turn();
+		assert.equal(ctx.overlays.length, 3, "only an explicit open creates the next workbench");
+		assert.equal(ctx.editorCalls.length, 1, "reopening does not repeat the Factory prompt");
+	});
+}
 
 test("issue admission gate handles positive admission, negative cases, and invariants", async () => {
 	const setup = async (issueAttrs, options = {}) => {

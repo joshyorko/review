@@ -98,6 +98,11 @@ palette and warm issue palette.
 | `?` | Show the key guide |
 | `q` / `Esc` | Close the workbench |
 
+`F` opens the Factory prompt with its existing command prefill preserved:
+`Enter` submit · `Shift+Enter` newline · `Esc` cancel. The workbench returns
+automatically after the handoff succeeds, errors, or is cancelled. Closing the
+dashboard itself with `q` or `Esc` leaves it closed.
+
 ## Slay execution
 
 Slay has entity-specific terminal conditions. Ordinary pull requests run through
