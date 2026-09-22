@@ -107,20 +107,23 @@ cannot silently bypass validation.
     `COPILOT_INTEGRATION_ID`.
   - Anthropic: `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`.
   - OpenAI and Gemini: `OPENAI_API_KEY`, `GEMINI_API_KEY`.
-  - Amazon Bedrock: `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`,
+  - Amazon Bedrock: `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ACCESS_KEY_ID`,
+    `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`,
     `AWS_DEFAULT_REGION`.
   This same allowlist is used by Podman's `--env` forwarding and Apptainer's
-  `APPTAINERENV_` forwarding. The launcher does not pass the broader AWS
-  credential or configuration environment.
+  `APPTAINERENV_` forwarding. The launcher does not pass unrelated `AWS_*`
+  variables or broader AWS configuration environment.
 - Apptainer's contained environment receives only the explicit credential and
   runtime allowlist through `APPTAINERENV_` variables. Keep `--no-eval` so
   credential and argument values remain literal inside the container.
 - The forwarded provider-credential allowlist names GitHub, Copilot, Anthropic,
   OpenAI, Gemini, Hive, and terminal variables, plus the Amazon Bedrock
-  credentials `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, and `AWS_DEFAULT_REGION`.
-  Only those reach the contained process; the rest of the AWS environment stays
-  on the host. The value travels through the environment only, never in argv,
-  launcher output, test logs, image layers, or committed files.
+  credentials `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, and
+  `AWS_DEFAULT_REGION`. Only those reach the contained process; the rest of the
+  AWS environment stays on the host. The value travels through the environment
+  only, never in argv, launcher output, test logs, image layers, or committed
+  files.
 - The contributor worker receives exactly one selected Hive registration.
 - The checkout contributor recipe stages remote Podman registrations privately
   and deletes only its validated staging directory. The packaged `bluefin`
