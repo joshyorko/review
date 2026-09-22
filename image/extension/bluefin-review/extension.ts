@@ -603,6 +603,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
 				}
+				if (!wasRepair && current.changedFilesComplete !== true) {
+					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+				}
 				if (!wasRepair && (current.ciEvidenceComplete === false || current.ciStatus === undefined)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: CI state is incomplete or unknown`;
 				}
