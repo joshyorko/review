@@ -10,7 +10,7 @@ import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
-import { registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
+import { registerFactoryReconciler, registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
 import { ResourceClaims, factoryClaimsRoot, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
@@ -144,6 +144,7 @@ export interface ExtensionOptions {
 interface UiLike {
 	notify(message: string, level?: "info" | "warning" | "error"): void;
 	input(title: string, placeholder?: string): Promise<string | undefined>;
+	select(title: string, options: Array<string | { label: string; description?: string }>): Promise<string | undefined>;
 	confirm(title: string, message: string): Promise<boolean>;
 	editor(title: string, prefill?: string, options?: unknown, editorOptions?: { promptStyle?: boolean }): Promise<string | undefined>;
 	setStatus(key: string, value: string | undefined): void;
@@ -445,6 +446,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (!wave) return "unknown";
 		return reconcileBlockedRepositoryClaim(resourceClaims(), batch, owner, resource, () => authoritativeReconcile(ctx, batch.id, resource, wave));
 	};
+	const unregisterFactoryReconciler = registerFactoryReconciler(reconcileMutationClaim);
 
 	const repaint = () => tui?.requestRender();
 
@@ -932,10 +934,38 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				ctx.ui.notify(`Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
 				return;
 			}
+			const items = mode.chosenItems();
+			if (items.length === 0) {
+				ctx.ui.notify("Select at least one Review item before sending it to Factory", "warning");
+				return;
+			}
+			const repositories = new Set(items.map((item) => item.repo));
+			const title = `Send ${items.length} selected item${items.length === 1 ? "" : "s"} across ${repositories.size} repositor${repositories.size === 1 ? "y" : "ies"} to Factory`;
+			const options: Array<string | { label: string; description?: string }> = mode.isBlueberry
+				? [
+					{ label: "Inspect selected items", description: "Run the read-only Factory inspection" },
+					{ label: "Factory status", description: "Show current Factory capacity and batches" },
+					"Cancel",
+				]
+				: [
+					{ label: "Patch selected items", description: "Start Factory patch work for the selection" },
+					{ label: "Inspect selected items", description: "Run the read-only Factory inspection" },
+					{ label: "Prepare PR-ready patches", description: "Prepare patches for review-ready pull requests" },
+					{ label: "Factory status", description: "Show current Factory capacity and batches" },
+					"Cancel",
+				];
+			const choice = await ctx.ui.select(title, options);
+			const command = choice === "Patch selected items"
+				? "start patch"
+				: choice === "Inspect selected items"
+					? "start inspect"
+					: choice === "Prepare PR-ready patches"
+						? "start pr-ready"
+						: choice === "Factory status"
+							? "status"
+							: undefined;
+			if (command === undefined) return;
 			try {
-				const command = await ctx.ui.editor("Factory: start inspect|patch|pr-ready, status, claims status|reconcile <owner> <resource>, resume/pause/stop <batch>, inspect/export/discard <batch>", `start ${action.action}`, undefined, { promptStyle: true });
-				if (command === undefined) return;
-				if (mode.isBlueberry && /^(start|selected)\s+(patch|pr-ready)|^(run|resume|retry)\b/.test(command)) throw new Error("Blueberry mode permits Factory inspection only");
 				const factoryCtx = { ...ctx, reconcileMutationClaim };
 				ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
 			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
@@ -1362,6 +1392,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	pi.on("session_shutdown", () => {
 		unregisterFactorySelection();
+		unregisterFactoryReconciler();
 		for (const stop of timers.splice(0)) stop();
 	});
 
