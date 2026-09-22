@@ -585,7 +585,15 @@ export async function fetchItemsByKey(
 			// ranking work after it is closed, and a finished item is not a queue.
 			if (!node || node.closed === true) continue;
 			const item = toQueueItem(node, mode);
-			if (item) items.push(item);
+			if (item) {
+				// Named reads are the mutation boundary. Missing expensive evidence
+				// must fail closed rather than look like a clean PR.
+				items.push(
+					mode === "prs" && item.changedFilesComplete === undefined
+						? { ...item, changedFilesComplete: false }
+						: item,
+				);
+			}
 		}
 		const failed = payload.errors?.length
 			? payload.errors.map((entry) => entry.message ?? "unknown").join("; ")

@@ -707,7 +707,7 @@ test("toCiStatus prioritizes decisive rollup and falls back to check suites (#59
 test("managed pull request queue keeps workflow changes and incomplete file lists visible but blocked", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
-		assert.match(body.query, /files\(first: 100\)/);
+		assert.doesNotMatch(body.query, /files\(first: 100\)|checkSuites\(first: 50\)|closingIssuesReferences/);
 		return {
 			ok: true,
 			status: 200,
