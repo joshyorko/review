@@ -55,9 +55,12 @@ set -eu
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
 if [[ "${1:-}" == run && "${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
   [[ "${AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
+  [[ "${AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || exit 19
+  [[ "${AWS_SECRET_ACCESS_KEY:-}" == test-secret-key ]] || exit 19
+  [[ "${AWS_SESSION_TOKEN:-}" == test-session-token ]] || exit 19
   [[ "${AWS_REGION:-}" == us-east-1 ]] || exit 19
   [[ "${AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
-  [[ "$*" != *test-bedrock-bearer* && "$*" != *us-east-1* ]] || exit 19
+  [[ "$*" != *test-bedrock-bearer* && "$*" != *test-access-key* && "$*" != *test-secret-key* && "$*" != *test-session-token* && "$*" != *us-east-1* ]] || exit 19
 fi
 if [[ "${1:-}" == run && -n "${EXPECT_EXTENSION:-}" ]]; then
   previous=""
@@ -102,7 +105,7 @@ for arg in "$@"; do
 done
 if [[ "${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
-  for name in GH_TOKEN OPENAI_API_KEY CONTEXT7_API_KEY HIVE_HUB AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION; do
+  for name in GH_TOKEN OPENAI_API_KEY CONTEXT7_API_KEY HIVE_HUB AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
     source_name="APPTAINERENV_${name}"
     [[ -v "$source_name" ]] && injected+=("$name=${!source_name}")
   done
@@ -112,6 +115,9 @@ if [[ "${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
        "$OPENAI_API_KEY" == "test-provider-token" &&
        "$HIVE_HUB" == https://hive.example.test &&
        ( -z "$AWS_BEARER_TOKEN_BEDROCK" || "$AWS_BEARER_TOKEN_BEDROCK" == "test-bedrock-token" ) &&
+       ( -z "$AWS_ACCESS_KEY_ID" || "$AWS_ACCESS_KEY_ID" == "test-access-key" ) &&
+       ( -z "$AWS_SECRET_ACCESS_KEY" || "$AWS_SECRET_ACCESS_KEY" == "test-secret-key" ) &&
+       ( -z "$AWS_SESSION_TOKEN" || "$AWS_SESSION_TOKEN" == "test-session-token" ) &&
        ( -z "$AWS_REGION" || "$AWS_REGION" == "us-west-2" ) &&
        ( -z "$AWS_DEFAULT_REGION" || "$AWS_DEFAULT_REGION" == "us-west-2" ) &&
        ( "$EXPECT_CONTEXT7_CREDENTIAL" != 1 || "$CONTEXT7_API_KEY" == "test-context7-token" ) ]]
@@ -119,9 +125,12 @@ if [[ "${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
 fi
 if [[ "${EXPECT_APPTAINER_AWS_FORWARDING:-}" == 1 ]]; then
   [[ "${APPTAINERENV_AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
+  [[ "${APPTAINERENV_AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || exit 19
+  [[ "${APPTAINERENV_AWS_SECRET_ACCESS_KEY:-}" == test-secret-key ]] || exit 19
+  [[ "${APPTAINERENV_AWS_SESSION_TOKEN:-}" == test-session-token ]] || exit 19
   [[ "${APPTAINERENV_AWS_REGION:-}" == us-east-1 ]] || exit 19
   [[ "${APPTAINERENV_AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
-  [[ "$*" != *test-bedrock-bearer* && "$*" != *us-east-1* ]] || exit 19
+  [[ "$*" != *test-bedrock-bearer* && "$*" != *test-access-key* && "$*" != *test-secret-key* && "$*" != *test-session-token* && "$*" != *us-east-1* ]] || exit 19
 fi
 exit 18
 EOF
@@ -279,19 +288,25 @@ set -e
 contains 'detached contributor containers are not supported' "$output"
 
 scenario="review forwards Bedrock and region credentials to KVM"
-export AWS_BEARER_TOKEN_BEDROCK=test-bedrock-bearer AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_PODMAN_AWS_FORWARDING=1
+export AWS_BEARER_TOKEN_BEDROCK=test-bedrock-bearer AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_PODMAN_AWS_FORWARDING=1
 run_just review-queue owner/repo
 [[ "$status" -eq 17 ]] || fail "review did not forward Bedrock credentials to Podman: $output"
 log_contains '--env AWS_BEARER_TOKEN_BEDROCK' "$podman_log"
+log_contains '--env AWS_ACCESS_KEY_ID' "$podman_log"
+log_contains '--env AWS_SECRET_ACCESS_KEY' "$podman_log"
+log_contains '--env AWS_SESSION_TOKEN' "$podman_log"
 log_contains '--env AWS_REGION' "$podman_log"
 log_contains '--env AWS_DEFAULT_REGION' "$podman_log"
 log_contains '--env COPILOT_INTEGRATION_ID' "$podman_log"
 log_not_contains 'test-bedrock-bearer' "$podman_log"
+log_not_contains 'test-access-key' "$podman_log"
+log_not_contains 'test-secret-key' "$podman_log"
+log_not_contains 'test-session-token' "$podman_log"
 log_not_contains 'us-east-1' "$podman_log"
-unset EXPECT_PODMAN_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION
+unset EXPECT_PODMAN_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION
 
 scenario="review forwards Bedrock and region credentials to Apptainer"
-export AWS_BEARER_TOKEN_BEDROCK=test-bedrock-bearer AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_APPTAINER_AWS_FORWARDING=1
+export AWS_BEARER_TOKEN_BEDROCK=test-bedrock-bearer AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_APPTAINER_AWS_FORWARDING=1
 : >"$apptainer_log"
 set +e
 output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
@@ -299,8 +314,11 @@ status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "review did not forward Bedrock credentials to Apptainer: $output"
 log_not_contains 'test-bedrock-bearer' "$apptainer_log"
+log_not_contains 'test-access-key' "$apptainer_log"
+log_not_contains 'test-secret-key' "$apptainer_log"
+log_not_contains 'test-session-token' "$apptainer_log"
 log_not_contains 'us-east-1' "$apptainer_log"
-unset EXPECT_APPTAINER_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION
+unset EXPECT_APPTAINER_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION
 
 scenario="KVM preflight failure falls back to Apptainer"
 : >"$apptainer_log"
@@ -395,27 +413,31 @@ log_contains 'ghcr.io/projectbluefin/review:stable --autoslay --advisor' "$podma
 scenario="Bedrock bearer-token credentials forward through the Podman/krun path"
 : >"$podman_log"
 set +e
-bedrock_output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="/dev/null" FAKE_PODMAN_INFO_FAIL=0 FAKE_NO_SKOPEO=0 FAKE_PULL_FAIL=0 FAKE_IMAGE_MISSING=0 REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor AWS_BEARER_TOKEN_BEDROCK=test-bedrock-token AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+bedrock_output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="/dev/null" FAKE_PODMAN_INFO_FAIL=0 FAKE_NO_SKOPEO=0 FAKE_PULL_FAIL=0 FAKE_IMAGE_MISSING=0 REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor AWS_BEARER_TOKEN_BEDROCK=test-bedrock-token AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
 bedrock_status=$?
 set -e
 [[ "$bedrock_status" -eq 17 ]] || fail "expected fake container exit 17 with Bedrock credentials, got $bedrock_status"
 bedrock_podman_call="$(cat "$podman_log")"
-for bedrock_var in AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION; do
+for bedrock_var in AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
   [[ "$bedrock_podman_call" == *"--env $bedrock_var"* ]] || fail "review Podman/krun did not forward $bedrock_var: $bedrock_podman_call"
 done
-log_not_contains 'test-bedrock-token' "$podman_log"
-log_not_contains 'test-bedrock-token' "$bedrock_output"
+for bedrock_value in test-bedrock-token test-access-key test-secret-key test-session-token us-west-2; do
+  log_not_contains "$bedrock_value" "$podman_log"
+  log_not_contains "$bedrock_value" "$bedrock_output"
+done
 
 scenario="Bedrock bearer-token credentials reach the contained Apptainer process"
 : >"$apptainer_log"
 set +e
-bedrock_apptainer_output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token HIVE_HUB=https://hive.example.test AWS_BEARER_TOKEN_BEDROCK=test-bedrock-token AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+bedrock_apptainer_output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token HIVE_HUB=https://hive.example.test AWS_BEARER_TOKEN_BEDROCK=test-bedrock-token AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
 bedrock_apptainer_status=$?
 set -e
 [[ "$bedrock_apptainer_status" -eq 18 ]] || fail "expected fake Apptainer exit 18 with Bedrock credentials, got $bedrock_apptainer_status"
 log_contains 'run --containall' "$apptainer_log"
-log_not_contains 'test-bedrock-token' "$apptainer_log"
-log_not_contains 'test-bedrock-token' "$bedrock_apptainer_output"
+for bedrock_value in test-bedrock-token test-access-key test-secret-key test-session-token us-west-2; do
+  log_not_contains "$bedrock_value" "$apptainer_log"
+  log_not_contains "$bedrock_value" "$bedrock_apptainer_output"
+done
 
 scenario="review repositories use independent microVM state"
 run_just review-queue owner/repo
