@@ -613,6 +613,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					return `Cannot dispatch ${item.repo}#${item.id}: CI is ${current.ciStatus}`;
 				}
 			}
+			for (const current of live.items) {
+				const wasRepair = isRepairRequested(current, mode.currentUserLogin);
+				if (!wasRepair && !policy.allowWorkflowSlay && (current.workflowFiles?.length ?? 0) > 0) {
+					return `Cannot dispatch ${current.repo}#${current.id}: changes ${current.workflowFiles![0]}`;
+				}
+			}
+			const liveWorkflowPermission = await workflowPermissionBlocker(live.items);
+			if (liveWorkflowPermission) return liveWorkflowPermission;
 			return undefined;
 		}
 
