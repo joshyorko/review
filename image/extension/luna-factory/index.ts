@@ -27,7 +27,7 @@ import { renderStatusDetail, renderWhy, truncatePlain } from "./ui/status.ts";
 import { BatchService, type BatchOptions } from "./omp/batch-service.ts";
 import { BatchGitHub } from "./omp/batch-github.ts";
 import { factoryClaimsRoot, factoryStateRoot, ResourceClaims } from "./omp/batch-store.ts";
-import { registerFactoryController, reportFactoryLoadFailure, selectedFactoryItems } from "./omp/batch-bridge.ts";
+import { registerFactoryController, registeredFactoryReconciler, reportFactoryLoadFailure, selectedFactoryItems } from "./omp/batch-bridge.ts";
 import type { NativeSDK, NativeContext, SchemaBuilder } from "./omp/batch-native.ts";
 import type { FactoryAction, SelectedItem } from "./core/batch.ts";
 import { resolveToken } from "../bluefin-review/github.ts";
@@ -492,7 +492,8 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			const owner = rest[0];
 			const resource = rest.slice(1).join(" ");
 			if (!owner || !resource) throw new Error("usage: /factory claims reconcile <owner> <resource>");
-			const verifier = (ctx as FactoryCtx & { reconcileMutationClaim?: (owner: string, resource: string) => Promise<"settled" | "unknown"> }).reconcileMutationClaim;
+			const explicitVerifier = (ctx as FactoryCtx & { reconcileMutationClaim?: (owner: string, resource: string) => Promise<"settled" | "unknown"> }).reconcileMutationClaim;
+			const verifier = explicitVerifier ?? registeredFactoryReconciler();
 			if (!verifier) throw new Error(`${resource} remains UNKNOWN; Review must provide authoritative worker/external-effect reconciliation`);
 			if (await verifier(owner, resource) !== "settled") return `Retained ${resource} for ${owner}; external effect remains UNKNOWN`;
 			claims.reconcile(resource, owner);

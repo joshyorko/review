@@ -2855,12 +2855,7 @@ test("production Review-to-Factory reconcile releases a failed wave only after e
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 	const factoryCommand = factory.commands.get("factory");
-	const reconcile = async (claimOwner, resource) => {
-		if (!ctx.asyncJobs.recent.some((job) => job.id === "worker-command" && job.status === "failed")) return "unknown";
-		claims.markSettled(resource, claimOwner);
-		return "settled";
-	};
-	await factoryCommand.handler(`claims reconcile ${owner} repo:projectbluefin/review`, { ui: ctx.ui, reconcileMutationClaim: reconcile });
+	await factoryCommand.handler(`claims reconcile ${owner} repo:projectbluefin/review`, ctx);
 	assert.ok(ctx.notifications.some((notification) => /claim released/.test(notification.message)));
 	assert.equal(claims.conflict("repo:projectbluefin/review", "review:other:0"), undefined);
 	const beforeRetry = pi.messages.length;
@@ -2907,14 +2902,9 @@ test("restart uses persisted terminal evidence for one Factory retry", async () 
 	await pi2.events.get("session_start")({}, ctx2);
 	await review2.whenStarted();
 	const factoryCommand = factory.commands.get("factory");
-	const claims = new ResourceClaims(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT);
-	const reconcile = async (claimOwner, resource) => {
-		claims.markSettled(resource, claimOwner);
-		return "settled";
-	};
-	await factoryCommand.handler(`claims reconcile ${owner} repo:projectbluefin/review`, { ui: ctx2.ui, reconcileMutationClaim: reconcile });
+	await factoryCommand.handler(`claims reconcile ${owner} repo:projectbluefin/review`, ctx2);
 	assert.ok(ctx2.notifications.some((notification) => /Reconciled .*repo:/.test(notification.message)));
-	await factoryCommand.handler(`claims reconcile ${owner} item:projectbluefin/review#42`, { ui: ctx2.ui, reconcileMutationClaim: reconcile });
+	await factoryCommand.handler(`claims reconcile ${owner} item:projectbluefin/review#42`, ctx2);
 	assert.ok(ctx2.notifications.some((notification) => /Reconciled .*item:/.test(notification.message)));
 	const beforeRetry = pi2.messages.length;
 	ctx2.overlays.at(-1).handleInput("A");

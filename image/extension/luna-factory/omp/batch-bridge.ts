@@ -1,9 +1,11 @@
 import type { FactoryAction, SelectedItem } from "../core/batch.ts";
 
 type Controller = (command: string, context: unknown) => Promise<string>;
+type Reconciler = (owner: string, resource: string) => Promise<"settled" | "unknown">;
 type BridgeState = {
 	selection?: (action: FactoryAction) => SelectedItem[];
 	controller?: Controller;
+	reconciler?: Reconciler;
 	loadFailure?: string;
 };
 
@@ -37,6 +39,15 @@ export function registerFactoryController(handler: Controller): () => void {
 	return () => { if (state.controller === handler) state.controller = undefined; };
 }
 
+/** Register Review's authoritative claim reconciliation seam for textual Factory commands. */
+export function registerFactoryReconciler(handler: Reconciler): () => void {
+	state.reconciler = handler;
+	return () => { if (state.reconciler === handler) state.reconciler = undefined; };
+}
+
+export function registeredFactoryReconciler(): Reconciler | undefined {
+	return state.reconciler;
+}
 /** Record why the Factory extension failed to load, for the caller's diagnostic. */
 export function reportFactoryLoadFailure(reason: string): void {
 	const collapsed = reason.replace(/\s+/g, " ").trim();

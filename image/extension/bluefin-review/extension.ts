@@ -10,7 +10,7 @@ import type { QueueItem } from "./github.ts";
 import { DEFAULT_ORG, exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
-import { registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
+import { registerFactoryReconciler, registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
 import { ResourceClaims, factoryClaimsRoot, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
@@ -446,6 +446,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (!wave) return "unknown";
 		return reconcileBlockedRepositoryClaim(resourceClaims(), batch, owner, resource, () => authoritativeReconcile(ctx, batch.id, resource, wave));
 	};
+	const unregisterFactoryReconciler = registerFactoryReconciler(reconcileMutationClaim);
 
 	const repaint = () => tui?.requestRender();
 
@@ -1391,6 +1392,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	pi.on("session_shutdown", () => {
 		unregisterFactorySelection();
+		unregisterFactoryReconciler();
 		for (const stop of timers.splice(0)) stop();
 	});
 
