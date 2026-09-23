@@ -294,11 +294,13 @@ function nativeTaskIdentities(details: unknown): NativeTaskIdentities {
 	if (Array.isArray(details.progress)) {
 		for (const progress of details.progress) {
 			if (!isRecord(progress)) continue;
-			if (progress.status === "running" || (typeof progress.requests === "number" && progress.requests > 0)) addAgent(progress);
+			if (typeof progress.requests === "number" && progress.requests > 0) addAgent(progress);
 		}
 	}
 	if (Array.isArray(details.results)) {
-		for (const result of details.results) addAgent(result);
+		for (const result of details.results) {
+			if (isRecord(result) && typeof result.requests === "number" && result.requests > 0) addAgent(result);
+		}
 	}
 	return { jobId, agentIdsByIndex, unindexedAgentIds };
 }
@@ -475,8 +477,9 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					&& NATIVE_IDENTITY_RE.test(asyncDetails.jobId);
 				const notStarted = bindings.bindings.filter((binding) => {
 					const current = ledger;
-					const attempt = current && findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
-					return attempt?.state === "started" && attempt.nativeAgentIds.length === 0;
+					const task = current && findTask(current, binding.taskId);
+					const attempt = task?.attempts.find((candidate) => candidate.id === binding.attemptId);
+					return task !== undefined && attempt !== undefined && attempt.nativeAgentIds.length === 0 && (attempt.state === "started" || task.state === "ESCALATE");
 				});
 				if (!stillDispatched && notStarted.length > 0) {
 					reconcileUnknown(notStarted, "OMP returned without an observed running/completed child agent identity");

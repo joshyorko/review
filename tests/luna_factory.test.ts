@@ -1388,7 +1388,7 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 	assert.ok(delayedUpdate);
 	delayedUpdate({ details: {
 		async: { state: "running", jobId: "job-1", type: "task" },
-		progress: [{ index: 0, id: "agent-1", status: "running" }],
+		progress: [{ index: 0, id: "agent-1", status: "running", requests: 1 }],
 	} });
 	const record = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
 	assert.equal(record.tasks[0]!.state, "RUNNING");
@@ -1437,7 +1437,7 @@ test("the native task seam validates and correlates an independent batch without
 				calls += 1;
 				return {
 					content: [{ type: "text", text: "batch completed" }],
-					details: { async: { state: "completed", jobId: "batch-1", type: "task" }, results: [{ index: 0, id: "agent-1" }, { index: 1, id: "agent-2" }] },
+					details: { async: { state: "completed", jobId: "batch-1", type: "task" }, results: [{ index: 0, id: "agent-1", requests: 1 }, { index: 1, id: "agent-2", requests: 1 }] },
 				};
 			},
 		} as never,
@@ -1488,7 +1488,7 @@ test("a write task must request native isolation before delegation", async () =>
 	const marker = dispatchMarker("T1", "T1-a1", "G1");
 	const invoke = async () => {
 		nativeCalls += 1;
-		return { content: [{ type: "text", text: "isolated native task completed" }], details: { async: { state: "completed", jobId: "write-job-1", type: "task" }, results: [{ id: "write-agent-1" }] } };
+		return { content: [{ type: "text", text: "isolated native task completed" }], details: { async: { state: "completed", jobId: "write-job-1", type: "task" }, results: [{ id: "write-agent-1", requests: 1 }] } };
 	};
 	const refused = await task.execute("call", { agent: "task", task: `write work\n${marker}` }, undefined, undefined, { invokeTool: invoke } as never);
 	assert.equal(refused.isError, true);
@@ -1894,4 +1894,72 @@ test("session settlement records a verdict and never dispatches", () => {
 	assert.equal(host.notifications.some((message) => /no Factory run is open/.test(message)), false);
 	host.events.get("session_stop")!({}, { hasUI: false, sessionManager: { getBranch: () => [] } });
 	assert.equal(host.entries.filter((entry) => entry.customType === "com.joshyorko.luna-factory.settlement").length, 0, "an idle session settles nothing");
+});
+
+test("OMP task running status without a request remains unknown, not RUNNING", async () => {
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "do not infer a child from a queued OMP task",
+		criteria: [{ id: "A1", statement: "the child start is observed" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "inspect the selected item",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const task = host.tools.get("task");
+	assert.ok(task);
+	const marker = dispatchMarker("T1", "T1-a1", "G1");
+	let stateAtUnstartedProgress = "";
+	const result = await task.execute(
+		"call",
+		{ task: `do the work\n${marker}` },
+		undefined,
+		undefined,
+		{
+			invokeTool: async (_params: unknown, options?: { onUpdate?: (update: unknown) => void }) => {
+				options?.onUpdate?.({
+					details: {
+						async: { state: "running", jobId: "job-setup", type: "task" },
+						progress: [{ index: 0, id: "agent-setup", status: "running", requests: 0 }],
+					},
+				});
+				const running = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
+				stateAtUnstartedProgress = running.tasks[0]!.state;
+				assert.deepEqual(running.tasks[0]!.attempts[0]!.nativeAgentIds, []);
+				options?.onUpdate?.({
+					details: {
+						async: { state: "failed", jobId: "job-setup", type: "task" },
+						progress: [{ index: 0, id: "agent-setup", status: "failed", requests: 0 }],
+					},
+				});
+				return {
+					content: [{ type: "text", text: "OMP setup failed" }],
+					details: {
+						async: { state: "failed", jobId: "job-setup", type: "task" },
+						progress: [{ index: 0, id: "agent-setup", status: "failed", requests: 0 }],
+					},
+				};
+			},
+		} as never,
+	);
+	assert.equal(stateAtUnstartedProgress, "READY");
+	assert.equal(result.isError, true);
+	assert.match(result.content[0]!.text, /escalated as unknown/);
+	const final = host.entries.at(-1)!.data as { tasks: Array<{ state: string; decisionReason: string; attempts: Array<{ state: string; nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
+	assert.equal(final.tasks[0]!.state, "ESCALATE");
+	assert.match(final.tasks[0]!.decisionReason, /liveness is unknown/);
+	assert.equal(final.tasks[0]!.attempts[0]!.state, "abandoned");
+	assert.deepEqual(final.tasks[0]!.attempts[0]!.nativeJobIds, ["job-setup"]);
+	assert.deepEqual(final.tasks[0]!.attempts[0]!.nativeAgentIds, []);
 });

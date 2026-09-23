@@ -60,9 +60,10 @@ the stable fallback:
 
 `luna_factory_attempt` records dispatch intent and leaves the task `READY`.
 An AsyncJobManager job id records dispatch only. The packaged OMP `task`
-wrapper moves the task to `RUNNING` only after a per-agent `running` progress
-identity or settled native result identity is correlated to its task, attempt,
-and generation. A dispatch prompt or job id alone cannot certify execution.
+wrapper moves the task to `RUNNING` only after a per-agent OMP progress/result
+identity with at least one assistant request is correlated to that task, attempt,
+and generation. A dispatch prompt, job id, or zero-request setup failure cannot
+certify execution.
 
 Factory-private SDK sessions remain outside OMP Agent Hub: they are not shown by
 Ctrl+A, which lists globally registered OMP agents. Factory status records the
@@ -136,8 +137,8 @@ security boundary and nothing here guarantees termination.
 ## Run state, evidence, recovery
 
 `CANDIDATE → READY` (including persisted attempt intent) → `RUNNING` only after
-observed OMP per-agent start/result identity or private-session `turn_start` →
-`VERIFY → DONE`, with run control (`active`, `paused`, `draining`,
+an OMP agent identity records an assistant request or a private session reports
+`turn_start` → `VERIFY → DONE`, with run control (`active`, `paused`, `draining`,
 `interrupted`, `quiescent`, `converged`) kept separate from task state.
 
 The ledger is one versioned, namespaced custom entry (`com.joshyorko.luna-factory.run`)
