@@ -66,13 +66,10 @@ export function buildDispatchPrompt(
 	if (ledger.control !== "active") {
 		return { ok: false, error: `run is ${ledger.control}; admission is closed and admitted work is only drained` };
 	}
-	if (task.state !== "RUNNING") {
+	if (task.state !== "READY") {
 		return {
 			ok: false,
-			error:
-				task.state === "READY"
-					? `task ${task.id} is READY; start_attempt must persist an attempt before dispatch`
-					: `task ${task.id} is ${task.state}; only an admitted RUNNING task may be dispatched`,
+			error: `task ${task.id} is ${task.state}; only an admitted task awaiting its first OMP execution identity may receive dispatch`,
 		};
 	}
 	const attempt = task.attempts.find((candidate) => candidate.id === attemptId);
@@ -81,6 +78,9 @@ export function buildDispatchPrompt(
 	}
 	if (attempt.state !== "started") {
 		return { ok: false, error: `attempt ${attemptId} is ${attempt.state} and cannot be dispatched` };
+	}
+	if (attempt.nativeJobIds.length > 0 || attempt.nativeAgentIds.length > 0) {
+		return { ok: false, error: `attempt ${attemptId} already has an OMP execution identity and cannot be dispatched again` };
 	}
 	if (
 		attempt.subject.repo !== ledger.subject.repo ||

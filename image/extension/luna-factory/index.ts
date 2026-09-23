@@ -15,7 +15,7 @@
 import { evaluateRun } from "./core/convergence.ts";
 import { emptyLedger } from "./core/model.ts";
 import { DEFAULT_FINISH_AUTHORITY } from "./core/model.ts";
-import type { Appetite, Criterion, Effect, Ledger, NativeJobId, ReduceResult, RunId, Subject, TaskId } from "./core/model.ts";
+import type { Appetite, Criterion, Effect, Ledger, NativeAgentId, NativeJobId, ReduceResult, RunId, Subject, TaskId } from "./core/model.ts";
 import { findTask } from "./core/model.ts";
 import { renderCompletionReceipt } from "./core/receipt.ts";
 import { reduce } from "./core/reducer.ts";
@@ -49,11 +49,28 @@ interface ToolUpdate {
 	readonly [key: string]: unknown;
 }
 
+interface NativeAgentSessionLike {
+	subscribe(listener: (event: unknown) => void): () => void;
+}
+
+interface NativeAgentRefLike {
+	readonly id: string;
+	readonly kind: string;
+	readonly session: NativeAgentSessionLike | null;
+}
+
+interface NativeAgentRegistryLike {
+	get(id: string): NativeAgentRefLike | undefined;
+	onChange(listener: (event: unknown) => void): () => void;
+}
+
 interface NativeInvokeContext extends FactoryCtx {
 	invokeTool?<TDetails = unknown>(
 		params: Record<string, unknown>,
 		options?: { signal?: AbortSignal; onUpdate?: (update: ToolUpdate) => void },
 	): Promise<ToolResult & { details?: TDetails }>;
+	/** Test seam; production loads OMP's existing global registry lazily. */
+	agentRegistry?: NativeAgentRegistryLike;
 }
 
 interface ZodLike {
@@ -260,8 +277,8 @@ function nativeTaskBindings(params: Record<string, unknown>, current: Ledger): {
 			return { ok: false, error: `native task item ${index + 1} is a write task and requires isolated:true before delegation` };
 		}
 		if (current.control !== "active") return { ok: false, error: `run is ${current.control}; native task admission is closed` };
-		if (task.state !== "RUNNING" || task.decision !== "ADMIT" || attempt.state !== "started") {
-			return { ok: false, error: `native task item ${index + 1} is not bound to an admitted running attempt` };
+		if (task.state !== "READY" || task.decision !== "ADMIT" || attempt.state !== "started" || attempt.nativeJobIds.length > 0 || attempt.nativeAgentIds.length > 0) {
+			return { ok: false, error: `native task item ${index + 1} is not bound to an admitted attempt awaiting its first OMP execution` };
 		}
 		if (attempt.subject.repo !== current.subject.repo || attempt.subject.base !== current.subject.base || attempt.subject.head !== current.subject.head) {
 			return { ok: false, error: `native task item ${index + 1} is bound to a stale Factory subject` };
@@ -273,27 +290,209 @@ function nativeTaskBindings(params: Record<string, unknown>, current: Ledger): {
 
 interface NativeTaskIdentities {
 	readonly jobId?: NativeJobId;
-	readonly resultIdsByIndex: ReadonlyMap<number, NativeJobId>;
-	readonly unindexedResultIds: readonly NativeJobId[];
+	readonly agentIdsByIndex: ReadonlyMap<number, NativeAgentId>;
+	readonly unindexedAgentIds: readonly NativeAgentId[];
 }
 
 function nativeTaskIdentities(details: unknown): NativeTaskIdentities {
-	if (!isRecord(details)) return { resultIdsByIndex: new Map(), unindexedResultIds: [] };
+	if (!isRecord(details)) return { agentIdsByIndex: new Map(), unindexedAgentIds: [] };
 	let jobId: NativeJobId | undefined;
 	if (isRecord(details.async) && typeof details.async.jobId === "string" && NATIVE_IDENTITY_RE.test(details.async.jobId)) {
 		jobId = details.async.jobId as NativeJobId;
 	}
-	const resultIdsByIndex = new Map<number, NativeJobId>();
-	const unindexedResultIds: NativeJobId[] = [];
-	if (Array.isArray(details.results)) {
-		for (const result of details.results) {
-			if (!isRecord(result) || typeof result.id !== "string" || !NATIVE_IDENTITY_RE.test(result.id)) continue;
-			const id = result.id as NativeJobId;
-			if (typeof result.index === "number" && Number.isInteger(result.index) && result.index >= 0) resultIdsByIndex.set(result.index, id);
-			else unindexedResultIds.push(id);
+	const agentIdsByIndex = new Map<number, NativeAgentId>();
+	const unindexedAgentIds: NativeAgentId[] = [];
+	const addAgent = (value: unknown): void => {
+		if (!isRecord(value) || typeof value.id !== "string" || !NATIVE_IDENTITY_RE.test(value.id)) return;
+		const id = value.id as NativeAgentId;
+		if (typeof value.index === "number" && Number.isInteger(value.index) && value.index >= 0) agentIdsByIndex.set(value.index, id);
+		else unindexedAgentIds.push(id);
+	};
+	if (Array.isArray(details.progress)) {
+		for (const progress of details.progress) {
+			if (!isRecord(progress)) continue;
+			if (typeof progress.requests === "number" && progress.requests > 0) addAgent(progress);
 		}
 	}
-	return { jobId, resultIdsByIndex, unindexedResultIds };
+	if (Array.isArray(details.results)) {
+		for (const result of details.results) {
+			if (isRecord(result) && typeof result.requests === "number" && result.requests > 0) addAgent(result);
+		}
+	}
+	return { jobId, agentIdsByIndex, unindexedAgentIds };
+}
+
+interface NativeAgentSteeringWatch {
+	readonly id: string;
+	session?: NativeAgentSessionLike;
+	binding?: NativeTaskBinding;
+	steered: boolean;
+	unsubscribe?: () => void;
+}
+
+interface NativeAgentSteeringObserver {
+	bind(agentId: NativeAgentId, binding: NativeTaskBinding): boolean;
+	finishCall(): void;
+	sync(current: Ledger): void;
+	isClosed(): boolean;
+	wasSteered(binding: NativeTaskBinding): boolean;
+}
+
+function nativeAgentSteeringKey(binding: NativeTaskBinding): string {
+	return `${binding.taskId}\u0000${binding.attemptId}`;
+}
+
+function createNativeAgentSteeringObserver(
+	registry: NativeAgentRegistryLike,
+	onSteering: (binding: NativeTaskBinding, agentId: NativeAgentId) => void,
+): NativeAgentSteeringObserver {
+	const watches = new Map<string, NativeAgentSteeringWatch>();
+	const invalidated = new Set<string>();
+	let acceptingNew = true;
+	let registryUnsubscribe: (() => void) | undefined;
+	let closed = false;
+
+	const closeRegistry = (): void => {
+		if (closed) return;
+		registryUnsubscribe?.();
+		registryUnsubscribe = undefined;
+		closed = true;
+	};
+	const remove = (id: string): void => {
+		watches.get(id)?.unsubscribe?.();
+		watches.delete(id);
+		if (!acceptingNew && watches.size === 0) closeRegistry();
+	};
+
+	const observe = (value: unknown): NativeAgentSteeringWatch | undefined => {
+		if (!isRecord(value) || typeof value.id !== "string" || value.kind !== "sub") return undefined;
+		const id = value.id;
+		const previous = watches.get(id);
+		const session = value.session as NativeAgentSessionLike | null;
+		if (session === null || typeof session?.subscribe !== "function") {
+			if (previous) {
+				previous.unsubscribe?.();
+				previous.unsubscribe = undefined;
+				previous.session = undefined;
+			}
+			return previous;
+		}
+		if (previous?.session === session) return previous;
+		previous?.unsubscribe?.();
+		const watch = previous ?? { id, steered: false };
+		watch.session = session;
+		watch.unsubscribe = session.subscribe((event) => {
+			if (!isRecord(event) || event.type !== "message_start" || !isRecord(event.message)) return;
+			if (event.message.role !== "user" || event.message.attribution !== "user") return;
+			if (watch.steered) return;
+			watch.steered = true;
+			if (watch.binding) {
+				invalidated.add(nativeAgentSteeringKey(watch.binding));
+				onSteering(watch.binding, id as NativeAgentId);
+			}
+		});
+		watches.set(id, watch);
+		return watch;
+	};
+
+	registryUnsubscribe = registry.onChange((event) => {
+		if (!isRecord(event) || !isRecord(event.ref) || typeof event.ref.id !== "string") return;
+		if (event.type === "removed") {
+			remove(event.ref.id);
+			return;
+		}
+		if (event.type === "registered" || event.type === "status_changed") {
+			if (acceptingNew || watches.has(event.ref.id)) observe(event.ref);
+		}
+	});
+
+	return {
+		bind(agentId, binding) {
+			const bindingKey = nativeAgentSteeringKey(binding);
+			if (invalidated.has(bindingKey)) return true;
+			if (closed) return false;
+			let watch = watches.get(agentId);
+			if (!watch) {
+				const ref = registry.get(agentId);
+				if (ref) watch = observe(ref);
+			}
+			if (!watch) return false;
+			watch.binding = binding;
+			if (watch.steered) {
+				invalidated.add(bindingKey);
+				onSteering(binding, agentId);
+			}
+			return true;
+		},
+		finishCall() {
+			acceptingNew = false;
+			for (const [id, watch] of watches) if (!watch.binding) remove(id);
+			if (watches.size === 0) closeRegistry();
+		},
+		sync(current) {
+			for (const [id, watch] of watches) {
+				if (!watch.binding) continue;
+				const task = findTask(current, watch.binding.taskId);
+				if (task === undefined || task.state === "DONE" || task.state === "ESCALATE" || task.state === "BLOCKED" || watch.steered) {
+					remove(id);
+				}
+			}
+			if (!acceptingNew && watches.size === 0) closeRegistry();
+		},
+		wasSteered(binding) {
+			return invalidated.has(nativeAgentSteeringKey(binding));
+		},
+		isClosed() {
+			return closed;
+		},
+	};
+}
+
+// Keep this a literal dynamic import so OMP's compiled-extension rewriter can
+// map its bundled registry; tests inject a fake because they lack that package.
+async function loadNativeAgentRegistry(context: NativeInvokeContext): Promise<NativeAgentRegistryLike> {
+	if (context.agentRegistry) return context.agentRegistry;
+	const imported = await import("@oh-my-pi/pi-coding-agent/registry/agent-registry") as unknown as { AgentRegistry?: { global?: () => unknown } };
+	const registry = imported.AgentRegistry?.global?.();
+	if (!isRecord(registry) || typeof registry.get !== "function" || typeof registry.onChange !== "function") {
+		throw new Error("OMP Agent Hub registry does not expose child observation");
+	}
+	return registry as unknown as NativeAgentRegistryLike;
+}
+
+function reconcileRestartedAttempts(ledger: Ledger, artifactRoots: readonly string[]): Ledger {
+	const unfinished = ledger.tasks.flatMap((task) =>
+		task.attempts
+			.filter((attempt) => attempt.state === "started")
+			.map((attempt) => ({ taskId: task.id, attempt })),
+	);
+	if (unfinished.length === 0) return ledger;
+	let current = ledger;
+	if (current.control !== "interrupted") {
+		const interrupted = reduce(current, {
+			kind: "set_control",
+			expectedRevision: current.revision,
+			control: "interrupted",
+		}, { artifactRoots });
+		if (!interrupted.ok) throw new Error(interrupted.error);
+		current = interrupted.ledger;
+	}
+	for (const { taskId, attempt } of unfinished) {
+		const identityObserved = attempt.nativeAgentIds.length > 0 || attempt.privateSessions.some((session) => session.started);
+		const reconciled = reduce(current, {
+			kind: "reconcile_attempt",
+			expectedRevision: current.revision,
+			taskId,
+			attemptId: attempt.id,
+			outcome: "unknown",
+			reason: identityObserved
+				? "Factory session restarted; the persisted OMP identity does not prove its child is still live"
+				: "Factory session restarted without an observed child start; execution liveness is unknown",
+		}, { artifactRoots });
+		if (!reconciled.ok) throw new Error(reconciled.error);
+		current = reconciled.ledger;
+	}
+	return current;
 }
 
 export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOptions = {}): LunaFactoryExtension {
@@ -303,6 +502,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	let loadProblem: string | undefined;
 	const nativeTaskParameters = host.arktype?.("object");
 	let nativeTaskWrapperRegistered = false;
+	const nativeSteeringObservers = new Set<NativeAgentSteeringObserver>();
 
 	const enabled = (): boolean => env[ENABLE_FLAG] === "1";
 
@@ -335,54 +535,190 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					return { content: text("native task is unsupported: OMP did not expose same-name ctx.invokeTool"), isError: true };
 				}
 				let result: ToolResult & { details?: unknown };
-				try {
-					result = await context.invokeTool(params, { signal, onUpdate });
-				} catch (error) {
-					return { content: text(`native task failed before a result could be correlated: ${error instanceof Error ? error.message : String(error)}`), isError: true };
-				}
-
-				const identities = nativeTaskIdentities(result.details);
-				for (const binding of bindings.bindings) {
-					const indexed = identities.resultIdsByIndex.get(binding.index);
-					const resultIds = indexed === undefined
-						? bindings.bindings.length === 1
-							? [...identities.unindexedResultIds, ...identities.resultIdsByIndex.values()]
-							: []
-						: [indexed];
+				const recordNativeEvent = (event: LedgerEvent): void => {
 					const current = ledger;
-					if (current === undefined) break;
-					const event: LedgerEvent | undefined =
-						identities.jobId === undefined
-							? undefined
-							: {
-									kind: "record_native_job",
-									expectedRevision: current.revision,
+					if (current === undefined) return;
+					const applied = reduce(current, event, { artifactRoots });
+					if (!applied.ok) {
+						host.appendEntry("com.joshyorko.luna-factory.native-correlation", { error: applied.error });
+					} else if (applied.ledger !== current) {
+						commit(applied.ledger);
+					}
+				};
+				let steeringObserver: NativeAgentSteeringObserver;
+				try {
+					const registry = await loadNativeAgentRegistry(context);
+					steeringObserver = createNativeAgentSteeringObserver(registry, (binding, agentId) => {
+						const current = ledger;
+						if (current === undefined) return;
+						recordNativeEvent({
+							kind: "record_native_agent_steering",
+							expectedRevision: current.revision,
+							taskId: binding.taskId,
+							attemptId: binding.attemptId,
+							agentId,
+							reason: "a user-attributed message arrived in the Hub-visible OMP child",
+						});
+					});
+					nativeSteeringObservers.add(steeringObserver);
+				} catch (error) {
+					const reason = `native task refused before execution: OMP Hub steering observation unavailable (${error instanceof Error ? error.message : String(error)})`;
+					for (const binding of bindings.bindings) {
+						const current = ledger;
+						const attempt = current && findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						if (current !== undefined && attempt?.state === "started") {
+							recordNativeEvent({
+								kind: "reconcile_attempt",
+								expectedRevision: current.revision,
+								taskId: binding.taskId,
+								attemptId: binding.attemptId,
+								outcome: "abandoned",
+								reason,
+							});
+						}
+					}
+					return { content: text(reason), isError: true };
+				}
+				const steeringUnobservableBindings = new Map<string, NativeTaskBinding>();
+				const observeNativeDetails = (details: unknown): void => {
+					const identities = nativeTaskIdentities(details);
+					for (const binding of bindings.bindings) {
+						const current = ledger;
+						if (current === undefined) break;
+						const attempt = findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						if (!attempt) continue;
+						if (identities.jobId !== undefined && !attempt.nativeJobIds.includes(identities.jobId)) {
+							recordNativeEvent({
+								kind: "record_native_job",
+								expectedRevision: current.revision,
+								taskId: binding.taskId,
+								attemptId: binding.attemptId,
+								jobId: identities.jobId,
+							});
+						}
+						const refreshed = ledger;
+						const refreshedAttempt = refreshed && findTask(refreshed, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						const agentId = identities.agentIdsByIndex.get(binding.index)
+							?? (bindings.bindings.length === 1 ? identities.unindexedAgentIds[0] : undefined);
+						if (agentId !== undefined && refreshedAttempt) {
+							if (!refreshedAttempt.nativeAgentIds.includes(agentId)) {
+								recordNativeEvent({
+									kind: "record_native_agent_start",
+									expectedRevision: refreshed!.revision,
 									taskId: binding.taskId,
 									attemptId: binding.attemptId,
-									jobId: identities.jobId,
-									resultIds,
-								  };
-					const correlated = event === undefined
-						? resultIds.reduce<ReduceResult>(
-							(currentResult, resultId) =>
-								currentResult.ok
-									? reduce(
-											currentResult.ledger,
-											{
-												kind: "record_native_result",
-												expectedRevision: currentResult.ledger.revision,
-												taskId: binding.taskId,
-												attemptId: binding.attemptId,
-												resultId,
-											},
-											{ artifactRoots },
-										)
-									: currentResult,
-							{ ok: true, ledger: current },
-						  )
-						: reduce(current, event, { artifactRoots });
-					if (correlated.ok) commit(correlated.ledger);
-					else host.appendEntry("com.joshyorko.luna-factory.native-correlation", { taskId: binding.taskId, attemptId: binding.attemptId, error: correlated.error });
+									agentId,
+								});
+							}
+							const latest = ledger;
+							const latestAttempt = latest && findTask(latest, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+							if (!latestAttempt?.nativeAgentIds.includes(agentId) || !steeringObserver.bind(agentId, binding)) {
+								steeringUnobservableBindings.set(nativeAgentSteeringKey(binding), binding);
+								const current = ledger;
+								if (current !== undefined && latestAttempt?.state === "started") {
+									recordNativeEvent({
+										kind: "reconcile_attempt",
+										expectedRevision: current.revision,
+										taskId: binding.taskId,
+										attemptId: binding.attemptId,
+										outcome: "unknown",
+										reason: "OMP exposed a child ID without a steer-observable Agent Hub session",
+									});
+								}
+							}
+						}
+					}
+				};
+				const reconcileUnknown = (targets: readonly NativeTaskBinding[], reason: string): void => {
+					for (const binding of targets) {
+						const current = ledger;
+						if (current === undefined) break;
+						const attempt = findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						if (attempt?.state !== "started") continue;
+						recordNativeEvent({
+							kind: "reconcile_attempt",
+							expectedRevision: current.revision,
+							taskId: binding.taskId,
+							attemptId: binding.attemptId,
+							outcome: "unknown",
+							reason,
+						});
+					}
+				};
+				const observeNativeSettlement = (details: unknown): void => {
+					observeNativeDetails(details);
+					if (!isRecord(details)) return;
+					const asyncDetails = isRecord(details.async) ? details.async : undefined;
+					const asyncSettled = asyncDetails?.state === "completed" || asyncDetails?.state === "failed";
+					const terminalProgress = new Set<number>();
+					if (Array.isArray(details.progress)) {
+						for (const progress of details.progress) {
+							if (!isRecord(progress) || typeof progress.index !== "number" || !Number.isInteger(progress.index) || progress.index < 0) continue;
+							const terminal = progress.status === "completed" || progress.status === "failed" || progress.status === "aborted";
+							if (terminal && !(typeof progress.requests === "number" && progress.requests > 0)) terminalProgress.add(progress.index);
+						}
+					}
+					const unknown = bindings.bindings.filter((binding) => {
+						const current = ledger;
+						const attempt = current && findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						return attempt?.state === "started" && attempt.nativeAgentIds.length === 0 && (asyncSettled || terminalProgress.has(binding.index));
+					});
+					if (unknown.length > 0) reconcileUnknown(unknown, "OMP task settled without an observed child agent start identity");
+					if (asyncSettled) steeringObserver.finishCall();
+				};
+				try {
+					result = await context.invokeTool(params, {
+						signal,
+						onUpdate: (update) => {
+							observeNativeSettlement(update.details);
+							onUpdate?.(update);
+						},
+					});
+				} catch (error) {
+					steeringObserver.finishCall();
+					const reason = `OMP task failed before a child identity could be reconciled: ${error instanceof Error ? error.message : String(error)}`;
+					reconcileUnknown(bindings.bindings, reason);
+					return { content: text(reason), isError: true };
+				}
+				observeNativeSettlement(result.details);
+				const details = isRecord(result.details) ? result.details : undefined;
+				const asyncDetails = details && isRecord(details.async) ? details.async : undefined;
+				const stillDispatched = asyncDetails?.state === "running"
+					&& typeof asyncDetails.jobId === "string"
+					&& NATIVE_IDENTITY_RE.test(asyncDetails.jobId);
+				const steeringBlocked = bindings.bindings.filter((binding) =>
+					steeringObserver.wasSteered(binding) || steeringUnobservableBindings.has(nativeAgentSteeringKey(binding)),
+				);
+				if (stillDispatched) {
+					return steeringBlocked.length > 0
+						? {
+								...result,
+								isError: true,
+								content: [...result.content, { type: "text", text: "Hub steering or an unobservable child invalidated this Factory attempt; no receipt can certify it." }],
+							}
+						: result;
+				}
+				steeringObserver.finishCall();
+				if (steeringBlocked.length > 0) {
+					return {
+						...result,
+						isError: true,
+						content: [...result.content, { type: "text", text: "Hub steering or an unobservable child invalidated this Factory attempt; no receipt can certify it." }],
+					};
+				}
+				const notStarted = bindings.bindings.filter((binding) => {
+					const current = ledger;
+					const task = current && findTask(current, binding.taskId);
+					const attempt = task?.attempts.find((candidate) => candidate.id === binding.attemptId);
+					return task !== undefined && attempt !== undefined && attempt.nativeAgentIds.length === 0 && (attempt.state === "started" || task.state === "ESCALATE");
+				});
+				if (!stillDispatched && notStarted.length > 0) {
+					reconcileUnknown(notStarted, "OMP returned without an observed running/completed child agent identity");
+					return {
+						...result,
+						isError: true,
+						content: [...result.content, { type: "text", text: "OMP did not expose a started child identity for every Factory attempt; unresolved attempts were escalated as unknown." }],
+					};
 				}
 				return result;
 			},
@@ -394,6 +730,10 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	const commit = (next: Ledger): void => {
 		saveRun(host, next);
 		ledger = next;
+		for (const observer of nativeSteeringObservers) {
+			observer.sync(next);
+			if (observer.isClosed()) nativeSteeringObservers.delete(observer);
+		}
 		registerNativeTaskWrapper();
 	};
 
@@ -436,6 +776,16 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		}
 		return [
 			...renderStatusDetail(ledger),
+			...ledger.tasks.flatMap((task) => task.attempts.flatMap((attempt) => {
+				const identities: string[] = [];
+				if (attempt.nativeJobIds.length > 0) identities.push(`OMP task dispatch (not start proof): ${attempt.nativeJobIds.join(", ")}`);
+				if (attempt.nativeAgentIds.length > 0) identities.push(`OMP agent identity (start observed; liveness not inferred): ${attempt.nativeAgentIds.join(", ")}`);
+				if (attempt.steeredAgentId !== undefined) identities.push(`OMP agent Hub-steered; attempt invalidated: ${attempt.steeredAgentId}`);
+				for (const session of attempt.privateSessions) {
+					identities.push(`Factory-private ${session.phase} session (${session.started ? "turn start observed; liveness not inferred" : "identity recorded; turn start not observed"}): ${session.sessionFile}`);
+				}
+				return identities.length > 0 ? [`execution ${task.id}/${attempt.id}: ${identities.join("; ")}`] : [];
+			})),
 			"",
 			`execution: ${enabled() ? "enabled" : `idle (${ENABLE_FLAG}=1 to enable)`}`,
 			`enforced: ${enforcedPaths().join(", ")}`,
@@ -1044,8 +1394,22 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		const loaded = loadRun(ctx);
 		ledger = loaded.ledger;
 		loadProblem = loaded.problem;
-		if (loaded.problem !== undefined && ctx.hasUI) {
-			ctx.ui?.notify?.(`Factory journal is unreadable: ${loaded.problem}`, "error");
+		if (ledger !== undefined) {
+			try {
+				const before = ledger;
+				const recovered = reconcileRestartedAttempts(before, artifactRoots);
+				if (recovered !== before) {
+					saveRun(host, recovered);
+					ledger = recovered;
+					if (ctx.hasUI) ctx.ui?.notify?.("Factory resumed with unfinished attempts marked UNKNOWN; inspect execution liveness before starting new work.", "warning");
+				}
+			} catch (error) {
+				ledger = undefined;
+				loadProblem = `unfinished Factory attempts could not be safely reconciled after restart: ${error instanceof Error ? error.message : String(error)}`;
+			}
+		}
+		if (loadProblem !== undefined && ctx.hasUI) {
+			ctx.ui?.notify?.(`Factory journal is unreadable or unreconciled: ${loadProblem}`, "error");
 		}
 		registerNativeTaskWrapper();
 		await activateFactoryTools();

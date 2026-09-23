@@ -239,6 +239,7 @@ export class BatchService {
 					const mutation = item.selected.action !== "inspect";
 					if ([...this.running.values()].some((active) => mutation && active.item.selected.repo === item.selected.repo && active.item.selected.action !== "inspect")) continue;
 					const owner = `${batch.id}:${item.selected.key}`;
+					if (this.running.has(owner)) continue;
 					try {
 						if (mutation) {
 							this.claims.claim(`repo:${item.selected.repo}`, owner);
@@ -246,7 +247,7 @@ export class BatchService {
 							catch (error) { this.claims.release(`repo:${item.selected.repo}`, owner); throw error; }
 						}
 					} catch (error) { item.stage = "BLOCKED"; item.blocker = message(error); this.persist(batch); continue; }
-					item.stage = "RUNNING"; item.blocker = undefined; this.persist(batch);
+					item.stage = "QUEUED"; item.blocker = undefined; this.persist(batch);
 					const controller = new AbortController();
 					const promise = Promise.resolve().then(() => this.execute(batch, item, controller.signal)).catch((error) => {
 						if (item.operation?.phase === "push" || item.operation?.phase === "pr") { item.stage = "UNKNOWN"; item.operation.state = "unknown"; }
@@ -315,8 +316,17 @@ export class BatchService {
 		const attempt = `T1-a${item.attempts}` as AttemptId;
 		this.event(item, { kind: "start_attempt", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId: attempt, subject: item.ledger.subject });
 		item.operation = { id: `${batch.id}:${item.selected.key}:${attempt}`, phase: "worker", state: "intent" }; this.persist(batch);
-		const onSession = (session: string) => { item.sessions.push(session); this.persist(batch); };
-		const worker = await runNative(this.sdk, this.schema, this.context, item, this.root, "worker", signal, onSession, item.blocker ?? "");
+		const onSession = (phase: "worker" | "acceptance", attemptId: AttemptId) => (sessionFile: string) => {
+			if (!item.sessions.includes(sessionFile)) item.sessions.push(sessionFile);
+			this.event(item, { kind: "record_private_session", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId, phase, sessionFile });
+			this.persist(batch);
+		};
+		const onExecutionStart = (phase: "worker" | "acceptance", attemptId: AttemptId) => (_sessionFile: string) => {
+			this.event(item, { kind: "record_private_session_start", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId, phase });
+			if (phase === "worker") item.stage = "RUNNING";
+			this.persist(batch);
+		};
+		const worker = await runNative(this.sdk, this.schema, this.context, item, this.root, "worker", signal, onSession("worker", attempt), onExecutionStart("worker", attempt), item.blocker ?? "");
 		batch.usage.modelCalls += worker.calls;
 		item.stage = "VERIFY"; item.operation.phase = "verify"; this.persist(batch);
 		if (item.selected.action !== "inspect" && !worker.tests.length) throw new Error("worker supplied no executable verification; inspect and retry within original appetite");
@@ -339,7 +349,7 @@ export class BatchService {
 			verification += `\n${test}: exit ${result.exitCode}\n${result.output.slice(-16384)}`;
 		}
 		item.operation.phase = "acceptance"; this.persist(batch);
-		const reviewer = await runNative(this.sdk, this.schema, this.context, item, this.root, "acceptance", signal, onSession, verification);
+		const reviewer = await runNative(this.sdk, this.schema, this.context, item, this.root, "acceptance", signal, onSession("acceptance", attempt), onExecutionStart("acceptance", attempt), verification);
 		batch.usage.modelCalls += reviewer.calls;
 		const reviewFile = join(evidenceDir, "acceptance.txt"); writeFileSync(reviewFile, reviewer.report, { flag: "wx", mode: 0o600 }); artifacts.push(reviewFile);
 		await this.github.assertFresh(item.selected);

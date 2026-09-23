@@ -58,9 +58,18 @@ the stable fallback:
 | (explicit post-success defect) | `luna_factory_reopen` — invalidate prior proof only after owner-supplied new evidence |
 | (verified finish) | `luna_factory_completion` |
 
-`luna_factory_dispatch` builds the bounded prompt for an admitted task. On the
-packaged OMP, the same-name `task` wrapper then admits only the stamped native
-task call and delegates execution through OMP's own `ctx.invokeTool` seam.
+`luna_factory_attempt` records dispatch intent and leaves the task `READY`.
+An AsyncJobManager job id records dispatch only. The packaged OMP `task`
+wrapper moves the task to `RUNNING` only after a per-agent OMP progress/result
+identity with at least one assistant request is correlated to that task, attempt,
+and generation. A dispatch prompt, job id, or zero-request setup failure cannot
+certify execution.
+
+Factory-private SDK sessions remain outside OMP Agent Hub: they are not shown by
+Ctrl+A, which lists globally registered OMP agents. Factory status records the
+worker/acceptance session path, but only an observed OMP `turn_start` marks that
+private execution started. A persisted session path or execution ID does not
+prove a child is live after restart; unfinished attempts reconcile as unknown.
 
 ## Execution boundary
 
@@ -127,9 +136,10 @@ security boundary and nothing here guarantees termination.
 
 ## Run state, evidence, recovery
 
-`CANDIDATE → READY | BLOCKED | DEFERRED | ESCALATE` then `READY → RUNNING →
-VERIFY → DONE`, with run control (`active`, `paused`, `draining`, `interrupted`,
-`quiescent`, `converged`) kept separate from task state.
+`CANDIDATE → READY` (including persisted attempt intent) → `RUNNING` only after
+an OMP agent identity records an assistant request or a private session reports
+`turn_start` → `VERIFY → DONE`, with run control (`active`, `paused`, `draining`,
+`interrupted`, `quiescent`, `converged`) kept separate from task state.
 
 The ledger is one versioned, namespaced custom entry (`com.joshyorko.luna-factory.run`)
 written through native session storage. A missing, corrupt, or unknown-version

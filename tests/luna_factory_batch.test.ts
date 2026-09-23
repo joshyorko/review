@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	batchConverged,
+	batchSummary,
 	createBatch,
 	dependencyBlocker,
 	selectionIdentity,
@@ -42,6 +43,29 @@ test("selection identity is canonical, duplicate selected keys are refused, and 
 	assert.throws(() => createBatch([items[0]!, items[0]!], options("dead")), /duplicate selected identity/);
 	assert.equal(createBatch(items, { ...options("beef"), mode: "retain" }).mode, "retain");
 });
+test("batch status exposes Factory-private session role and stable identity without claiming Hub visibility", () => {
+	const batch = createBatch([selected("org/a#1", "inspect")], options("session"));
+	const item = batch.items[0]!;
+	item.operation = { id: "batch-session-worker", phase: "worker", state: "intent" };
+	item.ledger = {
+		...item.ledger,
+		tasks: [{
+			id: "T1", generation: item.ledger.generation, criterionId: "A1", title: "inspect", deps: [],
+			effect: "read", owner: batch.id, state: "READY", attempts: [{
+				id: "T1-a1", lineage: 1, taskId: "T1", generation: item.ledger.generation, subject: item.ledger.subject,
+				state: "started", nativeJobIds: [], nativeAgentIds: [],
+				privateSessions: [{ phase: "worker", sessionFile: "/state/sessions/worker.jsonl", started: false }],
+				integrated: false,
+			}], decision: "ADMIT", decisionReason: "selected",
+		}],
+	} as never;
+	const status = batchSummary(batch, "/state");
+	assert.match(status, /worker intent/);
+	assert.ok(status.includes("batch-session-worker"));
+	assert.ok(status.includes("Factory-private worker session T1/T1-a1 (identity recorded; turn start not observed): /state/sessions/worker.jsonl"));
+	assert.match(status, /do not appear in Ctrl\+A/);
+});
+
 
 test("dependencies enforce verified patch, PR-ready, and merged-upstream stages", () => {
 	const items = [selected("org/a#1"), selected("org/b#2", "pr-ready"), selected("org/c#3", "pr-ready")];
@@ -350,6 +374,73 @@ test("an unconfirmed stop keeps the item unknown and the repository claim", asyn
 		assert.match(service.claims.conflict("repo:org/a", "another-owner")!, /batch-cafe/);
 		await service.shutdown();
 	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("drain does not reschedule a queued item while its OMP session start is pending", async () => {
+	const batchModule = new URL("../image/extension/luna-factory/core/batch.ts", import.meta.url).href;
+	const serviceModule = new URL("../image/extension/luna-factory/omp/batch-service.ts", import.meta.url).href;
+	const source = `
+		import { mkdtemp, rm } from "node:fs/promises";
+		import { tmpdir } from "node:os";
+		import { join } from "node:path";
+		import { createBatch } from ${JSON.stringify(batchModule)};
+		import { BatchService } from ${JSON.stringify(serviceModule)};
+		const root = await mkdtemp(join(tmpdir(), "factory-drain-"));
+		const selected = { key: "org/a#1", repo: "org/a", number: 1, kind: "issue", action: "inspect", overlaps: [], acceptanceRevision: "r1", base: "a".repeat(40), head: "a".repeat(40) };
+		const batch = createBatch([selected], { id: "batch-dead", capacity: 2, maxAttempts: 3, maxTotalAttempts: 10, mode: "once" });
+		const service = new BatchService(root, { snapshot: async value => value, assertFresh: async () => {} }, undefined, {}, 2);
+		const pendingStart = Promise.withResolvers();
+		const releaseExecution = pendingStart.resolve;
+		try {
+			service.store.acquire();
+			service.store.write(batch);
+			let executions = 0;
+			const startedSignal = Promise.withResolvers();
+			const started = startedSignal.promise;
+			const internal = service;
+			internal.execute = async (current, item) => {
+				executions += 1;
+				item.operation = { id: "batch-dead:org/a#1:worker", phase: "worker", state: "intent" };
+				internal.persist(current);
+				startedSignal.resolve();
+				await pendingStart.promise;
+				item.stage = "BLOCKED";
+				item.operation.state = "confirmed";
+				item.blocker = "native session start reconciled";
+				internal.persist(current);
+			};
+			await service.resume(batch.id, {});
+			await started;
+			const beforeResume = service.store.read(batch.id).items[0];
+			if (beforeResume.stage !== "QUEUED" || beforeResume.operation?.state !== "intent") throw new Error("the first session start must remain pending and owned");
+			await service.resume(batch.id, {});
+			const duringResume = service.store.read(batch.id).items[0];
+			if (executions !== 1) throw new Error("a queued item with a pending OMP start was redispatched");
+			if (duringResume.stage !== "QUEUED" || duringResume.operation?.state !== "intent") throw new Error("resume changed the pending operation state");
+			releaseExecution();
+			await service.waitForIdle();
+			const settled = service.store.read(batch.id).items[0];
+			if (executions !== 1) throw new Error("the same queued owner was executed more than once");
+			if (settled.stage !== "BLOCKED" || settled.blocker !== "native session start reconciled") throw new Error("the pending owner did not settle exactly once");
+		} finally {
+			releaseExecution();
+			await service.shutdown();
+			await rm(root, { recursive: true, force: true });
+		}
+	`;
+	const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", source], { stdio: ["ignore", "pipe", "pipe"] });
+	let output = "";
+	child.stdout.setEncoding("utf8").on("data", (chunk) => { output += chunk; });
+	child.stderr.setEncoding("utf8").on("data", (chunk) => { output += chunk; });
+	let timedOut = false;
+	// A real timeout is necessary: the regression is a synchronous infinite loop in a child process, so fake timers cannot interrupt it.
+	const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 3_000);
+	const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit) => {
+		child.once("exit", (code, signal) => resolveExit({ code, signal }));
+	});
+	clearTimeout(timer);
+	assert.equal(timedOut, false, "drain must yield while its only queued item is already in flight");
+	assert.equal(exit.code, 0, output);
 });
 
 test("read-only inspection bypasses mutation claims and runs concurrently", async () => {

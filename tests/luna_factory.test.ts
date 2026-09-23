@@ -102,8 +102,8 @@ function step(current: Ledger, build: (revision: number) => LedgerEvent): Ledger
 	return result.ok ? result.ledger : current;
 }
 
-/** An admitted, running task with one attempt already opened. */
-function runningTask(): Ledger {
+/** An admitted task with durable intent but no observed OMP child yet. */
+function intentTask(): Ledger {
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
 	return step(admitted, (revision) => ({
 		kind: "start_attempt",
@@ -111,6 +111,41 @@ function runningTask(): Ledger {
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		subject: SUBJECT,
+	}));
+}
+/** An admitted task whose OMP execution identity is observed and recorded. */
+function runningTask(): Ledger {
+	const intent = intentTask();
+	const dispatched = step(intent, (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		jobId: "job-1",
+	}));
+	return step(dispatched, (revision) => ({
+		kind: "record_native_agent_start",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		agentId: "agent-1",
+	}));
+}
+function executedAttempt(current: Ledger, taskId: TaskId, attemptId: string): Ledger {
+	const intent = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId, attemptId, subject: SUBJECT }));
+	const dispatched = step(intent, (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId,
+		attemptId,
+		jobId: `job-${taskId}-${attemptId}`,
+	}));
+	return step(dispatched, (revision) => ({
+		kind: "record_native_agent_start",
+		expectedRevision: revision,
+		taskId,
+		attemptId,
+		agentId: `agent-${taskId}-${attemptId}`,
 	}));
 }
 
@@ -207,8 +242,15 @@ test("independent admitted tasks can run in parallel on the same subject", () =>
 		attemptId: "T2-a1",
 		subject: SUBJECT,
 	}));
-	assert.equal(findTask(startedB, "T1" as TaskId)?.state, "RUNNING");
-	assert.equal(findTask(startedB, "T2" as TaskId)?.state, "RUNNING");
+	assert.equal(findTask(startedB, "T1" as TaskId)?.state, "READY");
+	assert.equal(findTask(startedB, "T2" as TaskId)?.state, "READY");
+	const dispatchedA = step(startedB, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", jobId: "job-T1" }));
+	assert.equal(findTask(dispatchedA, "T1" as TaskId)?.state, "READY");
+	const observedA = step(dispatchedA, (revision) => ({ kind: "record_native_agent_start", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", agentId: "agent-T1" }));
+	const dispatchedB = step(observedA, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", jobId: "job-T2" }));
+	const bothExecuted = step(dispatchedB, (revision) => ({ kind: "record_native_agent_start", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", agentId: "agent-T2" }));
+	assert.equal(findTask(bothExecuted, "T1" as TaskId)?.state, "RUNNING");
+	assert.equal(findTask(bothExecuted, "T2" as TaskId)?.state, "RUNNING");
 });
 
 test("a deferred dependency join becomes READY only after every dependency is proven", () => {
@@ -239,12 +281,12 @@ test("a deferred dependency join becomes READY only after every dependency is pr
 	}));
 	assert.equal(findTask(current, "T3" as TaskId)?.state, "DEFERRED");
 
-	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	current = executedAttempt(current, "T1" as TaskId, "T1-a1");
 	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ taskId: "T1" as TaskId, attemptId: "T1-a1" }) }));
 	current = step(current, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
 	assert.equal(findTask(current, "T3" as TaskId)?.state, "DEFERRED", "one proven dependency is not a join");
 
-	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", subject: SUBJECT }));
+	current = executedAttempt(current, "T2" as TaskId, "T2-a1");
 	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", receipt: receipt({ taskId: "T2" as TaskId, attemptId: "T2-a1" }) }));
 	current = step(current, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T2" as TaskId, criterionId: "A2" as CriterionId }));
 	assert.equal(findTask(current, "T3" as TaskId)?.state, "READY");
@@ -490,7 +532,7 @@ test("an interrupted attempt must be reconciled before resume and keeps retry li
 test("an unproven write cannot be integrated as if it were accepted", () => {
 	const writer = candidate({ effect: "write" });
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
-	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
 	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ unresolved: ["defect remains"] }) }));
 	const integrated = reduce(returned, { kind: "integrate_attempt", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: { ...SUBJECT, head: "b".repeat(40) } }, REDUCE);
 	assert.equal(integrated.ok, false);
@@ -499,34 +541,171 @@ test("an unproven write cannot be integrated as if it were accepted", () => {
 test("a proven write cannot integrate without an externally changed head", () => {
 	const writer = candidate({ effect: "write" });
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
-	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
 	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
 	const integrated = reduce(returned, { kind: "integrate_attempt", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
 	assert.equal(integrated.ok, false);
 	assert.match(integrated.ok ? "" : integrated.error, /externally changed head|concrete changed head/);
 });
 
-test("only a READY task may start, and an attempt id is not reused", () => {
+test("attempt intent stays READY until a bound OMP execution identity is recorded", () => {
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
-	const started = step(admitted, (revision) => ({
+	const intent = step(admitted, (revision) => ({
 		kind: "start_attempt",
 		expectedRevision: revision,
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		subject: SUBJECT,
 	}));
-	const again = reduce(started, { kind: "start_attempt", expectedRevision: started.revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }, REDUCE);
-	assert.equal(again.ok, false);
-	assert.match(again.ok ? "" : again.error, /only READY or VERIFY tasks may start/);
-
-	const duplicate = reduce(admitted, { kind: "start_attempt", expectedRevision: admitted.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
+	assert.equal(findTask(intent, "T1" as TaskId)?.state, "READY");
+	assert.deepEqual(findTask(intent, "T1" as TaskId)?.attempts[0]?.nativeJobIds, []);
+	const retry = reduce(intent, { kind: "start_attempt", expectedRevision: intent.revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }, REDUCE);
+	assert.equal(retry.ok, false);
+	assert.match(retry.ok ? "" : retry.error, /unreturned attempt/);
+	const dispatched = step(intent, (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		jobId: "omp-job-1",
+	}));
+	assert.equal(findTask(dispatched, "T1" as TaskId)?.state, "READY");
+	const prematureReceipt = reduce(dispatched, { kind: "record_receipt", expectedRevision: dispatched.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }, REDUCE);
+	assert.equal(prematureReceipt.ok, false);
+	assert.match(prematureReceipt.ok ? "" : prematureReceipt.error, /not an active dispatched attempt/);
+	const running = step(dispatched, (revision) => ({
+		kind: "record_native_agent_start",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		agentId: "omp-agent-1",
+	}));
+	assert.equal(findTask(running, "T1" as TaskId)?.state, "RUNNING");
+	assert.deepEqual(findTask(running, "T1" as TaskId)?.attempts[0]?.nativeJobIds, ["omp-job-1"]);
+	assert.deepEqual(findTask(running, "T1" as TaskId)?.attempts[0]?.nativeAgentIds, ["omp-agent-1"]);
+	const duplicate = reduce(running, { kind: "record_native_agent_start", expectedRevision: running.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", agentId: "omp-agent-1" }, REDUCE);
 	assert.equal(duplicate.ok, true);
-
-	const reused = reduce(started, { kind: "start_attempt", expectedRevision: started.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
-	assert.equal(reused.ok, false);
-	assert.match(reused.ok ? "" : reused.error, /already exists/);
+	assert.equal(duplicate.ok ? duplicate.ledger.revision : -1, running.revision, "a duplicate OMP start observation is idempotent");
+	const replacement = reduce(running, { kind: "record_native_agent_start", expectedRevision: running.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", agentId: "replacement-agent" }, REDUCE);
+	assert.equal(replacement.ok, false, "a replacement child needs a new Factory attempt");
 });
 
+test("native Hub steering invalidates the receipt before the criterion can be proven", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt(),
+	}));
+	const steered = step(recorded, (revision) => ({
+		kind: "record_native_agent_steering",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		agentId: "agent-1",
+		reason: "Hub message started with user attribution",
+	}));
+	assert.equal(findTask(steered, "T1" as TaskId)?.state, "ESCALATE");
+	assert.equal(findTask(steered, "T1" as TaskId)?.attempts[0]?.steeredAgentId, "agent-1");
+	assert.equal(criterionProven(steered, "A1" as CriterionId), false);
+	assert.equal(parseJournal(journalRecord(steered)).ok, true);
+	const finish = reduce(steered, {
+		kind: "finish_task",
+		expectedRevision: steered.revision,
+		taskId: "T1" as TaskId,
+		criterionId: "A1" as CriterionId,
+	}, REDUCE);
+	assert.equal(finish.ok, false);
+	const lateReceipt = reduce(steered, {
+		kind: "record_receipt",
+		expectedRevision: steered.revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt(),
+	}, REDUCE);
+	assert.equal(lateReceipt.ok, false);
+	assert.match(lateReceipt.ok ? "" : lateReceipt.error, /steered by OMP/);
+});
+
+test("private session identity alone is not execution; OMP turn start is persisted", () => {
+	const intent = intentTask();
+	const workerIdentity = step(intent, (revision) => ({
+		kind: "record_private_session",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		phase: "worker",
+		sessionFile: "/state/sessions/worker.jsonl",
+	}));
+	assert.equal(findTask(workerIdentity, "T1" as TaskId)?.state, "READY");
+	assert.equal(findTask(workerIdentity, "T1" as TaskId)?.attempts[0]?.privateSessions[0]?.started, false);
+	const workerStarted = step(workerIdentity, (revision) => ({
+		kind: "record_private_session_start",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		phase: "worker",
+	}));
+	assert.equal(findTask(workerStarted, "T1" as TaskId)?.state, "RUNNING");
+	const acceptanceIdentity = step(workerStarted, (revision) => ({
+		kind: "record_private_session",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		phase: "acceptance",
+		sessionFile: "/state/sessions/acceptance.jsonl",
+	}));
+	assert.equal(findTask(acceptanceIdentity, "T1" as TaskId)?.attempts[0]?.privateSessions[1]?.started, false);
+	const acceptanceStarted = step(acceptanceIdentity, (revision) => ({
+		kind: "record_private_session_start",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		phase: "acceptance",
+	}));
+	const loaded = parseJournal(journalRecord(acceptanceStarted));
+	assert.equal(loaded.ok, true);
+	assert.deepEqual(loaded.ok ? findTask(loaded.ledger, "T1" as TaskId)?.attempts[0]?.privateSessions : [], [
+		{ phase: "worker", sessionFile: "/state/sessions/worker.jsonl", started: true },
+		{ phase: "acceptance", sessionFile: "/state/sessions/acceptance.jsonl", started: true },
+	]);
+});
+test("session restart reconciles stale RUNNING and legacy intent without inventing a live child", async () => {
+	const recover = async (source: Ledger, legacy: boolean) => {
+		const stored = structuredClone(journalRecord(source)) as {
+			tasks: Array<{ attempts: Array<Record<string, unknown>> }>;
+		};
+		if (legacy) {
+			for (const task of stored.tasks) for (const attempt of task.attempts) {
+				delete attempt.nativeJobIds;
+				delete attempt.nativeAgentIds;
+				delete attempt.privateSessions;
+			}
+		}
+		const host = fakeHost();
+		createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+		await host.events.get("session_start")!({}, {
+			hasUI: true,
+			ui: { notify: (message: string) => host.notify(message) },
+			sessionManager: { getBranch: () => [{ type: "custom", customType: JOURNAL_ENTRY, data: stored }] },
+		});
+		const latest = host.entries.at(-1)?.data as Ledger;
+		assert.equal(latest.control, "interrupted");
+		assert.equal(findTask(latest, "T1" as TaskId)?.state, "ESCALATE");
+		assert.equal(findTask(latest, "T1" as TaskId)?.attempts[0]?.state, "abandoned");
+		assert.match(findTask(latest, "T1" as TaskId)?.decisionReason ?? "", /liveness is unknown/);
+		return latest;
+	};
+
+	const identity = await recover(runningTask(), false);
+	assert.deepEqual(findTask(identity, "T1" as TaskId)?.attempts[0]?.nativeJobIds, ["job-1"]);
+	assert.deepEqual(findTask(identity, "T1" as TaskId)?.attempts[0]?.nativeAgentIds, ["agent-1"]);
+
+	const legacy = await recover(intentTask(), true);
+	assert.deepEqual(findTask(legacy, "T1" as TaskId)?.attempts[0]?.nativeJobIds, []);
+	assert.deepEqual(findTask(legacy, "T1" as TaskId)?.attempts[0]?.nativeAgentIds, []);
+});
 test("an unproven VERIFY task can open one bounded retry on the same lineage", () => {
 	const returned = step(runningTask(), (revision) => ({
 		kind: "record_receipt",
@@ -542,7 +721,7 @@ test("an unproven VERIFY task can open one bounded retry on the same lineage", (
 		attemptId: "T1-a2",
 		subject: SUBJECT,
 	}));
-	assert.equal(findTask(retry, "T1" as TaskId)?.state, "RUNNING");
+	assert.equal(findTask(retry, "T1" as TaskId)?.state, "READY");
 	assert.deepEqual(findTask(retry, "T1" as TaskId)?.attempts.map((attempt) => attempt.lineage), [1, 2]);
 });
 
@@ -552,17 +731,32 @@ test("a returned worker moves to VERIFY and never straight to DONE", () => {
 	assert.equal(criterionProven(recorded, "A1" as CriterionId), false);
 });
 
+test("a returned receipt survives a journal reload", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt(),
+	}));
+	const loaded = parseJournal(journalRecord(recorded));
+	assert.equal(loaded.ok, true);
+	const persisted = loaded.ok
+		? findTask(loaded.ledger, "T1" as TaskId)?.attempts[0]?.receipt
+		: undefined;
+	assert.deepEqual(persisted, receipt());
+});
+
 test("a receipt may only be recorded once per attempt", () => {
 	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
 	const repeat = reduce(recorded, { kind: "record_receipt", expectedRevision: recorded.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }, REDUCE);
 	assert.equal(repeat.ok, false);
-	assert.match(repeat.ok ? "" : repeat.error, /already has a recorded receipt/);
 });
 
 test("a write task cannot complete before its attempt is integrated", () => {
 	const writer = candidate({ effect: "write" });
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
-	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
 	const recorded = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
 	const finish = reduce(recorded, { kind: "finish_task", expectedRevision: recorded.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }, REDUCE);
 	assert.equal(finish.ok, false);
@@ -604,7 +798,7 @@ test("integrating a moved head demotes proof taken against the old subject", () 
 	const writer = candidate({ taskId: "T2" as TaskId, criterionId: "A2" as CriterionId, effect: "write" });
 	const stillOpen = { ...firstFinished, criteria: firstFinished.criteria.map((criterion) => criterion.id === ("A2" as CriterionId) ? { ...criterion, mandatory: true } : criterion) };
 	const admitted = step(stillOpen, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
-	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", subject: SUBJECT }));
+	const started = executedAttempt(admitted, "T2" as TaskId, "T2-a1");
 	const recorded = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", receipt: receipt({ taskId: "T2" as TaskId, attemptId: "T2-a1" }) }));
 	const moved = step(recorded, (revision) => ({
 		kind: "integrate_attempt",
@@ -673,7 +867,7 @@ test("reopening requires new evidence and replanning requires a diagnosed platea
 		subject: SUBJECT,
 	}, REDUCE);
 	assert.equal(retry.ok, true, retry.ok ? "" : retry.error);
-	assert.equal(retry.ok ? findTask(retry.ledger, "T1" as TaskId)?.state : undefined, "RUNNING");
+	assert.equal(retry.ok ? findTask(retry.ledger, "T1" as TaskId)?.state : undefined, "READY");
 
 	const replan = reduce(reopened, { kind: "use_replan", expectedRevision: reopened.revision, taskId: "T1" as TaskId }, REDUCE);
 	assert.equal(replan.ok, false);
@@ -684,7 +878,7 @@ test("one bounded replan is allowed after a plateau, and only once", () => {
 	let current = runningTask();
 	for (const attempt of ["T1-a1", "T1-a2"]) {
 		if (attempt === "T1-a2") {
-			current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: attempt, subject: SUBJECT }));
+			current = executedAttempt(current, "T1" as TaskId, attempt);
 		}
 		current = step(current, (revision) => ({
 			kind: "record_receipt",
@@ -783,7 +977,7 @@ test("a user pause is never overridden by a converged verdict", () => {
 test("a diagnosed, exhausted plateau is reported as a blocker with no silent retry", () => {
 	let current = runningTask();
 	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ unresolved: ["still broken"] }) }));
-	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }));
+	current = executedAttempt(current, "T1" as TaskId, "T1-a2");
 	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a2", receipt: receipt({ attemptId: "T1-a2", unresolved: ["still broken"] }) }));
 	current = step(current, (revision) => ({ kind: "use_replan", expectedRevision: revision, taskId: "T1" as TaskId }));
 	const verdict = evaluateRun(current);
@@ -816,20 +1010,20 @@ test("an unproven execution path is refused rather than routed through silently"
 	assert.match(unknown.ok ? "" : unknown.error, /unknown execution path/);
 });
 
-test("dispatch refuses a task that is not admitted and running", () => {
+test("dispatch requires an admitted task and persisted attempt intent", () => {
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
 	const notStarted = buildDispatchPrompt(admitted, "T1" as TaskId, "T1-a1");
 	assert.equal(notStarted.ok, false);
-	assert.match(notStarted.ok ? "" : notStarted.error, /start_attempt must persist an attempt/);
+	assert.match(notStarted.ok ? "" : notStarted.error, /persist the intent before the effect/);
 
-	const started = step(admitted, (revision) => ({
+	const intent = step(admitted, (revision) => ({
 		kind: "start_attempt",
 		expectedRevision: revision,
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		subject: SUBJECT,
 	}));
-	const dispatched = buildDispatchPrompt(started, "T1" as TaskId, "T1-a1");
+	const dispatched = buildDispatchPrompt(intent, "T1" as TaskId, "T1-a1");
 	assert.equal(dispatched.ok, true);
 
 	const deferred = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ taskId: "T2" as TaskId, deps: ["T9" as TaskId] }) }));
@@ -846,7 +1040,7 @@ test("a closed run admits no new dispatch", () => {
 });
 
 test("the dispatched prompt carries the ledger's identity, never a caller-supplied one", () => {
-	const plan = buildDispatchPrompt(runningTask(), "T1" as TaskId, "T1-a1");
+	const plan = buildDispatchPrompt(intentTask(), "T1" as TaskId, "T1-a1");
 	assert.equal(plan.ok, true);
 	const prompt = plan.ok ? plan.prompt : "";
 	assert.match(prompt, /task T1 \(attempt T1-a1, lineage 1\)/);
@@ -855,6 +1049,16 @@ test("the dispatched prompt carries the ledger's identity, never a caller-suppli
 	assert.match(prompt, /Do not create successor tasks or missions/);
 	assert.match(prompt, /Do not approve, merge, publish/);
 	assert.ok(prompt.includes(RECEIPT_CONTRACT));
+	const dispatchOnly = step(intentTask(), (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		jobId: "omp-job-1",
+	}));
+	const duplicateDispatch = buildDispatchPrompt(dispatchOnly, "T1" as TaskId, "T1-a1");
+	assert.equal(duplicateDispatch.ok, false);
+	assert.match(duplicateDispatch.ok ? "" : duplicateDispatch.error, /already has an OMP execution identity/);
 });
 
 // -------------------------------------------------------------------- journal
@@ -969,14 +1173,88 @@ test("a converged receipt states its scope and disclaims merge authority", () =>
 
 // ------------------------------------------------------------ extension host
 
-function fakeHost(options: { nativeTask?: boolean } = {}) {
-	const tools = new Map<string, { name: string; description?: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }>();
+interface FakeToolResult {
+	content: Array<{ text: string; type?: string }>;
+	isError?: boolean;
+	details?: unknown;
+}
+
+interface FakeTool {
+	name: string;
+	description?: string;
+	execute(...args: any[]): Promise<FakeToolResult>;
+}
+
+interface FakeNativeAgentSession {
+	subscribe(listener: (event: unknown) => void): () => void;
+	emit(event: unknown): void;
+}
+
+interface FakeNativeAgentRegistry {
+	get(id: string): { id: string; kind: "sub"; session: FakeNativeAgentSession } | undefined;
+	onChange(listener: (event: unknown) => void): () => void;
+	registerAgent(id: string): FakeNativeAgentSession;
+}
+
+function fakeNativeAgentRegistry(): FakeNativeAgentRegistry {
+	const refs = new Map<string, { id: string; kind: "sub"; session: FakeNativeAgentSession }>();
+	const listeners = new Set<(event: unknown) => void>();
+	return {
+		get(id) {
+			return refs.get(id);
+		},
+		onChange(listener) {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
+		registerAgent(id) {
+			const sessionListeners = new Set<(event: unknown) => void>();
+			const session: FakeNativeAgentSession = {
+				subscribe(listener) {
+					sessionListeners.add(listener);
+					return () => sessionListeners.delete(listener);
+				},
+				emit(event) {
+					for (const listener of sessionListeners) listener(event);
+				},
+			};
+			const ref = { id, kind: "sub" as const, session };
+			refs.set(id, ref);
+			for (const listener of listeners) listener({ type: "registered", ref });
+			return session;
+		},
+	};
+}
+
+interface FakeHost {
+	agentRegistry: FakeNativeAgentRegistry;
+	tools: Map<string, FakeTool>;
+	nativeTaskCalls: { count: number };
+	events: Map<string, (event: unknown, ctx: unknown) => unknown>;
+	commands: Map<string, { description?: string; handler(args: string, ctx: unknown): unknown }>;
+	entries: Array<{ customType: string; data: unknown }>;
+	notifications: string[];
+	sentMessages: Array<{ content: string; options?: unknown }>;
+	zod: { object: () => unknown; string: () => unknown };
+	arktype?: (schema: unknown) => unknown;
+	setLabel(): void;
+	registerTool(definition: FakeTool): void;
+	appendEntry(customType: string, data: unknown): void;
+	on(name: string, handler: (event: unknown, ctx: unknown) => unknown): void;
+	registerCommand(name: string, definition: { description?: string; handler(args: string, ctx: unknown): unknown }): void;
+	sendUserMessage(content: string, options?: unknown): void;
+	notify(message: string): void;
+}
+
+function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
+	const tools = new Map<string, FakeTool>();
 	const events = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const commands = new Map<string, { description?: string; handler(args: string, ctx: unknown): unknown }>();
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	const notifications: string[] = [];
 	const sentMessages: Array<{ content: string; options?: unknown }> = [];
 	const nativeTaskCalls = { count: 0 };
+	const agentRegistry = fakeNativeAgentRegistry();
 	const leaf = (): unknown => ({ optional: () => leaf(), describe: () => leaf() });
 	if (options.nativeTask) {
 		tools.set("task", {
@@ -990,6 +1268,7 @@ function fakeHost(options: { nativeTask?: boolean } = {}) {
 	}
 	return {
 		tools,
+		agentRegistry,
 		nativeTaskCalls,
 		events,
 		commands,
@@ -999,8 +1278,22 @@ function fakeHost(options: { nativeTask?: boolean } = {}) {
 		zod: { object: () => ({}), string: leaf },
 		arktype: options.nativeTask ? ((schema: unknown) => schema) : undefined,
 		setLabel() {},
-		registerTool(definition: { name: string; description?: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }) {
-			tools.set(definition.name, definition);
+		registerTool(definition: FakeTool) {
+			if (definition.name === "task") {
+				tools.set(definition.name, {
+					...definition,
+					async execute(...args: any[]) {
+						const rawContext = args[4];
+						const context = typeof rawContext === "object" && rawContext !== null
+							? rawContext as Record<string, unknown>
+							: {};
+						args[4] = { ...context, agentRegistry };
+						return definition.execute(...args);
+					},
+				});
+			} else {
+				tools.set(definition.name, definition);
+			}
 		},
 		appendEntry(customType: string, data: unknown) {
 			entries.push({ customType, data });
@@ -1020,14 +1313,48 @@ function fakeHost(options: { nativeTask?: boolean } = {}) {
 	};
 }
 
-function startCtx(host: ReturnType<typeof fakeHost>) {
+function startCtx(host: FakeHost) {
 	return { hasUI: true, ui: { notify: (message: string) => host.notify(message) }, sessionManager: { getBranch: () => [] } };
 }
 
-async function callTool(host: ReturnType<typeof fakeHost>, name: string, input: unknown) {
+async function callTool(host: FakeHost, name: string, input: unknown) {
 	const tool = host.tools.get(name);
 	assert.ok(tool !== undefined, `${name} is not registered`);
 	return tool.execute("call", { input: JSON.stringify(input) });
+}
+async function observeNativeStart(
+	host: FakeHost,
+	taskId: string,
+	attemptId: string,
+	generation = "G1",
+	steerBeforeIdentity = false,
+): Promise<FakeNativeAgentSession> {
+	const task = host.tools.get("task");
+	assert.ok(task, "the native OMP task wrapper is registered");
+	const agentId = `agent-${taskId}-${attemptId}`;
+	const details = {
+		async: { state: "completed", jobId: `job-${taskId}-${attemptId}`, type: "task" },
+		progress: [{ index: 0, id: agentId, status: "completed", requests: 1 }],
+	};
+	let childSession: FakeNativeAgentSession | undefined;
+	const result = await task.execute(
+		"call",
+		{ agent: "task", isolated: true, task: `perform the admitted work\n${dispatchMarker(taskId, attemptId, generation)}` },
+		undefined,
+		undefined,
+		{
+			invokeTool: async (_params: unknown, options?: { onUpdate?: (update: unknown) => void }) => {
+				childSession = host.agentRegistry.registerAgent(agentId);
+				childSession.emit({ type: "message_start", message: { role: "user", attribution: "agent" } });
+				if (steerBeforeIdentity) childSession.emit({ type: "message_start", message: { role: "user", attribution: "user" } });
+				options?.onUpdate?.({ details });
+				return { content: [{ type: "text", text: "native child returned" }], details };
+			},
+		} as never,
+	);
+	assert.equal(result.isError, steerBeforeIdentity ? true : undefined, result.content[0]?.text);
+	assert.ok(childSession, "OMP registered the child session");
+	return childSession;
 }
 
 const FULL_ENV = { LUNA_FACTORY_ENABLED: "1" };
@@ -1198,15 +1525,26 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 		necessity: "A1 is unproven",
 	});
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const intent = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[] }> }> };
+	assert.equal(intent.tasks[0]!.state, "READY");
+	assert.deepEqual(intent.tasks[0]!.attempts[0]!.nativeJobIds, []);
+	const notStartedReceipt = await callTool(host, "luna_factory_receipt", receipt());
+	assert.equal(notStartedReceipt.isError, true);
+	assert.match(notStartedReceipt.content[0]!.text, /not an active dispatched attempt/);
 
 	const task = host.tools.get("task");
 	assert.ok(task, "a host with native task support gets a same-name wrapper");
-	const invoke = async () => {
+	let delayedUpdate: ((update: unknown) => void) | undefined;
+	const invoke = async (_params: unknown, options?: { onUpdate?: (update: unknown) => void }) => {
 		nativeCalls += 1;
-		return {
-			content: [{ type: "text", text: "native task completed" }],
-			details: { async: { state: "completed", jobId: "job-1", type: "task" }, results: [{ id: "agent-1" }] },
+		const childSession = host.agentRegistry.registerAgent("agent-1");
+		childSession.emit({ type: "message_start", message: { role: "user", attribution: "agent" } });
+		delayedUpdate = options?.onUpdate;
+		const details = {
+			async: { state: "running", jobId: "job-1", type: "task" },
+			progress: [{ index: 0, id: "agent-1", status: "pending" }],
 		};
+		return { content: [{ type: "text", text: "native task dispatched" }], details };
 	};
 	const context = { invokeTool: invoke };
 	const refused = await task.execute("call", { task: "unbound work" }, undefined, undefined, context);
@@ -1218,9 +1556,22 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 	const accepted = await task.execute("call", { task: `do the work\n${marker}` }, undefined, undefined, context);
 	assert.equal(accepted.isError, undefined);
 	assert.equal(nativeCalls, 1);
-	const record = host.entries.at(-1)!.data as { tasks: Array<{ attempts: Array<{ nativeJobIds: string[]; nativeResultIds: string[] }> }> };
+	const dispatchedRecord = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
+	assert.equal(dispatchedRecord.tasks[0]!.state, "READY");
+	assert.deepEqual(dispatchedRecord.tasks[0]!.attempts[0]!.nativeJobIds, ["job-1"]);
+	assert.deepEqual(dispatchedRecord.tasks[0]!.attempts[0]!.nativeAgentIds, []);
+	const dispatchOnlyReceipt = await callTool(host, "luna_factory_receipt", receipt());
+	assert.equal(dispatchOnlyReceipt.isError, true);
+	assert.match(dispatchOnlyReceipt.content[0]!.text, /not an active dispatched attempt/);
+	assert.ok(delayedUpdate);
+	delayedUpdate({ details: {
+		async: { state: "running", jobId: "job-1", type: "task" },
+		progress: [{ index: 0, id: "agent-1", status: "running", requests: 1 }],
+	} });
+	const record = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
+	assert.equal(record.tasks[0]!.state, "RUNNING");
 	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeJobIds, ["job-1"]);
-	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeResultIds, ["agent-1"]);
+	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeAgentIds, ["agent-1"]);
 });
 
 test("the native task seam validates and correlates an independent batch without partial authority", async () => {
@@ -1262,17 +1613,21 @@ test("the native task seam validates and correlates an independent batch without
 		{
 			invokeTool: async () => {
 				calls += 1;
+				for (const agentId of ["agent-1", "agent-2"]) {
+					const childSession = host.agentRegistry.registerAgent(agentId);
+					childSession.emit({ type: "message_start", message: { role: "user", attribution: "agent" } });
+				}
 				return {
 					content: [{ type: "text", text: "batch completed" }],
-					details: { async: { state: "completed", jobId: "batch-1", type: "task" }, results: [{ index: 0, id: "agent-1" }, { index: 1, id: "agent-2" }] },
+					details: { async: { state: "completed", jobId: "batch-1", type: "task" }, results: [{ index: 0, id: "agent-1", requests: 1 }, { index: 1, id: "agent-2", requests: 1 }] },
 				};
 			},
 		} as never,
 	);
 	assert.equal(result.isError, undefined);
 	assert.equal(calls, 1, "one native batch owns both admitted items");
-	const record = host.entries.at(-1)!.data as { tasks: Array<{ id: string; attempts: Array<{ nativeJobIds: string[]; nativeResultIds: string[] }> }> };
-	assert.deepEqual(record.tasks.map((entry) => [entry.id, entry.attempts[0]!.nativeJobIds, entry.attempts[0]!.nativeResultIds]), [
+	const record = host.entries.at(-1)!.data as { tasks: Array<{ id: string; attempts: Array<{ nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
+	assert.deepEqual(record.tasks.map((entry) => [entry.id, entry.attempts[0]!.nativeJobIds, entry.attempts[0]!.nativeAgentIds]), [
 		["T1", ["batch-1"], ["agent-1"]],
 		["T2", ["batch-1"], ["agent-2"]],
 	]);
@@ -1315,7 +1670,9 @@ test("a write task must request native isolation before delegation", async () =>
 	const marker = dispatchMarker("T1", "T1-a1", "G1");
 	const invoke = async () => {
 		nativeCalls += 1;
-		return { content: [{ type: "text", text: "isolated native task completed" }], details: { async: { state: "completed", jobId: "write-job-1", type: "task" }, results: [{ id: "write-agent-1" }] } };
+		const childSession = host.agentRegistry.registerAgent("write-agent-1");
+		childSession.emit({ type: "message_start", message: { role: "user", attribution: "agent" } });
+		return { content: [{ type: "text", text: "isolated native task completed" }], details: { async: { state: "completed", jobId: "write-job-1", type: "task" }, results: [{ id: "write-agent-1", requests: 1 }] } };
 	};
 	const refused = await task.execute("call", { agent: "task", task: `write work\n${marker}` }, undefined, undefined, { invokeTool: invoke } as never);
 	assert.equal(refused.isError, true);
@@ -1450,7 +1807,7 @@ test("opening rejects malformed objective and criteria before journaling", async
 });
 
 test("the admitted vertical runs end to end and finishes on proof", async () => {
-	const host = fakeHost();
+	const host = fakeHost({ nativeTask: true });
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
 	host.events.get("session_start")!({}, startCtx(host));
 
@@ -1477,6 +1834,7 @@ test("the admitted vertical runs end to end and finishes on proof", async () => 
 	assert.equal(dispatched.isError, undefined);
 	assert.match(dispatched.content[0]!.text, /admission boundary: enforced/);
 
+	await observeNativeStart(host, "T1", "T1-a1");
 	const recorded = await callTool(host, "luna_factory_receipt", {
 		...receipt(),
 		taskId: "T1",
@@ -1496,8 +1854,75 @@ test("the admitted vertical runs end to end and finishes on proof", async () => 
 	assert.ok(host.entries.some((entry) => entry.customType === JOURNAL_ENTRY), "the ledger is journalled");
 });
 
+test("an explicit Hub steer invalidates a live native Factory child", async () => {
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "prove the isolated child work",
+		criteria: [{ id: "A1", statement: "the child work is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "perform the child work",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const childSession = await observeNativeStart(host, "T1", "T1-a1");
+	childSession.emit({ type: "message_start", message: { role: "user", attribution: "user" } });
+
+	const journal = host.entries.at(-1)!.data as {
+		tasks: Array<{ state: string; attempts: Array<{ steeredAgentId?: string }> }>;
+	};
+	assert.equal(journal.tasks[0]!.state, "ESCALATE");
+	assert.equal(journal.tasks[0]!.attempts[0]!.steeredAgentId, "agent-T1-T1-a1");
+	const status = await callTool(host, "luna_factory_status", {});
+	assert.match(status.content[0]!.text, /Hub-steered; attempt invalidated/);
+	const receiptResult = await callTool(host, "luna_factory_receipt", receipt());
+	assert.equal(receiptResult.isError, true);
+	assert.match(receiptResult.content.map((part) => part.text).join("\n"), /steered by OMP/);
+	const finish = await callTool(host, "luna_factory_finish", { taskId: "T1" });
+	assert.equal(finish.isError, true);
+});
+
+test("Hub steering before OMP identity details is retained and invalidates the attempt", async () => {
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "prove the child work",
+		criteria: [{ id: "A1", statement: "the child work is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "perform child work",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await observeNativeStart(host, "T1", "T1-a1", "G1", true);
+	const journal = host.entries.at(-1)!.data as {
+		tasks: Array<{ state: string; attempts: Array<{ steeredAgentId?: string }> }>;
+	};
+	assert.equal(journal.tasks[0]!.state, "ESCALATE");
+	assert.equal(journal.tasks[0]!.attempts[0]!.steeredAgentId, "agent-T1-T1-a1");
+});
+
 test("write integration is an explicit owner event and moves the proof subject", async () => {
-	const host = fakeHost();
+	const host = fakeHost({ nativeTask: true });
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
 	host.events.get("session_start")!({}, startCtx(host));
 	await callTool(host, "luna_factory_open", {
@@ -1518,6 +1943,7 @@ test("write integration is an explicit owner event and moves the proof subject",
 		necessity: "A1 is unproven",
 	});
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await observeNativeStart(host, "T1", "T1-a1");
 	await callTool(host, "luna_factory_receipt", receipt());
 	const integrated = await callTool(host, "luna_factory_integrate", {
 		taskId: "T1",
@@ -1535,7 +1961,7 @@ test("write integration is an explicit owner event and moves the proof subject",
 });
 
 test("the replan adapter exposes only the one diagnosed same-goal replan", async () => {
-	const host = fakeHost();
+	const host = fakeHost({ nativeTask: true });
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
 	host.events.get("session_start")!({}, startCtx(host));
 	await callTool(host, "luna_factory_open", {
@@ -1556,12 +1982,14 @@ test("the replan adapter exposes only the one diagnosed same-goal replan", async
 		necessity: "A1 is unproven",
 	});
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await observeNativeStart(host, "T1", "T1-a1");
 	await callTool(host, "luna_factory_receipt", receipt({ unresolved: ["still broken"] }));
 	const premature = await callTool(host, "luna_factory_replan", { taskId: "T1" });
 	assert.equal(premature.isError, true);
 	assert.match(premature.content[0]!.text, /not diagnosed/);
 
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a2" });
+	await observeNativeStart(host, "T1", "T1-a2");
 	await callTool(host, "luna_factory_receipt", receipt({ attemptId: "T1-a2", unresolved: ["still broken differently"] }));
 	const replanned = await callTool(host, "luna_factory_replan", { taskId: "T1" });
 	assert.equal(replanned.isError, undefined);
@@ -1576,7 +2004,7 @@ test("the replan adapter exposes only the one diagnosed same-goal replan", async
 });
 
 test("the reopen adapter records explicit post-success defect evidence", async () => {
-	const host = fakeHost();
+	const host = fakeHost({ nativeTask: true });
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
 	host.events.get("session_start")!({}, startCtx(host));
 	await callTool(host, "luna_factory_open", {
@@ -1599,6 +2027,7 @@ test("the reopen adapter records explicit post-success defect evidence", async (
 		necessity: "A1 is unproven",
 	});
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await observeNativeStart(host, "T1", "T1-a1");
 	await callTool(host, "luna_factory_receipt", receipt());
 	await callTool(host, "luna_factory_finish", { taskId: "T1" });
 	const cleanup = await callTool(host, "luna_factory_candidate", {
@@ -1721,4 +2150,72 @@ test("session settlement records a verdict and never dispatches", () => {
 	assert.equal(host.notifications.some((message) => /no Factory run is open/.test(message)), false);
 	host.events.get("session_stop")!({}, { hasUI: false, sessionManager: { getBranch: () => [] } });
 	assert.equal(host.entries.filter((entry) => entry.customType === "com.joshyorko.luna-factory.settlement").length, 0, "an idle session settles nothing");
+});
+
+test("OMP task running status without a request remains unknown, not RUNNING", async () => {
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "do not infer a child from a queued OMP task",
+		criteria: [{ id: "A1", statement: "the child start is observed" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "inspect the selected item",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const task = host.tools.get("task");
+	assert.ok(task);
+	const marker = dispatchMarker("T1", "T1-a1", "G1");
+	let stateAtUnstartedProgress = "";
+	const result = await task.execute(
+		"call",
+		{ task: `do the work\n${marker}` },
+		undefined,
+		undefined,
+		{
+			invokeTool: async (_params: unknown, options?: { onUpdate?: (update: unknown) => void }) => {
+				options?.onUpdate?.({
+					details: {
+						async: { state: "running", jobId: "job-setup", type: "task" },
+						progress: [{ index: 0, id: "agent-setup", status: "running", requests: 0 }],
+					},
+				});
+				const running = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
+				stateAtUnstartedProgress = running.tasks[0]!.state;
+				assert.deepEqual(running.tasks[0]!.attempts[0]!.nativeAgentIds, []);
+				options?.onUpdate?.({
+					details: {
+						async: { state: "failed", jobId: "job-setup", type: "task" },
+						progress: [{ index: 0, id: "agent-setup", status: "failed", requests: 0 }],
+					},
+				});
+				return {
+					content: [{ type: "text", text: "OMP setup failed" }],
+					details: {
+						async: { state: "failed", jobId: "job-setup", type: "task" },
+						progress: [{ index: 0, id: "agent-setup", status: "failed", requests: 0 }],
+					},
+				};
+			},
+		} as never,
+	);
+	assert.equal(stateAtUnstartedProgress, "READY");
+	assert.equal(result.isError, true);
+	assert.ok(result.content.some((part) => /escalated as unknown/.test(part.text)));
+	const final = host.entries.at(-1)!.data as { tasks: Array<{ state: string; decisionReason: string; attempts: Array<{ state: string; nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
+	assert.equal(final.tasks[0]!.state, "ESCALATE");
+	assert.match(final.tasks[0]!.decisionReason, /liveness is unknown/);
+	assert.equal(final.tasks[0]!.attempts[0]!.state, "abandoned");
+	assert.deepEqual(final.tasks[0]!.attempts[0]!.nativeJobIds, ["job-setup"]);
+	assert.deepEqual(final.tasks[0]!.attempts[0]!.nativeAgentIds, []);
 });
