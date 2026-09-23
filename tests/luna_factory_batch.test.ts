@@ -51,7 +51,7 @@ test("batch status exposes Factory-private session role and stable identity with
 		...item.ledger,
 		tasks: [{
 			id: "T1", generation: item.ledger.generation, criterionId: "A1", title: "inspect", deps: [],
-			effect: "read", owner: batch.id, state: "RUNNING", attempts: [{
+			effect: "read", owner: batch.id, state: "READY", attempts: [{
 				id: "T1-a1", lineage: 1, taskId: "T1", generation: item.ledger.generation, subject: item.ledger.subject,
 				state: "started", nativeJobIds: [], nativeAgentIds: [],
 				privateSessions: [{ phase: "worker", sessionFile: "/state/sessions/worker.jsonl", started: false }],

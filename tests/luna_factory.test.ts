@@ -246,8 +246,8 @@ test("independent admitted tasks can run in parallel on the same subject", () =>
 	assert.equal(findTask(startedB, "T2" as TaskId)?.state, "READY");
 	const dispatchedA = step(startedB, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", jobId: "job-T1" }));
 	assert.equal(findTask(dispatchedA, "T1" as TaskId)?.state, "READY");
-	const startedA = step(dispatchedA, (revision) => ({ kind: "record_native_agent_start", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", agentId: "agent-T1" }));
-	const dispatchedB = step(startedA, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", jobId: "job-T2" }));
+	const observedA = step(dispatchedA, (revision) => ({ kind: "record_native_agent_start", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", agentId: "agent-T1" }));
+	const dispatchedB = step(observedA, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", jobId: "job-T2" }));
 	const bothExecuted = step(dispatchedB, (revision) => ({ kind: "record_native_agent_start", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", agentId: "agent-T2" }));
 	assert.equal(findTask(bothExecuted, "T1" as TaskId)?.state, "RUNNING");
 	assert.equal(findTask(bothExecuted, "T2" as TaskId)?.state, "RUNNING");
@@ -957,20 +957,20 @@ test("an unproven execution path is refused rather than routed through silently"
 	assert.match(unknown.ok ? "" : unknown.error, /unknown execution path/);
 });
 
-test("dispatch refuses a task that is not admitted and running", () => {
+test("dispatch requires an admitted task and persisted attempt intent", () => {
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
 	const notStarted = buildDispatchPrompt(admitted, "T1" as TaskId, "T1-a1");
 	assert.equal(notStarted.ok, false);
-	assert.match(notStarted.ok ? "" : notStarted.error, /start_attempt must persist an attempt/);
+	assert.match(notStarted.ok ? "" : notStarted.error, /persist the intent before the effect/);
 
-	const started = step(admitted, (revision) => ({
+	const intent = step(admitted, (revision) => ({
 		kind: "start_attempt",
 		expectedRevision: revision,
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		subject: SUBJECT,
 	}));
-	const dispatched = buildDispatchPrompt(started, "T1" as TaskId, "T1-a1");
+	const dispatched = buildDispatchPrompt(intent, "T1" as TaskId, "T1-a1");
 	assert.equal(dispatched.ok, true);
 
 	const deferred = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ taskId: "T2" as TaskId, deps: ["T9" as TaskId] }) }));
@@ -996,6 +996,16 @@ test("the dispatched prompt carries the ledger's identity, never a caller-suppli
 	assert.match(prompt, /Do not create successor tasks or missions/);
 	assert.match(prompt, /Do not approve, merge, publish/);
 	assert.ok(prompt.includes(RECEIPT_CONTRACT));
+	const dispatchOnly = step(intentTask(), (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		jobId: "omp-job-1",
+	}));
+	const duplicateDispatch = buildDispatchPrompt(dispatchOnly, "T1" as TaskId, "T1-a1");
+	assert.equal(duplicateDispatch.ok, false);
+	assert.match(duplicateDispatch.ok ? "" : duplicateDispatch.error, /already has an OMP execution identity/);
 });
 
 // -------------------------------------------------------------------- journal
@@ -1342,9 +1352,9 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 	const intent = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[] }> }> };
 	assert.equal(intent.tasks[0]!.state, "READY");
 	assert.deepEqual(intent.tasks[0]!.attempts[0]!.nativeJobIds, []);
-	const fabricated = await callTool(host, "luna_factory_receipt", receipt());
-	assert.equal(fabricated.isError, true);
-	assert.match(fabricated.content[0]!.text, /not an active dispatched attempt/);
+	const notStartedReceipt = await callTool(host, "luna_factory_receipt", receipt());
+	assert.equal(notStartedReceipt.isError, true);
+	assert.match(notStartedReceipt.content[0]!.text, /not an active dispatched attempt/);
 
 	const task = host.tools.get("task");
 	assert.ok(task, "a host with native task support gets a same-name wrapper");
@@ -1372,9 +1382,9 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 	assert.equal(dispatchedRecord.tasks[0]!.state, "READY");
 	assert.deepEqual(dispatchedRecord.tasks[0]!.attempts[0]!.nativeJobIds, ["job-1"]);
 	assert.deepEqual(dispatchedRecord.tasks[0]!.attempts[0]!.nativeAgentIds, []);
-	const fabricated = await callTool(host, "luna_factory_receipt", receipt());
-	assert.equal(fabricated.isError, true);
-	assert.match(fabricated.content[0]!.text, /not an active dispatched attempt/);
+	const dispatchOnlyReceipt = await callTool(host, "luna_factory_receipt", receipt());
+	assert.equal(dispatchOnlyReceipt.isError, true);
+	assert.match(dispatchOnlyReceipt.content[0]!.text, /not an active dispatched attempt/);
 	assert.ok(delayedUpdate);
 	delayedUpdate({ details: {
 		async: { state: "running", jobId: "job-1", type: "task" },

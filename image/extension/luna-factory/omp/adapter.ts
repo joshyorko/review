@@ -79,7 +79,7 @@ export function buildDispatchPrompt(
 	if (attempt.state !== "started") {
 		return { ok: false, error: `attempt ${attemptId} is ${attempt.state} and cannot be dispatched` };
 	}
-	if (attempt.nativeJobIds.length > 0 || attempt.nativeResultIds.length > 0) {
+	if (attempt.nativeJobIds.length > 0 || attempt.nativeAgentIds.length > 0) {
 		return { ok: false, error: `attempt ${attemptId} already has an OMP execution identity and cannot be dispatched again` };
 	}
 	if (
