@@ -31,10 +31,13 @@ export function dispatchMarker(taskId: string, attemptId: string, generation: st
 /** The receipt contract every dispatched worker is asked to return. */
 export const RECEIPT_CONTRACT = [
 	"Return one structured receipt with exactly these keys:",
-	"  version (1), taskId, attemptId, generation, subject {repo, base, head}, result,",
+	"  version (2), taskId, attemptId, generation, subject {repo, base, head}, result, assumptions[], predicates[],",
 	"  changed[], evidence[], tests[{command, outcome: pass|fail|not-run, artifact?}],",
 	"  cleanEnvironment (true|false|unknown), unresolved[], next, confidence (low|medium|high),",
-	"  routing {requested?, effective?, effort?, verified}, exitCode, aborted, truncated.",
+	"  routing {requested?, effective?, effort?, verified}, exitCode, aborted, truncated, semanticResult?.",
+	"Each assumption is {kind, value} (dependency-outcome also includes taskId); report every required criterion assumption exactly.",
+	"Each predicate is {phase: worker|verification|acceptance, item, ok, note}; include every checked item with true and false outcomes, never only an aggregate. False verification or acceptance predicates invalidate proof; worker-phase outcomes remain recorded observations.",
+	"semanticResult, when applicable, is {kind: inspection|finding, outcome: no-finding|supported|disproven|uncertain, summary, verified, publicationAuthority: none, publicationBlocker?}. A blocker retains disclosure restrictions; it never grants publication authority. Semantic results alone are not proof.",
 	"Use the task and attempt ids exactly as given; do not assign yourself another identity.",
 	"Reference artifacts only inside the run's artifact roots.",
 ].join("\n");
@@ -97,6 +100,7 @@ export function buildDispatchPrompt(
 		`Luna Factory task ${task.id} (attempt ${attempt.id}, lineage ${attempt.lineage}) — ${task.title}`,
 		`generation ${ledger.generation} · revision ${ledger.revision} · subject ${subject.repo}@${subject.head ?? subject.base}`,
 		`criterion ${task.criterionId}${criterion ? `: ${criterion.statement}` : ""} (unproven)`,
+		`current proof assumptions: ${JSON.stringify(criterion?.assumptions ?? [])}`,
 		`permitted effect: ${task.effect}`,
 		...(task.effect === "write" ? ["write dispatch requirement: call native task with isolated:true; auto-apply is disabled by the appliance and owner integration remains explicit"] : []),
 		`finish authority: ${ledger.goal.finishAuthority}`,

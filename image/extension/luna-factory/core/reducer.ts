@@ -17,7 +17,8 @@
  */
 
 import { admit, attemptsRemaining } from "./admission.ts";
-import { receiptAcceptable, reconcileReceipt } from "./evidence.ts";
+import { criterionProven, receiptAcceptable, reconcileReceipt, taskProofCurrent } from "./evidence.ts";
+import { parseProofAssumptions } from "./schema.ts";
 import type {
 	Attempt,
 	Candidate,
@@ -454,11 +455,19 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (subjectChanged(attempt.subject, ledger.subject)) {
 				return { ok: false, error: `proof for ${task.id} is at an older subject; reverify before completing` };
 			}
+			const criterion = ledger.criteria.find((candidate) => candidate.id === task.criterionId);
+			const currentAssumptions = (criterion?.assumptions ?? []).map((assumption) => {
+				if (assumption.kind !== "dependency-outcome") return assumption;
+				const dependency = ledger.tasks.find((candidate) => candidate.id === assumption.taskId);
+				return { ...assumption, value: dependency !== undefined && criterionProven(ledger, dependency.criterionId) ? "proven" : "unproven" };
+			});
 			const reconciliation = reconcileReceipt(ledger, attempt.receipt, {
 				taskId: task.id,
 				attemptId: attempt.id,
 				subject: ledger.subject,
 				artifactRoots: context.artifactRoots,
+				assumptions: currentAssumptions,
+				requiredAssumptions: criterion?.assumptions,
 			});
 			if (reconciliation.status !== "proven") {
 				return { ok: false, error: `evidence is ${reconciliation.status}: ${reconciliation.reasons.join("; ")}` };
@@ -467,6 +476,26 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			return bump({ ...refreshDeferred(next), noProgressAttempts: 0 });
 		}
 
+		case "revise_criterion_assumptions": {
+			const criterion = ledger.criteria.find((entry) => entry.id === event.criterionId);
+			if (criterion === undefined) return { ok: false, error: `unknown criterion ${event.criterionId}` };
+			if (!event.reason.trim()) return { ok: false, error: "assumption revision requires a reason" };
+			if (ledger.tasks.some((task) => task.criterionId === criterion.id && task.attempts.some((attempt) => attempt.state === "started"))) {
+				return { ok: false, error: `criterion ${criterion.id} has an in-flight attempt; reconcile it before changing assumptions` };
+			}
+			const parsedAssumptions = parseProofAssumptions(event.assumptions);
+			if (!parsedAssumptions.ok) return { ok: false, error: `assumptions rejected: ${parsedAssumptions.errors.join("; ")}` };
+			const next: Ledger = {
+				...ledger,
+				criteria: ledger.criteria.map((entry) => entry.id === criterion.id ? { ...entry, assumptions: parsedAssumptions.value } : entry),
+			};
+			const tasks = next.tasks.map((task) =>
+				task.state === "DONE" && !taskProofCurrent(next, task)
+					? { ...task, state: "READY" as TaskState, decisionReason: `proof assumption changed: ${event.reason.trim()}` }
+					: task,
+			);
+			return bump({ ...next, tasks });
+		}
 		case "reopen_task": {
 			const task = findTask(ledger, event.taskId);
 			if (task === undefined) return { ok: false, error: `unknown task ${event.taskId}` };

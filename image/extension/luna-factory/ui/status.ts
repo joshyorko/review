@@ -17,8 +17,6 @@ export function truncatePlain(text: string, width: number): string {
 	return `${text.slice(0, width - 1)}…`;
 }
 
-const ACTIVE_STATES: Record<string, true> = { READY: true, RUNNING: true, VERIFY: true };
-const BLOCKED_STATES: Record<string, true> = { BLOCKED: true, DEFERRED: true, ESCALATE: true };
 
 /**
  * The one-line status indicator.
@@ -27,12 +25,9 @@ const BLOCKED_STATES: Record<string, true> = { BLOCKED: true, DEFERRED: true, ES
  * queue gauge or Hive connectivity.
  */
 export function renderStatus(ledger: Ledger, width = 120, verdict: RunVerdict = evaluateRun(ledger)): string {
-	const activeCriteria = new Set(ledger.tasks.filter((task) => ACTIVE_STATES[task.state] === true).map((task) => task.criterionId));
-	const blockedCriteria = new Set(ledger.tasks.filter((task) => BLOCKED_STATES[task.state] === true).map((task) => task.criterionId));
-	const remaining = verdict.remaining;
-	const active = remaining.filter((id) => activeCriteria.has(id)).length;
-	const blocked = remaining.filter((id) => !activeCriteria.has(id) && blockedCriteria.has(id)).length;
-	const unknown = remaining.length - active - blocked;
+	const active = verdict.activeMandatory;
+	const blocked = verdict.blockedMandatory;
+	const unknown = verdict.unknownMandatory;
 	const parts = [
 		`Factory ${ledger.generation}`,
 		`${verdict.provenMandatory}/${verdict.totalMandatory} proven`,
@@ -82,6 +77,14 @@ export function renderStatusDetail(ledger: Ledger, width = 120, verdict: RunVerd
 				const requested = routing.requested ?? "unknown";
 				const effective = routing.verified ? (routing.effective ?? "unknown") : "unverified";
 				lines.push(`      routing: requested ${requested} · effective ${effective} · effort ${routing.effort ?? "unknown"}`);
+				for (const predicate of attempt.receipt.predicates ?? []) {
+					lines.push(`      predicate ${predicate.phase} ${predicate.ok ? "PASS" : "FAIL"}: ${predicate.item} — ${predicate.note}`);
+				}
+				const semantic = attempt.receipt.semanticResult;
+				if (semantic) {
+					lines.push(`      semantic result: ${semantic.outcome}; verified ${semantic.verified}; publication authority none`);
+					if (semantic.publicationBlocker) lines.push(`      publication/disclosure blocker: ${semantic.publicationBlocker}`);
+				}
 			}
 		}
 	}
@@ -109,6 +112,14 @@ export function renderWhy(ledger: Ledger, taskId: TaskId, width = 120): readonly
 		if (receipt === undefined) continue;
 		for (const reference of receipt.evidence) lines.push(`  evidence ${reference}`);
 		for (const claim of receipt.tests) lines.push(`  test ${claim.outcome}: ${claim.command}`);
+		for (const predicate of receipt.predicates ?? []) {
+			lines.push(`  predicate ${predicate.phase} ${predicate.ok ? "PASS" : "FAIL"}: ${predicate.item} — ${predicate.note}`);
+		}
+		const semantic = receipt.semanticResult;
+		if (semantic) {
+			lines.push(`  semantic result ${semantic.outcome}; verified ${semantic.verified}; publication authority none`);
+			if (semantic.publicationBlocker) lines.push(`  publication/disclosure blocker: ${semantic.publicationBlocker}`);
+		}
 		for (const item of receipt.unresolved) lines.push(`  unresolved ${item}`);
 	}
 	return lines.map((line) => truncatePlain(line, width));

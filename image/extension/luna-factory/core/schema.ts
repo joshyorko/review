@@ -18,10 +18,15 @@ import type {
 	Effect,
 	EvidenceReceipt,
 	GenerationId,
+	ProofAssumption,
+	PredicateEvidence,
 	Routing,
+	SemanticResult,
 	Subject,
 	TaskId,
 	TestClaim,
+	AttemptId,
+	OperationReceipt,
 } from "./model.ts";
 
 /** Bounds. A receipt is a bounded summary, not a transport for a log. */
@@ -170,6 +175,189 @@ function testClaims(value: unknown, errors: string[]): readonly TestClaim[] | un
 	return out;
 }
 
+function assumptions(value: unknown, errors: string[]): readonly ProofAssumption[] | undefined {
+	if (!Array.isArray(value) || value.length > 16) {
+		errors.push("assumptions must be an array with at most 16 entries");
+		return undefined;
+	}
+	const out: ProofAssumption[] = [];
+	const seen = new Set<string>();
+	for (const [index, entry] of value.entries()) {
+		if (!isRecord(entry)) {
+			errors.push(`assumptions[${index}] must be an object`);
+			return undefined;
+		}
+		const kind = entry.kind;
+		const parsedValue = text(entry.value, `assumptions[${index}].value`, errors);
+		if (parsedValue === undefined) return undefined;
+		if (kind === "dependency-outcome") {
+			const taskId = identity(entry.taskId, `assumptions[${index}].taskId`, errors);
+			if (taskId === undefined) return undefined;
+			if (parsedValue !== "proven" && parsedValue !== "unproven") {
+				errors.push(`assumptions[${index}].value must be proven or unproven`);
+				return undefined;
+			}
+			const key = `${kind}:${taskId}`;
+			if (seen.has(key)) {
+				errors.push(`assumptions[${index}] duplicates ${key}`);
+				return undefined;
+			}
+			seen.add(key);
+			out.push({ kind, taskId: taskId as TaskId, value: parsedValue });
+			continue;
+		}
+		if (kind !== "acceptance-revision") {
+			errors.push(`assumptions[${index}].kind is unsupported`);
+			return undefined;
+		}
+		if (seen.has(kind)) {
+			errors.push(`assumptions[${index}] duplicates ${kind}`);
+			return undefined;
+		}
+		seen.add(kind);
+		out.push({ kind, value: parsedValue });
+	}
+	return out;
+}
+
+function semanticResult(value: unknown, errors: string[]): SemanticResult | undefined {
+	if (!isRecord(value)) {
+		errors.push("semanticResult must be an object");
+		return undefined;
+	}
+	if (value.kind !== "inspection" && value.kind !== "finding") errors.push("semanticResult.kind must be inspection or finding");
+	if (!["no-finding", "supported", "disproven", "uncertain"].includes(String(value.outcome))) {
+		errors.push("semanticResult.outcome is unsupported");
+	}
+	if (value.kind === "inspection" && value.outcome !== "no-finding" && value.outcome !== "uncertain") {
+		errors.push("inspection semantic outcomes must be no-finding or uncertain");
+	}
+	if (value.kind === "finding" && value.outcome === "no-finding") {
+		errors.push("finding semantic outcomes cannot be no-finding");
+	}
+	if (value.outcome === "uncertain" && value.verified === true) {
+		errors.push("an uncertain semantic result cannot be verified");
+	}
+	const summary = text(value.summary, "semanticResult.summary", errors);
+	let publicationBlocker: string | undefined;
+	if (value.publicationBlocker !== undefined) {
+		publicationBlocker = text(value.publicationBlocker, "semanticResult.publicationBlocker", errors);
+	}
+	if (value.verified !== true && value.verified !== false) errors.push("semanticResult.verified must be boolean");
+	if (value.publicationAuthority !== "none") errors.push("semanticResult.publicationAuthority must be none");
+	if (summary === undefined || errors.length > 0) return undefined;
+	return {
+		kind: value.kind as SemanticResult["kind"],
+		outcome: value.outcome as SemanticResult["outcome"],
+		summary,
+		verified: value.verified as boolean,
+		publicationAuthority: "none",
+		...(publicationBlocker === undefined ? {} : { publicationBlocker }),
+	};
+}
+/** Parse the explicit current assumption snapshot on a criterion or proof binding. */
+export function parseProofAssumptions(value: unknown): ParseResult<readonly ProofAssumption[]> {
+	const errors: string[] = [];
+	const parsed = assumptions(value, errors);
+	return errors.length > 0 || parsed === undefined ? { ok: false, errors } : { ok: true, value: parsed };
+}
+
+function predicateRows(
+	value: unknown,
+	errors: string[],
+	defaultPhase?: PredicateEvidence["phase"],
+): readonly PredicateEvidence[] | undefined {
+	if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+		errors.push(`predicates must be an array with at most ${MAX_ITEMS} entries`);
+		return undefined;
+	}
+	const out: PredicateEvidence[] = [];
+	for (const [index, entry] of value.entries()) {
+		if (!isRecord(entry)) {
+			errors.push(`predicates[${index}] must be an object`);
+			return undefined;
+		}
+		const phase = defaultPhase ?? entry.phase;
+		if (phase !== "worker" && phase !== "verification" && phase !== "acceptance") {
+			errors.push(`predicates[${index}].phase is unsupported`);
+			return undefined;
+		}
+		if (defaultPhase !== undefined && entry.phase !== undefined && entry.phase !== defaultPhase) {
+			errors.push(`predicates[${index}].phase cannot override the observed phase`);
+			return undefined;
+		}
+		const item = text(entry.item, `predicates[${index}].item`, errors);
+		const note = text(entry.note, `predicates[${index}].note`, errors);
+		if (typeof entry.ok !== "boolean") errors.push(`predicates[${index}].ok must be boolean`);
+		if (item === undefined || note === undefined || typeof entry.ok !== "boolean") return undefined;
+		out.push({ phase, item, ok: entry.ok, note });
+	}
+	return out;
+}
+
+/** Parse positive/negative predicate rows, attaching phase only from trusted caller context. */
+export function parsePredicateEvidence(
+	value: unknown,
+	phase?: PredicateEvidence["phase"],
+): ParseResult<readonly PredicateEvidence[]> {
+	const errors: string[] = [];
+	const parsed = predicateRows(value, errors, phase);
+	return errors.length > 0 || parsed === undefined ? { ok: false, errors } : { ok: true, value: parsed };
+}
+
+/** Parse a durable operation identity before BatchStore can resume or retry it. */
+export function parseOperationReceipt(value: unknown): ParseResult<OperationReceipt> {
+	const errors: string[] = [];
+	if (!isRecord(value)) return { ok: false, errors: ["operation receipt must be an object"] };
+	const id = text(value.id, "operation.id", errors);
+	if (id !== undefined && id.length > 512) errors.push("operation.id exceeds 512 characters");
+	const generation = identity(value.generation, "operation.generation", errors);
+	const parsedSubject = parseSubject(value.subject);
+	if (!parsedSubject.ok) errors.push(...parsedSubject.errors.map((error) => `operation.${error}`));
+	const phase = value.phase;
+	if (phase !== "worker" && phase !== "verify" && phase !== "acceptance" && phase !== "push" && phase !== "pr") {
+		errors.push("operation.phase is unsupported");
+	}
+	const effect = phase === "push" ? "git-push" : phase === "pr" ? "pull-request-create" : "repository-work";
+	if (value.effect !== effect) errors.push("operation.effect does not match its phase");
+	if (value.state !== "intent" && value.state !== "applied" && value.state !== "not-applied" && value.state !== "unknown") {
+		errors.push("operation.state is unsupported");
+	}
+	const owner = value.owner === undefined ? undefined : text(value.owner, "operation.owner", errors);
+	if (owner !== undefined && owner.length > 256) errors.push("operation.owner exceeds 256 characters");
+	const attemptId = value.attemptId === undefined ? undefined : identity(value.attemptId, "operation.attemptId", errors);
+	const branch = value.branch === undefined ? undefined : text(value.branch, "operation.branch", errors);
+	if (branch !== undefined && branch.length > 256) errors.push("operation.branch exceeds 256 characters");
+	const sha = value.sha === undefined ? undefined : text(value.sha, "operation.sha", errors);
+	if (sha !== undefined && !REVISION_RE.test(sha)) errors.push("operation.sha must be a git object identity");
+	const url = value.url === undefined ? undefined : text(value.url, "operation.url", errors);
+	const resultHandle = value.resultHandle === undefined ? undefined : text(value.resultHandle, "operation.resultHandle", errors);
+	if (url !== undefined && url.length > MAX_TEXT) errors.push("operation.url is too long");
+	if (resultHandle !== undefined && resultHandle.length > MAX_TEXT) errors.push("operation.resultHandle is too long");
+	if (phase === "push" || phase === "pr") {
+		if (branch === undefined || sha === undefined) errors.push("publication operations require exact branch and SHA");
+		if (parsedSubject.ok && sha !== undefined && parsedSubject.value.head !== sha) errors.push("publication subject head must match the recorded SHA");
+	}
+	if (errors.length > 0 || id === undefined || generation === undefined || !parsedSubject.ok) return { ok: false, errors };
+	return {
+		ok: true,
+		value: {
+			id,
+			generation: generation as GenerationId,
+			subject: parsedSubject.value,
+			effect: effect as OperationReceipt["effect"],
+			phase: phase as OperationReceipt["phase"],
+			...(owner === undefined ? {} : { owner }),
+			...(attemptId === undefined ? {} : { attemptId: attemptId as AttemptId }),
+			state: value.state as OperationReceipt["state"],
+			...(branch === undefined ? {} : { branch }),
+			...(sha === undefined ? {} : { sha }),
+			...(url === undefined ? {} : { url }),
+			...(resultHandle === undefined ? {} : { resultHandle }),
+		},
+	};
+}
+
 /**
  * Parse an untrusted worker receipt.
  *
@@ -179,7 +367,10 @@ function testClaims(value: unknown, errors: string[]): readonly TestClaim[] | un
 export function parseReceipt(value: unknown): ParseResult<EvidenceReceipt> {
 	const errors: string[] = [];
 	if (!isRecord(value)) return { ok: false, errors: ["receipt must be an object"] };
-	if (value.version !== 1) return { ok: false, errors: ["receipt.version must be 1"] };
+	if (value.version !== 1 && value.version !== 2) return { ok: false, errors: ["receipt.version must be 1 or 2"] };
+	if (value.version === 1 && (value.assumptions !== undefined || value.semanticResult !== undefined || value.predicates !== undefined)) {
+		return { ok: false, errors: ["version-1 receipts cannot contain version-2 semantic fields"] };
+	}
 
 	const taskId = identity(value.taskId, "taskId", errors);
 	const attemptId = identity(value.attemptId, "attemptId", errors);
@@ -192,6 +383,11 @@ export function parseReceipt(value: unknown): ParseResult<EvidenceReceipt> {
 	const unresolved = stringList(value.unresolved, "unresolved", errors, true);
 	const next = text(value.next, "next", errors, true);
 	const parsedRouting = routing(value.routing, errors);
+	const parsedAssumptions = value.version === 2 ? assumptions(value.assumptions, errors) : undefined;
+	const parsedSemanticResult = value.semanticResult === undefined ? undefined : semanticResult(value.semanticResult, errors);
+	const parsedPredicates = value.version === 2 ? parsePredicateEvidence(value.predicates) : undefined;
+	if (value.version === 2 && parsedAssumptions === undefined) errors.push("version-2 receipts require assumptions");
+	if (parsedPredicates !== undefined && !parsedPredicates.ok) errors.push(...parsedPredicates.errors);
 
 	const cleanEnvironment = value.cleanEnvironment;
 	if (cleanEnvironment !== true && cleanEnvironment !== false && cleanEnvironment !== "unknown") {
@@ -213,7 +409,7 @@ export function parseReceipt(value: unknown): ParseResult<EvidenceReceipt> {
 	return {
 		ok: true,
 		value: {
-			version: 1,
+			version: value.version as 1 | 2,
 			taskId: taskId as TaskId,
 			attemptId: attemptId as AttemptId,
 			generation: generation as GenerationId,
@@ -230,6 +426,9 @@ export function parseReceipt(value: unknown): ParseResult<EvidenceReceipt> {
 			exitCode: value.exitCode as number,
 			aborted: value.aborted as boolean,
 			truncated: value.truncated as boolean,
+			...(value.version === 2 ? { assumptions: parsedAssumptions! } : {}),
+			...(parsedSemanticResult ? { semanticResult: parsedSemanticResult } : {}),
+			...(parsedPredicates?.ok ? { predicates: parsedPredicates.value } : {}),
 		},
 	};
 }

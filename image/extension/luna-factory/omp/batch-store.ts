@@ -4,6 +4,39 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createBatch, digest, type Batch } from "../core/batch.ts";
 import { parseJournal } from "../core/journal.ts";
+import { parseOperationReceipt } from "../core/schema.ts";
+import type { Ledger, OperationReceipt } from "../core/model.ts";
+
+
+function migrateLegacyOperation(batchId: string, item: Batch["items"][number], ledger: Ledger): void {
+	const legacy = item.operation as unknown as {
+		id?: unknown; phase?: unknown; state?: unknown; branch?: unknown; sha?: unknown; url?: unknown;
+	} | undefined;
+	item.operations ??= [];
+	if (!legacy) return;
+	if (typeof legacy.id !== "string" || !["worker", "verify", "acceptance", "push", "pr"].includes(String(legacy.phase)) ||
+		!["intent", "confirmed", "unknown"].includes(String(legacy.state))) {
+		throw new Error("unsupported legacy operation receipt; preserve original evidence");
+	}
+	const phase = legacy.phase as OperationReceipt["phase"];
+	if ((phase === "push" || phase === "pr") && (typeof legacy.branch !== "string" || typeof legacy.sha !== "string")) {
+		throw new Error("legacy publication operation lacks its exact branch/SHA; preserve original evidence");
+	}
+	const subject = phase === "push" || phase === "pr" ? { ...ledger.subject, head: legacy.sha as string } : ledger.subject;
+	item.operation = {
+		id: legacy.id,
+		generation: ledger.generation,
+		subject,
+		effect: phase === "push" ? "git-push" : phase === "pr" ? "pull-request-create" : "repository-work",
+		phase,
+		owner: `${batchId}:${item.selected.key}`,
+		...(ledger.tasks[0]?.attempts.at(-1)?.id ? { attemptId: ledger.tasks[0]!.attempts.at(-1)!.id } : {}),
+		state: legacy.state === "confirmed" ? "applied" : legacy.state as OperationReceipt["state"],
+		...(typeof legacy.branch === "string" ? { branch: legacy.branch } : {}),
+		...(typeof legacy.sha === "string" ? { sha: legacy.sha } : {}),
+		...(typeof legacy.url === "string" ? { url: legacy.url, resultHandle: legacy.url } : {}),
+	};
+}
 
 interface Owner { host: string; pid: number; start: string; token: string }
 function processStart(pid: number): string {
@@ -101,18 +134,47 @@ export class BatchStore {
 	}
 	read(id: string): Batch {
 		if (!/^batch-[a-f0-9-]+$/.test(id)) throw new Error("invalid batch identity");
-		const batch = JSON.parse(readFileSync(join(this.root, `${id}.json`), "utf8")) as Batch;
-		if (batch.version !== 1 || batch.id !== id || !Array.isArray(batch.items) || !Number.isSafeInteger(batch.revision)) throw new Error("unsupported or corrupt batch; preserve original state and export for inspection");
-		if (!Array.isArray(batch.dependencies) || !Array.isArray(batch.scopeRevisions) || !["paused", "active", "stopped"].includes(batch.control) || !batch.usage || !Number.isSafeInteger(batch.usage.modelCalls) || batch.usage.modelCalls < 0) throw new Error("unsupported or corrupt batch control/state");
+		const batch = JSON.parse(readFileSync(join(this.root, `${id}.json`), "utf8")) as Omit<Batch, "version"> & { version: number };
+		if ((batch.version !== 1 && batch.version !== 2) || batch.id !== id || !Array.isArray(batch.items) || !Number.isSafeInteger(batch.revision)) {
+			throw new Error("unsupported or corrupt batch; preserve original state and export for inspection");
+		}
+		if (!Array.isArray(batch.dependencies) || !Array.isArray(batch.scopeRevisions) || !["paused", "active", "stopped"].includes(batch.control) || !batch.usage || !Number.isSafeInteger(batch.usage.modelCalls) || batch.usage.modelCalls < 0) {
+			throw new Error("unsupported or corrupt batch control/state");
+		}
+		const legacy = batch.version === 1;
 		createBatch(batch.items.map((item) => item.selected), { id, capacity: batch.capacity, maxAttempts: batch.maxAttempts, maxTotalAttempts: batch.maxTotalAttempts, mode: batch.mode, dependencies: batch.dependencies });
 		for (const item of batch.items) {
-			if (!item.selected || !Array.isArray(item.sessions) || !item.sessions.every((session) => typeof session === "string") || !Number.isSafeInteger(item.attempts) || item.attempts < 0 || !["QUEUED", "RUNNING", "VERIFY", "DONE", "BLOCKED", "UNKNOWN", "CANCELLED", "EXCLUDED"].includes(item.stage)) throw new Error("invalid item state; no execution allowed");
-			if (item.operation && (!["worker", "verify", "acceptance", "push", "pr"].includes(item.operation.phase) || !["intent", "confirmed", "unknown"].includes(item.operation.state) || typeof item.operation.id !== "string")) throw new Error("invalid operation state; preserve original evidence");
-			if (item.proof && (!Array.isArray(item.proof.artifacts) || !item.proof.artifacts.every((artifact) => typeof artifact === "string") || typeof item.proof.digest !== "string" || typeof item.proof.reviewerSession !== "string" || !["verified-patch", "pr-ready", "merged-upstream"].includes(item.proof.stage))) throw new Error("invalid proof record; no execution allowed");
+			if (!item.selected || !Array.isArray(item.sessions) || !item.sessions.every((session) => typeof session === "string") || !Number.isSafeInteger(item.attempts) || item.attempts < 0 || !["QUEUED", "RUNNING", "VERIFY", "DONE", "BLOCKED", "UNKNOWN", "CANCELLED", "EXCLUDED"].includes(item.stage)) {
+				throw new Error("invalid item state; no execution allowed");
+			}
 			const parsed = parseJournal(item.ledger);
-			if (!parsed.ok && !(item.attempts === 0 && item.stage === "BLOCKED" && item.selected.blocker && item.ledger.tasks.length === 0)) throw new Error(`invalid item ledger: ${parsed.ok ? "" : parsed.reason}; original state preserved`);
+			const unavailableBlockedItem = !parsed.ok && item.attempts === 0 && item.stage === "BLOCKED" && Boolean(item.selected.blocker) && item.ledger.tasks.length === 0;
+			if (!parsed.ok && !unavailableBlockedItem) throw new Error(`invalid item ledger: ${parsed.ok ? "" : parsed.reason}; original state preserved`);
+			if (parsed.ok) item.ledger = parsed.ledger;
+			if (legacy) {
+				if (item.operations !== undefined && !Array.isArray(item.operations)) throw new Error("invalid legacy operation history; preserve original evidence");
+				item.operations ??= [];
+				if (parsed.ok) migrateLegacyOperation(batch.id, item, parsed.ledger);
+				else if (item.operation !== undefined) throw new Error("legacy operation cannot be reconciled without a valid ledger; preserve original evidence");
+			} else if (!Array.isArray(item.operations)) {
+				throw new Error("version-2 batch is missing operation history; preserve original evidence");
+			}
+			if (item.operation !== undefined) {
+				const parsedOperation = parseOperationReceipt(item.operation);
+				if (!parsedOperation.ok) throw new Error(`invalid operation receipt: ${parsedOperation.errors.join("; ")}; preserve original evidence`);
+				item.operation = parsedOperation.value;
+			}
+			item.operations = item.operations.map((operation) => {
+				const parsedOperation = parseOperationReceipt(operation);
+				if (!parsedOperation.ok) throw new Error(`invalid operation history: ${parsedOperation.errors.join("; ")}; preserve original evidence`);
+				return parsedOperation.value;
+			});
+			if (item.proof && (!Array.isArray(item.proof.artifacts) || !item.proof.artifacts.every((artifact) => typeof artifact === "string") || typeof item.proof.digest !== "string" || typeof item.proof.reviewerSession !== "string" || !["verified-patch", "pr-ready", "merged-upstream"].includes(item.proof.stage))) {
+				throw new Error("invalid proof record; no execution allowed");
+			}
 		}
-		return batch;
+		batch.version = 2;
+		return batch as Batch;
 	}
 	write(batch: Batch): void {
 		if (!this.held || this.failed) throw new Error("Factory persistence is not writable; new effects refused");
