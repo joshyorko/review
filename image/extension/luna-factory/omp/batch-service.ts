@@ -4,14 +4,42 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, w
 import { join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { batchConverged, batchSummary, createBatch, dependencyBlocker, digest, selectionIdentity, type Batch, type BatchItem, type SelectedItem, type Prerequisite } from "../core/batch.ts";
+import { reconcileReceipt } from "../core/evidence.ts";
 import { reduce } from "../core/reducer.ts";
-import type { AttemptId, CriterionId, EvidenceReceipt, LedgerEvent, TaskId } from "../core/model.ts";
+import type { AttemptId, CriterionId, EvidenceReceipt, LedgerEvent, OperationReceipt, PredicateEvidence, TaskId } from "../core/model.ts";
 import { BatchStore, ResourceClaims } from "./batch-store.ts";
 import { BatchGitHub } from "./batch-github.ts";
-import { runNative, sandboxTest, type NativeContext, type NativeSDK, type SchemaBuilder } from "./batch-native.ts";
+import { runNative, sandboxTest, type NativeContext, type NativeSDK, type SchemaBuilder, type SemanticOutcome } from "./batch-native.ts";
 
 const command = promisify(execFile);
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
+function operationReceipt(
+	batch: Batch,
+	item: BatchItem,
+	phase: OperationReceipt["phase"],
+	state: OperationReceipt["state"],
+	id: string,
+	extra: Partial<Pick<OperationReceipt, "attemptId" | "branch" | "sha" | "url" | "resultHandle" | "subject">> = {},
+): OperationReceipt {
+	return {
+		id,
+		generation: item.ledger.generation,
+		subject: item.ledger.subject,
+		effect: phase === "push" ? "git-push" : phase === "pr" ? "pull-request-create" : "repository-work",
+		phase,
+		owner: `${batch.id}:${item.selected.key}`,
+		state,
+		...extra,
+	};
+}
+/** Semantic outcomes exist only for read-only inspections; absence is uncertain there, neutral elsewhere. */
+export function semanticOutcomeFor(action: SelectedItem["action"], reported: SemanticOutcome): SemanticOutcome {
+	return action === "inspect" ? (reported === "none" ? "uncertain" : reported) : "none";
+}
+function transitionOperation(item: BatchItem, update: Partial<OperationReceipt>): void {
+	if (!item.operation) throw new Error("operation receipt unavailable");
+	item.operation = { ...item.operation, ...update };
+}
 export interface BatchOptions { capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[] }
 interface Running { batch: Batch; item: BatchItem; controller: AbortController; promise: Promise<void> }
 
@@ -105,10 +133,24 @@ export class BatchService {
 		}).join(""));
 	}
 	private async validateProof(item: BatchItem): Promise<void> {
-		if (!item.proof || item.proof.acceptanceRevision !== item.selected.acceptanceRevision || item.proof.subject !== item.selected.head || this.artifactDigest(item) !== item.proof.digest) throw new Error("proof artifact unavailable, modified or stale; restore exact evidence or explicitly reverify");
+		if (!item.proof || item.proof.acceptanceRevision !== item.selected.acceptanceRevision || item.proof.subject !== item.selected.head || this.artifactDigest(item) !== item.proof.digest) {
+			throw new Error("proof artifact unavailable, modified or stale; restore exact evidence or explicitly reverify");
+		}
+		const task = item.ledger.tasks[0];
+		const attempt = task?.attempts.at(-1);
+		if (!task || !attempt?.receipt) throw new Error("current Factory proof receipt unavailable");
+		const current = reconcileReceipt(item.ledger, attempt.receipt, {
+			taskId: task.id,
+			attemptId: attempt.id,
+			subject: attempt.subject,
+			artifactRoots: [this.root],
+		});
+		if (current.status !== "proven") throw new Error(`Factory proof is ${current.status}: ${current.reasons.join("; ")}`);
 		await this.github.assertFresh(item.selected);
 		if (!item.workspace || !item.proof.tree) throw new Error("verified workspace tree unavailable");
-		if (await this.git(item.workspace, ["write-tree"]) !== item.proof.tree || await this.git(item.workspace, ["diff", "--no-ext-diff", "--no-textconv", "--name-only"]) || await this.git(item.workspace, ["ls-files", "--others", "--exclude-standard"])) throw new Error("retained workspace differs from verified tree; preserve and explicitly reverify");
+		if (await this.git(item.workspace, ["write-tree"]) !== item.proof.tree || await this.git(item.workspace, ["diff", "--no-ext-diff", "--no-textconv", "--name-only"]) || await this.git(item.workspace, ["ls-files", "--others", "--exclude-standard"])) {
+			throw new Error("retained workspace differs from verified tree; preserve and explicitly reverify");
+		}
 	}
 	async resume(id: string, context: NativeContext): Promise<void> {
 		this.store.acquire();
@@ -125,12 +167,16 @@ export class BatchService {
 					if (item.operation?.phase === "pr") await this.reconcileEffect(item);
 					continue;
 				}
+				if (item.operation?.state === "not-applied") {
+					item.operations.push(item.operation);
+					item.operation = undefined;
+				}
 				if (item.operation?.phase === "push" || item.operation?.phase === "pr") {
 					await this.reconcileEffect(item);
 					if (item.stage === "DONE") this.release(item, owner);
 					continue;
 				}
-				if (item.stage === "VERIFY" && item.proof && item.operation?.state === "confirmed") {
+				if (item.stage === "VERIFY" && item.proof && item.operation?.state === "applied") {
 					await this.validateProof(item);
 					if (item.operation.phase === "pr") await this.reconcileEffect(item);
 					continue;
@@ -140,7 +186,11 @@ export class BatchService {
 					// sessions cannot push; writes still require explicit retained-patch inspection.
 					if (item.selected.action !== "inspect") throw new Error("interrupted native attempt; inspect retained workspace then explicitly retry");
 					this.abandon(item, "previous same-host native owner is dead; read-only attempt can resume");
-					item.operation = undefined;
+					if (item.operation) {
+						item.operations.push(item.operation.state === "intent" ? { ...item.operation, state: "unknown" } : item.operation);
+						item.operation = undefined;
+					}
+					item.proof = undefined;
 					this.release(item, owner);
 				}
 				if (item.blocker?.startsWith("already tracked") || item.blocker?.startsWith("proof artifact") || item.proof) continue;
@@ -153,7 +203,11 @@ export class BatchService {
 				const overlap = item.selected.overlaps.find((key) => batch.items.some((candidate) => candidate.selected.key === key && candidate.stage !== "EXCLUDED"));
 				if (overlap) throw new Error(`overlaps ${overlap}; explicitly revise scope before execution`);
 				item.stage = "QUEUED"; item.blocker = undefined;
-			} catch (error) { item.stage = "BLOCKED"; item.blocker = message(error); if (item.proof) item.proof = undefined; }
+			} catch (error) {
+				item.stage = item.operation?.state === "unknown" || item.operation?.state === "intent" || item.stage === "UNKNOWN" ? "UNKNOWN" : "BLOCKED";
+				item.blocker = message(error);
+				if (item.proof) item.proof = undefined;
+			}
 		}
 		// A dependent cannot retain success after its prerequisite loses its required proof.
 		for (let pass = 0; pass < batch.items.length; pass++) {
@@ -198,7 +252,11 @@ export class BatchService {
 		await this.github.assertFresh(item.selected);
 		this.abandon(item, "operator requested retry after inspecting retained workspace; original budgets retained");
 		if (item.ledger.tasks[0]?.state === "DONE") throw new Error("completed proof cannot be reset by retry; restore evidence or explicitly revise scope");
-		item.operation = undefined; item.proof = undefined; item.stage = "QUEUED"; item.blocker = undefined;
+		if (item.operation) {
+			item.operations.push(item.operation.state === "intent" ? { ...item.operation, state: "unknown" } : item.operation);
+			item.operation = undefined;
+		}
+		item.proof = undefined; item.stage = "QUEUED"; item.blocker = undefined;
 		this.release(item, `${id}:${item.selected.key}`);
 		this.batches.set(id, batch); this.persist(batch); await this.resume(id, context);
 	}
@@ -250,12 +308,20 @@ export class BatchService {
 					item.stage = "QUEUED"; item.blocker = undefined; this.persist(batch);
 					const controller = new AbortController();
 					const promise = Promise.resolve().then(() => this.execute(batch, item, controller.signal)).catch((error) => {
-						if (item.operation?.phase === "push" || item.operation?.phase === "pr") { item.stage = "UNKNOWN"; item.operation.state = "unknown"; }
-						else if (controller.signal.aborted && !message(error).includes("cancellation confirmed after native session settled")) { item.stage = "UNKNOWN"; if (item.operation) item.operation.state = "unknown"; }
-						else {
+						if (item.operation?.phase === "push" || item.operation?.phase === "pr" || item.operation?.state === "unknown") {
+							item.stage = "UNKNOWN";
+							if (item.operation.state !== "unknown") transitionOperation(item, { state: "unknown" });
+						} else if (controller.signal.aborted && !message(error).includes("cancellation confirmed after native session settled")) {
+							item.stage = "UNKNOWN";
+							if (item.operation) transitionOperation(item, { state: "unknown" });
+						} else {
+							const executionStarted = item.stage === "RUNNING" || item.stage === "VERIFY";
 							this.abandon(item, `native attempt settled without proof: ${message(error)}`);
 							item.stage = controller.signal.aborted ? "CANCELLED" : "BLOCKED";
-							if (item.operation) item.operation.state = "confirmed";
+							if (item.operation?.state === "intent") {
+								transitionOperation(item, { state: executionStarted ? "unknown" : "not-applied" });
+								if (executionStarted) item.stage = "UNKNOWN";
+							}
 						}
 						item.blocker = message(error);
 						if (!this.fatal) this.persist(batch);
@@ -298,7 +364,7 @@ export class BatchService {
 		if (!item.workspace) {
 			if (existsSync(directory)) throw new Error("fresh execution found retained workspace; inspect, never reset/delete it");
 			item.workspace = directory;
-			item.operation = { id: `${batch.id}:${item.selected.key}:checkout`, phase: "worker", state: "intent" }; this.persist(batch);
+			item.operation = operationReceipt(batch, item, "worker", "intent", `${batch.id}:${item.selected.key}:work`); this.persist(batch);
 			await command("gh", ["repo", "clone", item.selected.repo, directory, "--", "--no-checkout"], { timeout: 120_000, signal, env: { PATH: process.env.PATH, HOME: this.root, GH_TOKEN: this.github.token, GH_PROMPT_DISABLED: "1", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
 			if (item.selected.kind === "pr") await this.git(directory, ["fetch", "origin", `pull/${item.selected.number}/head`], signal);
 			await this.git(directory, ["checkout", "--detach", item.selected.head!], signal);
@@ -315,7 +381,14 @@ export class BatchService {
 		item.attempts += 1;
 		const attempt = `T1-a${item.attempts}` as AttemptId;
 		this.event(item, { kind: "start_attempt", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId: attempt, subject: item.ledger.subject });
-		item.operation = { id: `${batch.id}:${item.selected.key}:${attempt}`, phase: "worker", state: "intent" }; this.persist(batch);
+		const workOperationId = `${batch.id}:${item.selected.key}:work`;
+		if (item.operation?.id === workOperationId && item.operation.state === "intent") {
+			transitionOperation(item, { attemptId: attempt, phase: "worker" });
+		} else {
+			if (item.operation) item.operations.push(item.operation);
+			item.operation = operationReceipt(batch, item, "worker", "intent", workOperationId, { attemptId: attempt });
+		}
+		this.persist(batch);
 		const onSession = (phase: "worker" | "acceptance", attemptId: AttemptId) => (sessionFile: string) => {
 			if (!item.sessions.includes(sessionFile)) item.sessions.push(sessionFile);
 			this.event(item, { kind: "record_private_session", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId, phase, sessionFile });
@@ -328,7 +401,7 @@ export class BatchService {
 		};
 		const worker = await runNative(this.sdk, this.schema, this.context, item, this.root, "worker", signal, onSession("worker", attempt), onExecutionStart("worker", attempt), item.blocker ?? "");
 		batch.usage.modelCalls += worker.calls;
-		item.stage = "VERIFY"; item.operation.phase = "verify"; this.persist(batch);
+		item.stage = "VERIFY"; transitionOperation(item, { phase: "verify", state: "applied" }); this.persist(batch);
 		if (item.selected.action !== "inspect" && !worker.tests.length) throw new Error("worker supplied no executable verification; inspect and retry within original appetite");
 		await this.git(directory, ["add", "--all"], signal);
 		const tree = await this.git(directory, ["write-tree"], signal);
@@ -339,6 +412,7 @@ export class BatchService {
 		const testWorkspace = join(evidenceDir, "verification-workspace");
 		cpSync(directory, testWorkspace, { recursive: true, dereference: false, filter: (path) => !path.endsWith("/.git") });
 		const tests: EvidenceReceipt["tests"][number][] = [];
+		const verificationPredicates: PredicateEvidence[] = [];
 		const artifacts = [patchFile];
 		let verification = `Verified tree: ${tree}\nPatch:\n${patch.slice(0, 131072)}\n`;
 		for (const [index, test] of worker.tests.entries()) {
@@ -346,28 +420,78 @@ export class BatchService {
 			const artifact = join(evidenceDir, `test-${index}.txt`);
 			writeFileSync(artifact, `command: ${test}\nexit: ${result.exitCode}\n${result.output}`, { flag: "wx", mode: 0o600 });
 			artifacts.push(artifact); tests.push({ command: test, outcome: result.exitCode === 0 ? "pass" : "fail", artifact });
+			verificationPredicates.push({
+				phase: "verification",
+				item: test,
+				ok: result.exitCode === 0,
+				note: `exit ${result.exitCode}; artifact ${artifact}`,
+			});
 			verification += `\n${test}: exit ${result.exitCode}\n${result.output.slice(-16384)}`;
 		}
-		item.operation.phase = "acceptance"; this.persist(batch);
+		transitionOperation(item, { phase: "acceptance" }); this.persist(batch);
 		const reviewer = await runNative(this.sdk, this.schema, this.context, item, this.root, "acceptance", signal, onSession("acceptance", attempt), onExecutionStart("acceptance", attempt), verification);
 		batch.usage.modelCalls += reviewer.calls;
 		const reviewFile = join(evidenceDir, "acceptance.txt"); writeFileSync(reviewFile, reviewer.report, { flag: "wx", mode: 0o600 }); artifacts.push(reviewFile);
 		await this.github.assertFresh(item.selected);
 		if (await this.git(directory, ["write-tree"], signal) !== tree || await this.git(directory, ["diff", "--no-ext-diff", "--no-textconv", "--name-only"], signal) || await this.git(directory, ["ls-files", "--others", "--exclude-standard"], signal)) throw new Error("workspace changed during verification; proof stale");
 		const changed = (await this.git(directory, ["diff", "--cached", "--name-only", item.selected.head!], signal)).split("\n").filter(Boolean);
-		const receipt: EvidenceReceipt = { version: 1, taskId: "T1" as TaskId, attemptId: attempt, generation: item.ledger.generation, subject: item.ledger.subject, result: worker.report, changed, evidence: artifacts, tests, cleanEnvironment: true, unresolved: reviewer.accepted ? [] : [reviewer.report], next: "", confidence: "medium", routing: { verified: false }, exitCode: tests.some((test) => test.outcome === "fail") ? 1 : 0, aborted: false, truncated: false };
+		const workerReportFile = join(evidenceDir, "worker-report.txt");
+		writeFileSync(workerReportFile, worker.report, { flag: "wx", mode: 0o600 });
+		artifacts.push(workerReportFile);
+		const resultSummary = worker.report.length > 1_900 ? `${worker.report.slice(0, 1_900)} … [full report in worker-report.txt]` : worker.report;
+		const semanticOutcome = semanticOutcomeFor(item.selected.action, worker.semanticOutcome);
+		const unresolved = [
+			...(reviewer.accepted ? [] : [reviewer.report]),
+			...(semanticOutcome === "uncertain" ? ["semantic result remains uncertain"] : []),
+		];
+		const assumptions = item.selected.acceptanceRevision
+			? [{ kind: "acceptance-revision" as const, value: item.selected.acceptanceRevision }]
+			: [];
+		const receipt: EvidenceReceipt = {
+			version: 2,
+			taskId: "T1" as TaskId,
+			attemptId: attempt,
+			generation: item.ledger.generation,
+			subject: item.ledger.subject,
+			result: resultSummary,
+			changed,
+			evidence: artifacts,
+			tests,
+			predicates: [...worker.predicates, ...verificationPredicates, ...reviewer.predicates],
+			cleanEnvironment: true,
+			unresolved,
+			next: "",
+			confidence: "medium",
+			routing: { verified: false },
+			exitCode: tests.some((test) => test.outcome === "fail") ? 1 : 0,
+			aborted: false,
+			truncated: false,
+			assumptions,
+			...(item.selected.action === "inspect" ? {
+				semanticResult: {
+					kind: semanticOutcome === "supported" || semanticOutcome === "disproven" ? "finding" as const : "inspection" as const,
+					outcome: semanticOutcome,
+					summary: resultSummary,
+					verified: reviewer.accepted && semanticOutcome !== "uncertain",
+					publicationAuthority: "none" as const,
+					...(worker.publicationBlocker === undefined ? {} : { publicationBlocker: worker.publicationBlocker }),
+				},
+			} : {}),
+		};
 		this.event(item, { kind: "record_receipt", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId: attempt, receipt });
-		item.operation.state = "confirmed"; this.persist(batch);
+		transitionOperation(item, { state: "applied" }); this.persist(batch);
 		if (!reviewer.accepted || receipt.exitCode !== 0) {
 			item.stage = "QUEUED"; item.blocker = `acceptance unproved: ${reviewer.report}; repair only selected gap`;
 			this.persist(batch); return;
 		}
-		item.proof = { acceptanceRevision: item.selected.acceptanceRevision!, subject: item.selected.head!, tree, digest: digest(artifacts.map((path) => digest(readFileSync(path, "utf8"))).join("")), artifacts, stage: "verified-patch", reviewerSession: reviewer.session };
+		const verifiedProof: NonNullable<Batch["items"][number]["proof"]> = { acceptanceRevision: item.selected.acceptanceRevision!, subject: item.selected.head!, tree, digest: digest(artifacts.map((path) => digest(readFileSync(path, "utf8"))).join("")), artifacts, stage: "verified-patch", reviewerSession: reviewer.session };
 		if (item.selected.action === "inspect") {
 			this.event(item, { kind: "finish_task", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId });
+			item.proof = verifiedProof;
 			item.stage = "DONE"; item.blocker = undefined; this.persist(batch);
 			return;
 		}
+		item.proof = verifiedProof;
 		item.stage = "VERIFY"; item.blocker = "verified patch retained; explicit owner integration is required before completion";
 		this.persist(batch);
 		if (item.selected.action === "pr-ready") {
@@ -384,14 +508,21 @@ export class BatchService {
 		await this.git(item.workspace!, ["-c", "user.name=Luna Factory", "-c", "user.email=factory@localhost", "commit", "-m", `fix: address ${item.selected.key}`], signal);
 		const sha = await this.git(item.workspace!, ["rev-parse", "HEAD"], signal);
 		if (await this.git(item.workspace!, ["rev-parse", "HEAD^{tree}"], signal) !== item.proof!.tree) throw new Error("publication tree differs from verified patch");
-		item.operation = { id: `${batch.id}:${item.selected.key}:push`, phase: "push", state: "intent", branch, sha }; this.persist(batch);
+		if (!item.operation) throw new Error("verified work operation receipt unavailable");
+		item.operations.push(item.operation);
+		const subject = { ...item.ledger.subject, head: sha };
+		item.operation = operationReceipt(batch, item, "push", "intent", `${batch.id}:${item.selected.key}:push`, { branch, sha, subject });
+		this.persist(batch);
 		await command("git", ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=!gh auth git-credential", "push", "origin", `HEAD:refs/heads/${branch}`], { cwd: item.workspace, signal, timeout: 120_000, env: { PATH: process.env.PATH, HOME: this.root, GH_TOKEN: this.github.token, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
-		item.operation.state = "confirmed"; this.persist(batch);
+		transitionOperation(item, { state: "applied" }); this.persist(batch);
 		await this.github.assertFresh(item.selected);
-		item.operation = { ...item.operation, id: `${batch.id}:${item.selected.key}:pr`, phase: "pr", state: "intent" }; this.persist(batch);
+		item.operations.push(item.operation);
+		item.operation = operationReceipt(batch, item, "pr", "intent", `${batch.id}:${item.selected.key}:pr`, { branch, sha, subject });
+		this.persist(batch);
 		const result = await this.github.request<{ html_url: string; head: { sha: string }; base: { ref: string } }>(`repos/${item.selected.repo}/pulls`, { title: `fix: address ${item.selected.key}`, head: branch, base: item.selected.baseRef, body: `Selected Factory acceptance: ${item.selected.key}\n\n${item.selected.kind === "issue" ? "Closes" : "Related to"} ${item.selected.key}\n\nFactory operation: ${item.operation.id}\n\nVerified tree: ${item.proof!.tree}\nIndependent native acceptance recorded in ${batch.id}. No merge/deploy authority.`, draft: false });
 		if (result.head.sha !== sha || result.base.ref !== item.selected.baseRef) throw new Error("created PR subject differs from recorded operation");
-		item.operation.state = "confirmed"; item.operation.url = result.html_url; item.proof!.stage = "pr-ready"; this.persist(batch);
+		transitionOperation(item, { state: "applied", url: result.html_url, resultHandle: result.html_url });
+		item.proof!.stage = "pr-ready"; this.persist(batch);
 	}
 	private async reconcileEffect(item: BatchItem): Promise<void> {
 		const operation = item.operation!;
@@ -401,16 +532,21 @@ export class BatchService {
 			if (ref.object.sha !== operation.sha) throw new Error("remote branch differs from recorded effect");
 			const pulls = await this.github.request<Array<{ html_url: string; head: { sha: string }; base: { ref: string }; body: string; merged_at?: string }>>(`repos/${item.selected.repo}/pulls?state=all&head=${encodeURIComponent(`${item.selected.repo.split("/")[0]}:${operation.branch}`)}`);
 			const marker = operation.id.replace(/:push$/, ":pr");
-			const matches = pulls.filter((pull) => pull.head.sha === operation.sha && pull.base.ref === item.selected.baseRef && pull.body?.includes(`Factory operation: ${marker}`));
+			const markerText = `Factory operation: ${marker}`;
+			const matches = pulls.filter((pull) => pull.head.sha === operation.sha && pull.base.ref === item.selected.baseRef && pull.body?.split(/\r?\n/).includes(markerText));
 			if (matches.length !== 1) throw new Error("exact PR/effect identity unproven; inspect GitHub, do not repeat");
 			const pull = matches[0]!;
-			operation.state = "confirmed";
-			operation.url = pull.html_url;
-			operation.phase = "pr";
-			operation.id = marker;
+			if (operation.phase === "push") {
+				item.operation = {
+					...operation, id: marker, phase: "pr", effect: "pull-request-create", state: "applied",
+					url: pull.html_url, resultHandle: pull.html_url,
+				};
+			} else {
+				transitionOperation(item, { state: "applied", url: pull.html_url, resultHandle: pull.html_url });
+			}
 			item.proof!.stage = pull.merged_at ? "merged-upstream" : "pr-ready";
 			item.stage = "VERIFY";
 			item.blocker = "external effect is identified; explicit owner integration and fresh acceptance are required before completion";
-		} catch (error) { operation.state = "unknown"; item.stage = "UNKNOWN"; item.blocker = `external effect unresolved: ${message(error)}`; }
+		} catch (error) { transitionOperation(item, { state: "unknown" }); item.stage = "UNKNOWN"; item.blocker = `external effect unresolved: ${message(error)}`; }
 	}
 }

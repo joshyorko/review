@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { emptyLedger, type Ledger, type RunId, type CriterionId } from "./model.ts";
+import { emptyLedger, type Ledger, type OperationReceipt, type RunId, type CriterionId } from "./model.ts";
+import { criterionProven } from "./evidence.ts";
 
 export type FactoryAction = "inspect" | "patch" | "pr-ready";
 export type OutcomeStage = "verified-patch" | "pr-ready" | "merged-upstream";
@@ -28,12 +29,13 @@ export interface BatchItem {
 	blocker?: string;
 	workspace?: string;
 	attempts: number;
-	operation?: { id: string; phase: "worker" | "verify" | "acceptance" | "push" | "pr"; state: "intent" | "confirmed" | "unknown"; branch?: string; sha?: string; url?: string };
+	operation?: OperationReceipt;
+	operations: OperationReceipt[];
 	proof?: { acceptanceRevision: string; subject: string; tree?: string; digest: string; artifacts: string[]; stage: OutcomeStage; reviewerSession: string };
 	sessions: string[];
 }
 export interface Batch {
-	version: 1;
+	version: 2;
 	id: string;
 	revision: number;
 	selection: string;
@@ -88,20 +90,25 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 	const dependencies = (options.dependencies ?? []).map((edge) => ({ ...edge, item: edge.item.toLowerCase(), requires: edge.requires.toLowerCase() }));
 	validateDependencies(items, dependencies);
 	return {
-		version: 1, id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
+		version: 2, id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
 		mode: options.mode, control: "paused", capacity: options.capacity, maxAttempts: options.maxAttempts, maxTotalAttempts: options.maxTotalAttempts,
 		dependencies, scopeRevisions: [], usage: { modelCalls: 0, peakWorkers: 0, inputTokens: null, outputTokens: null, cost: null },
 		items: items.map((selected) => {
 			const overlap = selected.overlaps.find((key) => items.some((item) => item.key === key));
 			const blocker = selected.blocker ?? (overlap ? `overlapping selected work ${overlap}; resolve scope explicitly before execution` : undefined);
 			return {
-				selected, stage: blocker ? "BLOCKED" : "QUEUED", blocker, attempts: 0, sessions: [],
+				selected, stage: blocker ? "BLOCKED" : "QUEUED", blocker, attempts: 0, operation: undefined, operations: [], sessions: [],
 				ledger: emptyLedger(`${options.id}:${digest(selected.key).slice(0, 16)}` as RunId, {
 					statement: selected.acceptance ?? selected.key, nonGoals: ["unselected work", "merge", "deploy", "publish"],
 					permittedEffects: selected.action === "inspect" ? ["read"] : ["read", "write"],
 					finishAuthority: selected.action, appetite: { tasks: 1, attemptsPerTask: options.maxAttempts },
-				}, [{ id: "A1" as CriterionId, statement: selected.acceptance ?? selected.key, mandatory: true }], {
-					repo: selected.repo, base: selected.base ?? "unavailable", head: selected.head,
+				}, [{
+					id: "A1" as CriterionId, statement: selected.acceptance ?? selected.key, mandatory: true,
+					...(selected.acceptanceRevision ? { assumptions: [{ kind: "acceptance-revision" as const, value: selected.acceptanceRevision }] } : {}),
+				}], {
+					repo: selected.repo,
+					base: selected.base ?? "unavailable",
+					...(selected.head === undefined ? {} : { head: selected.head }),
 				}),
 			};
 		}),
@@ -119,18 +126,34 @@ export function dependencyBlocker(batch: Batch, key: string): string | undefined
 	}
 	return undefined;
 }
+export function batchItemProofCurrent(item: BatchItem): boolean {
+	const proof = item.proof;
+	if (item.stage !== "DONE" || proof === undefined || proof.acceptanceRevision !== item.selected.acceptanceRevision || proof.subject !== item.selected.head) return false;
+	return item.ledger.tasks.some((task) => task.state === "DONE" && criterionProven(item.ledger, task.criterionId));
+}
+
 export function batchConverged(batch: Batch): boolean {
-	return batch.items.length > 0 && batch.scopeRevisions.length === 0 && batch.items.every((item) => item.stage === "DONE" && item.proof !== undefined && item.proof.acceptanceRevision === item.selected.acceptanceRevision && item.proof.subject === item.selected.head && dependencyBlocker(batch, item.selected.key) === undefined);
+	return batch.items.length > 0 && batch.scopeRevisions.length === 0 && batch.items.every((item) =>
+		batchItemProofCurrent(item) && dependencyBlocker(batch, item.selected.key) === undefined,
+	);
 }
 export function batchSummary(batch: Batch, root: string): string {
-	const done = batch.items.filter((item) => item.stage === "DONE").length;
+	const excluded = batch.items.filter((item) => item.stage === "EXCLUDED").length;
+	const scope = batch.items.length - excluded;
+	const proven = batch.items.filter(batchItemProofCurrent).length;
+	const active = batch.items.filter((item) => ["QUEUED", "RUNNING", "VERIFY"].includes(item.stage)).length;
+	const blocked = batch.items.filter((item) => item.stage === "BLOCKED").length;
+	const unknown = batch.items.filter((item) => item.stage === "UNKNOWN" || (item.stage === "DONE" && !batchItemProofCurrent(item))).length;
+	const cancelled = batch.items.filter((item) => item.stage === "CANCELLED").length;
 	const lines = [
-		`Factory ${batch.id}: ${batchConverged(batch) ? "CONVERGED" : batch.control} · ${done}/${batch.items.length} proven · capacity ${batch.capacity}`,
+		`Factory ${batch.id}: ${batchConverged(batch) ? "CONVERGED" : batch.control} · ${proven}/${scope} proven · capacity ${batch.capacity}`,
+		`Current scope: ${proven} proven · ${active} active · ${blocked} blocked · ${unknown} unknown/unresolved · ${cancelled} cancelled · ${excluded} excluded (${scope}/${batch.items.length} items)`,
 		`State: ${root}; ${batch.mode === "once" ? "run once (unfinished work retained)" : "keep for resume"}. No detached service; process termination interrupts work.`,
 		...batch.items.flatMap((item) => {
 			const attempts = item.ledger.tasks.flatMap((task) => task.attempts.map((attempt) => ({ task, attempt })));
+			const stage = item.stage === "DONE" && !batchItemProofCurrent(item) ? "UNKNOWN (stored proof is not current)" : item.stage;
 			return [
-				`${item.selected.key} ${item.selected.action}: ${item.stage}${item.blocker ? ` — ${item.blocker}` : ""}${item.workspace ? ` · ${item.workspace}` : ""}${item.operation ? ` · ${item.operation.phase} ${item.operation.state} (${item.operation.id})` : ""}${item.operation?.url ? ` · ${item.operation.url}` : ""}`,
+				`${item.selected.key} ${item.selected.action}: ${stage}${item.blocker ? ` — ${item.blocker}` : ""}${item.workspace ? ` · ${item.workspace}` : ""}${item.operation ? ` · ${item.operation.phase} ${item.operation.state} (${item.operation.id})` : ""}`,
 				...attempts.flatMap(({ task, attempt }) => {
 					const identities: string[] = [];
 					if (attempt.nativeJobIds.length > 0) identities.push(`  OMP task dispatch ${task.id}/${attempt.id}: ${attempt.nativeJobIds.join(", ")}`);
@@ -138,6 +161,11 @@ export function batchSummary(batch: Batch, root: string): string {
 					identities.push(...attempt.privateSessions.map((session) =>
 						`  Factory-private ${session.phase} session ${task.id}/${attempt.id} (${session.started ? "turn start observed; liveness not inferred" : "identity recorded; turn start not observed"}): ${session.sessionFile}`,
 					));
+					const semantic = attempt.receipt?.semanticResult;
+					if (semantic) {
+						identities.push(`  Semantic result ${task.id}/${attempt.id}: ${semantic.outcome}; verified ${semantic.verified}; publication authority none`);
+						if (semantic.publicationBlocker) identities.push(`  Publication/disclosure blocker: ${semantic.publicationBlocker}`);
+					}
 					return identities;
 				}),
 			];

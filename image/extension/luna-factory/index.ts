@@ -19,7 +19,7 @@ import type { Appetite, Criterion, Effect, Ledger, NativeAgentId, NativeJobId, R
 import { findTask } from "./core/model.ts";
 import { renderCompletionReceipt } from "./core/receipt.ts";
 import { reduce } from "./core/reducer.ts";
-import { parseCandidate, parseReceipt, parseSubject } from "./core/schema.ts";
+import { parseCandidate, parseProofAssumptions, parseReceipt, parseSubject } from "./core/schema.ts";
 import { buildDispatchPrompt, DISPATCH_MARKER, dispatchMarker } from "./omp/adapter.ts";
 import { coverageFor, enforcedPaths, unsupportedPaths } from "./omp/capabilities.ts";
 import { type SessionCtx, loadRun, saveRun } from "./omp/session.ts";
@@ -981,7 +981,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			if (!objective.ok) return { content: text(objective.error), isError: true };
 			const rawCriteria = payload.criteria;
 			if (!Array.isArray(rawCriteria) || rawCriteria.length === 0) {
-				return { content: text("criteria must be a non-empty array of {id, statement, mandatory}"), isError: true };
+				return { content: text("criteria must be a non-empty array of {id, statement, mandatory, assumptions?}"), isError: true };
 			}
 			if (rawCriteria.length > 64) return { content: text("criteria exceeds 64 entries"), isError: true };
 			if (typeof payload.repo !== "string" || typeof payload.base !== "string") {
@@ -1020,11 +1020,20 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				if (record.mandatory !== undefined && typeof record.mandatory !== "boolean") {
 					return { content: text(`criteria.${record.id}.mandatory must be boolean when supplied`), isError: true };
 				}
+				let currentAssumptions: Criterion["assumptions"];
+				if (record.assumptions !== undefined) {
+					const parsedAssumptions = parseProofAssumptions(record.assumptions);
+					if (!parsedAssumptions.ok) {
+						return { content: text(`criteria.${record.id}.assumptions rejected: ${parsedAssumptions.errors.join("; ")}`), isError: true };
+					}
+					currentAssumptions = parsedAssumptions.value;
+				}
 				criterionIds.add(record.id);
 				criteria.push({
 					id: record.id as Criterion["id"],
 					statement: statement.value,
 					mandatory: record.mandatory !== false,
+					...(currentAssumptions === undefined ? {} : { assumptions: currentAssumptions }),
 				});
 			}
 			const parsedSubject = parseSubject(

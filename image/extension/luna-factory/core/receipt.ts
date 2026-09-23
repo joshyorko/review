@@ -21,10 +21,29 @@ import type { Ledger } from "./model.ts";
  */
 export function renderCompletionReceipt(ledger: Ledger, verdict: RunVerdict = evaluateRun(ledger)): string {
 	const lines: string[] = [];
+	let semanticTotal = 0;
+	let verifiedSemantic = 0;
+	const publicationBlockers = new Set<string>();
+	for (const task of ledger.tasks) {
+		for (const attempt of task.attempts) {
+			const result = attempt.receipt?.semanticResult;
+			if (!result) continue;
+			semanticTotal += 1;
+			if (result.verified && result.outcome !== "uncertain") verifiedSemantic += 1;
+			if (result.publicationBlocker) publicationBlockers.add(result.publicationBlocker);
+		}
+	}
+	if (semanticTotal > 0) lines.push(`semantic results retained: ${semanticTotal} (${verifiedSemantic} verified); publication authority none; results alone are not criterion proof`);
+	if (publicationBlockers.size > 0) {
+		lines.push(`publication/disclosure blockers retained: ${publicationBlockers.size}`);
+		for (const blocker of [...publicationBlockers].slice(0, 8)) lines.push(`  - ${blocker}`);
+		if (publicationBlockers.size > 8) lines.push(`  - ${publicationBlockers.size - 8} additional blockers omitted`);
+	}
 	if (verdict.converged) {
 		lines.push("FACTORY VERIFIED — objective met");
 		lines.push(`run ${ledger.runId} · ${ledger.generation} · revision ${ledger.revision}`);
 		lines.push(`mandatory criteria proven: ${verdict.provenMandatory}/${verdict.totalMandatory}`);
+		lines.push(`current mandatory work: ${verdict.activeMandatory} active · ${verdict.blockedMandatory} blocked · ${verdict.unknownMandatory} unknown`);
 		for (const criterion of ledger.criteria) {
 			if (!criterion.mandatory) continue;
 			lines.push(`  ${criterionProven(ledger, criterion.id) ? "[proven]" : "[unproven]"} ${criterion.id}: ${criterion.statement}`);
@@ -35,6 +54,7 @@ export function renderCompletionReceipt(ledger: Ledger, verdict: RunVerdict = ev
 
 	lines.push("FACTORY NOT CONVERGED");
 	lines.push(`run ${ledger.runId} · ${ledger.generation} · revision ${ledger.revision} · ${verdict.control}`);
+	lines.push(`current mandatory work: ${verdict.activeMandatory} active · ${verdict.blockedMandatory} blocked · ${verdict.unknownMandatory} unknown`);
 	lines.push(`mandatory criteria proven: ${verdict.provenMandatory}/${verdict.totalMandatory}`);
 	for (const id of verdict.remaining) lines.push(`  [unproven] ${id}`);
 	if (verdict.blockers.length > 0) {

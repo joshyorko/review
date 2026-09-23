@@ -8,7 +8,7 @@
  */
 
 import { artifactRefError, changedPathError } from "./schema.ts";
-import type { CriterionId, EvidenceReceipt, Ledger, Subject, TaskId } from "./model.ts";
+import type { CriterionId, EvidenceReceipt, Ledger, ProofAssumption, Subject, TaskId } from "./model.ts";
 
 export type EvidenceStatus = "proven" | "unproved" | "failed" | "contradicted";
 
@@ -21,14 +21,36 @@ export interface SubjectBinding {
 	readonly taskId: TaskId;
 	readonly attemptId: string;
 	readonly subject: Subject;
-	/** Roots the run owns. A reference outside them is not followed. */
-	readonly artifactRoots: readonly string[];
+	/** Current authoritative values for assumptions declared by this receipt. */
+	readonly assumptions?: readonly ProofAssumption[];
+	/** Assumptions required by the acceptance criterion; omitting one is UNKNOWN. */
+	readonly requiredAssumptions?: readonly ProofAssumption[];
+	/** Run-owned roots for receipt admission; omitted for durable proof projections. */
+	readonly artifactRoots?: readonly string[];
 }
 
+function assumptionKey(assumption: ProofAssumption): string {
+	return assumption.kind === "dependency-outcome" ? `${assumption.kind}:${assumption.taskId}` : assumption.kind;
+}
+
+function sameAssumption(left: ProofAssumption, right: ProofAssumption): boolean {
+	return assumptionKey(left) === assumptionKey(right) && left.value === right.value;
+
+}
 function sameSubject(left: Subject, right: Subject): boolean {
 	return left.repo === right.repo && left.base === right.base && left.head === right.head;
 }
 
+function currentAssumptionsFor(ledger: Ledger, taskId: TaskId): readonly ProofAssumption[] {
+	const task = ledger.tasks.find((entry) => entry.id === taskId);
+	const criterion = task && ledger.criteria.find((entry) => entry.id === task.criterionId);
+	return (criterion?.assumptions ?? []).flatMap((assumption) => {
+		if (assumption.kind !== "dependency-outcome") return [assumption];
+		const dependency = ledger.tasks.find((entry) => entry.id === assumption.taskId);
+		if (dependency === undefined) return [];
+		return [{ ...assumption, value: criterionProven(ledger, dependency.criterionId) ? "proven" : "unproven" }];
+	});
+}
 /**
  * Reconcile a receipt against the exact identity it claims to certify.
  *
@@ -57,21 +79,48 @@ export function reconcileReceipt(ledger: Ledger, receipt: EvidenceReceipt, bindi
 			reasons: [`receipt subject ${receipt.subject.repo}@${receipt.subject.head ?? receipt.subject.base} is not the certified subject`],
 		};
 	}
+	const assumptionReasons: string[] = [];
+	const criterion = ledger.criteria.find((entry) => entry.id === ledger.tasks.find((task) => task.id === binding.taskId)?.criterionId);
+	const currentAssumptions = binding.assumptions ?? currentAssumptionsFor(ledger, binding.taskId);
+	const requiredAssumptions = binding.requiredAssumptions ?? criterion?.assumptions ?? [];
+	for (const declared of receipt.assumptions ?? []) {
+		const current = currentAssumptions.find((assumption) => assumptionKey(assumption) === assumptionKey(declared));
+		if (current === undefined) assumptionReasons.push(`load-bearing assumption ${assumptionKey(declared)} is unavailable`);
+		else if (!sameAssumption(declared, current)) assumptionReasons.push(`load-bearing assumption ${assumptionKey(declared)} changed`);
+	}
+	for (const required of requiredAssumptions) {
+		if (!(receipt.assumptions ?? []).some((declared) => assumptionKey(declared) === assumptionKey(required))) {
+			assumptionReasons.push(`required load-bearing assumption ${assumptionKey(required)} was not declared`);
+		}
+	}
 
-	for (const reference of receipt.evidence) {
-		const error = artifactRefError(reference, binding.artifactRoots);
-		if (error !== undefined) reasons.push(`${error}: ${reference}`);
+	if (binding.artifactRoots !== undefined) {
+		for (const reference of receipt.evidence) {
+			const error = artifactRefError(reference, binding.artifactRoots);
+			if (error !== undefined) reasons.push(`${error}: ${reference}`);
+		}
 	}
 	for (const reference of receipt.changed) {
 		const error = changedPathError(reference);
 		if (error !== undefined) reasons.push(`${error}: ${reference}`);
 	}
-	for (const claim of receipt.tests) {
-		if (claim.artifact === undefined) continue;
-		const error = artifactRefError(claim.artifact, binding.artifactRoots);
-		if (error !== undefined) reasons.push(`${error}: ${claim.artifact}`);
+	if (binding.artifactRoots !== undefined) {
+		for (const claim of receipt.tests) {
+			if (claim.artifact === undefined) continue;
+			const error = artifactRefError(claim.artifact, binding.artifactRoots);
+			if (error !== undefined) reasons.push(`${error}: ${claim.artifact}`);
+		}
 	}
+	const failedPredicates = (receipt.predicates ?? []).filter((predicate) =>
+		(predicate.phase === "verification" || predicate.phase === "acceptance") && !predicate.ok,
+	);
 	if (reasons.length > 0) return { status: "failed", reasons };
+	if (failedPredicates.length > 0) return { status: "failed", reasons: [`acceptance/verification predicates failed: ${failedPredicates.map((predicate) => predicate.item).join(", ")}`] };
+	if (receipt.version === 2 && (receipt.predicates?.length ?? 0) === 0) return { status: "unproved", reasons: ["version-2 receipt has no predicate evidence"] };
+	if (receipt.version === 2 && !receipt.predicates?.some((predicate) => predicate.phase === "acceptance" && predicate.ok)) {
+		return { status: "unproved", reasons: ["version-2 receipt lacks a positive acceptance predicate"] };
+	}
+	if (assumptionReasons.length > 0) return { status: "unproved", reasons: assumptionReasons };
 
 	if (receipt.aborted) return { status: "unproved", reasons: ["attempt was aborted"] };
 	if (receipt.truncated) return { status: "unproved", reasons: ["attempt output was truncated"] };
@@ -94,6 +143,9 @@ export function reconcileReceipt(ledger: Ledger, receipt: EvidenceReceipt, bindi
 			};
 		}
 		return { status: "failed", reasons: [`attempt exited ${receipt.exitCode}`] };
+	}
+	if (receipt.semanticResult !== undefined && (!receipt.semanticResult.verified || receipt.semanticResult.outcome === "uncertain")) {
+		reasons.push("semantic result is unverified or uncertain");
 	}
 	if (failing.length > 0) {
 		return { status: "failed", reasons: [`verification failed: ${failing.map((claim) => claim.command).join(", ")}`] };
@@ -118,19 +170,48 @@ export function reconcileReceipt(ledger: Ledger, receipt: EvidenceReceipt, bindi
 	return reasons.length === 0 ? { status: "proven", reasons: [] } : { status: "unproved", reasons };
 }
 
-/**
- * Whether a criterion currently holds valid proof.
- *
- * Only a DONE task certifies, and only at the run's current generation: a git
- * SHA and a semantic goal are separate identities, so an older generation's
- * proof never certifies a new one.
- */
-export function criterionProven(ledger: Ledger, criterionId: CriterionId): boolean {
-	return ledger.tasks.some(
-		(task) => task.criterionId === criterionId && task.state === "DONE" && task.generation === ledger.generation,
-	);
+function taskProofCurrentIn(ledger: Ledger, task: Ledger["tasks"][number], visiting: Set<string>): boolean {
+	if (task.state !== "DONE" || task.generation !== ledger.generation || visiting.has(task.id)) return false;
+	visiting.add(task.id);
+	const criterion = ledger.criteria.find((entry) => entry.id === task.criterionId);
+	const attempt = task.attempts.at(-1);
+	const receipt = attempt?.receipt;
+	if (
+		attempt === undefined || attempt.state !== "returned" || attempt.taskId !== task.id ||
+		attempt.generation !== ledger.generation || !sameSubject(attempt.subject, ledger.subject) ||
+		receipt === undefined
+	) {
+		visiting.delete(task.id);
+		return false;
+	}
+	const currentAssumptions: readonly ProofAssumption[] = (criterion?.assumptions ?? []).map((assumption) => {
+		if (assumption.kind !== "dependency-outcome") return assumption;
+		const dependency = ledger.tasks.find((entry) => entry.id === assumption.taskId);
+		const proven = dependency !== undefined && criterionProofCurrentIn(ledger, dependency.criterionId, visiting);
+		return { ...assumption, value: proven ? "proven" : "unproven" };
+	});
+	const reconciliation = reconcileReceipt(ledger, receipt, {
+		taskId: task.id,
+		attemptId: attempt.id,
+		subject: ledger.subject,
+		assumptions: currentAssumptions,
+		requiredAssumptions: criterion?.assumptions,
+	});
+	visiting.delete(task.id);
+	return reconciliation.status === "proven";
 }
 
+function criterionProofCurrentIn(ledger: Ledger, criterionId: CriterionId, visiting: Set<string>): boolean {
+	return ledger.tasks.some((task) => task.criterionId === criterionId && taskProofCurrentIn(ledger, task, visiting));
+}
+
+export function taskProofCurrent(ledger: Ledger, task: Ledger["tasks"][number]): boolean {
+	return taskProofCurrentIn(ledger, task, new Set<string>());
+}
+
+export function criterionProven(ledger: Ledger, criterionId: CriterionId): boolean {
+	return criterionProofCurrentIn(ledger, criterionId, new Set<string>());
+}
 /** Mandatory criteria still lacking current proof. */
 export function unprovenMandatory(ledger: Ledger): readonly CriterionId[] {
 	return ledger.criteria

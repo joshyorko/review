@@ -67,7 +67,15 @@ function fakeSdk(root: string): NativeSDK {
 					active += 1;
 					await sleep(40);
 					if (!prompt.includes("probe/repo4#2")) {
-						await report.execute("probe-report", { report: `deterministic evidence for ${prompt.match(/Item: ([^\\n]+)/)?.[1] ?? "item"}`, tests: [], accepted: true });
+						const isWorker = prompt.startsWith("Implement/inspect");
+						await report.execute("probe-report", {
+							report: `deterministic evidence for ${prompt.match(/Item: ([^\\n]+)/)?.[1] ?? "item"}`,
+							tests: [],
+							accepted: true,
+							semanticOutcome: isWorker ? "no-finding" : "none",
+							predicates: [{ item: "selected acceptance inspected", ok: true, note: "bounded deterministic probe" }],
+							publicationBlocker: "",
+						});
 					}
 					active -= 1;
 				},
@@ -127,6 +135,7 @@ export async function runPackagedBatchProbe({ root, phase }: ProbeOptions): Prom
 	const final = service.store.read(batch.id);
 	const done = final.items.filter((item) => item.stage === "DONE");
 	const blocked = final.items.filter((item) => item.stage === "BLOCKED");
+	const unknown = final.items.filter((item) => item.stage === "UNKNOWN");
 	const dependent = final.items.find((item) => item.selected.key === "probe/repo5#1")!;
 	const failed = final.items.find((item) => item.selected.key === "probe/repo4#2")!;
 	const unavailable = final.items.find((item) => item.selected.key === "probe/repo5#2")!;
@@ -137,9 +146,10 @@ export async function runPackagedBatchProbe({ root, phase }: ProbeOptions): Prom
 		final.capacity !== 2 ||
 		final.usage.peakWorkers !== 2 ||
 		done.length !== 8 ||
-		blocked.length !== 2 ||
+		blocked.length !== 1 ||
+		unknown.length !== 1 ||
 		dependent.stage !== "DONE" ||
-		failed.stage !== "BLOCKED" ||
+		failed.stage !== "UNKNOWN" ||
 		unavailable.stage !== "BLOCKED" ||
 		final.items.some((item) => item.operation?.phase === "push" || item.operation?.phase === "pr") ||
 		final.control !== "active"
@@ -153,6 +163,7 @@ export async function runPackagedBatchProbe({ root, phase }: ProbeOptions): Prom
 		capacity: final.capacity,
 		peakWorkers: final.usage.peakWorkers,
 		done: done.length,
+		unknown: unknown.length,
 		blocked: blocked.length,
 		dependencyDone: dependent.stage === "DONE",
 		failedItemStage: failed.stage,

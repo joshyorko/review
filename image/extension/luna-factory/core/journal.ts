@@ -13,7 +13,7 @@
 
 import { isRecord } from "./guard.ts";
 import { DEFAULT_FINISH_AUTHORITY } from "./model.ts";
-import { parseReceipt } from "./schema.ts";
+import { parseProofAssumptions, parseReceipt } from "./schema.ts";
 import type {
 	AdmissionDecision,
 	Attempt,
@@ -97,10 +97,11 @@ function parseSubject(value: unknown): Subject | undefined {
 
 function parseCriterion(value: unknown): Criterion | undefined {
 	if (!isRecord(value)) return undefined;
-	if (!identity(value.id) || !boundedText(value.statement) || typeof value.mandatory !== "boolean") {
-		return undefined;
-	}
-	return { id: value.id as CriterionId, statement: value.statement, mandatory: value.mandatory };
+	if (!identity(value.id) || !boundedText(value.statement) || typeof value.mandatory !== "boolean") return undefined;
+	if (value.assumptions === undefined) return { id: value.id as CriterionId, statement: value.statement, mandatory: value.mandatory };
+	const parsed = parseProofAssumptions(value.assumptions);
+	if (!parsed.ok) return undefined;
+	return { id: value.id as CriterionId, statement: value.statement, mandatory: value.mandatory, assumptions: parsed.value };
 }
 
 function parseTask(value: unknown): TaskRecord | undefined {

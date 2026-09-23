@@ -74,7 +74,7 @@ function candidate(overrides: Partial<Candidate> = {}): Candidate {
 
 function receipt(overrides: Partial<EvidenceReceipt> = {}): EvidenceReceipt {
 	const base: EvidenceReceipt = {
-		version: 1,
+		version: 2,
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		generation: "G1" as GenerationId,
@@ -91,6 +91,11 @@ function receipt(overrides: Partial<EvidenceReceipt> = {}): EvidenceReceipt {
 		exitCode: 0,
 		aborted: false,
 		truncated: false,
+		assumptions: [],
+		predicates: [
+			{ phase: "worker", item: "verification evidence", ok: true, note: "recorded" },
+			{ phase: "acceptance", item: "criterion accepted", ok: true, note: "reviewed" },
+		],
 	};
 	return { ...base, ...overrides };
 }
@@ -370,10 +375,278 @@ test("receipt shape is validated, and a valid one round-trips", () => {
 	assert.equal(parsed.ok ? parsed.value.taskId : "", "T1");
 });
 
+test("version-one receipts remain legacy-readable but cannot be newly recorded", () => {
+	const legacy = receipt({ version: 1, assumptions: undefined, predicates: undefined });
+	assert.equal(parseReceipt(legacy).ok, true);
+	assert.equal(reconcileReceipt(ledger(), legacy, { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS }).status, "proven");
+
+	const running = runningTask();
+	const rejected = reduce(running, {
+		kind: "record_receipt",
+		expectedRevision: running.revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: legacy,
+	}, REDUCE);
+	assert.equal(rejected.ok, false);
+	if (!rejected.ok) assert.match(rejected.error, /legacy-only/);
+
+	const recorded = step(running, (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt(),
+	}));
+	const finished = step(recorded, (revision) => ({
+		kind: "finish_task",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		criterionId: "A1" as CriterionId,
+	}));
+	const migratedLegacyProof = {
+		...finished,
+		tasks: finished.tasks.map((task) => ({
+			...task,
+			attempts: task.attempts.map((attempt) => ({ ...attempt, receipt: legacy })),
+		})),
+	} as Ledger;
+	assert.equal(criterionProven(migratedLegacyProof, "A1" as CriterionId), true);
+});
+
+test("version-2 receipts retain explicit proof assumptions and non-authorizing semantic results", () => {
+	const parsed = parseReceipt({
+		...receipt(),
+		version: 2,
+		assumptions: [
+			{ kind: "acceptance-revision", value: "rev-2" },
+			{ kind: "dependency-outcome", taskId: "T0", value: "proven" },
+		],
+		predicates: [
+			{ phase: "worker", item: "reference predicate", ok: true, note: "reference was checked" },
+			{ phase: "worker", item: "counterexample predicate", ok: false, note: "counterexample was recorded" },
+		],
+		semanticResult: {
+			kind: "inspection",
+			outcome: "no-finding",
+			summary: "The inspected path has no matching issue.",
+			verified: true,
+			publicationAuthority: "none",
+		},
+	});
+	assert.equal(parsed.ok, true);
+	if (parsed.ok) {
+		assert.equal(parsed.value.assumptions?.length, 2);
+		assert.equal(parsed.value.semanticResult?.outcome, "no-finding");
+		assert.equal(parsed.value.semanticResult?.publicationAuthority, "none");
+		assert.deepEqual(parsed.value.predicates?.map((predicate) => predicate.ok), [true, false], "positive and negative checks survive receipt parsing");
+	}
+	assert.equal(parseReceipt({
+		...receipt(), version: 2, assumptions: undefined,
+		predicates: [{ phase: "worker", item: "required check", ok: true, note: "checked" }],
+	}).ok, false, "new records require explicit assumptions");
+	assert.equal(parseReceipt({
+		...receipt(), version: 2,
+		assumptions: [{ kind: "acceptance-revision", value: "p1" }, { kind: "acceptance-revision", value: "p2" }],
+		predicates: [{ phase: "worker", item: "required check", ok: true, note: "checked" }],
+	}).ok, false, "duplicate assumption identity is ambiguous");
+});
+
+test("semantic observations need separate evidence and cannot grant publication authority", () => {
+	const binding = { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS };
+	const noEvidence = receipt({
+		version: 2,
+		assumptions: [],
+		changed: [],
+		evidence: [],
+		tests: [],
+		predicates: [
+			{ phase: "worker", item: "inspection predicate", ok: true, note: "checked" },
+			{ phase: "acceptance", item: "inspection criterion", ok: true, note: "independently accepted" },
+		],
+		semanticResult: { kind: "inspection", outcome: "no-finding", summary: "no match", verified: true, publicationAuthority: "none" },
+	});
+	const noEvidenceResult = reconcileReceipt(ledger(), noEvidence, binding);
+	assert.equal(noEvidenceResult.status, "unproved");
+	assert.match(noEvidenceResult.reasons.join(";"), /neither verification nor evidence/);
+
+	const zeroFinding = receipt({
+		version: 2,
+		assumptions: [],
+		changed: [],
+		evidence: ["/artifacts/inspection.log"],
+		tests: [],
+		predicates: [
+			{ phase: "worker", item: "inspection predicate", ok: true, note: "checked" },
+			{ phase: "acceptance", item: "inspection criterion", ok: true, note: "independently accepted" },
+		],
+		semanticResult: { kind: "inspection", outcome: "no-finding", summary: "no match", verified: true, publicationAuthority: "none" },
+	});
+	assert.equal(reconcileReceipt(ledger(), zeroFinding, binding).status, "proven");
+	assert.equal(parseReceipt({
+		...zeroFinding,
+		semanticResult: { ...zeroFinding.semanticResult!, publicationAuthority: "issue" },
+	}).ok, false, "verified findings never authorize publication");
+	assert.equal(parseReceipt({ ...zeroFinding, predicates: undefined }).ok, false, "version-two receipts require checked predicate rows");
+
+	const uncertain = receipt({
+		...zeroFinding,
+		semanticResult: { kind: "inspection", outcome: "uncertain", summary: "evidence incomplete", verified: false, publicationAuthority: "none" },
+	});
+	assert.equal(reconcileReceipt(ledger(), uncertain, binding).status, "unproved");
+	const restricted = receipt({
+		version: 2,
+		assumptions: [],
+		predicates: [{ phase: "acceptance", item: "scope checked", ok: true, note: "reviewed" }],
+		semanticResult: {
+			kind: "finding",
+			outcome: "supported",
+			summary: "restricted finding retained",
+			verified: true,
+			publicationAuthority: "none",
+			publicationBlocker: "Hold disclosure pending owner approval.",
+		},
+	});
+	const parsedRestricted = parseReceipt(restricted);
+	assert.equal(parsedRestricted.ok, true);
+	if (parsedRestricted.ok) assert.equal(parsedRestricted.value.semanticResult?.publicationBlocker, "Hold disclosure pending owner approval.");
+	assert.equal(reconcileReceipt(ledger(), restricted, binding).status, "proven");
+	const restrictedRecorded = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: restricted,
+	}));
+	assert.ok(renderCompletionReceipt(restrictedRecorded).includes("Hold disclosure pending owner approval."));
+	assert.ok(renderStatusDetail(restrictedRecorded).some((row) => row.includes("publication/disclosure blocker: Hold disclosure pending owner approval.")));
+
+	const failedAcceptance = receipt({
+		version: 2,
+		assumptions: [],
+		predicates: [{ phase: "acceptance", item: "disclosure policy", ok: false, note: "approval missing" }],
+	});
+	assert.equal(reconcileReceipt(ledger(), failedAcceptance, binding).status, "failed");
+
+
+	const failedGate = receipt({
+		version: 2,
+		assumptions: [],
+		changed: [],
+		evidence: ["/artifacts/verification.log"],
+		tests: [],
+		predicates: [
+			{ phase: "verification", item: "smoke command", ok: false, note: "exit 1" },
+			{ phase: "acceptance", item: "verification result", ok: true, note: "reviewed" },
+		],
+	});
+	const gateResult = reconcileReceipt(ledger(), failedGate, binding);
+	assert.equal(gateResult.status, "failed");
+	assert.match(gateResult.reasons.join(";"), /verification predicates failed/);
+});
+
+test("worker-only version-two predicates cannot finish or remain current proof", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt({
+			version: 2,
+			assumptions: [],
+			predicates: [{ phase: "worker", item: "worker report", ok: true, note: "worker assertion only" }],
+		}),
+	}));
+	const finish = reduce(recorded, {
+		kind: "finish_task",
+		expectedRevision: recorded.revision,
+		taskId: "T1" as TaskId,
+		criterionId: "A1" as CriterionId,
+	}, REDUCE);
+	assert.equal(finish.ok, false);
+	if (!finish.ok) assert.match(finish.error, /positive acceptance predicate/);
+
+	const persistedDone = {
+		...recorded,
+		tasks: recorded.tasks.map((task) => ({ ...task, state: "DONE" as const })),
+	} as Ledger;
+	assert.equal(criterionProven(persistedDone, "A1" as CriterionId), false);
+	const acceptedReceipt = receipt({
+		version: 2,
+		assumptions: [],
+		predicates: [
+			{ phase: "worker", item: "worker evidence", ok: true, note: "recorded" },
+			{ phase: "acceptance", item: "criterion accepted", ok: true, note: "reviewed" },
+		],
+	});
+	const doneWithReceipt = (replacement: EvidenceReceipt): Ledger => ({
+		...persistedDone,
+		tasks: persistedDone.tasks.map((task) => ({
+			...task,
+			attempts: task.attempts.map((attempt) => ({ ...attempt, receipt: replacement })),
+		})),
+	});
+	assert.equal(criterionProven(doneWithReceipt(acceptedReceipt), "A1" as CriterionId), true);
+	assert.equal(criterionProven(doneWithReceipt({
+		...acceptedReceipt,
+		exitCode: 1,
+		tests: [{ command: "verification", outcome: "fail" }],
+	}), "A1" as CriterionId), false);
+	assert.equal(criterionProven(doneWithReceipt({
+		...acceptedReceipt,
+		unresolved: ["acceptance evidence is incomplete"],
+	}), "A1" as CriterionId), false);
+	assert.equal(criterionProven(doneWithReceipt({
+		...acceptedReceipt,
+		subject: { ...SUBJECT, head: "b".repeat(40) },
+	}), "A1" as CriterionId), false);
+	assert.ok(renderStatusDetail(persistedDone).some((line) => /A1: the fix is proven — unproven/.test(line)));
+});
+
+test("a persisted unverified semantic result cannot remain current criterion proof", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt({
+			version: 2,
+			assumptions: [],
+			predicates: [
+				{ phase: "worker", item: "inspection predicate", ok: true, note: "checked" },
+				{ phase: "acceptance", item: "inspection criterion", ok: true, note: "independently accepted" },
+			],
+			semanticResult: { kind: "inspection", outcome: "no-finding", summary: "observed", verified: true, publicationAuthority: "none" },
+		}),
+	}));
+	const finished = step(recorded, (revision) => ({
+		kind: "finish_task",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		criterionId: "A1" as CriterionId,
+	}));
+	const stale = {
+		...finished,
+		tasks: finished.tasks.map((task) => ({
+			...task,
+			attempts: task.attempts.map((attempt) => ({
+				...attempt,
+				receipt: attempt.receipt === undefined ? undefined : {
+					...attempt.receipt,
+					semanticResult: { ...attempt.receipt.semanticResult!, verified: false },
+				},
+			})),
+		})),
+	} as Ledger;
+	const restored = parseJournal(journalRecord(stale));
+	assert.equal(restored.ok, true);
+	assert.equal(restored.ok ? criterionProven(restored.ledger, "A1" as CriterionId) : true, false);
+});
+
 test("receipt parsing rejects a wrong version, bad enums, and a non-integer exit code", () => {
-	const badVersion = parseReceipt({ ...receipt(), version: 2 });
+	const badVersion = parseReceipt({ ...receipt(), version: 3 });
 	assert.equal(badVersion.ok, false);
-	assert.match(badVersion.ok ? "" : badVersion.errors.join(";"), /version must be 1/);
+	assert.match(badVersion.ok ? "" : badVersion.errors.join(";"), /version must be 1 or 2/);
 
 	const badOutcome = parseReceipt({ ...receipt(), tests: [{ command: "x", outcome: "maybe" }] });
 	assert.equal(badOutcome.ok, false);
@@ -429,6 +702,40 @@ test("a clean, complete receipt at the certified identity reconciles as proven",
 	const result = reconcileReceipt(ledger(), receipt(), { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS });
 	assert.equal(result.status, "proven");
 	assert.deepEqual(result.reasons, []);
+});
+
+test("proof assumptions invalidate selectively and missing current authority stays unknown", () => {
+	const proof = receipt({
+		version: 2,
+		assumptions: [
+			{ kind: "acceptance-revision", value: "rev-2" },
+			{ kind: "dependency-outcome", taskId: "T0" as TaskId, value: "proven" },
+		],
+		predicates: [
+			{ phase: "worker", item: "dependency predicate", ok: true, note: "checked" },
+			{ phase: "acceptance", item: "criterion accepted", ok: true, note: "reviewed" },
+		],
+	});
+	const binding = {
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		subject: SUBJECT,
+		artifactRoots: ROOTS,
+		assumptions: [
+			{ kind: "acceptance-revision", value: "rev-2" },
+			{ kind: "dependency-outcome", taskId: "T0" as TaskId, value: "proven" },
+			{ kind: "dependency-outcome", taskId: "T2" as TaskId, value: "unproven" },
+		] as const,
+	};
+	assert.equal(reconcileReceipt(ledger(), proof, binding).status, "proven");
+	assert.equal(reconcileReceipt(ledger(), proof, {
+		...binding,
+		assumptions: [{ kind: "acceptance-revision", value: "rev-3" }, binding.assumptions[1]!, binding.assumptions[2]!],
+	}).status, "unproved");
+	assert.equal(reconcileReceipt(ledger(), proof, {
+		...binding,
+		assumptions: [binding.assumptions[1]!, binding.assumptions[2]!],
+	}).status, "unproved");
 });
 
 test("a receipt for another task, attempt, generation, or subject is contradicted, not merely weak", () => {
@@ -772,6 +1079,64 @@ test("proven evidence completes a task and converges the run", () => {
 	assert.equal(verdict.provenMandatory, 1);
 });
 
+test("moving one criterion assumption invalidates only its dependent proof", () => {
+	const initial = ledger();
+	const scoped: Ledger = {
+		...initial,
+		criteria: initial.criteria.map((criterion) => {
+			if (criterion.id === ("A1" as CriterionId)) return { ...criterion, assumptions: [{ kind: "acceptance-revision", value: "r1" }] };
+			if (criterion.id === ("A2" as CriterionId)) return { ...criterion, mandatory: true };
+			return criterion;
+		}),
+	};
+	let current = step(scoped, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
+	current = executedAttempt(current, "T1" as TaskId, "T1-a1");
+	current = step(current, (revision) => ({
+		kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1",
+		receipt: receipt({ version: 2, assumptions: [{ kind: "acceptance-revision", value: "r1" }], predicates: [
+			{ phase: "worker", item: "acceptance predicate", ok: true, note: "checked" },
+			{ phase: "acceptance", item: "criterion accepted", ok: true, note: "independently reviewed" },
+		] }),
+	}));
+	current = step(current, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+	current = step(current, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ taskId: "T2" as TaskId, criterionId: "A2" as CriterionId }) }));
+	current = executedAttempt(current, "T2" as TaskId, "T2-a1");
+	current = step(current, (revision) => ({
+		kind: "record_receipt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1",
+		receipt: receipt({ taskId: "T2" as TaskId, attemptId: "T2-a1" }),
+	}));
+	current = step(current, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T2" as TaskId, criterionId: "A2" as CriterionId }));
+	const revised = step(current, (revision) => ({
+		kind: "revise_criterion_assumptions", expectedRevision: revision, criterionId: "A1" as CriterionId,
+		assumptions: [{ kind: "acceptance-revision", value: "r2" }], reason: "authoritative acceptance text changed",
+	}));
+	assert.equal(findTask(revised, "T1" as TaskId)?.state, "READY");
+	assert.equal(findTask(revised, "T2" as TaskId)?.state, "DONE");
+	assert.equal(criterionProven(revised, "A1" as CriterionId), false);
+	assert.equal(criterionProven(revised, "A2" as CriterionId), true);
+});
+
+test("assumptions cannot change while a READY attempt still has intent", () => {
+	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
+	const intent = step(admitted, (revision) => ({
+		kind: "start_attempt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		subject: SUBJECT,
+	}));
+	assert.equal(findTask(intent, "T1" as TaskId)?.state, "READY", "persisted intent is not execution start");
+	const revised = reduce(intent, {
+		kind: "revise_criterion_assumptions",
+		expectedRevision: intent.revision,
+		criterionId: "A1" as CriterionId,
+		assumptions: [{ kind: "acceptance-revision", value: "r2" }],
+		reason: "the authoritative acceptance changed",
+	}, REDUCE);
+	assert.equal(revised.ok, false);
+	assert.match(revised.ok ? "" : revised.error, /in-flight attempt/);
+});
+
 test("unproven evidence is refused at completion", () => {
 	const recorded = step(runningTask(), (revision) => ({
 		kind: "record_receipt",
@@ -964,6 +1329,33 @@ test("an empty queue is quiescent, not successful, and names the resumption cond
 	assert.match(verdict.resumption ?? "", /admit or advertise work for A1/);
 });
 
+test("progress reports escalated uncertainty separately from blocked work", () => {
+	const base = ledger();
+	const extraCriterion = { ...base.criteria[0]!, id: "A2" as CriterionId };
+	const task = (id: string, criterionId: CriterionId, state: "BLOCKED" | "ESCALATE", decision: "DEFER" | "ESCALATE") => ({
+		id: id as TaskId,
+		generation: base.generation,
+		criterionId,
+		title: id,
+		deps: [],
+		effect: "read" as const,
+		owner: "luna",
+		state,
+		attempts: [],
+		decision,
+		decisionReason: `${state} evidence`,
+	});
+	const mixed: Ledger = {
+		...base,
+		criteria: [...base.criteria, extraCriterion],
+		tasks: [task("T1", "A1" as CriterionId, "ESCALATE", "ESCALATE"), task("T2", "A2" as CriterionId, "BLOCKED", "DEFER")],
+	};
+	const verdict = evaluateRun(mixed);
+	assert.equal(verdict.blockedMandatory, 1);
+	assert.equal(verdict.unknownMandatory, 1);
+	assert.equal(verdict.provenMandatory, 0);
+});
+
 test("a user pause is never overridden by a converged verdict", () => {
 	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
 	const finished = step(recorded, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
@@ -1124,12 +1516,24 @@ test("durability is unavailable when the session exposes no history", () => {
 
 test("the status indicator is namespaced and reports gates without a dashboard", () => {
 	const line = renderStatus(ledger());
-	assert.match(line, /^Factory G1 · 0\/1 proven · 0 running · 0 blocked$/);
+	assert.match(line, /^Factory G1 · 0\/1 proven · 0 active · 0 blocked · 1 unknown$/);
 
 	const detail = renderStatusDetail(ledger());
 	assert.match(detail[0]!, /^Factory G1/);
 	assert.ok(detail.some((row) => /\[mandatory\] A1: the fix is proven — unproven/.test(row)));
 	assert.ok(detail.some((row) => /non-goals: no new dashboard/.test(row)));
+});
+
+test("status counts VERIFY as active and leaves unrepresented mandatory scope unknown", () => {
+	const verifying = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt({ unresolved: ["verification remains incomplete"] }),
+	}));
+	assert.match(renderStatus(verifying), /0\/1 proven · 1 active · 0 blocked · 0 unknown/);
+	assert.match(renderStatus(ledger()), /0\/1 proven · 0 active · 0 blocked · 1 unknown/);
 });
 
 test("status detail marks unread routing as unverified rather than assuming a model", () => {

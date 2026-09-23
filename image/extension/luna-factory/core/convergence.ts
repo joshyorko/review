@@ -21,6 +21,9 @@ export interface RunVerdict {
 	readonly converged: boolean;
 	readonly quiescent: boolean;
 	readonly provenMandatory: number;
+	readonly activeMandatory: number;
+	readonly blockedMandatory: number;
+	readonly unknownMandatory: number;
 	readonly totalMandatory: number;
 	readonly remaining: readonly CriterionId[];
 	readonly blockers: readonly string[];
@@ -29,8 +32,9 @@ export interface RunVerdict {
 	readonly resumption?: string;
 }
 
+const BLOCKED_PROGRESS_STATES: Record<string, true> = { BLOCKED: true, DEFERRED: true };
+const BLOCKER_STATES: Record<string, true> = { BLOCKED: true, DEFERRED: true, ESCALATE: true };
 const AUTHORIZED_STATES: Record<string, true> = { READY: true, RUNNING: true, VERIFY: true };
-const STALLED_STATES: Record<string, true> = { DEFERRED: true, ESCALATE: true };
 
 /**
  * Evaluate the run.
@@ -42,12 +46,17 @@ const STALLED_STATES: Record<string, true> = { DEFERRED: true, ESCALATE: true };
 export function evaluateRun(ledger: Ledger): RunVerdict {
 	const remaining = unprovenMandatory(ledger);
 	const totalMandatory = ledger.criteria.filter((criterion) => criterion.mandatory).length;
+	const activeCriteria = new Set(ledger.tasks.filter((task) => AUTHORIZED_STATES[task.state] === true).map((task) => task.criterionId));
+	const blockedCriteria = new Set(ledger.tasks.filter((task) => BLOCKED_PROGRESS_STATES[task.state] === true).map((task) => task.criterionId));
+	const activeMandatory = remaining.filter((id) => activeCriteria.has(id)).length;
+	const blockedMandatory = remaining.filter((id) => !activeCriteria.has(id) && blockedCriteria.has(id)).length;
+	const unknownMandatory = remaining.length - activeMandatory - blockedMandatory;
 	const converged = remaining.length === 0;
 	const authorized = ledger.tasks.some((task) => AUTHORIZED_STATES[task.state] === true);
 
 	const blockers: string[] = [];
 	for (const task of ledger.tasks) {
-		if (STALLED_STATES[task.state] !== true) continue;
+		if (BLOCKER_STATES[task.state] !== true) continue;
 		blockers.push(`${task.id} (${task.state}): ${task.decisionReason}`);
 	}
 	const plateau = ledger.noProgressAttempts >= 2;
@@ -84,6 +93,9 @@ export function evaluateRun(ledger: Ledger): RunVerdict {
 		converged,
 		quiescent: control === "quiescent",
 		provenMandatory: totalMandatory - remaining.length,
+		activeMandatory,
+		blockedMandatory,
+		unknownMandatory,
 		totalMandatory,
 		remaining,
 		blockers,

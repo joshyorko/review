@@ -59,6 +59,8 @@ export interface Criterion {
 	readonly statement: string;
 	/** Mandatory criteria gate CONVERGED; optional ones never manufacture successor work. */
 	readonly mandatory: boolean;
+	/** Current authoritative values; only proof declaring a changed value becomes stale. */
+	readonly assumptions?: readonly ProofAssumption[];
 }
 
 /** The exact thing evidence is about. A git SHA and a semantic goal are different identities. */
@@ -102,6 +104,30 @@ export interface Routing {
 	readonly verified: boolean;
 }
 
+/** Load-bearing state a proof explicitly depends on; absent declarations do not invalidate it. */
+export type ProofAssumption =
+	| { readonly kind: "acceptance-revision"; readonly value: string }
+	| { readonly kind: "dependency-outcome"; readonly taskId: TaskId; readonly value: string };
+
+/** A checked predicate preserves positive and negative observations verbatim. */
+export interface PredicateEvidence {
+	readonly phase: "worker" | "verification" | "acceptance";
+	readonly item: string;
+	readonly ok: boolean;
+	readonly note: string;
+}
+
+/** A semantic observation is evidence input, never proof or publication authority by itself. */
+export interface SemanticResult {
+	readonly kind: "inspection" | "finding";
+	readonly outcome: "no-finding" | "supported" | "disproven" | "uncertain";
+	readonly summary: string;
+	readonly verified: boolean;
+	readonly publicationAuthority: "none";
+	/** Retained disclosure restriction; never grants publication authority. */
+	readonly publicationBlocker?: string;
+}
+
 /**
  * The worker receipt, as structured data.
  *
@@ -109,7 +135,8 @@ export interface Routing {
  * silently misread.
  */
 export interface EvidenceReceipt {
-	readonly version: 1;
+	/** Version 1 is an explicitly supported legacy record; version 2 carries assumptions and predicate evidence. */
+	readonly version: 1 | 2;
 	readonly taskId: TaskId;
 	readonly attemptId: AttemptId;
 	readonly generation: GenerationId;
@@ -126,8 +153,27 @@ export interface EvidenceReceipt {
 	readonly exitCode: number;
 	readonly aborted: boolean;
 	readonly truncated: boolean;
+	readonly assumptions?: readonly ProofAssumption[];
+	readonly semanticResult?: SemanticResult;
+	/** Version-2 granular predicate evidence; legacy version-1 receipts omit it. */
+	readonly predicates?: readonly PredicateEvidence[];
 }
 
+/** Durable intent/settlement for one logical external effect, independent of retry owner. */
+export interface OperationReceipt {
+	readonly id: string;
+	readonly generation: GenerationId;
+	readonly subject: Subject;
+	readonly effect: "repository-work" | "git-push" | "pull-request-create";
+	readonly phase: "worker" | "verify" | "acceptance" | "push" | "pr";
+	readonly owner?: string;
+	readonly attemptId?: AttemptId;
+	readonly state: "intent" | "applied" | "not-applied" | "unknown";
+	readonly resultHandle?: string;
+	readonly branch?: string;
+	readonly sha?: string;
+	readonly url?: string;
+}
 /** A discovery. Discovery creates candidates, never authority. */
 export interface Candidate {
 	readonly taskId: TaskId;
@@ -283,6 +329,13 @@ export type LedgerEvent =
 			readonly expectedRevision: number;
 			readonly taskId: TaskId;
 			readonly criterionId: CriterionId;
+		}
+	| {
+			readonly kind: "revise_criterion_assumptions";
+			readonly expectedRevision: number;
+			readonly criterionId: CriterionId;
+			readonly assumptions: readonly ProofAssumption[];
+			readonly reason: string;
 		}
 	| { readonly kind: "reopen_task"; readonly expectedRevision: number; readonly taskId: TaskId; readonly reason: string }
 	| { readonly kind: "use_replan"; readonly expectedRevision: number; readonly taskId: TaskId }

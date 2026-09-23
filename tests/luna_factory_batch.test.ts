@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10,14 +10,16 @@ import {
 	batchSummary,
 	createBatch,
 	dependencyBlocker,
+	digest,
 	selectionIdentity,
 	type Batch,
 	type SelectedItem,
 } from "../image/extension/luna-factory/core/batch.ts";
+import type { AttemptId, EvidenceReceipt, TaskId } from "../image/extension/luna-factory/core/model.ts";
 import { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { BatchStore, ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { captureWaveJobIds, reconcileBlockedRepositoryClaim, waveWorkerCoverageComplete, waveWorkersSettled } from "../image/extension/bluefin-review/extension.ts";
-import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
+import { BatchService, semanticOutcomeFor } from "../image/extension/luna-factory/omp/batch-service.ts";
 import { BatchGitHub } from "../image/extension/luna-factory/omp/batch-github.ts";
 
 const selected = (key: string, action: SelectedItem["action"] = "patch", extra: Partial<SelectedItem> = {}): SelectedItem => {
@@ -30,6 +32,74 @@ const selected = (key: string, action: SelectedItem["action"] = "patch", extra: 
 const options = (id = "a") => ({ id: `batch-${id.replace(/[^a-f0-9-]/gi, "a")}`, capacity: 2, maxAttempts: 3, maxTotalAttempts: 10, mode: "once" as const });
 const done = (batch: Batch, key: string, stage: "verified-patch" | "pr-ready" | "merged-upstream" = "verified-patch"): void => {
 	const item = batch.items.find((candidate) => candidate.selected.key === key)!;
+	const taskId = "T1" as TaskId;
+	const attemptId = "T1-a1" as AttemptId;
+	const criterion = item.ledger.criteria[0]!;
+	const receipt: EvidenceReceipt = {
+		version: 2,
+		taskId,
+		attemptId,
+		generation: item.ledger.generation,
+		subject: item.ledger.subject,
+		result: "verified selected work",
+		changed: [],
+		evidence: ["/factory/proof.txt"],
+		tests: [{ command: "deterministic verification", outcome: "pass", artifact: "/factory/test.log" }],
+		cleanEnvironment: true,
+		unresolved: [],
+		next: "",
+		confidence: "high",
+		routing: { verified: false },
+		exitCode: 0,
+		aborted: false,
+		truncated: false,
+		assumptions: criterion.assumptions ?? [],
+		predicates: [
+			{ phase: "verification", item: "deterministic verification", ok: true, note: "exit 0" },
+			{ phase: "worker", item: "selected acceptance", ok: true, note: "reviewed" },
+			{ phase: "acceptance", item: "reported evidence", ok: true, note: "reviewed" },
+		],
+		...(item.selected.action === "inspect" ? {
+			semanticResult: {
+				kind: "inspection" as const,
+				outcome: "no-finding" as const,
+				summary: "deterministic inspection completed",
+				verified: true,
+				publicationAuthority: "none" as const,
+			},
+		} : {}),
+	};
+	item.ledger = {
+		...item.ledger,
+		tasks: [
+			...item.ledger.tasks.filter((task) => task.criterionId !== criterion.id),
+			{
+				id: taskId,
+				generation: item.ledger.generation,
+				criterionId: criterion.id,
+				title: key,
+				deps: [],
+				effect: item.selected.action === "inspect" ? "read" : "write",
+				owner: batch.id,
+				state: "DONE",
+				attempts: [{
+					id: attemptId,
+					lineage: 1,
+					taskId,
+					generation: item.ledger.generation,
+					subject: item.ledger.subject,
+					state: "returned",
+					nativeJobIds: [],
+					nativeAgentIds: [],
+					privateSessions: [{ phase: "worker", sessionFile: "/state/sessions/probe.jsonl", started: true }],
+					receipt,
+					integrated: true,
+				}],
+				decision: "ADMIT",
+				decisionReason: "deterministic test proof",
+			},
+		],
+	};
 	item.stage = "DONE";
 	item.proof = { acceptanceRevision: item.selected.acceptanceRevision!, subject: item.selected.head!, digest: "d", artifacts: [], stage, reviewerSession: "reviewer" };
 };
@@ -43,10 +113,24 @@ test("selection identity is canonical, duplicate selected keys are refused, and 
 	assert.throws(() => createBatch([items[0]!, items[0]!], options("dead")), /duplicate selected identity/);
 	assert.equal(createBatch(items, { ...options("beef"), mode: "retain" }).mode, "retain");
 });
+test("absence of a semantic result is neutral for patches but uncertain for inspections", () => {
+	assert.equal(semanticOutcomeFor("patch", "none"), "none");
+	assert.equal(semanticOutcomeFor("pr-ready", "none"), "none");
+	assert.equal(semanticOutcomeFor("inspect", "none"), "uncertain");
+	assert.equal(semanticOutcomeFor("inspect", "disproven"), "disproven");
+});
 test("batch status exposes Factory-private session role and stable identity without claiming Hub visibility", () => {
 	const batch = createBatch([selected("org/a#1", "inspect")], options("session"));
 	const item = batch.items[0]!;
-	item.operation = { id: "batch-session-worker", phase: "worker", state: "intent" };
+	item.operation = {
+		id: "batch-session-worker",
+		generation: item.ledger.generation,
+		subject: item.ledger.subject,
+		effect: "repository-work",
+		phase: "worker",
+		owner: `${batch.id}:${item.selected.key}`,
+		state: "intent",
+	};
 	item.ledger = {
 		...item.ledger,
 		tasks: [{
@@ -114,6 +198,37 @@ test("cancellation, exclusion, and scope revisions never falsely converge", () =
 	batch.scopeRevisions.push({ item: "org/a#1", reason: "changed", at: "now" }); assert.equal(batchConverged(batch), false);
 });
 
+
+test("batch progress distinguishes proof, active, blocked, unknown, cancelled, and excluded scope", () => {
+	const batch = createBatch([
+		selected("org/a#1"),
+		selected("org/b#2"),
+		selected("org/c#3"),
+		selected("org/d#4"),
+		selected("org/e#5"),
+		selected("org/f#6"),
+	], options("counts"));
+	done(batch, "org/a#1");
+	batch.items.find((item) => item.selected.key === "org/c#3")!.stage = "BLOCKED";
+	batch.items.find((item) => item.selected.key === "org/d#4")!.stage = "UNKNOWN";
+	batch.items.find((item) => item.selected.key === "org/e#5")!.stage = "CANCELLED";
+	batch.items.find((item) => item.selected.key === "org/f#6")!.stage = "EXCLUDED";
+	batch.scopeRevisions.push({ item: "org/f#6", reason: "operator revised scope", at: "now" });
+
+	assert.equal(batchConverged(batch), false);
+	assert.match(batchSummary(batch, "/state"), /Current scope: 1 proven · 1 active · 1 blocked · 1 unknown\/unresolved · 1 cancelled · 1 excluded \(5\/6 items\)/);
+	assert.match(batchSummary(batch, "/state"), /Original scope NOT converged/);
+});
+
+test("stale selected acceptance never counts as current batch proof", () => {
+	const batch = createBatch([selected("org/a#1", "inspect")], options("stale"));
+	done(batch, "org/a#1");
+	batch.items[0]!.selected.acceptanceRevision = "r2";
+
+	assert.equal(batchConverged(batch), false);
+	assert.match(batchSummary(batch, "/state"), /0\/1 proven/);
+	assert.match(batchSummary(batch, "/state"), /UNKNOWN \(stored proof is not current\)/);
+});
 test("BatchStore isolates ledgers, rejects stale revisions, and preserves corrupt originals", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-batch-"));
 	try {
@@ -123,6 +238,118 @@ test("BatchStore isolates ledgers, rejects stale revisions, and preserves corrup
 		assert.throws(() => second.acquire(), /owned by process/); assert.throws(() => first.write({ ...a, revision: 0 }), /stale batch revision/);
 		await writeFile(join(root, `${b.id}.json`), "{\"version\":999}"); assert.throws(() => first.read(b.id), /unsupported or corrupt/); assert.match(await readFile(join(root, `${b.id}.json`), "utf8"), /999/); first.release();
 	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("BatchStore migrates version-one operations before persisting version two", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-batch-migration-"));
+	const store = new BatchStore(root);
+	try {
+		store.acquire();
+		const batch = createBatch([selected("org/a#1")], options("migrate"));
+		const legacy = structuredClone(batch) as unknown as {
+			version: number;
+			id: string;
+			revision: number;
+			items: Array<{ operation?: unknown; operations?: unknown }>;
+		};
+		legacy.version = 1;
+		legacy.items[0]!.operation = {
+			id: `${batch.id}:org/a#1:push`,
+			phase: "push",
+			state: "confirmed",
+			branch: `factory/${batch.id}/1`,
+			sha: "b".repeat(40),
+		};
+		delete legacy.items[0]!.operations;
+		const path = join(root, `${batch.id}.json`);
+		await writeFile(path, `${JSON.stringify(legacy)}\n`);
+
+		const migrated = store.read(batch.id);
+		const operation = migrated.items[0]!.operation;
+		assert.equal(migrated.version, 2);
+		assert.equal(operation?.effect, "git-push");
+		assert.equal(operation?.state, "applied");
+		assert.equal(operation?.subject.head, "b".repeat(40));
+		assert.deepEqual(migrated.items[0]!.operations, []);
+		assert.equal(JSON.parse(await readFile(path, "utf8")).version, 1, "reading preserves the original version until a durable write");
+
+		store.write(migrated);
+		const persisted = JSON.parse(await readFile(path, "utf8"));
+		assert.equal(persisted.version, 2);
+		assert.equal(persisted.items[0].operation.state, "applied");
+	} finally {
+		store.release();
+		await rm(root, { recursive: true, force: true });
+	}
+});
+test("ambiguous PR settlement reconciles only one exact marker/head/base match and refuses duplicates", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-pr-reconcile-"));
+	try {
+		const run = async (duplicate: boolean) => {
+			const key = "org/a#1";
+			const selectedItem = selected(key, "pr-ready", { baseRef: "main" });
+			const batch = createBatch([selectedItem], options(duplicate ? "dupe" : "exact"));
+			const item = batch.items[0]!;
+			done(batch, key, "pr-ready");
+			const branch = `factory/${batch.id}/1`;
+			const sha = "b".repeat(40);
+			const marker = `${batch.id}:${key}:pr`;
+			item.operation = {
+				id: `${batch.id}:${key}:push`,
+				generation: item.ledger.generation,
+				subject: { ...item.ledger.subject, head: sha },
+				effect: "git-push",
+				phase: "push",
+				owner: `${batch.id}:${key}`,
+				state: "unknown",
+				branch,
+				sha,
+			};
+			item.stage = "UNKNOWN";
+			let requests = 0;
+			const exactPull = { html_url: "https://github.com/org/a/pull/7", head: { sha }, base: { ref: "main" }, body: `Factory operation: ${marker}` };
+			const decoys = [
+				{ ...exactPull, head: { sha: "c".repeat(40) } },
+				{ ...exactPull, base: { ref: "release" } },
+				{ ...exactPull, body: "Factory operation: unrelated" },
+				{ ...exactPull, body: `Factory operation: ${marker}:extra` },
+				{ ...exactPull, body: `prefix Factory operation: ${marker}` },
+			];
+			const github = {
+				request: async (path: string) => {
+					requests += 1;
+					return path.includes("/git/ref/heads/")
+						? { object: { sha } }
+						: duplicate ? [exactPull, { ...exactPull, html_url: "https://github.com/org/a/pull/8" }] : [...decoys, exactPull];
+				},
+			};
+			const service = new BatchService(root, github as never, undefined, {} as never, 1);
+			// Exercise exact-effect reconciliation while bypassing only artifact revalidation.
+			const internals = service as unknown as {
+				validateProof(item: Batch["items"][number]): Promise<void>;
+				reconcileEffect(item: Batch["items"][number]): Promise<void>;
+			};
+			internals.validateProof = async () => {};
+			await internals.reconcileEffect(item);
+			return { item, requests, marker };
+		};
+
+		const exact = await run(false);
+		assert.equal(exact.requests, 2);
+		assert.equal(exact.item.stage, "VERIFY");
+		assert.equal(exact.item.operation?.phase, "pr");
+		assert.equal(exact.item.operation?.state, "applied");
+		assert.equal(exact.item.operation?.id, exact.marker);
+		assert.equal(exact.item.operation?.url, "https://github.com/org/a/pull/7");
+
+		const duplicate = await run(true);
+		assert.equal(duplicate.requests, 2, "ambiguous settlement does not repeat publication");
+		assert.equal(duplicate.item.stage, "UNKNOWN");
+		assert.equal(duplicate.item.operation?.state, "unknown");
+		assert.ok(duplicate.item.blocker?.includes("exact PR/effect identity unproven"));
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
 });
 
 test("an orphaned acquisition mutex is recovered without admitting a live owner", async () => {
@@ -356,7 +583,15 @@ test("an unconfirmed stop keeps the item unknown and the repository claim", asyn
 			persist: (current: Batch) => void;
 		};
 		internal.execute = async (current, currentItem, signal) => {
-			currentItem.operation = { id: `${current.id}:${currentItem.selected.key}:attempt`, phase: "worker", state: "intent" };
+			currentItem.operation = {
+				id: `${current.id}:${currentItem.selected.key}:work`,
+				generation: currentItem.ledger.generation,
+				subject: currentItem.ledger.subject,
+				effect: "repository-work",
+				phase: "worker",
+				owner: `${current.id}:${currentItem.selected.key}`,
+				state: "intent",
+			};
 			internal.persist(current);
 			startedResolve();
 			await new Promise<never>((_resolve, reject) => {
@@ -400,12 +635,20 @@ test("drain does not reschedule a queued item while its OMP session start is pen
 			const internal = service;
 			internal.execute = async (current, item) => {
 				executions += 1;
-				item.operation = { id: "batch-dead:org/a#1:worker", phase: "worker", state: "intent" };
+				item.operation = {
+					id: "batch-dead:org/a#1:work",
+					generation: item.ledger.generation,
+					subject: item.ledger.subject,
+					effect: "repository-work",
+					phase: "worker",
+					owner: "batch-dead:org/a#1",
+					state: "intent",
+				};
 				internal.persist(current);
 				startedSignal.resolve();
 				await pendingStart.promise;
 				item.stage = "BLOCKED";
-				item.operation.state = "confirmed";
+				item.operation.state = "applied";
 				item.blocker = "native session start reconciled";
 				internal.persist(current);
 			};
@@ -442,6 +685,225 @@ test("drain does not reschedule a queued item while its OMP session start is pen
 	assert.equal(timedOut, false, "drain must yield while its only queued item is already in flight");
 	assert.equal(exit.code, 0, output);
 });
+
+test("accepted aggregate cannot override a false native acceptance predicate", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-acceptance-predicate-"));
+	const selectedItem = selected("org/a#2", "inspect");
+	const batch = createBatch([selectedItem], { ...options("predicate"), capacity: 1, maxAttempts: 1, maxTotalAttempts: 1 });
+	const item = batch.items[0]!;
+	const workspace = join(root, "workspaces", batch.id, digest(item.selected.key).slice(0, 16));
+	let service: BatchService | undefined;
+	let sessionCount = 0;
+	let publicationRequests = 0;
+	const sdk = {
+		Settings: { isolated: () => ({}) },
+		SessionManager: { create: () => ({}) },
+		AgentRegistry: class {},
+		async createAgentSession(options: Record<string, unknown>) {
+			const tools = options.customTools as Array<{ name: string; execute(id: string, args: Record<string, unknown>): Promise<unknown> }>;
+			const report = tools.find((tool) => tool.name === "factory_report");
+			assert.ok(report);
+			const sessionFile = join(root, "sessions", `acceptance-${++sessionCount}.jsonl`);
+			await mkdir(join(root, "sessions"), { recursive: true, mode: 0o700 });
+			await writeFile(sessionFile, "private acceptance session\n", { flag: "wx", mode: 0o600 });
+			const listeners = new Set<(event: { type: string }) => void>();
+			return {
+				session: {
+					sessionFile,
+					subscribe(listener: (event: { type: string }) => void) {
+						listeners.add(listener);
+						return () => listeners.delete(listener);
+					},
+					async prompt(prompt: string) {
+						for (const listener of listeners) listener({ type: "turn_start" });
+						const worker = prompt.startsWith("Implement/inspect");
+						await report.execute(worker ? "worker-report" : "acceptance-report", {
+							report: worker ? "inspected exact subject" : "aggregate says accepted but a checked item failed",
+							tests: [],
+							accepted: true,
+							semanticOutcome: worker ? "no-finding" : "none",
+							predicates: [{ item: "acceptance predicate", ok: worker, note: worker ? "worker observation" : "acceptance evidence contradicts aggregate" }],
+							publicationBlocker: "",
+						});
+					},
+					async abort() {},
+					async dispose() {},
+				},
+			};
+		},
+	};
+	const github = {
+		snapshot: async (value: SelectedItem) => value,
+		assertFresh: async () => {},
+		request: async () => { publicationRequests += 1; throw new Error("unexpected publication request"); },
+	};
+	try {
+		await mkdir(workspace, { recursive: true, mode: 0o700 });
+		const git = (...args: string[]): string => execFileSync("git", [
+			"-c", "user.name=Factory Predicate", "-c", "user.email=predicate@localhost", ...args,
+		], { cwd: workspace, encoding: "utf8" }).trim();
+		execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+		await writeFile(join(workspace, "README.probe"), "read-only inspection subject\n");
+		git("add", "README.probe");
+		git("commit", "--quiet", "-m", "probe");
+		const head = git("rev-parse", "HEAD");
+		git("remote", "add", "origin", `https://github.com/${item.selected.repo}`);
+		item.selected.base = head;
+		item.selected.head = head;
+		item.selected.baseRef = "main";
+		item.ledger = { ...item.ledger, subject: { repo: item.selected.repo, base: head, head } };
+		item.workspace = workspace;
+
+		service = new BatchService(root, github as never, sdk as never, {
+			object: () => ({}), string: () => ({}), array: () => ({}), boolean: () => ({}),
+		} as never, 1);
+		service.store.acquire();
+		service.store.write(batch);
+		await service.resume(batch.id, { model: {}, modelRegistry: { authStorage: {} } });
+		await service.waitForIdle();
+		const rejected = service.store.read(batch.id).items[0]!;
+		assert.notEqual(rejected.stage, "DONE");
+		assert.equal(rejected.proof, undefined);
+		assert.equal(rejected.operation?.state, "applied", "execution completion is not acceptance proof");
+		assert.ok(rejected.ledger.tasks[0]!.attempts.at(-1)!.receipt!.predicates!.some((predicate) => predicate.phase === "acceptance" && !predicate.ok));
+		assert.ok(rejected.operation?.phase !== "push" && rejected.operation?.phase !== "pr");
+		assert.equal(publicationRequests, 0);
+	} finally {
+		if (service) await service.shutdown();
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+
+test("a replacement inspection worker reuses its operation identity and retains disproven findings", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-operation-reuse-"));
+	const selectedItem = selected("org/a#1", "inspect");
+	const batch = createBatch([selectedItem], { ...options("beef"), capacity: 1 });
+	const item = batch.items[0]!;
+	const workspace = join(root, "workspaces", batch.id, digest(item.selected.key).slice(0, 16));
+	let service: BatchService | undefined;
+	let workers = 0;
+	let sessions = 0;
+	const sdk = {
+		Settings: { isolated: () => ({}) },
+		SessionManager: { create: () => ({}) },
+		AgentRegistry: class {},
+		async createAgentSession(options: Record<string, unknown>) {
+			const tools = options.customTools as Array<{ name: string; execute(id: string, args: Record<string, unknown>): Promise<unknown> }>;
+			const report = tools.find((tool) => tool.name === "factory_report");
+			assert.ok(report, "the private inspection session has its evidence tool");
+			const sessionFile = join(root, "sessions", `inspection-${++sessions}.jsonl`);
+			await mkdir(join(root, "sessions"), { recursive: true, mode: 0o700 });
+			await writeFile(sessionFile, "private deterministic session\n", { flag: "wx", mode: 0o600 });
+			const listeners = new Set<(event: { type: string }) => void>();
+			return {
+				session: {
+					sessionFile,
+					subscribe(listener: (event: { type: string }) => void) {
+						listeners.add(listener);
+						return () => listeners.delete(listener);
+					},
+					async prompt(prompt: string) {
+						if (prompt.startsWith("Implement/inspect")) {
+							workers += 1;
+							if (workers === 1) throw new Error("worker setup failed before turn_start");
+							for (const listener of listeners) listener({ type: "turn_start" });
+							await report.execute("worker-report", {
+								report: `inspection attempt ${workers}`,
+								tests: [],
+								accepted: true,
+								semanticOutcome: workers === 2 ? "uncertain" : "disproven",
+								predicates: [
+									{ item: "selected acceptance inspected", ok: true, note: "the exact selected item was read" },
+									{ item: "candidate finding supported", ok: workers !== 3, note: workers === 3 ? "the hypothesis was disproven" : "insufficient evidence on this attempt" },
+								],
+								publicationBlocker: workers === 3 ? "Disproven result retained privately; no disclosure is authorized." : "",
+							});
+						} else {
+							for (const listener of listeners) listener({ type: "turn_start" });
+							await report.execute("acceptance-report", {
+								report: "the inspection result is supported by retained evidence",
+								tests: [],
+								accepted: true,
+								semanticOutcome: "none",
+								predicates: [{ item: "worker evidence matches the exact subject", ok: true, note: "independent review checked the retained artifacts" }],
+								publicationBlocker: "",
+							});
+						}
+					},
+					async abort() {},
+					async dispose() {},
+				},
+			};
+		},
+	};
+	const schema = { object: () => ({}), string: () => ({}), array: () => ({}), boolean: () => ({}) };
+	const github = { token: "probe-token", snapshot: async (value: SelectedItem) => value, assertFresh: async () => {} };
+	const context = { model: {}, modelRegistry: { authStorage: {} } };
+	try {
+		await mkdir(workspace, { recursive: true, mode: 0o700 });
+		const git = (...args: string[]): string => execFileSync("git", [
+			"-c", "user.name=Factory Probe", "-c", "user.email=probe@localhost", ...args,
+		], { cwd: workspace, encoding: "utf8" }).trim();
+		execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+		await writeFile(join(workspace, "README.probe"), "stable inspection workspace\n");
+		git("add", "README.probe");
+		git("commit", "--quiet", "-m", "probe");
+		const head = git("rev-parse", "HEAD");
+		git("remote", "add", "origin", `https://github.com/${item.selected.repo}`);
+		item.selected.base = head;
+		item.selected.head = head;
+		item.selected.baseRef = "main";
+		item.ledger = { ...item.ledger, subject: { repo: item.selected.repo, base: head, head } };
+		item.workspace = workspace;
+
+		service = new BatchService(root, github as never, sdk as never, schema as never, 1);
+		service.store.acquire();
+		service.store.write(batch);
+		await service.resume(batch.id, context as never);
+		await service.waitForIdle();
+		const first = service.store.read(batch.id).items[0]!;
+		assert.equal(first.stage, "BLOCKED", "a confirmed pre-start failure can be retried safely");
+		assert.equal(first.operation?.state, "not-applied");
+		assert.equal(first.ledger.tasks[0]!.attempts[0]!.privateSessions[0]!.started, false);
+		assert.equal(first.ledger.tasks[0]!.attempts[0]!.receipt, undefined);
+		assert.equal(batchConverged(service.store.read(batch.id)), false);
+
+		await service.retry(batch.id, item.selected.key, context as never);
+		await service.waitForIdle();
+		const uncertain = service.store.read(batch.id).items[0]!;
+		assert.equal(uncertain.stage, "BLOCKED", "uncertain semantic evidence cannot complete the inspection");
+		assert.equal(uncertain.operation?.state, "applied", "completed execution is distinct from acceptance proof");
+		assert.equal(uncertain.ledger.tasks[0]!.attempts.at(-1)!.receipt!.semanticResult?.outcome, "uncertain");
+		assert.equal(batchConverged(service.store.read(batch.id)), false);
+
+		await service.retry(batch.id, item.selected.key, context as never);
+		await service.waitForIdle();
+		const final = new BatchStore(root).read(batch.id);
+		const completed = final.items[0]!;
+		assert.equal(workers, 3);
+		assert.equal(final.items.length, 1, "a disproven finding never becomes successor work");
+		assert.equal(completed.stage, "DONE");
+		assert.equal(completed.ledger.tasks[0]!.attempts.at(-1)!.receipt!.semanticResult?.outcome, "disproven");
+		assert.equal(completed.ledger.tasks[0]!.attempts.at(-1)!.receipt!.semanticResult?.publicationBlocker, "Disproven result retained privately; no disclosure is authorized.");
+		const finalPredicates = completed.ledger.tasks[0]!.attempts.at(-1)!.receipt!.predicates!;
+		assert.ok(finalPredicates.some((predicate) => predicate.phase === "worker" && predicate.ok));
+		assert.ok(finalPredicates.some((predicate) => predicate.phase === "worker" && !predicate.ok));
+		assert.ok(finalPredicates.some((predicate) => predicate.phase === "acceptance" && predicate.ok));
+		assert.ok(batchSummary(final, root).includes("Disproven result retained privately; no disclosure is authorized."));
+		assert.deepEqual(completed.operations.map((operation) => operation.state), ["not-applied", "applied"]);
+		assert.deepEqual(completed.operations.map((operation) => operation.attemptId), ["T1-a1", "T1-a2"]);
+		assert.equal(completed.operations[0]!.id, completed.operations[1]!.id);
+		assert.equal(completed.operations[0]!.id, completed.operation!.id, "replacement workers retain one logical operation identity");
+		assert.equal(completed.operation!.attemptId, "T1-a3");
+		assert.equal(batchConverged(final), true);
+		assert.ok([...completed.operations, completed.operation!].every((operation) => operation.phase !== "push" && operation.phase !== "pr"));
+	} finally {
+		if (service) await service.shutdown();
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 
 test("read-only inspection bypasses mutation claims and runs concurrently", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-inspect-"));

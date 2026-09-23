@@ -152,7 +152,7 @@ function responseForNormalReview(body) {
 
 function probeReceipt(taskId, attemptId, criterionId, overrides = {}) {
 	return {
-		version: 1,
+		version: 2,
 		taskId,
 		attemptId,
 		generation: "G1",
@@ -169,6 +169,11 @@ function probeReceipt(taskId, attemptId, criterionId, overrides = {}) {
 		exitCode: 0,
 		aborted: false,
 		truncated: false,
+		assumptions: [],
+		predicates: [
+			{ phase: "worker", item: `${criterionId} evidence checked`, ok: true, note: "deterministic packaged probe" },
+			{ phase: "acceptance", item: `${criterionId} accepted`, ok: true, note: "deterministic packaged probe" },
+		],
 		...overrides,
 	};
 }
