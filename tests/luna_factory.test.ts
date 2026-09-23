@@ -74,7 +74,7 @@ function candidate(overrides: Partial<Candidate> = {}): Candidate {
 
 function receipt(overrides: Partial<EvidenceReceipt> = {}): EvidenceReceipt {
 	const base: EvidenceReceipt = {
-		version: 1,
+		version: 2,
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		generation: "G1" as GenerationId,
@@ -91,6 +91,11 @@ function receipt(overrides: Partial<EvidenceReceipt> = {}): EvidenceReceipt {
 		exitCode: 0,
 		aborted: false,
 		truncated: false,
+		assumptions: [],
+		predicates: [
+			{ phase: "worker", item: "verification evidence", ok: true, note: "recorded" },
+			{ phase: "acceptance", item: "criterion accepted", ok: true, note: "reviewed" },
+		],
 	};
 	return { ...base, ...overrides };
 }
@@ -370,6 +375,45 @@ test("receipt shape is validated, and a valid one round-trips", () => {
 	assert.equal(parsed.ok ? parsed.value.taskId : "", "T1");
 });
 
+test("version-one receipts remain legacy-readable but cannot be newly recorded", () => {
+	const legacy = receipt({ version: 1, assumptions: undefined, predicates: undefined });
+	assert.equal(parseReceipt(legacy).ok, true);
+	assert.equal(reconcileReceipt(ledger(), legacy, { taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT, artifactRoots: ROOTS }).status, "proven");
+
+	const running = runningTask();
+	const rejected = reduce(running, {
+		kind: "record_receipt",
+		expectedRevision: running.revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: legacy,
+	}, REDUCE);
+	assert.equal(rejected.ok, false);
+	if (!rejected.ok) assert.match(rejected.error, /legacy-only/);
+
+	const recorded = step(running, (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt(),
+	}));
+	const finished = step(recorded, (revision) => ({
+		kind: "finish_task",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		criterionId: "A1" as CriterionId,
+	}));
+	const migratedLegacyProof = {
+		...finished,
+		tasks: finished.tasks.map((task) => ({
+			...task,
+			attempts: task.attempts.map((attempt) => ({ ...attempt, receipt: legacy })),
+		})),
+	} as Ledger;
+	assert.equal(criterionProven(migratedLegacyProof, "A1" as CriterionId), true);
+});
+
 test("version-2 receipts retain explicit proof assumptions and non-authorizing semantic results", () => {
 	const parsed = parseReceipt({
 		...receipt(),
@@ -398,7 +442,7 @@ test("version-2 receipts retain explicit proof assumptions and non-authorizing s
 		assert.deepEqual(parsed.value.predicates?.map((predicate) => predicate.ok), [true, false], "positive and negative checks survive receipt parsing");
 	}
 	assert.equal(parseReceipt({
-		...receipt(), version: 2,
+		...receipt(), version: 2, assumptions: undefined,
 		predicates: [{ phase: "worker", item: "required check", ok: true, note: "checked" }],
 	}).ok, false, "new records require explicit assumptions");
 	assert.equal(parseReceipt({
@@ -527,6 +571,35 @@ test("worker-only version-two predicates cannot finish or remain current proof",
 		tasks: recorded.tasks.map((task) => ({ ...task, state: "DONE" as const })),
 	} as Ledger;
 	assert.equal(criterionProven(persistedDone, "A1" as CriterionId), false);
+	const acceptedReceipt = receipt({
+		version: 2,
+		assumptions: [],
+		predicates: [
+			{ phase: "worker", item: "worker evidence", ok: true, note: "recorded" },
+			{ phase: "acceptance", item: "criterion accepted", ok: true, note: "reviewed" },
+		],
+	});
+	const doneWithReceipt = (replacement: EvidenceReceipt): Ledger => ({
+		...persistedDone,
+		tasks: persistedDone.tasks.map((task) => ({
+			...task,
+			attempts: task.attempts.map((attempt) => ({ ...attempt, receipt: replacement })),
+		})),
+	});
+	assert.equal(criterionProven(doneWithReceipt(acceptedReceipt), "A1" as CriterionId), true);
+	assert.equal(criterionProven(doneWithReceipt({
+		...acceptedReceipt,
+		exitCode: 1,
+		tests: [{ command: "verification", outcome: "fail" }],
+	}), "A1" as CriterionId), false);
+	assert.equal(criterionProven(doneWithReceipt({
+		...acceptedReceipt,
+		unresolved: ["acceptance evidence is incomplete"],
+	}), "A1" as CriterionId), false);
+	assert.equal(criterionProven(doneWithReceipt({
+		...acceptedReceipt,
+		subject: { ...SUBJECT, head: "b".repeat(40) },
+	}), "A1" as CriterionId), false);
 	assert.ok(renderStatusDetail(persistedDone).some((line) => /A1: the fix is proven — unproven/.test(line)));
 });
 

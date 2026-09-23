@@ -19,7 +19,7 @@ import type { AttemptId, EvidenceReceipt, TaskId } from "../image/extension/luna
 import { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { BatchStore, ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { captureWaveJobIds, reconcileBlockedRepositoryClaim, waveWorkerCoverageComplete, waveWorkersSettled } from "../image/extension/bluefin-review/extension.ts";
-import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
+import { BatchService, semanticOutcomeFor } from "../image/extension/luna-factory/omp/batch-service.ts";
 import { BatchGitHub } from "../image/extension/luna-factory/omp/batch-github.ts";
 
 const selected = (key: string, action: SelectedItem["action"] = "patch", extra: Partial<SelectedItem> = {}): SelectedItem => {
@@ -112,6 +112,12 @@ test("selection identity is canonical, duplicate selected keys are refused, and 
 	assert.equal(selectionIdentity(items), selectionIdentity([...items].reverse()));
 	assert.throws(() => createBatch([items[0]!, items[0]!], options("dead")), /duplicate selected identity/);
 	assert.equal(createBatch(items, { ...options("beef"), mode: "retain" }).mode, "retain");
+});
+test("absence of a semantic result is neutral for patches but uncertain for inspections", () => {
+	assert.equal(semanticOutcomeFor("patch", "none"), "none");
+	assert.equal(semanticOutcomeFor("pr-ready", "none"), "none");
+	assert.equal(semanticOutcomeFor("inspect", "none"), "uncertain");
+	assert.equal(semanticOutcomeFor("inspect", "disproven"), "disproven");
 });
 test("batch status exposes Factory-private session role and stable identity without claiming Hub visibility", () => {
 	const batch = createBatch([selected("org/a#1", "inspect")], options("session"));
@@ -318,6 +324,7 @@ test("ambiguous PR settlement reconciles only one exact marker/head/base match a
 				},
 			};
 			const service = new BatchService(root, github as never, undefined, {} as never, 1);
+			// Exercise exact-effect reconciliation while bypassing only artifact revalidation.
 			const internals = service as unknown as {
 				validateProof(item: Batch["items"][number]): Promise<void>;
 				reconcileEffect(item: Batch["items"][number]): Promise<void>;
@@ -766,6 +773,7 @@ test("accepted aggregate cannot override a false native acceptance predicate", a
 		await rm(root, { recursive: true, force: true });
 	}
 });
+
 
 test("a replacement inspection worker reuses its operation identity and retains disproven findings", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-operation-reuse-"));

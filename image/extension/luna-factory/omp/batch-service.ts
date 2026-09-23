@@ -9,7 +9,7 @@ import { reduce } from "../core/reducer.ts";
 import type { AttemptId, CriterionId, EvidenceReceipt, LedgerEvent, OperationReceipt, PredicateEvidence, TaskId } from "../core/model.ts";
 import { BatchStore, ResourceClaims } from "./batch-store.ts";
 import { BatchGitHub } from "./batch-github.ts";
-import { runNative, sandboxTest, type NativeContext, type NativeSDK, type SchemaBuilder } from "./batch-native.ts";
+import { runNative, sandboxTest, type NativeContext, type NativeSDK, type SchemaBuilder, type SemanticOutcome } from "./batch-native.ts";
 
 const command = promisify(execFile);
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -31,6 +31,10 @@ function operationReceipt(
 		state,
 		...extra,
 	};
+}
+/** Semantic outcomes exist only for read-only inspections; absence is uncertain there, neutral elsewhere. */
+export function semanticOutcomeFor(action: SelectedItem["action"], reported: SemanticOutcome): SemanticOutcome {
+	return action === "inspect" ? (reported === "none" ? "uncertain" : reported) : "none";
 }
 function transitionOperation(item: BatchItem, update: Partial<OperationReceipt>): void {
 	if (!item.operation) throw new Error("operation receipt unavailable");
@@ -435,7 +439,7 @@ export class BatchService {
 		writeFileSync(workerReportFile, worker.report, { flag: "wx", mode: 0o600 });
 		artifacts.push(workerReportFile);
 		const resultSummary = worker.report.length > 1_900 ? `${worker.report.slice(0, 1_900)} … [full report in worker-report.txt]` : worker.report;
-		const semanticOutcome = worker.semanticOutcome === "none" ? "uncertain" : worker.semanticOutcome;
+		const semanticOutcome = semanticOutcomeFor(item.selected.action, worker.semanticOutcome);
 		const unresolved = [
 			...(reviewer.accepted ? [] : [reviewer.report]),
 			...(semanticOutcome === "uncertain" ? ["semantic result remains uncertain"] : []),

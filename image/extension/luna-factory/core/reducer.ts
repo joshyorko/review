@@ -347,6 +347,7 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (task === undefined) return { ok: false, error: `unknown task ${event.taskId}` };
 			const attempt = task.attempts.find((candidate) => candidate.id === event.attemptId);
 			if (attempt === undefined) return { ok: false, error: `unknown attempt ${event.attemptId}` };
+			if (event.receipt.version !== 2) return { ok: false, error: "version-1 receipts are legacy-only and cannot be newly recorded" };
 
 			const unacceptable = receiptAcceptable(ledger, event.receipt);
 			if (attempt.steeredAgentId !== undefined) {
