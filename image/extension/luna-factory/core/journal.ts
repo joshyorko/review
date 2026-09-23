@@ -27,6 +27,7 @@ import type {
 	TaskId,
 	TaskRecord,
 	TaskState,
+	NativeAgentId,
 } from "./model.ts";
 
 /** Namespaced custom entry. A new key means a different shape, not a migration. */
@@ -138,6 +139,8 @@ function parseTask(value: unknown): TaskRecord | undefined {
 		if (!nativeJobIds.every((id) => identity(id)) || !nativeAgentIds.every((id) => identity(id))) return undefined;
 		if (new Set(nativeJobIds).size !== nativeJobIds.length || new Set(nativeAgentIds).size !== nativeAgentIds.length) return undefined;
 		const rawPrivateSessions = rawAttempt.privateSessions === undefined ? [] : rawAttempt.privateSessions;
+		const steeredAgentId = rawAttempt.steeredAgentId;
+		if (steeredAgentId !== undefined && (!identity(steeredAgentId) || !nativeAgentIds.includes(steeredAgentId))) return undefined;
 		if (!Array.isArray(rawPrivateSessions) || rawPrivateSessions.length > 2) return undefined;
 		const privateSessions: Attempt["privateSessions"][number][] = [];
 		for (const session of rawPrivateSessions) {
@@ -165,7 +168,7 @@ function parseTask(value: unknown): TaskRecord | undefined {
 			nativeJobIds: nativeJobIds as Attempt["nativeJobIds"],
 			nativeAgentIds: nativeAgentIds as Attempt["nativeAgentIds"],
 			privateSessions,
-			...(receipt === undefined ? {} : { receipt }),
+			...(steeredAgentId === undefined ? {} : { steeredAgentId: steeredAgentId as NativeAgentId }),
 			integrated: rawAttempt.integrated,
 		});
 	}

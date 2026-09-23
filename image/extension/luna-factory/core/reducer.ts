@@ -283,6 +283,33 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			}));
 			return bump(replaceTask(next, task.id, (current) => ({ ...current, state: "RUNNING" })));
 		}
+		case "record_native_agent_steering": {
+			const task = findTask(ledger, event.taskId);
+			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
+			if (task === undefined || attempt === undefined) return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
+			if (event.reason.trim().length === 0) return { ok: false, error: "OMP steering invalidation must name the observed message" };
+			if (!attempt.nativeAgentIds.includes(event.agentId)) {
+				return { ok: false, error: `OMP agent ${event.agentId} is not bound to attempt ${attempt.id}` };
+			}
+			if (attempt.steeredAgentId !== undefined) {
+				return attempt.steeredAgentId === event.agentId
+					? { ok: true, ledger }
+					: { ok: false, error: `attempt ${attempt.id} is already invalidated by a different OMP agent` };
+			}
+			const invalidated = replaceAttempt(ledger, task.id, attempt.id, (current) => ({
+				...current,
+				...(current.state === "started" ? { state: "abandoned" as const } : {}),
+				steeredAgentId: event.agentId,
+			}));
+			const next = replaceTask(invalidated, task.id, (current) => ({
+				...current,
+				state: "ESCALATE" as TaskState,
+				decision: "ESCALATE" as const,
+				decisionReason: `OMP agent ${event.agentId} received user steering; attempt ${attempt.id} and its proof are invalid: ${event.reason.trim()}`,
+			}));
+			return bump(settleDraining(next));
+		}
+
 		case "reconcile_attempt": {
 			const task = findTask(ledger, event.taskId);
 			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
@@ -321,7 +348,9 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (attempt === undefined) return { ok: false, error: `unknown attempt ${event.attemptId}` };
 
 			const unacceptable = receiptAcceptable(ledger, event.receipt);
-			if (unacceptable !== undefined) return { ok: false, error: unacceptable };
+			if (attempt.steeredAgentId !== undefined) {
+				return { ok: false, error: `attempt ${attempt.id} was steered by OMP; its receipt cannot certify this task` };
+			}
 			if (task.state !== "RUNNING" || attempt.state !== "started") {
 				return { ok: false, error: `attempt ${attempt.id} is not an active dispatched attempt` };
 			}
@@ -416,7 +445,9 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 				};
 			}
 			const attempt = lastReturned(task);
-			if (attempt?.receipt === undefined) return { ok: false, error: `task ${task.id} has no receipt to certify` };
+			if (attempt?.steeredAgentId !== undefined) {
+				return { ok: false, error: `attempt ${attempt.id} was steered by OMP; its proof cannot finish this task` };
+			}
 			if (task.effect === "write" && !attempt.integrated) {
 				return { ok: false, error: `write task ${task.id} must be integrated before it can complete` };
 			}

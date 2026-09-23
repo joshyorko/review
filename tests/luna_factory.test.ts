@@ -590,6 +590,44 @@ test("attempt intent stays READY until a bound OMP execution identity is recorde
 	assert.equal(replacement.ok, false, "a replacement child needs a new Factory attempt");
 });
 
+test("native Hub steering invalidates the receipt before the criterion can be proven", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt(),
+	}));
+	const steered = step(recorded, (revision) => ({
+		kind: "record_native_agent_steering",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		agentId: "agent-1",
+		reason: "Hub message started with user attribution",
+	}));
+	assert.equal(findTask(steered, "T1" as TaskId)?.state, "ESCALATE");
+	assert.equal(findTask(steered, "T1" as TaskId)?.attempts[0]?.steeredAgentId, "agent-1");
+	assert.equal(criterionProven(steered, "A1" as CriterionId), false);
+	assert.equal(parseJournal(journalRecord(steered)).ok, true);
+	const finish = reduce(steered, {
+		kind: "finish_task",
+		expectedRevision: steered.revision,
+		taskId: "T1" as TaskId,
+		criterionId: "A1" as CriterionId,
+	}, REDUCE);
+	assert.equal(finish.ok, false);
+	const lateReceipt = reduce(steered, {
+		kind: "record_receipt",
+		expectedRevision: steered.revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt(),
+	}, REDUCE);
+	assert.equal(lateReceipt.ok, false);
+	assert.match(lateReceipt.ok ? "" : lateReceipt.error, /steered by OMP/);
+});
+
 test("private session identity alone is not execution; OMP turn start is persisted", () => {
 	const intent = intentTask();
 	const workerIdentity = step(intent, (revision) => ({
@@ -1132,7 +1170,49 @@ interface FakeTool {
 	execute(...args: any[]): Promise<FakeToolResult>;
 }
 
+interface FakeNativeAgentSession {
+	subscribe(listener: (event: unknown) => void): () => void;
+	emit(event: unknown): void;
+}
+
+interface FakeNativeAgentRegistry {
+	get(id: string): { id: string; kind: "sub"; session: FakeNativeAgentSession } | undefined;
+	onChange(listener: (event: unknown) => void): () => void;
+	registerAgent(id: string): FakeNativeAgentSession;
+}
+
+function fakeNativeAgentRegistry(): FakeNativeAgentRegistry {
+	const refs = new Map<string, { id: string; kind: "sub"; session: FakeNativeAgentSession }>();
+	const listeners = new Set<(event: unknown) => void>();
+	return {
+		get(id) {
+			return refs.get(id);
+		},
+		onChange(listener) {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
+		registerAgent(id) {
+			const sessionListeners = new Set<(event: unknown) => void>();
+			const session: FakeNativeAgentSession = {
+				subscribe(listener) {
+					sessionListeners.add(listener);
+					return () => sessionListeners.delete(listener);
+				},
+				emit(event) {
+					for (const listener of sessionListeners) listener(event);
+				},
+			};
+			const ref = { id, kind: "sub" as const, session };
+			refs.set(id, ref);
+			for (const listener of listeners) listener({ type: "registered", ref });
+			return session;
+		},
+	};
+}
+
 interface FakeHost {
+	agentRegistry: FakeNativeAgentRegistry;
 	tools: Map<string, FakeTool>;
 	nativeTaskCalls: { count: number };
 	events: Map<string, (event: unknown, ctx: unknown) => unknown>;
@@ -1159,6 +1239,7 @@ function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
 	const notifications: string[] = [];
 	const sentMessages: Array<{ content: string; options?: unknown }> = [];
 	const nativeTaskCalls = { count: 0 };
+	const agentRegistry = fakeNativeAgentRegistry();
 	const leaf = (): unknown => ({ optional: () => leaf(), describe: () => leaf() });
 	if (options.nativeTask) {
 		tools.set("task", {
@@ -1172,6 +1253,7 @@ function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
 	}
 	return {
 		tools,
+		agentRegistry,
 		nativeTaskCalls,
 		events,
 		commands,
@@ -1181,8 +1263,22 @@ function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
 		zod: { object: () => ({}), string: leaf },
 		arktype: options.nativeTask ? ((schema: unknown) => schema) : undefined,
 		setLabel() {},
-		registerTool(definition: { name: string; description?: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }) {
-			tools.set(definition.name, definition);
+		registerTool(definition: FakeTool) {
+			if (definition.name === "task") {
+				tools.set(definition.name, {
+					...definition,
+					async execute(...args: any[]) {
+						const rawContext = args[4];
+						const context = typeof rawContext === "object" && rawContext !== null
+							? rawContext as Record<string, unknown>
+							: {};
+						args[4] = { ...context, agentRegistry };
+						return definition.execute(...args);
+					},
+				});
+			} else {
+				tools.set(definition.name, definition);
+			}
 		},
 		appendEntry(customType: string, data: unknown) {
 			entries.push({ customType, data });
@@ -1216,13 +1312,16 @@ async function observeNativeStart(
 	taskId: string,
 	attemptId: string,
 	generation = "G1",
-): Promise<void> {
+	steerBeforeIdentity = false,
+): Promise<FakeNativeAgentSession> {
 	const task = host.tools.get("task");
 	assert.ok(task, "the native OMP task wrapper is registered");
+	const agentId = `agent-${taskId}-${attemptId}`;
 	const details = {
 		async: { state: "completed", jobId: `job-${taskId}-${attemptId}`, type: "task" },
-		progress: [{ index: 0, id: `agent-${taskId}-${attemptId}`, status: "completed", requests: 1 }],
+		progress: [{ index: 0, id: agentId, status: "completed", requests: 1 }],
 	};
+	let childSession: FakeNativeAgentSession | undefined;
 	const result = await task.execute(
 		"call",
 		{ agent: "task", isolated: true, task: `perform the admitted work\n${dispatchMarker(taskId, attemptId, generation)}` },
@@ -1230,12 +1329,17 @@ async function observeNativeStart(
 		undefined,
 		{
 			invokeTool: async (_params: unknown, options?: { onUpdate?: (update: unknown) => void }) => {
+				childSession = host.agentRegistry.registerAgent(agentId);
+				childSession.emit({ type: "message_start", message: { role: "user", attribution: "agent" } });
+				if (steerBeforeIdentity) childSession.emit({ type: "message_start", message: { role: "user", attribution: "user" } });
 				options?.onUpdate?.({ details });
 				return { content: [{ type: "text", text: "native child returned" }], details };
 			},
 		} as never,
 	);
-	assert.equal(result.isError, undefined, result.content[0]?.text);
+	assert.equal(result.isError, steerBeforeIdentity ? true : undefined, result.content[0]?.text);
+	assert.ok(childSession, "OMP registered the child session");
+	return childSession;
 }
 
 const FULL_ENV = { LUNA_FACTORY_ENABLED: "1" };
@@ -1418,6 +1522,8 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 	let delayedUpdate: ((update: unknown) => void) | undefined;
 	const invoke = async (_params: unknown, options?: { onUpdate?: (update: unknown) => void }) => {
 		nativeCalls += 1;
+		const childSession = host.agentRegistry.registerAgent("agent-1");
+		childSession.emit({ type: "message_start", message: { role: "user", attribution: "agent" } });
 		delayedUpdate = options?.onUpdate;
 		const details = {
 			async: { state: "running", jobId: "job-1", type: "task" },
@@ -1492,6 +1598,10 @@ test("the native task seam validates and correlates an independent batch without
 		{
 			invokeTool: async () => {
 				calls += 1;
+				for (const agentId of ["agent-1", "agent-2"]) {
+					const childSession = host.agentRegistry.registerAgent(agentId);
+					childSession.emit({ type: "message_start", message: { role: "user", attribution: "agent" } });
+				}
 				return {
 					content: [{ type: "text", text: "batch completed" }],
 					details: { async: { state: "completed", jobId: "batch-1", type: "task" }, results: [{ index: 0, id: "agent-1", requests: 1 }, { index: 1, id: "agent-2", requests: 1 }] },
@@ -1545,6 +1655,8 @@ test("a write task must request native isolation before delegation", async () =>
 	const marker = dispatchMarker("T1", "T1-a1", "G1");
 	const invoke = async () => {
 		nativeCalls += 1;
+		const childSession = host.agentRegistry.registerAgent("write-agent-1");
+		childSession.emit({ type: "message_start", message: { role: "user", attribution: "agent" } });
 		return { content: [{ type: "text", text: "isolated native task completed" }], details: { async: { state: "completed", jobId: "write-job-1", type: "task" }, results: [{ id: "write-agent-1", requests: 1 }] } };
 	};
 	const refused = await task.execute("call", { agent: "task", task: `write work\n${marker}` }, undefined, undefined, { invokeTool: invoke } as never);
@@ -1725,6 +1837,73 @@ test("the admitted vertical runs end to end and finishes on proof", async () => 
 	const completion = await callTool(host, "luna_factory_completion", {});
 	assert.match(completion.content[0]!.text, /no merge or deploy authority/);
 	assert.ok(host.entries.some((entry) => entry.customType === JOURNAL_ENTRY), "the ledger is journalled");
+});
+
+test("an explicit Hub steer invalidates a live native Factory child", async () => {
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "prove the isolated child work",
+		criteria: [{ id: "A1", statement: "the child work is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "perform the child work",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const childSession = await observeNativeStart(host, "T1", "T1-a1");
+	childSession.emit({ type: "message_start", message: { role: "user", attribution: "user" } });
+
+	const journal = host.entries.at(-1)!.data as {
+		tasks: Array<{ state: string; attempts: Array<{ steeredAgentId?: string }> }>;
+	};
+	assert.equal(journal.tasks[0]!.state, "ESCALATE");
+	assert.equal(journal.tasks[0]!.attempts[0]!.steeredAgentId, "agent-T1-T1-a1");
+	const status = await callTool(host, "luna_factory_status", {});
+	assert.match(status.content[0]!.text, /Hub-steered; attempt invalidated/);
+	const receiptResult = await callTool(host, "luna_factory_receipt", receipt());
+	assert.equal(receiptResult.isError, true);
+	assert.match(receiptResult.content.map((part) => part.text).join("\n"), /steered by OMP/);
+	const finish = await callTool(host, "luna_factory_finish", { taskId: "T1" });
+	assert.equal(finish.isError, true);
+});
+
+test("Hub steering before OMP identity details is retained and invalidates the attempt", async () => {
+	const host = fakeHost({ nativeTask: true });
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	host.events.get("session_start")!({}, startCtx(host));
+	await callTool(host, "luna_factory_open", {
+		objective: "prove the child work",
+		criteria: [{ id: "A1", statement: "the child work is proven" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+	});
+	await callTool(host, "luna_factory_candidate", {
+		taskId: "T1",
+		generation: "G1",
+		criterionId: "A1",
+		title: "perform child work",
+		deps: [],
+		effect: "read",
+		owner: "luna",
+		necessity: "A1 is unproven",
+	});
+	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await observeNativeStart(host, "T1", "T1-a1", "G1", true);
+	const journal = host.entries.at(-1)!.data as {
+		tasks: Array<{ state: string; attempts: Array<{ steeredAgentId?: string }> }>;
+	};
+	assert.equal(journal.tasks[0]!.state, "ESCALATE");
+	assert.equal(journal.tasks[0]!.attempts[0]!.steeredAgentId, "agent-T1-T1-a1");
 });
 
 test("write integration is an explicit owner event and moves the proof subject", async () => {

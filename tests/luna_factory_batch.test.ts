@@ -386,19 +386,45 @@ test("drain does not reschedule a queued item while its OMP session start is pen
 		import { createBatch } from ${JSON.stringify(batchModule)};
 		import { BatchService } from ${JSON.stringify(serviceModule)};
 		const root = await mkdtemp(join(tmpdir(), "factory-drain-"));
+		const selected = { key: "org/a#1", repo: "org/a", number: 1, kind: "issue", action: "inspect", overlaps: [], acceptanceRevision: "r1", base: "a".repeat(40), head: "a".repeat(40) };
+		const batch = createBatch([selected], { id: "batch-dead", capacity: 2, maxAttempts: 3, maxTotalAttempts: 10, mode: "once" });
+		const service = new BatchService(root, { snapshot: async value => value, assertFresh: async () => {} }, undefined, {}, 2);
+		const pendingStart = Promise.withResolvers<void>();
+		const releaseExecution = pendingStart.resolve;
 		try {
-			const selected = { key: "org/a#1", repo: "org/a", number: 1, kind: "issue", action: "inspect", overlaps: [], acceptanceRevision: "r1", base: "a".repeat(40), head: "a".repeat(40) };
-			const batch = createBatch([selected], { id: "batch-dead", capacity: 2, maxAttempts: 3, maxTotalAttempts: 10, mode: "once" });
-			const service = new BatchService(root, { snapshot: async value => value, assertFresh: async () => {} }, undefined, {}, 2);
 			service.store.acquire();
 			service.store.write(batch);
 			let executions = 0;
-			service.execute = async (_batch, item) => { executions += 1; item.stage = "BLOCKED"; item.blocker = "test execution settled"; };
+			const startedSignal = Promise.withResolvers<void>();
+			const started = startedSignal.promise;
+			const internal = service;
+			internal.execute = async (current, item) => {
+				executions += 1;
+				item.operation = { id: "batch-dead:org/a#1:worker", phase: "worker", state: "intent" };
+				internal.persist(current);
+				startedSignal.resolve();
+				await pendingStart.promise;
+				item.stage = "BLOCKED";
+				item.operation.state = "confirmed";
+				item.blocker = "native session start reconciled";
+				internal.persist(current);
+			};
 			await service.resume(batch.id, {});
+			await started;
+			const beforeResume = service.store.read(batch.id).items[0];
+			if (beforeResume.stage !== "QUEUED" || beforeResume.operation?.state !== "intent") throw new Error("the first session start must remain pending and owned");
+			await service.resume(batch.id, {});
+			const duringResume = service.store.read(batch.id).items[0];
+			if (executions !== 1) throw new Error("a queued item with a pending OMP start was redispatched");
+			if (duringResume.stage !== "QUEUED" || duringResume.operation?.state !== "intent") throw new Error("resume changed the pending operation state");
+			releaseExecution();
 			await service.waitForIdle();
-			if (executions !== 1) throw new Error("one queued item was scheduled more than once");
-			await service.shutdown();
+			const settled = service.store.read(batch.id).items[0];
+			if (executions !== 1) throw new Error("the same queued owner was executed more than once");
+			if (settled.stage !== "BLOCKED" || settled.blocker !== "native session start reconciled") throw new Error("the pending owner did not settle exactly once");
 		} finally {
+			releaseExecution();
+			await service.shutdown();
 			await rm(root, { recursive: true, force: true });
 		}
 	`;

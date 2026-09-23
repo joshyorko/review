@@ -49,11 +49,28 @@ interface ToolUpdate {
 	readonly [key: string]: unknown;
 }
 
+interface NativeAgentSessionLike {
+	subscribe(listener: (event: unknown) => void): () => void;
+}
+
+interface NativeAgentRefLike {
+	readonly id: string;
+	readonly kind: string;
+	readonly session: NativeAgentSessionLike | null;
+}
+
+interface NativeAgentRegistryLike {
+	get(id: string): NativeAgentRefLike | undefined;
+	onChange(listener: (event: unknown) => void): () => void;
+}
+
 interface NativeInvokeContext extends FactoryCtx {
 	invokeTool?<TDetails = unknown>(
 		params: Record<string, unknown>,
 		options?: { signal?: AbortSignal; onUpdate?: (update: ToolUpdate) => void },
 	): Promise<ToolResult & { details?: TDetails }>;
+	/** Test seam; production loads OMP's existing global registry lazily. */
+	agentRegistry?: NativeAgentRegistryLike;
 }
 
 interface ZodLike {
@@ -305,6 +322,145 @@ function nativeTaskIdentities(details: unknown): NativeTaskIdentities {
 	return { jobId, agentIdsByIndex, unindexedAgentIds };
 }
 
+interface NativeAgentSteeringWatch {
+	readonly id: string;
+	session?: NativeAgentSessionLike;
+	binding?: NativeTaskBinding;
+	steered: boolean;
+	unsubscribe?: () => void;
+}
+
+interface NativeAgentSteeringObserver {
+	bind(agentId: NativeAgentId, binding: NativeTaskBinding): boolean;
+	finishCall(): void;
+	sync(current: Ledger): void;
+	isClosed(): boolean;
+	wasSteered(binding: NativeTaskBinding): boolean;
+}
+
+function nativeAgentSteeringKey(binding: NativeTaskBinding): string {
+	return `${binding.taskId}\u0000${binding.attemptId}`;
+}
+
+function createNativeAgentSteeringObserver(
+	registry: NativeAgentRegistryLike,
+	onSteering: (binding: NativeTaskBinding, agentId: NativeAgentId) => void,
+): NativeAgentSteeringObserver {
+	const watches = new Map<string, NativeAgentSteeringWatch>();
+	const invalidated = new Set<string>();
+	let acceptingNew = true;
+	let registryUnsubscribe: (() => void) | undefined;
+	let closed = false;
+
+	const closeRegistry = (): void => {
+		if (closed) return;
+		registryUnsubscribe?.();
+		registryUnsubscribe = undefined;
+		closed = true;
+	};
+	const remove = (id: string): void => {
+		watches.get(id)?.unsubscribe?.();
+		watches.delete(id);
+		if (!acceptingNew && watches.size === 0) closeRegistry();
+	};
+
+	const observe = (value: unknown): NativeAgentSteeringWatch | undefined => {
+		if (!isRecord(value) || typeof value.id !== "string" || value.kind !== "sub") return undefined;
+		const id = value.id;
+		const previous = watches.get(id);
+		const session = value.session as NativeAgentSessionLike | null;
+		if (session === null || typeof session?.subscribe !== "function") {
+			if (previous) {
+				previous.unsubscribe?.();
+				previous.unsubscribe = undefined;
+				previous.session = undefined;
+			}
+			return previous;
+		}
+		if (previous?.session === session) return previous;
+		previous?.unsubscribe?.();
+		const watch = previous ?? { id, steered: false };
+		watch.session = session;
+		watch.unsubscribe = session.subscribe((event) => {
+			if (!isRecord(event) || event.type !== "message_start" || !isRecord(event.message)) return;
+			if (event.message.role !== "user" || event.message.attribution === "agent") return;
+			if (watch.steered) return;
+			watch.steered = true;
+			if (watch.binding) {
+				invalidated.add(nativeAgentSteeringKey(watch.binding));
+				onSteering(watch.binding, id as NativeAgentId);
+			}
+		});
+		watches.set(id, watch);
+		return watch;
+	};
+
+	registryUnsubscribe = registry.onChange((event) => {
+		if (!isRecord(event) || !isRecord(event.ref) || typeof event.ref.id !== "string") return;
+		if (event.type === "removed") {
+			remove(event.ref.id);
+			return;
+		}
+		if (event.type === "registered" || event.type === "status_changed") {
+			if (acceptingNew || watches.has(event.ref.id)) observe(event.ref);
+		}
+	});
+
+	return {
+		bind(agentId, binding) {
+			const bindingKey = nativeAgentSteeringKey(binding);
+			if (invalidated.has(bindingKey)) return true;
+			if (closed) return false;
+			let watch = watches.get(agentId);
+			if (!watch) {
+				const ref = registry.get(agentId);
+				if (ref) watch = observe(ref);
+			}
+			if (!watch) return false;
+			watch.binding = binding;
+			if (watch.steered) {
+				invalidated.add(bindingKey);
+				onSteering(binding, agentId);
+			}
+			return true;
+		},
+		finishCall() {
+			acceptingNew = false;
+			for (const [id, watch] of watches) if (!watch.binding) remove(id);
+			if (watches.size === 0) closeRegistry();
+		},
+		sync(current) {
+			for (const [id, watch] of watches) {
+				if (!watch.binding) continue;
+				const task = findTask(current, watch.binding.taskId);
+				if (task === undefined || task.state === "DONE" || task.state === "ESCALATE" || task.state === "BLOCKED" || watch.steered) {
+					remove(id);
+				}
+			}
+			if (!acceptingNew && watches.size === 0) closeRegistry();
+		},
+		wasSteered(binding) {
+			return invalidated.has(nativeAgentSteeringKey(binding));
+		},
+		isClosed() {
+			return closed;
+		},
+	};
+}
+
+// OMP's registry is embedded in the host, not a Node test dependency. Load this
+// plugin-owned observer only for native Factory tasks; tests inject a fake.
+async function loadNativeAgentRegistry(context: NativeInvokeContext): Promise<NativeAgentRegistryLike> {
+	if (context.agentRegistry) return context.agentRegistry;
+	const moduleName = "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+	const imported = await import(moduleName) as unknown as { AgentRegistry?: { global?: () => unknown } };
+	const registry = imported.AgentRegistry?.global?.();
+	if (!isRecord(registry) || typeof registry.get !== "function" || typeof registry.onChange !== "function") {
+		throw new Error("OMP Agent Hub registry does not expose child observation");
+	}
+	return registry as unknown as NativeAgentRegistryLike;
+}
+
 function reconcileRestartedAttempts(ledger: Ledger, artifactRoots: readonly string[]): Ledger {
 	const unfinished = ledger.tasks.flatMap((task) =>
 		task.attempts
@@ -347,6 +503,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	let loadProblem: string | undefined;
 	const nativeTaskParameters = host.arktype?.("object");
 	let nativeTaskWrapperRegistered = false;
+	const nativeSteeringObservers = new Set<NativeAgentSteeringObserver>();
 
 	const enabled = (): boolean => env[ENABLE_FLAG] === "1";
 
@@ -389,6 +546,41 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 						commit(applied.ledger);
 					}
 				};
+				let steeringObserver: NativeAgentSteeringObserver;
+				try {
+					const registry = await loadNativeAgentRegistry(context);
+					steeringObserver = createNativeAgentSteeringObserver(registry, (binding, agentId) => {
+						const current = ledger;
+						if (current === undefined) return;
+						recordNativeEvent({
+							kind: "record_native_agent_steering",
+							expectedRevision: current.revision,
+							taskId: binding.taskId,
+							attemptId: binding.attemptId,
+							agentId,
+							reason: "a user-attributed message arrived in the Hub-visible OMP child",
+						});
+					});
+					nativeSteeringObservers.add(steeringObserver);
+				} catch (error) {
+					const reason = `native task refused before execution: OMP Hub steering observation unavailable (${error instanceof Error ? error.message : String(error)})`;
+					for (const binding of bindings.bindings) {
+						const current = ledger;
+						const attempt = current && findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						if (current !== undefined && attempt?.state === "started") {
+							recordNativeEvent({
+								kind: "reconcile_attempt",
+								expectedRevision: current.revision,
+								taskId: binding.taskId,
+								attemptId: binding.attemptId,
+								outcome: "abandoned",
+								reason,
+							});
+						}
+					}
+					return { content: text(reason), isError: true };
+				}
+				const steeringUnobservableBindings = new Map<string, NativeTaskBinding>();
 				const observeNativeDetails = (details: unknown): void => {
 					const identities = nativeTaskIdentities(details);
 					for (const binding of bindings.bindings) {
@@ -409,14 +601,32 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 						const refreshedAttempt = refreshed && findTask(refreshed, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
 						const agentId = identities.agentIdsByIndex.get(binding.index)
 							?? (bindings.bindings.length === 1 ? identities.unindexedAgentIds[0] : undefined);
-						if (agentId !== undefined && refreshedAttempt && !refreshedAttempt.nativeAgentIds.includes(agentId)) {
-							recordNativeEvent({
-								kind: "record_native_agent_start",
-								expectedRevision: refreshed!.revision,
-								taskId: binding.taskId,
-								attemptId: binding.attemptId,
-								agentId,
-							});
+						if (agentId !== undefined && refreshedAttempt) {
+							if (!refreshedAttempt.nativeAgentIds.includes(agentId)) {
+								recordNativeEvent({
+									kind: "record_native_agent_start",
+									expectedRevision: refreshed!.revision,
+									taskId: binding.taskId,
+									attemptId: binding.attemptId,
+									agentId,
+								});
+							}
+							const latest = ledger;
+							const latestAttempt = latest && findTask(latest, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+							if (!latestAttempt?.nativeAgentIds.includes(agentId) || !steeringObserver.bind(agentId, binding)) {
+								steeringUnobservableBindings.set(nativeAgentSteeringKey(binding), binding);
+								const current = ledger;
+								if (current !== undefined && latestAttempt?.state === "started") {
+									recordNativeEvent({
+										kind: "reconcile_attempt",
+										expectedRevision: current.revision,
+										taskId: binding.taskId,
+										attemptId: binding.attemptId,
+										outcome: "unknown",
+										reason: "OMP exposed a child ID without a steer-observable Agent Hub session",
+									});
+								}
+							}
 						}
 					}
 				};
@@ -455,6 +665,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 						return attempt?.state === "started" && attempt.nativeAgentIds.length === 0 && (asyncSettled || terminalProgress.has(binding.index));
 					});
 					if (unknown.length > 0) reconcileUnknown(unknown, "OMP task settled without an observed child agent start identity");
+					if (asyncSettled) steeringObserver.finishCall();
 				};
 				try {
 					result = await context.invokeTool(params, {
@@ -465,6 +676,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 						},
 					});
 				} catch (error) {
+					steeringObserver.finishCall();
 					const reason = `OMP task failed before a child identity could be reconciled: ${error instanceof Error ? error.message : String(error)}`;
 					reconcileUnknown(bindings.bindings, reason);
 					return { content: text(reason), isError: true };
@@ -475,6 +687,26 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				const stillDispatched = asyncDetails?.state === "running"
 					&& typeof asyncDetails.jobId === "string"
 					&& NATIVE_IDENTITY_RE.test(asyncDetails.jobId);
+				const steeringBlocked = bindings.bindings.filter((binding) =>
+					steeringObserver.wasSteered(binding) || steeringUnobservableBindings.has(nativeAgentSteeringKey(binding)),
+				);
+				if (stillDispatched) {
+					return steeringBlocked.length > 0
+						? {
+								...result,
+								isError: true,
+								content: [...result.content, { type: "text", text: "Hub steering or an unobservable child invalidated this Factory attempt; no receipt can certify it." }],
+							}
+						: result;
+				}
+				steeringObserver.finishCall();
+				if (steeringBlocked.length > 0) {
+					return {
+						...result,
+						isError: true,
+						content: [...result.content, { type: "text", text: "Hub steering or an unobservable child invalidated this Factory attempt; no receipt can certify it." }],
+					};
+				}
 				const notStarted = bindings.bindings.filter((binding) => {
 					const current = ledger;
 					const task = current && findTask(current, binding.taskId);
@@ -499,6 +731,10 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	const commit = (next: Ledger): void => {
 		saveRun(host, next);
 		ledger = next;
+		for (const observer of nativeSteeringObservers) {
+			observer.sync(next);
+			if (observer.isClosed()) nativeSteeringObservers.delete(observer);
+		}
 		registerNativeTaskWrapper();
 	};
 
@@ -545,6 +781,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				const identities: string[] = [];
 				if (attempt.nativeJobIds.length > 0) identities.push(`OMP task dispatch (not start proof): ${attempt.nativeJobIds.join(", ")}`);
 				if (attempt.nativeAgentIds.length > 0) identities.push(`OMP agent identity (start observed; liveness not inferred): ${attempt.nativeAgentIds.join(", ")}`);
+				if (attempt.steeredAgentId !== undefined) identities.push(`OMP agent Hub-steered; attempt invalidated: ${attempt.steeredAgentId}`);
 				for (const session of attempt.privateSessions) {
 					identities.push(`Factory-private ${session.phase} session (${session.started ? "turn start observed; liveness not inferred" : "identity recorded; turn start not observed"}): ${session.sessionFile}`);
 				}

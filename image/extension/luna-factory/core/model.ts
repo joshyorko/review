@@ -159,6 +159,8 @@ export interface Attempt {
 	readonly nativeJobIds: readonly NativeJobId[];
 	/** OMP child agent identities recorded from native task execution details. */
 	readonly nativeAgentIds: readonly NativeAgentId[];
+	/** OMP agent whose Hub steering invalidated this attempt, when observed. */
+	readonly steeredAgentId?: NativeAgentId;
 	/** Factory-private SDK sessions; these have no global OMP Agent Hub ID. */
 	readonly privateSessions: readonly FactoryPrivateSession[];
 	readonly receipt?: EvidenceReceipt;
@@ -245,6 +247,14 @@ export type LedgerEvent =
 			readonly taskId: TaskId;
 			readonly attemptId: AttemptId;
 			readonly agentId: NativeAgentId;
+		}
+	| {
+			readonly kind: "record_native_agent_steering";
+			readonly expectedRevision: number;
+			readonly taskId: TaskId;
+			readonly attemptId: AttemptId;
+			readonly agentId: NativeAgentId;
+			readonly reason: string;
 		}
 	| {
 			readonly kind: "reconcile_attempt";
