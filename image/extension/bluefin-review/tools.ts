@@ -348,7 +348,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 			const hive = mode.hive;
 			if (!hive.configured) {
 				return {
-					content: text("Hive hub is not configured in this environment (no HIVE_HUB or contributor.env)"),
+					content: text("Hive read-side integration is not configured; set HIVE_HUB explicitly to opt in."),
 					details: { configured: false, online: false },
 				};
 			}

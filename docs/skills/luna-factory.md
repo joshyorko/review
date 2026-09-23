@@ -1,7 +1,7 @@
 ---
 name: luna-factory
-version: "0.1"
-last_updated: 2026-09-20
+version: "0.2"
+last_updated: 2026-09-23
 id: luna-factory
 one_line_purpose: Keep the Luna Factory protocol's mechanical decisions in tested extension code.
 entry_point: docs/skills/luna-factory.md
@@ -9,9 +9,9 @@ category: ci-ops
 mcp_compliance_level: partial
 optimization_status: draft
 status: active
-dependencies: [review-dashboard, contribution-culture]
+dependencies: [review-dashboard]
 tags: [omp, extension, factory, evidence, admission]
-description: "Maintains the opt-in Luna Factory extension in image/extension/luna-factory/. Use when editing admission, evidence reconciliation, convergence, or repair lineage."
+description: "Maintains the opt-in Luna Factory extension in image/extension/luna-factory/. Use when changing admission, evidence reconciliation, convergence, or repair lineage."
 metadata:
   type: runbook
   context7-sources: []
@@ -34,8 +34,9 @@ convergence verdict, journal, capability table, or the extension's tool surface.
 
 ## When NOT to Use
 
-Use `review-dashboard.md` for the Review workbench, `launcher.md` for container
-launch mechanics, and `contribution-culture.md` for scoping the change itself.
+Use `review-dashboard.md` for the Review workbench and `launcher.md` for
+container launch mechanics. Factory changes must preserve explicit admission
+and separate Review/Factory authority.
 
 ## Core Process
 
@@ -62,8 +63,8 @@ launch mechanics, and `contribution-culture.md` for scoping the change itself.
   queue, an exhausted budget, and a returned worker imply neither.
 - Completion creates no merge, publish, or deploy authority.
 - Loading the extension starts nothing. Execution requires
-  `LUNA_FACTORY_ENABLED=1`, and Factory never infers an admission from a Hive
-  rank or a visible queue row.
+  `LUNA_FACTORY_ENABLED=1`; Factory never infers admission from a visible GitHub
+  or explicitly enabled Hive queue row.
 - `LUNA_FACTORY_ENABLED` and `LUNA_FACTORY_CAPACITY` are the only Factory
   runtime knobs that are user configuration; both cross the personal appliance
   boundary by name, and neither value is ever rendered into argv. Loading
@@ -84,7 +85,7 @@ launch mechanics, and `contribution-culture.md` for scoping the change itself.
 bash tests/omp-review-mode.sh
 bash tests/appliance-contract.sh
 bash tests/test-registry.sh
-BLUEFIN_REVIEW_IMAGE=review:test bash tests/review-factory-coload-smoke.sh
+REVIEW_APPLIANCE_IMAGE=review:test bash tests/review-factory-coload-smoke.sh
 git diff --check
 ```
 

@@ -11,72 +11,33 @@
 # standalone scripts they might stumble into and run directly out of context.
 #
 # Public commands:
-#   review-container  Run the contributor container: the Hive queue
-#                     OMP worker that receives Hive-assigned tasks.
-#                     Model and effort are chosen inside OMP. Contributor
-#                     containers run in the foreground; Ctrl-C stops them.
-#   review-stop       Stop cluster contributor workers. Local appliances stop
-#                     with Ctrl-C in their owning terminal.
-#   review-doctor     Preflight diagnostics. Starts no agent and mounts no
-#                     credential.
-#   review-queue      Convenience alias for the OMP review appliance. It opens
-#                     the same single-screen workbench as review-appliance and
-#                     forwards repository, issue, and pull-request arguments.
+#   review-queue      Run the GitHub Review workbench for an explicit scope.
+#   review-appliance  Run the same workbench in its isolated appliance.
+#   review-doctor     Check local runtime and GitHub authentication.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # LIFECYCLE
 #
-# Contributor and maintainer runs stay in the foreground. The preferred krun
-# path gives each invocation a unique container name; target-specific state
-# also keeps Apptainer fallback sessions independent. Ctrl-C stops only the
-# calling terminal's appliance.
+# Interactive Review launches stay in the foreground. Each invocation has
+# isolated state; Ctrl-C stops only the calling terminal's appliance.
 #
 # Every interactive launch path ends in an 'exec' or a final foreground
 # command whose exit status propagates verbatim; tests/just-onboarding.sh
 # pins all of it.
 # ─────────────────────────────────────────────────────────────────────────
 #
-# Bluefin's root Justfile (/usr/share/ublue-os/just/00-entry.just) imports a
-# fixed list of files, NOT a glob. Making these recipes work system-wide from
-# the image still means baking this launcher into a custom image build (out of
-# scope here — see README "Scope").
-#
-# In this checkout, run 'just review-container' (or another recipe below)
-# from the repository root. Persistent state is limited to launcher
-# configuration; the container receives credentials by environment and the
-# read-only ~/.config/hive mount, never a workspace or host home mount.
-# Hive remains the sole assignment authority. OMP owns provider, model, and
-# effort selection from the user's active configuration.
-hive_repo_url := "https://github.com/hivecommons/hive"
-# origin/v4 via `git ls-remote --heads https://github.com/hivecommons/hive v4`
-# on 2026-09-11, after kubestellar/hive#6637 (fix: key OMP readiness/busy/idle
-# off real captured chrome instead of a hand-written fixture that never
-# exercised OMP's actual welcome/idle/busy chrome at real dimensions),
-# kubestellar/hive#6639 (fix: stop OMP's rotating "Log in to several
-# accounts..." startup tip from faking a needs-login verdict), and
-# kubestellar/hive#6670 (fix: scope OMP's login/onboarding checks to the
-# pane's last 3 lines instead of a 15-line tail a tip or a finished turn's
-# own prose could still land in).
-hive_commit := "67530919a135cbc466d1e0961770028842c80876"
-contribute_image := env("CONTRIBUTE_IMAGE", "ghcr.io/projectbluefin/contribute:stable")
+# This checkout exposes Review and Luna Factory; optional integrations are
+# selected explicitly by the operator.
 
-# Shared bash, 'eval''d at the top of every recipe script that needs it:
-# host preflight, backend selection, and the pinned Hive checkout. Keeping
-# this in one place instead of duplicating it per-recipe is the only
-# concession to DRY here — it never leaves the Justfile as a file of its own.
+# Shared bash, 'eval''d at the top of recipes that need it:
+# GitHub authentication, host preflight, and runtime selection. Keeping
+# this in one place avoids duplicate launch policy without creating a
+# separate helper layer.
 shared_functions := '''
 GITHUB_LOGIN_COMMAND="gh auth login --web --hostname github.com --scopes repo,read:org,workflow"
 
 github_auth_ready() {
   command -v gh &>/dev/null && gh auth status --hostname github.com &>/dev/null
-}
-can_run_attended_hive_setup() {
-  [[ "${REVIEW_TEST_ATTACH_TTY:-}" == "1" ]] || { [[ -t 0 ]] && [[ -t 1 ]] && [[ -t 2 ]]; }
-}
-print_missing_hive_setup_guidance() {
-  local path="$1" reason="$2" tool="$3" commit="$4"
-  echo "ERROR: missing Hive setup at ${path}; ${reason}." >&2
-  echo "  Re-run review from an interactive terminal, or pre-seed it yourself from hivecommons/hive @ ${commit} by running \`just contribute-setup ${tool}\` in an interactive checkout (set REVIEW_HIVE_COMMIT to another full commit if needed)" >&2
 }
 kvm_device_ready() {
   local device="${REVIEW_TEST_KVM_DEVICE:-/dev/kvm}"
@@ -116,7 +77,7 @@ require_apptainer_fallback() {
 }
 prepare_apptainer_environment() {
   local name host_file
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY CONTEXT7_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION HIVE_HUB BLUEFIN_REVIEW_ORG TERM COLORTERM; do
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY CONTEXT7_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION HIVE_HUB REVIEW_DEFAULT_SCOPE REVIEW_MODE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS BLUEFIN_REVIEW_ORG BLUEFIN_REVIEW_MODE BLUEFIN_REVIEW_INHERIT_OMP_CONFIG BLUEFIN_REVIEW_SKIP_REPOS TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   APPTAINER_HOST_ARGS=()
@@ -199,7 +160,6 @@ ensure_image() {
   return 1
 }
 MIN_REVIEW_APPLIANCE_VERSION="26.08.06"
-MIN_CONTRIBUTOR_VERSION="26.08.02"
 EXPECTED_IMAGE_SERIES="26.08"
 
 launcher_revision() {
@@ -220,7 +180,7 @@ launcher_revision() {
 report_launcher_identity() {
   local rev
   rev="$(launcher_revision)"
-  echo "✓ bluefin launcher revision: ${rev}" >&2
+  echo "✓ Review launcher revision: ${rev}" >&2
 }
 
 check_image_compatibility() {
@@ -344,21 +304,9 @@ report_apptainer_image_identity() {
 
 
 resolve_gh_token() {
-  # Hive's contributor model is fork + pull request under the contributor's
-  # OWN GitHub identity: /usr/local/bin/gh injects the hub's App token only
-  # when HIVE_CONTRIBUTOR_MODE is not "true", and we always run with it set.
-  # Upstream's own `just contribute-run` therefore passes -e GH_TOKEN from
-  # `gh auth token`; without it the agent picks up a task, runs `gh`, is told
-  # to `gh auth login` -- which the wrapper also blocks in contributor mode --
-  # and stops. Every assigned task dies on arrival.
-  #
-  # By value, never by mounting ~/.config/gh: the container gets exactly one
-  # credential for exactly one host, and no view of any other account, of
-  # ~/.config/gh/hosts.yml, or of an enterprise login that happens to sit
-  # beside it.
-  # REVIEW_GH_TOKEN comes first so a contributor can hand the agent a
-  # purpose-made, narrowly scoped PAT instead of their desktop login, which
-  # typically carries admin:org, workflow and delete:packages.
+  # Pass one GitHub credential by value rather than bind-mounting ~/.config/gh.
+  # Review sees only the selected account/token, not other hosts or accounts.
+  # REVIEW_GH_TOKEN lets the user choose a narrower token than the CLI default.
   GH_TOKEN_VALUE="${REVIEW_GH_TOKEN:-${GH_TOKEN:-}}"
   GH_TOKEN_SOURCE="environment"
   if [[ -z "$GH_TOKEN_VALUE" ]]; then
@@ -370,32 +318,9 @@ resolve_gh_token() {
   return 0
 }
 gh_token_scopes() {
-  # Scopes, never the token. A contributor is about to hand these powers to an
-  # autonomous agent, so the launcher says out loud what it is handing over.
+  # Scopes, never the token. Report the authority Review will receive.
   command -v gh &>/dev/null || return 0
   gh auth status --hostname github.com 2>&1 | sed -nE "s/.*[Tt]oken scopes:[[:space:]]*(.+)/\1/p" | head -1 || true
-  return 0
-}
-report_gh_token_blast_radius() {
-  local source="$1" scopes
-  echo "✓ GitHub identity passed to the agent as GH_TOKEN (from ${source}; value not shown)."
-  scopes="$(gh_token_scopes)"
-  if [[ -n "$scopes" ]]; then
-    echo "  The agent can do anything this token can: ${scopes}"
-    if [[ ",${scopes//[[:space:]]/}," != *",workflow,"* && ",${scopes//[[:space:]]/}," != *"'workflow'"* ]]; then
-      echo "  ! Note: Token lacks 'workflow' scope; pushing tasks that modify .github/workflows/* will fail."
-    fi
-  fi
-  echo "  Narrow that with: REVIEW_GH_TOKEN=<scoped PAT> (public_repo or repo is enough to fork and open a PR)."
-  return 0
-}
-report_missing_gh_token() {
-  echo "! no GitHub token found; the agent has no GitHub identity." >&2
-  echo "  It cannot fork, clone, push or open a pull request, and will stop on" >&2
-  echo "  'To get started with GitHub CLI, please run: gh auth login' — which it" >&2
-  echo "  is not allowed to run. Every assigned task will die on arrival." >&2
-  echo "  Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org,workflow" >&2
-  echo "  Or export REVIEW_GH_TOKEN with a scoped PAT." >&2
   return 0
 }
 podman_selected_connection() {
@@ -424,424 +349,10 @@ podman_selected_connection() {
   fi
   awk -F'\t' '$4=="true"{printf "%s\t%s\n", $2, $3; exit}' <<<"$list"
 }
-normalize_git_remote() {
-  local value="$1"
-  value="${value#ssh://}"
-  value="${value%.git}"
-  value="${value%/}"
-  if [[ "$value" =~ ^git@github\.com:(.+)$ ]]; then
-    printf 'https://github.com/%s\n' "${BASH_REMATCH[1]}"
-  else
-    printf '%s\n' "$value"
-  fi
-}
-prepare_pinned_hive_checkout() {
-  local existing_origin actual_commit
-  [[ "$HIVE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
-    echo "ERROR: REVIEW_HIVE_COMMIT must be a full 40-character commit SHA; branch names like v2 are not allowed." >&2
-    return 1
-  }
-  if [[ -d "${HIVE_SRC_DIR}/.git" ]]; then
-    existing_origin="$(git -C "$HIVE_SRC_DIR" remote get-url origin 2>/dev/null || true)"
-    [[ -n "$existing_origin" ]] || {
-      echo "ERROR: ${HIVE_SRC_DIR} is missing an origin remote; move it aside or delete it so review can recreate the pinned checkout." >&2
-      return 1
-    }
-    if [[ "$(normalize_git_remote "$existing_origin")" != "$(normalize_git_remote "$HIVE_REPO_URL")" ]]; then
-      echo "ERROR: ${HIVE_SRC_DIR} points at ${existing_origin}, expected ${HIVE_REPO_URL}." >&2
-      echo "  Move it aside or delete it so review can recreate the pinned checkout." >&2
-      return 1
-    fi
-    [[ -z "$(git -C "$HIVE_SRC_DIR" status --porcelain 2>/dev/null)" ]] || {
-      echo "ERROR: ${HIVE_SRC_DIR} has local changes; refusing to execute an unverified Hive checkout." >&2
-      echo "  Use a clean checkout or delete it so review can recreate the pinned source." >&2
-      return 1
-    }
-  else
-    if [[ -e "$HIVE_SRC_DIR" && ! -d "$HIVE_SRC_DIR" ]]; then
-      echo "ERROR: ${HIVE_SRC_DIR} exists and is not a directory." >&2
-      return 1
-    fi
-    if [[ -d "$HIVE_SRC_DIR" && -n "$(ls -A "$HIVE_SRC_DIR" 2>/dev/null)" ]]; then
-      echo "ERROR: ${HIVE_SRC_DIR} exists but is not a managed git checkout." >&2
-      echo "  Move it aside or choose an empty directory before continuing." >&2
-      return 1
-    fi
-    mkdir -p "$HIVE_SRC_DIR"
-    git init --quiet "$HIVE_SRC_DIR"
-    git -C "$HIVE_SRC_DIR" remote add origin "$HIVE_REPO_URL"
-  fi
-
-  echo "Preparing hivecommons/hive @ ${HIVE_COMMIT:0:12} -> ${HIVE_SRC_DIR}..."
-  git -C "$HIVE_SRC_DIR" fetch --depth 1 origin "$HIVE_COMMIT"
-  git -C "$HIVE_SRC_DIR" checkout --detach -f FETCH_HEAD
-  actual_commit="$(git -C "$HIVE_SRC_DIR" rev-parse HEAD)"
-  [[ "$actual_commit" == "$HIVE_COMMIT" ]] || {
-    echo "ERROR: expected Hive commit ${HIVE_COMMIT}, got ${actual_commit}." >&2
-    return 1
-  }
-}
-hive_registration_name() {
-  # Which hive registration this launch uses. REVIEW_HIVE names one
-  # explicitly; otherwise the current repository's directory names it, so
-  # running from another checkout contributes to that project's hive once
-  # it is registered. Empty means the default registration.
-  HIVE_REGISTRATION_NAME=""
-  if [[ -n "${REVIEW_HIVE:-}" ]]; then
-    [[ "$REVIEW_HIVE" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || {
-      echo "ERROR: REVIEW_HIVE='${REVIEW_HIVE}' is not a valid registration name." >&2
-      echo "  Use [a-zA-Z0-9][a-zA-Z0-9_.-]*, e.g. REVIEW_HIVE=endusers." >&2
-      return 1
-    }
-    HIVE_REGISTRATION_NAME="$REVIEW_HIVE"
-    return 0
-  fi
-  command -v git &>/dev/null || return 0
-  local top base
-  top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
-  base="${top##*/}"
-  [[ "$base" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 0
-  HIVE_REGISTRATION_NAME="$base"
-}
-register_named_hive() {
-  # Register a dedicated hive under this name WITHOUT touching the default
-  # registration: upstream contribute-setup writes into a throwaway
-  # config_dir and the result is installed as contributor.<name>.env.
-  # With HIVE_HUB unset upstream lists the caller's hives and asks which
-  # one; an exported HIVE_HUB is honored as-is.
-  local target="$1" tmp
-  if [[ "${REVIEW_NON_INTERACTIVE:-}" == "true" ]]; then
-    print_missing_hive_setup_guidance "$target" "non-interactive mode cannot answer the upstream prompts" "${HIVE_SETUP_BACKEND:-omp}" "$HIVE_COMMIT"
-    return 1
-  fi
-  if ! can_run_attended_hive_setup; then
-    echo "ERROR: no hive registration named '${HIVE_REGISTRATION_NAME}' at ${target}." >&2
-    echo "  Register one from an interactive terminal: REVIEW_HIVE=${HIVE_REGISTRATION_NAME} just ${REVIEW_RECIPE:-review-container}" >&2
-    return 1
-  fi
-  for cmd in just gh git; do
-    command -v "$cmd" &>/dev/null || { echo "ERROR: '${cmd}' is required to run contribute-setup." >&2; return 1; }
-  done
-  prepare_pinned_hive_checkout || return 1
-  echo "Registering hive '${HIVE_REGISTRATION_NAME}': upstream contribute-setup with an isolated config_dir."
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/review-hive-setup.XXXXXX")"
-  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" config_dir="$tmp" contribute-setup "${HIVE_SETUP_BACKEND:-omp}" || {
-    rm -rf "$tmp"
-    echo "ERROR: upstream contribute-setup did not complete; nothing was registered." >&2
-    return 1
-  }
-  [[ -f "$tmp/contributor.env" ]] || {
-    rm -rf "$tmp"
-    echo "ERROR: contribute-setup ran but produced no contributor.env." >&2
-    return 1
-  }
-  mkdir -p "${HOME}/.config/hive"
-  cp "$tmp/contributor.env" "$target"
-  chmod 600 "$target"
-  rm -rf "$tmp"
-  echo "✓ hive '${HIVE_REGISTRATION_NAME}' registered: ${target}"
-}
-ensure_hive_contributor_env() {
-  # Upstream 'contribute-setup' writes these files. They are the only host
-  # state the container genuinely needs, and Hive owns their format.
-  # Selection: an explicit REVIEW_HIVE name, then the current repository's
-  # name, then the default registration.
-  local hive_dir="${HOME}/.config/hive"
-  HIVE_CONTRIBUTOR_ENV="${hive_dir}/contributor.env"
-  hive_registration_name || return 1
-  if [[ -n "$HIVE_REGISTRATION_NAME" ]]; then
-    local named="${hive_dir}/contributor.${HIVE_REGISTRATION_NAME}.env"
-    if [[ -f "$named" ]]; then
-      HIVE_CONTRIBUTOR_ENV="$named"
-    elif [[ -n "${REVIEW_HIVE:-}" ]]; then
-      register_named_hive "$named" || return 1
-      HIVE_CONTRIBUTOR_ENV="$named"
-    fi
-  fi
-  [[ -f "$HIVE_CONTRIBUTOR_ENV" ]] && return 0
-  if [[ "${REVIEW_NON_INTERACTIVE:-}" == "true" ]]; then
-    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "non-interactive mode cannot answer the upstream prompts" "${HIVE_SETUP_BACKEND:-omp}" "$HIVE_COMMIT"
-    return 1
-  fi
-  if ! can_run_attended_hive_setup; then
-    print_missing_hive_setup_guidance "$HIVE_CONTRIBUTOR_ENV" "stdin/stdout/stderr are not attached to a terminal" "${HIVE_SETUP_BACKEND:-omp}" "$HIVE_COMMIT"
-    return 1
-  fi
-  echo "Upstream contribute-setup hasn't run yet (no ${HIVE_CONTRIBUTOR_ENV})."
-  for cmd in just gh git; do
-    command -v "$cmd" &>/dev/null || { echo "ERROR: '${cmd}' is required to run contribute-setup." >&2; return 1; }
-  done
-  prepare_pinned_hive_checkout || return 1
-  echo "Running upstream pinned setup: just contribute-setup ${HIVE_SETUP_BACKEND:-omp}"
-  # HIVE_SKIP_VERSION_CHECK=true is upstream's own documented opt-out, not a
-  # local workaround. Upstream's private 'check-version' recipe — a prerequisite
-  # of 'contribute-setup' — compares HEAD against origin/v4 and aborts when they
-  # differ, printing "Or skip: export HIVE_SKIP_VERSION_CHECK=true". That check
-  # assumes a tracking checkout of v4. We deliberately run a pinned, detached
-  # SHA (see prepare_pinned_hive_checkout), so the comparison can only ever
-  # fail once v4 moves past the pin, and it would abort first-run onboarding on
-  # every clean machine. Taking upstream's flag for exactly the case it
-  # documents keeps Hive the authority; removing it would break setup without
-  # unpinning, and unpinning would mean executing unreviewed upstream code.
-  # Scoped to this one invocation so nothing else in the run inherits it.
-  HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" contribute-setup "${HIVE_SETUP_BACKEND:-omp}"
-  [[ -f "$HIVE_CONTRIBUTOR_ENV" ]] || { echo "ERROR: contribute-setup ran but ${HIVE_CONTRIBUTOR_ENV} still missing." >&2; return 1; }
-  echo "✓ Upstream contribute-setup complete."
-}
-stage_hive_registration_for_remote_podman() {
-  # Podman remote resolves bind mounts on its engine host, not the client.
-  # Mirror only the selected 0600 Hive registration when Podman targets an
-  # SSH engine, staging to an isolated private 0700
-  # directory and removing only that path on exit.
-  local selected_connection uri identity authority target port remote_dir remote_env
-  selected_connection="$(podman_selected_connection)" || return 1
-  [[ -n "$selected_connection" ]] || return 0
-  IFS=$'\t' read -r uri identity <<<"$selected_connection"
-  [[ "$uri" == ssh://* ]] || return 0
-  authority="${uri#ssh://}"
-  authority="${authority%%/*}"
-  [[ "$authority" =~ ^(([^@/]+)@)?(\[[^]]+\]|[^:]+)(:([0-9]+))?$ ]] || {
-    echo "ERROR: configured Podman SSH connection has an invalid host." >&2
-    return 1
-  }
-  target="${BASH_REMATCH[1]}${BASH_REMATCH[3]}"
-  port="${BASH_REMATCH[5]:-22}"
-  local -a ssh_args scp_args
-  ssh_args=(-o BatchMode=yes)
-  scp_args=(-o BatchMode=yes)
-  if [[ -n "$identity" ]]; then
-    ssh_args+=(-i "$identity")
-    scp_args+=(-i "$identity")
-  fi
-  if [[ "$port" != 22 ]]; then
-    ssh_args+=(-p "$port")
-    scp_args+=(-P "$port")
-  fi
-  remote_dir="$(ssh "${ssh_args[@]}" "$target" 'umask 077; mktemp -d /tmp/review-hive-registration.XXXXXX')" || {
-    echo "ERROR: cannot prepare the remote Podman Hive registration directory." >&2
-    return 1
-  }
-  [[ "$remote_dir" =~ ^/tmp/review-hive-registration\.[[:alnum:]]{6}$ ]] || {
-    echo "ERROR: remote Podman Hive registration directory is invalid." >&2
-    return 1
-  }
-  REMOTE_HIVE_TARGET="$target"
-  REMOTE_HIVE_SSH_ARGS=("${ssh_args[@]}")
-  REMOTE_HIVE_DIR="$remote_dir"
-  remote_env="${remote_dir}/${HIVE_CONTRIBUTOR_ENV##*/}"
-  REMOTE_HIVE_ENV="$remote_env"
-  scp "${scp_args[@]}" -p "$HIVE_CONTRIBUTOR_ENV" "${target}:${remote_env}" || {
-    echo "ERROR: cannot stage the Hive registration on the remote Podman engine." >&2
-    return 1
-  }
-  ssh "${ssh_args[@]}" "$target" "chmod 0600 $remote_env" || {
-    echo "ERROR: cannot secure the staged Hive registration on the remote Podman engine." >&2
-    return 1
-  }
-  HIVE_CONTRIBUTOR_ENV="$remote_env"
-  echo "✓ Hive contributor registration staged on remote Podman engine (0600, removed on exit; endpoint and secret not shown)."
-}
-cleanup_remote_hive_registration() {
-  local target="${REMOTE_HIVE_TARGET:-}"
-  local remote_dir="${REMOTE_HIVE_DIR:-}"
-  local remote_env="${REMOTE_HIVE_ENV:-}"
-  [[ -n "$target" && -n "$remote_dir" ]] || return 0
-  [[ "$remote_dir" =~ ^/tmp/review-hive-registration\.[[:alnum:]]{6}$ ]] || return 0
-  local cleanup_cmd
-  if [[ -n "$remote_env" ]]; then
-    [[ "$remote_env" =~ ^${remote_dir}/[a-zA-Z0-9_.-]+$ ]] || return 0
-    cleanup_cmd="rm -f -- $remote_env; rmdir -- $remote_dir"
-  else
-    cleanup_cmd="rmdir -- $remote_dir"
-  fi
-  ssh "${REMOTE_HIVE_SSH_ARGS[@]}" "$target" "$cleanup_cmd" 2>/dev/null || true
-  REMOTE_HIVE_TARGET=""
-  REMOTE_HIVE_DIR=""
-  REMOTE_HIVE_ENV=""
-  REMOTE_HIVE_SSH_ARGS=()
-}
-report_hive_selection() {
-  # Say out loud which hive this launch contributes to. A silent default is
-  # how a contributor ends up watching one hub's dashboard while their agent
-  # asks another for work. The token is never printed — the hub only.
-  local hub="${1:-}"
-  [[ -n "$hub" ]] || hub="$(read_hive_value HIVE_HUB)"
-  if [[ -n "$HIVE_REGISTRATION_NAME" && "$HIVE_CONTRIBUTOR_ENV" == *"contributor.${HIVE_REGISTRATION_NAME}.env" ]]; then
-    echo "✓ hive: ${hub:-unknown} (registration '${HIVE_REGISTRATION_NAME}')"
-  else
-    echo "✓ hive: ${hub:-unknown} (default registration)"
-    if [[ -n "$HIVE_REGISTRATION_NAME" ]]; then
-      echo "  '${HIVE_REGISTRATION_NAME}' has no registration of its own; register one with: REVIEW_HIVE=${HIVE_REGISTRATION_NAME} just ${REVIEW_RECIPE:-review-container}"
-    fi
-  fi
-}
-read_hive_value() {
-  local key="$1"
-  awk -F= -v wanted="$key" '
-    {
-      name = $1
-      sub(/^[[:space:]]*export[[:space:]]+/, "", name)
-      gsub(/[[:space:]]/, "", name)
-      if (name != wanted) next
-      sub(/^[^=]*=/, "")
-      sub(/^[[:space:]]+/, "")
-      sub(/[[:space:]]+$/, "")
-      if (($0 ~ /^".*"$/) || ($0 ~ /^\047.*\047$/)) {
-        $0 = substr($0, 2, length($0) - 2)
-      }
-      print
-      exit
-    }
-  ' "$HIVE_CONTRIBUTOR_ENV"
-}
-valid_hive_hub() {
-  local hub="$1"
-  [[ -n "$hub" ]] &&
-    [[ "$hub" != *,* ]] &&
-    [[ "$hub" =~ ^(wss|https)://[^/@?\#[:space:]]+([/?\#][^[:space:]]*)?$ ]]
-}
-
-
-
-scale_contribute() {
-  local replicas="$1" hub
-  HIVE_SETUP_BACKEND=omp
-  ensure_hive_contributor_env || return 1
-  hub="$(read_hive_value HIVE_HUB)"
-  valid_hive_hub "$hub" || { echo "ERROR: HIVE_HUB is not set in ${HIVE_CONTRIBUTOR_ENV}." >&2; return 1; }
-  resolve_gh_token
-  [[ -n "${GH_TOKEN_VALUE:-}" ]] || { report_missing_gh_token; return 1; }
-  kubectl create namespace bluefin-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
-  kubectl create secret generic contribute-secret -n bluefin-system \
-    --from-file=contributor.env="${HIVE_CONTRIBUTOR_ENV}" \
-    --from-file=GH_TOKEN=<(printf '%s' "$GH_TOKEN_VALUE") \
-    --from-file=GITHUB_COPILOT_TOKEN=<(printf '%s' "${GITHUB_COPILOT_TOKEN:-${COPILOT_GITHUB_TOKEN:-}}") \
-    --from-file=ANTHROPIC_API_KEY=<(printf '%s' "${ANTHROPIC_API_KEY:-}") \
-    --from-file=ANTHROPIC_OAUTH_TOKEN=<(printf '%s' "${ANTHROPIC_OAUTH_TOKEN:-}") \
-    --from-file=OPENAI_API_KEY=<(printf '%s' "${OPENAI_API_KEY:-}") \
-    --from-file=GEMINI_API_KEY=<(printf '%s' "${GEMINI_API_KEY:-}") \
-    --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null || return 1
-  local prior_annotation
-  prior_annotation="$(kubectl get secret contribute-secret -n bluefin-system -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}')" || return 1
-  [[ -z "$prior_annotation" ]] || kubectl annotate secret contribute-secret -n bluefin-system kubectl.kubernetes.io/last-applied-configuration- >/dev/null || return 1
-  kubectl apply -f deploy/contribute.yaml >/dev/null || return 1
-  kubectl set env deployment/contribute -n bluefin-system AGENT_BACKEND=omp HIVE_HUB="$hub" >/dev/null || return 1
-  kubectl scale deployment/contribute -n bluefin-system --replicas="$replicas" >/dev/null || return 1
-  kubectl rollout status deployment/contribute -n bluefin-system --timeout=15s >/dev/null 2>&1 || echo "! rollout still progressing after 15s; workers will continue pulling/starting in background." >&2
-}
-
-stop_cluster_contributors() {
-  if command -v kubectl &>/dev/null && kubectl get deployment contribute -n bluefin-system &>/dev/null; then
-    kubectl scale deployment/contribute -n bluefin-system --replicas=0 >/dev/null
-    echo "✓ stopped all cluster contributor workers (scaled to 0 in bluefin-system)."
-  else
-    echo "✓ no cluster contributor deployment found."
-  fi
-}
 '''
 
-# Both contributor convenience names enter the same OMP worker. Hive owns task
-# assignment; OMP owns the interactive model and effort choice.
-[doc("Run the Hive + OMP contributor worker.")]
-review-container mode="" count="": (contribute mode count)
 
-[doc("Run the Hive + OMP contributor worker.")]
-contribute mode="" count="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    {{shared_functions}}
-    if [[ {{quote(mode)}} == cluster ]]; then
-      replicas={{quote(count)}}; replicas="${replicas:-2}"
-      [[ "$replicas" =~ ^[0-9]+$ ]] || { echo "ERROR: contribute cluster expects a replica count." >&2; exit 1; }
-      STATE_DIR="${HOME}/.local/state/review"; HIVE_SRC_DIR="${STATE_DIR}/hive-src"; HIVE_REPO_URL="{{hive_repo_url}}"
-      HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"; HIVE_COMMIT="${HIVE_COMMIT,,}"; mkdir -p "$STATE_DIR"
-      REVIEW_RECIPE=contribute
-      scale_contribute "$replicas"
-      exit $?
-    fi
-    [[ -z {{quote(count)}} ]] || { echo "ERROR: contribute accepts one instance name outside cluster mode." >&2; exit 1; }
-    INSTANCE_HINT={{quote(mode)}}
-    if [[ -n "$INSTANCE_HINT" ]]; then
-      [[ "$INSTANCE_HINT" =~ ^[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?$ ]] || { echo "ERROR: invalid contributor instance '${INSTANCE_HINT}'." >&2; exit 1; }
-      export REVIEW_HIVE="${REVIEW_HIVE:-${INSTANCE_HINT//\//-}}"
-    fi
-    [[ -z "${REVIEW_DETACH:-}" ]] || { echo "ERROR: detached contributor containers are not supported." >&2; exit 1; }
-    STATE_DIR="${HOME}/.local/state/review"
-    HIVE_SRC_DIR="${STATE_DIR}/hive-src"
-    HIVE_REPO_URL="{{hive_repo_url}}"
-    HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
-    HIVE_COMMIT="${HIVE_COMMIT,,}"
-    mkdir -p "$STATE_DIR"
-    HIVE_SETUP_BACKEND=omp
-    REVIEW_RECIPE=contribute
-    ensure_hive_contributor_env
-    report_hive_selection
-    INSTANCE_KEY="$(instance_key "${BLUEFIN_INSTANCE:-contribute-${INSTANCE_HINT:-${HIVE_REGISTRATION_NAME:-default}}}")"
-    INSTANCE_ROOT="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${INSTANCE_KEY}"
-    INSTANCE_HOME="${INSTANCE_ROOT}/home"
-    CLAIMS_ROOT="${BLUEFIN_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
-    mkdir -p "$CLAIMS_ROOT"
-    CONTAINER_NAME="bluefin-contribute-${INSTANCE_KEY}-$(date +%s)-$$"
-    mkdir -p "$INSTANCE_HOME/workspace"
-    CONTRIBUTOR_VOLUME="${BLUEFIN_CONTRIBUTE_VOLUME:-bluefin-contribute-${INSTANCE_KEY}-home}"
-    IS_OVERRIDE=0
-    if [[ -n "${CONTRIBUTE_IMAGE:-}" ]]; then
-      CONTRIBUTOR_IMAGE="$CONTRIBUTE_IMAGE"
-      IS_OVERRIDE=1
-    elif [[ -n "${BLUEFIN_CONTRIBUTE_IMAGE:-}" ]]; then
-      CONTRIBUTOR_IMAGE="$BLUEFIN_CONTRIBUTE_IMAGE"
-      IS_OVERRIDE=1
-    elif [[ -n "${BLUEFIN_CONTRIBUTE_SIF:-}" ]]; then
-      CONTRIBUTOR_IMAGE="$BLUEFIN_CONTRIBUTE_SIF"
-      IS_OVERRIDE=1
-    else
-      CONTRIBUTOR_IMAGE="{{contribute_image}}"
-    fi
-    migrate_legacy_state "${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-contribute" "$INSTANCE_HOME" "bluefin-contribute.sif"
-    report_launcher_identity
-    resolve_gh_token
-    if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then export GH_TOKEN="$GH_TOKEN_VALUE"; report_gh_token_blast_radius "$GH_TOKEN_SOURCE"; else report_missing_gh_token; fi
 
-    KVM_FAILURE=""
-    if kvm_runtime_ready && [[ "$CONTRIBUTOR_IMAGE" != *.sif && ! -f "$CONTRIBUTOR_IMAGE" ]]; then
-      REMOTE_HIVE_TARGET=""; REMOTE_HIVE_DIR=""; REMOTE_HIVE_ENV=""; REMOTE_HIVE_SSH_ARGS=()
-      trap 'cleanup_remote_hive_registration' EXIT
-      CLAIMS_MOUNT="${CLAIMS_ROOT}:/home/bluefin/.local/state/review/mutation-claims:rw"
-      if [[ "${CONTAINER_HOST:-}" == ssh://* || "${FAKE_REMOTE_DEFAULT:-}" == 1 ]]; then CLAIMS_MOUNT="bluefin-review-mutation-claims:/home/bluefin/.local/state/review/mutation-claims:rw"; fi
-      stage_hive_registration_for_remote_podman
-      ensure_image "$CONTRIBUTOR_IMAGE" "contributor" "image/contribute/Containerfile" "CONTRIBUTE_IMAGE"
-      report_podman_image_identity "$CONTRIBUTOR_IMAGE" "contributor" "$IS_OVERRIDE" "$MIN_CONTRIBUTOR_VERSION"
-      CONTAINER_ARGS=(podman run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME" --userns "keep-id:uid=65532,gid=65532")
-      CONTAINER_ARGS+=(--volume "${CONTRIBUTOR_VOLUME}:/home/bluefin:rw" --volume "${CLAIMS_MOUNT}" --volume "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro,z" --env AGENT_BACKEND=omp --env "HIVE_CONTAINER_NAME=${CONTAINER_NAME}" --env HIVE_CONTAINER_RUNTIME=podman --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}")
-      for name in GITHUB_COPILOT_TOKEN COPILOT_GITHUB_TOKEN GITHUB_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
-        [[ -n "${!name:-}" ]] && CONTAINER_ARGS+=(--env "$name")
-      done
-      [[ -n "${GH_TOKEN_VALUE:-}" ]] && CONTAINER_ARGS+=(--env GH_TOKEN)
-      CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE")
-      echo "✓ starting isolated KVM contributor ${CONTAINER_NAME}. Choose model and effort in OMP."
-      "${CONTAINER_ARGS[@]}"
-      exit $?
-    fi
-
-    require_apptainer_fallback
-    [[ "$CONTRIBUTOR_IMAGE" != localhost/* ]] || { echo "ERROR: Apptainer cannot resolve local Podman image ${CONTRIBUTOR_IMAGE}." >&2; exit 1; }
-    APPTAINER_IMAGE="$CONTRIBUTOR_IMAGE"; [[ "$APPTAINER_IMAGE" == *://* || "$APPTAINER_IMAGE" == *.sif || -f "$APPTAINER_IMAGE" ]] || APPTAINER_IMAGE="docker://${APPTAINER_IMAGE}"
-    report_apptainer_image_identity "$CONTRIBUTOR_IMAGE" "contributor" "$IS_OVERRIDE" "$MIN_CONTRIBUTOR_VERSION"
-    echo "✓ starting isolated Apptainer contributor ${INSTANCE_KEY}. Choose model and effort in OMP."
-    prepare_apptainer_environment
-    exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /home/bluefin/workspace \
-      --bind "${CLAIMS_ROOT}:/home/bluefin/.local/state/review/mutation-claims:rw" \
-      --bind "${HIVE_CONTRIBUTOR_ENV}:/home/bluefin/.config/hive/contributor.env:ro" "$APPTAINER_IMAGE"
-
-# Stop cluster contributor workers. Local appliances belong to their foreground
-# terminals and stop with Ctrl-C.
-[doc("Stop cluster contributor workers.")]
-review-stop target="cluster":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    {{shared_functions}}
-    [[ "{{target}}" == cluster ]] || { echo "ERROR: review-stop only accepts 'cluster'; local appliances stop with Ctrl-C." >&2; exit 1; }
-    stop_cluster_contributors
 
 # Maintainer convenience name for the OMP appliance. Keep this as delegation,
 # not a second launch path: review-queue and review-appliance must execute the
@@ -851,7 +362,7 @@ alias review-queue := review-appliance
 # The review appliance prefers one foreground libkrun microVM per invocation.
 # Target-specific state and workspace directories also keep the Apptainer
 # fallback independent when KVM is unavailable.
-[doc("Run the distroless Bluefin Review appliance container.")]
+[doc("Run the distroless Review appliance container.")]
 [positional-arguments]
 review-appliance *appliance_args:
     #!/usr/bin/env bash
@@ -881,20 +392,11 @@ review-appliance *appliance_args:
       echo "WARNING: no GitHub credential found; the queue will load empty." >&2
       echo "  Run 'gh auth login' or export GH_TOKEN." >&2
     fi
-    if [[ -z "${HIVE_HUB:-}" && -f "${HOME}/.config/hive/contributor.env" ]]; then
-      HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.env"
-      HIVE_HUB="$(read_hive_value HIVE_HUB)"
-      if valid_hive_hub "$HIVE_HUB"; then
-        export HIVE_HUB
-      else
-        unset HIVE_HUB
-      fi
-    fi
 
     source scripts/parse-review-args.sh
     parse_review_args "$@"
     APPLIANCE_ARGS=("${PARSED_REVIEW_ARGS[@]}")
-    SCOPE=projectbluefin
+    SCOPE="${REVIEW_DEFAULT_SCOPE:-${BLUEFIN_REVIEW_ORG:-review}}"
     PREVIOUS=""
     for ARG in "${APPLIANCE_ARGS[@]}"; do
       if [[ "$PREVIOUS" == --repo ]]; then SCOPE="$ARG"; break; fi
@@ -929,7 +431,8 @@ review-appliance *appliance_args:
         --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN --env OPENAI_API_KEY --env GEMINI_API_KEY --env CONTEXT7_API_KEY
         --env TYPESAFE_API_KEY
         --env AWS_BEARER_TOKEN_BEDROCK --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY --env AWS_SESSION_TOKEN --env AWS_REGION --env AWS_DEFAULT_REGION
-        --env HIVE_HUB --env BLUEFIN_REVIEW_ORG
+        --env HIVE_HUB --env REVIEW_MODE --env REVIEW_DEFAULT_SCOPE --env REVIEW_INHERIT_OMP_CONFIG --env REVIEW_SKIP_REPOS
+        --env BLUEFIN_REVIEW_ORG --env BLUEFIN_REVIEW_MODE --env BLUEFIN_REVIEW_INHERIT_OMP_CONFIG --env BLUEFIN_REVIEW_SKIP_REPOS
         --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}"
       )
       exec podman "${ARGS[@]}" "$IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
@@ -947,7 +450,7 @@ review-appliance *appliance_args:
 # version is derived, never typed: FSDK series from the pinned base, revision
 # from image/appliance/REVISION.
 [doc("Build the review appliance image locally and verify its contract.")]
-review-appliance-build tag="localhost/projectbluefin/review:dev":
+review-appliance-build tag="localhost/review:dev":
     #!/usr/bin/env bash
     set -euo pipefail
     ENGINE="${CONTAINER_ENGINE:-podman}"
@@ -962,15 +465,13 @@ review-appliance-build tag="localhost/projectbluefin/review:dev":
       .
     bash tests/appliance-contract.sh --image "{{tag}}" --expect-arch "$(uname -m)"
 
-# Preflight check: is this machine actually ready for 'just review-container'?
-# Starts no agent and mounts no credential.
+# Preflight check for the Review appliance; starts no agent and mounts no credential.
 [doc("Preflight diagnostics for this machine. Starts no agent.")]
 review-doctor:
     #!/usr/bin/env bash
     set -uo pipefail
     {{shared_functions}}
-    HIVE_COMMIT="${REVIEW_HIVE_COMMIT:-{{hive_commit}}}"
-    HIVE_COMMIT="${HIVE_COMMIT,,}"
+
     pass=0; fail=0
     check() {
       local label="$1"; shift
@@ -1002,10 +503,10 @@ review-doctor:
     fi
     resolve_gh_token
     if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then
-      echo "  ✓ a GitHub token is available for the container-only agent (from ${GH_TOKEN_SOURCE}; not shown)"
+      echo "  ✓ a GitHub token is available to Review (from ${GH_TOKEN_SOURCE}; not shown)"
       DOCTOR_GH_SCOPES="$(gh_token_scopes)"
       if [[ -n "$DOCTOR_GH_SCOPES" ]]; then
-        echo "    The agent will be able to do anything this token can: ${DOCTOR_GH_SCOPES}"
+        echo "    Review actions are limited to permissions this token grants: ${DOCTOR_GH_SCOPES}"
         if [[ ",${DOCTOR_GH_SCOPES//[[:space:]]/}," != *",workflow,"* && ",${DOCTOR_GH_SCOPES//[[:space:]]/}," != *"'workflow'"* ]]; then
           echo "    ! Token lacks 'workflow' scope: tasks modifying .github/workflows/* cannot be pushed or merged."
         fi
@@ -1013,9 +514,8 @@ review-doctor:
       echo "    Narrow that with REVIEW_GH_TOKEN=<scoped PAT> if that is wider than you want."
       pass=$((pass+1))
     else
-      echo "  ✗ no GitHub token is available for the container-only agent"
-      echo "    It could not fork, push, or open a pull request, and would stop at 'gh auth login'."
-      echo "    For container-only mode, run: ${GITHUB_LOGIN_COMMAND}, or export REVIEW_GH_TOKEN."
+      echo "  ✗ no GitHub token is available to Review"
+      echo "    Run: ${GITHUB_LOGIN_COMMAND}, or export REVIEW_GH_TOKEN."
       fail=$((fail+1))
     fi
     unset GH_TOKEN_VALUE
@@ -1040,45 +540,9 @@ review-doctor:
       echo ""
     }
     doctor_image "Review" "${REVIEW_APPLIANCE_IMAGE:-ghcr.io/projectbluefin/review:stable}"
-    doctor_image "Contributor" "{{contribute_image}}"
 
-    echo "=== Hive contributor setup ==="
-    hive_registration_name || true
-    HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.env"
-    if [[ -n "${HIVE_REGISTRATION_NAME:-}" ]] &&
-      [[ -f "${HOME}/.config/hive/contributor.${HIVE_REGISTRATION_NAME}.env" ]]; then
-      HIVE_CONTRIBUTOR_ENV="${HOME}/.config/hive/contributor.${HIVE_REGISTRATION_NAME}.env"
-    fi
-    if [[ -f "$HIVE_CONTRIBUTOR_ENV" ]]; then
-      echo "  ✓ ${HIVE_CONTRIBUTOR_ENV} exists"
-      pass=$((pass+1))
-    else
-      echo "  ✗ ${HIVE_CONTRIBUTOR_ENV} is missing"
-      echo "    review runs upstream 'just contribute-setup omp' from"
-      echo "    hivecommons/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
-      fail=$((fail+1))
-    fi
-    echo ""
 
-    echo "=== Cluster scale-out ==="
-    if command -v kubectl &>/dev/null; then
-      k8s_ctx="$(kubectl config current-context 2>/dev/null || true)"
-      if [[ -n "$k8s_ctx" ]]; then
-        echo "  ✓ Kubernetes context: ${k8s_ctx}"
-        if kubectl get deployment contribute -n bluefin-system &>/dev/null; then
-          ready_rep="$(kubectl get deployment contribute -n bluefin-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
-          spec_rep="$(kubectl get deployment contribute -n bluefin-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
-          echo "  ✓ contribute: ${ready_rep:-0}/${spec_rep:-0} ready replicas in bluefin-system"
-        else
-          echo "  - contribute: not deployed (scale with 'just contribute cluster [N]')"
-        fi
-      else
-        echo "  - kubectl installed, no active context"
-      fi
-    else
-      echo "  - kubectl not installed (optional; for cluster scale-out)"
-    fi
-    echo ""
+
 
     echo "=== Workspace model ==="
     echo "  ✓ assigned repositories are cloned inside the disposable container"

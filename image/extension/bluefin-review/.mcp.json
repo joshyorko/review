@@ -9,11 +9,6 @@
       },
       "enabled": true
     },
-    "bluefin": {
-      "type": "http",
-      "url": "https://mcp.projectbluefin.io/mcp",
-      "enabled": true
-    },
     "context7": {
       "type": "http",
       "url": "https://mcp.context7.com/mcp",

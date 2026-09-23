@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { beforeEach, afterEach } from "node:test";
@@ -30,7 +30,6 @@ import {
 	STATE_ENTRY,
 	BATCH_ENTRY,
 	COMMENT_ENTRY,
-	BLUEFIN_POLICY,
 	GENERIC_WORKBENCH_POLICY,
 	actionPrompt,
 	createReviewExtension,
@@ -48,7 +47,7 @@ const NOW = 1_800_000_000_000;
 
 // No hub, no home: these tests must not read the developer's own Hive
 // registration and must never open a socket.
-const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", LUNA_FACTORY_STATE_ROOT: "", LUNA_FACTORY_CLAIMS_ROOT: "" };
+const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", REVIEW_MODE: "hive", LUNA_FACTORY_STATE_ROOT: "", LUNA_FACTORY_CLAIMS_ROOT: "" };
 beforeEach(() => {
 	ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "review-state-"));
 	ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT = mkdtempSync(join(tmpdir(), "review-claims-"));
@@ -349,6 +348,8 @@ function fakeCtx() {
 	const confirmations = [];
 	const editorResponses = [];
 	const editorCalls = [];
+	const inputResponses = [];
+	const inputCalls = [];
 	const selectResponses = [];
 	const selectCalls = [];
 	const ctx = {
@@ -361,11 +362,17 @@ function fakeCtx() {
 		confirmations,
 		editorResponses,
 		editorCalls,
+		inputResponses,
+		inputCalls,
 		selectResponses,
 		selectCalls,
 		asyncJobs: { running: [], recent: [], delivery: { pending: 0, pendingJobIds: [] } },
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
+			input: async (...args) => {
+				inputCalls.push(args);
+				return inputResponses.shift();
+			},
 			confirm: async (title, message) => {
 				confirmations.push({ title, message });
 				return true;
@@ -545,7 +552,7 @@ test("a cancelled tool call is skipped, not a failure (#465)", () => {
 
 test("queue fetch maps CI rollup and reports auth failure", async () => {
 	const calls = [];
-	const ok = await fetchQueue("prs", { token: "t", fetchImpl: fakeFetch(calls) });
+	const ok = await fetchQueue("prs", { token: "t", scope: { kind: "org", value: "acme" }, fetchImpl: fakeFetch(calls) });
 	assert.equal(ok.error, undefined);
 	assert.equal(ok.items.length, 2);
 	assert.equal(ok.items[0].ciStatus, "failure");
@@ -558,6 +565,7 @@ test("queue fetch maps CI rollup and reports auth failure", async () => {
 
 	const denied = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "acme" },
 		fetchImpl: async () => ({ ok: false, status: 401, statusText: "Unauthorized", json: async () => ({}) }),
 	});
 	assert.match(denied.error ?? "", /401/, "a failed queue must say why, not render empty");
@@ -593,7 +601,7 @@ test("check suites surface failures and pending runs without rollup contexts", a
 			] } } }),
 		};
 	};
-	const result = await fetchQueue("prs", { token: "t", fetchImpl });
+	const result = await fetchQueue("prs", { token: "t", scope: { kind: "org", value: "acme" }, fetchImpl });
 	assert.deepEqual(result.items.map((item) => item.ciStatus), ["failure", "pending", "success"]);
 });
 test("bounded named PR reads carry expensive evidence after lightweight discovery", async () => {
@@ -671,7 +679,7 @@ test("successful statusCheckRollup takes precedence over unrelated queued check 
 			}),
 		};
 	};
-	const result = await fetchQueue("prs", { token: "t", fetchImpl });
+	const result = await fetchQueue("prs", { token: "t", scope: { kind: "org", value: "acme" }, fetchImpl });
 	assert.equal(result.items[0].ciStatus, "success");
 });
 
@@ -758,7 +766,7 @@ test("managed pull request queue keeps workflow changes and incomplete file list
 			}),
 		};
 	};
-	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
+	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: false } });
 	mode.setToken("t");
 	await mode.refreshQueue();
 
@@ -810,7 +818,7 @@ test("managed pull request queue keeps workflow changes and incomplete file list
 			},
 		}),
 	});
-	const unsupportedMode = new ReviewMode({ org: "projectbluefin", fetchImpl: unsupportedOnlyFetch, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
+	const unsupportedMode = new ReviewMode({ org: "projectbluefin", fetchImpl: unsupportedOnlyFetch, env: ISOLATED_ENV, policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: false } });
 	unsupportedMode.setToken("t");
 	await unsupportedMode.refreshQueue();
 
@@ -831,6 +839,7 @@ test("queue cancellation is classified separately from failures", async () => {
 
 	const cancelled = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "acme" },
 		signal: controller.signal,
 		fetchImpl: async () => {
 			throw new Error("request was cancelled");
@@ -841,6 +850,7 @@ test("queue cancellation is classified separately from failures", async () => {
 
 	const failed = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "acme" },
 		fetchImpl: async () => {
 			throw new Error("network down");
 		},
@@ -1064,7 +1074,7 @@ test("issue queue fetch maps merged closedByPullRequestsReferences into closedBy
 			},
 		}),
 	});
-	const res = await fetchQueue("issues", { token: "t", fetchImpl: issueFetch });
+	const res = await fetchQueue("issues", { token: "t", scope: { kind: "org", value: "acme" }, fetchImpl: issueFetch });
 	assert.equal(res.items.length, 1);
 	assert.deepEqual(res.items[0].closedByPrs, ["projectbluefin/bluefin#1203"]);
 	assert.deepEqual(res.items[0].submittedPrs, ["projectbluefin/bluefin#1203", "projectbluefin/bluefin#1204"]);
@@ -1206,7 +1216,7 @@ test("a queue cut off by the fetch ceiling says so", async () => {
 		}),
 	});
 
-	const result = await fetchQueue("prs", { token: "t", limit: 1, fetchImpl: paged });
+	const result = await fetchQueue("prs", { token: "t", scope: { kind: "org", value: "acme" }, limit: 1, fetchImpl: paged });
 	assert.equal(result.truncated, true);
 
 	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl: paged });
@@ -1214,7 +1224,7 @@ test("a queue cut off by the fetch ceiling says so", async () => {
 	await mode.refreshQueue();
 	assert.match(mode.position(), /\+$/);
 
-	const complete = await fetchQueue("prs", { token: "t", fetchImpl: fakeFetch([]) });
+	const complete = await fetchQueue("prs", { token: "t", scope: { kind: "org", value: "acme" }, fetchImpl: fakeFetch([]) });
 	assert.equal(complete.truncated, false);
 });
 
@@ -1807,6 +1817,19 @@ test("an unreachable hub degrades to local order and says why", async () => {
 	assert.equal(resolveHub({ HOME: "/nonexistent" }), "");
 });
 
+test("Hive read-side integration never infers a hub from contributor registration", () => {
+	const home = mkdtempSync(join(tmpdir(), "review-hive-registration-"));
+	try {
+		const registration = join(home, ".config", "hive");
+		mkdirSync(registration, { recursive: true });
+		writeFileSync(join(registration, "contributor.env"), "HIVE_HUB=https://hive.example\n");
+		assert.equal(resolveHub({ HOME: home }), "");
+		assert.equal(resolveHub({ HOME: home, HIVE_HUB: "https://explicit.example" }), "https://explicit.example");
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
 test("a hub's queue and triage become one rank map in Hive's order", async () => {
 	const calls = [];
 	const snapshot = await fetchHive({
@@ -1881,15 +1904,90 @@ test("a hub's queue and triage become one rank map in Hive's order", async () =>
 });
 
 test("a repository scope is parsed strictly and reaches the search", () => {
-	assert.deepEqual(parseScope("owner/repo", "projectbluefin"), { kind: "repo", value: "owner/repo" });
-	assert.deepEqual(parseScope("bluefin", "projectbluefin"), { kind: "repo", value: "projectbluefin/bluefin" });
-	assert.deepEqual(parseScope("https://github.com/owner/repo.git", "projectbluefin"), { kind: "repo", value: "owner/repo" });
-	assert.deepEqual(parseScope("org:someorg", "projectbluefin"), { kind: "org", value: "someorg" });
-	assert.equal(parseScope("not a repo", "projectbluefin"), undefined);
-	assert.equal(parseScope("  ", "projectbluefin"), undefined);
+	assert.deepEqual(parseScope("acme/widgets", ""), { kind: "repo", value: "acme/widgets" });
+	assert.deepEqual(parseScope("https://github.com/acme/widgets.git", ""), { kind: "repo", value: "acme/widgets" });
+	assert.deepEqual(parseScope("org:acme", ""), { kind: "org", value: "acme" });
+	assert.deepEqual(parseScope("widgets", "acme"), { kind: "repo", value: "acme/widgets" });
+	assert.equal(parseScope("widgets", ""), undefined);
+	assert.equal(parseScope("not a repo", ""), undefined);
+	assert.equal(parseScope("  ", ""), undefined);
+	assert.match(searchExpression("prs", { kind: "repo", value: "acme/widgets" }), /^repo:acme\/widgets is:pr /);
+	assert.match(searchExpression("issues", { kind: "org", value: "acme" }), /^org:acme is:issue /);
+});
+test("generic Review skip-repository config takes precedence over its legacy alias", () => {
+	const generic = new ReviewMode({
+		org: "",
+		env: { ...ISOLATED_ENV, REVIEW_SKIP_REPOS: "acme/skip, acme/other", BLUEFIN_REVIEW_SKIP_REPOS: "legacy/skip" },
+	});
+	assert.deepEqual([...generic.skipRepos], ["acme/skip", "acme/other"]);
+	const legacy = new ReviewMode({
+		org: "",
+		env: { ...ISOLATED_ENV, REVIEW_SKIP_REPOS: undefined, BLUEFIN_REVIEW_SKIP_REPOS: "legacy/skip" },
+	});
+	assert.deepEqual([...legacy.skipRepos], ["legacy/skip"]);
+});
 
-	assert.match(searchExpression("prs", { kind: "repo", value: "owner/repo" }), /^repo:owner\/repo is:pr /);
-	assert.match(searchExpression("issues", { kind: "org", value: "projectbluefin" }), /^org:projectbluefin is:issue /);
+test("GitHub-only Review ignores an inherited Hive hub", async () => {
+	const calls: string[] = [];
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, {
+		org: "acme",
+		fetchImpl: async (url, init) => {
+			calls.push(String(url));
+			return fakeFetch([])(url, init);
+		},
+		env: { ...ISOLATED_ENV, REVIEW_MODE: "review", HIVE_HUB: "https://hive.example" },
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	assert.ok(calls.length > 0, "the explicit GitHub scope loads its queue");
+	assert.ok(calls.every((url) => url.startsWith("https://api.github.com/")), calls.join("\n"));
+	assert.ok(pi.tools.has("review_workbench_queue"));
+	assert.equal(pi.tools.has("hive_workbench_status"), false);
+});
+
+test("fresh Review prompts for scope and makes no GitHub request before one is selected", async () => {
+	const calls = [];
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, {
+		fetchImpl: async (...args) => {
+			calls.push(args);
+			return fakeFetch([])(...args);
+		},
+		env: { ...ISOLATED_ENV, REVIEW_MODE: "review", REVIEW_DEFAULT_SCOPE: undefined, BLUEFIN_REVIEW_ORG: undefined },
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	assert.equal(ctx.inputCalls.length, 1);
+	assert.equal(ctx.inputCalls[0][0], "Review which repository?");
+	assert.deepEqual(calls, []);
+	assert.equal(ctx.overlays.length, 0);
+});
+
+test("headless Review without configured scope reports the requirement without contacting GitHub", async () => {
+	const calls = [];
+	const pi = fakeHost();
+	createReviewExtension(pi, {
+		fetchImpl: async (...args) => {
+			calls.push(args);
+			return fakeFetch([])(...args);
+		},
+		env: { ...ISOLATED_ENV, REVIEW_MODE: "review", REVIEW_DEFAULT_SCOPE: undefined, BLUEFIN_REVIEW_ORG: undefined },
+	});
+	const ctx = fakeCtx();
+	ctx.hasUI = false;
+	await pi.events.get("session_start")({}, ctx);
+	const queue = await pi.tools.get("review_workbench_queue").execute("headless", {});
+
+	assert.deepEqual(calls, []);
+	assert.match(queue.content[0].text, /scope is required; supply owner\/repo or org:<name>/i);
+	assert.equal(queue.isError, true);
 });
 
 test("scoping the queue to one repository refetches and persists", async () => {
@@ -2058,7 +2156,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	workbench.handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 1, "slay dispatches without requiring Hive ranking");
-	assert.match(pi.messages[0], /bluefin-reviewer/);
+	assert.match(pi.messages[0], /reviewer/);
 	assert.ok(!ctx.notifications.some((notification) => /browse-only mode disables dispatch/.test(notification.message)));
 	workbench.handleInput("i");
 	await new Promise((resolve) => setImmediate(resolve));
@@ -2375,7 +2473,7 @@ test("generic PR fix revalidates every selected head and live workflow classific
 		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
 	};
 	const pi = fakeHost();
-	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: BLUEFIN_POLICY });
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: false } });
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
 	await pi.events.get("session_start")({}, ctx);
@@ -2455,14 +2553,18 @@ test("active slay blocks privileged and credential-bearing bash mutations", asyn
 	const call = (command) => guard({ toolName: "bash", input: { command } }, ctx);
 
 	assert.match((await call("gh pr merge 42 --repo projectbluefin/review --admin --squash")).reason, /admin merge bypass/);
-	assert.match((await call("git push origin repair --force-with-lease")).reason, /force-pushing/);
+	const forcePushBlock = await call("git push origin repair --force-with-lease");
+	assert.match(forcePushBlock.reason, /force-pushing/);
+	assert.doesNotMatch(forcePushBlock.reason, /Hive/i);
 	assert.match(
 		(await call("git push https://x-access-token:${GH_TOKEN}@github.com/projectbluefin/review.git repair")).reason,
 		/credentials in URL userinfo/,
 	);
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	batch.waves[0].items[0].ciStatus = "failure";
-	assert.match((await call("gh pr review 7 --repo projectbluefin/other --approve")).reason, /CI is failure/);
+	const failedReviewBlock = await call("gh pr review 7 --repo projectbluefin/other --approve");
+	assert.match(failedReviewBlock.reason, /CI is failure/);
+	assert.doesNotMatch(failedReviewBlock.reason, /Hive/i);
 	batch.waves[0].items[0].ciStatus = "pending";
 	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /CI is pending/);
 	batch.waves[0].items[0].ciStatus = "success";
@@ -2669,7 +2771,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	const captured = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.deepEqual(captured.waveJobIds, ["worker-1", "worker-2"], "staggered workers are accumulated by exact wave identity");
 	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through review, repair, and landing:/m);
-	assert.match(pi.messages[0], /Use the `task` tool once with one fresh bluefin-reviewer item per pull request/);
+	assert.match(pi.messages[0], /Use the `task` tool once with one fresh reviewer item per pull request/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/b/);
 
@@ -2924,7 +3026,7 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 		assert.match(prompt, /--name-only/);
 		assert.doesNotMatch(prompt, /--json [\w,]*\bbody\b/);
 	}
-	assert.match(slay, /`task` tool once with one fresh bluefin-reviewer item per pull request/);
+	assert.match(slay, /`task` tool once with one fresh reviewer item per pull request/);
 	assert.match(slay, /Do not use eval workpool/);
 	assert.match(slay, /fresh isolated fixer/);
 	assert.match(slay, /both `pull_request` and explicit `repo`/);
@@ -2935,15 +3037,14 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 	assert.match(slay, /Never use `--admin`/);
 	assert.match(slay, /do not disable and re-arm auto-merge/);
 	assert.match(slay, /report the outstanding approval gate and move on/);
-	const reviewerPrompt = readFileSync("image/extension/bluefin-review/agents/bluefin-reviewer.md", "utf8");
-	assert.match(reviewerPrompt, /hive_workbench_diff\(pull_request: <number>, repo: "<owner\/name>"\)/);
+	const reviewerPrompt = readFileSync("image/extension/bluefin-review/agents/reviewer.md", "utf8");
+	assert.match(reviewerPrompt, /review_workbench_diff\(pull_request: <number>, repo: "<owner\/name>"\)/);
 	assert.match(reviewerPrompt, /Do not assume a local checkout exists/);
 	const reviewerTools = reviewerPrompt.match(/^tools: (.+)$/m)?.[1] ?? "";
 	assert.doesNotMatch(reviewerTools, /\b(?:bash|yield)\b/);
-	assert.match(reviewerPrompt, /strictly read-only/);
-	assert.match(reviewerPrompt, /A `clean` verdict is\s+evidence/);
+	assert.match(reviewerPrompt, /read-only reviewer/);
+	assert.match(reviewerPrompt, /clean verdict/);
 	assert.doesNotMatch(reviewerPrompt, /\*\*`approve`\*\*/);
-	assert.match(reviewerPrompt, /Never claim a validator is absent/);
 	assert.match(fix, /`task` tool once with one fresh item per issue or pull request/);
 	assert.match(fix, /Never approve or merge/);
 });
@@ -3252,13 +3353,12 @@ test("a hive-only session with a broken hub still fails visibly and concisely", 
 
 test("action prompts reserve landing authority for slay", () => {
 	const item = queueItem();
-	assert.match(actionPrompt({ kind: "slay", item }), /hive_workbench_diff/);
-	assert.match(actionPrompt({ kind: "slay", item }), /hive_workbench_trace/);
-	assert.match(actionPrompt({ kind: "slay", item }), /bluefin-reviewer/);
+	assert.match(actionPrompt({ kind: "slay", item }), /review_workbench_diff/);
+	assert.match(actionPrompt({ kind: "slay", item }), /review_workbench_trace/);
+	assert.match(actionPrompt({ kind: "slay", item }), /reviewer/);
 	assert.match(actionPrompt({ kind: "fix", item }), /Never approve or merge/);
 	const slayAction = { kind: "slay", item, items: [item, queueItem({ id: 7, repo: item.repo })] };
 	const slayPrompt = actionPrompt(slayAction);
-	assert.match(slayPrompt, /Use the `task` tool once with one fresh bluefin-reviewer item per pull request/);
 	assert.match(slayPrompt, /review, repair, and landing/);
 	assert.match(slayPrompt, /Report one terminal outcome per item/);
 	assert.doesNotMatch(slayPrompt, /requires? (?:two|2) approvals?/i);
@@ -3825,7 +3925,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 				LUNA_FACTORY_STATE_ROOT: mkdtempSync(join(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, "admission-state-")),
 				LUNA_FACTORY_CLAIMS_ROOT: mkdtempSync(join(ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT, "admission-")),
 			},
-			policy: BLUEFIN_POLICY,
+			policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: false },
 		});
 		const ctx = fakeCtx();
 		ctx.ui.parent = ctx;

@@ -5,10 +5,10 @@
   ],
   "customManagers": [
     {
-      "description": "Track the shared OMP release version in both image Containerfiles; the post-upgrade task supplies verified per-architecture digests.",
+      "description": "Track the OMP release version in the Review appliance; the post-upgrade task applies verified per-architecture digests.",
       "customType": "regex",
       "managerFilePatterns": [
-        "/(^|/)image/(appliance|contribute)/Containerfile$/"
+        "/(^|/)image/appliance/Containerfile$/"
       ],
       "matchStrings": [
         "# renovate: datasource=github-releases depName=can1357/oh-my-pi\\nARG OMP_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
@@ -18,28 +18,10 @@
       "versioningTemplate": "semver-coerced"
     },
     {
-      "description": "Track hivecommons/hive origin/v4 as a pinned commit SHA. The SHA is duplicated in the launcher, contributor image, and README; one depName keeps every match in a single Renovate branch and PR.",
+      "description": "Track the GitHub CLI release version in the Review appliance; the post-upgrade task applies verified per-architecture digests.",
       "customType": "regex",
       "managerFilePatterns": [
-        "/(^|/)justfile$/",
-        "/(^|/)image/contribute/Containerfile$/",
-        "/(^|/)README\\.md$/"
-      ],
-      "matchStrings": [
-        "hive_commit := \"(?<currentDigest>[0-9a-f]{40})\"",
-        "ARG HIVE_COMMIT=(?<currentDigest>[0-9a-f]{40})",
-        "layers the pinned Hive runtime at `(?<currentDigest>[0-9a-f]{40})`"
-      ],
-      "currentValueTemplate": "v4",
-      "depNameTemplate": "hivecommons/hive",
-      "packageNameTemplate": "https://github.com/hivecommons/hive",
-      "datasourceTemplate": "git-refs"
-    },
-    {
-      "description": "Track the shared GitHub CLI release version in both image Containerfiles; the post-upgrade task supplies verified per-architecture digests.",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "/(^|/)image/(appliance|contribute)/Containerfile$/"
+        "/(^|/)image/appliance/Containerfile$/"
       ],
       "matchStrings": [
         "# renovate: datasource=github-releases depName=cli/cli\\nARG GH_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
@@ -47,32 +29,6 @@
       "depNameTemplate": "cli/cli",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver-coerced"
-    },
-    {
-      "description": "Track Node.js releases in the contributor image Containerfile; the post-upgrade task supplies verified per-architecture digests.",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "/(^|/)image/contribute/Containerfile$/"
-      ],
-      "matchStrings": [
-        "# renovate: datasource=node-version depName=node\\nARG NODE_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
-      ],
-      "depNameTemplate": "node",
-      "datasourceTemplate": "node-version",
-      "versioningTemplate": "node"
-    },
-    {
-      "description": "Track tmux static build releases in the contributor image Containerfile; the post-upgrade task supplies verified per-architecture digests.",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "/(^|/)image/contribute/Containerfile$/"
-      ],
-      "matchStrings": [
-        "# renovate: datasource=github-releases depName=tmux/tmux-builds\\nARG TMUX_VERSION=(?<currentValue>[0-9]+\\.[0-9]+[a-z]?)"
-      ],
-      "depNameTemplate": "tmux/tmux-builds",
-      "datasourceTemplate": "github-releases",
-      "versioningTemplate": "loose"
     },
     {
       "description": "Track requirements-ci.lock package versions; the post-upgrade task regenerates sha256 hashes from PyPI metadata.",
@@ -88,7 +44,7 @@
   ],
   "packageRules": [
     {
-      "description": "Immutable-ref housekeeping automerges by default. Other code-changing updates require review under the supply-chain gate projectbluefin/review#499 unless a later dependency-specific rule opts into validated automerge; the OMP rule below is that explicit exception. Pull-request automerge and squash are stated because branch protection rejects branch-mode automerge.",
+      "description": "Immutable-ref housekeeping automerges by default. Other code-changing updates require review unless a dependency-specific rule opts into validated automerge. The OMP rule below is the explicit exception; pull-request automerge and squash are stated because branch protection rejects branch-mode automerge.",
       "matchUpdateTypes": [
         "pin",
         "pinDigest"
@@ -99,7 +55,7 @@
       "platformAutomerge": true
     },
     {
-      "description": "Track every stable OMP GitHub release, refresh both verified binary digests, and merge after repository checks so both image publishers run from main.",
+      "description": "Track stable OMP releases, refresh the appliance's verified binary digests, and merge after repository checks.",
       "matchDatasources": [
         "github-releases"
       ],
@@ -117,8 +73,7 @@
           "node scripts/update-omp-pins.mjs"
         ],
         "fileFilters": [
-          "image/appliance/Containerfile",
-          "image/contribute/Containerfile"
+          "image/appliance/Containerfile"
         ],
         "executionMode": "branch"
       }
@@ -135,7 +90,7 @@
       "pinDigests": true
     },
     {
-      "description": "Track GitHub CLI releases and refresh both verified binary digests.",
+      "description": "Track GitHub CLI releases and refresh the appliance's verified binary digests.",
       "matchDatasources": [
         "github-releases"
       ],
@@ -149,48 +104,7 @@
           "node scripts/update-gh-pins.mjs"
         ],
         "fileFilters": [
-          "image/appliance/Containerfile",
-          "image/contribute/Containerfile"
-        ],
-        "executionMode": "branch"
-      }
-    },
-    {
-      "description": "Track Node.js releases and refresh verified binary digests.",
-      "matchDatasources": [
-        "node-version"
-      ],
-      "matchPackageNames": [
-        "node"
-      ],
-      "groupName": "Node.js runtime",
-      "rangeStrategy": "replace",
-      "postUpgradeTasks": {
-        "commands": [
-          "node scripts/update-node-pins.mjs"
-        ],
-        "fileFilters": [
-          "image/contribute/Containerfile"
-        ],
-        "executionMode": "branch"
-      }
-    },
-    {
-      "description": "Track tmux static builds and refresh verified binary digests.",
-      "matchDatasources": [
-        "github-releases"
-      ],
-      "matchPackageNames": [
-        "tmux/tmux-builds"
-      ],
-      "groupName": "tmux runtime",
-      "rangeStrategy": "replace",
-      "postUpgradeTasks": {
-        "commands": [
-          "node scripts/update-tmux-pins.mjs"
-        ],
-        "fileFilters": [
-          "image/contribute/Containerfile"
+          "image/appliance/Containerfile"
         ],
         "executionMode": "branch"
       }

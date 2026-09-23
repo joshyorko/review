@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contract for the Bluefin Review appliance image.
+# Contract for the Review appliance image.
 #
 # Two halves. The static half reads the Containerfile and the version machinery
 # and needs no container engine, so it runs on every commit. The runtime half
@@ -7,7 +7,7 @@
 # is skipped unless you pass one too.
 #
 #   bash tests/appliance-contract.sh
-#   bash tests/appliance-contract.sh --image localhost/projectbluefin/review:dev
+#   bash tests/appliance-contract.sh --image localhost/review:dev
 #
 # The runtime half exists because this image is assembled rather than installed:
 # a missing shared library or a pruned file does not fail the build, it fails in
@@ -96,11 +96,43 @@ require "$containerfile" \
   'COPY image/extension/typesafe-omp-loader.mjs /out/usr/share/bluefin/review/typesafe-omp-loader.mjs' \
   'COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/bluefin-review-appliance' \
   'COPY image/appliance/config.yml /out/usr/share/bluefin/review/appliance-config.yml' \
-  'io.projectbluefin.review.appliance="true"' \
+  'io.github.joshyorko.review.appliance="true"' \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"' \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
   'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory'
+forbid "$containerfile" 'image/contribute' 'bin/bluefin-contribute' 'ghcr.io/projectbluefin/contribute'
+for retired in \
+  bin/bluefin-contribute \
+  deploy/contribute.yaml \
+  deploy/contributor-secret.example.yaml \
+  image/contribute \
+  image/tmux.conf \
+  image/extension/bluefin-review/blueberry.ts \
+  image/extension/bluefin-review/agents/bluefin-reviewer.md \
+  image/extension/bluefin-review/agents/bluefin-ci-triage.md \
+  image/extension/bluefin-review/agents/bluefin-correctness.md \
+  image/extension/bluefin-review/agents/bluefin-doctrine.md \
+  image/extension/bluefin-review/agents/bluefin-queue-triage.md \
+  image/extension/bluefin-review/agents/bluefin-security.md \
+  image/extension/bluefin-review/agents/bluefin-simplicity.md \
+  image/extension/bluefin-review/agents/bluefin-test-coverage.md \
+  image/extension/bluefin-review/agents/generic-reviewer.md \
+  scripts/contribute-version.sh \
+  scripts/generate-contribute-sbom.py \
+  .github/workflows/publish-contribute.yml \
+  tests/contribute-contract.sh \
+  tests/contribute_sbom_contract.py \
+  tests/blueberry_mode.test.ts \
+  docs/skills/cluster-workers.md \
+  docs/skills/hive-runtime.md \
+  docs/skills/hive-triage.md \
+  docs/skills/upstream-hive.md \
+  docs/skills/pr-labels.md; do
+  [[ ! -e "$retired" ]] || fail "retired Bluefin/Contribute surface remains: $retired"
+done
+forbid .github/workflows/validate.yml 'tests/contribute-contract.sh' 'tests/contribute_sbom_contract.py'
+forbid image/extension/bluefin-review/policy.ts 'BLUEFIN_POLICY' 'isProjectBluefinRepository'
 # shellcheck disable=SC2016 # Literal launcher text, not shell expansion.
 require image/appliance/entrypoint.sh \
   'extension_args=(--extension /usr/share/bluefin/review/extension)' \
@@ -117,7 +149,7 @@ require "$containerfile" \
   'FROM ${AUDIO_BUILDER_IMAGE} AS audio' \
   'microdnf --assumeyes' \
   'COPY --from=audio /audio-out/ /out/' \
-  'io.projectbluefin.review.audio.source='
+  'io.github.joshyorko.review.audio.source='
 forbid "$containerfile" 'HEADROOM_' 'headroom-ai' '/usr/bin/headroom' 'headroom-requirements.txt'
 require image/appliance/stage-audio.sh \
   'libpulse-simple.so.0' \
@@ -136,7 +168,6 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 
 expected = {
     "github": "https://api.githubcopilot.com/mcp/",
-    "bluefin": "https://mcp.projectbluefin.io/mcp",
     "context7": "https://mcp.context7.com/mcp",
 }
 assert set(servers) == set(expected)
@@ -214,12 +245,12 @@ cat >"$entrypoint_tmp/omp" <<'EOF'
 printf '%s\n' "$@"
 EOF
 chmod +x "$entrypoint_tmp/omp"
-default_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+default_args="$(env -u REVIEW_INHERIT_OMP_CONFIG -u BLUEFIN_REVIEW_INHERIT_OMP_CONFIG PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'bluefin-review-appliance' <<<"$default_args" ||
   fail "the appliance entrypoint did not select its isolated profile"
 [[ "$(grep -cx -- '--advisor' <<<"$default_args")" -eq 1 ]] ||
   fail "the appliance did not enable exactly one OMP advisor"
-inherited_args="$(BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+inherited_args="$(REVIEW_INHERIT_OMP_CONFIG=1 PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'review' <<<"$inherited_args" ||
   fail "the explicit host omp configuration opt-in did not select the review profile"
 autoslay_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --autoslay)"
@@ -277,8 +308,8 @@ test "$(inspect '{{.ManifestType}}')" = "application/vnd.oci.image.manifest.v1+j
 image_version="$(inspect '{{index .Labels "org.opencontainers.image.version"}}')"
 test "$image_version" = "$version" ||
   fail "image label version '${image_version}' does not match derived '${version}'"
-test -z "$(inspect '{{index .Labels "io.projectbluefin.review.headroom.version"}}')"
-test "$(inspect '{{index .Labels "io.projectbluefin.review.audio.packages"}}')" = "pulseaudio-libs,alsa-lib"
+test -z "$(inspect '{{index .Labels "io.github.joshyorko.review.headroom.version"}}')"
+test "$(inspect '{{index .Labels "io.github.joshyorko.review.audio.packages"}}')" = "pulseaudio-libs,alsa-lib"
 
 # Sum the layer sizes rather than reading `.Size`: podman's inspect field
 # double-counts files a later layer replaces, and the number a maintainer sees
@@ -301,7 +332,7 @@ fi
 # Every bundled binary is executed, because "the file exists" says nothing about
 # whether its library closure came along.
 # omp reports itself as "omp/<version>"; the label carries the bare version.
-omp_label="$(inspect '{{index .Labels "io.projectbluefin.review.omp.version"}}')"
+omp_label="$(inspect '{{index .Labels "io.github.joshyorko.review.omp.version"}}')"
 omp_version="$(run 'omp --version')"
 test "$omp_version" = "omp/${omp_label}" ||
   fail "the omp binary reports '${omp_version}', but this image claims to ship ${omp_label}"
@@ -440,7 +471,7 @@ grep -q 'immutable appliance' <<<"$update_output" ||
 help_output="$("$engine" run --rm "$image" --help)"
 grep -q 'Replace it to update' <<<"$help_output" ||
   fail "appliance help does not explain replacement semantics"
-grep -q 'BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1' <<<"$help_output" ||
+grep -q 'REVIEW_INHERIT_OMP_CONFIG=1' <<<"$help_output" ||
   fail "appliance help does not expose the explicit host-config opt-in"
 
 TYPESAFE_RUNTIME_IMAGE="$image" bash tests/typesafe-appliance-contract.sh

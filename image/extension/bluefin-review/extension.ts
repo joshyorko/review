@@ -7,7 +7,7 @@
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import type { QueueItem } from "./github.ts";
-import { DEFAULT_ORG, exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, parseScope, resolveToken } from "./github.ts";
+import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, orgScope, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
 import { registerFactoryReconciler, registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
@@ -18,8 +18,7 @@ import type { KeyMatcher } from "./keys.ts";
 import { type ToolHost, registerTools } from "./tools.ts";
 import { hiveFailureStatus } from "./hive.ts";
 import { landingState, landingReason } from "./landing.ts";
-import { BLUEBERRY_WELCOME_MESSAGE, assertBlueberryActionAllowed, checkBlueberryPermission } from "./blueberry.ts";
-import { GENERIC_WORKBENCH_POLICY, isProjectBluefinRepository, managedPolicyFor, type WorkbenchPolicy } from "./policy.ts";
+import { GENERIC_WORKBENCH_POLICY, managedPolicyFor, type WorkbenchPolicy } from "./policy.ts";
 import {
 	commentInvocation,
 	createCommentActionPlan,
@@ -39,7 +38,6 @@ export {
 	commentInvocation,
 } from "./mutations.ts";
 export {
-	BLUEFIN_POLICY,
 	GENERIC_WORKBENCH_POLICY,
 	managedPolicyFor,
 	type ManagedRepoPolicy,
@@ -263,7 +261,7 @@ export function isImplementationAction(action: DashboardAction): boolean {
 export function actionPrompt(
 	action: DashboardAction,
 	priority?: Priority,
-	options?: { isBlueberry?: boolean; model?: string; workbenchMode?: WorkbenchMode },
+	options?: { workbenchMode?: WorkbenchMode },
 ): string | undefined {
 	if (
 		action.kind === "close"
@@ -274,9 +272,8 @@ export function actionPrompt(
 	) return undefined;
 
 	const selected = action.items && action.items.length > 0 ? action.items : [action.item];
-	const genericSurface = selected.some((item) => !isProjectBluefinRepository(item.repo));
-	const reviewerAgent = genericSurface ? "generic-reviewer" : "bluefin-reviewer";
-	const toolPrefix = options?.workbenchMode === "review" ? "review" : "hive";
+	const reviewerAgent = "reviewer";
+	const toolPrefix = options?.workbenchMode === "hive" ? "hive" : "review";
 	const traceTool = `${toolPrefix}_workbench_trace`;
 	const evidenceTool = selected.every((item) => item.type === "issue")
 		? toolPrefix === "review"
@@ -304,13 +301,13 @@ export function actionPrompt(
 	const reviewFinish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
 	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent}. If it has findings, dispatch one fresh isolated fixer with the exact repository, pull-request number, and head. Fixers use \`gh repo clone\` and \`gh pr checkout\` under \`$HOME/worktrees\`; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --auto --squash\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
 	const repairFinish = "These pull requests were returned to their authenticated author with requested changes. Read the review threads and failing checks, diagnose every requested correction, then dispatch one fresh isolated fixer per pull request. Fixers use `gh repo clone` and `gh pr checkout` under `$HOME/worktrees`, make the smallest complete correction, run focused verification, and push a new head without force. Never review, approve, auto-merge, or merge the author's own pull request. A repair is terminal only after GitHub shows a new head SHA. Report the pushed head and pull-request URL for every item, then stop; the workbench owns the next repository wave.";
-	const issueContext = options?.workbenchMode === "review"
-		? "Inspect the complete GitHub issue description before deciding how to implement it."
-		: "Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it.";
-	const issueEvidence = `Evidence is bounded and read once. ${issueContext} Never assume the working directory is a checkout: use \`gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>\` to materialize one unique workspace per issue under \`$HOME/worktrees\`, then enter that checkout before examining relevant source files and tests. Never clone into \`/tmp\`. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes <owner/repo>#<number>\`. Never merge or approve your own pull request. The issue is not terminal until GitHub has accepted that pull request.`;
-	const issueWorkflow = options?.workbenchMode === "review"
-		? "Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items."
-		: "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items.";
+	const issueContext = options?.workbenchMode === "hive"
+		? "Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it."
+		: "Inspect the complete GitHub issue description before deciding how to implement it.";
+	const issueEvidence = `Evidence is bounded and read once. ${issueContext} Never assume the working directory is a checkout: use \`gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>\` to materialize one unique workspace per issue under \`$HOME/worktrees\`, then enter that checkout before examining relevant source files and tests. Never clone into \`/tmp\`. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes <owner/repo>#<number>\`. Never merge or approve your own pull request.`;
+	const issueWorkflow = options?.workbenchMode === "hive"
+		? "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items."
+		: "Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items.";
 	const issueInspectSource = toolPrefix === "review"
 		? "Call `review_workbench_issue` with explicit `issue` and `repo` to read the complete issue body, discussion, and linked pull requests."
 		: "Read the complete issue body and discussion with `gh issue view <n> --repo <r> --comments`, and list the pull requests linked to it.";
@@ -333,7 +330,7 @@ export function actionPrompt(
 				if (repairWave) {
 					return `Repair this returned pull-request wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh isolated fixer per pull request through OMP workflowz. Do not share a checkout or conversation between items. Copy this block verbatim into every worker prompt:\n${repairRules}`;
 				}
-				return `Slay this repository wave for ${repository} through review, repair, and landing:\n\n${list}\n\nUse the \`task\` tool once with one fresh bluefin-reviewer item per pull request through OMP workflowz. Do not use eval workpool: its generated boolean output schema is rejected by the current Copilot provider. Keep repair agents isolated, and never reuse a reviewer for the post-fix head. Coordinate the complete lifecycle after the review workers return. Copy this block verbatim into every worker prompt:\n${slayRules}`;
+				return `Slay this repository wave for ${repository} through review, repair, and landing:\n\n${list}\n\nUse the \`task\` tool once with one fresh reviewer item per pull request through OMP workflowz. Do not use eval workpool: its generated boolean output schema is rejected by the current Copilot provider. Keep repair agents isolated, and never reuse a reviewer for the post-fix head. Coordinate the complete lifecycle after the review workers return. Copy this block verbatim into every worker prompt:\n${slayRules}`;
 			case "diff":
 				return allIssues
 					? `Inspect this issue wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Do not reuse a worker across repositories. Read each issue's body, discussion, and linked pull requests, and report the request, its current state, and concrete risks. Copy this block verbatim into every worker prompt:\n${issueInspectRules}`
@@ -355,16 +352,13 @@ export function actionPrompt(
 			: "Use the OMP workflowz `task` tool with one fresh item for this target.";
 	switch (action.kind) {
 		case "review":
-			if (options?.isBlueberry) {
-				return `Review ${cite(action.item)} in Blueberry advisory mode. Read the bounded diff with bluefin_review_diff and the recorded pipeline with bluefin_review_trace before judging. As a non-maintainer Blueberry contributor, donate your review to the project as an advisory submission. Format your review with \`[Blueberry Advisory Review | Model: ${options.model ?? "default"}]\` and submit it as a GitHub pull request comment or advisory review (\`gh pr review ${action.item.id} --repo ${action.item.repo} --comment -b "..."\`). Never approve, merge, or apply landing labels. ${authority} ${reviewFinish}`;
-			}
-			return `Review ${cite(action.item)}. Read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence, covering doctrine, correctness, security, tests, and simplicity. State explicitly what you verified and what you could not. ${authority} ${reviewFinish}`;
+			return `Review ${cite(action.item)}. Read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence, covering correctness, security, tests, and simplicity. State explicitly what you verified and what you could not. ${authority} ${reviewFinish}`;
 		case "slay":
 			if (allIssues) {
 				return `Implement ${cite(item)} as an issue. ${issueWorkflow} ${authority} ${issueEvidence} ${reviewFinish}`;
 			}
 			if (repairWave) {
-				return `Repair ${cite(item)} after requested changes. Use hive_workbench_diff and read the review threads, then push a corrected head. ${workflow} ${authority} ${repairFinish}`;
+				return `Repair ${cite(item)} after requested changes. Use ${evidenceTool} and read the review threads, then push a corrected head. ${workflow} ${authority} ${repairFinish}`;
 			}
 			return `Slay ${cite(item)} through review, repair, and landing. Use ${evidenceTool} and ${traceTool}, then run the complete lifecycle with fresh review and isolated fix agents. ${workflow} ${authority} ${slayFinish}`;
 		case "diff":
@@ -395,8 +389,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const env = options.env ?? process.env;
 	const policy = options.policy ?? GENERIC_WORKBENCH_POLICY;
 	const matchKey = options.matchKey;
+	const configuredScope = options.org
+		? orgScope(options.org)
+		: parseScope(env.REVIEW_DEFAULT_SCOPE ?? (env.BLUEFIN_REVIEW_ORG ? `org:${env.BLUEFIN_REVIEW_ORG}` : ""), "");
 	const mode = new ReviewMode({
-		org: options.org ?? env.BLUEFIN_REVIEW_ORG ?? DEFAULT_ORG,
+		org: options.org ?? (configuredScope?.kind === "org" ? configuredScope.value : ""),
+		scope: configuredScope ?? orgScope(""),
 		fetchImpl: options.fetchImpl,
 		env,
 		policy,
@@ -941,19 +939,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			const repositories = new Set(items.map((item) => item.repo));
 			const title = `Send ${items.length} selected item${items.length === 1 ? "" : "s"} across ${repositories.size} repositor${repositories.size === 1 ? "y" : "ies"} to Factory`;
-			const options: Array<string | { label: string; description?: string }> = mode.isBlueberry
-				? [
-					{ label: "Inspect selected items", description: "Run the read-only Factory inspection" },
-					{ label: "Factory status", description: "Show current Factory capacity and batches" },
-					"Cancel",
-				]
-				: [
-					{ label: "Patch selected items", description: "Start Factory patch work for the selection" },
-					{ label: "Inspect selected items", description: "Run the read-only Factory inspection" },
-					{ label: "Prepare PR-ready patches", description: "Prepare patches for review-ready pull requests" },
-					{ label: "Factory status", description: "Show current Factory capacity and batches" },
-					"Cancel",
-				];
+			const options: Array<string | { label: string; description?: string }> = [
+				{ label: "Patch selected items", description: "Start Factory patch work for the selection" },
+				{ label: "Inspect selected items", description: "Run the read-only Factory inspection" },
+				{ label: "Prepare PR-ready patches", description: "Prepare patches for review-ready pull requests" },
+				{ label: "Factory status", description: "Show current Factory capacity and batches" },
+				"Cancel",
+			];
 			const choice = await ctx.ui.select(title, options);
 			const command = choice === "Patch selected items"
 				? "start patch"
@@ -990,13 +982,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 		if (action.kind === "autoslay") {
-			if (mode.isBlueberry) {
-				const guard = assertBlueberryActionAllowed(action.kind, true);
-				if (!guard.allowed) {
-					ctx.ui.notify(guard.reason ?? "Action restricted in Blueberry Mode", "warning");
-					return;
-				}
-			}
 			activeCtx = ctx;
 			await startAutoslay(ctx);
 			return;
@@ -1008,13 +993,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 		const capturedItems = action.items && action.items.length > 0 ? [...action.items] : [action.item];
-		if (mode.isBlueberry) {
-			const guard = assertBlueberryActionAllowed(action.kind, true);
-			if (!guard.allowed) {
-				ctx.ui.notify(guard.reason ?? "Action restricted in Blueberry Mode", "warning");
-				return;
-			}
-		}
+
+
 
 		if (action.kind === "comment") {
 			if (commentInFlight) {
@@ -1171,6 +1151,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const startSession = async (ctx: CtxLike, persisted: PersistedSelection | undefined) => {
+		if (!mode.scope.value) {
+			await promptForScope(ctx);
+			if (!mode.scope.value) return;
+		}
 		const hive = await mode.refreshHive();
 		if (hive.configured && hive.error) {
 			ctx.ui.notify(
@@ -1337,10 +1321,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 		}
 		if (!ctx.hasUI) {
-			// No UI, so no frame can show an unranked queue: the two reads race
-			// safely, and both reprioritize on arrival. Nothing is awaited here
-			// either — the queue tools await `started` themselves, which is what a
-			// headless caller actually needs and what the handler budget allows.
+			if (!mode.scope.value) {
+				started = mode.refreshQueue().then(() => undefined);
+				return;
+			}
 			started = Promise.all([mode.refreshHive(), refreshQueue(ctx)])
 				.then(() => {
 					mode.restore(persisted);
@@ -1431,14 +1415,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (toolName !== "bash") return;
 		const command = String(input?.command ?? "");
 		const reason = slayBashBlockReason(command);
-		if (reason) return { block: true, reason: `Hive workbench slay guard: ${reason}` };
+		if (reason) return { block: true, reason: `Review Slay guard: ${reason}` };
 		const wave = activeBatch.waves[activeBatch.currentWave];
 		const visible = mode.visibleItems();
 		const currentItems = (wave?.items ?? []).map((item) =>
 			visible.find((candidate) => candidate.repo === item.repo && candidate.id === item.id) ?? item,
 		);
 		const landingBlocker = slayLandingBlockReason(command, currentItems, policy);
-		if (landingBlocker) return { block: true, reason: `Hive workbench slay guard: ${landingBlocker}` };
+		if (landingBlocker) return { block: true, reason: `Review Slay guard: ${landingBlocker}` };
 	});
 
 	pi.on("tool_execution_start", (event) => {

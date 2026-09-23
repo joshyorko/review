@@ -124,7 +124,7 @@ class PerArchitectureDigests(unittest.TestCase):
         found = packages_by_name(generate(self, "x86_64"))
         for name in ("omp", "gh"):
             self.assertEqual(found[name]["checksums"][0]["algorithm"], "SHA256")
-        for name in ("bluefin-review-mode",):
+        for name in ("review-workbench",):
             self.assertNotIn(
                 "checksums",
                 found[name],
@@ -207,8 +207,8 @@ class DownloadLocations(unittest.TestCase):
     def test_source_download_url(self):
         found = packages_by_name(generate(self, "x86_64"))
         self.assertEqual(
-            found["bluefin-review-mode"]["downloadLocation"],
-            "https://github.com/projectbluefin/review/tree/"
+            found["review-workbench"]["downloadLocation"],
+            "https://github.com/joshyorko/review/tree/"
             f"{BASE_ARGS['--revision']}/image/extension/bluefin-review",
         )
 
@@ -216,13 +216,13 @@ class DownloadLocations(unittest.TestCase):
 class PackageIdentity(unittest.TestCase):
     def test_the_three_load_bearing_components_are_present(self):
         found = packages_by_name(generate(self, "x86_64"))
-        self.assertEqual(sorted(found), ["bluefin-review-mode", "gh", "omp"])
+        self.assertEqual(sorted(found), ["gh", "omp", "review-workbench"])
 
     def test_versions_are_recorded(self):
         found = packages_by_name(generate(self, "x86_64"))
         self.assertEqual(found["omp"]["versionInfo"], "1.2.3")
         self.assertEqual(found["gh"]["versionInfo"], "2.80.1")
-        self.assertEqual(found["bluefin-review-mode"]["versionInfo"], "26.08.03")
+        self.assertEqual(found["review-workbench"]["versionInfo"], "26.08.03")
 
     def test_spdxids_are_unique_and_sanitised(self):
         found = packages_by_name(generate(self, "x86_64"))
@@ -242,8 +242,8 @@ class PackageIdentity(unittest.TestCase):
         )
         self.assertEqual(locator("gh"), f"pkg:github/cli/cli@v2.80.1?checksum=sha256:{GH_ARM}")
         self.assertEqual(
-            locator("bluefin-review-mode"),
-            f"pkg:github/projectbluefin/review@{BASE_ARGS['--revision']}",
+            locator("review-workbench"),
+            f"pkg:github/joshyorko/review@{BASE_ARGS['--revision']}",
         )
 
     def test_external_refs_are_package_manager_purls(self):
@@ -261,13 +261,13 @@ class DocumentShape(unittest.TestCase):
         self.assertEqual(document["spdxVersion"], "SPDX-2.3")
         self.assertEqual(document["dataLicense"], "CC0-1.0")
         self.assertEqual(document["SPDXID"], "SPDXRef-DOCUMENT")
-        self.assertEqual(document["name"], "projectbluefin-review-appliance")
+        self.assertEqual(document["name"], "joshyorko-review-appliance")
 
     def test_namespace_is_unique_per_version_revision_and_arch(self):
         document = generate(self, "x86_64")
         self.assertEqual(
             document["documentNamespace"],
-            "https://github.com/projectbluefin/review/sbom/review-appliance-"
+            "https://github.com/joshyorko/review/sbom/review-appliance-"
             f"26.08.03-{BASE_ARGS['--revision']}-x86_64",
         )
 
@@ -275,7 +275,7 @@ class DocumentShape(unittest.TestCase):
         creation = generate(self, "x86_64")["creationInfo"]
         self.assertRegex(creation["created"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         self.assertEqual(
-            creation["creators"], ["Tool: projectbluefin-review-generate-appliance-sbom"]
+            creation["creators"], ["Tool: review-generate-appliance-sbom"]
         )
 
 

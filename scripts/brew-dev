@@ -20,7 +20,7 @@ case "$action" in
     else ref="$1"; fi
     [[ "$ref" != -* ]] || fail 'invalid Git ref'
     sha="$(git -C "$repo" rev-parse --verify "$ref^{commit}" 2>/dev/null || git -C "$repo" rev-parse --verify "refs/remotes/origin/$ref^{commit}")"
-    source_ref="${BLUEFIN_REVIEW_SOURCE_REF:-$ref}"
+    source_ref="${REVIEW_SOURCE_REF:-${BLUEFIN_REVIEW_SOURCE_REF:-$ref}}"
     arch="$(uname -m)"
     [[ "$arch" == x86_64 || "$arch" == aarch64 ]] || fail 'native Linux x86_64 or aarch64 required'
     [[ "$(uname -s)" == Linux ]] || fail 'the SIF package requires Linux'
@@ -42,10 +42,10 @@ case "$action" in
       podman build --format oci --layers=false --force-rm \
         --build-arg "REVIEW_VERSION=$version" \
         --build-arg "REVIEW_REVISION=$sha" \
-        --label "io.projectbluefin.review.dev.branch=$source_ref" \
+        --label "io.github.joshyorko.review.dev.branch=$source_ref" \
         -f image/appliance/Containerfile -t "$image" .
     )
-    if [[ "${BLUEFIN_REVIEW_OCI_PUSH:-0}" == 1 ]]; then
+    if [[ "${REVIEW_OCI_PUSH:-${BLUEFIN_REVIEW_OCI_PUSH:-0}}" == 1 ]]; then
       [[ -n "${REGISTRY_AUTH_FILE:-}" && -r "${REGISTRY_AUTH_FILE}" ]] || fail "REGISTRY_AUTH_FILE must name a readable registry auth file when OCI push is enabled"
       podman_args=(--format oci --digestfile "$work/oci-digest" --authfile "${REGISTRY_AUTH_FILE}")
       podman push "${podman_args[@]}" "$image" "docker://${oci_arch_image}"
@@ -75,19 +75,16 @@ meta={'ref':ref,'sha':sha,'arch':arch,'oci_image':oci_image,'oci_arch_image':oci
 if oci_digest:
     meta['oci_arch_digest']=oci_digest
 (p/'build.json').write_text(json.dumps(meta,indent=2)+'\n')
-(p/'build.txt').write_text(f'Bluefin Review dev: {ref} @ {sha}\n')
+(p/'build.txt').write_text(f'Review dev: {ref} @ {sha}\n')
 PY
     cat > "$work/payload/bluefin" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 root="\$(cd "\$(dirname "\$(readlink -f "\${BASH_SOURCE[0]}")")/../libexec" && pwd)"
 if [[ "\${1:-}" == review ]]; then
-  export BLUEFIN_REVIEW_MODE=review
-  export BLUEFIN_REVIEW_PERSONAL_MODE=1
-  export BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS=1
-  export BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY="\${BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY:-1}"
-  export BLUEFIN_REVIEW_IMAGE="\${BLUEFIN_REVIEW_IMAGE:-$oci_image}"
-  export BLUEFIN_REVIEW_FALLBACK_SIF="\${BLUEFIN_REVIEW_FALLBACK_SIF:-\$root/launcher/bluefin-review.sif}"
+  export REVIEW_MODE=review
+  export REVIEW_APPLIANCE_IMAGE="\${REVIEW_APPLIANCE_IMAGE:-$oci_image}"
+  export REVIEW_APPLIANCE_FALLBACK_SIF="\${REVIEW_APPLIANCE_FALLBACK_SIF:-\$root/launcher/bluefin-review.sif}"
   cat "\$root/build.txt"
 fi
 exec "\$root/launcher/bin/bluefin" "\$@"

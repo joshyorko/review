@@ -66,7 +66,7 @@ export interface QueueResult {
 	viewerLogin?: string;
 }
 
-export const DEFAULT_ORG = "projectbluefin";
+
 
 const QUEUE_FIELDS = `
 	number
@@ -183,8 +183,7 @@ export function parseScope(input: string, defaultOrg: string): QueueScope | unde
 	const trimmed = input.trim().replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/, "").replace(/\/+$/, "");
 	if (!trimmed) return undefined;
 	if (/^[A-Za-z0-9._-]+$/.test(trimmed)) {
-		// A bare name is a repository in the configured organization; an
-		// organization is named with the explicit `org:` prefix below.
+		if (!defaultOrg) return undefined;
 		return { kind: "repo", value: `${defaultOrg}/${trimmed}` };
 	}
 	const org = /^org:([A-Za-z0-9._-]+)$/.exec(trimmed);
@@ -445,18 +444,18 @@ export const QUEUE_TIMEOUT_MS = 45_000;
 
 /** Fetch the open org queue, following pagination up to `limit` items. */
 export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): Promise<QueueResult> {
-	const { token, org = DEFAULT_ORG, limit = 150, signal } = options;
-	const scope = options.scope ?? orgScope(org);
-	const doFetch = options.fetchImpl ?? fetch;
+	const { token, org, limit = 150, signal } = options;
+	const scope = options.scope ?? (org ? orgScope(org) : undefined);
 	const query = mode === "prs" ? PR_QUEUE_QUERY : ISSUE_QUEUE_QUERY;
 	const deadline = deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal);
 	const items: QueueItem[] = [];
 	let cursor: string | undefined;
 	let viewerLogin: string | undefined;
+	if (signal?.aborted) return { items: [], cancelled: true, fetchedAt: Date.now() };
 	if (!token) {
-		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
-		return { items, error: "no GitHub credential (set GH_TOKEN or run gh auth login)", fetchedAt: Date.now() };
+		return { items: [], error: "no GitHub credential (set GH_TOKEN or run gh auth login)", fetchedAt: Date.now() };
 	}
+	if (!scope?.value) return { items: [], error: "GitHub scope is required; supply owner/repo or org:<name>", fetchedAt: Date.now() };
 
 	try {
 		while (items.length < limit) {

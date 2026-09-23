@@ -5,7 +5,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image="${BLUEFIN_REVIEW_IMAGE:-localhost/review:factory-handoff}"
+image="${REVIEW_APPLIANCE_IMAGE:-${BLUEFIN_REVIEW_IMAGE:-localhost/review:factory-handoff}}"
 run_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/review-factory-coload-$$"
 mkdir -p "$run_root"
 chmod 0777 "$run_root"
@@ -37,7 +37,7 @@ run_case() {
     --env XDG_CONFIG_HOME=/home/bluefin/.config
     --env XDG_STATE_HOME=/home/bluefin/.local/state
     --env XDG_CACHE_HOME=/home/bluefin/.cache
-    --env BLUEFIN_REVIEW_MODE=review
+    --env REVIEW_MODE=review
     --env GH_TOKEN=
     --env GITHUB_TOKEN=
   )

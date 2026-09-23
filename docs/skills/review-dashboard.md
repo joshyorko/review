@@ -1,17 +1,14 @@
 ---
 name: review-dashboard
-version: "5.5"
-last_updated: 2026-09-22
+version: "5.6"
+last_updated: 2026-09-23
 id: review-dashboard
-one_line_purpose: Maintain the queue, slay lifecycles, and workflowz workbench.
+one_line_purpose: Maintain the GitHub Review workbench and mutation guards.
 entry_point: docs/skills/review-dashboard.md
 category: ci-ops
-mcp_compliance_level: partial
-optimization_status: draft
 status: active
-dependencies: []
-tags: [omp, extension, dashboard, review, maintainer, workflowz]
-description: "Maintains the OMP review workbench. Use for queue ordering, slay or autoslay, workflowz issue batches, durable batch state, dashboard controls, or mutation guards."
+tags: [omp, extension, dashboard, review, workflowz, github]
+description: "Maintains Review queue behavior, evidence, bounded actions, and mutation safeguards."
 metadata:
   type: runbook
   context7-sources: []
@@ -19,207 +16,64 @@ metadata:
 
 # Review Workbench
 
-The only maintainer UI is `image/extension/bluefin-review/`: `bin/omp-review`
-loads source, while `just review-queue` and `just review-appliance` launch the
-packaged extension. The Hive contributor runtime attaches to Hive's OMP session.
+The OMP extension at `image/extension/bluefin-review/` is the GitHub-generic Review surface. `bin/omp-review` is the neutral source entry point; `just review-appliance` launches the packaged extension. The retained source directory name is not a routing or policy signal.
 
-## When to Use
+## Mode and authority
 
-Use this skill for queue ordering, slay/autoslay, workflowz dispatch, durable
-batch state, dashboard controls, prompts, or mutation guards. Use `launcher.md`
-for launch mechanics, `review-checks.md` for doctrine, and `hive-runtime.md` for
-contributor assignment behavior.
+Review defaults to GitHub-only mode. `REVIEW_MODE=hive` explicitly enables optional Hive read-side context and `HIVE_HUB` must be configured directly. Normal Review does not fetch Hive, discover contributor registration, show Hive controls, or inject Hive knowledge. Hive mode remains read-only and never assigns or completes worker tasks.
 
-`BLUEFIN_REVIEW_MODE` has exactly two values. `review` is GitHub-only: it
-registers only `review_workbench_*` tools and never reads or mentions Hive.
-`hive` adds hub ordering, knowledge, stages, controls, and `hive_workbench_*`
-tools. Bluefin policy and Blueberry authorization are independent of this mode.
-
-Issue inspection uses `review_workbench_issue` (`issue`, `repo`) in Review mode
-and `gh issue view --comments` in Hive mode, for both single items and waves;
-neither path sends issues to a pull-request diff tool. A configured Hive outage
-reports GitHub ordering fallback without claiming authorized actions are disabled.
-
-## Core Process
-
-1. Trace the key or flag from `dashboard.ts` through `extension.ts` to its prompt.
-2. Keep reviewers read-only. Slay authorizes bounded PR review/repair/landing or
-   issue implementation through pull-request submission.
-3. Add a headless interaction test, then exercise the real foreground workbench.
-
-## Authority
-
-- GitHub owns repository state.
-- Hive owns contributor selection, assignment, prompt injection, and output
-  capture. The workbench may read Hive order but never claim contributor work.
+- GitHub owns repository, issue, pull-request, check, and permission state.
 - OMP owns sessions, agents, tasks, tools, workflowz workpools, and cancellation.
-- The extension owns queue projection, durable human intent, mutation guards,
-  and presentation.
-- Humans own approval and merge decisions; confirmed slay intent delegates the
-  bounded coordinator lifecycle that executes them.
+- Review owns queue projection, bounded evidence, durable human intent, mutation guards, and presentation.
+- Luna Factory owns its admitted worker operations, claims, and receipts; a Review row is not Factory admission.
+- Humans own scope and mutating intent. A reviewer recommendation is not authorization.
 
-## Screen
-
-The queue, focused item, Dagger-style execution trace, and prompt share one
-screen. The top gauge reports mode, position, repository, outcomes, freshness,
-Hive ordering, and actionable count. The bottom gauge reports Hive connectivity,
-selection count, and the active workflowz slay.
-Hive coverage is mode-aware: issue mode counts Hive issue identities, while PR
-mode counts direct Hive pull requests and explicit open linked pull requests.
-Pull requests discovered through GitHub closing references still inherit the
-rank of their Hive issue. Never probe an issue identity as a pull request or
-report issue-only backlog as missing PR evidence.
-
-`Tab` switches PR/issue mode and every semantic accent between the cool PR
-palette and warm issue palette.
+## Core interaction
 
 | Key | Action |
 | --- | --- |
-| `Tab` | Toggle pull requests and issues |
-| `j` / `k` | Move through the queue |
+| `Tab` | Toggle pull-request and issue queues |
+| `j` / `k` | Move through the visible queue |
 | `Space` | Toggle the focused item |
 | `A` / `x` | Select the filtered slice / clear selection |
 | `Alt-B` | Select or clear the focused repository group |
-| `s` | Slay selected PRs, or implement selected issues through submitted PRs |
-| `Alt-S` | Repair returned PRs first, then implement the visible issue backlog |
-| `f` | Fix selected items in isolated workspaces |
-| `F` | Open the Factory command prompt when Factory is loaded |
-| `d` | Inspect bounded evidence (PR diff, issue discussion) |
+| `s` | Start the confirmed bounded review/repair lifecycle |
+| `Alt-S` | Repair returned work before the visible issue backlog |
+| `f` | Fix selected work in isolated workspaces |
+| `F` | Open the Luna Factory action picker for selected work when Factory is loaded |
+| `d` | Inspect bounded PR diff or issue discussion |
 | `p` | Pause or resume later wave admission |
-| `r` | Refetch GitHub and Hive projections |
+| `r` | Refresh GitHub evidence and explicitly enabled read-side projections |
 | `o` | Change repository or organization scope |
 | `/` | Filter the queue |
-| `H` / `L` | Toggle Hive-only rows / step through Hive stages |
-| `t` | Focus the execution trace |
-| `g` / `G` | Jump to the first / last row |
-| `h` / `l` | Collapse / expand the focused trace span |
-| `c` | Comment after confirmation and live revalidation |
-| `v` | Open the focused pull request or issue in the reader |
-| `Enter` / `i` | Cite the focused item in the prompt and show confirmation |
-| `?` | Show the key guide |
-| `q` / `Esc` | Close the workbench |
+| `H` / `L` | Hive-only filter/stages; available only in explicit Hive mode |
+| `t`, `g` / `G`, `h` / `l` | Focus trace, jump to ends, or collapse/expand a trace span |
+| `c` | Comment only after confirmation and live revalidation |
+| `v` | Open the focused GitHub item |
+| `?`, `q` / `Esc` | Show help / close the workbench |
 
-Factory command entry uses OMP’s prompt-style editor with the selected action
-prefilled: Enter submit · Shift+Enter newline · Esc cancel. The workbench closes
-before opening this prompt and reopens after success, error, or cancellation.
-Explicit workbench `q`/`Esc` still closes it.
+The normal Review help and status bars omit Hive controls and status. Do not add controls that imply optional integrations are required.
 
-## Slay execution
+## Bounded execution
 
-Slay has entity-specific terminal conditions. Ordinary pull requests run through
-review, isolated repair, fresh review, and landing. Each head first runs as a
-fresh `bluefin-reviewer` in one OMP workflowz `task` batch. Reviewers are
-read-only; findings dispatch isolated fixers, and a fixed head receives a fresh
-review before the coordinator may approve and request a squash merge.
+Review specialists use neutral definitions in `image/extension/bluefin-review/agents/`: `reviewer`, `review-security`, `review-correctness`, `review-test-coverage`, `review-simplicity`, `review-ci-triage`, and `review-queue-triage`. They remain read-only; the coordinator may dispatch isolated fixers only after explicit user intent and current evidence.
 
-Pull requests authored by the authenticated GitHub user with requested changes
-form a `repair-requested` lane ahead of Hive-ranked review work. Workflowz
-dispatches isolated fixers, never a self-review, self-approval, or self-merge.
-A returned PR is terminal only when GitHub shows a new head SHA.
+A pull-request lifecycle verifies the exact head and live repository rules before mutation. Returned pull requests from the authenticated user stay in a repair-only lane: never self-review, self-approve, or self-merge. Preserve workflow-file permission checks, incomplete-file-list fail-closed behavior, mutation claims, and ambiguous-effect reconciliation.
 
-Issue slay reads the complete issue plus Hive's queue entry and curated
-knowledge before deciding and implementing; Review mode uses the GitHub issue
-alone. A multi-issue wave uses one workflowz `task` call with a fresh item per
-issue. The appliance disables OMP parent-checkout isolation because `/workspace`
-starts empty; each worker instead clones the target into its own path under
-`$HOME/worktrees`, then opens a review-ready
-PR with a closing reference. The issue is terminal only when GitHub reports
-that submitted PR. The worker never approves or merges it.
+Issue work reads the GitHub issue and bounded discussion. A multi-issue wave uses OMP workflowz tasks with repository-local isolated workspaces. Workers may submit changes through pull requests; they do not approve or merge their own work. A settled job or empty queue alone is not terminal proof.
 
-`--autoslay` and `Alt-S` use the same repair-first plan: unless explicitly
-started in issue mode, repair all visible returned PRs, then switch to the
-visible issue backlog. Work is partitioned into type-homogeneous,
-repository-local waves of at most 25 items. OMP's advisor is always enabled and
-resolves through `@default`, following the maintainer's selected model.
+## Policy and tools
 
-The personal/self-hosted Review surface opts workflow-file PRs into the same
-review, repair, fresh-review, and landing lifecycle as ordinary PRs. The Brew
-launcher enables this with `BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY=1`; GitHub still
-requires workflow/Actions write permission, and a missing permission stops the
-dispatch with an actionable authentication error. Managed Bluefin policy keeps
-workflow PRs blocked unless an explicit policy setting enables the lane.
-Incomplete changed-file lists remain fail-closed, and returned authenticated-
-author PRs retain their repair-only lane and no-approval/no-merge boundary.
+Use the generic workbench policy for every owner/repository. Do not route based on `projectbluefin/`, `joshyorko/`, or another organization prefix, and do not restore Blueberry or product-specific label gates.
 
-Fresh reviewers receive explicit `repo` and `pull_request` arguments for
-`hive_workbench_diff`. Repair agents use `gh repo clone` and `gh pr checkout`
-under `$HOME/worktrees`, never `/tmp`, and read effective rules through
-`repos/<owner>/<repo>/rules/branches/<branch>`.
-The minimal appliance omits repository-specific toolchains; reviewers use
-hosted check evidence and report local validation gaps instead of retrying
-absent commands or installing packages.
-
-Preserve Hive order inside each lane and partition contiguous repository runs.
-Ask workflowz to execute every wave, including a singleton. Never add an
-extension-local worker pool, retry loop, scheduler, or agent lifecycle. Advance
-on final `agent_end` only after all wave jobs settle. Pausing stops new waves,
-not an agent already running.
-
-Persist slay intent, item identity, wave position, and terminal outcomes.
-Interrupted slays stay blocked and require explicit redispatch. Never replay a
-confirmed mutation. An ordinary PR wave is terminal when every target is closed
-or GitHub accepts auto-merge; open targets without auto-merge block redispatch.
-The merge queue's effective squash rule overrides the displayed
-`autoMergeRequest.mergeMethod`: never disable and re-arm auto-merge because it
-says `MERGE`. An accepted auto-merge request is terminal even when additional
-human approval remains; report that outstanding gate and move on. Settled
-workflowz jobs alone never advance any slay.
-
-## Mutations
-
-Capture repository, item number, entity type, and PR head SHA before preview.
-Immediately before mutation, fetch live targets and repository rules again and
-reject missing, changed, held, review-blocked, or type-mismatched targets.
-Execute `gh` with an argument array, never a shell-composed command. Only a
-maintainer-confirmed slay batch carries merge authority.
-During an active slay, the extension's pre-execution `tool_call` guard rejects
-admin merge bypasses, force pushes, and credential-bearing URL arguments even
-when the coordinator ignores its prompt contract.
-
-## Policy seam
-
-Generic queue and execution code must not know Bluefin labels or review rules.
-Bluefin action vocabulary lives in `policy.ts`; review doctrine lives in the
-companion agents under `image/extension/bluefin-review/agents/`.
-Every top-level TypeScript module in the extension must remain reachable from
-`index.ts`; delete disconnected implementations and their tests instead of
-keeping a second, unwired behavior model.
-
-The registered inspection tools are `hive_workbench_status`,
-`hive_workbench_queue`, `hive_workbench_diff`, `hive_workbench_trace`, and
-`hive_workbench_lookup`. The personal package also registers the generic
-`review_workbench_status`, `review_workbench_queue`, `review_workbench_diff`,
-`review_workbench_trace`, and `review_workbench_issue` names. The Hive lookup
-tool remains Hive-specific.
-
-## Common Rationalizations
-
-- “Slay is just autoreview.” Review without repair and landing is an incomplete
-  slay; reviewer agents stay read-only while the confirmed coordinator owns the
-  complete lifecycle.
-- “Review needs Hive admission.” Read-only review works from GitHub evidence
-  when Hive is absent; issue slay and fix still enforce fresh GitHub admission
-  and report unavailable Hive knowledge instead of inventing it.
-
-## Red Flags
-
-- A slay prompt uses the default task agent instead of `bluefin-reviewer` for
-  the review stages.
-- `s`, `Alt-S`, or `--autoslay` bypasses the common wave validation machinery.
-- A reviewer agent approves, merges, or edits instead of returning evidence to
-  the coordinator.
-- Slay lands without revalidating the exact reviewed head and live GitHub rules.
-- A repository wave advances before its OMP jobs settle.
-- An issue wave skips Hive queue/knowledge evidence or advances without a submitted PR.
+Review mode registers `review_workbench_*` tools for GitHub status, queue, diff, trace, and issue inspection. Explicit Hive mode uses the corresponding `hive_workbench_*` read-side tools. Keep missing-scope, permission, stale-head, and unavailable-integration reasons truthful.
 
 ## Verification
 
 ```bash
 bash tests/omp-review-mode.sh
-bash tests/appliance-contract.sh
-bash scripts/check-skill-frontmatter.sh
-git diff --check
+bash tests/test-registry.sh
+bash tests/review-factory-coload-smoke.sh
 ```
 
-For a visible change, launch `bin/omp-review --no-session` in a foreground
-terminal, exercise the changed key path, inspect the real screen, and stop it.
+For UI changes, exercise the real foreground OMP workbench and verify the visible surface as well as the focused headless contract.

@@ -6,7 +6,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 containerfile="image/appliance/Containerfile"
-contribute="image/contribute/Containerfile"
 entrypoint="image/appliance/entrypoint.sh"
 typesafe_version="0.6.1"
 omp_version="18.2.11"
@@ -40,12 +39,10 @@ forbid_secret() {
   fi
 }
 
-for file in "$containerfile" "$contribute"; do
-  require "$file" \
-    "ARG OMP_VERSION=${omp_version}" \
-    'ARG OMP_X86_64_SHA256=' \
-    'ARG OMP_AARCH64_SHA256='
-done
+require "$containerfile" \
+  "ARG OMP_VERSION=${omp_version}" \
+  'ARG OMP_X86_64_SHA256=' \
+  'ARG OMP_AARCH64_SHA256='
 
 require "$containerfile" \
   "ARG TYPESAFE_VERSION=${typesafe_version}" \
@@ -70,7 +67,7 @@ require image/extension/typesafe-omp-loader.mjs \
   'typeof pi.registerEntryRenderer'
 
 require "$containerfile" \
-  "io.projectbluefin.review.omp.version=\"\${OMP_VERSION}\""
+  "io.github.joshyorko.review.omp.version=\"\${OMP_VERSION}\""
 
 forbid_secret
 

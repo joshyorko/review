@@ -1,6 +1,6 @@
 ---
-name: bluefin-ci-triage
-description: Read-only triage of a failing Project Bluefin pull request check — finds the first real error in the run log, names the responsible file, and separates a genuine defect from infrastructure flake.
+name: review-ci-triage
+description: Read-only triage of a failing GitHub pull request check — finds the first real error in the run log, names the responsible file, and separates a genuine defect from infrastructure flake.
 tools: read, grep, glob, bash, yield
 read-summarize: false
 ---

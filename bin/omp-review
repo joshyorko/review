@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Entrypoint for omp in dedicated Bluefin review / issues mode.
+# Entrypoint for the generic GitHub Review workbench.
 set -euo pipefail
 
 # 1. Resolve GitHub API token transparently from gh CLI if not explicitly set
@@ -67,38 +67,10 @@ export CONTEXT7_API_KEY="${CONTEXT7_API_KEY:-}"
 # Pin Copilot client identity to developer CLI so Gemini/Kimi models are permitted by GitHub Copilot
 export COPILOT_INTEGRATION_ID="${COPILOT_INTEGRATION_ID:-copilot-developer-cli}"
 
-# 4. Resolve Hive Hub and ensure Hive knowledge export is available
-if [[ -z "${HIVE_HUB:-}" ]]; then
-  HIVE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hive"
-  if [[ -f "${HIVE_CONFIG_DIR}/contributor.env" ]]; then
-    RESOLVED_HUB="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?HIVE_HUB=[[:space:]]*["'\'']?([^"'\'']+)["'\'']?/\2/p' "${HIVE_CONFIG_DIR}/contributor.env" | head -1 || true)"
-    if [[ -n "$RESOLVED_HUB" ]]; then
-      export HIVE_HUB="$RESOLVED_HUB"
-    fi
-  fi
-fi
-
-if [[ -n "${HIVE_HUB:-}" && -n "${GH_TOKEN:-}" ]]; then
-  HUB_HTTP="${HIVE_HUB/wss:\/\//https://}"
-  HUB_ROOT="${HUB_HTTP%/contribute}"
-  KNOWLEDGE_FILE="${HOME}/agent.md"
-  # Refresh knowledge export if missing or older than 10 minutes
-  if [[ ! -s "$KNOWLEDGE_FILE" ]] || test $(($(date +%s) - $(date -r "$KNOWLEDGE_FILE" +%s 2>/dev/null || echo 0))) -gt 600; then
-    curl -sf --max-time 15 -H "Authorization: Bearer ${GH_TOKEN}" \
-      "${HUB_ROOT}/api/v1/knowledge" -o "${KNOWLEDGE_FILE}.tmp" 2>/dev/null || \
-    curl -sf --max-time 15 \
-      "${HUB_ROOT}/api/knowledge/export" -o "${KNOWLEDGE_FILE}.tmp" 2>/dev/null || true
-    if [[ -s "${KNOWLEDGE_FILE}.tmp" ]]; then
-      mv -f "${KNOWLEDGE_FILE}.tmp" "$KNOWLEDGE_FILE"
-    else
-      rm -f "${KNOWLEDGE_FILE}.tmp"
-    fi
-  fi
-fi
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 
 # The mode ships as an extension package directory: index.ts plus the companion
-# agents omp discovers under <extension-root>/agents.
+# 4. Ensure organization & repository skills are projected for agent discovery
 EXTENSION_PATH="${BLUEFIN_REVIEW_EXTENSION_PATH:-/opt/bluefin/extensions/bluefin-review}"
 if [[ ! -e "$EXTENSION_PATH" && -d "$SCRIPT_DIR/image/extension/bluefin-review" ]]; then
   EXTENSION_PATH="$SCRIPT_DIR/image/extension/bluefin-review"

@@ -11,7 +11,7 @@ name: Renovate
 #
 # Daily polling follows stable OMP GitHub releases. The repository package rule
 # runs one allowlisted pin synchronizer, then OMP-only automerge lets the main
-# push trigger both native image publishers.
+# push publish the Review appliance.
 
 on:
   schedule:
@@ -55,4 +55,4 @@ jobs:
           LOG_LEVEL: ${{ inputs.dry_run == true && 'debug' || 'info' }}
           RENOVATE_DRY_RUN: ${{ inputs.dry_run == true && 'full' || '' }}
           RENOVATE_REPOSITORIES: ${{ github.repository }}
-          RENOVATE_ALLOWED_COMMANDS: '["^node scripts/update-omp-pins\\.mjs$", "^node scripts/update-gh-pins\\.mjs$", "^node scripts/update-node-pins\\.mjs$", "^node scripts/update-tmux-pins\\.mjs$", "^node scripts/update-requirements-ci-hashes\\.mjs$"]'
+          RENOVATE_ALLOWED_COMMANDS: '["^node scripts/update-omp-pins\\.mjs$", "^node scripts/update-gh-pins\\.mjs$", "^node scripts/update-requirements-ci-hashes\\.mjs$"]'

@@ -55,8 +55,8 @@ jobs:
       - name: Build committed launcher and matching native SIF
         env:
           SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}
-          BLUEFIN_REVIEW_SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}
-          BLUEFIN_REVIEW_OCI_PUSH: "1"
+          REVIEW_SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}
+          REVIEW_OCI_PUSH: "1"
           REGISTRY_AUTH_FILE: ${{ runner.temp }}/ghcr-auth.json
         # scripts/brew-dev performs the authenticated podman push before it builds the SIF.
         run: ./scripts/brew-dev build "$SOURCE_REF" "$RUNNER_TEMP/bundles"

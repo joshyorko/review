@@ -7,9 +7,6 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { deadlineSignal } from "./deadline.ts";
 
 /** One item Hive has queued, in Hive's own order. */
@@ -60,15 +57,12 @@ export const EMPTY_HIVE: HiveSnapshot = {
 };
 
 /**
- * The hub's HTTPS root.
- *
- * A token-bearing request never travels over plaintext, and a comma-separated
- * list is a selection the launcher has not made yet — both resolve to "not
- * configured" rather than to a guess.
+ * Resolve only an explicitly configured optional Hive read-side endpoint.
+ * Token-bearing requests never travel over plaintext or to a guessed hub.
  */
 export function resolveHub(env: NodeJS.ProcessEnv = process.env): string {
 	let hub = (env.HIVE_HUB ?? "").trim();
-	if (!hub) hub = readHubFromContributorEnv(env);
+	if (!hub || hub.includes(",")) return "";
 	if (!hub || hub.includes(",")) return "";
 
 	const http = hub.startsWith("wss://") ? `https://${hub.slice("wss://".length)}` : hub;
@@ -89,21 +83,6 @@ export function resolveHub(env: NodeJS.ProcessEnv = process.env): string {
 	return http.endsWith("/contribute") ? http.slice(0, -"/contribute".length) : http;
 }
 
-/** The launcher mounts the contributor registration; read the hub out of it. */
-function readHubFromContributorEnv(env: NodeJS.ProcessEnv): string {
-	const configHome = env.XDG_CONFIG_HOME || join(env.HOME ?? homedir(), ".config");
-	try {
-		const text = readFileSync(join(configHome, "hive", "contributor.env"), "utf8");
-		for (const line of text.split("\n")) {
-			const match = /^\s*(?:export\s+)?HIVE_HUB\s*=\s*(.*)$/.exec(line);
-			if (!match) continue;
-			return match[1]!.trim().replace(/^(['"])(.*)\1$/, "$2");
-		}
-	} catch {
-		// Not registered with a hub. That is a supported way to run.
-	}
-	return "";
-}
 
 /**
  * The hub's bearer token is the maintainer's GitHub token.

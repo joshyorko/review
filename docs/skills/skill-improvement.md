@@ -25,10 +25,10 @@ catalog, or agent-facing repository contracts.
 
 ## When Not to Use
 
-Do not use this as a backlog, session log, or replacement for the
-task-specific launcher, image, Hive, MCP app, or pull-request workflow skill.
-Use it alongside the matching skill when documentation maintenance is part of
-that work.
+Do not use this as a backlog, session log, or replacement for a
+task-specific launcher, image-build, optional Hive read-side, or
+pull-request workflow skill. Use it alongside the matching skill when
+documentation maintenance is part of that work.
 
 ## Core Process
 
@@ -49,9 +49,9 @@ that work.
 5. Prune duplication, stale caches, and no-op instructions. Preserve every
    source-backed safety invariant: a soft length or style warning is evidence to
    remove sediment, never permission to delete live contract behavior.
-6. Use `projectbluefin/common` only as the pinned shared sidecar. It supplements
-   local guidance; it never overrides local repository boundaries or assigns
-   work.
+6. Prefer the repository's local contracts. Explicitly configured external
+   shared guidance may supplement them, but never overrides local boundaries
+   or assigns work.
 7. When skill frontmatter changes, regenerate `docs/skills/index.json` with
    `bash scripts/check-skill-frontmatter.sh --write`; never edit the catalog by
    hand. Keep changelogs, session notes, plans, and design scratchpads out of the

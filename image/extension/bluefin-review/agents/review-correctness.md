@@ -1,5 +1,5 @@
 ---
-name: bluefin-correctness
+name: review-correctness
 description: Specialized correctness and systems logic reviewer — analyzes diffs for functional defects, runtime errors, silent error paths, concurrency hazards, and broken invariants.
 tools: read, grep, glob, bash, yield
 read-summarize: false
@@ -25,6 +25,5 @@ Evaluate with concrete file and line citations:
 Report only evidenced functional bugs and regression risks with severity,
 exact location, and the concrete failure scenario.
 
-Consult the Hive knowledge base (`~/agent.md` when present) and organization
-skills in `.agents/skills/` or `~/.agents/skills/` for known patterns, conventions,
-and regressions relevant to the changed repository.
+Consult the target repository's instructions and relevant skills for known
+patterns, conventions, and regressions.

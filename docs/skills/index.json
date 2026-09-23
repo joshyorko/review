@@ -1,25 +1,7 @@
 {
-  "generated_at": "2026-09-22",
+  "generated_at": "2026-09-23",
   "schema_version": "1.0",
   "skills": [
-    {
-      "id": "cluster-workers",
-      "name": "cluster-workers",
-      "one_line_purpose": "Scale OMP contributor workers across Kubernetes clusters.",
-      "entry_point": "docs/skills/cluster-workers.md",
-      "category": "ci-ops",
-      "status": "active",
-      "tags": [
-        "kubernetes",
-        "cluster",
-        "scale",
-        "workers"
-      ],
-      "description": "Manages OMP contributor workers in bluefin-system and secret synchronization.",
-      "version": "2.1",
-      "last_updated": "2026-09-14",
-      "doc_type": "procedure"
-    },
     {
       "id": "contribution-culture",
       "name": "contribution-culture",
@@ -59,48 +41,27 @@
       "doc_type": "policy"
     },
     {
-      "id": "hive-runtime",
-      "name": "hive-runtime",
-      "one_line_purpose": "Operate inside Hive's tmux, token, and cooldown constraints.",
-      "entry_point": "docs/skills/hive-runtime.md",
+      "id": "hive-read-side",
+      "name": "hive-read-side",
+      "one_line_purpose": "Maintain Review's explicit optional Hive read-side integration.",
+      "entry_point": "docs/skills/hive-read-side.md",
       "category": "ci-ops",
       "status": "active",
       "tags": [
         "hive",
-        "tmux",
-        "runtime",
-        "tokens",
-        "cooldown",
-        "workspace"
+        "review",
+        "read-side",
+        "configuration"
       ],
-      "description": "Explains Hive's tmux session, workspace directory, prompt and output contract, contributor credentials, token lifetime, cooldown, and exclusive task selection. Use when operating or debugging a session.",
-      "version": "3.0",
-      "last_updated": "2026-09-14",
-      "doc_type": "reference"
-    },
-    {
-      "id": "hive-triage",
-      "name": "hive-triage",
-      "one_line_purpose": "Diagnose why an attached contributor is never handed work.",
-      "entry_point": "docs/skills/hive-triage.md",
-      "category": "ci-ops",
-      "status": "active",
-      "tags": [
-        "hive",
-        "triage",
-        "assignment",
-        "cooldown",
-        "websocket"
-      ],
-      "description": "Diagnoses a contributor that connects but receives no assignment without adding client-side selection or retry behavior. Use when a ready contributor remains idle.",
-      "version": "1.5",
-      "last_updated": "2026-08-07",
+      "description": "Documents the optional Hive projections available only when Review mode and HIVE_HUB are explicitly selected.",
+      "version": "1.0",
+      "last_updated": "2026-09-23",
       "doc_type": "runbook"
     },
     {
       "id": "image-build",
       "name": "image-build",
-      "one_line_purpose": "Build and pin the OMP review and contributor images.",
+      "one_line_purpose": "Build and pin the single Review appliance.",
       "entry_point": "docs/skills/image-build.md",
       "category": "ci-ops",
       "status": "active",
@@ -110,31 +71,31 @@
         "digest",
         "pinning",
         "omp",
-        "hive"
+        "review"
       ],
-      "description": "Use when maintaining the OMP review/contributor images, release pins, SBOM inputs, or multi-architecture publication workflows.",
-      "version": "3.5",
-      "last_updated": "2026-09-16",
+      "description": "Maintains the Review appliance, release pins, SBOM inputs, and publication workflows.",
+      "version": "3.6",
+      "last_updated": "2026-09-23",
       "doc_type": "procedure"
     },
     {
       "id": "launcher",
       "name": "launcher",
-      "one_line_purpose": "Change review just recipes without breaking the launch contract.",
+      "one_line_purpose": "Maintain the generic Review appliance launch contract.",
       "entry_point": "docs/skills/launcher.md",
       "category": "ci-ops",
       "status": "active",
       "tags": [
-        "just",
+        "review",
         "launcher",
         "podman",
-        "kubernetes",
+        "apptainer",
         "omp",
-        "hive"
+        "credentials"
       ],
-      "description": "Maintains the OMP appliance and Hive contributor launcher recipes without crossing their credential or authority boundaries.",
-      "version": "5.3",
-      "last_updated": "2026-09-15",
+      "description": "Maintains the Review appliance launcher, scope handoff, and credential boundary.",
+      "version": "5.4",
+      "last_updated": "2026-09-23",
       "doc_type": "runbook"
     },
     {
@@ -151,34 +112,15 @@
         "evidence",
         "admission"
       ],
-      "description": "Maintains the opt-in Luna Factory extension in image/extension/luna-factory/. Use when editing admission, evidence reconciliation, convergence, or repair lineage.",
-      "version": "0.1",
-      "last_updated": "2026-09-20",
+      "description": "Maintains the opt-in Luna Factory extension in image/extension/luna-factory/. Use when changing admission, evidence reconciliation, convergence, or repair lineage.",
+      "version": "0.2",
+      "last_updated": "2026-09-23",
       "doc_type": "runbook"
-    },
-    {
-      "id": "pr-labels",
-      "name": "pr-labels",
-      "one_line_purpose": "Enforce the canonical factory lifecycle, admission, and automation label contract.",
-      "entry_point": "docs/skills/pr-labels.md",
-      "category": "meta",
-      "status": "active",
-      "tags": [
-        "labels",
-        "factory",
-        "triage",
-        "automation",
-        "workflow"
-      ],
-      "description": "Defines projectbluefin's lifecycle labels, 3-clanker-queue admission, 3-human-queue routing, and the lgtm approval flag. Use when managing labels or triage.",
-      "version": "1.1",
-      "last_updated": "2026-09-13",
-      "doc_type": "policy"
     },
     {
       "id": "pr-workflow",
       "name": "pr-workflow",
-      "one_line_purpose": "Open review pull requests that merge cleanly.",
+      "one_line_purpose": "Prepare reviewable branches and pull requests for this repository.",
       "entry_point": "docs/skills/pr-workflow.md",
       "category": "meta",
       "status": "active",
@@ -186,18 +128,17 @@
         "git",
         "pullrequest",
         "branches",
-        "labels",
-        "testing"
+        "validation"
       ],
-      "description": "Defines pull request, branch, title, trailer, and validation requirements, repository lifecycle and queue label taxonomy, how to reconcile a long-lived branch with squash-merged main, and why a test must run a feature.",
-      "version": "1.12",
-      "last_updated": "2026-09-13",
+      "description": "Defines branch, commit, push, and pull-request practice for Review + Luna Factory changes.",
+      "version": "1.13",
+      "last_updated": "2026-09-23",
       "doc_type": "policy"
     },
     {
       "id": "review-checks",
       "name": "review-checks",
-      "one_line_purpose": "Maintain the OMP workbench review agents and policy seam.",
+      "one_line_purpose": "Maintain neutral Review agents and generic policy.",
       "entry_point": "docs/skills/review-checks.md",
       "category": "ci-ops",
       "status": "active",
@@ -205,18 +146,18 @@
         "checks",
         "review",
         "subagents",
-        "doctrine",
+        "policy",
         "omp"
       ],
-      "description": "Maintains the review agents shipped by the OMP workbench. Use when changing review doctrine, specialist responsibilities, or orchestration prompts.",
-      "version": "2.1",
-      "last_updated": "2026-09-14",
+      "description": "Maintains Review's generic policy seam and read-only specialist agents.",
+      "version": "2.2",
+      "last_updated": "2026-09-23",
       "doc_type": "reference"
     },
     {
       "id": "review-dashboard",
       "name": "review-dashboard",
-      "one_line_purpose": "Maintain the queue, slay lifecycles, and workflowz workbench.",
+      "one_line_purpose": "Maintain the GitHub Review workbench and mutation guards.",
       "entry_point": "docs/skills/review-dashboard.md",
       "category": "ci-ops",
       "status": "active",
@@ -225,18 +166,18 @@
         "extension",
         "dashboard",
         "review",
-        "maintainer",
-        "workflowz"
+        "workflowz",
+        "github"
       ],
-      "description": "Maintains the OMP review workbench. Use for queue ordering, slay or autoslay, workflowz issue batches, durable batch state, dashboard controls, or mutation guards.",
-      "version": "5.5",
-      "last_updated": "2026-09-22",
+      "description": "Maintains Review queue behavior, evidence, bounded actions, and mutation safeguards.",
+      "version": "5.6",
+      "last_updated": "2026-09-23",
       "doc_type": "runbook"
     },
     {
       "id": "review-monitoring",
       "name": "review-monitoring",
-      "one_line_purpose": "Monitor OMP workbenches and Hive contributor workers.",
+      "one_line_purpose": "Observe Review and Factory without disturbing active work.",
       "entry_point": "docs/skills/review-monitoring.md",
       "category": "ci-ops",
       "status": "active",
@@ -244,12 +185,12 @@
         "monitoring",
         "review",
         "omp",
-        "hive",
+        "factory",
         "container"
       ],
-      "description": "Use when observing or diagnosing a running OMP review appliance or Hive contributor worker.",
-      "version": "2.1",
-      "last_updated": "2026-09-14",
+      "description": "Use when observing or diagnosing an attended Review appliance or Luna Factory run.",
+      "version": "2.2",
+      "last_updated": "2026-09-23",
       "doc_type": "procedure"
     },
     {
@@ -269,25 +210,6 @@
       "version": "1.2",
       "last_updated": "2026-09-15",
       "doc_type": "reference"
-    },
-    {
-      "id": "upstream-hive",
-      "name": "upstream-hive",
-      "one_line_purpose": "File and follow up on hivecommons/hive issues as an exemplary downstream.",
-      "entry_point": "docs/skills/upstream-hive.md",
-      "category": "ci-ops",
-      "status": "active",
-      "tags": [
-        "hive",
-        "upstream",
-        "issues",
-        "evidence",
-        "contribution"
-      ],
-      "description": "Defines how this repository reports evidence to hivecommons/hive and follows up on filed issues. Use before opening, commenting on, or responding to an upstream Hive issue or pull request.",
-      "version": "1.3",
-      "last_updated": "2026-08-07",
-      "doc_type": "policy"
     }
   ]
 }

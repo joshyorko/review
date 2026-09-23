@@ -113,11 +113,11 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             gh_sha,
         ),
         package(
-            "bluefin-review-mode",
+            "review-workbench",
             args.version,
-            f"https://github.com/projectbluefin/review/tree/{args.revision}/image/extension/bluefin-review",
-            f"pkg:github/projectbluefin/review@{args.revision}",
-            "The Bluefin Review mode for omp: the extension package and its"
+            f"https://github.com/joshyorko/review/tree/{args.revision}/image/extension/bluefin-review",
+            f"pkg:github/joshyorko/review@{args.revision}",
+            "The GitHub Review workbench for OMP: its extension package and"
             " companion review agents, copied from this repository at the"
             " recorded revision. Installed to"
             " /usr/share/bluefin/review/extension.",
@@ -147,12 +147,12 @@ def main() -> int:
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
-        "name": "projectbluefin-review-appliance",
-        "documentNamespace": "https://github.com/projectbluefin/review/sbom/"
+        "name": "joshyorko-review-appliance",
+        "documentNamespace": "https://github.com/joshyorko/review/sbom/"
         f"review-appliance-{args.version}-{args.revision}-{arch}",
         "creationInfo": {
             "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "creators": ["Tool: projectbluefin-review-generate-appliance-sbom"],
+            "creators": ["Tool: review-generate-appliance-sbom"],
         },
         "packages": build_packages(args, arch),
     }

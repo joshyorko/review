@@ -1,5 +1,5 @@
 ---
-name: bluefin-test-coverage
+name: review-test-coverage
 description: Specialized test adequacy and regression reviewer — ensures diffs are backed by rigorous, deterministic automated tests, boundary checks, and regression tests for fixes.
 tools: read, grep, glob, bash, yield
 read-summarize: false
@@ -25,6 +25,5 @@ Evaluate with concrete file and line citations:
 Report gaps where modified or added production logic lacks adequate test coverage,
 citing the uncovered file and lines and specifying the missing test case.
 
-Consult the Hive knowledge base (`~/agent.md` when present) and testing skills
-(`test-coverage`, `shell-scripts`, `hardware-testing`) for known test patterns
-and gaps already recorded for this repository.
+Consult the target repository's instructions and relevant testing skills for
+known test patterns and gaps.
