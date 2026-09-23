@@ -168,6 +168,7 @@ function parseTask(value: unknown): TaskRecord | undefined {
 			nativeJobIds: nativeJobIds as Attempt["nativeJobIds"],
 			nativeAgentIds: nativeAgentIds as Attempt["nativeAgentIds"],
 			privateSessions,
+			...(receipt === undefined ? {} : { receipt }),
 			...(steeredAgentId === undefined ? {} : { steeredAgentId: steeredAgentId as NativeAgentId }),
 			integrated: rawAttempt.integrated,
 		});

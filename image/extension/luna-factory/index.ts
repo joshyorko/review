@@ -383,7 +383,7 @@ function createNativeAgentSteeringObserver(
 		watch.session = session;
 		watch.unsubscribe = session.subscribe((event) => {
 			if (!isRecord(event) || event.type !== "message_start" || !isRecord(event.message)) return;
-			if (event.message.role !== "user" || event.message.attribution === "agent") return;
+			if (event.message.role !== "user" || event.message.attribution !== "user") return;
 			if (watch.steered) return;
 			watch.steered = true;
 			if (watch.binding) {

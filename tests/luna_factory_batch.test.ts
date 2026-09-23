@@ -389,13 +389,13 @@ test("drain does not reschedule a queued item while its OMP session start is pen
 		const selected = { key: "org/a#1", repo: "org/a", number: 1, kind: "issue", action: "inspect", overlaps: [], acceptanceRevision: "r1", base: "a".repeat(40), head: "a".repeat(40) };
 		const batch = createBatch([selected], { id: "batch-dead", capacity: 2, maxAttempts: 3, maxTotalAttempts: 10, mode: "once" });
 		const service = new BatchService(root, { snapshot: async value => value, assertFresh: async () => {} }, undefined, {}, 2);
-		const pendingStart = Promise.withResolvers<void>();
+		const pendingStart = Promise.withResolvers();
 		const releaseExecution = pendingStart.resolve;
 		try {
 			service.store.acquire();
 			service.store.write(batch);
 			let executions = 0;
-			const startedSignal = Promise.withResolvers<void>();
+			const startedSignal = Promise.withResolvers();
 			const started = startedSignal.promise;
 			const internal = service;
 			internal.execute = async (current, item) => {

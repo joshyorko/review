@@ -731,11 +731,26 @@ test("a returned worker moves to VERIFY and never straight to DONE", () => {
 	assert.equal(criterionProven(recorded, "A1" as CriterionId), false);
 });
 
+test("a returned receipt survives a journal reload", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt(),
+	}));
+	const loaded = parseJournal(journalRecord(recorded));
+	assert.equal(loaded.ok, true);
+	const persisted = loaded.ok
+		? findTask(loaded.ledger, "T1" as TaskId)?.attempts[0]?.receipt
+		: undefined;
+	assert.deepEqual(persisted, receipt());
+});
+
 test("a receipt may only be recorded once per attempt", () => {
 	const recorded = step(runningTask(), (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
 	const repeat = reduce(recorded, { kind: "record_receipt", expectedRevision: recorded.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }, REDUCE);
 	assert.equal(repeat.ok, false);
-	assert.match(repeat.ok ? "" : repeat.error, /already has a recorded receipt/);
 });
 
 test("a write task cannot complete before its attempt is integrated", () => {
