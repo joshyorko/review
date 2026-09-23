@@ -17,8 +17,8 @@ export function truncatePlain(text: string, width: number): string {
 	return `${text.slice(0, width - 1)}…`;
 }
 
-const RUNNING_STATES: Record<string, true> = { RUNNING: true };
-const BLOCKED_STATES: Record<string, true> = { BLOCKED: true, DEFERRED: true, ESCALATE: true, VERIFY: true };
+const ACTIVE_STATES: Record<string, true> = { READY: true, RUNNING: true, VERIFY: true };
+const BLOCKED_STATES: Record<string, true> = { BLOCKED: true, DEFERRED: true, ESCALATE: true };
 
 /**
  * The one-line status indicator.
@@ -27,13 +27,18 @@ const BLOCKED_STATES: Record<string, true> = { BLOCKED: true, DEFERRED: true, ES
  * queue gauge or Hive connectivity.
  */
 export function renderStatus(ledger: Ledger, width = 120, verdict: RunVerdict = evaluateRun(ledger)): string {
-	const running = ledger.tasks.filter((task) => RUNNING_STATES[task.state] === true).length;
-	const blocked = ledger.tasks.filter((task) => BLOCKED_STATES[task.state] === true).length;
+	const activeCriteria = new Set(ledger.tasks.filter((task) => ACTIVE_STATES[task.state] === true).map((task) => task.criterionId));
+	const blockedCriteria = new Set(ledger.tasks.filter((task) => BLOCKED_STATES[task.state] === true).map((task) => task.criterionId));
+	const remaining = verdict.remaining;
+	const active = remaining.filter((id) => activeCriteria.has(id)).length;
+	const blocked = remaining.filter((id) => !activeCriteria.has(id) && blockedCriteria.has(id)).length;
+	const unknown = remaining.length - active - blocked;
 	const parts = [
 		`Factory ${ledger.generation}`,
 		`${verdict.provenMandatory}/${verdict.totalMandatory} proven`,
-		`${running} running`,
+		`${active} active`,
 		`${blocked} blocked`,
+		`${unknown} unknown`,
 	];
 	if (ledger.control !== "active") parts.push(ledger.control);
 	if (verdict.converged) parts.push("converged");

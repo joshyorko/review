@@ -1124,12 +1124,24 @@ test("durability is unavailable when the session exposes no history", () => {
 
 test("the status indicator is namespaced and reports gates without a dashboard", () => {
 	const line = renderStatus(ledger());
-	assert.match(line, /^Factory G1 · 0\/1 proven · 0 running · 0 blocked$/);
+	assert.match(line, /^Factory G1 · 0\/1 proven · 0 active · 0 blocked · 1 unknown$/);
 
 	const detail = renderStatusDetail(ledger());
 	assert.match(detail[0]!, /^Factory G1/);
 	assert.ok(detail.some((row) => /\[mandatory\] A1: the fix is proven — unproven/.test(row)));
 	assert.ok(detail.some((row) => /non-goals: no new dashboard/.test(row)));
+});
+
+test("status counts VERIFY as active and leaves unrepresented mandatory scope unknown", () => {
+	const verifying = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt({ unresolved: ["verification remains incomplete"] }),
+	}));
+	assert.match(renderStatus(verifying), /0\/1 proven · 1 active · 0 blocked · 0 unknown/);
+	assert.match(renderStatus(ledger()), /0\/1 proven · 0 active · 0 blocked · 1 unknown/);
 });
 
 test("status detail marks unread routing as unverified rather than assuming a model", () => {
