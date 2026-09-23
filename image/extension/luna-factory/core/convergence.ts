@@ -34,6 +34,7 @@ export interface RunVerdict {
 
 const BLOCKED_PROGRESS_STATES: Record<string, true> = { BLOCKED: true, DEFERRED: true };
 const BLOCKER_STATES: Record<string, true> = { BLOCKED: true, DEFERRED: true, ESCALATE: true };
+const AUTHORIZED_STATES: Record<string, true> = { READY: true, RUNNING: true, VERIFY: true };
 
 /**
  * Evaluate the run.
