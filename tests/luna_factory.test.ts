@@ -1083,9 +1083,11 @@ test("moving one criterion assumption invalidates only its dependent proof", () 
 	const initial = ledger();
 	const scoped: Ledger = {
 		...initial,
-		criteria: initial.criteria.map((criterion) => criterion.id === ("A1" as CriterionId)
-			? { ...criterion, assumptions: [{ kind: "acceptance-revision", value: "r1" }] }
-			: criterion),
+		criteria: initial.criteria.map((criterion) => {
+			if (criterion.id === ("A1" as CriterionId)) return { ...criterion, assumptions: [{ kind: "acceptance-revision", value: "r1" }] };
+			if (criterion.id === ("A2" as CriterionId)) return { ...criterion, mandatory: true };
+			return criterion;
+		}),
 	};
 	let current = step(scoped, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
 	current = executedAttempt(current, "T1" as TaskId, "T1-a1");
