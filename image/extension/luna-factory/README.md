@@ -58,9 +58,16 @@ the stable fallback:
 | (explicit post-success defect) | `luna_factory_reopen` — invalidate prior proof only after owner-supplied new evidence |
 | (verified finish) | `luna_factory_completion` |
 
-`luna_factory_dispatch` builds the bounded prompt for an admitted task. On the
-packaged OMP, the same-name `task` wrapper then admits only the stamped native
-task call and delegates execution through OMP's own `ctx.invokeTool` seam.
+`luna_factory_attempt` records dispatch intent and leaves the task `READY`.
+Only after the packaged OMP `task` wrapper observes OMP job/result identities
+bound to that task, attempt, and generation does the ledger move it to
+`RUNNING`. An attempt with no observed child remains intent, not execution.
+Factory-private SDK sessions remain outside OMP Agent Hub: they are not shown by
+Ctrl+A, which lists globally registered OMP agents. Factory status is the
+projection for Factory-owned work; do not switch its private registry to the
+global registry to make those sessions appear in Hub.
+Selected-batch status records each private session file with its worker/acceptance
+phase and attempt identity; session paths are not treated as live after restart.
 
 ## Execution boundary
 
@@ -127,9 +134,10 @@ security boundary and nothing here guarantees termination.
 
 ## Run state, evidence, recovery
 
-`CANDIDATE → READY | BLOCKED | DEFERRED | ESCALATE` then `READY → RUNNING →
-VERIFY → DONE`, with run control (`active`, `paused`, `draining`, `interrupted`,
-`quiescent`, `converged`) kept separate from task state.
+`CANDIDATE → READY` (including persisted attempt intent) → `RUNNING` only after
+the packaged OMP task returns a bound job/result identity → `VERIFY → DONE`,
+with run control (`active`, `paused`, `draining`, `interrupted`, `quiescent`,
+`converged`) kept separate from task state.
 
 The ledger is one versioned, namespaced custom entry (`com.joshyorko.luna-factory.run`)
 written through native session storage. A missing, corrupt, or unknown-version

@@ -141,6 +141,11 @@ export interface Candidate {
 	readonly necessity: string;
 }
 
+export interface FactoryPrivateSession {
+	readonly phase: "worker" | "acceptance";
+	readonly sessionFile: string;
+}
+
 export interface Attempt {
 	readonly id: AttemptId;
 	/** 1-based, preserved across new workers, branches, and goal changes. */
@@ -152,6 +157,8 @@ export interface Attempt {
 	readonly nativeJobIds: readonly NativeJobId[];
 	/** Native result/agent identities correlated with the recorded job. */
 	readonly nativeResultIds: readonly NativeJobId[];
+	/** Factory-private SDK session files; these have no OMP Agent Hub ID. */
+	readonly privateSessions: readonly FactoryPrivateSession[];
 	readonly receipt?: EvidenceReceipt;
 	/** Integration is an explicit owner act; auto-apply is never assumed. */
 	readonly integrated: boolean;
@@ -207,6 +214,14 @@ export type LedgerEvent =
 			readonly taskId: TaskId;
 			readonly attemptId: AttemptId;
 			readonly subject: Subject;
+		}
+	| {
+			readonly kind: "record_private_session";
+			readonly expectedRevision: number;
+			readonly taskId: TaskId;
+			readonly attemptId: AttemptId;
+			readonly phase: FactoryPrivateSession["phase"];
+			readonly sessionFile: string;
 		}
 	| {
 			readonly kind: "record_native_job";

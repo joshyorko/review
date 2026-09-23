@@ -124,12 +124,20 @@ export function batchConverged(batch: Batch): boolean {
 }
 export function batchSummary(batch: Batch, root: string): string {
 	const done = batch.items.filter((item) => item.stage === "DONE").length;
-	return [
+	const lines = [
 		`Factory ${batch.id}: ${batchConverged(batch) ? "CONVERGED" : batch.control} · ${done}/${batch.items.length} proven · capacity ${batch.capacity}`,
 		`State: ${root}; ${batch.mode === "once" ? "run once (unfinished work retained)" : "keep for resume"}. No detached service; process termination interrupts work.`,
-		...batch.items.map((item) => `${item.selected.key} ${item.selected.action}: ${item.stage}${item.blocker ? ` — ${item.blocker}` : ""}${item.workspace ? ` · ${item.workspace}` : ""}${item.operation?.url ? ` · ${item.operation.url}` : ""}`),
+		...batch.items.flatMap((item) => {
+			const attempts = item.ledger.tasks.flatMap((task) => task.attempts.map((attempt) => ({ task, attempt })));
+			return [
+				`${item.selected.key} ${item.selected.action}: ${item.stage}${item.blocker ? ` — ${item.blocker}` : ""}${item.workspace ? ` · ${item.workspace}` : ""}${item.operation ? ` · ${item.operation.phase} ${item.operation.state} (${item.operation.id})` : ""}${item.operation?.url ? ` · ${item.operation.url}` : ""}`,
+				...attempts.flatMap(({ task, attempt }) => attempt.privateSessions.map((session) => `  Factory-private ${session.phase} session ${task.id}/${attempt.id}: ${session.sessionFile}`)),
+			];
+		}),
 		...(batch.scopeRevisions.length ? [`Original scope NOT converged: ${batch.scopeRevisions.map((entry) => `${entry.item}: ${entry.reason}`).join("; ")}`] : []),
+		"Factory-private SDK sessions are not globally registered OMP agents and do not appear in Ctrl+A.",
 		`Usage: ${batch.usage.modelCalls} observed model calls; tokens/cost ${batch.usage.cost === null ? "unknown" : batch.usage.cost}. Stop-dispatch limits do not bound in-flight cost.`,
 		`/factory resume ${batch.id} · /factory inspect ${batch.id} · /factory pause ${batch.id} · /factory stop ${batch.id}`,
-	].join("\n");
+	];
+	return lines.join("\n");
 }

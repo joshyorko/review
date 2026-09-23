@@ -259,9 +259,8 @@ function nativeTaskBindings(params: Record<string, unknown>, current: Ledger): {
 		if (task.effect === "write" && rawItem.isolated !== true) {
 			return { ok: false, error: `native task item ${index + 1} is a write task and requires isolated:true before delegation` };
 		}
-		if (current.control !== "active") return { ok: false, error: `run is ${current.control}; native task admission is closed` };
-		if (task.state !== "RUNNING" || task.decision !== "ADMIT" || attempt.state !== "started") {
-			return { ok: false, error: `native task item ${index + 1} is not bound to an admitted running attempt` };
+		if (task.state !== "READY" || task.decision !== "ADMIT" || attempt.state !== "started" || attempt.nativeJobIds.length > 0 || attempt.nativeResultIds.length > 0) {
+			return { ok: false, error: `native task item ${index + 1} is not bound to an admitted attempt awaiting its first OMP execution` };
 		}
 		if (attempt.subject.repo !== current.subject.repo || attempt.subject.base !== current.subject.base || attempt.subject.head !== current.subject.head) {
 			return { ok: false, error: `native task item ${index + 1} is bound to a stale Factory subject` };
@@ -342,6 +341,23 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				}
 
 				const identities = nativeTaskIdentities(result.details);
+				const hasExecutionIdentity = identities.jobId !== undefined || identities.unindexedResultIds.length > 0 || identities.resultIdsByIndex.size > 0;
+				if (!hasExecutionIdentity) {
+					for (const binding of bindings.bindings) {
+						const current = ledger;
+						if (current === undefined) break;
+						const unknown = reduce(current, {
+							kind: "reconcile_attempt",
+							expectedRevision: current.revision,
+							taskId: binding.taskId,
+							attemptId: binding.attemptId,
+							outcome: "unknown",
+							reason: "OMP returned no execution identity for the delegated task",
+						}, { artifactRoots });
+						if (unknown.ok) commit(unknown.ledger);
+					}
+					return { content: text("native task returned without an OMP execution identity; bound attempts were escalated as unknown"), isError: true };
+				}
 				for (const binding of bindings.bindings) {
 					const indexed = identities.resultIdsByIndex.get(binding.index);
 					const resultIds = indexed === undefined

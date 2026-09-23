@@ -138,6 +138,14 @@ function parseTask(value: unknown): TaskRecord | undefined {
 		const nativeResultIds = rawAttempt.nativeResultIds;
 		if (!nativeResultIds.every((id) => identity(id))) return undefined;
 		if (new Set(rawAttempt.nativeJobIds).size !== rawAttempt.nativeJobIds.length || new Set(nativeResultIds).size !== nativeResultIds.length) return undefined;
+		const rawPrivateSessions = rawAttempt.privateSessions ?? [];
+		if (!Array.isArray(rawPrivateSessions) || rawPrivateSessions.length > 2) return undefined;
+		const privateSessions: Attempt["privateSessions"][number][] = [];
+		for (const session of rawPrivateSessions) {
+			if (!isRecord(session) || (session.phase !== "worker" && session.phase !== "acceptance") || !boundedText(session.sessionFile)) return undefined;
+			if (privateSessions.some((current) => current.phase === session.phase)) return undefined;
+			privateSessions.push({ phase: session.phase, sessionFile: session.sessionFile });
+		}
 		let receipt: Attempt["receipt"];
 		if (rawAttempt.receipt !== undefined) {
 			const parsedReceipt = parseReceipt(rawAttempt.receipt);
@@ -154,6 +162,7 @@ function parseTask(value: unknown): TaskRecord | undefined {
 			state: rawAttempt.state as Attempt["state"],
 			nativeJobIds: rawAttempt.nativeJobIds as Attempt["nativeJobIds"],
 			nativeResultIds: nativeResultIds as Attempt["nativeResultIds"],
+			privateSessions,
 			...(receipt === undefined ? {} : { receipt }),
 			integrated: rawAttempt.integrated,
 		});

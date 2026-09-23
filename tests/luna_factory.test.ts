@@ -102,8 +102,8 @@ function step(current: Ledger, build: (revision: number) => LedgerEvent): Ledger
 	return result.ok ? result.ledger : current;
 }
 
-/** An admitted, running task with one attempt already opened. */
-function runningTask(): Ledger {
+/** An admitted task with durable intent but no observed OMP child yet. */
+function intentTask(): Ledger {
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
 	return step(admitted, (revision) => ({
 		kind: "start_attempt",
@@ -111,6 +111,28 @@ function runningTask(): Ledger {
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		subject: SUBJECT,
+	}));
+}
+/** An admitted task whose OMP execution identity is observed and recorded. */
+function runningTask(): Ledger {
+	const intent = intentTask();
+	return step(intent, (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		jobId: "job-1",
+		resultIds: ["agent-1"],
+	}));
+}
+function executedAttempt(current: Ledger, taskId: TaskId, attemptId: string): Ledger {
+	const intent = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId, attemptId, subject: SUBJECT }));
+	return step(intent, (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId,
+		attemptId,
+		jobId: `job-${taskId}-${attemptId}`,
 	}));
 }
 
@@ -207,8 +229,12 @@ test("independent admitted tasks can run in parallel on the same subject", () =>
 		attemptId: "T2-a1",
 		subject: SUBJECT,
 	}));
-	assert.equal(findTask(startedB, "T1" as TaskId)?.state, "RUNNING");
-	assert.equal(findTask(startedB, "T2" as TaskId)?.state, "RUNNING");
+	assert.equal(findTask(startedB, "T1" as TaskId)?.state, "READY");
+	assert.equal(findTask(startedB, "T2" as TaskId)?.state, "READY");
+	const executed = step(startedB, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", jobId: "job-T1" }));
+	const bothExecuted = step(executed, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", jobId: "job-T2" }));
+	assert.equal(findTask(bothExecuted, "T1" as TaskId)?.state, "RUNNING");
+	assert.equal(findTask(bothExecuted, "T2" as TaskId)?.state, "RUNNING");
 });
 
 test("a deferred dependency join becomes READY only after every dependency is proven", () => {
@@ -239,12 +265,12 @@ test("a deferred dependency join becomes READY only after every dependency is pr
 	}));
 	assert.equal(findTask(current, "T3" as TaskId)?.state, "DEFERRED");
 
-	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	current = executedAttempt(current, "T1" as TaskId, "T1-a1");
 	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ taskId: "T1" as TaskId, attemptId: "T1-a1" }) }));
 	current = step(current, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
 	assert.equal(findTask(current, "T3" as TaskId)?.state, "DEFERRED", "one proven dependency is not a join");
 
-	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", subject: SUBJECT }));
+	current = executedAttempt(current, "T2" as TaskId, "T2-a1");
 	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", receipt: receipt({ taskId: "T2" as TaskId, attemptId: "T2-a1" }) }));
 	current = step(current, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T2" as TaskId, criterionId: "A2" as CriterionId }));
 	assert.equal(findTask(current, "T3" as TaskId)?.state, "READY");
@@ -490,7 +516,7 @@ test("an interrupted attempt must be reconciled before resume and keeps retry li
 test("an unproven write cannot be integrated as if it were accepted", () => {
 	const writer = candidate({ effect: "write" });
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
-	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
 	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ unresolved: ["defect remains"] }) }));
 	const integrated = reduce(returned, { kind: "integrate_attempt", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: { ...SUBJECT, head: "b".repeat(40) } }, REDUCE);
 	assert.equal(integrated.ok, false);
@@ -499,34 +525,65 @@ test("an unproven write cannot be integrated as if it were accepted", () => {
 test("a proven write cannot integrate without an externally changed head", () => {
 	const writer = candidate({ effect: "write" });
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
-	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
 	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
 	const integrated = reduce(returned, { kind: "integrate_attempt", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
 	assert.equal(integrated.ok, false);
 	assert.match(integrated.ok ? "" : integrated.error, /externally changed head|concrete changed head/);
 });
 
-test("only a READY task may start, and an attempt id is not reused", () => {
+test("attempt intent stays READY until a bound OMP execution identity is recorded", () => {
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
-	const started = step(admitted, (revision) => ({
+	const intent = step(admitted, (revision) => ({
 		kind: "start_attempt",
 		expectedRevision: revision,
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		subject: SUBJECT,
 	}));
-	const again = reduce(started, { kind: "start_attempt", expectedRevision: started.revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }, REDUCE);
-	assert.equal(again.ok, false);
-	assert.match(again.ok ? "" : again.error, /only READY or VERIFY tasks may start/);
-
-	const duplicate = reduce(admitted, { kind: "start_attempt", expectedRevision: admitted.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
-	assert.equal(duplicate.ok, true);
-
-	const reused = reduce(started, { kind: "start_attempt", expectedRevision: started.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
-	assert.equal(reused.ok, false);
-	assert.match(reused.ok ? "" : reused.error, /already exists/);
+	assert.equal(findTask(intent, "T1" as TaskId)?.state, "READY");
+	assert.deepEqual(findTask(intent, "T1" as TaskId)?.attempts[0]?.nativeJobIds, []);
+	const retry = reduce(intent, { kind: "start_attempt", expectedRevision: intent.revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }, REDUCE);
+	assert.equal(retry.ok, false);
+	assert.match(retry.ok ? "" : retry.error, /unreturned attempt/);
+	const running = step(intent, (revision) => ({
+		kind: "record_native_job",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		jobId: "omp-job-1",
+		resultIds: ["omp-agent-1"],
+	}));
+	assert.equal(findTask(running, "T1" as TaskId)?.state, "RUNNING");
+	assert.deepEqual(findTask(running, "T1" as TaskId)?.attempts[0]?.nativeJobIds, ["omp-job-1"]);
 });
 
+test("Factory-private worker and acceptance session identities persist with phase", () => {
+	const intent = intentTask();
+	const worker = step(intent, (revision) => ({
+		kind: "record_private_session",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		phase: "worker",
+		sessionFile: "/state/sessions/worker.jsonl",
+	}));
+	assert.equal(findTask(worker, "T1" as TaskId)?.state, "RUNNING");
+	const acceptance = step(worker, (revision) => ({
+		kind: "record_private_session",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		phase: "acceptance",
+		sessionFile: "/state/sessions/acceptance.jsonl",
+	}));
+	const loaded = parseJournal(journalRecord(acceptance));
+	assert.equal(loaded.ok, true);
+	assert.deepEqual(loaded.ok ? findTask(loaded.ledger, "T1" as TaskId)?.attempts[0]?.privateSessions : [], [
+		{ phase: "worker", sessionFile: "/state/sessions/worker.jsonl" },
+		{ phase: "acceptance", sessionFile: "/state/sessions/acceptance.jsonl" },
+	]);
+});
 test("an unproven VERIFY task can open one bounded retry on the same lineage", () => {
 	const returned = step(runningTask(), (revision) => ({
 		kind: "record_receipt",
@@ -542,7 +599,7 @@ test("an unproven VERIFY task can open one bounded retry on the same lineage", (
 		attemptId: "T1-a2",
 		subject: SUBJECT,
 	}));
-	assert.equal(findTask(retry, "T1" as TaskId)?.state, "RUNNING");
+	assert.equal(findTask(retry, "T1" as TaskId)?.state, "READY");
 	assert.deepEqual(findTask(retry, "T1" as TaskId)?.attempts.map((attempt) => attempt.lineage), [1, 2]);
 });
 
@@ -562,7 +619,7 @@ test("a receipt may only be recorded once per attempt", () => {
 test("a write task cannot complete before its attempt is integrated", () => {
 	const writer = candidate({ effect: "write" });
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
-	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
 	const recorded = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
 	const finish = reduce(recorded, { kind: "finish_task", expectedRevision: recorded.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }, REDUCE);
 	assert.equal(finish.ok, false);
@@ -604,7 +661,7 @@ test("integrating a moved head demotes proof taken against the old subject", () 
 	const writer = candidate({ taskId: "T2" as TaskId, criterionId: "A2" as CriterionId, effect: "write" });
 	const stillOpen = { ...firstFinished, criteria: firstFinished.criteria.map((criterion) => criterion.id === ("A2" as CriterionId) ? { ...criterion, mandatory: true } : criterion) };
 	const admitted = step(stillOpen, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
-	const started = step(admitted, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", subject: SUBJECT }));
+	const started = executedAttempt(admitted, "T2" as TaskId, "T2-a1");
 	const recorded = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", receipt: receipt({ taskId: "T2" as TaskId, attemptId: "T2-a1" }) }));
 	const moved = step(recorded, (revision) => ({
 		kind: "integrate_attempt",
@@ -673,7 +730,7 @@ test("reopening requires new evidence and replanning requires a diagnosed platea
 		subject: SUBJECT,
 	}, REDUCE);
 	assert.equal(retry.ok, true, retry.ok ? "" : retry.error);
-	assert.equal(retry.ok ? findTask(retry.ledger, "T1" as TaskId)?.state : undefined, "RUNNING");
+	assert.equal(retry.ok ? findTask(retry.ledger, "T1" as TaskId)?.state : undefined, "READY");
 
 	const replan = reduce(reopened, { kind: "use_replan", expectedRevision: reopened.revision, taskId: "T1" as TaskId }, REDUCE);
 	assert.equal(replan.ok, false);
@@ -684,7 +741,7 @@ test("one bounded replan is allowed after a plateau, and only once", () => {
 	let current = runningTask();
 	for (const attempt of ["T1-a1", "T1-a2"]) {
 		if (attempt === "T1-a2") {
-			current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: attempt, subject: SUBJECT }));
+			current = executedAttempt(current, "T1" as TaskId, attempt);
 		}
 		current = step(current, (revision) => ({
 			kind: "record_receipt",
@@ -783,7 +840,7 @@ test("a user pause is never overridden by a converged verdict", () => {
 test("a diagnosed, exhausted plateau is reported as a blocker with no silent retry", () => {
 	let current = runningTask();
 	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ unresolved: ["still broken"] }) }));
-	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }));
+	current = executedAttempt(current, "T1" as TaskId, "T1-a2");
 	current = step(current, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a2", receipt: receipt({ attemptId: "T1-a2", unresolved: ["still broken"] }) }));
 	current = step(current, (revision) => ({ kind: "use_replan", expectedRevision: revision, taskId: "T1" as TaskId }));
 	const verdict = evaluateRun(current);
@@ -846,7 +903,7 @@ test("a closed run admits no new dispatch", () => {
 });
 
 test("the dispatched prompt carries the ledger's identity, never a caller-supplied one", () => {
-	const plan = buildDispatchPrompt(runningTask(), "T1" as TaskId, "T1-a1");
+	const plan = buildDispatchPrompt(intentTask(), "T1" as TaskId, "T1-a1");
 	assert.equal(plan.ok, true);
 	const prompt = plan.ok ? plan.prompt : "";
 	assert.match(prompt, /task T1 \(attempt T1-a1, lineage 1\)/);
@@ -1198,6 +1255,9 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 		necessity: "A1 is unproven",
 	});
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	const intent = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[] }> }> };
+	assert.equal(intent.tasks[0]!.state, "READY");
+	assert.deepEqual(intent.tasks[0]!.attempts[0]!.nativeJobIds, []);
 
 	const task = host.tools.get("task");
 	assert.ok(task, "a host with native task support gets a same-name wrapper");
@@ -1218,7 +1278,8 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 	const accepted = await task.execute("call", { task: `do the work\n${marker}` }, undefined, undefined, context);
 	assert.equal(accepted.isError, undefined);
 	assert.equal(nativeCalls, 1);
-	const record = host.entries.at(-1)!.data as { tasks: Array<{ attempts: Array<{ nativeJobIds: string[]; nativeResultIds: string[] }> }> };
+	const record = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[]; nativeResultIds: string[] }> }> };
+	assert.equal(record.tasks[0]!.state, "RUNNING");
 	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeJobIds, ["job-1"]);
 	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeResultIds, ["agent-1"]);
 });

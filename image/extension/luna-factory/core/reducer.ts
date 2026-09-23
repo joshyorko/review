@@ -181,6 +181,9 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 					return { ok: false, error: `task ${task.id} already has current proven evidence; finish it before another attempt` };
 				}
 			}
+			if (task.attempts.some((attempt) => attempt.state === "started")) {
+				return { ok: false, error: `task ${task.id} already has an unreturned attempt` };
+			}
 			const attempt: Attempt = {
 				id: event.attemptId,
 				lineage: task.attempts.length + 1,
@@ -190,28 +193,53 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 				state: "started",
 				nativeJobIds: [],
 				nativeResultIds: [],
+				privateSessions: [],
 				integrated: false,
 			};
-			return bump(replaceTask(ledger, task.id, (current) => ({ ...current, state: "RUNNING", attempts: [...current.attempts, attempt] })));
+			// Persisted attempt intent is not proof that an OMP child exists.
+			return bump(replaceTask(ledger, task.id, (current) => ({ ...current, state: "READY", attempts: [...current.attempts, attempt] })));
 		}
 
+		case "record_private_session": {
+			const task = findTask(ledger, event.taskId);
+			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
+			if (task === undefined || attempt === undefined) return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
+			if (attempt.state !== "started") return { ok: false, error: `attempt ${attempt.id} is not awaiting a Factory private session` };
+			if (!event.sessionFile.trim() || event.sessionFile.length > 2_000) return { ok: false, error: "Factory private session identity is empty or too long" };
+			const existing = attempt.privateSessions.find((session) => session.phase === event.phase);
+			if (existing !== undefined) {
+				return existing.sessionFile === event.sessionFile
+					? { ok: true, ledger }
+					: { ok: false, error: `attempt ${attempt.id} already has a different ${event.phase} private session` };
+			}
+			if (event.phase === "worker" && task.state !== "READY") return { ok: false, error: `worker session cannot start while task ${task.id} is ${task.state}` };
+			if (event.phase === "acceptance" && task.state !== "RUNNING") return { ok: false, error: `acceptance session requires a running worker for ${task.id}` };
+			const next = replaceAttempt(ledger, task.id, attempt.id, (current) => ({
+				...current,
+				privateSessions: [...current.privateSessions, { phase: event.phase, sessionFile: event.sessionFile }],
+			}));
+			return bump(event.phase === "worker" ? replaceTask(next, task.id, (current) => ({ ...current, state: "RUNNING" })) : next);
+		}
 		case "record_native_job": {
 			const task = findTask(ledger, event.taskId);
 			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
 			if (task === undefined || attempt === undefined) {
 				return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
 			}
+			if (attempt.state !== "started") return { ok: false, error: `attempt ${attempt.id} is not awaiting an OMP execution identity` };
+			if (attempt.generation !== ledger.generation || attempt.subject.repo !== ledger.subject.repo || attempt.subject.base !== ledger.subject.base || attempt.subject.head !== ledger.subject.head) {
+				return { ok: false, error: `attempt ${attempt.id} is bound to a stale Factory execution` };
+			}
 			const resultIds = event.resultIds ?? [];
 			if (attempt.nativeJobIds.includes(event.jobId) && resultIds.every((id) => attempt.nativeResultIds.includes(id))) {
 				return { ok: true, ledger };
 			}
-			return bump(
-				replaceAttempt(ledger, task.id, attempt.id, (current) => ({
-					...current,
-					nativeJobIds: current.nativeJobIds.includes(event.jobId) ? current.nativeJobIds : [...current.nativeJobIds, event.jobId as NativeJobId],
-					nativeResultIds: [...current.nativeResultIds, ...resultIds.filter((id) => !current.nativeResultIds.includes(id))],
-				})),
-			);
+			const next = replaceAttempt(ledger, task.id, attempt.id, (current) => ({
+				...current,
+				nativeJobIds: current.nativeJobIds.includes(event.jobId) ? current.nativeJobIds : [...current.nativeJobIds, event.jobId as NativeJobId],
+				nativeResultIds: [...current.nativeResultIds, ...resultIds.filter((id) => !current.nativeResultIds.includes(id))],
+			}));
+			return bump(replaceTask(next, task.id, (current) => ({ ...current, state: "RUNNING" })));
 		}
 
 		case "record_native_result": {
@@ -220,14 +248,18 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (task === undefined || attempt === undefined) {
 				return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
 			}
+			if (attempt.state !== "started") return { ok: false, error: `attempt ${attempt.id} is not awaiting an OMP execution identity` };
+			if (attempt.generation !== ledger.generation || attempt.subject.repo !== ledger.subject.repo || attempt.subject.base !== ledger.subject.base || attempt.subject.head !== ledger.subject.head) {
+				return { ok: false, error: `attempt ${attempt.id} is bound to a stale Factory execution` };
+			}
 			if (attempt.nativeResultIds.includes(event.resultId)) return { ok: true, ledger };
-			return bump(
-				replaceAttempt(ledger, task.id, attempt.id, (current) => ({
-					...current,
-					nativeResultIds: [...current.nativeResultIds, event.resultId],
-				})),
-			);
+			const next = replaceAttempt(ledger, task.id, attempt.id, (current) => ({
+				...current,
+				nativeResultIds: [...current.nativeResultIds, event.resultId],
+			}));
+			return bump(replaceTask(next, task.id, (current) => ({ ...current, state: "RUNNING" })));
 		}
+
 
 		case "reconcile_attempt": {
 			const task = findTask(ledger, event.taskId);

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	batchConverged,
+	batchSummary,
 	createBatch,
 	dependencyBlocker,
 	selectionIdentity,
@@ -42,6 +43,29 @@ test("selection identity is canonical, duplicate selected keys are refused, and 
 	assert.throws(() => createBatch([items[0]!, items[0]!], options("dead")), /duplicate selected identity/);
 	assert.equal(createBatch(items, { ...options("beef"), mode: "retain" }).mode, "retain");
 });
+test("batch status exposes Factory-private session role and stable identity without claiming Hub visibility", () => {
+	const batch = createBatch([selected("org/a#1", "inspect")], options("session"));
+	const item = batch.items[0]!;
+	item.operation = { id: "batch-session-worker", phase: "worker", state: "intent" };
+	item.ledger = {
+		...item.ledger,
+		tasks: [{
+			id: "T1", generation: item.ledger.generation, criterionId: "A1", title: "inspect", deps: [],
+			effect: "read", owner: batch.id, state: "RUNNING", attempts: [{
+				id: "T1-a1", lineage: 1, taskId: "T1", generation: item.ledger.generation, subject: item.ledger.subject,
+				state: "started", nativeJobIds: [], nativeResultIds: [],
+				privateSessions: [{ phase: "worker", sessionFile: "/state/sessions/worker.jsonl" }],
+				integrated: false,
+			}], decision: "ADMIT", decisionReason: "selected",
+		}],
+	} as never;
+	const status = batchSummary(batch, "/state");
+	assert.match(status, /worker intent/);
+	assert.ok(status.includes("batch-session-worker"));
+	assert.ok(status.includes("Factory-private worker session T1/T1-a1: /state/sessions/worker.jsonl"));
+	assert.match(status, /do not appear in Ctrl\+A/);
+});
+
 
 test("dependencies enforce verified patch, PR-ready, and merged-upstream stages", () => {
 	const items = [selected("org/a#1"), selected("org/b#2", "pr-ready"), selected("org/c#3", "pr-ready")];
