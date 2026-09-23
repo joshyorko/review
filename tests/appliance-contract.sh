@@ -450,7 +450,7 @@ import json,sys
 document = json.load(sys.stdin)
 print(" ".join(sorted(package["name"] for package in document["packages"])))
 ')"
-for component in omp gh bluefin-review-mode; do
+for component in omp gh review-workbench; do
   grep -qF -- "$component" <<<"$sbom_packages" ||
     fail "the in-image SBOM does not record ${component}"
 done
