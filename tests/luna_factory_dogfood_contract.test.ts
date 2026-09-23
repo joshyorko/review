@@ -72,7 +72,7 @@ test("harness preserves the local-provider and runtime-boundary contract", () =>
     "luna_factory_candidate",
     "luna_factory_attempt",
     "luna_factory_dispatch",
-    "nativeResultIds",
+    "nativeAgentIds",
     "HOME",
     "XDG_STATE_HOME",
     'chmod 0711 "$run_root"',

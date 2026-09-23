@@ -1120,8 +1120,39 @@ test("a converged receipt states its scope and disclaims merge authority", () =>
 
 // ------------------------------------------------------------ extension host
 
-function fakeHost(options: { nativeTask?: boolean } = {}) {
-	const tools = new Map<string, { name: string; description?: string; execute(...args: any[]): Promise<{ content: Array<{ text: string }>; isError?: boolean; details?: unknown }> }>();
+interface FakeToolResult {
+	content: Array<{ text: string; type?: string }>;
+	isError?: boolean;
+	details?: unknown;
+}
+
+interface FakeTool {
+	name: string;
+	description?: string;
+	execute(...args: any[]): Promise<FakeToolResult>;
+}
+
+interface FakeHost {
+	tools: Map<string, FakeTool>;
+	nativeTaskCalls: { count: number };
+	events: Map<string, (event: unknown, ctx: unknown) => unknown>;
+	commands: Map<string, { description?: string; handler(args: string, ctx: unknown): unknown }>;
+	entries: Array<{ customType: string; data: unknown }>;
+	notifications: string[];
+	sentMessages: Array<{ content: string; options?: unknown }>;
+	zod: { object: () => unknown; string: () => unknown };
+	arktype?: (schema: unknown) => unknown;
+	setLabel(): void;
+	registerTool(definition: FakeTool): void;
+	appendEntry(customType: string, data: unknown): void;
+	on(name: string, handler: (event: unknown, ctx: unknown) => unknown): void;
+	registerCommand(name: string, definition: { description?: string; handler(args: string, ctx: unknown): unknown }): void;
+	sendUserMessage(content: string, options?: unknown): void;
+	notify(message: string): void;
+}
+
+function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
+	const tools = new Map<string, FakeTool>();
 	const events = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const commands = new Map<string, { description?: string; handler(args: string, ctx: unknown): unknown }>();
 	const entries: Array<{ customType: string; data: unknown }> = [];
@@ -1171,14 +1202,40 @@ function fakeHost(options: { nativeTask?: boolean } = {}) {
 	};
 }
 
-function startCtx(host: ReturnType<typeof fakeHost>) {
+function startCtx(host: FakeHost) {
 	return { hasUI: true, ui: { notify: (message: string) => host.notify(message) }, sessionManager: { getBranch: () => [] } };
 }
 
-async function callTool(host: ReturnType<typeof fakeHost>, name: string, input: unknown) {
+async function callTool(host: FakeHost, name: string, input: unknown) {
 	const tool = host.tools.get(name);
 	assert.ok(tool !== undefined, `${name} is not registered`);
 	return tool.execute("call", { input: JSON.stringify(input) });
+}
+async function observeNativeStart(
+	host: FakeHost,
+	taskId: string,
+	attemptId: string,
+	generation = "G1",
+): Promise<void> {
+	const task = host.tools.get("task");
+	assert.ok(task, "the native OMP task wrapper is registered");
+	const details = {
+		async: { state: "completed", jobId: `job-${taskId}-${attemptId}`, type: "task" },
+		progress: [{ index: 0, id: `agent-${taskId}-${attemptId}`, status: "completed", requests: 1 }],
+	};
+	const result = await task.execute(
+		"call",
+		{ agent: "task", isolated: true, task: `perform the admitted work\n${dispatchMarker(taskId, attemptId, generation)}` },
+		undefined,
+		undefined,
+		{
+			invokeTool: async (_params: unknown, options?: { onUpdate?: (update: unknown) => void }) => {
+				options?.onUpdate?.({ details });
+				return { content: [{ type: "text", text: "native child returned" }], details };
+			},
+		} as never,
+	);
+	assert.equal(result.isError, undefined, result.content[0]?.text);
 }
 
 const FULL_ENV = { LUNA_FACTORY_ENABLED: "1" };
@@ -1623,7 +1680,7 @@ test("opening rejects malformed objective and criteria before journaling", async
 });
 
 test("the admitted vertical runs end to end and finishes on proof", async () => {
-	const host = fakeHost();
+	const host = fakeHost({ nativeTask: true });
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
 	host.events.get("session_start")!({}, startCtx(host));
 
@@ -1650,6 +1707,7 @@ test("the admitted vertical runs end to end and finishes on proof", async () => 
 	assert.equal(dispatched.isError, undefined);
 	assert.match(dispatched.content[0]!.text, /admission boundary: enforced/);
 
+	await observeNativeStart(host, "T1", "T1-a1");
 	const recorded = await callTool(host, "luna_factory_receipt", {
 		...receipt(),
 		taskId: "T1",
@@ -1670,7 +1728,7 @@ test("the admitted vertical runs end to end and finishes on proof", async () => 
 });
 
 test("write integration is an explicit owner event and moves the proof subject", async () => {
-	const host = fakeHost();
+	const host = fakeHost({ nativeTask: true });
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
 	host.events.get("session_start")!({}, startCtx(host));
 	await callTool(host, "luna_factory_open", {
@@ -1691,6 +1749,7 @@ test("write integration is an explicit owner event and moves the proof subject",
 		necessity: "A1 is unproven",
 	});
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await observeNativeStart(host, "T1", "T1-a1");
 	await callTool(host, "luna_factory_receipt", receipt());
 	const integrated = await callTool(host, "luna_factory_integrate", {
 		taskId: "T1",
@@ -1708,7 +1767,7 @@ test("write integration is an explicit owner event and moves the proof subject",
 });
 
 test("the replan adapter exposes only the one diagnosed same-goal replan", async () => {
-	const host = fakeHost();
+	const host = fakeHost({ nativeTask: true });
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
 	host.events.get("session_start")!({}, startCtx(host));
 	await callTool(host, "luna_factory_open", {
@@ -1729,12 +1788,14 @@ test("the replan adapter exposes only the one diagnosed same-goal replan", async
 		necessity: "A1 is unproven",
 	});
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await observeNativeStart(host, "T1", "T1-a1");
 	await callTool(host, "luna_factory_receipt", receipt({ unresolved: ["still broken"] }));
 	const premature = await callTool(host, "luna_factory_replan", { taskId: "T1" });
 	assert.equal(premature.isError, true);
 	assert.match(premature.content[0]!.text, /not diagnosed/);
 
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a2" });
+	await observeNativeStart(host, "T1", "T1-a2");
 	await callTool(host, "luna_factory_receipt", receipt({ attemptId: "T1-a2", unresolved: ["still broken differently"] }));
 	const replanned = await callTool(host, "luna_factory_replan", { taskId: "T1" });
 	assert.equal(replanned.isError, undefined);
@@ -1749,7 +1810,7 @@ test("the replan adapter exposes only the one diagnosed same-goal replan", async
 });
 
 test("the reopen adapter records explicit post-success defect evidence", async () => {
-	const host = fakeHost();
+	const host = fakeHost({ nativeTask: true });
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
 	host.events.get("session_start")!({}, startCtx(host));
 	await callTool(host, "luna_factory_open", {
@@ -1772,6 +1833,7 @@ test("the reopen adapter records explicit post-success defect evidence", async (
 		necessity: "A1 is unproven",
 	});
 	await callTool(host, "luna_factory_attempt", { taskId: "T1", attemptId: "T1-a1" });
+	await observeNativeStart(host, "T1", "T1-a1");
 	await callTool(host, "luna_factory_receipt", receipt());
 	await callTool(host, "luna_factory_finish", { taskId: "T1" });
 	const cleanup = await callTool(host, "luna_factory_candidate", {
@@ -1955,7 +2017,7 @@ test("OMP task running status without a request remains unknown, not RUNNING", a
 	);
 	assert.equal(stateAtUnstartedProgress, "READY");
 	assert.equal(result.isError, true);
-	assert.match(result.content[0]!.text, /escalated as unknown/);
+	assert.ok(result.content.some((part) => /escalated as unknown/.test(part.text)));
 	const final = host.entries.at(-1)!.data as { tasks: Array<{ state: string; decisionReason: string; attempts: Array<{ state: string; nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
 	assert.equal(final.tasks[0]!.state, "ESCALATE");
 	assert.match(final.tasks[0]!.decisionReason, /liveness is unknown/);
