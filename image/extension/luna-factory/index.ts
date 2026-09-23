@@ -448,12 +448,11 @@ function createNativeAgentSteeringObserver(
 	};
 }
 
-// OMP's registry is embedded in the host, not a Node test dependency. Load this
-// plugin-owned observer only for native Factory tasks; tests inject a fake.
+// Keep this a literal dynamic import so OMP's compiled-extension rewriter can
+// map its bundled registry; tests inject a fake because they lack that package.
 async function loadNativeAgentRegistry(context: NativeInvokeContext): Promise<NativeAgentRegistryLike> {
 	if (context.agentRegistry) return context.agentRegistry;
-	const moduleName = "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-	const imported = await import(moduleName) as unknown as { AgentRegistry?: { global?: () => unknown } };
+	const imported = await import("@oh-my-pi/pi-coding-agent/registry/agent-registry") as unknown as { AgentRegistry?: { global?: () => unknown } };
 	const registry = imported.AgentRegistry?.global?.();
 	if (!isRecord(registry) || typeof registry.get !== "function" || typeof registry.onChange !== "function") {
 		throw new Error("OMP Agent Hub registry does not expose child observation");
