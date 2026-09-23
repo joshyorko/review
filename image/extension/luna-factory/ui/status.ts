@@ -8,6 +8,7 @@
  */
 
 import { evaluateRun, type RunVerdict } from "../core/convergence.ts";
+import { criterionProven } from "../core/evidence.ts";
 import type { Ledger, TaskId, TaskRecord } from "../core/model.ts";
 import { findTask } from "../core/model.ts";
 
@@ -62,8 +63,8 @@ export function renderStatusDetail(ledger: Ledger, width = 120, verdict: RunVerd
 	lines.push(`finish authority: ${ledger.goal.finishAuthority}`);
 	lines.push(`appetite: ${ledger.goal.appetite.tasks} tasks, ${ledger.goal.appetite.attemptsPerTask} attempts each`);
 	for (const criterion of ledger.criteria) {
-		const task = ledger.tasks.find((candidate) => candidate.criterionId === criterion.id && candidate.state === "DONE");
-		lines.push(`  ${criterion.mandatory ? "[mandatory]" : "[optional]"} ${criterion.id}: ${criterion.statement} — ${task ? "proven" : "unproven"}`);
+		const proven = criterionProven(ledger, criterion.id);
+		lines.push(`  ${criterion.mandatory ? "[mandatory]" : "[optional]"} ${criterion.id}: ${criterion.statement} — ${proven ? "proven" : "unproven"}`);
 	}
 	if (ledger.tasks.length === 0) {
 		lines.push("no tasks admitted yet");

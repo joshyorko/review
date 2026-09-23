@@ -527,6 +527,7 @@ test("worker-only version-two predicates cannot finish or remain current proof",
 		tasks: recorded.tasks.map((task) => ({ ...task, state: "DONE" as const })),
 	} as Ledger;
 	assert.equal(criterionProven(persistedDone, "A1" as CriterionId), false);
+	assert.ok(renderStatusDetail(persistedDone).some((line) => /A1: the fix is proven — unproven/.test(line)));
 });
 
 test("a persisted unverified semantic result cannot remain current criterion proof", () => {
