@@ -36,7 +36,7 @@ export const RECEIPT_CONTRACT = [
 	"  cleanEnvironment (true|false|unknown), unresolved[], next, confidence (low|medium|high),",
 	"  routing {requested?, effective?, effort?, verified}, exitCode, aborted, truncated, semanticResult?.",
 	"Each assumption is {kind, value} (dependency-outcome also includes taskId); report every required criterion assumption exactly.",
-	"Each predicate is {phase: worker|verification|acceptance, item, ok, note}; include every checked item with true and false outcomes, never only an aggregate. False verification or acceptance predicates invalidate proof; worker-phase outcomes remain recorded observations.",
+	"Each predicate is {phase: worker|verification|acceptance, item, ok, note}; include each checked item with its actual true or false result, never only an aggregate. Version-2 proof requires a positive acceptance predicate; false verification or acceptance predicates invalidate proof.",
 	"semanticResult, when applicable, is {kind: inspection|finding, outcome: no-finding|supported|disproven|uncertain, summary, verified, publicationAuthority: none, publicationBlocker?}. A blocker retains disclosure restrictions; it never grants publication authority. Semantic results alone are not proof.",
 	"Use the task and attempt ids exactly as given; do not assign yourself another identity.",
 	"Reference artifacts only inside the run's artifact roots.",

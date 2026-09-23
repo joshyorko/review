@@ -37,6 +37,12 @@ function sameAssumption(left: ProofAssumption, right: ProofAssumption): boolean 
 	return assumptionKey(left) === assumptionKey(right) && left.value === right.value;
 
 }
+function predicateEvidenceCurrent(receipt: EvidenceReceipt): boolean {
+	if (receipt.version === 1) return true;
+	const predicates = receipt.predicates ?? [];
+	return predicates.some((predicate) => predicate.phase === "acceptance" && predicate.ok) &&
+		!predicates.some((predicate) => (predicate.phase === "verification" || predicate.phase === "acceptance") && !predicate.ok);
+}
 function sameSubject(left: Subject, right: Subject): boolean {
 	return left.repo === right.repo && left.base === right.base && left.head === right.head;
 }
@@ -113,6 +119,9 @@ export function reconcileReceipt(ledger: Ledger, receipt: EvidenceReceipt, bindi
 	if (reasons.length > 0) return { status: "failed", reasons };
 	if (failedPredicates.length > 0) return { status: "failed", reasons: [`acceptance/verification predicates failed: ${failedPredicates.map((predicate) => predicate.item).join(", ")}`] };
 	if (receipt.version === 2 && (receipt.predicates?.length ?? 0) === 0) return { status: "unproved", reasons: ["version-2 receipt has no predicate evidence"] };
+	if (receipt.version === 2 && !receipt.predicates?.some((predicate) => predicate.phase === "acceptance" && predicate.ok)) {
+		return { status: "unproved", reasons: ["version-2 receipt lacks a positive acceptance predicate"] };
+	}
 	if (assumptionReasons.length > 0) return { status: "unproved", reasons: assumptionReasons };
 
 	if (receipt.aborted) return { status: "unproved", reasons: ["attempt was aborted"] };
@@ -170,6 +179,10 @@ function taskProofCurrentIn(ledger: Ledger, task: Ledger["tasks"][number], visit
 	const receipt = task.attempts.at(-1)?.receipt;
 	if (receipt === undefined) { visiting.delete(task.id); return false; }
 	if (receipt.semanticResult !== undefined && (!receipt.semanticResult.verified || receipt.semanticResult.outcome === "uncertain")) {
+		visiting.delete(task.id);
+		return false;
+	}
+	if (!predicateEvidenceCurrent(receipt)) {
 		visiting.delete(task.id);
 		return false;
 	}

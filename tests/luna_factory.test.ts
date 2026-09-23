@@ -416,7 +416,10 @@ test("semantic observations need separate evidence and cannot grant publication 
 		changed: [],
 		evidence: [],
 		tests: [],
-		predicates: [{ phase: "worker", item: "inspection predicate", ok: true, note: "checked" }],
+		predicates: [
+			{ phase: "worker", item: "inspection predicate", ok: true, note: "checked" },
+			{ phase: "acceptance", item: "inspection criterion", ok: true, note: "independently accepted" },
+		],
 		semanticResult: { kind: "inspection", outcome: "no-finding", summary: "no match", verified: true, publicationAuthority: "none" },
 	});
 	const noEvidenceResult = reconcileReceipt(ledger(), noEvidence, binding);
@@ -429,7 +432,10 @@ test("semantic observations need separate evidence and cannot grant publication 
 		changed: [],
 		evidence: ["/artifacts/inspection.log"],
 		tests: [],
-		predicates: [{ phase: "worker", item: "inspection predicate", ok: true, note: "checked" }],
+		predicates: [
+			{ phase: "worker", item: "inspection predicate", ok: true, note: "checked" },
+			{ phase: "acceptance", item: "inspection criterion", ok: true, note: "independently accepted" },
+		],
 		semanticResult: { kind: "inspection", outcome: "no-finding", summary: "no match", verified: true, publicationAuthority: "none" },
 	});
 	assert.equal(reconcileReceipt(ledger(), zeroFinding, binding).status, "proven");
@@ -485,11 +491,42 @@ test("semantic observations need separate evidence and cannot grant publication 
 		changed: [],
 		evidence: ["/artifacts/verification.log"],
 		tests: [],
-		predicates: [{ phase: "verification", item: "smoke command", ok: false, note: "exit 1" }],
+		predicates: [
+			{ phase: "verification", item: "smoke command", ok: false, note: "exit 1" },
+			{ phase: "acceptance", item: "verification result", ok: true, note: "reviewed" },
+		],
 	});
 	const gateResult = reconcileReceipt(ledger(), failedGate, binding);
 	assert.equal(gateResult.status, "failed");
 	assert.match(gateResult.reasons.join(";"), /verification predicates failed/);
+});
+
+test("worker-only version-two predicates cannot finish or remain current proof", () => {
+	const recorded = step(runningTask(), (revision) => ({
+		kind: "record_receipt",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		receipt: receipt({
+			version: 2,
+			assumptions: [],
+			predicates: [{ phase: "worker", item: "worker report", ok: true, note: "worker assertion only" }],
+		}),
+	}));
+	const finish = reduce(recorded, {
+		kind: "finish_task",
+		expectedRevision: recorded.revision,
+		taskId: "T1" as TaskId,
+		criterionId: "A1" as CriterionId,
+	}, REDUCE);
+	assert.equal(finish.ok, false);
+	if (!finish.ok) assert.match(finish.error, /positive acceptance predicate/);
+
+	const persistedDone = {
+		...recorded,
+		tasks: recorded.tasks.map((task) => ({ ...task, state: "DONE" as const })),
+	} as Ledger;
+	assert.equal(criterionProven(persistedDone, "A1" as CriterionId), false);
 });
 
 test("a persisted unverified semantic result cannot remain current criterion proof", () => {
@@ -501,7 +538,10 @@ test("a persisted unverified semantic result cannot remain current criterion pro
 		receipt: receipt({
 			version: 2,
 			assumptions: [],
-			predicates: [{ phase: "worker", item: "inspection predicate", ok: true, note: "checked" }],
+			predicates: [
+				{ phase: "worker", item: "inspection predicate", ok: true, note: "checked" },
+				{ phase: "acceptance", item: "inspection criterion", ok: true, note: "independently accepted" },
+			],
 			semanticResult: { kind: "inspection", outcome: "no-finding", summary: "observed", verified: true, publicationAuthority: "none" },
 		}),
 	}));
@@ -597,7 +637,10 @@ test("proof assumptions invalidate selectively and missing current authority sta
 			{ kind: "acceptance-revision", value: "rev-2" },
 			{ kind: "dependency-outcome", taskId: "T0" as TaskId, value: "proven" },
 		],
-		predicates: [{ phase: "worker", item: "dependency predicate", ok: true, note: "checked" }],
+		predicates: [
+			{ phase: "worker", item: "dependency predicate", ok: true, note: "checked" },
+			{ phase: "acceptance", item: "criterion accepted", ok: true, note: "reviewed" },
+		],
 	});
 	const binding = {
 		taskId: "T1" as TaskId,
@@ -974,7 +1017,10 @@ test("moving one criterion assumption invalidates only its dependent proof", () 
 	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
 	current = step(current, (revision) => ({
 		kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1",
-		receipt: receipt({ version: 2, assumptions: [{ kind: "acceptance-revision", value: "r1" }], predicates: [{ phase: "worker", item: "acceptance predicate", ok: true, note: "checked" }] }),
+		receipt: receipt({ version: 2, assumptions: [{ kind: "acceptance-revision", value: "r1" }], predicates: [
+			{ phase: "worker", item: "acceptance predicate", ok: true, note: "checked" },
+			{ phase: "acceptance", item: "criterion accepted", ok: true, note: "independently reviewed" },
+		] }),
 	}));
 	current = step(current, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
 	current = step(current, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ taskId: "T2" as TaskId, criterionId: "A2" as CriterionId }) }));
