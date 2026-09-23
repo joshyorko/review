@@ -18,7 +18,7 @@ export type TaskId = string & { readonly __identity: "TaskId" };
 export type AttemptId = string & { readonly __identity: "AttemptId" };
 export type CriterionId = string & { readonly __identity: "CriterionId" };
 export type GenerationId = string & { readonly __identity: "GenerationId" };
-export type NativeJobId = string & { readonly __identity: "NativeJobId" };
+export type NativeAgentId = string & { readonly __identity: "NativeAgentId" };
 
 /**
  * Task lifecycle.
@@ -144,6 +144,8 @@ export interface Candidate {
 export interface FactoryPrivateSession {
 	readonly phase: "worker" | "acceptance";
 	readonly sessionFile: string;
+	/** Set only after OMP reports this private session's first turn_start. */
+	readonly started: boolean;
 }
 
 export interface Attempt {
@@ -155,9 +157,9 @@ export interface Attempt {
 	readonly subject: Subject;
 	readonly state: "started" | "returned" | "abandoned";
 	readonly nativeJobIds: readonly NativeJobId[];
-	/** Native result/agent identities correlated with the recorded job. */
-	readonly nativeResultIds: readonly NativeJobId[];
-	/** Factory-private SDK session files; these have no OMP Agent Hub ID. */
+	/** OMP child agent identities recorded from native task execution details. */
+	readonly nativeAgentIds: readonly NativeAgentId[];
+	/** Factory-private SDK sessions; these have no global OMP Agent Hub ID. */
 	readonly privateSessions: readonly FactoryPrivateSession[];
 	readonly receipt?: EvidenceReceipt;
 	/** Integration is an explicit owner act; auto-apply is never assumed. */
@@ -224,19 +226,25 @@ export type LedgerEvent =
 			readonly sessionFile: string;
 		}
 	| {
+			readonly kind: "record_private_session_start";
+			readonly expectedRevision: number;
+			readonly taskId: TaskId;
+			readonly attemptId: AttemptId;
+			readonly phase: FactoryPrivateSession["phase"];
+		}
+	| {
 			readonly kind: "record_native_job";
 			readonly expectedRevision: number;
 			readonly taskId: TaskId;
 			readonly attemptId: AttemptId;
 			readonly jobId: NativeJobId;
-			readonly resultIds?: readonly NativeJobId[];
 		}
 	| {
-			readonly kind: "record_native_result";
+			readonly kind: "record_native_agent_start";
 			readonly expectedRevision: number;
 			readonly taskId: TaskId;
 			readonly attemptId: AttemptId;
-			readonly resultId: NativeJobId;
+			readonly agentId: NativeAgentId;
 		}
 	| {
 			readonly kind: "reconcile_attempt";

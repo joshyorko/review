@@ -127,25 +127,27 @@ function parseTask(value: unknown): TaskRecord | undefined {
 			!identity(rawAttempt.generation) ||
 			!isRecord(rawAttempt.subject) ||
 			typeof rawAttempt.state !== "string" ||
-			!Array.isArray(rawAttempt.nativeJobIds) ||
-			!Array.isArray(rawAttempt.nativeResultIds) ||
 			typeof rawAttempt.integrated !== "boolean"
 		) return undefined;
-		const parsedSubject = parseSubject(rawAttempt.subject);
-		if (parsedSubject === undefined || attemptIds.has(rawAttempt.id)) return undefined;
-		if (rawAttempt.state !== "started" && rawAttempt.state !== "returned" && rawAttempt.state !== "abandoned") return undefined;
-		if (!rawAttempt.nativeJobIds.every((id) => identity(id))) return undefined;
-		const nativeResultIds = rawAttempt.nativeResultIds;
-		if (!nativeResultIds.every((id) => identity(id))) return undefined;
-		if (new Set(rawAttempt.nativeJobIds).size !== rawAttempt.nativeJobIds.length || new Set(nativeResultIds).size !== nativeResultIds.length) return undefined;
-		const rawPrivateSessions = rawAttempt.privateSessions ?? [];
+		// Version-1 journals predate OMP identity fields. Missing identities stay empty;
+		// session-start reconciliation treats their unfinished attempts as unknown.
+		const nativeJobIds = rawAttempt.nativeJobIds === undefined ? [] : rawAttempt.nativeJobIds;
+		const legacyAgentIds = rawAttempt.nativeResultIds;
+		const nativeAgentIds = rawAttempt.nativeAgentIds === undefined ? (legacyAgentIds === undefined ? [] : legacyAgentIds) : rawAttempt.nativeAgentIds;
+		if (!Array.isArray(nativeJobIds) || !Array.isArray(nativeAgentIds)) return undefined;
+		if (!nativeJobIds.every((id) => identity(id)) || !nativeAgentIds.every((id) => identity(id))) return undefined;
+		if (new Set(nativeJobIds).size !== nativeJobIds.length || new Set(nativeAgentIds).size !== nativeAgentIds.length) return undefined;
+		const rawPrivateSessions = rawAttempt.privateSessions === undefined ? [] : rawAttempt.privateSessions;
 		if (!Array.isArray(rawPrivateSessions) || rawPrivateSessions.length > 2) return undefined;
 		const privateSessions: Attempt["privateSessions"][number][] = [];
 		for (const session of rawPrivateSessions) {
-			if (!isRecord(session) || (session.phase !== "worker" && session.phase !== "acceptance") || !boundedText(session.sessionFile)) return undefined;
+			if (!isRecord(session) || (session.phase !== "worker" && session.phase !== "acceptance") || !boundedText(session.sessionFile) || (session.started !== undefined && typeof session.started !== "boolean")) return undefined;
 			if (privateSessions.some((current) => current.phase === session.phase)) return undefined;
-			privateSessions.push({ phase: session.phase, sessionFile: session.sessionFile });
+			privateSessions.push({ phase: session.phase, sessionFile: session.sessionFile, started: session.started === true });
 		}
+		const parsedSubject = parseSubject(rawAttempt.subject);
+		if (parsedSubject === undefined || attemptIds.has(rawAttempt.id)) return undefined;
+		if (rawAttempt.state !== "started" && rawAttempt.state !== "returned" && rawAttempt.state !== "abandoned") return undefined;
 		let receipt: Attempt["receipt"];
 		if (rawAttempt.receipt !== undefined) {
 			const parsedReceipt = parseReceipt(rawAttempt.receipt);
@@ -160,8 +162,8 @@ function parseTask(value: unknown): TaskRecord | undefined {
 			generation: rawAttempt.generation as GenerationId,
 			subject: parsedSubject,
 			state: rawAttempt.state as Attempt["state"],
-			nativeJobIds: rawAttempt.nativeJobIds as Attempt["nativeJobIds"],
-			nativeResultIds: nativeResultIds as Attempt["nativeResultIds"],
+			nativeJobIds: nativeJobIds as Attempt["nativeJobIds"],
+			nativeAgentIds: nativeAgentIds as Attempt["nativeAgentIds"],
 			privateSessions,
 			...(receipt === undefined ? {} : { receipt }),
 			integrated: rawAttempt.integrated,

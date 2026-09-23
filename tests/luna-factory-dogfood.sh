@@ -242,7 +242,7 @@ else
   done
   journal_file="$(find "$home" "$state" -type f -print0 2>/dev/null | xargs -0 grep -Il 'com.joshyorko.luna-factory.run' 2>/dev/null | head -n 1 || true)"
   [[ -n "$journal_file" ]] || failed "Factory journal was not persisted by the packaged OMP run"
-  grep -Fq 'nativeResultIds' "$journal_file" || failed "native task returned without a persisted result identity"
+  grep -Fq 'nativeAgentIds' "$journal_file" || failed "native task returned without a persisted OMP agent identity"
 fi
 
 write_result passed "" "$run_root"

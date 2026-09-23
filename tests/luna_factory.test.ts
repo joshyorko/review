@@ -116,23 +116,36 @@ function intentTask(): Ledger {
 /** An admitted task whose OMP execution identity is observed and recorded. */
 function runningTask(): Ledger {
 	const intent = intentTask();
-	return step(intent, (revision) => ({
+	const dispatched = step(intent, (revision) => ({
 		kind: "record_native_job",
 		expectedRevision: revision,
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		jobId: "job-1",
-		resultIds: ["agent-1"],
+	}));
+	return step(dispatched, (revision) => ({
+		kind: "record_native_agent_start",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		agentId: "agent-1",
 	}));
 }
 function executedAttempt(current: Ledger, taskId: TaskId, attemptId: string): Ledger {
 	const intent = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId, attemptId, subject: SUBJECT }));
-	return step(intent, (revision) => ({
+	const dispatched = step(intent, (revision) => ({
 		kind: "record_native_job",
 		expectedRevision: revision,
 		taskId,
 		attemptId,
 		jobId: `job-${taskId}-${attemptId}`,
+	}));
+	return step(dispatched, (revision) => ({
+		kind: "record_native_agent_start",
+		expectedRevision: revision,
+		taskId,
+		attemptId,
+		agentId: `agent-${taskId}-${attemptId}`,
 	}));
 }
 
@@ -231,8 +244,11 @@ test("independent admitted tasks can run in parallel on the same subject", () =>
 	}));
 	assert.equal(findTask(startedB, "T1" as TaskId)?.state, "READY");
 	assert.equal(findTask(startedB, "T2" as TaskId)?.state, "READY");
-	const executed = step(startedB, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", jobId: "job-T1" }));
-	const bothExecuted = step(executed, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", jobId: "job-T2" }));
+	const dispatchedA = step(startedB, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", jobId: "job-T1" }));
+	assert.equal(findTask(dispatchedA, "T1" as TaskId)?.state, "READY");
+	const startedA = step(dispatchedA, (revision) => ({ kind: "record_native_agent_start", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", agentId: "agent-T1" }));
+	const dispatchedB = step(startedA, (revision) => ({ kind: "record_native_job", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", jobId: "job-T2" }));
+	const bothExecuted = step(dispatchedB, (revision) => ({ kind: "record_native_agent_start", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", agentId: "agent-T2" }));
 	assert.equal(findTask(bothExecuted, "T1" as TaskId)?.state, "RUNNING");
 	assert.equal(findTask(bothExecuted, "T2" as TaskId)?.state, "RUNNING");
 });
@@ -546,21 +562,37 @@ test("attempt intent stays READY until a bound OMP execution identity is recorde
 	const retry = reduce(intent, { kind: "start_attempt", expectedRevision: intent.revision, taskId: "T1" as TaskId, attemptId: "T1-a2", subject: SUBJECT }, REDUCE);
 	assert.equal(retry.ok, false);
 	assert.match(retry.ok ? "" : retry.error, /unreturned attempt/);
-	const running = step(intent, (revision) => ({
+	const dispatched = step(intent, (revision) => ({
 		kind: "record_native_job",
 		expectedRevision: revision,
 		taskId: "T1" as TaskId,
 		attemptId: "T1-a1",
 		jobId: "omp-job-1",
-		resultIds: ["omp-agent-1"],
+	}));
+	assert.equal(findTask(dispatched, "T1" as TaskId)?.state, "READY");
+	const prematureReceipt = reduce(dispatched, { kind: "record_receipt", expectedRevision: dispatched.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }, REDUCE);
+	assert.equal(prematureReceipt.ok, false);
+	assert.match(prematureReceipt.ok ? "" : prematureReceipt.error, /not an active dispatched attempt/);
+	const running = step(dispatched, (revision) => ({
+		kind: "record_native_agent_start",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		agentId: "omp-agent-1",
 	}));
 	assert.equal(findTask(running, "T1" as TaskId)?.state, "RUNNING");
 	assert.deepEqual(findTask(running, "T1" as TaskId)?.attempts[0]?.nativeJobIds, ["omp-job-1"]);
+	assert.deepEqual(findTask(running, "T1" as TaskId)?.attempts[0]?.nativeAgentIds, ["omp-agent-1"]);
+	const duplicate = reduce(running, { kind: "record_native_agent_start", expectedRevision: running.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", agentId: "omp-agent-1" }, REDUCE);
+	assert.equal(duplicate.ok, true);
+	assert.equal(duplicate.ok ? duplicate.ledger.revision : -1, running.revision, "a duplicate OMP start observation is idempotent");
+	const replacement = reduce(running, { kind: "record_native_agent_start", expectedRevision: running.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", agentId: "replacement-agent" }, REDUCE);
+	assert.equal(replacement.ok, false, "a replacement child needs a new Factory attempt");
 });
 
-test("Factory-private worker and acceptance session identities persist with phase", () => {
+test("private session identity alone is not execution; OMP turn start is persisted", () => {
 	const intent = intentTask();
-	const worker = step(intent, (revision) => ({
+	const workerIdentity = step(intent, (revision) => ({
 		kind: "record_private_session",
 		expectedRevision: revision,
 		taskId: "T1" as TaskId,
@@ -568,8 +600,17 @@ test("Factory-private worker and acceptance session identities persist with phas
 		phase: "worker",
 		sessionFile: "/state/sessions/worker.jsonl",
 	}));
-	assert.equal(findTask(worker, "T1" as TaskId)?.state, "RUNNING");
-	const acceptance = step(worker, (revision) => ({
+	assert.equal(findTask(workerIdentity, "T1" as TaskId)?.state, "READY");
+	assert.equal(findTask(workerIdentity, "T1" as TaskId)?.attempts[0]?.privateSessions[0]?.started, false);
+	const workerStarted = step(workerIdentity, (revision) => ({
+		kind: "record_private_session_start",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		phase: "worker",
+	}));
+	assert.equal(findTask(workerStarted, "T1" as TaskId)?.state, "RUNNING");
+	const acceptanceIdentity = step(workerStarted, (revision) => ({
 		kind: "record_private_session",
 		expectedRevision: revision,
 		taskId: "T1" as TaskId,
@@ -577,12 +618,55 @@ test("Factory-private worker and acceptance session identities persist with phas
 		phase: "acceptance",
 		sessionFile: "/state/sessions/acceptance.jsonl",
 	}));
-	const loaded = parseJournal(journalRecord(acceptance));
+	assert.equal(findTask(acceptanceIdentity, "T1" as TaskId)?.attempts[0]?.privateSessions[1]?.started, false);
+	const acceptanceStarted = step(acceptanceIdentity, (revision) => ({
+		kind: "record_private_session_start",
+		expectedRevision: revision,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		phase: "acceptance",
+	}));
+	const loaded = parseJournal(journalRecord(acceptanceStarted));
 	assert.equal(loaded.ok, true);
 	assert.deepEqual(loaded.ok ? findTask(loaded.ledger, "T1" as TaskId)?.attempts[0]?.privateSessions : [], [
-		{ phase: "worker", sessionFile: "/state/sessions/worker.jsonl" },
-		{ phase: "acceptance", sessionFile: "/state/sessions/acceptance.jsonl" },
+		{ phase: "worker", sessionFile: "/state/sessions/worker.jsonl", started: true },
+		{ phase: "acceptance", sessionFile: "/state/sessions/acceptance.jsonl", started: true },
 	]);
+});
+test("session restart reconciles stale RUNNING and legacy intent without inventing a live child", async () => {
+	const recover = async (source: Ledger, legacy: boolean) => {
+		const stored = structuredClone(journalRecord(source)) as {
+			tasks: Array<{ attempts: Array<Record<string, unknown>> }>;
+		};
+		if (legacy) {
+			for (const task of stored.tasks) for (const attempt of task.attempts) {
+				delete attempt.nativeJobIds;
+				delete attempt.nativeAgentIds;
+				delete attempt.privateSessions;
+			}
+		}
+		const host = fakeHost();
+		createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+		await host.events.get("session_start")!({}, {
+			hasUI: true,
+			ui: { notify: (message: string) => host.notify(message) },
+			sessionManager: { getBranch: () => [{ type: "custom", customType: JOURNAL_ENTRY, data: stored }] },
+		});
+		const latest = host.entries.at(-1)?.data as Ledger;
+		assert.equal(latest.control, "interrupted");
+		assert.equal(findTask(latest, "T1" as TaskId)?.state, "ESCALATE");
+		assert.equal(findTask(latest, "T1" as TaskId)?.attempts[0]?.state, "abandoned");
+		assert.match(findTask(latest, "T1" as TaskId)?.decisionReason ?? "", /liveness is unknown/);
+		return latest;
+	};
+
+	const identity = await recover(runningTask(), false);
+	assert.deepEqual(findTask(identity, "T1" as TaskId)?.attempts[0]?.nativeJobIds, ["job-1"]);
+	assert.deepEqual(findTask(identity, "T1" as TaskId)?.attempts[0]?.nativeAgentIds, ["agent-1"]);
+
+	const legacy = await recover(intentTask(), true);
+	assert.deepEqual(findTask(legacy, "T1" as TaskId)?.attempts[0]?.nativeJobIds, []);
+	assert.deepEqual(findTask(legacy, "T1" as TaskId)?.attempts[0]?.nativeAgentIds, []);
 });
 test("an unproven VERIFY task can open one bounded retry on the same lineage", () => {
 	const returned = step(runningTask(), (revision) => ({
@@ -1258,15 +1342,21 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 	const intent = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[] }> }> };
 	assert.equal(intent.tasks[0]!.state, "READY");
 	assert.deepEqual(intent.tasks[0]!.attempts[0]!.nativeJobIds, []);
+	const fabricated = await callTool(host, "luna_factory_receipt", receipt());
+	assert.equal(fabricated.isError, true);
+	assert.match(fabricated.content[0]!.text, /not an active dispatched attempt/);
 
 	const task = host.tools.get("task");
 	assert.ok(task, "a host with native task support gets a same-name wrapper");
-	const invoke = async () => {
+	let delayedUpdate: ((update: unknown) => void) | undefined;
+	const invoke = async (_params: unknown, options?: { onUpdate?: (update: unknown) => void }) => {
 		nativeCalls += 1;
-		return {
-			content: [{ type: "text", text: "native task completed" }],
-			details: { async: { state: "completed", jobId: "job-1", type: "task" }, results: [{ id: "agent-1" }] },
+		delayedUpdate = options?.onUpdate;
+		const details = {
+			async: { state: "running", jobId: "job-1", type: "task" },
+			progress: [{ index: 0, id: "agent-1", status: "pending" }],
 		};
+		return { content: [{ type: "text", text: "native task dispatched" }], details };
 	};
 	const context = { invokeTool: invoke };
 	const refused = await task.execute("call", { task: "unbound work" }, undefined, undefined, context);
@@ -1278,10 +1368,22 @@ test("the native task seam admits only a ledger-stamped assignment and journals 
 	const accepted = await task.execute("call", { task: `do the work\n${marker}` }, undefined, undefined, context);
 	assert.equal(accepted.isError, undefined);
 	assert.equal(nativeCalls, 1);
-	const record = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[]; nativeResultIds: string[] }> }> };
+	const dispatchedRecord = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
+	assert.equal(dispatchedRecord.tasks[0]!.state, "READY");
+	assert.deepEqual(dispatchedRecord.tasks[0]!.attempts[0]!.nativeJobIds, ["job-1"]);
+	assert.deepEqual(dispatchedRecord.tasks[0]!.attempts[0]!.nativeAgentIds, []);
+	const fabricated = await callTool(host, "luna_factory_receipt", receipt());
+	assert.equal(fabricated.isError, true);
+	assert.match(fabricated.content[0]!.text, /not an active dispatched attempt/);
+	assert.ok(delayedUpdate);
+	delayedUpdate({ details: {
+		async: { state: "running", jobId: "job-1", type: "task" },
+		progress: [{ index: 0, id: "agent-1", status: "running" }],
+	} });
+	const record = host.entries.at(-1)!.data as { tasks: Array<{ state: string; attempts: Array<{ nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
 	assert.equal(record.tasks[0]!.state, "RUNNING");
 	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeJobIds, ["job-1"]);
-	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeResultIds, ["agent-1"]);
+	assert.deepEqual(record.tasks[0]!.attempts[0]!.nativeAgentIds, ["agent-1"]);
 });
 
 test("the native task seam validates and correlates an independent batch without partial authority", async () => {
@@ -1332,8 +1434,8 @@ test("the native task seam validates and correlates an independent batch without
 	);
 	assert.equal(result.isError, undefined);
 	assert.equal(calls, 1, "one native batch owns both admitted items");
-	const record = host.entries.at(-1)!.data as { tasks: Array<{ id: string; attempts: Array<{ nativeJobIds: string[]; nativeResultIds: string[] }> }> };
-	assert.deepEqual(record.tasks.map((entry) => [entry.id, entry.attempts[0]!.nativeJobIds, entry.attempts[0]!.nativeResultIds]), [
+	const record = host.entries.at(-1)!.data as { tasks: Array<{ id: string; attempts: Array<{ nativeJobIds: string[]; nativeAgentIds: string[] }> }> };
+	assert.deepEqual(record.tasks.map((entry) => [entry.id, entry.attempts[0]!.nativeJobIds, entry.attempts[0]!.nativeAgentIds]), [
 		["T1", ["batch-1"], ["agent-1"]],
 		["T2", ["batch-1"], ["agent-2"]],
 	]);

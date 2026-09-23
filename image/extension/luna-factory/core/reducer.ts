@@ -23,7 +23,6 @@ import type {
 	Candidate,
 	Ledger,
 	LedgerEvent,
-	NativeJobId,
 	ReduceResult,
 	Subject,
 	TaskId,
@@ -192,7 +191,7 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 				subject: event.subject,
 				state: "started",
 				nativeJobIds: [],
-				nativeResultIds: [],
+				nativeAgentIds: [],
 				privateSessions: [],
 				integrated: false,
 			};
@@ -205,6 +204,7 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
 			if (task === undefined || attempt === undefined) return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
 			if (attempt.state !== "started") return { ok: false, error: `attempt ${attempt.id} is not awaiting a Factory private session` };
+			if (attempt.nativeJobIds.length > 0 || attempt.nativeAgentIds.length > 0) return { ok: false, error: `attempt ${attempt.id} already belongs to native OMP task execution` };
 			if (!event.sessionFile.trim() || event.sessionFile.length > 2_000) return { ok: false, error: "Factory private session identity is empty or too long" };
 			const existing = attempt.privateSessions.find((session) => session.phase === event.phase);
 			if (existing !== undefined) {
@@ -213,54 +213,76 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 					: { ok: false, error: `attempt ${attempt.id} already has a different ${event.phase} private session` };
 			}
 			if (event.phase === "worker" && task.state !== "READY") return { ok: false, error: `worker session cannot start while task ${task.id} is ${task.state}` };
-			if (event.phase === "acceptance" && task.state !== "RUNNING") return { ok: false, error: `acceptance session requires a running worker for ${task.id}` };
+			if (event.phase === "acceptance" && (task.state !== "RUNNING" || !attempt.privateSessions.some((session) => session.phase === "worker" && session.started))) {
+				return { ok: false, error: `acceptance session requires an observed running worker for ${task.id}` };
+			}
 			const next = replaceAttempt(ledger, task.id, attempt.id, (current) => ({
 				...current,
-				privateSessions: [...current.privateSessions, { phase: event.phase, sessionFile: event.sessionFile }],
+				privateSessions: [...current.privateSessions, { phase: event.phase, sessionFile: event.sessionFile, started: false }],
+			}));
+			// A session path exists before its first turn. Persist identity without claiming execution.
+			return bump(next);
+		}
+
+		case "record_private_session_start": {
+			const task = findTask(ledger, event.taskId);
+			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
+			if (task === undefined || attempt === undefined) return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
+			if (attempt.state !== "started") return { ok: false, error: `attempt ${attempt.id} is not awaiting a Factory private session start` };
+			const session = attempt.privateSessions.find((candidate) => candidate.phase === event.phase);
+			if (!session) return { ok: false, error: `attempt ${attempt.id} has no recorded ${event.phase} private session identity` };
+			if (session.started) return { ok: true, ledger };
+			if (event.phase === "worker" && task.state !== "READY") return { ok: false, error: `worker execution cannot start while task ${task.id} is ${task.state}` };
+			if (event.phase === "acceptance" && (task.state !== "RUNNING" || !attempt.privateSessions.some((candidate) => candidate.phase === "worker" && candidate.started))) {
+				return { ok: false, error: `acceptance execution requires an observed running worker for ${task.id}` };
+			}
+			const next = replaceAttempt(ledger, task.id, attempt.id, (current) => ({
+				...current,
+				privateSessions: current.privateSessions.map((candidate) =>
+					candidate.phase === event.phase ? { ...candidate, started: true } : candidate,
+				),
 			}));
 			return bump(event.phase === "worker" ? replaceTask(next, task.id, (current) => ({ ...current, state: "RUNNING" })) : next);
 		}
+
 		case "record_native_job": {
 			const task = findTask(ledger, event.taskId);
 			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
-			if (task === undefined || attempt === undefined) {
-				return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
-			}
-			if (attempt.state !== "started") return { ok: false, error: `attempt ${attempt.id} is not awaiting an OMP execution identity` };
+			if (task === undefined || attempt === undefined) return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
+			if (attempt.state !== "started") return { ok: false, error: `attempt ${attempt.id} is not awaiting an OMP dispatch identity` };
 			if (attempt.generation !== ledger.generation || attempt.subject.repo !== ledger.subject.repo || attempt.subject.base !== ledger.subject.base || attempt.subject.head !== ledger.subject.head) {
 				return { ok: false, error: `attempt ${attempt.id} is bound to a stale Factory execution` };
 			}
-			const resultIds = event.resultIds ?? [];
-			if (attempt.nativeJobIds.includes(event.jobId) && resultIds.every((id) => attempt.nativeResultIds.includes(id))) {
-				return { ok: true, ledger };
-			}
+			if (attempt.privateSessions.length > 0) return { ok: false, error: `attempt ${attempt.id} already belongs to a Factory-private session` };
+			if (attempt.nativeJobIds.includes(event.jobId)) return { ok: true, ledger };
+			if (attempt.nativeJobIds.length > 0) return { ok: false, error: `attempt ${attempt.id} already has a different OMP job identity` };
+			if ((task.state !== "READY" && task.state !== "RUNNING") || task.decision !== "ADMIT") return { ok: false, error: `attempt ${attempt.id} is not an admitted task awaiting or recording OMP dispatch` };
 			const next = replaceAttempt(ledger, task.id, attempt.id, (current) => ({
 				...current,
-				nativeJobIds: current.nativeJobIds.includes(event.jobId) ? current.nativeJobIds : [...current.nativeJobIds, event.jobId as NativeJobId],
-				nativeResultIds: [...current.nativeResultIds, ...resultIds.filter((id) => !current.nativeResultIds.includes(id))],
+				nativeJobIds: [...current.nativeJobIds, event.jobId],
 			}));
-			return bump(replaceTask(next, task.id, (current) => ({ ...current, state: "RUNNING" })));
+			// An AsyncJobManager id proves dispatch intent, not that its child started.
+			return bump(next);
 		}
 
-		case "record_native_result": {
+		case "record_native_agent_start": {
 			const task = findTask(ledger, event.taskId);
 			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
-			if (task === undefined || attempt === undefined) {
-				return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
-			}
-			if (attempt.state !== "started") return { ok: false, error: `attempt ${attempt.id} is not awaiting an OMP execution identity` };
+			if (task === undefined || attempt === undefined) return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
+			if (attempt.state !== "started") return { ok: false, error: `attempt ${attempt.id} is not awaiting an OMP agent start` };
 			if (attempt.generation !== ledger.generation || attempt.subject.repo !== ledger.subject.repo || attempt.subject.base !== ledger.subject.base || attempt.subject.head !== ledger.subject.head) {
 				return { ok: false, error: `attempt ${attempt.id} is bound to a stale Factory execution` };
 			}
-			if (attempt.nativeResultIds.includes(event.resultId)) return { ok: true, ledger };
+			if (attempt.privateSessions.length > 0) return { ok: false, error: `attempt ${attempt.id} already belongs to a Factory-private session` };
+			if (attempt.nativeAgentIds.includes(event.agentId)) return { ok: true, ledger };
+			if (attempt.nativeAgentIds.length > 0) return { ok: false, error: `attempt ${attempt.id} already has a different OMP agent identity` };
+			if (task.state !== "READY" || task.decision !== "ADMIT") return { ok: false, error: `attempt ${attempt.id} is not an admitted task awaiting its first OMP agent` };
 			const next = replaceAttempt(ledger, task.id, attempt.id, (current) => ({
 				...current,
-				nativeResultIds: [...current.nativeResultIds, event.resultId],
+				nativeAgentIds: [...current.nativeAgentIds, event.agentId],
 			}));
 			return bump(replaceTask(next, task.id, (current) => ({ ...current, state: "RUNNING" })));
 		}
-
-
 		case "reconcile_attempt": {
 			const task = findTask(ledger, event.taskId);
 			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
@@ -302,6 +324,9 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (unacceptable !== undefined) return { ok: false, error: unacceptable };
 			if (task.state !== "RUNNING" || attempt.state !== "started") {
 				return { ok: false, error: `attempt ${attempt.id} is not an active dispatched attempt` };
+			}
+			if (attempt.nativeAgentIds.length === 0 && !attempt.privateSessions.some((session) => session.phase === "worker" && session.started)) {
+				return { ok: false, error: `attempt ${attempt.id} has no observed OMP execution identity to bind this receipt to` };
 			}
 
 			const authorized = attempt.subject;

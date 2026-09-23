@@ -15,7 +15,7 @@
 import { evaluateRun } from "./core/convergence.ts";
 import { emptyLedger } from "./core/model.ts";
 import { DEFAULT_FINISH_AUTHORITY } from "./core/model.ts";
-import type { Appetite, Criterion, Effect, Ledger, NativeJobId, ReduceResult, RunId, Subject, TaskId } from "./core/model.ts";
+import type { Appetite, Criterion, Effect, Ledger, NativeAgentId, NativeJobId, ReduceResult, RunId, Subject, TaskId } from "./core/model.ts";
 import { findTask } from "./core/model.ts";
 import { renderCompletionReceipt } from "./core/receipt.ts";
 import { reduce } from "./core/reducer.ts";
@@ -259,7 +259,8 @@ function nativeTaskBindings(params: Record<string, unknown>, current: Ledger): {
 		if (task.effect === "write" && rawItem.isolated !== true) {
 			return { ok: false, error: `native task item ${index + 1} is a write task and requires isolated:true before delegation` };
 		}
-		if (task.state !== "READY" || task.decision !== "ADMIT" || attempt.state !== "started" || attempt.nativeJobIds.length > 0 || attempt.nativeResultIds.length > 0) {
+		if (current.control !== "active") return { ok: false, error: `run is ${current.control}; native task admission is closed` };
+		if (task.state !== "READY" || task.decision !== "ADMIT" || attempt.state !== "started" || attempt.nativeJobIds.length > 0 || attempt.nativeAgentIds.length > 0) {
 			return { ok: false, error: `native task item ${index + 1} is not bound to an admitted attempt awaiting its first OMP execution` };
 		}
 		if (attempt.subject.repo !== current.subject.repo || attempt.subject.base !== current.subject.base || attempt.subject.head !== current.subject.head) {
@@ -272,27 +273,69 @@ function nativeTaskBindings(params: Record<string, unknown>, current: Ledger): {
 
 interface NativeTaskIdentities {
 	readonly jobId?: NativeJobId;
-	readonly resultIdsByIndex: ReadonlyMap<number, NativeJobId>;
-	readonly unindexedResultIds: readonly NativeJobId[];
+	readonly agentIdsByIndex: ReadonlyMap<number, NativeAgentId>;
+	readonly unindexedAgentIds: readonly NativeAgentId[];
 }
 
 function nativeTaskIdentities(details: unknown): NativeTaskIdentities {
-	if (!isRecord(details)) return { resultIdsByIndex: new Map(), unindexedResultIds: [] };
+	if (!isRecord(details)) return { agentIdsByIndex: new Map(), unindexedAgentIds: [] };
 	let jobId: NativeJobId | undefined;
 	if (isRecord(details.async) && typeof details.async.jobId === "string" && NATIVE_IDENTITY_RE.test(details.async.jobId)) {
 		jobId = details.async.jobId as NativeJobId;
 	}
-	const resultIdsByIndex = new Map<number, NativeJobId>();
-	const unindexedResultIds: NativeJobId[] = [];
-	if (Array.isArray(details.results)) {
-		for (const result of details.results) {
-			if (!isRecord(result) || typeof result.id !== "string" || !NATIVE_IDENTITY_RE.test(result.id)) continue;
-			const id = result.id as NativeJobId;
-			if (typeof result.index === "number" && Number.isInteger(result.index) && result.index >= 0) resultIdsByIndex.set(result.index, id);
-			else unindexedResultIds.push(id);
+	const agentIdsByIndex = new Map<number, NativeAgentId>();
+	const unindexedAgentIds: NativeAgentId[] = [];
+	const addAgent = (value: unknown): void => {
+		if (!isRecord(value) || typeof value.id !== "string" || !NATIVE_IDENTITY_RE.test(value.id)) return;
+		const id = value.id as NativeAgentId;
+		if (typeof value.index === "number" && Number.isInteger(value.index) && value.index >= 0) agentIdsByIndex.set(value.index, id);
+		else unindexedAgentIds.push(id);
+	};
+	if (Array.isArray(details.progress)) {
+		for (const progress of details.progress) {
+			if (!isRecord(progress)) continue;
+			if (progress.status === "running" || (typeof progress.requests === "number" && progress.requests > 0)) addAgent(progress);
 		}
 	}
-	return { jobId, resultIdsByIndex, unindexedResultIds };
+	if (Array.isArray(details.results)) {
+		for (const result of details.results) addAgent(result);
+	}
+	return { jobId, agentIdsByIndex, unindexedAgentIds };
+}
+
+function reconcileRestartedAttempts(ledger: Ledger, artifactRoots: readonly string[]): Ledger {
+	const unfinished = ledger.tasks.flatMap((task) =>
+		task.attempts
+			.filter((attempt) => attempt.state === "started")
+			.map((attempt) => ({ taskId: task.id, attempt })),
+	);
+	if (unfinished.length === 0) return ledger;
+	let current = ledger;
+	if (current.control !== "interrupted") {
+		const interrupted = reduce(current, {
+			kind: "set_control",
+			expectedRevision: current.revision,
+			control: "interrupted",
+		}, { artifactRoots });
+		if (!interrupted.ok) throw new Error(interrupted.error);
+		current = interrupted.ledger;
+	}
+	for (const { taskId, attempt } of unfinished) {
+		const identityObserved = attempt.nativeAgentIds.length > 0 || attempt.privateSessions.some((session) => session.started);
+		const reconciled = reduce(current, {
+			kind: "reconcile_attempt",
+			expectedRevision: current.revision,
+			taskId,
+			attemptId: attempt.id,
+			outcome: "unknown",
+			reason: identityObserved
+				? "Factory session restarted; the persisted OMP identity does not prove its child is still live"
+				: "Factory session restarted without an observed child start; execution liveness is unknown",
+		}, { artifactRoots });
+		if (!reconciled.ok) throw new Error(reconciled.error);
+		current = reconciled.ledger;
+	}
+	return current;
 }
 
 export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOptions = {}): LunaFactoryExtension {
@@ -334,71 +377,114 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					return { content: text("native task is unsupported: OMP did not expose same-name ctx.invokeTool"), isError: true };
 				}
 				let result: ToolResult & { details?: unknown };
-				try {
-					result = await context.invokeTool(params, { signal, onUpdate });
-				} catch (error) {
-					return { content: text(`native task failed before a result could be correlated: ${error instanceof Error ? error.message : String(error)}`), isError: true };
-				}
-
-				const identities = nativeTaskIdentities(result.details);
-				const hasExecutionIdentity = identities.jobId !== undefined || identities.unindexedResultIds.length > 0 || identities.resultIdsByIndex.size > 0;
-				if (!hasExecutionIdentity) {
+				const recordNativeEvent = (event: LedgerEvent): void => {
+					const current = ledger;
+					if (current === undefined) return;
+					const applied = reduce(current, event, { artifactRoots });
+					if (!applied.ok) {
+						host.appendEntry("com.joshyorko.luna-factory.native-correlation", { error: applied.error });
+					} else if (applied.ledger !== current) {
+						commit(applied.ledger);
+					}
+				};
+				const observeNativeDetails = (details: unknown): void => {
+					const identities = nativeTaskIdentities(details);
 					for (const binding of bindings.bindings) {
 						const current = ledger;
 						if (current === undefined) break;
-						const unknown = reduce(current, {
+						const attempt = findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						if (!attempt) continue;
+						if (identities.jobId !== undefined && !attempt.nativeJobIds.includes(identities.jobId)) {
+							recordNativeEvent({
+								kind: "record_native_job",
+								expectedRevision: current.revision,
+								taskId: binding.taskId,
+								attemptId: binding.attemptId,
+								jobId: identities.jobId,
+							});
+						}
+						const refreshed = ledger;
+						const refreshedAttempt = refreshed && findTask(refreshed, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						const agentId = identities.agentIdsByIndex.get(binding.index)
+							?? (bindings.bindings.length === 1 ? identities.unindexedAgentIds[0] : undefined);
+						if (agentId !== undefined && refreshedAttempt && !refreshedAttempt.nativeAgentIds.includes(agentId)) {
+							recordNativeEvent({
+								kind: "record_native_agent_start",
+								expectedRevision: refreshed!.revision,
+								taskId: binding.taskId,
+								attemptId: binding.attemptId,
+								agentId,
+							});
+						}
+					}
+				};
+				const reconcileUnknown = (targets: readonly NativeTaskBinding[], reason: string): void => {
+					for (const binding of targets) {
+						const current = ledger;
+						if (current === undefined) break;
+						const attempt = findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						if (attempt?.state !== "started") continue;
+						recordNativeEvent({
 							kind: "reconcile_attempt",
 							expectedRevision: current.revision,
 							taskId: binding.taskId,
 							attemptId: binding.attemptId,
 							outcome: "unknown",
-							reason: "OMP returned no execution identity for the delegated task",
-						}, { artifactRoots });
-						if (unknown.ok) commit(unknown.ledger);
+							reason,
+						});
 					}
-					return { content: text("native task returned without an OMP execution identity; bound attempts were escalated as unknown"), isError: true };
+				};
+				const observeNativeSettlement = (details: unknown): void => {
+					observeNativeDetails(details);
+					if (!isRecord(details)) return;
+					const asyncDetails = isRecord(details.async) ? details.async : undefined;
+					const asyncSettled = asyncDetails?.state === "completed" || asyncDetails?.state === "failed";
+					const terminalProgress = new Set<number>();
+					if (Array.isArray(details.progress)) {
+						for (const progress of details.progress) {
+							if (!isRecord(progress) || typeof progress.index !== "number" || !Number.isInteger(progress.index) || progress.index < 0) continue;
+							const terminal = progress.status === "completed" || progress.status === "failed" || progress.status === "aborted";
+							if (terminal && !(typeof progress.requests === "number" && progress.requests > 0)) terminalProgress.add(progress.index);
+						}
+					}
+					const unknown = bindings.bindings.filter((binding) => {
+						const current = ledger;
+						const attempt = current && findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+						return attempt?.state === "started" && attempt.nativeAgentIds.length === 0 && (asyncSettled || terminalProgress.has(binding.index));
+					});
+					if (unknown.length > 0) reconcileUnknown(unknown, "OMP task settled without an observed child agent start identity");
+				};
+				try {
+					result = await context.invokeTool(params, {
+						signal,
+						onUpdate: (update) => {
+							observeNativeSettlement(update.details);
+							onUpdate?.(update);
+						},
+					});
+				} catch (error) {
+					const reason = `OMP task failed before a child identity could be reconciled: ${error instanceof Error ? error.message : String(error)}`;
+					reconcileUnknown(bindings.bindings, reason);
+					return { content: text(reason), isError: true };
 				}
-				for (const binding of bindings.bindings) {
-					const indexed = identities.resultIdsByIndex.get(binding.index);
-					const resultIds = indexed === undefined
-						? bindings.bindings.length === 1
-							? [...identities.unindexedResultIds, ...identities.resultIdsByIndex.values()]
-							: []
-						: [indexed];
+				observeNativeSettlement(result.details);
+				const details = isRecord(result.details) ? result.details : undefined;
+				const asyncDetails = details && isRecord(details.async) ? details.async : undefined;
+				const stillDispatched = asyncDetails?.state === "running"
+					&& typeof asyncDetails.jobId === "string"
+					&& NATIVE_IDENTITY_RE.test(asyncDetails.jobId);
+				const notStarted = bindings.bindings.filter((binding) => {
 					const current = ledger;
-					if (current === undefined) break;
-					const event: LedgerEvent | undefined =
-						identities.jobId === undefined
-							? undefined
-							: {
-									kind: "record_native_job",
-									expectedRevision: current.revision,
-									taskId: binding.taskId,
-									attemptId: binding.attemptId,
-									jobId: identities.jobId,
-									resultIds,
-								  };
-					const correlated = event === undefined
-						? resultIds.reduce<ReduceResult>(
-							(currentResult, resultId) =>
-								currentResult.ok
-									? reduce(
-											currentResult.ledger,
-											{
-												kind: "record_native_result",
-												expectedRevision: currentResult.ledger.revision,
-												taskId: binding.taskId,
-												attemptId: binding.attemptId,
-												resultId,
-											},
-											{ artifactRoots },
-										)
-									: currentResult,
-							{ ok: true, ledger: current },
-						  )
-						: reduce(current, event, { artifactRoots });
-					if (correlated.ok) commit(correlated.ledger);
-					else host.appendEntry("com.joshyorko.luna-factory.native-correlation", { taskId: binding.taskId, attemptId: binding.attemptId, error: correlated.error });
+					const attempt = current && findTask(current, binding.taskId)?.attempts.find((candidate) => candidate.id === binding.attemptId);
+					return attempt?.state === "started" && attempt.nativeAgentIds.length === 0;
+				});
+				if (!stillDispatched && notStarted.length > 0) {
+					reconcileUnknown(notStarted, "OMP returned without an observed running/completed child agent identity");
+					return {
+						...result,
+						isError: true,
+						content: [...result.content, { type: "text", text: "OMP did not expose a started child identity for every Factory attempt; unresolved attempts were escalated as unknown." }],
+					};
 				}
 				return result;
 			},
@@ -452,6 +538,15 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		}
 		return [
 			...renderStatusDetail(ledger),
+			...ledger.tasks.flatMap((task) => task.attempts.flatMap((attempt) => {
+				const identities: string[] = [];
+				if (attempt.nativeJobIds.length > 0) identities.push(`OMP task dispatch (not start proof): ${attempt.nativeJobIds.join(", ")}`);
+				if (attempt.nativeAgentIds.length > 0) identities.push(`OMP agent identity (start observed; liveness not inferred): ${attempt.nativeAgentIds.join(", ")}`);
+				for (const session of attempt.privateSessions) {
+					identities.push(`Factory-private ${session.phase} session (${session.started ? "turn start observed; liveness not inferred" : "identity recorded; turn start not observed"}): ${session.sessionFile}`);
+				}
+				return identities.length > 0 ? [`execution ${task.id}/${attempt.id}: ${identities.join("; ")}`] : [];
+			})),
 			"",
 			`execution: ${enabled() ? "enabled" : `idle (${ENABLE_FLAG}=1 to enable)`}`,
 			`enforced: ${enforcedPaths().join(", ")}`,
@@ -1060,8 +1155,22 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		const loaded = loadRun(ctx);
 		ledger = loaded.ledger;
 		loadProblem = loaded.problem;
-		if (loaded.problem !== undefined && ctx.hasUI) {
-			ctx.ui?.notify?.(`Factory journal is unreadable: ${loaded.problem}`, "error");
+		if (ledger !== undefined) {
+			try {
+				const before = ledger;
+				const recovered = reconcileRestartedAttempts(before, artifactRoots);
+				if (recovered !== before) {
+					saveRun(host, recovered);
+					ledger = recovered;
+					if (ctx.hasUI) ctx.ui?.notify?.("Factory resumed with unfinished attempts marked UNKNOWN; inspect execution liveness before starting new work.", "warning");
+				}
+			} catch (error) {
+				ledger = undefined;
+				loadProblem = `unfinished Factory attempts could not be safely reconciled after restart: ${error instanceof Error ? error.message : String(error)}`;
+			}
+		}
+		if (loadProblem !== undefined && ctx.hasUI) {
+			ctx.ui?.notify?.(`Factory journal is unreadable or unreconciled: ${loadProblem}`, "error");
 		}
 		registerNativeTaskWrapper();
 		await activateFactoryTools();

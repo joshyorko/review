@@ -131,7 +131,15 @@ export function batchSummary(batch: Batch, root: string): string {
 			const attempts = item.ledger.tasks.flatMap((task) => task.attempts.map((attempt) => ({ task, attempt })));
 			return [
 				`${item.selected.key} ${item.selected.action}: ${item.stage}${item.blocker ? ` — ${item.blocker}` : ""}${item.workspace ? ` · ${item.workspace}` : ""}${item.operation ? ` · ${item.operation.phase} ${item.operation.state} (${item.operation.id})` : ""}${item.operation?.url ? ` · ${item.operation.url}` : ""}`,
-				...attempts.flatMap(({ task, attempt }) => attempt.privateSessions.map((session) => `  Factory-private ${session.phase} session ${task.id}/${attempt.id}: ${session.sessionFile}`)),
+				...attempts.flatMap(({ task, attempt }) => {
+					const identities: string[] = [];
+					if (attempt.nativeJobIds.length > 0) identities.push(`  OMP task dispatch ${task.id}/${attempt.id}: ${attempt.nativeJobIds.join(", ")}`);
+					if (attempt.nativeAgentIds.length > 0) identities.push(`  OMP agent identity (start observed; liveness not inferred) ${task.id}/${attempt.id}: ${attempt.nativeAgentIds.join(", ")}`);
+					identities.push(...attempt.privateSessions.map((session) =>
+						`  Factory-private ${session.phase} session ${task.id}/${attempt.id} (${session.started ? "turn start observed; liveness not inferred" : "identity recorded; turn start not observed"}): ${session.sessionFile}`,
+					));
+					return identities;
+				}),
 			];
 		}),
 		...(batch.scopeRevisions.length ? [`Original scope NOT converged: ${batch.scopeRevisions.map((entry) => `${entry.item}: ${entry.reason}`).join("; ")}`] : []),

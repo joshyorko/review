@@ -53,8 +53,8 @@ test("batch status exposes Factory-private session role and stable identity with
 			id: "T1", generation: item.ledger.generation, criterionId: "A1", title: "inspect", deps: [],
 			effect: "read", owner: batch.id, state: "RUNNING", attempts: [{
 				id: "T1-a1", lineage: 1, taskId: "T1", generation: item.ledger.generation, subject: item.ledger.subject,
-				state: "started", nativeJobIds: [], nativeResultIds: [],
-				privateSessions: [{ phase: "worker", sessionFile: "/state/sessions/worker.jsonl" }],
+				state: "started", nativeJobIds: [], nativeAgentIds: [],
+				privateSessions: [{ phase: "worker", sessionFile: "/state/sessions/worker.jsonl", started: false }],
 				integrated: false,
 			}], decision: "ADMIT", decisionReason: "selected",
 		}],
@@ -62,7 +62,7 @@ test("batch status exposes Factory-private session role and stable identity with
 	const status = batchSummary(batch, "/state");
 	assert.match(status, /worker intent/);
 	assert.ok(status.includes("batch-session-worker"));
-	assert.ok(status.includes("Factory-private worker session T1/T1-a1: /state/sessions/worker.jsonl"));
+	assert.ok(status.includes("Factory-private worker session T1/T1-a1 (identity recorded; turn start not observed): /state/sessions/worker.jsonl"));
 	assert.match(status, /do not appear in Ctrl\+A/);
 });
 
@@ -374,6 +374,47 @@ test("an unconfirmed stop keeps the item unknown and the repository claim", asyn
 		assert.match(service.claims.conflict("repo:org/a", "another-owner")!, /batch-cafe/);
 		await service.shutdown();
 	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("drain does not reschedule a queued item while its OMP session start is pending", async () => {
+	const batchModule = new URL("../image/extension/luna-factory/core/batch.ts", import.meta.url).href;
+	const serviceModule = new URL("../image/extension/luna-factory/omp/batch-service.ts", import.meta.url).href;
+	const source = `
+		import { mkdtemp, rm } from "node:fs/promises";
+		import { tmpdir } from "node:os";
+		import { join } from "node:path";
+		import { createBatch } from ${JSON.stringify(batchModule)};
+		import { BatchService } from ${JSON.stringify(serviceModule)};
+		const root = await mkdtemp(join(tmpdir(), "factory-drain-"));
+		try {
+			const selected = { key: "org/a#1", repo: "org/a", number: 1, kind: "issue", action: "inspect", overlaps: [], acceptanceRevision: "r1", base: "a".repeat(40), head: "a".repeat(40) };
+			const batch = createBatch([selected], { id: "batch-dead", capacity: 2, maxAttempts: 3, maxTotalAttempts: 10, mode: "once" });
+			const service = new BatchService(root, { snapshot: async value => value, assertFresh: async () => {} }, undefined, {}, 2);
+			service.store.acquire();
+			service.store.write(batch);
+			let executions = 0;
+			service.execute = async (_batch, item) => { executions += 1; item.stage = "BLOCKED"; item.blocker = "test execution settled"; };
+			await service.resume(batch.id, {});
+			await service.waitForIdle();
+			if (executions !== 1) throw new Error("one queued item was scheduled more than once");
+			await service.shutdown();
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	`;
+	const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", source], { stdio: ["ignore", "pipe", "pipe"] });
+	let output = "";
+	child.stdout.setEncoding("utf8").on("data", (chunk) => { output += chunk; });
+	child.stderr.setEncoding("utf8").on("data", (chunk) => { output += chunk; });
+	let timedOut = false;
+	// A real timeout is necessary: the regression is a synchronous infinite loop in a child process, so fake timers cannot interrupt it.
+	const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 3_000);
+	const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit) => {
+		child.once("exit", (code, signal) => resolveExit({ code, signal }));
+	});
+	clearTimeout(timer);
+	assert.equal(timedOut, false, "drain must yield while its only queued item is already in flight");
+	assert.equal(exit.code, 0, output);
 });
 
 test("read-only inspection bypasses mutation claims and runs concurrently", async () => {

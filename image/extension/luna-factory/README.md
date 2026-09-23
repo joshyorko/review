@@ -59,15 +59,16 @@ the stable fallback:
 | (verified finish) | `luna_factory_completion` |
 
 `luna_factory_attempt` records dispatch intent and leaves the task `READY`.
-Only after the packaged OMP `task` wrapper observes OMP job/result identities
-bound to that task, attempt, and generation does the ledger move it to
-`RUNNING`. An attempt with no observed child remains intent, not execution.
+An AsyncJobManager job id records dispatch only. The packaged OMP `task`
+wrapper moves the task to `RUNNING` only after a per-agent `running` progress
+identity or settled native result identity is correlated to its task, attempt,
+and generation. A dispatch prompt or job id alone cannot certify execution.
+
 Factory-private SDK sessions remain outside OMP Agent Hub: they are not shown by
-Ctrl+A, which lists globally registered OMP agents. Factory status is the
-projection for Factory-owned work; do not switch its private registry to the
-global registry to make those sessions appear in Hub.
-Selected-batch status records each private session file with its worker/acceptance
-phase and attempt identity; session paths are not treated as live after restart.
+Ctrl+A, which lists globally registered OMP agents. Factory status records the
+worker/acceptance session path, but only an observed OMP `turn_start` marks that
+private execution started. A persisted session path or execution ID does not
+prove a child is live after restart; unfinished attempts reconcile as unknown.
 
 ## Execution boundary
 
@@ -135,9 +136,9 @@ security boundary and nothing here guarantees termination.
 ## Run state, evidence, recovery
 
 `CANDIDATE → READY` (including persisted attempt intent) → `RUNNING` only after
-the packaged OMP task returns a bound job/result identity → `VERIFY → DONE`,
-with run control (`active`, `paused`, `draining`, `interrupted`, `quiescent`,
-`converged`) kept separate from task state.
+observed OMP per-agent start/result identity or private-session `turn_start` →
+`VERIFY → DONE`, with run control (`active`, `paused`, `draining`,
+`interrupted`, `quiescent`, `converged`) kept separate from task state.
 
 The ledger is one versioned, namespaced custom entry (`com.joshyorko.luna-factory.run`)
 written through native session storage. A missing, corrupt, or unknown-version
