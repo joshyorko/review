@@ -20,7 +20,14 @@ function fake(invoke: (tools: Tool[]) => Promise<void>, startsTurn = true) {
 		prompt: async () => {
 			if (!startsTurn) return;
 			for (const listener of listeners) listener({ type: "turn_start" });
-			await tools.find((tool) => tool.name === "factory_report")?.execute("id", { report: "observed", tests: ["true"] });
+			await tools.find((tool) => tool.name === "factory_report")?.execute("id", {
+				report: "observed",
+				tests: ["true"],
+				accepted: true,
+				semanticOutcome: "none",
+				predicates: [{ item: "native verification command", ok: true, note: "reported" }],
+				publicationBlocker: "",
+			});
 		},
 	};
 	const sdk: NativeSDK = { Settings: { isolated: (x: Record<string, unknown>) => x }, SessionManager: { create: () => ({}) }, AgentRegistry: class {}, createAgentSession: async (options) => { tools = options.customTools as Tool[]; await invoke(tools); return { session }; } };

@@ -1015,7 +1015,7 @@ test("moving one criterion assumption invalidates only its dependent proof", () 
 			: criterion),
 	};
 	let current = step(scoped, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate() }));
-	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }));
+	current = executedAttempt(current, "T1" as TaskId, "T1-a1");
 	current = step(current, (revision) => ({
 		kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1",
 		receipt: receipt({ version: 2, assumptions: [{ kind: "acceptance-revision", value: "r1" }], predicates: [
@@ -1025,7 +1025,7 @@ test("moving one criterion assumption invalidates only its dependent proof", () 
 	}));
 	current = step(current, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
 	current = step(current, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ taskId: "T2" as TaskId, criterionId: "A2" as CriterionId }) }));
-	current = step(current, (revision) => ({ kind: "start_attempt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1", subject: SUBJECT }));
+	current = executedAttempt(current, "T2" as TaskId, "T2-a1");
 	current = step(current, (revision) => ({
 		kind: "record_receipt", expectedRevision: revision, taskId: "T2" as TaskId, attemptId: "T2-a1",
 		receipt: receipt({ taskId: "T2" as TaskId, attemptId: "T2-a1" }),
