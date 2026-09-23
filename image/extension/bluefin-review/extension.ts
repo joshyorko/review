@@ -1,8 +1,9 @@
 /**
- * Review and Hive Review workbench extension wiring.
+ * Review and optional Hive read-side workbench extension wiring.
  *
- * Hive owns queue authority and assignments. OMP owns sessions, tools, and
- * workflowz execution. This file only joins those seams to the workbench UI.
+ * Review uses GitHub as its queue; Hive is optional read-side context, never an
+ * assignment source. OMP owns sessions, tools, and workflowz execution. This file
+ * only joins those seams to the workbench UI.
  */
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
@@ -413,7 +414,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.setLabel(mode.isReviewMode() ? "Review Workbench" : "Hive Workbench");
 	pi.registerFlag("pr", { description: "Preselect a pull request or issue number", type: "string" });
 	pi.registerFlag("issues", { description: "Start in issues mode instead of pull requests", type: "boolean", default: false });
-	pi.registerFlag("all", { description: "Show all queue items instead of defaulting to Hive-only", type: "boolean", default: false });
+	pi.registerFlag("all", { description: "Show all queue items instead of filtering to Hive-assigned work", type: "boolean", default: false });
 	pi.registerFlag("repo", { description: "Review one repository: owner/repo, or org:name for a whole organization", type: "string" });
 	pi.registerFlag("skip-repo", { description: "Comma-separated repositories to skip", type: "string" });
 	pi.registerFlag("autoslay", { description: "Slay the selected or visible queue", type: "boolean", default: false });
