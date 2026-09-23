@@ -9,7 +9,7 @@ containerfile="image/appliance/Containerfile"
 contribute="image/contribute/Containerfile"
 entrypoint="image/appliance/entrypoint.sh"
 typesafe_version="0.6.1"
-omp_version="18.2.9"
+omp_version="18.2.11"
 
 fail() {
   echo "typesafe-appliance-contract: $*" >&2
