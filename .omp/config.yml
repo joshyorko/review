@@ -1,26 +1,26 @@
 # Project settings for joshyorko/review development.
 #
-# The interactive model remains the user's choice through /model. Repository
-# subagents are pinned so reviews and CI-oriented fan-out use one affordable,
-# reproducible model family; this file is not copied into either runtime image.
+# The interactive model remains the user's choice through /model. Review
+# subagents use OMP's native workload roles so the user's configured model
+# family and effort remain authoritative.
 #
 # Deliberately absent: modelRoles.default. The model *you* drive is yours to
 # choose; these settings apply only to agents spawned while working in this repo.
 task:
   agentModelOverrides:
-    scout: github-copilot/gemini-3.8-flash
-    sonic: github-copilot/gemini-3.8-flash
-    task: github-copilot/gemini-3.8-flash
-    reviewer: github-copilot/gemini-3.8-flash:high
-    review-ci-triage: github-copilot/gemini-3.8-flash
-    review-correctness: github-copilot/gemini-3.8-flash:high
-    review-queue-triage: github-copilot/gemini-3.8-flash
-    review-security: github-copilot/gemini-3.8-flash:high
-    review-simplicity: github-copilot/gemini-3.8-flash:high
-    review-test-coverage: github-copilot/gemini-3.8-flash:high
+    scout: "@smol"
+    sonic: "@smol"
+    task: "@task"
+    reviewer: "@task"
+    review-ci-triage: "@smol"
+    review-correctness: "@task"
+    review-queue-triage: "@smol"
+    review-security: "@task"
+    review-simplicity: "@task"
+    review-test-coverage: "@task"
+
+# Keep the advisor on the user's configured default role.
 modelRoles:
-  review: github-copilot/gemini-3.8-flash:high
-  fast: github-copilot/gemini-3.8-flash
   advisor: "@default"
 
 advisor:
