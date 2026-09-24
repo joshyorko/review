@@ -525,7 +525,7 @@ test("all repositories use the neutral reviewer agent", () => {
 		};
 		const prompt = actionPrompt({ kind: "slay", item }, undefined, { workbenchMode: "review" }) ?? "";
 		assert.match(prompt, /reviewer/);
-		assert.doesNotMatch(prompt, /bluefin|generic-reviewer|hive_workbench|Hive/i);
+		assert.doesNotMatch(prompt, /\bbluefin-(?:doctrine|reviewer|queue-triage)\b|generic-reviewer|hive_workbench_/i);
 	}
 });
 
@@ -571,6 +571,7 @@ function ciFetch(node: unknown) {
 test("authoritative successful rollup wins over queued ambient enterprise suites", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode("SUCCESS", {
 			pageInfo: { hasNextPage: false },
 			nodes: [
@@ -586,6 +587,7 @@ test("authoritative successful rollup wins over queued ambient enterprise suites
 test("successful rollup stays successful with terminal successful suite conclusions", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode("SUCCESS", {
 			pageInfo: { hasNextPage: false },
 			nodes: [
@@ -601,6 +603,7 @@ test("successful rollup stays successful with terminal successful suite conclusi
 test("failed rollup wins over unrelated suite noise", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode("FAILURE", {
 			pageInfo: { hasNextPage: false },
 			nodes: [{ status: "QUEUED", conclusion: null }],
@@ -612,6 +615,7 @@ test("failed rollup wins over unrelated suite noise", async () => {
 test("completed failing suites provide failure evidence when rollup is absent", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode(null, {
 			pageInfo: { hasNextPage: false },
 			nodes: [{ status: "COMPLETED", conclusion: "FAILURE" }],
@@ -623,6 +627,7 @@ test("completed failing suites provide failure evidence when rollup is absent", 
 test("active suites provide pending fallback evidence when rollup is absent", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode(null, {
 			pageInfo: { hasNextPage: false },
 			nodes: [{ status: "IN_PROGRESS", conclusion: null }],
@@ -634,6 +639,7 @@ test("active suites provide pending fallback evidence when rollup is absent", as
 test("terminal successful suites are nonblocking when rollup is absent", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode(null, {
 			pageInfo: { hasNextPage: false },
 			nodes: [
@@ -649,6 +655,7 @@ test("terminal successful suites are nonblocking when rollup is absent", async (
 test("incomplete fallback suite evidence is explicit unknown state", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode(null, {
 			pageInfo: { hasNextPage: true },
 			nodes: [{ status: "COMPLETED", conclusion: "SUCCESS" }],

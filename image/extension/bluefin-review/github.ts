@@ -445,6 +445,7 @@ export const QUEUE_TIMEOUT_MS = 45_000;
 /** Fetch the open org queue, following pagination up to `limit` items. */
 export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): Promise<QueueResult> {
 	const { token, org, limit = 150, signal } = options;
+	const doFetch = options.fetchImpl ?? fetch;
 	const scope = options.scope ?? (org ? orgScope(org) : undefined);
 	const query = mode === "prs" ? PR_QUEUE_QUERY : ISSUE_QUEUE_QUERY;
 	const deadline = deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal);

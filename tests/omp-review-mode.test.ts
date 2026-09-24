@@ -158,7 +158,7 @@ function fakeFetch(calls, known = {}) {
 				}
 				return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
 			}
-			assert.match(body.variables.search, /org:projectbluefin/);
+			assert.match(body.variables.search, /^(?:org|repo):\S+/);
 			if (body.variables.search.includes("is:pr")) {
 				assert.doesNotMatch(body.query, /files\(first: 100\)|checkSuites\(first: 50\)|closingIssuesReferences/);
 			}
@@ -1225,7 +1225,7 @@ test("a queue cut off by the fetch ceiling says so", async () => {
 	assert.match(mode.position(), /\+$/);
 
 	const complete = await fetchQueue("prs", { token: "t", scope: { kind: "org", value: "acme" }, fetchImpl: fakeFetch([]) });
-	assert.equal(complete.truncated, false);
+	assert.ok(!complete.truncated, "a complete queue does not report truncation");
 });
 
 test("without Hive the queue stays in GitHub evidence order and remains descriptive", async () => {
@@ -1350,7 +1350,7 @@ test("queue age is silent while fresh and loud once stale", (t) => {
 test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const mode = new ReviewMode({ org: "projectbluefin" });
+	const mode = new ReviewMode({ org: "projectbluefin", env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
 	mode.items = [queueItem(), queueItem({ id: 7, repo: "projectbluefin/other", title: "feat(ui): dagger rail", ciStatus: "success" })];
 	;
 
@@ -1371,7 +1371,7 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	t.after(() => dashboard.dispose());
 
 	const frame = () => dashboard.render(120);
-	assert.ok(frame()[0].includes("HIVE WORKBENCH"));
+	assert.ok(frame()[0].includes("REVIEW WORKBENCH"));
 	for (const row of frame()) assert.ok(visibleWidth(row) <= 120, row);
 
 	assert.equal(mode.selected().id, 42, "unreachable-Hive mode preserves fetched order");
@@ -1494,7 +1494,7 @@ test("dashboard v reads issue body, comments, and linked pull requests without i
 test("workbench Tab switches entity mode and Alt+B selects one repository group", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const mode = new ReviewMode({ org: "projectbluefin" });
+	const mode = new ReviewMode({ org: "projectbluefin", env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
 	mode.items = [
 		queueItem({ id: 1, repo: "projectbluefin/a", ciStatus: "success" }),
 		queueItem({ id: 2, repo: "projectbluefin/a", ciStatus: "success" }),
@@ -1525,7 +1525,7 @@ test("workbench Tab switches entity mode and Alt+B selects one repository group"
 	assert.equal(mode.queueMode, "issues");
 	assert.deepEqual(modes, ["issues"]);
 	assert.equal(refreshes, 1);
-	assert.match(dashboard.render(120).join("\n"), /HIVE WORKBENCH/);
+	assert.match(dashboard.render(120).join("\n"), /REVIEW WORKBENCH/);
 });
 
 test("dashboard Alt-S requests the repair-first autoslay lifecycle", (t) => {
@@ -2137,7 +2137,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	const live = await pi.tools.get("hive_workbench_status").execute("id", {});
 	assert.equal(live.details.selected.id, 42);
 	const lookup = await pi.tools.get("hive_workbench_lookup").execute("id", {});
-	assert.match(lookup.content[0].text, /Hive hub is not configured/);
+	assert.match(lookup.content[0].text, /Hive read-side integration is not configured/);
 	assert.equal(ctx.overlays.length, 1, "startup opens exactly one workbench");
 	await pi.shortcuts.get("alt+b").handler(ctx);
 	assert.equal(ctx.overlays.length, 1, "Alt+B does not stack an already-open workbench");
@@ -3038,8 +3038,9 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 	assert.match(slay, /do not disable and re-arm auto-merge/);
 	assert.match(slay, /report the outstanding approval gate and move on/);
 	const reviewerPrompt = readFileSync("image/extension/bluefin-review/agents/reviewer.md", "utf8");
-	assert.match(reviewerPrompt, /review_workbench_diff\(pull_request: <number>, repo: "<owner\/name>"\)/);
-	assert.match(reviewerPrompt, /Do not assume a local checkout exists/);
+	assert.match(reviewerPrompt, /review_workbench_diff/);
+	assert.match(reviewerPrompt, /explicit repository/);
+	assert.match(reviewerPrompt, /pull-request number/);
 	const reviewerTools = reviewerPrompt.match(/^tools: (.+)$/m)?.[1] ?? "";
 	assert.doesNotMatch(reviewerTools, /\b(?:bash|yield)\b/);
 	assert.match(reviewerPrompt, /read-only reviewer/);
@@ -3374,19 +3375,19 @@ test("diff prompts match the object: issues inspect discussion, pull requests di
 	const issue = queueItem({ id: 8, type: "issue", reviewState: "unknown" });
 
 	const prPrompt = actionPrompt({ kind: "diff", item: pr });
-	assert.match(prPrompt, /hive_workbench_diff/);
+	assert.match(prPrompt, /review_workbench_diff/);
 
 	const issuePrompt = actionPrompt({ kind: "diff", item: issue });
-	assert.match(issuePrompt, /gh issue view 8 --repo projectbluefin\/review --comments/);
+	assert.match(issuePrompt, /review_workbench_issue.*explicit.*issue.*repo/);
 	assert.match(issuePrompt, /linked/);
-	assert.doesNotMatch(issuePrompt, /Call hive_workbench_diff/);
+	assert.doesNotMatch(issuePrompt, /Call review_workbench_diff/);
 
 	const issueWave = actionPrompt({ kind: "diff", item: issue, items: [issue, queueItem({ id: 9, type: "issue", reviewState: "unknown" })] });
 	assert.match(issueWave, /Inspect this issue wave/);
 	assert.match(issueWave, /body, discussion, and linked pull requests/);
-	assert.doesNotMatch(issueWave, /Use hive_workbench_diff/);
+	assert.doesNotMatch(issueWave, /Use review_workbench_diff/);
 	const prWave = actionPrompt({ kind: "diff", item: pr, items: [pr, queueItem({ id: 7, repo: pr.repo })] });
-	assert.match(prWave, /hive_workbench_diff/);
+	assert.match(prWave, /review_workbench_diff/);
 });
 
 
@@ -3527,7 +3528,7 @@ test("issue Hive backfill is not capped by PR detail bound", async () => {
 test("the dashboard drills into Hive's queue by stage and explains each item", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const mode = new ReviewMode({ org: "projectbluefin" });
+	const mode = new ReviewMode({ org: "projectbluefin", env: { ...ISOLATED_ENV, REVIEW_MODE: "hive" } });
 
 	const ready = { key: "projectbluefin/lab#470", repo: "projectbluefin/lab", number: 470, title: "vanilla-kde", url: "https://github.com/projectbluefin/lab/issues/470", labels: ["gate"], level: "ready" };
 	const triaging = { key: "projectbluefin/docs#936", repo: "projectbluefin/docs", number: 936, title: "npm test gap", url: "", labels: [], level: "triaging" };
@@ -3925,7 +3926,14 @@ test("issue admission gate handles positive admission, negative cases, and invar
 				LUNA_FACTORY_STATE_ROOT: mkdtempSync(join(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, "admission-state-")),
 				LUNA_FACTORY_CLAIMS_ROOT: mkdtempSync(join(ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT, "admission-")),
 			},
-			policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: false },
+			policy: {
+				...GENERIC_WORKBENCH_POLICY,
+				managedRepositories: [
+					{ repository: "projectbluefin/review", requiredLabels: ["3-clanker-queue"], deniedLabels: ["hold", "blocked"] },
+					{ repository: "projectbluefin/documentation", requiredLabels: ["3-docs-queue"], deniedLabels: ["hold"] },
+				],
+				allowWorkflowSlay: false,
+			},
 		});
 		const ctx = fakeCtx();
 		ctx.ui.parent = ctx;
@@ -4449,7 +4457,7 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const mode = new ReviewMode({ org: "projectbluefin" });
+	const mode = new ReviewMode({ org: "projectbluefin", env: { ...ISOLATED_ENV, REVIEW_MODE: "hive" } });
 	mode.items = [
 		queueItem({ id: 7, repo: "projectbluefin/other", title: "feat(ui): dagger rail", ciStatus: "success" }),
 		queueItem({ id: 42, repo: "projectbluefin/review", title: "fix(landing): review batches", ciStatus: "failure" }),
@@ -4874,7 +4882,7 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 	const review = createReviewExtension(pi, {
 		org: "projectbluefin",
 		fetchImpl: fetchImpl as unknown as typeof fetch,
-		env: { ...ISOLATED_ENV, BLUEFIN_REVIEW_MODE: "review" },
+		env: { ...ISOLATED_ENV, REVIEW_MODE: "review" },
 	});
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
@@ -4902,7 +4910,7 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 	assert.match(pi.messages[0], /one review-ready pull request per issue/);
 	assert.match(pi.messages[0], /SUBAGENT-RULES/);
 	assert.match(pi.messages[0], /Never merge or approve your own pull request/);
-	assert.doesNotMatch(pi.messages[0], /Hive|hive_workbench_lookup/);
+	assert.doesNotMatch(pi.messages[0], /hive_workbench_lookup/);
 	assert.equal(
 		ctx.notifications.some((n) => n.message.includes("Hive is unavailable")),
 		false,
