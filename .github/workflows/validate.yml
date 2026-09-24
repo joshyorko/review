@@ -94,6 +94,7 @@ jobs:
       # headlessly against a fake host; the appliance's static contract holds
       # its pins and its version derivation without needing a container engine.
       - name: Review mode and appliance contracts
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           node --test tests/update-omp-pins.test.mjs

@@ -14,6 +14,15 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+test_files=(
+  tests/omp-review-mode.test.ts
+  tests/pr_reader.test.ts
+  tests/personal_policy.test.ts
+  tests/luna_factory.test.ts
+  tests/luna_factory_dogfood_contract.test.ts
+  tests/luna_factory_native.test.ts
+  tests/luna_factory_batch.test.ts
+)
 
 if ! command -v node >/dev/null 2>&1; then
   echo "omp-review-mode: node is required to exercise the review mode" >&2
@@ -25,7 +34,10 @@ fi
 node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
 if ((node_major < 24)); then
   if command -v bun >/dev/null 2>&1; then
-    bun test tests/omp-review-mode.test.ts tests/pr_reader.test.ts tests/personal_policy.test.ts tests/luna_factory.test.ts tests/luna_factory_dogfood_contract.test.ts tests/luna_factory_native.test.ts tests/luna_factory_batch.test.ts
+    for test_file in "${test_files[@]}"; do
+      printf 'omp-review-mode: running %s\n' "$test_file"
+      bun test "$test_file"
+    done
     bash tests/launcher-contract.sh
     exit 0
   fi
@@ -33,6 +45,9 @@ if ((node_major < 24)); then
   exit 1
 fi
 
-node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/omp-review-mode.test.ts tests/pr_reader.test.ts tests/personal_policy.test.ts tests/luna_factory.test.ts tests/luna_factory_dogfood_contract.test.ts tests/luna_factory_native.test.ts tests/luna_factory_batch.test.ts
+for test_file in "${test_files[@]}"; do
+  printf 'omp-review-mode: running %s\n' "$test_file"
+  node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON "$test_file"
+done
 python3 tests/personal_brew_oci_contract.py
 bash tests/launcher-contract.sh
