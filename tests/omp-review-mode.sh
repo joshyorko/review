@@ -47,7 +47,7 @@ fi
 
 for test_file in "${test_files[@]}"; do
   printf 'omp-review-mode: running %s\n' "$test_file"
-  node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON "$test_file"
+  node --test --test-reporter=tap --disable-warning=MODULE_TYPELESS_PACKAGE_JSON "$test_file"
 done
 python3 tests/personal_brew_oci_contract.py
 bash tests/launcher-contract.sh
