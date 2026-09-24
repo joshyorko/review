@@ -156,7 +156,7 @@ test("Renovate tracks only shipped Review and CI dependencies", async () => {
 	}
 	assert.doesNotMatch(workflow, /update-(?:node|tmux)-pins/);
 	const publisher = await readFile(".github/workflows/publish-appliance.yml", "utf8");
-	assert.match(publisher, /node --test tests\\/update-derived-pins\\.test\\.mjs/);
+	assert.match(publisher, /node --test tests\/update-derived-pins\.test\.mjs/);
 });
 
 test("Renovate extracts appliance pins and CI package versions", async () => {
