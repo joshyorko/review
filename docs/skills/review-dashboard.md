@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
 version: "5.6"
-last_updated: 2026-09-23
+last_updated: 2026-09-24
 id: review-dashboard
 one_line_purpose: Maintain the GitHub Review workbench and mutation guards.
 entry_point: docs/skills/review-dashboard.md
@@ -61,6 +61,21 @@ Review specialists use neutral definitions in `image/extension/bluefin-review/ag
 A pull-request lifecycle verifies the exact head and live repository rules before mutation. Returned pull requests from the authenticated user stay in a repair-only lane: never self-review, self-approve, or self-merge. Preserve workflow-file permission checks, incomplete-file-list fail-closed behavior, mutation claims, and ambiguous-effect reconciliation.
 
 Issue work reads the GitHub issue and bounded discussion. A multi-issue wave uses OMP workflowz tasks with repository-local isolated workspaces. Workers may submit changes through pull requests; they do not approve or merge their own work. A settled job or empty queue alone is not terminal proof.
+
+## Interrupted wave recovery
+
+Review persists the selected wave, worker identities, issue-submission baseline, and host-wide mutation resources before dispatch. On restart, a running wave becomes blocked and is reconciled against live GitHub state; an issue Slay settles only when exactly one new submitted pull request is identified for each issue. Missing, duplicate, unrelated, stale, or otherwise ambiguous effects remain `UNKNOWN` and keep their claims.
+
+Normal Review commands provide recovery without claim-file or Factory archaeology:
+
+- `/review status` shows the active/recoverable waves and Review-owned claims.
+- `/review reconcile` re-checks authoritative worker and GitHub evidence.
+- `/review drain` pauses admission and waits for the current wave to settle.
+- `/review cancel` drains active work, then archives the wave while retaining UNKNOWN claims.
+- `/review revise` cancels a blocked wave after the same safe reconciliation and leaves the session ready for a new selection.
+- `/review slay` starts another issue Slay from the refreshed visible queue.
+
+Reconciliation releases only claims with settled evidence. Changing instance keys or scopes does not bypass a host-wide claim.
 
 ## Policy and tools
 

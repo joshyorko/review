@@ -49,7 +49,7 @@ export const BATCH_ENTRY = "com.hive.workbench.batch";
 export const COMMENT_ENTRY = "com.hive.workbench.comment";
 
 export type RepositoryBatchKind = "slay" | "fix" | "diff";
-export type RepositoryBatchState = "running" | "paused" | "blocked" | "complete";
+export type RepositoryBatchState = "running" | "paused" | "blocked" | "complete" | "cancelled";
 
 export interface PersistedRepositoryBatch {
 	readonly version: 1;
@@ -68,6 +68,10 @@ export interface PersistedRepositoryBatch {
 	readonly waveJobIds?: readonly string[];
 	readonly waveTerminalJobStatuses?: Readonly<Record<string, "completed" | "failed" | "cancelled" | "canceled">>;
 	readonly waveEffectResources?: readonly string[];
+	/** Baseline issue submissions captured before this wave was dispatched. */
+	readonly issueSubmittedPrs?: Readonly<Record<string, readonly string[]>>;
+	/** Operator requested cancellation; the current wave must drain before archive. */
+	readonly cancelRequested?: boolean;
 }
 
 export interface PersistedCommentResult {
@@ -175,6 +179,7 @@ export interface ReviewExtensionHost {
 	registerFlag(name: string, options: { description?: string; type: "string" | "boolean"; default?: string | boolean }): void;
 	getFlag(name: string): string | boolean | undefined;
 	registerTool(definition: unknown): void;
+	registerCommand?(name: string, definition: { description?: string; handler(args: string, ctx: CtxLike): unknown }): void;
 	appendEntry(customType: string, data?: unknown): void;
 	sendUserMessage(content: string, options?: { deliverAs?: string; waveId?: string }): void;
 }
@@ -187,12 +192,14 @@ function readLatestCustom<T>(ctx: CtxLike, customType: string): T | undefined {
 	return latest;
 }
 
-function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
-	return readLatestCustom<PersistedSelection>(ctx, STATE_ENTRY);
+function readPersistedBatches(ctx: CtxLike): PersistedRepositoryBatch[] {
+	return (ctx.sessionManager?.getBranch() ?? [])
+		.filter((entry) => entry.type === "custom" && entry.customType === BATCH_ENTRY && entry.data)
+		.map((entry) => entry.data as PersistedRepositoryBatch);
 }
 
-function readPersistedBatch(ctx: CtxLike): PersistedRepositoryBatch | undefined {
-	return readLatestCustom<PersistedRepositoryBatch>(ctx, BATCH_ENTRY);
+function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
+	return readLatestCustom<PersistedSelection>(ctx, STATE_ENTRY);
 }
 
 function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined {
@@ -207,7 +214,7 @@ export async function reconcileBlockedRepositoryClaim(
 ): Promise<"settled" | "unknown"> {
 	const wave = batch.waves[batch.currentWave];
 	const resources = wave ? [`repo:${wave.repo.toLowerCase()}`, ...wave.items.map((item) => `item:${item.repo.toLowerCase()}#${item.id}`)] : [];
-	if (batch.state !== "blocked" || !wave || owner !== `review:${batch.id}:${batch.currentWave}` || !resources.includes(resource.toLowerCase())) return "unknown";
+	if (!["blocked", "cancelled"].includes(batch.state) || !wave || owner !== `review:${batch.id}:${batch.currentWave}` || !resources.includes(resource.toLowerCase())) return "unknown";
 	if (await authoritative() !== "settled") return "unknown";
 	claims.markSettled(resource, owner);
 	return "settled";
@@ -408,6 +415,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
 	let started: Promise<void> = Promise.resolve();
+	const recoveryBatches = new Map<string, PersistedRepositoryBatch>();
 	let activeBatch: PersistedRepositoryBatch | undefined;
 	let batchRequestGeneration = 0;
 	let commentInFlight = false;
@@ -422,6 +430,35 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const unregisterFactorySelection = registerFactorySelection((action) => mode.factorySelection(action));
 	let claims: ResourceClaims | undefined;
 	const resourceClaims = () => claims ??= new ResourceClaims(factoryStateRoot(env), factoryClaimsRoot(env));
+	const resourcesForBatch = (batch: PersistedRepositoryBatch): string[] => {
+		const wave = batch.waves[batch.currentWave];
+		if (!wave || batch.kind === "diff") return [];
+		return [...new Set(wave.items.flatMap((item) => [
+			`repo:${item.repo.toLowerCase()}`,
+			`item:${item.repo.toLowerCase()}#${item.id}`,
+		]))].sort();
+	};
+	const expectedIssueSubmission = (
+		batch: PersistedRepositoryBatch,
+		item: QueueItem,
+		current: QueueItem,
+	): string[] | undefined => {
+		const key = `${item.repo.toLowerCase()}#${item.id}`;
+		const baseline = batch.issueSubmittedPrs?.[key] ?? item.submittedPrs ?? [];
+		const currentPrs = current.submittedPrs ?? [];
+		const delta = currentPrs.filter((submittedPr) => !baseline.includes(submittedPr));
+		return delta.length === 1 ? delta : undefined;
+	};
+	const rememberRecoveryBatch = (batch: PersistedRepositoryBatch): void => {
+		if (batch.state === "blocked" || batch.state === "cancelled") recoveryBatches.set(batch.id, batch);
+		else recoveryBatches.delete(batch.id);
+	};
+	const batchForOwner = (owner: string): PersistedRepositoryBatch | undefined => {
+		const candidates = [activeBatch, ...recoveryBatches.values()].filter(
+			(batch): batch is PersistedRepositoryBatch => batch !== undefined,
+		);
+		return candidates.find((batch) => owner === `review:${batch.id}:${batch.currentWave}`);
+	};
 	const claimItems = (items: readonly QueueItem[], owner: string, allowExisting = true): void => {
 		const resources = [...new Set(items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))];
 		const acquired: string[] = [];
@@ -438,12 +475,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 	};
 	const reconcileMutationClaim = async (owner: string, resource: string): Promise<"settled" | "unknown"> => {
-		const batch = activeBatch;
+		const batch = batchForOwner(owner);
 		const ctx = activeCtx;
-		if (!batch || !ctx) return "unknown";
-		const wave = batch.waves[batch.currentWave];
-		if (!wave) return "unknown";
-		return reconcileBlockedRepositoryClaim(resourceClaims(), batch, owner, resource, () => authoritativeReconcile(ctx, batch.id, resource, wave));
+		if (!batch || !ctx || !batch.waves[batch.currentWave]) return "unknown";
+		return reconcileBlockedRepositoryClaim(
+			resourceClaims(),
+			batch,
+			owner,
+			resource,
+			() => authoritativeReconcile(ctx, batch, resource),
+		);
 	};
 	const unregisterFactoryReconciler = registerFactoryReconciler(reconcileMutationClaim);
 
@@ -466,27 +507,46 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 	const authoritativeReconcile = async (
 		ctx: CtxLike,
-		batchId: string,
+		batch: PersistedRepositoryBatch,
 		resource: string,
-		wave: { repo: string; items: readonly QueueItem[] },
 	): Promise<"settled" | "unknown"> => {
-		if (!activeBatch || activeBatch.id !== batchId || activeBatch.state !== "blocked") return "unknown";
-		const expectedResources = [`repo:${wave.repo.toLowerCase()}`, ...wave.items.flatMap((item) => [`item:${item.repo.toLowerCase()}#${item.id}`])].sort();
-		if (!activeBatch.waveEffectResources || JSON.stringify(activeBatch.waveEffectResources) !== JSON.stringify(expectedResources) || !waveWorkerCoverageComplete(activeBatch.waveJobIds, activeBatch.waveToolCallIds) || !expectedResources.includes(resource.toLowerCase())) return "unknown";
+		const wave = batch.waves[batch.currentWave];
+		const expectedResources = resourcesForBatch(batch);
+		if (
+			!["blocked", "cancelled"].includes(batch.state)
+			|| !wave
+			|| !batch.waveEffectResources
+			|| JSON.stringify(batch.waveEffectResources) !== JSON.stringify(expectedResources)
+			|| !waveWorkerCoverageComplete(batch.waveJobIds, batch.waveToolCallIds)
+			|| !expectedResources.includes(resource.toLowerCase())
+		) return "unknown";
 		const jobs = ctx.getAsyncJobSnapshot?.();
-		if (!waveWorkersSettled(jobs, activeBatch.waveJobIds, activeBatch.waveTerminalJobStatuses)) return "unknown";
-		if (activeBatch.kind === "diff") return "settled";
-		const groups = ["pr", "issue"] as const;
-		for (const type of groups) {
-			const items = wave.items.filter((item) => item.type === type);
+		if (!waveWorkersSettled(jobs, batch.waveJobIds, batch.waveTerminalJobStatuses)) return "unknown";
+		if (batch.kind === "diff") return "settled";
+
+		const targetItems = resource.toLowerCase().startsWith("repo:")
+			? wave.items
+			: wave.items.filter((item) => `item:${item.repo.toLowerCase()}#${item.id}` === resource.toLowerCase());
+		if (targetItems.length === 0) return "unknown";
+		for (const type of ["pr", "issue"] as const) {
+			const items = targetItems.filter((item) => item.type === type);
 			if (items.length === 0) continue;
-			const live = await fetchItemsByKey(items.map((item) => `${item.repo}#${item.id}`), type === "pr" ? "prs" : "issues", mode.tokenOptions());
+			const live = await fetchItemsByKey(
+				items.map((item) => `${item.repo}#${item.id}`),
+				type === "pr" ? "prs" : "issues",
+				mode.tokenOptions(),
+			);
 			if (live.error) return "unknown";
 			for (const item of items) {
 				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
 				if (!current) return "unknown";
-				if (type === "pr" && (current.headSha !== item.headSha || current.autoMergeEnabled !== item.autoMergeEnabled || current.reviewState !== item.reviewState)) return "unknown";
-				if (type === "issue" && (current.submittedPrs?.length ?? 0) > 0) return "unknown";
+				if (
+					type === "pr"
+					&& (current.headSha !== item.headSha
+						|| current.autoMergeEnabled !== item.autoMergeEnabled
+						|| current.reviewState !== item.reviewState)
+				) return "unknown";
+				if (type === "issue" && batch.kind === "slay" && expectedIssueSubmission(batch, item, current) === undefined) return "unknown";
 			}
 		}
 		return "settled";
@@ -568,9 +628,214 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const persistBatch = (ctx: CtxLike, batch: PersistedRepositoryBatch) => {
 		activeBatch = batch;
+		rememberRecoveryBatch(batch);
 		pi.appendEntry(BATCH_ENTRY, batch);
 		syncBatchProgress(ctx);
 	};
+
+	const observedSubmittedPrs = async (ctx: CtxLike, batch: PersistedRepositoryBatch): Promise<string[]> => {
+		const wave = batch.waves[batch.currentWave];
+		const issues = wave?.items.filter((item) => item.type === "issue") ?? [];
+		if (issues.length === 0) return [];
+		const live = await fetchItemsByKey(
+			issues.map((item) => `${item.repo}#${item.id}`),
+			"issues",
+			mode.tokenOptions(),
+		);
+		if (live.error) return [];
+		const refs: string[] = [];
+		for (const item of issues) {
+			const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+			const submission = current ? expectedIssueSubmission(batch, item, current) : undefined;
+			if (submission) refs.push(...submission);
+		}
+		return [...new Set(refs)].sort();
+	};
+
+	const reconcileBatchClaims = async (ctx: CtxLike, batch: PersistedRepositoryBatch) => {
+		const owner = `review:${batch.id}:${batch.currentWave}`;
+		const settled: string[] = [];
+		const unknown: string[] = [];
+		for (const resource of resourcesForBatch(batch)) {
+			if (resourceClaims().conflict(resource, owner)) {
+				unknown.push(resource);
+				continue;
+			}
+			const result = await reconcileBlockedRepositoryClaim(
+				resourceClaims(),
+				batch,
+				owner,
+				resource,
+				() => authoritativeReconcile(ctx, batch, resource),
+			);
+			if (result === "settled") {
+				resourceClaims().reconcile(resource, owner);
+				settled.push(resource);
+			} else {
+				unknown.push(resource);
+			}
+		}
+		return {
+			settled,
+			unknown,
+			submittedPrs: settled.length > 0 ? await observedSubmittedPrs(ctx, batch) : [],
+		};
+	};
+
+	const finishRecoveredBatch = async (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		result: { settled: string[]; unknown: string[]; submittedPrs: string[] },
+	): Promise<void> => {
+		if (result.unknown.length > 0 || activeBatch?.id !== batch.id) return;
+		const nextWave = batch.currentWave + 1;
+		const completedItems = batch.completedItems + (batch.waves[batch.currentWave]?.items.length ?? 0);
+		const evidence = result.submittedPrs.length > 0
+			? `; observed submitted PRs ${result.submittedPrs.join(", ")}`
+			: "";
+		if (nextWave >= batch.waves.length) {
+			persistBatch(ctx, {
+				...batch,
+				currentWave: nextWave,
+				completedItems,
+				state: "complete",
+				waveIdentity: undefined,
+				waveToolCallIds: undefined,
+				waveJobBaselineIds: undefined,
+				waveJobIds: undefined,
+				waveTerminalJobStatuses: undefined,
+				waveEffectResources: undefined,
+			});
+			if (ctx.hasUI) ctx.ui.notify(`Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
+			return;
+		}
+		persistBatch(ctx, {
+			...batch,
+			currentWave: nextWave,
+			completedItems,
+			state: mode.paused ? "paused" : "running",
+			waveStartedAt: Date.now(),
+			waveIdentity: undefined,
+			waveToolCallIds: undefined,
+			waveJobBaselineIds: undefined,
+			waveJobIds: undefined,
+			waveTerminalJobStatuses: undefined,
+			waveEffectResources: undefined,
+		});
+		if (ctx.hasUI) ctx.ui.notify(`Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
+		if (!mode.paused) await dispatchCurrentWave(ctx, "followUp");
+	};
+
+	const archiveCancelledBatch = (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		action: "cancel" | "revise",
+		result: { settled: string[]; unknown: string[]; submittedPrs: string[] },
+	): string => {
+		const evidence = result.submittedPrs.length > 0
+			? `; observed submitted PRs ${result.submittedPrs.join(", ")}`
+			: "";
+		const message = result.unknown.length > 0
+			? `${action === "revise" ? "Revision" : "Cancellation"} recorded for ${batch.id}; UNKNOWN claims remain fenced: ${result.unknown.join(", ")}${evidence}`
+			: `${action === "revise" ? "Revision" : "Cancellation"} recorded for ${batch.id}; settled claims released${evidence}`;
+		persistBatch(ctx, {
+			...batch,
+			state: "cancelled",
+			error: message,
+			cancelRequested: undefined,
+		});
+		activeBatch = undefined;
+		mode.setBatchProgress(undefined);
+		syncStatus(ctx);
+		return message;
+	};
+
+	const drainCancelledBatch = async (ctx: CtxLike, batch: PersistedRepositoryBatch): Promise<void> => {
+		const result = batch.waveIdentity
+			? await reconcileBatchClaims(ctx, batch)
+			: { settled: [], unknown: [], submittedPrs: [] };
+		const message = archiveCancelledBatch(ctx, batch, "cancel", result);
+		if (ctx.hasUI) ctx.ui.notify(message, result.unknown.length > 0 ? "warning" : "info");
+	};
+
+	const cancelBlockedBatch = async (ctx: CtxLike, action: "cancel" | "revise"): Promise<string> => {
+		const batch = activeBatch;
+		if (!batch) return "No Review wave is active";
+		if (batch.state === "running" || batch.state === "paused") {
+			if (!batch.waveIdentity) {
+				return archiveCancelledBatch(ctx, batch, action, { settled: [], unknown: [], submittedPrs: [] });
+			}
+			mode.setPaused(true);
+			persistBatch(ctx, {
+				...batch,
+				state: "paused",
+				cancelRequested: true,
+				error: `Cancellation requested; waiting for ${batch.id} to drain`,
+			});
+			return `Cancellation requested for ${batch.id}; current work will drain before claims are reconciled`;
+		}
+		if (batch.state !== "blocked") return "No blocked Review wave is active";
+		const workersSettled = !batch.waveIdentity
+			|| waveWorkersSettled(ctx.getAsyncJobSnapshot?.(), batch.waveJobIds, batch.waveTerminalJobStatuses);
+		if (!workersSettled) return `Run ${batch.id} still has an unaccounted worker; wait for it to drain before ${action}`;
+		const result = batch.waveIdentity
+			? await reconcileBatchClaims(ctx, batch)
+			: { settled: [], unknown: [], submittedPrs: [] };
+		return archiveCancelledBatch(ctx, batch, action, result);
+	};
+
+	const reviewCommand = async (rawArgs: string, ctx: CtxLike): Promise<string> => {
+		const args = rawArgs.trim().toLowerCase();
+		if (args === "slay" || args === "re-slay") {
+			activeCtx = ctx;
+			await startSlay(ctx, mode.slayableItems(BATCH_LIMIT));
+			return "Review Slay requested";
+		}
+		if (args === "cancel" || args === "drain" || args === "revise") {
+			return cancelBlockedBatch(ctx, args === "revise" ? "revise" : "cancel");
+		}
+		if (args === "reconcile" || args === "recover") {
+			const candidates = [...new Map(
+				[...recoveryBatches.values(), activeBatch]
+					.filter((batch): batch is PersistedRepositoryBatch => batch !== undefined)
+					.map((batch) => [batch.id, batch]),
+			).values()];
+			if (candidates.length === 0) return "No interrupted or blocked Review waves need reconciliation";
+			const lines: string[] = [];
+			for (const batch of candidates) {
+				const result = await reconcileBatchClaims(ctx, batch);
+				if (result.settled.length > 0) lines.push(`Reconciled ${result.settled.join(", ")} for ${batch.id}`);
+				if (result.submittedPrs.length > 0) lines.push(`Observed submitted PRs ${result.submittedPrs.join(", ")}`);
+				if (result.unknown.length > 0) lines.push(`Retained UNKNOWN claims ${result.unknown.join(", ")} for ${batch.id}`);
+				if (activeBatch?.id === batch.id && result.unknown.length === 0) await finishRecoveredBatch(ctx, batch, result);
+			}
+			return lines.length > 0 ? lines.join("; ") : "No Review claims were released";
+		}
+		if (args === "" || args === "status") {
+			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
+			const batches = [...recoveryBatches.values()].map((batch) =>
+				`${batch.id} ${batch.state}${batch.error ? ` — ${batch.error}` : ""}`);
+			return [
+				activeBatch ? `Active Review wave: ${activeBatch.id} ${activeBatch.state}` : "No active Review wave",
+				...batches,
+				claims.length > 0
+					? claims.map((claim) => `${claim.resource} is owned by ${claim.owner} [${claim.status}]`).join("\n")
+					: "No Review mutation claims",
+			].join("\n");
+		}
+		return "usage: /review status | reconcile | drain | cancel | revise | slay";
+	};
+	pi.registerCommand?.("review", {
+		description: "Inspect or recover an interrupted Review repository wave",
+		handler: async (args, ctx) => {
+			try {
+				const message = await reviewCommand(args, ctx);
+				if (ctx.hasUI) ctx.ui.notify(message, /UNKNOWN|unaccounted|No blocked/.test(message) ? "warning" : "info");
+			} catch (error) {
+				if (ctx.hasUI) ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
 
 	const batchBlocker = async (kind: RepositoryBatchKind, items: readonly QueueItem[]): Promise<string | undefined> => {
 		if (kind === "diff") return undefined;
@@ -749,7 +1014,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		const retryingBlockedWave = activeBatch.state === "blocked";
 		const startedAt = Date.now();
-		persistBatch(ctx, { ...activeBatch, state: "running", waveStartedAt: startedAt, error: undefined });
+		persistBatch(ctx, { ...activeBatch, state: "running", waveStartedAt: startedAt, error: undefined, cancelRequested: undefined });
 		const waveAction = {
 			kind: activeBatch.kind,
 			item: wave.items[0]!,
@@ -798,6 +1063,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const waves = mode.repositoryWaves(items);
 		if (waves.length === 0) return;
 		const startedAt = Date.now();
+		const issueSubmittedPrs = Object.fromEntries(
+			items
+				.filter((item) => item.type === "issue")
+				.map((item) => [`${item.repo.toLowerCase()}#${item.id}`, [...(item.submittedPrs ?? [])]]),
+		);
 		const batch: PersistedRepositoryBatch = {
 			version: 1,
 			id: `batch-${startedAt.toString(36)}`,
@@ -809,6 +1079,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			state: mode.paused ? "paused" : "running",
 			startedAt,
 			waveStartedAt: startedAt,
+			issueSubmittedPrs,
 		};
 		const blockers = await Promise.all(waves.map((wave) => batchBlocker(kind, wave.items)));
 		const blocker = blockers.find((reason) => reason !== undefined);
@@ -1166,15 +1437,35 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		await refreshQueue(ctx);
 		if (persisted?.id) mode.selectById(persisted.repo, persisted.id);
 
-		const recoveredBatch = readPersistedBatch(ctx);
+		const persistedBatches = readPersistedBatches(ctx);
+		for (const batch of persistedBatches) rememberRecoveryBatch(batch);
+		const recoveredBatch = persistedBatches.at(-1);
 		if (recoveredBatch) {
-			activeBatch = recoveredBatch.state === "running"
-				? { ...recoveredBatch, state: "blocked", error: "session ended before the repository wave reached a terminal state" }
-				: recoveredBatch;
-			if (recoveredBatch.state === "running") pi.appendEntry(BATCH_ENTRY, activeBatch);
-			if (recoveredBatch.state === "running") ctx.ui.notify(`Recovered blocked run ${recoveredBatch.id}; inspect claims with /factory claims status and reconcile only a settled external effect before retrying`, "warning");
-			if (activeBatch.state === "paused") mode.setPaused(true);
+			activeBatch = recoveredBatch.state === "running" || (recoveredBatch.state === "paused" && recoveredBatch.cancelRequested === true)
+				? {
+					...recoveredBatch,
+					state: "blocked",
+					error: recoveredBatch.cancelRequested === true
+						? "session ended while cancellation was draining the repository wave"
+						: "session ended before the repository wave reached a terminal state",
+				}
+				: ["blocked", "paused"].includes(recoveredBatch.state)
+					? recoveredBatch
+					: undefined;
+			if (activeBatch?.state === "blocked") rememberRecoveryBatch(activeBatch);
+			if (recoveredBatch.state === "running") {
+				pi.appendEntry(BATCH_ENTRY, activeBatch);
+				ctx.ui.notify(`Recovered blocked run ${recoveredBatch.id}; use /review reconcile or /review revise after inspecting the settled external effect`, "warning");
+			}
+			if (activeBatch?.state === "paused") mode.setPaused(true);
 			syncBatchProgress(ctx);
+			if (recoveredBatch.state === "running" && activeBatch?.state === "blocked") {
+				const result = await reconcileBatchClaims(ctx, activeBatch);
+				const resources = resourcesForBatch(activeBatch);
+				if (result.unknown.length === 0 && result.settled.length === resources.length && resources.length > 0) {
+					await finishRecoveredBatch(ctx, activeBatch, result);
+				}
+			}
 		}
 		const recoveredComment = readPersistedComment(ctx);
 		if (recoveredComment?.state === "previewed" || recoveredComment?.state === "confirmed") {
@@ -1194,20 +1485,28 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const advanceRepositoryBatch = async (ctx: CtxLike) => {
-		if (!activeBatch || activeBatch.state !== "running") return;
-		const wave = activeBatch.waves[activeBatch.currentWave];
-		if (!wave) return;
+		if (!activeBatch || (activeBatch.state !== "running" && !(activeBatch.state === "paused" && activeBatch.cancelRequested))) return;
+		const batchAtEntry = activeBatch;
+		const wave = batchAtEntry.waves[batchAtEntry.currentWave];
 		const jobs = ctx.getAsyncJobSnapshot?.();
 		rememberWaveEvidence(ctx);
 		if (jobs?.running.some((job) => job.startTime >= activeBatch!.waveStartedAt)) return;
 		const recent = jobs?.recent.filter((job) => job.startTime >= activeBatch!.waveStartedAt) ?? [];
 		const failed = recent.filter((job) => job.status !== "completed");
 		if (failed.length > 0 || recent.length === 0) {
+			if (batchAtEntry.cancelRequested) {
+				await drainCancelledBatch(ctx, batchAtEntry);
+				return;
+			}
 			const error = failed.length > 0
 				? `${failed.length} workflowz job${failed.length === 1 ? "" : "s"} failed or were cancelled`
 				: "workflowz produced no observable jobs for the repository wave";
 			persistBatch(ctx, { ...activeBatch, state: "blocked", error });
 			ctx.ui.notify(`Repository wave stopped: ${error}`, "error");
+			return;
+		}
+		if (batchAtEntry.cancelRequested) {
+			await drainCancelledBatch(ctx, batchAtEntry);
 			return;
 		}
 		if (activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr")) {
@@ -1249,10 +1548,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				ctx.ui.notify(`Slay wave stopped: ${live.error}`, "error");
 				return;
 			}
-			const unfinished = live.items.filter((item) => (item.submittedPrs?.length ?? 0) === 0);
+			const unfinished = wave.items.filter((item) => {
+				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				return !current || expectedIssueSubmission(activeBatch!, item, current) === undefined;
+			});
 			if (unfinished.length > 0) {
 				const targets = unfinished.map((item) => `${item.repo}#${item.id}`).join(", ");
-				const error = `issue slay jobs settled but no pull request was submitted: ${targets}`;
+				const error = `issue slay jobs settled without exactly one new submitted pull request (no pull request was submitted or the effect was ambiguous): ${targets}`;
 				persistBatch(ctx, { ...activeBatch, state: "blocked", error });
 				ctx.ui.notify(`Slay wave stopped: ${error}`, "error");
 				return;

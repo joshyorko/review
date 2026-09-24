@@ -69,7 +69,7 @@ const HELP: readonly string[] = [
 	"  x / A            clear selections / select the filtered slice",
 	"  tab              toggle pull requests and issues",
 	"  t                switch between queue and trace panes",
-	"  p                pause or resume future repository waves",
+	"  /review status|reconcile|drain|cancel|revise|slay  recover blocked waves safely",
 	"  v                read the highlighted pull request or issue",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
