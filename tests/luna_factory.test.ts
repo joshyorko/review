@@ -1586,7 +1586,8 @@ interface FakeToolResult {
 interface FakeTool {
 	name: string;
 	description?: string;
-	execute(...args: any[]): Promise<FakeToolResult>;
+	parameters?: unknown;
+	execute(...args: unknown[]): Promise<FakeToolResult>;
 }
 
 interface FakeNativeAgentSession {
@@ -1639,7 +1640,16 @@ interface FakeHost {
 	entries: Array<{ customType: string; data: unknown }>;
 	notifications: string[];
 	sentMessages: Array<{ content: string; options?: unknown }>;
-	zod: { object: () => unknown; string: () => unknown };
+	zod: {
+		object: (shape: Record<string, unknown>) => unknown;
+		string: () => unknown;
+		number: () => unknown;
+		boolean: () => unknown;
+		array: (item: unknown) => unknown;
+		enum: (values: readonly string[]) => unknown;
+		literal: (value: string | number | boolean) => unknown;
+		union: (values: readonly unknown[]) => unknown;
+	};
 	arktype?: (schema: unknown) => unknown;
 	setLabel(): void;
 	registerTool(definition: FakeTool): void;
@@ -1659,7 +1669,23 @@ function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
 	const sentMessages: Array<{ content: string; options?: unknown }> = [];
 	const nativeTaskCalls = { count: 0 };
 	const agentRegistry = fakeNativeAgentRegistry();
-	const leaf = (): unknown => ({ optional: () => leaf(), describe: () => leaf() });
+	interface FakeSchema {
+		kind: string;
+		[key: string]: unknown;
+		optional(): FakeSchema;
+		describe(description: string): FakeSchema;
+	}
+	const schema = (kind: string, properties: Record<string, unknown> = {}, isOptional = false): FakeSchema => ({
+		kind,
+		...properties,
+		...(isOptional ? { isOptional: true } : {}),
+		optional() {
+			return schema(kind, properties, true);
+		},
+		describe(description: string) {
+			return schema(kind, { ...properties, description }, isOptional);
+		},
+	});
 	if (options.nativeTask) {
 		tools.set("task", {
 			name: "task",
@@ -1679,7 +1705,16 @@ function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
 		entries,
 		notifications,
 		sentMessages,
-		zod: { object: () => ({}), string: leaf },
+		zod: {
+			object: (shape: Record<string, unknown>) => schema("object", { shape }),
+			string: () => schema("string"),
+			number: () => schema("number"),
+			boolean: () => schema("boolean"),
+			array: (item: unknown) => schema("array", { item }),
+			enum: (values: readonly string[]) => schema("enum", { values }),
+			literal: (value: string | number | boolean) => schema("literal", { value }),
+			union: (values: readonly unknown[]) => schema("union", { values }),
+		},
 		arktype: options.nativeTask ? ((schema: unknown) => schema) : undefined,
 		setLabel() {},
 		registerTool(definition: FakeTool) {
@@ -1721,10 +1756,10 @@ function startCtx(host: FakeHost) {
 	return { hasUI: true, ui: { notify: (message: string) => host.notify(message) }, sessionManager: { getBranch: () => [] } };
 }
 
-async function callTool(host: FakeHost, name: string, input: unknown) {
+async function callTool(host: FakeHost, name: string, input: Record<string, unknown>) {
 	const tool = host.tools.get(name);
 	assert.ok(tool !== undefined, `${name} is not registered`);
-	return tool.execute("call", { input: JSON.stringify(input) });
+	return tool.execute("call", input);
 }
 async function observeNativeStart(
 	host: FakeHost,
@@ -1904,6 +1939,60 @@ test("loading the extension registers its surface and starts no work", async () 
 	);
 	assert.equal(host.entries.length, 0, "loading writes no journal record");
 	assert.equal(host.notifications.length, 0, "loading is silent");
+});
+test("Factory exposes typed tool contracts and accepts an object on the first call", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	const open = host.tools.get("luna_factory_open");
+	assert.ok(open);
+	const parameters = open.parameters as {
+		kind: string;
+		shape: Record<string, { kind: string; isOptional?: boolean; item?: { kind: string; values?: readonly unknown[] }; values?: readonly unknown[]; shape?: Record<string, { isOptional?: boolean }> }>;
+	};
+	assert.equal(parameters.kind, "object");
+	assert.deepEqual(Object.keys(parameters.shape).sort(), [
+		"appetite",
+		"base",
+		"criteria",
+		"finishAuthority",
+		"finishDeliverable",
+		"head",
+		"nonGoals",
+		"objective",
+		"options",
+		"permittedEffects",
+		"replace",
+		"repo",
+	]);
+	assert.equal(parameters.shape.criteria.kind, "array");
+	assert.equal(parameters.shape.permittedEffects.kind, "array");
+	assert.deepEqual(parameters.shape.permittedEffects.item?.values, ["read", "write"]);
+	assert.equal(parameters.shape.finishDeliverable?.isOptional, true);
+	assert.equal(parameters.shape.options?.shape?.finishDeliverable?.isOptional, true);
+	const receiptTool = host.tools.get("luna_factory_receipt");
+	assert.ok(receiptTool);
+	const receiptParameters = receiptTool.parameters as {
+		kind: string;
+		values: ReadonlyArray<{ shape?: Record<string, { value?: unknown; isOptional?: boolean }> }>;
+	};
+	assert.equal(receiptParameters.kind, "union");
+	assert.deepEqual(receiptParameters.values.map((variant) => variant.shape?.version?.value), [1, 2]);
+	assert.equal(receiptParameters.values[0]?.shape?.assumptions, undefined);
+	assert.notEqual(receiptParameters.values[1]?.shape?.assumptions?.isOptional, true);
+	assert.notEqual(receiptParameters.values[1]?.shape?.predicates?.isOptional, true);
+	assert.equal(receiptParameters.values[1]?.shape?.semanticResult?.isOptional, true);
+	const opened = await callTool(host, "luna_factory_open", {
+		objective: "use the typed contract",
+		criteria: [{ id: "A1", statement: "the first call opens the run" }],
+		repo: "example/repo",
+		base: "a".repeat(40),
+		nonGoals: ["do not merge"],
+		permittedEffects: ["read"],
+		finishAuthority: "report only",
+		appetite: { tasks: 1, attemptsPerTask: 1 },
+	});
+	assert.equal(opened.isError, undefined);
+	assert.equal(host.entries.length, 1);
 });
 
 
