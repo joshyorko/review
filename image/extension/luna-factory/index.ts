@@ -281,6 +281,7 @@ function factoryToolSchemas(z: ZodLike): FactoryToolSchemas {
 		nonGoals: z.array(z.string()).optional(),
 		permittedEffects: z.array(z.enum(["read", "write"])).optional(),
 		finishAuthority: z.string().optional(),
+		finishDeliverable: z.string().optional(),
 		appetite: appetite.optional(),
 	});
 	const criterion = z.object({
@@ -314,8 +315,7 @@ function factoryToolSchemas(z: ZodLike): FactoryToolSchemas {
 		ok: z.boolean(),
 		note: z.string(),
 	}));
-	const receipt = z.object({
-		version: z.union([z.literal(1), z.literal(2)]),
+	const receiptFields = {
 		taskId: z.string(),
 		attemptId: z.string(),
 		generation: z.string(),
@@ -329,13 +329,23 @@ function factoryToolSchemas(z: ZodLike): FactoryToolSchemas {
 		next: z.string(),
 		confidence: z.enum(["low", "medium", "high"]),
 		routing,
-		assumptions: assumptions.optional(),
-		semanticResult: semanticResult.optional(),
-		predicates: predicates.optional(),
 		exitCode: z.number().describe("integer process exit code"),
 		aborted: z.boolean(),
 		truncated: z.boolean(),
-	});
+	};
+	const receipt = z.union([
+		z.object({
+			version: z.literal(1),
+			...receiptFields,
+		}),
+		z.object({
+			version: z.literal(2),
+			...receiptFields,
+			assumptions,
+			semanticResult: semanticResult.optional(),
+			predicates,
+		}),
+	]);
 	return {
 		empty: z.object({}),
 		open: z.object({
@@ -347,6 +357,7 @@ function factoryToolSchemas(z: ZodLike): FactoryToolSchemas {
 			nonGoals: z.array(z.string()).optional(),
 			permittedEffects: z.array(z.enum(["read", "write"])).optional(),
 			finishAuthority: z.string().optional(),
+			finishDeliverable: z.string().optional(),
 			appetite: appetite.optional(),
 			replace: z.boolean().optional(),
 			options: openOptions.describe("legacy nested form accepted by the current ledger adapter").optional(),

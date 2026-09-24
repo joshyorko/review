@@ -1675,14 +1675,15 @@ function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
 		optional(): FakeSchema;
 		describe(description: string): FakeSchema;
 	}
-	const schema = (kind: string, properties: Record<string, unknown> = {}): FakeSchema => ({
+	const schema = (kind: string, properties: Record<string, unknown> = {}, isOptional = false): FakeSchema => ({
 		kind,
 		...properties,
+		...(isOptional ? { isOptional: true } : {}),
 		optional() {
-			return schema(kind, { ...properties, optional: true });
+			return schema(kind, properties, true);
 		},
 		describe(description: string) {
-			return schema(kind, { ...properties, description });
+			return schema(kind, { ...properties, description }, isOptional);
 		},
 	});
 	if (options.nativeTask) {
@@ -1946,7 +1947,7 @@ test("Factory exposes typed tool contracts and accepts an object on the first ca
 	assert.ok(open);
 	const parameters = open.parameters as {
 		kind: string;
-		shape: Record<string, { kind: string; item?: { kind: string; values?: readonly unknown[] }; values?: readonly unknown[] }>;
+		shape: Record<string, { kind: string; isOptional?: boolean; item?: { kind: string; values?: readonly unknown[] }; values?: readonly unknown[]; shape?: Record<string, { isOptional?: boolean }> }>;
 	};
 	assert.equal(parameters.kind, "object");
 	assert.deepEqual(Object.keys(parameters.shape).sort(), [
@@ -1954,6 +1955,7 @@ test("Factory exposes typed tool contracts and accepts an object on the first ca
 		"base",
 		"criteria",
 		"finishAuthority",
+		"finishDeliverable",
 		"head",
 		"nonGoals",
 		"objective",
@@ -1965,6 +1967,20 @@ test("Factory exposes typed tool contracts and accepts an object on the first ca
 	assert.equal(parameters.shape.criteria.kind, "array");
 	assert.equal(parameters.shape.permittedEffects.kind, "array");
 	assert.deepEqual(parameters.shape.permittedEffects.item?.values, ["read", "write"]);
+	assert.equal(parameters.shape.finishDeliverable?.isOptional, true);
+	assert.equal(parameters.shape.options?.shape?.finishDeliverable?.isOptional, true);
+	const receiptTool = host.tools.get("luna_factory_receipt");
+	assert.ok(receiptTool);
+	const receiptParameters = receiptTool.parameters as {
+		kind: string;
+		values: ReadonlyArray<{ shape?: Record<string, { value?: unknown; isOptional?: boolean }> }>;
+	};
+	assert.equal(receiptParameters.kind, "union");
+	assert.deepEqual(receiptParameters.values.map((variant) => variant.shape?.version?.value), [1, 2]);
+	assert.equal(receiptParameters.values[0]?.shape?.assumptions, undefined);
+	assert.notEqual(receiptParameters.values[1]?.shape?.assumptions?.isOptional, true);
+	assert.notEqual(receiptParameters.values[1]?.shape?.predicates?.isOptional, true);
+	assert.equal(receiptParameters.values[1]?.shape?.semanticResult?.isOptional, true);
 	const opened = await callTool(host, "luna_factory_open", {
 		objective: "use the typed contract",
 		criteria: [{ id: "A1", statement: "the first call opens the run" }],
