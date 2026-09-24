@@ -348,7 +348,16 @@ function fakeHost() {
 		entries: [],
 		execResult: { stdout: "https://github.com/projectbluefin/review/issues/42#issuecomment-1\n", stderr: "", code: 0, killed: false },
 		execCalls: [],
-		zod: { object: () => ({}), string: zodLeaf, number: zodLeaf },
+		zod: {
+			object: zodLeaf,
+			string: zodLeaf,
+			number: zodLeaf,
+			boolean: zodLeaf,
+			array: zodLeaf,
+			enum: zodLeaf,
+			literal: zodLeaf,
+			union: zodLeaf,
+		},
 		setLabel(label) {
 			this.labels.push(label);
 		},

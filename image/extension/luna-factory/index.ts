@@ -73,9 +73,20 @@ interface NativeInvokeContext extends FactoryCtx {
 	agentRegistry?: NativeAgentRegistryLike;
 }
 
+interface SchemaLike {
+	optional(): SchemaLike;
+	describe(text: string): SchemaLike;
+}
+
 interface ZodLike {
-	object(shape: Record<string, unknown>): unknown;
-	string(): { optional(): unknown; describe(text: string): { optional(): unknown } };
+	object(shape: Record<string, unknown>): SchemaLike;
+	string(): SchemaLike;
+	number(): SchemaLike;
+	boolean(): SchemaLike;
+	array(item: unknown): SchemaLike;
+	enum(values: readonly [string, ...string[]]): SchemaLike;
+	literal(value: string | number | boolean): SchemaLike;
+	union(values: readonly unknown[]): SchemaLike;
 }
 
 /** The tool definition shape the host accepts. Named here so consumers do not rebuild it. */
@@ -153,16 +164,6 @@ function text(value: string): ToolContent[] {
 	return [{ type: "text", text: value }];
 }
 
-/** Read a JSON-string argument. Tools take one string so the package needs no schema library. */
-function parseArgument(params: Record<string, unknown>): { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: string } {
-	const raw = params.input;
-	if (typeof raw !== "string" || raw.trim().length === 0) return { ok: false, error: "input must be a non-empty JSON string" };
-	try {
-		return { ok: true, value: JSON.parse(raw) };
-	} catch (error) {
-		return { ok: false, error: `input is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
-	}
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -245,6 +246,149 @@ function parseOpenContract(payload: Record<string, unknown>): OpenContractResult
 	return { ok: true, value: { nonGoals: nonGoals.value, permittedEffects: permittedEffects.value, finishAuthority: finishAuthority.value, appetite: appetite.value } };
 }
 
+interface FactoryToolSchemas {
+	readonly empty: unknown;
+	readonly open: unknown;
+	readonly candidate: unknown;
+	readonly attempt: unknown;
+	readonly dispatch: unknown;
+	readonly receipt: unknown;
+	readonly reconcile: unknown;
+	readonly integrate: unknown;
+	readonly replan: unknown;
+	readonly reopen: unknown;
+	readonly finish: unknown;
+	readonly why: unknown;
+	readonly control: unknown;
+}
+
+function factoryToolSchemas(z: ZodLike): FactoryToolSchemas {
+	const subject = z.object({
+		repo: z.string().describe("canonical repository identity in owner/name form"),
+		base: z.string().describe("exact git revision for the current subject"),
+		head: z.string().describe("optional exact git revision").optional(),
+	});
+	const assumptions = z.array(z.object({
+		kind: z.enum(["acceptance-revision", "dependency-outcome"]),
+		value: z.string(),
+		taskId: z.string().describe("required for dependency-outcome").optional(),
+	}));
+	const appetite = z.object({
+		tasks: z.number().describe("integer from 1 through 64"),
+		attemptsPerTask: z.number().describe("integer from 1 through 64"),
+	});
+	const openOptions = z.object({
+		nonGoals: z.array(z.string()).optional(),
+		permittedEffects: z.array(z.enum(["read", "write"])).optional(),
+		finishAuthority: z.string().optional(),
+		finishDeliverable: z.string().optional(),
+		appetite: appetite.optional(),
+	});
+	const criterion = z.object({
+		id: z.string(),
+		statement: z.string(),
+		mandatory: z.boolean().describe("defaults to true").optional(),
+		assumptions: assumptions.optional(),
+	});
+	const testClaim = z.object({
+		command: z.string(),
+		outcome: z.enum(["pass", "fail", "not-run"]),
+		artifact: z.string().optional(),
+	});
+	const routing = z.object({
+		requested: z.string().optional(),
+		effective: z.string().optional(),
+		effort: z.string().optional(),
+		verified: z.boolean(),
+	});
+	const semanticResult = z.object({
+		kind: z.enum(["inspection", "finding"]),
+		outcome: z.enum(["no-finding", "supported", "disproven", "uncertain"]),
+		summary: z.string(),
+		verified: z.boolean(),
+		publicationAuthority: z.literal("none"),
+		publicationBlocker: z.string().optional(),
+	});
+	const predicates = z.array(z.object({
+		phase: z.enum(["worker", "verification", "acceptance"]),
+		item: z.string(),
+		ok: z.boolean(),
+		note: z.string(),
+	}));
+	const receiptFields = {
+		taskId: z.string(),
+		attemptId: z.string(),
+		generation: z.string(),
+		subject,
+		result: z.string(),
+		changed: z.array(z.string()),
+		evidence: z.array(z.string()),
+		tests: z.array(testClaim),
+		cleanEnvironment: z.union([z.boolean(), z.literal("unknown")]),
+		unresolved: z.array(z.string()),
+		next: z.string(),
+		confidence: z.enum(["low", "medium", "high"]),
+		routing,
+		exitCode: z.number().describe("integer process exit code"),
+		aborted: z.boolean(),
+		truncated: z.boolean(),
+	};
+	const receipt = z.union([
+		z.object({
+			version: z.literal(1),
+			...receiptFields,
+		}),
+		z.object({
+			version: z.literal(2),
+			...receiptFields,
+			assumptions,
+			semanticResult: semanticResult.optional(),
+			predicates,
+		}),
+	]);
+	return {
+		empty: z.object({}),
+		open: z.object({
+			repo: z.string().describe("canonical repository identity in owner/name form"),
+			base: z.string().describe("exact git revision for the current subject"),
+			head: z.string().describe("optional exact git revision").optional(),
+			objective: z.string(),
+			criteria: z.array(criterion),
+			nonGoals: z.array(z.string()).optional(),
+			permittedEffects: z.array(z.enum(["read", "write"])).optional(),
+			finishAuthority: z.string().optional(),
+			finishDeliverable: z.string().optional(),
+			appetite: appetite.optional(),
+			replace: z.boolean().optional(),
+			options: openOptions.describe("legacy nested form accepted by the current ledger adapter").optional(),
+		}),
+		candidate: z.object({
+			taskId: z.string(),
+			generation: z.string(),
+			criterionId: z.string(),
+			title: z.string(),
+			deps: z.array(z.string()).optional(),
+			effect: z.enum(["read", "write"]),
+			owner: z.string(),
+			necessity: z.string(),
+		}),
+		attempt: z.object({ taskId: z.string(), attemptId: z.string() }),
+		dispatch: z.object({ taskId: z.string(), attemptId: z.string(), path: z.string().optional() }),
+		receipt,
+		reconcile: z.object({
+			taskId: z.string(),
+			attemptId: z.string(),
+			outcome: z.enum(["abandoned", "unknown"]),
+			reason: z.string(),
+		}),
+		integrate: z.object({ taskId: z.string(), attemptId: z.string(), subject }),
+		replan: z.object({ taskId: z.string() }),
+		reopen: z.object({ taskId: z.string(), reason: z.string() }),
+		finish: z.object({ taskId: z.string() }),
+		why: z.object({ taskId: z.string() }),
+		control: z.object({ action: z.enum(["pause", "drain", "resume", "abort"]) }),
+	};
+}
 interface NativeTaskBinding {
 	readonly taskId: TaskId;
 	readonly attemptId: string;
@@ -738,12 +882,15 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	};
 
 	const z = host.zod;
-	const jsonParameters = z.object({ input: z.string().describe("JSON payload for this command") });
+	const schemas = factoryToolSchemas(z);
 
-	const registerTool = (definition: FactoryToolDefinition): void => {
+	const registerTool = (
+		definition: Omit<FactoryToolDefinition, "parameters">,
+		parameters: unknown,
+	): void => {
 		host.registerTool({
 			...definition,
-			parameters: jsonParameters,
+			parameters,
 			defaultInactive: !enabled(),
 			loadMode: "essential",
 		});
@@ -892,7 +1039,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				const result = await runPackagedBatchProbe({ root: factoryStateRoot(env), phase });
 				return { content: text(`BATCH_PROBE ${JSON.stringify(result)}`), details: result };
 			},
-		});
+		}, schemas.empty);
 	}
 
 	if (host.registerCommand !== undefined) {
@@ -941,7 +1088,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					return;
 				}
 				if (host.sendUserMessage === undefined) {
-					notifyCommand(ctx, "this OMP host has no prompt handoff; use luna_factory_open with an explicit JSON contract", "error");
+					notifyCommand(ctx, "this OMP host has no prompt handoff; use luna_factory_open with its typed contract", "error");
 					return;
 				}
 				host.sendUserMessage(
@@ -962,7 +1109,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		async execute() {
 			return { content: text(statusText()) };
 		},
-	});
+	}, schemas.empty);
 
 	registerTool({
 		name: "luna_factory_open",
@@ -970,13 +1117,10 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Establish a Factory run from an objective the user already agreed to. Pass objective, criteria, and the subject repository/base. Refuses to silently replace an open run.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
+			const payload = params;
 			if (!enabled()) {
 				return { content: text(`${ENABLE_FLAG}=1 is required to open a Factory run.`), isError: true };
 			}
-			if (!isRecord(parsed.value)) return { content: text("Factory open input must be a JSON object"), isError: true };
-			const payload = parsed.value;
 			const objective = boundedOptionText(payload.objective, "objective");
 			if (!objective.ok) return { content: text(objective.error), isError: true };
 			const rawCriteria = payload.criteria;
@@ -1053,7 +1197,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			commit(next);
 			return { content: text(`Factory run open: ${renderStatusDetail(next)[0]}`) };
 		},
-	});
+	}, schemas.open);
 
 	registerTool({
 		name: "luna_factory_candidate",
@@ -1061,9 +1205,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Submit a discovered candidate for admission. Discovery creates candidates, never authority: the ledger decides ADMIT, DEFER, DISMISS, or ESCALATE and records the reason.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			const candidate = parseCandidate(parsed.value);
+			const candidate = parseCandidate(params);
 			if (!candidate.ok) return { content: text(`candidate rejected: ${candidate.errors.join("; ")}`), isError: true };
 			return mutate(
 				(current) =>
@@ -1076,7 +1218,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				},
 			);
 		},
-	});
+	}, schemas.candidate);
 
 	registerTool({
 		name: "luna_factory_attempt",
@@ -1084,9 +1226,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Persist the intent to run an admitted task before any external effect, opening a new attempt on the task's lineage.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			const payload = parsed.value as { taskId?: unknown; attemptId?: unknown };
+			const payload = params as { taskId?: unknown; attemptId?: unknown };
 			if (typeof payload.taskId !== "string" || typeof payload.attemptId !== "string") {
 				return { content: text("taskId and attemptId are required"), isError: true };
 			}
@@ -1110,7 +1250,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				},
 			);
 		},
-	});
+	}, schemas.attempt);
 
 	registerTool({
 		name: "luna_factory_dispatch",
@@ -1118,10 +1258,8 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Build the bounded prompt for an admitted task. Factory's enforced boundary is the work it emits: it refuses an unadmitted task, a closed run, and any execution path whose admission gate is unproven.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
 			if (ledger === undefined) return { content: text(loadProblem ?? "no Factory run is open"), isError: true };
-			const payload = parsed.value as { taskId?: unknown; attemptId?: unknown; path?: unknown };
+			const payload = params as { taskId?: unknown; attemptId?: unknown; path?: unknown };
 			if (typeof payload.taskId !== "string" || typeof payload.attemptId !== "string") {
 				return { content: text("taskId and attemptId are required"), isError: true };
 			}
@@ -1134,7 +1272,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				details: { path, status: coverage.status },
 			};
 		},
-	});
+	}, schemas.dispatch);
 
 	registerTool({
 		name: "luna_factory_receipt",
@@ -1142,9 +1280,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Record a worker's structured receipt and reconcile it against the exact task, attempt, generation, and subject it claims to certify.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			const receipt = parseReceipt(parsed.value);
+			const receipt = parseReceipt(params);
 			if (!receipt.ok) return { content: text(`receipt rejected: ${receipt.errors.join("; ")}`), isError: true };
 			return mutate(
 				(current) =>
@@ -1165,7 +1301,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				},
 			);
 		},
-	});
+	}, schemas.receipt);
 
 	registerTool({
 		name: "luna_factory_reconcile",
@@ -1173,10 +1309,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Reconcile an interrupted native attempt as abandoned or liveness-unknown. This preserves native identities and retry lineage; it never invents a receipt or rolls back an external effect.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			if (!isRecord(parsed.value)) return { content: text("reconcile input must be a JSON object"), isError: true };
-			const payload = parsed.value;
+			const payload = params;
 			if (typeof payload.taskId !== "string" || typeof payload.attemptId !== "string") {
 				return { content: text("taskId and attemptId are required"), isError: true };
 			}
@@ -1203,7 +1336,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				(next) => `attempt ${payload.attemptId} reconciled as ${payload.outcome}; run remains ${next.control} until explicitly resumed`,
 			);
 		},
-	});
+	}, schemas.reconcile);
 
 	registerTool({
 		name: "luna_factory_integrate",
@@ -1211,10 +1344,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Record the owner's explicit integration of a proven write attempt at a new repository subject. Factory never applies or rolls back the external change.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			if (!isRecord(parsed.value)) return { content: text("integration input must be a JSON object"), isError: true };
-			const payload = parsed.value;
+			const payload = params;
 			if (typeof payload.taskId !== "string" || typeof payload.attemptId !== "string") {
 				return { content: text("taskId and attemptId are required"), isError: true };
 			}
@@ -1236,7 +1366,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				(next) => `attempt ${payload.attemptId} integrated explicitly at ${next.subject.repo}@${next.subject.head ?? next.subject.base}; Factory applied no external change`,
 			);
 		},
-	});
+	}, schemas.integrate);
 
 	registerTool({
 		name: "luna_factory_replan",
@@ -1244,10 +1374,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Use the one bounded materially different same-goal replan, but only after two consecutive no-progress attempts have been recorded.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			if (!isRecord(parsed.value)) return { content: text("replan input must be a JSON object"), isError: true };
-			const payload = parsed.value;
+			const payload = params;
 			if (typeof payload.taskId !== "string") return { content: text("taskId is required"), isError: true };
 			return mutate(
 				(current) =>
@@ -1259,7 +1386,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				(next) => `task ${payload.taskId} is READY for the one bounded replan; no-progress diagnosis remains recorded at ${next.noProgressAttempts}`,
 			);
 		},
-	});
+	}, schemas.replan);
 
 	registerTool({
 		name: "luna_factory_reopen",
@@ -1267,10 +1394,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Reopen a completed task only when the owner supplies new evidence of a legitimate defect; this invalidates its prior proof without authorizing successor work by itself.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			if (!isRecord(parsed.value)) return { content: text("reopen input must be a JSON object"), isError: true };
-			const payload = parsed.value;
+			const payload = params;
 			if (typeof payload.taskId !== "string") return { content: text("taskId is required"), isError: true };
 			if (typeof payload.reason !== "string" || payload.reason.trim().length === 0) {
 				return { content: text("reason must name the new evidence that justifies reopening the task"), isError: true };
@@ -1285,7 +1409,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				(next) => `task ${payload.taskId} reopened for explicit owner evidence; prior proof is no longer current`,
 			);
 		},
-	});
+	}, schemas.reopen);
 
 	registerTool({
 		name: "luna_factory_finish",
@@ -1293,9 +1417,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Certify an admitted task against a receipt that reconciles as proven at the current subject. Refuses unproven, stale, or unintegrated write work.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			const payload = parsed.value as { taskId?: unknown };
+			const payload = params as { taskId?: unknown };
 			if (typeof payload.taskId !== "string") return { content: text("taskId is required"), isError: true };
 			return mutate(
 				(current) => {
@@ -1315,21 +1437,19 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				(next) => renderCompletionReceipt(next, evaluateRun(next)),
 			);
 		},
-	});
+	}, schemas.finish);
 
 	registerTool({
 		name: "luna_factory_why",
 		label: "Factory Why",
 		description: "Explain why one task was admitted, deferred, dismissed, or escalated, with the evidence recorded for it.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			const payload = parsed.value as { taskId?: unknown };
+			const payload = params as { taskId?: unknown };
 			if (typeof payload.taskId !== "string") return { content: text("taskId is required"), isError: true };
 			if (ledger === undefined) return { content: text(loadProblem ?? "no Factory run is open"), isError: true };
 			return { content: text(renderWhy(ledger, payload.taskId as TaskId).join("\n")) };
 		},
-	});
+	}, schemas.why);
 
 	registerTool({
 		name: "luna_factory_control",
@@ -1337,9 +1457,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		description:
 			"Pause or drain admission, resume after reconciliation, or abort. Pause drains admitted work without claiming rollback; abort requests cancellation of owned work and never retracts external effects.",
 		async execute(_toolCallId, params) {
-			const parsed = parseArgument(params);
-			if (!parsed.ok) return { content: text(parsed.error), isError: true };
-			const payload = parsed.value as { action?: unknown };
+			const payload = params as { action?: unknown };
 			const control = payload.action === "pause" ? "paused" : payload.action === "drain" ? "draining" : payload.action === "resume" ? "active" : payload.action === "abort" ? "interrupted" : undefined;
 			if (control === undefined) return { content: text("action must be pause, drain, resume, or abort"), isError: true };
 			const result = mutate(
@@ -1348,7 +1466,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			);
 			return result;
 		},
-	});
+	}, schemas.control);
 
 	registerTool({
 		name: "luna_factory_completion",
@@ -1359,7 +1477,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			if (ledger === undefined) return { content: text(loadProblem ?? "no Factory run is open"), isError: true };
 			return { content: text(renderCompletionReceipt(ledger, evaluateRun(ledger))) };
 		},
-	});
+	}, schemas.empty);
 
 	// Discoverable extension tools are not guaranteed to be in OMP's initial
 	// active set. Activate them from session_start, after OMP has initialized the
