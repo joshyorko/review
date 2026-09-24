@@ -42,6 +42,12 @@ function response(payload, { status = 200, statusText = "OK" } = {}) {
 	};
 }
 
+function readVersionArg(source, name) {
+	const matches = [...source.matchAll(new RegExp(`^ARG ${name}=([0-9]+\\.[0-9]+\\.[0-9]+)$`, "gm"))];
+	assert.equal(matches.length, 1, `${name} must have exactly one version pin`);
+	return matches[0][1];
+}
+
 test("ghReleasePins accepts stable assets and rejects incomplete release evidence", () => {
 	assert.deepEqual(ghReleasePins(GH_RELEASE), { version: "2.97.0", x86_64: X64, aarch64: ARM64 });
 	assert.throws(() => ghReleasePins({ ...GH_RELEASE, prerelease: true }), /published stable release/);
@@ -157,7 +163,11 @@ test("Renovate tracks only shipped Review and CI dependencies", async () => {
 test("Renovate extracts appliance pins and CI package versions", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
 	const appliance = await readFile("image/appliance/Containerfile", "utf8");
-	for (const [depName, expectedVersion] of [["can1357/oh-my-pi", "18.2.11"], ["cli/cli", "2.97.0"]]) {
+	const expectedVersions = [
+		["can1357/oh-my-pi", readVersionArg(appliance, "OMP_VERSION")],
+		["cli/cli", readVersionArg(appliance, "GH_VERSION")],
+	];
+	for (const [depName, expectedVersion] of expectedVersions) {
 		const manager = config.customManagers.find((candidate) => candidate.depNameTemplate === depName);
 		const match = new RegExp(manager.matchStrings[0], "m").exec(appliance);
 		assert.ok(match, `${depName} pin is extracted from the Review appliance`);
