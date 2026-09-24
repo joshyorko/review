@@ -45,6 +45,8 @@ The Review workbench presents a GitHub queue and execution trace. It supports re
 
 Standalone Review uses **local attention order**: returned author repairs, personal review requests, failing CI, conflicts, ready-for-human-merge, review, issue triage, incomplete/waiting evidence, then blocked work. Within each category, dependency bumps receive one demotion point and work untouched for more than 21 days receives two; fewer points come first, then the most recently updated item, then the lowercase `owner/repo#number` key. Missing update times sort after known times at the same demotion. Demotion never moves work outside its category.
 
+Personal review requests are direct GitHub user requests, matched case-insensitively to your authenticated login. Team requests and missing reviewer evidence do not create personal priority.
+
 The dashboard and ordinary Slay/Autoslay use the same ordered queue. Explicit selections define the Slay scope and retain selection order. Optional Hive ranks take precedence within the existing author-repair and remaining-work lanes; local categories and safety gates remain visible. With Hive absent, disabled, or offline, local attention ordering remains active. Ranking only reads the captured GitHub snapshot, current user, policy, and staleness time. It does not dispatch work or change Factory admission, convergence, or mutation authority.
 
 

@@ -78,7 +78,7 @@ export function itemKey(item: QueueItem): string {
 }
 
 export function isDependencyBump(item: QueueItem): boolean {
-	if (BOT_AUTHORS[item.author.toLowerCase()]) return true;
+	if (Object.hasOwn(BOT_AUTHORS, item.author.toLowerCase())) return true;
 	if (item.labels.some((label) => DEPENDENCY_LABELS.test(label))) return true;
 	return /^chore\(deps\)/i.test(item.title);
 }
@@ -119,7 +119,7 @@ export function categorize(item: QueueItem, context: PrioritizeContext): { categ
 	if (blockedReason) {
 		return { category: "blocked", reason: blockedReason };
 	}
-	if (context.currentUserLogin && item.requestedReviewers && item.requestedReviewers.includes(context.currentUserLogin)) {
+	if (context.currentUserLogin && item.requestedReviewers?.some((login) => login.toLowerCase() === context.currentUserLogin!.toLowerCase())) {
 		return { category: "personal_request", reason: "review requested from you" };
 	}
 	if (item.draft) return { category: "investigate", reason: "draft, waiting on its author" };

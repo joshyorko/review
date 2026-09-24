@@ -643,6 +643,52 @@ test("queue fetch maps CI rollup and reports auth failure", async () => {
 	assert.match(denied.error ?? "", /401/, "a failed queue must say why, not render empty");
 });
 
+test("direct requested users govern fetched Review and Slay order, not teams or missing evidence", async () => {
+	const node = (number, updatedAt, reviewRequests) => ({
+		number,
+		title: `change ${number}`,
+		author: { login: "alice" },
+		repository: { nameWithOwner: "owner/repo" },
+		updatedAt: new Date(updatedAt).toISOString(),
+		mergeable: "MERGEABLE",
+		reviewDecision: "REVIEW_REQUIRED",
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+		files: { pageInfo: { hasNextPage: false }, nodes: [] },
+		reviewRequests,
+	});
+	const nodes = [
+		node(2, NOW, { nodes: [] }),
+		node(3, NOW - 1000, { nodes: [{ requestedReviewer: { __typename: "Team" } }] }),
+		node(4, NOW - 2000, undefined),
+		node(5, NOW - 3000, { nodes: [null, { requestedReviewer: null }, { requestedReviewer: { __typename: "User", login: "" } }] }),
+		node(1, NOW - 4000, { nodes: [{ requestedReviewer: { __typename: "User", login: "JoSh" } }] }),
+	];
+	for (const viewerLogin of ["josh", "JOSH", undefined]) {
+		const fetchImpl = async () => new Response(JSON.stringify({
+			data: { viewer: { login: viewerLogin }, search: { pageInfo: { hasNextPage: false }, nodes } },
+		}));
+		const mode = new ReviewMode({ scope: { kind: "repo", value: "owner/repo" }, fetchImpl, env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+		mode.setToken("t");
+		const result = await mode.refreshQueue();
+		assert.equal(result.error, undefined);
+		const expected = viewerLogin ? [1, 2, 3, 4, 5] : [2, 3, 4, 5, 1];
+		assert.deepEqual(mode.visibleItems().map((item) => item.id), expected);
+		assert.deepEqual(mode.slayableItems(2).map((item) => item.id), expected.slice(0, 2));
+		for (const item of result.items) {
+			assert.equal(mode.priorityFor(item).category, item.id === 1 && viewerLogin ? "personal_request" : "review");
+		}
+		const named = await fetchItemsByKey(nodes.map((item) => `owner/repo#${item.number}`), "prs", {
+			token: "t",
+			fetchImpl: async () => new Response(JSON.stringify({
+				data: Object.fromEntries(nodes.map((item, index) => [`w${index}`, { issueOrPullRequest: item }])),
+			})),
+		});
+		assert.equal(named.error, undefined);
+		const ranked = prioritize(named.items, { hive: EMPTY_HIVE, now: NOW, currentUserLogin: viewerLogin });
+		assert.deepEqual(ranked.items.map((item) => item.id), expected, "named reads retain the same personal-request evidence");
+	}
+});
+
 test("check suites surface failures and pending runs without rollup contexts", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
@@ -1792,6 +1838,21 @@ test("local governor bounds demotions within categories and breaks ties by canon
 	}
 	const urgent = prItem({ id: 9, ciStatus: "failure", author: "renovate[bot]", updatedAt: NOW - 90 * 86400000 });
 	assert.equal(prioritize([prItem({ id: 1, updatedAt: NOW }), urgent], { hive: EMPTY_HIVE, now: NOW }).items[0].id, 9);
+});
+
+test("local attention does not demote inherited bot-author names for PRs or issues", () => {
+	for (const type of ["pr", "issue"]) {
+		const items = [
+			prItem({ id: 2, type, author: "alice", updatedAt: NOW - 1000 }),
+			prItem({ id: 1, type, author: "constructor", updatedAt: NOW }),
+			prItem({ id: 3, type, author: "DePeNdAbOt[bot]", updatedAt: NOW }),
+			prItem({ id: 4, type, author: "alice", labels: ["dependencies"], updatedAt: NOW }),
+			prItem({ id: 5, type, author: "alice", title: "chore(deps): update library", updatedAt: NOW }),
+		];
+		const ranked = prioritize(items, { hive: EMPTY_HIVE, now: NOW });
+		assert.deepEqual(ranked.items.map((item) => item.id), [1, 2, 3, 4, 5]);
+		assert.deepEqual(items.map((item) => ranked.priorities.get(`projectbluefin/review#${item.id}`).demotion), [0, 0, 1, 1, 1]);
+	}
 });
 
 test("local governor shares the visible projection with Slay and preserves explicit selection", (t) => {
