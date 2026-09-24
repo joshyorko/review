@@ -124,7 +124,7 @@ foo==1.0.0 \\
 	assert.match(updated, /^# Header comment/m);
 	assert.match(updated, /^# Compiled via: uv pip compile/m);
 	assert.match(updated, /^foo==1\.0\.0 \\$/m);
-	assert.match(updated, new RegExp(`^    --hash=sha256:${[X64, ARM64].sort()[0]} \\$`, "m"));
+	assert.match(updated, new RegExp(`^    --hash=sha256:${[X64, ARM64].sort()[0]} \\\\$`, "m"));
 	assert.match(updated, new RegExp(`^    --hash=sha256:${[X64, ARM64].sort()[1]}$`, "m"));
 	assert.match(updated, /^    # via bar$/m);
 });
