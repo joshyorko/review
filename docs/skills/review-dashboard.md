@@ -77,6 +77,14 @@ Normal Review commands provide recovery without claim-file or Factory archaeolog
 
 Reconciliation releases only claims with settled evidence. Changing instance keys or scopes does not bypass a host-wide claim.
 
+Task invocation IDs, agent IDs, and async job IDs are distinct. Review maps
+structured task progress to OMP job snapshots and persists terminal status at
+result-delivery and tool-result boundaries. Consumed results need not remain in
+OMP's recent-job list. Recovery records live under `review-waves/` in the shared
+mutation-claims root, so losing the session projection does not lose the wave.
+An orphan claim without a valid record is reported as UNKNOWN; it is never
+released based on the claim file alone.
+
 ## Policy and tools
 
 Use the generic workbench policy for every owner/repository. Do not route based on `projectbluefin/`, `joshyorko/`, or another organization prefix, and do not restore Blueberry or product-specific label gates.
@@ -92,3 +100,13 @@ bash tests/review-factory-coload-smoke.sh
 ```
 
 For UI changes, exercise the real foreground OMP workbench and verify the visible surface as well as the focused headless contract.
+
+The validation workflow also runs the async-consumption regression against the
+OMP 18.3.0 job manager. To reproduce locally with a clean checkout of that tag:
+
+```bash
+REVIEW_OMP_SOURCE=/path/to/oh-my-pi node --experimental-transform-types --test --test-name-pattern='packaged OMP 18.3.0' tests/omp-review-mode.test.ts
+```
+
+Use Node 24 for this upstream TypeScript test. The test verifies the upstream
+commit before loading its manager; only the logger dependency is substituted.

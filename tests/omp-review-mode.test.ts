@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { beforeEach, afterEach } from "node:test";
+import { loadPackagedJobManager } from "./omp-async-runtime.ts";
 
 import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/extension/bluefin-review/glyphs.ts";
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
@@ -400,6 +401,16 @@ function fakeHost() {
  * only when that component calls `done`. Resolving immediately would hide a
  * session-start handler that blocks OMP.
  */
+function observeTask(pi, ctx, id, call = `call-${id}`) {
+	pi.events.get("tool_call")({ toolCallId: call, toolName: "task", input: {} }, ctx);
+	for (const job of [...ctx.asyncJobs.running, ...ctx.asyncJobs.recent]) {
+		if (job.id === id) { job.agentId = id; job.type = "task"; }
+	}
+	pi.events.get("tool_execution_end")({ toolCallId: call, result: { details: {
+		async: { type: "task", state: "running", jobId: id }, progress: [{ id, index: 0, status: "running" }],
+	} }, isError: false }, ctx);
+}
+
 function fakeCtx() {
 	const notifications = [];
 	const statuses = new Map();
@@ -2300,6 +2311,7 @@ test("--autoslay repairs returned pull requests before implementing issue waves"
 
 	repairHead = "b".repeat(40);
 	ctx.asyncJobs.recent = [{ id: "repair", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "repair");
 	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.messages.length, 2);
 	assert.match(pi.messages[1], /Implement projectbluefin\/review#77/);
@@ -2310,6 +2322,7 @@ test("--autoslay repairs returned pull requests before implementing issue waves"
 
 	issueHasPullRequest = true;
 	ctx.asyncJobs.recent = [{ id: "issue", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "issue");
 	await pi.events.get("agent_end")({}, ctx);
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(batch.state, "complete");
@@ -2345,6 +2358,7 @@ test("host Alt-S uses issue autoslay and blocks without a submitted pull request
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.match(pi.messages[0], /Implement projectbluefin\/review#77/);
 	ctx.asyncJobs.recent = [{ id: "issue", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "issue");
 	await pi.events.get("agent_end")({}, ctx);
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(batch.state, "blocked");
@@ -2821,6 +2835,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	pi.events.get("tool_call")({ toolCallId: "worker-1", toolName: "task", input: {} }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["worker-1"];
 	ctx.asyncJobs.recent = [{ id: "worker-1", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "worker-1", "worker-1");
 	await pi.events.get("turn_end")({}, ctx);
 	pi.events.get("tool_call")({ toolCallId: "worker-2", toolName: "task", input: {} }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["worker-1", "worker-2"];
@@ -2828,6 +2843,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 		{ id: "worker-1", status: "completed", startTime: Date.now() + 1 },
 		{ id: "worker-2", status: "completed", startTime: Date.now() + 2 },
 	];
+	observeTask(pi, ctx, "worker-2", "worker-2");
 	await pi.events.get("turn_end")({}, ctx);
 	const captured = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.deepEqual(captured.waveJobIds, ["worker-1", "worker-2"], "staggered workers are accumulated by exact wave identity");
@@ -2855,6 +2871,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.doesNotMatch(pi.messages[1], /projectbluefin\/a/);
 
 	ctx.asyncJobs.recent = [{ id: "hive-wave-2", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "hive-wave-2");
 	await pi.events.get("agent_end")({}, ctx);
 	const batches = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).map((entry) => entry.data);
 	assert.equal(batches.at(-1).state, "complete");
@@ -2877,6 +2894,7 @@ test("a slay wave blocks when review jobs leave pull requests open", async () =>
 	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	ctx.asyncJobs.recent = [{ id: "review-only", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "review-only");
 	await pi.events.get("agent_end")({}, ctx);
 
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
@@ -2908,6 +2926,7 @@ test("a failed workflowz job blocks later repository waves", async () => {
 	dashboard.handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	ctx.asyncJobs.recent = [{ id: "failed-worker", status: "failed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "failed-worker");
 	await pi.events.get("agent_end")({}, ctx);
 
 	assert.equal(pi.messages.length, 1, "a failed wave never advances to the next repository");
@@ -3005,6 +3024,7 @@ test("production Review-to-Factory reconcile releases a failed wave only after e
 				waveStartedAt: NOW,
 				waveIdentity: "command-wave:0",
 				waveToolCallIds: ["worker-command"],
+				waveTaskWorkers: { "worker-command": [{ agentId: "Worker", jobId: "worker-command" }] },
 				waveJobIds: ["worker-command"],
 				waveEffectResources: ["item:projectbluefin/review#42", "repo:projectbluefin/review"],
 			},
@@ -3045,6 +3065,7 @@ test("restart uses persisted terminal evidence for one Factory retry", async () 
 	pi1.events.get("tool_call")({ toolCallId: "worker-command", toolName: "task", input: {} }, ctx1);
 	ctx1.asyncJobs.delivery.pendingJobIds = ["worker-command"];
 	ctx1.asyncJobs.recent = [{ id: "worker-command", status: "failed", startTime: Date.now() + 1 }];
+	observeTask(pi1, ctx1, "worker-command", "worker-command");
 	await pi1.events.get("turn_end")({}, ctx1);
 	await pi1.events.get("agent_end")({}, ctx1);
 	const factory = fakeHost();
@@ -3091,10 +3112,177 @@ async function interruptedIssueSlay(states) {
 	pi.events.get("tool_call")({ toolCallId: "issue-worker", toolName: "task", input: {} }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["issue-worker"];
 	ctx.asyncJobs.recent = [{ id: "issue-worker", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "issue-worker", "issue-worker");
 	await pi.events.get("turn_end")({}, ctx);
 	await pi.events.get("session_shutdown")?.({}, ctx);
 	return { env, entries: pi.entries, batch };
 }
+
+for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retains distinct task/job identity after result consumption via ${delivery}`, async () => {
+	const states = { "projectbluefin/review#77": { title: "consumed worker", submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	pi.events.get("tool_call")({ toolCallId: "call-123", toolName: "task", input: {} }, ctx);
+	ctx.asyncJobs.running = [{ id: "FixIssue", agentId: "FixIssue", type: "task", status: "running", startTime: Date.now() }];
+	await pi.events.get("tool_execution_end")({ toolCallId: "call-123", result: { details: {
+		async: { type: "task", state: "running", jobId: "FixIssue" },
+		progress: [{ id: "FixIssue", index: 0, status: "running" }],
+	} }, isError: false }, ctx);
+	ctx.asyncJobs.running = [];
+	ctx.asyncJobs.recent = [{ id: "FixIssue", agentId: "FixIssue", type: "task", status: "completed", startTime: Date.now() }];
+	await pi.events.get(delivery)?.({ toolCallId: "wait-call", toolName: "wait", message: { role: "custom", customType: "async-result" } }, ctx);
+	ctx.asyncJobs.recent = [];
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	assert.equal(pi.messages.length, 1, "the worker is never replayed");
+});
+
+test("Review recovers a consumed worker from host evidence without session entries", async () => {
+	const states = { "projectbluefin/review#77": { title: "lost projection", submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	pi.events.get("tool_call")({ toolCallId: "lost-call", toolName: "task", input: {} }, ctx);
+	ctx.asyncJobs.recent = [{ id: "LostWorker", agentId: "LostWorker", type: "task", status: "completed", startTime: Date.now() }];
+	await pi.events.get("tool_execution_end")({ toolCallId: "lost-call", result: { details: {
+		async: { type: "task", state: "completed", jobId: "LostWorker" }, progress: [{ id: "LostWorker", index: 0, status: "completed" }],
+	} }, isError: false }, ctx);
+	await pi.events.get("session_shutdown")({}, ctx);
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+	const restarted = fakeHost(); restarted.flagValues.set("issues", true);
+	const next = fakeCtx(); next.ui.parent = next;
+	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await restarted.events.get("session_start")({}, next); await restored.whenStarted();
+	await restarted.commands.get("review").handler("reconcile", next);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	assert.equal(restarted.messages.length, 0);
+});
+
+for (const count of [1, 8]) test(`packaged OMP 18.3.0 delivers and evicts ${count} Slay workers without losing Review evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
+	const Manager = await loadPackagedJobManager(process.env.REVIEW_OMP_SOURCE!);
+	const states = Object.fromEntries(Array.from({ length: count }, (_, index) => [`projectbluefin/review#${77 + index}`, { title: `real manager ${index}`, submittedPrs: [] }]));
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost(); pi.flagValues.set("issues", true); pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const manager = new Manager({ consumedResultEvictionMs: 0, onJobComplete: async (jobId) => {
+		await pi.events.get("message_start")({ message: { role: "custom", customType: "async-result", details: { jobs: [{ jobId, type: "task" }] } } }, ctx);
+	} });
+	ctx.getAsyncJobSnapshot = () => ({ running: manager.getRunningJobs(), recent: manager.getRecentJobs(5), delivery: manager.getDeliveryState() });
+	try {
+		const baselineId = manager.register("bash", "pre-existing job", async () => "baseline", { id: "RealWorker0" });
+		manager.watchJobs([baselineId]);
+		await manager.getJob(baselineId).promise;
+		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+		await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+		pi.events.get("tool_call")({ toolCallId: "real-call", toolName: "task", input: {} }, ctx);
+		const pending = Array.from({ length: count }, () => Promise.withResolvers<string>());
+		const progress = pending.map((_, index) => ({ id: `RealWorker${index}`, index, status: "running" }));
+		const jobIds = pending.map((done, index) => manager.register("task", progress[index].id, () => done.promise, { id: progress[index].id, agentId: progress[index].id }));
+		assert.notEqual(jobIds[0], progress[0].id, "the real manager disambiguates a colliding job id");
+		await pi.events.get("tool_result")({ toolName: "task", toolCallId: "real-call", details: {
+			async: { type: "task", state: "running", jobId: jobIds[0] }, progress,
+		} }, ctx);
+		for (const row of progress) row.status = "completed";
+		await pi.events.get("tool_execution_update")({ toolCallId: "real-call", partialResult: { details: {
+			async: { type: "task", state: "completed", jobId: jobIds[0] }, progress,
+		} } }, ctx);
+		assert.deepEqual(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.waveTerminalJobStatuses ?? {}, {}, "progress alone never proves job settlement");
+		for (const done of pending) done.resolve("worker finished");
+		await Promise.all(jobIds.map((id) => manager.getJob(id).promise));
+		await manager.drainDeliveries();
+		for (const id of jobIds) assert.equal(manager.isJobResultConsumed(id), true);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.equal(manager.getRecentJobs(5).filter((job) => jobIds.includes(job.id)).length, 0, "the real manager evicts consumed results");
+		for (let index = 0; index < count; index++) states[`projectbluefin/review#${77 + index}`].submittedPrs = [`projectbluefin/review#${10 + index}`];
+		await pi.events.get("agent_end")({}, ctx);
+		assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
+		assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+		assert.equal(pi.messages.length, 1);
+	} finally { await manager.dispose(); }
+});
+
+test("Review reconcile reports orphan UNKNOWN claims without inventing settlement", async () => {
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
+	claims.claim("repo:projectbluefin/review", "review:orphan:0");
+	const pi = fakeHost(); const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({}), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("reconcile", ctx);
+	assert.ok(ctx.notifications.some((notice) => /UNKNOWN.*orphan.*recovery record/i.test(notice.message)));
+	assert.equal(claims.list().length, 1);
+});
+
+for (const scenario of ["failed", "cancelled", "never-started", "duplicate", "unaccounted", "missing-effect", "ambiguous-effect"]) {
+	test(`consumed issue worker fails closed: ${scenario}`, async () => {
+		const states = { "projectbluefin/review#77": { title: scenario, submittedPrs: [] } };
+		const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+		const pi = fakeHost(); pi.flagValues.set("issues", true); pi.flagValues.set("autoslay", true);
+		const ctx = fakeCtx(); ctx.ui.parent = ctx;
+		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+		await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+		pi.events.get("tool_call")({ toolName: "task", toolCallId: "call", input: {} }, ctx);
+		if (scenario !== "never-started") {
+			ctx.asyncJobs.recent = [{ id: "worker-job", agentId: "Worker", type: "task", startTime: Date.now(), status: ["failed", "cancelled"].includes(scenario) ? scenario : "completed" }];
+			const details = { async: { type: "task", state: "running", jobId: "worker-job" }, progress: [{ id: "Worker", index: 0, status: "running" }] };
+			pi.events.get("tool_result")({ toolName: "task", toolCallId: "call", details }, ctx);
+			if (scenario === "duplicate" || scenario === "unaccounted") {
+				pi.events.get("tool_call")({ toolName: "task", toolCallId: "other-call", input: {} }, ctx);
+				if (scenario === "duplicate") pi.events.get("tool_result")({ toolName: "task", toolCallId: "other-call", details }, ctx);
+			}
+		}
+		ctx.asyncJobs.recent = [];
+		states["projectbluefin/review#77"].submittedPrs = scenario === "missing-effect" ? [] : scenario === "ambiguous-effect" ? ["projectbluefin/review#10", "projectbluefin/review#11"] : ["projectbluefin/review#10"];
+		await pi.events.get("agent_end")({}, ctx);
+		assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "blocked");
+		assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+		assert.equal(pi.messages.length, 1);
+	});
+}
+
+test("one task fan-out retains every sibling job independently across consumption", async () => {
+	const states = {
+		"projectbluefin/review#77": { title: "first", submittedPrs: [] },
+		"projectbluefin/review#78": { title: "second", submittedPrs: [] },
+	};
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost(); pi.flagValues.set("issues", true); pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	pi.events.get("tool_call")({ toolName: "task", toolCallId: "fan-out", input: {} }, ctx);
+	ctx.asyncJobs.running = ["First", "Second"].map((agentId) => ({ id: `${agentId}-2`, agentId, type: "task", status: "running", startTime: Date.now() }));
+	pi.events.get("tool_result")({ toolName: "task", toolCallId: "fan-out", details: {
+		async: { type: "task", state: "running", jobId: "First-2" }, progress: [{ id: "First", index: 0 }, { id: "Second", index: 1 }],
+	} }, ctx);
+	for (const id of ["Second-2", "First-2"]) {
+		const job = ctx.asyncJobs.running.find((row) => row.id === id);
+		ctx.asyncJobs.running = ctx.asyncJobs.running.filter((row) => row.id !== id);
+		ctx.asyncJobs.recent = [{ ...job, status: "completed" }];
+		await pi.events.get("message_start")({}, ctx);
+		ctx.asyncJobs.recent = [];
+	}
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.deepEqual(batch.waveTaskWorkers, { "fan-out": [{ agentId: "First", jobId: "First-2" }, { agentId: "Second", jobId: "Second-2" }] });
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+	states["projectbluefin/review#78"].submittedPrs = ["projectbluefin/review#11"];
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+});
 
 test("interrupted issue Slay reconciles the exact submitted PR after restart", async () => {
 	const states = {
@@ -3171,6 +3359,7 @@ test("blocked issue Slay can be revised and re-Slayed in the same Review session
 	pi.events.get("tool_call")({ toolCallId: "failed-issue-worker", toolName: "task", input: {} }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["failed-issue-worker"];
 	ctx.asyncJobs.recent = [{ id: "failed-issue-worker", status: "failed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "failed-issue-worker", "failed-issue-worker");
 	await pi.events.get("turn_end")({}, ctx);
 	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "blocked");
@@ -3205,6 +3394,7 @@ test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async
 	pi.events.get("tool_call")({ toolCallId: "drain-worker", toolName: "task", input: {} }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["drain-worker"];
 	ctx.asyncJobs.running = [{ id: "drain-worker", status: "running", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "drain-worker", "drain-worker");
 	await pi.events.get("turn_end")({}, ctx);
 	await pi.commands.get("review").handler("drain", ctx);
 	const draining = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
