@@ -292,7 +292,6 @@ log_not_contains 'test-gh-token' "$apptainer_log"
 log_not_contains 'test-provider-token' "$apptainer_log"
 log_not_contains 'test-context7-token' "$apptainer_log"
 
-
 for mask in 0 1 2 3; do
   scenario="Apptainer host-file mask $mask"
   configure_host_files "$mask"
@@ -315,7 +314,6 @@ status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "review fallback failed with dangling localtime: $output"
 assert_apptainer_host_files "$(cat "$apptainer_log")" 2
-
 
 scenario="review alias preserves argument boundaries"
 EXPECT_EXTENSION="/tmp/review extension" run_just review-queue --extension "/tmp/review extension"
@@ -396,7 +394,6 @@ log_contains '-home:/home/bluefin:rw' "$podman_log"
 log_contains '-workspace:/workspace:rw' "$podman_log"
 log_not_contains "$home/" "$podman_log"
 [[ "$one_review_call" != "$two_review_call" ]] || fail "different review targets must not collide"
-
 
 scenario="configured Review scope and mode reach Podman"
 EXPECT_PODMAN_REVIEW_SCOPE=1 REVIEW_DEFAULT_SCOPE=org:acme REVIEW_MODE=review run_just review-queue
