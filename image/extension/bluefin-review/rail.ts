@@ -26,24 +26,15 @@ export function keymapBar(painter: Painter, keys: readonly RailKey[], width: num
 }
 
 /**
- * Retro tmux status bar styled like the contribute runtime's lower-third bar:
- * [🦖 BLUEFIN] [review] [🐝 HIVE/LOCAL] | Task: #123 (repo) | Issues: X | PRs: Y | Workers: Z/ZZ | Reviewers: X/XX | HH:MM
+ * Status bar for Review and the optional Hive read-side integration.
  */
 export function tmuxReviewStatusBar(mode: ReviewMode, painter: Painter, width: number, now: number): string {
-	// Colors matching image/contribute/entrypoint.sh & image/tmux.conf:
-	// left: #[bg=#1d4ed8,fg=#ffffff,bold] 🦖 BLUEFIN #[bg=#2563eb,fg=#ffffff,nobold] review #[bg=#1e40af,fg=#bfdbfe] 🐝 ${mode} #[default]
-	// status-style: bg=#1e293b,fg=#93c5fd
 	const hive = mode.hive;
+	const hiveEnabled = mode.isHiveMode();
 	const hiveMode = hive.online ? "HIVE" : (hive.configured ? "OFFLINE" : "LOCAL");
-
-	const blueBg = "\x1b[48;2;30;41;59m"; // #1e293b
-	const bluefinBadge = "\x1b[48;2;29;78;216m\x1b[38;2;255;255;255m\x1b[1m 🦖 BLUEFIN \x1b[0m";
-	const reviewLabel = mode.isBlueberry ? "Blueberry" : "review";
-	const reviewBadge = mode.isBlueberry
-		? "\x1b[48;2;99;102;241m\x1b[38;2;255;255;255m\x1b[1m Blueberry \x1b[0m"
-		: "\x1b[48;2;37;99;235m\x1b[38;2;255;255;255m review \x1b[0m";
-	const hiveBadge = `\x1b[48;2;30;64;175m\x1b[38;2;191;219;254m 🐝 ${hiveMode} \x1b[0m`;
-
+	const blueBg = "\x1b[48;2;30;41;59m";
+	const reviewBadge = "\x1b[48;2;37;99;235m\x1b[38;2;255;255;255m\x1b[1m review \x1b[0m";
+	const hiveBadge = hiveEnabled ? `\x1b[48;2;30;64;175m\x1b[38;2;191;219;254m ${hiveMode} \x1b[0m` : "";
 	const item = mode.selected();
 	let activeTaskStr = "";
 	if (item) {
@@ -53,14 +44,14 @@ export function tmuxReviewStatusBar(mode: ReviewMode, painter: Painter, width: n
 	}
 
 	const tally = mode.ciTally();
-	const issuesCount = mode.queueMode === "issues" ? mode.visibleItems().length : (hive.actionableItems ?? "-");
-	const prsCount = mode.queueMode === "prs" ? mode.visibleItems().length : tally.success + tally.failure + tally.pending;
+	const issuesCount = mode.queueMode === "issues" ? mode.visibleItems().length : (hiveEnabled ? hive.actionableItems ?? "-" : "-");
+	const prsCount = mode.queueMode === "prs" ? mode.visibleItems().length : (hiveEnabled ? tally.success + tally.failure + tally.pending : "-");
 
 	let stats = `${blueBg}\x1b[38;2;147;197;253mIssues: \x1b[1m\x1b[38;2;255;255;255m${issuesCount}\x1b[0m${blueBg}\x1b[38;2;147;197;253m \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mPRs: \x1b[1m\x1b[38;2;255;255;255m${prsCount}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
-	if (hive.workers) {
+	if (hiveEnabled && hive.workers) {
 		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mWorkers: \x1b[1m\x1b[38;2;255;255;255m${hive.workers}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
 	}
-	if (hive.reviewers) {
+	if (hiveEnabled && hive.reviewers) {
 		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mReviewers: \x1b[1m\x1b[38;2;255;255;255m${hive.reviewers}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
 	}
 	const date = new Date(now);
@@ -68,10 +59,10 @@ export function tmuxReviewStatusBar(mode: ReviewMode, painter: Painter, width: n
 	const minutes = String(date.getMinutes()).padStart(2, "0");
 	const timeStr = `\x1b[38;2;59;130;246m| \x1b[38;2;191;219;254m${hours}:${minutes}\x1b[0m`;
 
-	const content = `${bluefinBadge}${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}\x1b[0m`;
+	const content = `${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}\x1b[0m`;
 	const contentWidth = visibleWidth(content);
 	const fillSpaces = Math.max(0, width - contentWidth);
-	const bar = `${bluefinBadge}${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}${" ".repeat(fillSpaces)}\x1b[0m`;
+	const bar = `${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}${" ".repeat(fillSpaces)}\x1b[0m`;
 	return truncateToWidth(bar, width);
 }
 

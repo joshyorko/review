@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const REPOSITORY = "can1357/oh-my-pi";
-const CONTAINERFILES = ["image/appliance/Containerfile", "image/contribute/Containerfile"];
+const CONTAINERFILES = ["image/appliance/Containerfile"];
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 const DIGEST_PATTERN = /^sha256:([0-9a-f]{64})$/;
 
@@ -56,7 +56,7 @@ async function fetchRelease(requestedVersion, fetchImpl) {
 	const token = process.env.RENOVATE_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 	const headers = {
 		Accept: "application/vnd.github+json",
-		"User-Agent": "projectbluefin-review-omp-sync",
+		"User-Agent": "joshyorko-review-omp-sync",
 		"X-GitHub-Api-Version": "2022-11-28",
 	};
 	if (token) headers.Authorization = `Bearer ${token}`;
@@ -73,12 +73,9 @@ export async function syncOmpPins({ root = process.cwd(), requestedVersion, fetc
 		const path = join(root, relativePath);
 		return { relativePath, path, source: await readFile(path, "utf8") };
 	}));
-	const pinnedVersions = new Set(files.map(({ relativePath, source }) => readPinnedVersion(source, relativePath)));
-	const normalized = requestedVersion?.replace(/^v/, "") ?? [...pinnedVersions][0];
+	const pinnedVersion = readPinnedVersion(files[0].source, files[0].relativePath);
+	const normalized = requestedVersion?.replace(/^v/, "") ?? pinnedVersion;
 	if (!normalized || !VERSION_PATTERN.test(normalized)) throw new Error(`invalid requested OMP version: ${requestedVersion}`);
-	if (!requestedVersion && pinnedVersions.size !== 1) {
-		throw new Error(`OMP versions differ across shipped images: ${[...pinnedVersions].join(", ")}`);
-	}
 	const pins = await fetchRelease(normalized, fetchImpl);
 	for (const { relativePath, path, source } of files) {
 		const updated = updateContainerfile(source, pins, relativePath);

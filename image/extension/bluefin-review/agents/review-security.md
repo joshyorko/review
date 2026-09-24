@@ -1,6 +1,6 @@
 ---
-name: bluefin-security
-description: Specialized application security reviewer — analyzes diffs for vulnerabilities, unsafe shell/subprocesses, credential exposure, privilege boundaries, and injection hazards.
+name: review-security
+description: Specialized application security reviewer for GitHub repositories — analyzes diffs for vulnerabilities, unsafe shell/subprocesses, credential exposure, privilege boundaries, and injection hazards.
 tools: read, grep, glob, bash, yield
 read-summarize: false
 ---
@@ -29,6 +29,5 @@ Report only high-confidence, exploitable security findings with severity,
 exact file and line numbers, and concrete remediation steps. Do not flag
 theoretical or non-exploitable style preferences.
 
-Consult the Hive knowledge base (`~/agent.md` when present) and secrets policy
-(`~/.agents/skills/secrets-policy/SKILL.md` or `.agents/skills/secrets-policy/SKILL.md`)
-to enforce repository credential boundaries and prevent token leakage.
+Consult the target repository's security guidance and the available secrets
+policy skill to enforce its credential boundaries and prevent token leakage.

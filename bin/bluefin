@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
-# Launch an isolated Bluefin appliance, preferring a libkrun KVM microVM.
+# Launch the Review appliance, preferring a libkrun KVM microVM.
 set -euo pipefail
+if [[ -z "${REVIEW_DEFAULT_SCOPE:-}" && -n "${BLUEFIN_REVIEW_ORG:-}" ]]; then
+  export REVIEW_DEFAULT_SCOPE="$BLUEFIN_REVIEW_ORG"
+fi
+if [[ -z "${REVIEW_MODE:-}" && -n "${BLUEFIN_REVIEW_MODE:-}" ]]; then
+  export REVIEW_MODE="$BLUEFIN_REVIEW_MODE"
+fi
+if [[ -z "${REVIEW_INHERIT_OMP_CONFIG:-}" && -n "${BLUEFIN_REVIEW_INHERIT_OMP_CONFIG:-}" ]]; then
+  export REVIEW_INHERIT_OMP_CONFIG="$BLUEFIN_REVIEW_INHERIT_OMP_CONFIG"
+fi
+if [[ -z "${REVIEW_SKIP_REPOS:-}" && -n "${BLUEFIN_REVIEW_SKIP_REPOS:-}" ]]; then
+  export REVIEW_SKIP_REPOS="$BLUEFIN_REVIEW_SKIP_REPOS"
+fi
 
 command_name="${1:-}"
 shift || true
@@ -66,7 +78,7 @@ require_fallback() {
 }
 prepare_apptainer_environment() {
   local name host_file
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION HIVE_HUB BLUEFIN_REVIEW_ORG BLUEFIN_REVIEW_MODE BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY BLUEFIN_REVIEW_PERSONAL_MODE BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS BLUEFIN_REVIEW_INHERIT_OMP_CONFIG LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY TERM COLORTERM; do
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION HIVE_HUB REVIEW_DEFAULT_SCOPE REVIEW_MODE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   APPTAINER_HOST_ARGS=()
@@ -105,12 +117,12 @@ detect_review_audio() {
 prepare_review_omp_mount() {
   REVIEW_OMP_CONFIG_VOLUME=""
   REVIEW_OMP_WARNING=""
-  if [[ "${BLUEFIN_REVIEW_INHERIT_OMP_CONFIG:-0}" == 1 ]]; then
+  if [[ "${REVIEW_INHERIT_OMP_CONFIG:-0}" == 1 ]]; then
     local host_omp="${HOME:-/no-such-home}/.omp"
     if [[ -d "$host_omp" ]]; then
       REVIEW_OMP_CONFIG_VOLUME="$host_omp:/home/bluefin/.omp:rw"
     else
-      REVIEW_OMP_WARNING="WARNING: BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 was requested, but ${host_omp} is absent; using appliance-owned OMP state."
+      REVIEW_OMP_WARNING="WARNING: REVIEW_INHERIT_OMP_CONFIG=1 was requested, but ${host_omp} is absent; using appliance-owned OMP state."
     fi
   fi
 }
@@ -147,7 +159,6 @@ ensure_image() {
 }
 
 MIN_REVIEW_APPLIANCE_VERSION="26.08.06"
-MIN_CONTRIBUTOR_VERSION="26.08.02"
 EXPECTED_IMAGE_SERIES="26.08"
 
 launcher_revision() {
@@ -314,20 +325,6 @@ slugify() {
   printf '%s-%s\n' "$slug" "$digest"
 }
 
-read_env_value() {
-  local wanted="$1" file="$2" key value
-  while IFS='=' read -r key value; do
-    key="${key#export }"
-    key="${key//[[:space:]]/}"
-    [[ "$key" == "$wanted" ]] || continue
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    printf '%s\n' "$value"
-    return 0
-  done <"$file"
-}
 
 resolve_tokens() {
   if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
@@ -389,13 +386,9 @@ run_review() {
     echo "WARNING: no GitHub credential found; the queue will load empty." >&2
     echo "  Run 'gh auth login' or export GH_TOKEN." >&2
   fi
-  if [[ -z "${HIVE_HUB:-}" && -f "${HOME}/.config/hive/contributor.env" ]]; then
-    HIVE_HUB="$(read_env_value HIVE_HUB "${HOME}/.config/hive/contributor.env")"
-    export HIVE_HUB
-  fi
 
   review_args "$@"
-  local scope=projectbluefin arg previous=""
+  local scope="${REVIEW_DEFAULT_SCOPE:-review}" arg previous=""
   for arg in "${PARSED_REVIEW_ARGS[@]}"; do
     if [[ "$previous" == --repo ]]; then scope="$arg"; break; fi
     previous="$arg"
@@ -410,20 +403,19 @@ run_review() {
   claims_root="${BLUEFIN_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
   mkdir -p "$claims_root"
   name="bluefin-review-${key}-$(date +%s)-$$"
-  if [[ -n "${REVIEW_APPLIANCE_IMAGE:-}" ]]; then
-    image="$REVIEW_APPLIANCE_IMAGE"
+  local review_image="${REVIEW_APPLIANCE_IMAGE:-${BLUEFIN_REVIEW_IMAGE:-}}"
+  local review_sif="${REVIEW_APPLIANCE_SIF:-${BLUEFIN_REVIEW_SIF:-}}"
+  if [[ -n "$review_image" ]]; then
+    image="$review_image"
     is_override=1
-  elif [[ -n "${BLUEFIN_REVIEW_IMAGE:-}" ]]; then
-    image="$BLUEFIN_REVIEW_IMAGE"
-    is_override=1
-  elif [[ -n "${BLUEFIN_REVIEW_SIF:-}" ]]; then
-    image="$BLUEFIN_REVIEW_SIF"
-    sif="$BLUEFIN_REVIEW_SIF"
+  elif [[ -n "$review_sif" ]]; then
+    image="$review_sif"
+    sif="$review_sif"
     is_override=1
   else
     image="ghcr.io/projectbluefin/review:stable"
   fi
-  fallback_sif="${BLUEFIN_REVIEW_FALLBACK_SIF:-}"
+  fallback_sif="${REVIEW_APPLIANCE_FALLBACK_SIF:-${BLUEFIN_REVIEW_FALLBACK_SIF:-}}"
   mkdir -p "$home" "$workspace" "$scratch"
   migrate_legacy_state "${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review" "$home" "bluefin-review.sif"
   mkdir -p "$home/.omp" "$home/.config/pulse"
@@ -463,7 +455,7 @@ run_review() {
   fi
 
   if kvm_runtime_ready && [[ "$image" != *.sif && ! -f "$image" ]]; then
-    ensure_image "$image" "review appliance" "image/appliance/Containerfile" "BLUEFIN_REVIEW_IMAGE"
+    ensure_image "$image" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
     report_podman_image_identity "$image" "review appliance" "$is_override" "$MIN_REVIEW_APPLIANCE_VERSION"
     local -a podman_args=()
     podman_args+=(run --runtime=krun --rm --interactive --tty)
@@ -480,12 +472,11 @@ run_review() {
     podman_args+=(--env OPENAI_API_KEY --env GEMINI_API_KEY)
     podman_args+=(--env TYPESAFE_API_KEY)
     podman_args+=(--env AWS_BEARER_TOKEN_BEDROCK --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY --env AWS_SESSION_TOKEN --env AWS_REGION --env AWS_DEFAULT_REGION)
-    podman_args+=(--env HIVE_HUB --env BLUEFIN_REVIEW_ORG)
-    podman_args+=(--env BLUEFIN_REVIEW_MODE --env BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY --env BLUEFIN_REVIEW_PERSONAL_MODE --env BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS)
+    podman_args+=(--env HIVE_HUB --env REVIEW_DEFAULT_SCOPE --env REVIEW_MODE --env REVIEW_SKIP_REPOS)
     podman_args+=(--env "TERM=${TERM:-xterm-256color}")
     podman_args+=(--env "COLORTERM=${COLORTERM:-truecolor}")
-    [[ -v BLUEFIN_REVIEW_INHERIT_OMP_CONFIG ]] &&
-      podman_args+=(--env BLUEFIN_REVIEW_INHERIT_OMP_CONFIG)
+    [[ -v REVIEW_INHERIT_OMP_CONFIG ]] &&
+      podman_args+=(--env REVIEW_INHERIT_OMP_CONFIG)
     [[ -v LUNA_FACTORY_ENABLED ]] &&
       podman_args+=(--env LUNA_FACTORY_ENABLED)
     # Factory's execution bound is user configuration, not launcher policy: a
@@ -533,86 +524,11 @@ run_review() {
   apptainer_args+=("${PARSED_REVIEW_ARGS[@]}")
   exec apptainer "${apptainer_args[@]}"
 }
-run_contribute() {
-  resolve_tokens
-  [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] || fail "no GitHub token available; run 'gh auth login' or export GH_TOKEN."
-  [[ -z "${REVIEW_DETACH:-}" ]] || fail "detached contributor containers are not supported."
-  (($# <= 1)) || fail "contribute accepts at most one instance name (for example, org/repo)."
-
-  local instance="${1:-default}"
-  [[ "$instance" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "invalid contributor instance name: ${instance}"
-  local registration="${HIVE_CONTRIBUTOR_ENV:-${HOME}/.config/hive/contributor.env}"
-  if [[ $# -eq 1 && -z "${HIVE_CONTRIBUTOR_ENV:-}" ]]; then
-    local registration_name="${instance//\//-}"
-    local named="${HOME}/.config/hive/contributor.${registration_name}.env"
-    [[ -r "$named" ]] || fail "Hive registration for ${instance} is missing: ${named}"
-    registration="$named"
-  fi
-  [[ -r "$registration" ]] || fail "Hive registration is missing or unreadable: ${registration}"
-
-  local key root home claims_root name image is_override=0
-  key="$(slugify "${BLUEFIN_INSTANCE:-contribute-$instance}")"
-  root="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${key}"
-  home="${root}/home"
-  claims_root="${BLUEFIN_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
-  mkdir -p "$claims_root"
-  name="bluefin-contribute-${key}-$(date +%s)-$$"
-  if [[ -n "${CONTRIBUTE_IMAGE:-}" ]]; then
-    image="$CONTRIBUTE_IMAGE"
-    is_override=1
-  elif [[ -n "${BLUEFIN_CONTRIBUTE_IMAGE:-}" ]]; then
-    image="$BLUEFIN_CONTRIBUTE_IMAGE"
-    is_override=1
-  elif [[ -n "${BLUEFIN_CONTRIBUTE_SIF:-}" ]]; then
-    image="$BLUEFIN_CONTRIBUTE_SIF"
-    is_override=1
-  else
-    image="ghcr.io/projectbluefin/contribute:stable"
-  fi
-  mkdir -p "$home/workspace"
-  migrate_legacy_state "${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-contribute" "$home" "bluefin-contribute.sif"
-  report_launcher_identity
-
-  if kvm_runtime_ready && [[ "$image" != *.sif && ! -f "$image" ]]; then
-    ensure_image "$image" "contributor" "image/contribute/Containerfile" "BLUEFIN_CONTRIBUTE_IMAGE"
-    report_podman_image_identity "$image" "contributor" "$is_override" "$MIN_CONTRIBUTOR_VERSION"
-    exec "$engine" run --runtime=krun --rm --interactive --tty \
-      --name "$name" \
-      --userns keep-id:uid=65532,gid=65532 \
-      --volume "${home}:/home/bluefin:rw,z" \
-      --volume "${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw,z" \
-      --env "LUNA_FACTORY_CLAIMS_ROOT=/home/bluefin/.local/state/review/mutation-claims" \
-      --volume "${registration}:/home/bluefin/.config/hive/contributor.env:ro,z" \
-      --env AGENT_BACKEND=omp \
-      --env GH_TOKEN --env GITHUB_TOKEN \
-      --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN \
-      --env COPILOT_INTEGRATION_ID \
-      --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN \
-      --env OPENAI_API_KEY --env GEMINI_API_KEY \
-      --env AWS_BEARER_TOKEN_BEDROCK --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY --env AWS_SESSION_TOKEN --env AWS_REGION --env AWS_DEFAULT_REGION \
-      --env "HIVE_CONTAINER_NAME=${name}" --env HIVE_CONTAINER_RUNTIME=podman \
-      --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}" \
-      "$image"
-  fi
-
-  require_fallback
-  local apptainer_image="$image"
-  [[ "$apptainer_image" == *://* || "$apptainer_image" == *.sif || -f "$apptainer_image" ]] || apptainer_image="docker://${apptainer_image}"
-  report_apptainer_image_identity "$image" "contributor" "$is_override" "$MIN_CONTRIBUTOR_VERSION"
-  prepare_apptainer_environment
-  exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" \
-    --home "${home}:/home/bluefin" \
-    --pwd /home/bluefin/workspace \
-    --bind "${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw" \
-    --bind "${registration}:/home/bluefin/.config/hive/contributor.env:ro" \
-    "$apptainer_image"
-}
 
 case "$command_name" in
   review) run_review "$@" ;;
-  contribute) run_contribute "$@" ;;
   *)
-    echo "Usage: bluefin {review [org/repo|flags...]|contribute [instance]}" >&2
+    echo "Usage: bluefin review [owner/repo|org:<name>|flags...]" >&2
     exit 2
     ;;
 esac

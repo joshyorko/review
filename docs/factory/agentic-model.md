@@ -1,177 +1,51 @@
-# Bluefin Agentic Factory Feedback Loop
+# Review + Luna Factory Agentic Model
 
-This document is the canonical local model for `review`. It adapts
-[`projectbluefin/common`'s Agentic Operating Model][common-model] to this
-repository's OMP workbench and Hive contributor runtimes. Read it after
-`AGENTS.md` and before task-specific skills.
+This document defines the local product and authority boundaries for Review and Luna Factory. Read it after `AGENTS.md` and before the task-specific guide.
 
-The repository ships two purpose-specific runtimes:
-1. The distroless review appliance (`image/appliance/Containerfile` ->
-   `ghcr.io/projectbluefin/review`) packages the only maintainer UI: the OMP
-   extension in `image/extension/bluefin-review/`. Both `just review-queue` and
-   `just review-appliance` launch it. OMP owns agent execution, sessions, tasks,
-   workflowz, and tool boundaries.
-2. The contributor runtime (`image/contribute/Containerfile` ->
-   `ghcr.io/projectbluefin/contribute`) packages Hive's worker and OMP. Both
-   contributor convenience commands launch it; OMP owns model and effort.
+## Product and roles
 
-Local launchers run either OCI image through Podman's `krun` runtime. Each
-invocation is a separate foreground KVM microVM with a unique container name;
-repository or explicit instance identity selects separate persistent OMP state.
-
-Hive assignment authority remains separate from the human review surface:
-Hive assigns contributor tasks, while maintainer review sessions consume Hive
-reads as optional, non-mutating context and ordering.
-The model is documentation: the launcher, image, tests, skills, and
-user-facing instructions must describe the same roles and authority
-boundaries. When source evidence changes the model, update this document and
-the affected local contract together. Do not preserve superseded plans,
-session logs, or design scratchpads as competing explanations.
-
-## Roles and authority
-
-| Term | Meaning | Authority |
+| Component | Responsibility | Authority |
 |---|---|---|
-| **Bluefin Agentic Factory Feedback Loop** | The lifecycle that turns agent work and test feedback into reviewed Bluefin changes. | The model for this repository. |
-| **Toil** | Repetitive, low-novelty maintenance work an under-maintained project needs: broken CI, stale pins, drifted documentation, unreproduced reports, untriaged issues, stalled branches. | Toil is the work this factory exists to absorb. |
-| **Contributor** | A contributor using the worker configuration to receive and complete Hive-assigned work. They are treated as a contributor, they just happen to specialize in the `clanker-queue`. It's a "subclass" of contributor like a video game RPG character. Same team, different specialization. | Hive assigns work; the worker implements only its assigned scope. |
-| **Maintainer/Reviewer** | A maintainer assessing an incoming pull request or issue. Active review process requiring human judgement and decision. | The human decides review, approval, and merge. |
-| **Review Evidence** | Read-only pull-request, issue, verification, trace, and merge-state context shown before a review. | Evidence informs a human; it never makes a decision. |
-| **Review Mode / Extension** | The sole maintainer workbench in `image/extension/bluefin-review/`. It provides the live queue, pipeline trace, companion agents, and inspection tools. | OMP owns execution, session, workflowz, and tool boundaries. |
-| **Managed Reviewer Client** | A foreground OMP workbench a maintainer uses to examine evidence and dispatch bounded actions. | It executes only typed, human-authorized decisions; explicit slay intent delegates the corresponding coordinator lifecycle. |
-| **Portable Reviewer Prompt** | Markdown Review Evidence and queue instructions for a maintainer's own client. | It is context, not an assignment. |
-| **Bluefin Work Queue** | A live GitHub view of open pull requests and issues. | GitHub owns state; returned-author repairs form a local first lane; Hive supplies the remaining relative order when configured; the queue never assigns contributor work. |
-| **Workbench Activity** | The bounded projection of active workflowz tasks, outcomes, queue state, and freshness. | It reports observed state and never assigns Hive work. |
-| **Review Draft** | Analysis, review text, or commands prepared for a Maintainer Reviewer. | A human explicitly considers and submits it. |
+| **GitHub** | Repository, issue, pull-request, check, permission, and merge state. | The authenticated credential and live repository rules decide what can be read or changed. |
+| **Review** | Generic GitHub queue, bounded evidence, review/repair coordination, and durable human intent. | Projects `owner/repo` or `org:<name>` explicitly; it never guesses an organization from this fork. |
+| **OMP** | Sessions, model resolution, agents, tasks, tools, workflowz execution, and cancellation. | Runs only through the user's active OMP configuration and the packaged capability boundary. |
+| **Luna Factory** | Optional bounded native workers, evidence reconciliation, claims, and task state. | Execution is opt-in; visibility in Review is not admission. Completion grants no merge, publish, or deploy authority. |
+| **Human operator** | Scope, policy, and mutating intent. | Reviewers remain read-only; a confirmed action delegates only its bounded lifecycle. |
+| **Optional Hive read-side** | Explicitly configured ordering/status context for users who select Hive mode. | Read-side facts do not assign work, grant GitHub permissions, or create Factory admission. |
 
-Avoid classifying contributors by role; this isn't a class system it's the loadout a contributor chooses to use that day.
+The normal workbench is GitHub-only Review. It does not require Hive, contributor registration, Bluefin labels, organization policy, or an organization-specific MCP server. `REVIEW_MODE=hive` opts into the optional read-side integration; `HIVE_HUB` must be supplied explicitly. The default path performs no Hive fetch or contributor-registration discovery.
 
-## Two layers
+## Scope and evidence
 
-The factory has a human layer and an agent layer, governed by different rules.
-Conflating them is the most likely misreading of this model.
+Review scope follows explicit operator intent: an explicit repository/organization, a restored explicit Review scope, `REVIEW_DEFAULT_SCOPE`, then an interactive choice. Headless callers must provide `owner/repo` or `org:<name>`. Never infer an organization from repository ancestry, login identity, or historical defaults.
 
-The **agent** does the unglamorous work: the toil defined above, in small,
-evidenced, reviewable changes. They are humorously referred to as clankers as a joke on the absurdity of the world we live in.
+GitHub owns current state. A queue row is an observation, not a task assignment. Before any mutation, preserve the relevant item identity and exact head, refresh live evidence and permissions, and refuse stale or mismatched subjects. An absent permission or required check remains a real gate; optional Hive context cannot bypass it.
 
-The **human** does the "unglamorous work" of directing agents — scoping a task,
-judging the output, and carrying the result to a maintainer. Their standing is
-earned under ordinary open-source contribution culture, which AI did not
-change; projects determine it, and Hive may use it when distributing work.
-Nothing in this repository sets, scores, or automates it, and the
-`human-queue` is out of scope here.
+## Review and Factory separation
 
-The IMPORTANT DISTINCTION in the culture is that the humans take pride in maintaining systems at the highest levels. If they are doing their jobs, they are invisible. We are designing this tool because the mental toll of that maintenance is hurting people. Amongst their peers there is a culture of respect and craftmanship. The leaderboards/contribution graphs are supposed to be a friendly way to remind maintainers that their work is recognized by their peers. This is one of the highest honors a maintainer can receive. Silent professionals.
+Review is the source and observation front-end. Review specialist agents return evidence and recommendations; they have no comment, approval, push, or merge capability. Human-confirmed Slay intent may authorize a bounded coordinator lifecycle, subject to the existing live permission, exact-head, ruleset, mutation-claim, and no-self-review safeguards.
 
-Do not reconcile the two layers by applying agent scope rules to the human, or
-by reading the human ladder as a statement about agent output.
+Luna Factory is a separate execution controller co-loaded with Review. Loading it starts nothing. `LUNA_FACTORY_ENABLED=1` is required for work. Its admission, task state, evidence, worker receipts, retry lineage, and claims are Factory-owned. A queue row or Hive rank is never an admission signal. Factory completion never creates GitHub landing or deployment authority.
 
-## Scope of work
+## Factory proof and task state
 
-This is a toil-reduction factory for under-maintained open-source projects,
-not a feature factory. Factory Workers repair what is already broken and
-finish what a project already decided to do; they do not add features,
-dependencies, configuration surfaces, or architecture.
+- Attempts retain durable identity and history. A returned worker is not success; the owner enters verification and checks the receipt against the current task, attempt, generation, and subject.
+- Proof is subject-bound. Integration changes the subject and makes affected old proof stale; explicitly unaffected evidence may remain valid.
+- Contradictory identity or an artifact reference outside the run's allowed roots is rejected. Missing, stale, or ambiguous evidence is reported as blocked/unknown, never promoted to success.
+- `CONVERGED` means every mandatory acceptance criterion has current valid proof. `QUIESCENT` means no authorized autonomous progress remains; it may still be unconverged. An empty queue, exhausted budget, or returned worker implies neither.
+- A failed check reopens the same admitted task for bounded repair. Preserve attempt lineage; a new worker or commit does not reset it. New observations are candidates and require independent admission.
+- Claims enforce single-writer/resource exclusion across Review and Factory work. Stop and cancellation do not imply rollback or release until the external effect is known.
 
-Well-staffed projects restrict large agent-authored pull requests because
-those consume more maintainer attention than they return. That reasoning is
-the model here too: the reviewer's attention is the scarce resource, so a
-change is sized to be reviewable rather than to be complete in one pass. When
-an assigned task can only be finished by out-of-scope work, the deliverable is
-an evidenced written finding. That is completed work, not a declined
-assignment; Hive's authority over what gets worked on is unchanged.
+## Selected batches and runtime
 
-[`docs/skills/contribution-culture.md`](../skills/contribution-culture.md)
-carries the operational form of this section.
+A selected batch is a finite OMP operation, not a daemon. Run-once exits when work completes or an honest blocker is reached. Retained runs keep their journal, patches, logs, and native artifacts available for inspect, resume, pause, stop, export, or explicit discard. The same-host state root is authoritative for ownership and recovery.
 
-## Repository boundary
+The capacity bound includes native workers, retries, verification, and reviewer work without globally disabling unrelated Review work. OCI, Apptainer SIF/FUSE, and krun/KVM are distinct containment boundaries. Remote, gateway, and distributed workers remain unsupported unless their capability is demonstrated by the packaged runtime; never claim absent runtime evidence.
 
-`review` ships the review appliance image, the OMP extension, the contributor
-image, credential handoff, and review context.
+The launcher remains foreground and signal-responsive. It prefers Podman with `krun`/KVM and reports a missing prerequisite before isolated Apptainer fallback. Host OMP configuration is isolated unless explicitly requested. Credentials remain environment inputs and never enter argv, logs, or image layers.
 
-OMP owns agent execution, sessions, tasks, and companion review tool boundaries
-in the primary maintainer product. Hive reads remain optional, read-only
-context and queue ordering for maintainers.
+## Documentation and verification
 
-Hive owns the contributor WebSocket protocol, task selection, assignment prompt
-injection, the `contributor` tmux session, and output capture. The launcher
-must not decline, retry, or otherwise manage assignments mid-protocol. The
-maintainer-facing queue may put the authenticated user's pull requests with
-requested changes in a repair-only lane before Hive-ranked review work; those
-pull requests are never self-reviewed, self-approved, or self-merged. Hive also
-owns contributor completion. Review may display a read-only Hive projection,
-but it never completes an assignment.
+Code and tests define implementation behavior; this model and the matching skill define the local agent-facing contract. Keep the contract aligned with the actual launcher, appliance, tests, and OMP capability probes. Run the focused Review/Factory and appliance checks for the changed surface, and distinguish local evidence from hosted/runtime evidence.
 
-The `contribute` image defines one narrow contributor experience: it always
-launches OMP and rejects every other `AGENT_BACKEND` value before Hive starts.
-Its FSDK closure contains only the tools required by OMP and Hive's interactive
-relay. The generic upstream helper files needed by that relay are implementation
-dependencies, not alternate agent surfaces. No dashboard, review extension,
-scheduler, Codex, Pi, or provider state belongs in the image.
-The human Maintainer Reviewer owns approval, queueing, and merge decisions. A
-confirmed slay delegates bounded execution of that decision to the coordinator:
-ordinary PR waves may repair, approve, and request auto-merge after fresh review
-and live-rule validation. Reviewer agents remain read-only. Issue and returned-
-author workers may submit changes but never approve or merge their own pull
-requests. A clean review without confirmed slay intent is evidence, not landing
-authority.
-
-The pinned FSDK base owns the contributor toolchain. `review` consumes the
-tools the image ships and does not reimplement them: a missing utility is
-fixed at the FSDK seam, and a shim is removed the moment that fix lands. A
-local reimplementation is not a neutral stopgap — it shadows the real tool on
-`PATH` and silently substitutes its own semantics for the ones every caller
-assumes.
-
-
-
-## Documentation discipline
-
-Keep the model executable and compact:
-
-1. Treat local code and tests as evidence for implementation behavior.
-2. Treat `AGENTS.md`, this document, and the matching skill as the
-   agent-facing contract.
-3. Record durable operational knowledge in `docs/skills/` and generate
-   `docs/skills/index.json` from skill frontmatter.
-4. Delete stale changelogs, session notes, plans, design scratchpads, and
-   append-only status documents. They are historical noise, not the model.
-5. Use the pinned `projectbluefin/common` catalog as a shared sidecar after
-   local documentation; it complements but does not override local authority.
-   Its [factory onboarding sequence][common-onboarding] is the shared entry
-   procedure and self-repair loop; follow it there rather than restating it
-   here.
-
-## Verification
-
-CI enforces the complete verification suite in `.github/workflows/validate.yml` (see [`docs/image-and-development.md`](../image-and-development.md#validation) for the full local command list).
-
-For factory model, skills, and image contract changes, run the core contract checks:
-
-```bash
-pre-commit run --all-files
-git diff --check
-just --list
-bash scripts/check-skill-frontmatter.sh
-bash tests/generate-skills.sh
-bash tests/test-registry.sh
-bash tests/omp-review-mode.sh
-bash tests/appliance-contract.sh
-bash tests/contribute-contract.sh
-bash tests/just-onboarding.sh
-```
-## Selected-batch operating boundary
-
-The selected Factory batch is a finite OMP operation, not a daemon. Its one
-same-host state root is authoritative for ownership and resumable journals.
-Run-once exits at completion or an honest blocker; retained runs preserve
-patches and native artifacts for inspect/resume/export, while pause, resume,
-and stop are explicit cancellation controls. Stop never implies rollback.
-
-The capacity bound covers native Factory workers, retries, verification, and
-reviewer work; unrelated Review work must not be globally disabled. OCI,
-Apptainer SIF/FUSE, and krun/KVM are distinct containment boundaries. Remote,
-gateway, and distributed execution remain deferred and untested, and this
-model does not waive parent review gates or claim absent runtime evidence.
-[common-model]: https://github.com/projectbluefin/common/blob/main/docs/factory/agentic-model.md
-[common-onboarding]: https://github.com/projectbluefin/common/blob/main/docs/skills/factory-onboarding.md
+Historical paths and package aliases may remain for the current personal install path. They do not define product identity. No fork-network detachment, repository recreation, or history rewrite is part of this product boundary.

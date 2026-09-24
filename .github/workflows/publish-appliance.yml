@@ -104,9 +104,8 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/readme-quickstart.sh
-          grep -Fq 'review-container' justfile
           grep -Fq 'review-queue' justfile
-          grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
+          grep -Fq 'github.com/joshyorko/review' README.md
 
   # One source of truth for every OCI value in this run: the per-arch builds
   # stamp these as config labels and the index carries the identical set as
@@ -381,8 +380,8 @@ jobs:
           buildah manifest add appliance:index docker://${staging}@${amd64}
           buildah manifest add appliance:index docker://${staging}@${arm64}
           for annotation in \
-            "org.opencontainers.image.title=Bluefin Review" \
-            "org.opencontainers.image.description=Distroless review appliance: the Bluefin Review mode of omp over the live Project Bluefin queue." \
+            "org.opencontainers.image.title=Review" \
+            "org.opencontainers.image.description=GitHub Review workbench for OMP, packaged with Luna Factory." \
             "org.opencontainers.image.url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             "org.opencontainers.image.revision=${GITHUB_SHA}" \
@@ -391,7 +390,7 @@ jobs:
             "org.opencontainers.image.licenses=Apache-2.0" \
             "org.opencontainers.image.base.name=${BASE_NAME}" \
             "org.opencontainers.image.base.digest=${BASE_DIGEST}" \
-            "io.projectbluefin.review.appliance=true"; do
+            "io.github.joshyorko.review.appliance=true"; do
             buildah manifest annotate --index --annotation "\$annotation" appliance:index
           done
           for tag in ${TAGS}; do
@@ -446,7 +445,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## Bluefin Review appliance"
+            echo "## Review appliance"
             echo
             echo "Index digest: \`${DIGEST}\`"
             echo "Immutable tag: \`${IMAGE}:sha-${GITHUB_SHA}\`"

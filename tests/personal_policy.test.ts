@@ -1,4 +1,4 @@
-/** Personal self-hosted policy: workflow PRs are actionable when permissions allow. */
+/** Generic GitHub workflow-write permissions and Review behavior. */
 import assert from "node:assert/strict";
 import test, { beforeEach, afterEach } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -11,7 +11,7 @@ import { PLAIN_PAINTER } from "../image/extension/bluefin-review/glyphs.ts";
 import { fetchQueue } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE } from "../image/extension/bluefin-review/hive.ts";
 import { ReviewMode } from "../image/extension/bluefin-review/mode.ts";
-import { renderRail } from "../image/extension/bluefin-review/rail.ts";
+import { renderRail, tmuxReviewStatusBar } from "../image/extension/bluefin-review/rail.ts";
 import { registerTools } from "../image/extension/bluefin-review/tools.ts";
 
 const NOW = 1_800_000_000_000;
@@ -19,11 +19,9 @@ const ENV = {
 	GH_TOKEN: "t",
 	HOME: "/nonexistent",
 	XDG_CONFIG_HOME: "/nonexistent",
-	BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY: "1",
-	BLUEFIN_REVIEW_PERSONAL_MODE: "1",
 	LUNA_FACTORY_STATE_ROOT: "",
 	LUNA_FACTORY_CLAIMS_ROOT: "",
-	BLUEFIN_REVIEW_MODE: "review",
+	REVIEW_MODE: "review",
 };
 beforeEach(() => {
 	ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "personal-state-"));
@@ -435,6 +433,28 @@ test("Review mode registers only GitHub workbench tools and contains no Hive aff
 	assert.doesNotMatch(status.content[0].text, /Hive|hive|browse-only/);
 });
 
+test("GitHub Review ignores persisted Hive-only and stage filters", () => {
+	const mode = new ReviewMode({ org: "example", env: ENV });
+	const selected = {
+		id: 933,
+		type: "issue" as const,
+		repo: "example/repo",
+		title: "generic issue",
+		author: "alice",
+		url: "https://github.com/example/repo/issues/933",
+		updatedAt: NOW,
+		draft: false,
+		mergeState: "unknown" as const,
+		reviewState: "unknown" as const,
+		labels: [],
+	};
+	mode.items = [selected];
+	mode.restore({ mode: "prs", hiveOnly: true, hiveLevel: "ready" });
+	assert.equal(mode.hiveOnly, false);
+	assert.equal(mode.hiveLevel, undefined);
+	assert.deepEqual(mode.visibleItems().map((item) => item.id), [933]);
+});
+
 test("Review mode never contacts Hive even when HIVE_HUB is inherited", async () => {
 	const calls: string[] = [];
 	const mode = new ReviewMode({
@@ -481,32 +501,32 @@ test("personal UI presents a local Review surface without Hive-only controls", (
 		dashboard.handleInput("H");
 		assert.equal(mode.hiveOnly, false);
 		assert.match(renderRail(mode, PLAIN_PAINTER, 160, NOW, 0, []).join("\n"), /LOCAL/);
+		assert.doesNotMatch(tmuxReviewStatusBar(mode, PLAIN_PAINTER, 160, NOW), /HIVE|BLUEFIN/i);
 	} finally {
 		dashboard.dispose();
 	}
 });
 
-test("personal reviewer selection is generic outside Project Bluefin", () => {
-	const generic = {
-		...workflowNode(),
-		type: "pr" as const,
-		id: 42,
-		repo: "example/repo",
-		repository: { nameWithOwner: "example/repo" },
-		url: "https://github.com/example/repo/pull/42",
-	};
-	const bluefin = { ...workflowNode(), type: "pr" as const, id: 42, repo: "projectbluefin/review" };
-	assert.match(actionPrompt({ kind: "slay", item: generic as any }) ?? "", /generic-reviewer/);
-	assert.doesNotMatch(actionPrompt({ kind: "slay", item: generic as any }) ?? "", /bluefin-reviewer/);
-	assert.match(actionPrompt({ kind: "slay", item: bluefin as any }) ?? "", /bluefin-reviewer/);
-});
-
-test("Review mode keeps Bluefin policy without exposing Hive", () => {
-	const bluefin = { ...workflowNode(), type: "pr" as const, id: 42, repo: "projectbluefin/review" };
-	const prompt = actionPrompt({ kind: "slay", item: bluefin as any }, undefined, { workbenchMode: "review" }) ?? "";
-	assert.match(prompt, /bluefin-reviewer/);
-	assert.match(prompt, /review_workbench_diff/);
-	assert.doesNotMatch(prompt, /hive_workbench|Hive/);
+test("all repositories use the neutral reviewer agent", () => {
+	const repositories = ["example/repo", "projectbluefin/review", "acme/widgets"];
+	for (const repo of repositories) {
+		const item = {
+			id: 42,
+			type: "pr" as const,
+			repo,
+			title: "generic change",
+			author: "contributor",
+			url: `https://github.com/${repo}/pull/42`,
+			updatedAt: Date.now(),
+			draft: false,
+			mergeState: "clean" as const,
+			reviewState: "unknown" as const,
+			labels: [],
+		};
+		const prompt = actionPrompt({ kind: "slay", item }, undefined, { workbenchMode: "review" }) ?? "";
+		assert.match(prompt, /reviewer/);
+		assert.doesNotMatch(prompt, /\bbluefin-(?:doctrine|reviewer|queue-triage)\b|generic-reviewer|hive_workbench_/i);
+	}
 });
 
 function ciNode(rollup: string | null, checkSuites: unknown) {
@@ -551,6 +571,7 @@ function ciFetch(node: unknown) {
 test("authoritative successful rollup wins over queued ambient enterprise suites", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode("SUCCESS", {
 			pageInfo: { hasNextPage: false },
 			nodes: [
@@ -566,6 +587,7 @@ test("authoritative successful rollup wins over queued ambient enterprise suites
 test("successful rollup stays successful with terminal successful suite conclusions", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode("SUCCESS", {
 			pageInfo: { hasNextPage: false },
 			nodes: [
@@ -581,6 +603,7 @@ test("successful rollup stays successful with terminal successful suite conclusi
 test("failed rollup wins over unrelated suite noise", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode("FAILURE", {
 			pageInfo: { hasNextPage: false },
 			nodes: [{ status: "QUEUED", conclusion: null }],
@@ -592,6 +615,7 @@ test("failed rollup wins over unrelated suite noise", async () => {
 test("completed failing suites provide failure evidence when rollup is absent", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode(null, {
 			pageInfo: { hasNextPage: false },
 			nodes: [{ status: "COMPLETED", conclusion: "FAILURE" }],
@@ -603,6 +627,7 @@ test("completed failing suites provide failure evidence when rollup is absent", 
 test("active suites provide pending fallback evidence when rollup is absent", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode(null, {
 			pageInfo: { hasNextPage: false },
 			nodes: [{ status: "IN_PROGRESS", conclusion: null }],
@@ -614,6 +639,7 @@ test("active suites provide pending fallback evidence when rollup is absent", as
 test("terminal successful suites are nonblocking when rollup is absent", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode(null, {
 			pageInfo: { hasNextPage: false },
 			nodes: [
@@ -629,6 +655,7 @@ test("terminal successful suites are nonblocking when rollup is absent", async (
 test("incomplete fallback suite evidence is explicit unknown state", async () => {
 	const result = await fetchQueue("prs", {
 		token: "t",
+		scope: { kind: "org", value: "projectbluefin" },
 		fetchImpl: ciFetch(ciNode(null, {
 			pageInfo: { hasNextPage: true },
 			nodes: [{ status: "COMPLETED", conclusion: "SUCCESS" }],

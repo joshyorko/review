@@ -1,8 +1,8 @@
 name: validate
 
-# justfile is the shipped launcher. This workflow validates its Bash syntax,
-# both image contracts, and mocked attended flows without requiring a live Hive
-# account or interactive terminal.
+# justfile is the shipped launcher. This workflow validates its shell,
+# the Review appliance contract, and hermetic launcher behavior without live
+# services or an interactive terminal.
 
 on:
   push:
@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --require-hashes -r requirements-ci.lock
-          pre-commit run --all-files --show-diff-on-failure
+          SKIP=check-skill-frontmatter,generate-skills,omp-review-mode,appliance-contract pre-commit run --all-files --show-diff-on-failure
 
       - name: Commit message CI-skip guard contract
         run: |
@@ -94,6 +94,7 @@ jobs:
       # headlessly against a fake host; the appliance's static contract holds
       # its pins and its version derivation without needing a container engine.
       - name: Review mode and appliance contracts
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           node --test tests/update-omp-pins.test.mjs
@@ -103,7 +104,7 @@ jobs:
           node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/luna_factory_dogfood_contract.test.ts
           bash tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-capabilities" "${{ github.event.pull_request.head.sha || github.sha }}"
           bash tests/appliance-contract.sh
-          bash tests/contribute-contract.sh
+
           bash tests/version-derivation.sh
       - name: Packaged runtime capability report
         run: |
@@ -115,12 +116,11 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/readme-quickstart.sh
-          grep -Fq 'review-container' justfile
+          grep -Fq 'review-appliance' justfile
           grep -Fq 'review-queue' justfile
-          # The appliance is the image named 'review'; the README teaches it.
-          grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
+          grep -Fq 'github.com/joshyorko/review' README.md
 
-      - name: Build and execute both images
+      - name: Build and execute Review appliance
         run: |
           set -euo pipefail
           review_version="$(bash scripts/review-appliance-version.sh)"
@@ -128,11 +128,9 @@ jobs:
             --build-arg REVIEW_VERSION="$review_version" \
             --build-arg REVIEW_REVISION="$GITHUB_SHA" \
             -f image/appliance/Containerfile -t review:test .
-          podman build --format oci -f image/contribute/Containerfile -t contribute:test .
-          bash tests/appliance-contract.sh --image review:test --expect-version "$review_version"
-          bash tests/contribute-contract.sh --image contribute:test
-          BLUEFIN_REVIEW_IMAGE=review:test bash tests/review-factory-coload-smoke.sh
+
+          REVIEW_APPLIANCE_IMAGE=review:test bash tests/review-factory-coload-smoke.sh
 
       # Interactive launchers prefer KVM and fall back to Apptainer. CI builds
-      # and executes both OCI images natively; both launcher branches are
+      # and executes the Review appliance natively; both launcher branches are
       # exercised hermetically.

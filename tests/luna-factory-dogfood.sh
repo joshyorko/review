@@ -86,7 +86,7 @@ command -v node >/dev/null 2>&1 || blocked "node unavailable for local fixture"
 node "$root/tests/fixtures/luna-factory-omp-probe-server.mjs" >"$provider_log" 2>&1 &
 provider_pid=$!
 
-for attempt in {1..100}; do
+for _ in {1..100}; do
   grep -Fq '{"ready":true' "$provider_log" && break
   kill -0 "$provider_pid" 2>/dev/null || failed "local fixture exited before readiness"
   sleep 0.1
@@ -182,7 +182,7 @@ native)
   fi
   ;;
 oci)
-  image="${BLUEFIN_REVIEW_IMAGE:-localhost/review:luna-factory-dogfood}"
+  image="${REVIEW_APPLIANCE_IMAGE:-${BLUEFIN_REVIEW_IMAGE:-localhost/review:luna-factory-dogfood}}"
   command -v podman >/dev/null 2>&1 || blocked "podman unavailable"
   podman info >/dev/null 2>&1 || blocked "podman info unavailable"
   if [[ "$LUNA_PROBE_ROUTE" == selected-batch ]]; then
@@ -204,7 +204,7 @@ oci)
   fi
   ;;
 sif)
-  sif="${BLUEFIN_REVIEW_FALLBACK_SIF:-}"
+  sif="${REVIEW_APPLIANCE_FALLBACK_SIF:-${BLUEFIN_REVIEW_FALLBACK_SIF:-}}"
   [[ -n "$sif" ]] || blocked "generated SIF path unavailable"
   command -v apptainer >/dev/null 2>&1 || blocked "Apptainer unavailable"
   [[ -e "$sif" ]] || blocked "generated SIF missing"

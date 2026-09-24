@@ -54,13 +54,11 @@ assert_provider_env_names() {
     [[ "$call" == *"--env $name"* ]] || fail "$context did not preserve $name forwarding: $call"
   done
 }
-assert_personal_policy_env_names() {
-  local call="$1" context="${2:-launcher}"
-  for name in BLUEFIN_REVIEW_MODE BLUEFIN_REVIEW_ALLOW_WORKFLOW_SLAY BLUEFIN_REVIEW_PERSONAL_MODE BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS; do
-    [[ "$call" == *"--env $name"* ]] ||
-      fail "$context did not forward $name by name: $call"
+assert_review_scope_env_names() {
+  local call="$1" context="${2:-launcher}" name
+  for name in REVIEW_MODE REVIEW_DEFAULT_SCOPE REVIEW_SKIP_REPOS; do
+    [[ "$call" == *"--env $name"* ]] || fail "$context did not forward generic Review setting $name by name: $call"
   done
-  [[ "$call" != *"=1"* ]] || fail "$context exposed personal policy values in argv/log output: $call"
 }
 
 configure_host_files() {
@@ -172,9 +170,6 @@ test() {
 }
 EOF
 export BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture"
-cat >"$scratch/home/.config/hive/contributor.env" <<'EOF'
-HIVE_HUB=https://hive.example.test
-EOF
 mock_podman_log="$scratch/podman.log"
 kvm="$scratch/kvm"
 touch "$kvm"
@@ -221,8 +216,10 @@ for arg in "\$@"; do
   fi
   previous="\$arg"
 done
-if [[ "\${EXPECT_APPTAINER_PERSONAL_POLICY:-}" == 1 ]]; then
-  [[ "\${APPTAINERENV_BLUEFIN_REVIEW_MODE:-}" == review ]] || exit 19
+if [[ "\${EXPECT_APPTAINER_REVIEW_SCOPE:-}" == 1 ]]; then
+  [[ "\${APPTAINERENV_REVIEW_MODE:-}" == review ]] || exit 19
+  [[ "\${APPTAINERENV_REVIEW_DEFAULT_SCOPE:-}" == acme/widgets ]] || exit 19
+  [[ "\${APPTAINERENV_REVIEW_SKIP_REPOS:-}" == acme/skip ]] || exit 19
 fi
 if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
@@ -233,6 +230,9 @@ if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   if [[ "\${EXPECT_APPTAINER_HIVE:-}" == 1 ]]; then
     [[ "\${APPTAINERENV_HIVE_HUB:-}" == https://hive.example.test ]] || exit 19
   fi
+if [[ "\${EXPECT_APPTAINER_NO_HIVE:-}" == 1 ]]; then
+  [[ ! -v APPTAINERENV_HIVE_HUB ]] || exit 19
+fi
   env -i "\${injected[@]}" /bin/bash -c '
     [[ "\$GH_TOKEN" == mock-token &&
        "\$GITHUB_TOKEN" == mock-token &&
@@ -303,6 +303,7 @@ export XDG_STATE_HOME="$scratch/home/.local/state"
 export REVIEW_TEST_KVM_DEVICE="$kvm"
 export GH_TOKEN=mock-token GITHUB_TOKEN=mock-token
 unset HIVE_HUB
+unset BLUEFIN_REVIEW_INHERIT_OMP_CONFIG REVIEW_INHERIT_OMP_CONFIG
 export REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime"
 export REVIEW_TEST_SND_DEVICE="$scratch/no-snd"
 unset BLUEFIN_REVIEW_SIF
@@ -383,16 +384,16 @@ set -e
   fail "packaged review missing-image diagnostic was not actionable: $offline_output"
 ! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image acquisition failed"
 
-# An installed personal bundle points krun at its immutable OCI image.
+# The installed package uses the generic Review scope/mode interface.
 : >"$mock_podman_log"
-BLUEFIN_REVIEW_IMAGE="ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890" \
-  BLUEFIN_REVIEW_MODE=review BLUEFIN_REVIEW_PERSONAL_MODE=1 BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS=1 \
+REVIEW_APPLIANCE_IMAGE="ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890" \
+  REVIEW_MODE=review REVIEW_DEFAULT_SCOPE=acme/widgets REVIEW_SKIP_REPOS=acme/ignored \
   "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
-  fail "personal OCI review launch failed"
+  fail "Review OCI override launch failed"
 oci_call="$(grep '^run ' "$mock_podman_log")"
 [[ "$oci_call" == *"ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890"* ]] ||
-  fail "personal OCI review launch used the wrong image"
-assert_personal_policy_env_names "$oci_call" "Podman review personal policy"
+  fail "Review OCI override used the wrong image"
+assert_review_scope_env_names "$oci_call" "Podman Review"
 
 # Incompatible review appliance image rejection
 : >"$mock_podman_log"
@@ -471,19 +472,19 @@ rm -f "$scratch/bin/cp"
 mv "$scratch/bin/krun" "$scratch/krun"
 export PATH="$scratch/bin:/usr/bin:/bin"
 : >"$mock_apptainer_log"
-fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 EXPECT_APPTAINER_PERSONAL_POLICY=1 \
-  BLUEFIN_REVIEW_MODE=review BLUEFIN_REVIEW_PERSONAL_MODE=1 BLUEFIN_REVIEW_SHOW_WORKFLOW_PRS=1 \
+fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_NO_HIVE=1 EXPECT_APPTAINER_REVIEW_SCOPE=1 \
+  REVIEW_MODE=review REVIEW_DEFAULT_SCOPE=acme/widgets REVIEW_SKIP_REPOS=acme/skip \
   COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token \
   COPILOT_INTEGRATION_ID=test-copilot-integration ANTHROPIC_API_KEY=test-anthropic-key \
   ANTHROPIC_OAUTH_TOKEN=test-anthropic-oauth OPENAI_API_KEY=test-provider-token \
   GEMINI_API_KEY=test-gemini-key REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" \
-  "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
+  "${repo_root}/bin/bluefin" review acme/widgets 2>&1)" || fail "review Apptainer fallback lost credentials"
 [[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "review fallback warning is missing"
 [[ "$fallback_output" == *"✓ bluefin launcher revision:"* ]] || fail "review fallback missing launcher revision: $fallback_output"
 [[ "$fallback_output" == *"! review appliance image identity unavailable for ghcr.io/projectbluefin/review:stable."* ]] || fail "review fallback missing identity report without registry probe: $fallback_output"
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment"
-[[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/review:stable --repo projectbluefin/review"* ]] || fail "review fallback used the wrong image or scope"
+[[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/review:stable --repo acme/widgets"* ]] || fail "review fallback used the wrong image or scope"
 [[ "$fallback_call" == *":/workspace,"*":/tmp"* ]] || fail "review fallback did not bind workspace and instance-backed scratch together"
 [[ "$fallback_call" != *mock-token* && "$fallback_call" != *test-copilot-token* &&
   "$fallback_call" != *test-github-copilot-token* && "$fallback_call" != *test-copilot-integration* &&
@@ -560,12 +561,12 @@ default_review_call="$(grep '^run ' "$mock_podman_log")"
 
 mkdir -p "$HOME/.omp"
 : >"$mock_podman_log"
-BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+REVIEW_INHERIT_OMP_CONFIG=1 "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
   fail "review host-config opt-in failed"
 inherited_review_call="$(grep '^run ' "$mock_podman_log")"
 [[ "$inherited_review_call" == *"$HOME/.omp:/home/bluefin/.omp:rw"* ]] ||
   fail "review host-config opt-in did not add the requested host ~/.omp bind"
-unset BLUEFIN_REVIEW_INHERIT_OMP_CONFIG
+unset REVIEW_INHERIT_OMP_CONFIG
 
 # A real Pulse socket is the preferred transport, and only that socket is
 # projected; the containing runtime directory never crosses the boundary.
@@ -762,106 +763,7 @@ env -u LUNA_FACTORY_ENABLED -u LUNA_FACTORY_CAPACITY EXPECT_NO_FACTORY_ENV=1 \
   REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
   fail "Apptainer fallback did not launch without Factory configuration"
 
-# --- 4. Contributor aliases launch independent KVM appliances -----------------
-mkdir -p "$HOME/.config/hive"
-printf 'HIVE_REGISTRATION_TOKEN=test\nHIVE_HUB=https://hive.example.test\n' >"$HOME/.config/hive/contributor.env"
-printf 'HIVE_REGISTRATION_TOKEN=one\nHIVE_HUB=https://hive.example.test\n' >"$HOME/.config/hive/contributor.owner-repo.env"
-printf 'HIVE_REGISTRATION_TOKEN=two\nHIVE_HUB=https://hive.example.test\n' >"$HOME/.config/hive/contributor.owner-repo2.env"
-chmod 0600 "$HOME/.config/hive/"contributor*.env
-export GH_TOKEN=mock-token
-
-: >"$mock_podman_log"
-"${repo_root}/bin/bluefin-contribute" >/dev/null 2>&1 || fail "bluefin-contribute failed"
-contribute_alias_call="$(cat "$mock_podman_log")"
-[[ "$contribute_alias_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "contribute alias did not use krun"
-[[ "$contribute_alias_call" == *"ghcr.io/projectbluefin/contribute:stable"* ]] || fail "contribute alias used the wrong image"
-grep -qFx "pull ghcr.io/projectbluefin/contribute:stable" "$mock_podman_log" ||
-  fail "bin/bluefin contribute did not refresh the moving stable tag"
-grep -q '^image inspect --format ' "$mock_podman_log" ||
-  fail "bin/bluefin contribute did not inspect the resolved image identity"
-
-: >"$mock_podman_log"
-FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/bluefin" contribute owner/repo >/dev/null 2>&1 &
-contribute_one_pid=$!
-FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/bluefin" contribute owner/repo2 >/dev/null 2>&1 &
-contribute_two_pid=$!
-wait "$contribute_one_pid" "$contribute_two_pid"
-mapfile -t concurrent_contribute_calls < <(grep '^run ' "$mock_podman_log")
-assert_eq "${#concurrent_contribute_calls[@]}" "2" "concurrent contribute launch count"
-assert_eq "$(grep -cFx 'pull ghcr.io/projectbluefin/contribute:stable' "$mock_podman_log")" "2" "concurrent contributor refresh count"
-first_contribute_call="${concurrent_contribute_calls[0]}"
-second_contribute_call="${concurrent_contribute_calls[1]}"
-[[ "$(arg_after "$first_contribute_call" --name)" != "$(arg_after "$second_contribute_call" --name)" ]] || fail "contributor appliances must have unique container names"
-[[ "$(arg_after "$first_contribute_call" --volume)" != "$(arg_after "$second_contribute_call" --volume)" ]] || fail "contributor appliances must have isolated state volumes"
-[[ "$first_contribute_call$second_contribute_call" == *"contributor.owner-repo.env:/home/bluefin/.config/hive/contributor.env:ro,z"* ]] || fail "repo contributor did not select its Hive registration"
-[[ "$first_contribute_call$second_contribute_call" == *"contributor.owner-repo2.env:/home/bluefin/.config/hive/contributor.env:ro,z"* ]] || fail "repo2 contributor used the wrong registration"
-
-# Incompatible contributor image rejection
-: >"$mock_podman_log"
-set +e
-incompat_contribute_output="$(FAKE_INSPECT_VERSION="26.08.01" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)"
-incompat_contribute_status=$?
-set -e
-[[ "$incompat_contribute_status" -ne 0 ]] || fail "packaged contribute accepted incompatible image version 26.08.01"
-[[ "$incompat_contribute_output" == *"is incompatible with this launcher (requires >= 26.08.02)"* ]] ||
-  fail "incompatible contributor image diagnostic was not actionable: $incompat_contribute_output"
-! grep -q '^run ' "$mock_podman_log" || fail "packaged contribute ran after image compatibility check failed"
-# Documented contributor alias selects the same packaged launcher override path.
-: >"$mock_podman_log"
-CONTRIBUTE_IMAGE="custom/contribute:alias" FAKE_INSPECT_VERSION="26.08.07" "${repo_root}/bin/bluefin" contribute owner/repo >/dev/null 2>&1 ||
-  fail "CONTRIBUTE_IMAGE alias failed to start"
-grep -qFx "pull custom/contribute:alias" "$mock_podman_log" || fail "contributor alias was not refreshed"
-grep -q '^run .* custom/contribute:alias$' "$mock_podman_log" || fail "contributor alias was not passed to the container"
-
-# Malformed contributor labels must fail before execution as well.
-for malformed_version in 26.08.foo 26.08.06-rc; do
-  : >"$mock_podman_log"
-  set +e
-  malformed_contribute_output="$(FAKE_INSPECT_VERSION="$malformed_version" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)"
-  malformed_contribute_status=$?
-  set -e
-  [[ "$malformed_contribute_status" -ne 0 ]] || fail "packaged contribute accepted malformed image version $malformed_version"
-  [[ "$malformed_contribute_output" == *"malformed version label '$malformed_version'"* ]] ||
-    fail "malformed contributor version diagnostic was not actionable: $malformed_contribute_output"
-  ! grep -q '^run ' "$mock_podman_log" || fail "packaged contribute ran after malformed version check failed"
-done
-# Explicit contributor image override warning
-: >"$mock_podman_log"
-override_contribute_output="$(BLUEFIN_CONTRIBUTE_IMAGE="custom/contribute:old" FAKE_INSPECT_VERSION="26.08.01" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)" ||
-  fail "explicit contributor image override failed to start"
-[[ "$override_contribute_output" == *"older than recommended minimum (26.08.02); proceeding with explicit override"* ]] ||
-  fail "explicit contributor override warning missing: $override_contribute_output"
-grep -q '^run ' "$mock_podman_log" || fail "explicit contributor override did not launch container"
-
-# Legacy contribute state migration from v26.08.05
-legacy_contribute_dir="$scratch/home/.local/state/bluefin-contribute"
-mkdir -p "$legacy_contribute_dir/.config/contribute"
-touch "$legacy_contribute_dir/bluefin-contribute.sif" "$legacy_contribute_dir/contribute_session.json" "$legacy_contribute_dir/.config/contribute/config.env"
-chmod +x "$legacy_contribute_dir/bluefin-contribute.sif"
-migrate_contribute_output="$(HOME="$scratch/home" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)" ||
-  fail "contribute with legacy cache failed"
-[[ "$migrate_contribute_output" == *"migrated user configuration from"* ]] ||
-  fail "legacy contribute migration notice was not reported: $migrate_contribute_output"
-contribute_instance_home="$(find "$scratch/home/.local/state/bluefin/instances" -type d -path "*contribute-owner-repo-[0-9a-f]*/home" | head -1)"
-[[ -f "$contribute_instance_home/contribute_session.json" ]] || fail "contribute user session was not migrated to instance home"
-[[ -f "$contribute_instance_home/.config/contribute/config.env" ]] || fail "nested contribute configuration was not migrated"
-[[ ! -e "$contribute_instance_home/bluefin-contribute.sif" ]] || fail "legacy contribute SIF was copied into instance home"
-[[ -d "$legacy_contribute_dir" ]] || fail "legacy contribute state directory was broadly deleted"
-
 mv "$scratch/bin/krun" "$scratch/krun"
-: >"$mock_apptainer_log"
-fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 \
-  COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token \
-  COPILOT_INTEGRATION_ID=test-copilot-integration ANTHROPIC_API_KEY=test-anthropic-key \
-  ANTHROPIC_OAUTH_TOKEN=test-anthropic-oauth OPENAI_API_KEY=test-provider-token \
-  GEMINI_API_KEY=test-gemini-key "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)" || fail "contributor Apptainer fallback lost credentials"
-[[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "contributor fallback warning is missing"
-[[ "$fallback_output" == *"✓ bluefin launcher revision:"* ]] || fail "contributor fallback missing launcher revision: $fallback_output"
-[[ "$fallback_output" == *"! contributor image identity unavailable for ghcr.io/projectbluefin/contribute:stable."* ]] || fail "contributor fallback missing identity report without registry probe: $fallback_output"
-fallback_call="$(cat "$mock_apptainer_log")"
-[[ "$fallback_call" == *"run --containall"* ]] || fail "contributor fallback did not use Apptainer containment"
-[[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/contribute:stable"* ]] || fail "contributor fallback used the wrong image"
-
 for mask in 0 1 2 3; do
   configure_host_files "$mask"
   : >"$mock_apptainer_log"
@@ -869,24 +771,12 @@ for mask in 0 1 2 3; do
     fail "review fallback failed for host-file mask $mask"
   assert_apptainer_host_files "$(cat "$mock_apptainer_log")" "$mask"
 
-  : >"$mock_apptainer_log"
-  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" contribute >/dev/null 2>&1 ||
-    fail "contributor fallback failed for host-file mask $mask"
-  assert_apptainer_host_files "$(cat "$mock_apptainer_log")" "$mask"
 done
 configure_host_files 2
 ln -s missing-zoneinfo "$host_fixture/etc/localtime"
 : >"$mock_apptainer_log"
 REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
   fail "review fallback failed with dangling localtime"
-assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
-: >"$mock_apptainer_log"
-REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" contribute >/dev/null 2>&1 ||
-  fail "contributor fallback failed with dangling localtime"
-assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
-: >"$mock_apptainer_log"
-REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin-contribute" >/dev/null 2>&1 ||
-  fail "contributor wrapper fallback failed with dangling localtime"
 assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
 
 mv "$scratch/bin/squashfuse_ll" "$scratch/squashfuse_ll"
@@ -898,12 +788,6 @@ set -e
 [[ "$fallback_output" == *"squashfuse"* ]] || fail "missing squashfuse diagnostic was not actionable: $fallback_output"
 mv "$scratch/squashfuse_ll" "$scratch/bin/squashfuse_ll"
 
-set +e
-fallback_output="$(REVIEW_TEST_FUSE_DEVICE="$scratch/missing-fuse" REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" contribute 2>&1)"
-fallback_status=$?
-set -e
-[[ "$fallback_status" -ne 0 ]] || fail "contributor fallback accepted a missing FUSE device"
-[[ "$fallback_output" == *"FUSE device"* ]] || fail "missing FUSE diagnostic was not actionable: $fallback_output"
 mv "$scratch/krun" "$scratch/bin/krun"
 
 # --- 5. Parity test: KVM container and source launchers use identical flags ---

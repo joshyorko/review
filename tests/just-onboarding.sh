@@ -12,9 +12,10 @@ home="$scratch/home"
 fake_bin="$scratch/bin"
 podman_log="$scratch/podman.log"
 kubectl_log="$scratch/kubectl.log"
+: >"$kubectl_log"
 apptainer_log="$scratch/apptainer.log"
 kvm="$scratch/kvm"
-mkdir -p "$home/.config/hive" "$fake_bin"
+mkdir -p "$home" "$fake_bin"
 host_fixture="$scratch/host"
 mkdir -p "$host_fixture/etc"
 touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
@@ -37,12 +38,6 @@ EOF
 export BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture"
 touch "$kvm"
 chmod 0666 "$kvm"
-cat >"$home/.config/hive/contributor.env" <<'EOF'
-HIVE_REGISTRATION_TOKEN=test-registration
-HIVE_HUB=https://hive.example.test
-CONTRIBUTOR_USERNAME=test-user
-EOF
-chmod 0600 "$home/.config/hive/contributor.env"
 cat >"$fake_bin/gh" <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-} ${2:-}" == "auth status" ]] && exit 0
@@ -61,6 +56,10 @@ if [[ "${1:-}" == run && "${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
   [[ "${AWS_REGION:-}" == us-east-1 ]] || exit 19
   [[ "${AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
   [[ "$*" != *test-bedrock-bearer* && "$*" != *test-access-key* && "$*" != *test-secret-key* && "$*" != *test-session-token* && "$*" != *us-east-1* ]] || exit 19
+fi
+if [[ "${1:-}" == run && "${EXPECT_PODMAN_REVIEW_SCOPE:-}" == 1 ]]; then
+  [[ "$*" == *"--env REVIEW_DEFAULT_SCOPE"* && "$*" == *"--env REVIEW_MODE"* ]] || exit 19
+  [[ "$*" == *"bluefin-review-review-org-acme-"* ]] || exit 19
 fi
 if [[ "${1:-}" == run && -n "${EXPECT_EXTENSION:-}" ]]; then
   previous=""
@@ -110,46 +109,48 @@ if [[ "${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
     [[ -v "$source_name" ]] && injected+=("$name=${!source_name}")
   done
   injected+=("EXPECT_CONTEXT7_CREDENTIAL=${EXPECT_CONTEXT7_CREDENTIAL:-0}")
+  injected+=("EXPECT_APPTAINER_HIVE=${EXPECT_APPTAINER_HIVE:-0}")
   env -i "${injected[@]}" /bin/bash -c '
-    [[ "$GH_TOKEN" == test-gh-token &&
-       "$OPENAI_API_KEY" == "test-provider-token" &&
-       "$HIVE_HUB" == https://hive.example.test &&
-       ( -z "$AWS_BEARER_TOKEN_BEDROCK" || "$AWS_BEARER_TOKEN_BEDROCK" == "test-bedrock-token" ) &&
-       ( -z "$AWS_ACCESS_KEY_ID" || "$AWS_ACCESS_KEY_ID" == "test-access-key" ) &&
-       ( -z "$AWS_SECRET_ACCESS_KEY" || "$AWS_SECRET_ACCESS_KEY" == "test-secret-key" ) &&
-       ( -z "$AWS_SESSION_TOKEN" || "$AWS_SESSION_TOKEN" == "test-session-token" ) &&
-       ( -z "$AWS_REGION" || "$AWS_REGION" == "us-west-2" ) &&
-       ( -z "$AWS_DEFAULT_REGION" || "$AWS_DEFAULT_REGION" == "us-west-2" ) &&
-       ( "$EXPECT_CONTEXT7_CREDENTIAL" != 1 || "$CONTEXT7_API_KEY" == "test-context7-token" ) ]]
-  ' || exit 19
+    [[ "$GH_TOKEN" == test-gh-token ]] || { echo "contained GH_TOKEN mismatch" >&2; exit 1; }
+    [[ "$OPENAI_API_KEY" == "test-provider-token" ]] || { echo "contained OPENAI_API_KEY mismatch" >&2; exit 1; }
+    if [[ "$EXPECT_APPTAINER_HIVE" == 1 ]]; then
+      [[ "$HIVE_HUB" == https://hive.example.test ]] || { echo "contained HIVE_HUB mismatch" >&2; exit 1; }
+    else
+      [[ -z "$HIVE_HUB" ]] || { echo "unexpected Hive configuration in default Review" >&2; exit 1; }
+    fi
+    [[ -z "$AWS_BEARER_TOKEN_BEDROCK" || "$AWS_BEARER_TOKEN_BEDROCK" == "test-bedrock-token" ]] || { echo "contained AWS bearer mismatch" >&2; exit 1; }
+    [[ -z "$AWS_ACCESS_KEY_ID" || "$AWS_ACCESS_KEY_ID" == "test-access-key" ]] || { echo "contained AWS access-key mismatch" >&2; exit 1; }
+    [[ -z "$AWS_SECRET_ACCESS_KEY" || "$AWS_SECRET_ACCESS_KEY" == "test-secret-key" ]] || { echo "contained AWS secret-key mismatch" >&2; exit 1; }
+    [[ -z "$AWS_SESSION_TOKEN" || "$AWS_SESSION_TOKEN" == "test-session-token" ]] || { echo "contained AWS session-token mismatch" >&2; exit 1; }
+    [[ -z "$AWS_REGION" || "$AWS_REGION" == "us-west-2" ]] || { echo "contained AWS region mismatch" >&2; exit 1; }
+    [[ -z "$AWS_DEFAULT_REGION" || "$AWS_DEFAULT_REGION" == "us-west-2" ]] || { echo "contained default AWS region mismatch" >&2; exit 1; }
+    [[ "$EXPECT_CONTEXT7_CREDENTIAL" != 1 || "$CONTEXT7_API_KEY" == "test-context7-token" ]] || { echo "contained Context7 credential mismatch" >&2; exit 1; }
+  ' || { echo "contained credential environment mismatch" >&2; exit 19; }
 fi
 if [[ "${EXPECT_APPTAINER_AWS_FORWARDING:-}" == 1 ]]; then
-  [[ "${APPTAINERENV_AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
-  [[ "${APPTAINERENV_AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || exit 19
-  [[ "${APPTAINERENV_AWS_SECRET_ACCESS_KEY:-}" == test-secret-key ]] || exit 19
-  [[ "${APPTAINERENV_AWS_SESSION_TOKEN:-}" == test-session-token ]] || exit 19
-  [[ "${APPTAINERENV_AWS_REGION:-}" == us-east-1 ]] || exit 19
-  [[ "${APPTAINERENV_AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
-  [[ "$*" != *test-bedrock-bearer* && "$*" != *test-access-key* && "$*" != *test-secret-key* && "$*" != *test-session-token* && "$*" != *us-east-1* ]] || exit 19
+  [[ "${APPTAINERENV_AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || { echo "AWS_BEARER_TOKEN_BEDROCK not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || { echo "AWS_ACCESS_KEY_ID not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_SECRET_ACCESS_KEY:-}" == test-secret-key ]] || { echo "AWS_SECRET_ACCESS_KEY not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_SESSION_TOKEN:-}" == test-session-token ]] || { echo "AWS_SESSION_TOKEN not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_REGION:-}" == us-east-1 ]] || { echo "AWS_REGION not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_DEFAULT_REGION:-}" == us-east-1 ]] || { echo "AWS_DEFAULT_REGION not forwarded" >&2; exit 19; }
+  [[ "$*" != *test-bedrock-bearer* && "$*" != *test-access-key* && "$*" != *test-secret-key* && "$*" != *test-session-token* && "$*" != *us-east-1* ]] || { echo "AWS credentials leaked into Apptainer argv" >&2; exit 19; }
+fi
+if [[ "${EXPECT_APPTAINER_REVIEW_SCOPE:-}" == 1 ]]; then
+  [[ "${APPTAINERENV_REVIEW_DEFAULT_SCOPE:-}" == "org:acme" ]] || exit 19
+  [[ "${APPTAINERENV_REVIEW_MODE:-}" == "hive" ]] || exit 19
+  [[ "${APPTAINERENV_HIVE_HUB:-}" == "https://hive.example.test" ]] || exit 19
 fi
 exit 18
-EOF
-cat >"$fake_bin/kubectl" <<'EOF'
-#!/usr/bin/env bash
-set -eu
-printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
-case "$*" in
-  "create namespace bluefin-system --dry-run=client -o yaml") printf 'apiVersion: v1\nkind: Namespace\n' ;;
-  "create secret generic contribute-secret "*) printf 'apiVersion: v1\nkind: Secret\n' ;;
-  "apply "*) cat >/dev/null ;;
-  "get secret contribute-secret "*) : ;;
-  "get deployment contribute -n bluefin-system") : ;;
-esac
-exit 0
 EOF
 cat >"$fake_bin/krun" <<'EOF'
 #!/usr/bin/env bash
 exit 0
+EOF
+cat >"$fake_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
+exit 99
 EOF
 cat >"$fake_bin/squashfuse_ll" <<'EOF'
 #!/usr/bin/env bash
@@ -200,7 +201,7 @@ assert_apptainer_host_files() {
 }
 run_just() {
   : >"$podman_log"
-  : >"$kubectl_log"
+  export APPTAINER_LOG="$apptainer_log"
   set +e
   output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
   status=$?
@@ -209,8 +210,13 @@ run_just() {
 
 scenario="public recipes"
 recipes="$($real_just --justfile "$root/justfile" --list)"
-for recipe in contribute review-container review-queue review-appliance review-appliance-build review-stop review-doctor; do
+for recipe in review-queue review-appliance review-appliance-build review-doctor; do
   contains "$recipe" "$recipes"
+done
+for retired in contribute review-container; do
+  if grep -Fxq "$retired" <<<"$recipes"; then
+    fail "retired $retired recipe remains"
+  fi
 done
 
 scenario="doctor verifies the KVM runtime"
@@ -219,8 +225,6 @@ run_just review-doctor
 contains 'Podman krun KVM runtime ready' "$output"
 contains '=== Review image ===' "$output"
 contains 'ghcr.io/projectbluefin/review:stable is resolvable' "$output"
-contains '=== Contributor image ===' "$output"
-contains 'ghcr.io/projectbluefin/contribute:stable is resolvable' "$output"
 
 scenario="doctor diagnoses missing squashfuse"
 mv "$fake_bin/squashfuse_ll" "$scratch/squashfuse_ll"
@@ -239,53 +243,6 @@ FAKE_NO_SKOPEO=1 FAKE_PODMAN_INFO_FAIL=1 run_just review-doctor
 [[ "$status" -eq 0 ]] || fail "doctor treated unavailable non-mutating registry probes as launch failure: $output"
 contains '=== Review image ===' "$output"
 contains 'ghcr.io/projectbluefin/review:stable resolution deferred to Apptainer launch' "$output"
-contains '=== Contributor image ===' "$output"
-contains 'ghcr.io/projectbluefin/contribute:stable resolution deferred to Apptainer launch' "$output"
-scenario="contribute launches the OMP worker"
-run_just contribute
-[[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
-contains 'contributor image ghcr.io/projectbluefin/contribute:stable: version=26.08.07 revision=0123456789abcdef digest=sha256:deadbeef' "$output"
-log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-contribute-' "$podman_log"
-log_contains '--userns keep-id:uid=65532,gid=65532' "$podman_log"
-log_contains "$home/.config/hive/contributor.env:/home/bluefin/.config/hive/contributor.env:ro,z" "$podman_log"
-log_contains ':/home/bluefin:rw' "$podman_log"
-log_contains '--env AGENT_BACKEND=omp' "$podman_log"
-log_contains '--env TERM=xterm-256color' "$podman_log"
-log_contains '--env COLORTERM=truecolor' "$podman_log"
-log_contains 'ghcr.io/projectbluefin/contribute:stable' "$podman_log"
-log_not_contains 'AGENT_MODEL' "$podman_log"
-log_not_contains 'AGENT_REASONING_EFFORT' "$podman_log"
-log_not_contains 'test-gh-token' "$podman_log"
-
-scenario="review-container is the same worker"
-run_just review-container
-[[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
-log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-contribute-' "$podman_log"
-log_contains 'ghcr.io/projectbluefin/contribute:stable' "$podman_log"
-
-scenario="contributor instance names select independent state"
-cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.org-one.env"
-cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.org-two.env"
-run_just contribute org/one
-one_call="$(cat "$podman_log")"
-run_just contribute org/two
-two_call="$(cat "$podman_log")"
-[[ "$one_call" != "$two_call" ]] || fail "different contributor instances must not collide"
-[[ "$one_call" == *"contributor.org-one.env:/home/bluefin/.config/hive/contributor.env:ro,z"* ]] || fail "first contributor used the wrong registration"
-[[ "$two_call" == *"contributor.org-two.env:/home/bluefin/.config/hive/contributor.env:ro,z"* ]] || fail "second contributor used the wrong registration"
-
-scenario="contributor instance input cannot execute shell syntax"
-run_just contribute "\$(touch $scratch/injected)"
-[[ "$status" -ne 0 ]] || fail "invalid instance must be rejected"
-[[ ! -e "$scratch/injected" ]] || fail "instance argument executed shell code"
-
-scenario="detached workers are rejected"
-set +e
-output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token REVIEW_DETACH=1 "$real_just" --justfile "$root/justfile" contribute 2>&1)"
-status=$?
-set -e
-[[ "$status" -ne 0 ]] || fail "detached launch must fail"
-contains 'detached contributor containers are not supported' "$output"
 
 scenario="review forwards Bedrock and region credentials to KVM"
 export AWS_BEARER_TOKEN_BEDROCK=test-bedrock-bearer AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_PODMAN_AWS_FORWARDING=1
@@ -323,7 +280,7 @@ unset EXPECT_APPTAINER_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID
 scenario="KVM preflight failure falls back to Apptainer"
 : >"$apptainer_log"
 set +e
-output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token CONTEXT7_API_KEY=test-context7-token HIVE_HUB= EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_CONTEXT7_CREDENTIAL=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token CONTEXT7_API_KEY=test-context7-token HIVE_HUB= EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=0 EXPECT_CONTEXT7_CREDENTIAL=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
 status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "expected fake Apptainer exit 18, got $status"
@@ -334,13 +291,6 @@ log_contains ':/tmp' "$apptainer_log"
 log_not_contains 'test-gh-token' "$apptainer_log"
 log_not_contains 'test-provider-token' "$apptainer_log"
 log_not_contains 'test-context7-token' "$apptainer_log"
-
-scenario="contributor fallback preserves credentials under containment"
-set +e
-output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token HIVE_HUB=https://hive.example.test EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" contribute 2>&1)"
-status=$?
-set -e
-[[ "$status" -eq 18 ]] || fail "contributor credentials did not reach contained process: $output"
 
 for mask in 0 1 2 3; do
   scenario="Apptainer host-file mask $mask"
@@ -353,13 +303,6 @@ for mask in 0 1 2 3; do
   [[ "$status" -eq 18 ]] || fail "review fallback failed for host-file mask $mask: $output"
   assert_apptainer_host_files "$(cat "$apptainer_log")" "$mask"
 
-  : >"$apptainer_log"
-  set +e
-  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" contribute 2>&1)"
-  status=$?
-  set -e
-  [[ "$status" -eq 18 ]] || fail "contributor fallback failed for host-file mask $mask: $output"
-  assert_apptainer_host_files "$(cat "$apptainer_log")" "$mask"
 done
 configure_host_files 2
 ln -s missing-zoneinfo "$host_fixture/etc/localtime"
@@ -370,15 +313,6 @@ output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_lo
 status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "review fallback failed with dangling localtime: $output"
-assert_apptainer_host_files "$(cat "$apptainer_log")" 2
-
-scenario="contributor fallback suppresses dangling localtime"
-: >"$apptainer_log"
-set +e
-output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" contribute 2>&1)"
-status=$?
-set -e
-[[ "$status" -eq 18 ]] || fail "contributor fallback failed with dangling localtime: $output"
 assert_apptainer_host_files "$(cat "$apptainer_log")" 2
 
 scenario="review alias preserves argument boundaries"
@@ -428,11 +362,13 @@ done
 
 scenario="Bedrock bearer-token credentials reach the contained Apptainer process"
 : >"$apptainer_log"
+export EXPECT_APPTAINER_HIVE=1
 set +e
 bedrock_apptainer_output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token HIVE_HUB=https://hive.example.test AWS_BEARER_TOKEN_BEDROCK=test-bedrock-token AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
 bedrock_apptainer_status=$?
 set -e
-[[ "$bedrock_apptainer_status" -eq 18 ]] || fail "expected fake Apptainer exit 18 with Bedrock credentials, got $bedrock_apptainer_status"
+unset EXPECT_APPTAINER_HIVE
+[[ "$bedrock_apptainer_status" -eq 18 ]] || fail "expected fake Apptainer exit 18 with Bedrock credentials, got $bedrock_apptainer_status: $bedrock_apptainer_output"
 log_contains 'run --containall' "$apptainer_log"
 for bedrock_value in test-bedrock-token test-access-key test-secret-key test-session-token us-west-2; do
   log_not_contains "$bedrock_value" "$apptainer_log"
@@ -458,28 +394,15 @@ log_contains '-home:/home/bluefin:rw' "$podman_log"
 log_contains '-workspace:/workspace:rw' "$podman_log"
 log_not_contains "$home/" "$podman_log"
 [[ "$one_review_call" != "$two_review_call" ]] || fail "different review targets must not collide"
-log_not_contains 'ghcr.io/projectbluefin/contribute' "$podman_log"
 
-scenario="cluster scale uses the one contributor deployment"
-run_just contribute cluster 3
-[[ "$status" -eq 0 ]] || fail "cluster scale failed: $output"
-log_contains 'apply -f deploy/contribute.yaml' "$kubectl_log"
-log_contains 'set env deployment/contribute -n bluefin-system AGENT_BACKEND=omp HIVE_HUB=https://hive.example.test' "$kubectl_log"
-log_contains 'scale deployment/contribute -n bluefin-system --replicas=3' "$kubectl_log"
-log_contains 'rollout status deployment/contribute -n bluefin-system --timeout=15s' "$kubectl_log"
-log_not_contains 'test-gh-token' "$kubectl_log"
+scenario="configured Review scope and mode reach Podman"
+EXPECT_PODMAN_REVIEW_SCOPE=1 REVIEW_DEFAULT_SCOPE=org:acme REVIEW_MODE=review run_just review-queue
+[[ "$status" -eq 17 ]] || fail "configured Review scope did not launch: $output"
 
-scenario="review-container cluster delegates to the same deployment"
-run_just review-container cluster 2
-[[ "$status" -eq 0 ]] || fail "cluster alias failed: $output"
-log_contains 'scale deployment/contribute -n bluefin-system --replicas=2' "$kubectl_log"
-
-scenario="review-stop stops only cluster workers"
-run_just review-stop cluster
-[[ "$status" -eq 0 ]] || fail "cluster stop failed: $output"
-log_contains 'get deployment contribute -n bluefin-system' "$kubectl_log"
-log_contains 'scale deployment/contribute -n bluefin-system --replicas=0' "$kubectl_log"
-
+scenario="configured scope and explicit Hive mode reach Apptainer"
+EXPECT_APPTAINER_REVIEW_SCOPE=1 REVIEW_DEFAULT_SCOPE=org:acme REVIEW_MODE=hive HIVE_HUB=https://hive.example.test FAKE_PODMAN_INFO_FAIL=1 run_just review-queue
+[[ "$status" -eq 18 ]] || fail "explicit Hive configuration did not reach the Apptainer fallback: $output"
+[[ ! -s "$kubectl_log" ]] || fail "GitHub-only Review invoked Kubernetes"
 if ((failures)); then
   printf 'just-onboarding: %d failure(s)\n' "$failures" >&2
   exit 1

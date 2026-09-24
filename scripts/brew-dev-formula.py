@@ -33,11 +33,11 @@ def prepare(bundles: Path, output: Path):
     version = '0.' + datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
     tag = f'dev-{version}-{sha[:12]}'
     lines = ['class BluefinReviewDev < Formula',
-             '  desc "Personal development builds of Bluefin Review"',
+             '  desc "Personal development builds of Review"',
              '  homepage "https://github.com/joshyorko/review"',
              f'  version "{version}"', '  license "Apache-2.0"',
              '  depends_on :linux', '  depends_on "apptainer"', '  depends_on "squashfuse"', '  depends_on "gh"',
-             '  conflicts_with "bluefin-contributor-tools", because: "both provide bluefin"']
+             ]
     if len(arches) == 1:
         lines.append('  depends_on arch: :' + ('x86_64' if arches[0] == 'x86_64' else 'arm64'))
     for r in records:
@@ -52,7 +52,7 @@ def prepare(bundles: Path, output: Path):
         lines += [f'  {scope} do', f'    url "https://github.com/joshyorko/review/releases/download/{tag}/{name}"',
                   f'    sha256 "{actual}"', '  end']
     lines += ['  def install', '    libexec.install "launcher", "build.json", "build.txt"',
-              '    bin.install "bluefin"', '    bin.install_symlink libexec/"launcher/bin/bluefin-contribute"',
+              '    bin.install "bluefin"',
               '  end', '  test do', '    assert_match "Usage: bluefin", shell_output("#{bin}/bluefin 2>&1", 2)',
               '    assert_predicate libexec/"launcher/bluefin-review.sif", :executable?', '  end', 'end', '']
     output.mkdir(parents=True, exist_ok=True)

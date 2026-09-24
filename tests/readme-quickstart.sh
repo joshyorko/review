@@ -32,16 +32,17 @@ require_before() {
 }
 
 require_heading
-require_before '^## +(Start here|Quick start)([[:space:]]|$)' '^## +What this is for([[:space:]]|$)'
 
-for command in contribute review-doctor review-queue review-appliance review-container review-stop; do
-  require_text "just $command"
-done
+require_text 'just review-queue'
 
-require_text "\`review-queue\` delegates to \`review-appliance\`"
-require_text 'REVIEW_DETACH=1'
-require_text 'just review-stop'
-require_text 'podman run --runtime=krun'
+require_text 'just review-queue acme/widgets'
+require_text 'just review-queue org:acme'
+require_text 'REVIEW_DEFAULT_SCOPE'
+require_text 'Headless use without a scope'
+if grep -Eiq 'projectbluefin|just contribute|Blueberry' "$readme"; then
+  printf 'README must describe the generic Review product, not Project Bluefin or Contribute.\n' >&2
+  failures=$((failures + 1))
+fi
 
 if [[ "$failures" -ne 0 ]]; then
   printf '%d README onboarding assertion(s) failed.\n' "$failures" >&2

@@ -1,8 +1,7 @@
-# Bluefin Review appliance.
+# Review appliance.
 #
-# One image, one job: run the Bluefin Review mode of omp against the live
-# Project Bluefin queue on any machine that has podman or docker.
-#
+# One image, one job: run the GitHub Review workbench in OMP. The user
+# selects a repository or organization explicitly; no organization is implied.
 # It derives from Project Bluefin's distroless FSDK base — glibc, CA
 # certificates, tzdata, and the full terminfo database, no shell and no package
 # manager — and adds the OMP and GitHub CLI artifacts plus the minimum Linux
@@ -228,24 +227,23 @@ ENV HOME=/home/bluefin \
     SHELL=/usr/bin/bash \
     TERM=xterm-256color \
     COLORTERM=truecolor \
-    BLUEFIN_REVIEW_ORG=projectbluefin \
     BLUEFIN_REVIEW_APPLIANCE=1
 
-LABEL org.opencontainers.image.title="Bluefin Review" \
-      org.opencontainers.image.description="Distroless review appliance: the Bluefin Review mode of omp over the live Project Bluefin queue." \
-      org.opencontainers.image.source="https://github.com/projectbluefin/review" \
-      org.opencontainers.image.url="https://github.com/projectbluefin/review" \
-      org.opencontainers.image.documentation="https://github.com/projectbluefin/review/blob/main/docs/appliance.md" \
+LABEL org.opencontainers.image.title="Review" \
+      org.opencontainers.image.description="GitHub Review workbench for OMP, packaged with Luna Factory." \
+      org.opencontainers.image.source="https://github.com/joshyorko/review" \
+      org.opencontainers.image.url="https://github.com/joshyorko/review" \
+      org.opencontainers.image.documentation="https://github.com/joshyorko/review/blob/self-hosted/docs/appliance.md" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${REVIEW_VERSION}" \
       org.opencontainers.image.revision="${REVIEW_REVISION}" \
       org.opencontainers.image.base.name="${FSDK_BASE_IMAGE}" \
-      io.projectbluefin.review.appliance="true" \
-      io.projectbluefin.review.harness="omp" \
-      io.projectbluefin.review.omp.version="${OMP_VERSION}" \
-      io.projectbluefin.review.typesafe.version="${TYPESAFE_VERSION}" \
-      io.projectbluefin.review.audio.source="${AUDIO_BUILDER_IMAGE}" \
-      io.projectbluefin.review.audio.packages="pulseaudio-libs,alsa-lib"
+      io.github.joshyorko.review.appliance="true" \
+      io.github.joshyorko.review.harness="omp" \
+      io.github.joshyorko.review.omp.version="${OMP_VERSION}" \
+      io.github.joshyorko.review.typesafe.version="${TYPESAFE_VERSION}" \
+      io.github.joshyorko.review.audio.source="${AUDIO_BUILDER_IMAGE}" \
+      io.github.joshyorko.review.audio.packages="pulseaudio-libs,alsa-lib"
 
 USER 65532:65532
 WORKDIR /workspace

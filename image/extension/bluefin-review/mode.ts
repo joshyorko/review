@@ -26,10 +26,11 @@ import type { FactoryAction, SelectedItem } from "../luna-factory/core/batch.ts"
 
 export interface ReviewModeOptions {
 	org: string;
+	scope?: QueueScope;
 	token?: string;
 	fetchImpl?: typeof fetch;
 	env?: NodeJS.ProcessEnv;
-	/** Managed-repository policy, so landing state honours the same holds as the gate. */
+	/** Repository policy, so landing state honours the same holds as the gate. */
 	policy?: WorkbenchPolicy;
 }
 /**
@@ -89,10 +90,10 @@ export interface PersistedSelection {
 export type WorkbenchMode = "review" | "hive";
 
 function workbenchMode(env: NodeJS.ProcessEnv): WorkbenchMode {
-	const value = env.BLUEFIN_REVIEW_MODE?.trim().toLowerCase();
-	if (value === undefined || value === "") return "hive";
-	if (value === "review" || value === "hive") return value;
-	throw new Error(`BLUEFIN_REVIEW_MODE must be review or hive, got ${value}`);
+	const value = (env.REVIEW_MODE ?? env.BLUEFIN_REVIEW_MODE)?.trim().toLowerCase();
+	if (value === undefined || value === "" || value === "review") return "review";
+	if (value === "hive") return value;
+	throw new Error(`REVIEW_MODE must be review or hive, got ${value}`);
 }
 
 export class ReviewMode {
@@ -114,7 +115,6 @@ export class ReviewMode {
 	private selectedSnapshots = new Map<string, QueueItem>();
 	currentUserLogin?: string;
 	viewMode: "default" | "ci" = "default";
-	isBlueberry = false;
 	paused = false;
 	batchProgress?: WorkbenchBatchProgress;
 
@@ -132,13 +132,12 @@ export class ReviewMode {
 
 	constructor(options: ReviewModeOptions) {
 		this.org = options.org;
-		this.scope = orgScope(options.org);
-		this.token = options.token;
+		this.scope = options.scope ?? orgScope(options.org);
 		this.fetchImpl = options.fetchImpl;
 		this.env = options.env ?? process.env;
 		this.workbenchMode = workbenchMode(this.env);
 		this.policy = options.policy ?? GENERIC_WORKBENCH_POLICY;
-		const envSkip = (this.env.BLUEFIN_REVIEW_SKIP_REPOS ?? "")
+		const envSkip = (this.env.REVIEW_SKIP_REPOS ?? this.env.BLUEFIN_REVIEW_SKIP_REPOS ?? "")
 			.split(",")
 			.map((s) => s.trim().toLowerCase())
 			.filter(Boolean);
@@ -155,11 +154,9 @@ export class ReviewMode {
 		return { token: this.token, org: this.org, scope: this.scope, fetchImpl: this.fetchImpl };
 	}
 
-	/** What the queue currently covers, for display. */
 	scopeLabel(): string {
-		return this.scope.value;
+		return this.scope.value || "choose scope";
 	}
-
 	/** Review is GitHub-only; Hive mode adds hub ordering and knowledge. */
 	isReviewMode(): boolean {
 		return this.workbenchMode === "review";
@@ -387,9 +384,7 @@ export class ReviewMode {
 		this.viewMode = this.viewMode === "default" ? "ci" : "default";
 		return this.viewMode;
 	}
-	setBlueberry(isBlueberry: boolean): void {
-		this.isBlueberry = isBlueberry;
-	}
+
 
 
 	toggleSelected(key?: string): boolean {
@@ -551,6 +546,13 @@ export class ReviewMode {
 	 * cut off by a ceiling, and Hive's backlog is neither recent nor small.
 	 */
 	async refreshQueue(): Promise<QueueResult> {
+		if (!this.scope.value) {
+			const result = { items: [], error: "GitHub scope is required; supply owner/repo or org:<name>", fetchedAt: Date.now() };
+			this.queueError = result.error;
+			this.items = [];
+			this.loading = false;
+			return result;
+		}
 		this.inflight?.abort();
 		const controller = new AbortController();
 		this.inflight = controller;
@@ -689,8 +691,13 @@ export class ReviewMode {
 		if (persisted.mode === "prs" || persisted.mode === "issues") this.queueMode = persisted.mode;
 		if (persisted.scope?.value && (persisted.scope.kind === "org" || persisted.scope.kind === "repo")) this.scope = persisted.scope;
 		if (persisted.filter) this.filter = persisted.filter;
-		if (typeof persisted.hiveOnly === "boolean") this.hiveOnly = persisted.hiveOnly;
-		if (typeof persisted.hiveLevel === "string") this.hiveLevel = persisted.hiveLevel;
+		if (this.isHiveMode()) {
+			if (typeof persisted.hiveOnly === "boolean") this.hiveOnly = persisted.hiveOnly;
+			if (typeof persisted.hiveLevel === "string") this.hiveLevel = persisted.hiveLevel;
+		} else {
+			this.hiveOnly = false;
+			this.hiveLevel = undefined;
+		}
 		for (const key of persisted.selectedKeys ?? []) if (typeof key === "string") this.selectedKeys.add(key);
 		for (const item of persisted.selected ?? []) {
 			const key = itemKey(item);

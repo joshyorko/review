@@ -1,61 +1,43 @@
 ---
 name: review-checks
-version: "2.1"
-last_updated: 2026-09-14
+version: "2.2"
+last_updated: 2026-09-23
 id: review-checks
-one_line_purpose: Maintain the OMP workbench review agents and policy seam.
+one_line_purpose: Maintain neutral Review agents and generic policy.
 entry_point: docs/skills/review-checks.md
 category: ci-ops
 status: active
-tags: [checks, review, subagents, doctrine, omp]
-description: "Maintains the review agents shipped by the OMP workbench. Use when changing review doctrine, specialist responsibilities, or orchestration prompts."
+tags: [checks, review, subagents, policy, omp]
+description: "Maintains Review's generic policy seam and read-only specialist agents."
 metadata:
   type: reference
   context7-sources: []
 ---
 
-# Review Agents
+# Review Agents and Policy
 
-The appliance ships companion agent definitions under
-`image/extension/bluefin-review/agents/`. OMP discovers and runs them directly;
-there is no Python harness, consolidated review-scope overlay, or alternate
-backend adapter.
+OMP discovers the companion agent definitions in `image/extension/bluefin-review/agents/`. The retained directory name is a packaging path; the shipped agent vocabulary is neutral:
 
-## Agents
-
-- `bluefin-doctrine`: repository policy and project-specific invariants.
-- `bluefin-correctness`: observable correctness and failure behavior.
-- `bluefin-security`: trust boundaries, credentials, and unsafe mutations.
-- `bluefin-test-coverage`: valuable behavioral coverage and missing regressions.
-- `bluefin-simplicity`: duplication, dead machinery, and avoidable complexity.
-- `bluefin-ci-triage`: live CI failure analysis.
-- `bluefin-queue-triage`: Hive-ordered queue analysis.
-- `bluefin-reviewer`: coordinates the specialist findings into a human-facing
-  review draft.
-
-Keep generic Hive queue mechanics out of these files. Bluefin vocabulary and
-policy belong here or in `policy.ts`; OMP owns agent execution and workflowz.
+- `reviewer`: coordinates specialist evidence into a human-facing review draft.
+- `review-security`: examines trust boundaries, credentials, and unsafe mutations.
+- `review-correctness`: examines observable behavior and failure modes.
+- `review-test-coverage`: assesses meaningful behavioral coverage and regressions.
+- `review-simplicity`: identifies duplication, dead machinery, and avoidable complexity.
+- `review-ci-triage`: diagnoses live CI failures.
+- `review-queue-triage`: classifies GitHub queue evidence without organization-specific routing.
 
 ## Rules
 
-1. Agent definitions omit provider, model, and effort. OMP resolves the user's
-   active choice for every companion agent.
-2. Review agents read evidence and return findings. They never comment, submit
-   reviews, approve, enqueue, push, or merge. Enforce that boundary in their
-   tool allowlist: a prompt prohibition alone is not a capability boundary.
-3. Verdict labels such as `clean` are recommendations returned to the
-   coordinator, never authorization for the reviewer to mutate GitHub.
-4. The coordinator must preserve specialist evidence and surface uncertainty;
-   it must not turn absence of evidence into approval.
-5. Prompts reference live queue items and bounded diffs, never static queue
-   snapshots.
-6. Delete a specialist when its responsibility is fully duplicated by OMP or
-   another agent; do not preserve wrappers for compatibility.
+1. Agent definitions omit provider, model, and effort; OMP resolves the user's active choice.
+2. Review agents are read-only. Their tool allowlists must not include comment, submit-review, approval, push, or merge capabilities.
+3. Verdicts and specialist findings inform the human/coordinator; they never authorize GitHub mutation or turn missing evidence into approval.
+4. Use the target repository's own instructions. Do not route by owner prefix or add organization-specific labels, doctrine, or policy defaults.
+5. Review tools and prompts consume live GitHub evidence. Optional Hive projections are available only in explicitly selected Hive mode and do not assign work.
+6. Delete a specialist when its responsibility is fully duplicated by OMP or another agent; do not keep wrappers for compatibility.
 
 ## Verification
 
 ```bash
 bash tests/omp-review-mode.sh
 bash tests/appliance-contract.sh
-git diff --check
 ```

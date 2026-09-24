@@ -10,19 +10,15 @@ it scopes every task, so read it alongside the matching skill.
 |---|---|
 | Scope a change, size a pull request, or address a maintainer | [`contribution-culture.md`](skills/contribution-culture.md) |
 | Change a launcher recipe, launch mode, or container execution | [`launcher.md`](skills/launcher.md) |
-| Scale out contributor workers across a Kubernetes cluster | [`cluster-workers.md`](skills/cluster-workers.md) |
-| Investigate the contributor runtime, task delivery, or token lifetime | [`hive-runtime.md`](skills/hive-runtime.md) |
-| Investigate an assigned-task or connection problem | [`hive-triage.md`](skills/hive-triage.md) |
-| Report evidence to or follow up on a `hivecommons/hive` issue | [`upstream-hive.md`](skills/upstream-hive.md) |
 | Maintain the OMP workbench review agents and policy seam | [`review-checks.md`](skills/review-checks.md) |
 | Maintain the opt-in Luna Factory extension | [`luna-factory.md`](skills/luna-factory.md) |
-| Change either image, OMP pins, SBOMs, or publish workflows | [`image-build.md`](skills/image-build.md) |
-| Change queue ordering, slay/autoslay, issue batches, or workbench controls | [`review-dashboard.md`](skills/review-dashboard.md) |
-| Monitor running OMP workbenches or contributor workers | [`review-monitoring.md`](skills/review-monitoring.md) |
+| Build the Review appliance, OMP pins, SBOMs, or publication workflows | [`image-build.md`](skills/image-build.md) |
+| Configure explicitly selected optional Hive read-side context | [`hive-read-side.md`](skills/hive-read-side.md) |
+| Change queue ordering, issue batches, or workbench controls | [`review-dashboard.md`](skills/review-dashboard.md) |
+| Monitor running OMP workbenches | [`review-monitoring.md`](skills/review-monitoring.md) |
 | Prepare a branch, commit, or pull request | [`pr-workflow.md`](skills/pr-workflow.md) |
-| Triage, label, or route an issue or pull request | [`pr-labels.md`](skills/pr-labels.md) |
-| Audit all docs, repair skills, or maintain factory compliance | [`skill-improvement.md`](skills/skill-improvement.md) |
-| Coordinate bounded factory continuation and writable capacity | [`factory-operations.md`](skills/factory-operations.md) |
+| Audit docs or maintain factory compliance | [`skill-improvement.md`](skills/skill-improvement.md) |
+| Coordinate bounded Factory continuation and writable capacity | [`factory-operations.md`](skills/factory-operations.md) |
 
 `docs/skills/index.json` is the machine-readable catalog, generated from the
 frontmatter in each skill file. When changing a skill, regenerate it with

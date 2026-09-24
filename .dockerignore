@@ -4,15 +4,10 @@
 *
 !image/
 !image/**
-!package.json
-!package-lock.json
-# The skills generator runs at build time to project the org's docs/skills
-# manifest into Agent Skills layout.
+# The local skill generator consumes this repository's current skill manifest.
 !scripts/generate-skills.py
-# The appliance build stage generates its own SPDX document for the OMP and
-# Headroom archives it fetches, the GitHub CLI archive, and the review mode.
+# The appliance build stage generates an SPDX document for OMP, the GitHub CLI,
+# and the Review workbench package.
 !scripts/generate-appliance-sbom.py
-# The isolated contributor image writes its own minimal component manifest.
-!scripts/generate-contribute-sbom.py
 **/__pycache__/
 **/*.pyc

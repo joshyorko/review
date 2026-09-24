@@ -114,10 +114,10 @@ class BrewDevContract(unittest.TestCase):
         launcher.parent.mkdir(parents=True)
         (package / "libexec/launcher/bluefin-review.sif").write_bytes(b"sif")
         (package / "libexec/build.json").write_text('{"sha":"fixture"}\n')
-        (package / "libexec/build.txt").write_text("Bluefin Review dev: main @ fixture\n")
+        (package / "libexec/build.txt").write_text("Review dev: main @ fixture\n")
         launcher.write_text(
             "#!/usr/bin/env bash\n"
-            "printf 'delegated:%s\\nsif=%s\\n' \"$*\" \"$(printenv BLUEFIN_REVIEW_SIF)\"\n"
+            "printf 'delegated:%s\\nsif=%s\\n' \"$*\" \"$(printenv REVIEW_APPLIANCE_FALLBACK_SIF)\"\n"
         )
         launcher.chmod(0o755)
         outer = package / "bin/bluefin"
@@ -136,14 +136,14 @@ class BrewDevContract(unittest.TestCase):
             self.assertTrue(path.is_file(), path)
 
         result = subprocess.run(
-            [str(outer), "review", "--repo", "projectbluefin/review"],
+            [str(outer), "review", "--repo", "acme/widgets"],
             capture_output=True,
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Bluefin Review dev: main @ fixture", result.stdout)
-        self.assertIn("delegated:review --repo projectbluefin/review", result.stdout)
-        self.assertIn("sif=\n", result.stdout)
+        self.assertIn("Review dev: main @ fixture", result.stdout)
+        self.assertIn("delegated:review --repo acme/widgets", result.stdout)
+        self.assertIn(f"sif={package / 'libexec/launcher/bluefin-review.sif'}\n", result.stdout)
 
     def test_package_carries_parser_without_headroom_runtime(self):
         script = SCRIPT.read_text()
@@ -155,7 +155,7 @@ class BrewDevContract(unittest.TestCase):
         self.assertIn("default: self-hosted", workflow)
         self.assertEqual(workflow.count("ref: self-hosted"), 1)
         self.assertIn("SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}", workflow)
-        self.assertIn("BLUEFIN_REVIEW_SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}", workflow)
+        self.assertIn("REVIEW_SOURCE_REF: ${{ inputs.source_ref || 'self-hosted' }}", workflow)
         self.assertNotIn("dev/package-main", workflow)
 
 
@@ -189,7 +189,7 @@ class FormulaContract(unittest.TestCase):
         self.assertIn('depends_on "squashfuse"', formula)
         self.assertEqual((self.output / "sha").read_text().strip(), "a" * 40)
         self.assertEqual(formula.count("version "), 1)
-        self.assertNotIn("projectbluefin/review/releases", formula)
+        self.assertNotIn("projectbluefin/review", formula)
         self.assertIn('libexec.install "launcher", "build.json", "build.txt"', formula)
         self.assertIn('bin.install "bluefin"', formula)
 
