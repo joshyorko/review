@@ -284,6 +284,54 @@ function hiveBackedFetch(items, calls = []) {
 	};
 }
 
+function issueBackedFetch(states) {
+	const nodes = () => Object.entries(states).map(([key, state]) => {
+		const [repo, numberText] = key.split("#");
+		const number = Number(numberText);
+		return {
+			number,
+			title: state.title ?? `issue ${number}`,
+			url: `https://github.com/${repo}/issues/${number}`,
+			updatedAt: new Date(NOW).toISOString(),
+			author: { login: "maintainer" },
+			repository: { nameWithOwner: repo },
+			labels: { nodes: [] },
+			closedByPullRequestsReferences: {
+				nodes: (state.submittedPrs ?? []).map((ref) => {
+					const hash = ref.lastIndexOf("#");
+					const refRepo = ref.slice(0, hash);
+					return {
+						number: Number(ref.slice(hash + 1)),
+						state: "OPEN",
+						merged: false,
+						repository: { nameWithOwner: refRepo },
+					};
+				}),
+			},
+		};
+	});
+	return async (url, init) => {
+		if (!String(url).includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		const current = nodes();
+		if (body.variables?.search !== undefined) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({ data: { viewer: { login: "reviewer" }, search: { pageInfo: { hasNextPage: false }, nodes: current } } }),
+			};
+		}
+		const data = {};
+		const aliases = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+		for (const [, alias, owner, repo, number] of body.query.matchAll(aliases)) {
+			const node = current.find((candidate) => candidate.number === Number(number) && candidate.repository.nameWithOwner === `${owner}/${repo}`);
+			data[alias] = { issueOrPullRequest: node ? { ...node, closed: false } : null };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+}
+
 /** Fake omp extension host recording every registration. */
 function fakeHost() {
 	const zodLeaf = () => ({ optional: () => zodLeaf(), describe: () => zodLeaf() });
@@ -294,6 +342,7 @@ function fakeHost() {
 		flags: new Map(),
 		flagValues: new Map(),
 		tools: new Map(),
+		commands: new Map(),
 		messages: [],
 		messageOptions: [],
 		entries: [],
@@ -317,6 +366,9 @@ function fakeHost() {
 		},
 		registerTool(definition) {
 			this.tools.set(definition.name, definition);
+		},
+		registerCommand(name, definition) {
+			this.commands.set(name, definition);
 		},
 		sendUserMessage(content, options) {
 			this.messages.push(content);
@@ -3013,6 +3065,150 @@ test("restart uses persisted terminal evidence for one Factory retry", async () 
 	ctx2.overlays.at(-1).handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi2.messages.length, beforeRetry + 1);
+});
+
+
+async function interruptedIssueSlay(states) {
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	pi.events.get("tool_call")({ toolCallId: "issue-worker", toolName: "task", input: {} }, ctx);
+	ctx.asyncJobs.delivery.pendingJobIds = ["issue-worker"];
+	ctx.asyncJobs.recent = [{ id: "issue-worker", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("turn_end")({}, ctx);
+	await pi.events.get("session_shutdown")?.({}, ctx);
+	return { env, entries: pi.entries, batch };
+}
+
+test("interrupted issue Slay reconciles the exact submitted PR after restart", async () => {
+	const states = {
+		"projectbluefin/review#77": { title: "recover issue", submittedPrs: [] },
+	};
+	const { env, entries, batch } = await interruptedIssueSlay(states);
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	ctx.sessionManager = {
+		getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(recovered.state, "complete");
+	assert.equal(pi.messages.length, 0, "restart never replays the issue mutation");
+	assert.ok(ctx.notifications.some((notification) => /observed submitted PRs projectbluefin\/review#10/.test(notification.message)));
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
+	assert.equal(claims.conflict("repo:projectbluefin/review", "review:other:0"), undefined);
+	assert.equal(claims.conflict("item:projectbluefin/review#77", "review:other:0"), undefined);
+	assert.equal(batch.state, "running");
+});
+
+test("ambiguous submitted PR observations retain UNKNOWN issue-Slay claims", async () => {
+	const states = {
+		"projectbluefin/review#77": { title: "ambiguous issue", submittedPrs: [] },
+	};
+	const { env, entries, batch } = await interruptedIssueSlay(states);
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10", "projectbluefin/review#11"];
+
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	ctx.sessionManager = {
+		getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await pi.commands.get("review").handler("reconcile", ctx);
+
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
+	assert.equal(
+		claims.conflict("repo:projectbluefin/review", "review:other:0"),
+		`repo:projectbluefin/review is owned by review:${batch.id}:0`,
+	);
+	assert.ok(ctx.notifications.some((notification) => /UNKNOWN/.test(notification.message)));
+	assert.equal(pi.messages.length, 0);
+});
+
+test("blocked issue Slay can be revised and re-Slayed in the same Review session", async () => {
+	const states = {
+		"projectbluefin/review#77": { title: "wrong selection", submittedPrs: [] },
+	};
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	const first = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	pi.events.get("tool_call")({ toolCallId: "failed-issue-worker", toolName: "task", input: {} }, ctx);
+	ctx.asyncJobs.delivery.pendingJobIds = ["failed-issue-worker"];
+	ctx.asyncJobs.recent = [{ id: "failed-issue-worker", status: "failed", startTime: Date.now() + 1 }];
+	await pi.events.get("turn_end")({}, ctx);
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "blocked");
+
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+	await pi.commands.get("review").handler("revise", ctx);
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
+	assert.equal(claims.conflict("repo:projectbluefin/review", "review:other:0"), undefined);
+
+	states["projectbluefin/review#78"] = { title: "revised selection", submittedPrs: [] };
+	await pi.shortcuts.get("alt+u").handler(ctx);
+	await new Promise((resolve) => setImmediate(resolve));
+	await pi.commands.get("review").handler("slay", ctx);
+	assert.match(pi.messages.at(-1), /projectbluefin\/review#78/);
+	assert.notEqual(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).id, first.id);
+});
+
+
+test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async () => {
+	const states = {
+		"projectbluefin/review#77": { title: "drain issue", submittedPrs: [] },
+	};
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	pi.events.get("tool_call")({ toolCallId: "drain-worker", toolName: "task", input: {} }, ctx);
+	ctx.asyncJobs.delivery.pendingJobIds = ["drain-worker"];
+	ctx.asyncJobs.running = [{ id: "drain-worker", status: "running", startTime: Date.now() + 1 }];
+	await pi.events.get("turn_end")({}, ctx);
+	await pi.commands.get("review").handler("drain", ctx);
+	const draining = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(draining.state, "paused");
+	assert.equal(draining.cancelRequested, true);
+
+	ctx.asyncJobs.running = [];
+	ctx.asyncJobs.recent = [{ id: "drain-worker", status: "failed", startTime: Date.now() + 2 }];
+	await pi.events.get("agent_end")({}, ctx);
+	const cancelled = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(cancelled.state, "cancelled");
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
+	assert.match(claims.conflict("repo:projectbluefin/review", "review:other:0") ?? "", /owned by review:/);
 });
 
 test("slay prompts define bounded review, isolated repair, and live-rule landing", () => {

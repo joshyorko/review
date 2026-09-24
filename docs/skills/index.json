@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-23",
+  "generated_at": "2026-09-24",
   "schema_version": "1.0",
   "skills": [
     {
@@ -171,7 +171,7 @@
       ],
       "description": "Maintains Review queue behavior, evidence, bounded actions, and mutation safeguards.",
       "version": "5.6",
-      "last_updated": "2026-09-23",
+      "last_updated": "2026-09-24",
       "doc_type": "runbook"
     },
     {
