@@ -29,7 +29,7 @@ just review-queue acme/widgets
 
 The launcher prefers rootless Podman with `krun` and KVM; when unavailable it uses isolated Apptainer. Review keeps OMP sessions, provider auth, and MCP configuration under its appliance-owned state home; host `~/.omp` is not inherited by default. See [appliance setup](docs/appliance.md) and [launcher details](docs/skills/launcher.md).
 
-The personal package path currently publishes from `joshyorko/review`'s `self-hosted` branch. Existing installations retain the `bluefin-review-dev` formula and `bluefin review` command as compatibility names:
+The personal package path currently publishes from [joshyorko/review](https://github.com/joshyorko/review)'s `self-hosted` branch. Existing installations retain the `bluefin-review-dev` formula and `bluefin review` command as compatibility names:
 
 ```sh
 brew tap joshyorko/review-dev
