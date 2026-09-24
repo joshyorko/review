@@ -643,6 +643,52 @@ test("queue fetch maps CI rollup and reports auth failure", async () => {
 	assert.match(denied.error ?? "", /401/, "a failed queue must say why, not render empty");
 });
 
+test("direct requested users govern fetched Review and Slay order, not teams or missing evidence", async () => {
+	const node = (number, updatedAt, reviewRequests) => ({
+		number,
+		title: `change ${number}`,
+		author: { login: "alice" },
+		repository: { nameWithOwner: "owner/repo" },
+		updatedAt: new Date(updatedAt).toISOString(),
+		mergeable: "MERGEABLE",
+		reviewDecision: "REVIEW_REQUIRED",
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+		files: { pageInfo: { hasNextPage: false }, nodes: [] },
+		reviewRequests,
+	});
+	const nodes = [
+		node(2, NOW, { nodes: [] }),
+		node(3, NOW - 1000, { nodes: [{ requestedReviewer: { __typename: "Team" } }] }),
+		node(4, NOW - 2000, undefined),
+		node(5, NOW - 3000, { nodes: [null, { requestedReviewer: null }, { requestedReviewer: { __typename: "User", login: "" } }] }),
+		node(1, NOW - 4000, { nodes: [{ requestedReviewer: { __typename: "User", login: "JoSh" } }] }),
+	];
+	for (const viewerLogin of ["josh", "JOSH", undefined]) {
+		const fetchImpl = async () => new Response(JSON.stringify({
+			data: { viewer: { login: viewerLogin }, search: { pageInfo: { hasNextPage: false }, nodes } },
+		}));
+		const mode = new ReviewMode({ scope: { kind: "repo", value: "owner/repo" }, fetchImpl, env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+		mode.setToken("t");
+		const result = await mode.refreshQueue();
+		assert.equal(result.error, undefined);
+		const expected = viewerLogin ? [1, 2, 3, 4, 5] : [2, 3, 4, 5, 1];
+		assert.deepEqual(mode.visibleItems().map((item) => item.id), expected);
+		assert.deepEqual(mode.slayableItems(2).map((item) => item.id), expected.slice(0, 2));
+		for (const item of result.items) {
+			assert.equal(mode.priorityFor(item).category, item.id === 1 && viewerLogin ? "personal_request" : "review");
+		}
+		const named = await fetchItemsByKey(nodes.map((item) => `owner/repo#${item.number}`), "prs", {
+			token: "t",
+			fetchImpl: async () => new Response(JSON.stringify({
+				data: Object.fromEntries(nodes.map((item, index) => [`w${index}`, { issueOrPullRequest: item }])),
+			})),
+		});
+		assert.equal(named.error, undefined);
+		const ranked = prioritize(named.items, { hive: EMPTY_HIVE, now: NOW, currentUserLogin: viewerLogin });
+		assert.deepEqual(ranked.items.map((item) => item.id), expected, "named reads retain the same personal-request evidence");
+	}
+});
+
 test("check suites surface failures and pending runs without rollup contexts", async () => {
 	const fetchImpl = async (_url, init) => {
 		const body = JSON.parse(String(init?.body ?? "{}"));
@@ -1300,14 +1346,14 @@ test("a queue cut off by the fetch ceiling says so", async () => {
 	assert.ok(!complete.truncated, "a complete queue does not report truncation");
 });
 
-test("without Hive the queue stays in GitHub evidence order and remains descriptive", async () => {
+test("without Hive the queue uses local attention order", async () => {
 	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
 	mode.setToken("t");
 	await mode.refreshQueue();
 	assert.equal(mode.visibleItems().length, 2);
 
-	assert.equal(mode.selected().id, 42, "unreachable-Hive mode preserves the fetched GitHub order");
-	assert.equal(mode.priorityFor(mode.selected()).category, "fix-ci", "categories remain descriptive");
+	assert.equal(mode.selected().id, 42, "local attention puts failing checks first");
+	assert.equal(mode.priorityFor(mode.selected()).category, "fix-ci", "category explains local attention");
 	assert.equal(mode.orderSource(), "local");
 
 	mode.move(1);
@@ -1446,7 +1492,7 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	assert.ok(frame()[0].includes("REVIEW WORKBENCH"));
 	for (const row of frame()) assert.ok(visibleWidth(row) <= 120, row);
 
-	assert.equal(mode.selected().id, 42, "unreachable-Hive mode preserves fetched order");
+	assert.equal(mode.selected().id, 42, "failing checks come first");
 	dashboard.handleInput("j");
 	assert.equal(mode.selected().id, 7);
 	dashboard.handleInput("k");
@@ -1751,7 +1797,80 @@ function prItem(overrides) {
 	return queueItem({ ciStatus: "success", mergeState: "clean", reviewState: "review_required", ...overrides });
 }
 
-test("without a hub the queue remains unranked in fetched order", () => {
+test("local governor orders every category independently of API arrival order", () => {
+	const items = [
+		prItem({ id: 9, workflowFiles: [".github/workflows/ci.yml"] }),
+		prItem({ id: 8, ciStatus: "pending" }),
+		prItem({ id: 7, type: "issue" }),
+		prItem({ id: 6 }),
+		prItem({ id: 5, reviewState: "approved" }),
+		prItem({ id: 4, mergeState: "dirty" }),
+		prItem({ id: 3, ciStatus: "failure" }),
+		prItem({ id: 2, requestedReviewers: ["josh"] }),
+		prItem({ id: 1, author: "josh", reviewState: "changes_requested" }),
+	];
+	const snapshot = structuredClone(items);
+	for (const hive of [EMPTY_HIVE, { ...EMPTY_HIVE, configured: true, error: "offline", ranks: new Map([["projectbluefin/review#9", 0]]) }, { ...EMPTY_HIVE, configured: true, online: true }]) {
+		for (const input of [items, [...items].reverse(), [...items.slice(4), ...items.slice(0, 4)]]) {
+			const ranked = prioritize(input, { hive, now: NOW, currentUserLogin: "josh" });
+			assert.deepEqual(ranked.items.map((item) => item.id), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+			assert.equal(ranked.priorities.get("projectbluefin/review#9").category, "blocked");
+		}
+	}
+	assert.deepEqual(items, snapshot, "ranking does not mutate its captured snapshot");
+});
+
+test("local governor bounds demotions within categories and breaks ties by canonical key", () => {
+	for (const type of ["pr", "issue"]) {
+		const items = [
+			prItem({ id: 6, type, author: "dependabot[bot]", updatedAt: NOW - 30 * 86400000 }),
+			prItem({ id: 5, type, updatedAt: NOW - 30 * 86400000 }),
+			prItem({ id: 4, type, labels: ["dependencies"], updatedAt: NOW }),
+			prItem({ id: 3, type, updatedAt: 0 }),
+			prItem({ id: 2, type, updatedAt: NOW - 100 }),
+			prItem({ id: 1, type, updatedAt: NOW - 100 }),
+		];
+		for (const input of [items, [...items].reverse()]) {
+			const ranked = prioritize(input, { hive: EMPTY_HIVE, now: NOW });
+			assert.deepEqual(ranked.items.map((item) => item.id), [1, 2, 3, 4, 5, 6]);
+			assert.equal(ranked.priorities.get("projectbluefin/review#6").demotion, 3);
+		}
+	}
+	const urgent = prItem({ id: 9, ciStatus: "failure", author: "renovate[bot]", updatedAt: NOW - 90 * 86400000 });
+	assert.equal(prioritize([prItem({ id: 1, updatedAt: NOW }), urgent], { hive: EMPTY_HIVE, now: NOW }).items[0].id, 9);
+});
+
+test("local attention does not demote inherited bot-author names for PRs or issues", () => {
+	for (const type of ["pr", "issue"]) {
+		const items = [
+			prItem({ id: 2, type, author: "alice", updatedAt: NOW - 1000 }),
+			prItem({ id: 1, type, author: "constructor", updatedAt: NOW }),
+			prItem({ id: 3, type, author: "DePeNdAbOt[bot]", updatedAt: NOW }),
+			prItem({ id: 4, type, author: "alice", labels: ["dependencies"], updatedAt: NOW }),
+			prItem({ id: 5, type, author: "alice", title: "chore(deps): update library", updatedAt: NOW }),
+		];
+		const ranked = prioritize(items, { hive: EMPTY_HIVE, now: NOW });
+		assert.deepEqual(ranked.items.map((item) => item.id), [1, 2, 3, 4, 5]);
+		assert.deepEqual(items.map((item) => ranked.priorities.get(`projectbluefin/review#${item.id}`).demotion), [0, 0, 1, 1, 1]);
+	}
+});
+
+test("local governor shares the visible projection with Slay and preserves explicit selection", (t) => {
+	const mode = new ReviewMode({ env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	mode.items = [prItem({ id: 3, ciStatus: "pending" }), prItem({ id: 2 }), prItem({ id: 1, ciStatus: "failure" })];
+	mode.reprioritize(NOW);
+	assert.deepEqual(mode.slayableItems(), mode.visibleItems());
+	assert.deepEqual(mode.slayableItems(2).map((item) => item.id), [1, 2]);
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	t.after(() => dashboard.dispose());
+	assert.match(dashboard.render(140).join("\n"), /LOCAL · attention order/);
+	assert.doesNotMatch(dashboard.render(140).join("\n"), /LOCAL · LOCAL/);
+	mode.toggleSelected("projectbluefin/review#3");
+	assert.deepEqual(mode.slayableItems().map((item) => item.id), [3]);
+	assert.deepEqual(mode.visibleItems().map((item) => item.id), [1, 2, 3]);
+});
+
+test("without a hub local categories govern queue order", () => {
 	const now = NOW;
 	const items = [
 		prItem({ id: 1, title: "chore(deps): bump", author: "renovate[bot]", labels: ["deps"], reviewState: "approved" }),
@@ -1765,17 +1884,17 @@ test("without a hub the queue remains unranked in fetched order", () => {
 	const ranked = prioritize(items, { hive: EMPTY_HIVE, now });
 
 	assert.equal(ranked.source, "local");
-	assert.deepEqual(ranked.items.map((item) => item.id), [1, 2, 3, 4, 5, 6, 7]);
+	assert.deepEqual(ranked.items.map((item) => item.id), [4, 5, 3, 1, 7, 2, 6]);
 	assert.equal(ranked.priorities.get("projectbluefin/review#3").category, "ready-for-human-merge");
 	assert.equal(ranked.priorities.get("projectbluefin/review#7").category, "review");
 	assert.match(ranked.priorities.get("projectbluefin/review#7").reason, /awaiting review/);
 	assert.equal(ranked.priorities.get("projectbluefin/review#5").category, "resolve-conflicts");
 	assert.equal(ranked.priorities.get("projectbluefin/review#4").category, "fix-ci");
 	assert.equal(ranked.priorities.get("projectbluefin/review#2").category, "investigate");
-	assert.equal(ranked.priorities.get("projectbluefin/review#1").demotion, 1, "descriptive metadata may still mark a dependency bump");
+	assert.equal(ranked.priorities.get("projectbluefin/review#1").demotion, 1, "dependency bumps sink within their category");
 	assert.equal(categorize(queueItem({ type: "issue" }), { hive: EMPTY_HIVE, now }).category, "triage");
 });
-test("unreachable-Hive issue queues preserve fetched order and delineate repository transitions", () => {
+test("local issue queues prefer recent work and delineate repository transitions", () => {
 	const now = NOW;
 	const items = [
 		queueItem({ id: 201, type: "issue", repo: "projectbluefin/server", title: "server issue", updatedAt: now - 100 }),
@@ -1786,7 +1905,7 @@ test("unreachable-Hive issue queues preserve fetched order and delineate reposit
 	const ranked = prioritize(items, { hive: EMPTY_HIVE, now });
 	assert.deepEqual(
 		ranked.items.map((item) => `${item.repo}#${item.id}`),
-		["projectbluefin/server#201", "projectbluefin/actions#101", "projectbluefin/server#202", "projectbluefin/actions#102"],
+		["projectbluefin/server#202", "projectbluefin/actions#102", "projectbluefin/actions#101", "projectbluefin/server#201"],
 	);
 
 	const mode = new ReviewMode({ org: "projectbluefin" });
@@ -1823,7 +1942,7 @@ test("with a hub the order is Hive's, including through a closing reference", ()
 	};
 
 	const items = [
-		// Green and landable: local ranking would put this first.
+		// Ordinary review follows actionable CI repair in local attention order.
 		prItem({ id: 3, ciStatus: "success" }),
 		// Hive queued the issue this PR closes, so the PR inherits the position.
 		prItem({ id: 11, ciStatus: "failure", closingIssues: ["projectbluefin/docs#900"] }),
@@ -1833,6 +1952,8 @@ test("with a hub the order is Hive's, including through a closing reference", ()
 
 	assert.equal(ranked.source, "hive");
 	assert.equal(ranked.hiveRanked, 2);
+	assert.equal(ranked.priorities.get("projectbluefin/review#11").category, "fix-ci");
+	assert.match(priorityChip(PLAIN_PAINTER, ranked.priorities.get("projectbluefin/review#11")), /fix.ci.*hive#1/);
 	assert.deepEqual(ranked.items.map((item) => item.id), [11, 5, 3], "Hive's positions are preserved, not recomputed");
 	assert.match(ranked.priorities.get("projectbluefin/review#11").reason, /hive ready #1 via projectbluefin\/docs#900/);
 	assert.equal(ranked.priorities.get("projectbluefin/review#3").source, "local");
@@ -2195,7 +2316,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 
 	const status = await pi.tools.get("hive_workbench_status").execute("id", {});
 	assert.match(status.content[0].text, /selected projectbluefin\/review#42/);
-	assert.match(status.content[0].text, /order: unranked — no hive hub configured/);
+	assert.match(status.content[0].text, /order: LOCAL · attention order — no hive hub configured/);
 	assert.match(status.content[0].text, /priority: fix-ci/);
 	assert.equal(status.details.order_source, "local");
 	assert.equal(status.details.hive.configured, false);
@@ -2488,6 +2609,7 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 	assert.match(queue.content[0].text, /projectbluefin\/review#20/);
 
 	const dashboard = ctx.overlays[0];
+	dashboard.handleInput("j"); // Move past the more recently updated ordinary PR to the workflow PR.
 	dashboard.handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 1);
@@ -3606,7 +3728,7 @@ test("the status tool names the authority that ordered the queue", async () => {
 	const hubEnv = { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" };
 
 	const noHub = await statusFor(fakeFetch([]), ISOLATED_ENV);
-	assert.match(noHub.content[0].text, /order: unranked — no hive hub configured/);
+	assert.match(noHub.content[0].text, /order: LOCAL · attention order — no hive hub configured/);
 	assert.equal(noHub.details.hive.configured, false);
 
 	const quiet = await statusFor(hiveFetch([]), hubEnv);
@@ -3629,7 +3751,7 @@ test("the status tool names the authority that ordered the queue", async () => {
 		return { ok: false, status: 502, statusText: "Bad Gateway", json: async () => ({}) };
 	}, hubEnv);
 	// The header/status line is a concise fallback status, not the raw error.
-	assert.match(unreachable.content[0].text, /order: unavailable — hive unavailable; queue order falls back to GitHub, and review, fix, and slay remain available/);
+	assert.match(unreachable.content[0].text, /order: LOCAL · attention order — hive unavailable; local policy remains active, and review, fix, and slay remain available/);
 	// The raw diagnostic is kept behind the status, in the structured details.
 	assert.match(unreachable.details.hive.error ?? "", /502/, "the raw error stays in the status details, not the header");
 });
@@ -3696,7 +3818,7 @@ test("the status tool names all three optional-Hive states distinctly", async ()
 
 	// 1. Unconfigured: no hub at all.
 	const noHub = await statusFor(fakeFetch([]), ISOLATED_ENV);
-	assert.match(noHub.content[0].text, /order: unranked — no hive hub configured/);
+	assert.match(noHub.content[0].text, /order: LOCAL · attention order — no hive hub configured/);
 	assert.equal(noHub.details.hive.configured, false);
 
 	// 2. Online with nothing queued in this scope: not an error, just empty.
@@ -3719,7 +3841,7 @@ test("the status tool names all three optional-Hive states distinctly", async ()
 		},
 		hubEnv,
 	);
-	assert.match(broken.content[0].text, /order: unavailable — hive unavailable; queue order falls back to GitHub, and review, fix, and slay remain available/);
+	assert.match(broken.content[0].text, /order: LOCAL · attention order — hive unavailable; local policy remains active, and review, fix, and slay remain available/);
 	assert.match(broken.details.hive.error ?? "", /502/, "the raw error is the diagnostic, kept in the status details");
 	assert.equal(broken.details.hive.online, false);
 });
@@ -3739,10 +3861,10 @@ test("a hive-only session with a broken hub still fails visibly and concisely", 
 	await review.whenStarted();
 
 	assert.ok(
-		ctx.notifications.some((notification) => /hive unavailable; queue order falls back to GitHub/.test(notification.message)),
+		ctx.notifications.some((notification) => /hive unavailable; local attention order remains active/.test(notification.message)),
 		`a broken hive must fail visibly at startup, got ${JSON.stringify(ctx.notifications)}`,
 	);
-	const startupHive = ctx.notifications.find((notification) => /queue order falls back to GitHub/.test(notification.message));
+	const startupHive = ctx.notifications.find((notification) => /local attention order remains active/.test(notification.message));
 	assert.doesNotMatch(startupHive.message, /502/);
 });
 

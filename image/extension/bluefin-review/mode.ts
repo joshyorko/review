@@ -306,7 +306,7 @@ export class ReviewMode {
 			});
 		}
 		let candidates = this.hiveOnly && this.hive.online
-			? base.filter((item) => this.priorityFor(item)?.category === "hive")
+			? base.filter((item) => this.priorityFor(item)?.hiveRank !== undefined)
 			: base;
 		if (this.hiveLevel !== undefined) {
 			const level = this.hiveLevel;

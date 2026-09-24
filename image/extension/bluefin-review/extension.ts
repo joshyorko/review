@@ -1503,7 +1503,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const hive = await mode.refreshHive();
 		if (hive.configured && hive.error) {
 			ctx.ui.notify(
-				`${hiveFailureStatus(hive.error)}; queue order falls back to GitHub, and review, fix, and slay remain available`,
+				`${hiveFailureStatus(hive.error)}; local attention order remains active, and review, fix, and slay remain available`,
 				"warning",
 			);
 		}

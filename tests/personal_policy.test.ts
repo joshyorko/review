@@ -429,7 +429,7 @@ test("Review mode registers only GitHub workbench tools and contains no Hive aff
 	}
 	for (const name of pi.tools.keys()) assert.doesNotMatch(name, /^hive_/);
 	const status = await pi.tools.get("review_workbench_status").execute("id", {});
-	assert.match(status.content[0].text, /order: GitHub\/local/);
+	assert.match(status.content[0].text, /order: LOCAL · attention order/);
 	assert.doesNotMatch(status.content[0].text, /Hive|hive|browse-only/);
 });
 
