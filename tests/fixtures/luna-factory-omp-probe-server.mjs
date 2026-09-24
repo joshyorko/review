@@ -98,6 +98,9 @@ function isFactoryRoot(body) {
 }
 
 function functionCall(name, args) {
+	const toolArgs = args !== null && typeof args === "object" && typeof args.input === "string" && Object.keys(args).length === 1
+		? JSON.parse(args.input)
+		: args;
 	audit("tool-call", { name });
 	const base = {
 		id: `probe-${requestNumber}`,
@@ -118,7 +121,7 @@ function functionCall(name, args) {
 								index: 0,
 								id: `call-${requestNumber}`,
 								type: "function",
-								function: { name, arguments: JSON.stringify(args) },
+								function: { name, arguments: JSON.stringify(toolArgs) },
 							},
 						],
 					},
