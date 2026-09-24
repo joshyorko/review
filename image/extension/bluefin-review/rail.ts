@@ -85,7 +85,6 @@ export function queueAge(fetchedAt: number, now: number): string | undefined {
 const CATEGORY_ROLE: Record<PriorityCategory, PaintRole> = {
 	blocked: "error",
 	"repair-requested": "warning",
-	hive: "accent",
 	personal_request: "accent",
 	"ready-for-human-merge": "success",
 	review: "warning",
@@ -99,7 +98,6 @@ const CATEGORY_ROLE: Record<PriorityCategory, PaintRole> = {
 const CATEGORY_LABEL: Record<PriorityCategory, string> = {
 	blocked: "blocked",
 	"repair-requested": "repair",
-	hive: "hive",
 	personal_request: "direct-req",
 	"ready-for-human-merge": "merge",
 	review: "review",
@@ -117,7 +115,7 @@ export function priorityChip(painter: Painter, priority: Priority | undefined): 
 	}
 	const label = priority.category === "repair-requested" || priority.hiveRank === undefined
 		? CATEGORY_LABEL[priority.category]
-		: `hive#${priority.hiveRank + 1}`;
+		: `${CATEGORY_LABEL[priority.category]} · hive#${priority.hiveRank + 1}`;
 	return painter.fg(CATEGORY_ROLE[priority.category], label);
 }
 
@@ -129,8 +127,8 @@ export function priorityChip(painter: Painter, priority: Priority | undefined): 
  */
 export function orderSourceLabel(mode: ReviewMode): { text: string; role: PaintRole } {
 	const hive = mode.hive;
-	if (!hive.configured) return { text: "GitHub evidence · unranked", role: "dim" };
-	if (hive.error) return { text: hiveFailureStatus(hive.error), role: "error" };
+	if (!hive.configured) return { text: "LOCAL · attention order", role: "dim" };
+	if (hive.error) return { text: `LOCAL · attention order · ${hiveFailureStatus(hive.error)}`, role: "error" };
 	const coverage = mode.hiveCoverage();
 	if (mode.orderSource() === "hive") {
 		const actionable = hive.actionableItems === undefined ? "" : ` \u00b7 ${hive.actionableItems} actionable`;

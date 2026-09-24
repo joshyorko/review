@@ -43,6 +43,11 @@ The source checkout also provides `bin/omp-review`; historical package, image, a
 
 The Review workbench presents a GitHub queue and execution trace. It supports repository/organization scope, PR and issue views, bounded diff/issue inspection, review, fix, and Slay. Slay coordinates a review/repair lifecycle for pull requests or isolated implementation workers for issues. It never grants the operator permissions GitHub denies, and the coordinator does not approve or merge its own pull requests.
 
+Standalone Review uses **local attention order**: returned author repairs, personal review requests, failing CI, conflicts, ready-for-human-merge, review, issue triage, incomplete/waiting evidence, then blocked work. Within each category, dependency bumps receive one demotion point and work untouched for more than 21 days receives two; fewer points come first, then the most recently updated item, then the lowercase `owner/repo#number` key. Missing update times sort after known times at the same demotion. Demotion never moves work outside its category.
+
+The dashboard and ordinary Slay/Autoslay use the same ordered queue. Explicit selections define the Slay scope and retain selection order. Optional Hive ranks take precedence within the existing author-repair and remaining-work lanes; local categories and safety gates remain visible. With Hive absent, disabled, or offline, local attention ordering remains active. Ranking only reads the captured GitHub snapshot, current user, policy, and staleness time. It does not dispatch work or change Factory admission, convergence, or mutation authority.
+
+
 Luna Factory is selected from Review when available, and owns its worker execution, claims, and durable state. Use Review to inspect and select GitHub work; use Factory for bounded worker operations. See the [Factory operating model](docs/factory/agentic-model.md).
 
 Hive remains an optional, explicitly selected read-side integration for existing users. It is not required for Review, and the default mode makes no Hive requests or contributor-registration discovery.
