@@ -1803,6 +1803,7 @@ test("local governor shares the visible projection with Slay and preserves expli
 	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
 	t.after(() => dashboard.dispose());
 	assert.match(dashboard.render(140).join("\n"), /LOCAL · attention order/);
+	assert.doesNotMatch(dashboard.render(140).join("\n"), /LOCAL · LOCAL/);
 	mode.toggleSelected("projectbluefin/review#3");
 	assert.deepEqual(mode.slayableItems().map((item) => item.id), [3]);
 	assert.deepEqual(mode.visibleItems().map((item) => item.id), [1, 2, 3]);

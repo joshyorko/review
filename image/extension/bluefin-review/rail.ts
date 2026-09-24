@@ -149,7 +149,7 @@ export function workbenchProgressBar(mode: ReviewMode, painter: Painter, width: 
 		? painter.fg("success", "HIVE LIVE")
 		: mode.hive.configured
 			? painter.fg("error", "HIVE OFFLINE")
-			: painter.fg("warning", mode.isReviewMode() ? "LOCAL" : "HIVE UNCONFIGURED");
+			: mode.isReviewMode() ? "" : painter.fg("warning", "HIVE UNCONFIGURED");
 	const selected = painter.fg("text", `${mode.selectedKeys.size} selected`);
 	const pause = mode.paused ? painter.fg("warning", "PAUSED") : painter.fg("success", "RUNNING");
 	const progress = mode.batchProgress;
@@ -160,7 +160,7 @@ export function workbenchProgressBar(mode: ReviewMode, painter: Painter, width: 
 			)
 		: painter.fg("dim", "no active slay");
 	return truncateToWidth(
-		`${connection} ${painter.fg("dim", GLYPH.dot)} ${painter.fg(source.role, source.text)} ${painter.fg("dim", GLYPH.dot)} ${selected} ${painter.fg("dim", GLYPH.dot)} ${pause} ${painter.fg("dim", GLYPH.dot)} ${slay}`,
+		`${connection ? `${connection} ${painter.fg("dim", GLYPH.dot)} ` : ""}${painter.fg(source.role, source.text)} ${painter.fg("dim", GLYPH.dot)} ${selected} ${painter.fg("dim", GLYPH.dot)} ${pause} ${painter.fg("dim", GLYPH.dot)} ${slay}`,
 		width,
 	);
 }
