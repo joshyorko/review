@@ -78,6 +78,8 @@ test("syncOmpPins updates the Review appliance from the Renovate-selected releas
 });
 test("Renovate follows OMP releases and the appliance publisher validates the pin sync", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
+	assert.equal(config.extends, undefined, "Review must inherit centrally from Patchraptor");
+	assert.equal(config.forkProcessing, "enabled", "central autodiscovery must process this fork");
 	const manager = config.customManagers.find((candidate) => candidate.depNameTemplate === "can1357/oh-my-pi");
 	assert.ok(manager, "OMP needs a regex manager for ARG OMP_VERSION");
 	assert.equal(manager.datasourceTemplate, "github-releases");
@@ -93,10 +95,7 @@ test("Renovate follows OMP releases and the appliance publisher validates the pi
 	assert.deepEqual(rule.postUpgradeTasks.commands, ["node scripts/update-omp-pins.mjs"]);
 	assert.deepEqual(rule.postUpgradeTasks.fileFilters, ["image/appliance/Containerfile"]);
 
-	const renovateWorkflow = await readFile(".github/workflows/renovate.yml", "utf8");
-	assert.match(renovateWorkflow, /cron: '15 2 \* \* \*'/);
-	assert.match(renovateWorkflow, /RENOVATE_ALLOWED_COMMANDS:.*update-omp-pins/);
-	assert.match(renovateWorkflow, /RENOVATE_REPOSITORIES: \$\{\{ github\.repository \}\}/);
+	await assert.rejects(readFile(".github/workflows/renovate.yml"), { code: "ENOENT" });
 	const workflow = await readFile(".github/workflows/publish-appliance.yml", "utf8");
 	assert.match(workflow, /push:\n    branches:\n      - main/);
 	assert.match(workflow, /node --test tests\/update-omp-pins\.test\.mjs/);

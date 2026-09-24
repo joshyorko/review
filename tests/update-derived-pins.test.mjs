@@ -150,11 +150,6 @@ test("Renovate tracks only shipped Review and CI dependencies", async () => {
 	assert.deepEqual(pypiRule.postUpgradeTasks.commands, ["node scripts/update-requirements-ci-hashes.mjs"]);
 	assert.deepEqual(pypiRule.postUpgradeTasks.fileFilters, ["requirements-ci.lock"]);
 
-	const workflow = await readFile(".github/workflows/renovate.yml", "utf8");
-	for (const updater of ["update-omp-pins", "update-gh-pins", "update-requirements-ci-hashes"]) {
-		assert.match(workflow, new RegExp(updater));
-	}
-	assert.doesNotMatch(workflow, /update-(?:node|tmux)-pins/);
 	const publisher = await readFile(".github/workflows/publish-appliance.yml", "utf8");
 	assert.match(publisher, /node --test tests\/update-derived-pins\.test\.mjs/);
 });

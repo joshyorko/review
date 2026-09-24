@@ -1,8 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "local>projectbluefin/renovate-config"
-  ],
+  "forkProcessing": "enabled",
   "customManagers": [
     {
       "description": "Track the OMP release version in the Review appliance; the post-upgrade task applies verified per-architecture digests.",
