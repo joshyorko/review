@@ -8,12 +8,15 @@ cd "$repo_root"
 containerfile="image/appliance/Containerfile"
 entrypoint="image/appliance/entrypoint.sh"
 typesafe_version="0.6.1"
-omp_version="18.2.11"
 
 fail() {
   echo "typesafe-appliance-contract: $*" >&2
   exit 1
 }
+
+omp_version="$(sed -nE 's/^ARG OMP_VERSION=([^[:space:]]+)$/\1/p' "$containerfile")"
+[[ "$omp_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+  fail "$containerfile must contain exactly one valid OMP_VERSION pin"
 
 require() {
   local path="$1"

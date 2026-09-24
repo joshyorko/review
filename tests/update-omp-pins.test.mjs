@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { releasePins, syncOmpPins, updateContainerfile } from "../scripts/update-omp-pins.mjs";
 
@@ -17,6 +19,18 @@ const RELEASE = {
 		{ name: "omp-linux-x64", digest: `sha256:${X64}` },
 	],
 };
+const FUTURE_X64 = "d2fdaa29affe96e596eb9c78d42f548f1f291df28608631bcc00750a84b94bc3";
+const FUTURE_ARM64 = "bdfb9c494e17a2fee1956dae16a010a1953574ce4172c4db8efe06fbe477c637";
+const FUTURE_RELEASE = {
+	tag_name: "v18.3.0",
+	draft: false,
+	prerelease: false,
+	assets: [
+		{ name: "omp-linux-arm64", digest: `sha256:${FUTURE_ARM64}` },
+		{ name: "omp-linux-x64", digest: `sha256:${FUTURE_X64}` },
+	],
+};
+const runFile = promisify(execFile);
 const OLD_CONTAINERFILE = `# renovate: datasource=github-releases depName=can1357/oh-my-pi
 ARG OMP_VERSION=18.1.22
 ARG OMP_X86_64_SHA256=${"1".repeat(64)}
@@ -76,6 +90,32 @@ test("syncOmpPins updates the Review appliance from the Renovate-selected releas
 	assert.match(appliance, new RegExp(`^ARG OMP_X86_64_SHA256=${X64}$`, "m"));
 	assert.match(appliance, new RegExp(`^ARG OMP_AARCH64_SHA256=${ARM64}$`, "m"));
 });
+test("OMP upgrades keep version-owned appliance contracts current", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "omp-contract-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	for (const relativePath of [
+		"image/appliance/Containerfile",
+		"image/appliance/entrypoint.sh",
+		"image/extension/typesafe-omp-loader.mjs",
+		"tests/typesafe-appliance-contract.sh",
+	]) {
+		const destination = join(root, relativePath);
+		await mkdir(dirname(destination), { recursive: true });
+		await copyFile(relativePath, destination);
+	}
+
+	await syncOmpPins({
+		root,
+		requestedVersion: "18.3.0",
+		fetchImpl: async () => response(FUTURE_RELEASE),
+	});
+	const result = await runFile("bash", [join(root, "tests/typesafe-appliance-contract.sh")], {
+		cwd: root,
+		env: { ...process.env, TYPESAFE_RUNTIME_IMAGE: "" },
+	});
+	assert.match(result.stdout, /static contract holds \(OMP 18\.3\.0/);
+});
+
 test("Renovate follows OMP releases and the appliance publisher validates the pin sync", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
 	assert.equal(config.extends, undefined, "Review must inherit centrally from Patchraptor");
