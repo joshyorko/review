@@ -7,6 +7,7 @@
  */
 
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
+import { loadWave, saveWave } from "./wave-store.ts";
 import type { QueueItem } from "./github.ts";
 import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, orgScope, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
@@ -64,6 +65,7 @@ export interface PersistedRepositoryBatch {
 	readonly waveStartedAt: number;
 	readonly waveIdentity?: string;
 	readonly waveToolCallIds?: readonly string[];
+	readonly waveTaskWorkers?: Readonly<Record<string, readonly { agentId: string; jobId?: string; resultStatus?: "completed" | "failed" | "cancelled" }[]>>;
 	readonly waveJobBaselineIds?: readonly string[];
 	readonly waveJobIds?: readonly string[];
 	readonly waveTerminalJobStatuses?: Readonly<Record<string, "completed" | "failed" | "cancelled" | "canceled">>;
@@ -72,6 +74,7 @@ export interface PersistedRepositoryBatch {
 	readonly issueSubmittedPrs?: Readonly<Record<string, readonly string[]>>;
 	/** Operator requested cancellation; the current wave must drain before archive. */
 	readonly cancelRequested?: boolean;
+	readonly error?: string;
 }
 
 export interface PersistedCommentResult {
@@ -163,8 +166,8 @@ interface CtxLike {
 	ui: UiLike;
 	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown }> };
 	getAsyncJobSnapshot?(): {
-		running: Array<{ id: string; status: string; startTime: number; waveId?: string }>;
-		recent: Array<{ id: string; status: string; startTime: number; waveId?: string }>;
+		running: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
+		recent: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
 		delivery?: { pendingJobIds: readonly string[] };
 	} | null;
 }
@@ -229,7 +232,8 @@ export function waveWorkersSettled(
 	return ids.every((id) => {
 		const job = observed.get(id);
 		if (job) return (job.status === "completed" || job.status === "failed" || job.status === "cancelled" || job.status === "canceled") && !(snapshot?.running ?? []).some((running) => running.id === id);
-		return persisted?.[id] !== undefined;
+		const status = persisted?.[id];
+		return status === "completed" || status === "failed" || status === "cancelled" || status === "canceled";
 	});
 }
 export function captureWaveJobIds(
@@ -243,8 +247,21 @@ export function captureWaveJobIds(
 		.filter((id, index, all) => !excluded.has(id) && all.indexOf(id) === index)
 		.sort();
 }
-export function waveWorkerCoverageComplete(jobIds: readonly string[] | undefined, toolCallIds: readonly string[] | undefined): boolean {
-	return Boolean(jobIds?.length && toolCallIds?.length && JSON.stringify(jobIds) === JSON.stringify(toolCallIds));
+export function waveWorkerCoverageComplete(jobIds: readonly string[] | undefined, toolCallIds: readonly string[] | undefined, workers?: PersistedRepositoryBatch["waveTaskWorkers"]): boolean {
+	if (!jobIds?.length || !toolCallIds?.length || !workers) return false;
+	if (Object.keys(workers).length !== toolCallIds.length) return false;
+	const mapped: string[] = [];
+	const agents: string[] = [];
+	for (const call of toolCallIds) {
+		if (!workers[call]?.length) return false;
+		for (const worker of workers[call]) {
+			if (!worker.jobId) return false;
+			mapped.push(worker.jobId);
+			agents.push(worker.agentId);
+		}
+	}
+	return new Set(agents).size === agents.length && new Set(mapped).size === mapped.length
+		&& JSON.stringify([...mapped].sort()) === JSON.stringify([...jobIds].sort());
 }
 
 
@@ -453,6 +470,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (batch.state === "blocked" || batch.state === "cancelled") recoveryBatches.set(batch.id, batch);
 		else recoveryBatches.delete(batch.id);
 	};
+	const restoreClaimWaves = (): string[] => {
+		const missing: string[] = [];
+		for (const owner of new Set(resourceClaims().list().filter((claim) => claim.owner.startsWith("review:")).map((claim) => claim.owner))) {
+			if (activeBatch && owner === `review:${activeBatch.id}:${activeBatch.currentWave}`) continue;
+			const stored = loadWave(factoryClaimsRoot(env), owner);
+			if (stored) rememberRecoveryBatch({ ...stored, state: stored.state === "cancelled" ? "cancelled" : "blocked" });
+			else if (!batchForOwner(owner)) missing.push(owner);
+		}
+		return missing;
+	};
 	const batchForOwner = (owner: string): PersistedRepositoryBatch | undefined => {
 		const candidates = [activeBatch, ...recoveryBatches.values()].filter(
 			(batch): batch is PersistedRepositoryBatch => batch !== undefined,
@@ -517,7 +544,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			|| !wave
 			|| !batch.waveEffectResources
 			|| JSON.stringify(batch.waveEffectResources) !== JSON.stringify(expectedResources)
-			|| !waveWorkerCoverageComplete(batch.waveJobIds, batch.waveToolCallIds)
+			|| !waveWorkerCoverageComplete(batch.waveJobIds, batch.waveToolCallIds, batch.waveTaskWorkers)
 			|| !expectedResources.includes(resource.toLowerCase())
 		) return "unknown";
 		const jobs = ctx.getAsyncJobSnapshot?.();
@@ -600,17 +627,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		repaint();
 	};
 	const rememberWaveEvidence = (ctx: CtxLike): void => {
-		if (!activeBatch || activeBatch.state !== "running" || !activeBatch.waveIdentity) return;
+		if (!activeBatch || !["running", "paused", "blocked"].includes(activeBatch.state) || !activeBatch.waveIdentity) return;
 		const jobs = ctx.getAsyncJobSnapshot?.();
 		if (!jobs) return;
 		const baseline = new Set(activeBatch.waveJobBaselineIds ?? []);
-		const toolIds = new Set(activeBatch.waveToolCallIds ?? []);
-		const associated = [
-			...(jobs.delivery?.pendingJobIds ?? []).filter((id) => toolIds.has(id) && !baseline.has(id)).map((id) => ({ id })),
-			...jobs.running.filter((job) => toolIds.has(job.id)),
-			...jobs.recent.filter((job) => toolIds.has(job.id)),
-		];
-		if (associated.length === 0) return;
+		const observed = [...jobs.running, ...jobs.recent];
+		const workers = Object.fromEntries(Object.entries(activeBatch.waveTaskWorkers ?? {}).map(([call, workers]) => [call, workers.map((worker) => {
+			if (worker.jobId) return worker;
+			const matches = observed.filter((job) => job.type === "task" && job.agentId === worker.agentId && !baseline.has(job.id));
+			return matches.length === 1 ? { ...worker, jobId: matches[0].id } : worker;
+		})]));
+		const mapped = new Set(Object.values(workers).flatMap((workers) => workers.flatMap((worker) => worker.jobId ? [worker.jobId] : [])));
+		const associated = observed.filter((job) => mapped.has(job.id));
 		const ids = [...new Set([...(activeBatch.waveJobIds ?? []), ...associated.map((job) => job.id)])].sort();
 		const terminal = { ...(activeBatch.waveTerminalJobStatuses ?? {}) };
 		const runningIds = new Set(jobs.running.map((job) => job.id));
@@ -622,11 +650,47 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const resources = activeBatch.kind === "diff" || !wave
 			? []
 			: [...new Set(wave.items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))].sort();
-		if (JSON.stringify(activeBatch.waveJobIds ?? []) === JSON.stringify(ids) && JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) === JSON.stringify(terminal) && JSON.stringify(activeBatch.waveEffectResources ?? []) === JSON.stringify(resources)) return;
-		persistBatch(ctx, { ...activeBatch, waveJobIds: ids, waveTerminalJobStatuses: terminal, waveEffectResources: resources });
+		if (JSON.stringify(activeBatch.waveTaskWorkers ?? {}) === JSON.stringify(workers) && JSON.stringify(activeBatch.waveJobIds ?? []) === JSON.stringify(ids) && JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) === JSON.stringify(terminal) && JSON.stringify(activeBatch.waveEffectResources ?? []) === JSON.stringify(resources)) return;
+		persistBatch(ctx, { ...activeBatch, waveTaskWorkers: workers, waveJobIds: ids, waveTerminalJobStatuses: terminal, waveEffectResources: resources });
+	};
+	// OMP 18.3 task results identify each spawned agent in progress; snapshots
+	// expose the actual job id, including the manager's collision suffix.
+	const rememberTaskResult = (ctx: CtxLike, call: string, result: unknown): void => {
+		if (!activeBatch?.waveToolCallIds?.includes(call) || !result || typeof result !== "object" || !("details" in result)) return;
+		const details = result.details;
+		if (!details || typeof details !== "object" || !("async" in details) || !details.async || typeof details.async !== "object" || !("type" in details.async) || details.async.type !== "task" || !("progress" in details) || !Array.isArray(details.progress)) return;
+		const workers: { agentId: string; jobId?: string; resultStatus?: "completed" | "failed" | "cancelled" }[] = [];
+		for (const row of details.progress) {
+			if (!row || typeof row !== "object" || typeof row.id !== "string" || !row.id) return;
+			workers.push({ agentId: row.id, ...(row.status === "completed" || row.status === "failed" ? { resultStatus: row.status } : row.status === "aborted" ? { resultStatus: "cancelled" } : {}) });
+		}
+		const previous = activeBatch.waveTaskWorkers?.[call];
+		if (previous && JSON.stringify(previous.map((worker) => worker.agentId)) !== JSON.stringify(workers.map((worker) => worker.agentId))) {
+			persistBatch(ctx, { ...activeBatch, waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: [] } });
+			return;
+		}
+		const updated = workers.map((worker, index) => ({ ...previous?.[index], ...worker }));
+		if (JSON.stringify(previous) !== JSON.stringify(updated)) persistBatch(ctx, { ...activeBatch, waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: updated } });
+		rememberWaveEvidence(ctx);
+	};
+	const rememberDeliveredJobs = (event: unknown, ctx: CtxLike): void => {
+		if (!activeBatch || !event || typeof event !== "object" || !("message" in event)) return;
+		const message = event.message;
+		if (!message || typeof message !== "object" || !("customType" in message) || message.customType !== "async-result" || !("details" in message)) return;
+		const details = message.details;
+		if (!details || typeof details !== "object" || !("jobs" in details) || !Array.isArray(details.jobs)) return;
+		const delivered = new Set(details.jobs.filter((job) => job?.type === "task" && typeof job.jobId === "string").map((job) => job.jobId));
+		const terminal = { ...activeBatch.waveTerminalJobStatuses };
+		// Task progress alone is provisional. OMP's delivery proves the job has
+		// settled, including jobs omitted by the five-row recent snapshot limit.
+		for (const worker of Object.values(activeBatch.waveTaskWorkers ?? {}).flat()) {
+			if (worker.jobId && worker.resultStatus && delivered.has(worker.jobId) && !terminal[worker.jobId]) terminal[worker.jobId] = worker.resultStatus;
+		}
+		if (JSON.stringify(terminal) !== JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {})) persistBatch(ctx, { ...activeBatch, waveTerminalJobStatuses: terminal });
 	};
 
 	const persistBatch = (ctx: CtxLike, batch: PersistedRepositoryBatch) => {
+		saveWave(factoryClaimsRoot(env), batch);
 		activeBatch = batch;
 		rememberRecoveryBatch(batch);
 		pi.appendEntry(BATCH_ENTRY, batch);
@@ -701,6 +765,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				state: "complete",
 				waveIdentity: undefined,
 				waveToolCallIds: undefined,
+				waveTaskWorkers: undefined,
 				waveJobBaselineIds: undefined,
 				waveJobIds: undefined,
 				waveTerminalJobStatuses: undefined,
@@ -717,6 +782,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			waveStartedAt: Date.now(),
 			waveIdentity: undefined,
 			waveToolCallIds: undefined,
+			waveTaskWorkers: undefined,
 			waveJobBaselineIds: undefined,
 			waveJobIds: undefined,
 			waveTerminalJobStatuses: undefined,
@@ -795,23 +861,30 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return cancelBlockedBatch(ctx, args === "revise" ? "revise" : "cancel");
 		}
 		if (args === "reconcile" || args === "recover") {
+			const missing = restoreClaimWaves();
 			const candidates = [...new Map(
 				[...recoveryBatches.values(), activeBatch]
 					.filter((batch): batch is PersistedRepositoryBatch => batch !== undefined)
 					.map((batch) => [batch.id, batch]),
 			).values()];
-			if (candidates.length === 0) return "No interrupted or blocked Review waves need reconciliation";
-			const lines: string[] = [];
+			if (candidates.length === 0 && missing.length === 0) return "No interrupted or blocked Review waves need reconciliation";
+			const lines: string[] = missing.map((owner) => `Retained UNKNOWN claims for ${owner}: missing or invalid durable recovery record; worker and external-effect evidence required`);
 			for (const batch of candidates) {
 				const result = await reconcileBatchClaims(ctx, batch);
 				if (result.settled.length > 0) lines.push(`Reconciled ${result.settled.join(", ")} for ${batch.id}`);
 				if (result.submittedPrs.length > 0) lines.push(`Observed submitted PRs ${result.submittedPrs.join(", ")}`);
 				if (result.unknown.length > 0) lines.push(`Retained UNKNOWN claims ${result.unknown.join(", ")} for ${batch.id}`);
 				if (activeBatch?.id === batch.id && result.unknown.length === 0) await finishRecoveredBatch(ctx, batch, result);
+				else if (result.unknown.length === 0 && result.settled.length > 0) {
+					recoveryBatches.delete(batch.id);
+					const currentWave = batch.currentWave + 1;
+					pi.appendEntry(BATCH_ENTRY, { ...batch, currentWave, completedItems: batch.completedItems + batch.waves[batch.currentWave].items.length, state: currentWave === batch.waves.length ? "complete" : "paused", waveIdentity: undefined });
+				}
 			}
 			return lines.length > 0 ? lines.join("; ") : "No Review claims were released";
 		}
 		if (args === "" || args === "status") {
+			restoreClaimWaves();
 			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
 			const batches = [...recoveryBatches.values()].map((batch) =>
 				`${batch.id} ${batch.state}${batch.error ? ` — ${batch.error}` : ""}`);
@@ -1029,16 +1102,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			persistBatch(ctx, { ...activeBatch!, state: "blocked", error: "wave action produced no prompt" });
 			return;
 		}
+		const before = ctx.getAsyncJobSnapshot?.();
+		const baseline = [...new Set([...(before?.delivery?.pendingJobIds ?? []), ...(before?.running ?? []).map((job) => job.id), ...(before?.recent ?? []).map((job) => job.id)])].sort();
+		const resources = activeBatch.kind === "diff"
+			? []
+			: [...new Set(wave.items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))].sort();
+		persistBatch(ctx, { ...activeBatch, waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`, waveToolCallIds: undefined, waveTaskWorkers: undefined, waveJobBaselineIds: baseline, waveJobIds: undefined, waveTerminalJobStatuses: undefined, waveEffectResources: resources });
 		if (activeBatch.kind !== "diff") {
 			try { claimItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`, !retryingBlockedWave); }
 			catch (error) { persistBatch(ctx, { ...activeBatch, state: "blocked", error: String(error) }); ctx.ui.notify(String(error), "error"); return; }
 		}
-		const before = ctx.getAsyncJobSnapshot?.();
-		const baseline = [...(before?.delivery?.pendingJobIds ?? [])].sort();
-		const resources = activeBatch.kind === "diff"
-			? []
-			: [...new Set(wave.items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))].sort();
-		persistBatch(ctx, { ...activeBatch, waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`, waveToolCallIds: undefined, waveJobBaselineIds: baseline, waveJobIds: undefined, waveTerminalJobStatuses: undefined, waveEffectResources: resources });
 		ctx.ui.notify(`Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
 		pi.sendUserMessage(prompt, { ...(deliverAs ? { deliverAs } : {}), waveId: `${activeBatch.id}:${activeBatch.currentWave}` });
 		rememberWaveEvidence(ctx);
@@ -1439,7 +1512,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		const persistedBatches = readPersistedBatches(ctx);
 		for (const batch of persistedBatches) rememberRecoveryBatch(batch);
-		const recoveredBatch = persistedBatches.at(-1);
+		restoreClaimWaves();
+		const latest = persistedBatches.at(-1);
+		const latestOwner = latest ? `review:${latest.id}:${latest.currentWave}` : undefined;
+		const recoveredBatch = latestOwner && resourceClaims().list().some((claim) => claim.owner === latestOwner)
+			? loadWave(factoryClaimsRoot(env), latestOwner) ?? latest : latest;
 		if (recoveredBatch) {
 			activeBatch = recoveredBatch.state === "running" || (recoveredBatch.state === "paused" && recoveredBatch.cancelRequested === true)
 				? {
@@ -1491,22 +1568,24 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const jobs = ctx.getAsyncJobSnapshot?.();
 		rememberWaveEvidence(ctx);
 		if (jobs?.running.some((job) => job.startTime >= activeBatch!.waveStartedAt)) return;
-		const recent = jobs?.recent.filter((job) => job.startTime >= activeBatch!.waveStartedAt) ?? [];
-		const failed = recent.filter((job) => job.status !== "completed");
-		if (failed.length > 0 || recent.length === 0) {
+		const covered = waveWorkerCoverageComplete(activeBatch.waveJobIds, activeBatch.waveToolCallIds, activeBatch.waveTaskWorkers);
+		const settled = waveWorkersSettled(jobs, activeBatch.waveJobIds, activeBatch.waveTerminalJobStatuses);
+		const failed = (activeBatch.waveJobIds ?? []).filter((id) => ["failed", "cancelled", "canceled"].includes(activeBatch!.waveTerminalJobStatuses?.[id] ?? ""));
+		if (!covered || !settled || failed.length > 0) {
 			if (batchAtEntry.cancelRequested) {
-				await drainCancelledBatch(ctx, batchAtEntry);
+				await drainCancelledBatch(ctx, activeBatch);
 				return;
 			}
 			const error = failed.length > 0
 				? `${failed.length} workflowz job${failed.length === 1 ? "" : "s"} failed or were cancelled`
-				: "workflowz produced no observable jobs for the repository wave";
+				: !covered ? "workflowz task-to-job evidence is missing or ambiguous for the repository wave"
+					: "workflowz workers lack terminal settlement evidence for the repository wave";
 			persistBatch(ctx, { ...activeBatch, state: "blocked", error });
 			ctx.ui.notify(`Repository wave stopped: ${error}`, "error");
 			return;
 		}
 		if (batchAtEntry.cancelRequested) {
-			await drainCancelledBatch(ctx, batchAtEntry);
+			await drainCancelledBatch(ctx, activeBatch);
 			return;
 		}
 		if (activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr")) {
@@ -1581,6 +1660,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			state: mode.paused ? "paused" : "running",
 			waveIdentity: undefined,
 			waveToolCallIds: undefined,
+			waveTaskWorkers: undefined,
 			waveJobBaselineIds: undefined,
 			waveJobIds: undefined,
 			waveTerminalJobStatuses: undefined,
@@ -1705,6 +1785,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
 		if (ctxToUse) await advanceRepositoryBatch(ctxToUse);
 	});
+	pi.on("message_start", (event, ctx) => { rememberDeliveredJobs(event, ctx); rememberWaveEvidence(ctx); });
+	pi.on("tool_result", (event, ctx) => {
+		if (event && typeof event === "object" && "toolCallId" in event && typeof event.toolCallId === "string") rememberTaskResult(ctx, event.toolCallId, event);
+		rememberWaveEvidence(ctx);
+	});
 	pi.on("tool_call", (event) => {
 		const { toolCallId, toolName, input } = event as { toolCallId?: string; toolName?: string; input?: { command?: unknown } };
 		if (toolName === "task" && toolCallId && activeBatch?.state === "running" && activeCtx) {
@@ -1733,16 +1818,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		mode.session.startTool(toolCallId, toolName, args, Date.now());
 		repaint();
 	});
-	pi.on("tool_execution_update", (event) => {
+	pi.on("tool_execution_update", (event, ctx) => {
 		const { toolCallId, partialResult } = event as { toolCallId: string; partialResult: unknown };
 		mode.session.updateTool(toolCallId, partialResult);
+		const ctxToUse = ctx ?? activeCtx;
+		if (ctxToUse) rememberTaskResult(ctxToUse, toolCallId, partialResult);
 		repaint();
 	});
 	pi.on("tool_execution_end", (event, eventCtx) => {
 		const { toolCallId, result, isError } = event as { toolCallId: string; result: unknown; isError: boolean };
 		mode.session.endTool(toolCallId, result, isError === true, Date.now());
 		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
-		if (ctxToUse) syncBatchProgress(ctxToUse);
+		if (ctxToUse) { rememberTaskResult(ctxToUse, toolCallId, result); rememberWaveEvidence(ctxToUse); syncBatchProgress(ctxToUse); }
 		repaint();
 	});
 
