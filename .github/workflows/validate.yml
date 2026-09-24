@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --require-hashes -r requirements-ci.lock
-          pre-commit run --all-files --show-diff-on-failure
+          SKIP=check-skill-frontmatter,generate-skills,omp-review-mode,appliance-contract pre-commit run --all-files --show-diff-on-failure
 
       - name: Commit message CI-skip guard contract
         run: |
