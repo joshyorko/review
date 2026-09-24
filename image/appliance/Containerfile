@@ -27,7 +27,7 @@ ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:5ae0f18f14
 # Linux audio packages are absent from the FSDK runtime seam. The pinned audio
 # stage contributes only the PulseAudio/ALSA libraries and configuration.
 # renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
-ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:44@sha256:9bb5cffe3cebf098975f05ffd78e8a1d25cd9a9e4fc5e563b56e27b9546eb0c0
+ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:44@sha256:94c1e7ce49d919de784320ca36b21a268806f8f03318a9b3d9bd32a67918f521
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
 ARG OMP_VERSION=18.2.11
