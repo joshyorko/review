@@ -14,7 +14,7 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Install Apptainer
-        uses: eWaterCycle/setup-apptainer@58d788a297b0acdec33b8979428afa78679aa711 # v1 tag target
+        uses: eWaterCycle/setup-apptainer@4bb22c52d4f63406c49e94c804632975787312b3 # v2 tag target
       - name: Static Factory contracts
         run: bun test tests/luna_factory_dogfood_contract.test.ts
       - name: Runtime capability report
