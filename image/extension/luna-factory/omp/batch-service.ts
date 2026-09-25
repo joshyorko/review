@@ -1,6 +1,7 @@
+import { lstat as lstatAsync, readdir as readdirAsync } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { batchConverged, batchSummary, createBatch, dependencyBlocker, digest, selectionIdentity, type Batch, type BatchItem, type SelectedItem, type Prerequisite } from "../core/batch.ts";
@@ -43,6 +44,32 @@ function transitionOperation(item: BatchItem, update: Partial<OperationReceipt>)
 export interface BatchOptions { capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[] }
 interface Running { batch: Batch; item: BatchItem; controller: AbortController; promise: Promise<void> }
 
+export interface BatchSnapshotError {
+	readonly id: string;
+	readonly error: string;
+}
+
+/** A side-effect-free view of retained Factory state. */
+export interface BatchSnapshot {
+	readonly root: string;
+	readonly batches: readonly Batch[];
+	readonly errors: readonly BatchSnapshotError[];
+	readonly activeItemKeys: readonly string[];
+	readonly fatal?: string;
+}
+
+export interface BatchHistoryCursor {
+	readonly ids: readonly string[];
+	readonly offset: number;
+}
+
+export interface BatchHistoryPage {
+	readonly snapshot: BatchSnapshot;
+	readonly next?: BatchHistoryCursor;
+}
+
+export type BatchChangeListener = (event: { readonly batchId?: string }) => void;
+
 /** One owner and one slot bound for worker, verification and independent acceptance. */
 export class BatchService {
 	readonly store: BatchStore;
@@ -56,7 +83,7 @@ export class BatchService {
 	private running = new Map<string, Running>();
 	private pumping?: Promise<void>;
 	private submitTail: Promise<void> = Promise.resolve();
-	private changed = () => {};
+	private changed = new Set<BatchChangeListener>();
 	private context?: NativeContext;
 	private fatal?: string;
 
@@ -70,16 +97,115 @@ export class BatchService {
 		this.store = new BatchStore(root);
 		this.claims = new ResourceClaims(root, claimsRoot);
 	}
-	onChange(callback: () => void): void { this.changed = callback; }
+	onChange(callback: BatchChangeListener): () => void {
+		this.changed.add(callback);
+		return () => { this.changed.delete(callback); };
+	}
+	isWriterAcquired(): boolean { return this.store.isAcquired(); }
+	activeItemKeys(): readonly string[] { return [...this.running.values()].map((active) => active.item.selected.key); }
+	private notifyChanged(batchId?: string): void {
+		for (const callback of [...this.changed]) {
+			try { callback({ batchId }); } catch { /* observers never make a durable mutation fail */ }
+		}
+	}
 	private persist(batch: Batch): void {
 		if (this.fatal) throw new Error(this.fatal);
 		try { this.store.write(batch); }
 		catch (error) {
 			this.fatal = `persistence failed; no new effects: ${message(error)}`;
 			for (const active of this.running.values()) active.controller.abort();
+			this.notifyChanged(batch.id);
 			throw error;
 		}
-		this.changed();
+		this.notifyChanged(batch.id);
+	}
+	/**
+	 * Read persisted state without acquiring the writer lock, resuming work, or
+	 * touching GitHub/OMP. Each corrupt store is retained as a fail-closed error
+	 * while healthy batches remain available for inspection.
+	 */
+	readSnapshot(id?: string): BatchSnapshot {
+		const batches: Batch[] = [];
+		const errors: BatchSnapshotError[] = [];
+		let ids: string[];
+		try {
+			ids = id === undefined
+				? readdirSync(this.root).filter((name) => /^batch-[a-f0-9-]+\.json$/.test(name)).map((name) => name.slice(0, -5))
+				: [id];
+		} catch (error) {
+			return { root: this.root, batches, errors: [{ id: id ?? this.root, error: message(error) }], activeItemKeys: this.activeItemKeys(), ...(this.fatal ? { fatal: this.fatal } : {}) };
+		}
+		for (const batchId of ids) {
+			try {
+				if (!/^batch-[a-f0-9-]+$/.test(batchId)) throw new Error("invalid batch identity");
+				const file = join(this.root, `${batchId}.json`);
+				const stat = lstatSync(file);
+				if (!stat.isFile() || stat.nlink !== 1 || stat.size > 32 * 1024 * 1024) throw new Error("batch preview requires a regular file under 32 MiB; preserve original evidence for inspection");
+				batches.push(this.store.read(batchId));
+			}
+			catch (error) { errors.push({ id: batchId, error: message(error) }); }
+		}
+		return { root: this.root, batches, errors, activeItemKeys: this.activeItemKeys(), ...(this.fatal ? { fatal: this.fatal } : {}) };
+	}
+	async readSnapshotAsync(id?: string): Promise<BatchSnapshot> {
+		const batches: Batch[] = [];
+		const errors: BatchSnapshotError[] = [];
+		let ids: string[];
+		try { ids = id === undefined ? (await readdirAsync(this.root)).filter((name) => /^batch-[a-f0-9-]+\.json$/.test(name)).map((name) => name.slice(0, -5)) : [id]; }
+		catch (error) { return { root: this.root, batches, errors: [{ id: id ?? this.root, error: message(error) }], activeItemKeys: this.activeItemKeys(), ...(this.fatal ? { fatal: this.fatal } : {}) }; }
+		for (const batchId of ids) {
+			try { batches.push(await this.store.readAsync(batchId)); }
+			catch (error) { errors.push({ id: batchId, error: message(error) }); }
+		}
+		return { root: this.root, batches, errors, activeItemKeys: this.activeItemKeys(), ...(this.fatal ? { fatal: this.fatal } : {}) };
+	}
+	/** Read a stable, bounded page of retained history without acquiring ownership. */
+	async readHistoryPage(cursor?: BatchHistoryCursor, focusId?: string): Promise<BatchHistoryPage> {
+		const batches: Batch[] = [];
+		const errors: BatchSnapshotError[] = [];
+		const maxRecords = 25;
+		const maxBytes = 32 * 1024 * 1024;
+		let ids: string[];
+		let offset = 0;
+		try {
+			if (cursor) {
+				if (!Number.isSafeInteger(cursor.offset) || cursor.offset < 0 || cursor.offset > cursor.ids.length || cursor.ids.some((id) => !/^batch-[a-f0-9-]+$/.test(id))) throw new Error("invalid batch history cursor");
+				ids = [...cursor.ids];
+				offset = cursor.offset;
+			} else {
+				const entries = (await readdirAsync(this.root)).filter((name) => /^batch-[a-f0-9-]+\.json$/.test(name));
+				const dated = await Promise.all(entries.map(async (name) => {
+					const id = name.slice(0, -5);
+					try { return { id, mtimeMs: (await lstatAsync(join(this.root, name))).mtimeMs }; }
+					catch (error) { errors.push({ id, error: message(error) }); return undefined; }
+				}));
+				ids = dated.filter((entry): entry is { id: string; mtimeMs: number } => entry !== undefined)
+					.sort((a, b) => b.mtimeMs - a.mtimeMs || a.id.localeCompare(b.id)).map((entry) => entry.id);
+				if (focusId !== undefined) {
+					if (!/^batch-[a-f0-9-]+$/.test(focusId)) throw new Error("invalid focused batch identity");
+					ids = [focusId, ...ids.filter((id) => id !== focusId)];
+				}
+			}
+		} catch (error) {
+			return { snapshot: { root: this.root, batches, errors: [...errors, { id: this.root, error: message(error) }], activeItemKeys: this.activeItemKeys(), ...(this.fatal ? { fatal: this.fatal } : {}) } };
+		}
+		let sourceBytes = 0;
+		while (offset < ids.length && batches.length < maxRecords) {
+			const batchId = ids[offset++]!;
+			let size: number;
+			try { size = (await lstatAsync(join(this.root, `${batchId}.json`))).size; }
+			catch (error) { errors.push({ id: batchId, error: message(error) }); continue; }
+			if (size > maxBytes || (sourceBytes > 0 && sourceBytes + size > maxBytes)) {
+				if (sourceBytes > 0 && size <= maxBytes) { offset--; break; }
+				errors.push({ id: batchId, error: "batch history page source-byte limit exceeded" });
+				continue;
+			}
+			sourceBytes += size;
+			try { batches.push(await this.store.readAsync(batchId)); }
+			catch (error) { errors.push({ id: batchId, error: message(error) }); }
+		}
+		const snapshot: BatchSnapshot = { root: this.root, batches, errors, activeItemKeys: this.activeItemKeys(), ...(this.fatal ? { fatal: this.fatal } : {}) };
+		return { snapshot, ...(offset < ids.length ? { next: { ids, offset } } : {}) };
 	}
 	status(id?: string): string {
 		const batches = id ? [this.store.read(id)] : this.store.list();
@@ -328,6 +454,7 @@ export class BatchService {
 					}).finally(() => {
 						this.running.delete(owner);
 						if (!this.fatal && item.stage !== "UNKNOWN") this.release(item, owner);
+						this.notifyChanged(batch.id);
 					});
 					this.running.set(owner, { batch, item, controller, promise });
 					batch.usage.peakWorkers = Math.max(batch.usage.peakWorkers, this.running.size);

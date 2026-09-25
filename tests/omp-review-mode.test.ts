@@ -42,6 +42,7 @@ import {
 
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
+import { saveWave } from "../image/extension/bluefin-review/wave-store.ts";
 import { factoryHandoffState, registerFactoryController } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const NOW = 1_800_000_000_000;
@@ -3101,6 +3102,428 @@ test("restart blocks interrupted slays and never replays confirmed comments", as
 	assert.equal(recovered.state, "blocked");
 	assert.match(recovered.error, /session ended/);
 	assert.ok(ctx.overlays[0].render(240).some((line) => line.includes("BLOCKED")));
+});
+
+test("pre-tool coordinator failure is durable evidence for explicit recovery without completing the wave", async () => {
+	const states = { "projectbluefin/review#77": { title: "pre-tool failure", submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("f");
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	const running = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const assistantError = {
+		role: "assistant",
+		content: [{ type: "text", text: "Fixture configuration failure before any tool invocation" }],
+		stopReason: "error",
+		errorMessage: "Fixture configuration failure before any tool invocation",
+	};
+	const userMessage = { role: "user", content: [{ type: "text", text: pi.messages.at(-1) }] };
+	ctx.sessionManager = {
+		getBranch: () => [
+			{ type: "custom", customType: BATCH_ENTRY, data: running },
+			{ type: "message", message: userMessage },
+			{ type: "message", message: assistantError },
+		],
+	};
+	await pi.events.get("agent_end")({ messages: [userMessage, assistantError] }, ctx);
+
+	const blocked = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(blocked.state, "blocked");
+	assert.equal(blocked.wavePreToolTerminal, "error");
+	assert.deepEqual(blocked.waveToolInvocationIds, []);
+	assert.match(blocked.error, /before any tool invocation/);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().every((claim) => claim.status === "unknown"), true);
+
+	const interruptedAfterProof = { ...blocked, state: "running" };
+	saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, interruptedAfterProof);
+	const restarted = fakeHost();
+	const next = fakeCtx();
+	next.ui.parent = next;
+	next.sessionManager = {
+		getBranch: () => [
+			...pi.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+			{ type: "custom", customType: BATCH_ENTRY, data: interruptedAfterProof },
+		],
+	};
+	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await restarted.events.get("session_start")({}, next);
+	await restored.whenStarted();
+	assert.equal(restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "blocked");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2, "restart leaves pre-tool recovery for explicit operator action");
+	await restarted.commands.get("review").handler("reconcile", next);
+
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
+	assert.equal(claims.list().length, 0);
+	const recovered = restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(recovered.state, "cancelled");
+	assert.notEqual(recovered.state, "complete");
+});
+
+async function preToolFailureFixture(submittedPrs: string[] = [], fetchFactory = issueBackedFetch) {
+	const states = { "projectbluefin/review#77": { title: "pre-tool failure", submittedPrs } };
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fetchFactory(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("f");
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	const running = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const assistantError = {
+		role: "assistant",
+		content: [{ type: "text", text: "Fixture configuration failure before any tool invocation" }],
+		stopReason: "error",
+		errorMessage: "Fixture configuration failure before any tool invocation",
+	};
+	const userMessage = { role: "user", content: [{ type: "text", text: pi.messages.at(-1) }] };
+	ctx.sessionManager = {
+		getBranch: () => [
+			{ type: "custom", customType: BATCH_ENTRY, data: running },
+			{ type: "message", message: userMessage },
+			{ type: "message", message: assistantError },
+		],
+	};
+	return { states, env, pi, ctx, review, running, assistantError, userMessage };
+}
+
+test("tool invocation without a job keeps the Review claims UNKNOWN", async () => {
+	const fixture = await preToolFailureFixture();
+	fixture.pi.events.get("tool_call")({ toolCallId: "bash-call", toolName: "bash", input: { command: "true" } }, fixture.ctx);
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(blocked.state, "blocked");
+	assert.equal(blocked.wavePreToolTerminal, undefined);
+	assert.deepEqual(blocked.waveToolInvocationIds, ["bash-call"]);
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().every((claim) => claim.status === "unknown"), true);
+});
+
+test("a started job without terminal evidence remains an unaccounted UNKNOWN worker", async () => {
+	const fixture = await preToolFailureFixture();
+	fixture.pi.events.get("tool_call")({ toolCallId: "task-call", toolName: "task", input: {} }, fixture.ctx);
+	fixture.ctx.asyncJobs.running = [{ id: "job-1", agentId: "Worker", type: "task", status: "running", startTime: Date.now() }];
+	fixture.pi.events.get("tool_result")({ toolCallId: "task-call", details: {
+		async: { type: "task", state: "running", jobId: "job-1" },
+		progress: [{ id: "Worker", index: 0, status: "running" }],
+	} }, fixture.ctx);
+	fixture.ctx.asyncJobs.running = [];
+	fixture.ctx.asyncJobs.recent = [];
+	await fixture.pi.events.get("agent_end")({}, fixture.ctx);
+
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.deepEqual(blocked.waveJobIds, ["job-1"]);
+	assert.deepEqual(blocked.waveTerminalJobStatuses, {});
+	assert.equal(blocked.state, "blocked");
+	await fixture.pi.commands.get("review").handler("cancel", fixture.ctx);
+	assert.ok(fixture.ctx.notifications.some((notice) => /unaccounted worker/.test(notice.message)));
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("an unrelated terminal assistant message cannot settle the active Review wave", async () => {
+	const fixture = await preToolFailureFixture();
+	const foreignUser = { role: "user", content: [{ type: "text", text: "foreign prompt with the same provider error" }] };
+	fixture.ctx.sessionManager = {
+		getBranch: () => [
+			{ type: "custom", customType: BATCH_ENTRY, data: fixture.running },
+			{ type: "message", message: foreignUser },
+			{ type: "message", message: fixture.assistantError },
+		],
+	};
+	await fixture.pi.events.get("agent_end")({ messages: [foreignUser, fixture.assistantError] }, fixture.ctx);
+
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(blocked.wavePreToolTerminal, undefined);
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().every((claim) => claim.status === "unknown"), true);
+});
+
+test("a foreign user message after the matched dispatch prevents pre-tool proof", async () => {
+	const fixture = await preToolFailureFixture();
+	const foreignUser = { role: "user", content: [{ type: "text", text: "another request" }] };
+	fixture.ctx.sessionManager = {
+		getBranch: () => [
+			{ type: "custom", customType: BATCH_ENTRY, data: fixture.running },
+			{ type: "message", message: fixture.userMessage },
+			{ type: "message", message: foreignUser },
+			{ type: "message", message: fixture.assistantError },
+		],
+	};
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, foreignUser, fixture.assistantError] }, fixture.ctx);
+
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(blocked.wavePreToolTerminal, undefined);
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().every((claim) => claim.status === "unknown"), true);
+});
+
+test("an earlier assistant error followed by a successful final assistant cannot prove pre-tool failure", async () => {
+	const fixture = await preToolFailureFixture();
+	const success = { role: "assistant", content: [{ type: "text", text: "completed" }], stopReason: "stop" };
+	fixture.ctx.sessionManager = {
+		getBranch: () => [
+			{ type: "custom", customType: BATCH_ENTRY, data: fixture.running },
+			{ type: "message", message: fixture.userMessage },
+			{ type: "message", message: fixture.assistantError },
+			{ type: "message", message: success },
+		],
+	};
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError, success] }, fixture.ctx);
+
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(blocked.wavePreToolTerminal, undefined);
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().every((claim) => claim.status === "unknown"), true);
+});
+
+test("a terminal error without the acknowledged wave prompt cannot prove pre-tool failure", async () => {
+	const fixture = await preToolFailureFixture();
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.assistantError] }, fixture.ctx);
+
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(blocked.wavePreToolTerminal, undefined);
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().every((claim) => claim.status === "unknown"), true);
+});
+
+test("tools from prior conversation history do not invalidate the current wave proof", async () => {
+	const fixture = await preToolFailureFixture();
+	const priorReadOnlyTurn = { role: "assistant", content: [{ type: "toolCall", id: "old-read", name: "review_workbench_status", arguments: {} }] };
+	fixture.ctx.sessionManager = {
+		getBranch: () => [
+			{ type: "custom", customType: BATCH_ENTRY, data: fixture.running },
+			{ type: "message", message: priorReadOnlyTurn },
+			{ type: "message", message: fixture.userMessage },
+			{ type: "message", message: fixture.assistantError },
+		],
+	};
+	await fixture.pi.events.get("agent_end")({ messages: [priorReadOnlyTurn, fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+
+	assert.equal(fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.wavePreToolTerminal, "error");
+});
+
+test("a pre-tool proof does not release claims after an observed external effect", async () => {
+	const fixture = await preToolFailureFixture();
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	fixture.states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+
+	const restarted = fakeHost();
+	const next = fakeCtx();
+	next.ui.parent = next;
+	next.sessionManager = {
+		getBranch: () => [
+			...fixture.pi.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+			{ type: "message", message: fixture.userMessage },
+			{ type: "message", message: fixture.assistantError },
+		],
+	};
+	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
+	await restarted.events.get("session_start")({}, next);
+	await restored.whenStarted();
+	await restarted.commands.get("review").handler("reconcile", next);
+
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("two submitted pull requests also keep a pre-tool wave UNKNOWN", async () => {
+	const fixture = await preToolFailureFixture();
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	fixture.states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10", "projectbluefin/review#11"];
+
+	const restarted = fakeHost();
+	const next = fakeCtx();
+	next.ui.parent = next;
+	next.sessionManager = {
+		getBranch: () => [
+			...fixture.pi.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+			{ type: "message", message: fixture.userMessage },
+			{ type: "message", message: fixture.assistantError },
+		],
+	};
+	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
+	await restarted.events.get("session_start")({}, next);
+	await restored.whenStarted();
+	await restarted.commands.get("review").handler("reconcile", next);
+
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("a forged pre-tool marker with worker evidence remains fenced", async () => {
+	const fixture = await preToolFailureFixture();
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	saveWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, {
+		...blocked,
+		wavePreToolTerminal: "forged",
+		waveToolInvocationIds: [],
+		waveToolCallIds: ["call-1"],
+		waveTaskWorkers: { "call-1": [{ agentId: "Worker", jobId: "job-1" }] },
+		waveJobIds: ["job-1"],
+	} as never);
+
+	const restarted = fakeHost();
+	const next = fakeCtx();
+	next.ui.parent = next;
+	next.sessionManager = { getBranch: () => fixture.pi.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
+	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
+	await restarted.events.get("session_start")({}, next);
+	await restored.whenStarted();
+	await restarted.commands.get("review").handler("reconcile", next);
+
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("removing a captured submitted pull request remains an external-effect mismatch", async () => {
+	const fixture = await preToolFailureFixture(["projectbluefin/review#9"]);
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	fixture.states["projectbluefin/review#77"].submittedPrs = [];
+
+	const restarted = fakeHost();
+	const next = fakeCtx();
+	next.ui.parent = next;
+	next.sessionManager = {
+		getBranch: () => [
+			...fixture.pi.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+			{ type: "message", message: fixture.userMessage },
+			{ type: "message", message: fixture.assistantError },
+		],
+	};
+	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
+	await restarted.events.get("session_start")({}, next);
+	await restored.whenStarted();
+	await restarted.commands.get("review").handler("reconcile", next);
+
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("a late job contradiction invalidates a recorded pre-tool proof", async () => {
+	const fixture = await preToolFailureFixture();
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	assert.equal(fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.wavePreToolTerminal, "error");
+	fixture.pi.events.get("tool_call")({ toolCallId: "late-job", toolName: "task", input: {} }, fixture.ctx);
+
+	const contradicted = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(contradicted.wavePreToolTerminal, undefined);
+	assert.deepEqual(contradicted.waveToolInvocationIds, ["late-job"]);
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("late tool evidence during a deferred reconciliation lookup keeps claims fenced", async () => {
+	let holdLookup = false;
+	let lookupCount = 0;
+	let markLookupStarted;
+	let releaseLookup;
+	const lookupStarted = new Promise((resolve) => { markLookupStarted = resolve; });
+	const lookupGate = new Promise((resolve) => { releaseLookup = resolve; });
+	const fixture = await preToolFailureFixture([], (states) => {
+		const baseFetch = issueBackedFetch(states);
+		return async (url, init) => {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			if (holdLookup && body.variables?.search === undefined) {
+				lookupCount++;
+				if (lookupCount === 3) {
+					markLookupStarted();
+					await lookupGate;
+				}
+			}
+			return baseFetch(url, init);
+		};
+	});
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	holdLookup = true;
+	const reconcile = fixture.pi.commands.get("review").handler("reconcile", fixture.ctx);
+	await lookupStarted;
+	fixture.pi.events.get("tool_execution_start")({ toolCallId: "late-tool", toolName: "bash", args: {} }, fixture.ctx);
+	releaseLookup();
+	await reconcile;
+
+	const latest = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(latest.state, "blocked");
+	assert.equal(latest.wavePreToolTerminal, undefined);
+	assert.deepEqual(latest.waveToolInvocationIds, ["late-tool"]);
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("later reconciliation never completes a previously cancelled wave", async () => {
+	const fixture = await preToolFailureFixture();
+	const callId = "worker-call";
+	const jobId = "worker-job";
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const workerBatch = {
+		...blocked,
+		kind: "slay",
+		wavePreToolTerminal: undefined,
+		waveToolInvocationIds: [callId],
+		waveToolCallIds: [callId],
+		waveTaskWorkers: { [callId]: [{ agentId: "Worker", jobId, resultStatus: "completed" }] },
+		waveJobIds: [jobId],
+		waveTerminalJobStatuses: { [jobId]: "completed" },
+	};
+	saveWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, workerBatch);
+	const pi = fakeHost(); pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager = { getBranch: () => [
+		...fixture.pi.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+		{ type: "custom", customType: BATCH_ENTRY, data: workerBatch },
+	] };
+	const restored = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
+	await pi.events.get("session_start")({}, ctx);
+	await restored.whenStarted();
+	await pi.commands.get("review").handler("cancel", ctx);
+
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "cancelled");
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+	fixture.states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+	await pi.commands.get("review").handler("reconcile", ctx);
+
+	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(recovered.state, "cancelled");
+	assert.notEqual(recovered.state, "complete");
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+});
+
+test("post-dispatch running work prevents pre-tool claim release", async () => {
+	const fixture = await preToolFailureFixture();
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	fixture.ctx.asyncJobs.running = [{ id: "contradictory-job", status: "running", startTime: Date.now() }];
+	await fixture.pi.commands.get("review").handler("reconcile", fixture.ctx);
+
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("an unavailable async snapshot cannot release pre-tool claims", async () => {
+	const fixture = await preToolFailureFixture();
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	fixture.ctx.getAsyncJobSnapshot = () => undefined;
+	await fixture.pi.commands.get("review").handler("reconcile", fixture.ctx);
+
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("a non-hex 64-character prompt digest cannot release pre-tool claims", async () => {
+	const fixture = await preToolFailureFixture();
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	saveWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, { ...blocked, wavePromptDigest: "g".repeat(64) });
+
+	const restarted = fakeHost();
+	const next = fakeCtx();
+	next.ui.parent = next;
+	next.sessionManager = {
+		getBranch: () => fixture.pi.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
+	};
+	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
+	await restarted.events.get("session_start")({}, next);
+	await restored.whenStarted();
+	await restarted.commands.get("review").handler("reconcile", next);
+
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
 
 test("production Review-to-Factory reconcile releases a failed wave only after exact terminal proof", async () => {

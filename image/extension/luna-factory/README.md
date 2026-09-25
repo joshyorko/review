@@ -39,6 +39,18 @@ revision link is the skill itself.
 
 ## Command surface
 
+Bare `/factory` opens the native batch dashboard when interactive UI is
+available. It projects the existing batch service and keeps textual
+`/factory status`, `inspect`, `pause`, `resume`, `stop`, `retry`, `exclude`,
+`claims`, `export`, and `discard` controls available. Review's selected-items
+handoff opens the corresponding batch. See the [dashboard controls](../../../docs/appliance.md#factory-dashboard).
+
+The dashboard keeps Factory workers private, reads evidence only on demand,
+and never starts work merely by opening or closing. `ui/projection.ts` derives
+current-proof status and legal actions from the existing ledger; `ui/dashboard.ts`
+owns presentation only. Unknown external effects expose reconciliation, not
+retry. Excluding work does not make the original scope converge.
+
 The packaged OMP host registers `/factory`, `/factory status`, `/factory why
 <task-id>`, `/factory pause`, `/factory drain`, `/factory resume`, and
 `/factory abort`. Older or

@@ -75,6 +75,8 @@ Normal Review commands provide recovery without claim-file or Factory archaeolog
 - `/review revise` cancels a blocked wave after the same safe reconciliation and leaves the session ready for a new selection.
 - `/review slay` starts another issue Slay from the refreshed visible queue.
 
+If OMP records a coordinator error or abort before any tool invocation, Review binds that terminal event to the unique dispatched prompt and saves the proof. Explicit reconciliation can release its claims after checking that GitHub effects are unchanged and no worker is running or awaiting delivery. The wave is cancelled, not completed. Missing terminal proof, tool activity, or uncertain effects keep ownership protected. Existing records without this proof remain fenced.
+
 Reconciliation releases only claims with settled evidence. Changing instance keys or scopes does not bypass a host-wide claim.
 
 Task invocation IDs, agent IDs, and async job IDs are distinct. Review maps

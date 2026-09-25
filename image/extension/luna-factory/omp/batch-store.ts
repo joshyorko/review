@@ -1,4 +1,5 @@
-import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { open as openAsync } from "node:fs/promises";
+import { constants, closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -136,12 +137,35 @@ export class BatchStore {
 		if (JSON.parse(readFileSync(file, "utf8")).token === this.owner.token) rmSync(file);
 		this.held = false;
 	}
+	isAcquired(): boolean { return this.held; }
 	list(): Batch[] {
 		return readdirSync(this.root).filter((name) => /^batch-[a-f0-9-]+\.json$/.test(name)).map((name) => this.read(name.slice(0, -5)));
 	}
 	read(id: string): Batch {
 		if (!/^batch-[a-f0-9-]+$/.test(id)) throw new Error("invalid batch identity");
-		const batch = JSON.parse(readFileSync(join(this.root, `${id}.json`), "utf8")) as Omit<Batch, "version"> & { version: number };
+		return this.decode(id, readFileSync(join(this.root, `${id}.json`), "utf8"));
+	}
+	/** Async bounded reconstruction keeps the native loading screen responsive. */
+	async readAsync(id: string): Promise<Batch> {
+		if (!/^batch-[a-f0-9-]+$/.test(id)) throw new Error("invalid batch identity");
+		const file = await openAsync(join(this.root, `${id}.json`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+		try {
+			const stat = await file.stat();
+			// Atomic replacement can unlink this already-open snapshot. Reject hard links, not that valid old inode.
+			if (!stat.isFile() || stat.nlink > 1 || stat.size > 32 * 1024 * 1024) throw new Error("batch preview requires a regular file under 32 MiB; preserve original evidence for inspection");
+			const buffer = Buffer.alloc(stat.size + 1);
+			let count = 0;
+			while (count < buffer.length) {
+				const { bytesRead } = await file.read(buffer, count, buffer.length - count, count);
+				if (bytesRead === 0) break;
+				count += bytesRead;
+			}
+			if (count > stat.size) throw new Error("batch changed while reading; reopen to read its current revision");
+			return this.decode(id, buffer.subarray(0, count).toString("utf8"));
+		} finally { await file.close(); }
+	}
+	private decode(id: string, contents: string): Batch {
+		const batch = JSON.parse(contents) as Omit<Batch, "version"> & { version: number };
 		if ((batch.version !== 1 && batch.version !== 2) || batch.id !== id || !Array.isArray(batch.items) || !Number.isSafeInteger(batch.revision)) {
 			throw new Error("unsupported or corrupt batch; preserve original state and export for inspection");
 		}

@@ -435,6 +435,7 @@ run_review() {
       export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
     local -a sif_args=(run --containall --no-eval)
     sif_args+=("${APPTAINER_HOST_ARGS[@]}")
+    sif_args+=(--bind /dev/full:/dev/full)
     sif_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw")
     if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
       sif_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
@@ -510,6 +511,7 @@ run_review() {
     export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
   local -a apptainer_args=(run --containall --no-eval)
   apptainer_args+=("${APPTAINER_HOST_ARGS[@]}")
+  apptainer_args+=(--bind /dev/full:/dev/full)
   apptainer_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw")
   if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
     apptainer_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
