@@ -528,6 +528,32 @@ test("all repositories use the neutral reviewer agent", () => {
 		assert.doesNotMatch(prompt, /\bbluefin-(?:doctrine|reviewer|queue-triage)\b|generic-reviewer|hive_workbench_/i);
 	}
 });
+test("Review Slay coordinator retains authorized ownership until a bounded terminal condition", () => {
+	const item = {
+		id: 42,
+		type: "pr" as const,
+		repo: "example/repo",
+		title: "generic change",
+		author: "contributor",
+		url: "https://github.com/example/repo/pull/42",
+		updatedAt: Date.now(),
+		draft: false,
+		mergeState: "clean" as const,
+		reviewState: "unknown" as const,
+		labels: [],
+	};
+	const prompt = actionPrompt({ kind: "slay", item }, undefined, { workbenchMode: "review" }) ?? "";
+	assert.match(prompt, /Review Slay coordinator ownership persists through the selected lifecycle's declared terminal condition/);
+	assert.match(prompt, /Review completion, a fixer return, a push, green checks, or knowing the next action is progress, not completion/);
+	assert.match(prompt, /already-authorized in-scope work.*no second confirmation/);
+	assert.match(prompt, /new scope or effects still require authority/);
+	assert.match(prompt, /partial status report is not terminal/);
+	assert.match(prompt, /one lane is blocked, finish independent authorized work/);
+	assert.match(prompt, /live GitHub policy, permissions, exact-head checks, holds, self-review rules, and mutation guards/);
+	assert.match(prompt, /Never sleep or poll/);
+	assert.match(prompt, /Workers remain bounded and return to the coordinator/);
+});
+
 
 function ciNode(rollup: string | null, checkSuites: unknown) {
 	return {

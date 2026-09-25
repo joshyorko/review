@@ -38,6 +38,8 @@ import { EvidenceViewer } from "./ui/evidence-viewer.ts";
 import { dashboardActionAllowed } from "./ui/actions.ts";
 import { rawKeyMatcher, type KeyMatcher } from "../bluefin-review/keys.ts";
 
+const FACTORY_OWNER_HANDOFF = "Opening or owning a Factory run means the coordinator retains ownership of the recorded objective and drives it until CONVERGED, or honestly QUIESCENT/blocked because no authorized autonomous step can reduce the remaining gap. A plan, worker return, patch, pushed head, green check, review result, compaction, or knowing the next action is progress, not completion. Continue already-authorized in-scope work without re-requesting authority already present in the objective; new scope or effects still require authority. If one lane is blocked, finish independent authorized work first, then report that lane's exact blocker, evidence, and resumption condition. Stop only when the requested terminal outcome is satisfied and verified, a concrete external blocker prevents further authorized progress, or continuing requires authority or scope not granted. Completion, merge, publish, deploy, and scope authority remain separate; persistence adds no mutation authority. Workers remain bounded and return to the owner.";
+
 interface ToolContent {
 	type: "text";
 	text: string;
@@ -1361,7 +1363,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				host.sendUserMessage(
 					"The explicit operator objective for Luna Factory is:\n" +
 						objective +
-						"\nCapture the agreed generation, mandatory criteria, non-goals, permitted effects, finish authority, appetite, and exact repository subject before calling luna_factory_open. Do not infer write or merge authority; use the Factory tools and keep ordinary Review ownership unchanged.",
+						"\n" + FACTORY_OWNER_HANDOFF + " Capture the agreed generation, mandatory criteria, non-goals, permitted effects, finish authority, appetite, and exact repository subject before calling luna_factory_open. Do not infer write or merge authority; use the Factory tools and keep ordinary Review ownership unchanged.",
 					{ deliverAs: "steer" },
 				);
 			},
@@ -1382,7 +1384,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		name: "luna_factory_open",
 		label: "Factory Open",
 		description:
-			"Establish a Factory run from an objective the user already agreed to. Pass objective, criteria, and the subject repository/base. Refuses to silently replace an open run.",
+			"Establish a Factory run from an objective the user already agreed to. Opening/owning means driving the recorded objective until CONVERGED or honestly QUIESCENT/blocked because no authorized autonomous step can reduce the remaining gap; persistence adds no mutation authority. Pass objective, criteria, and the subject repository/base. Refuses to silently replace an open run.",
 		async execute(_toolCallId, params) {
 			const payload = params;
 			if (!enabled()) {
