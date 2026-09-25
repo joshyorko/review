@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createBatch, digest, type Batch } from "../core/batch.ts";
-import { parseJournal } from "../core/journal.ts";
+import { parseJournal, type JournalRead } from "../core/journal.ts";
 import { parseOperationReceipt } from "../core/schema.ts";
 import type { Ledger, OperationReceipt } from "../core/model.ts";
 
@@ -53,6 +53,13 @@ function inside(root: string, path: string): string {
 	if (!child || child === ".." || child.startsWith(`..${sep}`) || actual !== resolve(path)) throw new Error("artifact path escapes Factory state root or follows a symlink");
 	return child;
 }
+function validateItemLedger(item: Batch["items"][number], allowUnavailableBlocked = false): JournalRead {
+	const parsed = parseJournal(item.ledger);
+	const unavailableBlockedItem = allowUnavailableBlocked && !parsed.ok && item.attempts === 0 && item.stage === "BLOCKED" && Boolean(item.selected.blocker) && item.ledger.tasks.length === 0;
+	if (!parsed.ok && !unavailableBlockedItem) throw new Error(`invalid item ledger: ${parsed.reason}; original state preserved`);
+	return parsed;
+}
+
 export class BatchStore {
 	readonly root: string;
 	private owner: Owner = { host: hostname(), pid: process.pid, start: processStart(process.pid), token: randomUUID() };
@@ -147,9 +154,7 @@ export class BatchStore {
 			if (!item.selected || !Array.isArray(item.sessions) || !item.sessions.every((session) => typeof session === "string") || !Number.isSafeInteger(item.attempts) || item.attempts < 0 || !["QUEUED", "RUNNING", "VERIFY", "DONE", "BLOCKED", "UNKNOWN", "CANCELLED", "EXCLUDED"].includes(item.stage)) {
 				throw new Error("invalid item state; no execution allowed");
 			}
-			const parsed = parseJournal(item.ledger);
-			const unavailableBlockedItem = !parsed.ok && item.attempts === 0 && item.stage === "BLOCKED" && Boolean(item.selected.blocker) && item.ledger.tasks.length === 0;
-			if (!parsed.ok && !unavailableBlockedItem) throw new Error(`invalid item ledger: ${parsed.ok ? "" : parsed.reason}; original state preserved`);
+			const parsed = validateItemLedger(item, true);
 			if (parsed.ok) item.ledger = parsed.ledger;
 			if (legacy) {
 				if (item.operations !== undefined && !Array.isArray(item.operations)) throw new Error("invalid legacy operation history; preserve original evidence");
@@ -179,6 +184,7 @@ export class BatchStore {
 	write(batch: Batch): void {
 		if (!this.held || this.failed) throw new Error("Factory persistence is not writable; new effects refused");
 		if (!/^batch-[a-f0-9-]+$/.test(batch.id)) throw new Error("invalid batch identity");
+		for (const item of batch.items) validateItemLedger(item);
 		const file = join(this.root, `${batch.id}.json`);
 		if (existsSync(file) && this.read(batch.id).revision !== batch.revision) throw new Error("stale batch revision");
 		const next = { ...batch, revision: batch.revision + 1 };
