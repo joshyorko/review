@@ -247,7 +247,7 @@ export class FactoryDashboard {
 		} else if (this.view === "evidence") {
 			const entry = this.evidenceChoices()[this.cursor];
 			if (entry?.path && this.batchId && this.itemKey) this.emit({ kind: "evidence-preview", batchId: this.batchId, itemKey: this.itemKey, path: entry.path });
-			else if (entry?.text) { this.view = "evidence-detail" | "debug" | "claim-debug"; this.scroll = 0; }
+			else if (entry?.text) { this.enter("evidence-detail"); }
 		} else if (this.view === "claims") {
 			if (this.relevantClaims()[this.cursor]) this.enter("claim-detail");
 		}

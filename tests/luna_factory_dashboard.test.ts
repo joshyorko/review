@@ -293,3 +293,16 @@ test("older runs are discoverable without batch IDs and unavailable when history
 	view.setSource({ ...source(), hasMoreHistory: false }); const count = actions.length;
 	view.handleInput("m"); assert.equal(actions.length, count);
 });
+
+test("inline evidence opens its text and returns to the evidence list", () => {
+ const snapshot = source();
+ snapshot.batches[0]!.scopeRevisions.push({ item: "acme/app#1", reason: "Operator deferred the migration", at: "2026-09-25T00:00:00Z" });
+ const view = makeView(snapshot);
+ view.handleInput("e");
+ assert.match(view.render(80).join("\n"), /Scope revisions/);
+ view.handleInput("Enter");
+ assert.match(view.render(80).join("\n"), /Operator deferred the migration/);
+ view.handleInput("q");
+ assert.match(view.render(80).join("\n"), /Scope revisions/);
+ assert.doesNotMatch(view.render(80).join("\n"), /Operator deferred the migration/);
+});
