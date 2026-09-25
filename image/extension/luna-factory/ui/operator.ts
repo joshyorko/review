@@ -45,6 +45,11 @@ export function itemOverview(item: ProjectedItem, active = false): ItemOverview 
 	}
 	if (item.stage === "BLOCKED") {
 		const reason = item.blocker ?? "The last attempt could not continue.";
+        if (/Command failed:.*(?:gh repo clone|git.*(?:clone|fetch))/i.test(reason)) return {
+            caption: "repository setup failed", heading: "Repository setup failed",
+            explanation: "Factory couldn't prepare the repository workspace. The recorded error is available in Debug.",
+            next: "Inspect the error, fix the setup, then retry.", needsYou: true,
+        };
 		if (/credential|GitHub (401|403)|auth expired|restore access/i.test(reason)) return { caption: "GitHub access needs attention", heading: "Reconnect GitHub", explanation: "Factory couldn't use the current GitHub connection.", next: "Restore access, then retry this item.", needsYou: true };
 		if (/budget|attempt.*exhaust/i.test(reason)) return { caption: "attempt budget used", heading: "This run reached its limit", explanation: "The original attempt budget has been used. Retrying does not reset it.", next: "Inspect the work before deciding on another scope.", needsYou: true };
 		return { caption: reason, heading: "Work needs attention", explanation: reason, next: item.actions.includes("retry") ? "Retry when the blocker is resolved." : "Inspect the blocker and evidence.", needsYou: true };

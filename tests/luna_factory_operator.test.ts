@@ -19,3 +19,15 @@ test("unknown external effect puts reconciliation ahead of retry", () => {
  const b=batch();const i=b.items[0]!;i.stage="UNKNOWN";i.operation={id:"operation-a",generation:i.ledger.generation,subject:i.ledger.subject,effect:"git-push",phase:"push",state:"unknown"};
  const view=itemOverview(projectItem(b,i));assert.match(view.next,/Reconcile/);assert.doesNotMatch(view.next,/retry/i);
 });
+
+test("repository command failures keep paths and raw stderr behind debug", () => {
+ const b = batch(); const item = b.items[0]!;
+ item.stage = "BLOCKED";
+ item.blocker = "Command failed: gh repo clone acme/app /home/operator/state/batch-uuid/workspace\nraw git stderr";
+ const projected = projectItem(b, item);
+ const view = itemOverview(projected);
+ assert.equal(view.caption, "repository setup failed");
+ assert.match(view.next, /Inspect the error/);
+ assert.doesNotMatch(JSON.stringify(view), /batch-uuid|raw git stderr|\/home/);
+ assert.equal(projected.blocker, item.blocker);
+});

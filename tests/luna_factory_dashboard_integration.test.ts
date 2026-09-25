@@ -301,3 +301,37 @@ test("production loading, nested evidence, and pause preserve one live parent da
 		await host.events.get("session_shutdown")?.({}, ctx as never);
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("native stop confirmation runs after the dashboard closes and restores selection", { timeout: 10_000 }, async () => {
+ const root = await mkdtemp(join(tmpdir(), "factory-visible-confirm-"));
+ try {
+  const batch = await storedBatch(root);
+  const host = extensionHost(root);
+  let mounted = false; let mounts = 0; let confirmations = 0;
+  const ctx = { hasUI: true, ui: {
+   notify() {},
+   async confirm() { assert.equal(mounted, false, "editor confirmation must not be covered by the overlay"); confirmations++; return false; },
+   custom<T>(factory: (tui: unknown, theme: unknown, keys: unknown, done: (result: T) => void) => unknown): Promise<T> {
+    mounted = true; mounts++;
+    return new Promise((resolve, reject) => {
+     let component: FactoryDashboard | undefined; let acted = false;
+     const paint = () => {
+      if (!component || acted) return;
+      if (/Loading/.test(component.render(100).join("\n"))) return;
+      acted = true;
+      try {
+       assert.equal(component.selection.batchId, batch.id);
+       component.handleInput(mounts === 1 ? "x" : "q");
+      } catch (error) { reject(error); }
+     };
+     component = factory({ requestRender() { queueMicrotask(paint); } }, { fg: (_c: string, t: string) => t, bold: (t: string) => t, inverse: (t: string) => t }, {}, (action) => { mounted = false; component?.dispose(); resolve(action); }) as FactoryDashboard;
+     queueMicrotask(paint);
+    });
+   }
+  } };
+  await host.commands.get("factory")!.handler("", ctx as never);
+  assert.equal(confirmations, 1); assert.equal(mounts, 2);
+  assert.equal(new BatchStore(root).read(batch.id).control, "active");
+  await host.events.get("session_shutdown")?.({}, ctx as never);
+ } finally { await rm(root, { recursive: true, force: true }); }
+});

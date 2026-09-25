@@ -1126,7 +1126,13 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			for (;;) {
 				const action = await custom<FactoryDashboardAction>((tui, theme, _keys, done) => {
 					dashboard = new FactoryDashboard({
-						tui: tui as { requestRender(): void }, theme: theme as FactoryDashboardTheme, done, onAction: perform,
+						tui: tui as { requestRender(): void }, theme: theme as FactoryDashboardTheme, done,
+                        onAction: (action) => {
+                            // OMP's built-in dialogs replace the editor, beneath overlays.
+                            // Return first; the loop restores this view after the dialog.
+                            if (["stop", "retry", "exclude", "discard", "export", "reconcile", "reconcile-effect"].includes(action.kind)) done(action);
+                            else return perform(action);
+                        },
 						source: displayed ? { ...displayed, notice, busy } : { batches: [], claims: [], readOnly: true, loading: true, notice, busy },
 						matchKey, primitives, presentation, focusBatchId: focus,
 					});
@@ -1138,7 +1144,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				dashboardPresentation = presentation;
 				if (action.kind === "close") return;
 				// Compatible hosts may resolve a custom component with an action.
-				// Native callbacks keep this overlay mounted beneath nested viewers.
+				// Evidence viewers stay nested; editor dialogs run after closing this overlay.
 				await perform(action);
 			}
 		} finally {
