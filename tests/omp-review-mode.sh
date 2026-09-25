@@ -27,6 +27,11 @@ test_files=(
   tests/luna_factory_dashboard_integration.test.ts
   tests/luna_factory_dashboard_actions.test.ts
   tests/luna_factory_evidence.test.ts
+  tests/luna_factory_evidence_viewer.test.ts
+  tests/luna_factory_claims.test.ts
+  tests/luna_factory_claim_owner_bridge.test.ts
+  tests/luna_factory_history.test.ts
+  tests/luna_factory_operator.test.ts
 )
 
 if ! command -v node >/dev/null 2>&1; then

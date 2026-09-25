@@ -20,11 +20,11 @@ function dashboard(actions: FactoryDashboardAction[] = []) {
 test("dashboard renders wide and narrow layouts and emits typed controls", () => {
 	const actions: FactoryDashboardAction[] = [];
 	const view = dashboard(actions);
-	assert.match(view.render(120).join("\n"), /FACTORY batch-aaaaaaaa/);
-	assert.match(view.render(70).join("\n"), /ITEMS 2/);
+	assert.match(view.render(120).join("\n"), /Luna Factory/);
+	assert.match(view.render(70).join("\n"), /#1/);
 	view.handleInput("Enter");
 	assert.equal(actions.length, 0);
-	assert.match(view.render(70).join("\n"), /DETAIL/);
+	assert.match(view.render(70).join("\n"), /#1/);
 	view.handleInput("o");
 	assert.deepEqual(actions[0], { kind: "open", batchId: "batch-aaaaaaaa", itemKey: "acme/app#1", url: "https://github.com/acme/app/pull/1" });
 });
@@ -43,18 +43,19 @@ test("live updates retain selection by stable keys", () => {
 test("loading, empty, errors, and unknown values render honestly", () => {
 	const view = new FactoryDashboard({ tui: { requestRender() {} }, theme: { fg: (_c, t) => t, bold: (t) => t, inverse: (t) => t }, done: () => {}, source: { batches: [], claims: [], readOnly: true, error: "ledger unavailable" }, rows: 10 });
 	const frame = view.render(48).join("\n");
-	assert.match(frame, /No retained Factory batches/);
-	assert.match(frame, /ledger unavailable/);
-	assert.match(frame, /read-only/);
+	assert.match(frame, /Saved work needs attention/);
+	assert.match(frame, /Viewing only/i);
+	view.handleInput("?"); for (let i = 0; i < 100; i++) view.handleInput("j");
+	assert.match(view.render(48).join("\n"), /ledger unavailable/);
 });
 
 test("claims, evidence, help, palette and close are local views/actions", () => {
 	const actions: FactoryDashboardAction[] = [];
 	const view = dashboard(actions);
-	view.handleInput("c"); assert.match(view.render(80).join("\n"), /CLAIMS/);
-	view.handleInput("q"); assert.match(view.render(80).join("\n"), /FACTORY/);
+	view.handleInput("c"); assert.match(view.render(80).join("\n"), /Ownership/);
+	view.handleInput("q"); assert.match(view.render(80).join("\n"), /Luna Factory/);
 	view.handleInput("?"); assert.match(view.render(80).join("\n"), /HELP/);
-	view.handleInput("q"); view.handleInput("a"); assert.match(view.render(80).join("\n"), /ACTIONS/);
+	view.handleInput("q"); view.handleInput("a"); assert.match(view.render(80).join("\n"), /Actions/);
 	view.handleInput("q"); view.handleInput("q");
 	assert.deepEqual(actions.at(-1), { kind: "close" });
 });
@@ -68,9 +69,9 @@ function makeView(snapshot: FactoryDashboardSnapshot, actions: FactoryDashboardA
 test("stale DONE is never counted as proven in header or batch list", () => {
 	const snapshot = source(); snapshot.batches[0]!.items[0]!.stage = "DONE";
 	const view = makeView(snapshot);
-	assert.match(view.render(120).join("\n"), /0\/2 proven/);
+	assert.match(view.render(120).join("\n"), /0 proven/);
 	view.handleInput("b");
-	assert.doesNotMatch(view.render(120).join("\n"), /1\/2 proven/);
+	assert.doesNotMatch(view.render(120).join("\n"), /1 proven/);
 });
 
 test("roster follows selection and details scroll without moving the selected item", () => {
@@ -78,7 +79,7 @@ test("roster follows selection and details scroll without moving the selected it
 	batch.items = Array.from({ length: 30 }, (_, i) => ({ ...structuredClone(batch.items[0]!), selected: { ...batch.items[0]!.selected, key: `acme/app#${i + 1}`, number: i + 1, acceptance: "acceptance ".repeat(100) } }));
 	const view = makeView(snapshot);
 	for (let i = 0; i < 20; i++) view.handleInput("j");
-	assert.ok(view.render(70).some((row) => row.includes(`>`) && row.includes(view.selection.itemKey!)));
+	assert.ok(view.render(70).some((row) => row.includes(`›`) && row.includes(`#${view.selection.itemKey!.split("#")[1]}`)));
 	view.handleInput("Enter"); const selected = view.selection.itemKey;
 	const before = view.render(70).join("\n"); view.handleInput("j");
 	assert.equal(view.selection.itemKey, selected);
@@ -99,8 +100,8 @@ test("batch picker opens exact selected batch and presentation restores focus", 
 
 test("action palette is keyboard selectable and read-only inspection stays usable", () => {
 	const actions: FactoryDashboardAction[] = []; const snapshot = source();
-	const view = makeView(snapshot, actions); view.handleInput("a"); view.handleInput("Enter");
-	assert.match(view.render(90).join("\n"), /DETAIL/); assert.equal(actions.length, 0);
+	const view = makeView(snapshot, actions); view.handleInput("a"); view.handleInput("j"); view.handleInput("Enter");
+	assert.match(view.render(90).join("\n"), /#1/); assert.equal(actions.length, 0);
 	const readonly = makeView({ ...snapshot, readOnly: true }, actions); readonly.handleInput("a");
 	assert.match(readonly.render(90).join("\n"), /Inspect/);
 	readonly.handleInput("x"); readonly.handleInput("r"); readonly.handleInput("p");
@@ -111,15 +112,16 @@ test("evidence chooses the selected artifact and claims target the displayed own
 	const snapshot = source(); const item = snapshot.batches[0]!.items[0]!;
 	item.sessions = ["/tmp/factory/one.jsonl", "/tmp/factory/two.jsonl"];
 	const actions: FactoryDashboardAction[] = [];
-	const view = makeView({ ...snapshot, claims: [
+	const view = makeView({ ...snapshot, canReconcileClaims: true, claims: [
 		{ resource: "repo:other/repo", owner: "other", createdAt: "now", status: "unknown" },
-		{ resource: "repo:acme/app", owner: "displayed", createdAt: "now", status: "unknown" },
+		{ resource: "repo:acme/app", owner: "review:displayed:0", createdAt: "now", status: "unknown" },
 	] }, actions);
 	view.handleInput("e"); view.handleInput("j"); view.handleInput("Enter");
 	assert.equal(actions.at(-1)?.kind, "evidence-preview");
 	assert.equal((actions.at(-1) as {path?:string}).path, "/tmp/factory/two.jsonl");
 	view.handleInput("q"); view.handleInput("c"); view.handleInput("Enter");
-	assert.deepEqual(actions.at(-1), { kind: "reconcile", resource: "repo:acme/app", owner: "displayed" });
+	view.handleInput("r");
+	assert.deepEqual(actions.at(-1), { kind: "reconcile", resource: "repo:acme/app", owner: "review:displayed:0" });
 	const readonly = makeView({ ...snapshot, readOnly: true }, actions); const count = actions.length;
 	readonly.handleInput("c"); readonly.handleInput("Enter"); assert.equal(actions.length, count);
 });
@@ -149,7 +151,7 @@ test("large retained history projects only the visible viewport during navigatio
 	const view = makeView({ batches, claims: [], readOnly: true });
 	view.render(120); view.handleInput("j"); view.render(60);
 	assert.ok(accessed.size < 20, `projected ${accessed.size} retained batches for a bounded viewport`);
-	assert.match(view.render(120).join("\n"), /BATCHES/);
+	assert.match(view.render(120).join("\n"), /Recent runs/);
 });
 
 test("native panel and split primitives are exercised without widening rows", () => {
@@ -160,4 +162,102 @@ test("native panel and split primitives are exercised without widening rows", ()
 	} });
 	view.render(120); assert.equal(splits, 1); assert.equal(panels, 1);
 	view.render(60); assert.equal(splits, 1); assert.equal(panels, 2);
+});
+
+test("claim Enter opens an inspector and reconciliation is advertised only when available", () => {
+	const actions: FactoryDashboardAction[] = [];
+	const snapshot = source();
+	snapshot.canReconcileClaims = true;
+	snapshot.claims = [{ resource: "repo:acme/app", owner: "review:batch-other:0", createdAt: "2026-09-25T10:00:00Z", status: "unknown" }];
+	const view = makeView(snapshot, actions, { rows: 30 });
+	view.handleInput("c");
+	view.handleInput("Enter");
+	assert.match(view.render(80).join("\n"), /Repository locked/);
+	assert.match(view.render(80).join("\n"), /Next safe action/);
+	assert.match(view.render(80).join("\n"), /reconcile/i);
+	view.handleInput("r");
+	assert.deepEqual(actions.at(-1), { kind: "reconcile", resource: "repo:acme/app", owner: "review:batch-other:0" });
+
+	const unavailableActions: FactoryDashboardAction[] = [];
+	const unavailable = makeView({ ...snapshot, canReconcileClaims: false }, unavailableActions);
+	unavailable.handleInput("c");
+	unavailable.handleInput("Enter");
+	assert.doesNotMatch(unavailable.render(80).join("\n"), /r Reconcile/i);
+	unavailable.handleInput("r");
+	assert.equal(unavailableActions.length, 0);
+});
+
+test("batch and evidence cursors stay keyed to identities across switching and updates", () => {
+	const snapshot = source();
+	const actions: FactoryDashboardAction[] = [];
+	const first = snapshot.batches[0]!;
+	first.items[0]!.sessions = ["/evidence/a", "/evidence/b"];
+	first.items[1]!.sessions = ["/evidence/a", "/evidence/b"];
+	const second = structuredClone(first);
+	second.id = "batch-bbbbbbbb";
+	second.items[0]!.selected.key = "acme/app#1";
+	second.items[1]!.selected.key = "acme/app#2";
+	snapshot.batches = [first, second];
+	const view = makeView(snapshot, actions);
+	view.handleInput("j");
+	assert.equal(view.selection.itemKey, "acme/app#2");
+	view.handleInput("b");
+	view.handleInput("j");
+	view.handleInput("Enter");
+	view.handleInput("j");
+	assert.equal(view.selection.itemKey, "acme/app#2");
+	view.handleInput("b");
+	view.handleInput("k");
+	view.handleInput("Enter");
+	assert.equal(view.selection.itemKey, "acme/app#2");
+	view.handleInput("e");
+	view.handleInput("j");
+	const refreshed = structuredClone(snapshot);
+	refreshed.batches[0]!.items[0]!.sessions = ["/evidence/b", "/evidence/a"];
+	view.setSource(refreshed);
+	view.handleInput("Enter");
+	assert.deepEqual(actions.at(-1), { kind: "evidence-preview", batchId: first.id, itemKey: "acme/app#2", path: "/evidence/b" });
+});
+
+test("empty dashboard footer exposes only contextual actions", () => {
+	const view = makeView({ batches: [], claims: [], readOnly: true });
+	const frame = view.render(80).join("\n");
+	assert.match(frame, /\? Help.*q Close/);
+	assert.doesNotMatch(frame, /e evidence/);
+});
+
+test("focused retained batch survives the loading snapshot before reconstruction", () => {
+	const batch = source().batches[0]!;
+	const view = makeView({ batches: [], claims: [], readOnly: true, loading: true }, [], { focusBatchId: batch.id, presentation: { batchId: batch.id, itemKey: "acme/app#2", view: "roster", scroll: 0 } });
+	view.setSource({ batches: [batch], claims: [], readOnly: true });
+	assert.deepEqual(view.selection, { batchId: batch.id, itemKey: "acme/app#2" });
+});
+
+test("async action handling keeps the dashboard open while close still uses done", async () => {
+	const actions: FactoryDashboardAction[] = [];
+	const closed: FactoryDashboardAction[] = [];
+	const view = new FactoryDashboard({
+		tui: { requestRender() {} },
+		theme: plainTheme,
+		done: (action) => closed.push(action),
+		onAction: async (action) => { actions.push(action); },
+		source: { ...source(), canReconcileClaims: true, claims: [{ resource: "repo:acme/app", owner: "review:owner:0", createdAt: "now", status: "unknown" }] },
+		rows: 20,
+	});
+	view.handleInput("c"); view.handleInput("Enter"); view.handleInput("r");
+	await Promise.resolve();
+	assert.deepEqual(actions.at(-1), { kind: "reconcile", resource: "repo:acme/app", owner: "review:owner:0" });
+	assert.equal(closed.length, 0);
+	view.handleInput("q"); view.handleInput("q"); view.handleInput("q");
+	assert.deepEqual(closed.at(-1), { kind: "close" });
+});
+
+test("busy snapshots keep navigation available and hide mutation controls", () => {
+	const actions: FactoryDashboardAction[] = [];
+	const view = makeView({ ...source(), busy: true, canReconcileClaims: true, claims: [{ resource: "repo:acme/app", owner: "review:owner:0", createdAt: "now", status: "unknown" }] }, actions, { rows: 20 });
+	view.handleInput("c"); view.handleInput("Enter");
+	assert.match(view.render(80).join("\n"), /Action in progress/i);
+	assert.doesNotMatch(view.render(80).join("\n"), /reconcile/i);
+	view.handleInput("r");
+	assert.equal(actions.length, 0);
 });

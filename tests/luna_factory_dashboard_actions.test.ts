@@ -30,8 +30,9 @@ test("evidence and URL actions must still name authoritative recorded references
 	assert.equal(dashboardActionAllowed({ kind: "open", batchId: "batch-ab", itemKey: "a/b#1", url: "https://other.example/" }, state), false);
 });
 test("claim reconciliation must still match the captured resource and owner", () => {
-	const state = { ...snapshot(), claims: [{ resource: "repo:a/b", owner: "owner", status: "unknown" as const, createdAt: "now" }] };
+	const state = { ...snapshot(), canReconcileClaims: true, claims: [{ resource: "repo:a/b", owner: "owner", status: "unknown" as const, createdAt: "now" }] };
 	assert.equal(dashboardActionAllowed({ kind: "reconcile", resource: "repo:a/b", owner: "owner" }, state), true);
 	assert.equal(dashboardActionAllowed({ kind: "reconcile", resource: "repo:a/b", owner: "stale-owner" }, state), false);
+	assert.equal(dashboardActionAllowed({ kind: "reconcile", resource: "repo:a/b", owner: "owner" }, { ...state, canReconcileClaims: false }), false);
 	assert.equal(dashboardActionAllowed({ kind: "reconcile", resource: "repo:a/b", owner: "owner" }, { ...state, readOnly: true }), false);
 });

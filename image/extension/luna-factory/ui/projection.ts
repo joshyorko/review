@@ -327,20 +327,26 @@ function nextSafeAction(
 	dependency: string | undefined,
 	claims: readonly ProjectedClaim[],
 	readOnly: boolean,
+	active: boolean,
 ): string {
 	if (item.stage === "DONE" && !batchItemProofCurrent(item)) return "stored DONE proof is stale; reverify proof; retry unavailable";
-	if (stage === "DONE") return item.selected.action === "inspect" || item.proof?.stage === "merged-upstream" ? "no action required" : "owner integration required for verified-patch";
+	if (stage === "DONE") {
+		if (item.selected.action === "inspect" || item.proof?.stage === "merged-upstream") return "no action required";
+		return item.proof?.stage === "pr-ready" ? "human review and landing required; inspect the recorded PR" : "owner integration required for verified-patch";
+	}
 	if (item.stage === "EXCLUDED") return "scope revision recorded; no execution";
-	if (item.selected.action === "inspect" && stage === "UNKNOWN") return "inspect-only outcome; mutation actions unavailable";
 	if (externalEffect(item) && (item.operation?.state === "unknown" || item.operation?.state === "intent" || stage === "UNKNOWN")) return readOnly ? "inspect external effect; reconciliation required; retry unavailable" : "reconcile external effect; retry unavailable";
-	if (claims.some((claim) => claim.conflict || claim.status === "unknown")) return "inspect ownership / reconcile claim before resuming";
+	if (claims.some((claim) => claim.conflict)) return "inspect ownership / reconcile claim before resuming";
+	if (stage === "RUNNING") return active ? "wait for the observed worker; inspect execution evidence" : "inspect recorded execution; current worker liveness is unknown";
+	if (stage === "VERIFY") return active ? "wait for verification / independent acceptance; inspect evidence" : "inspect verification evidence and the resumption condition";
+	if (claims.some((claim) => claim.status === "unknown")) return "inspect ownership / reconcile claim before resuming";
 	if (dependency !== undefined) return `wait for ${dependency}`;
 	if (item.attempts >= batch.maxAttempts || batch.items.reduce((total, candidate) => total + candidate.attempts, 0) >= batch.maxTotalAttempts) return "original attempt budget exhausted; no retry";
-	if (stage === "UNKNOWN") return readOnly ? "inspect retained work; reconciliation may be required" : "inspect retained work, then retry within original budget";
-	if (stage === "BLOCKED" && retryEligible(batch, item, stage, dependency, claims, readOnly)) return "retry item within original budget";
-	if (stage === "VERIFY") return "inspect proof and complete the owner integration step";
-	if (stage === "QUEUED") return "wait for Factory dispatch";
-	if (stage === "CANCELLED") return "explicitly retry after inspecting retained work";
+	const retry = retryEligible(batch, item, stage, dependency, claims, readOnly);
+	if (stage === "UNKNOWN") return retry ? "inspect retained work, then retry within original budget" : "inspect retained work and reconcile its outcome; retry unavailable";
+	if (stage === "BLOCKED" && retry) return "retry item within original budget";
+	if (stage === "QUEUED") return readOnly ? "inspect queued work; execution controls unavailable in this context" : batch.control === "paused" ? "resume the batch when ready to dispatch" : "wait for Factory dispatch";
+	if (stage === "CANCELLED") return retry ? "explicitly retry after inspecting retained work" : "inspect retained work; retry unavailable in this context";
 	return item.blocker ?? "inspect Factory evidence";
 }
 
@@ -463,7 +469,7 @@ export function projectItem(batch: Batch, item: BatchItem, options: ProjectionOp
 	if (retryEligible(batch, item, stage, dependency, claims, options.readOnly === true)) actions.push("retry");
 	const uncertainOperation = item.operation !== undefined && ["unknown", "intent"].includes(item.operation.state);
 	if (!options.readOnly && item.selected.action !== "inspect" && ["BLOCKED", "QUEUED", "CANCELLED"].includes(item.stage) && !uncertainOperation) actions.push("exclude");
-	const next = nextSafeAction(batch, item, stage, dependency, claims, options.readOnly === true);
+	const next = nextSafeAction(batch, item, stage, dependency, claims, options.readOnly === true, options.activeItemKeys?.includes(item.selected.key) === true);
 	const details = detailRows(batch, item, stage, proof, dependency, claims, attemptHistory, historyForDetails, options.readOnly === true);
 	const activeKeys = options.activeItemKeys?.map((key) => key.toLowerCase());
 	const executionLiveness = stage !== "RUNNING"

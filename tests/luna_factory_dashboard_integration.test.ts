@@ -120,13 +120,21 @@ function interactive(actions: FactoryDashboardAction[], frames: string[][], conf
 			confirm: confirmations ? async () => confirmations() : undefined,
 			async custom<T>(factory: (tui: unknown, theme: unknown, keys: unknown, done: (result: T) => void) => unknown, options?: unknown): Promise<T> {
 				assert.deepEqual(options, { overlay: true, overlayOptions: { fullscreen: true, width: "100%", maxHeight: "100%", anchor: "top-left", mouseTracking: false } });
-				let result: T | undefined;
-				const component = factory({ requestRender() {} }, { fg: (_c: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text }, {}, (value) => { result = value; }) as FactoryDashboard;
-				frames.push(component.render(110));
-				const action = actions[calls++] ?? { kind: "close" };
-				if (calls > 10) throw new Error("dashboard did not close");
-				component.dispose();
-				return action as T;
+				return new Promise<T>((resolve, reject) => {
+					let component: FactoryDashboard | undefined;
+					let completed = false;
+					const paint = () => {
+						if (!component || completed) return;
+						const frame = component.render(110); frames.push(frame);
+						if (frame.some((line) => line.includes("Loading"))) return;
+						completed = true;
+						const action = actions[calls++] ?? { kind: "close" };
+						if (calls > 10) { reject(new Error("dashboard did not close")); return; }
+						component.dispose(); resolve(action as T);
+					};
+					component = factory({ requestRender() { queueMicrotask(paint); } }, { fg: (_c: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text }, {}, resolve) as FactoryDashboard;
+					paint();
+				});
 			},
 		},
 		messages,
@@ -145,8 +153,9 @@ test("loaded extension retains typed handoff seams; dashboard reopen does not wr
 		const ctx = interactive([{ kind: "close" }], frames);
 		await host.commands.get("factory")!.handler("", ctx as never);
 		await openFactoryDashboard(ctx, batch.id);
-		assert.equal(frames.length, 2);
-		assert.ok(frames.every((frame) => frame.join("\n").includes(batch.id)));
+		const loadedFrames = frames.filter((frame) => !frame.some((line) => line.includes("Loading")));
+		assert.equal(loadedFrames.length, 2);
+		assert.ok(loadedFrames.every((frame) => frame.join("\n").includes("#1")));
 		assert.equal(readFileSync(file, "utf8"), before);
 		assert.equal(existsSync(join(root, "owner.json")), false);
 		assert.equal(host.modelCalls(), 0);
@@ -187,7 +196,7 @@ test("disabled Factory still inspects retained history and refuses emitted mutat
 		const batch = await storedBatch(root); const host = extensionHost(root, false); const frames: string[][] = [];
 		const ctx = interactive([{ kind: "pause", batchId: batch.id }, { kind: "close" }], frames);
 		await host.commands.get("factory")!.handler("", ctx as never);
-		assert.match(frames[0]!.join("\n"), /read-only/);
+		assert.match(frames.find((frame) => !frame.some((line) => line.includes("Loading")))!.join("\n"), /Viewing only/);
 		assert.equal(new BatchStore(root).read(batch.id).control, "active");
 		assert.equal(existsSync(join(root, "owner.json")), false);
 		await host.events.get("session_shutdown")?.({}, ctx as never);
@@ -206,5 +215,89 @@ test("persistence failures repaint a fail-closed snapshot without overwriting th
 		assert.match(problem, /persistence failed.*disk full/);
 		assert.equal(new BatchStore(root).read(batch.id).control, "active");
 		service.store.release();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("asynchronous dashboard reconstruction uses the same store validation without acquiring ownership", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-async-reconstruct-"));
+	try {
+		const batch = await storedBatch(root);
+		const before = readFileSync(join(root, `${batch.id}.json`), "utf8");
+		const service = new BatchService(root, new BatchGitHub(undefined), undefined, {} as never, 2);
+		let yielded = false;
+		const reading = service.readSnapshotAsync();
+		queueMicrotask(() => { yielded = true; });
+		const snapshot = await reading;
+		assert.equal(yielded, true);
+		assert.deepEqual(snapshot, service.readSnapshot());
+		assert.equal(existsSync(join(root, "owner.json")), false);
+		assert.equal(readFileSync(join(root, `${batch.id}.json`), "utf8"), before);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+import { DASHBOARD_ENTRY, loadDashboardPresentation, saveDashboardPresentation } from "../image/extension/luna-factory/omp/session.ts";
+
+test("native session presentation restores batch/item/view without changing Factory authority", () => {
+	const entries: Array<{type: string; customType: string; data: unknown}> = [];
+	saveDashboardPresentation({ appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); } }, {
+		batchId: "batch-ab", itemKey: "example/repo#1", view: "evidence", scroll: 5, cursor: 2,
+		itemKeysByBatch: { "batch-ab": "example/repo#1", "batch-cd": "example/repo#2" }, cursorKeys: { evidence: "/state/session.jsonl" },
+	});
+	assert.equal(entries[0]?.customType, DASHBOARD_ENTRY);
+	const restored = loadDashboardPresentation({ sessionManager: { getBranch: () => entries } });
+	assert.equal(restored?.itemKey, "example/repo#1"); assert.equal(restored?.view, "evidence");
+	assert.equal(restored?.itemKeysByBatch?.["batch-cd"], "example/repo#2");
+	entries.push({ type: "custom", customType: DASHBOARD_ENTRY, data: { view: "execute", scroll: -1, control: "active" } });
+	assert.equal(loadDashboardPresentation({ sessionManager: { getBranch: () => entries } }), undefined);
+});
+
+test("production loading, nested evidence, and pause preserve one live parent dashboard", { timeout: 10_000 }, async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-journey-"));
+	const frames: string[][] = [];
+	try {
+		const batch = await storedBatch(root); const store = new BatchStore(root); store.acquire();
+		const session = join(root, "worker.jsonl"); await writeFile(session, "retained worker evidence ".repeat(100) + "TAIL_PROOF");
+		const saved = store.read(batch.id); saved.items[0]!.sessions = [session]; store.write(saved); store.release();
+		const host = extensionHost(root); let depth = 0; let mounts = 0; let viewers = 0; let phase = 0; let sawLoading = false;
+		let parentPaint: (() => void) | undefined;
+		const ctx = {
+			hasUI: true,
+			ui: {
+				notify() {},
+				async custom<T>(factory: (tui: unknown, theme: unknown, keys: unknown, done: (result: T) => void) => unknown): Promise<T> {
+					const level = ++depth; if (level === 1) mounts++; else viewers++;
+					return new Promise<T>((resolve, reject) => {
+						let component: { render(width: number): string[]; handleInput(input: string): void; dispose(): void };
+						let finished = false;
+						const paint = () => {
+							if (!component || finished) return;
+							try {
+								const frame = component.render(80); frames.push(frame);
+								if (level === 2) {
+									assert.equal(depth, 2); component.handleInput("end");
+									assert.match(component.render(80).join("\n"), /TAIL_PROOF/);
+									component.handleInput("q"); return;
+								}
+								if (frame.some((line) => line.includes("Loading"))) { sawLoading = true; assert.doesNotMatch(frame.join("\n"), /No retained/); return; }
+								if (depth !== 1 || /action in progress/i.test(frame.join("\n"))) return;
+								if (phase === 0) { phase = 1; component.handleInput("e"); component.handleInput("Enter"); }
+								else if (phase === 1 && viewers === 1) { phase = 2; component.handleInput("q"); component.handleInput("p"); }
+								else if (phase === 2 && /paused/i.test(frame.join("\n"))) { phase = 3; component.handleInput("q"); }
+							} catch (error) { reject(error); }
+						};
+						component = factory({ requestRender() { queueMicrotask(paint); }, terminal: { rows: 12 } }, { fg: (_c: string, t: string) => t, bold: (t: string) => t, inverse: (t: string) => t }, {}, (result) => {
+							finished = true; depth--; component.dispose(); resolve(result); if (level === 2) queueMicrotask(() => parentPaint?.());
+						}) as typeof component;
+						if (level === 1) parentPaint = paint;
+						paint();
+					});
+				},
+			},
+		};
+		await host.commands.get("factory")!.handler("", ctx as never);
+		assert.equal(sawLoading, true); assert.equal(mounts, 1); assert.equal(viewers, 1); assert.equal(phase, 3);
+		assert.equal(new BatchStore(root).read(batch.id).control, "paused");
+		assert.equal(host.modelCalls(), 0);
+		await host.events.get("session_shutdown")?.({}, ctx as never);
 	} finally { await rm(root, { recursive: true, force: true }); }
 });

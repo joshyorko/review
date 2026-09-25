@@ -309,3 +309,26 @@ test("items without an execution receipt explicitly display unknown model and ef
 	const batch = makeBatch([selected("org/a#1")]);
 	assert.match(projectItem(batch, batch.items[0]!).detail.join("\n"), /model: unknown.*effort: unknown/);
 });
+
+test("next action does not call a live final attempt exhausted or require reconciling its own active claim", () => {
+	const batch = makeBatch([selected("org/a#1")]); const item = batch.items[0]!;
+	item.stage = "RUNNING"; item.attempts = batch.maxAttempts;
+	const options = { activeItemKeys: [item.selected.key], claims: [{ resource: "repo:org/a", owner: `${batch.id}:${item.selected.key}`, status: "unknown" as const, createdAt: "now" }] };
+	assert.match(projectItem(batch, item, options).nextSafeAction, /wait.*worker/i);
+	item.stage = "VERIFY";
+	assert.match(projectItem(batch, item, options).nextSafeAction, /wait.*verification/i);
+});
+
+test("next action distinguishes PR-ready human landing from retained-patch integration", () => {
+	const batch = makeBatch([selected("org/a#1", "pr-ready")]); prove(batch.items[0]!, "pr-ready");
+	assert.match(projectItem(batch, batch.items[0]!).nextSafeAction, /human.*review|human.*landing/);
+	assert.doesNotMatch(projectItem(batch, batch.items[0]!).nextSafeAction, /verified-patch/);
+});
+
+test("read-only cancelled and paused queued next actions never suggest unavailable controls", () => {
+	const batch = makeBatch([selected("org/a#1")]); const item = batch.items[0]!;
+	item.stage = "CANCELLED";
+	assert.doesNotMatch(projectItem(batch, item, { readOnly: true }).nextSafeAction, /^explicitly retry/);
+	item.stage = "QUEUED";
+	assert.match(projectItem(batch, item).nextSafeAction, /resume/);
+});
