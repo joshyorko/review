@@ -13,7 +13,7 @@ import type { QueueItem } from "./github.ts";
 import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, orgScope, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
-import { registerFactoryReconciler, registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
+import { registerFactoryClaimInspector, registerFactoryReconciler, registeredFactoryReconciler, registerFactorySelection, factoryBatchSubmitterRegistered, factoryCommand, factoryControllerRegistered, factoryDashboardOpenerRegistered, factoryLoadDiagnostic, openFactoryDashboard, submitFactoryBatch, type ClaimOwnerObservation, type ClaimOwnerWorkerObservation } from "../luna-factory/omp/batch-bridge.ts";
 import { ResourceClaims, factoryClaimsRoot, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
@@ -269,6 +269,33 @@ export function waveWorkerCoverageComplete(jobIds: readonly string[] | undefined
 	}
 	return new Set(agents).size === agents.length && new Set(mapped).size === mapped.length
 		&& JSON.stringify([...mapped].sort()) === JSON.stringify([...jobIds].sort());
+}
+
+/** Project persisted worker identities against one current OMP job snapshot. */
+export function observeReviewWaveWorkers(
+	jobIds: readonly string[] | undefined,
+	toolCallIds: readonly string[] | undefined,
+	workers: PersistedRepositoryBatch["waveTaskWorkers"] | undefined,
+	terminalJobStatuses: PersistedRepositoryBatch["waveTerminalJobStatuses"] | undefined,
+	snapshot: { running: readonly { id: string; status: string }[]; recent: readonly { id: string; status: string }[] } | null | undefined,
+): ClaimOwnerWorkerObservation {
+	const recordedJobIds = [...(jobIds ?? [])];
+	const recorded = new Set(recordedJobIds);
+	const live = snapshot !== undefined && snapshot !== null;
+	const observed = live
+		? new Set([...(snapshot.running ?? []), ...(snapshot.recent ?? [])].map((job) => job.id))
+		: undefined;
+	return {
+		jobIds: recordedJobIds,
+		toolCallIds: [...(toolCallIds ?? [])],
+		runningJobIds: live ? snapshot.running.map((job) => job.id).filter((id) => recorded.has(id)) : [],
+		unobservedJobIds: live ? recordedJobIds.filter((id) => !observed?.has(id)) : [],
+		taskWorkers: workers ?? {},
+		terminalJobStatuses: terminalJobStatuses ?? {},
+		coverageComplete: waveWorkerCoverageComplete(jobIds, toolCallIds, workers),
+		settled: waveWorkersSettled(snapshot, jobIds, terminalJobStatuses),
+		source: live ? "live" : (recordedJobIds.length || Object.keys(terminalJobStatuses ?? {}).length ? "persisted" : "unknown"),
+	};
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -542,6 +569,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let dashboardOpen = false;
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
+	let factoryHandoffBatchId: string | undefined;
+	let factoryHandoffRequested = false;
 	let started: Promise<void> = Promise.resolve();
 	const recoveryBatches = new Map<string, PersistedRepositoryBatch>();
 	let activeBatch: PersistedRepositoryBatch | undefined;
@@ -688,6 +717,110 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		);
 	};
 	const unregisterFactoryReconciler = registerFactoryReconciler(reconcileMutationClaim);
+	const inspectClaimOwner = (owner: string, resource: string): ClaimOwnerObservation => {
+		const canonicalResource = resource.toLowerCase();
+		const persistedBatch = loadWave(factoryClaimsRoot(env), owner);
+		const batch = batchForOwner(owner) ?? persistedBatch;
+		const emptyWorker = {
+			jobIds: [],
+			toolCallIds: [],
+			runningJobIds: [],
+			unobservedJobIds: [],
+			taskWorkers: {},
+			terminalJobStatuses: {},
+			coverageComplete: false,
+			settled: false,
+			source: "unknown" as const,
+		};
+		if (!batch) {
+			return {
+				source: "review",
+				owner,
+				resource,
+				matches: false,
+				itemKeys: [],
+				recordedControllerState: "unknown",
+				worker: emptyWorker,
+				evidenceRefs: [],
+				sessionRefs: [],
+				missingWorkerReason: "no matching Review batch or durable wave record",
+				effectReconciliation: "unknown",
+				releaseCondition: "retain this claim until the exact owner and external effect are authoritatively reconciled",
+				reconcileAvailable: false,
+			};
+		}
+		const expectedOwner = `review:${batch.id}:${batch.currentWave}`;
+		const expectedResources = resourcesForBatch(batch);
+		const matches = owner === expectedOwner && expectedResources.includes(canonicalResource);
+		if (!matches) {
+			return {
+				source: "review",
+				owner,
+				resource,
+				matches: false,
+				itemKeys: [],
+				recordedControllerState: "unknown",
+				worker: emptyWorker,
+				evidenceRefs: [],
+				sessionRefs: [],
+				missingWorkerReason: "owner/resource does not match one retained Review wave exactly",
+				effectReconciliation: "unknown",
+				releaseCondition: "retain this claim; a mismatching owner or resource cannot authorize release",
+				reconcileAvailable: false,
+			};
+		}
+
+		const liveContext = activeBatch?.id === batch.id ? activeCtx : undefined;
+		const snapshot = liveContext?.getAsyncJobSnapshot?.();
+		const persisted = batch as PersistedRepositoryBatch & { evidenceRefs?: unknown; sessionRefs?: unknown };
+		const stringRefs = (value: unknown): string[] => Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+		const worker = observeReviewWaveWorkers(batch.waveJobIds, batch.waveToolCallIds, batch.waveTaskWorkers, batch.waveTerminalJobStatuses, snapshot);
+		const preTool = preToolProofValid(batch);
+		let missingWorkerReason: string | undefined;
+		if (preTool) missingWorkerReason = undefined;
+		else if (!batch.waveJobIds?.length) missingWorkerReason = "no workflowz job identity is recorded for this wave";
+		else if (!batch.waveToolCallIds?.length) missingWorkerReason = "no task tool-call identity is recorded for this wave";
+		else if (!batch.waveTaskWorkers) missingWorkerReason = "no persisted task-to-worker record is available";
+		else if (!worker.coverageComplete) missingWorkerReason = "task-to-worker/job coverage is missing or ambiguous";
+		else if (!worker.settled) {
+			if (worker.source !== "live") missingWorkerReason = "persisted worker terminal evidence is unavailable after session restart";
+			else if (worker.runningJobIds.length > 0) missingWorkerReason = `worker job${worker.runningJobIds.length === 1 ? "" : "s"} still running: ${worker.runningJobIds.join(", ")}`;
+			else if (worker.unobservedJobIds.length > 0) missingWorkerReason = `live worker snapshot omitted recorded job${worker.unobservedJobIds.length === 1 ? "" : "s"}: ${worker.unobservedJobIds.join(", ")}; terminal result remains unknown`;
+			else missingWorkerReason = "live worker snapshot lacks terminal status evidence";
+		}
+		let claimStatus: "unknown" | "settled" | undefined;
+		try {
+			claimStatus = claims?.list().find((claim) => claim.owner === owner && claim.resource.toLowerCase() === canonicalResource)?.status;
+		} catch {
+			claimStatus = undefined;
+		}
+		const effectReconciliation = claimStatus === "settled"
+			? "settled" as const
+			: preTool || worker.settled ? "awaiting" as const : "unknown" as const;
+		return {
+			source: "review",
+			owner,
+			resource,
+			matches: true,
+			batchId: batch.id,
+			runId: batch.id,
+			wave: batch.currentWave,
+			kind: batch.kind,
+			itemKeys: (batch.waves[batch.currentWave]?.items ?? []).map((item) => `${item.repo.toLowerCase()}#${item.id}`),
+			recordedControllerState: persistedBatch?.state ?? batch.state,
+			worker,
+			evidenceRefs: stringRefs(persisted.evidenceRefs),
+			sessionRefs: stringRefs(persisted.sessionRefs),
+			...(missingWorkerReason ? { missingWorkerReason } : {}),
+			coordinatorTerminal: preTool ? batch.wavePreToolTerminal : undefined,
+			effectReconciliation,
+			releaseCondition: claimStatus === "settled"
+				? "the existing controller has marked this exact owner/resource settled; release still requires owner identity verification"
+				: "retain this claim until the existing authoritative worker and external-effect reconciliation marks this exact owner/resource settled",
+			reconcileAvailable: registeredFactoryReconciler() === reconcileMutationClaim,
+		};
+	};
+	const unregisterFactoryClaimInspector = registerFactoryClaimInspector(inspectClaimOwner);
 
 	const repaint = () => tui?.requestRender();
 
@@ -1542,6 +1675,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		if (action.kind === "close") return;
 		if (action.kind === "factory") {
+			factoryHandoffRequested = true;
 			// The dashboard hides the chord when Factory is unavailable; this is
 			// the residual path (a stale frame, or a caller that drives the action
 			// directly). Name the cause instead of reporting a bare "not loaded".
@@ -1576,7 +1710,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (command === undefined) return;
 			try {
 				const factoryCtx = { ...ctx, reconcileMutationClaim };
-				ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+				if (command.startsWith("start ")) {
+					if (!factoryBatchSubmitterRegistered() || !factoryDashboardOpenerRegistered()) {
+						ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+						return;
+					}
+					const action = command.slice("start ".length) as "inspect" | "patch" | "pr-ready";
+					const handoff = await submitFactoryBatch(action, factoryCtx);
+					ctx.ui.notify(`Factory batch ${handoff.batchId} submitted`, "info");
+					factoryHandoffBatchId = handoff.batchId;
+				} else {
+					ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+				}
 			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 			return;
 		}
@@ -1755,7 +1900,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				{ overlay: false },
 			);
 			if (action.kind !== "close") await dispatch(ctx, action);
-			if (action.kind === "scope" || action.kind === "factory") reopen = true;
+			if (action.kind === "scope") reopen = true;
+			if (action.kind === "factory" && factoryHandoffRequested) {
+				const batchId = factoryHandoffBatchId;
+				factoryHandoffBatchId = undefined;
+				factoryHandoffRequested = false;
+				if (batchId !== undefined) await openFactoryDashboard(ctx, batchId);
+				reopen = true;
+			}
 		} catch {
 			// OMP cancellation closes the workbench without changing batch state.
 		} finally {
@@ -1800,7 +1952,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				}
 				: ["blocked", "paused"].includes(recoveredBatch.state)
 					? recoveredBatch
-					: undefined;
+				: undefined;
 			if (activeBatch?.state === "blocked") rememberRecoveryBatch(activeBatch);
 			if (recoveredBatch.state === "running") {
 				pi.appendEntry(BATCH_ENTRY, activeBatch);
@@ -2037,6 +2189,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.on("session_shutdown", () => {
 		unregisterFactorySelection();
 		unregisterFactoryReconciler();
+		unregisterFactoryClaimInspector();
 		for (const stop of timers.splice(0)) stop();
 	});
 
@@ -2131,7 +2284,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	});
 	pi.registerShortcut("alt+s", {
 		description: "Repair returned pull requests, then implement issue waves",
-		handler: (ctx) => void startAutoslay(ctx),
+		handler: (ctx) => { activeCtx = ctx; void startAutoslay(ctx); },
 	});
 	pi.registerShortcut("alt+u", {
 		description: mode.isReviewMode() ? "Refetch the Review workbench queue" : "Refetch the Hive workbench queue",
