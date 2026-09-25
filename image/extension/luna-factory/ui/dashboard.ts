@@ -407,7 +407,7 @@ export class FactoryDashboard {
 		];
 	}
 	private footer(width = 120): string {
-		if (this.view === "roster") return this.item() ? "j/k Select   Enter Inspect   a Actions   b Runs   q Close" : this.source.batches.length ? "b Runs   ? Help   q Close" : "? Help   q Close";
+		if (this.view === "roster") return this.item() ? "j/k Select   Enter Inspect   a Actions   b Runs   q Close" : this.source.batches.length ? "b Runs   ? Help   q Close" : this.source.claims.length ? "c Inspect ownership   ? Help   q Close" : "? Help   q Close";
 		if (this.view === "batches") return this.source.hasMoreHistory ? "j/k Select   Enter Open   m Older   q Close" : "j/k Select   Enter Open   a Actions   q Close";
 		if (this.view === "palette" || this.view === "evidence" || this.view === "claims") return "j/k Select   Enter Open   q Back";
 		if (this.view === "claim-detail") return this.claimCanReconcile() ? "r Reconcile   j/k Scroll   d Debug   q Back" : "j/k Scroll   d Debug   q Back";
@@ -442,7 +442,7 @@ export class FactoryDashboard {
 			...(observed?.itemKeys.length ? [`Work: ${observed.itemKeys.map((key) => `#${key.split("#").at(-1)}`).join(", ")}`] : inspection.itemKey ? [`Work: #${inspection.itemKey.split("#").at(-1)}`] : ["Work: not yet identified"]),
 			...(observed?.kind ? [`Operation: ${observed.kind === "fix" ? "repairing selected work" : observed.kind === "slay" ? "reviewing and landing selected work" : "inspecting changes"}`] : inspection.operation ? [`Operation: ${inspection.operation.phase === "pr" ? "creating a pull request" : inspection.operation.phase === "push" ? "pushing a commit" : inspection.operation.phase}`] : ["Operation: not yet confirmed"]),
 			"", "Why it stays locked", why, "", "Next safe action", next,
-			"", ...(this.claimCanReconcile() ? ["[r Reconcile ownership]"] : []), "[e Inspect evidence]   [d Debug details]",
+			"", ...(this.claimCanReconcile() ? ["[r Reconcile ownership]"] : []), "[d Debug details]",
 			...(live ? ["To stop the owner, return to its Review session. This view cannot cancel a different session's worker."] : []),
 		];
 	}
@@ -466,7 +466,7 @@ export class FactoryDashboard {
 	}
 	render(requestedWidth: number): string[] {
 		const width = Math.max(1, Math.floor(requestedWidth)); const height = this.height(); const batch = this.project();
-		const status = this.source.loading ? "Loading" : batch?.converged ? "Complete" : batch?.control === "active" ? "Active" : batch?.control === "paused" ? "Paused" : batch?.control === "stopped" ? "Stopped" : "Ready";
+		const status = this.source.loading ? "Loading" : batch?.converged ? "Complete" : batch?.control === "active" ? "Active" : batch?.control === "paused" ? "Paused" : batch?.control === "stopped" ? "Stopped" : !batch && this.source.claims.length ? "Needs attention" : "Ready";
 		const title = `${fitToWidth("Luna Factory", Math.max(0, width - visibleWidth(status) - 1))} ${status}`;
 		const running = batch?.items.filter((item) => this.active(item)).length ?? 0;
 		const needsYou = batch?.items.filter((item) => itemOverview(item, this.active(item)).needsYou).length ?? 0;
@@ -502,7 +502,13 @@ export class FactoryDashboard {
 				const needed = projected.items.filter((item) => itemOverview(item, this.active(item)).needsYou).length;
 				return [`${start + index === this.batchIndex ? "›" : " "} ${label} · ${projected.converged ? "complete" : run.control} · ${age}`, `    ${repos.join(", ")} · ${projected.proven} proven${needed ? ` · ${needed} needs attention` : ""}${run.scopeRevisions.length ? " · scope changed" : ""}`];
 			})];
-		} else if (!batch) body = ["Ready when you are", "", "Select work in Review and press Shift+F.", "Your runs and evidence will appear here."];
+		} else if (!batch && this.source.claims.length) body = [
+			"Repository protected", "",
+			...[...new Set(this.source.claims.map((claim) => claim.resource.replace(/^(repo|item):/, "").split("#")[0]))].slice(0, 3),
+			"", ...wrapped(["Another run has retained ownership. Inspect it before starting work in that repository."], width),
+			"", "[c Inspect ownership]",
+		];
+		else if (!batch) body = ["Ready when you are", "", "Select work in Review and press Shift+F.", "Your runs and evidence will appear here."];
 		else if (this.view === "detail") body = this.textRows(this.details(), width, bodyHeight);
 		else if (width >= 100) {
 			const leftWidth = Math.floor((width - 3) / 2); const rightWidth = width - leftWidth - 3;

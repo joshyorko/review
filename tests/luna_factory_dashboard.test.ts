@@ -306,3 +306,19 @@ test("inline evidence opens its text and returns to the evidence list", () => {
  assert.match(view.render(80).join("\n"), /Scope revisions/);
  assert.doesNotMatch(view.render(80).join("\n"), /Operator deferred the migration/);
 });
+
+test("retained ownership is actionable when no Factory batch exists", () => {
+ const view = makeView({ ...source(), batches: [] });
+ for (const width of [120, 60]) {
+  const frame = view.render(width).join("\n");
+  assert.match(frame, /Needs attention/);
+  assert.match(frame, /Repository protected/);
+  assert.match(frame, /acme\/app/);
+  assert.match(frame, /c Inspect ownership/);
+  assert.doesNotMatch(frame, /Ready when you are/);
+ }
+ view.handleInput("c");
+ view.handleInput("Enter");
+ assert.match(view.render(80).join("\n"), /Repository locked/);
+ assert.doesNotMatch(view.render(80).join("\n"), /e Inspect evidence/);
+});
