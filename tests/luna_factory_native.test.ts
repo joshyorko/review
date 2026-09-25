@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { runNative, sandboxTest, type NativeSDK, type SchemaBuilder } from "../image/extension/luna-factory/omp/batch-native.ts";
 
 const schema: SchemaBuilder = { object: (x: Record<string, unknown>) => x, string: () => ({}), array: (x: unknown) => x, boolean: () => ({}) };
-function item(workspace: string) { return { workspace, selected: { key: "r/1", repo: "r", number: 1, kind: "issue", action: "patch", overlaps: [], acceptance: "inspect" }, sessions: [], attempts: 0, stage: "QUEUED", ledger: {} } as never; }
+function item(workspace: string, acceptance = "inspect") { return { workspace, selected: { key: "r/1", repo: "r", number: 1, kind: "issue", action: "patch", overlaps: [], acceptance }, sessions: [], attempts: 0, stage: "QUEUED", ledger: {} } as never; }
 type Tool = { name: string; execute(_id: string, args: unknown): Promise<unknown> };
-function fake(invoke: (tools: Tool[]) => Promise<void>, startsTurn = true) {
+function fake(invoke: (tools: Tool[]) => Promise<void>, startsTurn = true, onPrompt: (prompt: string) => void = () => {}) {
 	let disposed = false;
 	let tools: Tool[] = [];
 	const listeners = new Set<(event: { type: string }) => void>();
@@ -17,7 +17,8 @@ function fake(invoke: (tools: Tool[]) => Promise<void>, startsTurn = true) {
 		subscribe(listener: (event: { type: string }) => void) { listeners.add(listener); return () => listeners.delete(listener); },
 		abort: async () => {},
 		dispose: async () => { disposed = true; },
-		prompt: async () => {
+		prompt: async (text: string) => {
+			onPrompt(text);
 			if (!startsTurn) return;
 			for (const listener of listeners) listener({ type: "turn_start" });
 			await tools.find((tool) => tool.name === "factory_report")?.execute("id", {
@@ -86,6 +87,33 @@ test("a persisted private session path does not report execution before turn_sta
 		assert.equal(sdk.disposed, true);
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
+test("native worker and reviewer prompts retain complete selected acceptance", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-acceptance-"));
+	try {
+		const acceptance = `${"long acceptance ".repeat(1_500)}LONG-ACCEPTANCE-SENTINEL`;
+		const prompts: string[] = [];
+		for (const phase of ["worker", "acceptance"] as const) {
+			const sdk = fake(async () => {}, true, (prompt) => prompts.push(prompt));
+			await runNative(
+				sdk.sdk,
+				schema,
+				{ model: {}, modelRegistry: { authStorage: {} } },
+				item(root, acceptance),
+				root,
+				phase,
+				new AbortController().signal,
+				() => {},
+				() => {},
+			);
+		}
+		assert.equal(prompts.length, 2);
+		for (const prompt of prompts) {
+			assert.ok(prompt.includes(acceptance));
+			assert.ok(prompt.includes("LONG-ACCEPTANCE-SENTINEL"));
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("sandbox refuses symlinked verification workspace before invoking bwrap", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-native-"));
 	try {

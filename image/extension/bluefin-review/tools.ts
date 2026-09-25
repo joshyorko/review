@@ -88,13 +88,13 @@ function issueDetailToText(detail: Awaited<ReturnType<typeof fetchIssueDetail>>[
  * either ignore a priority that exists or invent one that does not.
  */
 function orderLine(mode: ReviewMode): string {
-	if (mode.isReviewMode()) return "order: GitHub/local — repository scope and filters";
+	if (mode.isReviewMode()) return "order: LOCAL · attention order — repository scope and filters";
 	const hive = mode.hive;
 	if (!hive.configured) {
-		return "order: unranked — no hive hub configured; queue order falls back to GitHub, and review, fix, and slay remain available";
+		return "order: LOCAL · attention order — no hive hub configured; review, fix, and slay remain available";
 	}
 	if (!hive.online) {
-		return `order: unavailable — ${hiveFailureStatus(hive.error)}; queue order falls back to GitHub, and review, fix, and slay remain available`;
+		return `order: LOCAL · attention order — ${hiveFailureStatus(hive.error)}; local policy remains active, and review, fix, and slay remain available`;
 	}
 	const actionable = hive.actionableItems === undefined ? "" : `, ${hive.actionableItems} actionable overall`;
 	const coverage = mode.hiveCoverage();

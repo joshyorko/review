@@ -34,6 +34,8 @@ export interface QueueItem {
 	ciEvidenceComplete?: boolean;
 	mergeState: MergeState;
 	reviewState: ReviewState;
+	/** Direct requested-user logins; team requests are not personal requests. */
+	requestedReviewers?: string[];
 	labels: string[];
 	additions?: number;
 	deletions?: number;
@@ -83,6 +85,14 @@ const PR_QUEUE_FIELDS = `
 isDraft
 mergeable
 reviewDecision
+reviewRequests(first: 100) {
+	nodes {
+		requestedReviewer {
+			__typename
+			... on User { login }
+		}
+	}
+}
 additions
 deletions
 changedFiles
@@ -265,6 +275,9 @@ interface SearchNode {
 	author?: { login?: string } | null;
 	repository?: { nameWithOwner?: string } | null;
 	labels?: { nodes?: Array<{ name?: string }> } | null;
+	reviewRequests?: {
+		nodes?: Array<{ requestedReviewer?: { __typename?: string; login?: string } | null } | null>;
+	} | null;
 	files?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ path?: string }> } | null;
 	commits?: {
 		nodes?: Array<{
@@ -371,6 +384,12 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 		ciEvidenceComplete: mode === "prs" ? ci.complete : undefined,
 		mergeState: toMergeState(node.mergeable),
 		reviewState: toReviewState(node.reviewDecision),
+		requestedReviewers: mode === "prs"
+			? node.reviewRequests?.nodes?.flatMap((request) => {
+				const reviewer = request?.requestedReviewer;
+				return reviewer?.__typename === "User" && reviewer.login ? [reviewer.login] : [];
+			})
+			: undefined,
 		labels: (node.labels?.nodes ?? []).map((label) => label.name ?? "").filter(Boolean),
 		additions: node.additions,
 		deletions: node.deletions,
