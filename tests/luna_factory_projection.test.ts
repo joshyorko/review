@@ -304,3 +304,8 @@ test("converged batches expose only safe export/discard controls", () => {
 	const dependent = makeBatch([selected("org/a#1"), selected("org/b#2")], { id: "batch-dependent", dependencies: [{ item: "org/b#2", requires: "org/a#1", stage: "pr-ready" }] });
 	assert.equal(projectBatch(batch, { retainedBatches: [dependent] }).actions.includes("discard"), false);
 });
+
+test("items without an execution receipt explicitly display unknown model and effort", () => {
+	const batch = makeBatch([selected("org/a#1")]);
+	assert.match(projectItem(batch, batch.items[0]!).detail.join("\n"), /model: unknown.*effort: unknown/);
+});

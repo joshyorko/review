@@ -361,6 +361,7 @@ function detailRows(
 		`captured base/head: ${item.selected.base ?? "unknown"} / ${item.selected.head ?? "unknown"}`,
 		`acceptance: ${item.selected.acceptance ?? item.ledger.goal.statement}`,
 		`acceptance revision: ${item.selected.acceptanceRevision ?? "unknown"}`,
+		`model: ${attemptHistory.at(-1)?.routing?.effective ?? "unknown"} · effort: ${attemptHistory.at(-1)?.routing?.effort ?? "unknown"}`,
 		`attempts: ${item.attempts}/${batch.maxAttempts} · original batch budget ${batch.items.reduce((total, candidate) => total + candidate.attempts, 0)}/${batch.maxTotalAttempts}`,
 		`proof: ${proof.current ? "current" : "stale or unavailable"}${proof.stage ? ` · ${proof.stage}` : ""}`,
 		`proof subject: ${proof.subject || "unknown"}`,
