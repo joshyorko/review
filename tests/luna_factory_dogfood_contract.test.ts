@@ -33,7 +33,7 @@ test("workflow preserves the bounded exact-head no-publish contract", () => {
     "podman build --format oci",
     "tests/appliance-contract.sh --image",
     "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
-    "eWaterCycle/setup-apptainer@58d788a297b0acdec33b8979428afa78679aa711",
+    "eWaterCycle/setup-apptainer@4bb22c52d4f63406c49e94c804632975787312b3",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "id: capabilities",
