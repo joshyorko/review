@@ -1,11 +1,68 @@
 import type { FactoryAction, SelectedItem } from "../core/batch.ts";
+import type { FactoryDashboardSnapshot } from "../ui/dashboard.ts";
+export type { FactoryDashboardSnapshot } from "../ui/dashboard.ts";
 
 type Controller = (command: string, context: unknown) => Promise<string>;
 type Reconciler = (owner: string, resource: string) => Promise<"settled" | "unknown">;
+export type ClaimOwnerControllerState = "running" | "paused" | "blocked" | "complete" | "cancelled" | "unknown";
+export type ClaimOwnerObservationSource = "live" | "persisted" | "unknown";
+export type ClaimOwnerEffectReconciliation = "awaiting" | "settled" | "unknown";
+export interface ClaimOwnerWorkerObservation {
+	readonly jobIds: readonly string[];
+	readonly toolCallIds: readonly string[];
+	/** Job IDs observed in the current live snapshot as running. */
+	readonly runningJobIds: readonly string[];
+	/** Recorded job IDs absent from a current live snapshot. */
+	readonly unobservedJobIds: readonly string[];
+	readonly taskWorkers: Readonly<Record<string, readonly {
+		readonly agentId: string;
+		readonly jobId?: string;
+		readonly resultStatus?: "completed" | "failed" | "cancelled";
+	}[]>>;
+	readonly terminalJobStatuses: Readonly<Record<string, "completed" | "failed" | "cancelled" | "canceled">>;
+	readonly coverageComplete: boolean;
+	readonly settled: boolean;
+	readonly source: ClaimOwnerObservationSource;
+}
+/** Read-only Review ownership facts; this shape never authorizes a mutation. */
+export interface ClaimOwnerObservation {
+	readonly source: "review";
+	readonly owner: string;
+	readonly resource: string;
+	readonly matches: boolean;
+	readonly batchId?: string;
+	readonly runId?: string;
+	readonly wave?: number;
+	readonly itemKeys: readonly string[];
+	readonly recordedControllerState: ClaimOwnerControllerState;
+	readonly worker: ClaimOwnerWorkerObservation;
+	readonly missingWorkerReason?: string;
+	/** Recorded coordinator terminal proof before any tool invocation. */
+	readonly coordinatorTerminal?: "error" | "aborted";
+	readonly effectReconciliation: ClaimOwnerEffectReconciliation;
+	readonly releaseCondition: string;
+	readonly reconcileAvailable: boolean;
+	readonly kind?: "slay" | "fix" | "diff";
+	readonly evidenceRefs: readonly string[];
+	readonly sessionRefs: readonly string[];
+}
+export type ClaimOwnerInspector = (owner: string, resource: string) => ClaimOwnerObservation;
+export interface FactoryBatchHandoff {
+	readonly batchId: string;
+	readonly text: string;
+}
+
+type BatchSubmitter = (action: FactoryAction, context: unknown) => Promise<FactoryBatchHandoff>;
+type DashboardReader = () => FactoryDashboardSnapshot;
+type DashboardOpener = (context: unknown, batchId?: string) => Promise<void>;
 type BridgeState = {
 	selection?: (action: FactoryAction) => SelectedItem[];
 	controller?: Controller;
+	submitter?: BatchSubmitter;
+	dashboardReader?: DashboardReader;
+	dashboardOpener?: DashboardOpener;
 	reconciler?: Reconciler;
+	claimInspector?: ClaimOwnerInspector;
 	loadFailure?: string;
 };
 
@@ -34,10 +91,52 @@ export function selectedFactoryItems(action: FactoryAction): SelectedItem[] {
 	return state.selection(action);
 }
 export function registerFactoryController(handler: Controller): () => void {
+	if (state.controller !== handler) {
+		// A replacement controller belongs to a new extension lifetime. Do not
+		// leave typed dashboard seams pointing at a stale cached module instance.
+		state.submitter = undefined;
+		state.dashboardReader = undefined;
+		state.dashboardOpener = undefined;
+	}
 	state.controller = handler;
 	state.loadFailure = undefined;
 	return () => { if (state.controller === handler) state.controller = undefined; };
 }
+
+/** Register the typed Review-to-Factory handoff; callers never parse status text. */
+export function registerFactoryBatchSubmitter(handler: BatchSubmitter): () => void {
+	state.submitter = handler;
+	return () => { if (state.submitter === handler) state.submitter = undefined; };
+}
+
+export async function submitFactoryBatch(action: FactoryAction, context: unknown): Promise<FactoryBatchHandoff> {
+	if (!state.submitter) throw new Error(`Factory is not loaded; ${factoryLoadDiagnostic()}`);
+	return state.submitter(action, context);
+}
+export function factoryBatchSubmitterRegistered(): boolean { return state.submitter !== undefined; }
+
+/** Register a read-only local projection reader for the native dashboard. */
+export function registerFactoryDashboardReader(reader: DashboardReader): () => void {
+	state.dashboardReader = reader;
+	return () => { if (state.dashboardReader === reader) state.dashboardReader = undefined; };
+}
+
+export function readFactoryDashboardSnapshot(): FactoryDashboardSnapshot {
+	if (!state.dashboardReader) return { batches: [], claims: [], readOnly: true, error: factoryLoadDiagnostic() };
+	try { return state.dashboardReader(); }
+	catch (error) { return { batches: [], claims: [], readOnly: true, error: error instanceof Error ? error.message : String(error) }; }
+}
+
+export function registerFactoryDashboardOpener(opener: DashboardOpener): () => void {
+	state.dashboardOpener = opener;
+	return () => { if (state.dashboardOpener === opener) state.dashboardOpener = undefined; };
+}
+
+export async function openFactoryDashboard(context: unknown, batchId?: string): Promise<void> {
+	if (!state.dashboardOpener) throw new Error(`Factory dashboard is not loaded; ${factoryLoadDiagnostic()}`);
+	return state.dashboardOpener(context, batchId);
+}
+export function factoryDashboardOpenerRegistered(): boolean { return state.dashboardOpener !== undefined; }
 
 /** Register Review's authoritative claim reconciliation seam for textual Factory commands. */
 export function registerFactoryReconciler(handler: Reconciler): () => void {
@@ -47,6 +146,16 @@ export function registerFactoryReconciler(handler: Reconciler): () => void {
 
 export function registeredFactoryReconciler(): Reconciler | undefined {
 	return state.reconciler;
+}
+
+/** Register Review's synchronous, read-only ownership observation seam. */
+export function registerFactoryClaimInspector(inspector: ClaimOwnerInspector): () => void {
+	state.claimInspector = inspector;
+	return () => { if (state.claimInspector === inspector) state.claimInspector = undefined; };
+}
+
+export function registeredFactoryClaimInspector(): ClaimOwnerInspector | undefined {
+	return state.claimInspector;
 }
 /** Record why the Factory extension failed to load, for the caller's diagnostic. */
 export function reportFactoryLoadFailure(reason: string): void {

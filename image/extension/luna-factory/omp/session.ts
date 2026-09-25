@@ -45,3 +45,35 @@ export function loadRun(ctx: SessionCtx): LoadedRun {
 export function saveRun(host: JournalHost, ledger: Ledger): void {
 	host.appendEntry(JOURNAL_ENTRY, journalRecord(ledger));
 }
+
+import type { FactoryDashboardPresentation } from "../ui/dashboard.ts";
+export const DASHBOARD_ENTRY = "com.joshyorko.luna-factory.dashboard";
+const DASHBOARD_VIEWS = ["roster", "detail", "batches", "claims", "claim-detail", "evidence", "help", "palette", "evidence-detail", "debug", "claim-debug"] as const;
+
+/** Presentation is disposable native session metadata, never Factory authority. */
+function dashboardPresentation(value: unknown): FactoryDashboardPresentation | undefined {
+	if (typeof value !== "object" || value === null) return;
+	const data = value as Record<string, unknown>;
+	const view = DASHBOARD_VIEWS.find((candidate) => candidate === data.view);
+	if (!view || !Number.isSafeInteger(data.scroll) || Number(data.scroll) < 0 || Number(data.scroll) > 100_000) return;
+	const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512;
+	const mapping = (value: unknown): Record<string, string> | undefined => {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return;
+		return Object.fromEntries(Object.entries(value).slice(-128).filter((entry): entry is [string, string] => text(entry[0]) && text(entry[1])));
+	};
+	return {
+		view, scroll: Number(data.scroll),
+		...(text(data.batchId) ? { batchId: data.batchId } : {}),
+		...(text(data.itemKey) ? { itemKey: data.itemKey } : {}),
+		...(Number.isSafeInteger(data.cursor) && Number(data.cursor) >= 0 && Number(data.cursor) <= 100_000 ? { cursor: Number(data.cursor) } : {}),
+		itemKeysByBatch: mapping(data.itemKeysByBatch), cursorKeys: mapping(data.cursorKeys),
+	};
+}
+export function loadDashboardPresentation(ctx: SessionCtx): FactoryDashboardPresentation | undefined {
+	const entry = ctx.sessionManager?.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === DASHBOARD_ENTRY);
+	return dashboardPresentation(entry?.data);
+}
+export function saveDashboardPresentation(host: JournalHost, presentation: FactoryDashboardPresentation): void {
+	const bounded = dashboardPresentation(presentation);
+	if (bounded) host.appendEntry(DASHBOARD_ENTRY, bounded);
+}
