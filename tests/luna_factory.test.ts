@@ -1940,6 +1940,26 @@ test("loading the extension registers its surface and starts no work", async () 
 	assert.equal(host.entries.length, 0, "loading writes no journal record");
 	assert.equal(host.notifications.length, 0, "loading is silent");
 });
+test("Factory root handoff keeps ownership through convergence or an evidenced blocker", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	const command = host.commands.get("factory");
+	assert.ok(command);
+	await command.handler("-- finish the authorized objective", startCtx(host));
+	const steer = host.sentMessages.at(-1)?.content ?? "";
+	assert.match(steer, /retains ownership of the recorded objective/);
+	assert.match(steer, /until CONVERGED, or honestly QUIESCENT\/blocked/);
+	assert.match(steer, /worker return, patch, pushed head, green check, review result, compaction, or knowing the next action is progress, not completion/);
+	assert.match(steer, /without re-requesting authority already present/);
+	assert.match(steer, /one lane is blocked, finish independent authorized work first/);
+	assert.match(steer, /Completion, merge, publish, deploy, and scope authority remain separate/);
+	assert.equal(command.description, "Open or inspect the opt-in Luna Factory run");
+	const open = host.tools.get("luna_factory_open");
+	assert.ok(open);
+	assert.match(open.description ?? "", /Opening\/owning means driving the recorded objective until CONVERGED or honestly QUIESCENT\/blocked/);
+	assert.match(open.description ?? "", /persistence adds no mutation authority/);
+});
+
 test("Factory exposes typed tool contracts and accepts an object on the first call", async () => {
 	const host = fakeHost();
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
