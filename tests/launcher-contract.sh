@@ -79,6 +79,11 @@ assert_apptainer_host_files() {
     fi
   done
 }
+assert_apptainer_verification_device() {
+  local call="$1" context="${2:-Apptainer launcher}"
+  [[ "$call" == *"run --containall"* ]] || fail "$context did not keep Apptainer containment: $call"
+  [[ "$call" == *"--bind /dev/full:/dev/full"* ]] || fail "$context did not bind /dev/full: $call"
+}
 
 # --- 1. Parser unit tests across all forms and mixed combinations -------------
 
@@ -484,6 +489,7 @@ fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_NO_HIVE=1 EXP
 [[ "$fallback_output" == *"! review appliance image identity unavailable for ghcr.io/projectbluefin/review:stable."* ]] || fail "review fallback missing identity report without registry probe: $fallback_output"
 fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$fallback_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment"
+assert_apptainer_verification_device "$fallback_call" "generic Apptainer fallback"
 [[ "$fallback_call" == *"docker://ghcr.io/projectbluefin/review:stable --repo acme/widgets"* ]] || fail "review fallback used the wrong image or scope"
 [[ "$fallback_call" == *":/workspace,"*":/tmp"* ]] || fail "review fallback did not bind workspace and instance-backed scratch together"
 [[ "$fallback_call" != *mock-token* && "$fallback_call" != *test-copilot-token* &&
@@ -621,6 +627,7 @@ BLUEFIN_REVIEW_SIF="$sif" "${repo_root}/bin/bluefin" review owner/repo >/dev/nul
 sif_call="$(cat "$mock_apptainer_log")"
 [[ "$sif_call" == *"run --containall"* && "$sif_call" == *"$sif"* ]] ||
   fail "packaged SIF did not use the selected immutable image"
+assert_apptainer_verification_device "$sif_call" "explicit packaged SIF launch"
 [[ "$sif_call" != *".omp:/home/bluefin/.omp"* ]] ||
   fail "packaged SIF imported host ~/.omp without the explicit opt-in"
 
