@@ -428,8 +428,10 @@ export class FactoryDashboard {
 		const ownerLabel = claim.owner.startsWith("review:") ? "Review run" : inspection.batchId === this.batchId ? "This Factory run" : inspection.batchId ? "Another Factory run" : "Another run";
 		const stopped = observed?.worker.coverageComplete && observed.worker.settled;
 		const live = observed?.worker.runningJobIds?.length || inspection.liveness === "active";
-		const state = live ? "Worker running" : stopped ? observed?.effectReconciliation === "settled" ? "Work settled" : "Worker stopped; effect needs checking" : claim.status === "settled" ? "Recorded settled; awaiting verification" : "Outcome unknown";
-		const why = live ? "The owning worker is still running. Its repository stays protected until that work settles."
+		const beforeTools = observed?.coordinatorTerminal;
+		const state = beforeTools ? "Stopped before work started" : live ? "Worker running" : stopped ? observed?.effectReconciliation === "settled" ? "Work settled" : "Worker stopped; effect needs checking" : claim.status === "settled" ? "Recorded settled; awaiting verification" : "Outcome unknown";
+		const why = beforeTools ? "The coordinator stopped before any tool ran. Reconcile to check that no external effects need attention."
+			: live ? "The owning worker is still running. Its repository stays protected until that work settles."
 			: stopped ? "The worker has finished. Reconciliation must check what changed before ownership can be released."
 			: observed?.missingWorkerReason ? this.humanWorkerReason(observed.missingWorkerReason)
 			: "There isn't enough evidence to confirm that the owning work and its effects have settled.";

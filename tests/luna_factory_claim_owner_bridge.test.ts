@@ -182,3 +182,17 @@ test("live snapshot omission remains unknown instead of implying a running worke
 	assert.deepEqual(worker.unobservedJobIds, ["job-1"]);
 	assert.equal(worker.settled, false);
 });
+
+test("pre-tool terminal proof is presented without inventing worker completion", async () => {
+ const result = await recoveredInspector(wave("blocked", {
+  wavePromptDigest: "a".repeat(64), wavePreToolTerminal: "error",
+  waveToolInvocationIds: [], waveToolCallIds: [], waveTaskWorkers: {},
+  waveJobIds: [], waveTerminalJobStatuses: {},
+ }), { running: [], recent: [] });
+ try {
+  assert.equal(result.observation.coordinatorTerminal, "error");
+  assert.equal(result.observation.missingWorkerReason, undefined);
+  assert.equal(result.observation.effectReconciliation, "awaiting");
+  assert.equal(result.observation.worker.coverageComplete, false);
+ } finally { result.shutdown(); }
+});

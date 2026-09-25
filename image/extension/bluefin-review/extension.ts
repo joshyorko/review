@@ -775,8 +775,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const persisted = batch as PersistedRepositoryBatch & { evidenceRefs?: unknown; sessionRefs?: unknown };
 		const stringRefs = (value: unknown): string[] => Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 		const worker = observeReviewWaveWorkers(batch.waveJobIds, batch.waveToolCallIds, batch.waveTaskWorkers, batch.waveTerminalJobStatuses, snapshot);
+		const preTool = preToolProofValid(batch);
 		let missingWorkerReason: string | undefined;
-		if (!batch.waveJobIds?.length) missingWorkerReason = "no workflowz job identity is recorded for this wave";
+		if (preTool) missingWorkerReason = undefined;
+		else if (!batch.waveJobIds?.length) missingWorkerReason = "no workflowz job identity is recorded for this wave";
 		else if (!batch.waveToolCallIds?.length) missingWorkerReason = "no task tool-call identity is recorded for this wave";
 		else if (!batch.waveTaskWorkers) missingWorkerReason = "no persisted task-to-worker record is available";
 		else if (!worker.coverageComplete) missingWorkerReason = "task-to-worker/job coverage is missing or ambiguous";
@@ -794,7 +796,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		const effectReconciliation = claimStatus === "settled"
 			? "settled" as const
-			: worker.settled ? "awaiting" as const : "unknown" as const;
+			: preTool || worker.settled ? "awaiting" as const : "unknown" as const;
 		return {
 			source: "review",
 			owner,
@@ -810,6 +812,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			evidenceRefs: stringRefs(persisted.evidenceRefs),
 			sessionRefs: stringRefs(persisted.sessionRefs),
 			...(missingWorkerReason ? { missingWorkerReason } : {}),
+			coordinatorTerminal: preTool ? batch.wavePreToolTerminal : undefined,
 			effectReconciliation,
 			releaseCondition: claimStatus === "settled"
 				? "the existing controller has marked this exact owner/resource settled; release still requires owner identity verification"

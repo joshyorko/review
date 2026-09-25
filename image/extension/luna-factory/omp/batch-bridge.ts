@@ -37,6 +37,8 @@ export interface ClaimOwnerObservation {
 	readonly recordedControllerState: ClaimOwnerControllerState;
 	readonly worker: ClaimOwnerWorkerObservation;
 	readonly missingWorkerReason?: string;
+	/** Recorded coordinator terminal proof before any tool invocation. */
+	readonly coordinatorTerminal?: "error" | "aborted";
 	readonly effectReconciliation: ClaimOwnerEffectReconciliation;
 	readonly releaseCondition: string;
 	readonly reconcileAvailable: boolean;
