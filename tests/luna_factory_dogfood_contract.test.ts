@@ -11,6 +11,9 @@ const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\
 const assertIncludes = (source: string, markers: readonly string[]) => {
   for (const marker of markers) assert.ok(source.includes(marker), marker);
 };
+const isImmutableActionPin = (value: string, repository: string, major: number) =>
+  new RegExp(`^${escapeRegExp(repository)}@[a-f0-9]{40} # v${major}(?:\\.\\d+){0,2}$`).test(value);
+const apptainerV2Pin = /^eWaterCycle\/setup-apptainer@[a-f0-9]{40} # v2 tag target$/;
 
 test("workflow preserves the bounded exact-head no-publish contract", () => {
   const workflow = read(".github/workflows/luna-factory-dogfood.yml");
@@ -32,10 +35,6 @@ test("workflow preserves the bounded exact-head no-publish contract", () => {
     "actions/upload-artifact",
     "podman build --format oci",
     "tests/appliance-contract.sh --image",
-    "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
-    "eWaterCycle/setup-apptainer@4bb22c52d4f63406c49e94c804632975787312b3",
-    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "id: capabilities",
     "steps.capabilities.outputs.oci",
     "steps.capabilities.outputs.sif",
@@ -56,6 +55,39 @@ test("workflow preserves the bounded exact-head no-publish contract", () => {
     "BLUEFIN_REVIEW_OCI_PUSH",
   ]) assert.doesNotMatch(workflow, new RegExp(escapeRegExp(forbidden)), forbidden);
   assert.equal(existsSync(join(root, "tests/luna_factory_dogfood_contract.py")), false);
+});
+
+test("workflow pins the official Apptainer v2 action by immutable digest", () => {
+  const workflow = read(".github/workflows/luna-factory-dogfood.yml");
+  const step = workflow.match(/- name: Install Apptainer\s+uses: ([^\n]+)/);
+  assert.ok(step, "Install Apptainer action step");
+  assert.match(step[1], apptainerV2Pin);
+
+  for (const invalid of [
+    "eWaterCycle/setup-apptainer@v2 # v2 tag target",
+    "eWaterCycle/setup-apptainer@0123456789abcdef0123456789abcdef01234567 # v1 tag target",
+    "other/setup-apptainer@0123456789abcdef0123456789abcdef01234567 # v2 tag target",
+  ]) {
+    assert.doesNotMatch(invalid, apptainerV2Pin);
+  }
+});
+
+test("workflow keeps Renovate-managed actions on immutable refs and their current major", () => {
+  const workflow = read(".github/workflows/luna-factory-dogfood.yml");
+  for (const [repository, major] of [
+    ["actions/checkout", 7],
+    ["oven-sh/setup-bun", 2],
+    ["actions/upload-artifact", 7],
+  ] as const) {
+    const line = workflow.split("\n").map((item) => item.trim()).find((item) => item.replace(/^- /, "").startsWith(`uses: ${repository}@`));
+    assert.ok(line, `${repository} action`);
+    const action = line.replace(/^- /, "").slice("uses: ".length);
+    assert.ok(isImmutableActionPin(action, repository, major), line);
+  }
+
+  assert.equal(isImmutableActionPin("actions/checkout@v7 # v7", "actions/checkout", 7), false);
+  assert.equal(isImmutableActionPin("other/checkout@0123456789abcdef0123456789abcdef01234567 # v7", "actions/checkout", 7), false);
+  assert.equal(isImmutableActionPin("actions/checkout@0123456789abcdef0123456789abcdef01234567 # v6", "actions/checkout", 7), false);
 });
 
 test("harness preserves the local-provider and runtime-boundary contract", () => {
