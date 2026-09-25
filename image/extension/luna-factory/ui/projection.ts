@@ -280,7 +280,7 @@ function claimSnapshot(batch: Batch, item: BatchItem, claims: readonly ResourceC
 	return claims
 		.filter((claim) => resources.has(claim.resource.toLowerCase()))
 		.sort((left, right) => left.resource.localeCompare(right.resource))
-		.map((claim) => ({ ...claim, conflict: claim.owner !== owner }));
+		.map((claim) => ({ ...claim, conflict: item.selected.action !== "inspect" && claim.owner !== owner }));
 }
 
 function externalEffect(item: BatchItem): boolean {
@@ -310,7 +310,7 @@ function retryEligible(
 }
 
 function blockerFor(item: BatchItem, dependency: string | undefined, claims: readonly ProjectedClaim[]): string | undefined {
-	if (claims.some((claim) => claim.conflict || claim.status === "unknown")) {
+	if (item.selected.action !== "inspect" && claims.some((claim) => claim.conflict || claim.status === "unknown")) {
 		const conflict = claims.find((claim) => claim.conflict || claim.status === "unknown")!;
 		return `${conflict.resource} is claimed by ${conflict.owner} (${conflict.status}); reconcile ownership before resuming`;
 	}
@@ -336,10 +336,10 @@ function nextSafeAction(
 	}
 	if (item.stage === "EXCLUDED") return "scope revision recorded; no execution";
 	if (externalEffect(item) && (item.operation?.state === "unknown" || item.operation?.state === "intent" || stage === "UNKNOWN")) return readOnly ? "inspect external effect; reconciliation required; retry unavailable" : "reconcile external effect; retry unavailable";
-	if (claims.some((claim) => claim.conflict)) return "inspect ownership / reconcile claim before resuming";
+	if (item.selected.action !== "inspect" && claims.some((claim) => claim.conflict)) return "inspect ownership / reconcile claim before resuming";
 	if (stage === "RUNNING") return active ? "wait for the observed worker; inspect execution evidence" : "inspect recorded execution; current worker liveness is unknown";
 	if (stage === "VERIFY") return active ? "wait for verification / independent acceptance; inspect evidence" : "inspect verification evidence and the resumption condition";
-	if (claims.some((claim) => claim.status === "unknown")) return "inspect ownership / reconcile claim before resuming";
+	if (item.selected.action !== "inspect" && claims.some((claim) => claim.status === "unknown")) return "inspect ownership / reconcile claim before resuming";
 	if (dependency !== undefined) return `wait for ${dependency}`;
 	if (item.attempts >= batch.maxAttempts || batch.items.reduce((total, candidate) => total + candidate.attempts, 0) >= batch.maxTotalAttempts) return "original attempt budget exhausted; no retry";
 	const retry = retryEligible(batch, item, stage, dependency, claims, readOnly);

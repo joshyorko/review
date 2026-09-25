@@ -332,3 +332,11 @@ test("read-only cancelled and paused queued next actions never suggest unavailab
 	item.stage = "QUEUED";
 	assert.match(projectItem(batch, item).nextSafeAction, /resume/);
 });
+
+test("inspection work is not blocked by another run's mutation claim", () => {
+	const batch = makeBatch([selected("org/a#1", "inspect")]);
+	const item = projectItem(batch, batch.items[0]!, { claims: [{ resource: "repo:org/a", owner: "review:another:0", status: "unknown", createdAt: "now" }] });
+	assert.equal(item.claims.some((claim) => claim.conflict), false);
+	assert.doesNotMatch(item.blocker ?? "", /claimed|owned/);
+	assert.doesNotMatch(item.nextSafeAction, /ownership|claim/);
+});

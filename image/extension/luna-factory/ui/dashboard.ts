@@ -14,6 +14,7 @@ export interface FactoryDashboardSnapshot {
 	readonly root?: string;
 	readonly error?: string;
 	readonly loading?: boolean;
+	readonly hasMoreHistory?: boolean;
 	readonly notice?: string;
 	readonly busy?: boolean;
 	readonly activeItemKeys?: readonly string[];
@@ -24,6 +25,7 @@ export interface FactoryDashboardSnapshot {
 }
 export type FactoryDashboardAction =
 	| { kind: "close" }
+	| { kind: "older-runs" }
 	| { kind: "inspect"; batchId: string; itemKey: string }
 	| { kind: "pause" | "resume" | "stop"; batchId: string }
 	| { kind: "retry" | "reconcile-effect"; batchId: string; itemKey: string }
@@ -75,9 +77,11 @@ function wrapped(lines: readonly string[], width: number): string[] {
 		let line = clean(value);
 		if (!line) { result.push(""); continue; }
 		while (visibleWidth(line) > width) {
-			const part = truncateToWidth(line, width, "");
+			const fitted = truncateToWidth(line, width, "");
+			const boundary = fitted.lastIndexOf(" ");
+			const part = boundary > width / 3 ? fitted.slice(0, boundary) : fitted;
 			if (!part) break;
-			result.push(part); line = line.slice(part.length);
+			result.push(part); line = line.slice(part.length).trimStart();
 		}
 		result.push(line);
 	}
@@ -202,6 +206,7 @@ export class FactoryDashboard {
 		else if (key === "tab") this.enter(this.view === "detail" ? "roster" : "detail");
 		else if (key === "a") this.enter("palette");
 		else if (key === "b") this.enter("batches");
+		else if (key === "m" && this.view === "batches" && this.source.hasMoreHistory && !this.source.busy) this.emit({ kind: "older-runs" });
 		else if (key === "e") this.enter("evidence");
 		else if (key === "c") this.enter("claims");
 		else if (key === "?") this.enter(this.view === "help" ? "roster" : "help");
@@ -299,11 +304,13 @@ export class FactoryDashboard {
 		if (batch && this.batchId) for (const kind of batch.actions) {
 			if (kind === "pause" || kind === "resume" || kind === "stop" || kind === "export" || kind === "discard") {
 				const labels = { pause: "Pause run", resume: "Resume run", stop: "Stop run…", export: "Export evidence…", discard: "Archive run…" };
-				if (this.mutationsAvailable() && !(kind === "discard" && Object.keys(this.source.evidenceWarnings ?? {}).some((key) => key.startsWith(`${this.batchId}:`)))) choices.push({ label: labels[kind], action: { kind, batchId: this.batchId } });
+				if (this.mutationsAvailable() && !(kind === "discard" && (this.source.hasMoreHistory || Object.keys(this.source.evidenceWarnings ?? {}).some((key) => key.startsWith(`${this.batchId}:`))))) choices.push({ label: labels[kind], action: { kind, batchId: this.batchId } });
 			}
 		}
+		if (this.source.hasMoreHistory && this.view === "palette") choices.push({ label: "Older runs", action: { kind: "older-runs" } });
 		choices.push({ label: "Debug details", view: "debug" }, { label: "Help", view: "help" });
-		return choices.filter((choice, i) => choices.findIndex((other) => other.label === choice.label) === i);
+		const identity = (choice: Choice) => "view" in choice ? `view:${choice.view}` : `action:${choice.action.kind}`;
+		return choices.filter((choice, i) => choices.findIndex((other) => identity(other) === identity(choice)) === i);
 	}
 	private relevantClaims(): readonly ResourceClaim[] {
 		const item = this.item();
@@ -401,7 +408,7 @@ export class FactoryDashboard {
 	}
 	private footer(width = 120): string {
 		if (this.view === "roster") return this.item() ? "j/k Select   Enter Inspect   a Actions   b Runs   q Close" : this.source.batches.length ? "b Runs   ? Help   q Close" : "? Help   q Close";
-		if (this.view === "batches") return "j/k Select   Enter Open   a Actions   q Close";
+		if (this.view === "batches") return this.source.hasMoreHistory ? "j/k Select   Enter Open   m Older   q Close" : "j/k Select   Enter Open   a Actions   q Close";
 		if (this.view === "palette" || this.view === "evidence" || this.view === "claims") return "j/k Select   Enter Open   q Back";
 		if (this.view === "claim-detail") return this.claimCanReconcile() ? "r Reconcile   j/k Scroll   d Debug   q Back" : "j/k Scroll   d Debug   q Back";
 		if (this.view === "debug" || this.view === "claim-debug" || this.view === "help" || this.view === "evidence-detail") return "j/k Scroll   q Back";

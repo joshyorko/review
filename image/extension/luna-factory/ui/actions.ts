@@ -13,7 +13,7 @@ export function dashboardActionAllowed(action: FactoryDashboardAction, snapshot:
 	if (!batch) return false;
 	const options = { readOnly, claims: snapshot.claims, retainedBatches: snapshot.batches };
 	if (action.kind === "batch") return true;
-	if (action.kind === "discard" && Object.keys(snapshot.evidenceWarnings ?? {}).some((key) => key.startsWith(`${action.batchId}:`))) return false;
+	if (action.kind === "discard" && (snapshot.hasMoreHistory || Object.keys(snapshot.evidenceWarnings ?? {}).some((key) => key.startsWith(`${action.batchId}:`)))) return false;
 	if (action.kind === "pause" || action.kind === "resume" || action.kind === "stop" || action.kind === "export" || action.kind === "discard") return projectBatch(batch, options).actions.includes(action.kind);
 	if (!("itemKey" in action)) return false;
 	const item = batch.items.find((i) => i.selected.key === action.itemKey);

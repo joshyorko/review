@@ -261,3 +261,35 @@ test("busy snapshots keep navigation available and hide mutation controls", () =
 	view.handleInput("r");
 	assert.equal(actions.length, 0);
 });
+
+test("overview stays human while inspector and debug progressively disclose exact evidence", () => {
+	const snapshot = source(); const b = snapshot.batches[0]!; const item = b.items[0]!;
+	item.stage = "BLOCKED"; item.blocker = "auth expired; refresh operator credentials";
+	item.selected.base = "a".repeat(40); item.selected.head = "b".repeat(40);
+	item.workspace = "/private/workspaces/fixture";
+	const view = makeView({ ...snapshot, claims: [] }, [], { rows: 32 });
+	for (const width of [60, 120]) {
+		const overview = view.render(width).join("\n");
+		assert.match(overview, /Luna Factory/); assert.match(overview, /NEEDS YOU/); assert.match(overview, /Reconnect GitHub/);
+		assert.doesNotMatch(overview, /batch-aaaaaaaa|private\/workspaces|aaaaaaaaaaaaaaaa|bbbbbbbbbbbbbbbb|model: unknown|cost:/);
+		assert.match(overview, /\[r Retry\]/);
+	}
+	view.handleInput("Enter"); const inspector = view.render(120).join("\n");
+	assert.match(inspector, /Acceptance|Attempts/); assert.doesNotMatch(inspector, /aaaaaaaaaaaaaaaa|private\/workspaces/);
+	view.handleInput("d"); const debug = view.render(120).join("\n");
+	assert.match(debug, /batch-aaaaaaaa/); assert.match(debug, /aaaaaaaaaaaaaaaa/); assert.match(debug, /private\/workspaces/);
+});
+
+test("overview preserves the native split's column spacing", () => {
+	const view = makeView(source(), [], { rows: 30, primitives: { splitPane: () => ["left                       right"] } });
+	assert.ok(view.render(120).includes("left                       right"));
+});
+
+test("older runs are discoverable without batch IDs and unavailable when history is complete", () => {
+	const actions: FactoryDashboardAction[] = [];
+	const view = makeView({ ...source(), hasMoreHistory: true }, actions);
+	view.handleInput("b"); assert.match(view.render(100).join("\n"), /m Older/);
+	view.handleInput("m"); assert.deepEqual(actions.at(-1), { kind: "older-runs" });
+	view.setSource({ ...source(), hasMoreHistory: false }); const count = actions.length;
+	view.handleInput("m"); assert.equal(actions.length, count);
+});

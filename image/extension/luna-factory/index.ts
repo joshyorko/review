@@ -24,7 +24,7 @@ import { buildDispatchPrompt, DISPATCH_MARKER, dispatchMarker } from "./omp/adap
 import { coverageFor, enforcedPaths, unsupportedPaths } from "./omp/capabilities.ts";
 import { type SessionCtx, loadRun, saveRun, loadDashboardPresentation, saveDashboardPresentation } from "./omp/session.ts";
 import { renderStatusDetail, renderWhy, truncatePlain } from "./ui/status.ts";
-import { BatchService, type BatchOptions, type BatchSnapshot } from "./omp/batch-service.ts";
+import { BatchService, type BatchOptions, type BatchSnapshot, type BatchHistoryCursor } from "./omp/batch-service.ts";
 import { BatchGitHub } from "./omp/batch-github.ts";
 import { factoryClaimsRoot, factoryStateRoot, ResourceClaims } from "./omp/batch-store.ts";
 import { registerFactoryController, registerFactoryBatchSubmitter, registerFactoryDashboardOpener, registerFactoryDashboardReader, registeredFactoryReconciler, registeredFactoryClaimInspector, reportFactoryLoadFailure, selectedFactoryItems } from "./omp/batch-bridge.ts";
@@ -983,6 +983,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		let busy = false;
 		let notice: string | undefined;
 		let displayed: FactoryDashboardSnapshot | undefined;
+		let historyCursor: BatchHistoryCursor | undefined;
 		const pending = new Set<string | undefined>();
 		let refreshing = false;
 		const refresh = async (id?: string): Promise<void> => {
@@ -992,9 +993,18 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			try {
 				while (alive && pending.size) {
 					const ids = [...pending]; pending.clear();
-					if (ids.includes(undefined) || !displayed || displayed.error) displayed = await dashboardSnapshotAsync();
-					else for (const changedId of ids) displayed = await dashboardSnapshotAsync(changedId, displayed);
-					if (alive) dashboard?.setSource({ ...displayed, notice, busy });
+					if (!displayed) {
+						try {
+							const owner = batchServiceForView();
+							const page = await owner.readHistoryPage(undefined, focusBatchId ?? dashboardPresentation?.batchId);
+							historyCursor = page.next;
+							displayed = assembleDashboardSnapshot(owner, page.snapshot);
+						} catch (error) { displayed = failedSnapshot(error); }
+					} else {
+						const targets = [...new Set(ids.map((id) => id ?? dashboard?.selection.batchId).filter((id): id is string => id !== undefined))];
+						for (const changedId of targets) displayed = await dashboardSnapshotAsync(changedId, displayed);
+					}
+					if (alive && displayed) { displayed = { ...displayed, hasMoreHistory: historyCursor !== undefined }; dashboard?.setSource({ ...displayed, notice, busy }); }
 				}
 			} finally { refreshing = false; }
 		};
@@ -1016,7 +1026,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				panelRows: (_title, rows, width) => { const panel = new PanelRows(); panel.setLines(rows); return panel.render(width); },
 				splitPane: (left, right, width) => {
 					const leftRows = new PanelRows(); const rightRows = new PanelRows(); leftRows.setLines(left); rightRows.setLines(right);
-					return new SplitPane({ left: leftRows, right: rightRows, splitAt: 96, rightMinWidth: 32, narrowPane: "left", divider: "   " }).render(width);
+					return new SplitPane({ left: leftRows, right: rightRows, splitAt: 96, leftSize: { fixed: Math.floor((width - 3) / 2) }, rightMinWidth: 32, narrowPane: "left", divider: "   " }).render(width);
 				},
 			};
 		} catch (error) { notice = `Native layout unavailable; bounded text layout: ${error instanceof Error ? error.message : String(error)}`; }
@@ -1026,7 +1036,17 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			if (displayed) dashboard?.setSource({ ...displayed, notice, busy });
 			try {
 				if (["close", "inspect", "batch", "claims", "evidence", "help", "palette"].includes(action.kind)) return;
-				const current = dashboardSnapshot();
+				if (action.kind === "older-runs") {
+					if (historyCursor && displayed) {
+						const owner = batchServiceForView(); const page = await owner.readHistoryPage(historyCursor); historyCursor = page.next;
+						const loaded = assembleDashboardSnapshot(owner, page.snapshot);
+						const existing = new Map(displayed.batches.map((batch) => [batch.id, batch]));
+						for (const batch of loaded.batches) existing.set(batch.id, batch);
+						displayed = { ...displayed, ...loaded, batches: [...existing.values()], hasMoreHistory: historyCursor !== undefined };
+					}
+					return;
+				}
+				const current = dashboardSnapshot("batchId" in action ? action.batchId : dashboard?.selection.batchId, displayed);
 				if (!dashboardActionAllowed(action, current)) { report("Action is no longer available for this subject; inspect current Factory state", "warning"); return; }
 				if (action.kind === "open") {
 					const opened = await host.exec?.("gh", ["pr", "view", action.url, "--web"], { timeout: 15_000 });
@@ -1076,8 +1096,9 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					command = `resume ${action.batchId}`;
 				}
 				if (!command) return;
-				if (!dashboardActionAllowed(action, dashboardSnapshot())) { report("Factory state changed while confirming; action refused", "warning"); return; }
+				if (!dashboardActionAllowed(action, dashboardSnapshot("batchId" in action ? action.batchId : dashboard?.selection.batchId, displayed))) { report("Factory state changed while confirming; action refused", "warning"); return; }
 				const result = await batchCommand(command, ctx);
+				if (action.kind === "discard") { displayed = undefined; historyCursor = undefined; }
 				const message = action.kind === "pause" ? "Paused. Work already running can finish."
 					: action.kind === "resume" ? "Resumed. Eligible work can start."
 					: action.kind === "stop" ? "Stop requested. Ownership stays protected until work settles."
@@ -1158,11 +1179,12 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		return batchServiceForView();
 	};
 	const assembleDashboardSnapshot = (service: BatchService, snapshot: BatchSnapshot, batchId?: string, previous?: FactoryDashboardSnapshot): FactoryDashboardSnapshot => {
-			const retained = batchId && previous && !previous.error ? [...previous.batches.filter((batch) => batch.id !== batchId), ...snapshot.batches] : [...snapshot.batches];
+			const retained = batchId && previous ? [...previous.batches.filter((batch) => batch.id !== batchId), ...snapshot.batches] : [...snapshot.batches];
 			let claims;
 			try { claims = service.claims.list(); }
 			catch (error) { return { batches: retained, claims: [], root: snapshot.root, readOnly: true, error: `claims unreadable: ${error instanceof Error ? error.message : String(error)}` }; }
 			const errors = snapshot.errors.map((entry) => `${entry.id}: ${entry.error}`);
+			if (previous?.error && !errors.includes(previous.error)) errors.push(previous.error);
 			const inspector = registeredFactoryClaimInspector();
 			const claimOwners = inspector ? claims.filter((claim) => claim.owner.startsWith("review:")).flatMap((claim) => {
 				try { return [inspector(claim.owner, claim.resource)]; } catch { return []; }
@@ -1170,19 +1192,19 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			if (loadProblem) errors.push(`Factory journal unreadable: ${loadProblem}; original state preserved`);
 			if (ledger) errors.push("A single-subject journal is open; use /factory status and its textual controls. Selected batches are inspect-only in this session.");
 			retained.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
-			return { batches: retained, claims, claimOwners, evidenceWarnings: Object.fromEntries(evidenceWarnings), canReconcileClaims: registeredFactoryReconciler() !== undefined, activeItemKeys: snapshot.activeItemKeys, root: snapshot.root, readOnly: !enabled() || Boolean(snapshot.fatal || errors.length), ...(snapshot.fatal || errors.length ? { error: [snapshot.fatal, ...errors].filter(Boolean).join("; ") } : {}) };
+			return { batches: retained, hasMoreHistory: previous?.hasMoreHistory, claims, claimOwners, evidenceWarnings: Object.fromEntries(evidenceWarnings), canReconcileClaims: registeredFactoryReconciler() !== undefined, activeItemKeys: snapshot.activeItemKeys, root: snapshot.root, readOnly: !enabled() || Boolean(snapshot.fatal || errors.length), ...(snapshot.fatal || errors.length ? { error: [snapshot.fatal, ...errors].filter(Boolean).join("; ") } : {}) };
 	};
 	const failedSnapshot = (error: unknown): FactoryDashboardSnapshot => ({ batches: [], claims: [], root: factoryStateRoot(env), readOnly: true, error: error instanceof Error ? error.message : String(error) });
 	const dashboardSnapshot = (batchId?: string, previous?: FactoryDashboardSnapshot): FactoryDashboardSnapshot => {
 		try {
 			const service = batchServiceForView();
-			return assembleDashboardSnapshot(service, service.readSnapshot(previous && !previous.error ? batchId : undefined), batchId, previous);
+			return assembleDashboardSnapshot(service, service.readSnapshot(batchId), batchId, previous);
 		} catch (error) { return failedSnapshot(error); }
 	};
 	const dashboardSnapshotAsync = async (batchId?: string, previous?: FactoryDashboardSnapshot): Promise<FactoryDashboardSnapshot> => {
 		try {
 			const service = batchServiceForView();
-			return assembleDashboardSnapshot(service, await service.readSnapshotAsync(previous && !previous.error ? batchId : undefined), batchId, previous);
+			return assembleDashboardSnapshot(service, await service.readSnapshotAsync(batchId), batchId, previous);
 		} catch (error) { return failedSnapshot(error); }
 	};
 

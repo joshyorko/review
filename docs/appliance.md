@@ -28,11 +28,14 @@ textual controls remain available for scripts and headless sessions.
 
 Use `j/k` or arrows to select an item, `Enter` or `Tab` for detail, `b` for batch
 history, `a` for available actions, `e` for evidence, `c` for ownership, and `?`
-for help. Narrow terminals show one pane at a time. Closing with `q` or `Esc`
-does not pause or stop work.
+for help. `d` opens exact IDs and debug details; `v` views the recorded worker
+session. `m` loads older runs in history. Narrow terminals keep a short roster
+and the selected item's next action visible. Closing with `q` or `Esc` does not
+pause or stop work.
 
-The inspector shows current proof, dependencies, blockers, and the next safe
-action. Missing model, effort, token, or cost observations remain unknown.
+The overview shows observed work, recorded proof, and items needing attention.
+The inspector shows acceptance, dependencies, attempts, blockers, and the next
+safe action. Missing model, effort, token, or cost observations remain unknown.
 UNKNOWN effects require reconciliation; they cannot be blindly retried. Stop
 prevents further dispatch and does not roll back external effects. Scope
 revisions remain visible and prevent original-scope convergence.
