@@ -307,7 +307,7 @@ test("native stop confirmation runs after the dashboard closes and restores sele
  try {
   const batch = await storedBatch(root);
   const host = extensionHost(root);
-  let mounted = false; let mounts = 0; let confirmations = 0;
+  let mounted = false; let mounts = 0; let confirmations = 0; let inputError: unknown;
   const ctx = { hasUI: true, ui: {
    notify() {},
    async confirm() { assert.equal(mounted, false, "editor confirmation must not be covered by the overlay"); confirmations++; return false; },
@@ -322,7 +322,7 @@ test("native stop confirmation runs after the dashboard closes and restores sele
       try {
        assert.equal(component.selection.batchId, batch.id);
        component.handleInput(mounts === 1 ? "x" : "q");
-      } catch (error) { reject(error); }
+      } catch (error) { inputError = error; reject(error); }
      };
      component = factory({ requestRender() { queueMicrotask(paint); } }, { fg: (_c: string, t: string) => t, bold: (t: string) => t, inverse: (t: string) => t }, {}, (action) => { mounted = false; component?.dispose(); resolve(action); }) as FactoryDashboard;
      queueMicrotask(paint);
@@ -330,6 +330,7 @@ test("native stop confirmation runs after the dashboard closes and restores sele
    }
   } };
   await host.commands.get("factory")!.handler("", ctx as never);
+  assert.equal(inputError, undefined);
   assert.equal(confirmations, 1); assert.equal(mounts, 2);
   assert.equal(new BatchStore(root).read(batch.id).control, "active");
   await host.events.get("session_shutdown")?.({}, ctx as never);

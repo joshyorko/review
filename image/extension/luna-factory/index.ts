@@ -1127,7 +1127,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				const action = await custom<FactoryDashboardAction>((tui, theme, _keys, done) => {
 					dashboard = new FactoryDashboard({
 						tui: tui as { requestRender(): void }, theme: theme as FactoryDashboardTheme, done,
-                        onAction: (action) => {
+                        onAction: async (action) => {
                             // OMP's built-in dialogs replace the editor, beneath overlays.
                             // Return first; the loop restores this view after the dialog.
                             if (["stop", "retry", "exclude", "discard", "export", "reconcile", "reconcile-effect"].includes(action.kind)) done(action);
