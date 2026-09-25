@@ -96,14 +96,15 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 		items: items.map((selected) => {
 			const overlap = selected.overlaps.find((key) => items.some((item) => item.key === key));
 			const blocker = selected.blocker ?? (overlap ? `overlapping selected work ${overlap}; resolve scope explicitly before execution` : undefined);
+			const acceptanceReference = `Satisfy ${selected.key} acceptance @ ${selected.acceptanceRevision ?? "unresolved"}`;
 			return {
 				selected, stage: blocker ? "BLOCKED" : "QUEUED", blocker, attempts: 0, operation: undefined, operations: [], sessions: [],
 				ledger: emptyLedger(`${options.id}:${digest(selected.key).slice(0, 16)}` as RunId, {
-					statement: selected.acceptance ?? selected.key, nonGoals: ["unselected work", "merge", "deploy", "publish"],
+					statement: acceptanceReference, nonGoals: ["unselected work", "merge", "deploy", "publish"],
 					permittedEffects: selected.action === "inspect" ? ["read"] : ["read", "write"],
 					finishAuthority: selected.action, appetite: { tasks: 1, attemptsPerTask: options.maxAttempts },
 				}, [{
-					id: "A1" as CriterionId, statement: selected.acceptance ?? selected.key, mandatory: true,
+					id: "A1" as CriterionId, statement: acceptanceReference, mandatory: true,
 					...(selected.acceptanceRevision ? { assumptions: [{ kind: "acceptance-revision" as const, value: selected.acceptanceRevision }] } : {}),
 				}], {
 					repo: selected.repo,

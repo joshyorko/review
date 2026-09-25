@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, readdirSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -191,6 +192,84 @@ test("freshness rejects a newly introduced GitHub overlap", async () => {
 	await assert.rejects(() => github.assertFresh(snapshot), /overlap|scope|stale/i);
 });
 
+test("selected batches preserve oversized GitHub acceptance through persistence", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-batch-long-"));
+	try {
+		const body = `${"acceptance ".repeat(2_100)}LONG-ACCEPTANCE-SENTINEL`;
+		const repository = { id: "repo-long", nameWithOwner: "org/repo", defaultBranchRef: { name: "main", target: { oid: "a".repeat(40) } } };
+		const github = new BatchGitHub("token", (async () => ({
+			ok: true,
+			status: 200,
+			json: async () => ({
+				data: {
+					repository: {
+						...repository,
+						issueOrPullRequest: {
+							id: "item-long",
+							__typename: "Issue",
+							title: "large acceptance",
+							body,
+							closed: false,
+							url: "https://github.com/org/repo/issues/1",
+							labels: { nodes: [], pageInfo: { hasNextPage: false } },
+						},
+					},
+				},
+			}),
+		})) as unknown as typeof fetch);
+		const snapshot = await github.snapshot(selected("org/repo#1"));
+		assert.ok(snapshot.acceptance?.endsWith("LONG-ACCEPTANCE-SENTINEL"));
+		const batch = createBatch([snapshot], options("long"));
+
+		const store = new BatchStore(root);
+		store.acquire();
+		store.write(batch);
+		const loaded = store.read(batch.id);
+		assert.equal(loaded.items[0]!.selected.acceptance, snapshot.acceptance);
+		const statement = loaded.items[0]!.ledger.goal.statement;
+		assert.equal(statement, loaded.items[0]!.ledger.criteria[0]!.statement);
+		assert.ok(statement.length <= 2_000);
+		assert.match(statement, new RegExp(snapshot.key));
+		assert.ok(statement.includes(snapshot.acceptanceRevision!));
+		assert.equal(statement.includes("LONG-ACCEPTANCE-SENTINEL"), false);
+		store.release();
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+test("changing complete acceptance changes its revision and invalidates old proof", async () => {
+	const bodies = ["old acceptance", "new acceptance with a changed sentinel"];
+	const repository = { id: "repo-revision", nameWithOwner: "org/repo", defaultBranchRef: { name: "main", target: { oid: "a".repeat(40) } } };
+	const github = new BatchGitHub("token", (async () => ({
+		ok: true,
+		status: 200,
+		json: async () => ({
+			data: {
+				repository: {
+					...repository,
+					issueOrPullRequest: {
+						id: "item-revision",
+						__typename: "Issue",
+						title: "acceptance revision",
+						body: bodies.shift()!,
+						closed: false,
+						url: "https://github.com/org/repo/issues/2",
+						labels: { nodes: [], pageInfo: { hasNextPage: false } },
+					},
+				},
+			},
+		}),
+	})) as unknown as typeof fetch);
+	const original = await github.snapshot(selected("org/repo#2"));
+	const batch = createBatch([original], options("revision"));
+	done(batch, original.key);
+	const changed = await github.snapshot(original);
+	assert.notEqual(changed.acceptanceRevision, original.acceptanceRevision);
+	batch.items[0]!.selected = changed;
+	assert.equal(batchConverged(batch), false);
+});
+
+
 test("cancellation, exclusion, and scope revisions never falsely converge", () => {
 	const batch = createBatch([selected("org/a#1"), selected("org/b#2")], options("dead"));
 	batch.items[0]!.stage = "CANCELLED"; batch.items[1]!.stage = "EXCLUDED"; assert.equal(batchConverged(batch), false);
@@ -239,6 +318,25 @@ test("BatchStore isolates ledgers, rejects stale revisions, and preserves corrup
 		await writeFile(join(root, `${b.id}.json`), "{\"version\":999}"); assert.throws(() => first.read(b.id), /unsupported or corrupt/); assert.match(await readFile(join(root, `${b.id}.json`), "utf8"), /999/); first.release();
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
+test("BatchStore rejects an invalid new ledger before creating durable state", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-batch-invalid-"));
+	try {
+		const store = new BatchStore(root);
+		store.acquire();
+		const batch = createBatch([selected("org/a#1")], options("invalid"));
+		batch.items[0]!.ledger = {
+			...batch.items[0]!.ledger,
+			goal: { ...batch.items[0]!.ledger.goal, statement: "x".repeat(2_001) },
+		};
+		assert.throws(() => store.write(batch), /invalid item ledger: journal goal is unreadable/);
+		assert.equal(existsSync(join(root, `${batch.id}.json`)), false);
+		assert.deepEqual(readdirSync(root).filter((name) => name.startsWith(`${batch.id}.json.`) && name.endsWith(".tmp")), []);
+		store.release();
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 
 test("BatchStore migrates version-one operations before persisting version two", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-batch-migration-"));
