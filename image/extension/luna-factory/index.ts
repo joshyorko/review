@@ -1013,7 +1013,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			refreshing = task;
 			return task;
 		};
-		const unsubscribe = service?.onChange((event) => { if (alive) void refresh(event.batchId); }) ?? (() => {});
+		const unsubscribe = service?.onChange((event) => { if (alive) { notice = undefined; void refresh(event.batchId); } }) ?? (() => {});
 		const report = (message: string, level = "info"): void => {
 			notice = message;
 			if (alive && displayed) dashboard?.setSource({ ...displayed, notice, busy });
@@ -1094,15 +1094,26 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					if (!directory?.trim()) return;
 					command = `export ${action.batchId} ${directory.trim()}`;
 				} else if (action.kind === "reconcile") {
-					if (!ctx.ui?.confirm || !(await ctx.ui.confirm("Reconcile mutation ownership?", `Verify ${action.resource} owned by ${action.owner}. Release is allowed only after authoritative worker/effect settlement.`))) return;
+					if (!ctx.ui?.confirm || !(await ctx.ui.confirm("Reconcile mutation ownership?", `Check the selected run’s ownership for ${action.resource.replace(/^(repo|item):/, "")}. Each related claim is released only after its worker and effects are confirmed settled.`))) return;
 					command = `claims reconcile ${action.owner} ${action.resource}`;
 				} else if (action.kind === "reconcile-effect") {
 					if (!ctx.ui?.confirm || !(await ctx.ui.confirm("Reconcile effects and resume this batch?", "The existing resume controller checks recorded external effects, then may dispatch other eligible items. UNKNOWN effects are not repeated."))) return;
 					command = `resume ${action.batchId}`;
 				}
 				if (!command) return;
-				if (!dashboardActionAllowed(action, dashboardSnapshot("batchId" in action ? action.batchId : dashboard?.selection.batchId, displayed))) { report("Factory state changed while confirming; action refused", "warning"); return; }
-				const result = await batchCommand(command, ctx);
+				const confirmed = dashboardSnapshot("batchId" in action ? action.batchId : dashboard?.selection.batchId, displayed);
+                if (!dashboardActionAllowed(action, confirmed)) { report("Factory state changed while confirming; action refused", "warning"); return; }
+                let result: string;
+                if (action.kind === "reconcile") {
+                    const results: string[] = [];
+                    for (const claim of confirmed.claims.filter((claim) => claim.owner === action.owner)) {
+                        results.push(await batchCommand(`claims reconcile ${claim.owner} ${claim.resource}`, ctx));
+                    }
+                    result = results.every((text) => text.startsWith("Reconciled")) ? "Reconciled" : "Retained";
+                    // Ownership can change without a Factory batch or service event.
+                    // Reconstruct a bounded page so the next view shows fresh claims.
+                    displayed = undefined; historyCursor = undefined;
+                } else result = await batchCommand(command, ctx);
 				if (action.kind === "discard") { displayed = undefined; historyCursor = undefined; }
 				const message = action.kind === "pause" ? "Paused. Work already running can finish."
 					: action.kind === "resume" ? "Resumed. Eligible work can start."
@@ -1157,6 +1168,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				// Compatible hosts may resolve a custom component with an action.
 				// Evidence viewers stay nested; editor dialogs run after closing this overlay.
 				await perform(action);
+				if (action.kind === "reconcile" && presentation) presentation = { ...presentation, view: "claims", scroll: 0 };
 				if ("batchId" in action && action.kind !== "discard") await refresh(action.batchId);
 			}
 		} finally {

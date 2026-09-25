@@ -273,6 +273,7 @@ export class FactoryDashboard {
 		if (this.mutationsAvailable() && item.actions.includes("reconcile")) return { label: "Reconcile effect", action: { kind: "reconcile-effect", batchId: this.batchId, itemKey: item.key } };
 		if (this.mutationsAvailable() && item.actions.includes("retry") && ["BLOCKED", "UNKNOWN", "CANCELLED"].includes(item.stage)) return { label: "Retry", action: { kind: "retry", batchId: this.batchId, itemKey: item.key } };
 		if (item.prUrl && item.actions.includes("open-pr")) return { label: "Open PR", action: { kind: "open", batchId: this.batchId, itemKey: item.key, url: item.prUrl } };
+		if (item.stage === "DONE" && this.evidenceChoices().length) return { label: "Inspect evidence", view: "evidence" };
 		if (item.actions.includes("view-session")) return { label: "View worker", action: { kind: "session", batchId: this.batchId, itemKey: item.key } };
 		if (this.evidenceChoices().length) return { label: "Inspect evidence", view: "evidence" };
 		if (this.mutationsAvailable() && this.project()?.actions.includes("resume")) return { label: "Resume", action: { kind: "resume", batchId: this.batchId } };

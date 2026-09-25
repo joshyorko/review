@@ -425,3 +425,27 @@ test("native confirmation keeps the selected batch when another active batch sor
 		await rm(root, { recursive: true, force: true });
 	}
 });
+
+test("ownership recovery checks the selected owner once and refreshes an empty dashboard", async () => {
+ const root = await mkdtemp(join(tmpdir(), "factory-owner-recovery-"));
+ const { ResourceClaims } = await import("../image/extension/luna-factory/omp/batch-store.ts");
+ const { registerFactoryReconciler } = await import("../image/extension/luna-factory/omp/batch-bridge.ts");
+ const claims = new ResourceClaims(root, join(root, "claims"));
+ const owner = "review:target:0";
+ claims.claim("repo:target/repo", owner); claims.claim("item:target/repo#1", owner);
+ claims.claim("repo:other/repo", "review:other:0");
+ const checked: string[] = [];
+ const unregister = registerFactoryReconciler(async (actualOwner, resource) => {
+  assert.equal(actualOwner, owner); checked.push(resource); claims.markSettled(resource, owner); return "settled";
+ });
+ try {
+  const host = extensionHost(root); const frames: string[][] = [];
+  const ctx = interactive([{ kind: "reconcile", owner, resource: "repo:target/repo" }, { kind: "close" }], frames, () => true);
+  await host.commands.get("factory")!.handler("", ctx as never);
+  assert.deepEqual(checked.sort(), ["item:target/repo#1", "repo:target/repo"]);
+  assert.deepEqual(claims.list().map((claim) => claim.owner), ["review:other:0"]);
+  assert.doesNotMatch(frames.at(-1)!.join("\n"), /target\/repo/);
+  assert.match(frames.at(-1)!.join("\n"), /other\/repo/);
+  await host.events.get("session_shutdown")?.({}, ctx as never);
+ } finally { unregister(); await rm(root, { recursive: true, force: true }); }
+});
