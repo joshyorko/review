@@ -12,6 +12,7 @@
  * callers; loading either surface starts no work.
  */
 
+import { stripVTControlCharacters } from "node:util";
 import { evaluateRun } from "./core/convergence.ts";
 import { emptyLedger } from "./core/model.ts";
 import { DEFAULT_FINISH_AUTHORITY } from "./core/model.ts";
@@ -27,11 +28,16 @@ import { renderStatusDetail, renderWhy, truncatePlain } from "./ui/status.ts";
 import { BatchService, type BatchOptions } from "./omp/batch-service.ts";
 import { BatchGitHub } from "./omp/batch-github.ts";
 import { factoryClaimsRoot, factoryStateRoot, ResourceClaims } from "./omp/batch-store.ts";
-import { registerFactoryController, registeredFactoryReconciler, reportFactoryLoadFailure, selectedFactoryItems } from "./omp/batch-bridge.ts";
+import { registerFactoryController, registerFactoryBatchSubmitter, registerFactoryDashboardOpener, registerFactoryDashboardReader, registeredFactoryReconciler, reportFactoryLoadFailure, selectedFactoryItems } from "./omp/batch-bridge.ts";
 import type { NativeSDK, NativeContext, SchemaBuilder } from "./omp/batch-native.ts";
 import type { FactoryAction, SelectedItem } from "./core/batch.ts";
 import { resolveToken } from "../bluefin-review/github.ts";
 import { runPackagedBatchProbe } from "./omp/batch-probe.ts";
+import { FactoryDashboard, type FactoryDashboardAction, type FactoryDashboardPresentation, type FactoryDashboardSnapshot } from "./ui/dashboard.ts";
+import { readBoundedEvidence } from "./ui/evidence.ts";
+import { dashboardActionAllowed } from "./ui/actions.ts";
+import { truncateToWidth } from "../bluefin-review/width.ts";
+import { canonicalKey, rawKeyMatcher, type KeyMatcher } from "../bluefin-review/keys.ts";
 
 interface ToolContent {
 	type: "text";
@@ -130,7 +136,16 @@ export interface FactoryHost {
 
 interface FactoryCtx extends SessionCtx, NativeContext {
 	hasUI?: boolean;
-	ui?: { notify(message: string, level?: string): void };
+	ui?: {
+		notify(message: string, level?: string): void;
+		theme?: { fg(color: string, text: string): string; bold(text: string): string; inverse(text: string): string };
+		custom?<T>(factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown, options?: unknown): Promise<T>;
+		confirm?(title: string, message: string): Promise<boolean>;
+		input?(title: string, placeholder?: string): Promise<string | undefined>;
+		editor?(title: string, prefill?: string, options?: unknown, editorOptions?: { promptStyle?: boolean }): Promise<string | undefined>;
+		pasteToEditor?(text: string): void;
+		setTitle?(title: string): void;
+	};
 }
 
 export interface FactoryOptions {
@@ -949,6 +964,144 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		// turn merely to print a read-only command result.
 		host.appendEntry("com.joshyorko.luna-factory.command", { command: "factory", message });
 	};
+	let batchService: BatchService | undefined;
+	let dashboardReaderUnsubscribe: (() => void) | undefined;
+	let dashboardOpenerUnsubscribe: (() => void) | undefined;
+	let dashboardPresentation: FactoryDashboardPresentation | undefined;
+	const openDashboard = async (ctx: FactoryCtx, focusBatchId?: string): Promise<void> => {
+		if (!ctx.hasUI || !ctx.ui?.custom) {
+			notifyCommand(ctx, "Factory dashboard requires an interactive OMP UI; use /factory status for headless inspection", "warning");
+			return;
+		}
+		let service: BatchService | undefined;
+		try { service = batchServiceForView(); } catch { /* the dashboard renders the bounded read error below */ }
+		let dashboard: FactoryDashboard | undefined;
+		let alive = true;
+		let displayed: FactoryDashboardSnapshot | undefined;
+		const unsubscribe = service?.onChange((event) => {
+			if (alive && dashboard) { displayed = dashboardSnapshot(event.batchId, displayed); dashboard.update(displayed); }
+		}) ?? (() => {});
+		try {
+			let presentation: FactoryDashboardPresentation | undefined = dashboardPresentation;
+			let initialFocusBatchId = focusBatchId;
+			let matchKey: KeyMatcher = rawKeyMatcher;
+			let nativePrimitives: { panelRows: (title: string, rows: readonly string[], width: number) => readonly string[]; splitPane: (left: readonly string[], right: readonly string[], width: number) => readonly string[] } | undefined;
+			try {
+				const [{ PanelRows }, { SplitPane, matchesKey }] = await Promise.all([
+					import("@oh-my-pi/pi-tui/chrome") as Promise<{ PanelRows: new () => { setLines(lines: readonly string[]): void; render(width: number): readonly string[] } }>,
+					import("@oh-my-pi/pi-tui") as Promise<{ matchesKey: KeyMatcher; SplitPane: new (options: Record<string, unknown>) => { render(width: number): readonly string[] } }>,
+				]);
+				matchKey = matchesKey;
+				nativePrimitives = {
+					panelRows: (_title, rows, width) => { const panel = new PanelRows(); panel.setLines(rows); return panel.render(width); },
+					splitPane: (left, right, width) => {
+						const leftRows = new PanelRows(); const rightRows = new PanelRows();
+						leftRows.setLines(left); rightRows.setLines(right);
+						const split = new SplitPane({ left: leftRows, right: rightRows, splitAt: 96, rightMinWidth: 32, narrowPane: "left", divider: " │ " });
+						return split.render(width);
+					},
+				};
+			} catch (error) { notifyCommand(ctx, `Factory native layout unavailable; using bounded text layout: ${error instanceof Error ? error.message : String(error)}`, "warning"); }
+			for (;;) {
+				const loaded = dashboardSnapshot();
+				const source: FactoryDashboardSnapshot = loaded;
+				displayed = loaded;
+				const action = await ctx.ui.custom<FactoryDashboardAction>((tui, theme, _keybindings, done) => {
+					const actualTheme = (theme ?? ctx.ui?.theme ?? {
+						fg: (_color: string, text: string) => text,
+						bold: (text: string) => text,
+						inverse: (text: string) => text,
+					});
+					dashboard = new FactoryDashboard({ tui: tui as { requestRender(): void }, theme: actualTheme, done, source, matchKey, ...(nativePrimitives ? { primitives: nativePrimitives } : {}), ...(presentation ? { presentation } : {}), ...(initialFocusBatchId ? { focusBatchId: initialFocusBatchId } : {}) });
+					return dashboard;
+				}, { overlay: true, overlayOptions: { fullscreen: true, width: "100%", maxHeight: "100%", anchor: "top-left", mouseTracking: false } });
+				initialFocusBatchId = undefined;
+				presentation = dashboard?.presentation;
+				dashboardPresentation = presentation;
+				if (action.kind === "close") return;
+				if (["inspect", "batch", "claims", "evidence", "help", "palette"].includes(action.kind)) continue;
+				const current = dashboardSnapshot();
+				if (!dashboardActionAllowed(action, current)) { notifyCommand(ctx, "Action is no longer safe for this subject; inspect current Factory state", "warning"); continue; }
+				if (action.kind === "open") {
+					ctx.ui.pasteToEditor?.(action.url);
+					notifyCommand(ctx, `${ctx.ui.pasteToEditor ? "Recorded URL copied to the prompt" : "Recorded URL"}: ${action.url}`, "info");
+					continue;
+				}
+				if (action.kind === "evidence-preview") {
+					try {
+						const preview = readBoundedEvidence(dashboardSnapshot().root ?? factoryStateRoot(env), action.path);
+						let offset = 0;
+						await ctx.ui.custom<undefined>((tui, _theme, _keys, done) => {
+							const lines = preview.text.split("\n");
+							return {
+								render: (width: number) => {
+									const safeWidth = Math.max(1, width);
+									const title = stripVTControlCharacters(preview.path).replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, " ");
+									const header = truncateToWidth(`EVIDENCE ${title}${preview.truncated ? " (truncated)" : ""}`, safeWidth);
+									const height = Math.max(1, (process.stdout.rows ?? 30) - 4);
+									return [header, ...lines.slice(offset, offset + height).map((line) => truncateToWidth(line, safeWidth)), truncateToWidth("j/k scroll · q/Esc close", safeWidth)];
+								},
+								handleInput: (input: string) => {
+									const key = canonicalKey(input, matchKey);
+									if (key === "q" || key === "escape") done(undefined);
+									else if (key === "j" || key === "down") offset = Math.min(Math.max(0, lines.length - 1), offset + 1);
+									else if (key === "k" || key === "up") offset = Math.max(0, offset - 1);
+									(tui as { requestRender?: () => void }).requestRender?.();
+								},
+								dispose() {},
+							};
+						}, { overlay: true, overlayOptions: { fullscreen: true, width: "100%", maxHeight: "100%", anchor: "top-left", mouseTracking: false } });
+					} catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
+					continue;
+				}
+				if (action.kind === "workspace" || action.kind === "session") {
+					const item = current.batches.find((b) => b.id === action.batchId)?.items.find((i) => i.selected.key === action.itemKey);
+					const value = action.kind === "workspace" ? item?.workspace : item?.sessions.at(-1);
+					if (value) ctx.ui.pasteToEditor?.(value);
+					notifyCommand(ctx, value ? `${action.kind}: ${value}` : `${action.kind} unavailable`, value ? "info" : "warning");
+					continue;
+				}
+				if (current.readOnly || current.error) { notifyCommand(ctx, current.error ?? "Factory state is read-only; mutation refused", "warning"); continue; }
+				const currentBatch = current.batches.find((batch) => "batchId" in action && batch.id === action.batchId);
+				if (!currentBatch && !["reconcile"].includes(action.kind)) { notifyCommand(ctx, "Selected Factory batch is no longer available; refresh and inspect retained state", "warning"); continue; }
+				if (action.kind === "stop") {
+					if (!ctx.ui.confirm || !(await ctx.ui.confirm("Stop Factory batch?", "New dispatch will stop; existing effects are not rolled back."))) { notifyCommand(ctx, "Stop requires explicit confirmation", "warning"); continue; }
+				} else if (action.kind === "retry") {
+					if (!ctx.ui.confirm || !(await ctx.ui.confirm("Retry Factory item?", "The original attempt budget and any retained evidence remain in force."))) { notifyCommand(ctx, "Retry requires explicit confirmation", "warning"); continue; }
+				} else if (action.kind === "exclude") {
+					if (!ctx.ui.confirm || !(await ctx.ui.confirm("Exclude Factory item?", "This creates a durable scope revision and removes it from execution."))) { notifyCommand(ctx, "Exclude requires explicit confirmation", "warning"); continue; }
+					const reason = ctx.ui.editor ? await ctx.ui.editor("Why exclude this item?", "", undefined, { promptStyle: true }) : await ctx.ui.input?.("Why exclude this item?", "reason");
+					if (!reason?.trim()) { notifyCommand(ctx, "Exclusion cancelled: a reason is required", "warning"); continue; }
+					if (!dashboardActionAllowed(action, dashboardSnapshot())) { notifyCommand(ctx, "Item state changed while confirming; exclusion refused", "warning"); continue; }
+					try { notifyCommand(ctx, await batchCommand(`exclude ${action.batchId} ${action.itemKey} ${reason.trim()}`, ctx)); } catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
+					continue;
+				} else if (action.kind === "discard") {
+					if (!ctx.ui.confirm || !(await ctx.ui.confirm("Archive Factory batch?", "Native evidence and workspaces remain retained."))) { notifyCommand(ctx, "Archive requires explicit confirmation", "warning"); continue; }
+				}
+				let command: string | undefined;
+				if (action.kind === "pause" || action.kind === "resume" || action.kind === "stop") command = `${action.kind} ${action.batchId}`;
+				else if (action.kind === "retry") command = `retry ${action.batchId} ${action.itemKey}`;
+				else if (action.kind === "discard") command = `discard ${action.batchId}`;
+				else if (action.kind === "export") {
+					const destination = await ctx.ui.input?.("Export Factory evidence to which directory?", "unused destination directory");
+					if (!destination?.trim()) { notifyCommand(ctx, "Export cancelled: destination directory is required", "warning"); continue; }
+					command = `export ${action.batchId} ${destination.trim()}`;
+				} else if (action.kind === "reconcile") command = `claims reconcile ${action.owner} ${action.resource}`;
+				else if (action.kind === "reconcile-effect") {
+					if (!ctx.ui.confirm || !(await ctx.ui.confirm("Reconcile effects and resume this batch?", "The existing resume controller checks recorded external effects, then may dispatch other eligible items in this batch. UNKNOWN effects are not repeated."))) continue;
+					command = `resume ${action.batchId}`;
+				}
+				if (!command) continue;
+				if (!dashboardActionAllowed(action, dashboardSnapshot())) { notifyCommand(ctx, "Factory state changed while confirming; action refused", "warning"); continue; }
+				try { notifyCommand(ctx, await batchCommand(command, ctx)); }
+				catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
+			}
+		} finally {
+			alive = false;
+			unsubscribe();
+			dashboard?.dispose();
+		}
+	};
 
 	const controlSummary = (control: "active" | "paused" | "draining" | "interrupted", next: Ledger): string => {
 		if (control !== "interrupted") return `run is ${next.control}`;
@@ -964,17 +1117,57 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		return lines.join("\n");
 	};
 
-	let batchService: BatchService | undefined;
-	const batches = (): BatchService => {
-		if (!enabled()) throw new Error("Factory is disabled; explicitly enable LUNA_FACTORY_ENABLED=1");
-		if (ledger) throw new Error("A single-subject journal is open; preserve it and use a fresh native session for selected batches");
-		if (loadProblem !== undefined) throw new Error(`Factory journal is unreadable: ${loadProblem}; preserve it before starting a selected batch`);
+	const batchServiceForView = (): BatchService => {
 		if (!batchService) {
 			const capacity = Number(env.LUNA_FACTORY_CAPACITY ?? "2");
 			if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("LUNA_FACTORY_CAPACITY must be between 1 and 100");
 			batchService = new BatchService(factoryStateRoot(env), new BatchGitHub(resolveToken(env)), host.pi, host.zod as unknown as SchemaBuilder, capacity, factoryClaimsRoot(env));
 		}
 		return batchService;
+	};
+	const batches = (): BatchService => {
+		if (!enabled()) throw new Error("Factory is disabled; explicitly enable LUNA_FACTORY_ENABLED=1");
+		if (ledger) throw new Error("A single-subject journal is open; preserve it and use a fresh native session for selected batches");
+		if (loadProblem !== undefined) throw new Error(`Factory journal is unreadable: ${loadProblem}; preserve it before starting a selected batch`);
+		return batchServiceForView();
+	};
+	const dashboardSnapshot = (batchId?: string, previous?: FactoryDashboardSnapshot): FactoryDashboardSnapshot => {
+		try {
+			const service = batchServiceForView();
+			const snapshot = service.readSnapshot(previous && !previous.error ? batchId : undefined);
+			const retained = batchId && previous && !previous.error ? [...previous.batches.filter((batch) => batch.id !== batchId), ...snapshot.batches] : snapshot.batches;
+			let claims;
+			try { claims = service.claims.list(); }
+			catch (error) { return { batches: retained, claims: [], root: snapshot.root, readOnly: true, error: `claims unreadable: ${error instanceof Error ? error.message : String(error)}` }; }
+			const errors = snapshot.errors.map((entry) => `${entry.id}: ${entry.error}`);
+			if (loadProblem) errors.push(`Factory journal unreadable: ${loadProblem}; original state preserved`);
+			if (ledger) errors.push("A single-subject journal is open; use /factory status and its textual controls. Selected batches are inspect-only in this session.");
+			retained.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+			return { batches: retained, claims, activeItemKeys: snapshot.activeItemKeys, root: snapshot.root, readOnly: !enabled() || Boolean(snapshot.fatal || errors.length), ...(snapshot.fatal || errors.length ? { error: [snapshot.fatal, ...errors].filter(Boolean).join("; ") } : {}) };
+		} catch (error) {
+			return { batches: [], claims: [], readOnly: true, error: error instanceof Error ? error.message : String(error) };
+		}
+	};
+	const registerDashboardReader = (): void => {
+		dashboardReaderUnsubscribe?.();
+		dashboardReaderUnsubscribe = registerFactoryDashboardReader(dashboardSnapshot);
+	};
+	const submitSelectedBatch = async (action: FactoryAction, context: unknown, settings: Partial<BatchOptions> = {}): Promise<{ batchId: string; text: string }> => {
+		const ctx = context as FactoryCtx;
+		const service = batches();
+		const items = selectedFactoryItems(action);
+		const batch = await service.submit(items, {
+			capacity: settings.capacity ?? service.capacity,
+			maxAttempts: settings.maxAttempts ?? 3,
+			maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3,
+			mode: settings.mode ?? "once",
+			dependencies: settings.dependencies,
+		});
+		const preflight = service.status(batch.id);
+		notifyCommand(ctx, preflight);
+		await service.resume(batch.id, ctx);
+		if (!ctx.hasUI) await service.waitForIdle();
+		return { batchId: batch.id, text: service.status(batch.id) };
 	};
 	const batchCommand = async (raw: string, context: unknown): Promise<string> => {
 		const ctx = context as FactoryCtx;
@@ -1028,7 +1221,16 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		return service.status(id);
 	};
 	const unregisterBatchController = registerFactoryController(batchCommand);
-	host.on("session_shutdown", async () => { unregisterBatchController(); await batchService?.shutdown(); });
+	const unregisterBatchSubmitter = registerFactoryBatchSubmitter((action, context) => submitSelectedBatch(action, context));
+	registerDashboardReader();
+	dashboardOpenerUnsubscribe = registerFactoryDashboardOpener((context, focusBatchId) => openDashboard(context as FactoryCtx, focusBatchId));
+	host.on("session_shutdown", async () => {
+		unregisterBatchController();
+		unregisterBatchSubmitter();
+		dashboardReaderUnsubscribe?.();
+		dashboardOpenerUnsubscribe?.();
+		if (batchService?.isWriterAcquired()) await batchService.shutdown();
+	});
 	if (env.LUNA_FACTORY_PACKAGED_BATCH_PROBE === "1") {
 		registerTool({
 			name: "luna_factory_packaged_batch_probe",
@@ -1047,6 +1249,11 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			description: "Open or inspect the opt-in Luna Factory run",
 			handler: async (rawArgs, ctx) => {
 				const args = rawArgs.trim();
+				if (args.length === 0 && ctx.hasUI && ctx.ui?.custom) {
+					try { await openDashboard(ctx); }
+					catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
+					return;
+				}
 				if (!ledger && (args.length === 0 || /^(start|selected|run|status|inspect|claims|pause|resume|stop|retry|exclude|export|discard)(\s|$)/.test(args))) {
 					try { notifyCommand(ctx, await batchCommand(args || "status", ctx)); }
 					catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }

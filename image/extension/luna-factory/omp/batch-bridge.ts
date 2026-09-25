@@ -1,10 +1,23 @@
 import type { FactoryAction, SelectedItem } from "../core/batch.ts";
+import type { FactoryDashboardSnapshot } from "../ui/dashboard.ts";
+export type { FactoryDashboardSnapshot } from "../ui/dashboard.ts";
 
 type Controller = (command: string, context: unknown) => Promise<string>;
 type Reconciler = (owner: string, resource: string) => Promise<"settled" | "unknown">;
+export interface FactoryBatchHandoff {
+	readonly batchId: string;
+	readonly text: string;
+}
+
+type BatchSubmitter = (action: FactoryAction, context: unknown) => Promise<FactoryBatchHandoff>;
+type DashboardReader = () => FactoryDashboardSnapshot;
+type DashboardOpener = (context: unknown, batchId?: string) => Promise<void>;
 type BridgeState = {
 	selection?: (action: FactoryAction) => SelectedItem[];
 	controller?: Controller;
+	submitter?: BatchSubmitter;
+	dashboardReader?: DashboardReader;
+	dashboardOpener?: DashboardOpener;
 	reconciler?: Reconciler;
 	loadFailure?: string;
 };
@@ -34,10 +47,52 @@ export function selectedFactoryItems(action: FactoryAction): SelectedItem[] {
 	return state.selection(action);
 }
 export function registerFactoryController(handler: Controller): () => void {
+	if (state.controller !== handler) {
+		// A replacement controller belongs to a new extension lifetime. Do not
+		// leave typed dashboard seams pointing at a stale cached module instance.
+		state.submitter = undefined;
+		state.dashboardReader = undefined;
+		state.dashboardOpener = undefined;
+	}
 	state.controller = handler;
 	state.loadFailure = undefined;
 	return () => { if (state.controller === handler) state.controller = undefined; };
 }
+
+/** Register the typed Review-to-Factory handoff; callers never parse status text. */
+export function registerFactoryBatchSubmitter(handler: BatchSubmitter): () => void {
+	state.submitter = handler;
+	return () => { if (state.submitter === handler) state.submitter = undefined; };
+}
+
+export async function submitFactoryBatch(action: FactoryAction, context: unknown): Promise<FactoryBatchHandoff> {
+	if (!state.submitter) throw new Error(`Factory is not loaded; ${factoryLoadDiagnostic()}`);
+	return state.submitter(action, context);
+}
+export function factoryBatchSubmitterRegistered(): boolean { return state.submitter !== undefined; }
+
+/** Register a read-only local projection reader for the native dashboard. */
+export function registerFactoryDashboardReader(reader: DashboardReader): () => void {
+	state.dashboardReader = reader;
+	return () => { if (state.dashboardReader === reader) state.dashboardReader = undefined; };
+}
+
+export function readFactoryDashboardSnapshot(): FactoryDashboardSnapshot {
+	if (!state.dashboardReader) return { batches: [], claims: [], readOnly: true, error: factoryLoadDiagnostic() };
+	try { return state.dashboardReader(); }
+	catch (error) { return { batches: [], claims: [], readOnly: true, error: error instanceof Error ? error.message : String(error) }; }
+}
+
+export function registerFactoryDashboardOpener(opener: DashboardOpener): () => void {
+	state.dashboardOpener = opener;
+	return () => { if (state.dashboardOpener === opener) state.dashboardOpener = undefined; };
+}
+
+export async function openFactoryDashboard(context: unknown, batchId?: string): Promise<void> {
+	if (!state.dashboardOpener) throw new Error(`Factory dashboard is not loaded; ${factoryLoadDiagnostic()}`);
+	return state.dashboardOpener(context, batchId);
+}
+export function factoryDashboardOpenerRegistered(): boolean { return state.dashboardOpener !== undefined; }
 
 /** Register Review's authoritative claim reconciliation seam for textual Factory commands. */
 export function registerFactoryReconciler(handler: Reconciler): () => void {

@@ -12,7 +12,7 @@ import type { QueueItem } from "./github.ts";
 import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, orgScope, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
-import { registerFactoryReconciler, registerFactorySelection, factoryCommand, factoryControllerRegistered, factoryLoadDiagnostic } from "../luna-factory/omp/batch-bridge.ts";
+import { registerFactoryReconciler, registerFactorySelection, factoryBatchSubmitterRegistered, factoryCommand, factoryControllerRegistered, factoryDashboardOpenerRegistered, factoryLoadDiagnostic, openFactoryDashboard, submitFactoryBatch } from "../luna-factory/omp/batch-bridge.ts";
 import { ResourceClaims, factoryClaimsRoot, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
@@ -431,6 +431,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let dashboardOpen = false;
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
+	let factoryHandoffBatchId: string | undefined;
+	let factoryHandoffRequested = false;
 	let started: Promise<void> = Promise.resolve();
 	const recoveryBatches = new Map<string, PersistedRepositoryBatch>();
 	let activeBatch: PersistedRepositoryBatch | undefined;
@@ -1270,6 +1272,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		if (action.kind === "close") return;
 		if (action.kind === "factory") {
+			factoryHandoffRequested = true;
 			// The dashboard hides the chord when Factory is unavailable; this is
 			// the residual path (a stale frame, or a caller that drives the action
 			// directly). Name the cause instead of reporting a bare "not loaded".
@@ -1304,7 +1307,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (command === undefined) return;
 			try {
 				const factoryCtx = { ...ctx, reconcileMutationClaim };
-				ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+				if (command.startsWith("start ")) {
+					if (!factoryBatchSubmitterRegistered() || !factoryDashboardOpenerRegistered()) {
+						ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+						return;
+					}
+					const action = command.slice("start ".length) as "inspect" | "patch" | "pr-ready";
+					const handoff = await submitFactoryBatch(action, factoryCtx);
+					ctx.ui.notify(`Factory batch ${handoff.batchId} submitted`, "info");
+					factoryHandoffBatchId = handoff.batchId;
+				} else {
+					ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+				}
 			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 			return;
 		}
@@ -1483,7 +1497,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				{ overlay: false },
 			);
 			if (action.kind !== "close") await dispatch(ctx, action);
-			if (action.kind === "scope" || action.kind === "factory") reopen = true;
+			if (action.kind === "scope") reopen = true;
+			if (action.kind === "factory" && factoryHandoffRequested) {
+				const batchId = factoryHandoffBatchId;
+				factoryHandoffBatchId = undefined;
+				factoryHandoffRequested = false;
+				if (batchId !== undefined) await openFactoryDashboard(ctx, batchId);
+				reopen = true;
+			}
 		} catch {
 			// OMP cancellation closes the workbench without changing batch state.
 		} finally {

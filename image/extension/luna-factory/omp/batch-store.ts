@@ -136,6 +136,7 @@ export class BatchStore {
 		if (JSON.parse(readFileSync(file, "utf8")).token === this.owner.token) rmSync(file);
 		this.held = false;
 	}
+	isAcquired(): boolean { return this.held; }
 	list(): Batch[] {
 		return readdirSync(this.root).filter((name) => /^batch-[a-f0-9-]+\.json$/.test(name)).map((name) => this.read(name.slice(0, -5)));
 	}

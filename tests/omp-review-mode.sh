@@ -22,6 +22,11 @@ test_files=(
   tests/luna_factory_dogfood_contract.test.ts
   tests/luna_factory_native.test.ts
   tests/luna_factory_batch.test.ts
+  tests/luna_factory_projection.test.ts
+  tests/luna_factory_dashboard.test.ts
+  tests/luna_factory_dashboard_integration.test.ts
+  tests/luna_factory_dashboard_actions.test.ts
+  tests/luna_factory_evidence.test.ts
 )
 
 if ! command -v node >/dev/null 2>&1; then

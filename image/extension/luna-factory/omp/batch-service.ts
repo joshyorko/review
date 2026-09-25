@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { batchConverged, batchSummary, createBatch, dependencyBlocker, digest, selectionIdentity, type Batch, type BatchItem, type SelectedItem, type Prerequisite } from "../core/batch.ts";
@@ -43,6 +43,22 @@ function transitionOperation(item: BatchItem, update: Partial<OperationReceipt>)
 export interface BatchOptions { capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[] }
 interface Running { batch: Batch; item: BatchItem; controller: AbortController; promise: Promise<void> }
 
+export interface BatchSnapshotError {
+	readonly id: string;
+	readonly error: string;
+}
+
+/** A side-effect-free view of retained Factory state. */
+export interface BatchSnapshot {
+	readonly root: string;
+	readonly batches: readonly Batch[];
+	readonly errors: readonly BatchSnapshotError[];
+	readonly activeItemKeys: readonly string[];
+	readonly fatal?: string;
+}
+
+export type BatchChangeListener = (event: { readonly batchId?: string }) => void;
+
 /** One owner and one slot bound for worker, verification and independent acceptance. */
 export class BatchService {
 	readonly store: BatchStore;
@@ -56,7 +72,7 @@ export class BatchService {
 	private running = new Map<string, Running>();
 	private pumping?: Promise<void>;
 	private submitTail: Promise<void> = Promise.resolve();
-	private changed = () => {};
+	private changed = new Set<BatchChangeListener>();
 	private context?: NativeContext;
 	private fatal?: string;
 
@@ -70,16 +86,55 @@ export class BatchService {
 		this.store = new BatchStore(root);
 		this.claims = new ResourceClaims(root, claimsRoot);
 	}
-	onChange(callback: () => void): void { this.changed = callback; }
+	onChange(callback: BatchChangeListener): () => void {
+		this.changed.add(callback);
+		return () => { this.changed.delete(callback); };
+	}
+	isWriterAcquired(): boolean { return this.store.isAcquired(); }
+	activeItemKeys(): readonly string[] { return [...this.running.values()].map((active) => active.item.selected.key); }
+	private notifyChanged(batchId?: string): void {
+		for (const callback of [...this.changed]) {
+			try { callback({ batchId }); } catch { /* observers never make a durable mutation fail */ }
+		}
+	}
 	private persist(batch: Batch): void {
 		if (this.fatal) throw new Error(this.fatal);
 		try { this.store.write(batch); }
 		catch (error) {
 			this.fatal = `persistence failed; no new effects: ${message(error)}`;
 			for (const active of this.running.values()) active.controller.abort();
+			this.notifyChanged(batch.id);
 			throw error;
 		}
-		this.changed();
+		this.notifyChanged(batch.id);
+	}
+	/**
+	 * Read persisted state without acquiring the writer lock, resuming work, or
+	 * touching GitHub/OMP. Each corrupt store is retained as a fail-closed error
+	 * while healthy batches remain available for inspection.
+	 */
+	readSnapshot(id?: string): BatchSnapshot {
+		const batches: Batch[] = [];
+		const errors: BatchSnapshotError[] = [];
+		let ids: string[];
+		try {
+			ids = id === undefined
+				? readdirSync(this.root).filter((name) => /^batch-[a-f0-9-]+\.json$/.test(name)).map((name) => name.slice(0, -5))
+				: [id];
+		} catch (error) {
+			return { root: this.root, batches, errors: [{ id: id ?? this.root, error: message(error) }], activeItemKeys: this.activeItemKeys(), ...(this.fatal ? { fatal: this.fatal } : {}) };
+		}
+		for (const batchId of ids) {
+			try {
+				if (!/^batch-[a-f0-9-]+$/.test(batchId)) throw new Error("invalid batch identity");
+				const file = join(this.root, `${batchId}.json`);
+				const stat = lstatSync(file);
+				if (!stat.isFile() || stat.nlink !== 1 || stat.size > 32 * 1024 * 1024) throw new Error("batch preview requires a regular file under 32 MiB; preserve original evidence for inspection");
+				batches.push(this.store.read(batchId));
+			}
+			catch (error) { errors.push({ id: batchId, error: message(error) }); }
+		}
+		return { root: this.root, batches, errors, activeItemKeys: this.activeItemKeys(), ...(this.fatal ? { fatal: this.fatal } : {}) };
 	}
 	status(id?: string): string {
 		const batches = id ? [this.store.read(id)] : this.store.list();
