@@ -100,7 +100,7 @@ export async function runNative(
 	const { session, modelFallbackMessage } = await sdk.createAgentSession({
 		cwd: workspace, model: context.model, authStorage: context.modelRegistry.authStorage, modelRegistry: context.modelRegistry,
 		agentRegistry: new sdk.AgentRegistry(), sessionManager: sdk.SessionManager.create(workspace, join(root, "sessions")),
-		settings: sdk.Settings.isolated({ "advisor.enabled": false, "autolearn.enabled": false, "memory.enabled": false, "retry.enabled": false, "compaction.enabled": false, "task.maxRecursionDepth": 0 }),
+		settings: sdk.Settings.isolated({ "advisor.enabled": false, "autolearn.enabled": false, "retry.enabled": false, "compaction.enabled": false, "task.maxRecursionDepth": 0 }),
 		toolNames: tools.map((tool) => tool.name), restrictToolNames: true, allowRestrictedCustomTools: true, customTools: tools,
 		disableExtensionDiscovery: true, enableMCP: false, enableLsp: false, enableIrc: false, skipPythonPreflight: true,
 		skills: [], rules: [], contextFiles: [], promptTemplates: [], slashCommands: [], spawns: "", taskDepth: 1,
