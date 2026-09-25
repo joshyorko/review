@@ -322,3 +322,20 @@ test("retained ownership is actionable when no Factory batch exists", () => {
  assert.match(view.render(80).join("\n"), /Repository locked/);
  assert.doesNotMatch(view.render(80).join("\n"), /e Inspect evidence/);
 });
+
+test("claim inspector and debug stay on the newly selected ownership row", () => {
+ const actions: FactoryDashboardAction[] = [];
+ const view = makeView({ ...source(), batches: [], canReconcileClaims: true, claims: [
+  { resource: "repo:first/repo", owner: "review:first:0", status: "unknown", createdAt: "now" },
+  { resource: "repo:second/repo", owner: "review:second:0", status: "unknown", createdAt: "now" },
+ ] }, actions);
+ view.handleInput("c"); view.handleInput("Enter"); view.handleInput("q");
+ view.handleInput("j"); view.handleInput("Enter");
+ assert.match(view.render(100).join("\n"), /second\/repo/);
+ assert.doesNotMatch(view.render(100).join("\n"), /first\/repo/);
+ view.handleInput("r");
+ assert.deepEqual(actions.at(-1), { kind: "reconcile", owner: "review:second:0", resource: "repo:second/repo" });
+ view.handleInput("d");
+ assert.match(view.render(100).join("\n"), /second\/repo/);
+ assert.doesNotMatch(view.render(100).join("\n"), /first\/repo/);
+});

@@ -161,16 +161,19 @@ export class FactoryDashboard {
 		if (this.batchId !== undefined && this.itemKey !== undefined) this.itemKeysByBatch.set(this.batchId, this.itemKey);
 		this.cursor = Math.max(0, this.cursor);
 	}
-	private cursorScope(view = this.view): string { return `${view}:${this.batchId ?? ""}:${this.itemKey ?? ""}`; }
+	private cursorScope(view = this.view): string {
+		const list = view === "claim-detail" || view === "claim-debug" ? "claims" : view === "evidence-detail" ? "evidence" : view;
+		return `${list}:${this.batchId ?? ""}:${this.itemKey ?? ""}`;
+	}
 	private cursorIdentity(view = this.view): string | undefined { return this.cursorKeys.get(this.cursorScope(view)); }
 	private setCursorIdentity(identity: string | undefined, view = this.view): void {
 		const scope = this.cursorScope(view);
 		if (identity === undefined) this.cursorKeys.delete(scope); else this.cursorKeys.set(scope, identity);
 	}
 	private syncCursor(): void {
-		const entries = this.view === "claims" || this.view === "claim-detail" ? this.relevantClaims() : this.view === "evidence" || this.view === "evidence-detail" ? this.evidenceChoices() : this.view === "palette" ? this.choices() : [];
+		const entries = this.view === "claims" || this.view === "claim-detail" || this.view === "claim-debug" ? this.relevantClaims() : this.view === "evidence" || this.view === "evidence-detail" ? this.evidenceChoices() : this.view === "palette" ? this.choices() : [];
 		if (!entries.length) { this.cursor = 0; return; }
-		const identities = this.view === "claims" || this.view === "claim-detail"
+		const identities = this.view === "claims" || this.view === "claim-detail" || this.view === "claim-debug"
 			? (entries as ReturnType<typeof this.relevantClaims>).map(claimIdentity)
 			: this.view === "evidence" || this.view === "evidence-detail"
 				? (entries as EvidenceChoice[]).map((entry) => entry.path ?? entry.label)
