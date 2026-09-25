@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createBatch, type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
@@ -77,4 +77,22 @@ test("history page source bytes stay bounded", async () => {
 		assert.ok(bytes.reduce((sum, value) => sum + value, 0) <= 32 * 1024 * 1024);
 		assert.ok(page.next);
 	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("atomic replacement during async preview retains the opened snapshot", async (t) => {
+ const root = await mkdtemp(join(tmpdir(), "factory-preview-replace-"));
+ const store = new BatchStore(root); store.acquire();
+ const batch = createBatch([selected(1)], { ...options, id: "batch-aabb" }); batch.control = "active"; store.write(batch);
+ const handle = await open(join(root, batch.id + ".json"), "r");
+ const prototype = Object.getPrototypeOf(handle); const original = prototype.stat;
+ let replaced = false;
+ const stub = t.mock.method(prototype, "stat", async function (...args: unknown[]) {
+  if (!replaced) { replaced = true; batch.control = "paused"; store.write(batch); }
+  return original.apply(this, args);
+ });
+ try {
+  const snapshot = await store.readAsync(batch.id);
+  assert.equal(replaced, true); assert.equal(snapshot.control, "active");
+  assert.equal(store.read(batch.id).control, "paused");
+ } finally { stub.mock.restore(); await handle.close(); store.release(); await rm(root, { recursive: true, force: true }); }
 });

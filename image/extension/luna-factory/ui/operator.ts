@@ -45,6 +45,11 @@ export function itemOverview(item: ProjectedItem, active = false): ItemOverview 
 	}
 	if (item.stage === "BLOCKED") {
 		const reason = item.blocker ?? "The last attempt could not continue.";
+        if (/ENOENT|retained workspace identity mismatch|verification workspace unavailable/i.test(reason)) return {
+            caption: "workspace unavailable", heading: "Workspace needs attention",
+            explanation: "The retained workspace could not be opened. Inspect Debug for the recorded error; existing evidence has been preserved.",
+            next: "Restore the workspace before retrying.", needsYou: true,
+        };
         if (/Command failed:.*(?:gh repo clone|git.*(?:clone|fetch))/i.test(reason)) return {
             caption: "repository setup failed", heading: "Repository setup failed",
             explanation: "Factory couldn't prepare the repository workspace. The recorded error is available in Debug.",

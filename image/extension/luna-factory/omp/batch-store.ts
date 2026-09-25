@@ -151,7 +151,8 @@ export class BatchStore {
 		const file = await openAsync(join(this.root, `${id}.json`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		try {
 			const stat = await file.stat();
-			if (!stat.isFile() || stat.nlink !== 1 || stat.size > 32 * 1024 * 1024) throw new Error("batch preview requires a regular file under 32 MiB; preserve original evidence for inspection");
+			// Atomic replacement can unlink this already-open snapshot. Reject hard links, not that valid old inode.
+			if (!stat.isFile() || stat.nlink > 1 || stat.size > 32 * 1024 * 1024) throw new Error("batch preview requires a regular file under 32 MiB; preserve original evidence for inspection");
 			const buffer = Buffer.alloc(stat.size + 1);
 			let count = 0;
 			while (count < buffer.length) {

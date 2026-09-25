@@ -340,3 +340,13 @@ test("inspection work is not blocked by another run's mutation claim", () => {
 	assert.doesNotMatch(item.blocker ?? "", /claimed|owned/);
 	assert.doesNotMatch(item.nextSafeAction, /ownership|claim/);
 });
+
+test("stopped inspections expose the existing safe retry controller within budgets", () => {
+ const batch = makeBatch([selected("org/repo#1", "inspect")]);
+ const item = batch.items[0]!; item.stage = "UNKNOWN"; item.attempts = 1;
+ const options = { claims: [{ resource: "repo:org/repo", owner: "another-writer", status: "unknown" as const, createdAt: "now" }] };
+ assert.equal(projectItem(batch, item, options).actions.includes("retry"), true);
+ assert.equal(projectItem(batch, item, { ...options, readOnly: true }).actions.includes("retry"), false);
+ item.attempts = batch.maxAttempts;
+ assert.equal(projectItem(batch, item, options).actions.includes("retry"), false);
+});

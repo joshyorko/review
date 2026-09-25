@@ -299,8 +299,8 @@ function retryEligible(
 	claims: readonly ProjectedClaim[],
 	readOnly: boolean,
 ): boolean {
-	if (readOnly || item.selected.action === "inspect" || dependency !== undefined || item.stage === "DONE" || item.stage === "EXCLUDED") return false;
-	if (externalEffect(item) || claims.some((claim) => claim.conflict || claim.status === "unknown")) return false;
+	if (readOnly || dependency !== undefined || item.stage === "DONE" || item.stage === "EXCLUDED") return false;
+	if (externalEffect(item) || (item.selected.action !== "inspect" && claims.some((claim) => claim.conflict || claim.status === "unknown"))) return false;
 	if (item.ledger.tasks.some((task) => task.state === "DONE")) return false;
 	if (!(item.stage === "BLOCKED" || item.stage === "CANCELLED" || item.stage === "UNKNOWN" || item.stage === "QUEUED")) return false;
 	if (stage === "DONE" || stage === "EXCLUDED") return false;

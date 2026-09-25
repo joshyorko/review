@@ -10,6 +10,7 @@ export interface EvidenceViewerPreview {
 
 export interface EvidenceViewerOptions {
 	readonly preview: EvidenceViewerPreview;
+	readonly title?: string;
 	readonly tui: { requestRender(): void; terminal?: { readonly rows?: number } };
 	readonly done: () => void;
 	readonly matchKey?: KeyMatcher;
@@ -92,7 +93,7 @@ export class EvidenceViewer {
 		const viewport = this.viewport();
 		this.offset = Math.min(this.offset, Math.max(0, this.rows.length - viewport));
 		const marker = this.truncated ? " (truncated)" : "";
-		const label = `EVIDENCE ${this.path}`;
+		const label = this.options.title ? safeText(this.options.title) : `EVIDENCE ${this.path}`;
 		const header = visibleWidth(label) + visibleWidth(marker) <= safeWidth
 			? `${label}${marker}`
 			: `${truncateToWidth(label, Math.max(0, safeWidth - visibleWidth(marker)), "")}${marker}`;

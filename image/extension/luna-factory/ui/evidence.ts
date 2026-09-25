@@ -33,3 +33,27 @@ export function readBoundedEvidence(root: string, path: string, maxBytes = PREVI
 		return { path: actual, text, truncated };
 	} finally { closeSync(fd); }
 }
+
+/** Format only the already-bounded native session preview; never load another file. */
+export function sessionEvidence(preview: EvidencePreview): EvidencePreview {
+ const rows: string[] = [];
+ for (const line of preview.text.split("\n")) {
+  if (!line.trim()) continue;
+  let entry: unknown;
+  try { entry = JSON.parse(line); }
+  catch { rows.push("[Unreadable or incomplete session entry]"); continue; }
+  if (typeof entry !== "object" || entry === null || !("message" in entry)) continue;
+  const message = entry.message;
+  if (typeof message !== "object" || message === null || !("role" in message) || !("content" in message)) continue;
+  const role = message.role === "user" ? "Instruction" : message.role === "assistant" ? "Worker" : message.role === "toolResult" ? "Tool result" : "Message";
+  const content = typeof message.content === "string" ? [message.content] : Array.isArray(message.content) ? message.content.flatMap((part: unknown) => {
+   if (typeof part !== "object" || part === null) return [];
+   if ("text" in part && typeof part.text === "string") return [part.text];
+   if ("type" in part && part.type === "toolCall" && "name" in part && typeof part.name === "string") return [`Called ${part.name}`];
+   return [];
+  }) : [];
+  if (content.length) rows.push(role, ...content, "");
+ }
+ const text = rows.join("\n") || "No conversation messages in this preview.";
+ return { ...preview, text: text.slice(0, PREVIEW_BYTES), truncated: preview.truncated || text.length > PREVIEW_BYTES };
+}

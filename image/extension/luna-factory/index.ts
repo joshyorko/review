@@ -33,7 +33,7 @@ import type { FactoryAction, SelectedItem } from "./core/batch.ts";
 import { resolveToken } from "../bluefin-review/github.ts";
 import { runPackagedBatchProbe } from "./omp/batch-probe.ts";
 import { FactoryDashboard, type FactoryDashboardAction, type FactoryDashboardPresentation, type FactoryDashboardSnapshot, type FactoryDashboardPrimitives, type FactoryDashboardTheme } from "./ui/dashboard.ts";
-import { readBoundedEvidence } from "./ui/evidence.ts";
+import { readBoundedEvidence, sessionEvidence } from "./ui/evidence.ts";
 import { EvidenceViewer } from "./ui/evidence-viewer.ts";
 import { dashboardActionAllowed } from "./ui/actions.ts";
 import { rawKeyMatcher, type KeyMatcher } from "../bluefin-review/keys.ts";
@@ -987,11 +987,11 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		let displayed: FactoryDashboardSnapshot | undefined;
 		let historyCursor: BatchHistoryCursor | undefined;
 		const pending = new Set<string | undefined>();
-		let refreshing = false;
-		const refresh = async (id?: string): Promise<void> => {
+		let refreshing: Promise<void> | undefined;
+		const refresh = (id?: string): Promise<void> => {
 			pending.add(id);
-			if (refreshing) return;
-			refreshing = true;
+			if (refreshing) return refreshing;
+			const task = Promise.resolve().then(async () => {
 			try {
 				while (alive && pending.size) {
 					const ids = [...pending]; pending.clear();
@@ -1008,7 +1008,10 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					}
 					if (alive && displayed) { displayed = { ...displayed, hasMoreHistory: historyCursor !== undefined }; dashboard?.setSource({ ...displayed, notice, busy }); }
 				}
-			} finally { refreshing = false; }
+			} finally { refreshing = undefined; }
+			});
+			refreshing = task;
+			return task;
 		};
 		const unsubscribe = service?.onChange((event) => { if (alive) void refresh(event.batchId); }) ?? (() => {});
 		const report = (message: string, level = "info"): void => {
@@ -1065,8 +1068,8 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					const item = current.batches.find((b) => b.id === action.batchId)?.items.find((i) => i.selected.key === action.itemKey);
 					const value = action.kind === "workspace" ? item?.workspace : item?.ledger.tasks.flatMap((task) => task.attempts.flatMap((attempt) => attempt.privateSessions.filter((session) => session.phase === "worker"))).at(-1)?.sessionFile ?? item?.sessions.at(-1);
 					if (action.kind === "session" && value) {
-						const preview = readBoundedEvidence(current.root ?? factoryStateRoot(env), value);
-						await custom<void>((tui, _theme, _keys, done) => new EvidenceViewer({ preview, tui: tui as { requestRender(): void }, done: () => done(), matchKey }), overlay);
+						const preview = sessionEvidence(readBoundedEvidence(current.root ?? factoryStateRoot(env), value));
+						await custom<void>((tui, _theme, _keys, done) => new EvidenceViewer({ preview, title: "Worker session", tui: tui as { requestRender(): void }, done: () => done(), matchKey }), overlay);
 					} else { if (value) ctx.ui?.pasteToEditor?.(value); report(value ? `Workspace path copied to the prompt: ${value}` : `${action.kind} unavailable`); }
 					return;
 				}
@@ -1141,11 +1144,20 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				}, overlay);
 				focus = undefined;
 				presentation = dashboard?.presentation;
+				if ("batchId" in action && action.kind !== "discard") {
+					const itemKey = "itemKey" in action ? action.itemKey : presentation?.itemKeysByBatch?.[action.batchId] ?? presentation?.itemKey;
+					presentation = {
+						...(presentation ?? { view: "roster", scroll: 0 }),
+						batchId: action.batchId,
+						...(itemKey ? { itemKey, itemKeysByBatch: { ...presentation?.itemKeysByBatch, [action.batchId]: itemKey } } : {}),
+					};
+				}
 				dashboardPresentation = presentation;
 				if (action.kind === "close") return;
 				// Compatible hosts may resolve a custom component with an action.
 				// Evidence viewers stay nested; editor dialogs run after closing this overlay.
 				await perform(action);
+				if ("batchId" in action && action.kind !== "discard") await refresh(action.batchId);
 			}
 		} finally {
 			alive = false; unsubscribe();

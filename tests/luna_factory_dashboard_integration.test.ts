@@ -103,9 +103,9 @@ function extensionHost(root: string, enabled = true) {
 	return { commands, events, modelCalls: () => modelCalls };
 }
 
-async function storedBatch(root: string) {
+async function storedBatch(root: string, id = "batch-abcdef", number = 1) {
 	const store = new BatchStore(root); store.acquire();
-	const batch = createBatch([{ ...selected(1), action: "patch" }], { ...options, id: "batch-abcdef" });
+	const batch = createBatch([{ ...selected(number), action: "patch" }], { ...options, id });
 	batch.control = "active";
 	store.write(batch); store.release(); return batch;
 }
@@ -335,4 +335,93 @@ test("native stop confirmation runs after the dashboard closes and restores sele
   assert.equal(new BatchStore(root).read(batch.id).control, "active");
   await host.events.get("session_shutdown")?.({}, ctx as never);
  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("native confirmation keeps the selected batch when another active batch sorts ahead", { timeout: 10_000 }, async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-confirm-selection-"));
+	try {
+		const store = new BatchStore(root);
+		store.acquire();
+		const old = createBatch([{ ...selected(1), action: "patch" }], { ...options, id: "batch-11111111" });
+		old.createdAt = "2026-01-01T00:00:00.000Z";
+		old.control = "active";
+		old.items[0]!.stage = "BLOCKED";
+		old.items[0]!.blocker = "older blocked run";
+		store.write(old);
+		const target = createBatch([{ ...selected(2), action: "patch" }], { ...options, id: "batch-22222222" });
+		target.createdAt = "2026-02-01T00:00:00.000Z";
+		target.control = "active";
+		target.items[0]!.stage = "RUNNING";
+		store.write(target);
+		store.release();
+
+		const host = extensionHost(root);
+		const branch = [{ type: "custom", customType: DASHBOARD_ENTRY, data: {
+			batchId: old.id, itemKey: old.items[0]!.selected.key, view: "roster", scroll: 0,
+		} }];
+		const context = { hasUI: true, sessionManager: { getBranch: () => branch } };
+		await host.events.get("session_start")?.({}, context as never);
+		let mounted = false;
+		let mounts = 0;
+		let confirmations = 0;
+		let selectedTarget = false;
+		let firstError: unknown;
+		const ui = {
+			notify() {},
+			async confirm() {
+				assert.equal(mounted, false, "native confirmation must be above the closed dashboard");
+				confirmations++;
+				return true;
+			},
+			custom<T>(factory: (tui: unknown, theme: unknown, keys: unknown, done: (result: T) => void) => unknown): Promise<T> {
+				mounted = true;
+				mounts++;
+				return new Promise((resolve, reject) => {
+					let component: FactoryDashboard | undefined;
+					let finished = false;
+					const paint = () => {
+						if (!component || finished) return;
+						try {
+							const frame = component.render(100).join("\n");
+							if (/Loading/.test(frame)) return;
+							if (mounts === 1 && !selectedTarget) {
+								assert.equal(component.selection.batchId, old.id);
+								component.handleInput("b");
+								component.handleInput("k");
+								component.handleInput("Enter");
+								assert.equal(component.selection.batchId, target.id);
+								selectedTarget = true;
+								component.handleInput("x");
+							} else if (mounts === 2) {
+								assert.equal(component.selection.batchId, target.id, "the confirmed action's batch remains selected after remount");
+								assert.equal(component.selection.itemKey, target.items[0]!.selected.key);
+								assert.equal(store.read(target.id).control, "stopped");
+								assert.match(frame, /Stopped/);
+								finished = true;
+								component.handleInput("q");
+							}
+						} catch (error) {
+							firstError = error;
+							reject(error);
+						}
+					};
+					component = factory({ requestRender() { queueMicrotask(paint); } }, { fg: (_c: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text }, {}, (action) => {
+						mounted = false;
+						component?.dispose();
+						resolve(action);
+					}) as FactoryDashboard;
+					queueMicrotask(paint);
+				});
+			},
+		};
+		await host.commands.get("factory")!.handler("", { ...context, ui } as never);
+		assert.equal(firstError, undefined);
+		assert.equal(selectedTarget, true);
+		assert.equal(mounts, 2);
+		assert.equal(confirmations, 1);
+		assert.equal(store.read(old.id).control, "active");
+		await host.events.get("session_shutdown")?.({}, context as never);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
 });
