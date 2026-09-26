@@ -1709,7 +1709,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 							: undefined;
 			if (command === undefined) return;
 			try {
-				const factoryCtx = { ...ctx, reconcileMutationClaim };
+				// Delegate inherited/live capabilities with their original receiver. Factory
+				// captures only execution references; this handler's UI stays scoped here.
+				const factoryCtx = new Proxy(ctx, {
+					get(target, key) {
+						if (key === "reconcileMutationClaim") return reconcileMutationClaim;
+						const value = Reflect.get(target, key, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+					set() { throw new Error("Factory cannot mutate the OMP handler context"); },
+				});
 				if (command.startsWith("start ")) {
 					if (!factoryBatchSubmitterRegistered() || !factoryDashboardOpenerRegistered()) {
 						ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
