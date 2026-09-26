@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -138,4 +138,14 @@ test("known unprepared dependency sets block before any implementation attempt",
   assert.throws(()=>requiredChecks(f.item.selected,f.path),/dependencies are not prepared/);
   assert.equal(f.item.attempts,0);
  }finally{await f.cleanup();}
+});
+
+
+test("preparation refuses a symlink parent before creating anything outside its workspace root",async()=>{
+ const f=fixture();const outside=mkdtempSync(join(tmpdir(),"factory-outside-"));try{
+  writeFileSync(join(outside,"sentinel"),"unchanged");symlinkSync(outside,join(f.root,"workspaces"));
+  const internal=f.service as unknown as {prepareWorkspace(batch:Batch,item:BatchItem,signal:AbortSignal):Promise<string>};
+  await assert.rejects(()=>internal.prepareWorkspace(f.batch,f.item,new AbortController().signal),/symlink/);
+  assert.deepEqual(readdirSync(outside),["sentinel"]);assert.equal(readFileSync(join(outside,"sentinel"),"utf8"),"unchanged");
+ }finally{await f.cleanup();rmSync(outside,{recursive:true,force:true});}
 });

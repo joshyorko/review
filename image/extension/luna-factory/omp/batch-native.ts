@@ -7,7 +7,7 @@ import type { BatchItem } from "../core/batch.ts";
 import type { PredicateEvidence } from "../core/model.ts";
 import { MAX_TEXT, parsePredicateEvidence } from "../core/schema.ts";
 
-import type { AgentSession, CreateAgentSessionOptions, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
+import type { AgentSession, CreateAgentSessionOptions, ModelRegistry, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 
 const execute = promisify(execFile);
 type OmpSDK = typeof import("@oh-my-pi/pi-coding-agent");
@@ -132,6 +132,20 @@ function readEvidenceRange(root: string, handle: NativeEvidenceHandle, offset: n
 	} finally { closeSync(fd); }
 }
 
+function isObjectArgs(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function stringArg(args: Record<string, unknown>, key: string): string {
+	const value = args[key];
+	if (typeof value !== "string") throw new Error(`${key} must be a string`);
+	return value;
+}
+function stringArrayArg(args: Record<string, unknown>, key: string): string[] {
+	const value = args[key];
+	if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) throw new Error(`${key} must be a string array`);
+	return value;
+}
+
 /** No shell/eval/MCP/task/ambient extension is reachable from these SDK sessions. */
 export async function runNative(
 	sdk: NativeSDK, schema: SchemaBuilder, context: NativeContext | NativeBinding, item: BatchItem, root: string,
@@ -145,7 +159,7 @@ export async function runNative(
 	const workspace = realpathSync(item.workspace);
 	const writable = phase === "worker" && item.selected.action !== "inspect";
 	let submitted: { report: string; tests: string[]; accepted?: boolean; semanticOutcome: SemanticOutcome; predicates: readonly PredicateEvidence[]; publicationBlocker?: string } | undefined;
-	const result = (text: string) => ({ content: [{ type: "text", text }] });
+	const result = (text: string) => ({ content: [{ type: "text" as const, text }] });
 	let reportFailure: string | undefined;
 	const coverage = new Map<string, Array<{ start: number; end: number }>>();
 	const coverageComplete = (): boolean => (packet?.artifacts ?? []).every((artifact) => {
@@ -154,9 +168,9 @@ export async function runNative(
 		for (const range of ranges) { if (range.start > end) return false; end = Math.max(end, range.end); }
 		return end >= artifact.bytes;
 	});
-	const tools = [
-		{ name: "factory_read", label: "Read repository file range", description: `Read a repository-relative UTF-8 byte range (maximum ${MAX_READ_BYTES} bytes). Continue at nextOffset until eof to establish full coverage.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id: string, args: { path: string; offset?: number; limit?: number }) { const file = repositoryPath(workspace, args.path); const offset = pageNumber(args.offset, 0, Number.MAX_SAFE_INTEGER); const limit = pageNumber(args.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); return result(JSON.stringify({ path: args.path, ...readRange(file, offset, limit) })); } },
-		{ name: "factory_files", label: "Repository files page", description: `List up to ${MAX_LIST_ENTRIES} entries from one repository directory. Continue at nextOffset; each page reports whether enumeration reached EOF.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id: string, args: { path: string; offset?: number; limit?: number }) { const directory = args.path === "." ? workspace : repositoryPath(workspace, args.path); if (!lstatSync(directory).isDirectory()) throw new Error("repository directory required"); const offset = pageNumber(args.offset, 0, 1_000_000); const limit = pageNumber(args.limit, MAX_LIST_ENTRIES, MAX_LIST_ENTRIES); if (limit === 0) throw new Error("list limit must be positive"); const entries: string[] = []; let visible = 0; let eof = true; const dir = opendirSync(directory); try { for await (const entry of dir) { if ([".git", ".omp", ".pi", ".claude", "node_modules"].includes(entry.name) || entry.isSymbolicLink()) continue; if (visible++ < offset) continue; if (entries.length === limit) { eof = false; break; } entries.push(`${entry.name}${entry.isDirectory() ? "/" : ""}`); } } finally { await dir.close().catch(() => {}); } const nextOffset = eof ? null : offset + entries.length; return result(JSON.stringify({ path: args.path, entries, offset, nextOffset, eof })); } },
+	const tools: ToolDefinition[] = [
+		{ name: "factory_read", label: "Read repository file range", description: `Read a repository-relative UTF-8 byte range (maximum ${MAX_READ_BYTES} bytes). Continue at nextOffset until eof to establish full coverage.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const file = repositoryPath(workspace, path); const offset = pageNumber(rawArgs.offset, 0, Number.MAX_SAFE_INTEGER); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); return result(JSON.stringify({ path, ...readRange(file, offset, limit) })); } },
+		{ name: "factory_files", label: "Repository files page", description: `List up to ${MAX_LIST_ENTRIES} entries from one repository directory. Continue at nextOffset; each page reports whether enumeration reached EOF.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const directory = path === "." ? workspace : repositoryPath(workspace, path); if (!lstatSync(directory).isDirectory()) throw new Error("repository directory required"); const offset = pageNumber(rawArgs.offset, 0, 1_000_000); const limit = pageNumber(rawArgs.limit, MAX_LIST_ENTRIES, MAX_LIST_ENTRIES); if (limit === 0) throw new Error("list limit must be positive"); const entries: string[] = []; let visible = 0; let eof = true; const dir = opendirSync(directory); try { for await (const entry of dir) { if ([".git", ".omp", ".pi", ".claude", "node_modules"].includes(entry.name) || entry.isSymbolicLink()) continue; if (visible++ < offset) continue; if (entries.length === limit) { eof = false; break; } entries.push(`${entry.name}${entry.isDirectory() ? "/" : ""}`); } } finally { await dir.close().catch(() => {}); } const nextOffset = eof ? null : offset + entries.length; return result(JSON.stringify({ path, entries, offset, nextOffset, eof })); } },
 		{
 			name: "factory_report",
 			label: "Submit evidence candidate",
@@ -169,22 +183,29 @@ export async function runNative(
 				predicates: schema.array(schema.object({ item: schema.string(), ok: schema.boolean(), note: schema.string() })),
 				publicationBlocker: schema.string(),
 			}),
-		async execute(_id: string, args: { report: string; tests: string[]; accepted: boolean; semanticOutcome: string; predicates: unknown; publicationBlocker: string }) {
+		async execute(_id, rawArgs) {
 			try {
 			if (submitted) throw new Error("factory_report already submitted; one authoritative report is allowed per native session");
-			if (args.report.length > 32768 || args.tests.length > 8 || args.tests.some((command) => command.length > MAX_TEXT) || args.publicationBlocker.length > MAX_TEXT) throw new Error("report exceeds bounds");
+			if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object");
+			const report = stringArg(rawArgs, "report");
+			const tests = stringArrayArg(rawArgs, "tests");
+			const publicationBlocker = stringArg(rawArgs, "publicationBlocker");
+			const rawSemanticOutcome = stringArg(rawArgs, "semanticOutcome");
+			const accepted = rawArgs.accepted;
+			if (typeof accepted !== "boolean") throw new Error("accepted must be a boolean");
+			if (report.length > 32768 || tests.length > 8 || tests.some((command) => command.length > MAX_TEXT) || publicationBlocker.length > MAX_TEXT) throw new Error("report exceeds bounds");
 				const outcomes: readonly SemanticOutcome[] = ["none", "no-finding", "supported", "disproven", "uncertain"];
-				if (!outcomes.includes(args.semanticOutcome as SemanticOutcome)) throw new Error("semanticOutcome must be none, no-finding, supported, disproven, or uncertain");
-				const parsedPredicates = parsePredicateEvidence(args.predicates, phase);
+				if (!outcomes.includes(rawSemanticOutcome as SemanticOutcome)) throw new Error("semanticOutcome must be none, no-finding, supported, disproven, or uncertain");
+				const parsedPredicates = parsePredicateEvidence(rawArgs.predicates, phase);
 				if (!parsedPredicates.ok) throw new Error(`predicate evidence rejected: ${parsedPredicates.errors.join("; ")}`);
 				if (parsedPredicates.value.length === 0) throw new Error("at least one predicate evidence row is required");
-				const semanticOutcome = args.semanticOutcome as SemanticOutcome;
-				const publicationBlocker = args.publicationBlocker.trim();
+				const semanticOutcome = rawSemanticOutcome as SemanticOutcome;
+				const normalizedPublicationBlocker = publicationBlocker.trim();
 			if (phase === "worker" && item.selected.action === "inspect" && semanticOutcome === "none") throw new Error("inspection must report a semantic outcome");
 			if ((phase === "acceptance" || item.selected.action !== "inspect") && semanticOutcome !== "none") throw new Error("semantic outcomes are recorded only by read-only inspection workers");
-			if (semanticOutcome === "none" && publicationBlocker) throw new Error("publication blockers are recorded only with semantic outcomes");
-			if (phase === "acceptance" && args.accepted && !coverageComplete()) throw new Error("acceptance cannot be accepted until all supplied evidence handles are read in full");
-			submitted = { report: args.report, tests: args.tests, semanticOutcome, predicates: parsedPredicates.value, ...(phase === "acceptance" ? { accepted: args.accepted && parsedPredicates.value.every((predicate) => predicate.ok) } : {}), ...(publicationBlocker ? { publicationBlocker } : {}) };
+			if (semanticOutcome === "none" && normalizedPublicationBlocker) throw new Error("publication blockers are recorded only with semantic outcomes");
+			if (phase === "acceptance" && accepted && !coverageComplete()) throw new Error("acceptance cannot be accepted until all supplied evidence handles are read in full");
+			submitted = { report, tests, semanticOutcome, predicates: parsedPredicates.value, ...(phase === "acceptance" ? { accepted: accepted && parsedPredicates.value.every((predicate) => predicate.ok) } : {}), ...(normalizedPublicationBlocker ? { publicationBlocker: normalizedPublicationBlocker } : {}) };
 			return result("Evidence candidate recorded; coordinator independently checks outcomes.");
 			} catch (error) { reportFailure = error instanceof Error ? error.message : String(error); throw error; }
 		},
@@ -194,10 +215,10 @@ export async function runNative(
 		const handles = packet.artifacts ?? [];
 		if (handles.length > MAX_EVIDENCE_HANDLES || handles.reduce((total, handle) => total + handle.bytes, 0) > MAX_EVIDENCE_TOTAL_BYTES || new Set(handles.map((handle) => handle.id)).size !== handles.length) throw new NativeExecutionError("capability-unavailable", "attempt evidence packet exceeds safe bounds or has duplicate handles");
 		const byId = new Map(handles.map((handle) => [handle.id, handle]));
-		for (const handle of handles) if (handle.bytes > MAX_EVIDENCE_BYTES || !handle.id || !handle.attemptId) throw new NativeExecutionError("capability-unavailable", "attempt evidence packet contains an invalid handle");
-		tools.push({ name: "factory_evidence_read", label: "Read retained attempt evidence", description: "Read a digest-checked byte range from an explicitly supplied attempt artifact handle. Paths and unrelated artifacts are inaccessible.", parameters: schema.object({ id: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id: string, args: { id: string; offset?: number; limit?: number }) { const handle = byId.get(args.id); if (!handle) throw new Error("evidence handle unavailable for this attempt"); const offset = pageNumber(args.offset, 0, handle.bytes); const limit = pageNumber(args.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); const chunk = readEvidenceRange(root, handle, offset, limit); if (chunk.bytes > 0) coverage.set(handle.id, [...(coverage.get(handle.id) ?? []), { start: chunk.offset, end: chunk.offset + chunk.bytes }]); return result(JSON.stringify({ id: handle.id, attemptId: handle.attemptId, digest: handle.digest, bytes: handle.bytes, ...chunk })); } } as typeof tools[number]);
+		for (const handle of handles) if (!Number.isSafeInteger(handle.bytes) || handle.bytes < 0 || handle.bytes > MAX_EVIDENCE_BYTES || !handle.id || !handle.attemptId || !/^[a-f0-9]{64}$/i.test(handle.digest)) throw new NativeExecutionError("capability-unavailable", "attempt evidence packet contains an invalid handle");
+		tools.push({ name: "factory_evidence_read", label: "Read retained attempt evidence", description: "Read a digest-checked byte range from an explicitly supplied attempt artifact handle. Paths and unrelated artifacts are inaccessible.", parameters: schema.object({ id: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const id = stringArg(rawArgs, "id"); const handle = byId.get(id); if (!handle) throw new Error("evidence handle unavailable for this attempt"); const offset = pageNumber(rawArgs.offset, 0, handle.bytes); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); const chunk = readEvidenceRange(root, handle, offset, limit); if (chunk.bytes > 0) coverage.set(handle.id, [...(coverage.get(handle.id) ?? []), { start: chunk.offset, end: chunk.offset + chunk.bytes }]); return result(JSON.stringify({ id: handle.id, attemptId: handle.attemptId, digest: handle.digest, artifactBytes: handle.bytes, readBytes: chunk.bytes, offset: chunk.offset, text: chunk.text, nextOffset: chunk.nextOffset, eof: chunk.eof })); } });
 	}
-	if (writable) tools.push({ name: "factory_write", label: "Write repository file", description: "Replace a repository-relative text file; changes remain in this item workspace.", parameters: schema.object({ path: schema.string(), content: schema.string() }), async execute(_id: string, args: { path: string; content: string }) { if (args.content.length > 131072) throw new Error("file exceeds 128KiB"); const rel = args.path.replace(/\\/g, "/"); if (item.selected.action === "pr-ready" && (rel === ".github/workflows" || rel.startsWith(".github/workflows/"))) throw new Error("Factory cannot publish workflow-changing work; use patch-only inspection and human Review"); const file = repositoryPath(workspace, args.path); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, args.content); return result(`Wrote ${args.path}`); } } as typeof tools[number]);
+	if (writable) tools.push({ name: "factory_write", label: "Write repository file", description: "Replace a repository-relative text file; changes remain in this item workspace.", parameters: schema.object({ path: schema.string(), content: schema.string() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const content = stringArg(rawArgs, "content"); if (content.length > 131072) throw new Error("file exceeds 128KiB"); const rel = path.replace(/\\/g, "/"); if (item.selected.action === "pr-ready" && (rel === ".github/workflows" || rel.startsWith(".github/workflows/"))) throw new Error("Factory cannot publish workflow-changing work; use patch-only inspection and human Review"); const file = repositoryPath(workspace, path); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, content); return result(`Wrote ${path}`); } });
 	const options: CreateAgentSessionOptions = {
 		cwd: workspace, model: binding.model, authStorage: binding.modelRegistry.authStorage, modelRegistry: binding.modelRegistry,
 		agentRegistry: new sdk.AgentRegistry(), sessionManager: sdk.SessionManager.create(workspace, join(root, "sessions")),

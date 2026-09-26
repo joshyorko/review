@@ -306,12 +306,10 @@ export class BatchService {
 				}
 				if (item.operation?.phase === "push" || item.operation?.phase === "pr") {
 					await this.reconcileEffect(item);
-					if (item.stage === "DONE") this.release(item, owner);
 					continue;
 				}
 				if (item.stage === "VERIFY" && item.proof && item.operation?.state === "applied") {
 					await this.validateProof(item);
-					if (item.operation.phase === "pr") await this.reconcileEffect(item);
 					continue;
 				}
 				if (item.operation?.state === "unknown" || item.operation?.state === "intent" || item.stage === "RUNNING" || item.stage === "VERIFY") {
@@ -408,6 +406,7 @@ export class BatchService {
 		finally {
 			for (const active of this.running.values()) active.controller.abort();
 			await Promise.allSettled([...this.running.values()].map((active) => active.promise));
+			this.bindings.clear();
 			if (!this.fatal) this.store.release();
 		}
 	}
@@ -531,9 +530,13 @@ export class BatchService {
 		} else if (!existsSync(directory) && (!noWorker || !evidenced)) {
 			throw new Error("retained workspace is absent without positive no-worker-start initialization evidence; preserve and inspect");
 		}
-		const parent = join(this.root, "workspaces", batch.id);
-		mkdirSync(parent, { recursive: true, mode: 0o700 });
-		if (realpathSync(parent) !== parent || (process.getuid && lstatSync(parent).uid !== process.getuid())) throw new Error("workspace parent is not the canonical runtime-owned directory; inspect ownership before cloning");
+		for (const parent of [join(this.root, "workspaces"), join(this.root, "workspaces", batch.id)]) {
+			const existing = lstatSync(parent, { throwIfNoEntry: false });
+			if (existing?.isSymbolicLink()) throw new Error("workspace parent is a symlink; preserve and inspect before cloning");
+			if (!existing) mkdirSync(parent, { mode: 0o700 });
+			if (realpathSync(parent) !== parent || !lstatSync(parent).isDirectory() || (process.getuid && lstatSync(parent).uid !== process.getuid())) throw new Error("workspace parent is not the canonical runtime-owned directory; inspect ownership before cloning");
+		}
+		if (lstatSync(directory, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error("retained workspace is a symlink; preserve and inspect before cloning");
 		if (!existsSync(directory)) {
 			item.operation = operationReceipt(batch, item, "worker", "intent", `${owner}:work`);
 			item.preparation = { phase: "clone", owner, head: item.selected.head! }; this.persist(batch);
@@ -692,9 +695,9 @@ export class BatchService {
 			...(item.selected.action === "inspect" ? {
 				semanticResult: {
 					kind: semanticOutcome === "supported" || semanticOutcome === "disproven" ? "finding" as const : "inspection" as const,
-					outcome: semanticOutcome,
+					outcome: semanticOutcome === "none" ? "uncertain" : semanticOutcome,
 					summary: resultSummary,
-					verified: reviewer.accepted && semanticOutcome !== "uncertain",
+					verified: reviewer.accepted === true && semanticOutcome !== "uncertain",
 					publicationAuthority: "none" as const,
 					...(worker.publicationBlocker === undefined ? {} : { publicationBlocker: worker.publicationBlocker }),
 				},

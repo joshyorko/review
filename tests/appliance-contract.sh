@@ -101,6 +101,12 @@ require "$containerfile" \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"' \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
   'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory'
+require image/appliance/entrypoint.sh \
+  'if (( EUID == 0 )); then' \
+  'os.setgroups([65532])' \
+  'os.setgid(65532)' \
+  'os.setuid(65532)' \
+  'prepare_factory_state_dir'
 forbid "$containerfile" 'image/contribute' 'bin/bluefin-contribute' 'ghcr.io/projectbluefin/contribute'
 for retired in \
   bin/bluefin-contribute \
@@ -240,28 +246,29 @@ require .github/workflows/publish-appliance.yml \
 # the profile boundary observable and proves that update never reaches omp.
 entrypoint_tmp="$(mktemp -d)"
 trap 'rm -rf "$entrypoint_tmp"' EXIT
+mkdir -m 0700 "$entrypoint_tmp/home"
 cat >"$entrypoint_tmp/omp" <<'EOF'
 #!/usr/bin/bash
 printf '%s\n' "$@"
 EOF
 chmod +x "$entrypoint_tmp/omp"
-default_args="$(env -u REVIEW_INHERIT_OMP_CONFIG -u BLUEFIN_REVIEW_INHERIT_OMP_CONFIG PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+default_args="$(env -u REVIEW_INHERIT_OMP_CONFIG -u BLUEFIN_REVIEW_INHERIT_OMP_CONFIG HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'bluefin-review-appliance' <<<"$default_args" ||
   fail "the appliance entrypoint did not select its isolated profile"
 [[ "$(grep -cx -- '--advisor' <<<"$default_args")" -eq 1 ]] ||
   fail "the appliance did not enable exactly one OMP advisor"
-inherited_args="$(REVIEW_INHERIT_OMP_CONFIG=1 PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+inherited_args="$(REVIEW_INHERIT_OMP_CONFIG=1 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'review' <<<"$inherited_args" ||
   fail "the explicit host omp configuration opt-in did not select the review profile"
-autoslay_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --autoslay)"
+autoslay_args="$(HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --autoslay)"
 [[ "$(grep -cx -- '--advisor' <<<"$autoslay_args")" -eq 1 ]] ||
   fail "autoslay duplicated the always-on OMP advisor"
 grep -qx -- '--autoslay' <<<"$autoslay_args" ||
   fail "autoslay flag did not reach the review extension"
-explicit_advisor_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --advisor)"
+explicit_advisor_args="$(HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --advisor)"
 [[ "$(grep -cx -- '--advisor' <<<"$explicit_advisor_args")" -eq 1 ]] ||
   fail "the appliance duplicated an explicit OMP advisor flag"
-if PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh update >"$entrypoint_tmp/update.out" 2>&1; then
+if HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh update >"$entrypoint_tmp/update.out" 2>&1; then
   fail "the immutable appliance accepted an in-place update"
 fi
 grep -q 'immutable appliance' "$entrypoint_tmp/update.out" ||
@@ -377,6 +384,49 @@ run '
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run 'set -eu; test -w "$HOME"; test "$HOME" = /home/bluefin' >/dev/null ||
   fail "HOME must exist and be writable by the nonroot user"
+
+# Exercise the normal named-home-volume shape from root because krun currently
+# presents its OCI entrypoint as uid 0 even when the image declares USER 65532.
+identity_fixture="$(mktemp -d)"
+chmod 0755 "$identity_fixture"
+mkdir -m 0700 "$identity_fixture/claims"
+cat >"$identity_fixture/omp" <<'EOF'
+#!/usr/bin/bash
+factory_state="$HOME/.local/state/review/factory"
+if [[ -e "$factory_state/retained-probe" ]]; then retained=yes; else retained=no; fi
+touch "$factory_state/retained-probe" "$LUNA_FACTORY_CLAIMS_ROOT/claims-probe"
+printf 'uid=%s gid=%s home=%s state_owner=%s retained=%s\n' "$(id -u)" "$(id -g)" "$HOME" "$(stat -c %u:%g "$factory_state")" "$retained"
+EOF
+chmod 0755 "$identity_fixture/omp"
+runtime_args=()
+[[ -z "${REVIEW_TEST_RUNTIME:-}" ]] || runtime_args+=(--runtime "$REVIEW_TEST_RUNTIME")
+home_volume="review-appliance-contract-home-$$"
+"$engine" volume create "$home_volume" >/dev/null
+trap 'rm -rf "$identity_fixture"; "$engine" volume rm "$home_volume" >/dev/null 2>&1 || true' EXIT
+run_named_home_probe() {
+  "$engine" run "${runtime_args[@]}" --rm --userns keep-id:uid=65532,gid=65532 --user 0:0 \
+    --volume "$home_volume:/home/bluefin:rw,z" \
+    --volume "$identity_fixture/claims:/claims:rw,z" \
+    --volume "$identity_fixture:/runtime-probe:ro" \
+    --env LUNA_FACTORY_CLAIMS_ROOT=/claims \
+    --env PATH=/runtime-probe:/usr/bin:/bin \
+    --entrypoint /usr/bin/bluefin-review-appliance "$image" --version 2>/dev/null
+}
+first_identity_output="$(run_named_home_probe)" ||
+  fail "entrypoint could not prepare a named home volume from uid 0"
+[[ "$first_identity_output" == "uid=65532 gid=65532 home=/home/bluefin state_owner=65532:65532 retained=no" ]] ||
+  fail "entrypoint did not create named-volume Factory state under bluefin: ${first_identity_output}"
+retained_identity_output="$(run_named_home_probe)" ||
+  fail "entrypoint could not reopen retained named home state"
+[[ "$retained_identity_output" == "uid=65532 gid=65532 home=/home/bluefin state_owner=65532:65532 retained=yes" ]] ||
+  fail "entrypoint did not retain named-volume Factory state: ${retained_identity_output}"
+home_mount="$("$engine" volume mount "$home_volume")"
+[[ "$(stat -c %u:%g "$home_mount/.local/state/review/factory/retained-probe")" == "$(id -u):$(id -g)" ]] ||
+  fail "retained Factory state is not host-owned by the runtime caller"
+"$engine" volume unmount "$home_volume" >/dev/null
+[[ "$(stat -c %u:%g "$identity_fixture/claims/claims-probe")" == "$(id -u):$(id -g)" ]] ||
+  fail "the existing claims mount lost host ownership"
+
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
