@@ -12,7 +12,7 @@ import { BatchService } from "../image/extension/luna-factory/omp/batch-service.
 function fixture(preflight: typeof sandboxPreflight = sandboxPreflight) {
  const root = mkdtempSync(join(tmpdir(), "factory-corrective-"));
  const batch = createBatch([{ key: "org/repo#1", repo: "org/repo", number: 1, kind: "pr", action: "patch", overlaps: [], acceptanceRevision: "r1", head: "a".repeat(40), base: "a".repeat(40) }], { id: "batch-abcdef", capacity: 1, maxAttempts: 3, maxTotalAttempts: 3, mode: "retain" });
- const service = new BatchService(root, { assertFresh: async () => {}, snapshot: async (x: unknown) => x } as never, undefined, {} as never, 1, root, preflight);
+ const service = new BatchService(root, { assertFresh: async () => {}, snapshot: async (x: unknown) => x } as never, undefined, { object: () => ({}), string: () => ({}), array: () => ({}), number: () => ({}), boolean: () => ({}) } as never, 1, root, preflight);
  service.store.acquire(); service.store.write(batch);
  const item = batch.items[0]!;
  const path = join(root, "workspaces", batch.id, digest(item.selected.key).slice(0, 16));
