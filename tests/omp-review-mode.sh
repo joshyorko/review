@@ -23,6 +23,7 @@ test_files=(
   tests/luna_factory_native.test.ts
   tests/luna_factory_native_sdk_contract.test.ts
   tests/luna_factory_batch.test.ts
+  tests/luna_factory_corrective.test.ts
   tests/luna_factory_projection.test.ts
   tests/luna_factory_dashboard.test.ts
   tests/luna_factory_dashboard_integration.test.ts
@@ -62,3 +63,9 @@ for test_file in "${test_files[@]}"; do
 done
 python3 tests/personal_brew_oci_contract.py
 bash tests/launcher-contract.sh
+
+# The installed-runtime ABI probe is opt-in because normal hermetic tests have no
+# authenticated OMP profile. This is a separate gate, never inferred from mocks.
+if [[ -n "${REVIEW_PINNED_OMP_BINARY:-}" ]]; then
+  OMP_BINARY="$REVIEW_PINNED_OMP_BINARY" bash tests/luna-factory-sdk-init-probe.sh
+fi

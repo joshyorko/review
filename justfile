@@ -238,6 +238,22 @@ migrate_legacy_state() {
     echo "✓ migrated user configuration from ${legacy_dir} to ${target_home}" >&2
   fi
 }
+prepare_factory_state_dirs() {
+  local home="$1" uid gid path owner group mode
+  uid="$(id -u)"; gid="$(id -g)"
+  for path in "$home" "$home/.local" "$home/.local/state" "$home/.local/state/review" "$home/.local/state/review/factory"; do
+    [[ ! -L "$path" ]] || { echo "ERROR: persistent Factory state path ${path} is a symlink; refusing to follow it." >&2; return 1; }
+    if [[ ! -e "$path" ]]; then
+      mkdir -m 0700 -- "$path" || { echo "ERROR: could not prepare persistent Factory state path ${path}." >&2; return 1; }
+    fi
+    [[ -d "$path" ]] || { echo "ERROR: persistent Factory state path ${path} is not a directory." >&2; return 1; }
+    IFS=: read -r owner group mode < <(stat -c '%u:%g:%a' -- "$path") || { echo "ERROR: could not inspect persistent Factory state path ${path}." >&2; return 1; }
+    if [[ "$owner" != "$uid" || "$group" != "$gid" || ! -w "$path" ]]; then
+      echo "ERROR: persistent Factory state path ${path} is owned by ${owner}:${group} (mode ${mode}); expected ${uid}:${gid}. No ownership changes were made; select a fresh BLUEFIN_INSTANCE or inspect this exact path." >&2
+      return 1
+    fi
+  done
+}
 
 report_podman_image_identity() {
   local ref="$1" product="$2" is_override="${3:-0}" min_version="${4:-$MIN_REVIEW_APPLIANCE_VERSION}"
@@ -409,14 +425,13 @@ review-appliance *appliance_args:
     INSTANCE_TMP="${INSTANCE_ROOT}/tmp"
     CLAIMS_ROOT="${BLUEFIN_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
     mkdir -p "$CLAIMS_ROOT"
-    migrate_legacy_state "${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review" "$INSTANCE_HOME" "bluefin-review.sif"
     report_launcher_identity
     CONTAINER_NAME="bluefin-review-${INSTANCE_KEY}-$(date +%s)-$$"
     KVM_FAILURE=""
     if kvm_runtime_ready && [[ "$IMAGE" != *.sif && ! -f "$IMAGE" ]]; then
       ensure_image "$IMAGE" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
-      CLAIMS_MOUNT="${CLAIMS_ROOT}:/home/bluefin/.local/state/review/mutation-claims:rw"
-      if [[ "${CONTAINER_HOST:-}" == ssh://* || "${FAKE_REMOTE_DEFAULT:-}" == 1 ]]; then CLAIMS_MOUNT="bluefin-review-mutation-claims:/home/bluefin/.local/state/review/mutation-claims:rw"; fi
+      CLAIMS_MOUNT="${CLAIMS_ROOT}:/claims:rw"
+      if [[ "${CONTAINER_HOST:-}" == ssh://* || "${FAKE_REMOTE_DEFAULT:-}" == 1 ]]; then CLAIMS_MOUNT="bluefin-review-mutation-claims:/claims:rw"; fi
       report_podman_image_identity "$IMAGE" "review appliance" "$IS_OVERRIDE" "$MIN_REVIEW_APPLIANCE_VERSION"
       ARGS=(
         run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME"
@@ -425,7 +440,7 @@ review-appliance *appliance_args:
         --volume "bluefin-review-${INSTANCE_KEY}-workspace:/workspace:rw"
         --volume "bluefin-review-${INSTANCE_KEY}-tmp:/tmp:rw"
         --volume "${CLAIMS_MOUNT}"
-        --env "LUNA_FACTORY_CLAIMS_ROOT=/home/bluefin/.local/state/review/mutation-claims"
+        --env "LUNA_FACTORY_CLAIMS_ROOT=/claims"
         --env GH_TOKEN --env GITHUB_TOKEN --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN
         --env COPILOT_INTEGRATION_ID
         --env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN --env OPENAI_API_KEY --env GEMINI_API_KEY --env CONTEXT7_API_KEY
@@ -440,11 +455,15 @@ review-appliance *appliance_args:
 
     require_apptainer_fallback
     [[ "$IMAGE" != localhost/* ]] || { echo "ERROR: Apptainer cannot resolve local Podman image ${IMAGE}." >&2; exit 1; }
+    mkdir -p "$INSTANCE_HOME" "$INSTANCE_WORKSPACE" "$INSTANCE_TMP"
+    migrate_legacy_state "${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review" "$INSTANCE_HOME" "bluefin-review.sif"
+    prepare_factory_state_dirs "$INSTANCE_HOME"
     APPTAINER_IMAGE="$IMAGE"; [[ "$APPTAINER_IMAGE" == *://* || "$APPTAINER_IMAGE" == *.sif || -f "$APPTAINER_IMAGE" ]] || APPTAINER_IMAGE="docker://${APPTAINER_IMAGE}"
     report_apptainer_image_identity "$IMAGE" "review appliance" "$IS_OVERRIDE" "$MIN_REVIEW_APPLIANCE_VERSION"
     prepare_apptainer_environment
+    export APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT=/claims
     exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /workspace \
-      --bind "${INSTANCE_WORKSPACE}:/workspace,${INSTANCE_TMP}:/tmp,${CLAIMS_ROOT}:/home/bluefin/.local/state/review/mutation-claims:rw" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
+      --bind "${INSTANCE_WORKSPACE}:/workspace,${INSTANCE_TMP}:/tmp,${CLAIMS_ROOT}:/claims:rw" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
 
 # Build the appliance from this checkout and hold it to its contract. The
 # version is derived, never typed: FSDK series from the pinned base, revision

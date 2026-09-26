@@ -11,7 +11,7 @@ export function dashboardActionAllowed(action: FactoryDashboardAction, snapshot:
 	if (!("batchId" in action)) return true;
 	const batch = snapshot.batches.find((b) => b.id === action.batchId);
 	if (!batch) return false;
-	const options = { readOnly, claims: snapshot.claims, retainedBatches: snapshot.batches };
+	const options = { readOnly, claims: snapshot.claims, retainedBatches: snapshot.batches, activeItemKeys: snapshot.activeItemKeys };
 	if (action.kind === "batch") return true;
 	if (action.kind === "discard" && (snapshot.hasMoreHistory || Object.keys(snapshot.evidenceWarnings ?? {}).some((key) => key.startsWith(`${action.batchId}:`)))) return false;
 	if (action.kind === "pause" || action.kind === "resume" || action.kind === "stop" || action.kind === "export" || action.kind === "discard") return projectBatch(batch, options).actions.includes(action.kind);

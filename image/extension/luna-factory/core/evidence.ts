@@ -44,7 +44,7 @@ function sameSubject(left: Subject, right: Subject): boolean {
 function currentAssumptionsFor(ledger: Ledger, taskId: TaskId): readonly ProofAssumption[] {
 	const task = ledger.tasks.find((entry) => entry.id === taskId);
 	const criterion = task && ledger.criteria.find((entry) => entry.id === task.criterionId);
-	return (criterion?.assumptions ?? []).flatMap((assumption) => {
+	return (criterion?.assumptions ?? []).flatMap<ProofAssumption>((assumption) => {
 		if (assumption.kind !== "dependency-outcome") return [assumption];
 		const dependency = ledger.tasks.find((entry) => entry.id === assumption.taskId);
 		if (dependency === undefined) return [];

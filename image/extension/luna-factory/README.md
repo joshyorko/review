@@ -51,6 +51,18 @@ current-proof status and legal actions from the existing ledger; `ui/dashboard.t
 owns presentation only. Unknown external effects expose reconciliation, not
 retry. Excluding work does not make the original scope converge.
 
+The cockpit identifies the selected run, action, repositories, outcome counts,
+capacity, attempt budget, and next safe action. It shows model routing only when
+the recorded route is verified. A blocked item's roster cause is concise; press
+`Enter` to read the full sanitized retained error. Press `d` for technical IDs
+and state paths.
+
+Writable items capture existing Go, Node, or Python test commands before the
+worker edits files. Unknown repositories need explicit `requiredChecks` when
+submitted as a batch. Missing toolchains or known unprepared dependencies block
+before a worker attempt. Worker-proposed checks are added to the captured list;
+they cannot replace it.
+
 The packaged OMP host registers `/factory`, `/factory status`, `/factory why
 <task-id>`, `/factory pause`, `/factory drain`, `/factory resume`, and
 `/factory abort`. Older or
@@ -59,16 +71,21 @@ the stable fallback:
 
 | Objective | Supported surface |
 |---|---|
-| `/factory <objective>` | `luna_factory_open` (refuses to silently replace an open run) |
-| `/factory status` | `luna_factory_status` |
-| `/factory why <task-id>` | `luna_factory_why` |
-| `/factory pause` / `drain` / `resume` / `abort` | `luna_factory_control` |
-| (ledger input) | `luna_factory_candidate`, `luna_factory_attempt`, `luna_factory_receipt`, `luna_factory_finish` |
-| (owner integration) | `luna_factory_integrate` |
-| (interrupted attempt) | `luna_factory_reconcile` |
-| (diagnosed plateau) | `luna_factory_replan` — one bounded same-goal replan after two no-progress attempts |
-| (explicit post-success defect) | `luna_factory_reopen` — invalidate prior proof only after owner-supplied new evidence |
-| (verified finish) | `luna_factory_completion` |
+| Submit selected Review items | `Shift+F` or `/factory start inspect|patch|pr-ready` |
+| Inspect selected-batch status and controls | `/factory`, `/factory status`, `/factory inspect <batch>`, and the textual batch controls above |
+| Inspect command diagnostics | `/factory debug` |
+| Steer a conversational objective | `/factory -- <objective>`; the appliance cwd may be empty, so establish the exact repository subject through the Factory contract |
+| Open a single-subject run | `luna_factory_open` (refuses to silently replace an open run) |
+| Inspect a single-subject run | `/factory status`, `/factory why <task-id>`, `luna_factory_status`, `luna_factory_why` |
+| Control a single-subject run | `/factory pause`, `drain`, `resume`, `abort`; `luna_factory_control` |
+| Record and verify task work | `luna_factory_candidate`, `luna_factory_attempt`, `luna_factory_receipt`, `luna_factory_finish` |
+| Integrate or reconcile task work | `luna_factory_integrate`, `luna_factory_reconcile` |
+| Replan or reopen a task | `luna_factory_replan`, `luna_factory_reopen` |
+| Read a completion receipt | `luna_factory_completion` |
+
+Bare text such as `/factory debug` never starts a conversational objective. Use
+the explicit `--` form; the older implicit `/factory <objective>` spelling is
+rejected with guidance.
 
 `luna_factory_attempt` records dispatch intent and leaves the task `READY`.
 An AsyncJobManager job id records dispatch only. The packaged OMP `task`

@@ -315,6 +315,36 @@ migrate_legacy_state() {
   fi
 }
 
+ensure_owned_state_dir() {
+  local path="$1" expected_uid="$2" expected_gid="$3" owner group mode
+  if [[ -L "$path" ]]; then
+    fail "persistent Factory state path ${path} is a symlink; refusing to follow it"
+  fi
+  if [[ ! -e "$path" ]]; then
+    mkdir -m 0700 -- "$path" || fail "could not prepare persistent Factory state path ${path}"
+  fi
+  [[ -d "$path" ]] || fail "persistent Factory state path ${path} is not a directory"
+  IFS=: read -r owner group mode < <(stat -c '%u:%g:%a' -- "$path") ||
+    fail "could not inspect persistent Factory state path ${path}"
+  if [[ "$owner" != "$expected_uid" || "$group" != "$expected_gid" || ! -w "$path" ]]; then
+    fail "persistent Factory state path ${path} is owned by ${owner}:${group} (mode ${mode}); expected ${expected_uid}:${expected_gid}. No ownership changes were made; select a fresh BLUEFIN_INSTANCE or inspect this exact path"
+  fi
+}
+
+prepare_factory_state_home() {
+  local target_home="$1" uid gid path
+  uid="$(id -u)"
+  gid="$(id -g)"
+  for path in \
+    "$target_home" \
+    "$target_home/.local" \
+    "$target_home/.local/state" \
+    "$target_home/.local/state/review" \
+    "$target_home/.local/state/review/factory"; do
+    ensure_owned_state_dir "$path" "$uid" "$gid"
+  done
+}
+
 
 slugify() {
   local value="$1" slug digest
@@ -418,6 +448,7 @@ run_review() {
   fallback_sif="${REVIEW_APPLIANCE_FALLBACK_SIF:-${BLUEFIN_REVIEW_FALLBACK_SIF:-}}"
   mkdir -p "$home" "$workspace" "$scratch"
   migrate_legacy_state "${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review" "$home" "bluefin-review.sif"
+  prepare_factory_state_home "$home"
   mkdir -p "$home/.omp" "$home/.config/pulse"
   detect_review_audio
   prepare_review_omp_mount
@@ -436,7 +467,8 @@ run_review() {
     local -a sif_args=(run --containall --no-eval)
     sif_args+=("${APPTAINER_HOST_ARGS[@]}")
     sif_args+=(--bind /dev/full:/dev/full)
-    sif_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw")
+    sif_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/claims:rw")
+    export APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT=/claims
     if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
       sif_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
       [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
@@ -465,7 +497,8 @@ run_review() {
     podman_args+=(--volume "${home}:/home/bluefin:rw,z")
     podman_args+=(--volume "${workspace}:/workspace:rw,z")
     podman_args+=(--volume "${scratch}:/tmp:rw,z")
-    podman_args+=(--volume "${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw,z")
+    podman_args+=(--volume "${claims_root}:/claims:rw,z")
+    podman_args+=(--env LUNA_FACTORY_CLAIMS_ROOT=/claims)
     podman_args+=(--env GH_TOKEN --env GITHUB_TOKEN)
     podman_args+=(--env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN)
     podman_args+=(--env COPILOT_INTEGRATION_ID)
@@ -512,7 +545,8 @@ run_review() {
   local -a apptainer_args=(run --containall --no-eval)
   apptainer_args+=("${APPTAINER_HOST_ARGS[@]}")
   apptainer_args+=(--bind /dev/full:/dev/full)
-  apptainer_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/home/bluefin/.local/state/review/mutation-claims:rw")
+  apptainer_args+=(--home "${home}:/home/bluefin" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/claims:rw")
+  export APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT=/claims
   if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
     apptainer_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native")
     [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||

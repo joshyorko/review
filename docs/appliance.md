@@ -22,15 +22,20 @@ Luna Factory is packaged beside Review. Loading it starts no work; execution req
 
 ## Factory dashboard
 
-Open `/factory` in an interactive session to inspect retained batches. Review's
-`Shift+F` handoff opens the submitted batch directly. `/factory status` and the
-textual controls remain available for scripts and headless sessions.
+Open `/factory` in an interactive session to inspect retained batches. Its
+cockpit shows the selected run, work type, repositories, outcome counts,
+capacity, attempts, and the selected item's next safe action. Model information
+appears only when Factory recorded a verified route. Review's `Shift+F` handoff
+opens the submitted batch directly. `/factory status` and the textual controls
+remain available for scripts and headless sessions.
 
 Use `j/k` or arrows to select an item, `Enter` or `Tab` for detail, `b` for batch
 history, `a` for available actions, `e` for evidence, `c` for ownership, and `?`
 for help. `d` opens exact IDs and debug details; `v` views the recorded worker
-session. `m` loads older runs in history. Narrow terminals keep a short roster
-and the selected item's next action visible. Closing with `q` or `Esc` does not
+session. `m` loads older runs in history. The roster summarizes setup failures;
+press `Enter` on a blocked item to inspect the full sanitized error. `d` keeps
+technical IDs and state paths behind a separate disclosure. Narrow terminals
+keep the blocker and next action visible. Closing with `q` or `Esc` does not
 pause or stop work.
 
 The overview shows observed work, recorded proof, and items needing attention.
@@ -39,6 +44,15 @@ safe action. Missing model, effort, token, or cost observations remain unknown.
 UNKNOWN effects require reconciliation; they cannot be blindly retried. Stop
 prevents further dispatch and does not roll back external effects. Scope
 revisions remain visible and prevent original-scope convergence.
+
+Writable items keep detected Go, Node, or Python checks as mandatory work.
+Unknown repositories need explicit `requiredChecks` when submitted as a batch.
+Missing toolchains or known unprepared dependencies block before a worker
+attempt. Worker-proposed checks cannot replace the captured list.
+
+Use `/factory debug` for a diagnostic hint. Bare text is never treated as a
+conversational objective. Use `/factory -- <objective>` to steer one explicitly;
+the appliance's `/workspace` may be empty and is not the selected repository.
 
 Evidence previews load on demand and read at most 64 KiB of a regular artifact
 inside the Factory state root. They do not execute artifact content. Opening

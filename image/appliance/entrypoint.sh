@@ -3,6 +3,66 @@
 # developer workstation must not silently become appliance startup policy.
 set -eu
 
+# krun may start the OCI entrypoint as guest root even though the image declares
+# USER 65532:65532. Persistent bind mounts are owned by that mapped appliance
+# user, so drop before touching OMP state or launching the interactive process.
+# Apptainer and runtimes that honor OCI USER already enter as bluefin and pass
+# through unchanged.
+if ((EUID == 0)); then
+  export HOME=/home/bluefin USER=bluefin LOGNAME=bluefin
+  exec /usr/bin/python3 -c '
+import os
+import sys
+
+try:
+    os.setgroups([65532])
+    os.setgid(65532)
+    os.setuid(65532)
+except OSError as error:
+    print(f"Review appliance: could not drop to bluefin uid/gid 65532: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+os.execv("/usr/bin/bash", ["/usr/bin/bash", "/usr/bin/bluefin-review-appliance", *sys.argv[1:]])
+' "$@"
+fi
+
+prepare_factory_state_dir() {
+  local path="$1" expected_uid expected_gid owner group
+  expected_uid="$(id -u)"
+  expected_gid="$(id -g)"
+  if [[ -L "$path" ]]; then
+    echo "Review appliance: persistent Factory state path ${path} is a symlink; refusing to follow it." >&2
+    return 1
+  fi
+  if [[ ! -e "$path" ]]; then
+    mkdir -m 0700 -- "$path" || {
+      echo "Review appliance: could not prepare persistent Factory state path ${path}." >&2
+      return 1
+    }
+  fi
+  [[ -d "$path" ]] || {
+    echo "Review appliance: persistent Factory state path ${path} is not a directory." >&2
+    return 1
+  }
+  IFS=: read -r owner group < <(stat -c '%u:%g' -- "$path") || {
+    echo "Review appliance: could not inspect persistent Factory state path ${path}." >&2
+    return 1
+  }
+  if [[ "$owner" != "$expected_uid" || "$group" != "$expected_gid" || ! -w "$path" ]]; then
+    echo "Review appliance: persistent Factory state path ${path} is owned by ${owner}:${group}; expected ${expected_uid}:${expected_gid}. No ownership changes were made; use a fresh instance or inspect this exact path." >&2
+    return 1
+  fi
+}
+
+factory_home="${HOME:-/home/bluefin}"
+for factory_path in \
+  "$factory_home/.local" \
+  "$factory_home/.local/state" \
+  "$factory_home/.local/state/review" \
+  "$factory_home/.local/state/review/factory"; do
+  prepare_factory_state_dir "$factory_path" || exit 1
+done
+
 export COPILOT_INTEGRATION_ID="${COPILOT_INTEGRATION_ID:-copilot-developer-cli}"
 export COPILOT_GITHUB_TOKEN="${COPILOT_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
 export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-${COPILOT_GITHUB_TOKEN:-}}"

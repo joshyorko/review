@@ -41,7 +41,7 @@ function fakeGitHub() {
 
 function fakeSchema(): SchemaBuilder {
 	const value = () => value;
-	return { object: value, string: value, array: value, boolean: value } as unknown as SchemaBuilder;
+	return { object: value, string: value, array: value, number: value, boolean: value } as unknown as SchemaBuilder;
 }
 
 function fakeSdk(root: string): NativeSDK {
@@ -66,7 +66,9 @@ function fakeSdk(root: string): NativeSDK {
 					listeners.forEach((listener) => listener({ type: "turn_start" }));
 					active += 1;
 					await sleep(40);
-					if (!prompt.includes("probe/repo4#2")) {
+					// Exercise an unaccounted native failure, not a correctable missing report.
+					if (prompt.includes("probe/repo4#2")) throw new Error("deterministic unaccounted worker failure after native start");
+					{
 						const isWorker = prompt.startsWith("Implement/inspect");
 						await report.execute("probe-report", {
 							report: `deterministic evidence for ${prompt.match(/Item: ([^\\n]+)/)?.[1] ?? "item"}`,
@@ -130,7 +132,7 @@ export async function runPackagedBatchProbe({ root, phase }: ProbeOptions): Prom
 	prepareWorkspaces(root, persisted);
 	service.store.write(persisted);
 	service.store.release();
-	await service.resume(batch.id, { model: {}, modelRegistry: { authStorage: {} } });
+	await service.resume(batch.id, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } });
 	await service.waitForIdle();
 	const final = service.store.read(batch.id);
 	const done = final.items.filter((item) => item.stage === "DONE");

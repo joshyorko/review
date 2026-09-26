@@ -27,7 +27,7 @@ test("repository command failures keep paths and raw stderr behind debug", () =>
  const projected = projectItem(b, item);
  const view = itemOverview(projected);
  assert.equal(view.caption, "repository setup failed");
- assert.match(view.next, /Inspect the error/);
+	assert.match(view.next, /Inspect the recorded error/);
  assert.doesNotMatch(JSON.stringify(view), /batch-uuid|raw git stderr|\/home/);
  assert.equal(projected.blocker, item.blocker);
 });

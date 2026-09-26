@@ -19,6 +19,8 @@ export interface SelectedItem {
 	head?: string;
 	url?: string;
 	overlaps: string[];
+	/** Operator/repository checks captured before the worker can propose commands. */
+	requiredChecks?: string[];
 	blocker?: string;
 }
 export interface Prerequisite { item: string; requires: string; stage: OutcomeStage }
@@ -28,6 +30,10 @@ export interface BatchItem {
 	stage: "QUEUED" | "RUNNING" | "VERIFY" | "DONE" | "BLOCKED" | "UNKNOWN" | "CANCELLED" | "EXCLUDED";
 	blocker?: string;
 	workspace?: string;
+	checkScripts?: string;
+	preparation?: { phase: "clone" | "checkout" | "ready"; owner: string; head: string };
+	settlement?: { attemptId: string; sessionFiles: string[]; outcome: "cancelled" };
+	repair?: { generation: string; head: string; acceptanceRevision: string; attemptId: string; reason: string; artifacts: { id: string; path: string; digest: string; bytes: number; attemptId: string }[] };
 	attempts: number;
 	operation?: OperationReceipt;
 	operations: OperationReceipt[];
@@ -77,6 +83,7 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 	items = structuredClone(items);
 	for (const item of items) {
 		if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(item.repo) || !Number.isSafeInteger(item.number) || item.number < 1 || !["inspect", "patch", "pr-ready"].includes(item.action) || !["issue", "pr", "unknown"].includes(item.kind) || !Array.isArray(item.overlaps)) throw new Error("invalid selected identity/action; explicitly resolve selection");
+		if (item.requiredChecks !== undefined && (!Array.isArray(item.requiredChecks) || item.requiredChecks.length === 0 || item.requiredChecks.length > 8 || item.requiredChecks.some((check) => typeof check !== "string" || !check.trim() || check.length > 4096))) throw new Error("requiredChecks must contain one to eight bounded commands");
 		const key = `${item.repo.toLowerCase()}#${item.number}`;
 		if (item.key.toLowerCase() !== key) throw new Error("selected key does not match repository/item identity");
 		item.repo = item.repo.toLowerCase(); item.key = key;

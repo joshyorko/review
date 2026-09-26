@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runNative, type NativeSDK, type SchemaBuilder } from "../image/extension/luna-factory/omp/batch-native.ts";
 
-const schema: SchemaBuilder = {
+const schema = {
 	object: (value: Record<string, unknown>) => value,
 	string: () => ({}),
+	number: () => ({}),
 	array: (value: unknown) => value,
 	boolean: () => ({}),
-};
+} as unknown as SchemaBuilder;
 
 function item(workspace: string) {
 	return {
@@ -78,10 +79,10 @@ function sdkContract(capture: (options: Record<string, unknown>) => void): Nativ
 			};
 		},
 	};
-	return sdk;
+	return sdk as unknown as NativeSDK;
 }
 
-test("native adapter uses the OMP 18.3.1 restricted custom-tool contract", async () => {
+test("native adapter uses the OMP 18.3.2 restricted custom-tool contract", async () => {
 	const workspace = await mkdtemp(join(tmpdir(), "factory-native-sdk-"));
 	try {
 		let captured: Record<string, unknown> | undefined;
@@ -89,7 +90,7 @@ test("native adapter uses the OMP 18.3.1 restricted custom-tool contract", async
 		await runNative(
 			sdk,
 			schema,
-			{ model: {}, modelRegistry: { authStorage: {} } },
+			{ model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } },
 			item(workspace),
 			workspace,
 			"worker",

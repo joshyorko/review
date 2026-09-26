@@ -1336,9 +1336,51 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		}, schemas.empty);
 	}
 
+	const factoryDiagnostics = async (ctx: FactoryCtx): Promise<string> => {
+		const sdk = host.pi as Partial<NativeSDK> | undefined;
+		const missingSdkParts = [
+			...(typeof sdk?.createAgentSession === "function" ? [] : ["createAgentSession"]),
+			...(typeof sdk?.Settings?.isolated === "function" ? [] : ["Settings.isolated"]),
+			...(typeof sdk?.SessionManager?.create === "function" ? [] : ["SessionManager.create"]),
+			...(typeof sdk?.AgentRegistry === "function" ? [] : ["AgentRegistry"]),
+		];
+		const sdkStatus = !sdk ? "unavailable" : missingSdkParts.length ? `incomplete; missing ${missingSdkParts.join(", ")}` : "available";
+		let modelLabel = "unknown";
+		let registryStatus = "unavailable";
+		try {
+			const model = ctx.model;
+			if (model && typeof model.provider === "string" && typeof model.id === "string") modelLabel = `${model.provider}/${model.id}`;
+		} catch { /* a host getter may be unavailable during command dispatch */ }
+		try { if (ctx.modelRegistry !== undefined) registryStatus = "available"; }
+		catch { registryStatus = "unavailable in this command context"; }
+
+		const stateRoot = factoryStateRoot(env);
+		let stateLines: string[];
+		const { sanitizeRetainedError } = await import("./ui/operator.ts");
+		const safe = (value: string): string => sanitizeRetainedError(value).replace(/\s+/g, " ").slice(0, 1200);
+		try {
+			const { stat } = await import("node:fs/promises");
+			await stat(stateRoot);
+			const { BatchStore } = await import("./omp/batch-store.ts");
+			const batches = new BatchStore(stateRoot).list();
+			stateLines = batches.length === 0 ? ["Persisted batches: none"] : batches.map((batch) => {
+				const counts = ["RUNNING", "VERIFY", "QUEUED", "DONE", "BLOCKED", "UNKNOWN", "CANCELLED", "EXCLUDED"]
+					.map((stage) => `${stage.toLowerCase()} ${batch.items.filter((item) => item.stage === stage).length}`);
+				return `Batch ${safe(batch.id)}: ${batch.control}; ${counts.join(", ")}`;
+			});
+			stateLines.push("Factory state error: none");
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			stateLines = code === "ENOENT"
+				? ["Persisted batches: none", "Factory state error: no saved Factory state"]
+				: [`Factory state error at ${safe(stateRoot)}: ${safe(error instanceof Error ? error.message : String(error))}`];
+		}
+		return ["Factory diagnostics (read-only)", `OMP SDK: ${sdkStatus}`, `Selected model: ${safe(modelLabel)}`, `Model registry: ${registryStatus}`, `State root: ${safe(stateRoot)}`, ...stateLines].join("\n");
+	};
+
 	if (host.registerCommand !== undefined) {
 		host.registerCommand("factory", {
-			description: "Open or inspect the opt-in Luna Factory run",
+			description: "Open Factory batches, inspect diagnostics, or pass an explicit conversational objective with --",
 			handler: async (rawArgs, ctx) => {
 				const args = rawArgs.trim();
 				if (args.length === 0 && ctx.hasUI && ctx.ui?.custom) {
@@ -1355,8 +1397,13 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					notifyCommand(ctx, statusText());
 					return;
 				}
-				if (args === "help") {
-					notifyCommand(ctx, "usage: /factory <objective> | status | why <task-id> | pause | drain | resume | abort | -- <literal objective>");
+				if (args === "help" || args === "--help") {
+					notifyCommand(ctx, "Selected batches: /factory (dashboard), Review Shift+F, /factory start inspect|patch|pr-ready. Controls: status|inspect <batch>, pause|resume|stop <batch>, retry|exclude <batch> <item>, claims status|reconcile, export|discard <batch>. Diagnostics: /factory debug. Conversational objective: /factory -- <objective>.");
+					return;
+				}
+				if (args === "debug" || args === "--debug") {
+					try { notifyCommand(ctx, await factoryDiagnostics(ctx)); }
+					catch (error) { notifyCommand(ctx, `Factory diagnostics failed: ${error instanceof Error ? error.message : String(error)}`, "warning"); }
 					return;
 				}
 				if (args.startsWith("why ")) {
@@ -1381,9 +1428,13 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					notifyCommand(ctx, result.content[0]!.text, result.isError === true ? "error" : "warning");
 					return;
 				}
-				const objective = args.startsWith("--") ? args.slice(2).trim() : args;
+				if (args !== "--" && !/^--\s/.test(args)) {
+					notifyCommand(ctx, `Unknown /factory command: ${args}. Bare text never starts an objective. Use /factory help, or /factory -- <objective> for conversational Factory work. The appliance cwd may be empty; establish the exact repository subject and workspace through the Factory contract.`, "warning");
+					return;
+				}
+				const objective = args.slice(2).trim();
 				if (objective.length === 0) {
-					notifyCommand(ctx, "a literal objective after /factory -- must be non-empty", "warning");
+					notifyCommand(ctx, "usage: /factory -- <non-empty objective>", "warning");
 					return;
 				}
 				if (host.sendUserMessage === undefined) {
@@ -1393,7 +1444,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				host.sendUserMessage(
 					"The explicit operator objective for Luna Factory is:\n" +
 						objective +
-						"\n" + FACTORY_OWNER_HANDOFF + " Capture the agreed generation, mandatory criteria, non-goals, permitted effects, finish authority, appetite, and exact repository subject before calling luna_factory_open. Do not infer write or merge authority; use the Factory tools and keep ordinary Review ownership unchanged.",
+						"\n" + FACTORY_OWNER_HANDOFF + " The appliance cwd may be empty; do not treat /workspace as the selected repository. Establish the exact repository subject and workspace through the Factory contract. Capture the agreed generation, mandatory criteria, non-goals, permitted effects, finish authority, appetite, and exact repository subject before calling luna_factory_open. Do not infer write or merge authority; use the Factory tools and keep ordinary Review ownership unchanged.",
 					{ deliverAs: "steer" },
 				);
 			},

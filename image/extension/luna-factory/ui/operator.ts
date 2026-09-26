@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import type { Batch } from "../core/batch.ts";
 import type { ProjectedItem } from "./projection.ts";
 
@@ -13,6 +14,35 @@ export function itemTitle(batch: Batch, item: ProjectedItem): string {
 	return batch.items.find((entry) => entry.selected.key === item.key)?.selected.acceptance?.slice(0, 512).split("\n", 1)[0]?.trim() || `Work on #${item.number}`;
 }
 const stageName = (stage: string): string => stage === "verified-patch" ? "verified patch" : stage === "pr-ready" ? "ready PR" : "merged change";
+
+/** Keep retained command output useful while preventing terminal control and credential disclosure. */
+export function sanitizeRetainedError(value: string): string {
+	return stripVTControlCharacters(value)
+		.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, " ")
+		.replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[REDACTED]")
+		.replace(/(\bBearer\s+)\S+/gi, "$1[REDACTED]")
+		.replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/gi, "$1[REDACTED]@")
+		.replace(/((?:access[_-]?token|token|password|passwd|secret|authorization)=)[^\s&]+/gi, "$1[REDACTED]")
+		.trim();
+}
+
+function shortCause(value: string, limit = 66): string {
+	const safe = value.replace(/\s+/g, " ").trim();
+	return safe.length <= limit ? safe : `${safe.slice(0, limit - 1).trimEnd()}…`;
+}
+
+/** Translate common repository/setup failures into a useful one-line roster cause. */
+export function conciseFailureCause(value: string): string {
+	const safe = sanitizeRetainedError(value);
+	if (/detected dubious ownership|safe\.directory/i.test(safe)) return "Git rejected workspace ownership";
+	if (/EACCES|permission denied/i.test(safe)) return "Workspace access denied";
+	if (/could not resolve host|temporary failure in name resolution|network is unreachable/i.test(safe)) return "Network blocked repository setup";
+	if (/repository not found|HTTP 404|not found.*repository/i.test(safe)) return "Repository unavailable to this GitHub identity";
+	if (/authentication failed|could not read username|HTTP 401|HTTP 403/i.test(safe)) return "GitHub access needs attention";
+	if (/Command failed:.*(?:gh repo clone|git\b)/i.test(safe)) return "repository setup failed";
+	const meaningful = safe.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !/^Command failed:/i.test(line));
+	return shortCause(meaningful[0] ?? safe) || "The last attempt could not continue";
+}
 export function itemOverview(item: ProjectedItem, active = false): ItemOverview {
 	const owner = item.claims.find((claim) => claim.conflict);
 	if (owner) return {
@@ -45,19 +75,19 @@ export function itemOverview(item: ProjectedItem, active = false): ItemOverview 
 	}
 	if (item.stage === "BLOCKED") {
 		const reason = item.blocker ?? "The last attempt could not continue.";
-        if (/ENOENT|retained workspace identity mismatch|verification workspace unavailable/i.test(reason)) return {
-            caption: "workspace unavailable", heading: "Workspace needs attention",
-            explanation: "The retained workspace could not be opened. Inspect Debug for the recorded error; existing evidence has been preserved.",
-            next: "Restore the workspace before retrying.", needsYou: true,
-        };
-        if (/Command failed:.*(?:gh repo clone|git.*(?:clone|fetch))/i.test(reason)) return {
-            caption: "repository setup failed", heading: "Repository setup failed",
-            explanation: "Factory couldn't prepare the repository workspace. The recorded error is available in Debug.",
-            next: "Inspect the error, fix the setup, then retry.", needsYou: true,
-        };
+		if (/ENOENT|retained workspace identity mismatch|verification workspace unavailable/i.test(reason)) return {
+			caption: "workspace unavailable", heading: "Workspace needs attention",
+			explanation: "The retained workspace could not be opened. The recorded error is available in the item details; existing evidence is preserved.",
+			next: "Inspect the recorded error, restore the workspace, then retry.", needsYou: true,
+		};
+		if (/Command failed:.*(?:gh repo clone|git.*(?:clone|fetch))/i.test(reason)) return {
+			caption: conciseFailureCause(reason), heading: "Repository setup failed",
+			explanation: conciseFailureCause(reason),
+			next: "Inspect the recorded error, fix repository setup, then retry.", needsYou: true,
+		};
 		if (/credential|GitHub (401|403)|auth expired|restore access/i.test(reason)) return { caption: "GitHub access needs attention", heading: "Reconnect GitHub", explanation: "Factory couldn't use the current GitHub connection.", next: "Restore access, then retry this item.", needsYou: true };
 		if (/budget|attempt.*exhaust/i.test(reason)) return { caption: "attempt budget used", heading: "This run reached its limit", explanation: "The original attempt budget has been used. Retrying does not reset it.", next: "Inspect the work before deciding on another scope.", needsYou: true };
-		return { caption: reason, heading: "Work needs attention", explanation: reason, next: item.actions.includes("retry") ? "Retry when the blocker is resolved." : "Inspect the blocker and evidence.", needsYou: true };
+		return { caption: conciseFailureCause(reason), heading: "Work needs attention", explanation: sanitizeRetainedError(reason), next: item.actions.includes("retry") ? "Inspect the recorded error, resolve the blocker, then retry." : "Inspect the recorded blocker and evidence.", needsYou: true };
 	}
 	return { caption: "waiting to start", heading: "Ready when the run can continue", explanation: "This item is queued within the current run's capacity and dependencies.", next: "Resume the run if it is paused.", needsYou: false };
 }

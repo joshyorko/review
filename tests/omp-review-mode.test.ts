@@ -43,7 +43,7 @@ import {
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { saveWave } from "../image/extension/bluefin-review/wave-store.ts";
-import { factoryHandoffState, registerFactoryController } from "../image/extension/luna-factory/omp/batch-bridge.ts";
+import { factoryHandoffState, registerFactoryController, registerFactoryBatchSubmitter, registerFactoryDashboardOpener } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -4709,6 +4709,51 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	assert.doesNotMatch(prompt, /maximum of 7|fix-and-merge|approve and merge/);
 });
 
+
+test("Factory selection keeps inherited OMP model access live after a model switch", async () => {
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const uiContext = fakeCtx();
+	let model: object | undefined;
+	const modelRegistry = { authStorage: {} };
+	// OMP scopes event contexts with Object.create; only ui is an own property.
+	const ctx = Object.create({
+		...uiContext,
+		get model() { assert.equal(this, ctx, "OMP accessor retains its handler receiver"); return model; },
+		modelRegistry,
+	});
+	Object.defineProperty(ctx, "ui", { value: uiContext.ui, enumerable: true });
+	let nativeContext: { model?: unknown; modelRegistry?: unknown } | undefined;
+	const unregister = registerFactoryController(async () => "unused");
+	const unregisterSubmitter = registerFactoryBatchSubmitter(async (_action, context) => {
+		nativeContext = context as typeof nativeContext;
+		return { batchId: "batch-model-context", text: "submitted" };
+	});
+	const unregisterDashboard = registerFactoryDashboardOpener(async () => {});
+	try {
+		await pi.events.get("session_start")({}, ctx);
+		await review.whenStarted();
+		model = { id: "authenticated-model" };
+		uiContext.overlays[0].handleInput("space");
+		uiContext.selectResponses.push("Inspect selected items");
+		uiContext.overlays[0].handleInput("F");
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		assert.ok(nativeContext, "the selected batch reaches Factory");
+		assert.equal(nativeContext.model, model, "the authenticated model survives the scoped event context");
+		assert.equal(nativeContext.modelRegistry, modelRegistry, "Factory retains the session auth registry");
+		model = { id: "replacement-model" };
+		assert.equal(nativeContext.model, model, "retained Factory context observes OMP model changes");
+		model = undefined;
+		assert.equal(nativeContext.model, undefined, "clearing the model cannot leave stale execution authority");
+		assert.equal(Object.hasOwn(ctx, "reconcileMutationClaim"), false, "Review does not mutate the host context");
+		uiContext.overlays.at(-1).handleInput("q");
+	} finally {
+		unregisterDashboard();
+		unregisterSubmitter();
+		unregister();
+		await pi.events.get("session_shutdown")?.({}, ctx);
+	}
+});
 
 for (const outcome of ["success", "error", "cancel"] as const) {
 	test(`Factory picker returns to Review after ${outcome}`, async () => {

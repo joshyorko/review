@@ -8,6 +8,9 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { admit } from "../image/extension/luna-factory/core/admission.ts";
@@ -26,13 +29,16 @@ import type {
 	Subject,
 	TaskId,
 } from "../image/extension/luna-factory/core/model.ts";
-import type { FactoryAction, SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
+import { createBatch, type FactoryAction, type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
 import { renderCompletionReceipt } from "../image/extension/luna-factory/core/receipt.ts";
 import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
 import { artifactRefError, changedPathError, parseCandidate, parseReceipt, parseSubject } from "../image/extension/luna-factory/core/schema.ts";
 import { buildDispatchPrompt, dispatchMarker, RECEIPT_CONTRACT } from "../image/extension/luna-factory/omp/adapter.ts";
 import { DISPATCH_COVERAGE, coverageFor, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
 import { renderStatus, renderStatusDetail, renderWhy } from "../image/extension/luna-factory/ui/status.ts";
+import { FactoryDashboard } from "../image/extension/luna-factory/ui/dashboard.ts";
+import { itemOverview, sanitizeRetainedError } from "../image/extension/luna-factory/ui/operator.ts";
+import { projectBatch } from "../image/extension/luna-factory/ui/projection.ts";
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { factoryCommand, factoryHandoffState, factoryLoadDiagnostic, registerFactoryController, registerFactorySelection, reportFactoryLoadFailure, selectedFactoryItems } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
@@ -1557,6 +1563,50 @@ test("narrow output degrades by truncation, not by losing the line", () => {
 	assert.ok(line.endsWith("…"));
 });
 
+test("Factory cockpit summarizes mixed outcomes and keeps the sanitized setup error one Enter away", () => {
+	const batch = createBatch([
+		{ key: "acme/alpha#1", repo: "acme/alpha", number: 1, kind: "pr", action: "patch", overlaps: [] },
+		{ key: "acme/beta#2", repo: "acme/beta", number: 2, kind: "pr", action: "pr-ready", overlaps: [] },
+	], { id: "batch-1234abcd", capacity: 2, maxAttempts: 3, maxTotalAttempts: 6, mode: "once" });
+	batch.control = "active";
+	batch.items[0]!.stage = "BLOCKED";
+	batch.items[0]!.attempts = 2;
+	batch.items[0]!.blocker = "Command failed: git fetch origin pull/1/head\nfatal: detected dubious ownership in repository at '/workspace/acme/alpha'\nremote: https://user:ghp_abcdefghijklmnopqrstuvwxyz1234567890@example.invalid/acme/alpha";
+	batch.items[1]!.stage = "UNKNOWN";
+	batch.items[1]!.blocker = "push result was not observed";
+	const dashboard = new FactoryDashboard({
+		tui: { requestRender() {}, terminal: { rows: 30 } },
+		theme: { fg: (_color, text) => text, bold: (text) => text, inverse: (text) => text },
+		done() {},
+		rows: 30,
+		source: { batches: [batch], claims: [], activeItemKeys: [], readOnly: true },
+	});
+	const wide = dashboard.render(140).join("\n");
+	assert.match(wide, /Mixed work/);
+	assert.match(wide, /Run 1234abcd/);
+	assert.match(wide, /0 active \/ 2 slots/);
+	assert.match(wide, /attempts 2\/6/i);
+	assert.match(wide, /BLOCKED/);
+	assert.match(wide, /UNKNOWN/);
+	assert.match(wide, /Git rejected workspace ownership/);
+	assert.doesNotMatch(wide, /ghp_abcdefghijklmnopqrstuvwxyz/);
+	assert.doesNotMatch(wide, /git fetch origin/);
+
+	const narrow = dashboard.render(72).join("\n");
+	assert.match(narrow, /UNKNOWN/);
+	assert.match(narrow, /Git rejected workspace ownership/);
+
+	dashboard.handleInput("\r");
+	const detail = dashboard.render(72).join("\n");
+	assert.match(detail, /Recorded error/);
+	assert.match(detail, /detected dubious\s+ownership/);
+	assert.match(detail, /\[REDACTED\]/);
+	assert.doesNotMatch(detail, /ghp_abcdefghijklmnopqrstuvwxyz/);
+	dashboard.dispose();
+	assert.match(itemOverview(projectBatch(batch, { readOnly: true }).items[0]!).caption, /Git rejected workspace ownership/);
+	assert.match(sanitizeRetainedError("fatal: token=shh123"), /token=\[REDACTED\]/);
+});
+
 // -------------------------------------------------------------- completion
 
 test("the completion receipt is explicit about a run that has not converged", () => {
@@ -1953,11 +2003,65 @@ test("Factory root handoff keeps ownership through convergence or an evidenced b
 	assert.match(steer, /without re-requesting authority already present/);
 	assert.match(steer, /one lane is blocked, finish independent authorized work first/);
 	assert.match(steer, /Completion, merge, publish, deploy, and scope authority remain separate/);
-	assert.equal(command.description, "Open or inspect the opt-in Luna Factory run");
+	assert.match(command.description ?? "", /explicit conversational objective/);
 	const open = host.tools.get("luna_factory_open");
 	assert.ok(open);
 	assert.match(open.description ?? "", /Opening\/owning means driving the recorded objective until CONVERGED or honestly QUIESCENT\/blocked/);
 	assert.match(open.description ?? "", /persistence adds no mutation authority/);
+});
+
+test("Factory diagnostics and arbitrary text cannot enter conversational objective mode", async () => {
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
+	const command = host.commands.get("factory");
+	assert.ok(command);
+	await command.handler("debug", startCtx(host));
+	await command.handler("--debug", startCtx(host));
+	await command.handler("--help", startCtx(host));
+	await command.handler("inspect the failure", startCtx(host));
+	assert.equal(host.sentMessages.length, 0);
+	assert.ok(host.notifications.some((message) => /diagnostic/i.test(message)));
+	assert.ok(host.notifications.some((message) => /\/factory -- <objective>/.test(message)));
+	assert.ok(host.notifications.some((message) => /selected batches|Factory batches/i.test(message)));
+	await command.handler("-- inspect the failure", startCtx(host));
+	assert.equal(host.sentMessages.length, 1);
+	assert.match(host.sentMessages[0]!.content, /appliance cwd may be empty/);
+});
+
+test("Factory debug reports read-only runtime and persisted-state diagnostics without credentials or prompts", async () => {
+	const root = mkdtempSync(join(tmpdir(), "luna-factory-debug-"));
+	try {
+		const batch = createBatch([{ key: "example/repo#1", repo: "example/repo", number: 1, kind: "issue", action: "inspect", overlaps: [], base: "a".repeat(40), head: "a".repeat(40), acceptanceRevision: "r1" }], {
+			id: "batch-aaaaaaaa", capacity: 2, maxAttempts: 3, maxTotalAttempts: 3, mode: "retain",
+		});
+		const stateFile = join(root, `${batch.id}.json`);
+		writeFileSync(stateFile, JSON.stringify(batch));
+		const secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+		const host = fakeHost();
+		createLunaFactoryExtension(host as never, { env: { LUNA_FACTORY_STATE_ROOT: root, GH_TOKEN: secret }, artifactRoots: ROOTS });
+		const command = host.commands.get("factory");
+		assert.ok(command);
+		const ctx = Object.assign(Object.create({ model: { provider: "fixture-provider", id: "fixture-model" }, modelRegistry: {} }), startCtx(host));
+		await command.handler("debug", ctx);
+		const status = host.notifications.at(-1) ?? "";
+		assert.match(status, /OMP SDK: unavailable/);
+		assert.match(status, /Selected model: fixture-provider\/fixture-model/);
+		assert.match(status, /Model registry: available/);
+		assert.match(status, /batch-aaaaaaaa: paused/);
+		assert.doesNotMatch(status, /ghp_abcdefghijklmnopqrstuvwxyz/);
+		assert.equal(host.sentMessages.length, 0);
+		assert.equal(host.nativeTaskCalls.count, 0);
+		assert.equal(readFileSync(stateFile, "utf8"), JSON.stringify(batch));
+
+		const brokenPath = join(root, "batch-bbbbbbbb.json");
+		writeFileSync(brokenPath, `{"token":"${secret}"}`);
+		await command.handler("--debug", ctx);
+		const error = host.notifications.at(-1) ?? "";
+		assert.match(error, /Factory state error/i);
+		assert.doesNotMatch(error, /ghp_abcdefghijklmnopqrstuvwxyz/);
+		assert.equal(readFileSync(brokenPath, "utf8"), `{"token":"${secret}"}`);
+		assert.equal(host.sentMessages.length, 0);
+	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("Factory exposes typed tool contracts and accepts an object on the first call", async () => {
