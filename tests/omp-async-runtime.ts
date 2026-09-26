@@ -6,7 +6,7 @@ import { join } from "node:path";
 /** Run upstream's unmodified manager. Only its logging dependency is replaced. */
 export async function loadPackagedJobManager(root: string) {
 	const revision = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-	if (revision !== "62bc57be1b03ef0802a33cf7f5f530e534527531") throw new Error(`Expected packaged OMP 18.3.0, found ${revision}`);
+	if (revision !== "7853b4e499936f9dcc13c9b64adb55f6b342aabf") throw new Error(`Expected packaged OMP 18.3.2, found ${revision}`);
 	execFileSync("git", ["-C", root, "diff", "--exit-code", "HEAD", "--", "packages/coding-agent/src/async/job-manager.ts"]);
 	const hooks = registerHooks({
 		resolve(specifier, context, next) {
