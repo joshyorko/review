@@ -148,6 +148,7 @@ test("changed mandatory checks block retained work without an automatic second w
    },async abort(){},async dispose(){}}};
   }};
   Object.defineProperty(f.service,"sdk",{value:sdk,writable:true});
+  f.service.store.write(f.batch);
   await f.service.resume(f.batch.id,{model:{},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});await f.service.waitForIdle();
   const final=f.service.store.read(f.batch.id).items[0]!;
   assert.equal(workers,1);assert.equal(final.stage,"BLOCKED");assert.match(final.blocker!,/changed the captured mandatory package test scripts/);
