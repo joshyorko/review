@@ -6,12 +6,13 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createBatch, digest, type Batch, type BatchItem } from "../image/extension/luna-factory/core/batch.ts";
 import { requiredChecks, packageCheckScripts } from "../image/extension/luna-factory/omp/batch-checks.ts";
+import { sandboxPreflight } from "../image/extension/luna-factory/omp/batch-native.ts";
 import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
 
-function fixture() {
+function fixture(preflight: typeof sandboxPreflight = sandboxPreflight) {
  const root = mkdtempSync(join(tmpdir(), "factory-corrective-"));
  const batch = createBatch([{ key: "org/repo#1", repo: "org/repo", number: 1, kind: "pr", action: "patch", overlaps: [], acceptanceRevision: "r1", head: "a".repeat(40), base: "a".repeat(40) }], { id: "batch-abcdef", capacity: 1, maxAttempts: 3, maxTotalAttempts: 3, mode: "retain" });
- const service = new BatchService(root, { assertFresh: async () => {}, snapshot: async (x: unknown) => x } as never, undefined, {} as never, 1);
+ const service = new BatchService(root, { assertFresh: async () => {}, snapshot: async (x: unknown) => x } as never, undefined, {} as never, 1, root, preflight);
  service.store.acquire(); service.store.write(batch);
  const item = batch.items[0]!;
  const path = join(root, "workspaces", batch.id, digest(item.selected.key).slice(0, 16));
@@ -133,7 +134,7 @@ test("captured mandatory checks survive repository test-script edits and are cop
  }finally{await f.cleanup();}
 });
 test("changed mandatory checks block retained work without an automatic second worker attempt",async()=>{
- const f=fixture();let workers=0;try{
+ const f=fixture(async (_workspace, requiredExecutables) => ({available:["bash", ...requiredExecutables], missing:[], scope:"executable-presence-only"}));let workers=0;try{
   ready(f);writeFileSync(join(f.path,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));
   f.item.attempts=1;f.item.selected.requiredChecks=["npm test"];f.item.checkScripts=packageCheckScripts(f.path);
   const sdk={Settings:{isolated:()=>({})},SessionManager:{create:()=>({})},AgentRegistry:class{},async createAgentSession(options:Record<string,unknown>){

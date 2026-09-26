@@ -87,13 +87,15 @@ export class BatchService {
 	private changed = new Set<BatchChangeListener>();
 	private bindings = new Map<string, { binding: NativeBinding } | { error: string }>();
 	private fatal?: string;
+	private readonly preflight: typeof sandboxPreflight;
 
-	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root) {
+	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root, preflight: typeof sandboxPreflight = sandboxPreflight) {
 		this.root = root;
 		this.github = github;
 		this.sdk = sdk;
 		this.schema = schema;
 		this.capacity = capacity;
+		this.preflight = preflight;
 		if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("invalid shared Factory capacity");
 		this.store = new BatchStore(root);
 		this.claims = new ResourceClaims(root, claimsRoot);
@@ -581,7 +583,7 @@ export class BatchService {
 				if (!executable) throw new Error("task readiness: verification command needs an explicit executable name");
 				return executable;
 			});
-			const capability = await sandboxPreflight(directory, executables, signal);
+			const capability = await this.preflight(directory, executables, signal);
 			const missing = [...new Set(executables)].filter((name) => !capability.available.includes(name));
 			if (missing.length) throw new Error(`task readiness: verifier lacks required executable(s): ${missing.join(", ")}; prepare the supported toolchain before retry`);
 		}
