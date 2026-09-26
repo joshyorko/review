@@ -237,12 +237,20 @@ test("a second factory report cannot overwrite the authoritative first submissio
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("sandbox preflight reports required executables without running repository commands", async () => {
+test("sandbox preflight distinguishes a missing tool from an absent sandbox without running repository commands", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-native-preflight-"));
-	const result = await sandboxPreflight(root, ["definitely-not-a-real-factory-tool"], new AbortController().signal);
-	assert.deepEqual(result.missing, ["definitely-not-a-real-factory-tool"]);
-	assert.ok(result.available.includes("bash"));
-	await rm(root, { recursive: true, force: true });
+	try {
+		await assert.rejects(() => sandboxPreflight(root, ["tool; unexpected-command"], new AbortController().signal), /invalid required executable name/);
+		try {
+			const result = await sandboxPreflight(root, ["definitely-not-a-real-factory-tool"], new AbortController().signal);
+			assert.deepEqual(result.missing, ["definitely-not-a-real-factory-tool"]);
+			assert.ok(result.available.includes("bash"));
+		} catch (error) {
+			// Hermetic CI does not install bwrap; require the precise missing-boundary diagnostic.
+			assert.ok(error instanceof Error && "code" in error && error.code === "capability-unavailable");
+			assert.match(error.message, /spawn bwrap ENOENT/);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("failed native abort still disposes and never certifies cancellation settlement", async () => {

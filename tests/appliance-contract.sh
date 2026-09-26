@@ -420,10 +420,9 @@ retained_identity_output="$(run_named_home_probe)" ||
   fail "entrypoint could not reopen retained named home state"
 [[ "$retained_identity_output" == "uid=65532 gid=65532 home=/home/bluefin state_owner=65532:65532 retained=yes" ]] ||
   fail "entrypoint did not retain named-volume Factory state: ${retained_identity_output}"
-home_mount="$("$engine" volume mount "$home_volume")"
+home_mount="$("$engine" volume inspect --format '{{.Mountpoint}}' "$home_volume")"
 [[ "$(stat -c %u:%g "$home_mount/.local/state/review/factory/retained-probe")" == "$(id -u):$(id -g)" ]] ||
   fail "retained Factory state is not host-owned by the runtime caller"
-"$engine" volume unmount "$home_volume" >/dev/null
 [[ "$(stat -c %u:%g "$identity_fixture/claims/claims-probe")" == "$(id -u):$(id -g)" ]] ||
   fail "the existing claims mount lost host ownership"
 
