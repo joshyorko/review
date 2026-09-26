@@ -98,7 +98,6 @@ test("syncGhPins updates the Review appliance from the selected release", async 
 	assert.match(appliance, new RegExp(`^ARG GH_AARCH64_SHA256=${ARM64}$`, "m"));
 });
 
-
 test("syncTypesafePins refreshes every packaged TypeSafe npm tarball digest", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "typesafe-pins-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
@@ -143,107 +142,7 @@ test("syncTypesafePins refreshes every packaged TypeSafe npm tarball digest", as
 		assert.ok(pin, `${spec.depName} pin was refreshed`);
 		const expected = createHash("sha256").update(bodies.get(pin.url)).digest("hex");
 		assert.equal(pin.sha256, expected);
-		assert.match(appliance, new RegExp(`^ARG ${spec.shaArg}=${expected}import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test from "node:test";
-
-import {
-	releasePins as ghReleasePins,
-	syncGhPins,
-	updateContainerfile as updateGhContainerfile,
-} from "../scripts/update-gh-pins.mjs";
-import {
-	fetchPackageHashes,
-	updateLockfileContent,
-} from "../scripts/update-requirements-ci-hashes.mjs";
-import { syncTypesafePins, TYPESAFE_PACKAGES } from "../scripts/update-typesafe-pins.mjs";
-
-const X64 = "a".repeat(64);
-const ARM64 = "b".repeat(64);
-const GH_RELEASE = {
-	tag_name: "v2.97.0",
-	draft: false,
-	prerelease: false,
-	assets: [
-		{ name: "gh_2.97.0_linux_amd64.tar.gz", digest: `sha256:${X64}` },
-		{ name: "gh_2.97.0_linux_arm64.tar.gz", digest: `sha256:${ARM64}` },
-	],
-};
-const OLD_GH_CONTAINERFILE = `# renovate: datasource=github-releases depName=cli/cli
-ARG GH_VERSION=2.96.0
-ARG GH_X86_64_SHA256=${"1".repeat(64)}
-ARG GH_AARCH64_SHA256=${"2".repeat(64)}
-`;
-const RENOVATED_GH_CONTAINERFILE = OLD_GH_CONTAINERFILE.replace("2.96.0", "2.97.0");
-
-function response(payload, { status = 200, statusText = "OK" } = {}) {
-	return {
-		ok: status >= 200 && status < 300,
-		status,
-		statusText,
-		json: async () => payload,
-		text: async () => (typeof payload === "string" ? payload : JSON.stringify(payload)),
-	};
-}
-
-function readVersionArg(source, name) {
-	const matches = [...source.matchAll(new RegExp(`^ARG ${name}=([0-9]+\\.[0-9]+\\.[0-9]+)$`, "gm"))];
-	assert.equal(matches.length, 1, `${name} must have exactly one version pin`);
-	return matches[0][1];
-}
-
-test("ghReleasePins accepts stable assets and rejects incomplete release evidence", () => {
-	assert.deepEqual(ghReleasePins(GH_RELEASE), { version: "2.97.0", x86_64: X64, aarch64: ARM64 });
-	assert.throws(() => ghReleasePins({ ...GH_RELEASE, prerelease: true }), /published stable release/);
-	assert.throws(() => ghReleasePins({ ...GH_RELEASE, draft: true }), /published stable release/);
-	assert.throws(
-		() => ghReleasePins({ ...GH_RELEASE, assets: GH_RELEASE.assets.filter((asset) => !asset.name.includes("arm64")) }),
-		/has no gh_2\.97\.0_linux_arm64\.tar\.gz asset/,
-	);
-	assert.throws(
-		() => ghReleasePins({ ...GH_RELEASE, assets: [{ name: "gh_2.97.0_linux_amd64.tar.gz", digest: "" }] }),
-		/no valid SHA-256 digest/,
-	);
-});
-
-test("updateGhContainerfile replaces one complete GH pin set", () => {
-	const updated = updateGhContainerfile(OLD_GH_CONTAINERFILE, { version: "2.97.0", x86_64: X64, aarch64: ARM64 });
-	assert.match(updated, /^ARG GH_VERSION=2\.97\.0$/m);
-	assert.match(updated, new RegExp(`^ARG GH_X86_64_SHA256=${X64}$`, "m"));
-	assert.match(updated, new RegExp(`^ARG GH_AARCH64_SHA256=${ARM64}$`, "m"));
-	assert.throws(
-		() => updateGhContainerfile(`${OLD_GH_CONTAINERFILE}ARG GH_VERSION=2.0.0\n`, { version: "2.97.0", x86_64: X64, aarch64: ARM64 }),
-		/expected one ARG GH_VERSION pin/,
-	);
-});
-
-test("syncGhPins updates the Review appliance from the selected release", async (t) => {
-	const root = await mkdtemp(join(tmpdir(), "gh-pins-"));
-	t.after(() => rm(root, { recursive: true, force: true }));
-	await mkdir(join(root, "image/appliance"), { recursive: true });
-	await writeFile(join(root, "image/appliance/Containerfile"), RENOVATED_GH_CONTAINERFILE);
-
-	const urls = [];
-	const pins = await syncGhPins({
-		root,
-		fetchImpl: async (url) => {
-			urls.push(String(url));
-			return response(GH_RELEASE);
-		},
-	});
-
-	assert.equal(pins.version, "2.97.0");
-	assert.deepEqual(urls, ["https://api.github.com/repos/cli/cli/releases/tags/v2.97.0"]);
-	const appliance = await readFile(join(root, "image/appliance/Containerfile"), "utf8");
-	assert.match(appliance, /^ARG GH_VERSION=2\.97\.0$/m);
-	assert.match(appliance, new RegExp(`^ARG GH_X86_64_SHA256=${X64}$`, "m"));
-	assert.match(appliance, new RegExp(`^ARG GH_AARCH64_SHA256=${ARM64}$`, "m"));
-});
-
-, "m"));
+		assert.match(appliance, new RegExp(`^ARG ${spec.shaArg}=${expected}$`, "m"));
 	}
 });
 

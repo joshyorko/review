@@ -7,7 +7,7 @@ cd "$repo_root"
 
 containerfile="image/appliance/Containerfile"
 entrypoint="image/appliance/entrypoint.sh"
-typesafe_version="$(sed -nE 's/^ARG TYPESAFE_VERSION=([^[:space:]]+)$/\\1/p' "$containerfile")"
+typesafe_version="$(sed -nE 's/^ARG TYPESAFE_VERSION=([^[:space:]]+)$/\1/p' "$containerfile")"
 
 fail() {
   echo "typesafe-appliance-contract: $*" >&2
