@@ -238,7 +238,11 @@ export async function runNative(
 	let unsubscribe = () => {};
 	let abortPromise: Promise<void> | undefined;
 	let cancelled = false;
-	const abort = () => { cancelled = true; abortPromise ??= session.abort(); };
+	let abortFailure: { error: unknown } | undefined;
+	const abort = () => {
+		cancelled = true;
+		abortPromise ??= Promise.resolve().then(() => session.abort()).catch((error: unknown) => { abortFailure = { error }; });
+	};
 	signal.addEventListener("abort", abort, { once: true });
 	try {
 		// Persist the private session identity first; its path alone is not evidence of execution.
@@ -258,9 +262,9 @@ export async function runNative(
 		else throw error;
 	} finally {
 		signal.removeEventListener("abort", abort);
-		unsubscribe();
-		if (abortPromise) await abortPromise;
-		await session.dispose();
+		try { unsubscribe(); if (abortPromise) await abortPromise; }
+		finally { await session.dispose(); }
+		if (abortFailure) throw abortFailure.error;
 	}
 	if (cancelled) throw new NativeExecutionError("cancellation-settled", "native session cancellation and disposal settled; inspect retained workspace and artifacts before retry");
 	if (!submitted) throw new NativeExecutionError(reportFailure ? "report-invalid" : "report-missing", reportFailure ? `native report rejected: ${reportFailure}` : "native worker returned without an evidence candidate");

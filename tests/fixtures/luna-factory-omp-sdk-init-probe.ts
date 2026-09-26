@@ -114,6 +114,7 @@ export default function sdkInitializationProbe(pi: any) {
 						await native.session.dispose();
 						throw new Error(native.modelFallbackMessage);
 					}
+					assert.deepEqual([...native.session.getActiveToolNames()].sort(), [...toolNames].sort(), "actual SDK exposes only the restricted Factory tool set");
 					assert.ok(native.session.sessionFile, "SDK initialization created a persistent native session");
 					assert.ok(native.session.model, "SDK initialization retained the selected model");
 					initializedModel = `${native.session.model!.provider}/${native.session.model!.id}`;

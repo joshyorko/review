@@ -192,7 +192,10 @@ configure_host_files() {
 assert_apptainer_host_files() {
   local call="$1" mask="$2" path bit previous="" runtime_home="" arg
   for arg in $call; do
-    if [[ "$previous" == --home ]]; then runtime_home="${arg%%:*}"; break; fi
+    if [[ "$previous" == --home ]]; then
+      runtime_home="${arg%%:*}"
+      break
+    fi
     previous="$arg"
   done
   [[ -d "$runtime_home/.local/state/review/factory" ]] || fail "Apptainer Factory state was not prepared before launch"

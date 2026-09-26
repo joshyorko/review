@@ -102,7 +102,7 @@ require "$containerfile" \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
   'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory'
 require image/appliance/entrypoint.sh \
-  'if (( EUID == 0 )); then' \
+  'if ((EUID == 0)); then' \
   'os.setgroups([65532])' \
   'os.setgid(65532)' \
   'os.setuid(65532)' \

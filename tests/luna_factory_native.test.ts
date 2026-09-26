@@ -244,3 +244,14 @@ test("sandbox preflight reports required executables without running repository 
 	assert.ok(result.available.includes("bash"));
 	await rm(root, { recursive: true, force: true });
 });
+
+test("failed native abort still disposes and never certifies cancellation settlement", async () => {
+ const root = await mkdtemp(join(tmpdir(), "factory-native-abort-fail-"));
+ try {
+  const controller = new AbortController();let disposed = false;
+  const session = { sessionFile: "native.log", subscribe: () => () => {}, async prompt() { controller.abort(); }, async abort() { throw new Error("abort transport failed"); }, async dispose() { disposed = true; } };
+  const sdk = { Settings: { isolated: () => ({}) }, SessionManager: { create: () => ({}) }, AgentRegistry: class {}, createAgentSession: async () => ({session}) } as unknown as NativeSDK;
+  await assert.rejects(() => runNative(sdk, schema, {model: {}, modelRegistry: {authStorage: {}, hasConfiguredAuth: () => true}}, item(root), root, "worker", controller.signal, () => {}, () => {}), /abort transport failed/);
+  assert.equal(disposed, true, "dispose remains required when abort fails");
+ } finally { await rm(root, {recursive: true, force: true}); }
+});
