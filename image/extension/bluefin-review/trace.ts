@@ -22,11 +22,12 @@ import {
 import { truncateToWidth } from "./width.ts";
 
 /** Why an OMP span needs a visible badge. */
-export type TraceClass = "cancelled" | "tool";
+export type TraceClass = "cancelled" | "tool" | "unknown";
 
 export function traceClassBadge(cls?: TraceClass): string {
 	if (cls === "cancelled") return "CANCELLED";
 	if (cls === "tool") return "TOOL";
+	if (cls === "unknown") return "UNKNOWN";
 	return "";
 }
 

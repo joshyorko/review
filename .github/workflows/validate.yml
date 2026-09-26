@@ -111,8 +111,8 @@ jobs:
         # The normal Review suite remains hermetic.
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch v18.3.0 https://github.com/can1357/oh-my-pi.git "$RUNNER_TEMP/review-omp-source"
-          REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --experimental-transform-types --test --test-name-pattern='packaged OMP 18.3.0' tests/omp-review-mode.test.ts
+          git clone --depth 1 --branch v18.3.2 https://github.com/can1357/oh-my-pi.git "$RUNNER_TEMP/review-omp-source"
+          REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --experimental-transform-types --test --test-name-pattern='packaged OMP 18.3.2' tests/omp-review-mode.test.ts
 
       - name: Packaged runtime capability report
         run: |

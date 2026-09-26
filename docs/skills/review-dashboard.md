@@ -87,6 +87,13 @@ mutation-claims root, so losing the session projection does not lose the wave.
 An orphan claim without a valid record is reported as UNKNOWN; it is never
 released based on the claim file alone.
 
+The Review trace treats OMP lifecycle fields as authority: structured
+`__interrupted`/synthetic interruption details and `isError` settle tool spans;
+result prose never does. `turn_end` is only a foreground turn boundary, so a
+running task or background job remains visible as `UNKNOWN` until its native
+terminal status is observed. The rail, plain-text trace, and
+`review_workbench_trace` tool read the same projection.
+
 ## Policy and tools
 
 Use the generic workbench policy for every owner/repository. Do not route based on `projectbluefin/`, `joshyorko/`, or another organization prefix, and do not restore Blueberry or product-specific label gates.
@@ -104,10 +111,11 @@ bash tests/review-factory-coload-smoke.sh
 For UI changes, exercise the real foreground OMP workbench and verify the visible surface as well as the focused headless contract.
 
 The validation workflow also runs the async-consumption regression against the
-OMP 18.3.0 job manager. To reproduce locally with a clean checkout of that tag:
+packaged OMP 18.3.2 job manager. To reproduce locally with a clean checkout of
+that tag:
 
 ```bash
-REVIEW_OMP_SOURCE=/path/to/oh-my-pi node --experimental-transform-types --test --test-name-pattern='packaged OMP 18.3.0' tests/omp-review-mode.test.ts
+REVIEW_OMP_SOURCE=/path/to/oh-my-pi node --experimental-transform-types --test --test-name-pattern='packaged OMP 18.3.2' tests/omp-review-mode.test.ts
 ```
 
 Use Node 24 for this upstream TypeScript test. The test verifies the upstream
