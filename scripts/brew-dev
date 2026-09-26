@@ -53,10 +53,10 @@ case "$action" in
       [[ "$oci_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "personal OCI push returned an invalid digest"
     fi
     podman save --format docker-archive -o "$work/review.tar" "$image"
-    # Local qualification uses the same OCI bytes as the SIF without publishing.
+    # Local qualification retains the same built image in native OCI format.
     if [[ -n "${REVIEW_OCI_ARCHIVE:-}" ]]; then
       [[ ! -e "$REVIEW_OCI_ARCHIVE" ]] || fail "local OCI archive destination already exists"
-      cp -- "$work/review.tar" "$REVIEW_OCI_ARCHIVE"
+      podman save --format oci-archive -o "$REVIEW_OCI_ARCHIVE" "$image"
     fi
     APPTAINER_CACHEDIR="$work/apptainer-cache" apptainer build \
       "$work/payload/launcher/bluefin-review.sif" "docker-archive:$work/review.tar"

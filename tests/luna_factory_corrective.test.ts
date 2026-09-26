@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -148,4 +148,25 @@ test("preparation refuses a symlink parent before creating anything outside its 
   await assert.rejects(()=>internal.prepareWorkspace(f.batch,f.item,new AbortController().signal),/symlink/);
   assert.deepEqual(readdirSync(outside),["sentinel"]);assert.equal(readFileSync(join(outside,"sentinel"),"utf8"),"unchanged");
  }finally{await f.cleanup();rmSync(outside,{recursive:true,force:true});}
+});
+
+
+test("fetch alone receives the scoped GitHub helper and credential without ambient environment",async()=>{
+ const f=fixture();const oldPath=process.env.PATH;const oldSentinel=process.env.FACTORY_UNRELATED_SECRET;
+ try{
+  const bin=join(f.root,"bin");mkdirSync(bin);const executable=join(bin,"git");
+  writeFileSync(executable,`#!${process.execPath}\nconsole.log(JSON.stringify({args:process.argv.slice(2),credential:process.env.GH_TOKEN==='fixture-secret',ambient:Boolean(process.env.FACTORY_UNRELATED_SECRET)}));\n`);chmodSync(executable,0o700);
+  process.env.PATH=`${bin}:${oldPath}`;process.env.FACTORY_UNRELATED_SECRET="must-not-pass";
+  (f.service.github as unknown as {token:string}).token="fixture-secret";
+  const internal=f.service as unknown as {git(path:string,args:string[]):Promise<string>};
+  const local=JSON.parse(await internal.git(f.root,["status","--porcelain"]));
+  const remote=JSON.parse(await internal.git(f.root,["fetch","origin","pull/1/head"]));
+  assert.equal(local.credential,false);assert.equal(local.ambient,false);assert.equal(remote.ambient,false);assert.equal(remote.credential,true);
+  assert.ok(remote.args.includes("credential.https://github.com.helper=!gh auth git-credential"));
+  assert.ok(remote.args.includes("protocol.file.allow=never"));
+ }finally{
+  if(oldPath===undefined)delete process.env.PATH;else process.env.PATH=oldPath;
+  if(oldSentinel===undefined)delete process.env.FACTORY_UNRELATED_SECRET;else process.env.FACTORY_UNRELATED_SECRET=oldSentinel;
+  await f.cleanup();
+ }
 });

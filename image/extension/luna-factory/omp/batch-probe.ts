@@ -66,7 +66,9 @@ function fakeSdk(root: string): NativeSDK {
 					listeners.forEach((listener) => listener({ type: "turn_start" }));
 					active += 1;
 					await sleep(40);
-					if (!prompt.includes("probe/repo4#2")) {
+					// Exercise an unaccounted native failure, not a correctable missing report.
+					if (prompt.includes("probe/repo4#2")) throw new Error("deterministic unaccounted worker failure after native start");
+					{
 						const isWorker = prompt.startsWith("Implement/inspect");
 						await report.execute("probe-report", {
 							report: `deterministic evidence for ${prompt.match(/Item: ([^\\n]+)/)?.[1] ?? "item"}`,

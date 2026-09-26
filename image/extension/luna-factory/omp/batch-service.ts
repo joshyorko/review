@@ -507,7 +507,9 @@ export class BatchService {
 		if (attempt?.state === "started") this.event(item, { kind: "reconcile_attempt", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId: attempt.id, outcome: "abandoned", reason });
 	}
 	private async git(workspace: string, args: string[], signal?: AbortSignal): Promise<string> {
-		const result = await command("git", ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", ...args], { cwd: workspace, signal, timeout: 60_000, maxBuffer: 4 * 1024 * 1024, env: { PATH: process.env.PATH, HOME: this.root, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
+		const fetching = args[0] === "fetch";
+		const credential = fetching ? ["-c", "credential.https://github.com.helper=!gh auth git-credential"] : [];
+		const result = await command("git", ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", ...credential, ...args], { cwd: workspace, signal, timeout: 60_000, maxBuffer: 4 * 1024 * 1024, env: { PATH: process.env.PATH, HOME: this.root, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", ...(fetching ? { GH_TOKEN: this.github.token } : {}) } });
 		return result.stdout.trimEnd();
 	}
 	private async cloneWorkspace(item: BatchItem, directory: string, signal: AbortSignal): Promise<void> {
