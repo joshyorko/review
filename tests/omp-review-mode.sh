@@ -23,6 +23,7 @@ test_files=(
   tests/luna_factory_native.test.ts
   tests/luna_factory_native_sdk_contract.test.ts
   tests/luna_factory_batch.test.ts
+  tests/luna_factory_corrective.test.ts
   tests/luna_factory_projection.test.ts
   tests/luna_factory_dashboard.test.ts
   tests/luna_factory_dashboard_integration.test.ts

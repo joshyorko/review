@@ -41,7 +41,7 @@ function fakeGitHub() {
 
 function fakeSchema(): SchemaBuilder {
 	const value = () => value;
-	return { object: value, string: value, array: value, boolean: value } as unknown as SchemaBuilder;
+	return { object: value, string: value, array: value, number: value, boolean: value } as unknown as SchemaBuilder;
 }
 
 function fakeSdk(root: string): NativeSDK {
@@ -130,7 +130,7 @@ export async function runPackagedBatchProbe({ root, phase }: ProbeOptions): Prom
 	prepareWorkspaces(root, persisted);
 	service.store.write(persisted);
 	service.store.release();
-	await service.resume(batch.id, { model: {}, modelRegistry: { authStorage: {} } });
+	await service.resume(batch.id, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } });
 	await service.waitForIdle();
 	const final = service.store.read(batch.id);
 	const done = final.items.filter((item) => item.stage === "DONE");

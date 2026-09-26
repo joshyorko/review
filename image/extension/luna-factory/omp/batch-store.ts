@@ -198,6 +198,10 @@ export class BatchStore {
 				if (!parsedOperation.ok) throw new Error(`invalid operation history: ${parsedOperation.errors.join("; ")}; preserve original evidence`);
 				return parsedOperation.value;
 			});
+			if (item.checkScripts !== undefined && (typeof item.checkScripts !== "string" || item.checkScripts.length > 131072)) throw new Error("invalid captured package check definition");
+			if (item.preparation && (!["clone", "checkout", "ready"].includes(item.preparation.phase) || item.preparation.owner !== `${batch.id}:${item.selected.key}` || item.preparation.head !== item.selected.head)) throw new Error("invalid workspace preparation evidence; preserve original state");
+			if (item.settlement && (item.settlement.outcome !== "cancelled" || typeof item.settlement.attemptId !== "string" || !Array.isArray(item.settlement.sessionFiles) || !item.settlement.sessionFiles.every((path) => typeof path === "string" && item.sessions.includes(path)))) throw new Error("invalid native settlement evidence; preserve original state");
+			if (item.repair && (typeof item.repair.generation !== "string" || typeof item.repair.head !== "string" || typeof item.repair.acceptanceRevision !== "string" || typeof item.repair.attemptId !== "string" || typeof item.repair.reason !== "string" || item.repair.reason.length > 32768 || !Array.isArray(item.repair.artifacts) || !item.repair.artifacts.every((artifact) => typeof artifact.id === "string" && typeof artifact.path === "string" && typeof artifact.digest === "string" && /^[a-f0-9]{64}$/.test(artifact.digest) && Number.isSafeInteger(artifact.bytes) && artifact.bytes >= 0 && typeof artifact.attemptId === "string"))) throw new Error("invalid repair evidence; preserve original state");
 			if (item.proof && (!Array.isArray(item.proof.artifacts) || !item.proof.artifacts.every((artifact) => typeof artifact === "string") || typeof item.proof.digest !== "string" || typeof item.proof.reviewerSession !== "string" || !["verified-patch", "pr-ready", "merged-upstream"].includes(item.proof.stage))) {
 				throw new Error("invalid proof record; no execution allowed");
 			}
