@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ import {
 	fetchPackageHashes,
 	updateLockfileContent,
 } from "../scripts/update-requirements-ci-hashes.mjs";
+import { syncTypesafePins, TYPESAFE_PACKAGES } from "../scripts/update-typesafe-pins.mjs";
 
 const X64 = "a".repeat(64);
 const ARM64 = "b".repeat(64);
@@ -96,6 +98,54 @@ test("syncGhPins updates the Review appliance from the selected release", async 
 	assert.match(appliance, new RegExp(`^ARG GH_AARCH64_SHA256=${ARM64}$`, "m"));
 });
 
+test("syncTypesafePins refreshes every packaged TypeSafe npm tarball digest", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "typesafe-pins-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	await mkdir(join(root, "image/appliance"), { recursive: true });
+	const versions = {
+		TYPESAFE_VERSION: "0.6.2",
+		TYPESAFE_SDK_VERSION: "0.6.0",
+		TYPESAFE_TYPEBOX_VERSION: "1.3.34",
+	};
+	await writeFile(
+		join(root, "image/appliance/Containerfile"),
+		[
+			`ARG TYPESAFE_VERSION=${versions.TYPESAFE_VERSION}`,
+			`ARG TYPESAFE_SHA256=${"1".repeat(64)}`,
+			`ARG TYPESAFE_SDK_VERSION=${versions.TYPESAFE_SDK_VERSION}`,
+			`ARG TYPESAFE_SDK_SHA256=${"2".repeat(64)}`,
+			`ARG TYPESAFE_TYPEBOX_VERSION=${versions.TYPESAFE_TYPEBOX_VERSION}`,
+			`ARG TYPESAFE_TYPEBOX_SHA256=${"3".repeat(64)}`,
+			"",
+		].join("\n"),
+	);
+
+	const bodies = new Map();
+	const pins = await syncTypesafePins({
+		root,
+		fetchImpl: async (url) => {
+			const body = Buffer.from(`tarball:${url}`);
+			bodies.set(String(url), body);
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+			};
+		},
+	});
+
+	assert.equal(bodies.size, 3);
+	const appliance = await readFile(join(root, "image/appliance/Containerfile"), "utf8");
+	for (const spec of TYPESAFE_PACKAGES) {
+		const pin = pins[spec.depName];
+		assert.ok(pin, `${spec.depName} pin was refreshed`);
+		const expected = createHash("sha256").update(bodies.get(pin.url)).digest("hex");
+		assert.equal(pin.sha256, expected);
+		assert.match(appliance, new RegExp(`^ARG ${spec.shaArg}=${expected}$`, "m"));
+	}
+});
+
 test("fetchPackageHashes deduplicates hashes and rejects unavailable PyPI releases", async () => {
 	const hashes = await fetchPackageHashes("sample-pkg", "1.0.0", async () => response({
 		urls: [
@@ -139,20 +189,29 @@ test("Renovate tracks only shipped Review and CI dependencies", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
 	const ompManager = config.customManagers.find((manager) => manager.depNameTemplate === "can1357/oh-my-pi");
 	const ghManager = config.customManagers.find((manager) => manager.depNameTemplate === "cli/cli");
+	const typesafeManagers = ["pi-typesafe", "@typesafe-ai/sdk", "typebox"].map((depName) =>
+		config.customManagers.find((manager) => manager.depNameTemplate === depName),
+	);
 	const pypiManager = config.customManagers.find((manager) => manager.datasourceTemplate === "pypi");
 	assert.ok(ompManager);
 	assert.ok(ghManager);
+	assert.ok(typesafeManagers.every(Boolean), "all packaged TypeSafe npm pins need Renovate managers");
 	assert.ok(pypiManager);
 	assert.match(ompManager.managerFilePatterns[0], /image\/appliance\/Containerfile/);
 	assert.match(ghManager.managerFilePatterns[0], /image\/appliance\/Containerfile/);
 
 	const ompRule = config.packageRules.find((rule) => rule.matchPackageNames?.includes("can1357/oh-my-pi"));
 	const ghRule = config.packageRules.find((rule) => rule.matchPackageNames?.includes("cli/cli"));
+	const typesafeRule = config.packageRules.find((rule) => rule.groupName === "TypeSafe runtime");
 	const pypiRule = config.packageRules.find((rule) => rule.matchDatasources?.includes("pypi"));
 	assert.deepEqual(ompRule.postUpgradeTasks.commands, ["node scripts/update-omp-pins.mjs"]);
 	assert.deepEqual(ompRule.postUpgradeTasks.fileFilters, ["image/appliance/Containerfile"]);
 	assert.deepEqual(ghRule.postUpgradeTasks.commands, ["node scripts/update-gh-pins.mjs"]);
 	assert.deepEqual(ghRule.postUpgradeTasks.fileFilters, ["image/appliance/Containerfile"]);
+	assert.deepEqual(typesafeRule.matchDatasources, ["npm"]);
+	assert.deepEqual(typesafeRule.matchPackageNames, ["pi-typesafe", "@typesafe-ai/sdk", "typebox"]);
+	assert.deepEqual(typesafeRule.postUpgradeTasks.commands, ["node scripts/update-typesafe-pins.mjs"]);
+	assert.deepEqual(typesafeRule.postUpgradeTasks.fileFilters, ["image/appliance/Containerfile"]);
 	assert.deepEqual(pypiRule.postUpgradeTasks.commands, ["node scripts/update-requirements-ci-hashes.mjs"]);
 	assert.deepEqual(pypiRule.postUpgradeTasks.fileFilters, ["requirements-ci.lock"]);
 
@@ -166,6 +225,9 @@ test("Renovate extracts appliance pins and CI package versions", async () => {
 	const expectedVersions = [
 		["can1357/oh-my-pi", readVersionArg(appliance, "OMP_VERSION")],
 		["cli/cli", readVersionArg(appliance, "GH_VERSION")],
+		["pi-typesafe", readVersionArg(appliance, "TYPESAFE_VERSION")],
+		["@typesafe-ai/sdk", readVersionArg(appliance, "TYPESAFE_SDK_VERSION")],
+		["typebox", readVersionArg(appliance, "TYPESAFE_TYPEBOX_VERSION")],
 	];
 	for (const [depName, expectedVersion] of expectedVersions) {
 		const manager = config.customManagers.find((candidate) => candidate.depNameTemplate === depName);
