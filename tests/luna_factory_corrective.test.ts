@@ -132,6 +132,27 @@ test("captured mandatory checks survive repository test-script edits and are cop
   assert.deepEqual(f.item.selected.requiredChecks,["npm test"]);assert.notEqual(packageCheckScripts(f.path),f.item.checkScripts);
  }finally{await f.cleanup();}
 });
+test("changed mandatory checks block retained work without an automatic second worker attempt",async()=>{
+ const f=fixture();let workers=0;try{
+  ready(f);writeFileSync(join(f.path,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));
+  f.item.attempts=1;f.item.selected.requiredChecks=["npm test"];f.item.checkScripts=packageCheckScripts(f.path);
+  const sdk={Settings:{isolated:()=>({})},SessionManager:{create:()=>({})},AgentRegistry:class{},async createAgentSession(options:Record<string,unknown>){
+   const tools=options.customTools as Array<{name:string;execute(id:string,args:unknown):Promise<unknown>}>;
+   const report=tools.find(t=>t.name==="factory_report")!;const sessionFile=join(f.root,"worker-session.jsonl");writeFileSync(sessionFile,"session\n");
+   const listeners=new Set<(event:{type:string})=>void>();
+   return {session:{sessionFile,subscribe(fn:(event:{type:string})=>void){listeners.add(fn);return ()=>listeners.delete(fn);},async prompt(){
+    workers++;for(const fn of listeners)fn({type:"turn_start"});
+    writeFileSync(join(f.path,"package.json"),JSON.stringify({scripts:{test:"true"}}));
+    await report.execute("worker-report",{report:"changed the captured test contract",tests:[],accepted:true,semanticOutcome:"none",predicates:[{item:"selected acceptance",ok:true,note:"worker inspected the selected subject"}],publicationBlocker:""});
+   },async abort(){},async dispose(){}}};
+  }};
+  Object.defineProperty(f.service,"sdk",{value:sdk,writable:true});
+  await f.service.resume(f.batch.id,{model:{},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});await f.service.waitForIdle();
+  const final=f.service.store.read(f.batch.id).items[0]!;
+  assert.equal(workers,1);assert.equal(final.stage,"BLOCKED");assert.match(final.blocker!,/changed the captured mandatory package test scripts/);
+  assert.equal(final.workspace,f.path);assert.equal(JSON.parse(readFileSync(join(f.path,"package.json"),"utf8")).scripts.test,"true");
+ }finally{await f.cleanup();}
+});
 test("known unprepared dependency sets block before any implementation attempt",async()=>{
  const f=fixture();try{
   ready(f);writeFileSync(join(f.path,"go.mod"),"module fixture\nrequire example.org/dependency v1.0.0\n");

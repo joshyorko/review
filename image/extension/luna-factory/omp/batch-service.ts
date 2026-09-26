@@ -624,7 +624,7 @@ export class BatchService {
 		const worker = await runNative(this.sdk, this.schema, binding, item, this.root, "worker", signal, onSession("worker", attempt), onExecutionStart("worker", attempt), repairFeedback, { attemptId: attempt, repairFeedback, artifacts: protocolRepair?.artifacts });
 		batch.usage.modelCalls += worker.calls;
 		item.stage = "VERIFY"; transitionOperation(item, { phase: "verify", state: "applied" }); this.persist(batch);
-		if (item.checkScripts !== undefined && packageCheckScripts(directory) !== item.checkScripts) throw new NativeExecutionError("report-invalid", "Worker changed the captured mandatory package test scripts; restore the original checks. A changed verification contract requires explicit operator selection.");
+		if (item.checkScripts !== undefined && packageCheckScripts(directory) !== item.checkScripts) throw new NativeExecutionError("report-checks-changed", "Worker changed the captured mandatory package test scripts; restore the original checks. A changed verification contract requires explicit operator selection.");
 		if (item.selected.action !== "inspect" && !mandatory.length && !worker.tests.length) throw new Error("worker supplied no executable verification; inspect and retry within original appetite");
 		await this.git(directory, ["add", "--all"], signal);
 		const tree = await this.git(directory, ["write-tree"], signal);

@@ -17,7 +17,7 @@ type OmpZod = typeof import("@oh-my-pi/omptype/zod");
 export type SchemaBuilder = Pick<OmpZod, "object" | "string" | "number" | "array" | "boolean">;
 export interface NativeContext { model?: CreateAgentSessionOptions["model"]; modelRegistry?: ModelRegistry; }
 export interface NativeBinding { readonly model: NonNullable<CreateAgentSessionOptions["model"]>; readonly modelRegistry: ModelRegistry; }
-export type NativeFailureCode = "capability-unavailable" | "model-unavailable" | "model-registry-unavailable" | "model-auth-unconfigured" | "cancelled-before-start" | "cancellation-settled" | "report-missing" | "report-invalid";
+export type NativeFailureCode = "capability-unavailable" | "model-unavailable" | "model-registry-unavailable" | "model-auth-unconfigured" | "cancelled-before-start" | "cancellation-settled" | "report-missing" | "report-invalid" | "report-checks-changed";
 export class NativeExecutionError extends Error {
 	readonly code: NativeFailureCode;
 	constructor(code: NativeFailureCode, message: string) { super(message); this.code = code; this.name = "NativeExecutionError"; }
