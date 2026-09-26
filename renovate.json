@@ -29,6 +29,45 @@
       "versioningTemplate": "semver-coerced"
     },
     {
+      "description": "Track the packaged pi-typesafe extension version; the post-upgrade task refreshes the verified npm tarball SHA-256.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG TYPESAFE_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "pi-typesafe",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "Track the TypeSafe JavaScript SDK bundled with pi-typesafe; the post-upgrade task refreshes the verified npm tarball SHA-256.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG TYPESAFE_SDK_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "@typesafe-ai/sdk",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "Track the TypeBox runtime bundled with pi-typesafe; the post-upgrade task refreshes the verified npm tarball SHA-256.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG TYPESAFE_TYPEBOX_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "typebox",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
       "description": "Track requirements-ci.lock package versions; the post-upgrade task regenerates sha256 hashes from PyPI metadata.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -100,6 +139,28 @@
       "postUpgradeTasks": {
         "commands": [
           "node scripts/update-gh-pins.mjs"
+        ],
+        "fileFilters": [
+          "image/appliance/Containerfile"
+        ],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "description": "Group packaged TypeSafe/Jev runtime updates and refresh every verified npm tarball digest after Renovate changes a version pin.",
+      "matchDatasources": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "pi-typesafe",
+        "@typesafe-ai/sdk",
+        "typebox"
+      ],
+      "groupName": "TypeSafe runtime",
+      "rangeStrategy": "replace",
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-typesafe-pins.mjs"
         ],
         "fileFilters": [
           "image/appliance/Containerfile"

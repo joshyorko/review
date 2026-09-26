@@ -447,7 +447,8 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 				};
 			}
 			const attempt = lastReturned(task);
-			if (attempt?.steeredAgentId !== undefined) {
+			if (!attempt?.receipt) return { ok: false, error: `task ${task.id} has no returned receipt; completion is unproved` };
+			if (attempt.steeredAgentId !== undefined) {
 				return { ok: false, error: `attempt ${attempt.id} was steered by OMP; its proof cannot finish this task` };
 			}
 			if (task.effect === "write" && !attempt.integrated) {

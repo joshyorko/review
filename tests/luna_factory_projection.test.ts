@@ -8,6 +8,7 @@ import {
 } from "../image/extension/luna-factory/core/batch.ts";
 import type { AttemptId, EvidenceReceipt, TaskId } from "../image/extension/luna-factory/core/model.ts";
 import { projectBatch, projectItem } from "../image/extension/luna-factory/ui/projection.ts";
+import { dashboardActionAllowed } from "../image/extension/luna-factory/ui/actions.ts";
 
 const selected = (key: string, action: SelectedItem["action"] = "patch", extra: Partial<SelectedItem> = {}): SelectedItem => {
 	const match = /^([^#]+)#(\d+)$/.exec(key);
@@ -341,12 +342,95 @@ test("inspection work is not blocked by another run's mutation claim", () => {
 	assert.doesNotMatch(item.nextSafeAction, /ownership|claim/);
 });
 
-test("stopped inspections expose the existing safe retry controller within budgets", () => {
- const batch = makeBatch([selected("org/repo#1", "inspect")]);
- const item = batch.items[0]!; item.stage = "UNKNOWN"; item.attempts = 1;
- const options = { claims: [{ resource: "repo:org/repo", owner: "another-writer", status: "unknown" as const, createdAt: "now" }] };
- assert.equal(projectItem(batch, item, options).actions.includes("retry"), true);
- assert.equal(projectItem(batch, item, { ...options, readOnly: true }).actions.includes("retry"), false);
- item.attempts = batch.maxAttempts;
- assert.equal(projectItem(batch, item, options).actions.includes("retry"), false);
+function settledCancellation(batch: Batch, item: BatchItem): void {
+	const owner = `${batch.id}:${item.selected.key}`;
+	const attemptId = "cancelled-attempt" as AttemptId;
+	const sessionFile = "/factory/sessions/cancelled-worker.jsonl";
+	const taskId = "T1" as TaskId;
+	item.ledger = {
+		...item.ledger,
+		tasks: [{
+			id: taskId,
+			generation: item.ledger.generation,
+			criterionId: item.ledger.criteria[0]!.id,
+			title: "cancelled work",
+			deps: [],
+			effect: "read",
+			owner: item.ledger.runId,
+			state: "BLOCKED",
+			attempts: [{
+				id: attemptId,
+				lineage: 1,
+				taskId,
+				generation: item.ledger.generation,
+				subject: item.ledger.subject,
+				state: "abandoned",
+				nativeJobIds: [],
+				nativeAgentIds: [],
+				privateSessions: [{ phase: "worker", sessionFile, started: true }],
+				integrated: false,
+			}],
+			decision: "ADMIT",
+			decisionReason: "selected work",
+		}],
+	};
+	item.sessions = [sessionFile];
+	item.attempts = 1;
+	item.stage = "CANCELLED";
+	item.operation = {
+		id: `${owner}:work`,
+		generation: item.ledger.generation,
+		subject: item.ledger.subject,
+		effect: "repository-work",
+		phase: "worker",
+		owner,
+		attemptId,
+		state: "unknown",
+	};
+	item.settlement = { attemptId, sessionFiles: [sessionFile], outcome: "cancelled" };
+}
+
+test("native retry needs a matching settled cancellation, no running work, and no foreign claim", () => {
+	const batch = makeBatch([selected("org/repo#1")]);
+	const item = batch.items[0]!;
+	settledCancellation(batch, item);
+	const options = { activeItemKeys: [], claims: [{ resource: "repo:org/repo", owner: `${batch.id}:${item.selected.key}`, status: "unknown" as const, createdAt: "now" }] };
+	assert.equal(projectItem(batch, item, options).actions.includes("retry"), true, "the owner's own uncertain claim can be released after proven native settlement");
+	assert.equal(projectItem(batch, item, { ...options, readOnly: true }).actions.includes("retry"), false);
+	assert.equal(projectItem(batch, item, { ...options, activeItemKeys: [item.selected.key] }).actions.includes("retry"), false);
+	assert.equal(projectItem(batch, item, { claims: options.claims }).actions.includes("retry"), false, "missing live active-item evidence fails closed");
+	assert.equal(projectItem(batch, item, { ...options, claims: [{ ...options.claims[0]!, owner: "another-writer" }] }).actions.includes("retry"), false);
+	assert.match(projectItem(batch, item, options).nextSafeAction, /inspect retained workspace/i);
+
+	item.settlement = { ...item.settlement!, attemptId: "different-attempt" };
+	assert.equal(projectItem(batch, item, options).actions.includes("retry"), false, "settlement must bind the latest attempt");
+	settledCancellation(batch, item);
+	item.settlement = { ...item.settlement!, sessionFiles: ["/factory/sessions/other.jsonl"] };
+	assert.equal(projectItem(batch, item, options).actions.includes("retry"), false, "settlement session files must belong to the stopped attempt");
+	settledCancellation(batch, item);
+	item.stage = "UNKNOWN";
+	assert.equal(projectItem(batch, item, options).actions.includes("retry"), false, "native UNKNOWN is not a positive cancellation settlement");
+});
+
+test("dashboard revalidates native retry against current active identities", () => {
+	const batch = makeBatch([selected("org/repo#1")]);
+	settledCancellation(batch, batch.items[0]!);
+	const action = { kind: "retry" as const, batchId: batch.id, itemKey: batch.items[0]!.selected.key };
+	const state = { readOnly: false, claims: [], activeItemKeys: [], batches: [batch] };
+	assert.equal(dashboardActionAllowed(action, state), true);
+	assert.equal(dashboardActionAllowed(action, { ...state, activeItemKeys: undefined }), false);
+	assert.equal(dashboardActionAllowed(action, { ...state, activeItemKeys: [action.itemKey] }), false);
+	assert.equal(dashboardActionAllowed(action, { ...state, claims: [{ resource: "repo:org/repo", owner: "another-run", status: "settled" as const, createdAt: "now" }] }), false);
+});
+
+test("confirmed not-applied preparation can retry without a native settlement", () => {
+	const batch = makeBatch([selected("org/repo#1")]);
+	const item = batch.items[0]!; const owner = `${batch.id}:${item.selected.key}`;
+	item.stage = "BLOCKED";
+	item.operation = {
+		id: `${owner}:work`, generation: item.ledger.generation, subject: item.ledger.subject,
+		effect: "repository-work", phase: "worker", owner, state: "not-applied",
+	};
+	item.preparation = { phase: "checkout", owner, head: item.selected.head! };
+	assert.equal(projectItem(batch, item, { activeItemKeys: [], claims: [] }).actions.includes("retry"), true);
 });

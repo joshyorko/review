@@ -45,8 +45,9 @@ test("loading, empty, errors, and unknown values render honestly", () => {
 	const frame = view.render(48).join("\n");
 	assert.match(frame, /Saved work needs attention/);
 	assert.match(frame, /Viewing only/i);
-	view.handleInput("?"); for (let i = 0; i < 100; i++) view.handleInput("j");
+	view.handleInput("?");
 	assert.match(view.render(48).join("\n"), /ledger unavailable/);
+	for (let i = 0; i < 100; i++) view.handleInput("j");
 });
 
 test("claims, evidence, help, palette and close are local views/actions", () => {
@@ -69,7 +70,7 @@ function makeView(snapshot: FactoryDashboardSnapshot, actions: FactoryDashboardA
 test("stale DONE is never counted as proven in header or batch list", () => {
 	const snapshot = source(); snapshot.batches[0]!.items[0]!.stage = "DONE";
 	const view = makeView(snapshot);
-	assert.match(view.render(120).join("\n"), /0 proven/);
+	assert.match(view.render(120).join("\n"), /0\/2 proven/);
 	view.handleInput("b");
 	assert.doesNotMatch(view.render(120).join("\n"), /1 proven/);
 });

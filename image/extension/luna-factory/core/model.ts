@@ -18,6 +18,7 @@ export type TaskId = string & { readonly __identity: "TaskId" };
 export type AttemptId = string & { readonly __identity: "AttemptId" };
 export type CriterionId = string & { readonly __identity: "CriterionId" };
 export type GenerationId = string & { readonly __identity: "GenerationId" };
+export type NativeJobId = string & { readonly __identity: "NativeJobId" };
 export type NativeAgentId = string & { readonly __identity: "NativeAgentId" };
 
 /**

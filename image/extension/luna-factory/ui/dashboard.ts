@@ -4,7 +4,7 @@ import type { ClaimOwnerObservation } from "../omp/batch-bridge.ts";
 import type { ResourceClaim } from "../omp/batch-store.ts";
 import { fitToWidth, truncateToWidth, visibleWidth } from "../../bluefin-review/width.ts";
 import { canonicalKey, rawKeyMatcher, type KeyMatcher } from "../../bluefin-review/keys.ts";
-import { itemOverview, itemTitle } from "./operator.ts";
+import { itemOverview, itemTitle, sanitizeRetainedError } from "./operator.ts";
 import { projectBatch, type ProjectedBatch, type ProjectedItem } from "./projection.ts";
 import { claimIdentity, inspectClaim } from "./claims.ts";
 
@@ -350,13 +350,60 @@ export class FactoryDashboard {
 		return rows.slice(this.scroll, this.scroll + height);
 	}
 	private active(item: ProjectedItem): boolean { return this.source.activeItemKeys?.includes(item.key) === true && ["RUNNING", "VERIFY"].includes(item.stage); }
+	private batchAction(batch = this.batch()): string {
+		if (!batch) return "Factory runs";
+		const actions = new Set(batch.items.map((item) => item.selected.action));
+		if (actions.size > 1) return "Mixed work";
+		if (batch.items.every((item) => item.selected.action === "inspect")) return "Inspection";
+		if (batch.items.some((item) => item.selected.action === "pr-ready")) return "PR-ready work";
+		return "Patch work";
+	}
+	private observedModel(item = this.item()): string {
+		const routing = item?.attemptHistory.slice().reverse().find((attempt) => attempt.routing?.verified && attempt.routing.effective !== "unknown")?.routing;
+		return routing?.effective ?? "unknown";
+	}
 	private focusCard(width: number, height: number): string[] {
 		const item = this.item(); if (!item) return [];
-		const copy = itemOverview(item, this.active(item));
+		const projected = this.project(); const batch = this.batch(); const copy = itemOverview(item, this.active(item));
 		const heading = copy.needsYou ? "NEEDS YOU" : item.stage === "DONE" ? "PROVEN" : this.active(item) ? "WORKING" : "SELECTED";
-		const intro = [heading, `#${item.number} · ${copy.heading}`];
-		const middle = wrapped(["", copy.explanation, "", `Next: ${copy.next}`], width);
-		return [...intro.map((line) => truncateToWidth(line, width)), ...middle.slice(0, Math.max(0, height - 3)), truncateToWidth(`[${this.primaryLabel()}]`, width)];
+		const active = projected?.items.filter((entry) => this.active(entry)).length ?? 0;
+		const activeCount = this.source.activeItemKeys === undefined ? "unknown" : String(active);
+		const queued = projected?.items.filter((entry) => entry.stage === "QUEUED").length ?? 0;
+		const cancelled = projected?.items.filter((entry) => entry.stage === "CANCELLED").length ?? 0;
+		const excluded = projected?.items.filter((entry) => entry.stage === "EXCLUDED").length ?? 0;
+		const runState = projected?.converged ? "CONVERGED" : projected?.control ?? "unknown";
+		const repoCount = batch ? new Set(batch.items.map((entry) => entry.selected.repo)).size : 0;
+		const cause = item.blocker ? copy.caption : copy.explanation;
+		const model = this.observedModel(item);
+		const lines = width >= 55
+			? [
+				"BATCH OUTCOME",
+				`Run ${(projected?.id ?? "unknown").slice(-8)} · ${this.batchAction()} · ${repoCount} ${repoCount === 1 ? "repository" : "repositories"}`,
+				`Outcome: ${runState} · ${activeCount} active / ${projected?.capacity ?? "unknown"} slots`,
+				`Proven ${projected?.proven ?? 0}/${projected?.inScope ?? 0} · queued ${queued} · blocked ${projected?.blocked ?? 0} · unknown ${projected?.unknown ?? 0}`,
+				`Stopped ${cancelled} · excluded ${excluded} · attempts ${projected?.attempts ?? 0}/${projected?.maxTotalAttempts ?? "unknown"}`,
+				...(model === "unknown" ? [] : [`Observed model: ${model}`]),
+				"",
+				"SELECTED ITEM",
+				`#${item.number} ${item.repo} · ${item.action} · ${item.stage}`,
+				`${heading} · ${copy.heading}`,
+				`Cause: ${cause}`,
+				`Next: ${copy.next}`,
+				`Attempts: ${item.attempts}/${item.maxAttempts} · proof ${item.proof.current ? "current" : "not current"}`,
+			]
+			: [
+				`${heading} · ${copy.heading}`,
+				`#${item.number} ${item.repo} · ${item.stage}`,
+				`Active ${activeCount}/${projected?.capacity ?? "?"} · proven ${projected?.proven ?? 0}/${projected?.inScope ?? 0} · ${runState}`,
+				`Cause: ${cause}`,
+				`Next: ${copy.next}`,
+				`Attempts ${item.attempts}/${item.maxAttempts}${model === "unknown" ? "" : ` · model ${model}`}`,
+			];
+		const primaryAction = this.primaryLabel();
+		const primary = item.blocker
+			? `Enter Inspect recorded error${primaryAction ? ` · [${primaryAction}]` : ""}`
+			: primaryAction;
+		return [...lines.slice(0, Math.max(0, height - 1)).map((line) => truncateToWidth(clean(line), width)), truncateToWidth(`[${primary}]`, width)];
 	}
 	private details(): string[] {
 		const item = this.item(); const batch = this.batch();
@@ -364,7 +411,8 @@ export class FactoryDashboard {
 		const copy = itemOverview(item, this.active(item));
 		const selected = batch.items.find((entry) => entry.selected.key === item.key)!;
 		return [
-			`#${item.number} · ${itemTitle(batch, item)}`, item.repo, "", copy.heading, copy.explanation, `Next: ${copy.next}`, "", this.primaryLabel(), "",
+			`#${item.number} · ${itemTitle(batch, item)}`, item.repo, "", copy.heading, copy.explanation, `Next: ${copy.next}`, "", item.blocker ? "Recorded error follows" : this.primaryLabel(), "",
+			...(item.blocker ? ["Recorded error", sanitizeRetainedError(item.blocker), ""] : []),
 			...(this.source.evidenceWarnings?.[`${batch.id}:${item.key}`] ? ["Evidence is unavailable. Recorded proof needs revalidation before this run can be archived.", ""] : []),
 			"Acceptance", selected.selected.acceptance ?? "Use the captured issue's acceptance.", "",
 			`Attempts: ${item.attempts} of ${item.maxAttempts}`, `Run limit: ${batch.capacity} workers at once`, `Proof: ${item.proof.current ? "recorded current for this revision" : item.proof.stage === "unknown" ? "not yet proven" : "awaiting owner acceptance"}`,
@@ -388,9 +436,10 @@ export class FactoryDashboard {
 
 	private help(): string[] {
 		return [
+			...(this.source.error ? [`STATE ERROR: ${this.source.error}`, "Original evidence is preserved. Inspect the affected store; no automatic repair or deletion.", ""] : []),
 			"/factory opens this dashboard. No global shortcut overrides your OMP bindings.",
 			"j/k or arrows select; Enter opens; Tab switches roster/detail; q/Esc goes back or closes. Closing does not stop work.",
-			"Enter: item inspector. d: exact IDs, paths, and debug evidence. v: worker session.",
+			"Enter: item inspector and full sanitized blocker. d: technical IDs, paths, and debug evidence. v: worker session.",
 			"a: safe actions for the selected state. b: retained batches. c: mutation ownership. e: evidence. o: recorded PR.",
 			"p: pause/resume. x: stop with confirmation. r: eligible retry within original budgets.",
 			"UNKNOWN push/PR effects require reconciliation, never blind retry. Reconciliation can contact GitHub; rendering cannot.",
@@ -407,7 +456,6 @@ export class FactoryDashboard {
 			"Private Factory workers stay outside Agent Hub. Recorded start/session identity is not proof of current liveness.",
 			`State location: ${this.source.root ?? "unknown"}`,
 			...(this.source.notice ? [`NOTICE: ${clean(this.source.notice)}`] : []),
-			...(this.source.error ? [`STATE ERROR: ${this.source.error}`, "Original evidence preserved. Inspect the affected store; no automatic repair or deletion."] : []),
 		];
 	}
 	private footer(width = 120): string {
@@ -475,13 +523,18 @@ export class FactoryDashboard {
 		const status = this.source.loading ? "Loading" : batch?.converged ? "Complete" : batch?.control === "active" ? "Active" : batch?.control === "paused" ? "Paused" : batch?.control === "stopped" ? "Stopped" : !batch && this.source.claims.length ? "Needs attention" : "Ready";
 		const title = `${fitToWidth("Luna Factory", Math.max(0, width - visibleWidth(status) - 1))} ${status}`;
 		const running = batch?.items.filter((item) => this.active(item)).length ?? 0;
+		const runningCount = this.source.activeItemKeys === undefined ? "unknown" : String(running);
 		const needsYou = batch?.items.filter((item) => itemOverview(item, this.active(item)).needsYou).length ?? 0;
-		const summary = this.source.loading ? "Opening your runs…" : batch ? `${running} running   ${batch.proven} proven   ${needsYou} need${needsYou === 1 ? "s" : ""} you${batch.inScope !== batch.total ? "   · scope changed" : ""}` : "";
-		const header = [this.options.theme.bold(title), summary, ""];
-		if (this.source.busy) header.splice(2, 0, "Action in progress…");
-		else if (this.source.notice) header.splice(2, 0, truncateToWidth(clean(this.source.notice), width));
-		else if (this.source.error) header.splice(2, 0, "Some saved work couldn't be read. Viewing only; ? has details.");
-		if (this.readOnly() && !this.source.loading && !this.source.error) header.splice(2, 0, "Viewing only");
+		const queued = batch?.items.filter((item) => item.stage === "QUEUED").length ?? 0;
+		const summary = this.source.loading ? "Opening your runs…" : batch
+			? `${runningCount}/${batch.capacity} active   ${batch.proven}/${batch.inScope} proven   ${queued} queued   ${batch.blocked} blocked   ${batch.unknown} unknown${needsYou ? `   · ${needsYou} need${needsYou === 1 ? "s" : ""} you` : ""}`
+			: "";
+		const context = batch ? `Run ${batch.id.slice(-8)} · ${this.batchAction()} · ${new Set(batch.items.map((item) => item.repo)).size} repositories · attempts ${batch.attempts}/${batch.maxTotalAttempts}` : "";
+		const header = [this.options.theme.bold(title), context, summary, ""];
+		if (this.source.busy) header.splice(3, 0, "Action in progress…");
+		else if (this.source.notice) header.splice(3, 0, truncateToWidth(clean(this.source.notice), width));
+		else if (this.source.error) header.splice(3, 0, "Viewing only. Saved work needs attention; original evidence is preserved. ? has details.");
+		if (this.readOnly() && !this.source.loading && !this.source.error) header.splice(3, 0, "Viewing only");
 		const bodyHeight = Math.max(1, height - header.length - 2);
 		let body: readonly string[];
 		if (this.source.loading) body = ["Loading retained work…"];
@@ -521,7 +574,7 @@ export class FactoryDashboard {
 			const left = this.rosterRows(leftWidth, bodyHeight); const right = this.focusCard(rightWidth, bodyHeight);
 			body = this.options.primitives?.splitPane?.(left, right, width) ?? Array.from({ length: Math.max(left.length, right.length) }, (_, i) => `${fitToWidth(left[i] ?? "", leftWidth)}   ${truncateToWidth(right[i] ?? "", rightWidth)}`);
 		} else {
-			const cardHeight = Math.min(11, Math.max(5, Math.floor(bodyHeight / 2))); const rosterHeight = Math.max(1, bodyHeight - cardHeight - 1);
+			const cardHeight = Math.min(12, Math.max(6, Math.floor(bodyHeight * 0.62))); const rosterHeight = Math.max(1, bodyHeight - cardHeight - 1);
 			body = [...this.rosterRows(width, rosterHeight), "", ...this.focusCard(width, cardHeight)];
 		}
 		const bounded = body.slice(0, bodyHeight).map((line) => {

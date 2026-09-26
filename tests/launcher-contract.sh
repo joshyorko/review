@@ -187,6 +187,16 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
   exit 0
 fi
 printf '%s\n' "\$*" >>"$mock_podman_log"
+if [[ "\${1:-}" == run ]]; then
+  previous=""
+  home_mount=""
+  for arg in "\$@"; do
+    if [[ "\$previous" == --volume ]]; then home_mount="\${arg%%:*}"; break; fi
+    previous="\$arg"
+  done
+  [[ -n "\$home_mount" && -d "\$home_mount/.local/state/review/factory" ]] || exit 19
+  [[ "\$(stat -c %u "\$home_mount/.local/state/review/factory")" == "\$(id -u)" ]] || exit 19
+fi
 if [[ "\${1:-}" == run && "\${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
   [[ "\${AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
   [[ "\${AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || exit 19
@@ -334,7 +344,12 @@ assert_bluefin_review() {
   local state_volume state_home
   state_volume="$(arg_after "$podman_call" --volume)"
   state_home="${state_volume%%:*}"
+  last_state_home="$state_home"
   [[ -d "$state_home/.omp" ]] || fail "review did not create persistent appliance OMP state"
+  [[ -d "$state_home/.local/state/review/factory" ]] || fail "review did not pre-create Factory XDG state before the container launch"
+  [[ "$(stat -c %u "$state_home/.local/state/review/factory")" == "$(id -u)" ]] || fail "Factory XDG state was not prepared under the host uid mapped to bluefin"
+  [[ "$podman_call" == *"${HOME}/.local/state/review/mutation-claims:/claims:rw,z"* ]] || fail "review did not mount the existing claims root at a non-nested container path"
+  [[ "$podman_call" == *"LUNA_FACTORY_CLAIMS_ROOT=/claims"* ]] || fail "review did not pass the mounted claims root to Factory"
   [[ "$podman_call" == *":/tmp:rw,z"* ]] || fail "review did not use instance-backed scratch storage: $podman_call"
 
   grep -qFx "pull ghcr.io/projectbluefin/review:stable" "$mock_podman_log" ||
@@ -555,6 +570,31 @@ second_repo_call="${concurrent_review_calls[1]}"
 [[ "$(arg_after "$first_repo_call" --name)" != "$(arg_after "$second_repo_call" --name)" ]] || fail "concurrent reviews collided on container name"
 [[ "$(arg_after "$first_repo_call" --volume)" != "$(arg_after "$second_repo_call" --volume)" ]] || fail "concurrent reviews collided on state volume"
 assert_bluefin_review "projectbluefin/review #463" "--repo projectbluefin/review --pr 463"
+
+# Existing state with unexpected ownership is preserved and blocks before Podman.
+retained_marker="$last_state_home/.local/state/review/factory/retained-proof.txt"
+printf 'retain this evidence\n' >"$retained_marker"
+blocked_state_path="$last_state_home/.local"
+cat >"$scratch/bin/stat" <<EOF
+#!/usr/bin/env bash
+if [[ "\${4:-}" == "$blocked_state_path" ]]; then
+  printf '100000:100000:1755\\n'
+  exit 0
+fi
+exec /usr/bin/stat "\$@"
+EOF
+chmod +x "$scratch/bin/stat"
+set +e
+blocked_state_output="$("${repo_root}/bin/bluefin" review projectbluefin/review#463 2>&1)"
+blocked_state_status=$?
+set -e
+[[ "$blocked_state_status" -ne 0 ]] || fail "launcher used an existing Factory state tree owned by a subordinate uid"
+[[ "$blocked_state_output" == *"owned by 100000:100000 (mode 1755); expected $(id -u):$(id -g). No ownership changes were made"* ]] ||
+  fail "launcher did not report the exact retained-state ownership blocker: $blocked_state_output"
+[[ "$(cat "$retained_marker")" == "retain this evidence" ]] || fail "launcher changed retained Factory evidence after ownership mismatch"
+[[ "$(/usr/bin/stat -c %u:%g "$last_state_home/.local")" == "$(id -u):$(id -g)" ]] || fail "launcher changed existing Factory parent ownership"
+rm -f "$scratch/bin/stat"
+
 assert_bluefin_review "projectbluefin/review#463" "--repo projectbluefin/review --pr 463"
 assert_bluefin_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
 assert_bluefin_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
@@ -746,8 +786,10 @@ assert_factory_podman_env_names "$factory_podman_call" "Podman review"
 env -u LUNA_FACTORY_ENABLED -u LUNA_FACTORY_CAPACITY \
   "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 || fail "bin/bluefin did not launch without Factory configuration"
 default_podman_call="$(grep '^run ' "$mock_podman_log")"
-[[ "$default_podman_call" != *"LUNA_FACTORY"* ]] ||
-  fail "Podman review invented Factory configuration the host never set: $default_podman_call"
+[[ "$default_podman_call" != *"--env LUNA_FACTORY_ENABLED"* && "$default_podman_call" != *"--env LUNA_FACTORY_CAPACITY"* ]] ||
+  fail "Podman review invented Factory execution configuration the host never set: $default_podman_call"
+[[ "$default_podman_call" == *"--env LUNA_FACTORY_CLAIMS_ROOT=/claims"* ]] ||
+  fail "Podman review did not pass its mounted claims root: $default_podman_call"
 
 # The generic Apptainer fallback and the packaged SIF share one environment
 # seam, so a non-default capacity has to survive both.

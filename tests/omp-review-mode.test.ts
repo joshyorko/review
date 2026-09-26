@@ -43,7 +43,7 @@ import {
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { saveWave } from "../image/extension/bluefin-review/wave-store.ts";
-import { factoryHandoffState, registerFactoryController } from "../image/extension/luna-factory/omp/batch-bridge.ts";
+import { factoryHandoffState, registerFactoryController, registerFactoryBatchSubmitter, registerFactoryDashboardOpener } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -426,6 +426,7 @@ function fakeCtx() {
 	const selectResponses = [];
 	const selectCalls = [];
 	const ctx = {
+		sessionId: "session-1",
 		hasUI: true,
 		notifications,
 		statuses,
@@ -474,7 +475,7 @@ function fakeCtx() {
 		getAsyncJobSnapshot() {
 			return this.asyncJobs;
 		},
-		sessionManager: { getBranch: () => [] },
+		sessionManager: { getBranch: () => [], getSessionId() { return ctx.sessionId; } },
 	};
 	return ctx;
 }
@@ -606,19 +607,117 @@ test("the queue badge comes directly from GitHub checks", () => {
 	assert.equal(queueItem({ ciStatus: "success" }).ciStatus, "success");
 });
 
-test("a cancelled tool call is skipped, not a failure (#465)", () => {
+test("native lifecycle evidence controls trace outcomes", () => {
+	const success = new SessionTrace();
+	success.startTurn(NOW);
+	success.startTool("success", "bash", "tests", NOW);
+	success.endTool("success", "Tests: 12 passed, 0 cancelled", false, NOW + 1);
+	success.endTurn(NOW + 2);
+	assert.equal(success.roots()[0].status, "success");
+
+	const failure = new SessionTrace();
+	failure.startTurn(NOW);
+	failure.startTool("failure", "bash", "tests", NOW);
+	failure.endTool("failure", "FAIL: AbortController cancellation regression", true, NOW + 1);
+	failure.endTurn(NOW + 2);
+	assert.equal(failure.roots()[0].status, "failure");
+
+	const cancelled = new SessionTrace();
+	cancelled.startTurn(NOW);
+	cancelled.startTool("cancelled", "bash", "tests", NOW);
+	cancelled.endTool("cancelled", {
+		content: [{ type: "text", text: "tool call cancelled" }],
+		details: { __interrupted: true, source: "interrupt_skipped", execution: "started" },
+	}, true, NOW + 1);
+	cancelled.endTurn(NOW + 2);
+	assert.equal(cancelled.roots()[0].status, "skipped");
+	assert.equal(cancelled.roots()[0].cls, "cancelled");
+	assert.match(traceToText(cancelled.roots(), NOW + 2, 200), /CANCELLED/);
+});
+
+test("a foreground turn stays UNKNOWN while a native background task runs", () => {
 	const trace = new SessionTrace();
 	trace.startTurn(NOW);
-	trace.startTool("t1", "bash", "rm -rf /", NOW);
-	// The queue moved on: omp surfaces cancellation as a message in the result.
-	trace.endTool("t1", "tool call cancelled, no longer needed", true, NOW);
-	trace.endTurn(NOW);
-	const run = trace.roots();
-	assert.equal(run[0].status, "skipped");
-	assert.equal(run[0].cls, "cancelled");
-	const text = traceToText(run, NOW, 200);
-	assert.match(text, /CANCELLED/);
-	assert.doesNotMatch(text, /\u2718/); // no red ✘ failure glyph
+	trace.startTool("task-call", "task", {}, NOW);
+	trace.endTool("task-call", {
+		details: {
+			async: { type: "task", state: "running", jobId: "job-1" },
+			progress: [{ id: "worker-1", index: 0, status: "running" }],
+		},
+	}, false, NOW + 1);
+	trace.endTurn(NOW + 2);
+	assert.equal(trace.roots()[0].status, "running");
+	assert.equal(trace.roots()[0].cls, "unknown");
+	assert.match(traceToText(trace.roots(), NOW + 2, 200), /UNKNOWN/);
+	trace.syncAsyncJobs({ running: [], recent: [] }, NOW + 2.5);
+	assert.equal(trace.roots()[0].status, "running", "missing terminal rows remain UNKNOWN");
+	trace.syncAsyncJobs({ running: [{ id: "job-1", agentId: "worker-1", status: "running" }], recent: [] }, NOW + 2.75);
+	trace.syncAsyncJobs({ running: [], recent: [{ id: "job-1", agentId: "worker-1", status: "completed" }] }, NOW + 3);
+	assert.equal(trace.roots()[0].status, "success");
+	assert.equal(trace.roots()[0].children[0].children?.[0].status, "success");
+	trace.updateTool("task-call", {
+		details: {
+			async: { type: "task", state: "failed", jobId: "job-1" },
+			progress: [{ id: "worker-1", index: 0, status: "failed" }],
+		},
+	}, NOW + 4);
+	assert.equal(trace.roots()[0].status, "success", "late progress cannot regress a terminal job");
+});
+
+test("partial task details survive a plain final result", () => {
+	const trace = new SessionTrace();
+	trace.startTurn(NOW);
+	trace.startTool("partial-task", "task", {}, NOW);
+	trace.updateTool("partial-task", {
+		details: {
+			async: { type: "task", state: "running", jobId: "job-partial" },
+			progress: [{ id: "worker-partial", index: 0, status: "running" }],
+		},
+	}, NOW + 1);
+	trace.endTool("partial-task", "plain final result", false, NOW + 2);
+	trace.endTurn(NOW + 3);
+	assert.equal(trace.roots()[0].status, "running");
+	trace.syncAsyncJobs({ running: [], recent: [{ id: "job-partial", agentId: "worker-partial", status: "completed" }] }, NOW + 4);
+	assert.equal(trace.roots()[0].status, "success");
+});
+
+test("duplicate and late terminal events cannot regress a trace", () => {
+	const trace = new SessionTrace();
+	trace.startTurn(NOW);
+	trace.startTool("once", "bash", {}, NOW);
+	trace.endTool("once", "done", false, NOW + 1);
+	trace.endTool("once", "abort", true, NOW + 2);
+	trace.startTool("once", "bash", {}, NOW + 3);
+	trace.endTurn(NOW + 4);
+	assert.equal(trace.roots()[0].status, "success");
+
+	trace.clear();
+	trace.startTurn(NOW + 5);
+	trace.startTool("once", "bash", {}, NOW + 5);
+	trace.endTool("once", "reused", false, NOW + 6);
+	trace.endTurn(NOW + 7);
+	assert.equal(trace.roots()[0].status, "success");
+
+	trace.clear();
+	trace.endTool("once", "late failure", true, NOW + 8);
+	assert.deepEqual(trace.roots(), []);
+
+});
+test("terminal markers are evicted with their retained trace roots", () => {
+	const trace = new SessionTrace();
+	trace.startTurn(NOW);
+	trace.startTool("reusable", "bash", {}, NOW);
+	trace.endTool("reusable", "first", false, NOW + 1);
+	trace.endTurn(NOW + 2);
+	for (let index = 0; index < 6; index++) {
+		trace.startTurn(NOW + 10 + index);
+		trace.startTool(`turn-${index}`, "bash", {}, NOW + 10 + index);
+		trace.endTool(`turn-${index}`, "done", false, NOW + 11 + index);
+		trace.endTurn(NOW + 12 + index);
+	}
+	trace.startTool("reusable", "bash", {}, NOW + 100);
+	trace.endTool("reusable", "second", false, NOW + 101);
+	assert.equal(trace.current()?.children?.some((child) => child.id === "tool/reusable"), true);
 });
 
 // ---------------------------------------------------------------- github
@@ -2283,6 +2382,28 @@ test("tool executions become spans on the current turn", () => {
 	assert.equal(failing.roots()[0].status, "failure", "a failed tool fails its turn");
 });
 
+test("native trace events reach the plain-text inspection surface with correct outcomes", async () => {
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	const ctx = fakeCtx();
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	pi.events.get("turn_start")({}, ctx);
+	pi.events.get("tool_execution_start")({ toolCallId: "success", toolName: "bash", args: {} }, ctx);
+	pi.events.get("tool_execution_end")({ toolCallId: "success", result: "Tests: 12 passed, 0 cancelled", isError: false }, ctx);
+	pi.events.get("turn_end")({ message: { role: "assistant", stopReason: "stop" } }, ctx);
+	const inspected = await pi.tools.get("review_workbench_trace").execute("id", {});
+	assert.match(inspected.content[0].text, /✔ turn 1/);
+
+	pi.events.get("turn_start")({}, ctx);
+	pi.events.get("tool_execution_start")({ toolCallId: "failure", toolName: "bash", args: {} }, ctx);
+	pi.events.get("tool_execution_end")({ toolCallId: "failure", result: "FAIL: AbortController cancellation regression", isError: true }, ctx);
+	pi.events.get("turn_end")({ message: { role: "assistant", stopReason: "error" } }, ctx);
+	const failed = await pi.tools.get("review_workbench_trace").execute("id", {});
+	assert.match(failed.content[0].text, /✘ turn 2/);
+});
+
 // ---------------------------------------------------------------- extension
 
 test("the extension registers keyboard-only surfaces and real tools", async () => {
@@ -2356,6 +2477,32 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.match(ctx.pasted.at(-1) ?? "", /projectbluefin\/other#7/);
 	assert.match(status.content[0].text, /review, fix, and slay remain available/, "a missing Hive must not read as browse-only: authorized actions remain available");
+});
+
+test("session transitions clear old trace state and reject late events", async () => {
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const first = fakeCtx();
+	await pi.events.get("session_start")({}, first);
+	await review.whenStarted();
+	pi.events.get("turn_start")({}, first);
+	pi.events.get("tool_execution_start")({ toolCallId: "old", toolName: "bash", args: {} }, first);
+
+	const next = fakeCtx();
+	next.sessionId = "session-2";
+	pi.events.get("session_switch")({}, next);
+	pi.events.get("tool_execution_end")({ toolCallId: "old", result: "late failure", isError: true }, first);
+	const empty = await pi.tools.get("hive_workbench_trace").execute("id", {});
+	assert.equal(empty.details.has_state, false);
+
+	pi.events.get("turn_start")({}, next);
+	pi.events.get("tool_execution_start")({ toolCallId: "new", toolName: "bash", args: {} }, next);
+	pi.events.get("tool_execution_end")({ toolCallId: "new", toolName: "bash", result: "new result", isError: false }, next);
+	pi.events.get("turn_end")({ message: { role: "assistant", stopReason: "stop" } }, next);
+	const current = await pi.tools.get("hive_workbench_trace").execute("id", {});
+	assert.equal(current.details.has_state, true);
+	assert.match(current.content[0].text, /turn 1/);
+	assert.doesNotMatch(current.content[0].text, /late failure/);
 });
 
 test("--autoslay repairs returned pull requests before implementing issue waves", async () => {
@@ -3716,7 +3863,7 @@ test("Review recovers a consumed worker from host evidence without session entri
 	assert.equal(restarted.messages.length, 0);
 });
 
-for (const count of [1, 8]) test(`packaged OMP 18.3.0 delivers and evicts ${count} Slay workers without losing Review evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
+for (const count of [1, 8]) test(`packaged OMP 18.3.2 delivers and evicts ${count} Slay workers without losing Review evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
 	const Manager = await loadPackagedJobManager(process.env.REVIEW_OMP_SOURCE!);
 	const states = Object.fromEntries(Array.from({ length: count }, (_, index) => [`projectbluefin/review#${77 + index}`, { title: `real manager ${index}`, submittedPrs: [] }]));
 	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
@@ -4562,6 +4709,51 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	assert.doesNotMatch(prompt, /maximum of 7|fix-and-merge|approve and merge/);
 });
 
+
+test("Factory selection keeps inherited OMP model access live after a model switch", async () => {
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const uiContext = fakeCtx();
+	let model: object | undefined;
+	const modelRegistry = { authStorage: {} };
+	// OMP scopes event contexts with Object.create; only ui is an own property.
+	const ctx = Object.create({
+		...uiContext,
+		get model() { assert.equal(this, ctx, "OMP accessor retains its handler receiver"); return model; },
+		modelRegistry,
+	});
+	Object.defineProperty(ctx, "ui", { value: uiContext.ui, enumerable: true });
+	let nativeContext: { model?: unknown; modelRegistry?: unknown } | undefined;
+	const unregister = registerFactoryController(async () => "unused");
+	const unregisterSubmitter = registerFactoryBatchSubmitter(async (_action, context) => {
+		nativeContext = context as typeof nativeContext;
+		return { batchId: "batch-model-context", text: "submitted" };
+	});
+	const unregisterDashboard = registerFactoryDashboardOpener(async () => {});
+	try {
+		await pi.events.get("session_start")({}, ctx);
+		await review.whenStarted();
+		model = { id: "authenticated-model" };
+		uiContext.overlays[0].handleInput("space");
+		uiContext.selectResponses.push("Inspect selected items");
+		uiContext.overlays[0].handleInput("F");
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		assert.ok(nativeContext, "the selected batch reaches Factory");
+		assert.equal(nativeContext.model, model, "the authenticated model survives the scoped event context");
+		assert.equal(nativeContext.modelRegistry, modelRegistry, "Factory retains the session auth registry");
+		model = { id: "replacement-model" };
+		assert.equal(nativeContext.model, model, "retained Factory context observes OMP model changes");
+		model = undefined;
+		assert.equal(nativeContext.model, undefined, "clearing the model cannot leave stale execution authority");
+		assert.equal(Object.hasOwn(ctx, "reconcileMutationClaim"), false, "Review does not mutate the host context");
+		uiContext.overlays.at(-1).handleInput("q");
+	} finally {
+		unregisterDashboard();
+		unregisterSubmitter();
+		unregister();
+		await pi.events.get("session_shutdown")?.({}, ctx);
+	}
+});
 
 for (const outcome of ["success", "error", "cancel"] as const) {
 	test(`Factory picker returns to Review after ${outcome}`, async () => {

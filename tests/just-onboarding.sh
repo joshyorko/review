@@ -93,6 +93,7 @@ exit 0
 EOF
 cat >"$fake_bin/apptainer" <<'EOF'
 #!/usr/bin/env bash
+[[ "${APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT:-}" == /claims ]] || exit 19
 printf '%s\n' "$*" >>"${APPTAINER_LOG:?}"
 previous=""
 for arg in "$@"; do
@@ -189,7 +190,16 @@ configure_host_files() {
   return 0
 }
 assert_apptainer_host_files() {
-  local call="$1" mask="$2" path bit
+  local call="$1" mask="$2" path bit previous="" runtime_home="" arg
+  for arg in $call; do
+    if [[ "$previous" == --home ]]; then
+      runtime_home="${arg%%:*}"
+      break
+    fi
+    previous="$arg"
+  done
+  [[ -d "$runtime_home/.local/state/review/factory" ]] || fail "Apptainer Factory state was not prepared before launch"
+  [[ "$(stat -c %u:%g "$runtime_home/.local/state/review/factory")" == "$(id -u):$(id -g)" ]] || fail "Apptainer Factory state is not host-owned"
   for path in /etc/localtime /etc/hosts; do
     [[ "$path" == /etc/localtime ]] && bit=1 || bit=2
     if ((mask & bit)); then
@@ -340,6 +350,8 @@ run_just review-queue --issues
 log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-review-' "$podman_log"
 log_contains 'ghcr.io/projectbluefin/review:stable --issues --advisor' "$podman_log"
 log_contains '--env CONTEXT7_API_KEY' "$podman_log"
+log_contains "$home/.local/state/review/mutation-claims:/claims:rw" "$podman_log"
+log_contains '--env LUNA_FACTORY_CLAIMS_ROOT=/claims' "$podman_log"
 run_just review-queue autoslay
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
 log_contains 'ghcr.io/projectbluefin/review:stable --autoslay --advisor' "$podman_log"
@@ -392,6 +404,7 @@ kvm="$saved_kvm"
 [[ "$status" -eq 17 ]] || fail "default remote review did not launch: $output"
 log_contains '-home:/home/bluefin:rw' "$podman_log"
 log_contains '-workspace:/workspace:rw' "$podman_log"
+log_contains 'bluefin-review-mutation-claims:/claims:rw' "$podman_log"
 log_not_contains "$home/" "$podman_log"
 [[ "$one_review_call" != "$two_review_call" ]] || fail "different review targets must not collide"
 

@@ -3,14 +3,15 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { batchConverged, batchSummary, createBatch, dependencyBlocker, digest, selectionIdentity, type Batch, type BatchItem, type SelectedItem, type Prerequisite } from "../core/batch.ts";
 import { reconcileReceipt } from "../core/evidence.ts";
 import { reduce } from "../core/reducer.ts";
 import type { AttemptId, CriterionId, EvidenceReceipt, LedgerEvent, OperationReceipt, PredicateEvidence, TaskId } from "../core/model.ts";
 import { BatchStore, ResourceClaims } from "./batch-store.ts";
+import { requiredChecks, packageCheckScripts } from "./batch-checks.ts";
 import { BatchGitHub } from "./batch-github.ts";
-import { runNative, sandboxTest, type NativeContext, type NativeSDK, type SchemaBuilder, type SemanticOutcome } from "./batch-native.ts";
+import { runNative, sandboxTest, sandboxPreflight, NativeExecutionError, resolveNativeBinding, validateNativeSDK, type NativeBinding, type NativeContext, type NativeSDK, type SchemaBuilder, type SemanticOutcome } from "./batch-native.ts";
 
 const command = promisify(execFile);
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -84,15 +85,17 @@ export class BatchService {
 	private pumping?: Promise<void>;
 	private submitTail: Promise<void> = Promise.resolve();
 	private changed = new Set<BatchChangeListener>();
-	private context?: NativeContext;
+	private bindings = new Map<string, { binding: NativeBinding } | { error: string }>();
 	private fatal?: string;
+	private readonly preflight: typeof sandboxPreflight;
 
-	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root) {
+	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root, preflight: typeof sandboxPreflight = sandboxPreflight) {
 		this.root = root;
 		this.github = github;
 		this.sdk = sdk;
 		this.schema = schema;
 		this.capacity = capacity;
+		this.preflight = preflight;
 		if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("invalid shared Factory capacity");
 		this.store = new BatchStore(root);
 		this.claims = new ResourceClaims(root, claimsRoot);
@@ -226,6 +229,10 @@ export class BatchService {
 		const existing = this.store.list();
 		const duplicate = existing.find((batch) => batch.selection === preliminary.selection && !batchConverged(batch) && batch.scopeRevisions.length === 0);
 		if (duplicate) {
+			for (const proposed of preliminary.items) {
+				const prior = duplicate.items.find((item) => item.selected.key === proposed.selected.key);
+				if (proposed.selected.requiredChecks && JSON.stringify(prior?.selected.requiredChecks) !== JSON.stringify(proposed.selected.requiredChecks)) throw new Error(`selection is already tracked by ${duplicate.id} with different required checks; inspect existing contract`);
+			}
 			if (JSON.stringify(duplicate.dependencies) !== JSON.stringify(preliminary.dependencies)) throw new Error(`selection is already tracked by ${duplicate.id} with different prerequisites; inspect existing scope`);
 			const current = this.batches.get(duplicate.id) ?? duplicate;
 			this.batches.set(current.id, current);
@@ -281,7 +288,9 @@ export class BatchService {
 	async resume(id: string, context: NativeContext): Promise<void> {
 		this.store.acquire();
 		if (this.fatal) throw new Error(this.fatal);
-		this.context = context;
+		// Snapshot only the approved execution references, never a handler's UI/signal.
+		try { this.bindings.set(id, { binding: resolveNativeBinding(context) }); }
+		catch (error) { this.bindings.set(id, { error: message(error) }); }
 		const batch = this.batches.get(id) ?? this.store.read(id);
 		this.batches.set(id, batch);
 		for (const item of batch.items) {
@@ -299,12 +308,10 @@ export class BatchService {
 				}
 				if (item.operation?.phase === "push" || item.operation?.phase === "pr") {
 					await this.reconcileEffect(item);
-					if (item.stage === "DONE") this.release(item, owner);
 					continue;
 				}
 				if (item.stage === "VERIFY" && item.proof && item.operation?.state === "applied") {
 					await this.validateProof(item);
-					if (item.operation.phase === "pr") await this.reconcileEffect(item);
 					continue;
 				}
 				if (item.operation?.state === "unknown" || item.operation?.state === "intent" || item.stage === "RUNNING" || item.stage === "VERIFY") {
@@ -375,6 +382,15 @@ export class BatchService {
 		const item = batch.items.find((candidate) => candidate.selected.key === key.toLowerCase());
 		if (!item || this.running.has(`${id}:${item.selected.key}`) || item.stage === "DONE" || item.stage === "EXCLUDED") throw new Error("item not eligible for explicit retry");
 		if (item.operation?.phase === "push" || item.operation?.phase === "pr") throw new Error("external effects must be reconciled, never blindly retried");
+		if (item.attempts >= batch.maxAttempts || batch.items.reduce((total, entry) => total + entry.attempts, 0) >= batch.maxTotalAttempts) throw new Error("original attempt budget exhausted; retry never resets it");
+		const owner = `${id}:${item.selected.key}`;
+		for (const resource of [`repo:${item.selected.repo}`, `item:${item.selected.key}`]) {
+			const conflict = this.claims.conflict(resource, owner); if (conflict) throw new Error(conflict);
+		}
+		if ((item.operation?.state === "unknown" || item.operation?.state === "intent") && !(item.attempts === 0 && item.sessions.length === 0 && item.preparation && item.preparation.phase !== "ready" && item.preparation.owner === owner && item.preparation.head === item.selected.head && item.operation.phase === "worker" && item.operation.owner === owner && item.operation.generation === item.ledger.generation)) {
+			const attempt = item.ledger.tasks[0]?.attempts.at(-1);
+			if (!attempt || item.settlement?.outcome !== "cancelled" || item.settlement.attemptId !== attempt.id || !item.settlement.sessionFiles.length || item.settlement.sessionFiles.some((path) => !attempt.privateSessions.some((session) => session.sessionFile === path))) throw new Error("native settlement is unproved; preserve claims and inspect before retry");
+		}
 		await this.github.assertFresh(item.selected);
 		this.abandon(item, "operator requested retry after inspecting retained workspace; original budgets retained");
 		if (item.ledger.tasks[0]?.state === "DONE") throw new Error("completed proof cannot be reset by retry; restore evidence or explicitly revise scope");
@@ -392,6 +408,7 @@ export class BatchService {
 		finally {
 			for (const active of this.running.values()) active.controller.abort();
 			await Promise.allSettled([...this.running.values()].map((active) => active.promise));
+			this.bindings.clear();
 			if (!this.fatal) this.store.release();
 		}
 	}
@@ -420,6 +437,9 @@ export class BatchService {
 					const dependency = dependencyBlocker(batch, item.selected.key);
 					if (dependency) { item.blocker = dependency; continue; }
 					if (item.attempts >= batch.maxAttempts || batch.items.reduce((sum, candidate) => sum + candidate.attempts, 0) >= batch.maxTotalAttempts) { item.stage = "BLOCKED"; item.blocker = "original attempt budget exhausted; retry never resets it"; this.persist(batch); continue; }
+					const approved = this.bindings.get(batch.id);
+					const binding = approved && "binding" in approved ? approved.binding : undefined;
+					const bindingError = approved && "error" in approved ? approved.error : "OMP execution binding unavailable; explicitly resume from the current session";
 					const mutation = item.selected.action !== "inspect";
 					if ([...this.running.values()].some((active) => mutation && active.item.selected.repo === item.selected.repo && active.item.selected.action !== "inspect")) continue;
 					const owner = `${batch.id}:${item.selected.key}`;
@@ -433,11 +453,11 @@ export class BatchService {
 					} catch (error) { item.stage = "BLOCKED"; item.blocker = message(error); this.persist(batch); continue; }
 					item.stage = "QUEUED"; item.blocker = undefined; this.persist(batch);
 					const controller = new AbortController();
-					const promise = Promise.resolve().then(() => this.execute(batch, item, controller.signal)).catch((error) => {
+					const promise = Promise.resolve().then(() => this.execute(batch, item, controller.signal, binding, bindingError)).catch((error) => {
 						if (item.operation?.phase === "push" || item.operation?.phase === "pr" || item.operation?.state === "unknown") {
 							item.stage = "UNKNOWN";
 							if (item.operation.state !== "unknown") transitionOperation(item, { state: "unknown" });
-						} else if (controller.signal.aborted && !message(error).includes("cancellation confirmed after native session settled")) {
+						} else if (controller.signal.aborted && !(error instanceof NativeExecutionError && error.code === "cancellation-settled")) {
 							item.stage = "UNKNOWN";
 							if (item.operation) transitionOperation(item, { state: "unknown" });
 						} else {
@@ -448,12 +468,21 @@ export class BatchService {
 								transitionOperation(item, { state: executionStarted ? "unknown" : "not-applied" });
 								if (executionStarted) item.stage = "UNKNOWN";
 							}
+							const attempt = item.ledger.tasks[0]?.attempts.at(-1);
+							if (error instanceof NativeExecutionError && error.code === "cancellation-settled" && attempt) {
+								item.settlement = { attemptId: attempt.id, sessionFiles: attempt.privateSessions.map((entry) => entry.sessionFile), outcome: "cancelled" };
+								item.stage = "CANCELLED";
+							} else if (error instanceof NativeExecutionError && ["report-missing", "report-invalid"].includes(error.code) && executionStarted && attempt) {
+								item.repair = { generation: item.ledger.generation, head: item.selected.head!, acceptanceRevision: item.selected.acceptanceRevision!, attemptId: attempt.id, reason: message(error).slice(0, 32768), artifacts: item.repair?.artifacts ?? [] };
+								if (item.operation) transitionOperation(item, { state: "applied" });
+								item.stage = "QUEUED";
+							}
 						}
 						item.blocker = message(error);
 						if (!this.fatal) this.persist(batch);
 					}).finally(() => {
 						this.running.delete(owner);
-						if (!this.fatal && item.stage !== "UNKNOWN") this.release(item, owner);
+						if (!this.fatal && item.stage !== "UNKNOWN" && item.operation?.state !== "unknown") this.release(item, owner);
 						this.notifyChanged(batch.id);
 					});
 					this.running.set(owner, { batch, item, controller, promise });
@@ -480,31 +509,99 @@ export class BatchService {
 		if (attempt?.state === "started") this.event(item, { kind: "reconcile_attempt", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId: attempt.id, outcome: "abandoned", reason });
 	}
 	private async git(workspace: string, args: string[], signal?: AbortSignal): Promise<string> {
-		const result = await command("git", ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", ...args], { cwd: workspace, signal, timeout: 60_000, maxBuffer: 4 * 1024 * 1024, env: { PATH: process.env.PATH, HOME: this.root, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
+		const fetching = args[0] === "fetch";
+		const credential = fetching ? ["-c", "credential.https://github.com.helper=!gh auth git-credential"] : [];
+		const result = await command("git", ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", ...credential, ...args], { cwd: workspace, signal, timeout: 60_000, maxBuffer: 4 * 1024 * 1024, env: { PATH: process.env.PATH, HOME: this.root, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", ...(fetching ? { GH_TOKEN: this.github.token } : {}) } });
 		return result.stdout.trimEnd();
 	}
-	private async execute(batch: Batch, item: BatchItem, signal: AbortSignal): Promise<void> {
-		if (!this.sdk || !this.context) throw new Error("pinned OMP public SDK unavailable; execution refused");
-		await this.github.assertFresh(item.selected);
+	private async cloneWorkspace(item: BatchItem, directory: string, signal: AbortSignal): Promise<void> {
+		await command("gh", ["repo", "clone", item.selected.repo, directory, "--", "--no-checkout"], { timeout: 120_000, signal, env: { PATH: process.env.PATH, HOME: this.root, GH_TOKEN: this.github.token, GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
+	}
+	private async prepareWorkspace(batch: Batch, item: BatchItem, signal: AbortSignal): Promise<string> {
 		const directory = join(this.root, "workspaces", batch.id, digest(item.selected.key).slice(0, 16));
-		mkdirSync(join(this.root, "workspaces", batch.id), { recursive: true, mode: 0o700 });
+		const owner = `${batch.id}:${item.selected.key}`;
+		const noWorker = item.attempts === 0 && item.sessions.length === 0 && item.ledger.tasks.every((task) => task.attempts.length === 0);
+		const evidenced = [...item.operations, ...(item.operation ? [item.operation] : [])].some((operation) =>
+			operation.owner === owner && operation.generation === item.ledger.generation && operation.phase === "worker" && (operation.state === "not-applied" || operation.state === "unknown" && item.preparation?.phase !== undefined && item.preparation.phase !== "ready") && operation.subject.repo === item.ledger.subject.repo && operation.subject.head === item.ledger.subject.head && operation.subject.base === item.ledger.subject.base);
+		if (item.workspace && item.workspace !== directory) throw new Error("retained workspace identity mismatch; preserve and inspect");
+		if (item.preparation && (item.preparation.owner !== owner || item.preparation.head !== item.selected.head)) throw new Error("workspace initialization evidence differs from selected owner/head; preserve and inspect");
 		if (!item.workspace) {
 			if (existsSync(directory)) throw new Error("fresh execution found retained workspace; inspect, never reset/delete it");
 			item.workspace = directory;
-			item.operation = operationReceipt(batch, item, "worker", "intent", `${batch.id}:${item.selected.key}:work`); this.persist(batch);
-			await command("gh", ["repo", "clone", item.selected.repo, directory, "--", "--no-checkout"], { timeout: 120_000, signal, env: { PATH: process.env.PATH, HOME: this.root, GH_TOKEN: this.github.token, GH_PROMPT_DISABLED: "1", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
-			if (item.selected.kind === "pr") await this.git(directory, ["fetch", "origin", `pull/${item.selected.number}/head`], signal);
-			await this.git(directory, ["checkout", "--detach", item.selected.head!], signal);
-		} else if (item.workspace !== directory || realpathSync(directory) !== directory) throw new Error("retained workspace identity mismatch; preserve and inspect");
+			item.preparation = { phase: "clone", owner, head: item.selected.head! };
+			item.operation = operationReceipt(batch, item, "worker", "intent", `${owner}:work`);
+			this.persist(batch);
+		} else if (!existsSync(directory) && (!noWorker || !evidenced)) {
+			throw new Error("retained workspace is absent without positive no-worker-start initialization evidence; preserve and inspect");
+		}
+		for (const parent of [join(this.root, "workspaces"), join(this.root, "workspaces", batch.id)]) {
+			const existing = lstatSync(parent, { throwIfNoEntry: false });
+			if (existing?.isSymbolicLink()) throw new Error("workspace parent is a symlink; preserve and inspect before cloning");
+			if (!existing) mkdirSync(parent, { mode: 0o700 });
+			if (realpathSync(parent) !== parent || !lstatSync(parent).isDirectory() || (process.getuid && lstatSync(parent).uid !== process.getuid())) throw new Error("workspace parent is not the canonical runtime-owned directory; inspect ownership before cloning");
+		}
+		if (lstatSync(directory, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error("retained workspace is a symlink; preserve and inspect before cloning");
+		if (!existsSync(directory)) {
+			item.operation = operationReceipt(batch, item, "worker", "intent", `${owner}:work`);
+			item.preparation = { phase: "clone", owner, head: item.selected.head! }; this.persist(batch);
+			await this.cloneWorkspace(item, directory, signal);
+			item.preparation = { phase: "checkout", owner, head: item.selected.head! }; this.persist(batch);
+		}
+		if (realpathSync(directory) !== directory || lstatSync(directory).isSymbolicLink() || !lstatSync(directory).isDirectory()) throw new Error("retained workspace identity mismatch; preserve and inspect");
+		const metadata = join(directory, ".git");
+		if (!existsSync(metadata) || lstatSync(metadata).isSymbolicLink() || !lstatSync(metadata).isDirectory()) throw new Error("partial workspace has no owned Git directory; preserve files and inspect initialization");
+		if (process.getuid && (lstatSync(directory).uid !== process.getuid() || lstatSync(metadata).uid !== process.getuid())) throw new Error("Git workspace ownership differs from the executing user; inspect runtime ownership before retry");
 		const origin = await this.git(directory, ["remote", "get-url", "origin"], signal);
 		if (origin.replace(/\.git$/, "").toLowerCase() !== `https://github.com/${item.selected.repo}`) throw new Error("workspace origin mismatch; preserve and inspect");
-		if (await this.git(directory, ["rev-parse", "HEAD"], signal) !== item.selected.head) throw new Error("workspace head differs from selected subject; preserve and inspect");
-		if (item.attempts === 0 && await this.git(directory, ["status", "--porcelain"], signal)) throw new Error("dirty reused checkout; preserve user files");
+		let head: string | undefined;
+		try { head = await this.git(directory, ["rev-parse", "HEAD"], signal); } catch { /* An evidenced partial clone may have no checked-out HEAD. */ }
+		const initializing = item.preparation?.phase !== "ready" && noWorker && (evidenced || item.operation?.state === "intent");
+		const entries = readdirSync(directory).filter((name) => name !== ".git");
+		if (initializing && entries.length === 0) {
+			item.operation = operationReceipt(batch, item, "worker", "intent", `${owner}:work`);
+			item.preparation = { phase: "checkout", owner, head: item.selected.head! }; this.persist(batch);
+			if (item.selected.kind === "pr") await this.git(directory, ["fetch", "origin", `pull/${item.selected.number}/head`], signal);
+			await this.git(directory, ["checkout", "--detach", item.selected.head!], signal);
+			head = await this.git(directory, ["rev-parse", "HEAD"], signal);
+		} else if (head !== item.selected.head) {
+			throw new Error("partial workspace or selected head mismatch with retained files; preserve and inspect before preparation");
+		}
+		if (head !== item.selected.head) throw new Error("workspace head differs from selected subject; preserve and inspect");
+		if (noWorker && await this.git(directory, ["status", "--porcelain"], signal)) throw new Error("partial or dirty reused checkout; preserve user files");
+		item.preparation = { phase: "ready", owner, head: item.selected.head! }; this.persist(batch);
+		return directory;
+	}
+	private async execute(batch: Batch, item: BatchItem, signal: AbortSignal, binding?: NativeBinding, bindingError?: string): Promise<void> {
+		validateNativeSDK(this.sdk);
+		if (!binding) throw new Error(bindingError ?? "OMP execution binding unavailable");
+		await this.github.assertFresh(item.selected);
+		const directory = await this.prepareWorkspace(batch, item, signal);
+		const mandatory = requiredChecks(item.selected, directory);
+		if (mandatory.length) {
+			const executables = mandatory.map((check) => {
+				const executable = /^([A-Za-z0-9][A-Za-z0-9._+-]*)(?:\s|$)/.exec(check.trim())?.[1];
+				if (!executable) throw new Error("task readiness: verification command needs an explicit executable name");
+				return executable;
+			});
+			const capability = await this.preflight(directory, executables, signal);
+			const missing = [...new Set(executables)].filter((name) => !capability.available.includes(name));
+			if (missing.length) throw new Error(`task readiness: verifier lacks required executable(s): ${missing.join(", ")}; prepare the supported toolchain before retry`);
+		}
+		if (mandatory.includes("npm test") && item.checkScripts === undefined) {
+			if (item.attempts > 0) throw new Error("original package check definition is unavailable for this retained attempt; inspect and declare explicit requiredChecks before retry");
+			item.checkScripts = packageCheckScripts(directory); this.persist(batch);
+		}
+		if (!item.selected.requiredChecks && mandatory.length) { item.selected.requiredChecks = mandatory; this.persist(batch); }
+		const previous = item.ledger.tasks.flatMap((task) => task.attempts).filter((attempt) => attempt.generation === item.ledger.generation && attempt.subject.head === item.selected.head).at(-1);
+		const previousReceipt = previous?.receipt;
+		const protocolRepair = item.repair && item.repair.generation === item.ledger.generation && item.repair.head === item.selected.head && item.repair.acceptanceRevision === item.selected.acceptanceRevision ? item.repair : undefined;
+		const repairFeedback = previousReceipt ? JSON.stringify({ attempt: previous!.id, subject: previousReceipt.subject, acceptanceRevision: item.selected.acceptanceRevision, result: previousReceipt.result, failed: previousReceipt.predicates?.filter((predicate) => !predicate.ok), tests: previousReceipt.tests.filter((test) => test.outcome !== "pass"), unresolved: previousReceipt.unresolved }).slice(0, 32768) : protocolRepair?.reason ?? "";
 		if (item.ledger.noProgressAttempts >= 2) {
 			if (item.ledger.replans >= 1) throw new Error("plateau after one bounded replan; new evidence or explicit scope decision required");
 			this.event(item, { kind: "use_replan", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId });
 		}
 		if (!item.ledger.tasks.length) this.event(item, { kind: "record_candidate", expectedRevision: item.ledger.revision, candidate: { taskId: "T1" as TaskId, generation: item.ledger.generation, criterionId: "A1" as CriterionId, title: item.selected.key, deps: [], effect: item.selected.action === "inspect" ? "read" : "write", owner: batch.id, necessity: "explicit selected acceptance remains unproved" } });
+		item.settlement = undefined;
 		item.attempts += 1;
 		const attempt = `T1-a${item.attempts}` as AttemptId;
 		this.event(item, { kind: "start_attempt", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId: attempt, subject: item.ledger.subject });
@@ -526,10 +623,11 @@ export class BatchService {
 			if (phase === "worker") item.stage = "RUNNING";
 			this.persist(batch);
 		};
-		const worker = await runNative(this.sdk, this.schema, this.context, item, this.root, "worker", signal, onSession("worker", attempt), onExecutionStart("worker", attempt), item.blocker ?? "");
+		const worker = await runNative(this.sdk, this.schema, binding, item, this.root, "worker", signal, onSession("worker", attempt), onExecutionStart("worker", attempt), repairFeedback, { attemptId: attempt, repairFeedback, artifacts: protocolRepair?.artifacts });
 		batch.usage.modelCalls += worker.calls;
 		item.stage = "VERIFY"; transitionOperation(item, { phase: "verify", state: "applied" }); this.persist(batch);
-		if (item.selected.action !== "inspect" && !worker.tests.length) throw new Error("worker supplied no executable verification; inspect and retry within original appetite");
+		if (item.checkScripts !== undefined && packageCheckScripts(directory) !== item.checkScripts) throw new NativeExecutionError("report-checks-changed", "Worker changed the captured mandatory package test scripts; restore the original checks. A changed verification contract requires explicit operator selection.");
+		if (item.selected.action !== "inspect" && !mandatory.length && !worker.tests.length) throw new Error("worker supplied no executable verification; inspect and retry within original appetite");
 		await this.git(directory, ["add", "--all"], signal);
 		const tree = await this.git(directory, ["write-tree"], signal);
 		const evidenceDir = join(this.root, "evidence", batch.id, digest(item.selected.key).slice(0, 16), attempt);
@@ -541,8 +639,8 @@ export class BatchService {
 		const tests: EvidenceReceipt["tests"][number][] = [];
 		const verificationPredicates: PredicateEvidence[] = [];
 		const artifacts = [patchFile];
-		let verification = `Verified tree: ${tree}\nPatch:\n${patch.slice(0, 131072)}\n`;
-		for (const [index, test] of worker.tests.entries()) {
+		let verification = `Verified tree: ${tree}\nPatch preview (${Math.min(patch.length, 131072)} of ${patch.length} characters; full content is retained as evidence-0):\n${patch.slice(0, 131072)}\n`;
+		for (const [index, test] of [...new Set([...mandatory, ...worker.tests])].entries()) {
 			const result = await sandboxTest(testWorkspace, test, signal);
 			const artifact = join(evidenceDir, `test-${index}.txt`);
 			writeFileSync(artifact, `command: ${test}\nexit: ${result.exitCode}\n${result.output}`, { flag: "wx", mode: 0o600 });
@@ -553,11 +651,15 @@ export class BatchService {
 				ok: result.exitCode === 0,
 				note: `exit ${result.exitCode}; artifact ${artifact}`,
 			});
-			verification += `\n${test}: exit ${result.exitCode}\n${result.output.slice(-16384)}`;
+			verification += `\n${test}: exit ${result.exitCode}; preview is the last ${Math.min(result.output.length, 16384)} of ${result.output.length} characters. Read the complete retained test artifact.\n${result.output.slice(-16384)}`;
 		}
+		const handles = artifacts.map((path, index) => { const bytes = readFileSync(path); return { id: `evidence-${index}`, path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: attempt }; });
+		item.repair = { generation: item.ledger.generation, head: item.selected.head!, acceptanceRevision: item.selected.acceptanceRevision!, attemptId: attempt, reason: "Acceptance pending for retained candidate", artifacts: handles };
 		transitionOperation(item, { phase: "acceptance" }); this.persist(batch);
-		const reviewer = await runNative(this.sdk, this.schema, this.context, item, this.root, "acceptance", signal, onSession("acceptance", attempt), onExecutionStart("acceptance", attempt), verification);
+		const reviewer = await runNative(this.sdk, this.schema, binding, item, this.root, "acceptance", signal, onSession("acceptance", attempt), onExecutionStart("acceptance", attempt), verification, { attemptId: attempt, artifacts: handles });
 		batch.usage.modelCalls += reviewer.calls;
+		if (reviewer.accepted && reviewer.evidenceCoverageComplete !== true) throw new NativeExecutionError("report-invalid", "acceptance did not establish full coverage of the retained candidate artifacts");
+		for (const artifact of handles) if (createHash("sha256").update(readFileSync(artifact.path)).digest("hex") !== artifact.digest) throw new Error("retained evidence changed during acceptance; proof stale");
 		const reviewFile = join(evidenceDir, "acceptance.txt"); writeFileSync(reviewFile, reviewer.report, { flag: "wx", mode: 0o600 }); artifacts.push(reviewFile);
 		await this.github.assertFresh(item.selected);
 		if (await this.git(directory, ["write-tree"], signal) !== tree || await this.git(directory, ["diff", "--no-ext-diff", "--no-textconv", "--name-only"], signal) || await this.git(directory, ["ls-files", "--others", "--exclude-standard"], signal)) throw new Error("workspace changed during verification; proof stale");
@@ -589,7 +691,7 @@ export class BatchService {
 			unresolved,
 			next: "",
 			confidence: "medium",
-			routing: { verified: false },
+			routing: { ...(binding.model.provider && binding.model.id ? { requested: `${binding.model.provider}/${binding.model.id}` } : {}), ...(worker.model ? { effective: worker.model } : {}), verified: Boolean(worker.model) },
 			exitCode: tests.some((test) => test.outcome === "fail") ? 1 : 0,
 			aborted: false,
 			truncated: false,
@@ -597,9 +699,9 @@ export class BatchService {
 			...(item.selected.action === "inspect" ? {
 				semanticResult: {
 					kind: semanticOutcome === "supported" || semanticOutcome === "disproven" ? "finding" as const : "inspection" as const,
-					outcome: semanticOutcome,
+					outcome: semanticOutcome === "none" ? "uncertain" : semanticOutcome,
 					summary: resultSummary,
-					verified: reviewer.accepted && semanticOutcome !== "uncertain",
+					verified: reviewer.accepted === true && semanticOutcome !== "uncertain",
 					publicationAuthority: "none" as const,
 					...(worker.publicationBlocker === undefined ? {} : { publicationBlocker: worker.publicationBlocker }),
 				},
@@ -609,6 +711,7 @@ export class BatchService {
 		transitionOperation(item, { state: "applied" }); this.persist(batch);
 		if (!reviewer.accepted || receipt.exitCode !== 0) {
 			item.stage = "QUEUED"; item.blocker = `acceptance unproved: ${reviewer.report}; repair only selected gap`;
+			item.repair.reason = JSON.stringify({ reviewer: reviewer.report, failed: receipt.predicates?.filter((predicate) => !predicate.ok), tests: receipt.tests.filter((test) => test.outcome !== "pass") }).slice(0, 32768);
 			this.persist(batch); return;
 		}
 		const verifiedProof: NonNullable<Batch["items"][number]["proof"]> = { acceptanceRevision: item.selected.acceptanceRevision!, subject: item.selected.head!, tree, digest: digest(artifacts.map((path) => digest(readFileSync(path, "utf8"))).join("")), artifacts, stage: "verified-patch", reviewerSession: reviewer.session };

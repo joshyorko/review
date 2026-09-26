@@ -106,13 +106,21 @@ jobs:
           bash tests/appliance-contract.sh
 
           bash tests/version-derivation.sh
+      - name: Pinned OMP SDK type compatibility
+        run: |
+          set -euo pipefail
+          sdk_version="$(sed -n 's/^ARG OMP_VERSION=//p' image/appliance/Containerfile)"
+          sdk_root="$RUNNER_TEMP/factory-sdk-types"
+          npm install --prefix "$sdk_root" --ignore-scripts --no-audit --no-fund typescript@5.9.3 @types/node@24 "@oh-my-pi/pi-coding-agent@$sdk_version"
+          OMP_SDK_NODE_MODULES="$sdk_root/node_modules" bash tests/luna-factory-sdk-types.sh
+
       - name: Packaged OMP async-result consumption regression
         # Exercise consumed-result eviction with the exact packaged OMP manager.
         # The normal Review suite remains hermetic.
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch v18.3.0 https://github.com/can1357/oh-my-pi.git "$RUNNER_TEMP/review-omp-source"
-          REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --experimental-transform-types --test --test-name-pattern='packaged OMP 18.3.0' tests/omp-review-mode.test.ts
+          git clone --depth 1 --branch v18.3.2 https://github.com/can1357/oh-my-pi.git "$RUNNER_TEMP/review-omp-source"
+          REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --experimental-transform-types --test --test-name-pattern='packaged OMP 18.3.2' tests/omp-review-mode.test.ts
 
       - name: Packaged runtime capability report
         run: |

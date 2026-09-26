@@ -7,7 +7,7 @@ cd "$repo_root"
 
 containerfile="image/appliance/Containerfile"
 entrypoint="image/appliance/entrypoint.sh"
-typesafe_version="0.6.1"
+typesafe_version="$(sed -nE 's/^ARG TYPESAFE_VERSION=([^[:space:]]+)$/\1/p' "$containerfile")"
 
 fail() {
   echo "typesafe-appliance-contract: $*" >&2
@@ -17,6 +17,8 @@ fail() {
 omp_version="$(sed -nE 's/^ARG OMP_VERSION=([^[:space:]]+)$/\1/p' "$containerfile")"
 [[ "$omp_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
   fail "$containerfile must contain exactly one valid OMP_VERSION pin"
+[[ "$typesafe_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+  fail "$containerfile must contain exactly one valid TYPESAFE_VERSION pin"
 
 require() {
   local path="$1"
@@ -87,7 +89,7 @@ if [[ -n "${TYPESAFE_RUNTIME_IMAGE:-}" ]]; then
   grep -Fxq "omp/${omp_version}" <<<"$version" ||
     fail "runtime OMP version was not ${omp_version}: ${version}"
   run 'test -f /usr/share/bluefin/review/pi-typesafe/package.json'
-  run "grep -Fq '\"version\": \"0.6.1\"' /usr/share/bluefin/review/pi-typesafe/package.json"
+  run "grep -Fq '\"version\": \"${typesafe_version}\"' /usr/share/bluefin/review/pi-typesafe/package.json"
   run 'test ! -e /usr/bin/node && test ! -e /usr/bin/npm'
   run "test -z \"\${TYPESAFE_API_KEY:-}\""
 

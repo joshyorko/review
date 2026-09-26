@@ -298,14 +298,50 @@ function retryEligible(
 	dependency: string | undefined,
 	claims: readonly ProjectedClaim[],
 	readOnly: boolean,
+	activeItemKeys?: readonly string[],
 ): boolean {
 	if (readOnly || dependency !== undefined || item.stage === "DONE" || item.stage === "EXCLUDED") return false;
-	if (externalEffect(item) || (item.selected.action !== "inspect" && claims.some((claim) => claim.conflict || claim.status === "unknown"))) return false;
+	const owner = `${batch.id}:${item.selected.key}`;
+	if (externalEffect(item) || claims.some((claim) => claim.owner !== owner)) return false;
 	if (item.ledger.tasks.some((task) => task.state === "DONE")) return false;
 	if (!(item.stage === "BLOCKED" || item.stage === "CANCELLED" || item.stage === "UNKNOWN" || item.stage === "QUEUED")) return false;
 	if (stage === "DONE" || stage === "EXCLUDED") return false;
 	if (item.attempts >= batch.maxAttempts) return false;
 	if (batch.items.reduce((total, candidate) => total + candidate.attempts, 0) >= batch.maxTotalAttempts) return false;
+	const preparationRetry = safePreparationRetry(batch, item);
+	const settledCancellationRetry = settledNativeCancellation(batch, item, activeItemKeys);
+	if (item.stage === "CANCELLED" && !settledCancellationRetry && !preparationRetry && item.operation?.state !== "not-applied") return false;
+	if (item.stage === "UNKNOWN" && !settledCancellationRetry && !preparationRetry && item.operation?.state !== "not-applied") return false;
+	if (item.operation && ["unknown", "intent"].includes(item.operation.state) && !settledCancellationRetry && !preparationRetry) return false;
+	return true;
+}
+
+function safePreparationRetry(batch: Batch, item: BatchItem): boolean {
+	const operation = item.operation;
+	if (!operation || !["unknown", "intent"].includes(operation.state)) return false;
+	const owner = `${batch.id}:${item.selected.key}`;
+	const noWorker = item.attempts === 0 && item.sessions.length === 0 && item.ledger.tasks.every((task) => task.attempts.length === 0);
+	const preparation = item.preparation;
+	return noWorker && preparation !== undefined && preparation.phase !== "ready" && preparation.owner === owner &&
+		preparation.head === item.selected.head && operation.phase === "worker" && operation.owner === owner &&
+		operation.generation === item.ledger.generation && operation.subject.repo === item.ledger.subject.repo &&
+		operation.subject.base === item.ledger.subject.base && operation.subject.head === item.ledger.subject.head;
+}
+
+function settledNativeCancellation(batch: Batch, item: BatchItem, activeItemKeys?: readonly string[]): boolean {
+	if (item.stage !== "CANCELLED" || activeItemKeys === undefined || activeItemKeys.some((key) => key.toLowerCase() === item.selected.key.toLowerCase())) return false;
+	const taskAttempts = item.ledger.tasks.flatMap((task) => task.attempts.map((attempt) => ({ task, attempt })));
+	const latest = taskAttempts.at(-1);
+	const settlement = item.settlement;
+	if (!latest || !settlement || settlement.outcome !== "cancelled" || settlement.attemptId !== latest.attempt.id || latest.attempt.state !== "abandoned") return false;
+	if (latest.task.generation !== item.ledger.generation || latest.attempt.generation !== item.ledger.generation ||
+		latest.attempt.subject.repo !== item.ledger.subject.repo || latest.attempt.subject.base !== item.ledger.subject.base || latest.attempt.subject.head !== item.ledger.subject.head) return false;
+	const sessionFiles = latest.attempt.privateSessions.map((session) => session.sessionFile);
+	if (!sessionFiles.length || settlement.sessionFiles.length !== sessionFiles.length ||
+		settlement.sessionFiles.some((path, index) => path !== sessionFiles[index] || !item.sessions.includes(path))) return false;
+	const operation = item.operation;
+	if (operation && (operation.phase === "push" || operation.phase === "pr" || operation.owner !== `${batch.id}:${item.selected.key}` ||
+		operation.attemptId !== latest.attempt.id || operation.generation !== latest.attempt.generation)) return false;
 	return true;
 }
 
@@ -328,6 +364,7 @@ function nextSafeAction(
 	claims: readonly ProjectedClaim[],
 	readOnly: boolean,
 	active: boolean,
+	retryAvailable: boolean,
 ): string {
 	if (item.stage === "DONE" && !batchItemProofCurrent(item)) return "stored DONE proof is stale; reverify proof; retry unavailable";
 	if (stage === "DONE") {
@@ -336,17 +373,17 @@ function nextSafeAction(
 	}
 	if (item.stage === "EXCLUDED") return "scope revision recorded; no execution";
 	if (externalEffect(item) && (item.operation?.state === "unknown" || item.operation?.state === "intent" || stage === "UNKNOWN")) return readOnly ? "inspect external effect; reconciliation required; retry unavailable" : "reconcile external effect; retry unavailable";
-	if (item.selected.action !== "inspect" && claims.some((claim) => claim.conflict)) return "inspect ownership / reconcile claim before resuming";
+	const owner = `${batch.id}:${item.selected.key}`;
+	const foreignClaim = claims.some((claim) => claim.owner !== owner);
+	if (item.selected.action !== "inspect" && foreignClaim) return "inspect ownership / reconcile claim before resuming";
 	if (stage === "RUNNING") return active ? "wait for the observed worker; inspect execution evidence" : "inspect recorded execution; current worker liveness is unknown";
 	if (stage === "VERIFY") return active ? "wait for verification / independent acceptance; inspect evidence" : "inspect verification evidence and the resumption condition";
-	if (item.selected.action !== "inspect" && claims.some((claim) => claim.status === "unknown")) return "inspect ownership / reconcile claim before resuming";
 	if (dependency !== undefined) return `wait for ${dependency}`;
 	if (item.attempts >= batch.maxAttempts || batch.items.reduce((total, candidate) => total + candidate.attempts, 0) >= batch.maxTotalAttempts) return "original attempt budget exhausted; no retry";
-	const retry = retryEligible(batch, item, stage, dependency, claims, readOnly);
-	if (stage === "UNKNOWN") return retry ? "inspect retained work, then retry within original budget" : "inspect retained work and reconcile its outcome; retry unavailable";
-	if (stage === "BLOCKED" && retry) return "retry item within original budget";
+	if (stage === "UNKNOWN") return retryAvailable ? "inspect retained workspace, then retry within original budget" : "inspect retained work and reconcile its outcome; retry unavailable";
+	if (stage === "BLOCKED" && retryAvailable) return "inspect retained workspace and recorded cause, then retry within original budget";
 	if (stage === "QUEUED") return readOnly ? "inspect queued work; execution controls unavailable in this context" : batch.control === "paused" ? "resume the batch when ready to dispatch" : "wait for Factory dispatch";
-	if (stage === "CANCELLED") return retry ? "explicitly retry after inspecting retained work" : "inspect retained work; retry unavailable in this context";
+	if (stage === "CANCELLED") return retryAvailable ? "inspect retained workspace and settled attempt, then retry within original budget" : "inspect retained work; native settlement or ownership is unproved, retry unavailable";
 	return item.blocker ?? "inspect Factory evidence";
 }
 
@@ -466,10 +503,11 @@ export function projectItem(batch: Batch, item: BatchItem, options: ProjectionOp
 	if (item.workspace !== undefined) actions.push("open-workspace");
 	if (prUrl !== undefined) actions.push("open-pr");
 	if (attemptHistory.some((attempt) => attempt.sessions.length > 0) || item.sessions.length > 0) actions.push("view-session");
-	if (retryEligible(batch, item, stage, dependency, claims, options.readOnly === true)) actions.push("retry");
+	const retry = retryEligible(batch, item, stage, dependency, claims, options.readOnly === true, options.activeItemKeys);
+	if (retry) actions.push("retry");
 	const uncertainOperation = item.operation !== undefined && ["unknown", "intent"].includes(item.operation.state);
 	if (!options.readOnly && item.selected.action !== "inspect" && ["BLOCKED", "QUEUED", "CANCELLED"].includes(item.stage) && !uncertainOperation) actions.push("exclude");
-	const next = nextSafeAction(batch, item, stage, dependency, claims, options.readOnly === true, options.activeItemKeys?.includes(item.selected.key) === true);
+	const next = nextSafeAction(batch, item, stage, dependency, claims, options.readOnly === true, options.activeItemKeys?.includes(item.selected.key) === true, retry);
 	const details = detailRows(batch, item, stage, proof, dependency, claims, attemptHistory, historyForDetails, options.readOnly === true);
 	const activeKeys = options.activeItemKeys?.map((key) => key.toLowerCase());
 	const executionLiveness = stage !== "RUNNING"

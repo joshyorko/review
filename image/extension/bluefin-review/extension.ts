@@ -171,7 +171,7 @@ interface UiLike {
 interface CtxLike {
 	hasUI: boolean;
 	ui: UiLike;
-	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }> };
+	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>; getSessionId?(): string };
 	getAsyncJobSnapshot?(): {
 		running: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
 		recent: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
@@ -569,6 +569,19 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let dashboardOpen = false;
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
+	let traceSessionId: string | undefined;
+	const traceContext = (ctx?: CtxLike): CtxLike | undefined => {
+		const candidate = ctx ?? activeCtx;
+		if (!candidate) return undefined;
+		const sessionId = candidate.sessionManager?.getSessionId?.();
+		if (traceSessionId && sessionId && traceSessionId !== sessionId) return undefined;
+		traceSessionId ??= sessionId;
+		return candidate;
+	};
+	const resetTrace = (ctx: CtxLike): void => {
+		mode.session.clear();
+		traceSessionId = ctx.sessionManager?.getSessionId?.();
+	};
 	let factoryHandoffBatchId: string | undefined;
 	let factoryHandoffRequested = false;
 	let started: Promise<void> = Promise.resolve();
@@ -1709,7 +1722,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 							: undefined;
 			if (command === undefined) return;
 			try {
-				const factoryCtx = { ...ctx, reconcileMutationClaim };
+				// Delegate inherited/live capabilities with their original receiver. Factory
+				// captures only execution references; this handler's UI stays scoped here.
+				const factoryCtx = new Proxy(ctx, {
+					get(target, key) {
+						if (key === "reconcileMutationClaim") return reconcileMutationClaim;
+						const value = Reflect.get(target, key, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+					set() { throw new Error("Factory cannot mutate the OMP handler context"); },
+				});
 				if (command.startsWith("start ")) {
 					if (!factoryBatchSubmitterRegistered() || !factoryDashboardOpenerRegistered()) {
 						ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
@@ -2099,9 +2121,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	pi.on("session_start", async (_event, ctx) => {
 		activeCtx = ctx;
-		// One bounded startup diagnostic, by cause. Without it a Factory handoff
-		// that cannot be reached only surfaces as a mystery on Shift+F, and the
-		// absent LUNA_FACTORY_ENABLED opt-in is blamed for a load failure.
+		resetTrace(ctx);
+		// One bounded startup diagnostic: a missing Factory controller that cannot
+		// be reached only surfaces as a mystery on Shift+F, and the absent
+		// LUNA_FACTORY_ENABLED opt-in is blamed for a load failure.
 		if (!factoryControllerRegistered()) {
 			ctx.ui.notify(`Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
 		}
@@ -2186,7 +2209,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		});
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_switch", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
+	pi.on("session_branch", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
+	pi.on("session_tree", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
+	pi.on("session_shutdown", (_event, ctx) => {
+		mode.session.clear();
+		traceSessionId = undefined;
+		activeCtx = ctx;
 		unregisterFactorySelection();
 		unregisterFactoryReconciler();
 		unregisterFactoryClaimInspector();
@@ -2196,18 +2225,21 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	// ---- live turn trace -----------------------------------------------------
 
 	pi.on("turn_start", (_event, eventCtx) => {
+		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
+		if (!ctxToUse) return;
 		mode.session.startTurn(Date.now());
-		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
-		if (ctxToUse) syncBatchProgress(ctxToUse);
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		syncBatchProgress(ctxToUse);
 		repaint();
 	});
-	pi.on("turn_end", (_event, eventCtx) => {
-		mode.session.endTurn(Date.now());
-		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
-		if (ctxToUse) {
-			rememberWaveEvidence(ctxToUse);
-			syncBatchProgress(ctxToUse);
-		}
+	pi.on("turn_end", (event, eventCtx) => {
+		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
+		if (!ctxToUse) return;
+		const message = event && typeof event === "object" && "message" in event ? event.message : undefined;
+		mode.session.endTurn(Date.now(), message);
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		rememberWaveEvidence(ctxToUse);
+		syncBatchProgress(ctxToUse);
 		repaint();
 	});
 	pi.on("agent_end", async (event, eventCtx) => {
@@ -2221,13 +2253,22 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			await advanceRepositoryBatch(ctxToUse);
 		}
 	});
-	pi.on("message_start", (event, ctx) => { rememberDeliveredJobs(event, ctx); rememberWaveEvidence(ctx); });
+	pi.on("message_start", (event, ctx) => {
+		const ctxToUse = traceContext(ctx);
+		if (!ctxToUse) return;
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		rememberDeliveredJobs(event, ctxToUse);
+		rememberWaveEvidence(ctxToUse);
+	});
 	pi.on("tool_result", (event, ctx) => {
+		const ctxToUse = traceContext(ctx);
+		if (!ctxToUse) return;
 		if (event && typeof event === "object" && "toolCallId" in event && typeof event.toolCallId === "string") {
-			rememberToolInvocation(ctx, event.toolCallId);
-			rememberTaskResult(ctx, event.toolCallId, event);
+			rememberToolInvocation(ctxToUse, event.toolCallId);
+			rememberTaskResult(ctxToUse, event.toolCallId, event);
 		}
-		rememberWaveEvidence(ctx);
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		rememberWaveEvidence(ctxToUse);
 	});
 	pi.on("tool_call", (event) => {
 		const { toolCallId, toolName, input } = event as { toolCallId?: string; toolName?: string; input?: { command?: unknown } };
@@ -2255,24 +2296,31 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	pi.on("tool_execution_start", (event, eventCtx) => {
 		const { toolCallId, toolName, args } = event as { toolCallId: string; toolName: string; args: unknown };
-		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
-		if (ctxToUse) rememberToolInvocation(ctxToUse, toolCallId);
+		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
+		if (!ctxToUse) return;
+		rememberToolInvocation(ctxToUse, toolCallId);
 		mode.session.startTool(toolCallId, toolName, args, Date.now());
 		repaint();
 	});
 	pi.on("tool_execution_update", (event, ctx) => {
 		const { toolCallId, partialResult } = event as { toolCallId: string; partialResult: unknown };
-		rememberToolInvocation(ctx, toolCallId);
+		const ctxToUse = traceContext(ctx);
+		if (!ctxToUse) return;
+		rememberToolInvocation(ctxToUse, toolCallId);
 		mode.session.updateTool(toolCallId, partialResult);
-		const ctxToUse = ctx ?? activeCtx;
-		if (ctxToUse) rememberTaskResult(ctxToUse, toolCallId, partialResult);
+		rememberTaskResult(ctxToUse, toolCallId, partialResult);
 		repaint();
 	});
 	pi.on("tool_execution_end", (event, eventCtx) => {
 		const { toolCallId, result, isError } = event as { toolCallId: string; result: unknown; isError: boolean };
+		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
+		if (!ctxToUse) return;
 		mode.session.endTool(toolCallId, result, isError === true, Date.now());
-		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
-		if (ctxToUse) { rememberToolInvocation(ctxToUse, toolCallId); rememberTaskResult(ctxToUse, toolCallId, result); rememberWaveEvidence(ctxToUse); syncBatchProgress(ctxToUse); }
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		rememberToolInvocation(ctxToUse, toolCallId);
+		rememberTaskResult(ctxToUse, toolCallId, result);
+		rememberWaveEvidence(ctxToUse);
+		syncBatchProgress(ctxToUse);
 		repaint();
 	});
 
