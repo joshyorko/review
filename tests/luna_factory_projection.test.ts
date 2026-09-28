@@ -434,3 +434,23 @@ test("confirmed not-applied preparation can retry without a native settlement", 
 	item.preparation = { phase: "checkout", owner, head: item.selected.head! };
 	assert.equal(projectItem(batch, item, { activeItemKeys: [], claims: [] }).actions.includes("retry"), true);
 });
+test("archived no-start evidence is required before exposing retained retry", () => {
+	const batch = makeBatch([selected("org/repo#1")]);
+	const item = batch.items[0]!;
+	const owner = `${batch.id}:${item.selected.key}`;
+	item.stage = "BLOCKED";
+	item.workspace = "/factory/workspaces/batch/item";
+	item.preparation = { phase: "clone", owner, head: item.selected.head! };
+	item.operations = [{
+		id: `${owner}:work`,
+		generation: item.ledger.generation,
+		subject: item.ledger.subject,
+		effect: "repository-work",
+		phase: "worker",
+		owner,
+		state: "not-applied",
+	}];
+	assert.equal(projectItem(batch, item, { activeItemKeys: [], claims: [] }).actions.includes("retry"), true);
+	item.operations = [{ ...item.operations[0]!, subject: { ...item.operations[0]!.subject, head: "b".repeat(40) } }];
+	assert.equal(projectItem(batch, item, { activeItemKeys: [], claims: [] }).actions.includes("retry"), false);
+});

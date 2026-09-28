@@ -44,6 +44,13 @@ test("missing retained workspace without positive no-start proof is not reconstr
   await assert.rejects(()=>internals.prepareWorkspace(f.batch,f.item,new AbortController().signal),/no-worker-start|initialization evidence/);
  }finally{await f.cleanup();}
 });
+test("retry refuses a retained workspace without positive initialization evidence",async()=>{
+ const f=fixture();try{
+  f.item.workspace=f.path;f.item.stage="BLOCKED";f.item.operation=intent(f);f.service.store.write(f.batch);
+  await assert.rejects(()=>f.service.retry(f.batch.id,f.item.selected.key,{}),/initialization evidence/);
+  assert.equal(f.item.stage,"BLOCKED");assert.equal(f.item.workspace,f.path);
+ }finally{await f.cleanup();}
+});
 test("ready retained checkout and worker modifications are preserved without clone or checkout",async()=>{
  const f=fixture();try{
   ready(f);f.item.attempts=1;writeFileSync(join(f.path,"value.txt"),"worker content\n");
