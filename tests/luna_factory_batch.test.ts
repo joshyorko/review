@@ -120,7 +120,7 @@ test("absence of a semantic result is neutral for patches but uncertain for insp
 	assert.equal(semanticOutcomeFor("inspect", "none"), "uncertain");
 	assert.equal(semanticOutcomeFor("inspect", "disproven"), "disproven");
 });
-test("batch status exposes Factory-private session role and stable identity without claiming Hub visibility", () => {
+test("batch status exposes Factory session role and retained identity alongside native Hub guidance", () => {
 	const batch = createBatch([selected("org/a#1", "inspect")], options("session"));
 	const item = batch.items[0]!;
 	item.operation = {
@@ -147,8 +147,8 @@ test("batch status exposes Factory-private session role and stable identity with
 	const status = batchSummary(batch, "/state");
 	assert.match(status, /worker intent/);
 	assert.ok(status.includes("batch-session-worker"));
-	assert.ok(status.includes("Factory-private worker session T1/T1-a1 (identity recorded; turn start not observed): /state/sessions/worker.jsonl"));
-	assert.match(status, /do not appear in Ctrl\+A/);
+	assert.ok(status.includes("Factory worker session T1/T1-a1 (identity recorded; turn start not observed): /state/sessions/worker.jsonl"));
+	assert.match(status, /Agent Hub for status, transcript focus, and cancellation/);
 });
 
 

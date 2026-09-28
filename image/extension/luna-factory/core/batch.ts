@@ -168,7 +168,7 @@ export function batchSummary(batch: Batch, root: string): string {
 					if (attempt.nativeJobIds.length > 0) identities.push(`  OMP task dispatch ${task.id}/${attempt.id}: ${attempt.nativeJobIds.join(", ")}`);
 					if (attempt.nativeAgentIds.length > 0) identities.push(`  OMP agent identity (start observed; liveness not inferred) ${task.id}/${attempt.id}: ${attempt.nativeAgentIds.join(", ")}`);
 					identities.push(...attempt.privateSessions.map((session) =>
-						`  Factory-private ${session.phase} session ${task.id}/${attempt.id} (${session.started ? "turn start observed; liveness not inferred" : "identity recorded; turn start not observed"}): ${session.sessionFile}`,
+						`  Factory ${session.phase} session ${task.id}/${attempt.id} (${session.started ? "turn start observed; liveness not inferred" : "identity recorded; turn start not observed"}): ${session.sessionFile}`,
 					));
 					const semantic = attempt.receipt?.semanticResult;
 					if (semantic) {
@@ -180,7 +180,7 @@ export function batchSummary(batch: Batch, root: string): string {
 			];
 		}),
 		...(batch.scopeRevisions.length ? [`Original scope NOT converged: ${batch.scopeRevisions.map((entry) => `${entry.item}: ${entry.reason}`).join("; ")}`] : []),
-		"Factory-private SDK sessions are not globally registered OMP agents and do not appear in Ctrl+A.",
+		"Live Factory workers use the host OMP Agent Hub for status, transcript focus, and cancellation; retained session evidence remains available here.",
 		`Usage: ${batch.usage.modelCalls} observed model calls; tokens/cost ${batch.usage.cost === null ? "unknown" : batch.usage.cost}. Stop-dispatch limits do not bound in-flight cost.`,
 		`/factory resume ${batch.id} · /factory inspect ${batch.id} · /factory pause ${batch.id} · /factory stop ${batch.id}`,
 	];

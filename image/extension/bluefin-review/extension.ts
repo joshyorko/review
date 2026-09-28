@@ -583,6 +583,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		traceSessionId = ctx.sessionManager?.getSessionId?.();
 	};
 	let factoryHandoffBatchId: string | undefined;
+	let factoryOpenOnly = false;
 	let factoryHandoffRequested = false;
 	let started: Promise<void> = Promise.resolve();
 	const recoveryBatches = new Map<string, PersistedRepositoryBatch>();
@@ -1688,39 +1689,45 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		if (action.kind === "close") return;
 		if (action.kind === "factory") {
-			factoryHandoffRequested = true;
-			// The dashboard hides the chord when Factory is unavailable; this is
-			// the residual path (a stale frame, or a caller that drives the action
-			// directly). Name the cause instead of reporting a bare "not loaded".
+			// Capture the selected work packet before awaiting the operator's
+			// outcome choice. Review selection can change while the menu is open,
+			// but an admitted Factory batch must remain immutable.
+			const capturedItems = mode.factorySelection("inspect");
 			if (!factoryControllerRegistered()) {
 				ctx.ui.notify(`Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
 				return;
 			}
-			const items = mode.chosenItems();
-			if (items.length === 0) {
-				ctx.ui.notify("Select at least one Review item before sending it to Factory", "warning");
+			const repositories = new Set(capturedItems.map((item) => item.repo));
+			const title = capturedItems.length === 0
+				? "Open Luna Factory"
+				: `Send ${capturedItems.length} selected item${capturedItems.length === 1 ? "" : "s"} across ${repositories.size} repositor${repositories.size === 1 ? "y" : "ies"} to Factory`;
+			const options: Array<string | { label: string; description?: string }> = capturedItems.length === 0
+				? [
+					{ label: "Open Factory", description: "View running and retained Factory work" },
+					"Cancel",
+				]
+				: [
+					{ label: "Implement locally", description: "Make and verify the change. Stop before opening a PR." },
+					{ label: "Inspect only", description: "Research the selected work. Make no changes." },
+					{ label: "Implement and prepare PR", description: "Make and verify the change, then prepare it for review." },
+					{ label: "Open Factory", description: "View running and retained Factory work" },
+					"Cancel",
+				];
+			const choice = await ctx.ui.select(title, options);
+			if (choice === "Open Factory") {
+				factoryHandoffRequested = true;
+				factoryOpenOnly = true;
 				return;
 			}
-			const repositories = new Set(items.map((item) => item.repo));
-			const title = `Send ${items.length} selected item${items.length === 1 ? "" : "s"} across ${repositories.size} repositor${repositories.size === 1 ? "y" : "ies"} to Factory`;
-			const options: Array<string | { label: string; description?: string }> = [
-				{ label: "Patch selected items", description: "Start Factory patch work for the selection" },
-				{ label: "Inspect selected items", description: "Run the read-only Factory inspection" },
-				{ label: "Prepare PR-ready patches", description: "Prepare patches for review-ready pull requests" },
-				{ label: "Factory status", description: "Show current Factory capacity and batches" },
-				"Cancel",
-			];
-			const choice = await ctx.ui.select(title, options);
-			const command = choice === "Patch selected items"
+			const command = choice === "Implement locally"
 				? "start patch"
-				: choice === "Inspect selected items"
+				: choice === "Inspect only"
 					? "start inspect"
-					: choice === "Prepare PR-ready patches"
+					: choice === "Implement and prepare PR"
 						? "start pr-ready"
-						: choice === "Factory status"
-							? "status"
-							: undefined;
+						: undefined;
 			if (command === undefined) return;
+			factoryHandoffRequested = true;
 			try {
 				// Delegate inherited/live capabilities with their original receiver. Factory
 				// captures only execution references; this handler's UI stays scoped here.
@@ -1738,7 +1745,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 						return;
 					}
 					const action = command.slice("start ".length) as "inspect" | "patch" | "pr-ready";
-					const handoff = await submitFactoryBatch(action, factoryCtx);
+					const handoff = await submitFactoryBatch(action, factoryCtx, capturedItems.map((item) => ({ ...item, action })));
 					ctx.ui.notify(`Factory batch ${handoff.batchId} submitted`, "info");
 					factoryHandoffBatchId = handoff.batchId;
 				} else {
@@ -1925,9 +1932,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (action.kind === "scope") reopen = true;
 			if (action.kind === "factory" && factoryHandoffRequested) {
 				const batchId = factoryHandoffBatchId;
+				const openOnly = factoryOpenOnly;
 				factoryHandoffBatchId = undefined;
+				factoryOpenOnly = false;
 				factoryHandoffRequested = false;
-				if (batchId !== undefined) await openFactoryDashboard(ctx, batchId);
+				if (batchId !== undefined || openOnly) await openFactoryDashboard(ctx, batchId);
 				reopen = true;
 			}
 		} catch {

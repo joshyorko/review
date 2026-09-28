@@ -946,7 +946,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				if (attempt.nativeAgentIds.length > 0) identities.push(`OMP agent identity (start observed; liveness not inferred): ${attempt.nativeAgentIds.join(", ")}`);
 				if (attempt.steeredAgentId !== undefined) identities.push(`OMP agent Hub-steered; attempt invalidated: ${attempt.steeredAgentId}`);
 				for (const session of attempt.privateSessions) {
-					identities.push(`Factory-private ${session.phase} session (${session.started ? "turn start observed; liveness not inferred" : "identity recorded; turn start not observed"}): ${session.sessionFile}`);
+					identities.push(`Factory ${session.phase} session (${session.started ? "turn start observed; liveness not inferred" : "identity recorded; turn start not observed"}): ${session.sessionFile}`);
 				}
 				return identities.length > 0 ? [`execution ${task.id}/${attempt.id}: ${identities.join("; ")}`] : [];
 			})),
@@ -1066,10 +1066,15 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				}
 				if (action.kind === "workspace" || action.kind === "session") {
 					const item = current.batches.find((b) => b.id === action.batchId)?.items.find((i) => i.selected.key === action.itemKey);
+					const active = action.kind === "session" && current.activeItemKeys?.includes(action.itemKey) === true;
+					if (active) {
+						report("Live Factory workers are in OMP Agent Hub (Alt+A); use its native focus or kill controls. Factory will record the terminal cancellation.", "info");
+						return;
+					}
 					const value = action.kind === "workspace" ? item?.workspace : item?.ledger.tasks.flatMap((task) => task.attempts.flatMap((attempt) => attempt.privateSessions.filter((session) => session.phase === "worker"))).at(-1)?.sessionFile ?? item?.sessions.at(-1);
 					if (action.kind === "session" && value) {
 						const preview = sessionEvidence(readBoundedEvidence(current.root ?? factoryStateRoot(env), value));
-						await custom<void>((tui, _theme, _keys, done) => new EvidenceViewer({ preview, title: "Worker session", tui: tui as { requestRender(): void }, done: () => done(), matchKey }), overlay);
+						await custom<void>((tui, _theme, _keys, done) => new EvidenceViewer({ preview, title: "Retained worker session", tui: tui as { requestRender(): void }, done: () => done(), matchKey }), overlay);
 					} else { if (value) ctx.ui?.pasteToEditor?.(value); report(value ? `Workspace path copied to the prompt: ${value}` : `${action.kind} unavailable`); }
 					return;
 				}
@@ -1244,10 +1249,10 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		dashboardReaderUnsubscribe?.();
 		dashboardReaderUnsubscribe = registerFactoryDashboardReader(dashboardSnapshot);
 	};
-	const submitSelectedBatch = async (action: FactoryAction, context: unknown, settings: Partial<BatchOptions> = {}): Promise<{ batchId: string; text: string }> => {
+	const submitSelectedBatch = async (action: FactoryAction, context: unknown, capturedItems?: readonly SelectedItem[], settings: Partial<BatchOptions> = {}): Promise<{ batchId: string; text: string }> => {
 		const ctx = context as FactoryCtx;
 		const service = batches();
-		const items = selectedFactoryItems(action);
+		const items = capturedItems === undefined ? selectedFactoryItems(action) : capturedItems.map((item) => ({ ...item, action }));
 		const batch = await service.submit(items, {
 			capacity: settings.capacity ?? service.capacity,
 			maxAttempts: settings.maxAttempts ?? 3,
@@ -1313,7 +1318,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		return service.status(id);
 	};
 	const unregisterBatchController = registerFactoryController(batchCommand);
-	const unregisterBatchSubmitter = registerFactoryBatchSubmitter((action, context) => submitSelectedBatch(action, context));
+	const unregisterBatchSubmitter = registerFactoryBatchSubmitter((action, context, selectedItems) => submitSelectedBatch(action, context, selectedItems));
 	registerDashboardReader();
 	dashboardOpenerUnsubscribe = registerFactoryDashboardOpener((context, focusBatchId) => openDashboard(context as FactoryCtx, focusBatchId));
 	host.on("session_shutdown", async () => {
