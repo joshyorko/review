@@ -4115,7 +4115,9 @@ test("slay prompts define bounded review, checkout-isolated repair, and live-rul
 	}
 	assert.match(slay, /`task` tool once with one fresh reviewer item per pull request/);
 	assert.match(slay, /Do not use eval workpool/);
-	assert.match(slay, /Do not request OMP-native .*isolated.* task execution/);\n\tassert.match(slay, /unique checkout/);\n\tassert.doesNotMatch(slay, /fresh isolated fixer/);
+	assert.match(slay, /Do not request OMP-native .*isolated.* task execution/);
+	assert.match(slay, /unique checkout/);
+	assert.doesNotMatch(slay, /fresh isolated fixer/);
 	assert.match(slay, /both `pull_request` and explicit `repo`/);
 	assert.match(slay, /\$HOME\/worktrees/);
 	assert.match(slay, /rules\/branches\/<branch>/);
