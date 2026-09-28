@@ -42,6 +42,17 @@ function transitionOperation(item: BatchItem, update: Partial<OperationReceipt>)
 	if (!item.operation) throw new Error("operation receipt unavailable");
 	item.operation = { ...item.operation, ...update };
 }
+function hasPreparationRecoveryEvidence(batch: Batch, item: BatchItem): boolean {
+	const owner = `${batch.id}:${item.selected.key}`;
+	const noWorker = item.attempts === 0 && item.sessions.length === 0 && item.ledger.tasks.every((task) => task.attempts.length === 0);
+	const preparation = item.preparation;
+	if (!noWorker || preparation === undefined || preparation.owner !== owner || preparation.head !== item.selected.head) return false;
+	return [...item.operations, ...(item.operation === undefined ? [] : [item.operation])].some((operation) =>
+		operation.owner === owner && operation.generation === item.ledger.generation && operation.phase === "worker" &&
+		["not-applied", "unknown", "intent"].includes(operation.state) &&
+		operation.subject.repo === item.ledger.subject.repo && operation.subject.base === item.ledger.subject.base &&
+		operation.subject.head === item.ledger.subject.head);
+}
 export interface BatchOptions { capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[] }
 interface Running { batch: Batch; item: BatchItem; controller: AbortController; promise: Promise<void> }
 
@@ -387,9 +398,26 @@ export class BatchService {
 		for (const resource of [`repo:${item.selected.repo}`, `item:${item.selected.key}`]) {
 			const conflict = this.claims.conflict(resource, owner); if (conflict) throw new Error(conflict);
 		}
-		if ((item.operation?.state === "unknown" || item.operation?.state === "intent") && !(item.attempts === 0 && item.sessions.length === 0 && item.preparation && item.preparation.phase !== "ready" && item.preparation.owner === owner && item.preparation.head === item.selected.head && item.operation.phase === "worker" && item.operation.owner === owner && item.operation.generation === item.ledger.generation)) {
+		const preparationRecovery = hasPreparationRecoveryEvidence(batch, item);
+		const archivedPreparation = item.operation === undefined && item.operations.some((operation) =>
+			operation.phase === "worker" && ["not-applied", "unknown", "intent"].includes(operation.state));
+		if ((item.operation?.state === "not-applied" || archivedPreparation) && item.attempts === 0 && !preparationRecovery) {
+			throw new Error("retained workspace initialization evidence is missing or mismatched; preserve and inspect before retry");
+		}
+		if ((item.operation?.state === "unknown" || item.operation?.state === "intent") && !preparationRecovery) {
 			const attempt = item.ledger.tasks[0]?.attempts.at(-1);
-			if (!attempt || item.settlement?.outcome !== "cancelled" || item.settlement.attemptId !== attempt.id || !item.settlement.sessionFiles.length || item.settlement.sessionFiles.some((path) => !attempt.privateSessions.some((session) => session.sessionFile === path))) throw new Error("native settlement is unproved; preserve claims and inspect before retry");
+			const subject = item.ledger.subject;
+			const operation = item.operation;
+			const sessionFiles = attempt?.privateSessions.map((session) => session.sessionFile) ?? [];
+			if (!attempt || attempt.state !== "abandoned" || item.settlement?.outcome !== "cancelled" || !sessionFiles.length ||
+				item.settlement.sessionFiles.length !== sessionFiles.length || item.settlement.attemptId !== attempt.id || attempt.generation !== item.ledger.generation ||
+				attempt.subject.repo !== subject.repo || attempt.subject.base !== subject.base || attempt.subject.head !== subject.head ||
+				item.settlement.sessionFiles.some((path, index) => path !== sessionFiles[index] || !item.sessions.includes(path)) ||
+				operation.phase !== "worker" || operation.owner !== owner || operation.attemptId !== attempt.id ||
+				operation.generation !== attempt.generation || operation.subject.repo !== attempt.subject.repo ||
+				operation.subject.base !== attempt.subject.base || operation.subject.head !== attempt.subject.head) {
+				throw new Error("native settlement is unproved; preserve claims and inspect before retry");
+			}
 		}
 		await this.github.assertFresh(item.selected);
 		this.abandon(item, "operator requested retry after inspecting retained workspace; original budgets retained");

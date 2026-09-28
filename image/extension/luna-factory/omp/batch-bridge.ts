@@ -52,7 +52,7 @@ export interface FactoryBatchHandoff {
 	readonly text: string;
 }
 
-type BatchSubmitter = (action: FactoryAction, context: unknown) => Promise<FactoryBatchHandoff>;
+type BatchSubmitter = (action: FactoryAction, context: unknown, selectedItems?: readonly SelectedItem[]) => Promise<FactoryBatchHandoff>;
 type DashboardReader = () => FactoryDashboardSnapshot;
 type DashboardOpener = (context: unknown, batchId?: string) => Promise<void>;
 type BridgeState = {
@@ -109,9 +109,9 @@ export function registerFactoryBatchSubmitter(handler: BatchSubmitter): () => vo
 	return () => { if (state.submitter === handler) state.submitter = undefined; };
 }
 
-export async function submitFactoryBatch(action: FactoryAction, context: unknown): Promise<FactoryBatchHandoff> {
+export async function submitFactoryBatch(action: FactoryAction, context: unknown, selectedItems?: readonly SelectedItem[]): Promise<FactoryBatchHandoff> {
 	if (!state.submitter) throw new Error(`Factory is not loaded; ${factoryLoadDiagnostic()}`);
-	return state.submitter(action, context);
+	return state.submitter(action, context, selectedItems);
 }
 export function factoryBatchSubmitterRegistered(): boolean { return state.submitter !== undefined; }
 

@@ -227,7 +227,7 @@ migrate_legacy_state() {
     base="${item##*/}"
     [[ "$base" == "." || "$base" == ".." || "$base" == "$sif_name" ]] && continue
     if [[ ! -e "$target_home/$base" ]]; then
-      if ! cp -a "$item" "$target_home/" 2>/dev/null; then
+      if ! cp -R --no-preserve=ownership "$item" "$target_home/" 2>/dev/null; then
         echo "ERROR: failed to migrate legacy state item ${item} to ${target_home}; check permissions and available space." >&2
         return 1
       fi
@@ -424,22 +424,36 @@ review-appliance *appliance_args:
     INSTANCE_WORKSPACE="${INSTANCE_ROOT}/workspace"
     INSTANCE_TMP="${INSTANCE_ROOT}/tmp"
     CLAIMS_ROOT="${BLUEFIN_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
+    mkdir -p "$INSTANCE_HOME" "$INSTANCE_WORKSPACE" "$INSTANCE_TMP"
+    migrate_legacy_state "${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review" "$INSTANCE_HOME" "bluefin-review.sif"
+    prepare_factory_state_dirs "$INSTANCE_HOME"
+    mkdir -p "$INSTANCE_HOME/.omp" "$INSTANCE_HOME/.config/pulse"
     mkdir -p "$CLAIMS_ROOT"
     report_launcher_identity
     CONTAINER_NAME="bluefin-review-${INSTANCE_KEY}-$(date +%s)-$$"
     KVM_FAILURE=""
     if kvm_runtime_ready && [[ "$IMAGE" != *.sif && ! -f "$IMAGE" ]]; then
       ensure_image "$IMAGE" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
+      PODMAN_CONNECTION="$(podman_selected_connection)"
+      IFS=$'\t' read -r PODMAN_URI _ <<<"$PODMAN_CONNECTION"
+      PODMAN_HOME_MOUNT="${INSTANCE_HOME}:/home/bluefin:rw,z"
+      PODMAN_WORKSPACE_MOUNT="${INSTANCE_WORKSPACE}:/workspace:rw,z"
+      PODMAN_TMP_MOUNT="${INSTANCE_TMP}:/tmp:rw,z"
       CLAIMS_MOUNT="${CLAIMS_ROOT}:/claims:rw"
-      if [[ "${CONTAINER_HOST:-}" == ssh://* || "${FAKE_REMOTE_DEFAULT:-}" == 1 ]]; then CLAIMS_MOUNT="bluefin-review-mutation-claims:/claims:rw"; fi
+      if [[ -n "$PODMAN_URI" && "$PODMAN_URI" != unix://* ]]; then
+        PODMAN_HOME_MOUNT="bluefin-review-${INSTANCE_KEY}-home:/home/bluefin:rw"
+        PODMAN_WORKSPACE_MOUNT="bluefin-review-${INSTANCE_KEY}-workspace:/workspace:rw"
+        PODMAN_TMP_MOUNT="bluefin-review-${INSTANCE_KEY}-tmp:/tmp:rw"
+        CLAIMS_MOUNT="bluefin-review-mutation-claims:/claims:rw"
+      fi
       report_podman_image_identity "$IMAGE" "review appliance" "$IS_OVERRIDE" "$MIN_REVIEW_APPLIANCE_VERSION"
       ARGS=(
         run --runtime=krun --rm --interactive --tty --name "$CONTAINER_NAME"
         --userns "keep-id:uid=65532,gid=65532"
-        --volume "bluefin-review-${INSTANCE_KEY}-home:/home/bluefin:rw"
-        --volume "bluefin-review-${INSTANCE_KEY}-workspace:/workspace:rw"
-        --volume "bluefin-review-${INSTANCE_KEY}-tmp:/tmp:rw"
-        --volume "${CLAIMS_MOUNT}"
+        --volume "$PODMAN_HOME_MOUNT"
+        --volume "$PODMAN_WORKSPACE_MOUNT"
+        --volume "$PODMAN_TMP_MOUNT"
+        --volume "$CLAIMS_MOUNT"
         --env "LUNA_FACTORY_CLAIMS_ROOT=/claims"
         --env GH_TOKEN --env GITHUB_TOKEN --env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN
         --env COPILOT_INTEGRATION_ID
