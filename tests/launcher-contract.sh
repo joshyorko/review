@@ -696,6 +696,9 @@ mock_omp_log="$scratch/omp.log"
 cat >"$scratch/bin/omp" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$mock_omp_log"
+if [[ -n "\${REVIEW_CONTRACT_CWD_FILE:-}" ]]; then
+  printf '%s\n' "\$PWD" >"\$REVIEW_CONTRACT_CWD_FILE"
+fi
 exit 0
 EOF
 chmod +x "$scratch/bin/omp"
@@ -756,6 +759,79 @@ assert_eq "$(grep -o -- '--extension' <<<"$absent_call" | wc -l | xargs)" "1" "b
   fail "bin/omp-review did not pass the Review extension without Factory: $absent_call"
 [[ "$absent_stderr" == *"Luna Factory extension is not packaged"* ]] ||
   fail "bin/omp-review did not report the missing Factory package: $absent_stderr"
+
+# Native task isolation needs a Git baseline. Keep an existing caller checkout
+# as-is, including its current HEAD and uncommitted files.
+caller_checkout="$scratch/caller-checkout"
+mkdir -p "$caller_checkout"
+git -C "$caller_checkout" init -q
+git -C "$caller_checkout" config user.name "Review Contract"
+git -C "$caller_checkout" config user.email "review-contract@localhost"
+printf 'committed input\n' >"$caller_checkout/input.txt"
+git -C "$caller_checkout" add input.txt
+git -C "$caller_checkout" commit -qm "test: caller baseline"
+caller_head="$(git -C "$caller_checkout" rev-parse HEAD)"
+printf 'caller edit\n' >>"$caller_checkout/input.txt"
+printf 'caller data\n' >"$caller_checkout/keep.txt"
+caller_status="$(git -C "$caller_checkout" status --porcelain)"
+caller_cwd_file="$scratch/caller.cwd"
+(
+  cd "$caller_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token REVIEW_CONTRACT_CWD_FILE="$caller_cwd_file" \
+    HOME="$scratch/caller-home" PATH="$scratch/bin:$PATH" "$source_only/bin/omp-review" --repo owner/repo >/dev/null 2>&1
+) || fail "bin/omp-review failed inside an existing caller checkout"
+[[ "$(cat "$caller_cwd_file")" == "$caller_checkout" ]] ||
+  fail "bin/omp-review did not retain the caller Git checkout"
+[[ "$(git -C "$caller_checkout" rev-parse HEAD)" == "$caller_head" ]] ||
+  fail "bin/omp-review changed the caller checkout baseline"
+[[ "$(git -C "$caller_checkout" status --porcelain)" == "$caller_status" ]] ||
+  fail "bin/omp-review changed caller checkout files"
+[[ "$(cat "$caller_checkout/keep.txt")" == 'caller data' ]] ||
+  fail "bin/omp-review removed caller data"
+
+# Outside a Git checkout, source mode creates its own committed isolation
+# baseline under user state and leaves the invocation directory untouched.
+outside_checkout="$scratch/outside-checkout"
+mkdir -p "$outside_checkout"
+printf 'keep me\n' >"$outside_checkout/caller.txt"
+outside_home="$scratch/outside-home"
+outside_cwd_file="$scratch/outside.cwd"
+(
+  cd "$outside_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token REVIEW_CONTRACT_CWD_FILE="$outside_cwd_file" \
+    HOME="$outside_home" PATH="$scratch/bin:$PATH" "$source_only/bin/omp-review" --repo owner/repo >/dev/null 2>&1
+) || fail "bin/omp-review failed outside a Git checkout"
+source_coordinator="$outside_home/.local/state/review/coordinator"
+[[ "$(cat "$outside_cwd_file")" == "$source_coordinator" ]] ||
+  fail "bin/omp-review did not enter its source coordinator repository"
+[[ "$(git -C "$source_coordinator" rev-parse --is-inside-work-tree)" == true ]] ||
+  fail "bin/omp-review source coordinator is not a Git repository"
+[[ "$(git -C "$source_coordinator" log -1 --format=%s)" == 'chore: initialize Review coordinator' ]] ||
+  fail "bin/omp-review source coordinator has no baseline commit"
+[[ -z "$(git -C "$source_coordinator" status --porcelain)" ]] ||
+  fail "bin/omp-review source coordinator is not clean"
+source_coordinator_head="$(git -C "$source_coordinator" rev-parse HEAD)"
+(
+  cd "$outside_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token REVIEW_CONTRACT_CWD_FILE="$outside_cwd_file" \
+    HOME="$outside_home" PATH="$scratch/bin:$PATH" "$source_only/bin/omp-review" --repo owner/repo >/dev/null 2>&1
+) || fail "bin/omp-review failed when reusing its source coordinator"
+[[ "$(git -C "$source_coordinator" rev-parse HEAD)" == "$source_coordinator_head" ]] ||
+  fail "bin/omp-review changed the reused source coordinator baseline"
+printf 'keep coordinator data\n' >"$source_coordinator/operator-data.txt"
+dirty_coordinator_stderr="$(
+  cd "$outside_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token HOME="$outside_home" PATH="$scratch/bin:$PATH" \
+    "$source_only/bin/omp-review" --repo owner/repo 2>&1 >/dev/null
+)" && fail "bin/omp-review accepted a dirty source coordinator"
+[[ "$dirty_coordinator_stderr" == *"source coordinator has uncommitted files"* ]] ||
+  fail "bin/omp-review did not explain its dirty source coordinator refusal: $dirty_coordinator_stderr"
+[[ "$(git -C "$source_coordinator" rev-parse HEAD)" == "$source_coordinator_head" ]] ||
+  fail "bin/omp-review changed the dirty source coordinator baseline"
+[[ "$(cat "$source_coordinator/operator-data.txt")" == 'keep coordinator data' ]] ||
+  fail "bin/omp-review removed source coordinator data"
+[[ "$(cat "$outside_checkout/caller.txt")" == 'keep me' ]] ||
+  fail "bin/omp-review changed the non-repository caller directory"
 rm -rf "$source_only"
 
 # --- 3b. Factory runtime config crosses the appliance boundary ---------------

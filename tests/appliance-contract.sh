@@ -101,6 +101,7 @@ require "$containerfile" \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"' \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
   'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory'
+# shellcheck disable=SC2016 # These are literal source strings, not expansions.
 require image/appliance/entrypoint.sh \
   'if ((EUID == 0)); then' \
   'os.setgroups([65532])' \

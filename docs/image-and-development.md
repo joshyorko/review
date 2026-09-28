@@ -19,6 +19,11 @@ bin/omp-review acme/widgets
 scripts/brew-dev build self-hosted
 ```
 
+The source launcher keeps an existing Git checkout as OMP's isolation baseline.
+When launched outside Git, it prepares a committed coordinator at
+`$HOME/.local/state/review/coordinator`; it leaves the caller's directory and
+files unchanged.
+
 The personal package workflow publishes an immutable OCI image and native SIF from the same committed source ref, then updates the existing `bluefin-review-dev` formula in `joshyorko/homebrew-review-dev`. Those formula and `bluefin review` names remain compatibility aliases; `bin/omp-review` is the neutral source entry point.
 
 ## Validation

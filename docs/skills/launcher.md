@@ -38,6 +38,12 @@ GitHub-only Review is the default and makes no Hive request. Hive read-side data
 
 The appliance prefers `podman run --runtime=krun` when Podman, krun, and `/dev/kvm` are available. Report missing prerequisites before isolated Apptainer fallback. Every run stays in the foreground with a unique container name and target-specific home, workspace, and scratch directories. `Ctrl-C` stops only the active invocation; never add detached or resurrected worker behavior.
 
+The source launcher keeps the caller's current directory when it is already
+inside a Git checkout. Outside Git, it creates or reuses
+`$HOME/.local/state/review/coordinator` with a committed baseline for OMP's
+native isolated tasks. It refuses a non-empty non-repository or a dirty
+coordinator without cleaning either it or the caller's files.
+
 The appliance owns its OMP profile and MCP configuration. Host OMP configuration is opt-in through `REVIEW_INHERIT_OMP_CONFIG=1`. Keep the explicit credential allowlist and Apptainer `--no-eval` boundary; do not put secrets in argv, logs, image layers, or unapproved host mounts. GitHub permission remains authoritative.
 
 ## Personal package compatibility

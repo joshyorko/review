@@ -3132,7 +3132,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	const captured = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.deepEqual(captured.waveJobIds, ["worker-1", "worker-2"], "staggered workers are accumulated by exact wave identity");
 	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through review, repair, and landing:/m);
-	assert.match(pi.messages[0], /Use the `task` tool once with one fresh reviewer item per pull request/);
+	assert.match(pi.messages[0], /Use the `task` tool once with one fresh isolated reviewer item per pull request/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/b/);
 
@@ -3996,7 +3996,10 @@ test("one task fan-out retains every sibling job independently across consumptio
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	pi.events.get("tool_call")({ toolName: "task", toolCallId: "fan-out", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolName: "task", toolCallId: "fan-out", input: { tasks: [
+		{ task: "first", isolated: true },
+		{ task: "second", isolated: true },
+	] } }, ctx);
 	ctx.asyncJobs.running = ["First", "Second"].map((agentId) => ({ id: `${agentId}-2`, agentId, type: "task", status: "running", startTime: Date.now() }));
 	pi.events.get("tool_result")({ toolName: "task", toolCallId: "fan-out", details: {
 		async: { type: "task", state: "running", jobId: "First-2" }, progress: [{ id: "First", index: 0 }, { id: "Second", index: 1 }],
@@ -4159,7 +4162,7 @@ test("slay prompts require native per-item isolation and live-rule landing", () 
 	assert.match(slay, /Do not use eval workpool/);
 	assert.match(slay, /fresh isolated fixer/);
 	assert.doesNotMatch(slay, /Do not request OMP-native/);
-	assert.match(slay, /unique target checkout/);
+	assert.match(slay, /distinct target checkout/);
 	assert.match(slay, /both `pull_request` and explicit `repo`/);
 	assert.match(slay, /\$HOME\/worktrees/);
 	assert.match(slay, /rules\/branches\/<branch>/);
@@ -4186,7 +4189,7 @@ test("fix waves repair conflicts without landing them", () => {
 	const sibling = queueItem({ id: 7, repo: dirty.repo, mergeState: "dirty" });
 	const batch = actionPrompt({ kind: "fix", item: dirty, items: [dirty, sibling] });
 	assert.match(batch, /merge=dirty/);
-	assert.match(batch, /`task` tool once with one fresh item/);
+	assert.match(batch, /`task` tool once with one fresh isolated item/);
 	assert.match(batch, /Never approve or merge/);
 });
 
@@ -4747,7 +4750,7 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	const batch = mode.chosenItems();
 	const prompt = actionPrompt({ kind: "fix", item: batch[0], items: batch });
 	assert.match(prompt, /Use the `task` tool once/);
-	assert.match(prompt, /`task` tool once with one fresh item per issue through OMP workflowz/);
+	assert.match(prompt, /`task` tool once with one fresh isolated item per issue through OMP workflowz/);
 	assert.match(prompt, /`gh repo clone .*under `\$HOME\/worktrees`/s);
 	assert.match(prompt, /Never assume the working directory is a checkout/);
 	assert.doesNotMatch(prompt, /maximum of 7|fix-and-merge|approve and merge/);
@@ -6081,7 +6084,7 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 
 	assert.equal(pi.messages.length, 1, "selected issues dispatched without requiring Hive");
 	assert.match(pi.messages[0], /Implement this repository wave for projectbluefin\/unmanaged/);
-	assert.match(pi.messages[0], /Use the `task` tool once with one fresh item/);
+	assert.match(pi.messages[0], /Use the `task` tool once with one fresh isolated item/);
 	assert.match(pi.messages[0], /gh repo clone <owner\/repo>/);
 	assert.match(pi.messages[0], /one review-ready pull request per issue/);
 	assert.match(pi.messages[0], /SUBAGENT-RULES/);
