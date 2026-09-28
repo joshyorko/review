@@ -15,6 +15,7 @@ import test from "node:test";
 
 import { admit } from "../image/extension/luna-factory/core/admission.ts";
 import { evaluateRun } from "../image/extension/luna-factory/core/convergence.ts";
+import { evaluateWorkGraph, type GraphRelation, type WorkGraphObservation } from "../image/extension/luna-factory/core/graph.ts";
 import { criterionProven, reconcileReceipt } from "../image/extension/luna-factory/core/evidence.ts";
 import { JOURNAL_ENTRY, durabilityOf, journalRecord, parseJournal, readJournal } from "../image/extension/luna-factory/core/journal.ts";
 import { emptyLedger, findTask } from "../image/extension/luna-factory/core/model.ts";
@@ -29,7 +30,7 @@ import type {
 	Subject,
 	TaskId,
 } from "../image/extension/luna-factory/core/model.ts";
-import { createBatch, type FactoryAction, type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
+import { batchGraphDecision, createBatch, type FactoryAction, type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
 import { renderCompletionReceipt } from "../image/extension/luna-factory/core/receipt.ts";
 import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
 import { artifactRefError, changedPathError, parseCandidate, parseReceipt, parseSubject } from "../image/extension/luna-factory/core/schema.ts";
@@ -2835,4 +2836,102 @@ test("OMP task running status without a request remains unknown, not RUNNING", a
 	assert.equal(final.tasks[0]!.attempts[0]!.state, "abandoned");
 	assert.deepEqual(final.tasks[0]!.attempts[0]!.nativeJobIds, ["job-setup"]);
 	assert.deepEqual(final.tasks[0]!.attempts[0]!.nativeAgentIds, []);
+});
+
+function graphNode(key: string, state: WorkGraphObservation["nodes"][number]["state"] = "QUEUED", overrides: Partial<WorkGraphObservation["nodes"][number]> = {}) {
+	return {
+		key,
+		generation: "G1",
+		subject: { repo: "example/repo", base: "a".repeat(40) },
+		required: true,
+		target: "verified-patch" as const,
+		state,
+		...overrides,
+	};
+}
+
+test("typed work graph keeps true prerequisites, parallel READY work, and isolated UNKNOWN lanes", () => {
+	const relations: GraphRelation[] = [
+		{ from: "example/repo#2", to: "example/repo#1", kind: "requires", authority: "authoritative", source: "selected dependency" },
+		{ from: "example/repo#3", to: "example/repo#1", kind: "requires", authority: "authoritative", source: "selected dependency" },
+	];
+	const observation: WorkGraphObservation = {
+		generation: "G1",
+		nodes: [
+			graphNode("example/repo#1"),
+			graphNode("example/repo#2"),
+			graphNode("example/repo#3"),
+			graphNode("example/repo#4", "UNKNOWN"),
+		],
+		relations,
+	};
+	const before = evaluateWorkGraph(observation);
+	assert.deepEqual(before.ready, ["example/repo#1"]);
+	assert.equal(before.nodes.find((node) => node.key === "example/repo#2")?.decision, "BLOCKED");
+	assert.equal(before.nodes.find((node) => node.key === "example/repo#4")?.decision, "UNKNOWN");
+	assert.equal(before.verdict, "ACTIVE");
+
+	const after = evaluateWorkGraph({
+		...observation,
+		nodes: observation.nodes.map((node) => node.key === "example/repo#1"
+			? { ...node, state: "DONE" as const, proof: "verified-patch" as const, proofCurrent: true }
+			: node),
+	});
+	assert.deepEqual(after.ready, ["example/repo#2", "example/repo#3"]);
+	assert.equal(after.nodes.find((node) => node.key === "example/repo#4")?.decision, "UNKNOWN");
+});
+
+test("graph relation vocabulary preserves non-gating edges and marks inferred order as a hint", () => {
+	const relations: GraphRelation[] = [
+		{ from: "pr#2", to: "issue#1", kind: "implements", authority: "authoritative", source: "closing reference" },
+		{ from: "issue#3", to: "issue#1", kind: "contains", authority: "authoritative", source: "parent reference" },
+		{ from: "pr#4", to: "pr#2", kind: "requires", authority: "inferred", source: "model proposal", reason: "textual ordering only" },
+	];
+	const decision = evaluateWorkGraph({
+		generation: "G1",
+		nodes: [graphNode("issue#1"), graphNode("pr#2"), graphNode("issue#3"), graphNode("pr#4")],
+		relations,
+	});
+	assert.deepEqual(decision.ready, ["issue#1", "pr#2", "issue#3", "pr#4"]);
+	assert.equal(decision.softHints.length, 1);
+	assert.match(decision.softHints[0]!, /model proposal/);
+});
+
+test("graph re-observation invalidates stale proof and rejects authoritative cycles", () => {
+	const base: WorkGraphObservation = {
+		generation: "G1",
+		nodes: [graphNode("a", "DONE", { proof: "verified-patch", proofCurrent: false }), graphNode("b")],
+		relations: [{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "dependency" }],
+	};
+	assert.equal(evaluateWorkGraph(base).nodes.find((node) => node.key === "a")?.decision, "UNKNOWN");
+	assert.throws(() => evaluateWorkGraph({
+		...base,
+		relations: [
+			{ from: "a", to: "b", kind: "requires", authority: "authoritative", source: "dependency" },
+			{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "dependency" },
+		],
+	}), /graph dependency cycle/);
+});
+
+test("graph distinguishes converged from autonomously quiescent", () => {
+	const done = graphNode("done", "DONE", { proof: "verified-patch", proofCurrent: true });
+	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [done], relations: [] }).verdict, "CONVERGED");
+	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [graphNode("blocked", "BLOCKED")], relations: [] }).verdict, "AUTONOMOUSLY_QUIESCENT");
+});
+
+test("batch execution admits only graph-ready work and retains prerequisite blockers", () => {
+	const batch = createBatch([
+		{ key: "example/repo#1", repo: "example/repo", number: 1, kind: "issue", action: "patch", overlaps: [], base: "a".repeat(40), head: "b".repeat(40), acceptanceRevision: "r1" },
+		{ key: "example/repo#2", repo: "example/repo", number: 2, kind: "issue", action: "patch", overlaps: [], base: "a".repeat(40), head: "c".repeat(40), acceptanceRevision: "r1" },
+	], {
+		id: "batch-graph1234",
+		capacity: 2,
+		maxAttempts: 2,
+		maxTotalAttempts: 4,
+		mode: "retain",
+		dependencies: [{ item: "example/repo#2", requires: "example/repo#1", stage: "verified-patch" }],
+	});
+	const decision = batchGraphDecision(batch);
+	assert.deepEqual(decision.ready, ["example/repo#1"]);
+	assert.match(decision.nodes.find((node) => node.key === "example/repo#2")!.blockers[0]!, /prerequisite/);
 });

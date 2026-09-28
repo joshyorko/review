@@ -36,6 +36,13 @@ revision link is the skill itself.
 | CONVERGED ≠ QUIESCENT; empty queues and returned workers prove nothing | `core/convergence.ts` — `evaluateRun` |
 | Required safety defects are not scope creep; optional cleanup is not a successor mission | `core/convergence.ts` blockers + `core/receipt.ts` |
 | Completion creates no merge or deploy authority | `core/receipt.ts` — the receipt says so explicitly |
+| Typed convergence graph keeps prerequisite, overlap, inferred, and subject/generation evidence separate | `core/graph.ts` — `evaluateWorkGraph`; `core/batch.ts` — `batchGraphDecision` |
+
+The batch dispatcher evaluates this graph before admission. Authoritative
+`requires` and `stacked-on` edges gate work; `contains` and `implements` are
+descriptive; inferred edges are hints only and never authorize mutation.
+Unknown subject or proof state remains unknown, and a graph with no ready or
+active lane is `AUTONOMOUSLY_QUIESCENT`, not converged.
 
 ## Command surface
 
