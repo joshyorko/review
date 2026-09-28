@@ -4102,7 +4102,7 @@ test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async
 	assert.match(claims.conflict("repo:projectbluefin/review", "review:other:0") ?? "", /owned by review:/);
 });
 
-test("slay prompts define bounded review, checkout-isolated repair, and live-rule landing", () => {
+test("slay prompts require native per-item isolation and live-rule landing", () => {
 	const item = queueItem();
 	const sibling = queueItem({ id: 7, repo: item.repo });
 	const slay = actionPrompt({ kind: "slay", item, items: [item, sibling] });
@@ -4112,12 +4112,13 @@ test("slay prompts define bounded review, checkout-isolated repair, and live-rul
 		assert.match(prompt, /Evidence is bounded and read once/);
 		assert.match(prompt, /--name-only/);
 		assert.doesNotMatch(prompt, /--json [\w,]*\bbody\b/);
+		assert.match(prompt, /isolated: true/);
 	}
-	assert.match(slay, /`task` tool once with one fresh reviewer item per pull request/);
+	assert.match(slay, /`task` tool once with one fresh isolated reviewer item per pull request/);
 	assert.match(slay, /Do not use eval workpool/);
-	assert.match(slay, /Do not request OMP-native .*isolated.* task execution/);
-	assert.match(slay, /unique checkout/);
-	assert.doesNotMatch(slay, /fresh isolated fixer/);
+	assert.match(slay, /fresh isolated fixer/);
+	assert.doesNotMatch(slay, /Do not request OMP-native/);
+	assert.match(slay, /unique target checkout/);
 	assert.match(slay, /both `pull_request` and explicit `repo`/);
 	assert.match(slay, /\$HOME\/worktrees/);
 	assert.match(slay, /rules\/branches\/<branch>/);
@@ -4135,7 +4136,7 @@ test("slay prompts define bounded review, checkout-isolated repair, and live-rul
 	assert.match(reviewerPrompt, /read-only reviewer/);
 	assert.match(reviewerPrompt, /clean verdict/);
 	assert.doesNotMatch(reviewerPrompt, /\*\*`approve`\*\*/);
-	assert.match(fix, /`task` tool once with one fresh item per issue or pull request/);
+	assert.match(fix, /`task` tool once with one fresh isolated item per issue or pull request/);
 	assert.match(fix, /Never approve or merge/);
 });
 
