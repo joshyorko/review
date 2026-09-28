@@ -69,6 +69,55 @@ export COPILOT_INTEGRATION_ID="${COPILOT_INTEGRATION_ID:-copilot-developer-cli}"
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 
+# OMP's native isolated task runner creates worktrees from the session's Git
+# repository. Keep a caller's existing checkout as the baseline; when Review
+# starts outside Git, use a small source-owned repository under user state.
+if ! git -C "$PWD" rev-parse --show-toplevel >/dev/null 2>&1; then
+  source_coordinator="${HOME:-}/.local/state/review/coordinator"
+  if [[ -z "${HOME:-}" ]]; then
+    echo "omp-review: HOME must be set to prepare the source coordinator repository." >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$source_coordinator")"
+  if [[ -L "$source_coordinator" ]]; then
+    echo "omp-review: source coordinator path is a symlink; refusing to follow it." >&2
+    exit 1
+  fi
+  if [[ ! -e "$source_coordinator" ]]; then
+    mkdir -m 0700 -- "$source_coordinator"
+  fi
+  if [[ ! -d "$source_coordinator" ]]; then
+    echo "omp-review: source coordinator path is not a directory." >&2
+    exit 1
+  fi
+  if [[ -e "$source_coordinator/.git" && ! -d "$source_coordinator/.git" ]]; then
+    echo "omp-review: source coordinator Git metadata is not a directory; refusing startup." >&2
+    exit 1
+  fi
+  if [[ ! -d "$source_coordinator/.git" ]]; then
+    if find "$source_coordinator" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      echo "omp-review: source coordinator path is non-empty but is not a Git repository; refusing startup." >&2
+      exit 1
+    fi
+    git -C "$source_coordinator" init -q
+    git -C "$source_coordinator" config user.name "Review Source"
+    git -C "$source_coordinator" config user.email "review-source@localhost"
+    printf 'Review source coordinator repository.\n' >"$source_coordinator/.review-coordinator"
+    git -C "$source_coordinator" add .review-coordinator
+    git -C "$source_coordinator" -c commit.gpgSign=false commit -qm "chore: initialize Review coordinator"
+  fi
+  if ! git -C "$source_coordinator" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    ! git -C "$source_coordinator" rev-parse --verify HEAD >/dev/null 2>&1; then
+    echo "omp-review: source coordinator path is not a valid Git worktree." >&2
+    exit 1
+  fi
+  if [[ -n "$(git -C "$source_coordinator" status --porcelain)" ]]; then
+    echo "omp-review: source coordinator has uncommitted files; refusing to modify them." >&2
+    exit 1
+  fi
+  cd "$source_coordinator"
+fi
+
 # The mode ships as an extension package directory: index.ts plus the companion
 # 4. Ensure organization & repository skills are projected for agent discovery
 EXTENSION_PATH="${BLUEFIN_REVIEW_EXTENSION_PATH:-/opt/bluefin/extensions/bluefin-review}"

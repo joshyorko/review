@@ -403,13 +403,23 @@ function fakeHost() {
  * session-start handler that blocks OMP.
  */
 function observeTask(pi, ctx, id, call = `call-${id}`) {
-	pi.events.get("tool_call")({ toolCallId: call, toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: call, toolName: "task", input: { isolated: true } }, ctx);
 	for (const job of [...ctx.asyncJobs.running, ...ctx.asyncJobs.recent]) {
 		if (job.id === id) { job.agentId = id; job.type = "task"; }
 	}
 	pi.events.get("tool_execution_end")({ toolCallId: call, result: { details: {
 		async: { type: "task", state: "running", jobId: id }, progress: [{ id, index: 0, status: "running" }],
 	} }, isError: false }, ctx);
+}
+
+function deliverTaskResults(pi, ctx, jobIds) {
+	ctx.asyncJobs.delivery.pendingJobIds = ctx.asyncJobs.delivery.pendingJobIds.filter((id) => !jobIds.includes(id));
+	ctx.asyncJobs.delivery.pending = ctx.asyncJobs.delivery.pendingJobIds.length;
+	return pi.events.get("message_start")({ message: {
+		role: "custom",
+		customType: "async-result",
+		details: { jobs: jobIds.map((jobId) => ({ jobId, type: "task" })) },
+	} }, ctx);
 }
 
 function fakeCtx() {
@@ -2897,6 +2907,20 @@ test("active slay blocks privileged and credential-bearing bash mutations", asyn
 	const guard = pi.events.get("tool_call");
 	const call = (command) => guard({ toolName: "bash", input: { command } }, ctx);
 
+	assert.match(
+		(await guard({ toolName: "task", input: { isolated: false } }, ctx)).reason,
+		/must set isolated:true/,
+	);
+	assert.equal(await guard({ toolName: "task", input: { isolated: true } }, ctx), undefined);
+	assert.match(
+		(await guard({ toolName: "task", input: { tasks: [{ task: "one", solutionSpace: "bounded" }] } }, ctx)).reason,
+		/task item 1 must set isolated:true/,
+	);
+	assert.equal(
+		await guard({ toolName: "task", input: { tasks: [{ task: "one", solutionSpace: "bounded", isolated: true }] } }, ctx),
+		undefined,
+	);
+
 	assert.match((await call("gh pr merge 42 --repo projectbluefin/review --admin --squash")).reason, /admin merge bypass/);
 	const forcePushBlock = await call("git push origin repair --force-with-lease");
 	assert.match(forcePushBlock.reason, /force-pushing/);
@@ -3102,12 +3126,12 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.equal(pi.messages.length, 1);
 	const dispatchedBatch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(pi.messageOptions[0]?.waveId, `${dispatchedBatch.id}:0`, "dispatch carries exact wave identity to OMP");
-	pi.events.get("tool_call")({ toolCallId: "worker-1", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "worker-1", toolName: "task", input: { isolated: true } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["worker-1"];
 	ctx.asyncJobs.recent = [{ id: "worker-1", status: "completed", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "worker-1", "worker-1");
 	await pi.events.get("turn_end")({}, ctx);
-	pi.events.get("tool_call")({ toolCallId: "worker-2", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "worker-2", toolName: "task", input: { isolated: true } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["worker-1", "worker-2"];
 	ctx.asyncJobs.recent = [
 		{ id: "worker-1", status: "completed", startTime: Date.now() + 1 },
@@ -3118,7 +3142,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	const captured = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.deepEqual(captured.waveJobIds, ["worker-1", "worker-2"], "staggered workers are accumulated by exact wave identity");
 	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through review, repair, and landing:/m);
-	assert.match(pi.messages[0], /Use the `task` tool once with one fresh reviewer item per pull request/);
+	assert.match(pi.messages[0], /Use the `task` tool once with one fresh isolated reviewer item per pull request/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/b/);
 
@@ -3129,6 +3153,8 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.messages.length, 1, "unfinished workers must settle before another repository starts");
 	ctx.asyncJobs.running = [];
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.messages.length, 1, "pending async-result deliveries must hold repository advancement");
 
 	dashboard.handleInput("p");
 	ctx.asyncJobs.recent = [{ id: "hive-wave", status: "completed", startTime: Date.now() + 1 }];
@@ -3136,6 +3162,9 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.equal(pi.messages.length, 1, "pause prevents the next repository from starting");
 	dashboard.handleInput("p");
 	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1, "resume waits for pending async-result deliveries");
+	await deliverTaskResults(pi, ctx, ["worker-1", "worker-2"]);
+	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.messages.length, 2);
 	assert.match(pi.messages[1], /projectbluefin\/b/);
 	assert.doesNotMatch(pi.messages[1], /projectbluefin\/a/);
@@ -3358,7 +3387,7 @@ test("tool invocation without a job keeps the Review claims UNKNOWN", async () =
 
 test("a started job without terminal evidence remains an unaccounted UNKNOWN worker", async () => {
 	const fixture = await preToolFailureFixture();
-	fixture.pi.events.get("tool_call")({ toolCallId: "task-call", toolName: "task", input: {} }, fixture.ctx);
+	fixture.pi.events.get("tool_call")({ toolCallId: "task-call", toolName: "task", input: { isolated: true } }, fixture.ctx);
 	fixture.ctx.asyncJobs.running = [{ id: "job-1", agentId: "Worker", type: "task", status: "running", startTime: Date.now() }];
 	fixture.pi.events.get("tool_result")({ toolCallId: "task-call", details: {
 		async: { type: "task", state: "running", jobId: "job-1" },
@@ -3553,7 +3582,7 @@ test("a late job contradiction invalidates a recorded pre-tool proof", async () 
 	const fixture = await preToolFailureFixture();
 	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
 	assert.equal(fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.wavePreToolTerminal, "error");
-	fixture.pi.events.get("tool_call")({ toolCallId: "late-job", toolName: "task", input: {} }, fixture.ctx);
+	fixture.pi.events.get("tool_call")({ toolCallId: "late-job", toolName: "task", input: { isolated: true } }, fixture.ctx);
 
 	const contradicted = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(contradicted.wavePreToolTerminal, undefined);
@@ -3754,11 +3783,14 @@ test("restart uses persisted terminal evidence for one Factory retry", async () 
 	await new Promise((resolve) => setImmediate(resolve));
 	const first = pi1.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	const owner = `review:${first.id}:0`;
-	pi1.events.get("tool_call")({ toolCallId: "worker-command", toolName: "task", input: {} }, ctx1);
+	pi1.events.get("tool_call")({ toolCallId: "worker-command", toolName: "task", input: { isolated: true } }, ctx1);
 	ctx1.asyncJobs.delivery.pendingJobIds = ["worker-command"];
 	ctx1.asyncJobs.recent = [{ id: "worker-command", status: "failed", startTime: Date.now() + 1 }];
 	observeTask(pi1, ctx1, "worker-command", "worker-command");
 	await pi1.events.get("turn_end")({}, ctx1);
+	await pi1.events.get("agent_end")({}, ctx1);
+	assert.equal(pi1.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "running");
+	await deliverTaskResults(pi1, ctx1, ["worker-command"]);
 	await pi1.events.get("agent_end")({}, ctx1);
 	const factory = fakeHost();
 	factory.commands = new Map();
@@ -3801,7 +3833,7 @@ async function interruptedIssueSlay(states) {
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	pi.events.get("tool_call")({ toolCallId: "issue-worker", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "issue-worker", toolName: "task", input: { isolated: true } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["issue-worker"];
 	ctx.asyncJobs.recent = [{ id: "issue-worker", status: "completed", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "issue-worker", "issue-worker");
@@ -3821,7 +3853,7 @@ for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retain
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	pi.events.get("tool_call")({ toolCallId: "call-123", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "call-123", toolName: "task", input: { isolated: true } }, ctx);
 	ctx.asyncJobs.running = [{ id: "FixIssue", agentId: "FixIssue", type: "task", status: "running", startTime: Date.now() }];
 	await pi.events.get("tool_execution_end")({ toolCallId: "call-123", result: { details: {
 		async: { type: "task", state: "running", jobId: "FixIssue" },
@@ -3838,6 +3870,33 @@ for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retain
 	assert.equal(pi.messages.length, 1, "the worker is never replayed");
 });
 
+test("OMP 18.4 primary async job id survives without a transient job snapshot", async () => {
+	const states = { "projectbluefin/review#77": { title: "direct job identity", submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	pi.events.get("tool_call")({ toolCallId: "direct-call", toolName: "task", input: { isolated: true } }, ctx);
+	ctx.asyncJobs.running = [];
+	ctx.asyncJobs.recent = [];
+	await pi.events.get("tool_execution_end")({ toolCallId: "direct-call", result: { details: {
+		async: { type: "task", state: "completed", jobId: "DirectWorker-2" },
+		progress: [{ id: "DirectWorker", index: 0, status: "completed" }],
+	} }, isError: false }, ctx);
+	const recorded = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.deepEqual(recorded.waveJobIds, ["DirectWorker-2"]);
+	assert.deepEqual(recorded.waveTaskWorkers, {
+		"direct-call": [{ agentId: "DirectWorker", jobId: "DirectWorker-2", resultStatus: "completed" }],
+	});
+	assert.deepEqual(recorded.waveTerminalJobStatuses, { "DirectWorker-2": "completed" });
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
+});
+
 test("Review recovers a consumed worker from host evidence without session entries", async () => {
 	const states = { "projectbluefin/review#77": { title: "lost projection", submittedPrs: [] } };
 	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
@@ -3847,7 +3906,7 @@ test("Review recovers a consumed worker from host evidence without session entri
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	pi.events.get("tool_call")({ toolCallId: "lost-call", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "lost-call", toolName: "task", input: { isolated: true } }, ctx);
 	ctx.asyncJobs.recent = [{ id: "LostWorker", agentId: "LostWorker", type: "task", status: "completed", startTime: Date.now() }];
 	await pi.events.get("tool_execution_end")({ toolCallId: "lost-call", result: { details: {
 		async: { type: "task", state: "completed", jobId: "LostWorker" }, progress: [{ id: "LostWorker", index: 0, status: "completed" }],
@@ -3863,7 +3922,7 @@ test("Review recovers a consumed worker from host evidence without session entri
 	assert.equal(restarted.messages.length, 0);
 });
 
-for (const count of [1, 8]) test(`packaged OMP 18.3.2 delivers and evicts ${count} Slay workers without losing Review evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
+for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts ${count} Slay workers without losing Review evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
 	const Manager = await loadPackagedJobManager(process.env.REVIEW_OMP_SOURCE!);
 	const states = Object.fromEntries(Array.from({ length: count }, (_, index) => [`projectbluefin/review#${77 + index}`, { title: `real manager ${index}`, submittedPrs: [] }]));
 	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
@@ -3879,7 +3938,7 @@ for (const count of [1, 8]) test(`packaged OMP 18.3.2 delivers and evicts ${coun
 		await manager.getJob(baselineId).promise;
 		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 		await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-		pi.events.get("tool_call")({ toolCallId: "real-call", toolName: "task", input: {} }, ctx);
+		pi.events.get("tool_call")({ toolCallId: "real-call", toolName: "task", input: { isolated: true } }, ctx);
 		const pending = Array.from({ length: count }, () => Promise.withResolvers<string>());
 		const progress = pending.map((_, index) => ({ id: `RealWorker${index}`, index, status: "running" }));
 		const jobIds = pending.map((done, index) => manager.register("task", progress[index].id, () => done.promise, { id: progress[index].id, agentId: progress[index].id }));
@@ -3955,7 +4014,10 @@ test("one task fan-out retains every sibling job independently across consumptio
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	pi.events.get("tool_call")({ toolName: "task", toolCallId: "fan-out", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolName: "task", toolCallId: "fan-out", input: { tasks: [
+		{ task: "first", isolated: true },
+		{ task: "second", isolated: true },
+	] } }, ctx);
 	ctx.asyncJobs.running = ["First", "Second"].map((agentId) => ({ id: `${agentId}-2`, agentId, type: "task", status: "running", startTime: Date.now() }));
 	pi.events.get("tool_result")({ toolName: "task", toolCallId: "fan-out", details: {
 		async: { type: "task", state: "running", jobId: "First-2" }, progress: [{ id: "First", index: 0 }, { id: "Second", index: 1 }],
@@ -4048,11 +4110,14 @@ test("blocked issue Slay can be revised and re-Slayed in the same Review session
 	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	const first = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	pi.events.get("tool_call")({ toolCallId: "failed-issue-worker", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "failed-issue-worker", toolName: "task", input: { isolated: true } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["failed-issue-worker"];
 	ctx.asyncJobs.recent = [{ id: "failed-issue-worker", status: "failed", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "failed-issue-worker", "failed-issue-worker");
 	await pi.events.get("turn_end")({}, ctx);
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "running");
+	await deliverTaskResults(pi, ctx, ["failed-issue-worker"]);
 	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "blocked");
 
@@ -4083,7 +4148,7 @@ test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	pi.events.get("tool_call")({ toolCallId: "drain-worker", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "drain-worker", toolName: "task", input: { isolated: true } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["drain-worker"];
 	ctx.asyncJobs.running = [{ id: "drain-worker", status: "running", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "drain-worker", "drain-worker");
@@ -4096,13 +4161,16 @@ test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async
 	ctx.asyncJobs.running = [];
 	ctx.asyncJobs.recent = [{ id: "drain-worker", status: "failed", startTime: Date.now() + 2 }];
 	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "paused");
+	await deliverTaskResults(pi, ctx, ["drain-worker"]);
+	await pi.events.get("agent_end")({}, ctx);
 	const cancelled = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(cancelled.state, "cancelled");
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
 	assert.match(claims.conflict("repo:projectbluefin/review", "review:other:0") ?? "", /owned by review:/);
 });
 
-test("slay prompts define bounded review, checkout-isolated repair, and live-rule landing", () => {
+test("slay prompts require native per-item isolation and live-rule landing", () => {
 	const item = queueItem();
 	const sibling = queueItem({ id: 7, repo: item.repo });
 	const slay = actionPrompt({ kind: "slay", item, items: [item, sibling] });
@@ -4112,12 +4180,13 @@ test("slay prompts define bounded review, checkout-isolated repair, and live-rul
 		assert.match(prompt, /Evidence is bounded and read once/);
 		assert.match(prompt, /--name-only/);
 		assert.doesNotMatch(prompt, /--json [\w,]*\bbody\b/);
+		assert.match(prompt, /isolated: true/);
 	}
-	assert.match(slay, /`task` tool once with one fresh reviewer item per pull request/);
+	assert.match(slay, /`task` tool once with one fresh isolated reviewer item per pull request/);
 	assert.match(slay, /Do not use eval workpool/);
-	assert.match(slay, /Do not request OMP-native .*isolated.* task execution/);
-	assert.match(slay, /unique checkout/);
-	assert.doesNotMatch(slay, /fresh isolated fixer/);
+	assert.match(slay, /fresh isolated fixer/);
+	assert.doesNotMatch(slay, /Do not request OMP-native/);
+	assert.match(slay, /distinct target checkout/);
 	assert.match(slay, /both `pull_request` and explicit `repo`/);
 	assert.match(slay, /\$HOME\/worktrees/);
 	assert.match(slay, /rules\/branches\/<branch>/);
@@ -4135,7 +4204,7 @@ test("slay prompts define bounded review, checkout-isolated repair, and live-rul
 	assert.match(reviewerPrompt, /read-only reviewer/);
 	assert.match(reviewerPrompt, /clean verdict/);
 	assert.doesNotMatch(reviewerPrompt, /\*\*`approve`\*\*/);
-	assert.match(fix, /`task` tool once with one fresh item per issue or pull request/);
+	assert.match(fix, /`task` tool once with one fresh isolated item per issue or pull request/);
 	assert.match(fix, /Never approve or merge/);
 });
 
@@ -4144,7 +4213,7 @@ test("fix waves repair conflicts without landing them", () => {
 	const sibling = queueItem({ id: 7, repo: dirty.repo, mergeState: "dirty" });
 	const batch = actionPrompt({ kind: "fix", item: dirty, items: [dirty, sibling] });
 	assert.match(batch, /merge=dirty/);
-	assert.match(batch, /`task` tool once with one fresh item/);
+	assert.match(batch, /`task` tool once with one fresh isolated item/);
 	assert.match(batch, /Never approve or merge/);
 });
 
@@ -4705,7 +4774,7 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	const batch = mode.chosenItems();
 	const prompt = actionPrompt({ kind: "fix", item: batch[0], items: batch });
 	assert.match(prompt, /Use the `task` tool once/);
-	assert.match(prompt, /`task` tool once with one fresh item per issue through OMP workflowz/);
+	assert.match(prompt, /`task` tool once with one fresh isolated item per issue through OMP workflowz/);
 	assert.match(prompt, /`gh repo clone .*under `\$HOME\/worktrees`/s);
 	assert.match(prompt, /Never assume the working directory is a checkout/);
 	assert.doesNotMatch(prompt, /maximum of 7|fix-and-merge|approve and merge/);
@@ -6039,7 +6108,7 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 
 	assert.equal(pi.messages.length, 1, "selected issues dispatched without requiring Hive");
 	assert.match(pi.messages[0], /Implement this repository wave for projectbluefin\/unmanaged/);
-	assert.match(pi.messages[0], /Use the `task` tool once with one fresh item/);
+	assert.match(pi.messages[0], /Use the `task` tool once with one fresh isolated item/);
 	assert.match(pi.messages[0], /gh repo clone <owner\/repo>/);
 	assert.match(pi.messages[0], /one review-ready pull request per issue/);
 	assert.match(pi.messages[0], /SUBAGENT-RULES/);

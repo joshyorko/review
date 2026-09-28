@@ -63,6 +63,42 @@ for factory_path in \
   prepare_factory_state_dir "$factory_path" || exit 1
 done
 
+# OMP native task isolation requires the session cwd to be inside a Git
+# repository. Review itself is repository-agnostic, so give the coordinator a
+# tiny appliance-owned repository and let isolated workers fan out from that
+# stable parent instead of disabling task isolation globally.
+coordinator_root="$factory_home/.local/state/review/coordinator"
+prepare_factory_state_dir "$coordinator_root" || exit 1
+if [[ -e "$coordinator_root/.git" && ! -d "$coordinator_root/.git" ]]; then
+  echo "Review appliance: coordinator Git metadata is not a directory; refusing startup." >&2
+  exit 1
+fi
+if [[ ! -d "$coordinator_root/.git" ]]; then
+  if find "$coordinator_root" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    echo "Review appliance: coordinator path is non-empty but is not a Git repository; refusing startup." >&2
+    exit 1
+  fi
+  git -C "$coordinator_root" init -q
+  git -C "$coordinator_root" config user.name "Review Appliance"
+  git -C "$coordinator_root" config user.email "review-appliance@localhost"
+  printf 'Review appliance coordinator repository.\n' >"$coordinator_root/.review-coordinator"
+  git -C "$coordinator_root" add .review-coordinator
+  git -C "$coordinator_root" -c commit.gpgSign=false commit -qm "chore: initialize Review coordinator"
+fi
+git -C "$coordinator_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  echo "Review appliance: coordinator path is not a valid Git worktree." >&2
+  exit 1
+}
+# This directory is appliance-owned; discard only its transient coordinator
+# debris so every OMP isolation baseline starts clean.
+git -C "$coordinator_root" reset --hard -q HEAD
+git -C "$coordinator_root" clean -ffdxq
+if [[ -n "$(git -C "$coordinator_root" status --porcelain)" ]]; then
+  echo "Review appliance: coordinator Git worktree is not clean after reset." >&2
+  exit 1
+fi
+cd "$coordinator_root"
+
 export COPILOT_INTEGRATION_ID="${COPILOT_INTEGRATION_ID:-copilot-developer-cli}"
 export COPILOT_GITHUB_TOKEN="${COPILOT_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
 export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-${COPILOT_GITHUB_TOKEN:-}}"

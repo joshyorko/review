@@ -1,12 +1,18 @@
 import { registerHooks } from "node:module";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 
 /** Run upstream's unmodified manager. Only its logging dependency is replaced. */
 export async function loadPackagedJobManager(root: string) {
-	const revision = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-	if (revision !== "7853b4e499936f9dcc13c9b64adb55f6b342aabf") throw new Error(`Expected packaged OMP 18.3.2, found ${revision}`);
+	const appliance = readFileSync(new URL("../image/appliance/Containerfile", import.meta.url), "utf8");
+	const expectedVersion = appliance.match(/^ARG OMP_VERSION=(\S+)$/m)?.[1];
+	if (!expectedVersion) throw new Error("Could not read the packaged OMP version from the appliance Containerfile");
+	const packageJson = JSON.parse(readFileSync(join(root, "packages/coding-agent/package.json"), "utf8"));
+	if (packageJson.version !== expectedVersion) throw new Error(`Expected packaged OMP ${expectedVersion}, found ${packageJson.version}`);
+	const tag = execFileSync("git", ["-C", root, "describe", "--tags", "--exact-match", "HEAD"], { encoding: "utf8" }).trim();
+	if (tag !== `v${expectedVersion}`) throw new Error(`Expected packaged OMP tag v${expectedVersion}, found ${tag}`);
 	execFileSync("git", ["-C", root, "diff", "--exit-code", "HEAD", "--", "packages/coding-agent/src/async/job-manager.ts"]);
 	const hooks = registerHooks({
 		resolve(specifier, context, next) {
