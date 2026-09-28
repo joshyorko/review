@@ -254,7 +254,7 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (attempt.generation !== ledger.generation || attempt.subject.repo !== ledger.subject.repo || attempt.subject.base !== ledger.subject.base || attempt.subject.head !== ledger.subject.head) {
 				return { ok: false, error: `attempt ${attempt.id} is bound to a stale Factory execution` };
 			}
-			if (attempt.privateSessions.length > 0) return { ok: false, error: `attempt ${attempt.id} already belongs to a Factory-private session` };
+			if (attempt.privateSessions.length > 0) return { ok: false, error: `attempt ${attempt.id} already belongs to a Factory SDK session` };
 			if (attempt.nativeJobIds.includes(event.jobId)) return { ok: true, ledger };
 			if (attempt.nativeJobIds.length > 0) return { ok: false, error: `attempt ${attempt.id} already has a different OMP job identity` };
 			if ((task.state !== "READY" && task.state !== "RUNNING") || task.decision !== "ADMIT") return { ok: false, error: `attempt ${attempt.id} is not an admitted task awaiting or recording OMP dispatch` };
@@ -274,7 +274,7 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (attempt.generation !== ledger.generation || attempt.subject.repo !== ledger.subject.repo || attempt.subject.base !== ledger.subject.base || attempt.subject.head !== ledger.subject.head) {
 				return { ok: false, error: `attempt ${attempt.id} is bound to a stale Factory execution` };
 			}
-			if (attempt.privateSessions.length > 0) return { ok: false, error: `attempt ${attempt.id} already belongs to a Factory-private session` };
+			if (attempt.privateSessions.length > 0) return { ok: false, error: `attempt ${attempt.id} already belongs to a Factory SDK session` };
 			if (attempt.nativeAgentIds.includes(event.agentId)) return { ok: true, ledger };
 			if (attempt.nativeAgentIds.length > 0) return { ok: false, error: `attempt ${attempt.id} already has a different OMP agent identity` };
 			if (task.state !== "READY" || task.decision !== "ADMIT") return { ok: false, error: `attempt ${attempt.id} is not an admitted task awaiting its first OMP agent` };
