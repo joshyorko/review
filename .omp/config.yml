@@ -4,9 +4,15 @@
 # subagents use OMP's native workload roles so the user's configured model
 # family and effort remain authoritative.
 #
+# Review/Slay fans out writable work across multiple subagents. Keep isolation
+# explicit here rather than inheriting OMP's false default so parallel workers
+# never share the parent checkout accidentally.
+#
 # Deliberately absent: modelRoles.default. The model *you* drive is yours to
 # choose; these settings apply only to agents spawned while working in this repo.
 task:
+  isolation:
+    enabled: true
   agentModelOverrides:
     scout: "@smol"
     sonic: "@smol"
@@ -18,6 +24,10 @@ task:
     review-security: "@task"
     review-simplicity: "@task"
     review-test-coverage: "@task"
+
+# Let OMP choose the best supported isolation backend on the current host.
+isolation:
+  backend: auto
 
 # Keep the advisor on the user's configured default role.
 modelRoles:
