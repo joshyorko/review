@@ -83,7 +83,7 @@ if [[ ! -d "$coordinator_root/.git" ]]; then
   git -C "$coordinator_root" config user.email "review-appliance@localhost"
   printf 'Review appliance coordinator repository.\n' >"$coordinator_root/.review-coordinator"
   git -C "$coordinator_root" add .review-coordinator
-  git -C "$coordinator_root" commit -qm "chore: initialize Review coordinator"
+  git -C "$coordinator_root" -c commit.gpgSign=false commit -qm "chore: initialize Review coordinator"
 fi
 git -C "$coordinator_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   echo "Review appliance: coordinator path is not a valid Git worktree." >&2
