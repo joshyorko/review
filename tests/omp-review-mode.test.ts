@@ -3852,6 +3852,33 @@ for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retain
 	assert.equal(pi.messages.length, 1, "the worker is never replayed");
 });
 
+test("OMP 18.4 primary async job id survives without a transient job snapshot", async () => {
+	const states = { "projectbluefin/review#77": { title: "direct job identity", submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	pi.events.get("tool_call")({ toolCallId: "direct-call", toolName: "task", input: { isolated: true } }, ctx);
+	ctx.asyncJobs.running = [];
+	ctx.asyncJobs.recent = [];
+	await pi.events.get("tool_execution_end")({ toolCallId: "direct-call", result: { details: {
+		async: { type: "task", state: "completed", jobId: "DirectWorker-2" },
+		progress: [{ id: "DirectWorker", index: 0, status: "completed" }],
+	} }, isError: false }, ctx);
+	const recorded = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.deepEqual(recorded.waveJobIds, ["DirectWorker-2"]);
+	assert.deepEqual(recorded.waveTaskWorkers, {
+		"direct-call": [{ agentId: "DirectWorker", jobId: "DirectWorker-2", resultStatus: "completed" }],
+	});
+	assert.deepEqual(recorded.waveTerminalJobStatuses, { "DirectWorker-2": "completed" });
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
+});
+
 test("Review recovers a consumed worker from host evidence without session entries", async () => {
 	const states = { "projectbluefin/review#77": { title: "lost projection", submittedPrs: [] } };
 	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
