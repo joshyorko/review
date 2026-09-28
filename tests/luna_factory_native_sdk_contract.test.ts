@@ -97,6 +97,8 @@ test("native adapter uses the OMP 18.3.2 restricted custom-tool contract", async
 			new AbortController().signal,
 			() => {},
 			() => {},
+			"",
+			{ attemptId: "T1-a1" },
 		);
 
 		assert.ok(captured);
