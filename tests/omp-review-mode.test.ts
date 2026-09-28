@@ -4786,10 +4786,14 @@ for (const outcome of ["success", "error", "cancel"] as const) {
 					n.message === `Factory command ${outcome === "error" ? "failed" : "completed"}` &&
 					n.level === (outcome === "error" ? "error" : "info")));
 			}
-			assert.equal(ctx.overlays.length, 2, "one workbench reopens after handoff settles");
-			ctx.overlays[1].handleInput(outcome === "cancel" ? "\u001b" : "q");
-			for (let i = 0; i < 20; i++) await Promise.resolve();
-			assert.equal(ctx.overlays.length, 2, "explicit close stays closed");
+			if (outcome === "cancel") {
+				assert.equal(ctx.overlays.length, 1, "cancel returns to the existing Review workbench");
+			} else {
+				assert.equal(ctx.overlays.length, 2, "one workbench reopens after handoff settles");
+				ctx.overlays[1].handleInput("q");
+				for (let i = 0; i < 20; i++) await Promise.resolve();
+				assert.equal(ctx.overlays.length, 2, "explicit close stays closed");
+			}
 		} finally {
 			unregister();
 			await pi.events.get("session_shutdown")?.({}, ctx);
