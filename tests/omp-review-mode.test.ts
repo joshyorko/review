@@ -4102,7 +4102,7 @@ test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async
 	assert.match(claims.conflict("repo:projectbluefin/review", "review:other:0") ?? "", /owned by review:/);
 });
 
-test("slay prompts define bounded review, isolated repair, and live-rule landing", () => {
+test("slay prompts define bounded review, checkout-isolated repair, and live-rule landing", () => {
 	const item = queueItem();
 	const sibling = queueItem({ id: 7, repo: item.repo });
 	const slay = actionPrompt({ kind: "slay", item, items: [item, sibling] });
@@ -4115,7 +4115,7 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 	}
 	assert.match(slay, /`task` tool once with one fresh reviewer item per pull request/);
 	assert.match(slay, /Do not use eval workpool/);
-	assert.match(slay, /fresh isolated fixer/);
+	assert.match(slay, /Do not request OMP-native .*isolated.* task execution/);\n\tassert.match(slay, /unique checkout/);\n\tassert.doesNotMatch(slay, /fresh isolated fixer/);
 	assert.match(slay, /both `pull_request` and explicit `repo`/);
 	assert.match(slay, /\$HOME\/worktrees/);
 	assert.match(slay, /rules\/branches\/<branch>/);
