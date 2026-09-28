@@ -48,6 +48,19 @@ cat >"$fake_bin/podman" <<'EOF'
 set -eu
 [[ "${1:-}" == info ]] && { [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]]; exit; }
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
+if [[ "${1:-}" == run && "${FAKE_REMOTE_DEFAULT:-}" != 1 ]]; then
+  previous=""
+  home_mount=""
+  for arg in "$@"; do
+    if [[ "$previous" == --volume ]]; then
+      home_mount="${arg%%:*}"
+      break
+    fi
+    previous="$arg"
+  done
+  [[ -d "$home_mount/.local/state/review/factory" ]] || exit 19
+  [[ "$(stat -c %u:%g "$home_mount/.local/state/review/factory")" == "$(id -u):$(id -g)" ]] || exit 19
+fi
 if [[ "${1:-}" == run && "${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
   [[ "${AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
   [[ "${AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || exit 19
@@ -213,7 +226,7 @@ run_just() {
   : >"$podman_log"
   export APPTAINER_LOG="$apptainer_log"
   set +e
-  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
+  output="$(env HOME="$home" XDG_STATE_HOME="$home/.local/state" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
   status=$?
   set -e
 }
@@ -223,6 +236,8 @@ recipes="$($real_just --justfile "$root/justfile" --list)"
 for recipe in review-queue review-appliance review-appliance-build review-doctor; do
   contains "$recipe" "$recipes"
 done
+grep -qF 'cp -R --no-preserve=ownership' "$root/justfile" ||
+  fail "legacy state migration must not preserve subordinate ownership"
 for retired in contribute review-container; do
   if grep -Fxq "$retired" <<<"$recipes"; then
     fail "retired $retired recipe remains"
