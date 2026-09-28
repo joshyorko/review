@@ -4735,7 +4735,7 @@ test("Factory selection keeps inherited OMP model access live after a model swit
 		await review.whenStarted();
 		model = { id: "authenticated-model" };
 		uiContext.overlays[0].handleInput("space");
-		uiContext.selectResponses.push("Inspect selected items");
+		uiContext.selectResponses.push("Inspect only");
 		uiContext.overlays[0].handleInput("F");
 		for (let i = 0; i < 20; i++) await Promise.resolve();
 		assert.ok(nativeContext, "the selected batch reaches Factory");
@@ -4770,7 +4770,7 @@ for (const outcome of ["success", "error", "cancel"] as const) {
 			await pi.events.get("session_start")({}, ctx);
 			await review.whenStarted();
 			ctx.overlays[0].handleInput("space");
-			ctx.selectResponses.push(outcome === "cancel" ? "Cancel" : "Inspect selected items");
+			ctx.selectResponses.push(outcome === "cancel" ? "Cancel" : "Inspect only");
 			ctx.overlays[0].handleInput("F");
 			for (let i = 0; i < 20; i++) await Promise.resolve();
 			assert.deepEqual(commands, outcome === "cancel" ? [] : ["start inspect"]);
@@ -4779,7 +4779,7 @@ for (const outcome of ["success", "error", "cancel"] as const) {
 			assert.match(ctx.selectCalls[0][0], /Send 1 selected item across 1 repository to Factory/);
 			assert.deepEqual(
 				ctx.selectCalls[0][1].map((option) => typeof option === "string" ? option : option.label),
-				["Patch selected items", "Inspect selected items", "Prepare PR-ready patches", "Factory status", "Cancel"],
+				["Implement locally", "Inspect only", "Implement and prepare PR", "Open Factory", "Cancel"],
 			);
 			if (outcome !== "cancel") {
 				assert.ok(ctx.notifications.some((n) =>
@@ -4796,12 +4796,11 @@ for (const outcome of ["success", "error", "cancel"] as const) {
 		}
 	});
 }
-test("Factory picker maps every native choice to the existing command path", async () => {
+test("Factory picker maps each operator outcome to the existing command path", async () => {
 	const choices = [
-		["Patch selected items", "start patch"],
-		["Inspect selected items", "start inspect"],
-		["Prepare PR-ready patches", "start pr-ready"],
-		["Factory status", "status"],
+		["Implement locally", "start patch"],
+		["Inspect only", "start inspect"],
+		["Implement and prepare PR", "start pr-ready"],
 	] as const;
 	for (const [choice, expected] of choices) {
 		const commands: string[] = [];
@@ -4831,27 +4830,29 @@ test("Factory picker maps every native choice to the existing command path", asy
 	}
 });
 
-test("empty Factory handoff selection is a clear no-op", async () => {
+test("empty Factory handoff opens the cockpit without requiring a selection", async () => {
 	const commands: string[] = [];
 	const unregister = registerFactoryController(async (command) => {
 		commands.push(command);
 		return "Factory command completed";
 	});
+	const unregisterDashboard = registerFactoryDashboardOpener(async () => {});
 	const pi = fakeHost();
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
 	const ctx = fakeCtx();
 	try {
 		await pi.events.get("session_start")({}, ctx);
 		await review.whenStarted();
+		ctx.selectResponses.push("Open Factory");
 		ctx.overlays[0].handleInput("F");
 		for (let i = 0; i < 20; i++) await Promise.resolve();
 		assert.deepEqual(commands, []);
-		assert.equal(ctx.selectCalls.length, 0);
+		assert.equal(ctx.selectCalls.length, 1);
+		assert.deepEqual(ctx.selectCalls[0][1].map((option) => typeof option === "string" ? option : option.label), ["Open Factory", "Cancel"]);
 		assert.equal(ctx.editorCalls.length, 0);
-		assert.ok(ctx.notifications.some((n) => n.message === "Select at least one Review item before sending it to Factory" && n.level === "warning"));
 	} finally {
+		unregisterDashboard();
 		unregister();
-		await pi.events.get("session_shutdown")?.({}, ctx);
 	}
 });
 
@@ -4897,12 +4898,12 @@ test("a Review session that offers the Factory handoff has a registered Factory 
 	assert.ok(coLoaded.render(200).join("\n").includes("F factory"), "a co-loaded Factory is advertised");
 	assert.ok(!ctx2.notifications.some((n) => /Factory handoff unavailable/.test(n.message)), "a co-loaded session warns about nothing");
 	ctx2.overlays[0].handleInput("space");
-	ctx2.selectResponses.push("Factory status");
+	ctx2.selectResponses.push("Open Factory");
 	coLoaded.handleInput("F");
 	for (let i = 0; i < 20; i++) await Promise.resolve();
 	assert.ok(
-		ctx2.notifications.some((n) => /LUNA_FACTORY_ENABLED=1|Factory is disabled/.test(n.message)),
-		"the handoff reaches Factory, which reports the execution opt-in instead of a load failure",
+		!ctx2.notifications.some((n) => /Factory handoff unavailable/.test(n.message)),
+		"the handoff reaches the co-loaded Factory surface",
 	);
 	ctx2.overlays.at(-1).handleInput("q");
 

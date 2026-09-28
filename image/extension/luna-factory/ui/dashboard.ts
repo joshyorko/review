@@ -277,7 +277,7 @@ export class FactoryDashboard {
 		if (this.mutationsAvailable() && item.actions.includes("retry") && ["BLOCKED", "UNKNOWN", "CANCELLED"].includes(item.stage)) return { label: "Retry", action: { kind: "retry", batchId: this.batchId, itemKey: item.key } };
 		if (item.prUrl && item.actions.includes("open-pr")) return { label: "Open PR", action: { kind: "open", batchId: this.batchId, itemKey: item.key, url: item.prUrl } };
 		if (item.stage === "DONE" && this.evidenceChoices().length) return { label: "Inspect evidence", view: "evidence" };
-		if (item.actions.includes("view-session")) return { label: "View worker", action: { kind: "session", batchId: this.batchId, itemKey: item.key } };
+		if (item.actions.includes("view-session")) return { label: "Agent Hub / retained session", action: { kind: "session", batchId: this.batchId, itemKey: item.key } };
 		if (this.evidenceChoices().length) return { label: "Inspect evidence", view: "evidence" };
 		if (this.mutationsAvailable() && this.project()?.actions.includes("resume")) return { label: "Resume", action: { kind: "resume", batchId: this.batchId } };
 		return { label: "Inspect item", view: "detail" };
@@ -300,7 +300,7 @@ export class FactoryDashboard {
 					if (this.mutationsAvailable() && action === "reconcile") choices.push({ label: "Reconcile effect", action: { kind: "reconcile-effect", batchId: this.batchId, itemKey: item.key } });
 					if (this.mutationsAvailable() && action === "exclude") choices.push({ label: "Remove from this run…", action: { kind: "exclude", batchId: this.batchId, itemKey: item.key } });
 					if (action === "open-pr" && item.prUrl) choices.push({ label: "Open PR", action: { kind: "open", batchId: this.batchId, itemKey: item.key, url: item.prUrl } });
-					if (action === "view-session") choices.push({ label: "View worker", action: { kind: "session", batchId: this.batchId, itemKey: item.key } });
+					if (action === "view-session") choices.push({ label: "Agent Hub / retained session", action: { kind: "session", batchId: this.batchId, itemKey: item.key } });
 					if (action === "open-workspace") choices.push({ label: "Show workspace", action: { kind: "workspace", batchId: this.batchId, itemKey: item.key } });
 				}
 			}
@@ -375,6 +375,9 @@ export class FactoryDashboard {
 		const repoCount = batch ? new Set(batch.items.map((entry) => entry.selected.repo)).size : 0;
 		const cause = item.blocker ? copy.caption : copy.explanation;
 		const model = this.observedModel(item);
+		const worker = this.active(item)
+			? `Worker: Factory #${item.number} · OMP Agent Hub · running`
+			: item.executionLiveness === "unknown" ? `Worker: Factory #${item.number} · OMP Agent Hub · status unknown` : "";
 		const lines = width >= 55
 			? [
 				"BATCH OUTCOME",
@@ -383,6 +386,7 @@ export class FactoryDashboard {
 				`Proven ${projected?.proven ?? 0}/${projected?.inScope ?? 0} · queued ${queued} · blocked ${projected?.blocked ?? 0} · unknown ${projected?.unknown ?? 0}`,
 				`Stopped ${cancelled} · excluded ${excluded} · attempts ${projected?.attempts ?? 0}/${projected?.maxTotalAttempts ?? "unknown"}`,
 				...(model === "unknown" ? [] : [`Observed model: ${model}`]),
+				...(worker ? [worker] : []),
 				"",
 				"SELECTED ITEM",
 				`#${item.number} ${item.repo} · ${item.action} · ${item.stage}`,
@@ -395,7 +399,7 @@ export class FactoryDashboard {
 				`${heading} · ${copy.heading}`,
 				`#${item.number} ${item.repo} · ${item.stage}`,
 				`Active ${activeCount}/${projected?.capacity ?? "?"} · proven ${projected?.proven ?? 0}/${projected?.inScope ?? 0} · ${runState}`,
-				`Cause: ${cause}`,
+				...(worker ? [worker] : []),
 				`Next: ${copy.next}`,
 				`Attempts ${item.attempts}/${item.maxAttempts}${model === "unknown" ? "" : ` · model ${model}`}`,
 			];
@@ -453,7 +457,7 @@ export class FactoryDashboard {
 			"/factory export <batch> <directory> — copy retained evidence to an unused destination.",
 			"/factory discard <batch> — archive eligible settled receipts; retain workspaces and native logs.",
 			"Workspace paths are shown/copied; they are not executed. Evidence/session previews are read-only and byte bounded.",
-			"Private Factory workers stay outside Agent Hub. Recorded start/session identity is not proof of current liveness.",
+			"Live workers appear in OMP Agent Hub (Alt+A); use its native focus and kill controls. Retained sessions remain read-only evidence.",
 			`State location: ${this.source.root ?? "unknown"}`,
 			...(this.source.notice ? [`NOTICE: ${clean(this.source.notice)}`] : []),
 		];
