@@ -23,7 +23,7 @@ except OSError as error:
     raise SystemExit(1)
 
 os.execv("/usr/bin/bash", ["/usr/bin/bash", "/usr/bin/bluefin-review-appliance", *sys.argv[1:]])
-' review-entrypoint "$@"
+' "$@"
 fi
 
 prepare_factory_state_dir() {

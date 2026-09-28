@@ -23,7 +23,8 @@ task:
   isolation:
     # The appliance starts from an empty /workspace. Each write-capable worker
     # clones one unique checkout under $HOME/worktrees instead of asking OMP to
-    # derive an isolation from a parent checkout that does not exist.
+    # derive an isolation from a parent checkout that does not exist. Review
+    # Slay therefore uses checkout isolation and must not request isolated:true.
     enabled: false
     apply: false
 
