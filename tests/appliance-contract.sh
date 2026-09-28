@@ -392,10 +392,69 @@ chmod 0755 "$identity_fixture"
 mkdir -m 0700 "$identity_fixture/claims"
 cat >"$identity_fixture/omp" <<'EOF'
 #!/usr/bin/bash
+has_version=false
+for arg; do
+  [[ "$arg" == --version ]] && has_version=true
+done
+$has_version || exit 19
 factory_state="$HOME/.local/state/review/factory"
+origin="$factory_state/origin.git"
+seed="$factory_state/seed"
+workspace="$factory_state/workspaces/probe"
+if [[ ! -d "$origin/objects" ]]; then
+  mkdir -p "$factory_state/workspaces"
+  git init -q "$seed"
+  git -C "$seed" config user.name probe
+  git -C "$seed" config user.email probe@example.test
+  printf 'ownership probe\n' >"$seed/README"
+  git -C "$seed" add README
+  git -C "$seed" commit -qm probe
+  git -C "$seed" branch -M main
+  mkdir -p "$origin"
+  cp -a "$seed/.git/." "$origin/"
+  git --git-dir="$origin" config core.bare true
+  git --git-dir="$origin" update-ref refs/pull/42/head refs/heads/main
+  git --git-dir="$origin" update-server-info
+fi
+python3 - "$origin" "$workspace" "$factory_state/gh" <<'PY'
+import functools
+import http.server
+import os
+import subprocess
+import sys
+import threading
+
+origin, workspace, gh_path = sys.argv[1:]
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=origin)
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+
+def run(*args, env=None):
+    subprocess.run(args, check=True, stdout=subprocess.DEVNULL, env=env)
+
+url = f"http://127.0.0.1:{server.server_port}/"
+with open(gh_path, "w", encoding="utf-8") as gh:
+    gh.write("""#!/usr/bin/bash
+set -eu
+[[ "${1:-} ${2:-}" == "repo clone" ]] || exit 2
+exec git -c protocol.file.allow=never clone -q --no-checkout "$FACTORY_GIT_URL" "${4:?}"
+""")
+os.chmod(gh_path, 0o755)
+env = os.environ.copy()
+env["FACTORY_GIT_URL"] = url
+env["PATH"] = f"{os.path.dirname(gh_path)}:{env['PATH']}"
+if not os.path.isdir(os.path.join(workspace, ".git")):
+    run("gh", "repo", "clone", "example/repo", workspace, "--", "--no-checkout", env=env)
+else:
+    run("git", "-C", workspace, "remote", "set-url", "origin", url)
+run("git", "-C", workspace, "fetch", "-q", "origin", "pull/42/head:refs/remotes/origin/pr-42")
+run("git", "-C", workspace, "checkout", "-q", "--detach", "FETCH_HEAD")
+server.shutdown()
+PY
+[[ -n "$(git -C "$workspace" rev-parse --verify HEAD)" ]] || exit 19
 if [[ -e "$factory_state/retained-probe" ]]; then retained=yes; else retained=no; fi
 touch "$factory_state/retained-probe" "$LUNA_FACTORY_CLAIMS_ROOT/claims-probe"
-printf 'uid=%s gid=%s home=%s state_owner=%s retained=%s\n' "$(id -u)" "$(id -g)" "$HOME" "$(stat -c %u:%g "$factory_state")" "$retained"
+printf 'uid=%s gid=%s home=%s state_owner=%s workspace_owner=%s retained=%s\n' "$(id -u)" "$(id -g)" "$HOME" "$(stat -c %u:%g "$factory_state")" "$(stat -c %u:%g "$workspace")" "$retained"
 EOF
 chmod 0755 "$identity_fixture/omp"
 runtime_args=()
@@ -410,19 +469,27 @@ run_named_home_probe() {
     --volume "$identity_fixture:/runtime-probe:ro" \
     --env LUNA_FACTORY_CLAIMS_ROOT=/claims \
     --env PATH=/runtime-probe:/usr/bin:/bin \
-    --entrypoint /usr/bin/bluefin-review-appliance "$image" --version 2>/dev/null
+    --entrypoint /usr/bin/bluefin-review-appliance "$image" --version
 }
-first_identity_output="$(run_named_home_probe)" ||
-  fail "entrypoint could not prepare a named home volume from uid 0"
-[[ "$first_identity_output" == "uid=65532 gid=65532 home=/home/bluefin state_owner=65532:65532 retained=no" ]] ||
-  fail "entrypoint did not create named-volume Factory state under bluefin: ${first_identity_output}"
-retained_identity_output="$(run_named_home_probe)" ||
-  fail "entrypoint could not reopen retained named home state"
-[[ "$retained_identity_output" == "uid=65532 gid=65532 home=/home/bluefin state_owner=65532:65532 retained=yes" ]] ||
-  fail "entrypoint did not retain named-volume Factory state: ${retained_identity_output}"
+probe_stdout="$identity_fixture/probe.stdout"
+probe_stderr="$identity_fixture/probe.stderr"
+if ! run_named_home_probe >"$probe_stdout" 2>"$probe_stderr"; then
+  fail "entrypoint probe failed: stdout=$(cat "$probe_stdout") stderr=$(cat "$probe_stderr")"
+fi
+first_identity_output="$(cat "$probe_stdout")"
+[[ "$first_identity_output" == "uid=65532 gid=65532 home=/home/bluefin state_owner=65532:65532 workspace_owner=65532:65532 retained=no" ]] ||
+  fail "entrypoint did not create named-volume Factory state and workspace under bluefin: ${first_identity_output}"
+if ! run_named_home_probe >"$probe_stdout" 2>"$probe_stderr"; then
+  fail "retained entrypoint probe failed: stdout=$(cat "$probe_stdout") stderr=$(cat "$probe_stderr")"
+fi
+retained_identity_output="$(cat "$probe_stdout")"
+[[ "$retained_identity_output" == "uid=65532 gid=65532 home=/home/bluefin state_owner=65532:65532 workspace_owner=65532:65532 retained=yes" ]] ||
+  fail "entrypoint did not retain named-volume Factory state and workspace: ${retained_identity_output}"
 home_mount="$("$engine" volume inspect --format '{{.Mountpoint}}' "$home_volume")"
 [[ "$(stat -c %u:%g "$home_mount/.local/state/review/factory/retained-probe")" == "$(id -u):$(id -g)" ]] ||
   fail "retained Factory state is not host-owned by the runtime caller"
+[[ "$(stat -c %u:%g "$home_mount/.local/state/review/factory/workspaces/probe")" == "$(id -u):$(id -g)" ]] ||
+  fail "retained Factory workspace is not host-owned by the runtime caller"
 [[ "$(stat -c %u:%g "$identity_fixture/claims/claims-probe")" == "$(id -u):$(id -g)" ]] ||
   fail "the existing claims mount lost host ownership"
 
