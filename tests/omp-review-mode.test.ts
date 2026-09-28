@@ -412,6 +412,16 @@ function observeTask(pi, ctx, id, call = `call-${id}`) {
 	} }, isError: false }, ctx);
 }
 
+function deliverTaskResults(pi, ctx, jobIds) {
+	ctx.asyncJobs.delivery.pendingJobIds = ctx.asyncJobs.delivery.pendingJobIds.filter((id) => !jobIds.includes(id));
+	ctx.asyncJobs.delivery.pending = ctx.asyncJobs.delivery.pendingJobIds.length;
+	return pi.events.get("message_start")({ message: {
+		role: "custom",
+		customType: "async-result",
+		details: { jobs: jobIds.map((jobId) => ({ jobId, type: "task" })) },
+	} }, ctx);
+}
+
 function fakeCtx() {
 	const notifications = [];
 	const statuses = new Map();
@@ -3143,6 +3153,8 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.messages.length, 1, "unfinished workers must settle before another repository starts");
 	ctx.asyncJobs.running = [];
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.messages.length, 1, "pending async-result deliveries must hold repository advancement");
 
 	dashboard.handleInput("p");
 	ctx.asyncJobs.recent = [{ id: "hive-wave", status: "completed", startTime: Date.now() + 1 }];
@@ -3150,6 +3162,9 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.equal(pi.messages.length, 1, "pause prevents the next repository from starting");
 	dashboard.handleInput("p");
 	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1, "resume waits for pending async-result deliveries");
+	await deliverTaskResults(pi, ctx, ["worker-1", "worker-2"]);
+	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.messages.length, 2);
 	assert.match(pi.messages[1], /projectbluefin\/b/);
 	assert.doesNotMatch(pi.messages[1], /projectbluefin\/a/);
@@ -3774,6 +3789,9 @@ test("restart uses persisted terminal evidence for one Factory retry", async () 
 	observeTask(pi1, ctx1, "worker-command", "worker-command");
 	await pi1.events.get("turn_end")({}, ctx1);
 	await pi1.events.get("agent_end")({}, ctx1);
+	assert.equal(pi1.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "running");
+	await deliverTaskResults(pi1, ctx1, ["worker-command"]);
+	await pi1.events.get("agent_end")({}, ctx1);
 	const factory = fakeHost();
 	factory.commands = new Map();
 	factory.registerCommand = (name, definition) => factory.commands.set(name, definition);
@@ -4098,6 +4116,9 @@ test("blocked issue Slay can be revised and re-Slayed in the same Review session
 	observeTask(pi, ctx, "failed-issue-worker", "failed-issue-worker");
 	await pi.events.get("turn_end")({}, ctx);
 	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "running");
+	await deliverTaskResults(pi, ctx, ["failed-issue-worker"]);
+	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "blocked");
 
 	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
@@ -4139,6 +4160,9 @@ test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async
 
 	ctx.asyncJobs.running = [];
 	ctx.asyncJobs.recent = [{ id: "drain-worker", status: "failed", startTime: Date.now() + 2 }];
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "paused");
+	await deliverTaskResults(pi, ctx, ["drain-worker"]);
 	await pi.events.get("agent_end")({}, ctx);
 	const cancelled = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(cancelled.state, "cancelled");
