@@ -73,7 +73,7 @@ export default function sdkInitializationProbe(pi: any) {
 			hasUI: { value: true },
 			ui: { value: {
 				notify: (message: string) => { notices.push(message); },
-				select: async () => "Inspect selected items",
+				select: async () => "Inspect only",
 				setStatus() {}, setWidget() {}, setTitle() {},
 				theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text },
 				custom(factory: (...args: any[]) => unknown) {

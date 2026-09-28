@@ -94,11 +94,11 @@ identity with at least one assistant request is correlated to that task, attempt
 and generation. A dispatch prompt, job id, or zero-request setup failure cannot
 certify execution.
 
-Factory-private SDK sessions remain outside OMP Agent Hub: they are not shown by
-Ctrl+A, which lists globally registered OMP agents. Factory status records the
-worker/acceptance session path, but only an observed OMP `turn_start` marks that
-private execution started. A persisted session path or execution ID does not
-prove a child is live after restart; unfinished attempts reconcile as unknown.
+Factory SDK sessions use the host OMP Agent Hub's global registry with
+collision-safe Factory identities. Alt+A exposes live status, transcript focus,
+and native cancellation; retained session paths remain read-only evidence. A
+persisted session path or execution identity does not prove a child is live
+after restart; unfinished attempts reconcile as unknown.
 
 ## Execution boundary
 

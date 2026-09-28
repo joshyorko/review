@@ -97,10 +97,14 @@ test("native adapter uses the OMP 18.3.2 restricted custom-tool contract", async
 			new AbortController().signal,
 			() => {},
 			() => {},
+			"",
+			{ attemptId: "T1-a1" },
 		);
 
 		assert.ok(captured);
-		assert.ok(captured.agentRegistry instanceof PrivateAgentRegistry);
+		assert.equal(captured.agentRegistry, undefined, "Factory uses OMP's global registry instead of an isolated private registry");
+		assert.match(String(captured.agentId), /^factory-[a-f0-9]{32}$/);
+		assert.match(String(captured.agentDisplayName), /^Factory #1 · worker · attempt a1$/);
 		assert.equal(captured.restrictToolNames, true);
 		assert.equal(captured.allowRestrictedCustomTools, true);
 		assert.equal(captured.enableMCP, false);

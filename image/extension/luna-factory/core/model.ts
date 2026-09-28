@@ -208,7 +208,7 @@ export interface Attempt {
 	readonly nativeAgentIds: readonly NativeAgentId[];
 	/** OMP agent whose Hub steering invalidated this attempt, when observed. */
 	readonly steeredAgentId?: NativeAgentId;
-	/** Factory-private SDK sessions; these have no global OMP Agent Hub ID. */
+	/** Factory SDK session records; live execution is visible through OMP Agent Hub. */
 	readonly privateSessions: readonly FactoryPrivateSession[];
 	readonly receipt?: EvidenceReceipt;
 	/** Integration is an explicit owner act; auto-apply is never assumed. */
