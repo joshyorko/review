@@ -436,8 +436,6 @@ export class BatchService {
 				for (const item of batch.items.filter((candidate) => candidate.stage === "QUEUED").sort((a, b) => a.attempts - b.attempts)) {
 					const graphNode = batchGraphDecision(batch).nodes.find((node) => node.key === item.selected.key);
 					if (graphNode && graphNode.decision !== "READY") {
-						if (graphNode.decision === "UNKNOWN") item.stage = "UNKNOWN";
-						else if (graphNode.decision === "BLOCKED") item.stage = "BLOCKED";
 						item.blocker = graphNode.blockers[0] ?? `graph admission is ${graphNode.decision}`;
 						this.persist(batch);
 						continue;

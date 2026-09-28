@@ -21,6 +21,7 @@ export interface GraphRelation {
 	readonly authority: GraphAuthority;
 	readonly source: string;
 	readonly stage?: GraphOutcomeStage;
+	readonly reason?: string;
 }
 
 export interface GraphNodeObservation {

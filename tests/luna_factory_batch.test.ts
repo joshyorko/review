@@ -665,6 +665,57 @@ test("dependency-deferred work remains queued when an unrelated prerequisite is 
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("service re-evaluates a queued dependent after its prerequisite becomes proven", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-service-join-"));
+	let service: BatchService | undefined;
+	try {
+		const prerequisite = selected("org/a#1", "inspect");
+		const dependent = selected("org/b#2", "inspect");
+		const batch = createBatch([prerequisite, dependent], {
+			...options("join"),
+			capacity: 1,
+			dependencies: [{ item: dependent.key, requires: prerequisite.key, stage: "verified-patch" }],
+		});
+		let prerequisiteBlocked = true;
+		const executed: string[] = [];
+		const github = {
+			snapshot: async (item: SelectedItem) => item,
+			assertFresh: async (item: SelectedItem) => {
+				if (prerequisiteBlocked && item.key === prerequisite.key) throw new Error("prerequisite temporarily inaccessible");
+			},
+		};
+		service = new BatchService(root, github as never, undefined, {} as never, 1);
+		service.store.acquire();
+		service.store.write(batch);
+		await service.resume(batch.id, {});
+		await service.waitForIdle();
+		const deferred = service.store.read(batch.id);
+		assert.equal(deferred.items.find((item) => item.selected.key === prerequisite.key)?.stage, "BLOCKED");
+		assert.equal(deferred.items.find((item) => item.selected.key === dependent.key)?.stage, "QUEUED");
+
+		const proven = service.store.read(batch.id);
+		done(proven, prerequisite.key);
+		service.store.write(proven);
+		prerequisiteBlocked = false;
+		const internals = service as unknown as {
+			validateProof(item: Batch["items"][number]): Promise<void>;
+			execute(batch: Batch, item: Batch["items"][number], signal: AbortSignal, binding?: unknown, bindingError?: string): Promise<void>;
+		};
+		internals.validateProof = async () => {};
+		internals.execute = async (_batch, item) => {
+			executed.push(item.selected.key);
+			item.stage = "BLOCKED";
+			item.blocker = "test execution settled";
+		};
+		await service.resume(batch.id, {});
+		await service.waitForIdle();
+		assert.deepEqual(executed, [dependent.key]);
+	} finally {
+		if (service) await service.shutdown();
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("an unconfirmed stop keeps the item unknown and the repository claim", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-cancel-"));
 	try {
