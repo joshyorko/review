@@ -107,6 +107,7 @@ require image/appliance/entrypoint.sh \
   'os.setgid(65532)' \
   'os.setuid(65532)' \
   'prepare_factory_state_dir'
+forbid image/appliance/entrypoint.sh 'review-entrypoint'
 forbid "$containerfile" 'image/contribute' 'bin/bluefin-contribute' 'ghcr.io/projectbluefin/contribute'
 for retired in \
   bin/bluefin-contribute \
@@ -394,6 +395,7 @@ cat >"$identity_fixture/omp" <<'EOF'
 #!/usr/bin/bash
 has_version=false
 for arg; do
+  [[ "$arg" != review-entrypoint ]] || exit 21
   [[ "$arg" == --version ]] && has_version=true
 done
 $has_version || exit 19
