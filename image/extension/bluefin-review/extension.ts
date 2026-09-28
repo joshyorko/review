@@ -996,12 +996,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (JSON.stringify(activeBatch.waveTaskWorkers ?? {}) === JSON.stringify(workers) && JSON.stringify(activeBatch.waveJobIds ?? []) === JSON.stringify(ids) && JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) === JSON.stringify(terminal) && JSON.stringify(activeBatch.waveEffectResources ?? []) === JSON.stringify(resources)) return;
 		persistBatch(ctx, { ...activeBatch, waveTaskWorkers: workers, waveJobIds: ids, waveTerminalJobStatuses: terminal, waveEffectResources: resources });
 	};
-	// OMP 18.3 task results identify each spawned agent in progress; snapshots
-	// expose the actual job id, including the manager's collision suffix.
+	// OMP 18.4 task details expose the primary async job id directly. Persist it
+	// immediately for single-spawn calls instead of racing the transient job
+	// snapshot; the snapshot remains the authoritative mapper for batch siblings.
 	const rememberTaskResult = (ctx: CtxLike, call: string, result: unknown): void => {
 		if (!activeBatch?.waveToolCallIds?.includes(call) || !result || typeof result !== "object" || !("details" in result)) return;
 		const details = result.details;
 		if (!details || typeof details !== "object" || !("async" in details) || !details.async || typeof details.async !== "object" || !("type" in details.async) || details.async.type !== "task" || !("progress" in details) || !Array.isArray(details.progress)) return;
+		const asyncJobId = "jobId" in details.async && typeof details.async.jobId === "string" && details.async.jobId ? details.async.jobId : undefined;
+		const asyncState = "state" in details.async && typeof details.async.state === "string" ? details.async.state : undefined;
 		const workers: { agentId: string; jobId?: string; resultStatus?: "completed" | "failed" | "cancelled" }[] = [];
 		for (const row of details.progress) {
 			if (!row || typeof row !== "object" || typeof row.id !== "string" || !row.id) return;
@@ -1012,8 +1015,27 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			persistBatch(ctx, { ...activeBatch, waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: [] } });
 			return;
 		}
-		const updated = workers.map((worker, index) => ({ ...previous?.[index], ...worker }));
-		if (JSON.stringify(previous) !== JSON.stringify(updated)) persistBatch(ctx, { ...activeBatch, waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: updated } });
+		const updated = workers.map((worker, index) => ({
+			...previous?.[index],
+			...worker,
+			...(workers.length === 1 && asyncJobId ? { jobId: asyncJobId } : {}),
+		}));
+		const jobIds = [...new Set([...(activeBatch.waveJobIds ?? []), ...updated.flatMap((worker) => worker.jobId ? [worker.jobId] : [])])].sort();
+		const terminal = { ...(activeBatch.waveTerminalJobStatuses ?? {}) };
+		if (workers.length === 1 && asyncJobId && asyncState !== "running") {
+			const status = updated[0]?.resultStatus;
+			if (status) terminal[asyncJobId] = status;
+		}
+		if (JSON.stringify(previous) !== JSON.stringify(updated)
+			|| JSON.stringify(activeBatch.waveJobIds ?? []) !== JSON.stringify(jobIds)
+			|| JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) !== JSON.stringify(terminal)) {
+			persistBatch(ctx, {
+				...activeBatch,
+				waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: updated },
+				waveJobIds: jobIds,
+				waveTerminalJobStatuses: terminal,
+			});
+		}
 		rememberWaveEvidence(ctx);
 	};
 	const rememberDeliveredJobs = (event: unknown, ctx: CtxLike): void => {
@@ -2038,6 +2060,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const jobs = ctx.getAsyncJobSnapshot?.();
 		rememberWaveEvidence(ctx);
 		if (jobs?.running.some((job) => job.startTime >= activeBatch!.waveStartedAt)) return;
+		const knownWaveJobs = new Set(activeBatch.waveJobIds ?? []);
+		if (jobs?.delivery?.pendingJobIds.some((id) => knownWaveJobs.has(id))) return;
 		const covered = waveWorkerCoverageComplete(activeBatch.waveJobIds, activeBatch.waveToolCallIds, activeBatch.waveTaskWorkers);
 		const settled = waveWorkersSettled(jobs, activeBatch.waveJobIds, activeBatch.waveTerminalJobStatuses);
 		const failed = (activeBatch.waveJobIds ?? []).filter((id) => ["failed", "cancelled", "canceled"].includes(activeBatch!.waveTerminalJobStatuses?.[id] ?? ""));
