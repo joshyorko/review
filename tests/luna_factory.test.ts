@@ -30,7 +30,7 @@ import type {
 	Subject,
 	TaskId,
 } from "../image/extension/luna-factory/core/model.ts";
-import { batchGraphDecision, createBatch, type FactoryAction, type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
+import { createBatch, type FactoryAction, type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
 import { renderCompletionReceipt } from "../image/extension/luna-factory/core/receipt.ts";
 import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
 import { artifactRefError, changedPathError, parseCandidate, parseReceipt, parseSubject } from "../image/extension/luna-factory/core/schema.ts";
@@ -2917,21 +2917,4 @@ test("graph distinguishes converged from autonomously quiescent", () => {
 	const done = graphNode("done", "DONE", { proof: "verified-patch", proofCurrent: true });
 	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [done], relations: [] }).verdict, "CONVERGED");
 	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [graphNode("blocked", "BLOCKED")], relations: [] }).verdict, "AUTONOMOUSLY_QUIESCENT");
-});
-
-test("batch execution admits only graph-ready work and retains prerequisite blockers", () => {
-	const batch = createBatch([
-		{ key: "example/repo#1", repo: "example/repo", number: 1, kind: "issue", action: "patch", overlaps: [], base: "a".repeat(40), head: "b".repeat(40), acceptanceRevision: "r1" },
-		{ key: "example/repo#2", repo: "example/repo", number: 2, kind: "issue", action: "patch", overlaps: [], base: "a".repeat(40), head: "c".repeat(40), acceptanceRevision: "r1" },
-	], {
-		id: "batch-graph1234",
-		capacity: 2,
-		maxAttempts: 2,
-		maxTotalAttempts: 4,
-		mode: "retain",
-		dependencies: [{ item: "example/repo#2", requires: "example/repo#1", stage: "verified-patch" }],
-	});
-	const decision = batchGraphDecision(batch);
-	assert.deepEqual(decision.ready, ["example/repo#1"]);
-	assert.match(decision.nodes.find((node) => node.key === "example/repo#2")!.blockers[0]!, /prerequisite/);
 });

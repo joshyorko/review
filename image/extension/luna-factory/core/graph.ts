@@ -47,6 +47,11 @@ export interface GraphNodeDecision extends GraphNodeObservation {
 	readonly blockers: readonly string[];
 	readonly softHints: readonly string[];
 }
+interface MutableGraphNodeDecision extends GraphNodeObservation {
+	readonly decision: GraphDecisionState;
+	blockers: string[];
+	softHints: string[];
+}
 
 export interface WorkGraphDecision {
 	readonly generation: string;
@@ -59,7 +64,7 @@ export interface WorkGraphDecision {
 }
 
 const STAGES: readonly GraphOutcomeStage[] = ["verified-patch", "pr-ready", "merged-upstream"];
-const HARD_KINDS = new Set<GraphRelationKind>(["requires", "stacked-on"]);
+const HARD_KINDS: Partial<Record<GraphRelationKind, true>> = { requires: true, "stacked-on": true };
 
 function stageAtLeast(actual: GraphOutcomeStage | undefined, target: GraphOutcomeStage): boolean {
 	return actual !== undefined && STAGES.indexOf(actual) >= STAGES.indexOf(target);
@@ -80,7 +85,7 @@ function assertGraph(input: WorkGraphObservation): void {
 	}
 	for (const relation of input.relations) {
 		if (!keys.has(relation.from) || !keys.has(relation.to)) throw new Error(`graph relation references an unselected node: ${relationLabel(relation)}`);
-		if (relation.from === relation.to && HARD_KINDS.has(relation.kind) && relation.authority === "authoritative") throw new Error(`graph self-cycle: ${relationLabel(relation)}`);
+		if (relation.from === relation.to && HARD_KINDS[relation.kind] === true && relation.authority === "authoritative") throw new Error(`graph self-cycle: ${relationLabel(relation)}`);
 		if (!relation.source.trim()) throw new Error(`graph relation source is required: ${relationLabel(relation)}`);
 	}
 	const visiting = new Set<string>();
@@ -90,7 +95,7 @@ function assertGraph(input: WorkGraphObservation): void {
 		if (visited.has(key)) return;
 		visiting.add(key);
 		for (const relation of input.relations) {
-			if (relation.to !== key || !HARD_KINDS.has(relation.kind) || relation.authority !== "authoritative") continue;
+			if (relation.to !== key || HARD_KINDS[relation.kind] !== true || relation.authority !== "authoritative") continue;
 			visit(relation.from);
 		}
 		visiting.delete(key);
@@ -106,8 +111,17 @@ function assertGraph(input: WorkGraphObservation): void {
 export function evaluateWorkGraph(input: WorkGraphObservation): WorkGraphDecision {
 	assertGraph(input);
 	const relationByFrom = new Map<string, GraphRelation[]>();
-	for (const relation of input.relations) relationByFrom.set(relation.from, [...(relationByFrom.get(relation.from) ?? []), relation]);
-	const base = new Map<string, GraphNodeDecision>();
+	for (const relation of input.relations) {
+		relationByFrom.set(relation.from, [...(relationByFrom.get(relation.from) ?? []), relation]);
+		if (relation.kind !== "overlaps" || relation.authority !== "authoritative") continue;
+		const reverseExists = input.relations.some((candidate) =>
+			candidate.from === relation.to && candidate.to === relation.from && candidate.kind === "overlaps" && candidate.authority === "authoritative");
+		if (!reverseExists) {
+			const reverse = { ...relation, from: relation.to, to: relation.from, source: `${relation.source} (symmetric)` };
+			relationByFrom.set(reverse.from, [...(relationByFrom.get(reverse.from) ?? []), reverse]);
+		}
+	}
+	const base = new Map<string, MutableGraphNodeDecision>();
 	for (const node of input.nodes) {
 		let decision: GraphDecisionState;
 		const blockers: string[] = [];
@@ -127,16 +141,19 @@ export function evaluateWorkGraph(input: WorkGraphObservation): WorkGraphDecisio
 				current.softHints.push(`${relationLabel(relation)} is a soft ordering hint (${relation.reason ?? relation.source})`);
 				continue;
 			}
-			if (relation.kind === "contains" || relation.kind === "implements") continue;
+			if (relation.kind === "contains" || relation.kind === "implements" || current.decision !== "READY") continue;
 			const prerequisite = base.get(relation.to)!;
 			if (relation.kind === "overlaps") {
-				if (current.decision !== "DONE" && prerequisite.decision !== "DONE" && prerequisite.decision !== "UNKNOWN") {
+				if (prerequisite.decision === "DONE") continue;
+				if (prerequisite.decision === "UNKNOWN") {
+					current.blockers.push(`overlap with ${relation.to} is UNKNOWN`);
+					current.decision = "UNKNOWN";
+				} else {
 					current.blockers.push(`overlaps active selected work ${relation.to}`);
-					if (current.decision === "READY") current.decision = "BLOCKED";
+					current.decision = "BLOCKED";
 				}
 				continue;
 			}
-			if (current.decision === "DONE" || current.decision === "UNKNOWN" || current.decision === "BLOCKED") continue;
 			if (prerequisite.decision === "DONE" && stageAtLeast(prerequisite.proof, relation.stage ?? node.target)) continue;
 			if (prerequisite.decision === "UNKNOWN") {
 				current.blockers.push(`${relation.kind} prerequisite ${relation.to} is UNKNOWN`);
@@ -147,7 +164,7 @@ export function evaluateWorkGraph(input: WorkGraphObservation): WorkGraphDecisio
 			}
 		}
 	}
-	const nodes = [...base.values()].map((node) => ({ ...node, blockers: [...new Set(node.blockers)], softHints: [...new Set(node.softHints)] }));
+	const nodes: GraphNodeDecision[] = [...base.values()].map((node) => ({ ...node, blockers: [...node.blockers], softHints: [...node.softHints] }));
 	const ready = nodes.filter((node) => node.decision === "READY").map((node) => node.key);
 	const blockers = nodes.flatMap((node) => node.blockers.map((blocker) => `${node.key}: ${blocker}`));
 	const softHints = nodes.flatMap((node) => node.softHints);

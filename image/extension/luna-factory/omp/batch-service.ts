@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { batchConverged, batchGraphDecision, batchSummary, createBatch, dependencyBlocker, digest, selectionIdentity, type Batch, type BatchItem, type SelectedItem, type Prerequisite } from "../core/batch.ts";
+import { batchConverged, batchSummary, createBatch, dependencyBlocker, digest, selectionIdentity, type Batch, type BatchItem, type SelectedItem, type Prerequisite } from "../core/batch.ts";
 import { reconcileReceipt } from "../core/evidence.ts";
 import { reduce } from "../core/reducer.ts";
 import type { AttemptId, CriterionId, EvidenceReceipt, LedgerEvent, OperationReceipt, PredicateEvidence, TaskId } from "../core/model.ts";
@@ -434,12 +434,6 @@ export class BatchService {
 				if (this.running.size >= this.capacity) break;
 				if ([...this.running.values()].filter((active) => active.batch.id === batch.id).length >= batch.capacity) continue;
 				for (const item of batch.items.filter((candidate) => candidate.stage === "QUEUED").sort((a, b) => a.attempts - b.attempts)) {
-					const graphNode = batchGraphDecision(batch).nodes.find((node) => node.key === item.selected.key);
-					if (graphNode && graphNode.decision !== "READY") {
-						item.blocker = graphNode.blockers[0] ?? `graph admission is ${graphNode.decision}`;
-						this.persist(batch);
-						continue;
-					}
 					const dependency = dependencyBlocker(batch, item.selected.key);
 					if (dependency) { item.blocker = dependency; continue; }
 					const approved = this.bindings.get(batch.id);

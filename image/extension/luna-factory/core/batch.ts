@@ -1,4 +1,3 @@
-import { evaluateWorkGraph, type GraphRelation, type WorkGraphDecision, type WorkGraphObservation } from "./graph.ts";
 import { createHash } from "node:crypto";
 import { emptyLedger, type Ledger, type OperationReceipt, type RunId, type CriterionId } from "./model.ts";
 import { criterionProven } from "./evidence.ts";
@@ -20,8 +19,6 @@ export interface SelectedItem {
 	head?: string;
 	url?: string;
 	overlaps: string[];
-	/** Typed relationship evidence captured with the selection. */
-	relations?: GraphRelation[];
 	/** Operator/repository checks captured before the worker can propose commands. */
 	requiredChecks?: string[];
 	blocker?: string;
@@ -143,50 +140,6 @@ export function batchItemProofCurrent(item: BatchItem): boolean {
 	return item.ledger.tasks.some((task) => task.state === "DONE" && criterionProven(item.ledger, task.criterionId));
 }
 
-export function batchGraphObservation(batch: Batch): WorkGraphObservation {
-	const nodeKeys = new Set(batch.items.map((item) => item.selected.key));
-	const relations: GraphRelation[] = [
-		...batch.dependencies.map((edge) => ({
-			from: edge.item,
-			to: edge.requires,
-			kind: "requires" as const,
-			authority: "authoritative" as const,
-			source: "persisted batch prerequisite",
-			stage: edge.stage,
-		})),
-		...batch.items.flatMap((item) => item.selected.relations ?? []),
-		...batch.items.flatMap((item) => item.selected.overlaps
-			.filter((key) => key !== item.selected.key && nodeKeys.has(key))
-			.map((key) => ({
-				from: item.selected.key,
-				to: key,
-				kind: "overlaps" as const,
-				authority: "authoritative" as const,
-				source: "persisted selection overlap",
-			}))),
-	];
-	return {
-		generation: `batch:${batch.id}`,
-		nodes: batch.items.map((item) => ({
-			key: item.selected.key,
-			generation: `batch:${batch.id}`,
-			subject: item.selected.base === undefined || item.selected.base === "unavailable"
-				? undefined
-				: { repo: item.selected.repo, base: item.selected.base, ...(item.selected.head === undefined ? {} : { head: item.selected.head }) },
-			required: item.stage !== "EXCLUDED" && item.stage !== "CANCELLED",
-			target: item.selected.action === "pr-ready" ? "pr-ready" : "verified-patch",
-			state: item.stage === "CANCELLED" ? "EXCLUDED" : item.stage,
-			proof: item.proof?.stage,
-			proofCurrent: batchItemProofCurrent(item),
-			blocker: item.blocker,
-		})),
-		relations,
-	};
-}
-
-export function batchGraphDecision(batch: Batch): WorkGraphDecision {
-	return evaluateWorkGraph(batchGraphObservation(batch));
-}
 
 export function batchConverged(batch: Batch): boolean {
 	return batch.items.length > 0 && batch.scopeRevisions.length === 0 && batch.items.every((item) =>
@@ -194,7 +147,6 @@ export function batchConverged(batch: Batch): boolean {
 	);
 }
 export function batchSummary(batch: Batch, root: string): string {
-	const graph = batchGraphDecision(batch);
 	const excluded = batch.items.filter((item) => item.stage === "EXCLUDED").length;
 	const scope = batch.items.length - excluded;
 	const proven = batch.items.filter(batchItemProofCurrent).length;
@@ -204,7 +156,6 @@ export function batchSummary(batch: Batch, root: string): string {
 	const cancelled = batch.items.filter((item) => item.stage === "CANCELLED").length;
 	const lines = [
 		`Factory ${batch.id}: ${batchConverged(batch) ? "CONVERGED" : batch.control} · ${proven}/${scope} proven · capacity ${batch.capacity}`,
-		`Graph: ${graph.verdict} · ready ${graph.ready.length} · blockers ${graph.blockers.length} · model calls ${graph.modelCalls}`,
 		`Current scope: ${proven} proven · ${active} active · ${blocked} blocked · ${unknown} unknown/unresolved · ${cancelled} cancelled · ${excluded} excluded (${scope}/${batch.items.length} items)`,
 		`State: ${root}; ${batch.mode === "once" ? "run once (unfinished work retained)" : "keep for resume"}. No detached service; process termination interrupts work.`,
 		...batch.items.flatMap((item) => {
