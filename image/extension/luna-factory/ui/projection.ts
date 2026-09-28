@@ -310,22 +310,25 @@ function retryEligible(
 	if (batch.items.reduce((total, candidate) => total + candidate.attempts, 0) >= batch.maxTotalAttempts) return false;
 	const preparationRetry = safePreparationRetry(batch, item);
 	const settledCancellationRetry = settledNativeCancellation(batch, item, activeItemKeys);
-	if (item.stage === "CANCELLED" && !settledCancellationRetry && !preparationRetry && item.operation?.state !== "not-applied") return false;
-	if (item.stage === "UNKNOWN" && !settledCancellationRetry && !preparationRetry && item.operation?.state !== "not-applied") return false;
+	const archivedPreparation = item.operation === undefined && item.operations.some((operation) =>
+		operation.phase === "worker" && ["not-applied", "unknown", "intent"].includes(operation.state));
+	if ((item.operation?.state === "not-applied" || archivedPreparation) && item.attempts === 0 && !preparationRetry) return false;
+	if (item.stage === "CANCELLED" && !settledCancellationRetry && !preparationRetry) return false;
+	if (item.stage === "UNKNOWN" && !settledCancellationRetry && !preparationRetry) return false;
 	if (item.operation && ["unknown", "intent"].includes(item.operation.state) && !settledCancellationRetry && !preparationRetry) return false;
 	return true;
 }
 
 function safePreparationRetry(batch: Batch, item: BatchItem): boolean {
-	const operation = item.operation;
-	if (!operation || !["unknown", "intent"].includes(operation.state)) return false;
 	const owner = `${batch.id}:${item.selected.key}`;
 	const noWorker = item.attempts === 0 && item.sessions.length === 0 && item.ledger.tasks.every((task) => task.attempts.length === 0);
 	const preparation = item.preparation;
-	return noWorker && preparation !== undefined && preparation.phase !== "ready" && preparation.owner === owner &&
-		preparation.head === item.selected.head && operation.phase === "worker" && operation.owner === owner &&
-		operation.generation === item.ledger.generation && operation.subject.repo === item.ledger.subject.repo &&
-		operation.subject.base === item.ledger.subject.base && operation.subject.head === item.ledger.subject.head;
+	if (!noWorker || preparation === undefined || preparation.owner !== owner || preparation.head !== item.selected.head) return false;
+	return [...item.operations, ...(item.operation === undefined ? [] : [item.operation])].some((operation) =>
+		operation.owner === owner && operation.generation === item.ledger.generation && operation.phase === "worker" &&
+		["not-applied", "unknown", "intent"].includes(operation.state) &&
+		operation.subject.repo === item.ledger.subject.repo && operation.subject.base === item.ledger.subject.base &&
+		operation.subject.head === item.ledger.subject.head);
 }
 
 function settledNativeCancellation(batch: Batch, item: BatchItem, activeItemKeys?: readonly string[]): boolean {
@@ -341,7 +344,9 @@ function settledNativeCancellation(batch: Batch, item: BatchItem, activeItemKeys
 		settlement.sessionFiles.some((path, index) => path !== sessionFiles[index] || !item.sessions.includes(path))) return false;
 	const operation = item.operation;
 	if (operation && (operation.phase === "push" || operation.phase === "pr" || operation.owner !== `${batch.id}:${item.selected.key}` ||
-		operation.attemptId !== latest.attempt.id || operation.generation !== latest.attempt.generation)) return false;
+		operation.attemptId !== latest.attempt.id || operation.generation !== latest.attempt.generation ||
+		operation.subject.repo !== latest.attempt.subject.repo || operation.subject.base !== latest.attempt.subject.base ||
+		operation.subject.head !== latest.attempt.subject.head)) return false;
 	return true;
 }
 
