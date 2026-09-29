@@ -13,6 +13,8 @@ repos:
     rev: v6.0.0 # v6.0.0
     hooks:
       - id: trailing-whitespace
+        # Unified diff context spaces are part of the patch syntax.
+        exclude: ^patches/omp/memory-backend-registration\.patch$
       - id: end-of-file-fixer
       - id: check-merge-conflict
       - id: detect-private-key

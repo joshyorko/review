@@ -17,6 +17,12 @@ fail() {
 omp_version="$(sed -nE 's/^ARG OMP_VERSION=([^[:space:]]+)$/\1/p' "$containerfile")"
 [[ "$omp_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
   fail "$containerfile must contain exactly one valid OMP_VERSION pin"
+omp_source_commit="$(sed -nE 's/^ARG OMP_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
+[[ "$omp_source_commit" =~ ^[0-9a-f]{40}$ ]] ||
+  fail "$containerfile must pin the exact OMP source commit"
+omp_natives_version="$(sed -nE 's/^ARG OMP_NATIVES_VERSION=([^[:space:]]+)$/\1/p' "$containerfile")"
+[[ "$omp_natives_version" == "$omp_version" ]] ||
+  fail "OMP native addon version must match OMP_VERSION"
 [[ "$typesafe_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
   fail "$containerfile must contain exactly one valid TYPESAFE_VERSION pin"
 
@@ -46,8 +52,14 @@ forbid_secret() {
 
 require "$containerfile" \
   "ARG OMP_VERSION=${omp_version}" \
-  'ARG OMP_X86_64_SHA256=' \
-  'ARG OMP_AARCH64_SHA256='
+  "ARG OMP_SOURCE_COMMIT=${omp_source_commit}" \
+  'ARG OMP_SOURCE_SHA256=' \
+  'ARG OMP_PATCH_SHA256=' \
+  "ARG OMP_NATIVES_VERSION=${omp_natives_version}" \
+  'ARG OMP_NATIVES_X86_64_SHA512=' \
+  'ARG OMP_NATIVES_AARCH64_SHA512=' \
+  'COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp' \
+  'COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch'
 
 require "$containerfile" \
   "ARG TYPESAFE_VERSION=${typesafe_version}" \
@@ -72,7 +84,9 @@ require image/extension/typesafe-omp-loader.mjs \
   'typeof pi.registerEntryRenderer'
 
 require "$containerfile" \
-  "io.github.joshyorko.review.omp.version=\"\${OMP_VERSION}\""
+  "io.github.joshyorko.review.omp.version=\"\${OMP_VERSION}\"" \
+  "io.github.joshyorko.review.omp.source.commit=\"\${OMP_SOURCE_COMMIT}\"" \
+  "io.github.joshyorko.review.omp.patch.sha256=\"\${OMP_PATCH_SHA256}\""
 
 forbid_secret
 
