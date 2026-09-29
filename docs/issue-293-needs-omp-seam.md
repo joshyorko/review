@@ -79,11 +79,11 @@ baseline: SHA-256
 (matches `image/appliance/Containerfile:34`), output `omp/18.4.3`. This is the
 upstream artifact hash, not a derived-output hash and not candidate proof.
 
-Local source build prerequisite observed missing: shell `bun --version` and
-`node --version` returned `command not found`; shell PATH also has no `npm`,
-`rustc`, `cargo`, or `gcc`. No upstream build script, compile, native canary,
-or CI-derived artifact run was completed. CI setup/build work and all derived
-artifact provenance remain unproven.
+Local source build prerequisite observed missing: shell `bun --version` returned
+`command not found`; `command -v bun node npm rustc cargo gcc` returned no tool
+paths. No upstream build script, compile, native canary, or CI-derived artifact
+run was completed. CI setup/build work and all derived artifact provenance
+remain unproven.
 
 ### Upstream issue evidence
 
