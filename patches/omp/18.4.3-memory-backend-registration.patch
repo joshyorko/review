@@ -435,10 +435,10 @@ index 3f9ab1757d..dc211b8d32 100644
  			return backend.save
  				? await backend.save(context, normalized)
 diff --git a/packages/coding-agent/src/memory-backend/settings.ts b/packages/coding-agent/src/memory-backend/settings.ts
-index 033bc38fba..9382cd1386 100644
+index 033bc38fba..9f4f53818b 100644
 --- a/packages/coding-agent/src/memory-backend/settings.ts
 +++ b/packages/coding-agent/src/memory-backend/settings.ts
-@@ -12,29 +12,21 @@ import { register } from "../config/registry";
+@@ -12,29 +12,28 @@ import { register } from "../config/registry";
  export const cfgMemoryBackend = register({
  	id: "memory.backend",
  	protocolDefault: ["rpc", "acp"],
@@ -451,10 +451,11 @@ index 033bc38fba..9382cd1386 100644
  		group: "General",
  		label: "Memory Backend",
 -		description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter",
--		options: [
--			{ value: "off", label: "Off", description: "No memory subsystem runs" },
--			{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
--			{ value: "hindsight", label: "Hindsight", description: "Vectorize Hindsight remote memory service" },
++		description: "Built-in or extension-provided memory backend",
+ 		options: [
+ 			{ value: "off", label: "Off", description: "No memory subsystem runs" },
+ 			{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
+ 			{ value: "hindsight", label: "Hindsight", description: "Vectorize Hindsight remote memory service" },
 -			{
 -				value: "mnemopi",
 -				label: "Mnemopi",
@@ -466,8 +467,9 @@ index 033bc38fba..9382cd1386 100644
 -				description:
 -					"Friction-gated project decision files (architecture/product/style), consolidated in the background",
 -			},
--		],
-+		description: "Built-in or extension-provided memory backend",
++			{ value: "mnemopi", label: "Mnemopi", description: "Local SQLite recall/retain backend with optional embeddings" },
++			{ value: "sharpshooter", label: "Sharpshooter", description: "Friction-gated project decision files" },
+ 		],
  	},
  });
 +
