@@ -18,7 +18,7 @@ import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/exten
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
 import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
+import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
@@ -329,6 +329,83 @@ function issueBackedFetch(states) {
 		for (const [, alias, owner, repo, number] of body.query.matchAll(aliases)) {
 			const node = current.find((candidate) => candidate.number === Number(number) && candidate.repository.nameWithOwner === `${owner}/${repo}`);
 			data[alias] = { issueOrPullRequest: node ? { ...node, closed: false } : null };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+}
+
+function recoveredPrSlayFetch(items, effects, options = {}) {
+	const queueNodes = () => items.filter((item) => effects[item.id]?.state === "OPEN").map((item) => ({
+		number: item.id,
+		title: item.title,
+		url: item.url,
+		updatedAt: new Date(NOW).toISOString(),
+		isDraft: false,
+		mergeable: "MERGEABLE",
+		reviewDecision: "REVIEW_REQUIRED",
+		headRefOid: item.headSha,
+		autoMergeRequest: null,
+		changedFiles: 1,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "src/change.ts" }] },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+		author: { login: item.author },
+		repository: { nameWithOwner: item.repo },
+		labels: { nodes: [] },
+	}));
+	return async (url, init) => {
+		if (!String(url).includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (options.unreadable && body.query.includes("pullRequest(number:")) return { ok: false, status: 503, statusText: "Unavailable", json: async () => ({}) };
+		const nodes = queueNodes();
+		if (body.variables?.search !== undefined) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "maintainer" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } }) };
+		}
+		if (body.query.includes("pullRequest(number:")) {
+			const match = /repository\(owner: "([^\"]+)", name: "([^\"]+)"\)\s*\{\s*nameWithOwner pullRequest\(number: (\d+)\)/.exec(body.query);
+			const [, owner, name, numberText] = match ?? [];
+			const effect = numberText ? effects[Number(numberText)] : undefined;
+			const repo = `${owner}/${name}`;
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { repository: effect ? {
+				nameWithOwner: repo,
+				pullRequest: {
+					id: `PR_${numberText}`,
+					number: Number(numberText),
+					url: `https://github.com/${repo}/pull/${numberText}`,
+					state: effect.state,
+					merged: effect.merged,
+					mergedAt: Object.hasOwn(effect, "mergedAt") ? effect.mergedAt : effect.merged ? new Date().toISOString() : null,
+					headRefOid: effect.headSha,
+					autoMergeRequest: effect.autoMerge ? { enabledAt: new Date().toISOString() } : null,
+					reviewDecision: Object.hasOwn(effect, "reviewDecision") ? effect.reviewDecision : "REVIEW_REQUIRED",
+					author: { login: items.find((item) => item.id === Number(numberText))?.author },
+					latestReviews: { pageInfo: { hasNextPage: effect.reviewsIncomplete === true }, nodes: effect.reviews ?? [] },
+				},
+			} : null } }) };
+		}
+		const data = {};
+		const aliases = /(\w+): repository\(owner: "([^\"]+)", name: "([^\"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+		for (const [, alias, owner, repo, numberText] of body.query.matchAll(aliases)) {
+			const item = items.find((candidate) => candidate.repo === `${owner}/${repo}` && candidate.id === Number(numberText));
+			const effect = effects[Number(numberText)];
+			const node = item && effect?.state === "OPEN" ? {
+				number: item.id,
+				title: item.title,
+				url: item.url,
+				updatedAt: new Date(NOW).toISOString(),
+				isDraft: false,
+				mergeable: "MERGEABLE",
+				reviewDecision: "REVIEW_REQUIRED",
+				headRefOid: item.headSha,
+				autoMergeRequest: null,
+				changedFiles: 1,
+				files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "src/change.ts" }] },
+				commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+				author: { login: item.author },
+				repository: { nameWithOwner: item.repo },
+				labels: { nodes: [] },
+				closed: false,
+			} : null;
+			data[alias] = { issueOrPullRequest: node };
 		}
 		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
 	};
@@ -868,6 +945,51 @@ test("bounded named PR reads carry expensive evidence after lightweight discover
 	assert.equal(result.items[0]?.headSha, "a".repeat(40));
 	assert.deepEqual(result.items[0]?.workflowFiles, [".github/workflows/ci.yml"]);
 	assert.deepEqual(result.items[0]?.closingIssues, ["owner/repo#2"]);
+});
+
+test("exact PR effect reads accept GitHub MERGED state and preserve null aggregate review decision", async () => {
+	const item = queueItem({ id: 350, repo: "owner/repo", url: "https://github.com/owner/repo/pull/350", headSha: "a".repeat(40) });
+	const effects = { 350: { state: "MERGED", merged: true, headSha: item.headSha, reviewDecision: null, reviews: [] } };
+	const fetchImpl = recoveredPrSlayFetch([item], effects);
+	const effect = await fetchPullRequestEffect("owner/repo", 350, { token: "t", fetchImpl });
+	assert.equal(effect.kind, "observed");
+	if (effect.kind === "observed") {
+		assert.equal(effect.pullRequest.state, "MERGED");
+		assert.equal(effect.pullRequest.merged, true);
+		assert.equal(effect.pullRequest.reviewDecision, null);
+	}
+	const queue = await fetchItemsByKey(["owner/repo#350"], "prs", { token: "t", fetchImpl });
+	assert.deepEqual(queue.items, [], "merged PRs remain absent from named open-queue reads");
+});
+
+test("exact PR effect reads reject contradictory GitHub state, merged, and mergedAt combinations", async () => {
+	const item = queueItem({ id: 350, repo: "owner/repo", url: "https://github.com/owner/repo/pull/350", headSha: "a".repeat(40) });
+	for (const effect of [
+		{ state: "MERGED", merged: false, mergedAt: null },
+		{ state: "MERGED", merged: true, mergedAt: null },
+		{ state: "CLOSED", merged: true, mergedAt: new Date().toISOString() },
+		{ state: "OPEN", merged: true, mergedAt: new Date().toISOString() },
+	]) {
+		const result = await fetchPullRequestEffect("owner/repo", 350, {
+			token: "t",
+			fetchImpl: recoveredPrSlayFetch([item], { 350: { ...effect, headSha: item.headSha, reviews: [] } }),
+		});
+		assert.equal(result.kind, "unknown", JSON.stringify(effect));
+	}
+});
+
+test("exact PR effect reads retain closed state without changing the open queue projection", async () => {
+	const item = queueItem({ id: 350, repo: "owner/repo", url: "https://github.com/owner/repo/pull/350", headSha: "a".repeat(40) });
+	const effects = { 350: { state: "CLOSED", merged: false, headSha: item.headSha, reviewDecision: "REVIEW_REQUIRED", reviews: [] } };
+	const fetchImpl = recoveredPrSlayFetch([item], effects);
+	const effect = await fetchPullRequestEffect("owner/repo", 350, { token: "t", fetchImpl });
+	assert.equal(effect.kind, "observed");
+	if (effect.kind === "observed") {
+		assert.equal(effect.pullRequest.state, "CLOSED");
+		assert.equal(effect.pullRequest.merged, false);
+	}
+	const queue = await fetchItemsByKey(["owner/repo#350"], "prs", { token: "t", fetchImpl });
+	assert.deepEqual(queue.items, [], "closed PRs remain absent from named open-queue reads");
 });
 
 
@@ -3841,6 +3963,191 @@ async function interruptedIssueSlay(states) {
 	await pi.events.get("session_shutdown")?.({}, ctx);
 	return { env, entries: pi.entries, batch };
 }
+
+async function blockedPrSlayWave() {
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const items = [350, 352, 353, 354].map((id) => queueItem({
+		id,
+		repo: "projectbluefin/review",
+		title: `recovery target ${id}`,
+		author: "contributor",
+		url: `https://github.com/projectbluefin/review/pull/${id}`,
+		headSha: String(id).repeat(40).slice(0, 40),
+		ciStatus: "success",
+		changedFiles: 1,
+		changedFilesComplete: true,
+	}));
+	const effects = Object.fromEntries(items.map((item) => [item.id, {
+		state: item.id === 354 ? "CLOSED" : "OPEN",
+		merged: false,
+		headSha: item.headSha,
+		autoMerge: false,
+		reviewDecision: "REVIEW_REQUIRED",
+		reviews: [],
+	}]));
+	const pi = fakeHost();
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	ctx.overlays.at(-1).handleInput("A");
+	ctx.overlays.at(-1).handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1);
+	const dispatched = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.deepEqual(dispatched.waves[0].items.map((item) => item.id), [350, 352, 353]);
+	const workers = [350, 352, 353].map((id) => ({ id: `reviewer-${id}`, agentId: `reviewer-${id}`, type: "task", status: "completed", startTime: Date.now() + 1 }));
+	ctx.asyncJobs.recent = workers;
+	pi.events.get("tool_call")({ toolCallId: "review-call", toolName: "task", input: { isolated: true } }, ctx);
+	await pi.events.get("tool_execution_end")({ toolCallId: "review-call", result: { details: {
+		async: { type: "task", state: "completed", jobId: workers[0].id },
+		progress: workers.map((worker, index) => ({ id: worker.agentId, index, status: "completed" })),
+	} }, isError: false }, ctx);
+	await pi.events.get("agent_end")({}, ctx);
+	const blocked = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(blocked.state, "blocked");
+	assert.ok(blocked.waveTerminalJobStatuses && Object.keys(blocked.waveTerminalJobStatuses).length === 3);
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
+	assert.deepEqual(claims.map((claim) => claim.resource).sort(), [
+		"item:projectbluefin/review#350", "item:projectbluefin/review#352", "item:projectbluefin/review#353", "repo:projectbluefin/review",
+	]);
+	assert.ok(claims.every((claim) => claim.owner === `review:${blocked.id}:0`));
+	await pi.events.get("session_shutdown")?.({}, ctx);
+	return { env, items, effects, entries: pi.entries, batch: blocked };
+}
+
+async function reconcileBlockedPrSlayWave(prepare, options = {}, beforeReconcile = () => {}) {
+	const { env, items, effects, entries, batch } = await blockedPrSlayWave();
+	prepare({ env, items, effects, batch });
+	beforeReconcile(env, batch, items);
+	const pi = fakeHost();
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager = { getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects, options), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("reconcile", ctx);
+	return {
+		batch,
+		recovered: pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data ?? batch,
+		claims: new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list(),
+		ctx,
+	};
+}
+
+test("/review reconcile recovers a merged three-PR Slay wave and admits the next mutation", async () => {
+	const { env, items, effects, entries, batch } = await blockedPrSlayWave();
+	for (const item of batch.waves[0].items) {
+		effects[item.id] = { state: "MERGED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: null, reviews: [] };
+	}
+	const pi = fakeHost();
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager = { getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("reconcile", ctx);
+	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(recovered.state, "complete");
+	assert.equal(recovered.completedItems, 3);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+
+	effects[354] = { state: "OPEN", merged: false, headSha: items[3].headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED", reviews: [] };
+	ctx.overlays.at(-1).handleInput("r");
+	await new Promise((resolve) => setImmediate(resolve));
+	await pi.commands.get("review").handler("slay", ctx);
+	assert.equal(pi.messages.length, 1, "a new Slay dispatch is not blocked by the recovered wave's old claims");
+	assert.match(ctx.notifications.map((notification) => notification.message).join("\n"), /Reconciled/);
+});
+
+test("reconcile accepts open auto-merge at a changed head with fresh head-bound review", async () => {
+	const { recovered, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const headSha = "f".repeat(40);
+			effects[item.id] = {
+				state: "OPEN", merged: false, headSha, autoMerge: true, reviewDecision: "REVIEW_REQUIRED",
+				reviews: [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: headSha } }],
+			};
+		}
+	});
+	assert.equal(recovered.state, "complete");
+	assert.equal(recovered.completedItems, 3);
+	assert.equal(claims.length, 0);
+});
+
+test("reconcile accepts changed-head MERGED only with a fresh current-head approval", async () => {
+	const { recovered, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const headSha = "f".repeat(40);
+			effects[item.id] = {
+				state: "MERGED", merged: true, headSha, autoMerge: false, reviewDecision: null,
+				reviews: [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: headSha } }],
+			};
+		}
+	});
+	assert.equal(recovered.state, "complete");
+	assert.equal(recovered.completedItems, 3);
+	assert.equal(claims.length, 0);
+});
+
+for (const scenario of ["unreviewed", "stale", "changes-requested"]) test(`changed-head MERGED retains UNKNOWN claims for ${scenario} review evidence`, async () => {
+	const { batch, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const headSha = "f".repeat(40);
+			effects[item.id] = {
+				state: "MERGED", merged: true, headSha, autoMerge: false,
+				reviewDecision: scenario === "changes-requested" ? "CHANGES_REQUESTED" : null,
+				reviews: scenario === "unreviewed" ? [] : [{
+					state: "APPROVED",
+					submittedAt: new Date(Date.now() + 100).toISOString(),
+					author: { login: "maintainer" },
+					commit: { oid: scenario === "stale" ? item.headSha : headSha },
+				}],
+			};
+		}
+	});
+	assert.equal(batch.state, "blocked");
+	assert.equal(claims.length, 4);
+	assert.ok(claims.every((claim) => claim.owner === `review:${batch.id}:0`));
+});
+
+test("closed unmerged Slay PRs release claims without counting as completed", async () => {
+	const { recovered, claims, ctx } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) effects[item.id] = { state: "CLOSED", merged: false, headSha: item.headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED", reviewsIncomplete: true, reviews: [] };
+	});
+	assert.equal(recovered.state, "cancelled");
+	assert.equal(recovered.completedItems, 0);
+	assert.equal(claims.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /terminal outcome not satisfied.*closed without merging/i.test(notification.message)));
+});
+
+for (const scenario of ["unreviewed-head-change", "stale-review-head", "unreadable"]) test(`Slay PR reconciliation retains UNKNOWN claims for ${scenario}`, async () => {
+	const { batch, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const changedHead = "e".repeat(40);
+			effects[item.id] = {
+				state: "OPEN", merged: false, headSha: changedHead, autoMerge: true, reviewDecision: "REVIEW_REQUIRED",
+				reviews: scenario === "stale-review-head" ? [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: item.headSha } }] : [],
+			};
+		}
+	}, { unreadable: scenario === "unreadable" });
+	assert.equal(claims.length, 4);
+	assert.ok(claims.every((claim) => claim.owner === `review:${batch.id}:0`));
+});
+
+test("reconcile never releases a Slay claim whose owner changed", async () => {
+	const { batch, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) effects[item.id] = {
+			state: "MERGED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: null, reviews: [],
+		};
+	}, {}, (testEnv, currentBatch, items) => {
+		const store = new ResourceClaims(testEnv.LUNA_FACTORY_STATE_ROOT, testEnv.LUNA_FACTORY_CLAIMS_ROOT);
+		const resource = `item:${items[0].repo}#${items[0].id}`;
+		store.release(resource, `review:${currentBatch.id}:0`);
+		store.claim(resource, "review:other-wave:0");
+	});
+	assert.equal(claims.length, 1);
+	assert.equal(claims[0].owner, "review:other-wave:0");
+	assert.equal(claims[0].resource, "item:projectbluefin/review#350");
+	assert.equal(batch.state, "blocked");
+});
 
 for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retains distinct task/job identity after result consumption via ${delivery}`, async () => {
 	const states = { "projectbluefin/review#77": { title: "consumed worker", submittedPrs: [] } };
