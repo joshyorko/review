@@ -78,7 +78,7 @@ export interface PullRequestEffect {
 	readonly headSha: string | null;
 	readonly autoMergeEnabled: boolean;
 	readonly reviewDecision: ReviewState;
-	readonly authorLogin: string;
+	readonly authorLogin: string | null;
 	readonly reviewsComplete: boolean;
 	readonly latestReviews: readonly {
 		readonly authorLogin: string;
@@ -676,7 +676,7 @@ export async function fetchPullRequestEffect(
 		});
 		if (!response.ok) return { kind: "unknown", error: `GitHub GraphQL ${response.status} ${response.statusText}` };
 		const payload: unknown = await response.json();
-		if (!isRecord(payload) || (Array.isArray(payload.errors) && payload.errors.length > 0) || !isRecord(payload.data)
+		if (!isRecord(payload) || !isRecord(payload.data)
 			|| !isRecord(payload.data.repository) || !isRecord(payload.data.repository.pullRequest)) {
 			return { kind: "unknown", error: "GitHub returned incomplete pull-request effect evidence" };
 		}
@@ -686,20 +686,25 @@ export async function fetchPullRequestEffect(
 			|| node.state === "OPEN" && (node.merged || node.mergedAt !== null)
 			|| node.state === "CLOSED" && node.merged !== (typeof node.mergedAt === "string")
 			|| (node.headRefOid !== null && typeof node.headRefOid !== "string")
-			|| !isRecord(payload.data.repository) || payload.data.repository.nameWithOwner !== `${owner}/${name}`
-			|| !isRecord(node.author) || typeof node.author.login !== "string"
-			|| (node.autoMergeRequest !== null && !isRecord(node.autoMergeRequest))
-			|| (node.reviewDecision !== null && node.reviewDecision !== "APPROVED" && node.reviewDecision !== "CHANGES_REQUESTED" && node.reviewDecision !== "REVIEW_REQUIRED")
-			|| !isRecord(node.latestReviews) || !isRecord(node.latestReviews.pageInfo) || node.latestReviews.pageInfo.hasNextPage !== false
-			|| !Array.isArray(node.latestReviews.nodes)) {
+			|| payload.data.repository.nameWithOwner !== `${owner}/${name}`) {
 			return { kind: "unknown", error: "GitHub returned ambiguous pull-request effect evidence" };
 		}
 		const latestReviews: PullRequestEffect["latestReviews"][number][] = [];
-		for (const review of node.latestReviews.nodes) {
+		const latestReviewNodes = isRecord(node.latestReviews) && isRecord(node.latestReviews.pageInfo)
+			&& node.latestReviews.pageInfo.hasNextPage === false && Array.isArray(node.latestReviews.nodes)
+			? node.latestReviews.nodes
+			: undefined;
+		let reviewsComplete = !(Array.isArray(payload.errors) && payload.errors.length > 0)
+			&& (node.autoMergeRequest === null || isRecord(node.autoMergeRequest))
+			&& (node.reviewDecision === null || node.reviewDecision === "APPROVED" || node.reviewDecision === "CHANGES_REQUESTED" || node.reviewDecision === "REVIEW_REQUIRED")
+			&& latestReviewNodes !== undefined;
+		for (const review of latestReviewNodes ?? []) {
 			if (!isRecord(review) || typeof review.state !== "string" || typeof review.submittedAt !== "string"
 				|| !Number.isFinite(Date.parse(review.submittedAt)) || !isRecord(review.author) || typeof review.author.login !== "string"
 				|| (review.commit !== null && review.commit !== undefined && (!isRecord(review.commit) || typeof review.commit.oid !== "string"))) {
-				return { kind: "unknown", error: "GitHub returned incomplete latest-review evidence" };
+				reviewsComplete = false;
+				latestReviews.length = 0;
+				break;
 			}
 			const commitSha = isRecord(review.commit) && typeof review.commit.oid === "string" ? review.commit.oid : null;
 			latestReviews.push({
@@ -721,8 +726,8 @@ export async function fetchPullRequestEffect(
 				headSha: typeof node.headRefOid === "string" ? node.headRefOid : null,
 				autoMergeEnabled: isRecord(node.autoMergeRequest),
 				reviewDecision: toReviewState(typeof node.reviewDecision === "string" ? node.reviewDecision : undefined),
-				authorLogin: node.author.login,
-				reviewsComplete: true,
+				authorLogin: isRecord(node.author) && typeof node.author.login === "string" ? node.author.login : null,
+				reviewsComplete,
 				latestReviews,
 			},
 		};

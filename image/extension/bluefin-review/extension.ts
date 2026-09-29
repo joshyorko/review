@@ -907,15 +907,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					const pullRequest = observed.pullRequest;
 					if (pullRequest.repo.toLowerCase() !== item.repo.toLowerCase()
 						|| pullRequest.number !== item.id
-						|| pullRequest.url !== item.url
-						|| pullRequest.authorLogin.toLowerCase() !== item.author.toLowerCase()
-						|| !pullRequest.reviewsComplete
-						|| pullRequest.reviewDecision === "unknown") return { kind: "unknown" };
+						|| pullRequest.url !== item.url) return { kind: "unknown" };
 					if (pullRequest.state === "CLOSED" && !pullRequest.merged) {
 						outcome = "non-success";
 						nonSuccessItems.push(`${item.repo}#${item.id}`);
 						continue;
 					}
+					if (pullRequest.authorLogin === null
+						|| pullRequest.authorLogin.toLowerCase() !== item.author.toLowerCase()
+						|| !pullRequest.reviewsComplete
+						|| pullRequest.reviewDecision === "unknown") return { kind: "unknown" };
 					const headSha = pullRequest.headSha;
 					const reviewedHead = headSha !== null && pullRequest.latestReviews.some((review) =>
 						review.state === "APPROVED"

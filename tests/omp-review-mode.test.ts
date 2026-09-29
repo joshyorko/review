@@ -4046,7 +4046,7 @@ test("reconcile accepts open auto-merge at a changed head with fresh head-bound 
 
 test("closed unmerged Slay PRs release claims without counting as completed", async () => {
 	const { recovered, claims, ctx } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
-		for (const item of items.slice(0, 3)) effects[item.id] = { state: "CLOSED", merged: false, headSha: item.headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED", reviews: [] };
+		for (const item of items.slice(0, 3)) effects[item.id] = { state: "CLOSED", merged: false, headSha: item.headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED", reviewsIncomplete: true, reviews: [] };
 	});
 	assert.equal(recovered.state, "cancelled");
 	assert.equal(recovered.completedItems, 0);
