@@ -1,4 +1,4 @@
-# Issue #293 — NEEDS_OMP_SEAM
+# Issue #293 — extension proof in progress
 
 This receipt records the live capability audit for
 [joshyorko/review#293](https://github.com/joshyorko/review/issues/293).
