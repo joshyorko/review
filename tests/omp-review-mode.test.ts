@@ -373,10 +373,10 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 					url: `https://github.com/${repo}/pull/${numberText}`,
 					state: effect.state,
 					merged: effect.merged,
-					mergedAt: effect.merged ? new Date().toISOString() : null,
+					mergedAt: Object.hasOwn(effect, "mergedAt") ? effect.mergedAt : effect.merged ? new Date().toISOString() : null,
 					headRefOid: effect.headSha,
 					autoMergeRequest: effect.autoMerge ? { enabledAt: new Date().toISOString() } : null,
-					reviewDecision: effect.reviewDecision ?? "REVIEW_REQUIRED",
+					reviewDecision: Object.hasOwn(effect, "reviewDecision") ? effect.reviewDecision : "REVIEW_REQUIRED",
 					author: { login: items.find((item) => item.id === Number(numberText))?.author },
 					latestReviews: { pageInfo: { hasNextPage: effect.reviewsIncomplete === true }, nodes: effect.reviews ?? [] },
 				},
@@ -947,15 +947,46 @@ test("bounded named PR reads carry expensive evidence after lightweight discover
 	assert.deepEqual(result.items[0]?.closingIssues, ["owner/repo#2"]);
 });
 
+test("exact PR effect reads accept GitHub MERGED state and preserve null aggregate review decision", async () => {
+	const item = queueItem({ id: 350, repo: "owner/repo", url: "https://github.com/owner/repo/pull/350", headSha: "a".repeat(40) });
+	const effects = { 350: { state: "MERGED", merged: true, headSha: item.headSha, reviewDecision: null, reviews: [] } };
+	const fetchImpl = recoveredPrSlayFetch([item], effects);
+	const effect = await fetchPullRequestEffect("owner/repo", 350, { token: "t", fetchImpl });
+	assert.equal(effect.kind, "observed");
+	if (effect.kind === "observed") {
+		assert.equal(effect.pullRequest.state, "MERGED");
+		assert.equal(effect.pullRequest.merged, true);
+		assert.equal(effect.pullRequest.reviewDecision, null);
+	}
+	const queue = await fetchItemsByKey(["owner/repo#350"], "prs", { token: "t", fetchImpl });
+	assert.deepEqual(queue.items, [], "merged PRs remain absent from named open-queue reads");
+});
+
+test("exact PR effect reads reject contradictory GitHub state, merged, and mergedAt combinations", async () => {
+	const item = queueItem({ id: 350, repo: "owner/repo", url: "https://github.com/owner/repo/pull/350", headSha: "a".repeat(40) });
+	for (const effect of [
+		{ state: "MERGED", merged: false, mergedAt: null },
+		{ state: "MERGED", merged: true, mergedAt: null },
+		{ state: "CLOSED", merged: true, mergedAt: new Date().toISOString() },
+		{ state: "OPEN", merged: true, mergedAt: new Date().toISOString() },
+	]) {
+		const result = await fetchPullRequestEffect("owner/repo", 350, {
+			token: "t",
+			fetchImpl: recoveredPrSlayFetch([item], { 350: { ...effect, headSha: item.headSha, reviews: [] } }),
+		});
+		assert.equal(result.kind, "unknown", JSON.stringify(effect));
+	}
+});
+
 test("exact PR effect reads retain closed state without changing the open queue projection", async () => {
 	const item = queueItem({ id: 350, repo: "owner/repo", url: "https://github.com/owner/repo/pull/350", headSha: "a".repeat(40) });
-	const effects = { 350: { state: "CLOSED", merged: true, headSha: item.headSha, reviewDecision: "REVIEW_REQUIRED", reviews: [] } };
+	const effects = { 350: { state: "CLOSED", merged: false, headSha: item.headSha, reviewDecision: "REVIEW_REQUIRED", reviews: [] } };
 	const fetchImpl = recoveredPrSlayFetch([item], effects);
 	const effect = await fetchPullRequestEffect("owner/repo", 350, { token: "t", fetchImpl });
 	assert.equal(effect.kind, "observed");
 	if (effect.kind === "observed") {
 		assert.equal(effect.pullRequest.state, "CLOSED");
-		assert.equal(effect.pullRequest.merged, true);
+		assert.equal(effect.pullRequest.merged, false);
 	}
 	const queue = await fetchItemsByKey(["owner/repo#350"], "prs", { token: "t", fetchImpl });
 	assert.deepEqual(queue.items, [], "closed PRs remain absent from named open-queue reads");
@@ -4005,10 +4036,7 @@ async function reconcileBlockedPrSlayWave(prepare, options = {}, beforeReconcile
 test("/review reconcile recovers a merged three-PR Slay wave and admits the next mutation", async () => {
 	const { env, items, effects, entries, batch } = await blockedPrSlayWave();
 	for (const item of batch.waves[0].items) {
-		effects[item.id] = {
-			state: "CLOSED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED",
-			reviews: [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: item.headSha } }],
-		};
+		effects[item.id] = { state: "MERGED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: null, reviews: [] };
 	}
 	const pi = fakeHost();
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
@@ -4044,6 +4072,42 @@ test("reconcile accepts open auto-merge at a changed head with fresh head-bound 
 	assert.equal(claims.length, 0);
 });
 
+test("reconcile accepts changed-head MERGED only with a fresh current-head approval", async () => {
+	const { recovered, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const headSha = "f".repeat(40);
+			effects[item.id] = {
+				state: "MERGED", merged: true, headSha, autoMerge: false, reviewDecision: null,
+				reviews: [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: headSha } }],
+			};
+		}
+	});
+	assert.equal(recovered.state, "complete");
+	assert.equal(recovered.completedItems, 3);
+	assert.equal(claims.length, 0);
+});
+
+for (const scenario of ["unreviewed", "stale", "changes-requested"]) test(`changed-head MERGED retains UNKNOWN claims for ${scenario} review evidence`, async () => {
+	const { batch, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const headSha = "f".repeat(40);
+			effects[item.id] = {
+				state: "MERGED", merged: true, headSha, autoMerge: false,
+				reviewDecision: scenario === "changes-requested" ? "CHANGES_REQUESTED" : null,
+				reviews: scenario === "unreviewed" ? [] : [{
+					state: "APPROVED",
+					submittedAt: new Date(Date.now() + 100).toISOString(),
+					author: { login: "maintainer" },
+					commit: { oid: scenario === "stale" ? item.headSha : headSha },
+				}],
+			};
+		}
+	});
+	assert.equal(batch.state, "blocked");
+	assert.equal(claims.length, 4);
+	assert.ok(claims.every((claim) => claim.owner === `review:${batch.id}:0`));
+});
+
 test("closed unmerged Slay PRs release claims without counting as completed", async () => {
 	const { recovered, claims, ctx } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
 		for (const item of items.slice(0, 3)) effects[item.id] = { state: "CLOSED", merged: false, headSha: item.headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED", reviewsIncomplete: true, reviews: [] };
@@ -4071,8 +4135,7 @@ for (const scenario of ["unreviewed-head-change", "stale-review-head", "unreadab
 test("reconcile never releases a Slay claim whose owner changed", async () => {
 	const { batch, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
 		for (const item of items.slice(0, 3)) effects[item.id] = {
-			state: "CLOSED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED",
-			reviews: [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: item.headSha } }],
+			state: "MERGED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: null, reviews: [],
 		};
 	}, {}, (testEnv, currentBatch, items) => {
 		const store = new ResourceClaims(testEnv.LUNA_FACTORY_STATE_ROOT, testEnv.LUNA_FACTORY_CLAIMS_ROOT);

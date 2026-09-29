@@ -73,11 +73,12 @@ export interface PullRequestEffect {
 	readonly repo: string;
 	readonly number: number;
 	readonly url: string;
-	readonly state: "OPEN" | "CLOSED";
+	readonly state: "OPEN" | "CLOSED" | "MERGED";
 	readonly merged: boolean;
 	readonly headSha: string | null;
 	readonly autoMergeEnabled: boolean;
-	readonly reviewDecision: ReviewState;
+	/** GitHub omits aggregate review policy when reviewDecision is null. */
+	readonly reviewDecision: ReviewState | null;
 	readonly authorLogin: string | null;
 	readonly reviewsComplete: boolean;
 	readonly latestReviews: readonly {
@@ -682,9 +683,10 @@ export async function fetchPullRequestEffect(
 		}
 		const node = payload.data.repository.pullRequest;
 		if (typeof node.id !== "string" || node.id.length === 0 || node.number !== number || node.url !== `https://github.com/${owner}/${name}/pull/${number}`
-			|| (node.state !== "OPEN" && node.state !== "CLOSED") || typeof node.merged !== "boolean"
+			|| (node.state !== "OPEN" && node.state !== "CLOSED" && node.state !== "MERGED") || typeof node.merged !== "boolean"
 			|| node.state === "OPEN" && (node.merged || node.mergedAt !== null)
-			|| node.state === "CLOSED" && node.merged !== (typeof node.mergedAt === "string")
+			|| node.state === "CLOSED" && (node.merged || node.mergedAt !== null)
+			|| node.state === "MERGED" && (!node.merged || typeof node.mergedAt !== "string" || !Number.isFinite(Date.parse(node.mergedAt)))
 			|| (node.headRefOid !== null && typeof node.headRefOid !== "string")
 			|| payload.data.repository.nameWithOwner !== `${owner}/${name}`) {
 			return { kind: "unknown", error: "GitHub returned ambiguous pull-request effect evidence" };
@@ -725,7 +727,7 @@ export async function fetchPullRequestEffect(
 				merged: node.merged,
 				headSha: typeof node.headRefOid === "string" ? node.headRefOid : null,
 				autoMergeEnabled: isRecord(node.autoMergeRequest),
-				reviewDecision: toReviewState(typeof node.reviewDecision === "string" ? node.reviewDecision : undefined),
+				reviewDecision: node.reviewDecision === null ? null : toReviewState(typeof node.reviewDecision === "string" ? node.reviewDecision : undefined),
 				authorLogin: isRecord(node.author) && typeof node.author.login === "string" ? node.author.login : null,
 				reviewsComplete,
 				latestReviews,

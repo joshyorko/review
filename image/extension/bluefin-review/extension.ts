@@ -916,15 +916,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					if (pullRequest.authorLogin === null
 						|| pullRequest.authorLogin.toLowerCase() !== item.author.toLowerCase()
 						|| !pullRequest.reviewsComplete
-						|| pullRequest.reviewDecision === "unknown") return { kind: "unknown" };
+						|| pullRequest.reviewDecision === "unknown"
+						|| pullRequest.reviewDecision === "changes_requested") return { kind: "unknown" };
 					const headSha = pullRequest.headSha;
+					if (pullRequest.state === "MERGED" && headSha === item.headSha) continue;
 					const reviewedHead = headSha !== null && pullRequest.latestReviews.some((review) =>
 						review.state === "APPROVED"
 						&& review.authorLogin.toLowerCase() !== pullRequest.authorLogin.toLowerCase()
 						&& review.commitSha === headSha
 						&& review.submittedAt >= batch.waveStartedAt,
 					);
-					if (!reviewedHead || pullRequest.reviewDecision === "changes_requested") return { kind: "unknown" };
+					if (!reviewedHead) return { kind: "unknown" };
 					if (pullRequest.state === "OPEN" && !pullRequest.autoMergeEnabled) return { kind: "unknown" };
 				}
 				continue;
