@@ -10,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import { loadWave, saveWave } from "./wave-store.ts";
 import type { QueueItem } from "./github.ts";
-import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, orgScope, parseScope, resolveToken } from "./github.ts";
+import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, orgScope, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
 import { registerFactoryClaimInspector, registerFactoryReconciler, registeredFactoryReconciler, registerFactorySelection, factoryBatchSubmitterRegistered, factoryCommand, factoryControllerRegistered, factoryDashboardOpenerRegistered, factoryLoadDiagnostic, openFactoryDashboard, submitFactoryBatch, type ClaimOwnerObservation, type ClaimOwnerWorkerObservation } from "../luna-factory/omp/batch-bridge.ts";
@@ -52,6 +52,11 @@ export const COMMENT_ENTRY = "com.hive.workbench.comment";
 
 export type RepositoryBatchKind = "slay" | "fix" | "diff";
 export type RepositoryBatchState = "running" | "paused" | "blocked" | "complete" | "cancelled";
+type ReconcileObservation =
+	| { readonly kind: "unknown" }
+	| { readonly kind: "settled"; readonly outcome: "success" }
+	| { readonly kind: "settled"; readonly outcome: "non-success"; readonly items: readonly string[] };
+type ReconciliationResult = { settled: string[]; unknown: string[]; submittedPrs: string[]; nonSuccessItems?: string[] };
 
 export interface PersistedRepositoryBatch {
 	readonly version: 1;
@@ -739,7 +744,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			batch,
 			owner,
 			resource,
-			() => authoritativeReconcile(ctx, batch, resource),
+			async () => (await authoritativeReconcile(ctx, batch, resource)).kind === "settled" ? "settled" : "unknown",
 		);
 	};
 	const unregisterFactoryReconciler = registerFactoryReconciler(reconcileMutationClaim);
@@ -869,7 +874,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		ctx: CtxLike,
 		batch: PersistedRepositoryBatch,
 		resource: string,
-	): Promise<"settled" | "unknown"> => {
+	): Promise<ReconcileObservation> => {
 		const wave = batch.waves[batch.currentWave];
 		const expectedResources = resourcesForBatch(batch);
 		if (
@@ -878,48 +883,83 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			|| !batch.waveEffectResources
 			|| JSON.stringify(batch.waveEffectResources) !== JSON.stringify(expectedResources)
 			|| !expectedResources.includes(resource.toLowerCase())
-		) return "unknown";
+		) return { kind: "unknown" };
 		const preTool = preToolProofValid(batch);
-		if (preTool && !preToolRuntimeSettled(ctx, batch)) return "unknown";
-		if (!preTool && !waveWorkerCoverageComplete(batch.waveJobIds, batch.waveToolCallIds, batch.waveTaskWorkers)) return "unknown";
+		if (preTool && !preToolRuntimeSettled(ctx, batch)) return { kind: "unknown" };
+		if (!preTool && !waveWorkerCoverageComplete(batch.waveJobIds, batch.waveToolCallIds, batch.waveTaskWorkers)) return { kind: "unknown" };
 		const jobs = ctx.getAsyncJobSnapshot?.();
-		if (!preTool && !waveWorkersSettled(jobs, batch.waveJobIds, batch.waveTerminalJobStatuses)) return "unknown";
-		if (batch.kind === "diff") return "settled";
+		if (!preTool && !waveWorkersSettled(jobs, batch.waveJobIds, batch.waveTerminalJobStatuses)) return { kind: "unknown" };
+		if (batch.kind === "diff") return { kind: "settled", outcome: "success" };
 
 		const targetItems = resource.toLowerCase().startsWith("repo:")
 			? wave.items
 			: wave.items.filter((item) => `item:${item.repo.toLowerCase()}#${item.id}` === resource.toLowerCase());
-		if (targetItems.length === 0) return "unknown";
+		if (targetItems.length === 0) return { kind: "unknown" };
+		let outcome: ReconcileObservation["outcome"] = "success";
+		const nonSuccessItems: string[] = [];
 		for (const type of ["pr", "issue"] as const) {
 			const items = targetItems.filter((item) => item.type === type);
 			if (items.length === 0) continue;
+			if (type === "pr" && batch.kind === "slay" && !preTool) {
+				for (const item of items) {
+					const observed = await fetchPullRequestEffect(item.repo, item.id, mode.tokenOptions());
+					if (observed.kind !== "observed") return { kind: "unknown" };
+					const pullRequest = observed.pullRequest;
+					if (pullRequest.repo.toLowerCase() !== item.repo.toLowerCase()
+						|| pullRequest.number !== item.id
+						|| pullRequest.url !== item.url) return { kind: "unknown" };
+					if (pullRequest.state === "CLOSED" && !pullRequest.merged) {
+						outcome = "non-success";
+						nonSuccessItems.push(`${item.repo}#${item.id}`);
+						continue;
+					}
+					if (pullRequest.authorLogin === null
+						|| pullRequest.authorLogin.toLowerCase() !== item.author.toLowerCase()
+						|| !pullRequest.reviewsComplete
+						|| pullRequest.reviewDecision === "unknown"
+						|| pullRequest.reviewDecision === "changes_requested") return { kind: "unknown" };
+					const headSha = pullRequest.headSha;
+					if (pullRequest.state === "MERGED" && headSha === item.headSha) continue;
+					const reviewedHead = headSha !== null && pullRequest.latestReviews.some((review) =>
+						review.state === "APPROVED"
+						&& review.authorLogin.toLowerCase() !== pullRequest.authorLogin.toLowerCase()
+						&& review.commitSha === headSha
+						&& review.submittedAt >= batch.waveStartedAt,
+					);
+					if (!reviewedHead) return { kind: "unknown" };
+					if (pullRequest.state === "OPEN" && !pullRequest.autoMergeEnabled) return { kind: "unknown" };
+				}
+				continue;
+			}
 			const live = await fetchItemsByKey(
 				items.map((item) => `${item.repo}#${item.id}`),
 				type === "pr" ? "prs" : "issues",
 				mode.tokenOptions(),
 			);
-			if (live.error) return "unknown";
+			if (live.error) return { kind: "unknown" };
 			for (const item of items) {
 				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
-				if (!current) return "unknown";
+				if (!current) return { kind: "unknown" };
 				if (
 					type === "pr"
 					&& (current.headSha !== item.headSha
 						|| current.autoMergeEnabled !== item.autoMergeEnabled
 						|| current.reviewState !== item.reviewState)
-				) return "unknown";
+				) return { kind: "unknown" };
 				if (type === "issue" && (batch.kind === "slay" || (preTool && batch.kind === "fix"))) {
 					const submission = expectedIssueSubmission(batch, item, current);
-					if (preTool ? !issueSubmissionsMatch(batch, item, current) : submission === undefined) return "unknown";
+					if (preTool ? !issueSubmissionsMatch(batch, item, current) : submission === undefined) return { kind: "unknown" };
 				}
 			}
 		}
 		if (preTool) {
 			const latest = loadWave(factoryClaimsRoot(env), `review:${batch.waveIdentity}`);
 			if (!latest || latest.wavePromptDigest !== batch.wavePromptDigest
-				|| !preToolProofValid(latest) || !preToolRuntimeSettled(ctx, latest)) return "unknown";
+				|| !preToolProofValid(latest) || !preToolRuntimeSettled(ctx, latest)) return { kind: "unknown" };
 		}
-		return "settled";
+		return outcome === "success"
+			? { kind: "settled", outcome }
+			: { kind: "settled", outcome, items: nonSuccessItems };
 	};
 
 	const every = (intervalMs: number, work: () => void) => {
@@ -1102,23 +1142,29 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const owner = `review:${batch.id}:${batch.currentWave}`;
 		const settled: string[] = [];
 		const unknown: string[] = [];
+		const nonSuccessItems: string[] = [];
 		const preTool = preToolProofValid(batch);
 		for (const resource of resourcesForBatch(batch)) {
 			if (resourceClaims().conflict(resource, owner)) {
 				unknown.push(resource);
 				continue;
 			}
+			let observation: ReconcileObservation = { kind: "unknown" };
 			const result = preTool
-				? await authoritativeReconcile(ctx, batch, resource)
+				? (observation = await authoritativeReconcile(ctx, batch, resource)).kind === "settled" ? "settled" : "unknown"
 				: await reconcileBlockedRepositoryClaim(
 					resourceClaims(),
 					batch,
 					owner,
 					resource,
-					() => authoritativeReconcile(ctx, batch, resource),
+					async () => {
+						observation = await authoritativeReconcile(ctx, batch, resource);
+						return observation.kind === "settled" ? "settled" : "unknown";
+					},
 				);
 			if (result === "settled") {
 				settled.push(resource);
+				if (observation.kind === "settled" && observation.outcome === "non-success") nonSuccessItems.push(...observation.items);
 			} else {
 				unknown.push(resource);
 			}
@@ -1142,15 +1188,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			settled,
 			unknown: [...new Set(unknown)],
 			submittedPrs,
+			nonSuccessItems: [...new Set(nonSuccessItems)],
 		};
 	};
 
 	const finishRecoveredBatch = async (
 		ctx: CtxLike,
 		batch: PersistedRepositoryBatch,
-		result: { settled: string[]; unknown: string[]; submittedPrs: string[] },
+		result: ReconciliationResult,
 	): Promise<void> => {
 		if (result.unknown.length > 0 || activeBatch?.id !== batch.id) return;
+		if (result.nonSuccessItems?.length) {
+			archiveSlayNonSuccess(ctx, batch, result);
+			return;
+		}
 		const nextWave = batch.currentWave + 1;
 		const completedItems = batch.completedItems + (batch.waves[batch.currentWave]?.items.length ?? 0);
 		const evidence = result.submittedPrs.length > 0
@@ -1201,7 +1252,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		ctx: CtxLike,
 		batch: PersistedRepositoryBatch,
 		action: "cancel" | "revise",
-		result: { settled: string[]; unknown: string[]; submittedPrs: string[] },
+		result: ReconciliationResult,
 	): string => {
 		const evidence = result.submittedPrs.length > 0
 			? `; observed submitted PRs ${result.submittedPrs.join(", ")}`
@@ -1228,6 +1279,24 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				resourceClaims().reconcile(resource, owner);
 			}
 		}
+		if (wasActive) {
+			activeBatch = undefined;
+			mode.setBatchProgress(undefined);
+		}
+		syncStatus(ctx);
+		return message;
+	};
+	const archiveSlayNonSuccess = (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		result: ReconciliationResult,
+	): string => {
+		const latest = latestWaveForArchive(batch);
+		if (!latest) return `Slay ${batch.id} was not archived because wave evidence changed; UNKNOWN claims remain fenced`;
+		const items = [...new Set(result.nonSuccessItems ?? [])].sort();
+		const message = `Slay terminal outcome not satisfied: closed without merging ${items.join(", ")}; settled claims released`;
+		const archived = { ...latest, state: "cancelled", error: message, cancelRequested: undefined } satisfies PersistedRepositoryBatch;
+		const wasActive = persistArchivedBatch(ctx, archived);
 		if (wasActive) {
 			activeBatch = undefined;
 			mode.setBatchProgress(undefined);
@@ -1318,14 +1387,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const batch of candidates) {
 				const result = await reconcileBatchClaims(ctx, batch);
 				if (result.settled.length > 0) lines.push(`Reconciled ${result.settled.join(", ")} for ${batch.id}`);
+				if (result.nonSuccessItems?.length) lines.push(`Slay did not satisfy its terminal outcome for ${[...new Set(result.nonSuccessItems)].sort().join(", ")}`);
 				if (result.submittedPrs.length > 0) lines.push(`Observed submitted PRs ${result.submittedPrs.join(", ")}`);
 				if (result.unknown.length > 0) lines.push(`Retained UNKNOWN claims ${result.unknown.join(", ")} for ${batch.id}`);
 				if (activeBatch?.id === batch.id && result.unknown.length === 0) {
 					if (preToolProofValid(batch)) lines.push(archivePreToolBatch(ctx, batch, result));
+					else if (result.nonSuccessItems?.length) lines.push(archiveSlayNonSuccess(ctx, batch, result));
 					else await finishRecoveredBatch(ctx, batch, result);
 				}
 				else if (result.unknown.length === 0 && result.settled.length > 0) {
 					if (preToolProofValid(batch)) lines.push(archivePreToolBatch(ctx, batch, result));
+					else if (result.nonSuccessItems?.length) lines.push(archiveSlayNonSuccess(ctx, batch, result));
 					else if (batch.state !== "cancelled") {
 						recoveryBatches.delete(batch.id);
 						const currentWave = batch.currentWave + 1;
