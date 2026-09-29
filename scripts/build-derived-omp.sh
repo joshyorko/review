@@ -21,36 +21,42 @@ if [[ ! "$OMP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$OMP_SOURCE_COMMIT" =~ 
   exit 1
 fi
 for tool in curl git python3 tar sha256sum sha512sum install; do
-  command -v "$tool" >/dev/null || { echo "missing build prerequisite: $tool" >&2; exit 1; }
+  command -v "$tool" >/dev/null || {
+    echo "missing build prerequisite: $tool" >&2
+    exit 1
+  }
 done
-[[ -f "$OMP_PATCH_PATH" ]] || { echo "OMP patch not found: $OMP_PATCH_PATH" >&2; exit 1; }
+[[ -f "$OMP_PATCH_PATH" ]] || {
+  echo "OMP patch not found: $OMP_PATCH_PATH" >&2
+  exit 1
+}
 if [[ "$OMP_PATCH_PATH" != /* ]]; then
   OMP_PATCH_PATH="$PWD/$OMP_PATCH_PATH"
 fi
 
 case "$(uname -m)" in
-  x86_64)
-    omp_target=linux-x64
-    bun_asset=bun-linux-x64-baseline.zip
-    bun_member=bun-linux-x64-baseline/bun
-    bun_sha="$OMP_BUN_X86_64_SHA256"
-    native_package=pi-natives-linux-x64
-    native_sha="$OMP_NATIVES_X86_64_SHA512"
-    native_file=pi_natives.linux-x64-baseline.node
-    ;;
-  aarch64|arm64)
-    omp_target=linux-arm64
-    bun_asset=bun-linux-aarch64.zip
-    bun_member=bun-linux-aarch64/bun
-    bun_sha="$OMP_BUN_AARCH64_SHA256"
-    native_package=pi-natives-linux-arm64
-    native_sha="$OMP_NATIVES_AARCH64_SHA512"
-    native_file=pi_natives.linux-arm64.node
-    ;;
-  *)
-    echo "unsupported derived OMP build architecture: $(uname -m)" >&2
-    exit 1
-    ;;
+x86_64)
+  omp_target=linux-x64
+  bun_asset=bun-linux-x64-baseline.zip
+  bun_member=bun-linux-x64-baseline/bun
+  bun_sha="$OMP_BUN_X86_64_SHA256"
+  native_package=pi-natives-linux-x64
+  native_sha="$OMP_NATIVES_X86_64_SHA512"
+  native_file=pi_natives.linux-x64-baseline.node
+  ;;
+aarch64 | arm64)
+  omp_target=linux-arm64
+  bun_asset=bun-linux-aarch64.zip
+  bun_member=bun-linux-aarch64/bun
+  bun_sha="$OMP_BUN_AARCH64_SHA256"
+  native_package=pi-natives-linux-arm64
+  native_sha="$OMP_NATIVES_AARCH64_SHA512"
+  native_file=pi_natives.linux-arm64.node
+  ;;
+*)
+  echo "unsupported derived OMP build architecture: $(uname -m)" >&2
+  exit 1
+  ;;
 esac
 
 workdir="$(mktemp -d)"
@@ -63,10 +69,10 @@ tag_refs="$(git ls-remote --exit-code https://github.com/can1357/oh-my-pi.git "$
 tag_commit=""
 while IFS=$'\t' read -r object ref; do
   case "$ref" in
-    "${omp_tag}^{}") tag_commit="$object" ;;
-    "$omp_tag") tag_commit="${tag_commit:-$object}" ;;
+  "${omp_tag}^{}") tag_commit="$object" ;;
+  "$omp_tag") tag_commit="${tag_commit:-$object}" ;;
   esac
-done <<< "$tag_refs"
+done <<<"$tag_refs"
 [[ "$tag_commit" == "$OMP_SOURCE_COMMIT" ]] || {
   echo "OMP v${OMP_VERSION} tag resolves to ${tag_commit:-missing}, expected ${OMP_SOURCE_COMMIT}" >&2
   exit 1
@@ -80,7 +86,10 @@ printf '%s  %s\n' "$OMP_SOURCE_SHA256" "$omp_archive" | sha256sum --check --stat
   exit 1
 }
 tar --no-same-owner --extract --gzip --file "$omp_archive" --directory "$source_dir" --strip-components=1
-sha256sum "$OMP_PATCH_PATH" | { read -r actual _; [[ "$actual" == "$OMP_PATCH_SHA256" ]]; } || {
+sha256sum "$OMP_PATCH_PATH" | {
+  read -r actual _
+  [[ "$actual" == "$OMP_PATCH_SHA256" ]]
+} || {
   echo "OMP registration patch digest mismatch" >&2
   exit 1
 }
@@ -142,14 +151,16 @@ bun --cwd=packages/coding-agent test test/modes/components/settings-selector-mem
 bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"
 
 candidate="$source_dir/packages/coding-agent/binaries/omp-${omp_target}"
-[[ -x "$candidate" ]] || { echo "OMP build did not produce ${candidate}" >&2; exit 1; }
+[[ -x "$candidate" ]] || {
+  echo "OMP build did not produce ${candidate}" >&2
+  exit 1
+}
 version_output="$("$candidate" --version)"
 [[ "$version_output" == "omp/${OMP_VERSION}" ]] || {
   echo "derived OMP version mismatch: ${version_output}" >&2
   exit 1
 }
 install -D -m 0755 "$candidate" "$OMP_OUTPUT_PATH"
-
 
 printf 'OMP derived build: version=%s commit=%s arch=%s\n' "$OMP_VERSION" "$OMP_SOURCE_COMMIT" "$omp_target"
 printf 'OMP patch SHA-256: %s\n' "$OMP_PATCH_SHA256"

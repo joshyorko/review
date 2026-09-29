@@ -119,6 +119,7 @@ require "$containerfile" \
   'io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}"' \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
   'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory'
+# shellcheck disable=SC2016 # These are literal source strings, not expansions.
 require scripts/build-derived-omp.sh \
   'git ls-remote --exit-code' \
   'sha256sum --check --status' \
@@ -132,6 +133,7 @@ grep -qF 'arch: arm64' .github/workflows/publish-appliance.yml ||
   fail "the appliance matrix must build the aarch64 image"
 grep -qF 'needs: [metadata, build]' .github/workflows/publish-appliance.yml ||
   fail "OCI promotion must wait for both native architecture builds"
+# shellcheck disable=SC2016 # This is a literal workflow source string.
 grep -qF 'for digest in "$amd64" "$arm64"; do' .github/workflows/publish-appliance.yml ||
   fail "OCI promotion must reject a missing architecture digest"
 # shellcheck disable=SC2016 # These are literal source strings, not expansions.

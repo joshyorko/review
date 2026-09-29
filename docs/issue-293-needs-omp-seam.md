@@ -17,7 +17,7 @@ packaged MemoryD behavior is not claimed.
 | Last published Review dev appliance | `dev-0.20260929125440-ca9496e659`; still contains upstream OMP 18.4.3 |
 | OMP source tag and exact commit | `v18.4.3` = `fc671eba383f2a7208500836673b485c0dc7073d` |
 | OMP live `main` audited | `60d3a5a4520b2937b4a0fc727abadabbed17cf2e` |
-| Latest local derived x86_64 OMP SHA-256 | `9ac68b5d682c42bc6e12f3da59241655db470616c396aa8faf524953502b15c3` |
+| Latest local derived x86_64 OMP SHA-256 | `fa5b03f628d2371af47fe0c017051c4a8ee5fa6595c5db40753834049019d33d` |
 | MemoryD adapter source | `e7f8d431797973afbdf4d0530aa14a25f43acf35`; no license file at that commit |
 
 The OMP source, patch, Bun, native-package, and MemoryD test-source pins are in
@@ -88,12 +88,12 @@ then compiles the native binary. The x86_64 run passed:
   selector regression tests passed (7 tests, 39 expectations); adapter tests
   passed (27 tests, 68 expectations);
 - derived executable reported `omp/18.4.3`, SHA-256
-  `9ac68b5d682c42bc6e12f3da59241655db470616c396aa8faf524953502b15c3`.
+  `fa5b03f628d2371af47fe0c017051c4a8ee5fa6595c5db40753834049019d33d`.
 
 The live x86_64 canary used that derived executable and the exact adapter source
 fetched ephemerally from the pinned commit. A loopback synthetic MemoryD server
 returned a recall marker on the first prompt. OMP sent one `/v1/recall` request
-with `profile=personal`, `workspace=issue-293-canary-current`,
+with `profile=personal`, `workspace=issue-293-canary-final`,
 `pack_mode=active_task`, and `source_kind=omp_native_recall`; the provider
 boundary observed the marker after one recall and returned
 `MEMORYD_RECALL_PRESENT_OK` (process exit 0). After stopping the synthetic
@@ -162,6 +162,10 @@ fetched only into temporary build/canary directories and is not copied into the
 Review repository or image. MemoryD #245 remains open; no published release,
 tag, npm artifact, or Homebrew formula was verified. Packaging the adapter is
 blocked until distribution rights are established.
+This ad-hoc source commit is an ephemeral test/canary input only, not a
+distribution contract. Review packaging must wait for MemoryD #245 to provide
+explicit terms and a release-shaped artifact, then consume a pinned licensed
+release rather than this source commit.
 
 ## Generic native registration patch implemented
 
