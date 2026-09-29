@@ -9,5 +9,9 @@
 # The appliance build stage generates an SPDX document for OMP, the GitHub CLI,
 # and the Review workbench package.
 !scripts/generate-appliance-sbom.py
+!scripts/build-derived-omp.sh
+!patches/
+!patches/omp/
+!patches/omp/memory-backend-registration.patch
 **/__pycache__/
 **/*.pyc

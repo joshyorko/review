@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
-"""Write the SPDX manifest for the review appliance's fetched components.
+"""Write the SPDX manifest for the review appliance's derived OMP and fetched components.
 
-The appliance fetches omp and GitHub CLI directly. syft only
-inventories package-manager metadata, so without this document those load-
-bearing components would be invisible.
-
-This runs inside the build, where every pin is a resolved build argument, and
-writes SPDX 2.3 JSON to ``/usr/share/bluefin/review/sbom.spdx.json``. The publish
-workflow's syft run ingests it through the sbom-cataloger, so each component
-reaches the attestation with its pinned version, its versioned download URL, and
-the SHA-256 the build actually verified before executing it.
-
-This generator is intentionally self-contained because it is copied alone into
-the image build stage.
+This runs inside the build, where each source, patch, addon, and runtime
+artifact has already passed its pinned integrity check. It writes SPDX 2.3 JSON
+to ``/usr/share/bluefin/review/sbom.spdx.json`` for the publication workflow.
 """
 
 from __future__ import annotations
@@ -20,20 +11,35 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
 from datetime import datetime, timezone
-import re
 
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
-
-# Each publisher names architectures differently in its release assets.
-OMP_ARCH = {"x86_64": "linux-x64", "aarch64": "linux-arm64"}
+SHA512_PATTERN = re.compile(r"[0-9a-f]{128}\Z")
+COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 GH_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}
+NATIVE_PACKAGE = {
+    "x86_64": "pi-natives-linux-x64",
+    "aarch64": "pi-natives-linux-arm64",
+}
 
 
 def require_sha256(value: str, label: str) -> str:
     if not SHA256_PATTERN.fullmatch(value):
         raise SystemExit(f"{label} must be a lowercase SHA-256 hex digest, got: {value!r}")
+    return value
+
+
+def require_sha512(value: str, label: str) -> str:
+    if not SHA512_PATTERN.fullmatch(value):
+        raise SystemExit(f"{label} must be a lowercase SHA-512 hex digest, got: {value!r}")
+    return value
+
+
+def require_commit(value: str, label: str) -> str:
+    if not COMMIT_PATTERN.fullmatch(value):
+        raise SystemExit(f"{label} must be a lowercase 40-character commit SHA, got: {value!r}")
     return value
 
 
@@ -43,11 +49,8 @@ def require_non_empty(value: str, label: str) -> str:
     return value
 
 
-def with_checksum_qualifier(purl: str, sha256: str) -> str:
-    # syft's sbom-cataloger keeps name, version and externalRefs when merging an
-    # embedded document, so the verified digest rides through as the purl spec's
-    # standard checksum qualifier.
-    return f"{purl}?checksum=sha256:{sha256}" if sha256 else purl
+def with_checksum_qualifier(purl: str, algorithm: str, digest: str) -> str:
+    return f"{purl}?checksum={algorithm.lower()}:{digest}" if digest else purl
 
 
 def package(
@@ -56,7 +59,8 @@ def package(
     download_url: str,
     purl: str,
     comment: str,
-    sha256: str = "",
+    checksum_algorithm: str = "",
+    checksum_value: str = "",
 ) -> dict:
     entry = {
         "name": name,
@@ -68,48 +72,95 @@ def package(
             {
                 "referenceCategory": "PACKAGE-MANAGER",
                 "referenceType": "purl",
-                "referenceLocator": with_checksum_qualifier(purl, sha256),
+                "referenceLocator": with_checksum_qualifier(purl, checksum_algorithm, checksum_value),
             }
         ],
         "comment": comment,
     }
-    if sha256:
-        entry["checksums"] = [{"algorithm": "SHA256", "checksumValue": sha256}]
+    if checksum_value:
+        entry["checksums"] = [{"algorithm": checksum_algorithm.upper(), "checksumValue": checksum_value}]
     return entry
-
-
-def per_arch(args: argparse.Namespace, prefix: str, arch: str) -> str:
-    return require_sha256(vars(args)[f"{prefix}_{arch}"], f"{prefix} for {arch}")
 
 
 def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     omp_version = require_non_empty(args.omp_version, "omp version")
+    omp_bun_version = require_non_empty(args.omp_bun_version, "omp Bun version")
+    natives_version = require_non_empty(args.omp_natives_version, "omp native addon version")
     gh_version = require_non_empty(args.gh_version, "gh version")
+    source_commit = require_commit(args.omp_source_commit, "omp source commit")
+    omp_sha = require_sha256(args.omp_sha256, "omp_sha256")
+    source_sha = require_sha256(args.omp_source_sha256, "omp_source_sha256")
+    patch_sha = require_sha256(args.omp_patch_sha256, "omp_patch_sha256")
+    native_sha = require_sha512(args.omp_native_sha512, "omp_native_sha512")
+    gh_sha = require_sha256(args.gh_sha256, "gh_sha256")
 
-    omp_sha = per_arch(args, "omp_sha256", arch)
-    gh_sha = per_arch(args, "gh_sha256", arch)
+    native_package = NATIVE_PACKAGE[arch]
+    if args.omp_native_package != native_package:
+        raise SystemExit(
+            f"omp native package for {arch} must be {native_package}, got: {args.omp_native_package!r}"
+        )
+    native_url = (
+        "https://registry.npmjs.org/%40oh-my-pi%2F"
+        f"{native_package}/-/{native_package}-{natives_version}.tgz"
+    )
+    gh_arch = GH_ARCH[arch]
+    source_url = f"https://github.com/can1357/oh-my-pi/archive/{source_commit}.tar.gz"
+    patch_url = (
+        f"https://github.com/joshyorko/review/blob/{args.revision}/"
+        "patches/omp/memory-backend-registration.patch"
+    )
 
     return [
         package(
             "omp",
             omp_version,
-            "https://github.com/can1357/oh-my-pi/releases/download/"
-            f"v{omp_version}/omp-{OMP_ARCH[arch]}",
-            f"pkg:github/can1357/oh-my-pi@v{omp_version}",
-            "Oh My Pi coding agent, a Bun single-file executable that embeds its"
-            " own JavaScript runtime; the appliance's entrypoint. The digest is"
-            " verified against the release SHA256SUMS before the file is made"
-            " executable. Installed to /usr/bin/omp.",
+            "NOASSERTION",
+            f"pkg:generic/omp-derived@{omp_version}",
+            "Review-derived OMP executable built locally from the pinned source archive "
+            f"at {source_commit} (SHA-256 {source_sha}) with the generic memory registration "
+            f"patch (SHA-256 {patch_sha}), Bun {omp_bun_version}, and verified native addon "
+            f"{native_package}@{natives_version}. Installed to /usr/bin/omp.",
+            "SHA256",
             omp_sha,
+        ),
+        package(
+            "omp-source",
+            source_commit,
+            source_url,
+            f"pkg:github/can1357/oh-my-pi@{source_commit}",
+            "Exact OMP source archive used to produce the Review-derived executable; its "
+            "SHA-256 is verified before extraction.",
+            "SHA256",
+            source_sha,
+        ),
+        package(
+            "omp-memory-backend-patch",
+            args.revision,
+            patch_url,
+            f"pkg:generic/omp-memory-backend-registration-patch@{args.revision}",
+            "Generic native MemoryBackend registration patch applied to the pinned OMP source; "
+            "its SHA-256 is verified before application.",
+            "SHA256",
+            patch_sha,
+        ),
+        package(
+            "omp-native-addon",
+            natives_version,
+            native_url,
+            f"pkg:npm/%40oh-my-pi/{native_package}@{natives_version}",
+            "Pinned architecture-specific npm native addon build input, verified using the "
+            "registry's SHA-512 integrity value.",
+            "SHA512",
+            native_sha,
         ),
         package(
             "gh",
             gh_version,
-            f"https://github.com/cli/cli/releases/download/v{gh_version}/gh_{gh_version}_linux_{GH_ARCH[arch]}.tar.gz",
+            f"https://github.com/cli/cli/releases/download/v{gh_version}/gh_{gh_version}_linux_{gh_arch}.tar.gz",
             f"pkg:github/cli/cli@v{gh_version}",
-            "GitHub CLI. The appliance reviews, approves, and merges through it,"
-            " so it is a runtime dependency rather than a convenience."
-            " Installed to /usr/bin/gh.",
+            "GitHub CLI. The appliance reviews, approves, and merges through it, so it is a "
+            "runtime dependency rather than a convenience. Installed to /usr/bin/gh.",
+            "SHA256",
             gh_sha,
         ),
         package(
@@ -117,10 +168,9 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             args.version,
             f"https://github.com/joshyorko/review/tree/{args.revision}/image/extension/bluefin-review",
             f"pkg:github/joshyorko/review@{args.revision}",
-            "The GitHub Review workbench for OMP: its extension package and"
-            " companion review agents, copied from this repository at the"
-            " recorded revision. Installed to"
-            " /usr/share/bluefin/review/extension.",
+            "The GitHub Review workbench for OMP: its extension package and companion review "
+            "agents, copied from this repository at the recorded revision. Installed to "
+            "/usr/share/bluefin/review/extension.",
         ),
     ]
 
@@ -132,11 +182,16 @@ def main() -> int:
     parser.add_argument("--revision", required=True, help="review source revision")
     parser.add_argument("--out", required=True, type=pathlib.Path, help="output SPDX JSON path")
     parser.add_argument("--omp-version", required=True)
-    parser.add_argument("--omp-sha256-x86-64", required=True)
-    parser.add_argument("--omp-sha256-aarch64", required=True)
+    parser.add_argument("--omp-sha256", required=True)
+    parser.add_argument("--omp-source-commit", required=True)
+    parser.add_argument("--omp-source-sha256", required=True)
+    parser.add_argument("--omp-patch-sha256", required=True)
+    parser.add_argument("--omp-bun-version", required=True)
+    parser.add_argument("--omp-natives-version", required=True)
+    parser.add_argument("--omp-native-package", required=True)
+    parser.add_argument("--omp-native-sha512", required=True)
     parser.add_argument("--gh-version", required=True)
-    parser.add_argument("--gh-sha256-x86-64", required=True)
-    parser.add_argument("--gh-sha256-aarch64", required=True)
+    parser.add_argument("--gh-sha256", required=True)
     args = parser.parse_args()
 
     arch = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(args.arch)

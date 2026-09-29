@@ -1,10 +1,12 @@
-# Issue #293 — derived native OMP proof in progress
+# Issue #293 — derived native OMP seam proof; distribution blocked
 
-This receipt records the live capability audit for
+This receipt records the live capability audit and follow-up for
 [joshyorko/review#293](https://github.com/joshyorko/review/issues/293).
-The packaged native path is intentionally not claimed: the exact OMP releases
-Review ships do not expose the generic external `MemoryBackend` registration
-seam required by the existing MemoryD adapter.
+The generic OMP patch, x86_64 derived build, first-turn native selection/recall,
+and daemon-down fail-open path are verified locally. The appliance now builds
+derived OMP per native architecture, but no image or aarch64 build was run here.
+The MemoryD adapter is not packaged: its pinned source commit has no license, so
+packaged MemoryD behavior is not claimed.
 
 ## Exact heads
 
@@ -12,15 +14,17 @@ seam required by the existing MemoryD adapter.
 | --- | --- |
 | Review live `self-hosted` head at audit | `35dec9f80eed65dd307e3fdf1626ce2fd7749f64` |
 | Review handoff baseline | `ca9496e1a65912344cf68fa08c2a7425f1da627d` |
-| Packaged OMP | `18.4.3`, release source tag `fc671eba383f2a7208500836673b485c0dc7073d` |
+| Last published Review dev appliance | `dev-0.20260929125440-ca9496e659`; still contains upstream OMP 18.4.3 |
+| OMP source tag and exact commit | `v18.4.3` = `fc671eba383f2a7208500836673b485c0dc7073d` |
 | OMP live `main` audited | `60d3a5a4520b2937b4a0fc727abadabbed17cf2e` |
-| MemoryD adapter source | `e7f8d431797973afbdf4d0530aa14a25f43acf35` |
+| Latest local derived x86_64 OMP SHA-256 | `9ac68b5d682c42bc6e12f3da59241655db470616c396aa8faf524953502b15c3` |
+| MemoryD adapter source | `e7f8d431797973afbdf4d0530aa14a25f43acf35`; no license file at that commit |
 
-The Review source pin is digest-verified in
-`image/appliance/Containerfile:32-35`. The latest published Review dev
-appliance observed during the audit is `dev-0.20260929125440-ca9496e659`; it
-also contains OMP 18.4.3. The issue's original 18.4.2 publication baseline is
-now stale.
+The OMP source, patch, Bun, native-package, and MemoryD test-source pins are in
+`image/appliance/Containerfile:32-44`; the resolved derived binary hash is
+recorded in the image SBOM. The last published Review dev appliance observed
+during the audit is not this derived candidate. The issue's original 18.4.2
+publication baseline is stale.
 
 ## Phase 0 evidence
 
@@ -58,32 +62,59 @@ At both OMP 18.4.3 and the audited live `main`:
   `packages/coding-agent/test/memories-runtime.test.ts` cover the existing
   built-in resolver/lifecycle/subagent behavior, not third-party registration.
 
-**Native seam conclusion:** at the audited release, current OMP does **not**
-expose a third-party `registerMemoryBackend` API. `memory.backend` has a closed
-enum and resolver; native MemoryD selection therefore requires a small generic
-registration/resolution patch in a locally derived OMP build. Do not substitute
-an extension hook or change the upstream release artifact.
+**Native seam conclusion:** unmodified OMP `v18.4.3` does **not** expose a
+third-party `registerMemoryBackend` API. `memory.backend` has a closed enum and
+resolver. A generic registration/resolution patch is therefore required in a
+derived source build; it leaves the upstream tag and release artifact unchanged.
 
-### Follow-up: exact-source derived native build
+### Follow-up: exact-source derived build and provider-boundary canary
 
-The official OMP `v18.4.3` source tag resolves to
-`fc671eba383f2a7208500836673b485c0dc7073d`; the checkout tag and commit agree.
-The immutable MemoryD adapter source is
-`joshyorko/codex-memoryd@e7f8d431797973afbdf4d0530aa14a25f43acf35`. Review has
-not yet applied a generic OMP registration patch, built a derived executable,
-or proved native adapter selection at the provider boundary.
+`scripts/build-derived-omp.sh` fetches and verifies the exact OMP source archive,
+applies `patches/omp/memory-backend-registration.patch`, verifies the toolchain
+and native addon, runs the pinned MemoryD adapter tests and focused OMP tests,
+then compiles the native binary. The x86_64 run passed:
 
-The unmodified official x86_64 artifact was also downloaded and executed as a
+- OMP source `fc671eba383f2a7208500836673b485c0dc7073d`, archive SHA-256
+  `d7e19ecdf0e75312098b94b3a4997c8c7f0d36ef0b350a93d7cfa486c1cb9ef2`;
+- generic patch SHA-256
+  `08985708402dc8657f8e34eeff10fdede62343d276fab6ec4b77f82c2b3d9e41`;
+- Bun 1.4.2 x86_64 archive SHA-256
+  `c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f`;
+- `@oh-my-pi/pi-natives-linux-x64@18.4.3` archive SHA-512
+  `9186665bbcf69f557bac60b8311840b3e45b367a78d1d1cf841b07ee2102d1655ef524d7abd99996efcc66774891e7d2bd78c1c1d541dd9303f21a9dfd1567be`;
+- MemoryD source `e7f8d431797973afbdf4d0530aa14a25f43acf35`, archive SHA-256
+  `155ec09537e941e4c71a65b738650b0419ae86f12cc86e28761d10553627d692`;
+- OMP typecheck passed; resolver tests passed (7 tests, 20 expectations);
+  selector regression tests passed (7 tests, 39 expectations); adapter tests
+  passed (27 tests, 68 expectations);
+- derived executable reported `omp/18.4.3`, SHA-256
+  `9ac68b5d682c42bc6e12f3da59241655db470616c396aa8faf524953502b15c3`.
+
+The live x86_64 canary used that derived executable and the exact adapter source
+fetched ephemerally from the pinned commit. A loopback synthetic MemoryD server
+returned a recall marker on the first prompt. OMP sent one `/v1/recall` request
+with `profile=personal`, `workspace=issue-293-canary-current`,
+`pack_mode=active_task`, and `source_kind=omp_native_recall`; the provider
+boundary observed the marker after one recall and returned
+`MEMORYD_RECALL_PRESENT_OK` (process exit 0). After stopping the synthetic
+MemoryD server, a second OMP process exited 0 with
+`MEMORYD_NO_RECALL_FAIL_OPEN_OK`; the provider saw no recall marker. This proves
+the native selector and fail-open path against deterministic loopback fixtures,
+not against a production MemoryD daemon or packaged appliance.
+
+The unmodified official x86_64 OMP artifact was separately executed as a
 baseline: SHA-256
 `afcecdff1f421f3c88fb1714c407b3700899b4de3ed003cd8369f52ae6ca87de`
-(matches `image/appliance/Containerfile:34`), output `omp/18.4.3`. This is the
-upstream artifact hash, not a derived-output hash and not candidate proof.
+and output `omp/18.4.3`. It is an upstream artifact, not the derived candidate,
+and the Containerfile no longer downloads it.
 
-Local source build prerequisite observed missing: shell `bun --version` returned
-`command not found`; `command -v bun node npm rustc cargo gcc` returned no tool
-paths. No upstream build script, compile, native canary, or CI-derived artifact
-run was completed. CI setup/build work and all derived artifact provenance
-remain unproven.
+`scripts/update-omp-pins.mjs 18.4.3` resolved the source commit/archive and
+both npm native-package integrities from their live endpoints. Its focused test
+passed (6 tests). `bash tests/appliance-contract.sh` passed the static image,
+SBOM, architecture-lane, and promotion-gate contracts; it did not build or
+publish an OCI image. The existing publish workflow builds x86_64 and aarch64
+on native runners and assembles the index only after both builds succeed. The
+aarch64 builder and hosted promotion have not been exercised in this worktree.
 
 ### Upstream issue evidence
 
@@ -116,52 +147,50 @@ remain unproven.
 
 ### MemoryD adapter and distribution evidence
 
-MemoryD commit `e7f8d431797973afbdf4d0530aa14a25f43acf35` contains the landed
-`adapters/omp-memory-provider` source package:
+The immutable MemoryD source commit contains the landed
+`adapters/omp-memory-provider` package (`@codex-memoryd/omp-memory-provider`,
+version `0.1.0`). Its `src/index.ts` calls only the generic
+`api.registerMemoryBackend(registration)` API; `src/backend.ts` owns adapter
+policy, bounded recall, `recall_not_authority` framing, staged-commit
+protection, fail-open behavior, cancellation, status/search/explicit-save, and
+bounded pre-compaction recall. Automatic observation/writeback remains
+disabled pending MemoryD #233. No fake `memory://` resource is introduced.
 
-- package: `@codex-memoryd/omp-memory-provider`, version `0.1.0`;
-- `src/index.ts` exports the generic registration packet and calls only
-  `api.registerMemoryBackend(registration)`;
-- `src/backend.ts` implements the native lifecycle, bounded recall,
-  `recall_not_authority` framing, staged commit protection, fail-open behavior,
-  cancellation, status/search/explicit-save, and bounded pre-compaction recall;
-- automatic observation/writeback remains disabled pending MemoryD #233;
-- no fake `memory://` resource is introduced.
+The pinned MemoryD repository commit has no `LICENSE` file; no license or
+distribution grant is inferred from repository ownership. The adapter is
+fetched only into temporary build/canary directories and is not copied into the
+Review repository or image. MemoryD #245 remains open; no published release,
+tag, npm artifact, or Homebrew formula was verified. Packaging the adapter is
+blocked until distribution rights are established.
 
-This Git commit is an immutable source identity suitable for a future dogfood
-fetch. MemoryD #245 is still open; no published GitHub release, tag, npm
-artifact, or Homebrew formula was verified. The adapter must therefore not be
-copied into Review or treated as a published package.
+## Generic native registration patch implemented
 
-## Generic native registration patch required
+The Review patch adds duplicate-safe generic `MemoryBackend` factory
+registration, reserved-ID protection, registration resolution, and native
+session lifecycle integration. It preserves the built-in OMP selector and keeps
+MemoryD policy in the adapter; there is no MemoryD-specific OMP branch,
+competing memory loop, or automatic writeback. No upstream OMP fork or PR was
+created.
 
-The derived source build needs a generic, duplicate-safe registration API for
-external `MemoryBackend` factories, with metadata/settings ownership and
-reserved-ID protection. Resolve a registered backend through OMP's existing
-native per-session startup, prompt, compaction, status/search/save, live-setting,
-cwd-rebind, resume, cancellation, disposal, and child-session paths. Preserve
-the existing built-in resolver behavior and fail-open semantics. Keep all
-MemoryD-specific policy in the adapter; no MemoryD branch in OMP, competing
-memory loop, or automatic writeback.
-
-No upstream OMP PR, fork repository, or generic source patch has yet been made.
-Do not promote or package a derived candidate until a clean source build passes
-the native MemoryD x86_64 canary. Then connect only those tested bytes to the
-existing Review CI/package flow and add the existing aarch64 lane.
+`image/appliance/Containerfile` builds the patched OMP source on each native
+image architecture. The existing publish workflow retains its native arm64
+runner, and the OCI index job depends on both architecture builds and checks for
+both digests. Static contract tests guard these gates. Actual arm64 compilation,
+hosted CI, and image publication remain unverified.
 
 ## Acceptance status
 
 | Criterion | Status |
 | --- | --- |
 | Official OMP source tag matches exact commit | TESTED — `v18.4.3` = `fc671eba383f2a7208500836673b485c0dc7073d` |
-| Official upstream x86_64 binary version and digest verified | TESTED — upstream artifact only; not derived candidate |
-| MemoryD adapter source identity pinned | TESTED — `joshyorko/codex-memoryd@e7f8d431797973afbdf4d0530aa14a25f43acf35` |
-| Generic native registration patch, clean derived OMP build, provenance | REMAINING — not attempted |
-| Derived x86_64 binary selects existing adapter and recalls synthetic fact on first provider request | REMAINING — no derived binary/provider-boundary run |
-| Daemon-down fail-open/degraded and cancellation/stale/rebind controls | REMAINING — not exercised |
-| Native status/search/explicit save; automatic writeback remains disabled | REMAINING — not exercised |
-| Derived artifact integrated with existing CI/package flow; aarch64 lane | REMAINING — do not expand before x86_64 canary |
-| Promotion gate preserves last verified release on patch/build/test failure | REMAINING |
-| Exact-head independent review | REMAINING |
+| Generic registration patch, x86_64 derived build, focused OMP tests, provenance | TESTED — executable SHA-256 recorded above |
+| Derived x86_64 binary selects the adapter and recalls a synthetic fact on the first provider request | TESTED — provider-boundary trace above |
+| Daemon-down recall is fail-open | TESTED — second loopback canary process exited 0 without recalled context |
+| Adapter cancellation, stale/root invalidation, status/search/save, and write policy | TESTED — pinned adapter unit tests only; no live daemon lifecycle integration |
+| Native status/search/explicit save against MemoryD | REMAINING — no runtime exercise; automatic writeback remains disabled |
+| Derived image build and native aarch64 lane | IMPLEMENTED, NOT RUN — local builder was x86_64; hosted native arm64 build remains pending |
+| Promotion waits for both native builds and both digests | TESTED — static workflow contract only; no hosted promotion |
+| MemoryD adapter distribution authorization | BLOCKED — pinned commit contains no license; adapter is not packaged |
+| Exact-head independent review and hosted checks | REMAINING |
 
-Terminal marker: `NATIVE_BUILD_PROOF_REMAINING`.
+Terminal marker: `DISTRIBUTION_AUTHORIZATION_REQUIRED`.
