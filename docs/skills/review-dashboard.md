@@ -79,6 +79,8 @@ If OMP records a coordinator error or abort before any tool invocation, Review b
 
 Reconciliation releases only claims with settled evidence. Changing instance keys or scopes does not bypass a host-wide claim.
 
+For a PR Slay wave, reconciliation observes the exact PR effect independently of the open queue. A merged PR or an open PR with accepted auto-merge settles only when a fresh, non-author approval is bound to the current head and submitted during that wave; GitHub may still await additional required human reviews. A PR closed without merging settles its claims but archives Slay as cancelled without increasing completed-item counts. An unexplained open head, stale or missing review, incomplete review history, unreadable PR, or contradictory state remains UNKNOWN and keeps its claims.
+
 Task invocation IDs, agent IDs, and async job IDs are distinct. Review maps
 structured task progress to OMP job snapshots and persists terminal status at
 result-delivery and tool-result boundaries. Consumed results need not remain in
