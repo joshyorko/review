@@ -1,0 +1,1178 @@
+diff --git a/packages/coding-agent/src/extensibility/extensions/loader.ts b/packages/coding-agent/src/extensibility/extensions/loader.ts
+index e277e6d58c..94ee01f47a 100644
+--- a/packages/coding-agent/src/extensibility/extensions/loader.ts
++++ b/packages/coding-agent/src/extensibility/extensions/loader.ts
+@@ -38,6 +38,8 @@ import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/leg
+ import { getAllPluginExtensionPaths } from "../plugins/loader";
+ 
+ import { resolvePath, withHostGuard } from "../utils";
++import { validateMemoryBackendRegistration } from "../../memory-backend/registry";
++import type { MemoryBackendRegistration } from "../../memory-backend/types";
+ import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+ import type {
+ 	AssistantThinkingRenderer,
+@@ -100,6 +102,7 @@ export class ExtensionRuntimeNotInitializedError extends Error {
+ export class ExtensionRuntime implements IExtensionRuntime {
+ 	flagValues = new Map<string, boolean | string>();
+ 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
++	pendingMemoryBackendRegistrations: Array<{ registration: MemoryBackendRegistration; sourceId: string }> = [];
+ 
+ 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
+ 		this.pendingProviderRegistrations.push({ name, config, sourceId });
+@@ -110,6 +113,15 @@ export class ExtensionRuntime implements IExtensionRuntime {
+ 		this.pendingProviderRegistrations.splice(0, this.pendingProviderRegistrations.length, ...remaining);
+ 	}
+ 
++	registerMemoryBackend(registration: MemoryBackendRegistration, sourceId: string): void {
++		validateMemoryBackendRegistration(registration);
++		const previous = this.pendingMemoryBackendRegistrations.find(entry => entry.registration.id === registration.id);
++		if (previous) {
++			throw new Error(`Memory backend ${registration.id} is already registered by ${previous.sourceId}`);
++		}
++		this.pendingMemoryBackendRegistrations.push({ registration, sourceId });
++	}
++
+ 	sendMessage(): void {
+ 		throw new ExtensionRuntimeNotInitializedError();
+ 	}
+@@ -187,6 +199,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
+ 		config: ProviderConfig;
+ 		sourceId: string;
+ 	}> = [];
++	readonly pendingMemoryBackendRegistrations: Array<{ registration: MemoryBackendRegistration; sourceId: string }> = [];
+ 
+ 	constructor(
+ 		public readonly pi: typeof PiCodingAgent,
+@@ -363,6 +376,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
+ 		this.runtime.registerProvider(name, config, this.extension.path);
+ 	}
+ 
++	registerMemoryBackend(registration: MemoryBackendRegistration): void {
++		this.runtime.registerMemoryBackend(registration, this.extension.path);
++	}
++
+ 	unregisterProvider(name: string): void {
+ 		this.runtime.unregisterProvider(name, this.extension.path);
+ 	}
+@@ -400,6 +417,7 @@ async function runExtensionFactory(
+ 	runtime: IExtensionRuntime,
+ ): Promise<void> {
+ 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
++	const memoryBackendRegistrationCheckpoint = [...runtime.pendingMemoryBackendRegistrations];
+ 
+ 	try {
+ 		await factory(api);
+@@ -409,6 +427,11 @@ async function runExtensionFactory(
+ 			runtime.pendingProviderRegistrations.length,
+ 			...providerRegistrationCheckpoint,
+ 		);
++		runtime.pendingMemoryBackendRegistrations.splice(
++			0,
++			runtime.pendingMemoryBackendRegistrations.length,
++			...memoryBackendRegistrationCheckpoint,
++		);
+ 		throw error;
+ 	}
+ }
+diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
+index 480896602a..ae764acd26 100644
+--- a/packages/coding-agent/src/extensibility/extensions/types.ts
++++ b/packages/coding-agent/src/extensibility/extensions/types.ts
+@@ -78,6 +78,7 @@ import type { ExecOptions, ExecResult } from "../../exec/exec";
+ import type * as PiCodingAgent from "../../index";
+ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+ import type { MemoryRuntimeContext } from "../../memory-backend";
++import type { MemoryBackendRegistration } from "../../memory-backend/types";
+ import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+ import type { Theme } from "@oh-my-pi/pi-tui/theme";
+ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+@@ -1607,6 +1608,9 @@ export interface ExtensionAPI {
+ 	 */
+ 	unregisterProvider(name: string): void;
+ 
++	/** Register a memory backend for this agent session. */
++	registerMemoryBackend(registration: MemoryBackendRegistration): void;
++
+ 	/** Shared event bus for extension communication. */
+ 	events: EventBus;
+ }
+@@ -1769,10 +1773,12 @@ export interface ExtensionRuntimeState {
+ 	flagValues: Map<string, boolean | string>;
+ 	/** Provider registrations queued during extension loading, processed during session initialization */
+ 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
++	pendingMemoryBackendRegistrations: Array<{ registration: MemoryBackendRegistration; sourceId: string }>;
+ 	/** Queue a provider registration until initialization, then apply it immediately. */
+ 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
+ 	/** Remove a queued or initialized provider registration. */
+ 	unregisterProvider(name: string, sourceId: string): void;
++	registerMemoryBackend(registration: MemoryBackendRegistration, sourceId: string): void;
+ }
+ 
+ /** Action implementations for ExtensionAPI methods. */
+diff --git a/packages/coding-agent/src/memory-backend/index.ts b/packages/coding-agent/src/memory-backend/index.ts
+index 7f386726db..43ec08243f 100644
+--- a/packages/coding-agent/src/memory-backend/index.ts
++++ b/packages/coding-agent/src/memory-backend/index.ts
+@@ -10,5 +10,6 @@ export * from "./local-backend";
+ export * from "./messages";
+ export * from "./off-backend";
+ export * from "./resolve";
++export * from "./registry";
+ export * from "./runtime";
+ export * from "./types";
+diff --git a/packages/coding-agent/src/memory-backend/resolve.ts b/packages/coding-agent/src/memory-backend/resolve.ts
+index c38c4aef39..52a45a76ec 100644
+--- a/packages/coding-agent/src/memory-backend/resolve.ts
++++ b/packages/coding-agent/src/memory-backend/resolve.ts
+@@ -1,29 +1,224 @@
+ import type { Settings } from "../config/settings";
++import type { AgentSession } from "../session/agent-session";
+ import { localBackend } from "./local-backend";
+ import { offBackend } from "./off-backend";
+-import type { MemoryBackend } from "./types";
+-
+-import { cfgMemoryBackend } from "./settings";
+-
+-/**
+- * Pick the active memory backend for a Settings instance.
+- *
+- * Selection rules (single source of truth — every memory consumer routes
+- * through this):
+- *   - `memory.backend === "hindsight"`  → Hindsight remote memory
+- *   - `memory.backend === "mnemopi"`  → local Mnemopi SQLite memory
+- *   - `memory.backend === "sharpshooter"` → friction-gated project decision memory
+- *   - `memory.backend === "local"`      → local rollout summary pipeline
+- *   - everything else                   → no-op
+- *
+- * `memories.enabled` remains accepted only as a legacy migration input. Once
+- * a config is loaded, `memory.backend` is the sole runtime selector.
+- */
+-export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBackend> {
++import { cfgMemoryBackend, cfgMemoryBackendSettings } from "./settings";
++import type {
++	MemoryBackend,
++	MemoryBackendId,
++	MemoryBackendOperationContext,
++	MemoryBackendResolutionContext,
++	MemoryBackendSaveInput,
++	MemoryBackendSaveResult,
++	MemoryBackendSearchOptions,
++	MemoryBackendSearchResult,
++	MemoryBackendStartOptions,
++	MemoryBackendStatus,
++	MemoryPromptPreparation,
++	MemoryBackendRegistration,
++	RegisteredMemoryBackendContext,
++	RegisteredMemoryBackendInstance,
++} from "./types";
++import { getMemoryBackendRegistration, unbindMemoryBackendRegistrations } from "./registry";
++
++type RegisteredBackendCache = {
++	registration: MemoryBackendRegistration;
++	settings: Readonly<Record<string, unknown>>;
++	agentDir: string;
++	cwd: string;
++	taskDepth: number;
++	backend: MemoryBackend;
++};
++const backendInstances = new WeakMap<AgentSession, Map<string, RegisteredBackendCache>>();
++const EMPTY_SETTINGS: Readonly<Record<string, unknown>> = Object.freeze({});
++
++/** Resolve one built-in or extension-registered backend for the active session. */
++export async function resolveMemoryBackend(
++	settings: Settings,
++	context?: MemoryBackendResolutionContext,
++): Promise<MemoryBackend> {
+ 	const id = cfgMemoryBackend.get(settings);
+ 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
+ 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
+ 	if (id === "sharpshooter") return (await import("../sharpshooter/backend")).sharpshooterBackend;
+ 	if (id === "local") return localBackend;
+-	return offBackend;
++	if (id === "off") return offBackend;
++	if (!context?.session) return unavailableBackend(id, `Memory backend "${id}" requires an active session`);
++
++	const registration = getMemoryBackendRegistration(id, context.session);
++	if (!registration) return unavailableBackend(id, `Memory backend "${id}" is not registered for this session`);
++
++	const perBackendSettings = cfgMemoryBackendSettings.get(settings);
++	const configuredValue =
++		settings.getProvenance(cfgMemoryBackendSettings) === "project" || !Object.hasOwn(perBackendSettings, id)
++			? undefined
++			: perBackendSettings[id];
++	if (
++		configuredValue !== undefined &&
++		(configuredValue === null || typeof configuredValue !== "object" || Array.isArray(configuredValue))
++	) {
++		return unavailableBackend(id, `Memory backend "${id}" settings must be a record`);
++	}
++	const configured: Readonly<Record<string, unknown>> = configuredValue ?? EMPTY_SETTINGS;
++	const backendSettings: Record<string, unknown> = {};
++	for (const setting of registration.settings) {
++		const value = Object.hasOwn(configured, setting.id) ? configured[setting.id] : setting.default;
++		if (value === undefined && setting.required) {
++			return unavailableBackend(id, `Memory backend "${id}" requires setting "${setting.id}"`);
++		}
++		if (value !== undefined && typeof value !== setting.type) {
++			return unavailableBackend(id, `Memory backend "${id}" setting "${setting.id}" must be ${setting.type}`);
++		}
++		if (value !== undefined) backendSettings[setting.id] = value;
++	}
++
++	let byId = backendInstances.get(context.session);
++	if (!byId) {
++		byId = new Map();
++		backendInstances.set(context.session, byId);
++	}
++	const cached = byId.get(id);
++	if (
++		cached?.registration === registration &&
++		cached.agentDir === context.agentDir &&
++		cached.cwd === context.cwd &&
++		cached.taskDepth === context.taskDepth &&
++		Bun.deepEquals(cached.settings, backendSettings)
++	) {
++		return cached.backend;
++	}
++	if (cached) {
++		byId.delete(id);
++		try {
++			await cached.backend.dispose?.();
++		} catch (error) {
++			return unavailableBackend(id, `Memory backend "${id}" failed to dispose: ${String(error)}`);
++		}
++	}
++
++	const factoryContext: RegisteredMemoryBackendContext = {
++		...context,
++		settings: backendSettings,
++	};
++	try {
++		const instance = registration.create(factoryContext);
++		if (instance.id !== id) return unavailableBackend(id, `Memory backend factory returned id "${instance.id}"`);
++		const backend = adaptRegisteredBackend(registration, instance, factoryContext);
++		byId.set(id, {
++			registration,
++			settings: backendSettings,
++			agentDir: context.agentDir,
++			cwd: context.cwd,
++			taskDepth: context.taskDepth,
++			backend,
++		});
++		return backend;
++	} catch (error) {
++		return unavailableBackend(id, `Memory backend "${id}" failed to initialize: ${String(error)}`);
++	}
++}
++
++function adaptRegisteredBackend(
++	registration: MemoryBackendRegistration,
++	instance: RegisteredMemoryBackendInstance,
++	factoryContext: RegisteredMemoryBackendContext,
++): MemoryBackend {
++	const backend: MemoryBackend = {
++		id: registration.id,
++		async start(options: MemoryBackendStartOptions) {
++			await instance.start({
++				...factoryContext,
++				session: options.session,
++				taskDepth: options.taskDepth,
++				parent: options.parentMnemopiSessionState ?? options.parentHindsightSessionState,
++			});
++		},
++		buildDeveloperInstructions(agentDir, _settings, session) {
++			return instance.buildDeveloperInstructions(agentDir, factoryContext.settings, session);
++		},
++		clear(agentDir, cwd, session) {
++			return instance.clear(agentDir, cwd, session);
++		},
++		enqueue(agentDir, cwd, session) {
++			return instance.enqueue(agentDir, cwd, session);
++		},
++	};
++	if (instance.dispose) backend.dispose = instance.dispose.bind(instance);
++	const status = instance.status;
++	if (status) backend.status = (context: MemoryBackendOperationContext): Promise<MemoryBackendStatus> => status.call(instance, context);
++	const search = registration.capabilities.search ? instance.search : undefined;
++	if (search) {
++		backend.search = (
++			context: MemoryBackendOperationContext,
++			query: string,
++			options?: MemoryBackendSearchOptions,
++			): Promise<MemoryBackendSearchResult> => search.call(instance, context, query, options);
++	}
++	const save = registration.capabilities.explicitSave ? instance.save : undefined;
++	if (save) {
++		backend.save = (
++			context: MemoryBackendOperationContext,
++			input: MemoryBackendSaveInput,
++		): Promise<MemoryBackendSaveResult> => save.call(instance, context, input);
++	}
++	const beforeAgentStartPrompt = registration.capabilities.recall ? instance.beforeAgentStartPrompt : undefined;
++	if (beforeAgentStartPrompt) {
++		backend.beforeAgentStartPrompt = (
++			session: AgentSession,
++			promptText: string,
++			signal?: AbortSignal,
++		): Promise<MemoryPromptPreparation | undefined> => beforeAgentStartPrompt.call(instance, session, promptText, signal);
++	}
++	const preCompactionContext = registration.capabilities.compactionRecall ? instance.preCompactionContext : undefined;
++	if (preCompactionContext) {
++		backend.preCompactionContext = (
++			messages: readonly unknown[],
++			_settings: Settings,
++			session?: AgentSession,
++		): Promise<string | undefined> => preCompactionContext.call(instance, messages, factoryContext.settings, session);
++	}
++	return backend;
++}
++
++function unavailableBackend(id: MemoryBackendId, message: string): MemoryBackend {
++	return {
++		id,
++		async start() {},
++		async buildDeveloperInstructions() {
++			return undefined;
++		},
++		async clear() {},
++		async enqueue() {},
++		async status() {
++			return { backend: id, active: false, writable: false, searchable: false, message, error: message };
++		},
++		async search(_context, query) {
++			return { backend: id, query, count: 0, items: [], message };
++		},
++		async save() {
++			return { backend: id, stored: 0, message };
++		},
++	};
++}
++/** Dispose every instance cached for a session before a backend transition. */
++export async function disposeRegisteredMemoryBackendInstances(session: AgentSession): Promise<void> {
++	const instances = backendInstances.get(session);
++	if (!instances) return;
++	backendInstances.delete(session);
++	const results = await Promise.allSettled(
++		Array.from(instances.values(), ({ backend }) => Promise.resolve().then(() => backend.dispose?.())),
++	);
++	const errors = results
++		.filter((result): result is PromiseRejectedResult => result.status === "rejected")
++		.map(result => result.reason);
++	if (errors.length > 0) throw new AggregateError(errors, "Failed to dispose registered memory backends");
++}
++
++/** Dispose cached instances and unbind registrations when a session closes. */
++export async function releaseRegisteredMemoryBackendSession(session: AgentSession): Promise<void> {
++	try {
++		await disposeRegisteredMemoryBackendInstances(session);
++	} finally {
++		unbindMemoryBackendRegistrations(session);
++	}
+ }
+diff --git a/packages/coding-agent/src/memory-backend/runtime.ts b/packages/coding-agent/src/memory-backend/runtime.ts
+index 3f9ab1757d..dc211b8d32 100644
+--- a/packages/coding-agent/src/memory-backend/runtime.ts
++++ b/packages/coding-agent/src/memory-backend/runtime.ts
+@@ -7,11 +7,13 @@ import type {
+ 	MemoryBackendSearchOptions,
+ 	MemoryRuntimeContext,
+ } from "./types";
++
+ export function createMemoryRuntimeContext(context: MemoryBackendOperationContext): MemoryRuntimeContext {
+ 	const settings = context.session?.settings;
+ 	return {
+ 		async status() {
+-			if (!settings) {
++			const session = context.session;
++			if (!settings || !session) {
+ 				return {
+ 					backend: "off" as const,
+ 					active: false,
+@@ -20,7 +22,12 @@ export function createMemoryRuntimeContext(context: MemoryBackendOperationContex
+ 					message: "No active agent session.",
+ 				};
+ 			}
+-			const backend = await resolveMemoryBackend(settings);
++			const backend = await resolveMemoryBackend(settings, {
++				session,
++				agentDir: context.agentDir,
++				cwd: context.cwd,
++				taskDepth: session.memoryTaskDepth,
++			});
+ 			return backend.status
+ 				? await backend.status(context)
+ 				: {
+@@ -32,15 +39,27 @@ export function createMemoryRuntimeContext(context: MemoryBackendOperationContex
+ 					};
+ 		},
+ 		async search(query: string, options?: MemoryBackendSearchOptions) {
+-			if (!settings) return unavailableSearch("off", query, "No active agent session.");
+-			const backend = await resolveMemoryBackend(settings);
++			const session = context.session;
++			if (!settings || !session) return unavailableSearch("off", query, "No active agent session.");
++			const backend = await resolveMemoryBackend(settings, {
++				session,
++				agentDir: context.agentDir,
++				cwd: context.cwd,
++				taskDepth: session.memoryTaskDepth,
++			});
+ 			return backend.search
+ 				? await backend.search(context, query, options)
+ 				: unavailableSearch(backend.id, query, `Memory search is not available for the ${backend.id} backend.`);
+ 		},
+ 		async save(input: string | MemoryBackendSaveInput) {
+-			if (!settings) return unavailableSave("off", "No active agent session.");
+-			const backend = await resolveMemoryBackend(settings);
++			const session = context.session;
++			if (!settings || !session) return unavailableSave("off", "No active agent session.");
++			const backend = await resolveMemoryBackend(settings, {
++				session,
++				agentDir: context.agentDir,
++				cwd: context.cwd,
++				taskDepth: session.memoryTaskDepth,
++			});
+ 			const normalized = typeof input === "string" ? { content: input } : input;
+ 			return backend.save
+ 				? await backend.save(context, normalized)
+diff --git a/packages/coding-agent/src/memory-backend/settings.ts b/packages/coding-agent/src/memory-backend/settings.ts
+index 033bc38fba..9382cd1386 100644
+--- a/packages/coding-agent/src/memory-backend/settings.ts
++++ b/packages/coding-agent/src/memory-backend/settings.ts
+@@ -12,29 +12,21 @@ import { register } from "../config/registry";
+ export const cfgMemoryBackend = register({
+ 	id: "memory.backend",
+ 	protocolDefault: ["rpc", "acp"],
+-	type: "enum",
+-	values: ["off", "local", "hindsight", "mnemopi", "sharpshooter"] as const,
++	type: "string",
+ 	default: "off",
+ 	ui: {
+ 		tab: "memory",
+ 		group: "General",
+ 		label: "Memory Backend",
+-		description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter",
+-		options: [
+-			{ value: "off", label: "Off", description: "No memory subsystem runs" },
+-			{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
+-			{ value: "hindsight", label: "Hindsight", description: "Vectorize Hindsight remote memory service" },
+-			{
+-				value: "mnemopi",
+-				label: "Mnemopi",
+-				description: "Local SQLite recall/retain backend with optional embeddings",
+-			},
+-			{
+-				value: "sharpshooter",
+-				label: "Sharpshooter",
+-				description:
+-					"Friction-gated project decision files (architecture/product/style), consolidated in the background",
+-			},
+-		],
++		description: "Built-in or extension-provided memory backend",
+ 	},
+ });
++
++const EMPTY_MEMORY_BACKEND_SETTINGS: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {};
++
++/** Per-backend settings are isolated by registered backend ID. */
++export const cfgMemoryBackendSettings = register({
++	id: "memory.backendSettings",
++	type: "record",
++	default: EMPTY_MEMORY_BACKEND_SETTINGS,
++});
+diff --git a/packages/coding-agent/src/memory-backend/types.ts b/packages/coding-agent/src/memory-backend/types.ts
+index 8490797ec8..2d04747f1e 100644
+--- a/packages/coding-agent/src/memory-backend/types.ts
++++ b/packages/coding-agent/src/memory-backend/types.ts
+@@ -13,7 +13,7 @@ import type { HindsightSessionState } from "../hindsight/state";
+ import type { MnemopiSessionState } from "../mnemopi/state";
+ import type { AgentSession } from "../session/agent-session";
+ 
+-export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
++export type MemoryBackendId = string;
+ 
+ export interface MemoryBackendStatus {
+ 	backend: MemoryBackendId;
+@@ -92,6 +92,75 @@ export interface MemoryBackendStartOptions {
+ 	parentMnemopiSessionState?: MnemopiSessionState;
+ }
+ 
++/** Context required to instantiate and use an extension-owned backend. */
++export interface MemoryBackendResolutionContext {
++	session: AgentSession;
++	agentDir: string;
++	cwd: string;
++	taskDepth: number;
++}
++
++export interface RegisteredMemoryBackendContext extends MemoryBackendResolutionContext {
++	settings: Readonly<Record<string, unknown>>;
++	parent?: unknown;
++}
++
++export interface MemoryBackendSetting {
++	id: string;
++	type: "string" | "boolean" | "number";
++	description: string;
++	default?: string | boolean | number;
++	required?: boolean;
++}
++
++/** Stable metadata and factory registered by an extension. */
++export interface MemoryBackendRegistration {
++	id: string;
++	label: string;
++	description: string;
++	settings: readonly MemoryBackendSetting[];
++	capabilities: {
++		recall: boolean;
++		search: boolean;
++		explicitSave: boolean;
++		automaticObservation: boolean;
++		compactionRecall: boolean;
++	};
++	create(context: RegisteredMemoryBackendContext): RegisteredMemoryBackendInstance;
++}
++
++/** Extension backend contract, adapted to the core's Settings and session lifecycle. */
++export interface RegisteredMemoryBackendInstance {
++	readonly id: string;
++	start(context: RegisteredMemoryBackendContext): void | Promise<void>;
++	buildDeveloperInstructions(
++		agentDir: string,
++		settings: Readonly<Record<string, unknown>>,
++		session?: AgentSession,
++	): Promise<string | undefined>;
++	clear(agentDir: string, cwd: string, session?: AgentSession): Promise<void>;
++	enqueue(agentDir: string, cwd: string, session?: AgentSession): Promise<void>;
++	status?(context: MemoryBackendOperationContext): Promise<MemoryBackendStatus>;
++	search?(
++		context: MemoryBackendOperationContext,
++		query: string,
++		options?: MemoryBackendSearchOptions,
++	): Promise<MemoryBackendSearchResult>;
++	save?(context: MemoryBackendOperationContext, input: MemoryBackendSaveInput): Promise<MemoryBackendSaveResult>;
++	beforeAgentStartPrompt?(
++		session: AgentSession,
++		promptText: string,
++		signal?: AbortSignal,
++	): Promise<MemoryPromptPreparation | undefined>;
++	preCompactionContext?(
++		messages: readonly unknown[],
++		settings: Readonly<Record<string, unknown>>,
++		session?: AgentSession,
++	): Promise<string | undefined>;
++	dispose?(): void | Promise<void>;
++}
++
++
+ /** A successful recall, including an empty result, staged until user-turn delivery. */
+ export interface MemoryPromptPreparation {
+ 	context?: string;
+@@ -184,4 +253,5 @@ export interface MemoryBackend {
+ 	 * its runtime state, memory tools, and prompt from the current settings.
+ 	 */
+ 	applySettings?(session: AgentSession, changed: readonly string[]): Promise<void>;
++	dispose?(): void | Promise<void>;
+ }
+diff --git a/packages/coding-agent/src/modes/controllers/command-controller.ts b/packages/coding-agent/src/modes/controllers/command-controller.ts
+index fa58f748ca..a433db0ec9 100644
+--- a/packages/coding-agent/src/modes/controllers/command-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/command-controller.ts
+@@ -719,7 +719,12 @@ export class CommandController {
+ 		const argumentText = text.slice(7).trim();
+ 		const action = argumentText.split(/\s+/, 1)[0]?.toLowerCase() || "view";
+ 		const agentDir = this.ctx.settings.getAgentDir();
+-		const backend = await resolveMemoryBackend(this.ctx.settings);
++		const backend = await resolveMemoryBackend(this.ctx.settings, {
++			session: this.ctx.session,
++			agentDir,
++			cwd: this.ctx.sessionManager.getCwd(),
++			taskDepth: this.ctx.session.memoryTaskDepth,
++		});
+ 
+ 		if (action === "view") {
+ 			const payload = await backend.buildDeveloperInstructions(agentDir, this.ctx.settings, this.ctx.session);
+diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
+index d5f0649093..1e131b3bca 100644
+--- a/packages/coding-agent/src/sdk.ts
++++ b/packages/coding-agent/src/sdk.ts
+@@ -146,7 +146,13 @@ import {
+ import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
+ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
+ import { resolveMCPToolAlias } from "./mcp/tool-bridge";
+-import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
++import {
++	bindMemoryBackendRegistrations,
++	createSessionMemoryRuntimeContext,
++	getMemoryBackendRegistration,
++	resolveMemoryBackend,
++} from "./memory-backend";
++import { cfgMemoryBackend } from "./memory-backend/settings";
+ import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
+ import type { MnemopiSessionState } from "./mnemopi/state";
+ import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
+@@ -3711,7 +3717,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					setActiveRules(nextActiveRules);
+ 				}
+ 			}
+-			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
++			const memoryBackend =
++				restrictToolNames || !session
++					? undefined
++					: await resolveMemoryBackend(settings, { session, agentDir, cwd: settings.getCwd(), taskDepth });
+ 			const memoryInstructions = memoryBackend
+ 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
+ 				: undefined;
+@@ -4560,6 +4569,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			advisorMcpResources: cursorMcpResources,
+ 			titleSystemPrompt: options.titleSystemPrompt,
+ 		});
++		bindMemoryBackendRegistrations(session, extensionsResult.runtime.pendingMemoryBackendRegistrations);
++		extensionsResult.runtime.pendingMemoryBackendRegistrations = [];
+ 		hasSession = true;
+ 		credentialNoticeSession = session;
+ 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
+@@ -5001,7 +5012,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		}
+ 
+ 		const startMemoryBackend = async () => {
+-			const memoryBackend = await resolveMemoryBackend(settings);
++			const memoryBackend = await resolveMemoryBackend(settings, {
++				session,
++				agentDir,
++				cwd: settings.getCwd(),
++				taskDepth,
++			});
+ 			await memoryBackend.start({
+ 				session,
+ 				settings,
+@@ -5011,6 +5027,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				parentHindsightSessionState: options.parentHindsightSessionState,
+ 				parentMnemopiSessionState: options.parentMnemopiSessionState,
+ 			});
++			if (getMemoryBackendRegistration(memoryBackend.id, session)) {
++				try {
++					await session.refreshBaseSystemPrompt();
++				} catch (error) {
++					logger.warn("Failed to refresh prompt after extension memory backend startup", { error: String(error) });
++				}
++			}
+ 		};
+ 
+ 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
+@@ -5087,12 +5110,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		//
+ 		// The controller is installed for every top-level session and gates each
+ 		// stop on the live `autolearn.enabled`, so enabling or disabling it
+-		// mid-session takes effect at the next stop; the tool registry reconciles
+ 		// `learn`/`manage_skill` on the same setting, and captures resolve those
+ 		// tools per run. The subscription lives for the session's lifetime; the
+ 		// reference is intentionally discarded (the listener retains it).
+ 		if (!restrictToolNames) {
+-			if (cfgAutolearnEnabled.get(settings) && taskDepth === 0) {
++			if (
++				getMemoryBackendRegistration(cfgMemoryBackend.get(settings), session) ||
++				(cfgAutolearnEnabled.get(settings) && taskDepth === 0)
++			) {
+ 				await logger.time("startMemoryStartupTask", startMemoryBackend);
+ 			} else {
+ 				void logger.time("startMemoryStartupTask", startMemoryBackend);
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index a29e5d4b1e..cd77cc8eb1 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -673,6 +673,8 @@ export class AgentSession implements SettingsScope {
+ 	readonly settings: Settings;
+ 	/** Session-start policy, independent of the selected project memory backend. */
+ 	readonly memoryEnabled: boolean;
++	/** Task depth is required to scope extension memory backends to subagents. */
++	readonly memoryTaskDepth: number;
+ 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
+ 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
+ 	readonly yieldQueue: YieldQueue;
+@@ -1429,6 +1431,7 @@ export class AgentSession implements SettingsScope {
+ 		this.settings = config.settings;
+ 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
+ 		this.memoryEnabled = config.memoryEnabled ?? true;
++		this.memoryTaskDepth = config.memoryTaskDepth ?? 0;
+ 		this.#modelRegistry = config.modelRegistry;
+ 		this.#extensionRoots =
+ 			config.extensionRoots ??
+@@ -1819,6 +1822,7 @@ export class AgentSession implements SettingsScope {
+ 				this.#codeModeState.namespacesInfo = info;
+ 			},
+ 			memoryBackendSession: () => this,
++			memoryTaskDepth: () => this.memoryTaskDepth,
+ 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
+ 			clearMemoryPromotionSnapshot: () => this.#memory.clearPromotionSnapshot(),
+ 			captureMemoryPromotionSnapshot: prompt => this.#memory.capturePromotionSnapshot(prompt),
+@@ -2100,6 +2104,7 @@ export class AgentSession implements SettingsScope {
+ 				this.#experimentalContextNotesReminder = { prompt, generation: this.#promptGeneration };
+ 			},
+ 			memoryBackendSession: () => this,
++			memoryTaskDepth: () => this.memoryTaskDepth,
+ 			emitSessionEvent: (event, options) => this.#emitSessionEvent(event, options),
+ 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
+ 			schedulePostPromptTask: (task, options) => this.#schedulePostPromptTask(task, options),
+@@ -5354,6 +5359,7 @@ export class AgentSession implements SettingsScope {
+ 			shutdownTinyTitleClient(),
+ 			this.#disconnectOwnedMcp(),
+ 			advisorRecorderClosed,
++			this.#memory.dispose(),
+ 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+ 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
+ 			sharpshooterFlushed,
+diff --git a/packages/coding-agent/src/session/session-maintenance.ts b/packages/coding-agent/src/session/session-maintenance.ts
+index a53b9daf70..a77a391116 100644
+--- a/packages/coding-agent/src/session/session-maintenance.ts
++++ b/packages/coding-agent/src/session/session-maintenance.ts
+@@ -423,7 +423,8 @@ export interface SessionMaintenanceHost {
+ 	hasExperimentalContextRolloverTools(): boolean;
+ 	takeExperimentalContextRolloverRequest(context: AgentTurnEndContext | undefined): boolean;
+ 	queueExperimentalContextNotesReminder(prompt: string): void;
+-	memoryBackendSession(): MemoryBackendOperationContext["session"];
++	memoryBackendSession(): NonNullable<MemoryBackendOperationContext["session"]>;
++	memoryTaskDepth?(): number;
+ 	emitSessionEvent(event: AgentSessionEvent, options?: { detachExtensions?: boolean }): Promise<void>;
+ 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
+ 	schedulePostPromptTask(
+@@ -1860,7 +1861,12 @@ export class SessionMaintenance {
+ 		messagesToSummarize: AgentMessage[];
+ 		turnPrefixMessages: AgentMessage[];
+ 	}): Promise<string | undefined> {
+-		const backend = await resolveMemoryBackend(this.#host.settings);
++		const backend = await resolveMemoryBackend(this.#host.settings, {
++			session: this.#host.memoryBackendSession(),
++			agentDir: this.#host.settings.getAgentDir(),
++			cwd: this.#host.settings.getCwd(),
++			taskDepth: this.#host.memoryTaskDepth?.() ?? 0,
++		});
+ 		if (!backend.preCompactionContext) return undefined;
+ 		const messages = preparation.messagesToSummarize.concat(preparation.turnPrefixMessages);
+ 		try {
+diff --git a/packages/coding-agent/src/session/session-memory.ts b/packages/coding-agent/src/session/session-memory.ts
+index 03202b651c..e599ad6dc5 100644
+--- a/packages/coding-agent/src/session/session-memory.ts
++++ b/packages/coding-agent/src/session/session-memory.ts
+@@ -6,12 +6,16 @@ import type { ModelRegistry } from "../config/model-registry";
+ import { all as allSettings, combine, type Derived } from "../config/registry";
+ import type { Settings } from "../config/settings";
+ import type { HindsightSessionState } from "../hindsight/state";
+-import { resolveMemoryBackend } from "../memory-backend/resolve";
++import {
++	disposeRegisteredMemoryBackendInstances,
++	releaseRegisteredMemoryBackendSession,
++	resolveMemoryBackend,
++} from "../memory-backend/resolve";
+ import type { MemoryBackendStartOptions } from "../memory-backend/types";
+ import type { MnemopiSessionState } from "../mnemopi/state";
+ import { releaseSharpshooterSession } from "../sharpshooter/backend";
+ 
+-import { cfgMemoryBackend } from "../memory-backend/settings";
++import { cfgMemoryBackend, cfgMemoryBackendSettings } from "../memory-backend/settings";
+ 
+ /** Id prefixes of the memory backends' own settings; their live edits reconfigure the active backend. */
+ const MEMORY_BACKEND_SETTING_PREFIXES: readonly string[] = ["hindsight.", "mnemopi.", "sharpshooter."];
+@@ -26,6 +30,7 @@ function memorySettingsValue(): Derived<Record<string, unknown>> {
+ 				.filter(
+ 					handle =>
+ 						handle.id === cfgMemoryBackend.id ||
++						handle.id === cfgMemoryBackendSettings.id ||
+ 						MEMORY_BACKEND_SETTING_PREFIXES.some(prefix => handle.id.startsWith(prefix)),
+ 				)
+ 				.map(handle => [handle.id, handle]),
+@@ -138,7 +143,7 @@ export class SessionMemory {
+ 	 */
+ 	async #applySettingsChange(changed: string[]): Promise<void> {
+ 		try {
+-			if (changed.includes("memory.backend")) {
++			if (changed.includes("memory.backend") || changed.includes(cfgMemoryBackendSettings.id)) {
+ 				await this.applyMemoryBackend();
+ 				return;
+ 			}
+@@ -146,7 +151,12 @@ export class SessionMemory {
+ 			// transition drain orders after this edit.
+ 			const hook = await this.#enqueueTransition(async () => {
+ 				if (this.#host.isDisposed()) return undefined;
+-				const backend = await resolveMemoryBackend(this.#host.settings);
++				const backend = await resolveMemoryBackend(this.#host.settings, {
++					session: this.#host.memoryBackendSession(),
++					agentDir: this.#memoryAgentDir ?? this.#host.settings.getAgentDir(),
++					cwd: this.#host.cwd(),
++					taskDepth: this.#memoryTaskDepth,
++				});
+ 				const own = changed.filter(path => path.startsWith(`${backend.id}.`));
+ 				if (own.length === 0) return undefined;
+ 				if (backend.applySettings) return { backend, own };
+@@ -259,8 +269,22 @@ export class SessionMemory {
+ 		if (this.#localMemoryStartupAbort?.signal === signal) this.#localMemoryStartupAbort = undefined;
+ 	}
+ 
++	/** Dispose extension-owned state and unbind registrations when this session closes. */
++	async dispose(): Promise<void> {
++		try {
++			await releaseRegisteredMemoryBackendSession(this.#host.memoryBackendSession());
++		} catch (error) {
++			logger.warn("Memory lifecycle: registered backend dispose failed", { error: String(error) });
++		}
++	}
++
+ 	async #disposeMemoryBackendState(consolidateMnemopi = true, retainMnemopi = true): Promise<void> {
+ 		this.cancelLocalMemoryStartup();
++		try {
++			await disposeRegisteredMemoryBackendInstances(this.#host.memoryBackendSession());
++		} catch (error) {
++			logger.warn("Memory lifecycle: registered backend dispose failed", { error: String(error) });
++		}
+ 		try {
+ 			releaseSharpshooterSession(this.#host.memoryBackendSession());
+ 		} catch (error) {
+@@ -331,7 +355,12 @@ export class SessionMemory {
+ 			await this.#disposeMemoryBackendState(true, retain);
+ 			this.#runtimeCwd = cwd;
+ 			if (this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#host.isDisposed()) {
+-				const backend = await resolveMemoryBackend(this.#host.settings);
++				const backend = await resolveMemoryBackend(this.#host.settings, {
++					session: this.#host.memoryBackendSession(),
++					agentDir: this.#memoryAgentDir,
++					cwd,
++					taskDepth: this.#memoryTaskDepth,
++				});
+ 				await backend.start({
+ 					session: this.#host.memoryBackendSession(),
+ 					settings: this.#host.settings,
+diff --git a/packages/coding-agent/src/session/session-tools.ts b/packages/coding-agent/src/session/session-tools.ts
+index 7a09f2ca59..43ddf18895 100644
+--- a/packages/coding-agent/src/session/session-tools.ts
++++ b/packages/coding-agent/src/session/session-tools.ts
+@@ -77,6 +77,7 @@ export interface SessionToolsHost {
+ 	planModeEnabled(): boolean;
+ 	model(): Model | undefined;
+ 	memoryBackendSession(): MemoryBackendStartOptions["session"];
++	memoryTaskDepth?(): number;
+ 	clearInheritedProviderPromptCacheKey(): void;
+ 	clearMemoryPromotionSnapshot(): void;
+ 	captureMemoryPromotionSnapshot(prompt: string[]): void;
+@@ -2005,7 +2006,12 @@ export class SessionTools {
+ 		isCurrent: () => boolean,
+ 		signal?: AbortSignal,
+ 	): Promise<SystemPromptPreparation> {
+-		const backend = await resolveMemoryBackend(this.#host.settings);
++		const backend = await resolveMemoryBackend(this.#host.settings, {
++			session: this.#host.memoryBackendSession(),
++			agentDir: this.#host.settings.getAgentDir(),
++			cwd: this.#host.settings.getCwd(),
++			taskDepth: this.#host.memoryTaskDepth?.() ?? 0,
++		});
+ 		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
+ 
+ 		try {
+diff --git a/packages/coding-agent/src/slash-commands/builtin-lifecycle.ts b/packages/coding-agent/src/slash-commands/builtin-lifecycle.ts
+index ad263dd1b9..89a38d412c 100644
+--- a/packages/coding-agent/src/slash-commands/builtin-lifecycle.ts
++++ b/packages/coding-agent/src/slash-commands/builtin-lifecycle.ts
+@@ -581,7 +581,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
+ 		allowArgs: true,
+ 		handle: async (command, runtime) => {
+ 			const verb = (command.args.trim().split(/\s+/)[0] ?? "").toLowerCase() || "view";
+-			const backend = await resolveMemoryBackend(runtime.settings);
++			const backend = await resolveMemoryBackend(runtime.settings, {
++				session: runtime.session,
++				agentDir: runtime.settings.getAgentDir(),
++				cwd: runtime.cwd,
++				taskDepth: runtime.session.memoryTaskDepth,
++			});
+ 			switch (verb) {
+ 				case "view": {
+ 					const payload = await backend.buildDeveloperInstructions(
+diff --git a/packages/coding-agent/test/memory-backend-resolve.test.ts b/packages/coding-agent/test/memory-backend-resolve.test.ts
+index 576fd288da..6832e527e1 100644
+--- a/packages/coding-agent/test/memory-backend-resolve.test.ts
++++ b/packages/coding-agent/test/memory-backend-resolve.test.ts
+@@ -1,6 +1,16 @@
+ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+-import { createMemoryRuntimeContext, resolveMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend";
++import { TempDir } from "@oh-my-pi/pi-utils";
++import {
++	createMemoryRuntimeContext,
++	releaseRegisteredMemoryBackendSession,
++	resolveMemoryBackend,
++} from "@oh-my-pi/pi-coding-agent/memory-backend";
++import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
++import { bindMemoryBackendRegistrations } from "@oh-my-pi/pi-coding-agent/memory-backend/registry";
++import type { MemoryBackendRegistration } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
++import { cfgMemoryBackendSettings } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
++import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+ 
+ describe("resolveMemoryBackend", () => {
+ 	beforeEach(() => {
+@@ -48,4 +58,200 @@ describe("resolveMemoryBackend", () => {
+ 			count: 0,
+ 		});
+ 	});
++	it("registers extension backends only for their owning session and runs first-turn recall", async () => {
++		const started: string[] = [];
++		const disposed = { value: false };
++		const registration: MemoryBackendRegistration = {
++			id: "test-session-memory",
++			label: "Test session memory",
++			description: "Test backend",
++			settings: [{ id: "profile", type: "string", description: "Profile", required: true }],
++			capabilities: {
++				recall: true,
++				search: false,
++				explicitSave: false,
++				automaticObservation: false,
++				compactionRecall: false,
++			},
++			create(context) {
++				expect(context.settings.profile).toBe("work");
++				return {
++					id: registration.id,
++					async start(startContext) {
++						started.push(startContext.settings.profile as string);
++					},
++					async buildDeveloperInstructions() {
++						return undefined;
++					},
++					async clear() {},
++					async enqueue() {},
++					dispose() {
++						disposed.value = true;
++					},
++					async beforeAgentStartPrompt() {
++						expect(started).toEqual(["work"]);
++						return { context: "recalled work context", commit: () => true };
++					},
++				};
++			},
++		};
++		const runtime = new ExtensionRuntime();
++		await loadExtensionFromFactory(
++			api => api.registerMemoryBackend(registration),
++			"/tmp",
++			new EventBus(),
++			runtime,
++		);
++
++		const ownerSession = { memoryTaskDepth: 0 } as never;
++		const otherSession = { memoryTaskDepth: 0 } as never;
++		bindMemoryBackendRegistrations(ownerSession, runtime.pendingMemoryBackendRegistrations);
++		const settings = Settings.isolated({
++			"memory.backend": registration.id,
++			"memory.backendSettings": { [registration.id]: { profile: "work" } },
++		});
++		const context = {
++			session: ownerSession,
++			agentDir: "/tmp/agent",
++			cwd: "/tmp/project",
++			taskDepth: 0,
++		};
++		const backend = await resolveMemoryBackend(settings, context);
++		await backend.start({
++			...context,
++			settings,
++			modelRegistry: {} as never,
++		});
++		const preparation = await backend.beforeAgentStartPrompt?.(ownerSession, "first prompt");
++		expect(preparation?.context).toBe("recalled work context");
++		expect(preparation?.commit()).toBe(true);
++
++		const isolated = await resolveMemoryBackend(settings, { ...context, session: otherSession });
++		await expect(isolated.status?.({ agentDir: "/tmp/agent", cwd: "/tmp/project", session: otherSession })).resolves.toMatchObject({
++			active: false,
++			error: expect.stringContaining("not registered for this session"),
++		});
++		await releaseRegisteredMemoryBackendSession(ownerSession);
++		expect(disposed.value).toBe(true);
++		expect(started).toEqual(["work"]);
++	});
++	it("rejects duplicate backend IDs from one extension", async () => {
++		const registration: MemoryBackendRegistration = {
++			id: "duplicate-memory",
++			label: "Duplicate",
++			description: "Duplicate",
++			settings: [],
++			capabilities: {
++				recall: false,
++				search: false,
++				explicitSave: false,
++				automaticObservation: false,
++				compactionRecall: false,
++			},
++			create() {
++				throw new Error("unused");
++			},
++		};
++		const runtime = new ExtensionRuntime();
++		await expect(
++			loadExtensionFromFactory(
++				api => {
++					api.registerMemoryBackend(registration);
++					api.registerMemoryBackend(registration);
++				},
++				"/tmp",
++				new EventBus(),
++				runtime,
++			),
++		).rejects.toThrow(/already registered/);
++		expect(runtime.pendingMemoryBackendRegistrations).toEqual([]);
++
++		const session = { memoryTaskDepth: 0 } as never;
++		expect(() =>
++			bindMemoryBackendRegistrations(session, [
++				{ registration, sourceId: "extension.ts" },
++				{ registration, sourceId: "extension.ts" },
++			]),
++		).toThrow(/registered more than once/);
++	});
++
++	it("rejects a registered backend with missing required settings without creating it", async () => {
++		let created = false;
++		const registration: MemoryBackendRegistration = {
++			id: "test-required-memory-setting",
++			label: "Required setting test",
++			description: "Test backend",
++			settings: [{ id: "profile", type: "string", description: "Profile", required: true }],
++			capabilities: {
++				recall: false,
++				search: false,
++				explicitSave: false,
++				automaticObservation: false,
++				compactionRecall: false,
++			},
++			create() {
++				created = true;
++				throw new Error("must not create");
++			},
++		};
++		const session = {} as never;
++		bindMemoryBackendRegistrations(session, [{ registration, sourceId: "test-extension" }]);
++		const backend = await resolveMemoryBackend(
++			Settings.isolated({ "memory.backend": registration.id }),
++			{ session, agentDir: "/tmp/agent", cwd: "/tmp/project", taskDepth: 0 },
++		);
++
++		await expect(backend.status?.({ agentDir: "/tmp/agent", cwd: "/tmp/project", session })).resolves.toMatchObject({
++			active: false,
++			error: expect.stringContaining('requires setting "profile"'),
++		});
++		expect(created).toBe(false);
++	});
++	it("does not load backend credentials from project settings", async () => {
++		await using temp = await TempDir.create("@memory-backend-provenance-");
++		const id = "test-project-memory";
++		await Bun.write(
++			temp.join(".omp/config.yml"),
++			JSON.stringify({ memory: { backendSettings: { [id]: { profile: "project-secret" } } } }),
++		);
++		const settings = await Settings.loadIsolated({
++			cwd: temp.path(),
++			agentDir: temp.join("agent"),
++			overrides: { "memory.backend": id },
++		});
++		expect(settings.getProvenance(cfgMemoryBackendSettings)).toBe("project");
++
++		let created = false;
++		const registration: MemoryBackendRegistration = {
++			id,
++			label: "Project setting test",
++			description: "Test backend",
++			settings: [{ id: "profile", type: "string", description: "Profile", required: true }],
++			capabilities: {
++				recall: false,
++				search: false,
++				explicitSave: false,
++				automaticObservation: false,
++				compactionRecall: false,
++			},
++			create() {
++				created = true;
++				throw new Error("project credential must not be loaded");
++			},
++		};
++		const session = {} as never;
++		bindMemoryBackendRegistrations(session, [{ registration, sourceId: "test-extension" }]);
++		const backend = await resolveMemoryBackend(settings, {
++			session,
++			agentDir: temp.join("agent"),
++			cwd: temp.path(),
++			taskDepth: 0,
++		});
++
++		await expect(backend.status?.({ agentDir: temp.join("agent"), cwd: temp.path(), session })).resolves.toMatchObject({
++			active: false,
++			error: expect.stringContaining('requires setting "profile"'),
++		});
++		expect(created).toBe(false);
++	});
+ });
+diff --git a/packages/coding-agent/src/memory-backend/registry.ts b/packages/coding-agent/src/memory-backend/registry.ts
+new file mode 100644
+index 0000000000..3695e360d4
+--- /dev/null
++++ b/packages/coding-agent/src/memory-backend/registry.ts
+@@ -0,0 +1,62 @@
++import type { AgentSession } from "../session/agent-session";
++import type { MemoryBackendRegistration } from "./types";
++
++const BUILTIN_IDS = new Set(["off", "local", "hindsight", "mnemopi", "sharpshooter"]);
++type OwnedRegistration = { owner: string; registration: MemoryBackendRegistration };
++type PendingRegistration = { sourceId: string; registration: MemoryBackendRegistration };
++const sessionRegistrations = new WeakMap<AgentSession, Map<string, OwnedRegistration>>();
++
++export function validateMemoryBackendRegistration(registration: MemoryBackendRegistration): void {
++	if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(registration.id)) {
++		throw new TypeError(`Invalid memory backend id: ${registration.id}`);
++	}
++	if (BUILTIN_IDS.has(registration.id)) {
++		throw new Error(`Memory backend id is reserved by OMP: ${registration.id}`);
++	}
++	if (typeof registration.create !== "function") {
++		throw new TypeError(`Memory backend ${registration.id} must provide a factory`);
++	}
++	const settingIds = new Set<string>();
++	for (const setting of registration.settings) {
++		if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(setting.id) || settingIds.has(setting.id)) {
++			throw new TypeError(`Memory backend ${registration.id} has an invalid or duplicate setting id`);
++		}
++		if (!["string", "boolean", "number"].includes(setting.type)) {
++			throw new TypeError(`Memory backend ${registration.id} has an unsupported setting type: ${setting.type}`);
++		}
++		if (setting.default !== undefined && typeof setting.default !== setting.type) {
++			throw new TypeError(`Memory backend ${registration.id} setting "${setting.id}" has an invalid default type`);
++		}
++		if (setting.required !== undefined && typeof setting.required !== "boolean") {
++			throw new TypeError(`Memory backend ${registration.id} setting "${setting.id}" has an invalid required flag`);
++		}
++		settingIds.add(setting.id);
++	}
++}
++
++/** Bind only this AgentSession's successfully loaded extension registrations. */
++export function bindMemoryBackendRegistrations(
++	session: AgentSession,
++	pending: readonly PendingRegistration[],
++): void {
++	const registrations = new Map<string, OwnedRegistration>();
++	for (const { registration, sourceId } of pending) {
++		validateMemoryBackendRegistration(registration);
++		if (registrations.has(registration.id)) {
++			throw new Error(`Memory backend ${registration.id} is registered more than once by ${sourceId}`);
++		}
++		registrations.set(registration.id, { owner: sourceId, registration });
++	}
++	sessionRegistrations.set(session, registrations);
++}
++
++export function getMemoryBackendRegistration(
++	id: string,
++	session: AgentSession,
++): MemoryBackendRegistration | undefined {
++	return sessionRegistrations.get(session)?.get(id)?.registration;
++}
++/** Release the extension registrations after this session is disposed. */
++export function unbindMemoryBackendRegistrations(session: AgentSession): void {
++	sessionRegistrations.delete(session);
++}
