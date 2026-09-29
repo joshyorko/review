@@ -58,11 +58,29 @@ At both OMP 18.4.3 and the audited live `main`:
   `packages/coding-agent/test/memories-runtime.test.ts` cover the existing
   built-in resolver/lifecycle/subagent behavior, not third-party registration.
 
-**Conclusion:** current OMP does **not** expose a stable third-party
+**Native seam conclusion:** current OMP does **not** expose a stable third-party
 `registerMemoryBackend`-style API. An extension-only implementation cannot
 make `memory.backend=codex-memoryd` work because settings validation and the
 resolver reject/ignore the unknown ID before the extension can own the
-lifecycle.
+lifecycle. This finding does not rule out automatic recall through the
+documented extension lifecycle.
+
+### Follow-up: stock-binary extension path
+
+The official OMP 18.4.3 `omp-linux-x64` release artifact was downloaded and
+executed on x86_64. Its SHA-256 is
+`afcecdff1f421f3c88fb1714c407b3700899b4de3ed003cd8369f52ae6ca87de`, matching
+the x86_64 pin at `image/appliance/Containerfile:34`. The binary reported
+`omp/18.4.3`.
+
+At the matching source tag `fc671eba383f2a7208500836673b485c0dc7073d`,
+`packages/coding-agent/src/extensibility/extensions/types.ts` declares
+`before_agent_start` with an awaited handler and a `message` result at
+`BeforeAgentStartEventResult`; it can inject context before the agent runs.
+This is a potential extension route, not a MemoryBackend registration API.
+This continuation did **not** load an extension into that binary or observe a
+provider-bound request. No recall, attribution, cancellation/retry/scope,
+duplicate suppression, or daemon-outage behavior is proven.
 
 ### Upstream issue evidence
 
@@ -112,37 +130,39 @@ fetch. MemoryD #245 is still open; no published GitHub release, tag, npm
 artifact, or Homebrew formula was verified. The adapter must therefore not be
 copied into Review or treated as a published package.
 
-## Generic seam required
+## Native registration seam (not required for extension mode)
 
-The smallest generic OMP seam must register a session-scoped backend factory
-with generic metadata (ID, label, description, settings, capabilities), make
-registered IDs valid for `memory.backend`, and feed the resolved backend through
-existing native startup, prompt, compaction, `/memory`, runtime status/search/
-save, live setting changes, cwd rebind, resume, and child-session paths.
+The native integration previously considered would register a session-scoped
+backend factory with generic metadata, accept registered IDs for
+`memory.backend`, and route the resolved backend through existing native
+startup, prompt, compaction, `/memory`, runtime status/search/save, live setting
+changes, cwd rebind, resume, and child-session paths.
 
-It must preserve reserved built-in IDs, reject duplicate registrations, avoid
-silent unknown-ID fallback, and leave backend-specific policy in the external
-adapter. No MemoryD-specific branch, custom recall tool, generic prompt hook,
-or Hindsight/Mnemopi shadowing is acceptable.
+That describes native `/memory` integration, not an acceptance prerequisite for
+the rewritten extension-based request. No MemoryD-specific OMP branch, custom
+recall tool, competing hidden memory loop, or Hindsight/Mnemopi shadowing is
+being proposed.
 
 No generic OMP patch or upstream PR was created in this Review change. The
-Review implementation remains ready only after that seam exists in the exact
-OMP artifact packaged by the appliance.
+native registration audit remains valid, but it is not a blocker to the
+rewritten extension-based request. The stock-binary extension lifecycle route
+is identified, not yet proven; implementation and provider-boundary acceptance
+remain in progress.
 
 ## Acceptance status
 
 | Criterion | Status |
 | --- | --- |
-| Exact OMP version/commit recorded | PASS |
-| Generic external MemoryBackend registration in packaged OMP | BLOCKED — missing upstream seam |
-| MemoryD selected through native `memory.backend` | BLOCKED |
-| Existing MemoryD adapter consumed without duplication | SKIPPED — no Review integration attempted while seam is absent |
-| Proven local-only appliance transport to durable MemoryD | BLOCKED — transport/supervision not implemented |
-| First-turn recall, `/memory`, status/search/save, cancellation, compaction | BLOCKED — native seam unavailable |
-| MemoryD outage fail-open and Review/Factory continuity | BLOCKED — packaged path unavailable |
-| Automatic writeback disabled before MemoryD #233 | PASS in audited adapter source |
-| No host-LAN exposure or fake `memory://` promise | PASS in audited design/source; packaged path not run |
-| Packaged appliance dogfood receipt | BLOCKED — no runnable native path |
-| Exact-head independent review | SKIPPED — no implementation head to review |
+| Exact OMP version, architecture, and pinned artifact digest verified | TESTED — official 18.4.3 x86_64 artifact runs and matches pin |
+| Native external MemoryBackend registration in packaged OMP | ABSENT — audit finding; not required for extension-mode recall |
+| Documented extension pre-agent lifecycle contract identified | TESTED — source contract only; not exercised in binary |
+| Extension loaded by exact official binary and awaited recall before provider request | REMAINING — not proven |
+| First provider request contains one correctly attributed synthetic recall, no memory tool | REMAINING — provider boundary not exercised |
+| Cancellation/re-entry/retry/scope invalidation, duplicate protection, daemon-down fail-open | REMAINING — not exercised |
+| Existing MemoryD adapter reused by immutable identity | REMAINING — no integration attempted |
+| Explicit writes only; automatic assistant-turn writeback disabled | REMAINING — no integration attempted |
+| `/memory` parity, status/search/save, compaction, appliance transport/supervision | REMAINING — out of current proof; do not claim |
+| Packaged appliance dogfood receipt | REMAINING — do not expand packaging before stock-binary proof |
+| Exact-head independent review | REMAINING |
 
-Terminal marker: `NEEDS_OMP_SEAM`.
+Terminal marker: `EXTENSION_PROOF_REMAINING`.
