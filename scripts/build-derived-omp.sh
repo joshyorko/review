@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${OMP_VERSION:?OMP_VERSION is required}"
 : "${OMP_SOURCE_COMMIT:?OMP_SOURCE_COMMIT is required}"
@@ -160,6 +161,7 @@ version_output="$("$candidate" --version)"
   echo "derived OMP version mismatch: ${version_output}" >&2
   exit 1
 }
+bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"
 install -D -m 0755 "$candidate" "$OMP_OUTPUT_PATH"
 
 printf 'OMP derived build: version=%s commit=%s arch=%s\n' "$OMP_VERSION" "$OMP_SOURCE_COMMIT" "$omp_target"

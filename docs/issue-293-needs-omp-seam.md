@@ -17,7 +17,7 @@ packaged MemoryD behavior is not claimed.
 | Last published Review dev appliance | `dev-0.20260929125440-ca9496e659`; still contains upstream OMP 18.4.3 |
 | OMP source tag and exact commit | `v18.4.3` = `fc671eba383f2a7208500836673b485c0dc7073d` |
 | OMP live `main` audited | `60d3a5a4520b2937b4a0fc727abadabbed17cf2e` |
-| Latest local derived x86_64 OMP SHA-256 | `fa5b03f628d2371af47fe0c017051c4a8ee5fa6595c5db40753834049019d33d` |
+| Latest local derived x86_64 OMP SHA-256 | `afe378d03e2cc169cde2739f4997b8bc4effef77a8af8874ec6f6f8b9640cc34` |
 | MemoryD adapter source | `e7f8d431797973afbdf4d0530aa14a25f43acf35`; no license file at that commit |
 
 The OMP source, patch, Bun, native-package, and MemoryD test-source pins are in
@@ -72,7 +72,9 @@ derived source build; it leaves the upstream tag and release artifact unchanged.
 `scripts/build-derived-omp.sh` fetches and verifies the exact OMP source archive,
 applies `patches/omp/memory-backend-registration.patch`, verifies the toolchain
 and native addon, runs the pinned MemoryD adapter tests and focused OMP tests,
-then compiles the native binary. The x86_64 run passed:
+then compiles the native binary and runs the provider-boundary recall/outage
+canary against that exact candidate before installation. A canary failure aborts
+the image build; its adapter source stays ephemeral. The x86_64 run passed:
 
 - OMP source `fc671eba383f2a7208500836673b485c0dc7073d`, archive SHA-256
   `d7e19ecdf0e75312098b94b3a4997c8c7f0d36ef0b350a93d7cfa486c1cb9ef2`;
@@ -88,14 +90,14 @@ then compiles the native binary. The x86_64 run passed:
   selector regression tests passed (7 tests, 39 expectations); adapter tests
   passed (27 tests, 68 expectations);
 - derived executable reported `omp/18.4.3`, SHA-256
-  `fa5b03f628d2371af47fe0c017051c4a8ee5fa6595c5db40753834049019d33d`.
+  `afe378d03e2cc169cde2739f4997b8bc4effef77a8af8874ec6f6f8b9640cc34`.
 
 The live x86_64 canary used that derived executable and the exact adapter source
 fetched ephemerally from the pinned commit. A loopback synthetic MemoryD server
 returned a recall marker on the first prompt. OMP sent one `/v1/recall` request
-with `profile=personal`, `workspace=issue-293-canary-final`,
-`pack_mode=active_task`, and `source_kind=omp_native_recall`; the provider
-boundary observed the marker after one recall and returned
+with `profile=personal`, `workspace=derived-omp-ci-canary`, and
+`source_kind=omp_native_recall`; the provider boundary observed the marker
+after one recall and returned
 `MEMORYD_RECALL_PRESENT_OK` (process exit 0). After stopping the synthetic
 MemoryD server, a second OMP process exited 0 with
 `MEMORYD_NO_RECALL_FAIL_OPEN_OK`; the provider saw no recall marker. This proves

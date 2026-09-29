@@ -102,6 +102,7 @@ require "$containerfile" \
   'FROM ${FSDK_BUILDER_IMAGE} AS build' \
   'FROM ${FSDK_BASE_IMAGE}' \
   'COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp' \
+  'COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts' \
   'COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'OMP_PATCH_PATH=/usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
@@ -126,7 +127,8 @@ require scripts/build-derived-omp.sh \
   'sha512sum --check --status' \
   'git -C "$source_dir" apply --check "$OMP_PATCH_PATH"' \
   'bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests' \
-  'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"'
+  'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"' \
+  'bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"'
 grep -qF 'runner: ubuntu-26.04-arm' .github/workflows/publish-appliance.yml ||
   fail "the appliance must keep its native aarch64 build runner"
 grep -qF 'arch: arm64' .github/workflows/publish-appliance.yml ||
@@ -267,8 +269,12 @@ grep -qE '^[0-9]+$' image/appliance/REVISION || fail "image/appliance/REVISION m
 [[ -d image/extension/luna-factory/agents ]] || fail "the Luna Factory companion agents are missing"
 grep -qF '!scripts/generate-appliance-sbom.py' .dockerignore ||
   fail ".dockerignore must let the appliance SBOM generator into the build context"
+grep -qF '!scripts/' .dockerignore ||
+  fail ".dockerignore must reopen scripts before allowlisting build inputs"
 grep -qF '!scripts/build-derived-omp.sh' .dockerignore ||
   fail ".dockerignore must let the derived OMP builder into the build context"
+grep -qF '!scripts/derived-omp-canary.ts' .dockerignore ||
+  fail ".dockerignore must let the derived OMP canary into the build context"
 grep -qF '!patches/omp/memory-backend-registration.patch' .dockerignore ||
   fail ".dockerignore must let the OMP registration patch into the build context"
 

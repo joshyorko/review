@@ -100,6 +100,7 @@ ARG REVIEW_REVISION
 # OMP is rebuilt from the pinned source on this native architecture. Every
 # build input is checked before the derived executable is installed.
 COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp
+COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts
 COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch
 RUN set -eu; \
     mkdir -p /out/usr/bin /out/usr/share/bluefin/review; \
