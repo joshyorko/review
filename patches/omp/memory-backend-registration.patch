@@ -78,13 +78,14 @@ diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packa
 index 480896602a..ae764acd26 100644
 --- a/packages/coding-agent/src/extensibility/extensions/types.ts
 +++ b/packages/coding-agent/src/extensibility/extensions/types.ts
-@@ -78,6 +78,7 @@ import type { ExecOptions, ExecResult } from "../../exec/exec";
+@@ -78,7 +78,8 @@ import type { ExecOptions, ExecResult } from "../../exec/exec";
  import type * as PiCodingAgent from "../../index";
  import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
  import type { MemoryRuntimeContext } from "../../memory-backend";
 +import type { MemoryBackendRegistration } from "../../memory-backend/types";
  import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
  import type { Theme } from "@oh-my-pi/pi-tui/theme";
+ import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
  import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 @@ -1607,6 +1608,9 @@ export interface ExtensionAPI {
  	 */
