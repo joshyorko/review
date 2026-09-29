@@ -1,4 +1,4 @@
-# Issue #293 — extension proof in progress
+# Issue #293 — derived native OMP proof in progress
 
 This receipt records the live capability audit for
 [joshyorko/review#293](https://github.com/joshyorko/review/issues/293).
@@ -58,29 +58,32 @@ At both OMP 18.4.3 and the audited live `main`:
   `packages/coding-agent/test/memories-runtime.test.ts` cover the existing
   built-in resolver/lifecycle/subagent behavior, not third-party registration.
 
-**Native seam conclusion:** current OMP does **not** expose a stable third-party
-`registerMemoryBackend`-style API. An extension-only implementation cannot
-make `memory.backend=codex-memoryd` work because settings validation and the
-resolver reject/ignore the unknown ID before the extension can own the
-lifecycle. This finding does not rule out automatic recall through the
-documented extension lifecycle.
+**Native seam conclusion:** at the audited release, current OMP does **not**
+expose a third-party `registerMemoryBackend` API. `memory.backend` has a closed
+enum and resolver; native MemoryD selection therefore requires a small generic
+registration/resolution patch in a locally derived OMP build. Do not substitute
+an extension hook or change the upstream release artifact.
 
-### Follow-up: stock-binary extension path
+### Follow-up: exact-source derived native build
 
-The official OMP 18.4.3 `omp-linux-x64` release artifact was downloaded and
-executed on x86_64. Its SHA-256 is
-`afcecdff1f421f3c88fb1714c407b3700899b4de3ed003cd8369f52ae6ca87de`, matching
-the x86_64 pin at `image/appliance/Containerfile:34`. The binary reported
-`omp/18.4.3`.
+The official OMP `v18.4.3` source tag resolves to
+`fc671eba383f2a7208500836673b485c0dc7073d`; the checkout tag and commit agree.
+The immutable MemoryD adapter source is
+`joshyorko/codex-memoryd@e7f8d431797973afbdf4d0530aa14a25f43acf35`. Review has
+not yet applied a generic OMP registration patch, built a derived executable,
+or proved native adapter selection at the provider boundary.
 
-At the matching source tag `fc671eba383f2a7208500836673b485c0dc7073d`,
-`packages/coding-agent/src/extensibility/extensions/types.ts` declares
-`before_agent_start` with an awaited handler and a `message` result at
-`BeforeAgentStartEventResult`; it can inject context before the agent runs.
-This is a potential extension route, not a MemoryBackend registration API.
-This continuation did **not** load an extension into that binary or observe a
-provider-bound request. No recall, attribution, cancellation/retry/scope,
-duplicate suppression, or daemon-outage behavior is proven.
+The unmodified official x86_64 artifact was also downloaded and executed as a
+baseline: SHA-256
+`afcecdff1f421f3c88fb1714c407b3700899b4de3ed003cd8369f52ae6ca87de`
+(matches `image/appliance/Containerfile:34`), output `omp/18.4.3`. This is the
+upstream artifact hash, not a derived-output hash and not candidate proof.
+
+Local source build prerequisite observed missing: shell `bun --version` and
+`node --version` returned `command not found`; shell PATH also has no `npm`,
+`rustc`, `cargo`, or `gcc`. No upstream build script, compile, native canary,
+or CI-derived artifact run was completed. CI setup/build work and all derived
+artifact provenance remain unproven.
 
 ### Upstream issue evidence
 
@@ -130,39 +133,35 @@ fetch. MemoryD #245 is still open; no published GitHub release, tag, npm
 artifact, or Homebrew formula was verified. The adapter must therefore not be
 copied into Review or treated as a published package.
 
-## Native registration seam (not required for extension mode)
+## Generic native registration patch required
 
-The native integration previously considered would register a session-scoped
-backend factory with generic metadata, accept registered IDs for
-`memory.backend`, and route the resolved backend through existing native
-startup, prompt, compaction, `/memory`, runtime status/search/save, live setting
-changes, cwd rebind, resume, and child-session paths.
+The derived source build needs a generic, duplicate-safe registration API for
+external `MemoryBackend` factories, with metadata/settings ownership and
+reserved-ID protection. Resolve a registered backend through OMP's existing
+native per-session startup, prompt, compaction, status/search/save, live-setting,
+cwd-rebind, resume, cancellation, disposal, and child-session paths. Preserve
+the existing built-in resolver behavior and fail-open semantics. Keep all
+MemoryD-specific policy in the adapter; no MemoryD branch in OMP, competing
+memory loop, or automatic writeback.
 
-That describes native `/memory` integration, not an acceptance prerequisite for
-the rewritten extension-based request. No MemoryD-specific OMP branch, custom
-recall tool, competing hidden memory loop, or Hindsight/Mnemopi shadowing is
-being proposed.
-
-No generic OMP patch or upstream PR was created in this Review change. The
-native registration audit remains valid, but it is not a blocker to the
-rewritten extension-based request. The stock-binary extension lifecycle route
-is identified, not yet proven; implementation and provider-boundary acceptance
-remain in progress.
+No upstream OMP PR, fork repository, or generic source patch has yet been made.
+Do not promote or package a derived candidate until a clean source build passes
+the native MemoryD x86_64 canary. Then connect only those tested bytes to the
+existing Review CI/package flow and add the existing aarch64 lane.
 
 ## Acceptance status
 
 | Criterion | Status |
 | --- | --- |
-| Exact OMP version, architecture, and pinned artifact digest verified | TESTED — official 18.4.3 x86_64 artifact runs and matches pin |
-| Native external MemoryBackend registration in packaged OMP | ABSENT — audit finding; not required for extension-mode recall |
-| Documented extension pre-agent lifecycle contract identified | TESTED — source contract only; not exercised in binary |
-| Extension loaded by exact official binary and awaited recall before provider request | REMAINING — not proven |
-| First provider request contains one correctly attributed synthetic recall, no memory tool | REMAINING — provider boundary not exercised |
-| Cancellation/re-entry/retry/scope invalidation, duplicate protection, daemon-down fail-open | REMAINING — not exercised |
-| Existing MemoryD adapter reused by immutable identity | REMAINING — no integration attempted |
-| Explicit writes only; automatic assistant-turn writeback disabled | REMAINING — no integration attempted |
-| `/memory` parity, status/search/save, compaction, appliance transport/supervision | REMAINING — out of current proof; do not claim |
-| Packaged appliance dogfood receipt | REMAINING — do not expand packaging before stock-binary proof |
+| Official OMP source tag matches exact commit | TESTED — `v18.4.3` = `fc671eba383f2a7208500836673b485c0dc7073d` |
+| Official upstream x86_64 binary version and digest verified | TESTED — upstream artifact only; not derived candidate |
+| MemoryD adapter source identity pinned | TESTED — `joshyorko/codex-memoryd@e7f8d431797973afbdf4d0530aa14a25f43acf35` |
+| Generic native registration patch, clean derived OMP build, provenance | REMAINING — not attempted |
+| Derived x86_64 binary selects existing adapter and recalls synthetic fact on first provider request | REMAINING — no derived binary/provider-boundary run |
+| Daemon-down fail-open/degraded and cancellation/stale/rebind controls | REMAINING — not exercised |
+| Native status/search/explicit save; automatic writeback remains disabled | REMAINING — not exercised |
+| Derived artifact integrated with existing CI/package flow; aarch64 lane | REMAINING — do not expand before x86_64 canary |
+| Promotion gate preserves last verified release on patch/build/test failure | REMAINING |
 | Exact-head independent review | REMAINING |
 
-Terminal marker: `EXTENSION_PROOF_REMAINING`.
+Terminal marker: `NATIVE_BUILD_PROOF_REMAINING`.
