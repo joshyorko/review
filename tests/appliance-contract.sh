@@ -80,7 +80,7 @@ grep -qE '^ARG FSDK_BUILDER_IMAGE=ghcr\.io/projectbluefin/lab-runner:[^@[:space:
 
 # Source and build inputs are pinned; architecture-specific addons and runtime
 # artifacts carry independent checksums and verified package integrity.
-for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256; do
+for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 NODE_X86_64_SHA256 NODE_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256; do
   grep -qE "^ARG ${pin}=[0-9a-f]{64}$" "$containerfile" ||
     fail "ARG ${pin} must be a lowercase sha256 digest"
 done
@@ -92,10 +92,14 @@ for pin in OMP_SOURCE_COMMIT MEMORYD_SOURCE_COMMIT; do
   grep -qE "^ARG ${pin}=[0-9a-f]{40}$" "$containerfile" ||
     fail "ARG ${pin} must be a full lowercase commit SHA"
 done
-for pin in OMP_VERSION OMP_BUN_VERSION OMP_NATIVES_VERSION; do
+for pin in OMP_VERSION OMP_BUN_VERSION NODE_VERSION OMP_NATIVES_VERSION; do
   grep -qE "^ARG ${pin}=[0-9]+\\.[0-9]+\\.[0-9]+$" "$containerfile" ||
     fail "ARG ${pin} must be a semantic version"
 done
+node_major="$(sed -nE 's/^ARG NODE_VERSION=([0-9]+)\..*/\1/p' "$containerfile")"
+if [[ ! "$node_major" =~ ^[0-9]+$ ]] || ((node_major < 24)); then
+  fail "NODE_VERSION must be at least 24"
+fi
 
 # shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
 require "$containerfile" \
@@ -106,6 +110,14 @@ require "$containerfile" \
   'COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'OMP_PATCH_PATH=/usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
+  'https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz' \
+  'cp -a "$node_dir/lib/node_modules/npm" /out/usr/lib/node_modules/npm' \
+  'ln -s ../lib/node_modules/npm/bin/npm-cli.js /out/usr/bin/npm' \
+  'ln -s ../lib/node_modules/npm/bin/npx-cli.js /out/usr/bin/npx' \
+  '/usr/local/bin/node' \
+  '/usr/local/bin/bun' \
+  'io.github.joshyorko.review.node.version="${NODE_VERSION}"' \
+  'io.github.joshyorko.review.bun.version="${OMP_BUN_VERSION}"' \
   '--omp-source-commit "$OMP_SOURCE_COMMIT"' \
   'USER 65532:65532' \
   'WORKDIR /workspace' \
@@ -128,6 +140,7 @@ require scripts/build-derived-omp.sh \
   'git -C "$source_dir" apply --check "$OMP_PATCH_PATH"' \
   'bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests' \
   'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"' \
+  'install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun' \
   'bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"'
 grep -qF 'runner: ubuntu-26.04-arm' .github/workflows/publish-appliance.yml ||
   fail "the appliance must keep its native aarch64 build runner"
@@ -244,7 +257,16 @@ forbid "$containerfile" \
   'apk add' \
   'RUN curl | ' \
   'curl -sL |'
-forbid "$containerfile" 'PI_VERSION' 'NODE_VERSION' 'pi-coding-agent' '/usr/bin/pi' '/usr/bin/node'
+# shellcheck disable=SC2016 # Literal Containerfile text, not shell expansion.
+require "$containerfile" \
+  '"https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"' \
+  'echo "${node_sha}  $workdir/node.tar.gz" | sha256sum --check --status' \
+  'ARG NODE_VERSION' \
+  'ARG NODE_X86_64_SHA256' \
+  'ARG NODE_AARCH64_SHA256' \
+  'ARG OMP_BUN_VERSION' \
+  '/usr/local/bin/bun'
+forbid "$containerfile" 'PI_VERSION' 'pi-coding-agent' '/usr/bin/pi'
 
 # `SHELL` is silently ignored for the OCI image format; a RUN that relies on it
 # for `set -e` is a RUN whose failures are invisible.
@@ -405,6 +427,14 @@ omp_label="$(inspect '{{index .Labels "io.github.joshyorko.review.omp.version"}}
 omp_version="$(run 'omp --version')"
 test "$omp_version" = "omp/${omp_label}" ||
   fail "the omp binary reports '${omp_version}', but this image claims to ship ${omp_label}"
+node_label="$(inspect '{{index .Labels "io.github.joshyorko.review.node.version"}}')"
+bun_label="$(inspect '{{index .Labels "io.github.joshyorko.review.bun.version"}}')"
+test "$(run 'node --version')" = "v${node_label}" ||
+  fail "node version does not match the pinned appliance version"
+test "$(run 'bun --version')" = "$bun_label" ||
+  fail "bun version does not match the pinned OMP build runtime"
+run 'npm --version && npx --version' >/dev/null ||
+  fail "npm or npx failed to execute"
 
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
@@ -423,6 +453,19 @@ run '
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
 
 ' >/dev/null || fail "a bundled binary failed to execute"
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+run '
+  set -eu
+  mounts=()
+  for path in /usr /bin /lib /lib64; do
+    [[ ! -e "$path" ]] || mounts+=(--ro-bind "$path" "$path")
+  done
+  bwrap --unshare-all --die-with-parent --new-session --clearenv \
+    "${mounts[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home \
+    --dir /home/worker --setenv HOME /home/worker \
+    --setenv PATH /usr/bin:/bin /usr/bin/bash --noprofile --norc -c \
+    "node --version && bun --version && npm --version && npx --version"
+' >/dev/null || fail "Node, Bun, npm, or npx is unavailable inside the Factory bubblewrap verifier"
 
 # git is here to land fixes, which means it has to be able to commit and to
 # reach GitHub over https — the remote helper and its TLS closure included.
@@ -612,11 +655,11 @@ run '
   test -f /usr/share/bluefin/review/sbom.spdx.json
 ' >/dev/null || fail "the review mode or its SBOM is missing from the image"
 
-# Nothing inside may install anything.
+# No OS package manager may enter the final image; npm is the requested Node runtime toolchain, not an OS installer.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
-  for forbidden in dnf microdnf apt apt-get apk rpm yum pip pip3 npm; do
+  for forbidden in dnf microdnf apt apt-get apk rpm yum pip pip3; do
     if command -v "$forbidden" >/dev/null 2>&1; then
       echo "found package manager: $forbidden" >&2
       exit 1
@@ -629,7 +672,7 @@ import json,sys
 document = json.load(sys.stdin)
 print(" ".join(sorted(package["name"] for package in document["packages"])))
 ')"
-for component in omp omp-source omp-memory-backend-patch omp-native-addon gh review-workbench; do
+for component in omp omp-source omp-memory-backend-patch omp-native-addon node bun gh review-workbench; do
   grep -qwF -- "$component" <<<"$sbom_packages" ||
     fail "the in-image SBOM does not record ${component}"
 done

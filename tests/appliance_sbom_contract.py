@@ -27,6 +27,10 @@ NATIVE_X86 = "e" * 128
 NATIVE_ARM = "f" * 128
 GH_X86 = "1" * 64
 GH_ARM = "2" * 64
+NODE_X86 = "3" * 64
+NODE_ARM = "4" * 64
+BUN_X86 = "5" * 64
+BUN_ARM = "6" * 64
 SOURCE_COMMIT = "abcdef0123456789abcdef0123456789abcdef01"
 REVIEW_REVISION = "0123456789abcdef0123456789abcdef01234567"
 BASE_ARGS = {
@@ -38,6 +42,9 @@ BASE_ARGS = {
     "--omp-source-sha256": OMP_SOURCE,
     "--omp-patch-sha256": OMP_PATCH,
     "--omp-bun-version": "1.4.2",
+    "--bun-sha256": BUN_X86,
+    "--node-version": "24.21.0",
+    "--node-sha256": NODE_X86,
     "--omp-natives-version": "1.2.3",
     "--omp-native-package": "pi-natives-linux-x64",
     "--omp-native-sha512": NATIVE_X86,
@@ -55,6 +62,8 @@ def args_for_arch(arch: str, **overrides: str) -> dict[str, str]:
                 "--omp-sha256": OMP_ARM,
                 "--omp-native-package": "pi-natives-linux-arm64",
                 "--omp-native-sha512": NATIVE_ARM,
+                "--node-sha256": NODE_ARM,
+                "--bun-sha256": BUN_ARM,
                 "--gh-sha256": GH_ARM,
             }
         )
@@ -121,8 +130,10 @@ class PerArchitectureDigests(unittest.TestCase):
         self.assertEqual(found["omp"]["checksums"][0]["checksumValue"], OMP_X86)
         self.assertEqual(found["omp-native-addon"]["checksums"][0]["checksumValue"], NATIVE_X86)
         self.assertEqual(found["gh"]["checksums"][0]["checksumValue"], GH_X86)
+        self.assertEqual(found["node"]["checksums"][0]["checksumValue"], NODE_X86)
+        self.assertEqual(found["bun"]["checksums"][0]["checksumValue"], BUN_X86)
         serialized = json.dumps(found)
-        for foreign in (OMP_ARM, NATIVE_ARM, GH_ARM):
+        for foreign in (OMP_ARM, NATIVE_ARM, GH_ARM, NODE_ARM, BUN_ARM):
             self.assertNotIn(foreign, serialized, "an aarch64 digest reached an x86_64 SBOM")
 
     def test_aarch64_records_its_derived_binary_native_addon_and_gh_hashes(self):
@@ -130,8 +141,10 @@ class PerArchitectureDigests(unittest.TestCase):
         self.assertEqual(found["omp"]["checksums"][0]["checksumValue"], OMP_ARM)
         self.assertEqual(found["omp-native-addon"]["checksums"][0]["checksumValue"], NATIVE_ARM)
         self.assertEqual(found["gh"]["checksums"][0]["checksumValue"], GH_ARM)
+        self.assertEqual(found["node"]["checksums"][0]["checksumValue"], NODE_ARM)
+        self.assertEqual(found["bun"]["checksums"][0]["checksumValue"], BUN_ARM)
         serialized = json.dumps(found)
-        for foreign in (OMP_X86, NATIVE_X86, GH_X86):
+        for foreign in (OMP_X86, NATIVE_X86, GH_X86, NODE_X86, BUN_X86):
             self.assertNotIn(foreign, serialized, "an x86_64 digest reached an aarch64 SBOM")
 
     def test_every_verified_component_has_its_actual_checksum_algorithm(self):
@@ -139,6 +152,8 @@ class PerArchitectureDigests(unittest.TestCase):
         for name in ("omp", "omp-source", "omp-memory-backend-patch", "gh"):
             self.assertEqual(found[name]["checksums"][0]["algorithm"], "SHA256")
         self.assertEqual(found["omp-native-addon"]["checksums"][0]["algorithm"], "SHA512")
+        self.assertEqual(found["node"]["checksums"][0]["algorithm"], "SHA256")
+        self.assertEqual(found["bun"]["checksums"][0]["algorithm"], "SHA256")
         self.assertNotIn("checksums", found["review-workbench"])
 
     def test_derived_binary_records_its_exact_source_patch_and_bun_inputs(self):
@@ -164,6 +179,8 @@ class DigestValidation(unittest.TestCase):
         self.assert_rejected("omp_source_sha256", **{"--omp-source-sha256": "c" * 63})
         self.assert_rejected("omp_patch_sha256", **{"--omp-patch-sha256": "z" * 64})
         self.assert_rejected("gh_sha256", **{"--gh-sha256": "sha256:" + GH_X86})
+        self.assert_rejected("node_sha256", **{"--node-sha256": "Z" * 64})
+        self.assert_rejected("bun_sha256", **{"--bun-sha256": "Z" * 64})
 
     def test_native_sha512_must_be_exact_hex(self):
         self.assert_rejected("omp_native_sha512", **{"--omp-native-sha512": "e" * 127})
@@ -178,6 +195,7 @@ class DigestValidation(unittest.TestCase):
             ("--omp-bun-version", "omp Bun version"),
             ("--omp-natives-version", "omp native addon version"),
             ("--gh-version", "gh version"),
+            ("--node-version", "Node.js version"),
         ):
             with self.subTest(flag=flag):
                 self.assert_rejected(f"{label} must not be empty", **{flag: ""})
@@ -206,6 +224,30 @@ class DownloadLocations(unittest.TestCase):
             f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/memory-backend-registration.patch",
         )
 
+    def test_node_download_is_versioned_and_architecture_specific(self):
+        x86 = packages_by_name(generate(self, "x86_64"))
+        arm = packages_by_name(generate(self, "aarch64"))
+        self.assertEqual(
+            x86["node"]["downloadLocation"],
+            "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.gz",
+        )
+        self.assertEqual(
+            arm["node"]["downloadLocation"],
+            "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-arm64.tar.gz",
+        )
+
+    def test_bun_runtime_archive_is_versioned_and_architecture_specific(self):
+        x86 = packages_by_name(generate(self, "x86_64"))
+        arm = packages_by_name(generate(self, "aarch64"))
+        self.assertEqual(
+            x86["bun"]["downloadLocation"],
+            "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64-baseline.zip",
+        )
+        self.assertEqual(
+            arm["bun"]["downloadLocation"],
+            "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-aarch64.zip",
+        )
+
     def test_native_archive_url_is_scoped_and_architecture_specific(self):
         found = packages_by_name(generate(self, "aarch64"))
         self.assertEqual(
@@ -231,13 +273,15 @@ class PackageIdentity(unittest.TestCase):
         found = packages_by_name(generate(self, "x86_64"))
         self.assertEqual(
             sorted(found),
-            ["gh", "omp", "omp-memory-backend-patch", "omp-native-addon", "omp-source", "review-workbench"],
+            ["bun", "gh", "node", "omp", "omp-memory-backend-patch", "omp-native-addon", "omp-source", "review-workbench"],
         )
         self.assertEqual(found["omp"]["versionInfo"], "1.2.3")
         self.assertEqual(found["omp-source"]["versionInfo"], SOURCE_COMMIT)
         self.assertEqual(found["omp-memory-backend-patch"]["versionInfo"], REVIEW_REVISION)
         self.assertEqual(found["omp-native-addon"]["versionInfo"], "1.2.3")
         self.assertEqual(found["gh"]["versionInfo"], "2.80.1")
+        self.assertEqual(found["node"]["versionInfo"], "24.21.0")
+        self.assertEqual(found["bun"]["versionInfo"], "1.4.2")
         self.assertEqual(found["review-workbench"]["versionInfo"], "26.08.03")
 
     def test_spdxids_are_unique_and_sanitised(self):
@@ -269,6 +313,8 @@ class PackageIdentity(unittest.TestCase):
             f"pkg:npm/%40oh-my-pi/pi-natives-linux-arm64@1.2.3?checksum=sha512:{NATIVE_ARM}",
         )
         self.assertEqual(locator("gh"), f"pkg:github/cli/cli@v2.80.1?checksum=sha256:{GH_ARM}")
+        self.assertEqual(locator("node"), f"pkg:generic/node@24.21.0?checksum=sha256:{NODE_ARM}")
+        self.assertEqual(locator("bun"), f"pkg:github/oven-sh/bun@bun-v1.4.2?checksum=sha256:{BUN_ARM}")
         self.assertEqual(locator("review-workbench"), f"pkg:github/joshyorko/review@{REVIEW_REVISION}")
 
     def test_external_refs_are_package_manager_purls(self):

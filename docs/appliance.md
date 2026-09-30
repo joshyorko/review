@@ -71,6 +71,7 @@ Persistent OMP state lives under the appliance-owned home (`/home/bluefin`, a re
 ## Image and personal package
 
 The image derives from a digest-pinned FSDK base, builds OMP from pinned source plus the generic registration patch on each native architecture, and verifies GitHub CLI artifacts against per-architecture SHA-256 pins. The derived binary and its source, patch, and native-package provenance are recorded in the SBOM. Review and Luna Factory extensions remain packaged; MemoryD's adapter is not included pending distribution authorization. The TypeSafe OMP loader is optional; Review starts without a TypeSafe key. Audio is included for OMP voice support when the host exposes a supported PulseAudio socket or `/dev/snd`.
+The image includes checksum-verified Node.js 24 with its bundled npm/npx and the checksum-verified pinned Bun runtime used to build OMP. These runtimes are staged into the shared root filesystem used by both OCI and Apptainer packaging; no system package manager is added.
 
 Current source and SBOM provenance identify [`joshyorko/review`](https://github.com/joshyorko/review). The personal Homebrew workflow builds an immutable OCI image and matching native SIF from the selected committed ref on `self-hosted`, then publishes the package to `joshyorko/homebrew-review-dev`.
 
