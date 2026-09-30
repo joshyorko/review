@@ -263,3 +263,166 @@ test("failed native abort still disposes and never certifies cancellation settle
   assert.equal(disposed, true, "dispose remains required when abort fails");
  } finally { await rm(root, {recursive: true, force: true}); }
 });
+
+test("bounded escalation activates native Advisor on the same worker session and resumes the same attempt once", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-advisor-"));
+	try {
+		const events: string[] = [];
+		const prompts: string[] = [];
+		const listeners = new Set<(event: { type: string }) => void>();
+		const model = { provider: "configured-provider", id: "configured-advisor" };
+		let enabled = false;
+		let assistantMessages = 0;
+		let tools: Tool[] = [];
+		const report = { report: "resumed after native advice", tests: ["true"], accepted: true, semanticOutcome: "none", predicates: [{ item: "same attempt", ok: true, note: "worker resumed" }], publicationBlocker: "" };
+		const session = {
+			sessionFile: "same-worker-session.jsonl",
+			subscribe(listener: (event: { type: string }) => void) { listeners.add(listener); return () => listeners.delete(listener); },
+			abort: async () => {},
+			dispose: async () => {},
+			setAdvisorEnabled(value: boolean) { enabled = value; events.push(value ? "advisor-on" : "advisor-off"); return value; },
+			isAdvisorEnabled: () => enabled,
+			isAdvisorActive: () => enabled,
+			async waitForAdvisorCatchup() { events.push("advisor-catchup"); assistantMessages++; return true; },
+			getAdvisorStats() {
+				return {
+					configured: enabled,
+					active: enabled,
+					model: enabled ? model : undefined,
+					contextWindow: 100_000,
+					contextTokens: 100,
+					tokens: { input: assistantMessages * 20, output: assistantMessages * 10, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: assistantMessages * 30 },
+					cost: assistantMessages * 0.02,
+					messages: { user: assistantMessages, assistant: assistantMessages, total: assistantMessages * 2 },
+					advisors: enabled ? [{ name: "Configured", status: "running", model, contextWindow: 100_000, contextTokens: 100, tokens: { input: assistantMessages * 20, output: assistantMessages * 10, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: assistantMessages * 30 }, cost: assistantMessages * 0.02, messages: { user: assistantMessages, assistant: assistantMessages, total: assistantMessages * 2 } }] : [],
+				};
+			},
+			formatAdvisorStatus: () => "Advisor active on configured-provider/configured-advisor",
+			formatAdvisorHistoryAsText: () => "Native advisory: compare the two supplied alternatives against the exact acceptance.",
+			async prompt(text: string) {
+				prompts.push(text);
+				events.push(text.startsWith("Resume") ? "worker-resume" : text.startsWith("Factory judgment") ? "advisor-packet" : "worker-start");
+				for (const listener of listeners) listener({ type: "turn_start" });
+				if (prompts.length === 1) {
+					const tool = tools.find((candidate) => candidate.name === "factory_escalate")!;
+					await tool.execute("escalate", { judgment: "Which compatibility strategy preserves the contract?", reason: "The evidence supports two incompatible outcomes.", evidence: ["existing callers require stable output"], alternatives: ["preserve output", "replace output"] });
+				} else if (prompts.length === 3) {
+					const escalation = tools.find((candidate) => candidate.name === "factory_escalate")!;
+					await assert.rejects(() => escalation.execute("again", { judgment: "second", reason: "second", evidence: ["second"] }), /already used its one native Advisor escalation/);
+					await tools.find((candidate) => candidate.name === "factory_report")!.execute("report", report);
+				}
+			},
+		};
+		const sdk = {
+			Settings: { isolated: (value: Record<string, unknown>) => value },
+			SessionManager: { create: () => ({}) },
+			AgentRegistry: class {},
+			async createAgentSession(options: { customTools?: Tool[] }) { tools = options.customTools ?? []; return { session }; },
+		} as unknown as NativeSDK;
+		const result = await runNative(
+			sdk,
+			schema,
+			{ model: { provider: "worker-provider", id: "worker-model" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } },
+			item(root),
+			root,
+			"worker",
+			new AbortController().signal,
+			() => {},
+			() => {},
+			"",
+			{
+				attemptId: "T1-a1",
+				escalationIdentity: { taskId: "T1", itemKey: "example/repo#1", attemptId: "T1-a1", generation: "G1", subject: { repo: "example/repo", base: "base-sha", head: "head-sha" }, acceptanceRevision: "acceptance-v1", acceptance: "preserve stable output" },
+			},
+		);
+		assert.equal(prompts.length, 3);
+		assert.equal(result.session, "same-worker-session.jsonl");
+		assert.equal(result.calls, 3);
+		assert.equal(result.report, "resumed after native advice");
+		assert.deepEqual(events.filter((event) => event === "advisor-on" || event === "advisor-off"), ["advisor-on", "advisor-off"]);
+		assert.ok(events.indexOf("advisor-on") < events.indexOf("advisor-packet"));
+		assert.ok(events.indexOf("advisor-catchup") < events.indexOf("advisor-off"));
+		assert.ok(events.indexOf("advisor-off") < events.indexOf("worker-resume"));
+		assert.match(prompts[1], /acceptanceSha256/);
+		assert.match(prompts[1], /Which compatibility strategy/);
+		assert.deepEqual(result.advisor?.effectiveModels, ["configured-provider/configured-advisor"]);
+		assert.match(result.advisor?.history ?? "", /Native advisory:/);
+		assert.equal(result.advisor?.usage.calls, 1);
+		assert.equal(enabled, false);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("native Advisor resolution and catch-up failures block the existing attempt without worker fallback", async () => {
+	for (const failure of ["no-advisor-model", "catchup"] as const) {
+		const root = await mkdtemp(join(tmpdir(), `factory-native-advisor-${failure}-`));
+		try {
+			const events: string[] = [];
+			const prompts: string[] = [];
+			const listeners = new Set<(event: { type: string }) => void>();
+			const configuredModel = { provider: "configured-provider", id: "configured-advisor" };
+			const resolves = failure !== "no-advisor-model";
+			let enabled = false;
+			let tools: Tool[] = [];
+			let escalations = 0;
+			const session = {
+				sessionFile: "blocked-worker-session.jsonl",
+				subscribe(listener: (event: { type: string }) => void) { listeners.add(listener); return () => listeners.delete(listener); },
+				abort: async () => {},
+				dispose: async () => {},
+				setAdvisorEnabled(value: boolean) { enabled = value; events.push(value ? "advisor-on" : "advisor-off"); return value && resolves; },
+				isAdvisorEnabled: () => enabled,
+				isAdvisorActive: () => enabled && resolves,
+				async waitForAdvisorCatchup() { events.push("advisor-catchup"); return false; },
+				getAdvisorStats() {
+					return {
+						configured: enabled,
+						active: enabled && resolves,
+						model: enabled && resolves ? configuredModel : undefined,
+						contextWindow: 0, contextTokens: 0,
+						tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						cost: 0,
+						messages: { user: 0, assistant: 0, total: 0 },
+						advisors: enabled && resolves ? [{ name: "Configured", status: "running", model: configuredModel, contextWindow: 100_000, contextTokens: 0, tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0, messages: { user: 0, assistant: 0, total: 0 } }] : [],
+					};
+				},
+				formatAdvisorStatus: () => enabled && resolves ? "Advisor active" : "Advisor model unavailable",
+				formatAdvisorHistoryAsText: () => null,
+				async prompt(text: string) {
+					prompts.push(text);
+					for (const listener of listeners) listener({ type: "turn_start" });
+					if (prompts.length === 1) {
+						escalations++;
+						await tools.find((tool) => tool.name === "factory_escalate")!.execute("escalate", { judgment: "resolve incompatible behavior", reason: "evidence conflicts", evidence: ["existing output contract"], alternatives: ["keep", "replace"] });
+					}
+				},
+			};
+			const sdk = {
+				Settings: { isolated: (value: Record<string, unknown>) => value },
+				SessionManager: { create: () => ({}) },
+				AgentRegistry: class {},
+				async createAgentSession(options: { customTools?: Tool[] }) { tools = options.customTools ?? []; return { session }; },
+			} as unknown as NativeSDK;
+			await assert.rejects(
+				() => runNative(
+					sdk,
+					schema,
+					{ model: { provider: "worker-provider", id: "worker-model" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } },
+					item(root),
+					root,
+					"worker",
+					new AbortController().signal,
+					() => {},
+					() => {},
+					"",
+					{ attemptId: "T1-a1", escalationIdentity: { taskId: "T1", itemKey: "r/1", attemptId: "T1-a1", generation: "G1", subject: { repo: "r", base: "base", head: "head" }, acceptanceRevision: "acceptance-v1", acceptance: "original acceptance" } },
+				),
+				(error: unknown) => error instanceof Error && "code" in error && error.code === "advisor-blocked",
+			);
+			assert.equal(escalations, 1);
+			assert.equal(enabled, false, "Advisor is disabled after the failed escalation");
+			assert.ok(events.includes("advisor-off"));
+			assert.equal(prompts.some((prompt) => prompt.startsWith("Resume")), false, "blocked escalation never resumes with a worker-model substitute");
+			assert.equal(prompts.length, failure === "catchup" ? 2 : 1);
+		} finally { await rm(root, { recursive: true, force: true }); }
+	}
+});

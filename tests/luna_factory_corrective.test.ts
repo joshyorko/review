@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createBatch, digest, type Batch, type BatchItem } from "../image/extension/luna-factory/core/batch.ts";
 import { requiredChecks, packageCheckScripts } from "../image/extension/luna-factory/omp/batch-checks.ts";
-import { sandboxPreflight } from "../image/extension/luna-factory/omp/batch-native.ts";
+import { NativeExecutionError, sandboxPreflight } from "../image/extension/luna-factory/omp/batch-native.ts";
 import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
 
 function fixture(preflight: typeof sandboxPreflight = sandboxPreflight) {
@@ -97,6 +97,25 @@ test("an independent rejection survives queue clearing and reaches the bounded r
   const final=service.store.read(f.batch.id).items[0]!;
   assert.equal(workers,2);assert.equal(reviews,2);assert.match(prompts[1]!,/DISTINCTIVE_REJECTION/);assert.equal(final.attempts,2);assert.equal(final.ledger.tasks[0]!.attempts.length,2);
   await service.shutdown();
+ }finally{await f.cleanup();}
+});
+
+test("failed native Advisor escalation persists an unknown blocked operation and retains mutation claims", async () => {
+ const f=fixture();try{
+  const internals=f.service as unknown as {execute(batch:Batch,item:BatchItem,signal:AbortSignal,binding:unknown,bindingError?:string):Promise<void>};
+  internals.execute=async(_batch,item)=>{
+   item.operation={...intent(f),state:"intent"};
+   item.stage="RUNNING";
+   throw new NativeExecutionError("advisor-blocked","native Advisor route unavailable");
+  };
+  await f.service.resume(f.batch.id,{model:{provider:"worker",id:"worker"},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});
+  await f.service.waitForIdle();
+  const persisted=f.service.store.read(f.batch.id).items[0]!;
+  assert.equal(persisted.stage,"BLOCKED");
+  assert.equal(persisted.operation?.state,"unknown");
+  assert.match(persisted.blocker!,/native Advisor escalation blocked/);
+  assert.deepEqual(f.service.claims.list().map(claim=>claim.resource).filter(Boolean).sort(),[`item:${f.item.selected.key}`,`repo:${f.item.selected.repo}`].sort());
+  assert.equal(persisted.attempts,0,"failed escalation does not fabricate an attempt receipt");
  }finally{await f.cleanup();}
 });
 
