@@ -120,6 +120,7 @@ printf '%s  %s\n' "$bun_sha" "$bun_archive" | sha256sum --check --status || {
 }
 python3 -m zipfile -e "$bun_archive" "$workdir"
 install -m 0755 "$workdir/$bun_member" "$workdir/bin/bun"
+install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun
 export PATH="$workdir/bin:$PATH"
 [[ "$(bun --version)" == "$OMP_BUN_VERSION" ]] || {
   echo "downloaded Bun version does not match ${OMP_BUN_VERSION}" >&2

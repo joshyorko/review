@@ -19,6 +19,8 @@ SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 SHA512_PATTERN = re.compile(r"[0-9a-f]{128}\Z")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 GH_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}
+NODE_ARCH = {"x86_64": "x64", "aarch64": "arm64"}
+BUN_ARCHIVE = {"x86_64": "bun-linux-x64-baseline.zip", "aarch64": "bun-linux-aarch64.zip"}
 NATIVE_PACKAGE = {
     "x86_64": "pi-natives-linux-x64",
     "aarch64": "pi-natives-linux-arm64",
@@ -86,6 +88,7 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     omp_version = require_non_empty(args.omp_version, "omp version")
     omp_bun_version = require_non_empty(args.omp_bun_version, "omp Bun version")
     natives_version = require_non_empty(args.omp_natives_version, "omp native addon version")
+    node_version = require_non_empty(args.node_version, "Node.js version")
     gh_version = require_non_empty(args.gh_version, "gh version")
     source_commit = require_commit(args.omp_source_commit, "omp source commit")
     omp_sha = require_sha256(args.omp_sha256, "omp_sha256")
@@ -93,6 +96,8 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     patch_sha = require_sha256(args.omp_patch_sha256, "omp_patch_sha256")
     native_sha = require_sha512(args.omp_native_sha512, "omp_native_sha512")
     gh_sha = require_sha256(args.gh_sha256, "gh_sha256")
+    node_sha = require_sha256(args.node_sha256, "node_sha256")
+    bun_sha = require_sha256(args.bun_sha256, "bun_sha256")
 
     native_package = NATIVE_PACKAGE[arch]
     if args.omp_native_package != native_package:
@@ -104,6 +109,10 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
         f"{native_package}/-/{native_package}-{natives_version}.tgz"
     )
     gh_arch = GH_ARCH[arch]
+    node_arch = NODE_ARCH[arch]
+    node_url = f"https://nodejs.org/dist/v{node_version}/node-v{node_version}-linux-{node_arch}.tar.gz"
+    bun_asset = BUN_ARCHIVE[arch]
+    bun_url = f"https://github.com/oven-sh/bun/releases/download/bun-v{omp_bun_version}/{bun_asset}"
     source_url = f"https://github.com/can1357/oh-my-pi/archive/{source_commit}.tar.gz"
     patch_url = (
         f"https://github.com/joshyorko/review/blob/{args.revision}/"
@@ -154,6 +163,24 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             native_sha,
         ),
         package(
+            "node",
+            node_version,
+            node_url,
+            f"pkg:generic/node@{node_version}",
+            "Node.js runtime and bundled npm/npx distribution; the architecture-specific release archive is verified by SHA-256.",
+            "SHA256",
+            node_sha,
+        ),
+        package(
+            "bun",
+            omp_bun_version,
+            bun_url,
+            f"pkg:github/oven-sh/bun@bun-v{omp_bun_version}",
+            "Pinned Bun runtime archive used to build OMP and installed in the appliance; its architecture-specific ZIP is verified by SHA-256.",
+            "SHA256",
+            bun_sha,
+        ),
+        package(
             "gh",
             gh_version,
             f"https://github.com/cli/cli/releases/download/v{gh_version}/gh_{gh_version}_linux_{gh_arch}.tar.gz",
@@ -187,6 +214,9 @@ def main() -> int:
     parser.add_argument("--omp-source-sha256", required=True)
     parser.add_argument("--omp-patch-sha256", required=True)
     parser.add_argument("--omp-bun-version", required=True)
+    parser.add_argument("--node-version", required=True)
+    parser.add_argument("--node-sha256", required=True)
+    parser.add_argument("--bun-sha256", required=True)
     parser.add_argument("--omp-natives-version", required=True)
     parser.add_argument("--omp-native-package", required=True)
     parser.add_argument("--omp-native-sha512", required=True)

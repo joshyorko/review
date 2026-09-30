@@ -37,6 +37,9 @@ ARG OMP_PATCH_SHA256=972820eaba72b3717d051ddb1e136c9dfecd024045dd7f94b2bb1026446
 ARG OMP_BUN_VERSION=1.4.2
 ARG OMP_BUN_X86_64_SHA256=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
 ARG OMP_BUN_AARCH64_SHA256=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7
+ARG NODE_VERSION=24.21.0
+ARG NODE_X86_64_SHA256=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff
+ARG NODE_AARCH64_SHA256=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5
 ARG OMP_NATIVES_VERSION=18.4.4
 ARG OMP_NATIVES_X86_64_SHA512=1be03b157be6de8da20544e453b1909688b6d12bbf89b14ec125283bf2cafb9600bb1487b96b45b688c45d59ef0286136c8dc7f7fac80097b295633c3727a7a2
 ARG OMP_NATIVES_AARCH64_SHA512=1886d9db2d0495f9b08ff29f9e7917b204c277e5123b05fd1979b7c40970cff52a312abf0d55d2ce3bc67c586cb78596abb04fc3e22ea4fd1636b578ee6b35a1
@@ -77,6 +80,9 @@ ARG OMP_PATCH_SHA256
 ARG OMP_BUN_VERSION
 ARG OMP_BUN_X86_64_SHA256
 ARG OMP_BUN_AARCH64_SHA256
+ARG NODE_VERSION
+ARG NODE_X86_64_SHA256
+ARG NODE_AARCH64_SHA256
 ARG OMP_NATIVES_VERSION
 ARG OMP_NATIVES_X86_64_SHA512
 ARG OMP_NATIVES_AARCH64_SHA512
@@ -169,13 +175,35 @@ RUN set -eu; \
 # the pinned FSDK builder by an explicit allowlist. Nothing is installed into
 # the final image; it is assembled from binaries already present at that seam.
 COPY --chmod=0755 image/appliance/stage-runtime.sh /usr/local/libexec/stage-runtime
+RUN set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) node_arch=x64; node_sha="$NODE_X86_64_SHA256" ;; \
+      aarch64) node_arch=arm64; node_sha="$NODE_AARCH64_SHA256" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    curl --fail --location --show-error --silent \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
+      -o "$workdir/node.tar.gz"; \
+    echo "${node_sha}  $workdir/node.tar.gz" | sha256sum --check --status; \
+    tar --no-same-owner --extract --gzip --file "$workdir/node.tar.gz" --directory "$workdir"; \
+    node_dir="$workdir/node-v${NODE_VERSION}-linux-${node_arch}"; \
+    install -D -m 0755 "$node_dir/bin/node" /usr/local/bin/node; \
+    install -d -m 0755 /out/usr/lib/node_modules; \
+    cp -a "$node_dir/lib/node_modules/npm" /out/usr/lib/node_modules/npm; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /out/usr/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /out/usr/bin/npx; \
+    rm -rf "$workdir"
 RUN /usr/local/libexec/stage-runtime /out \
     /usr/sbin/actionlint \
     /usr/sbin/shellcheck \
     /usr/sbin/yq \
     /usr/sbin/jq \
     /usr/sbin/just \
-    /usr/sbin/openssl
+    /usr/sbin/openssl \
+    /usr/local/bin/node \
+    /usr/local/bin/bun
 COPY --from=audio /audio-out/ /out/
 
 # The in-image SBOM. syft can only see package-manager metadata, and every
@@ -184,8 +212,8 @@ COPY --from=audio /audio-out/ /out/
 COPY --chmod=0755 scripts/generate-appliance-sbom.py /usr/local/libexec/appliance-sbom
 RUN arch="$(uname -m)"; \
     case "$arch" in \
-      x86_64) native_package=pi-natives-linux-x64; native_sha="$OMP_NATIVES_X86_64_SHA512"; gh_sha="$GH_X86_64_SHA256" ;; \
-      aarch64) native_package=pi-natives-linux-arm64; native_sha="$OMP_NATIVES_AARCH64_SHA512"; gh_sha="$GH_AARCH64_SHA256" ;; \
+      x86_64) native_package=pi-natives-linux-x64; native_sha="$OMP_NATIVES_X86_64_SHA512"; gh_sha="$GH_X86_64_SHA256"; node_sha="$NODE_X86_64_SHA256"; bun_sha="$OMP_BUN_X86_64_SHA256" ;; \
+      aarch64) native_package=pi-natives-linux-arm64; native_sha="$OMP_NATIVES_AARCH64_SHA512"; gh_sha="$GH_AARCH64_SHA256"; node_sha="$NODE_AARCH64_SHA256"; bun_sha="$OMP_BUN_AARCH64_SHA256" ;; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     mkdir -p /out/usr/share/bluefin/review; \
@@ -199,6 +227,9 @@ RUN arch="$(uname -m)"; \
       --omp-source-sha256 "$OMP_SOURCE_SHA256" \
       --omp-patch-sha256 "$OMP_PATCH_SHA256" \
       --omp-bun-version "$OMP_BUN_VERSION" \
+      --node-version "$NODE_VERSION" \
+      --node-sha256 "$node_sha" \
+      --bun-sha256 "$bun_sha" \
       --omp-natives-version "$OMP_NATIVES_VERSION" \
       --omp-native-package "$native_package" \
       --omp-native-sha512 "$native_sha" \
@@ -232,7 +263,7 @@ RUN set -eu; \
       aarch64) audio_triplet=aarch64-linux-gnu ;; \
       *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
-    for binary in /out/usr/bin/omp /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash /out/usr/bin/python3; do \
+    for binary in /out/usr/bin/omp /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash /out/usr/bin/python3 /out/usr/bin/node /out/usr/bin/bun /out/usr/bin/npm /out/usr/bin/npx; do \
       test -x "$binary" || { echo "missing $binary" >&2; exit 1; }; \
     done; \
     test -e "/out/usr/lib/${audio_triplet}/libpulse-simple.so.0"; \
@@ -255,6 +286,8 @@ ARG FSDK_BASE_IMAGE
 ARG OMP_VERSION
 ARG OMP_SOURCE_COMMIT
 ARG OMP_PATCH_SHA256
+ARG NODE_VERSION
+ARG OMP_BUN_VERSION
 ARG TYPESAFE_VERSION
 ARG AUDIO_BUILDER_IMAGE
 
@@ -287,6 +320,8 @@ LABEL org.opencontainers.image.title="Review" \
       io.github.joshyorko.review.harness="omp" \
       io.github.joshyorko.review.omp.version="${OMP_VERSION}" \
       io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}" \
+      io.github.joshyorko.review.node.version="${NODE_VERSION}" \
+      io.github.joshyorko.review.bun.version="${OMP_BUN_VERSION}" \
       io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}" \
       io.github.joshyorko.review.typesafe.version="${TYPESAFE_VERSION}" \
       io.github.joshyorko.review.audio.source="${AUDIO_BUILDER_IMAGE}" \
