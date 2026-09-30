@@ -37,6 +37,8 @@ test("workflow preserves the bounded exact-head no-publish contract", () => {
     "tests/appliance-contract.sh --image",
     "id: capabilities",
     "steps.capabilities.outputs.oci",
+    "steps.capabilities.outputs.userNamespace",
+    "REVIEW_APPLIANCE_BWRAP_CAPABILITY",
     "steps.capabilities.outputs.sif",
     "REVIEW_REVISION",
     'localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}',

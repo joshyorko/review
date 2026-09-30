@@ -453,19 +453,30 @@ run '
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
 
 ' >/dev/null || fail "a bundled binary failed to execute"
-# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
-run '
-  set -eu
-  mounts=()
-  for path in /usr /bin /lib /lib64; do
-    [[ ! -e "$path" ]] || mounts+=(--ro-bind "$path" "$path")
-  done
-  bwrap --unshare-all --die-with-parent --new-session --clearenv \
-    "${mounts[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home \
-    --dir /home/worker --setenv HOME /home/worker \
-    --setenv PATH /usr/bin:/bin /usr/bin/bash --noprofile --norc -c \
-    "node --version && bun --version && npm --version && npx --version"
-' >/dev/null || fail "Node, Bun, npm, or npx is unavailable inside the Factory bubblewrap verifier"
+bwrap_capability="${REVIEW_APPLIANCE_BWRAP_CAPABILITY:-available}"
+case "$bwrap_capability" in
+  available)
+    # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+    run '
+      set -eu
+      mounts=()
+      for path in /usr /bin /lib /lib64; do
+        [[ ! -e "$path" ]] || mounts+=(--ro-bind "$path" "$path")
+      done
+      bwrap --unshare-all --die-with-parent --new-session --clearenv \
+        "${mounts[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home \
+        --dir /home/worker --setenv HOME /home/worker \
+        --setenv PATH /usr/bin:/bin /usr/bin/bash --noprofile --norc -c \
+        "node --version && bun --version && npm --version && npx --version"
+    ' >/dev/null || fail "Node, Bun, npm, or npx is unavailable inside the Factory bubblewrap verifier"
+    ;;
+  blocked)
+    echo "appliance-contract: Factory bubblewrap verification blocked by runner user-namespace capability"
+    ;;
+  *)
+    fail "REVIEW_APPLIANCE_BWRAP_CAPABILITY must be available or blocked"
+    ;;
+esac
 
 # git is here to land fixes, which means it has to be able to commit and to
 # reach GitHub over https — the remote helper and its TLS closure included.

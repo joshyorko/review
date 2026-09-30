@@ -48,7 +48,8 @@ jobs:
             --build-arg "REVIEW_REVISION=${{ github.event.pull_request.head.sha }}" \
             -f image/appliance/Containerfile \
             -t "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" .
-          tests/appliance-contract.sh --image "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
+          REVIEW_APPLIANCE_BWRAP_CAPABILITY="${{ steps.capabilities.outputs.userNamespace }}" \
+            tests/appliance-contract.sh --image "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
           REVIEW_APPLIANCE_IMAGE="localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" \
             tests/review-factory-coload-smoke.sh
           label_format='{{index .Labels "org.opencontainers.image.revision"}}'
