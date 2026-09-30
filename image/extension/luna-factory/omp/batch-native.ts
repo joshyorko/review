@@ -27,7 +27,7 @@ export type NativeSession = Pick<
 	| "formatAdvisorHistoryAsText"
 >;
 export type NativeSDK = Pick<OmpSDK, "createAgentSession" | "Settings" | "SessionManager" | "AgentRegistry">;
-type OmpZod = typeof import("@oh-my-pi/omtype/zod");
+type OmpZod = typeof import("@oh-my-pi/omptype/zod");
 export type SchemaBuilder = Pick<OmpZod, "object" | "string" | "number" | "array" | "boolean">;
 export interface NativeContext { model?: CreateAgentSessionOptions["model"]; modelRegistry?: ModelRegistry; }
 export interface NativeBinding { readonly model: NonNullable<CreateAgentSessionOptions["model"]>; readonly modelRegistry: ModelRegistry; }
