@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 omp_binary="${OMP_BINARY:-omp}"
-expected_version="omp/18.3.2"
+expected_version="omp/18.4.4"
 probe_root="$(mktemp -d "${TMPDIR:-/tmp}/luna-factory-sdk-init.XXXXXX")"
 output="$probe_root/omp-output.log"
 

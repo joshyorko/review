@@ -29,3 +29,18 @@ anything you could not resolve in `unresolved` instead of leaving it out.
 
 A receipt is reconciled before it certifies anything. Overstating it does not
 make the criterion pass; it makes the receipt contradicted.
+
+## Native Advisor escalation
+
+For a consequential unresolved judgment that cannot be safely resolved from the
+task's evidence, the native Factory worker may call `factory_escalate` once with
+the exact judgment, why independent review is needed, bounded relevant evidence,
+and alternatives/tradeoffs when applicable. After the tool records the request,
+end the turn immediately without resolving the judgment or using more tools.
+The coordinator temporarily activates OMP's native Advisor on this same worker
+session, then resumes the same task and attempt with its advice. Advisor guidance
+is review-only and does not change acceptance, authority, or retry lineage.
+
+Do not escalate routine implementation questions, ordinary test failures,
+missing binaries, broken checkout, or authentication/environment setup failures.
+Those remain normal work or environment blockers.
