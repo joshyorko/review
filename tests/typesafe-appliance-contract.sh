@@ -106,8 +106,8 @@ if [[ -n "${TYPESAFE_RUNTIME_IMAGE:-}" ]]; then
     fail "runtime OMP version was not ${omp_version}: ${version}"
   run 'test -f /usr/share/bluefin/review/pi-typesafe/package.json'
   run "grep -Fq '\"version\": \"${typesafe_version}\"' /usr/share/bluefin/review/pi-typesafe/package.json"
-  run "test \"\$(/usr/local/bin/node --version)\" = \"v${node_version}\""
-  run "test \"\$(/usr/local/bin/bun --version)\" = \"${bun_version}\""
+  run "test \"\$(/usr/bin/node --version)\" = \"v${node_version}\""
+  run "test \"\$(/usr/bin/bun --version)\" = \"${bun_version}\""
   # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
   run '[[ "$(/usr/bin/npm --version)" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$(/usr/bin/npx --version)" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]'
   run "test -z \"\${TYPESAFE_API_KEY:-}\""
