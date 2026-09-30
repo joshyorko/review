@@ -21,8 +21,8 @@ containerfile="image/appliance/Containerfile"
 image=""
 expect_arch=""
 expect_version=""
-# The appliance carries OMP and review tools, not an alternate agent runtime.
-size_ceiling_bytes=$((500 * 1024 * 1024))
+# Node.js 24/npm/npx and the pinned Bun runtime add their immutable runtime closures to the image.
+size_ceiling_bytes=$((750 * 1024 * 1024))
 
 while (($#)); do
   case "$1" in
