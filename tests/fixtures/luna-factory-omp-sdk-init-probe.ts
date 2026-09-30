@@ -116,6 +116,19 @@ export default function sdkInitializationProbe(pi: any) {
 					}
 					assert.deepEqual([...native.session.getActiveToolNames()].sort(), [...toolNames].sort(), "actual SDK exposes only the restricted Factory tool set");
 					assert.ok(native.session.sessionFile, "SDK initialization created a persistent native session");
+					const advisorLifecycle = [
+						"setAdvisorEnabled", "isAdvisorEnabled", "isAdvisorActive", "waitForAdvisorCatchup",
+						"getAdvisorStats", "formatAdvisorStatus", "formatAdvisorHistoryAsText",
+					] as const;
+					assert.ok(advisorLifecycle.every((method) => typeof native.session[method] === "function"), "pinned public AgentSession exposes the native Advisor lifecycle and evidence API");
+					assert.equal(native.session.isAdvisorEnabled(), false, "ordinary Factory session starts with Advisor disabled");
+					assert.equal(native.session.isAdvisorActive(), false, "ordinary Factory session has no continuously active Advisor");
+					const advisorStats = native.session.getAdvisorStats();
+					assert.equal(advisorStats.configured, false);
+					assert.equal(advisorStats.active, false);
+					assert.equal(native.session.setAdvisorEnabled(false), false, "public Advisor lifecycle remains a no-op while ordinary execution is disabled");
+					assert.ok(native.session.formatAdvisorStatus());
+					native.session.formatAdvisorHistoryAsText({ compact: true });
 					assert.ok(native.session.model, "SDK initialization retained the selected model");
 					initializedModel = `${native.session.model!.provider}/${native.session.model!.id}`;
 					await native.session.dispose();

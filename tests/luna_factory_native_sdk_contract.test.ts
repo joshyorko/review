@@ -82,7 +82,7 @@ function sdkContract(capture: (options: Record<string, unknown>) => void): Nativ
 	return sdk as unknown as NativeSDK;
 }
 
-test("native adapter uses the OMP 18.3.2 restricted custom-tool contract", async () => {
+test("native adapter uses the OMP 18.4.4 restricted custom-tool contract", async () => {
 	const workspace = await mkdtemp(join(tmpdir(), "factory-native-sdk-"));
 	try {
 		let captured: Record<string, unknown> | undefined;
@@ -110,7 +110,7 @@ test("native adapter uses the OMP 18.3.2 restricted custom-tool contract", async
 		assert.equal(captured.enableMCP, false);
 		assert.equal(captured.enableLsp, false);
 		assert.equal(captured.enableIrc, false);
-		assert.deepEqual(captured.toolNames, ["factory_read", "factory_files", "factory_report", "factory_write"]);
+		assert.deepEqual(captured.toolNames, ["factory_read", "factory_files", "factory_escalate", "factory_report", "factory_write"]);
 		const tools = captured.customTools as Tool[];
 		assert.deepEqual(tools.map((tool) => tool.name), captured.toolNames);
 		assert.ok(tools.every((tool) => typeof tool.execute === "function"));
