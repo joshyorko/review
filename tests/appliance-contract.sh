@@ -455,9 +455,9 @@ run '
 ' >/dev/null || fail "a bundled binary failed to execute"
 bwrap_capability="${REVIEW_APPLIANCE_BWRAP_CAPABILITY:-available}"
 case "$bwrap_capability" in
-  available)
-    # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
-    run '
+available)
+  # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+  run '
       set -eu
       mounts=()
       for path in /usr /bin /lib /lib64; do
@@ -469,13 +469,13 @@ case "$bwrap_capability" in
         --setenv PATH /usr/bin:/bin /usr/bin/bash --noprofile --norc -c \
         "node --version && bun --version && npm --version && npx --version"
     ' >/dev/null || fail "Node, Bun, npm, or npx is unavailable inside the Factory bubblewrap verifier"
-    ;;
-  blocked)
-    echo "appliance-contract: Factory bubblewrap verification blocked by runner user-namespace capability"
-    ;;
-  *)
-    fail "REVIEW_APPLIANCE_BWRAP_CAPABILITY must be available or blocked"
-    ;;
+  ;;
+blocked)
+  echo "appliance-contract: Factory bubblewrap verification blocked by runner user-namespace capability"
+  ;;
+*)
+  fail "REVIEW_APPLIANCE_BWRAP_CAPABILITY must be available or blocked"
+  ;;
 esac
 
 # git is here to land fixes, which means it has to be able to commit and to
