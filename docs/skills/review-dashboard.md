@@ -52,6 +52,26 @@ Review defaults to GitHub-only mode. `REVIEW_MODE=hive` explicitly enables optio
 | `v` | Open the focused GitHub item |
 | `?`, `q` / `Esc` | Show help / close the workbench |
 
+`/review recap` opens a deterministic, bounded summary of the current Review
+selection, persisted Review operations, native OMP outcomes, and resolved
+artifact references. It does not call a model or add the recap to model
+context. `/review handoff` writes the same safety-bounded handoff through OMP's
+session artifact API, opens a fresh child session, and sends one visible custom
+message with `triggerTurn: false`. The new context must revalidate the current
+repository, head, selection, claims, budget, and external effects and obtain
+explicit human authorization. A handoff grants no approval, merge, comment,
+publish, or deploy authority. OMP's `sendMessage` has no delivery receipt, so
+Review reports submission without claiming acknowledgement and blocks blind
+duplicate sends. If new-session creation is cancelled, the export remains and
+no message is sent.
+
+The ordinary Review trace bounds UTF-8 previews, total retained trace bytes,
+output bytes, turns, tools, and task spans at ingestion. Truncation metadata is
+shown in both the tree and text projection. Native artifact links are resolved
+against the source session; expired or unresolved artifacts stay unavailable.
+Native totals are shown only when OMP supplied `details.meta.truncation` totals,
+and `details.meta.artifactError` suppresses the full-output link.
+
 The normal Review help and status bars omit Hive controls and status. Do not add controls that imply optional integrations are required.
 
 ## Bounded execution

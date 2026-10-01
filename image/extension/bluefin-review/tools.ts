@@ -161,7 +161,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 					`head: ${item.headSha ? `${item.headSha.slice(0, 12)}...${item.headSha}` : "unknown"}`,
 					item.url,
 					"",
-					traceToText(mode.session.roots(), now),
+					traceToText(mode.session.roots(), now, 180),
 				);
 			} else {
 				lines.push("", "no item selected");
@@ -329,7 +329,7 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 			const now = Date.now();
 			const spans = mode.session.roots();
 			return {
-				content: text(traceToText(spans, now)),
+				content: text(traceToText(spans, now, 180)),
 				details: { has_state: spans.length > 0 },
 			};
 		},
