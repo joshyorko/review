@@ -392,8 +392,8 @@ factory_probe_calls="$(grep '^run ' "$mock_podman_log" || true)"
 [[ "$(grep -c '^run ' "$mock_podman_log" || true)" == 2 ]] ||
   fail "Factory-enabled Review started the appliance after its verifier probe failed: $factory_probe_calls"
 [[ "$factory_probe_calls" == *"--runtime=krun"* &&
-   "$factory_probe_calls" == *"--userns keep-id:uid=65532,gid=65532"* &&
-   "$factory_probe_calls" == *"--factory-verifier-probe"* ]] ||
+  "$factory_probe_calls" == *"--userns keep-id:uid=65532,gid=65532"* &&
+  "$factory_probe_calls" == *"--factory-verifier-probe"* ]] ||
   fail "Factory verifier probe did not use the packaged krun launch profile: $factory_probe_calls"
 [[ "$factory_probe_calls" == *"--network=none"* ]] ||
   fail "Factory verifier probe did not disable external network access: $factory_probe_calls"
