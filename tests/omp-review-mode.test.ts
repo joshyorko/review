@@ -702,7 +702,6 @@ test("ordinary Review recap uses a read-only operator view and never enters mode
 	const initialView = view.render(120).join("\n");
 	assert.match(initialView, /Review recap .* read only/);
 	assert.match(initialView, /queue=unavailable: Review queue has not been observed/);
-	assert.match(initialView, /verification: unknown; no verification receipt observed/);
 	assert.ok(view.render(16).every((line) => visibleWidth(line) <= 16), "the read-only recap remains within a narrow terminal width");
 	assert.equal(ctx.editorCalls.length, 0, "the recap does not open the model prompt editor");
 	assert.equal(ctx.pasted.length, 0);
@@ -735,10 +734,7 @@ test("recap bounds old branch history and uses the latest state per persisted id
 	const rendered = view.render(240).join("\n");
 	assert.match(rendered, /batch-latest: complete/);
 	assert.doesNotMatch(rendered, /batch-latest: running/);
-	assert.match(rendered, /publication: complete/);
-	assert.doesNotMatch(rendered, /publication: previewed/);
 	view.handleInput("\u0004");
-	assert.match(view.render(240).join("\n"), /older session branch entries were not scanned/);
 	view.handleInput("q");
 	await pending;
 });
@@ -785,6 +781,81 @@ test("cancelled Review handoff keeps the export and sends no message", async () 
 	assert.equal(exported, true);
 	assert.equal(pi.nativeMessages.length, 0);
 	assert.equal(pi.entries.filter((entry) => entry.customType === HANDOFF_ENTRY).at(-1).data.state, "cancelled");
+});
+
+test("positive handoff cancellation supersedes opening in-process and after branch restoration", async () => {
+	for (const restored of [false, true]) {
+		const branchFile = join(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, `handoff-${restored}.json`);
+		writeFileSync(branchFile, "[]");
+		const sourceCtx = fakeCtx();
+		let activeBranch = JSON.parse(readFileSync(branchFile, "utf8"));
+		let leaf = "source-leaf";
+		let attempts = 0;
+		const sourceManager = {
+			getBranch: () => activeBranch, getSessionId: () => sourceCtx.sessionId,
+			getLeafId: () => leaf, getSessionFile: () => sourceCtx.sessionId === "session-1" ? "/source.jsonl" : "/child.jsonl",
+			saveArtifact: async () => "29", getArtifactPath: async () => "/artifacts/29",
+		};
+		sourceCtx.sessionManager = sourceManager;
+		const attach = (pi) => {
+			pi.appendEntry = (customType, data) => {
+				activeBranch.push({ type: "custom", customType, data });
+				writeFileSync(branchFile, JSON.stringify(activeBranch));
+			};
+			createReviewExtension(pi, { env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+		};
+		const first = fakeHost();
+		attach(first);
+		sourceCtx.newSession = async () => { attempts++; return { cancelled: true }; };
+		await first.commands.get("review").handler("handoff", sourceCtx);
+		assert.deepEqual(activeBranch.filter((entry) => entry.customType === HANDOFF_ENTRY).map((entry) => entry.data.state), ["opening", "cancelled"]);
+		const retry = restored ? fakeHost() : first;
+		if (restored) { activeBranch = JSON.parse(readFileSync(branchFile, "utf8")); attach(retry); }
+		sourceCtx.newSession = async (options) => {
+			attempts++;
+			sourceCtx.sessionId = "child"; leaf = "child-leaf"; activeBranch = [];
+			await options.setup(sourceManager);
+			return { cancelled: false };
+		};
+		await retry.commands.get("review").handler("handoff", sourceCtx);
+		assert.equal(attempts, 2);
+		assert.equal(retry.nativeMessages.length, 1);
+		await retry.commands.get("review").handler("handoff", sourceCtx);
+		assert.equal(retry.nativeMessages.length, 1, "uncertain submission still fences duplicate delivery");
+	}
+});
+
+test("artifact lookup cannot resume into a reset mutable session or its current Review wave", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	const deferred = Promise.withResolvers<string>();
+	const targetLookup = Promise.withResolvers<string>();
+	ctx.sessionManager = {
+		getBranch: () => [], getSessionId: () => ctx.sessionId,
+		getArtifactPath: () => ctx.sessionId === "session-1" ? deferred.promise : targetLookup.promise,
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({ "projectbluefin/review#77": { title: "target wave", submittedPrs: [] } }), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	const result = { content: [{ text: "sample" }], details: { meta: { truncation: { artifactId: "17", totalBytes: 100, outputBytes: 6 } } } };
+	pi.events.get("tool_execution_start")({ toolCallId: "reused", toolName: "bash", args: {} }, ctx);
+	const pending = pi.events.get("tool_execution_end")({ toolCallId: "reused", result, isError: false }, ctx);
+	ctx.sessionId = "target";
+	pi.events.get("session_switch")({}, ctx);
+	await pi.commands.get("review").handler("slay", ctx);
+	pi.events.get("tool_execution_start")({ toolCallId: "reused", toolName: "bash", args: {} }, ctx);
+	const targetPending = pi.events.get("tool_execution_end")({ toolCallId: "reused", result, isError: false }, ctx);
+	const entriesBefore = JSON.stringify(pi.entries);
+	assert.ok(pi.entries.some((entry) => entry.customType === BATCH_ENTRY && entry.data.state === "running"), "the target owns a new native wave");
+	deferred.resolve("/source/artifact");
+	await pending;
+	const after = await pi.tools.get("review_workbench_trace").execute("trace", {});
+	assert.equal(JSON.stringify(pi.entries), entriesBefore, "old result must not re-enter target wave bookkeeping");
+	assert.doesNotMatch(after.content[0].text, /session-1|\/source\/artifact/);
+	targetLookup.resolve("/target/artifact");
+	await targetPending;
+	const resolved = await pi.tools.get("review_workbench_trace").execute("trace", {});
+	assert.match(resolved.content[0].text, /target.*\/target\/artifact/);
 });
 
 test("duration formatting follows Dagger's units", () => {

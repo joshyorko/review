@@ -200,3 +200,106 @@ test("native artifactError suppresses the raw output link", () => {
 	trace.endTool("error", { content: [{ type: "text", text: "capture failed" }], details: { meta: { artifactError: "disk full", truncation: { direction: "tail", truncatedBy: "bytes", totalLines: 1, totalBytes: 14, outputLines: 1, outputBytes: 14, artifactId: "44" } } } }, false, NOW + 1);
 	assert.equal(trace.roots()[0]!.children![0]!.output?.reference, undefined);
 });
+
+test("every supported credential form is masked before head and tail clipping", () => {
+	const fixtures = [
+		...["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-", "sk-", "AIza"].map((prefix) => ({ value: `${prefix}${"Q".repeat(36)}`, secret: "QQQQQ" })),
+		{ value: "https://alice:never-export-password@example.com", secret: "export" },
+		{ value: 'password="never-export-password"', secret: "export" },
+		{ value: "Authorization: Bearer never-export-password", secret: "export" },
+		{ value: "Basic never-export-password", secret: "export" },
+		{ value: `${"x".repeat(2_000)}TOKEN${"x".repeat(2_000)}=never-export-password`, secret: "export" },
+		{ value: `Bearer${" ".repeat(2_000)}never-export-password`, secret: "export" },
+	];
+	for (const { value, secret } of fixtures) {
+		const tailInput = `${value} ${"z".repeat(4_080)}`;
+		const headInput = `visible ${value}`;
+		for (const preview of [safePreview(tailInput, 4_096), safePreview(headInput, headInput.indexOf(secret) + secret.length, "head")]) {
+			assert.ok(Buffer.byteLength(preview.text) <= 4_096);
+			assert.ok(!preview.text.includes(secret), value);
+		}
+		const trace = new SessionTrace();
+		trace.startTool("credential", "bash", { command: headInput }, NOW);
+		trace.endTool("credential", tailInput, false, NOW + 1);
+		assert.ok(!traceToText(trace.roots()).includes(secret), value);
+	}
+});
+
+test("omitted native calls cannot turn failures, cancellation, or unfinished work green", () => {
+	for (const outcome of ["failure", "cancelled", "unfinished", "async", "success"]) {
+		const trace = new SessionTrace();
+		trace.startTurn(NOW);
+		for (let i = 0; i < 63; i++) {
+			trace.startTool(`retained-${i}`, "read", {}, NOW);
+			trace.endTool(`retained-${i}`, "", false, NOW + 1);
+		}
+		trace.startTool("omitted", "task", {}, NOW + 2);
+		if (outcome !== "unfinished") trace.endTool("omitted", outcome === "cancelled" ? { details: { __interrupted: true } } : outcome === "async" ? { details: { async: { state: "running", jobId: "job" } } } : "", outcome === "failure", NOW + 3);
+		trace.endTurn(NOW + 4);
+		const root = trace.roots()[0]!;
+		assert.equal(root.status, outcome === "failure" ? "failure" : outcome === "cancelled" ? "skipped" : outcome === "success" ? "success" : "running");
+		if (outcome === "unfinished" || outcome === "async") assert.equal(root.cls, "unknown");
+		for (const projection of [traceToText(trace.roots()), renderSpanTree(trace.roots(), { painter: PLAIN_PAINTER, width: 160 }).map((row) => row.text).join("\n")]) {
+			assert.match(projection, /omitted/);
+			if (outcome === "unfinished" || outcome === "async") assert.match(projection, /UNKNOWN/);
+		}
+	}
+});
+
+test("discarded-call tracking is bounded and eviction releases unfinished tool names", () => {
+	const trace = new SessionTrace();
+	trace.startTurn(NOW);
+	for (let i = 0; i < 2_000; i++) trace.startTool(`id-${i}`, "read", {}, NOW);
+	const internal = trace as unknown as {
+		omittedCalls: Map<string, unknown>; orphanTerminalToolCallIds: Set<string>;
+		toolNamesByCallId: Map<string, string>; toolsByCallId: Map<string, unknown>;
+		omittedWork: Map<unknown, unknown>;
+	};
+	assert.ok(internal.omittedCalls.size <= TRACE_LIMITS.maxTurns * 8);
+	const trackedIds = [...internal.omittedCalls.keys(), ...internal.toolNamesByCallId.keys()];
+	assert.ok(trackedIds.reduce((bytes, id) => bytes + Buffer.byteLength(id), 0) <= (48 + 63) * TRACE_LIMITS.maxIdentifierBytes);
+	for (let i = 0; i < 2_000; i++) trace.endTool(`id-${i}`, "", false, NOW + 1);
+	trace.endTurn(NOW + 2);
+	assert.equal(trace.roots()[0]!.cls, "unknown", "overflow must preserve uncertainty after losing call identity");
+	assert.ok(internal.orphanTerminalToolCallIds.size <= TRACE_LIMITS.maxTurns * 8);
+	for (let i = 0; i < 20; i++) { trace.startTurn(NOW + i); trace.startTool(`unfinished-${i}`, "read", {}, NOW + i); }
+	assert.equal(internal.toolNamesByCallId.size, internal.toolsByCallId.size);
+	assert.equal(internal.toolsByCallId.size, TRACE_LIMITS.maxTurns);
+	assert.equal(internal.omittedWork.size, 0);
+	for (const id of internal.toolNamesByCallId.keys()) assert.ok(Buffer.byteLength(id) <= TRACE_LIMITS.maxIdentifierBytes);
+});
+
+test("accumulated previews obey tool bytes and account line, byte and native eviction", () => {
+	const trace = new SessionTrace();
+	trace.startTool("chunks", "read", {}, NOW);
+	for (let i = 0; i < 3; i++) trace.updateTool("chunks", "a".repeat(4_096), NOW);
+	const chunk = trace.roots()[0]!.children![0]!;
+	assert.equal(Buffer.byteLength(chunk.logs!.join("\n")), 8_192);
+	assert.equal(chunk.output?.omittedBytes, 12_290 - 8_192);
+
+	trace.startTool("lines", "bash", {}, NOW);
+	const lines = Array.from({ length: 100 }, (_, i) => `line-${i}`).join("\n");
+	trace.updateTool("lines", "x".repeat(8_000), NOW);
+	trace.endTool("lines", { content: [{ text: lines }], details: { meta: { truncation: { totalBytes: 2_000, outputBytes: Buffer.byteLength(lines) } } } }, false, NOW + 1);
+	const multiline = trace.roots()[0]!.children![1]!;
+	assert.deepEqual(multiline.logs, lines.split("\n").slice(-12));
+	assert.equal(multiline.output?.omittedBytes, 2_000 - Buffer.byteLength(multiline.logs!.join("\n")));
+	assert.equal(multiline.output?.nativeTotalBytes, 2_000);
+
+	trace.startTool("small-chunks", "read", {}, NOW);
+	for (let i = 0; i < 100; i++) trace.updateTool("small-chunks", `line-${i}`, NOW);
+	const small = trace.roots()[0]!.children![2]!;
+	assert.equal(small.output?.omittedBytes, Buffer.byteLength(lines) - Buffer.byteLength(small.logs!.join("\n")));
+});
+
+test("omitted task descendants remain UNKNOWN and native job aliases stay bounded", () => {
+	const trace = new SessionTrace();
+	trace.startTool("task", "task", {}, NOW);
+	for (let i = 0; i < 1_000; i++) trace.updateTool("task", { details: { async: { jobId: `alias-${i}` }, progress: [{ id: "worker", status: "running" }] } }, NOW);
+	const internal = trace as unknown as { jobsByNativeId: Map<string, unknown> };
+	assert.equal(internal.jobsByNativeId.size, 1);
+	trace.endTool("task", { details: { progress: Array.from({ length: 33 }, (_, i) => ({ id: i === 0 ? "worker" : `worker-${i}`, status: i === 32 ? "failed" : "completed" })) } }, false, NOW + 1);
+	trace.endTurn(NOW + 2);
+	assert.equal(trace.roots()[0]!.cls, "unknown");
+	assert.match(traceToText(trace.roots()), /UNKNOWN/);
+});

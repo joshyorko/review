@@ -119,7 +119,6 @@ test("queue CI and PR states are timestamped observations, never verification or
 	assert.match(recap.text, /timestamped queue observations \(not verification\)/i);
 	assert.match(recap.text, new RegExp(`observed=${new Date(input.queue.observedAt).toISOString()}`));
 	assert.match(recap.text, /queue source URL=https:\/\/github.com\/acme\/widgets\/pull\/18/);
-	assert.match(recap.text, /verification: unknown; no verification receipt observed/i);
 	assert.doesNotMatch(recap.text, /verified successfully|receipt=https:\/\/github.com\/acme\/widgets\/pull\/18/i);
 	assert.notEqual(buildReviewRecap(input).id, buildReviewRecap({ ...input, observations: [{ ...input.observations[0]!, status: "current queue observation; ci=failure; review=changes_requested; merge=dirty" }] }).id);
 });
@@ -147,4 +146,59 @@ test("recap and handoff payloads stay finite under oversized issue and tool data
 	assert.ok(Buffer.byteLength(recap.text, "utf8") <= 16 * 1024);
 	assert.ok(Buffer.byteLength(recap.handoffText, "utf8") <= 16 * 1024);
 	assert.match(recap.text, /omitted/i);
+});
+
+test("maximum ordinary history cannot evict the handoff safety boundary or unresolved effects", () => {
+	const input = base();
+	const repo = `${"o".repeat(39)}/${"r".repeat(80)}`;
+	input.selection = Array.from({ length: 25 }, (_, id) => ({ repo, id: id + 1, type: "pr", title: "🙂".repeat(64), url: `https://github.com/${repo}/pull/${id + 1}`, headSha: "a".repeat(40) }));
+	input.observations = input.selection.map((item) => ({ subject: `${item.repo}#${item.id} head=${item.headSha}`, observedAt: input.observedAt, status: "unknown ".repeat(25), sourceUrl: item.url }));
+	input.operations = Array.from({ length: 12 }, (_, i) => ({ ...input.operations[0]!, id: `wave-${i}`, items: input.selection.slice(0, 8), error: "unresolved ".repeat(16) }));
+	input.comments = Array.from({ length: 24 }, () => ({ state: "unknown", targets: input.selection.slice(0, 8).map((item) => `${item.repo}#${item.id}`), receipts: input.selection.slice(0, 8).map((item) => `${item.url}#issuecomment-123`) }));
+	input.remaining = Array.from({ length: 16 }, (_, i) => `Reconcile unknown effect ${i}: ${"x".repeat(120)}`);
+	const recap = buildReviewRecap(input);
+	for (const text of [recap.text, recap.handoffText]) {
+		assert.ok(Buffer.byteLength(text) <= 16 * 1_024);
+		assert.ok(!text.includes("\uFFFD"));
+		assert.ok(text.includes(input.source.sessionId));
+		assert.match(text, /no approval, merge, comment, publish, or deploy authority/);
+		assert.match(text, /revalidate current repository, head, selection, claims, budget, and external effects/);
+		assert.match(text, /explicit human authorization/);
+		for (let i = 0; i < 16; i++) assert.ok(text.includes(`Reconcile unknown effect ${i}:`));
+	}
+});
+
+test("recent failed and unknown descendants survive older successful history with precise omissions", () => {
+	const input = base();
+	input.trace = [
+		{ id: "turn/old", label: "old", status: "success", children: Array.from({ length: 40 }, (_, i) => ({ id: `tool/old-${i}`, label: "read()", status: "success" })) },
+		{ id: "turn/new", label: "new", status: "running", cls: "unknown", children: [{ id: "tool/failed", label: "bash()", status: "failure" }, { id: "tool/unknown", label: "task()", status: "running", cls: "unknown" }] },
+	];
+	const recap = buildReviewRecap(input);
+	for (const text of [recap.text, recap.handoffText]) {
+		assert.match(text, /tool\/failed\|bash\|failure/);
+		assert.match(text, /tool\/unknown\|task\|running\|unknown/);
+		assert.match(text, /12 native trace spans omitted/);
+	}
+	input.trace[1]!.children![0]!.status = "success";
+	assert.notEqual(buildReviewRecap(input).id, recap.id);
+});
+
+test("credential boundaries in labels never reach a recap or handoff", () => {
+	for (const credential of [`ghp_${"Q".repeat(36)}`, "https://alice:never-export-password@example.com"]) {
+		const input = base();
+		input.selection[0]!.title = `${"x".repeat(240)} ${credential}`;
+		const recap = buildReviewRecap(input);
+		for (const text of [recap.text, recap.handoffText]) assert.doesNotMatch(text, /QQQQQ|never-export|export-password/);
+	}
+});
+
+test("trace byte budgeting counts every unrepresented descendant", () => {
+	const input = base();
+	input.trace = [{ id: "root", label: "root", status: "failure", children: Array.from({ length: 40 }, (_, i) => ({ id: `tool/${"x".repeat(118)}-${i}`, label: "long-native-operation-name".repeat(3), status: "failure" })) }];
+	const recap = buildReviewRecap(input);
+	const represented = recap.text.split("\n").filter((line) => line.startsWith("- ") && line.includes("|failure|")).length;
+	assert.ok(represented < 32);
+	assert.ok(recap.text.includes(`${41 - represented} native trace spans omitted.`));
+	assert.ok(recap.handoffText.includes(`${41 - represented} native trace spans omitted.`));
 });

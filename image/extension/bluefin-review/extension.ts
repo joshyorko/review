@@ -598,6 +598,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
 	let traceSessionId: string | undefined;
+	let traceGeneration = 0;
 	const traceContext = (ctx?: CtxLike): CtxLike | undefined => {
 		const candidate = ctx ?? activeCtx;
 		if (!candidate) return undefined;
@@ -607,6 +608,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return candidate;
 	};
 	const resetTrace = (ctx: CtxLike): void => {
+		traceGeneration++;
 		mode.session.clear();
 		traceSessionId = ctx.sessionManager?.getSessionId?.();
 	};
@@ -1467,7 +1469,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (!sourceSessionId || !sourceBranchId || !sourceSessionFile || (traceSessionId && traceSessionId !== sourceSessionId)) return "Source session or branch is stale; refresh Review before handoff";
 		const recap = buildRecap(ctx);
 		const reviewStateAtStart = handoffReviewState();
-		const prior = uncertainHandoffIds.has(recap.id) || (sessionManager.getBranch() ?? []).some((entry) => entry.type === "custom" && entry.customType === HANDOFF_ENTRY && isRecord(entry.data) && entry.data.state !== "cancelled" && (entry.data.recapId === recap.id || entry.data.state === "opening" || entry.data.state === "submission-uncertain" || entry.data.state === "transition-uncertain"));
+		const latestAttempts = new Map<string, Record<string, unknown>>();
+		for (const entry of sessionManager.getBranch() ?? []) {
+			if (entry.type !== "custom" || entry.customType !== HANDOFF_ENTRY || !isRecord(entry.data) || typeof entry.data.recapId !== "string") continue;
+			latestAttempts.set(JSON.stringify([entry.data.sourceSessionId, entry.data.sourceBranchId, entry.data.recapId]), entry.data);
+		}
+		const prior = uncertainHandoffIds.has(recap.id) || [...latestAttempts.values()].some((attempt) => attempt.state !== "cancelled" && (attempt.recapId === recap.id || attempt.state === "opening" || attempt.state === "submission-uncertain" || attempt.state === "transition-uncertain"));
 		if (prior) return `Handoff ${recap.id} already has a submission attempt; inspect the fresh session before retrying`;
 		const artifactId = await sessionManager.saveArtifact(recap.handoffText, "review-handoff");
 		if (!artifactId) return "Could not create durable handoff export; no new session or message was created";
@@ -2531,6 +2538,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.on("session_branch", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
 	pi.on("session_tree", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
 	pi.on("session_shutdown", (_event, ctx) => {
+		traceGeneration++;
 		mode.session.clear();
 		traceSessionId = undefined;
 		activeCtx = ctx;
@@ -2631,20 +2639,23 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const { toolCallId, result, isError } = event as { toolCallId: string; result: unknown; isError: boolean };
 		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
 		if (!ctxToUse) return;
+		const generation = traceGeneration;
+		const sourceSessionId = ctxToUse.sessionManager?.getSessionId?.();
 		mode.session.endTool(toolCallId, result, isError === true, Date.now());
-		const artifactId = hasNativeArtifactError(result) ? undefined : nativeArtifactId(result);
-		if (artifactId) {
-			const sourceSessionId = ctxToUse.sessionManager?.getSessionId?.() ?? "unknown-session";
-			let path: string | null = null;
-			try { path = await ctxToUse.sessionManager?.getArtifactPath?.(artifactId) ?? null; } catch { path = null; }
-			mode.session.setArtifactReference(toolCallId, sourceSessionId, path);
-		}
 		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
 		rememberToolInvocation(ctxToUse, toolCallId);
 		rememberTaskResult(ctxToUse, toolCallId, result);
 		rememberWaveEvidence(ctxToUse);
 		syncBatchProgress(ctxToUse);
 		repaint();
+		const artifactId = hasNativeArtifactError(result) ? undefined : nativeArtifactId(result);
+		if (artifactId) {
+			let path: string | null = null;
+			try { path = await ctxToUse.sessionManager?.getArtifactPath?.(artifactId) ?? null; } catch { path = null; }
+			if (generation !== traceGeneration || ctxToUse.sessionManager?.getSessionId?.() !== sourceSessionId || traceSessionId !== sourceSessionId) return;
+			mode.session.setArtifactReference(toolCallId, sourceSessionId ?? "unknown-session", path);
+			repaint();
+		}
 	});
 
 	// ---- keyboard ------------------------------------------------------------

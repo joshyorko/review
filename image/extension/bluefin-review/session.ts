@@ -13,7 +13,7 @@ import type { Span, TraceClass } from "./trace.ts";
 import type { NativeOutputReference, OutputRetention } from "./trace.ts";
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { boundedUtf8Head, safePreview } from "./safe-output.ts";
+import { boundedUtf8Tail, safePreview } from "./safe-output.ts";
 
 export const TRACE_LIMITS = Object.freeze({
 	maxTurns: 6,
@@ -123,7 +123,7 @@ export function describeToolCall(toolName: string, args: unknown): string {
 						? `#${record.pull_request}`
 							: undefined;
 	const safeName = safePreview(toolName, 64, "head").text || "tool";
-	const candidate = first === undefined ? undefined : boundedUtf8Head(first, TRACE_LIMITS.maxLabelBytes * 2).text;
+	const candidate = first === undefined ? undefined : safePreview(first, TRACE_LIMITS.maxLabelBytes * 2, "head").text;
 	const lineEnd = candidate?.indexOf("\n") ?? -1;
 	const firstLine = candidate === undefined ? undefined : candidate.slice(0, lineEnd < 0 ? candidate.length : lineEnd);
 	const safeArgument = firstLine === undefined ? undefined : safePreview(firstLine, TRACE_LIMITS.maxLabelBytes, "head").text;
@@ -211,7 +211,7 @@ function countSpans(root: Span): number {
 }
 
 function spanOutputBytes(span: Span): number {
-	return (span.logs ?? []).reduce((total, line) => total + Buffer.byteLength(line, "utf8"), 0);
+	return (span.logs ?? []).reduce((total, line) => total + Buffer.byteLength(line, "utf8"), Math.max(0, (span.logs?.length ?? 0) - 1));
 }
 
 function spanRetainedBytes(span: Span): number {
@@ -283,6 +283,8 @@ export class SessionTrace {
 	private taskSpansByCallId = new Map<string, Span>();
 	private terminalToolCallIds = new Map<string, Span>();
 	private orphanTerminalToolCallIds = new Set<string>();
+	private omittedCalls = new Map<string, Span>();
+	private omittedWork = new Map<Span, { pending: number; failed: boolean; cancelled: boolean; unknown: boolean }>();
 	private jobsByAgentId = new Map<string, Span>();
 	private jobsByNativeId = new Map<string, Span>();
 	private endedTurns = new Set<Span>();
@@ -316,8 +318,9 @@ export class SessionTrace {
 		for (const span of spans) { outputBytes += spanOutputBytes(span); retainedBytes += spanRetainedBytes(span); }
 		for (const span of spans) {
 			while ((span.logs?.length ?? 0) > 0 && (outputBytes > TRACE_LIMITS.maxTraceOutputBytes || retainedBytes > TRACE_LIMITS.maxTraceBytes)) {
-				const first = span.logs!.shift()!;
-				const bytes = Buffer.byteLength(first, "utf8");
+				const before = spanOutputBytes(span);
+				span.logs!.shift();
+				const bytes = before - spanOutputBytes(span);
 				outputBytes -= bytes; retainedBytes -= bytes;
 				addOmittedBytes(span, bytes);
 			}
@@ -338,31 +341,56 @@ export class SessionTrace {
 			const dropped = this.turns.shift();
 			this.endedTurns.delete(dropped!);
 			this.turnStopReasons.delete(dropped!);
+			this.omittedWork.delete(dropped!);
+			for (const [id, owner] of this.omittedCalls) if (owner === dropped) this.omittedCalls.delete(id);
 			const contains = (root: Span | undefined, target: Span): boolean =>
 				root === target || (root?.children ?? []).some((child) => contains(child, target));
-			for (const [id, span] of this.toolsByCallId) if (contains(dropped, span)) this.toolsByCallId.delete(id);
+			for (const [id, span] of this.toolsByCallId) if (contains(dropped, span)) {
+				this.toolsByCallId.delete(id);
+				this.toolNamesByCallId.delete(id);
+			}
 			for (const [id, span] of this.taskSpansByCallId) if (contains(dropped, span)) this.taskSpansByCallId.delete(id);
 			for (const [id, span] of this.terminalToolCallIds) if (contains(dropped, span)) this.terminalToolCallIds.delete(id);
 			for (const [id, span] of this.jobsByAgentId) if (contains(dropped, span)) this.jobsByAgentId.delete(id);
 			for (const [id, span] of this.jobsByNativeId) if (contains(dropped, span)) this.jobsByNativeId.delete(id);
+			for (const owner of this.omittedWork.keys()) if (contains(dropped, owner)) this.omittedWork.delete(owner);
 		}
+	}
+
+	private rememberOrphan(id: string): void {
+		this.orphanTerminalToolCallIds.add(id);
+		if (this.orphanTerminalToolCallIds.size > MAX_ORPHAN_TERMINAL_CALL_IDS) {
+			this.orphanTerminalToolCallIds.delete(this.orphanTerminalToolCallIds.values().next().value!);
+		}
+	}
+
+	private workFor(owner: Span) {
+		let work = this.omittedWork.get(owner);
+		if (!work) {
+			work = { pending: 0, failed: false, cancelled: false, unknown: false };
+			this.omittedWork.set(owner, work);
+		}
+		return work;
 	}
 
 	private hasUnsettled(span: Span): boolean {
 		if (span.status === "running" || span.status === "pending") return true;
+		const omitted = this.omittedWork.get(span);
+		if (omitted && (omitted.pending > 0 || omitted.unknown)) return true;
 		return (span.children ?? []).some((child) => this.hasUnsettled(child));
 	}
 
 	private reconcileTurn(turn: Span, now: number): void {
 		if (!this.endedTurns.has(turn)) return;
-		if ((turn.children ?? []).some((child) => this.hasUnsettled(child))) {
+		const omitted = this.omittedWork.get(turn);
+		if ((omitted && (omitted.pending > 0 || omitted.unknown)) || (turn.children ?? []).some((child) => this.hasUnsettled(child))) {
 			turn.status = "running";
 			turn.cls = "unknown";
 			turn.endedAt = undefined;
 			return;
 		}
-		const failed = (turn.children ?? []).some((child) => this.hasFailure(child));
-		const cancelled = !failed && (turn.children ?? []).some((child) => this.hasCancellation(child));
+		const failed = omitted?.failed || (turn.children ?? []).some((child) => this.hasFailure(child));
+		const cancelled = !failed && (omitted?.cancelled || (turn.children ?? []).some((child) => this.hasCancellation(child)));
 		const stopReason = this.turnStopReasons.get(turn);
 		turn.status = failed || stopReason === "error" ? "failure" : cancelled || stopReason === "aborted" ? "skipped" : "success";
 		turn.cls = turn.status === "failure" ? (failed ? "tool" : undefined) : turn.status === "skipped" ? "cancelled" : undefined;
@@ -370,17 +398,18 @@ export class SessionTrace {
 	}
 
 	private hasFailure(span: Span): boolean {
-		return span.status === "failure" || (span.children ?? []).some((child) => this.hasFailure(child));
+		return span.status === "failure" || this.omittedWork.get(span)?.failed === true || (span.children ?? []).some((child) => this.hasFailure(child));
 	}
 
 	private hasCancellation(span: Span): boolean {
-		return span.status === "skipped" || (span.children ?? []).some((child) => this.hasCancellation(child));
+		return span.status === "skipped" || this.omittedWork.get(span)?.cancelled === true || (span.children ?? []).some((child) => this.hasCancellation(child));
 	}
 
 	private reconcileEndedTurns(now: number): void {
 		for (const span of this.taskSpansByCallId.values()) {
 			if ((span.children?.length ?? 0) === 0) continue;
-			if (span.children!.some((child) => this.hasUnsettled(child))) {
+			const omitted = this.omittedWork.get(span);
+			if ((omitted && (omitted.pending > 0 || omitted.unknown)) || span.children!.some((child) => this.hasUnsettled(child))) {
 				span.status = "running";
 				span.cls = "unknown";
 				span.endedAt = undefined;
@@ -416,7 +445,7 @@ export class SessionTrace {
 	startTool(toolCallId: string, toolName: string, args: unknown, now: number): void {
 		toolCallId = compactIdentifier(toolCallId);
 		toolName = safePreview(toolName, 64, "head").text || "tool";
-		if (this.toolsByCallId.has(toolCallId) || this.terminalToolCallIds.has(toolCallId) || this.orphanTerminalToolCallIds.has(toolCallId)) return;
+		if (this.toolsByCallId.has(toolCallId) || this.terminalToolCallIds.has(toolCallId) || this.orphanTerminalToolCallIds.has(toolCallId) || this.omittedCalls.has(toolCallId)) return;
 		let turn = this.current();
 		if (!turn || turn.status !== "running") {
 			this.startTurn(now);
@@ -432,7 +461,13 @@ export class SessionTrace {
 		};
 		if (countSpans(turn) >= TRACE_LIMITS.maxSpansPerTurn || this.stats().spanCount >= TRACE_LIMITS.maxRetainedSpans) {
 			addOmittedSpans(turn, 1);
-			this.orphanTerminalToolCallIds.add(toolCallId);
+			this.workFor(turn).pending++;
+			this.omittedCalls.set(toolCallId, turn);
+			if (this.omittedCalls.size > MAX_ORPHAN_TERMINAL_CALL_IDS) {
+				const oldest = this.omittedCalls.entries().next().value!;
+				this.workFor(oldest[1]).unknown = true;
+				this.omittedCalls.delete(oldest[0]);
+			}
 			return;
 		}
 		turn.children?.push(span);
@@ -442,6 +477,10 @@ export class SessionTrace {
 
 	private updateTaskDetails(span: Span, details: NativeTaskDetails, now: number): void {
 		const progress: NativeTaskProgress[] = [];
+		if ((details.progress?.length ?? 0) > TRACE_LIMITS.maxJobsPerTool) {
+			addOmittedSpans(span, details.progress!.length - TRACE_LIMITS.maxJobsPerTool);
+			this.workFor(span).unknown = true;
+		}
 		for (const value of (details.progress ?? []).slice(0, TRACE_LIMITS.maxJobsPerTool)) {
 			if (!value || typeof value !== "object") continue;
 			progress.push({
@@ -456,7 +495,7 @@ export class SessionTrace {
 			const nativeAgentId = compactIdentifier(row.id);
 			let job = this.jobsByAgentId.get(nativeAgentId);
 			if (!job) {
-				if ((span.children?.length ?? 0) >= TRACE_LIMITS.maxJobsPerTool || this.stats().spanCount >= TRACE_LIMITS.maxRetainedSpans || countSpans(this.current()!) >= TRACE_LIMITS.maxSpansPerTurn) { addOmittedSpans(span, 1); continue; }
+				if ((span.children?.length ?? 0) >= TRACE_LIMITS.maxJobsPerTool || this.stats().spanCount >= TRACE_LIMITS.maxRetainedSpans || countSpans(this.current()!) >= TRACE_LIMITS.maxSpansPerTurn) { addOmittedSpans(span, 1); this.workFor(span).unknown = true; continue; }
 				const safeId = compactIdentifier(row.id);
 				job = { id: `${span.id}/job/${safeId}`, label: safePreview(`task ${row.id}`, TRACE_LIMITS.maxLabelBytes, "head").text, status: "running", startedAt: now };
 				span.children ??= [];
@@ -464,14 +503,18 @@ export class SessionTrace {
 				this.jobsByAgentId.set(nativeAgentId, job);
 			}
 			const nativeId = index === 0 ? primaryJobId : undefined;
-			if (nativeId) this.jobsByNativeId.set(compactIdentifier(nativeId), job);
+			if (nativeId) {
+				const safeNativeId = compactIdentifier(nativeId);
+				for (const [id, owner] of this.jobsByNativeId) if (owner === job && id !== safeNativeId) this.jobsByNativeId.delete(id);
+				this.jobsByNativeId.set(safeNativeId, job);
+			}
 			const status = nativeTaskStatus(row.status);
 			if (status) this.applyJobStatus(job, status, now);
 		}
 		if (progress.length === 0 && primaryJobId && details.async?.state !== undefined) {
 			let job = this.jobsByNativeId.get(compactIdentifier(primaryJobId));
 			if (!job) {
-				if ((span.children?.length ?? 0) >= TRACE_LIMITS.maxJobsPerTool || this.stats().spanCount >= TRACE_LIMITS.maxRetainedSpans || countSpans(this.current()!) >= TRACE_LIMITS.maxSpansPerTurn) { addOmittedSpans(span, 1); return; }
+				if ((span.children?.length ?? 0) >= TRACE_LIMITS.maxJobsPerTool || this.stats().spanCount >= TRACE_LIMITS.maxRetainedSpans || countSpans(this.current()!) >= TRACE_LIMITS.maxSpansPerTurn) { addOmittedSpans(span, 1); this.workFor(span).unknown = true; return; }
 				job = { id: `${span.id}/job/${compactIdentifier(primaryJobId)}`, label: safePreview(`task ${primaryJobId}`, TRACE_LIMITS.maxLabelBytes, "head").text, status: "running", startedAt: now };
 				span.children ??= [];
 				span.children.push(job);
@@ -509,14 +552,23 @@ export class SessionTrace {
 
 	endTool(toolCallId: string, result: unknown, isError: boolean, now: number): void {
 		toolCallId = compactIdentifier(toolCallId);
+		const owner = this.omittedCalls.get(toolCallId);
+		if (owner) {
+			const work = this.workFor(owner);
+			work.pending--;
+			work.cancelled ||= nativeCancellation(result);
+			work.failed ||= isError && !nativeCancellation(result);
+			const details = nativeTaskDetails(result);
+			if (details && (details.async || details.progress?.length)) work.unknown = true;
+			this.omittedCalls.delete(toolCallId);
+			this.rememberOrphan(toolCallId);
+			this.reconcileEndedTurns(now);
+			return;
+		}
 		if (this.terminalToolCallIds.has(toolCallId) || this.orphanTerminalToolCallIds.has(toolCallId)) return;
 		const span = this.toolsByCallId.get(toolCallId);
 		if (!span) {
-			this.orphanTerminalToolCallIds.add(toolCallId);
-			if (this.orphanTerminalToolCallIds.size > MAX_ORPHAN_TERMINAL_CALL_IDS) {
-				const oldest = this.orphanTerminalToolCallIds.values().next().value;
-				if (typeof oldest === "string") this.orphanTerminalToolCallIds.delete(oldest);
-			}
+			this.rememberOrphan(toolCallId);
 			return;
 		}
 		const details = nativeTaskDetails(result);
@@ -546,20 +598,22 @@ export class SessionTrace {
 	}
 
 	private applyOutput(span: Span, extracted: ExtractedText, replace: boolean, terminal: boolean, source: unknown): void {
-		const lines = extracted.text ? extracted.text.split("\n").slice(-MAX_LOG_LINES) : [];
-		if (replace) span.logs = lines;
-		else span.logs = [...(span.logs ?? []), ...lines].slice(-MAX_LOG_LINES);
+		const accumulated = replace ? extracted.text : [...(span.logs ?? []), ...(extracted.text ? [extracted.text] : [])].join("\n");
+		const lines = accumulated ? accumulated.split("\n").slice(-MAX_LOG_LINES).join("\n") : "";
+		const bounded = boundedUtf8Tail(lines, TRACE_LIMITS.maxToolPreviewBytes);
+		span.logs = bounded.text ? bounded.text.split("\n") : [];
+		const locallyOmitted = Buffer.byteLength(accumulated, "utf8") - Buffer.byteLength(bounded.text, "utf8");
 		if (replace) {
 			const previous = span.output;
-			span.output = { omittedBytes: extracted.omittedBytes, omittedSpans: previous?.omittedSpans ?? 0, omittedUnknown: extracted.omittedUnknown || (previous?.omittedUnknown ?? false), ...(previous?.omittedJobs === undefined ? {} : { omittedJobs: previous.omittedJobs }), ...(previous?.nativeTotalBytes === undefined ? {} : { nativeTotalBytes: previous.nativeTotalBytes }), ...(previous?.nativeArtifactElidedBytes === undefined ? {} : { nativeArtifactElidedBytes: previous.nativeArtifactElidedBytes }), ...(previous?.reference ? { reference: previous.reference } : {}) };
-		} else addOmittedBytes(span, extracted.omittedBytes, extracted.omittedUnknown);
+			span.output = { omittedBytes: extracted.omittedBytes + locallyOmitted, omittedSpans: previous?.omittedSpans ?? 0, omittedUnknown: extracted.omittedUnknown || (previous?.omittedUnknown ?? false), ...(previous?.omittedJobs === undefined ? {} : { omittedJobs: previous.omittedJobs }), ...(previous?.nativeTotalBytes === undefined ? {} : { nativeTotalBytes: previous.nativeTotalBytes }), ...(previous?.nativeArtifactElidedBytes === undefined ? {} : { nativeArtifactElidedBytes: previous.nativeArtifactElidedBytes }), ...(previous?.reference ? { reference: previous.reference } : {}) };
+		} else addOmittedBytes(span, extracted.omittedBytes + locallyOmitted, extracted.omittedUnknown);
 		const truncation = terminal ? nativeTruncation(source) : undefined;
 		if (truncation) {
 			const previous = span.output;
 			const nativeTotalBytes = typeof truncation.totalBytes === "number" && Number.isFinite(truncation.totalBytes) ? truncation.totalBytes : undefined;
 			const artifactId = typeof truncation.artifactId === "string" && /^\d{1,128}$/.test(truncation.artifactId) ? truncation.artifactId : undefined;
 			span.output = {
-				omittedBytes: Math.max(previous?.omittedBytes ?? 0, typeof truncation.elidedBytes === "number" ? truncation.elidedBytes : (nativeTotalBytes === undefined ? 0 : Math.max(0, nativeTotalBytes - (Number(truncation.outputBytes) || Buffer.byteLength(extracted.text, "utf8"))))),
+				omittedBytes: (previous?.omittedBytes ?? 0) + Math.max(0, typeof truncation.elidedBytes === "number" ? truncation.elidedBytes : (nativeTotalBytes === undefined ? 0 : nativeTotalBytes - (typeof truncation.outputBytes === "number" ? truncation.outputBytes : Buffer.byteLength(extracted.text, "utf8")))),
 				omittedSpans: previous?.omittedSpans ?? 0,
 				omittedUnknown: previous?.omittedUnknown ?? false,
 				...(previous?.omittedJobs === undefined ? {} : { omittedJobs: previous.omittedJobs }),
@@ -634,6 +688,8 @@ export class SessionTrace {
 		this.taskSpansByCallId.clear();
 		this.terminalToolCallIds.clear();
 		this.orphanTerminalToolCallIds.clear();
+		this.omittedCalls.clear();
+		this.omittedWork.clear();
 		this.jobsByAgentId.clear();
 		this.jobsByNativeId.clear();
 		this.endedTurns.clear();
