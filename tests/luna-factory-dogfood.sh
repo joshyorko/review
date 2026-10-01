@@ -208,6 +208,7 @@ sif)
   [[ -n "$sif" ]] || blocked "generated SIF path unavailable"
   command -v apptainer >/dev/null 2>&1 || blocked "Apptainer unavailable"
   [[ -e "$sif" ]] || blocked "generated SIF missing"
+  "$root/bin/bluefin" factory-verifier-probe apptainer "$sif" >/dev/null
   if [[ "$LUNA_PROBE_ROUTE" == selected-batch ]]; then
     export LUNA_FACTORY_PACKAGED_BATCH_PROBE=1 LUNA_FACTORY_BATCH_PROBE_PHASE=seed
     run_command "$seed_terminal_file" apptainer exec --containall --home "$home:/home/bluefin" --env XDG_CONFIG_HOME=/home/bluefin/.config --env XDG_STATE_HOME=/home/bluefin/.local/state --env LUNA_FACTORY_ENABLED=1 --env LUNA_FACTORY_PACKAGED_BATCH_PROBE=1 --env LUNA_FACTORY_BATCH_PROBE_PHASE=seed --env LUNA_FACTORY_PROVIDER_URL=http://127.0.0.1:43129 --env LUNA_PROBE_PORT=43129 --env LUNA_PROBE_ROUTE="$LUNA_PROBE_ROUTE" --env LUNA_FACTORY_HEAD_SHA="$head_sha" --bind "$home:/home/bluefin:rw" --bind "$state:/home/bluefin/.local/state:rw" "$sif" /usr/bin/omp --mode rpc-ui --no-skills --no-rules --no-pty --config /home/bluefin/.config/omp/omp.yml --extension /usr/share/bluefin/review/luna-factory

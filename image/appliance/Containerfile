@@ -272,6 +272,7 @@ RUN set -eu; \
     test -e /out/usr/share/bluefin/review/extension/index.ts; \
     test -d /out/usr/share/bluefin/review/extension/agents; \
     test -e /out/usr/share/bluefin/review/luna-factory/index.ts; \
+    test -e /out/usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts; \
     test -d /out/usr/share/bluefin/review/luna-factory/agents; \
     test -L /out/usr/share/bluefin/review/bluefin-review; \
     test -e /out/usr/share/bluefin/review/bluefin-review/github.ts

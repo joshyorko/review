@@ -26,6 +26,20 @@ os.execv("/usr/bin/bash", ["/usr/bin/bash", "/usr/bin/bluefin-review-appliance",
 ' "$@"
 fi
 
+if [[ "${1:-}" == --factory-verifier-probe ]]; then
+  [[ $# -eq 1 ]] || {
+    echo "Review appliance: --factory-verifier-probe accepts no additional arguments." >&2
+    exit 2
+  }
+  exec /usr/bin/bun /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts
+fi
+
+if [[ "${LUNA_FACTORY_ENABLED:-0}" == 1 ]] &&
+  ! /usr/bin/bun /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts >/dev/null; then
+  echo "Review appliance: Factory verifier capability unavailable; refusing opt-in startup before work selection." >&2
+  exit 1
+fi
+
 prepare_factory_state_dir() {
   local path="$1" expected_uid expected_gid owner group
   expected_uid="$(id -u)"
