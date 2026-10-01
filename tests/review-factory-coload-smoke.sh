@@ -37,6 +37,7 @@ run_case() {
     --env XDG_CONFIG_HOME=/home/bluefin/.config
     --env XDG_STATE_HOME=/home/bluefin/.local/state
     --env XDG_CACHE_HOME=/home/bluefin/.cache
+    --env REVIEW_DEFAULT_SCOPE=example/repo
     --env REVIEW_MODE=review
     --env GH_TOKEN=
     --env GITHUB_TOKEN=

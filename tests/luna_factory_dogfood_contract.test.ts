@@ -59,6 +59,43 @@ test("workflow preserves the bounded exact-head no-publish contract", () => {
   assert.equal(existsSync(join(root, "tests/luna_factory_dogfood_contract.py")), false);
 });
 
+test("packaged verifier probe uses the production preflight and harmless sandbox test", () => {
+  const probe = read("image/extension/luna-factory/omp/verifier-probe.ts");
+  assertIncludes(probe, [
+    'from "./batch-native.ts"',
+    "sandboxPreflight",
+    "sandboxTest",
+    '"true"',
+    '"available"',
+    "uidMap",
+    "maxUserNamespaces",
+    "bwrapVersion",
+  ]);
+  const entrypoint = read("image/appliance/entrypoint.sh");
+  assert.match(entrypoint, /--factory-verifier-probe/);
+  const optedInProbe = entrypoint.indexOf('[[ "${LUNA_FACTORY_ENABLED:-0}" == 1 ]]');
+  const persistentSetup = entrypoint.indexOf("prepare_factory_state_dir() {");
+  assert.ok(optedInProbe >= 0 && optedInProbe < persistentSetup, "verifier qualifies before persistent state setup");
+});
+
+test("OCI Factory dogfood keeps generic qualification separate from krun verifier readiness", () => {
+  const workflow = read(".github/workflows/luna-factory-dogfood.yml");
+  assertIncludes(workflow, [
+    "factory-verifier.json",
+    "bin/bluefin factory-verifier-probe krun",
+    "Factory verifier: available on the packaged podman+krun+keep-id profile.",
+    "Factory verifier: BLOCKED (host prerequisites unavailable).",
+  ]);
+  assert.match(workflow, /Factory verifier qualification failed on a runnable krun profile/);
+  assert.match(workflow, /exit 1/);
+  assert.match(workflow, /if: steps\.capabilities\.outputs\.oci == 'available' && steps\.capabilities\.outputs\.userNamespace == 'available'/);
+  assert.match(workflow, /Record blocked generic OCI selected-batch dogfood/);
+  assertIncludes(workflow, [
+    "Run packaged Review Factory co-load smoke under generic OCI",
+    "Record blocked generic OCI Review Factory co-load smoke",
+  ]);
+});
+
 test("workflow pins the official Apptainer v2 action by immutable digest", () => {
   const workflow = read(".github/workflows/luna-factory-dogfood.yml");
   const step = workflow.match(/- name: Install Apptainer\s+uses: ([^\n]+)/);
@@ -135,10 +172,17 @@ test("harness preserves the local-provider and runtime-boundary contract", () =>
   assert.doesNotMatch(harness, /--no-session/);
 });
 
+test("Review Factory co-load smoke supplies an explicit Review scope", () => {
+  const smoke = read("tests/review-factory-coload-smoke.sh");
+  assert.ok(smoke.includes("--env REVIEW_DEFAULT_SCOPE=example/repo"));
+});
+
 test("SIF harness uses Apptainer directly and does not claim krun", () => {
   const harness = read("tests/luna-factory-dogfood.sh");
-  assertIncludes(harness, ["BLUEFIN_REVIEW_FALLBACK_SIF", "apptainer exec", '--home "$home:/home/bluefin"', "--bind"]);
-  assert.doesNotMatch(harness, /krun/);
+  const sifBranch = harness.split("\nsif)\n")[1]?.split("\nesac")[0];
+  assert.ok(sifBranch, "SIF harness branch");
+  assertIncludes(sifBranch, ["BLUEFIN_REVIEW_FALLBACK_SIF", "factory-verifier-probe apptainer", "apptainer exec", '--home "$home:/home/bluefin"', "--bind"]);
+  assert.doesNotMatch(sifBranch, /krun/);
 });
 
 test("capability probe records the independently classified host boundaries", () => {
