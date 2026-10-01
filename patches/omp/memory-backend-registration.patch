@@ -626,7 +626,7 @@ index d5f0649093..1e131b3bca 100644
  			const memoryInstructions = memoryBackend
  				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
  				: undefined;
-@@ -4560,6 +4569,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -4560,5 +4569,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			advisorMcpResources: cursorMcpResources,
  			titleSystemPrompt: options.titleSystemPrompt,
  		});
@@ -634,7 +634,6 @@ index d5f0649093..1e131b3bca 100644
 +		extensionsResult.runtime.pendingMemoryBackendRegistrations = [];
  		hasSession = true;
  		credentialNoticeSession = session;
- 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
 @@ -5001,7 +5012,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  		}
  
