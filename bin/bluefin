@@ -26,6 +26,76 @@ fail() {
   exit 1
 }
 
+factory_verifier_probe() (
+  set -euo pipefail
+  local profile="${1:?runtime profile required}" image="${2:?image required}"
+  local selected_engine="$engine" scratch output diagnostics status
+  command -v timeout >/dev/null 2>&1 || fail "timeout is required to qualify the packaged Factory verifier"
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/review-factory-verifier.XXXXXXXX")" || fail "could not prepare an isolated Factory verifier probe directory"
+  chmod 0700 "$scratch"
+  trap 'rm -rf -- "$scratch"' EXIT
+
+  case "$profile" in
+    krun)
+      command -v "$selected_engine" >/dev/null 2>&1 || fail "${selected_engine} is unavailable for the krun verifier probe"
+      timeout --foreground --signal=TERM --kill-after=2s 15s "$selected_engine" image exists "$image" >/dev/null 2>&1 ||
+        fail "Review image is not available locally for the krun verifier probe: ${image}"
+      timeout --foreground --signal=TERM --kill-after=2s 15s "$selected_engine" run --rm --pull=never \
+        --network=none --runtime=krun --userns keep-id:uid=65532,gid=65532 --entrypoint /usr/bin/test \
+        "$image" -r /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts ||
+        fail "Review image lacks the packaged Factory verifier probe: ${image}"
+      if timeout --foreground --signal=TERM --kill-after=5s 45s "$selected_engine" run --rm --pull=never \
+        --network=none --runtime=krun --userns keep-id:uid=65532,gid=65532 --volume "$scratch:/tmp:rw,z" \
+        "$image" --factory-verifier-probe >"$scratch/result.stdout" 2>"$scratch/result.stderr"; then
+        status=0
+      else
+        status=$?
+      fi
+      ;;
+    apptainer)
+      command -v apptainer >/dev/null 2>&1 || fail "Apptainer is unavailable for the Factory verifier probe"
+      mkdir -m 0700 "$scratch/home" "$scratch/tmp"
+      if ! timeout --foreground --signal=TERM --kill-after=5s 180s env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
+        apptainer exec --containall --cleanenv --home "$scratch/home:/home/bluefin" \
+        --bind "$scratch/tmp:/tmp" "$image" /usr/bin/test -r \
+        /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts; then
+        fail "Review image lacks the packaged Factory verifier probe or Apptainer could not prepare it: ${image}"
+      fi
+      if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
+        timeout --foreground --signal=TERM --kill-after=5s 45s apptainer run --containall --no-eval \
+        --home "$scratch/home:/home/bluefin" --bind "$scratch/tmp:/tmp" "$image" \
+        --factory-verifier-probe >"$scratch/result.stdout" 2>"$scratch/result.stderr"; then
+        status=0
+      else
+        status=$?
+      fi
+      ;;
+    *) fail "unsupported Factory verifier runtime profile: ${profile}" ;;
+  esac
+
+  output="$(cat "$scratch/result.stdout")"
+  diagnostics="$(cat "$scratch/result.stderr")"
+  if ((status != 0)); then
+    echo "Factory verifier capability unavailable in ${profile} profile (exit ${status}): ${diagnostics}${output}" >&2
+    exit "$status"
+  fi
+  if [[ "$output" == *$'\n'* ]] ||
+    [[ "$output" != '{"kind":"review-factory-verifier","status":"available"'* ]]; then
+    echo "Factory verifier profile returned no valid packaged success receipt: ${output}" >&2
+    exit 1
+  fi
+  printf '%s\n' "$output"
+)
+
+factory_verifier_ready() {
+  [[ "${LUNA_FACTORY_ENABLED:-0}" == 1 ]] || return 0
+  local profile="$1" image="$2" output
+  if ! output="$(factory_verifier_probe "$profile" "$image" 2>&1)"; then
+    output="${output#ERROR: }"
+    fail "${output}; refusing Factory-enabled startup before work selection"
+  fi
+}
+
 kvm_runtime_ready() {
   local device="${REVIEW_TEST_KVM_DEVICE:-/dev/kvm}"
   if ! command -v "$engine" >/dev/null 2>&1; then KVM_FAILURE="Podman is unavailable"; return 1; fi
@@ -461,6 +531,7 @@ run_review() {
     [[ -x "$selected_sif" ]] || fail "review SIF is missing or not executable: ${selected_sif}"
     KVM_FAILURE="the packaged Review SIF was selected"
     require_fallback
+    factory_verifier_ready apptainer "$selected_sif"
     prepare_apptainer_environment
     [[ -z "$REVIEW_AUDIO_PULSE_SERVER" ]] ||
       export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
@@ -490,6 +561,7 @@ run_review() {
   if kvm_runtime_ready && [[ "$image" != *.sif && ! -f "$image" ]]; then
     ensure_image "$image" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
     report_podman_image_identity "$image" "review appliance" "$is_override" "$MIN_REVIEW_APPLIANCE_VERSION"
+    factory_verifier_ready krun "$image"
     local -a podman_args=()
     podman_args+=(run --runtime=krun --rm --interactive --tty)
     podman_args+=(--name "$name")
@@ -539,6 +611,7 @@ run_review() {
   local apptainer_image="$image"
   [[ "$apptainer_image" == *://* || "$apptainer_image" == *.sif || -f "$apptainer_image" ]] || apptainer_image="docker://${apptainer_image}"
   report_apptainer_image_identity "$image" "review appliance" "$is_override" "$MIN_REVIEW_APPLIANCE_VERSION"
+  factory_verifier_ready apptainer "$apptainer_image"
   prepare_apptainer_environment
   [[ -z "$REVIEW_AUDIO_PULSE_SERVER" ]] ||
     export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
@@ -563,6 +636,10 @@ run_review() {
 
 case "$command_name" in
   review) run_review "$@" ;;
+  factory-verifier-probe)
+    [[ $# -eq 2 ]] || fail "usage: bluefin factory-verifier-probe krun|apptainer IMAGE"
+    factory_verifier_probe "$@"
+    ;;
   *)
     echo "Usage: bluefin review [owner/repo|org:<name>|flags...]" >&2
     exit 2

@@ -27,22 +27,22 @@ ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:7c4a93cb6c
 # Linux audio packages are absent from the FSDK runtime seam. The pinned audio
 # stage contributes only the PulseAudio/ALSA libraries and configuration.
 # renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
-ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:8a13204878c697edb20be767ddaf3f10154442a41eed298d8c82b7c0a47a1223
+ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:5f52d6b49508881f59ab47ab83bc24056257b3a67d1a57218b671d9b41e93113
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
-ARG OMP_VERSION=18.4.6
-ARG OMP_SOURCE_COMMIT=8b25ad4a05625dde65df41d057756b4815f4837c
-ARG OMP_SOURCE_SHA256=3451f9b5bd456f3e8420c2f9eb2de9aa148e2ba7689e30c3931b5e02d3382664
-ARG OMP_PATCH_SHA256=972820eaba72b3717d051ddb1e136c9dfecd024045dd7f94b2bb1026446ceb38
+ARG OMP_VERSION=18.4.9
+ARG OMP_SOURCE_COMMIT=d3a32f6c9e2db84a54741464099422b8f2b2ad51
+ARG OMP_SOURCE_SHA256=f3612acdd027a03d274e40fa3d7fd12ed58ca1a409f06d8d43adbf413155e75d
+ARG OMP_PATCH_SHA256=c4b7cc81811b17519d56865ab50e85675299a1f138dd08444f4173c202ce0a51
 ARG OMP_BUN_VERSION=1.4.2
 ARG OMP_BUN_X86_64_SHA256=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
 ARG OMP_BUN_AARCH64_SHA256=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7
 ARG NODE_VERSION=24.21.0
 ARG NODE_X86_64_SHA256=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff
 ARG NODE_AARCH64_SHA256=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5
-ARG OMP_NATIVES_VERSION=18.4.6
-ARG OMP_NATIVES_X86_64_SHA512=e4d17207877276f817a799aaf392fcee449577ea6c99e36467237484819ab230b0ef159133a98f5ac5a246cecd769b50476542fe3cbc1175e0722ddc99b9775e
-ARG OMP_NATIVES_AARCH64_SHA512=98769c10985a40b631d7ce351376eeb797436dbd273774468dff5fff08900ea3a20ee638dcb4151764b3dc232f90c51c31dfc6b62268800f124b0da713df96df
+ARG OMP_NATIVES_VERSION=18.4.9
+ARG OMP_NATIVES_X86_64_SHA512=dd06dbabe3039f3767039eedf64447b3f7b0baad9a63eafedcdfef55324ba4436f42ec22445972032d9bfeaa098c90ea55a2914f49e21ce36f6bb9cd2e65d5e4
+ARG OMP_NATIVES_AARCH64_SHA512=9874fe266b3cd9b82db0251a2692eb6cda92f433d9c0979ca03a2fbae2fac375369b6e8fdebcaf77d3324fc60891d85f901372da9fe37f4ddd62620ac793a6ab
 ARG MEMORYD_SOURCE_COMMIT=e7f8d431797973afbdf4d0530aa14a25f43acf35
 ARG MEMORYD_SOURCE_SHA256=155ec09537e941e4c71a65b738650b0419ae86f12cc86e28761d10553627d692
 ARG TYPESAFE_VERSION=0.7.4
@@ -272,6 +272,7 @@ RUN set -eu; \
     test -e /out/usr/share/bluefin/review/extension/index.ts; \
     test -d /out/usr/share/bluefin/review/extension/agents; \
     test -e /out/usr/share/bluefin/review/luna-factory/index.ts; \
+    test -e /out/usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts; \
     test -d /out/usr/share/bluefin/review/luna-factory/agents; \
     test -L /out/usr/share/bluefin/review/bluefin-review; \
     test -e /out/usr/share/bluefin/review/bluefin-review/github.ts

@@ -36,7 +36,7 @@ GitHub-only Review is the default and makes no Hive request. Hive read-side data
 
 ## Isolation and lifecycle
 
-The appliance prefers `podman run --runtime=krun` when Podman, krun, and `/dev/kvm` are available. Report missing prerequisites before isolated Apptainer fallback. Every run stays in the foreground with a unique container name and target-specific home, workspace, and scratch directories. `Ctrl-C` stops only the active invocation; never add detached or resurrected worker behavior.
+The appliance prefers `podman run --runtime=krun` when Podman, krun, and `/dev/kvm` are available. Report infrastructure prerequisites separately from the packaged Factory verifier qualification. With Factory enabled, qualify the selected runtime using the shipped verifier before OMP opens; refuse startup on a blocked probe. Apptainer is qualified independently when selected. Every run stays in the foreground with a unique container name and target-specific home, workspace, and scratch directories. `Ctrl-C` stops only the active invocation; never add detached or resurrected worker behavior.
 
 The source launcher keeps the caller's current directory when it is already
 inside a Git checkout. Outside Git, it creates or reuses
