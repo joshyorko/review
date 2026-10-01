@@ -1,6 +1,8 @@
 /** Behavioral contracts for the finite, no-publish Factory dogfood path. */
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { join } from "node:path";
 import { boundaryOutputLines, reportCapabilities } from "./appliance-runtime-report.ts";
@@ -175,6 +177,59 @@ test("harness preserves the local-provider and runtime-boundary contract", () =>
 test("Review Factory co-load smoke supplies an explicit Review scope", () => {
   const smoke = read("tests/review-factory-coload-smoke.sh");
   assert.ok(smoke.includes("--env REVIEW_DEFAULT_SCOPE=example/repo"));
+});
+
+test("co-load smoke verifies startup refusal without qualifying a blocked verifier", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "factory-coload-contract-"));
+  const bin = join(fixture, "bin");
+  mkdirSync(bin);
+  const version = read("image/appliance/Containerfile").match(/^ARG OMP_VERSION=(\S+)$/m)?.[1];
+  assert.ok(version);
+  writeFileSync(join(bin, "podman"), `#!/usr/bin/env bash
+set -eu
+if [[ "$1" == image ]]; then exit 0; fi
+if [[ "$*" == *--version* ]]; then printf 'omp/%s\\n' "$FIXTURE_OMP_VERSION"; exit 0; fi
+if [[ "$*" == *LUNA_FACTORY_ENABLED=1* ]]; then
+  case "$FIXTURE_COLOAD_RESULT" in
+    blocked|state-leak|omp-leak)
+      printf '%s\\n' '{"kind":"review-factory-verifier","status":"blocked","reason":"namespace unavailable"}'
+      echo 'Review appliance: Factory verifier capability unavailable; refusing opt-in startup before work selection.'
+      if [[ "$FIXTURE_COLOAD_RESULT" == state-leak ]]; then
+        for argument; do
+          if [[ "$argument" == *:/home/bluefin:rw ]]; then mkdir -p "$(printf '%s' "$argument" | cut -d: -f1)/.local/state/review"; fi
+        done
+      fi
+      if [[ "$FIXTURE_COLOAD_RESULT" == omp-leak ]]; then echo '{"statusKey":"review_workbench"}'; fi
+      exit 1
+      ;;
+    unexpected-failure) echo 'unexpected startup failure'; exit 1 ;;
+  esac
+  message='Factory has no batches.'
+else
+  message='Factory is disabled; explicitly enable LUNA_FACTORY_ENABLED=1'
+fi
+printf '%s\\n' '{"statusKey":"review_workbench"}' '{"name":"factory"}' "$message"
+`, { mode: 0o755 });
+  try {
+    for (const outcome of ["available", "blocked", "state-leak", "omp-leak", "unexpected-failure"]) {
+      const result = spawnSync("bash", [join(root, "tests/review-factory-coload-smoke.sh")], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          RUNNER_TEMP: join(fixture, outcome),
+          FIXTURE_OMP_VERSION: version,
+          FIXTURE_COLOAD_RESULT: outcome,
+        },
+      });
+      const output = result.stdout + result.stderr;
+      assert.equal(result.status, outcome === "available" || outcome === "blocked" ? 0 : 1, output);
+      if (outcome === "blocked") assert.match(output, /enabled=blocked disabled=passed/);
+      if (outcome === "available") assert.match(output, /enabled=passed disabled=passed/);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("SIF harness uses Apptainer directly and does not claim krun", () => {

@@ -7,6 +7,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${REVIEW_APPLIANCE_IMAGE:-${BLUEFIN_REVIEW_IMAGE:-localhost/review:factory-handoff}}"
 run_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/review-factory-coload-$$"
+enabled_result=passed
 mkdir -p "$run_root"
 chmod 0777 "$run_root"
 
@@ -57,6 +58,18 @@ run_case() {
       >"$output" 2>&1
   local status=$?
   set -e
+  if [[ "$flag" == enabled && "$status" -eq 1 ]] &&
+    grep -Fq '"kind":"review-factory-verifier","status":"blocked"' "$output" &&
+    grep -Fq 'refusing opt-in startup before work selection.' "$output"; then
+    if grep -Fq '"statusKey":"review_workbench"' "$output" || [[ -e "$home/.local/state/review" ]]; then
+      echo "review-factory-coload-smoke: blocked verifier reached OMP or persistent state; evidence=$output" >&2
+      return 1
+    fi
+    enabled_result=blocked
+    cat "$output"
+    echo "review-factory-coload-smoke: enabled BLOCKED by packaged generic OCI verifier; startup refusal verified; evidence=$output"
+    return 0
+  fi
   [[ "$status" -eq 0 ]] || {
     echo "review-factory-coload-smoke: $name exited $status; evidence=$output" >&2
     return 1
@@ -81,4 +94,4 @@ run_case() {
 
 run_case enabled 'Factory has no batches.' enabled
 run_case disabled 'Factory is disabled; explicitly enable LUNA_FACTORY_ENABLED=1' absent
-printf 'review-factory-coload-smoke: passed image=%s evidence=%s\n' "$image" "$run_root"
+printf 'review-factory-coload-smoke: enabled=%s disabled=passed image=%s evidence=%s\n' "$enabled_result" "$image" "$run_root"
