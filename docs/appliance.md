@@ -10,6 +10,8 @@ bin/omp-review org:acme
 
 The rootless launcher prefers Podman with `krun` and KVM, then reports missing prerequisites and falls back to isolated Apptainer. Runs stay in the foreground. `Ctrl-C` stops only the active invocation.
 
+When `LUNA_FACTORY_ENABLED=1`, the packaged launcher and entrypoint qualify the selected runtime with Factory's bubblewrap preflight and a harmless sandbox test before OMP opens. `just review-doctor` reports runtime prerequisites and packaged verifier qualification separately. A failed probe refuses Factory-enabled startup; Apptainer is qualified independently when selected.
+
 ## Scope, mode, and authentication
 
 A fresh interactive session without an explicit, restored, or configured scope asks for one. Headless callers must pass `owner/repo` or `org:<name>`. `REVIEW_DEFAULT_SCOPE` supplies an explicit generic default; the launcher does not infer an organization from this fork, the GitHub login, or image metadata.

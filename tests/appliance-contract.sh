@@ -131,7 +131,8 @@ require "$containerfile" \
   'io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}"' \
   'io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}"' \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
-  'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory'
+  'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory' \
+  'test -e /out/usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts'
 # shellcheck disable=SC2016 # These are literal source strings, not expansions.
 require scripts/build-derived-omp.sh \
   'git ls-remote --exit-code' \
@@ -157,6 +158,9 @@ require image/appliance/entrypoint.sh \
   'os.setgroups([65532])' \
   'os.setgid(65532)' \
   'os.setuid(65532)' \
+  '--factory-verifier-probe' \
+  'verifier-probe.ts' \
+  'refusing opt-in startup before work selection' \
   'prepare_factory_state_dir' \
   'coordinator_root="$factory_home/.local/state/review/coordinator"' \
   'git -C "$coordinator_root" init -q' \
@@ -471,7 +475,7 @@ available)
     ' >/dev/null || fail "Node, Bun, npm, or npx is unavailable inside the Factory bubblewrap verifier"
   ;;
 blocked)
-  echo "appliance-contract: Factory bubblewrap verification blocked by runner user-namespace capability"
+  echo "appliance-contract: generic OCI bubblewrap contract blocked by runner user-namespace capability; krun Factory qualification is separate"
   ;;
 *)
   fail "REVIEW_APPLIANCE_BWRAP_CAPABILITY must be available or blocked"

@@ -77,7 +77,7 @@ require_apptainer_fallback() {
 }
 prepare_apptainer_environment() {
   local name host_file
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY CONTEXT7_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION HIVE_HUB REVIEW_DEFAULT_SCOPE REVIEW_MODE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS BLUEFIN_REVIEW_ORG BLUEFIN_REVIEW_MODE BLUEFIN_REVIEW_INHERIT_OMP_CONFIG BLUEFIN_REVIEW_SKIP_REPOS TERM COLORTERM; do
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY CONTEXT7_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION HIVE_HUB REVIEW_DEFAULT_SCOPE REVIEW_MODE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY BLUEFIN_REVIEW_ORG BLUEFIN_REVIEW_MODE BLUEFIN_REVIEW_INHERIT_OMP_CONFIG BLUEFIN_REVIEW_SKIP_REPOS TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   APPTAINER_HOST_ARGS=()
@@ -434,6 +434,9 @@ review-appliance *appliance_args:
     KVM_FAILURE=""
     if kvm_runtime_ready && [[ "$IMAGE" != *.sif && ! -f "$IMAGE" ]]; then
       ensure_image "$IMAGE" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
+      if [[ "${LUNA_FACTORY_ENABLED:-0}" == 1 ]]; then
+        bin/bluefin factory-verifier-probe krun "$IMAGE" >/dev/null
+      fi
       PODMAN_CONNECTION="$(podman_selected_connection)"
       IFS=$'\t' read -r PODMAN_URI _ <<<"$PODMAN_CONNECTION"
       PODMAN_HOME_MOUNT="${INSTANCE_HOME}:/home/bluefin:rw,z"
@@ -464,6 +467,8 @@ review-appliance *appliance_args:
         --env BLUEFIN_REVIEW_ORG --env BLUEFIN_REVIEW_MODE --env BLUEFIN_REVIEW_INHERIT_OMP_CONFIG --env BLUEFIN_REVIEW_SKIP_REPOS
         --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}"
       )
+      [[ -v LUNA_FACTORY_ENABLED ]] && ARGS+=(--env LUNA_FACTORY_ENABLED)
+      [[ -v LUNA_FACTORY_CAPACITY ]] && ARGS+=(--env LUNA_FACTORY_CAPACITY)
       exec podman "${ARGS[@]}" "$IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
     fi
 
@@ -474,6 +479,9 @@ review-appliance *appliance_args:
     prepare_factory_state_dirs "$INSTANCE_HOME"
     APPTAINER_IMAGE="$IMAGE"; [[ "$APPTAINER_IMAGE" == *://* || "$APPTAINER_IMAGE" == *.sif || -f "$APPTAINER_IMAGE" ]] || APPTAINER_IMAGE="docker://${APPTAINER_IMAGE}"
     report_apptainer_image_identity "$IMAGE" "review appliance" "$IS_OVERRIDE" "$MIN_REVIEW_APPLIANCE_VERSION"
+    if [[ "${LUNA_FACTORY_ENABLED:-0}" == 1 ]]; then
+      bin/bluefin factory-verifier-probe apptainer "$APPTAINER_IMAGE" >/dev/null
+    fi
     prepare_apptainer_environment
     export APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT=/claims
     exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/bluefin" --pwd /workspace \
@@ -514,11 +522,35 @@ review-doctor:
     echo "=== Isolation runtime ==="
     KVM_FAILURE=""
     if kvm_runtime_ready; then
-      echo "  ✓ Podman krun KVM runtime ready"
+      echo "  ✓ Podman krun KVM infrastructure prerequisites ready"
       pass=$((pass+1))
+      doctor_image="${REVIEW_APPLIANCE_IMAGE:-${BLUEFIN_REVIEW_IMAGE:-ghcr.io/projectbluefin/review:stable}}"
+      if podman image exists "$doctor_image" >/dev/null 2>&1; then
+        if verifier_output="$(bin/bluefin factory-verifier-probe krun "$doctor_image" 2>&1)"; then
+          echo "  ✓ Packaged Factory verifier qualified in krun profile"
+          pass=$((pass+1))
+        else
+          echo "  ✗ Packaged Factory verifier unavailable in krun profile: ${verifier_output}"
+          fail=$((fail+1))
+        fi
+      else
+        echo "  ! Factory verifier unqualified (image not cached locally; an opt-in launch probes before starting OMP)"
+      fi
     elif apptainer_fallback_ready; then
-      echo "  ! ${KVM_FAILURE}; isolated Apptainer fallback ready"
+      echo "  ! ${KVM_FAILURE}; isolated Apptainer fallback infrastructure ready"
       pass=$((pass+1))
+      doctor_sif="${BLUEFIN_REVIEW_SIF:-}"
+      if [[ -n "$doctor_sif" && -f "$doctor_sif" ]]; then
+        if verifier_output="$(bin/bluefin factory-verifier-probe apptainer "$doctor_sif" 2>&1)"; then
+          echo "  ✓ Packaged Factory verifier qualified in Apptainer profile"
+          pass=$((pass+1))
+        else
+          echo "  ✗ Packaged Factory verifier unavailable in Apptainer profile: ${verifier_output}"
+          fail=$((fail+1))
+        fi
+      else
+        echo "  ! Factory verifier unqualified (no local SIF to probe; an opt-in launch probes before starting OMP)"
+      fi
     else
       echo "  ✗ ${KVM_FAILURE}; ${APPTAINER_FAILURE}"
       fail=$((fail+1))
