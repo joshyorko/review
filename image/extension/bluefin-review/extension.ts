@@ -21,6 +21,8 @@ import type { KeyMatcher } from "./keys.ts";
 import { type ToolHost, registerTools } from "./tools.ts";
 import { hiveFailureStatus } from "./hive.ts";
 import { landingState, landingReason } from "./landing.ts";
+import { buildReviewRecap, type ReviewRecapInput } from "./recap.ts";
+import { truncateToWidth } from "./width.ts";
 import { GENERIC_WORKBENCH_POLICY, managedPolicyFor, type WorkbenchPolicy } from "./policy.ts";
 import {
 	commentInvocation,
@@ -49,6 +51,8 @@ export {
 export const STATE_ENTRY = "com.hive.workbench.selection";
 export const BATCH_ENTRY = "com.hive.workbench.batch";
 export const COMMENT_ENTRY = "com.hive.workbench.comment";
+export const HANDOFF_ENTRY = "com.hive.workbench.handoff";
+const RECAP_BRANCH_ENTRY_LIMIT = 512;
 
 export type RepositoryBatchKind = "slay" | "fix" | "diff";
 export type RepositoryBatchState = "running" | "paused" | "blocked" | "complete" | "cancelled";
@@ -173,10 +177,18 @@ interface UiLike {
 	readonly theme: { fg(color: string, text: string): string; bold(text: string): string; inverse(text: string): string };
 }
 
+interface SessionSetupManager {
+	getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>;
+	getSessionId(): string;
+	getLeafId(): string | null;
+	getSessionFile(): string | undefined;
+}
+
 interface CtxLike {
 	hasUI: boolean;
 	ui: UiLike;
-	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>; getSessionId?(): string };
+	newSession?(options?: { parentSession?: string; setup?: (sessionManager: SessionSetupManager) => Promise<void> }): Promise<{ cancelled: boolean }>;
+	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>; getSessionId?(): string; getLeafId?(): string | null; getSessionFile?(): string | undefined; saveArtifact?(content: string, toolType: string): Promise<string | undefined>; getArtifactPath?(id: string): Promise<string | null>; getArtifactsDir?(): string | null };
 	getAsyncJobSnapshot?(): {
 		running: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
 		recent: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
@@ -197,6 +209,7 @@ export interface ReviewExtensionHost {
 	registerCommand?(name: string, definition: { description?: string; handler(args: string, ctx: CtxLike): unknown }): void;
 	appendEntry(customType: string, data?: unknown): void;
 	sendUserMessage(content: string, options?: { deliverAs?: string; waveId?: string }): void;
+	sendMessage?(message: { customType: string; content: string; display?: boolean; details?: unknown }, options?: { triggerTurn?: boolean }): void;
 }
 
 function readLatestCustom<T>(ctx: CtxLike, customType: string): T | undefined {
@@ -219,6 +232,16 @@ function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
 
 function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined {
 	return readLatestCustom<PersistedCommentResult>(ctx, COMMENT_ENTRY);
+}
+
+function nativeArtifactId(value: unknown): string | undefined {
+	if (!isRecord(value) || !isRecord(value.details) || !isRecord(value.details.meta) || !isRecord(value.details.meta.truncation)) return undefined;
+	const id = value.details.meta.truncation.artifactId;
+	return typeof id === "string" && /^\d{1,128}$/.test(id) ? id : undefined;
+}
+
+function hasNativeArtifactError(value: unknown): boolean {
+	return isRecord(value) && isRecord(value.details) && isRecord(value.details.meta) && Boolean(value.details.meta.artifactError);
 }
 export async function reconcileBlockedRepositoryClaim(
 	claims: ResourceClaims,
@@ -575,6 +598,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
 	let traceSessionId: string | undefined;
+	let traceGeneration = 0;
 	const traceContext = (ctx?: CtxLike): CtxLike | undefined => {
 		const candidate = ctx ?? activeCtx;
 		if (!candidate) return undefined;
@@ -584,6 +608,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return candidate;
 	};
 	const resetTrace = (ctx: CtxLike): void => {
+		traceGeneration++;
 		mode.session.clear();
 		traceSessionId = ctx.sessionManager?.getSessionId?.();
 	};
@@ -595,6 +620,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeBatch: PersistedRepositoryBatch | undefined;
 	let batchRequestGeneration = 0;
 	let commentInFlight = false;
+	const uncertainHandoffIds = new Set<string>();
 	pi.setLabel(mode.isReviewMode() ? "Review Workbench" : "Hive Workbench");
 	pi.registerFlag("pr", { description: "Preselect a pull request or issue number", type: "string" });
 	pi.registerFlag("issues", { description: "Start in issues mode instead of pull requests", type: "boolean", default: false });
@@ -1353,8 +1379,202 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return archiveCancelledBatch(ctx, batch, action, result);
 	};
 
+	const buildRecap = (ctx: CtxLike) => {
+		const branch = ctx.sessionManager?.getBranch() ?? [];
+		const branchStart = Math.max(0, branch.length - RECAP_BRANCH_ENTRY_LIMIT);
+		const olderBranchEntriesOmitted = branchStart;
+		const sessionId = ctx.sessionManager?.getSessionId?.() ?? "unknown-session";
+		const latestCustom = <T>(customType: string, limit: number, identity: (data: Record<string, unknown>) => string | undefined): { values: T[]; omitted: number } => {
+			const values: T[] = [];
+			const seen = new Set<string>();
+			let count = 0;
+			for (let index = branch.length - 1; index >= branchStart; index--) {
+				const entry = branch[index]!;
+				if (entry.type !== "custom" || entry.customType !== customType || !isRecord(entry.data)) continue;
+				const key = identity(entry.data);
+				if (!key || seen.has(key)) continue;
+				seen.add(key);
+				count++;
+				if (values.length < limit) values.push(entry.data as T);
+			}
+			values.reverse();
+			return { values, omitted: Math.max(0, count - limit) };
+		};
+		const batches = latestCustom<PersistedRepositoryBatch>(BATCH_ENTRY, 12, (data) => typeof data.id === "string" ? data.id : undefined);
+		const comments = latestCustom<PersistedCommentResult>(COMMENT_ENTRY, 24, (data) => isRecord(data.plan) && typeof data.plan.id === "string" ? data.plan.id : undefined);
+		const selectedItems = mode.chosenItems();
+		const focused = mode.selected();
+		if (focused && !selectedItems.some((item) => item.repo === focused.repo && item.id === focused.id)) selectedItems.push(focused);
+		const artifacts: ReviewRecapInput["artifacts"] = [];
+		const visit = (span: import("./trace.ts").Span): void => {
+			const ref = span.output?.reference;
+			if (ref?.kind === "available") artifacts.push({ kind: "available", sessionId: ref.sourceSessionId, uri: ref.uri, path: ref.path, complete: ref.complete });
+			else if (ref?.kind === "unavailable") artifacts.push({ kind: "unavailable", sessionId: ref.sourceSessionId, uri: ref.uri, reason: ref.reason });
+			for (const child of span.children ?? []) visit(child);
+		};
+		for (const span of mode.session.roots()) visit(span);
+		return buildReviewRecap({
+			source: { sessionId, branchId: ctx.sessionManager?.getLeafId?.() ?? "unknown-branch", authoritySource: "Review persisted selection, batch, and comment custom entries" },
+			observedAt: Date.now(),
+			scope: mode.scopeLabel(),
+			queue: mode.queueError ? { kind: "unavailable", reason: mode.queueError, observedAt: mode.fetchedAt } : mode.fetchedAt > 0 ? { kind: "available", itemCount: mode.items.length, observedAt: mode.fetchedAt } : { kind: "unavailable", reason: "Review queue has not been observed in this session", observedAt: 0 },
+			selection: selectedItems.map((item) => ({ repo: item.repo, id: item.id, type: item.type === "pr" ? "pr" as const : "issue" as const, title: item.title, url: item.url, headSha: item.type === "pr" ? item.headSha : undefined })),
+			observations: (mode.fetchedAt > 0 ? selectedItems.slice(0, 25) : []).map((item) => ({
+				subject: `${item.repo}#${item.id}${item.type === "pr" ? ` head=${item.headSha ?? "unknown"}` : ""}`,
+				observedAt: mode.fetchedAt > 0 ? mode.fetchedAt : undefined,
+				status: `current queue observation; ci=${item.ciStatus ?? "unknown"}; review=${item.reviewState}; merge=${item.mergeState}`,
+				sourceUrl: item.url,
+			})),
+			operations: batches.values.map((batch) => ({ id: batch.id, kind: batch.kind, state: batch.state, completedItems: batch.completedItems, totalItems: batch.totalItems, startedAt: batch.startedAt, items: batch.waves.slice(0, 12).flatMap((wave) => wave.items.slice(0, 25).map((item) => ({ repo: item.repo, id: item.id, type: item.type, headSha: item.type === "pr" ? item.headSha : undefined }))), error: batch.error })),
+			comments: comments.values.map((comment) => ({ state: comment.state, targets: comment.plan.targets.slice(0, 100).map((target) => `${target.repo}#${target.number}`), receipts: (comment.receipts ?? []).slice(0, 100) })),
+			trace: mode.session.roots(),
+			artifacts,
+			verification: [],
+			remaining: [
+				...(olderBranchEntriesOmitted > 0 ? [`${olderBranchEntriesOmitted} older session branch entries were not scanned for recap history.`] : []),
+				...(batches.omitted > 0 ? [`${batches.omitted} older Review operation records omitted from the recap.`] : []),
+				...(comments.omitted > 0 ? [`${comments.omitted} older publication records omitted from the recap.`] : []),
+				...(mode.queueError ? [`Refresh queue: ${mode.queueError}`] : []),
+				...(activeBatch && activeBatch.state !== "complete" && activeBatch.state !== "cancelled" ? [`Reconcile Review wave ${activeBatch.id}; its current outcome may be unknown`] : []),
+				...resourceClaims().list().filter((claim) => claim.owner.startsWith("review:")).slice(0, 16).map((claim) => `Retained claim ${claim.resource}: ${claim.status}; revalidate before work.`),
+				"Refresh selected repositories and pull request heads before continuing.",
+			],
+		});
+	};
+
+	const handoffReviewState = (): string => {
+		const selected = mode.chosenItems();
+		const focused = mode.selected();
+		if (focused && !selected.some((item) => item.repo === focused.repo && item.id === focused.id)) selected.push(focused);
+		return JSON.stringify({
+			scope: mode.scope,
+			queueMode: mode.queueMode,
+			filter: mode.filter,
+			selection: selected.map((item) => [item.repo, item.id, item.type, item.type === "pr" ? item.headSha ?? "unknown" : undefined]).sort((a, b) => `${a[0]}#${a[1]}`.localeCompare(`${b[0]}#${b[1]}`)),
+		});
+	};
+
+	const markUncertainTransition = (recapId: string, sourceSessionId: string, sourceBranchId: string, exportPath: string): void => {
+		uncertainHandoffIds.add(recapId);
+		pi.appendEntry(HANDOFF_ENTRY, { recapId, state: "transition-uncertain", sourceSessionId, sourceBranchId, exportPath });
+	};
+
+	const handoff = async (ctx: CtxLike): Promise<string> => {
+		if (!mode.isReviewMode()) return "Review recap handoff is available only in ordinary Review mode";
+		const sessionManager = ctx.sessionManager;
+		if (!sessionManager?.saveArtifact || !sessionManager.getArtifactPath || !sessionManager.getSessionFile || !ctx.newSession || !pi.sendMessage) return "OMP public session artifact or native handoff API is unavailable";
+		const sourceSessionId = sessionManager.getSessionId?.();
+		const sourceBranchId = sessionManager.getLeafId?.();
+		const sourceSessionFile = sessionManager.getSessionFile();
+		if (!sourceSessionId || !sourceBranchId || !sourceSessionFile || (traceSessionId && traceSessionId !== sourceSessionId)) return "Source session or branch is stale; refresh Review before handoff";
+		const recap = buildRecap(ctx);
+		const reviewStateAtStart = handoffReviewState();
+		const latestAttempts = new Map<string, Record<string, unknown>>();
+		for (const entry of sessionManager.getBranch() ?? []) {
+			if (entry.type !== "custom" || entry.customType !== HANDOFF_ENTRY || !isRecord(entry.data) || typeof entry.data.recapId !== "string") continue;
+			latestAttempts.set(JSON.stringify([entry.data.sourceSessionId, entry.data.sourceBranchId, entry.data.recapId]), entry.data);
+		}
+		const prior = uncertainHandoffIds.has(recap.id) || [...latestAttempts.values()].some((attempt) => attempt.state !== "cancelled" && (attempt.recapId === recap.id || attempt.state === "opening" || attempt.state === "submission-uncertain" || attempt.state === "transition-uncertain"));
+		if (prior) return `Handoff ${recap.id} already has a submission attempt; inspect the fresh session before retrying`;
+		const artifactId = await sessionManager.saveArtifact(recap.handoffText, "review-handoff");
+		if (!artifactId) return "Could not create durable handoff export; no new session or message was created";
+		const exportPath = await sessionManager.getArtifactPath(artifactId);
+		if (!exportPath) return `Handoff export ${artifactId} was created but its path is unavailable; no message was sent`;
+		if (sessionManager.getSessionId?.() !== sourceSessionId || sessionManager.getLeafId?.() !== sourceBranchId || handoffReviewState() !== reviewStateAtStart || buildRecap(ctx).id !== recap.id) return `Source, queue, claims, or selection changed during export; durable recap remains at ${exportPath}, no message was sent`;
+		pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "opening", sourceSessionId, sourceBranchId, exportPath });
+		let setupOutcome: "not-run" | "blocked" | "uncertain" | "submitted" = "not-run";
+		let setupReason = "target session setup did not run";
+		uncertainHandoffIds.add(recap.id);
+		let opened: { cancelled: boolean };
+		try {
+			opened = await ctx.newSession({
+				parentSession: sourceSessionFile,
+				setup: async (targetSession) => {
+					const targetSessionId = targetSession.getSessionId();
+					const targetBranchBeforeWrite = targetSession.getLeafId();
+					const targetSessionFile = targetSession.getSessionFile();
+					if (!targetSessionId || targetSessionId === sourceSessionId || !targetSessionFile || targetSessionFile === sourceSessionFile || handoffReviewState() !== reviewStateAtStart) {
+						setupOutcome = "blocked";
+						setupReason = "target session identity, scope, or selection did not match";
+						pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "transition-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, exportPath });
+						return;
+					}
+					pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "submission-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, freshBranchId: targetBranchBeforeWrite, exportPath });
+					const sendBranchId = targetSession.getLeafId();
+					const attemptRecorded = targetSession.getBranch().some((entry) => entry.type === "custom" && entry.customType === HANDOFF_ENTRY && isRecord(entry.data) && entry.data.recapId === recap.id && entry.data.freshSessionId === targetSessionId && entry.data.state === "submission-uncertain");
+					if (!attemptRecorded || targetSession.getSessionId() !== targetSessionId || targetSession.getLeafId() !== sendBranchId || handoffReviewState() !== reviewStateAtStart) {
+						setupOutcome = "blocked";
+						setupReason = "target session, branch, scope, or selection changed at the send boundary";
+						pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "transition-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, exportPath });
+						return;
+					}
+					try {
+						pi.sendMessage({ customType: "review-handoff", content: recap.handoffText, display: true, details: { reviewHandoffId: recap.id, exportPath } }, { triggerTurn: false });
+						setupOutcome = "submitted";
+						setupReason = "";
+					} catch {
+						setupOutcome = "uncertain";
+						setupReason = "message submission threw without an acknowledgement";
+						pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "transition-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, exportPath });
+					}
+				},
+			});
+		} catch {
+			markUncertainTransition(recap.id, sourceSessionId, sourceBranchId, exportPath);
+			if (setupOutcome === "submitted") return `Fresh session transition is uncertain after message submission; delivery acknowledgement is unavailable. Export: ${exportPath}. Do not retry blindly.`;
+			return `Fresh session transition is uncertain (${setupReason}); export remains at ${exportPath}; do not retry blindly`;
+		}
+		if (opened.cancelled) {
+			uncertainHandoffIds.delete(recap.id);
+			pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "cancelled", sourceSessionId, sourceBranchId, exportPath });
+			return `Fresh Review session cancelled; export remains at ${exportPath}; no message was sent`;
+		}
+		if (setupOutcome !== "submitted") return `Fresh session opened but the handoff was not sent (${setupReason}); export remains at ${exportPath}; do not retry blindly`;
+		return `Fresh session opened and handoff ${recap.id} submitted without triggering a model turn; delivery acknowledgement is unavailable. Export: ${exportPath}`;
+	};
+
+	const showReadOnlyRecap = async (ctx: CtxLike, id: string, text: string): Promise<void> => {
+		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+			const painter = theme as { fg(color: string, value: string): string; bold(value: string): string };
+			let scroll = 0;
+			const lines = text.split("\n");
+			const screenHeight = isRecord(tui) && typeof tui.height === "number" ? tui.height : 24;
+			const requestRender = (): void => {
+				if (isRecord(tui) && typeof tui.requestRender === "function") (tui.requestRender as () => void).call(tui);
+			};
+			return {
+				render(width: number): readonly string[] {
+					const bodyHeight = Math.max(1, Math.min(18, screenHeight - 4));
+					const content = lines.slice(scroll, scroll + bodyHeight).map((line) => truncateToWidth(painter.fg("text", line), width));
+					while (content.length < bodyHeight) content.push("");
+					return [
+						truncateToWidth(painter.bold(painter.fg("accent", `Review recap ${id} · read only`)), width),
+						truncateToWidth(painter.fg("border", "─".repeat(width)), width),
+						...content,
+						truncateToWidth(painter.fg("dim", `${scroll + 1}-${Math.min(lines.length, scroll + bodyHeight)} of ${lines.length} · j/k scroll · q/Esc close`), width),
+					];
+				},
+				handleInput(data: string): void {
+					if (data === "q" || data === "\u001b" || data === "\u001b[27;5;27~") { done(undefined); return; }
+					const previous = scroll;
+					if (data === "j" || data === "\u001b[B") scroll = Math.min(Math.max(0, lines.length - 1), scroll + 1);
+					else if (data === "k" || data === "\u001b[A") scroll = Math.max(0, scroll - 1);
+					else if (data === "\u0004" || data === "\u001b[6~") scroll = Math.min(Math.max(0, lines.length - 1), scroll + 16);
+					else if (data === "\u0015" || data === "\u001b[5~") scroll = Math.max(0, scroll - 16);
+					if (scroll !== previous) requestRender();
+				},
+			};
+		}, { overlay: true, overlayOptions: { fullscreen: true, width: "100%", maxHeight: "100%", anchor: "center" } });
+	};
+
 	const reviewCommand = async (rawArgs: string, ctx: CtxLike): Promise<string> => {
 		const args = rawArgs.trim().toLowerCase();
+		if (args === "recap") {
+			const recap = buildRecap(ctx);
+			if (ctx.hasUI) await showReadOnlyRecap(ctx, recap.id, recap.text);
+			return `Review recap ${recap.id}${ctx.hasUI ? " opened for inspection" : `\n${recap.text}`}`;
+		}
+		if (args === "handoff") return handoff(ctx);
 		if (args === "slay" || args === "re-slay") {
 			activeCtx = ctx;
 			await startSlay(ctx, mode.slayableItems(BATCH_LIMIT));
@@ -1408,7 +1628,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					: "No Review mutation claims",
 			].join("\n");
 		}
-		return "usage: /review status | reconcile | drain | cancel | revise | slay";
+		return "usage: /review status | recap | handoff | reconcile | drain | cancel | revise | slay";
 	};
 	pi.registerCommand?.("review", {
 		description: "Inspect or recover an interrupted Review repository wave",
@@ -2318,6 +2538,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.on("session_branch", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
 	pi.on("session_tree", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
 	pi.on("session_shutdown", (_event, ctx) => {
+		traceGeneration++;
 		mode.session.clear();
 		traceSessionId = undefined;
 		activeCtx = ctx;
@@ -2414,10 +2635,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		rememberTaskResult(ctxToUse, toolCallId, partialResult);
 		repaint();
 	});
-	pi.on("tool_execution_end", (event, eventCtx) => {
+	pi.on("tool_execution_end", async (event, eventCtx) => {
 		const { toolCallId, result, isError } = event as { toolCallId: string; result: unknown; isError: boolean };
 		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
 		if (!ctxToUse) return;
+		const generation = traceGeneration;
+		const sourceSessionId = ctxToUse.sessionManager?.getSessionId?.();
 		mode.session.endTool(toolCallId, result, isError === true, Date.now());
 		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
 		rememberToolInvocation(ctxToUse, toolCallId);
@@ -2425,6 +2648,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		rememberWaveEvidence(ctxToUse);
 		syncBatchProgress(ctxToUse);
 		repaint();
+		const artifactId = hasNativeArtifactError(result) ? undefined : nativeArtifactId(result);
+		if (artifactId) {
+			let path: string | null = null;
+			try { path = await ctxToUse.sessionManager?.getArtifactPath?.(artifactId) ?? null; } catch { path = null; }
+			if (generation !== traceGeneration || ctxToUse.sessionManager?.getSessionId?.() !== sourceSessionId || traceSessionId !== sourceSessionId) return;
+			mode.session.setArtifactReference(toolCallId, sourceSessionId ?? "unknown-session", path);
+			repaint();
+		}
 	});
 
 	// ---- keyboard ------------------------------------------------------------

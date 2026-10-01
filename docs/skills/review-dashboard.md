@@ -52,6 +52,37 @@ Review defaults to GitHub-only mode. `REVIEW_MODE=hive` explicitly enables optio
 | `v` | Open the focused GitHub item |
 | `?`, `q` / `Esc` | Show help / close the workbench |
 
+`/review recap` opens a deterministic, bounded summary of the current Review
+selection, persisted Review operations, native OMP outcomes, and resolved
+artifact references. It does not call a model or add the recap to model
+context. `/review handoff` writes the same safety-bounded handoff through OMP's
+session artifact API, opens a fresh child session, and sends one visible custom
+message with `triggerTurn: false`. The new context must revalidate the current
+repository, head, selection, claims, budget, and external effects and obtain
+explicit human authorization. A handoff grants no approval, merge, comment,
+publish, or deploy authority. OMP's `sendMessage` has no delivery receipt, so
+Review reports submission without claiming acknowledgement and blocks blind
+duplicate sends. If new-session creation is positively cancelled, the export
+remains, no message is sent, and a later retry is allowed, including after
+restoring the source branch. Uncertain transitions and submissions remain fenced.
+Source identity, revalidation/no-authority instructions, and unresolved effects
+are reserved before optional history; each history section has its own UTF-8
+budget. Native trace facts prioritize recent failed, cancelled, and unknown
+outcomes and disclose omitted descendants, not just omitted turns.
+
+The ordinary Review trace bounds UTF-8 previews, total retained trace bytes,
+accumulated per-tool output bytes, turns, tools, and task spans at ingestion.
+Credentials are masked using their original source ranges before head/tail
+clipping. Omitted work retains bounded aggregate lifecycle evidence; lost or
+unsettled outcomes keep the enclosing turn UNKNOWN rather than successful.
+Truncation metadata includes bytes lost to line and byte budgets plus known
+native clipping, and is shown in both the tree and text projection. Native
+artifact links are resolved against the source session; a session/branch reset
+rejects pending lookups from the old trace. Expired or unresolved artifacts stay
+unavailable. Native totals are shown only when OMP supplied
+`details.meta.truncation` totals, and `details.meta.artifactError` suppresses the
+full-output link.
+
 The normal Review help and status bars omit Hive controls and status. Do not add controls that imply optional integrations are required.
 
 ## Bounded execution

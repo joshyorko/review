@@ -31,6 +31,7 @@ import {
 	STATE_ENTRY,
 	BATCH_ENTRY,
 	COMMENT_ENTRY,
+	HANDOFF_ENTRY,
 	GENERIC_WORKBENCH_POLICY,
 	actionPrompt,
 	createReviewExtension,
@@ -424,6 +425,7 @@ function fakeHost() {
 		commands: new Map(),
 		messages: [],
 		messageOptions: [],
+		nativeMessages: [],
 		entries: [],
 		execResult: { stdout: "https://github.com/projectbluefin/review/issues/42#issuecomment-1\n", stderr: "", code: 0, killed: false },
 		execCalls: [],
@@ -462,6 +464,7 @@ function fakeHost() {
 			this.messages.push(content);
 			this.messageOptions.push(options);
 		},
+		sendMessage(message, options) { this.nativeMessages.push({ message, options }); },
 		async exec(command, args) {
 			this.execCalls.push({ command, args });
 			return this.execResult;
@@ -512,6 +515,7 @@ function fakeCtx() {
 	const inputCalls = [];
 	const selectResponses = [];
 	const selectCalls = [];
+	let renderRequests = 0;
 	const ctx = {
 		sessionId: "session-1",
 		hasUI: true,
@@ -527,6 +531,7 @@ function fakeCtx() {
 		inputCalls,
 		selectResponses,
 		selectCalls,
+		get renderRequests() { return renderRequests; },
 		asyncJobs: { running: [], recent: [], delivery: { pending: 0, pendingJobIds: [] } },
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
@@ -554,7 +559,7 @@ function fakeCtx() {
 			},
 			custom(factory) {
 				const { promise, resolve } = Promise.withResolvers();
-				overlays.push(factory({ requestRender: () => {} }, this.theme, {}, resolve));
+				overlays.push(factory({ requestRender: () => { renderRequests++; } }, this.theme, {}, resolve));
 				return promise;
 			},
 			theme: { fg: (_c, t) => t, bold: (t) => t, inverse: (t) => t },
@@ -568,6 +573,290 @@ function fakeCtx() {
 }
 
 // ---------------------------------------------------------------- vocabulary
+
+test("explicit Review handoff exports durably, opens a child, and sends without triggering a model turn", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const sourceBranch = [];
+	const targetBranch = [];
+	let activeBranch = sourceBranch;
+	const saved = new Map();
+	const newSessionCalls = [];
+	let leaf = "leaf-1";
+	ctx.sessionManager = {
+		getBranch: () => activeBranch,
+		getSessionId: () => ctx.sessionId,
+		getLeafId: () => leaf,
+		getSessionFile: () => ctx.sessionId === "session-1" ? "/state/parent.jsonl" : "/state/child.jsonl",
+		async saveArtifact(content, toolType) { assert.equal(toolType, "review-handoff"); saved.set("7", content); return "7"; },
+		async getArtifactPath(id) { return `/state/artifacts/${id}.review-handoff`; },
+	};
+	const targetManager = {
+		getBranch: () => targetBranch,
+		getSessionId: () => ctx.sessionId,
+		getLeafId: () => leaf,
+		getSessionFile: () => "/state/child.jsonl",
+	};
+	ctx.newSession = async (options) => {
+		newSessionCalls.push(options);
+		ctx.sessionId = "session-child"; leaf = "leaf-child"; activeBranch = targetBranch;
+		await options.setup(targetManager);
+		return { cancelled: false };
+	};
+	const append = pi.appendEntry.bind(pi);
+	pi.appendEntry = (type, data) => { append(type, data); activeBranch.push({ type: "custom", customType: type, data }); };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(saved.size, 1);
+	assert.match([...saved.values()][0], /explicit human authorization/i);
+	assert.equal(newSessionCalls.length, 1);
+	assert.equal(newSessionCalls[0].parentSession, "/state/parent.jsonl");
+	assert.equal(typeof newSessionCalls[0].setup, "function", "child setup owns identity validation and message insertion");
+	assert.equal(pi.nativeMessages.length, 1);
+	assert.equal(pi.nativeMessages[0].options.triggerTurn, false);
+	assert.ok(targetBranch.some((entry) => entry.customType === HANDOFF_ENTRY && entry.data.state === "submission-uncertain"));
+	assert.equal(ctx.pasted.length, 0, "export does not depend on clipboard availability");
+	assert.equal(pi.entries.filter((entry) => entry.customType === HANDOFF_ENTRY).at(-1).data.state, "submission-uncertain");
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(pi.nativeMessages.length, 1, "stable identity prevents a blind duplicate submission");
+	assert.equal(saved.size, 1);
+});
+
+test("uncertain Review session transition keeps the export and fences retry", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const branch = [];
+	let saves = 0;
+	let transitions = 0;
+	let leaf = "leaf-1";
+	ctx.sessionManager = {
+		getBranch: () => branch, getSessionId: () => ctx.sessionId, getLeafId: () => leaf, getSessionFile: () => "/state/parent.jsonl",
+		async saveArtifact() { saves++; return "19"; }, async getArtifactPath() { return "/state/artifacts/19.review-handoff"; },
+	};
+	ctx.newSession = async () => { transitions++; ctx.sessionId = "session-child"; leaf = "child-leaf"; throw new Error("transition outcome uncertain"); };
+	const append = pi.appendEntry.bind(pi);
+	pi.appendEntry = (type, data) => { append(type, data); branch.push({ type: "custom", customType: type, data }); };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(saves, 1);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.equal(branch.at(-1).data.state, "transition-uncertain");
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(transitions, 1);
+	assert.equal(saves, 1);
+	assert.equal(pi.nativeMessages.length, 0);
+});
+
+test("handoff target setup rejects a mismatched child and sends nothing", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const sourceBranch = [];
+	const targetBranch = [];
+	let activeBranch = sourceBranch;
+	let leaf = "source-leaf";
+	ctx.sessionManager = {
+		getBranch: () => activeBranch, getSessionId: () => ctx.sessionId, getLeafId: () => leaf, getSessionFile: () => "/state/source.jsonl",
+		async saveArtifact() { return "21"; }, async getArtifactPath() { return "/state/artifacts/21.review-handoff"; },
+	};
+	ctx.newSession = async (options) => {
+		ctx.sessionId = "session-child"; leaf = "child-leaf"; activeBranch = targetBranch;
+		await options.setup({ getBranch: () => targetBranch, getSessionId: () => "session-1", getLeafId: () => leaf, getSessionFile: () => "/state/source.jsonl" });
+		return { cancelled: false };
+	};
+	const append = pi.appendEntry.bind(pi);
+	pi.appendEntry = (type, data) => { append(type, data); activeBranch.push({ type: "custom", customType: type, data }); };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.ok(targetBranch.some((entry) => entry.customType === HANDOFF_ENTRY && entry.data.state === "transition-uncertain"));
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(pi.nativeMessages.length, 0, "mismatched target identity fences a later resend");
+});
+
+test("Review handoff rejects source branch changes during durable export", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	let leaf = "leaf-1";
+	ctx.sessionManager = {
+		getBranch: () => [], getSessionId: () => "session-1", getLeafId: () => leaf, getSessionFile: () => "/state/parent.jsonl",
+		async saveArtifact() { leaf = "leaf-moved"; return "9"; }, async getArtifactPath() { return "/state/artifacts/9.review-handoff"; },
+	};
+	ctx.newSession = async () => { throw new Error("must not fork stale source"); };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.equal(ctx.sessionManager.getLeafId(), "leaf-moved");
+	assert.equal(pi.entries.some((entry) => entry.customType === HANDOFF_ENTRY), false);
+});
+
+test("ordinary Review recap uses a read-only operator view and never enters model input", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	const pending = pi.commands.get("review").handler("recap", ctx);
+	const view = ctx.overlays.at(-1);
+	assert.ok(view);
+	const initialView = view.render(120).join("\n");
+	assert.match(initialView, /Review recap .* read only/);
+	assert.match(initialView, /queue=unavailable: Review queue has not been observed/);
+	assert.ok(view.render(16).every((line) => visibleWidth(line) <= 16), "the read-only recap remains within a narrow terminal width");
+	assert.equal(ctx.editorCalls.length, 0, "the recap does not open the model prompt editor");
+	assert.equal(ctx.pasted.length, 0);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.equal(pi.messages.length, 0);
+	const requestsBeforeScroll = ctx.renderRequests;
+	view.handleInput("j");
+	assert.ok(ctx.renderRequests > requestsBeforeScroll, "scrolling invalidates the read-only overlay");
+	view.handleInput("q");
+	await pending;
+});
+
+test("recap bounds old branch history and uses the latest state per persisted identity", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const batch = (state) => ({ id: "batch-latest", kind: "slay", state, completedItems: state === "complete" ? 1 : 0, totalItems: 1, startedAt: NOW, currentWave: 0, waves: [] });
+	const comment = (state, receipts = []) => ({ version: 1, state, plan: { id: "comment-plan", targets: [{ repo: "acme/widgets", number: 17, type: "issue" }] }, receipts });
+	const branch = [
+		{ type: "custom", customType: BATCH_ENTRY, data: batch("running") },
+		...Array.from({ length: 510 }, () => ({ type: "message", message: { role: "user", content: "old" } })),
+		{ type: "custom", customType: BATCH_ENTRY, data: batch("running") },
+		{ type: "custom", customType: COMMENT_ENTRY, data: comment("previewed") },
+		{ type: "custom", customType: BATCH_ENTRY, data: batch("complete") },
+		{ type: "custom", customType: COMMENT_ENTRY, data: comment("complete", ["https://github.com/acme/widgets/issues/17#issuecomment-19"]) },
+	];
+	ctx.sessionManager = { getBranch: () => branch, getSessionId: () => "session-1", getLeafId: () => "leaf-1" };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	const pending = pi.commands.get("review").handler("recap", ctx);
+	const view = ctx.overlays.at(-1);
+	const rendered = view.render(240).join("\n");
+	assert.match(rendered, /batch-latest: complete/);
+	assert.doesNotMatch(rendered, /batch-latest: running/);
+	view.handleInput("\u0004");
+	view.handleInput("q");
+	await pending;
+});
+
+test("Review resolves only native truncation artifacts against the source session", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const lookups = [];
+	ctx.sessionManager = {
+		getBranch: () => [], getSessionId: () => "session-native",
+		async getArtifactPath(id) { lookups.push(id); return id === "17" ? "/state/session-native/artifacts/17.bash.log" : null; },
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	pi.events.get("tool_execution_start")({ toolCallId: "native-artifact", toolName: "bash", args: { command: "printf output" } }, ctx);
+	await pi.events.get("tool_execution_end")({
+		toolCallId: "native-artifact", isError: false,
+		result: { content: [{ type: "text", text: "sample" }], details: { meta: { truncation: { direction: "tail", truncatedBy: "bytes", totalLines: 10, totalBytes: 100, outputLines: 1, outputBytes: 6, artifactId: "17" } } } },
+	}, ctx);
+	const trace = await pi.tools.get("review_workbench_trace").execute("trace", {});
+	assert.deepEqual(lookups, ["17"]);
+	assert.match(trace.content[0].text, /artifact:\/\/17.*session-native.*17\.bash\.log/);
+
+	pi.events.get("tool_execution_start")({ toolCallId: "native-error", toolName: "bash", args: {} }, ctx);
+	await pi.events.get("tool_execution_end")({
+		toolCallId: "native-error", isError: false,
+		result: { content: [], details: { meta: { artifactError: "storage unavailable", truncation: { direction: "tail", truncatedBy: "bytes", totalLines: 10, totalBytes: 100, outputLines: 1, outputBytes: 6, artifactId: "must-not-resolve" } } } },
+	}, ctx);
+	assert.deepEqual(lookups, ["17"]);
+});
+
+test("cancelled Review handoff keeps the export and sends no message", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	let exported = false;
+	ctx.sessionManager = {
+		getBranch: () => [], getSessionId: () => "session-1", getLeafId: () => "leaf-1", getSessionFile: () => "/state/parent.jsonl",
+		async saveArtifact() { exported = true; return "8"; }, async getArtifactPath() { return "/state/artifacts/8.review-handoff"; },
+	};
+	ctx.newSession = async (options) => { assert.equal(typeof options.setup, "function"); return { cancelled: true }; };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(exported, true);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.equal(pi.entries.filter((entry) => entry.customType === HANDOFF_ENTRY).at(-1).data.state, "cancelled");
+});
+
+test("positive handoff cancellation supersedes opening in-process and after branch restoration", async () => {
+	for (const restored of [false, true]) {
+		const branchFile = join(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, `handoff-${restored}.json`);
+		writeFileSync(branchFile, "[]");
+		const sourceCtx = fakeCtx();
+		let activeBranch = JSON.parse(readFileSync(branchFile, "utf8"));
+		let leaf = "source-leaf";
+		let attempts = 0;
+		const sourceManager = {
+			getBranch: () => activeBranch, getSessionId: () => sourceCtx.sessionId,
+			getLeafId: () => leaf, getSessionFile: () => sourceCtx.sessionId === "session-1" ? "/source.jsonl" : "/child.jsonl",
+			saveArtifact: async () => "29", getArtifactPath: async () => "/artifacts/29",
+		};
+		sourceCtx.sessionManager = sourceManager;
+		const attach = (pi) => {
+			pi.appendEntry = (customType, data) => {
+				activeBranch.push({ type: "custom", customType, data });
+				writeFileSync(branchFile, JSON.stringify(activeBranch));
+			};
+			createReviewExtension(pi, { env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+		};
+		const first = fakeHost();
+		attach(first);
+		sourceCtx.newSession = async () => { attempts++; return { cancelled: true }; };
+		await first.commands.get("review").handler("handoff", sourceCtx);
+		assert.deepEqual(activeBranch.filter((entry) => entry.customType === HANDOFF_ENTRY).map((entry) => entry.data.state), ["opening", "cancelled"]);
+		const retry = restored ? fakeHost() : first;
+		if (restored) { activeBranch = JSON.parse(readFileSync(branchFile, "utf8")); attach(retry); }
+		sourceCtx.newSession = async (options) => {
+			attempts++;
+			sourceCtx.sessionId = "child"; leaf = "child-leaf"; activeBranch = [];
+			await options.setup(sourceManager);
+			return { cancelled: false };
+		};
+		await retry.commands.get("review").handler("handoff", sourceCtx);
+		assert.equal(attempts, 2);
+		assert.equal(retry.nativeMessages.length, 1);
+		await retry.commands.get("review").handler("handoff", sourceCtx);
+		assert.equal(retry.nativeMessages.length, 1, "uncertain submission still fences duplicate delivery");
+	}
+});
+
+test("artifact lookup cannot resume into a reset mutable session or its current Review wave", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	const deferred = Promise.withResolvers<string>();
+	const targetLookup = Promise.withResolvers<string>();
+	ctx.sessionManager = {
+		getBranch: () => [], getSessionId: () => ctx.sessionId,
+		getArtifactPath: () => ctx.sessionId === "session-1" ? deferred.promise : targetLookup.promise,
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({ "projectbluefin/review#77": { title: "target wave", submittedPrs: [] } }), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	const result = { content: [{ text: "sample" }], details: { meta: { truncation: { artifactId: "17", totalBytes: 100, outputBytes: 6 } } } };
+	pi.events.get("tool_execution_start")({ toolCallId: "reused", toolName: "bash", args: {} }, ctx);
+	const pending = pi.events.get("tool_execution_end")({ toolCallId: "reused", result, isError: false }, ctx);
+	ctx.sessionId = "target";
+	pi.events.get("session_switch")({}, ctx);
+	await pi.commands.get("review").handler("slay", ctx);
+	pi.events.get("tool_execution_start")({ toolCallId: "reused", toolName: "bash", args: {} }, ctx);
+	const targetPending = pi.events.get("tool_execution_end")({ toolCallId: "reused", result, isError: false }, ctx);
+	const entriesBefore = JSON.stringify(pi.entries);
+	assert.ok(pi.entries.some((entry) => entry.customType === BATCH_ENTRY && entry.data.state === "running"), "the target owns a new native wave");
+	deferred.resolve("/source/artifact");
+	await pending;
+	const after = await pi.tools.get("review_workbench_trace").execute("trace", {});
+	assert.equal(JSON.stringify(pi.entries), entriesBefore, "old result must not re-enter target wave bookkeeping");
+	assert.doesNotMatch(after.content[0].text, /session-1|\/source\/artifact/);
+	targetLookup.resolve("/target/artifact");
+	await targetPending;
+	const resolved = await pi.tools.get("review_workbench_trace").execute("trace", {});
+	assert.match(resolved.content[0].text, /target.*\/target\/artifact/);
+});
 
 test("duration formatting follows Dagger's units", () => {
 	assert.equal(formatDuration(340), "0.3s");
