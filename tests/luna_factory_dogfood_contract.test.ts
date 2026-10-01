@@ -1,6 +1,8 @@
 /** Behavioral contracts for the finite, no-publish Factory dogfood path. */
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { join } from "node:path";
 import { boundaryOutputLines, reportCapabilities } from "./appliance-runtime-report.ts";
@@ -57,6 +59,43 @@ test("workflow preserves the bounded exact-head no-publish contract", () => {
     "BLUEFIN_REVIEW_OCI_PUSH",
   ]) assert.doesNotMatch(workflow, new RegExp(escapeRegExp(forbidden)), forbidden);
   assert.equal(existsSync(join(root, "tests/luna_factory_dogfood_contract.py")), false);
+});
+
+test("packaged verifier probe uses the production preflight and harmless sandbox test", () => {
+  const probe = read("image/extension/luna-factory/omp/verifier-probe.ts");
+  assertIncludes(probe, [
+    'from "./batch-native.ts"',
+    "sandboxPreflight",
+    "sandboxTest",
+    '"true"',
+    '"available"',
+    "uidMap",
+    "maxUserNamespaces",
+    "bwrapVersion",
+  ]);
+  const entrypoint = read("image/appliance/entrypoint.sh");
+  assert.match(entrypoint, /--factory-verifier-probe/);
+  const optedInProbe = entrypoint.indexOf('[[ "${LUNA_FACTORY_ENABLED:-0}" == 1 ]]');
+  const persistentSetup = entrypoint.indexOf("prepare_factory_state_dir() {");
+  assert.ok(optedInProbe >= 0 && optedInProbe < persistentSetup, "verifier qualifies before persistent state setup");
+});
+
+test("OCI Factory dogfood keeps generic qualification separate from krun verifier readiness", () => {
+  const workflow = read(".github/workflows/luna-factory-dogfood.yml");
+  assertIncludes(workflow, [
+    "factory-verifier.json",
+    "bin/bluefin factory-verifier-probe krun",
+    "Factory verifier: available on the packaged podman+krun+keep-id profile.",
+    "Factory verifier: BLOCKED (host prerequisites unavailable).",
+  ]);
+  assert.match(workflow, /Factory verifier qualification failed on a runnable krun profile/);
+  assert.match(workflow, /exit 1/);
+  assert.match(workflow, /if: steps\.capabilities\.outputs\.oci == 'available' && steps\.capabilities\.outputs\.userNamespace == 'available'/);
+  assert.match(workflow, /Record blocked generic OCI selected-batch dogfood/);
+  assertIncludes(workflow, [
+    "Run packaged Review Factory co-load smoke under generic OCI",
+    "Record blocked generic OCI Review Factory co-load smoke",
+  ]);
 });
 
 test("workflow pins the official Apptainer v2 action by immutable digest", () => {
@@ -135,10 +174,70 @@ test("harness preserves the local-provider and runtime-boundary contract", () =>
   assert.doesNotMatch(harness, /--no-session/);
 });
 
+test("Review Factory co-load smoke supplies an explicit Review scope", () => {
+  const smoke = read("tests/review-factory-coload-smoke.sh");
+  assert.ok(smoke.includes("--env REVIEW_DEFAULT_SCOPE=example/repo"));
+});
+
+test("co-load smoke verifies startup refusal without qualifying a blocked verifier", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "factory-coload-contract-"));
+  const bin = join(fixture, "bin");
+  mkdirSync(bin);
+  const version = read("image/appliance/Containerfile").match(/^ARG OMP_VERSION=(\S+)$/m)?.[1];
+  assert.ok(version);
+  writeFileSync(join(bin, "podman"), `#!/usr/bin/env bash
+set -eu
+if [[ "$1" == image ]]; then exit 0; fi
+if [[ "$*" == *--version* ]]; then printf 'omp/%s\\n' "$FIXTURE_OMP_VERSION"; exit 0; fi
+if [[ "$*" == *LUNA_FACTORY_ENABLED=1* ]]; then
+  case "$FIXTURE_COLOAD_RESULT" in
+    blocked|state-leak|omp-leak)
+      printf '%s\\n' '{"kind":"review-factory-verifier","status":"blocked","reason":"namespace unavailable"}'
+      echo 'Review appliance: Factory verifier capability unavailable; refusing opt-in startup before work selection.'
+      if [[ "$FIXTURE_COLOAD_RESULT" == state-leak ]]; then
+        for argument; do
+          if [[ "$argument" == *:/home/bluefin:rw ]]; then mkdir -p "$(printf '%s' "$argument" | cut -d: -f1)/.local/state/review"; fi
+        done
+      fi
+      if [[ "$FIXTURE_COLOAD_RESULT" == omp-leak ]]; then echo '{"statusKey":"review_workbench"}'; fi
+      exit 1
+      ;;
+    unexpected-failure) echo 'unexpected startup failure'; exit 1 ;;
+  esac
+  message='Factory has no batches.'
+else
+  message='Factory is disabled; explicitly enable LUNA_FACTORY_ENABLED=1'
+fi
+printf '%s\\n' '{"statusKey":"review_workbench"}' '{"name":"factory"}' "$message"
+`, { mode: 0o755 });
+  try {
+    for (const outcome of ["available", "blocked", "state-leak", "omp-leak", "unexpected-failure"]) {
+      const result = spawnSync("bash", [join(root, "tests/review-factory-coload-smoke.sh")], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          RUNNER_TEMP: join(fixture, outcome),
+          FIXTURE_OMP_VERSION: version,
+          FIXTURE_COLOAD_RESULT: outcome,
+        },
+      });
+      const output = result.stdout + result.stderr;
+      assert.equal(result.status, outcome === "available" || outcome === "blocked" ? 0 : 1, output);
+      if (outcome === "blocked") assert.match(output, /enabled=blocked disabled=passed/);
+      if (outcome === "available") assert.match(output, /enabled=passed disabled=passed/);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("SIF harness uses Apptainer directly and does not claim krun", () => {
   const harness = read("tests/luna-factory-dogfood.sh");
-  assertIncludes(harness, ["BLUEFIN_REVIEW_FALLBACK_SIF", "apptainer exec", '--home "$home:/home/bluefin"', "--bind"]);
-  assert.doesNotMatch(harness, /krun/);
+  const sifBranch = harness.split("\nsif)\n")[1]?.split("\nesac")[0];
+  assert.ok(sifBranch, "SIF harness branch");
+  assertIncludes(sifBranch, ["BLUEFIN_REVIEW_FALLBACK_SIF", "factory-verifier-probe apptainer", "apptainer exec", '--home "$home:/home/bluefin"', "--bind"]);
+  assert.doesNotMatch(sifBranch, /krun/);
 });
 
 test("capability probe records the independently classified host boundaries", () => {
