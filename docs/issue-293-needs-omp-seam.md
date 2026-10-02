@@ -5,8 +5,12 @@ This receipt records the live capability audit and follow-up for
 The generic OMP patch, x86_64 derived build, first-turn native selection/recall,
 and daemon-down fail-open path are verified locally. The appliance now builds
 derived OMP per native architecture, but no image or aarch64 build was run here.
-The MemoryD adapter is not packaged: its pinned source commit has no license, so
-packaged MemoryD behavior is not claimed.
+The MemoryD adapter is not packaged. Its pinned source commit has no `LICENSE`
+file, its package manifest has no license field, and the published v0.1.0
+release contains no adapter artifact. The repository's root Cargo manifest
+declares MIT, but this audit does not establish whether that grant covers
+distribution of the nested adapter package, so packaged adapter behavior is
+not claimed.
 
 ## Native qualification on 2026-10-02
 
@@ -24,9 +28,13 @@ The native canary now invokes `ctx.memory.status`, `search`, and explicit `save`
 through a test-only extension command in the actual derived executable. An
 isolated loopback fixture proves active/writable/searchable status, a scoped
 search result, one explicit saved ID with current session identity, and no
-automatic or unexpected write requests. First-turn recall must appear in the
-provider's system/developer context with `recall_not_authority`, preserving the
-original daemon-down fail-open control. The runtime regression first failed
+automatic or unexpected write requests. At the provider boundary, the single
+synthetic fact must appear exactly once in the same system/developer message as
+the ordered MemoryD contextual-memory header, `recall_not_authority` disclaimer,
+and precedence statement. The test rejects a bare marker, an authority directive,
+a marker split from its frame, and a duplicated fact. This is adapter-frame
+evidence, not a claim that recalled content becomes authoritative policy.
+The runtime regression first failed
 because these native operations were absent, then passed against the retained
 image. Network access was disabled and no real model/provider was called.
 
@@ -36,12 +44,17 @@ Podman/krun and Apptainer transport/storage, extension coexistence, and complete
 packaged MemoryD acceptance also remain separate gates. The retained x86 fixture
 does not satisfy them.
 
-The historical claim below that MemoryD has no release is superseded: MemoryD
-#245 is closed and its immutable v0.1.0 native release exists at source
-`45b5ef31e0d027bd03260d0731d7d5da09a611ef`; its Cargo manifest declares MIT.
-That release does not provide an independently licensed adapter package among
-its published native assets. Adapter distribution authorization and a pinned
-release-shaped adapter artifact remain required; this work infers neither.
+MemoryD #245 is closed. Its immutable v0.1.0 native release exists at source
+`45b5ef31e0d027bd03260d0731d7d5da09a611ef`; the root Cargo manifest declares
+MIT. Published assets are native daemon archives, provenance, and checksums;
+they do not include a separately packaged OMP adapter. The adapter package
+manifest has no `license` field, and no repository `LICENSE` file was found at
+the release tag. The scope of the root Cargo license declaration for the nested
+adapter is unresolved, so this work infers no adapter redistribution grant.
+
+The earlier Review audit text at `2c49c270823b2a447ee6ffdff6a4f4f1981166c1`
+said that #245 was still open and no release existed. That statement was stale
+at that revision and is retained only in Git history, not as current evidence.
 MemoryD #241 still owns adapter semantics, and automatic observation remains
 disabled pending MemoryD #233.
 
@@ -55,7 +68,7 @@ disabled pending MemoryD #233.
 | OMP source tag and exact commit | `v18.4.3` = `fc671eba383f2a7208500836673b485c0dc7073d` |
 | OMP live `main` audited | `60d3a5a4520b2937b4a0fc727abadabbed17cf2e` |
 | Latest local derived x86_64 OMP SHA-256 | `afe378d03e2cc169cde2739f4997b8bc4effef77a8af8874ec6f6f8b9640cc34` |
-| MemoryD adapter source | `e7f8d431797973afbdf4d0530aa14a25f43acf35`; no license file at that commit |
+| MemoryD adapter source | `e7f8d431797973afbdf4d0530aa14a25f43acf35`; no `LICENSE` file or package-level license field; root Cargo metadata declares MIT |
 
 The OMP source, patch, Bun, native-package, and MemoryD test-source pins are in
 `image/appliance/Containerfile:32-44`; the resolved derived binary hash is
@@ -195,16 +208,15 @@ protection, fail-open behavior, cancellation, status/search/explicit-save, and
 bounded pre-compaction recall. Automatic observation/writeback remains
 disabled pending MemoryD #233. No fake `memory://` resource is introduced.
 
-The pinned MemoryD repository commit has no `LICENSE` file; no license or
-distribution grant is inferred from repository ownership. The adapter is
-fetched only into temporary build/canary directories and is not copied into the
-Review repository or image. MemoryD #245 remains open; no published release,
-tag, npm artifact, or Homebrew formula was verified. Packaging the adapter is
-blocked until distribution rights are established.
-This ad-hoc source commit is an ephemeral test/canary input only, not a
-distribution contract. Review packaging must wait for MemoryD #245 to provide
-explicit terms and a release-shaped artifact, then consume a pinned licensed
-release rather than this source commit.
+The adapter is fetched only into temporary build/canary directories and is not
+copied into the Review repository or image. MemoryD #245 has since closed and
+published v0.1.0 daemon assets, but they do not include an adapter package. The
+adapter manifest has no package-level license field, the release tag has no
+`LICENSE` file, and the root Cargo manifest's MIT declaration does not by itself
+settle the adapter package's distribution scope in this audit. Packaging stays
+blocked until adapter distribution terms and a pinned release-shaped adapter
+artifact are established. The pinned source commit remains an ephemeral
+test/canary input, not a distribution contract.
 
 ## Generic native registration patch implemented
 
@@ -233,7 +245,7 @@ hosted CI, and image publication remain unverified.
 | Native status/search/explicit save against MemoryD | TESTED — current derived x86 executable through native runtime, synthetic loopback fixture only; live daemon and packaged integration remain unproved |
 | Derived image build and native aarch64 lane | IMPLEMENTED, NOT RUN — local builder was x86_64; hosted native arm64 build remains pending |
 | Promotion waits for both native builds and both digests | TESTED — static workflow contract only; no hosted promotion |
-| MemoryD adapter distribution authorization | BLOCKED — pinned commit contains no license; adapter is not packaged |
+| MemoryD adapter distribution authorization | BLOCKED — #245's MIT-licensed native daemon release has no adapter asset; adapter-package distribution terms remain unresolved |
 | Exact-head independent review and hosted checks | REMAINING |
 
 Terminal marker: `DISTRIBUTION_AUTHORIZATION_REQUIRED`.
