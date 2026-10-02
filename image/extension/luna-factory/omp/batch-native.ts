@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { promisify, TextDecoder } from "node:util";
 import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -102,6 +102,19 @@ function pageNumber(value: unknown, fallback: number, maximum: number): number {
 	return value;
 }
 
+function decodeUtf8Page(buffer: Buffer, requestedBytes: number, offset: number, size: number): { text: string; bytes: number; offset: number; nextOffset: number | null; eof: boolean } {
+	const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+	const maximum = Math.min(buffer.length, requestedBytes + 3);
+	for (let bytes = requestedBytes; bytes <= maximum; bytes++) {
+		try {
+			const text = decoder.decode(buffer.subarray(0, bytes));
+			const nextOffset = offset + bytes;
+			return { text, bytes, offset, nextOffset: nextOffset < size ? nextOffset : null, eof: nextOffset >= size };
+		} catch { /* Extend only enough to finish a split UTF-8 character. */ }
+	}
+	throw new Error("UTF-8 range is invalid or starts at a continuation byte");
+}
+
 function repositoryPath(workspace: string, input: string): string {
 	if (!input || input.includes("\0") || input.includes("\\") || /^[a-z][a-z0-9+.-]*:/i.test(input) || input.startsWith("/")) throw new Error("repository-relative path required");
 	const parts = input.split("/");
@@ -126,15 +139,14 @@ function readRange(path: string, offset: number, limit: number): { text: string;
 		const stat = fstatSync(fd);
 		if (!stat.isFile() || stat.nlink > 1 || offset > stat.size) throw new Error("file range unavailable");
 		const size = Math.min(limit, Math.max(0, stat.size - offset));
-		const buffer = Buffer.alloc(size);
+		const buffer = Buffer.alloc(Math.min(size + 3, Math.max(0, stat.size - offset)));
 		let received = 0;
-		while (received < size) {
-			const count = readSync(fd, buffer, received, size - received, offset + received);
+		while (received < buffer.length) {
+			const count = readSync(fd, buffer, received, buffer.length - received, offset + received);
 			if (count === 0) break;
 			received += count;
 		}
-		const nextOffset = offset + received;
-		return { text: buffer.subarray(0, received).toString("utf8"), bytes: received, offset, nextOffset: nextOffset < stat.size ? nextOffset : null, eof: nextOffset >= stat.size };
+		return decodeUtf8Page(buffer.subarray(0, received), Math.min(size, received), offset, stat.size);
 	} finally { closeSync(fd); }
 }
 
@@ -157,7 +169,8 @@ function readEvidenceRange(root: string, handle: NativeEvidenceHandle, offset: n
 		if (!stat.isFile() || stat.nlink !== 1 || stat.size !== handle.bytes || offset > stat.size) throw new Error("evidence changed or unavailable");
 		const hash = createHash("sha256");
 		const buffer = Buffer.alloc(64 * 1024);
-		const range = Buffer.alloc(Math.min(limit, Math.max(0, stat.size - offset)));
+		const requestedBytes = Math.min(limit, Math.max(0, stat.size - offset));
+		const range = Buffer.alloc(Math.min(requestedBytes + 3, Math.max(0, stat.size - offset)));
 		let position = 0;
 		while (position < stat.size) {
 			const count = readSync(fd, buffer, 0, Math.min(buffer.length, stat.size - position), position);
@@ -169,8 +182,7 @@ function readEvidenceRange(root: string, handle: NativeEvidenceHandle, offset: n
 			position += count;
 		}
 		if (hash.digest("hex") !== handle.digest.toLowerCase()) throw new Error("evidence changed or unavailable");
-		const nextOffset = offset + range.length;
-		return { text: range.toString("utf8"), bytes: range.length, offset, nextOffset: nextOffset < stat.size ? nextOffset : null, eof: nextOffset >= stat.size };
+		return decodeUtf8Page(range, requestedBytes, offset, stat.size);
 	} finally { closeSync(fd); }
 }
 
@@ -342,7 +354,7 @@ export async function runNative(
 	let allowReport = true;
 	let forceTurnYield = false;
 	const tools: ToolDefinition[] = [
-		{ name: "factory_read", label: "Read repository file range", description: `Read a repository-relative UTF-8 byte range (requests up to ${MAX_READ_BYTES} bytes; returned pages at most ${MODEL_PAGE_BYTES} bytes to preserve complete native transport). Continue at nextOffset until eof to establish full coverage.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const file = repositoryPath(workspace, path); const offset = pageNumber(rawArgs.offset, 0, Number.MAX_SAFE_INTEGER); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); return result(JSON.stringify({ path, ...readRange(file, offset, Math.min(limit, MODEL_PAGE_BYTES)) })); } },
+		{ name: "factory_read", label: "Read repository file range", description: `Read a repository-relative UTF-8 byte range (requests up to ${MAX_READ_BYTES} bytes; pages target ${MODEL_PAGE_BYTES} bytes and may consume up to three extra bytes to finish a UTF-8 character). Continue at nextOffset until eof to establish full coverage.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const file = repositoryPath(workspace, path); const offset = pageNumber(rawArgs.offset, 0, Number.MAX_SAFE_INTEGER); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); return result(JSON.stringify({ path, ...readRange(file, offset, Math.min(limit, MODEL_PAGE_BYTES)) })); } },
 		{ name: "factory_files", label: "Repository files page", description: `List up to ${MAX_LIST_ENTRIES} entries from one repository directory. Continue at nextOffset; each page reports whether enumeration reached EOF.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const directory = path === "." ? workspace : repositoryPath(workspace, path); if (!lstatSync(directory).isDirectory()) throw new Error("repository directory required"); const offset = pageNumber(rawArgs.offset, 0, 1_000_000); const limit = pageNumber(rawArgs.limit, MAX_LIST_ENTRIES, MAX_LIST_ENTRIES); if (limit === 0) throw new Error("list limit must be positive"); const entries: string[] = []; let visible = 0; let eof = true; const dir = opendirSync(directory); try { for await (const entry of dir) { if ([".git", ".omp", ".pi", ".claude", "node_modules"].includes(entry.name) || entry.isSymbolicLink()) continue; if (visible++ < offset) continue; const name = `${entry.name}${entry.isDirectory() ? "/" : ""}`; if (entries.length === limit || Buffer.byteLength(JSON.stringify({ path, entries: [...entries, name], offset, nextOffset: offset + entries.length + 1, eof: false })) > 32 * 1024) { if (!entries.length) throw new Error("directory page exceeds bounded native transport"); eof = false; break; } entries.push(name); } } finally { await dir.close().catch(() => {}); } const nextOffset = eof ? null : offset + entries.length; return result(JSON.stringify({ path, entries, offset, nextOffset, eof })); } },
 		{
 			name: "factory_report",
@@ -420,7 +432,7 @@ export async function runNative(
 				if (!child || child === ".." || child.startsWith(`..${sep}`) || resolve(handle.path) === resolve(packet.evidenceRoot)) throw new NativeExecutionError("capability-unavailable", "evidence ownership escapes the admitted run/item");
 			}
 		}
-		tools.push({ name: "factory_evidence_read", label: "Read retained attempt evidence", description: "Read a digest-checked byte range from an explicitly supplied attempt artifact handle. Paths and unrelated artifacts are inaccessible.", parameters: schema.object({ id: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const id = stringArg(rawArgs, "id"); const handle = byId.get(id); if (!handle) throw new Error("evidence handle unavailable for this attempt"); const offset = pageNumber(rawArgs.offset, 0, handle.bytes); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); const chunk = readEvidenceRange(root, handle, offset, Math.min(limit, MODEL_PAGE_BYTES)); if (chunk.bytes > 0) coverage.set(handle.id, [...(coverage.get(handle.id) ?? []), { start: chunk.offset, end: chunk.offset + chunk.bytes }]); return result(JSON.stringify({ id: handle.id, attemptId: handle.attemptId, digest: handle.digest, artifactBytes: handle.bytes, readBytes: chunk.bytes, offset: chunk.offset, text: chunk.text, nextOffset: chunk.nextOffset, eof: chunk.eof })); } });
+		tools.push({ name: "factory_evidence_read", label: "Read retained attempt evidence", description: `Read a digest-checked UTF-8 byte range from an explicitly supplied attempt artifact handle. Pages target ${MODEL_PAGE_BYTES} bytes and may consume up to three extra bytes to finish a UTF-8 character. Paths and unrelated artifacts are inaccessible.`, parameters: schema.object({ id: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const id = stringArg(rawArgs, "id"); const handle = byId.get(id); if (!handle) throw new Error("evidence handle unavailable for this attempt"); const offset = pageNumber(rawArgs.offset, 0, handle.bytes); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); const chunk = readEvidenceRange(root, handle, offset, Math.min(limit, MODEL_PAGE_BYTES)); if (chunk.bytes > 0) coverage.set(handle.id, [...(coverage.get(handle.id) ?? []), { start: chunk.offset, end: chunk.offset + chunk.bytes }]); return result(JSON.stringify({ id: handle.id, attemptId: handle.attemptId, digest: handle.digest, artifactBytes: handle.bytes, readBytes: chunk.bytes, offset: chunk.offset, text: chunk.text, nextOffset: chunk.nextOffset, eof: chunk.eof })); } });
 	}
 	if (writable) tools.push({ name: "factory_write", label: "Write repository file", description: "Replace a repository-relative text file; changes remain in this item workspace.", parameters: schema.object({ path: schema.string(), content: schema.string() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const content = stringArg(rawArgs, "content"); if (content.length > 131072) throw new Error("file exceeds 128KiB"); const rel = path.replace(/\\/g, "/"); if (item.selected.action === "pr-ready" && (rel === ".github/workflows" || rel.startsWith(".github/workflows/"))) throw new Error("Factory cannot publish workflow-changing work; use patch-only inspection and human Review"); const file = repositoryPath(workspace, path); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, content); return result(`Wrote ${path}`); } });
 	for (const tool of tools) {

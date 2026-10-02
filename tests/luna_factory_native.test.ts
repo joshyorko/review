@@ -228,6 +228,77 @@ test("escaped repository and evidence pages fit the native model transport witho
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("repository and evidence pages preserve UTF-8 characters across byte boundaries", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-utf8-pages-"));
+	try {
+		const { createHash } = await import("node:crypto");
+		const cases = ["é", "€", "🦕"];
+		const handles = [] as { id: string; path: string; digest: string; bytes: number; attemptId: string }[];
+		for (let index = 0; index < cases.length; index++) {
+			const path = join(root, `utf8-${index}.txt`);
+			const bytes = Buffer.from(`${"a".repeat(4095)}${cases[index]}tail`);
+			await writeFile(path, bytes);
+			handles.push({ id: `utf8-${index}`, path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: "attempt-1" });
+		}
+		const bomPath = join(root, "bom.txt");
+		const bomBytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("text")]);
+		await writeFile(bomPath, bomBytes);
+		handles.push({ id: "bom", path: bomPath, digest: createHash("sha256").update(bomBytes).digest("hex"), bytes: bomBytes.length, attemptId: "attempt-1" });
+		let tools: Tool[] = [];
+		const sdk = fake(async (registered) => { tools = registered; });
+		await runNative(sdk.sdk, schema, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } }, item(root), root, "worker", new AbortController().signal, () => {}, () => {}, "", { attemptId: "attempt-2", artifacts: handles });
+		const repositoryRead = tools.find((tool) => tool.name === "factory_read")!;
+		const evidenceRead = tools.find((tool) => tool.name === "factory_evidence_read")!;
+		for (let index = 0; index < cases.length; index++) {
+			const prefix = "a".repeat(4095) + cases[index];
+			const expectedBytes = Buffer.byteLength(prefix);
+			const repositoryPage = JSON.parse((await repositoryRead.execute("id", { path: `utf8-${index}.txt`, offset: 0, limit: 4096 }) as { content: { text: string }[] }).content[0].text);
+			assert.equal(repositoryPage.text, prefix);
+			assert.equal(repositoryPage.bytes, expectedBytes);
+			assert.equal(repositoryPage.nextOffset, expectedBytes);
+			assert.equal(repositoryPage.eof, false);
+			const evidencePage = JSON.parse((await evidenceRead.execute("id", { id: `utf8-${index}`, offset: 0, limit: 4096 }) as { content: { text: string }[] }).content[0].text);
+			assert.equal(evidencePage.text, prefix);
+			assert.equal(evidencePage.readBytes, expectedBytes);
+			assert.equal(evidencePage.nextOffset, expectedBytes);
+			const smallLimit = JSON.parse((await repositoryRead.execute("id", { path: `utf8-${index}.txt`, offset: 4095, limit: 1 }) as { content: { text: string }[] }).content[0].text);
+			assert.equal(smallLimit.text, cases[index]);
+			assert.equal(smallLimit.bytes, Buffer.byteLength(cases[index]));
+		}
+		const bomPage = JSON.parse((await repositoryRead.execute("id", { path: "bom.txt", offset: 0, limit: 7 }) as { content: { text: string }[] }).content[0].text);
+		assert.equal(bomPage.text, "\uFEFFtext");
+		const evidenceBomPage = JSON.parse((await evidenceRead.execute("id", { id: "bom", offset: 0, limit: 7 }) as { content: { text: string }[] }).content[0].text);
+		assert.equal(evidenceBomPage.text, "\uFEFFtext");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("native UTF-8 reads reject invalid bytes, incomplete EOF, and continuation-byte offsets", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-utf8-invalid-"));
+	try {
+		const { createHash } = await import("node:crypto");
+		const inputs = [
+			{ id: "invalid", bytes: Buffer.from([0x61, 0xff, 0x62]), offset: 0 },
+			{ id: "incomplete", bytes: Buffer.from([0x61, 0xf0, 0x9f]), offset: 0 },
+			{ id: "continuation", bytes: Buffer.from("🦕"), offset: 1 },
+		];
+		const handles = [] as { id: string; path: string; digest: string; bytes: number; attemptId: string }[];
+		for (const input of inputs) {
+			const path = join(root, `${input.id}.txt`);
+			await writeFile(path, input.bytes);
+			handles.push({ id: input.id, path, digest: createHash("sha256").update(input.bytes).digest("hex"), bytes: input.bytes.length, attemptId: "attempt-1" });
+		}
+		let tools: Tool[] = [];
+		const sdk = fake(async (registered) => { tools = registered; });
+		await runNative(sdk.sdk, schema, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } }, item(root), root, "worker", new AbortController().signal, () => {}, () => {}, "", { attemptId: "attempt-2", artifacts: handles });
+		const repositoryRead = tools.find((tool) => tool.name === "factory_read")!;
+		const evidenceRead = tools.find((tool) => tool.name === "factory_evidence_read")!;
+		for (const input of inputs) {
+			await assert.rejects(() => repositoryRead.execute("id", { path: `${input.id}.txt`, offset: input.offset, limit: 2 }), /UTF-8 range is invalid/);
+			await assert.rejects(() => evidenceRead.execute("id", { id: input.id, offset: input.offset, limit: 2 }), /UTF-8 range is invalid/);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("admitted evidence identifiers cannot overwhelm complete native JSON pages", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-native-evidence-identities-"));
 	try {
