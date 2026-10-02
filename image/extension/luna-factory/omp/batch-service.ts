@@ -303,7 +303,7 @@ export class BatchService {
 				const criterion = item.ledger.criteria.find((entry) => entry.observation);
 				if (!criterion?.observation || this.running.has(`${batch.id}:${item.selected.key}`)) continue;
 				const current = observation.nodes.find((node) => node.key === item.selected.key);
-				const same = current?.subject?.base === item.selected.base && current?.subject?.head === item.selected.head && current.acceptanceRevision === item.selected.acceptanceRevision;
+				const same = current !== undefined && current.subject?.base === item.selected.base && current.subject?.head === item.selected.head && current.acceptanceRevision === item.selected.acceptanceRevision;
 				const status = current?.state === "UNKNOWN" || !same ? "unknown" : current.proofCurrent && current.proof === "merged-upstream" ? "proven" : "unproved";
 				this.event(item, { kind: "record_observation", expectedRevision: item.ledger.revision, observation: {
 					criterionId: criterion.id, generation: item.ledger.generation, subject: item.ledger.subject, source: criterion.observation,
