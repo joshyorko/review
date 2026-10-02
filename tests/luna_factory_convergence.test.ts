@@ -164,7 +164,12 @@ test("one selected graph drives real native sessions, verification and bounded r
 		await service.resume(batch.id, { model: { provider: "fixture", id: "fixture" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } } as never);
 		await service.waitForIdle();
 		const final = service.store.read(batch.id);
-		assert.deepEqual(final.items.slice(0, 3).map((item) => item.stage), ["DONE", "DONE", "DONE"]);
+		const selectedStages = final.items.slice(0, 3).map((item) => ({
+			key: item.selected.key,
+			stage: item.stage,
+			blocker: item.blocker?.replace(/(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)/g, "[redacted]").slice(0, 400),
+		}));
+		assert.deepEqual(selectedStages.map((item) => item.stage), ["DONE", "DONE", "DONE"], `selected lane states: ${JSON.stringify(selectedStages)}`);
 		assert.equal(final.items[0]!.attempts, 2);
 		assert.equal(final.items[1]!.attempts, 1);
 		assert.ok(starts.indexOf(items[1]!.key) > starts.lastIndexOf(items[0]!.key));
