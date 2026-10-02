@@ -75,6 +75,10 @@ if [[ "${REVIEW_NATIVE_REPAIR_ACCEPTANCE:-0}" == "1" ]]; then
   bash tests/luna-factory-repair-acceptance.sh "${REVIEW_NATIVE_REPAIR_PROFILE:-native}"
 fi
 
+if [[ "${REVIEW_NATIVE_GRAPH_ACCEPTANCE:-0}" == "1" ]]; then
+  bash tests/luna-factory-graph-acceptance.sh "${REVIEW_NATIVE_GRAPH_PROFILE:-native}"
+fi
+
 # The installed-runtime ABI probe is opt-in because normal hermetic tests have no
 # authenticated OMP profile. This is a separate gate, never inferred from mocks.
 if [[ -n "${REVIEW_PINNED_OMP_BINARY:-}" ]]; then
