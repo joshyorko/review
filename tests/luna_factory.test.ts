@@ -2897,24 +2897,63 @@ test("graph relation vocabulary preserves non-gating edges and marks inferred or
 	assert.match(decision.softHints[0]!, /model proposal/);
 });
 
-test("graph re-observation invalidates stale proof and rejects authoritative cycles", () => {
+test("graph re-observation invalidates stale proof and withholds authoritative cycles", () => {
 	const base: WorkGraphObservation = {
 		generation: "G1",
 		nodes: [graphNode("a", "DONE", { proof: "verified-patch", proofCurrent: false }), graphNode("b")],
 		relations: [{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "dependency" }],
 	};
 	assert.equal(evaluateWorkGraph(base).nodes.find((node) => node.key === "a")?.decision, "UNKNOWN");
-	assert.throws(() => evaluateWorkGraph({
+	const cycle = evaluateWorkGraph({
 		...base,
 		relations: [
 			{ from: "a", to: "b", kind: "requires", authority: "authoritative", source: "dependency" },
 			{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "dependency" },
 		],
-	}), /graph dependency cycle/);
+	});
+	assert.deepEqual(cycle.ready, []);
+	assert.match(cycle.blockers.join("; "), /graph dependency cycle/);
 });
 
 test("graph distinguishes converged from autonomously quiescent", () => {
 	const done = graphNode("done", "DONE", { proof: "verified-patch", proofCurrent: true });
 	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [done], relations: [] }).verdict, "CONVERGED");
 	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [graphNode("blocked", "BLOCKED")], relations: [] }).verdict, "AUTONOMOUSLY_QUIESCENT");
+});
+
+test("empty typed scope cannot manufacture convergence", () => {
+	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [], relations: [] }).verdict, "AUTONOMOUSLY_QUIESCENT");
+});
+
+test("graph rejects stale dependent proof while retaining independent READY work", () => {
+	const decision = evaluateWorkGraph({ generation: "G1", nodes: [
+		graphNode("a", "DONE", { proof: "verified-patch", proofCurrent: false }),
+		graphNode("b", "DONE", { proof: "verified-patch", proofCurrent: true }),
+		graphNode("independent"),
+	], relations: [{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "native dependency" }] });
+	assert.notEqual(decision.nodes.find((node) => node.key === "b")?.decision, "DONE");
+	assert.deepEqual(decision.ready, ["independent"]);
+});
+
+test("missing prerequisite and cyclic components do not freeze independent READY work", () => {
+	for (const relations of [
+		[{ from: "a", to: "external", kind: "requires", authority: "authoritative", source: "native dependency" }],
+		[{ from: "a", to: "b", kind: "requires", authority: "authoritative", source: "native dependency" }, { from: "b", to: "a", kind: "requires", authority: "authoritative", source: "native dependency" }],
+	] satisfies GraphRelation[][]) {
+		const decision = evaluateWorkGraph({ generation: "G1", nodes: [graphNode("a"), graphNode("b"), graphNode("independent")], relations });
+		assert.ok(decision.ready.includes("independent"));
+		assert.ok(!decision.ready.includes("a"));
+		assert.ok(decision.blockers.length > 0);
+	}
+});
+
+test("all hard-edge blockers and UNKNOWN precedence are independent of relation order", () => {
+	const observation: WorkGraphObservation = { generation: "G1", nodes: [graphNode("a"), graphNode("blocked", "BLOCKED"), graphNode("unknown", "UNKNOWN")], relations: [
+		{ from: "a", to: "blocked", kind: "requires", authority: "authoritative", source: "native dependency" },
+		{ from: "a", to: "unknown", kind: "requires", authority: "authoritative", source: "native dependency" },
+	] };
+	const before = evaluateWorkGraph(observation);
+	assert.deepEqual(before, evaluateWorkGraph({ ...observation, relations: [...observation.relations].reverse() }));
+	assert.equal(before.nodes[0]!.decision, "UNKNOWN");
+	assert.equal(before.nodes[0]!.blockers.length, 2);
 });

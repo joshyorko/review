@@ -463,7 +463,8 @@ export class BatchService {
 				if ([...this.running.values()].filter((active) => active.batch.id === batch.id).length >= batch.capacity) continue;
 				for (const item of batch.items.filter((candidate) => candidate.stage === "QUEUED").sort((a, b) => a.attempts - b.attempts)) {
 					const dependency = dependencyBlocker(batch, item.selected.key);
-					if (dependency) { item.blocker = dependency; continue; }
+						if (dependency) { item.blocker = dependency; continue; }
+						if (item.attempts >= batch.maxAttempts || batch.items.reduce((sum, candidate) => sum + candidate.attempts, 0) >= batch.maxTotalAttempts) { item.stage = "BLOCKED"; item.blocker = "original attempt budget exhausted; retry never resets it"; this.persist(batch); continue; }
 					const approved = this.bindings.get(batch.id);
 					const binding = approved && "binding" in approved ? approved.binding : undefined;
 					const bindingError = approved && "error" in approved ? approved.error : "OMP execution binding unavailable; explicitly resume from the current session";

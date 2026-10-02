@@ -80,28 +80,12 @@ function assertGraph(input: WorkGraphObservation): void {
 	for (const node of input.nodes) {
 		if (!node.key.trim() || keys.has(node.key)) throw new Error(`duplicate graph node ${node.key}`);
 		keys.add(node.key);
-		if (node.generation !== input.generation) throw new Error(`node ${node.key} is bound to stale generation ${node.generation}`);
 		if (node.subject !== undefined && (!node.subject.repo || !node.subject.base)) throw new Error(`node ${node.key} has an incomplete subject`);
 	}
 	for (const relation of input.relations) {
-		if (!keys.has(relation.from) || !keys.has(relation.to)) throw new Error(`graph relation references an unselected node: ${relationLabel(relation)}`);
-		if (relation.from === relation.to && HARD_KINDS[relation.kind] === true && relation.authority === "authoritative") throw new Error(`graph self-cycle: ${relationLabel(relation)}`);
+		if (!keys.has(relation.from)) throw new Error(`graph relation has no observed source: ${relationLabel(relation)}`);
 		if (!relation.source.trim()) throw new Error(`graph relation source is required: ${relationLabel(relation)}`);
 	}
-	const visiting = new Set<string>();
-	const visited = new Set<string>();
-	const visit = (key: string): void => {
-		if (visiting.has(key)) throw new Error(`graph dependency cycle at ${key}`);
-		if (visited.has(key)) return;
-		visiting.add(key);
-		for (const relation of input.relations) {
-			if (relation.to !== key || HARD_KINDS[relation.kind] !== true || relation.authority !== "authoritative") continue;
-			visit(relation.from);
-		}
-		visiting.delete(key);
-		visited.add(key);
-	};
-	for (const node of input.nodes) visit(node.key);
 }
 
 /**
@@ -110,8 +94,12 @@ function assertGraph(input: WorkGraphObservation): void {
  */
 export function evaluateWorkGraph(input: WorkGraphObservation): WorkGraphDecision {
 	assertGraph(input);
+	const ordered = [...input.relations].sort((a, b) => {
+		const left = JSON.stringify(a), right = JSON.stringify(b);
+		return left < right ? -1 : left > right ? 1 : 0;
+	});
 	const relationByFrom = new Map<string, GraphRelation[]>();
-	for (const relation of input.relations) {
+	for (const relation of ordered) {
 		relationByFrom.set(relation.from, [...(relationByFrom.get(relation.from) ?? []), relation]);
 		if (relation.kind !== "overlaps" || relation.authority !== "authoritative") continue;
 		const reverseExists = input.relations.some((candidate) =>
@@ -121,54 +109,85 @@ export function evaluateWorkGraph(input: WorkGraphObservation): WorkGraphDecisio
 			relationByFrom.set(reverse.from, [...(relationByFrom.get(reverse.from) ?? []), reverse]);
 		}
 	}
+	const cyclic = new Set<string>();
+	const visited = new Set<string>();
+	const visit = (key: string, path: string[]): void => {
+		const start = path.indexOf(key);
+		if (start >= 0) { for (const member of path.slice(start)) cyclic.add(member); return; }
+		if (visited.has(key)) return;
+		for (const relation of relationByFrom.get(key) ?? []) {
+			if (HARD_KINDS[relation.kind] === true && relation.authority === "authoritative") visit(relation.to, [...path, key]);
+		}
+		visited.add(key);
+	};
+	for (const node of input.nodes) visit(node.key, []);
 	const base = new Map<string, MutableGraphNodeDecision>();
 	for (const node of input.nodes) {
 		let decision: GraphDecisionState;
 		const blockers: string[] = [];
-		if (node.state === "RUNNING") decision = "RUNNING";
+		if (cyclic.has(node.key)) { decision = "BLOCKED"; blockers.push(`graph dependency cycle at ${node.key}; resolve authoritative prerequisites`); }
+		else if (node.state === "RUNNING") decision = "RUNNING";
 		else if (node.state === "VERIFY") decision = "VERIFY";
 		else if (node.state === "BLOCKED" || node.state === "EXCLUDED") { decision = "BLOCKED"; blockers.push(node.blocker ?? "authoritative policy or ownership blocker"); }
-		else if (node.state === "UNKNOWN" || node.generation !== input.generation || node.subject === undefined) decision = "UNKNOWN";
+		else if (node.state === "UNKNOWN" || node.generation !== input.generation || node.subject === undefined) {
+			decision = "UNKNOWN";
+			blockers.push(node.blocker ?? (node.generation !== input.generation ? "current generation must be re-observed" : node.subject === undefined ? "exact repository subject must be observed" : "authoritative evidence must be restored"));
+		}
 		else if (node.state === "DONE" && node.proofCurrent === true && stageAtLeast(node.proof, node.target)) decision = "DONE";
-		else if (node.state === "DONE") decision = "UNKNOWN";
+		else if (node.state === "DONE") { decision = "UNKNOWN"; blockers.push("declared outcome proof is missing or stale; re-observe or reverify"); }
 		else decision = "READY";
 		base.set(node.key, { ...node, decision, blockers, softHints: [] });
 	}
-	for (const node of input.nodes) {
-		const current = base.get(node.key)!;
+	const initial = new Map(base);
+	for (let pass = 0; pass <= input.nodes.length; pass++) {
+		const previous = new Map(base);
+		for (const node of input.nodes) {
+		const original = initial.get(node.key)!;
+		const current = { ...original, blockers: [...original.blockers], softHints: [] as string[] };
+		let unknown = false, blocked = false;
 		for (const relation of relationByFrom.get(node.key) ?? []) {
 			if (relation.authority === "inferred") {
-				current.softHints.push(`${relationLabel(relation)} is a soft ordering hint (${relation.reason ?? relation.source})`);
+				current.softHints.push(`${relationLabel(relation)} is a soft ordering hint (${relation.source}${relation.reason ? `: ${relation.reason}` : ""})`);
 				continue;
 			}
-			if (relation.kind === "contains" || relation.kind === "implements" || current.decision !== "READY") continue;
-			const prerequisite = base.get(relation.to)!;
+			if (relation.kind === "contains" || relation.kind === "implements" || !["READY", "DONE"].includes(original.decision)) continue;
+			const prerequisite = previous.get(relation.to);
+			if (prerequisite === undefined) {
+				current.blockers.push(`missing authoritative observation for ${relation.to}; observe prerequisite without expanding mutation scope`);
+				unknown = true; continue;
+			}
 			if (relation.kind === "overlaps") {
+				if (original.decision === "DONE") continue;
 				if (prerequisite.decision === "DONE") continue;
 				if (prerequisite.decision === "UNKNOWN") {
 					current.blockers.push(`overlap with ${relation.to} is UNKNOWN`);
-					current.decision = "UNKNOWN";
+					unknown = true;
 				} else {
 					current.blockers.push(`overlaps active selected work ${relation.to}`);
-					current.decision = "BLOCKED";
+					blocked = true;
 				}
 				continue;
 			}
 			if (prerequisite.decision === "DONE" && stageAtLeast(prerequisite.proof, relation.stage ?? node.target)) continue;
 			if (prerequisite.decision === "UNKNOWN") {
 				current.blockers.push(`${relation.kind} prerequisite ${relation.to} is UNKNOWN`);
-				current.decision = "UNKNOWN";
+				unknown = true;
 			} else {
 				current.blockers.push(`${relation.kind} prerequisite ${relation.to} is ${prerequisite.decision}`);
-				current.decision = "BLOCKED";
+				blocked = true;
 			}
 		}
+		if (unknown || blocked) current.decision = original.decision === "DONE" || unknown ? "UNKNOWN" : "BLOCKED";
+		base.set(node.key, current);
+		}
+		if ([...base].every(([key, node]) => node.decision === previous.get(key)?.decision)) break;
 	}
 	const nodes: GraphNodeDecision[] = [...base.values()].map((node) => ({ ...node, blockers: [...node.blockers], softHints: [...node.softHints] }));
 	const ready = nodes.filter((node) => node.decision === "READY").map((node) => node.key);
 	const blockers = nodes.flatMap((node) => node.blockers.map((blocker) => `${node.key}: ${blocker}`));
 	const softHints = nodes.flatMap((node) => node.softHints);
-	const converged = nodes.filter((node) => node.required).every((node) => node.decision === "DONE");
+	const mandatory = nodes.filter((node) => node.required);
+	const converged = mandatory.length > 0 && mandatory.every((node) => node.decision === "DONE");
 	const active = nodes.some((node) => node.decision === "READY" || node.decision === "RUNNING" || node.decision === "VERIFY");
 	return {
 		generation: input.generation,
