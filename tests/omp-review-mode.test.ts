@@ -18,7 +18,7 @@ import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/exten
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
 import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
+import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
@@ -31,6 +31,7 @@ import {
 	STATE_ENTRY,
 	BATCH_ENTRY,
 	COMMENT_ENTRY,
+	HANDOFF_ENTRY,
 	GENERIC_WORKBENCH_POLICY,
 	actionPrompt,
 	createReviewExtension,
@@ -334,6 +335,83 @@ function issueBackedFetch(states) {
 	};
 }
 
+function recoveredPrSlayFetch(items, effects, options = {}) {
+	const queueNodes = () => items.filter((item) => effects[item.id]?.state === "OPEN").map((item) => ({
+		number: item.id,
+		title: item.title,
+		url: item.url,
+		updatedAt: new Date(NOW).toISOString(),
+		isDraft: false,
+		mergeable: "MERGEABLE",
+		reviewDecision: "REVIEW_REQUIRED",
+		headRefOid: item.headSha,
+		autoMergeRequest: null,
+		changedFiles: 1,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "src/change.ts" }] },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+		author: { login: item.author },
+		repository: { nameWithOwner: item.repo },
+		labels: { nodes: [] },
+	}));
+	return async (url, init) => {
+		if (!String(url).includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (options.unreadable && body.query.includes("pullRequest(number:")) return { ok: false, status: 503, statusText: "Unavailable", json: async () => ({}) };
+		const nodes = queueNodes();
+		if (body.variables?.search !== undefined) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "maintainer" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } }) };
+		}
+		if (body.query.includes("pullRequest(number:")) {
+			const match = /repository\(owner: "([^\"]+)", name: "([^\"]+)"\)\s*\{\s*nameWithOwner pullRequest\(number: (\d+)\)/.exec(body.query);
+			const [, owner, name, numberText] = match ?? [];
+			const effect = numberText ? effects[Number(numberText)] : undefined;
+			const repo = `${owner}/${name}`;
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { repository: effect ? {
+				nameWithOwner: repo,
+				pullRequest: {
+					id: `PR_${numberText}`,
+					number: Number(numberText),
+					url: `https://github.com/${repo}/pull/${numberText}`,
+					state: effect.state,
+					merged: effect.merged,
+					mergedAt: Object.hasOwn(effect, "mergedAt") ? effect.mergedAt : effect.merged ? new Date().toISOString() : null,
+					headRefOid: effect.headSha,
+					autoMergeRequest: effect.autoMerge ? { enabledAt: new Date().toISOString() } : null,
+					reviewDecision: Object.hasOwn(effect, "reviewDecision") ? effect.reviewDecision : "REVIEW_REQUIRED",
+					author: { login: items.find((item) => item.id === Number(numberText))?.author },
+					latestReviews: { pageInfo: { hasNextPage: effect.reviewsIncomplete === true }, nodes: effect.reviews ?? [] },
+				},
+			} : null } }) };
+		}
+		const data = {};
+		const aliases = /(\w+): repository\(owner: "([^\"]+)", name: "([^\"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+		for (const [, alias, owner, repo, numberText] of body.query.matchAll(aliases)) {
+			const item = items.find((candidate) => candidate.repo === `${owner}/${repo}` && candidate.id === Number(numberText));
+			const effect = effects[Number(numberText)];
+			const node = item && effect?.state === "OPEN" ? {
+				number: item.id,
+				title: item.title,
+				url: item.url,
+				updatedAt: new Date(NOW).toISOString(),
+				isDraft: false,
+				mergeable: "MERGEABLE",
+				reviewDecision: "REVIEW_REQUIRED",
+				headRefOid: item.headSha,
+				autoMergeRequest: null,
+				changedFiles: 1,
+				files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "src/change.ts" }] },
+				commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+				author: { login: item.author },
+				repository: { nameWithOwner: item.repo },
+				labels: { nodes: [] },
+				closed: false,
+			} : null;
+			data[alias] = { issueOrPullRequest: node };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+}
+
 /** Fake omp extension host recording every registration. */
 function fakeHost() {
 	const zodLeaf = () => ({ optional: () => zodLeaf(), describe: () => zodLeaf() });
@@ -347,6 +425,7 @@ function fakeHost() {
 		commands: new Map(),
 		messages: [],
 		messageOptions: [],
+		nativeMessages: [],
 		entries: [],
 		execResult: { stdout: "https://github.com/projectbluefin/review/issues/42#issuecomment-1\n", stderr: "", code: 0, killed: false },
 		execCalls: [],
@@ -385,6 +464,7 @@ function fakeHost() {
 			this.messages.push(content);
 			this.messageOptions.push(options);
 		},
+		sendMessage(message, options) { this.nativeMessages.push({ message, options }); },
 		async exec(command, args) {
 			this.execCalls.push({ command, args });
 			return this.execResult;
@@ -403,13 +483,23 @@ function fakeHost() {
  * session-start handler that blocks OMP.
  */
 function observeTask(pi, ctx, id, call = `call-${id}`) {
-	pi.events.get("tool_call")({ toolCallId: call, toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: call, toolName: "task", input: { isolated: false } }, ctx);
 	for (const job of [...ctx.asyncJobs.running, ...ctx.asyncJobs.recent]) {
 		if (job.id === id) { job.agentId = id; job.type = "task"; }
 	}
 	pi.events.get("tool_execution_end")({ toolCallId: call, result: { details: {
 		async: { type: "task", state: "running", jobId: id }, progress: [{ id, index: 0, status: "running" }],
 	} }, isError: false }, ctx);
+}
+
+function deliverTaskResults(pi, ctx, jobIds) {
+	ctx.asyncJobs.delivery.pendingJobIds = ctx.asyncJobs.delivery.pendingJobIds.filter((id) => !jobIds.includes(id));
+	ctx.asyncJobs.delivery.pending = ctx.asyncJobs.delivery.pendingJobIds.length;
+	return pi.events.get("message_start")({ message: {
+		role: "custom",
+		customType: "async-result",
+		details: { jobs: jobIds.map((jobId) => ({ jobId, type: "task" })) },
+	} }, ctx);
 }
 
 function fakeCtx() {
@@ -425,6 +515,7 @@ function fakeCtx() {
 	const inputCalls = [];
 	const selectResponses = [];
 	const selectCalls = [];
+	let renderRequests = 0;
 	const ctx = {
 		sessionId: "session-1",
 		hasUI: true,
@@ -440,6 +531,7 @@ function fakeCtx() {
 		inputCalls,
 		selectResponses,
 		selectCalls,
+		get renderRequests() { return renderRequests; },
 		asyncJobs: { running: [], recent: [], delivery: { pending: 0, pendingJobIds: [] } },
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
@@ -467,7 +559,7 @@ function fakeCtx() {
 			},
 			custom(factory) {
 				const { promise, resolve } = Promise.withResolvers();
-				overlays.push(factory({ requestRender: () => {} }, this.theme, {}, resolve));
+				overlays.push(factory({ requestRender: () => { renderRequests++; } }, this.theme, {}, resolve));
 				return promise;
 			},
 			theme: { fg: (_c, t) => t, bold: (t) => t, inverse: (t) => t },
@@ -481,6 +573,290 @@ function fakeCtx() {
 }
 
 // ---------------------------------------------------------------- vocabulary
+
+test("explicit Review handoff exports durably, opens a child, and sends without triggering a model turn", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const sourceBranch = [];
+	const targetBranch = [];
+	let activeBranch = sourceBranch;
+	const saved = new Map();
+	const newSessionCalls = [];
+	let leaf = "leaf-1";
+	ctx.sessionManager = {
+		getBranch: () => activeBranch,
+		getSessionId: () => ctx.sessionId,
+		getLeafId: () => leaf,
+		getSessionFile: () => ctx.sessionId === "session-1" ? "/state/parent.jsonl" : "/state/child.jsonl",
+		async saveArtifact(content, toolType) { assert.equal(toolType, "review-handoff"); saved.set("7", content); return "7"; },
+		async getArtifactPath(id) { return `/state/artifacts/${id}.review-handoff`; },
+	};
+	const targetManager = {
+		getBranch: () => targetBranch,
+		getSessionId: () => ctx.sessionId,
+		getLeafId: () => leaf,
+		getSessionFile: () => "/state/child.jsonl",
+	};
+	ctx.newSession = async (options) => {
+		newSessionCalls.push(options);
+		ctx.sessionId = "session-child"; leaf = "leaf-child"; activeBranch = targetBranch;
+		await options.setup(targetManager);
+		return { cancelled: false };
+	};
+	const append = pi.appendEntry.bind(pi);
+	pi.appendEntry = (type, data) => { append(type, data); activeBranch.push({ type: "custom", customType: type, data }); };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(saved.size, 1);
+	assert.match([...saved.values()][0], /explicit human authorization/i);
+	assert.equal(newSessionCalls.length, 1);
+	assert.equal(newSessionCalls[0].parentSession, "/state/parent.jsonl");
+	assert.equal(typeof newSessionCalls[0].setup, "function", "child setup owns identity validation and message insertion");
+	assert.equal(pi.nativeMessages.length, 1);
+	assert.equal(pi.nativeMessages[0].options.triggerTurn, false);
+	assert.ok(targetBranch.some((entry) => entry.customType === HANDOFF_ENTRY && entry.data.state === "submission-uncertain"));
+	assert.equal(ctx.pasted.length, 0, "export does not depend on clipboard availability");
+	assert.equal(pi.entries.filter((entry) => entry.customType === HANDOFF_ENTRY).at(-1).data.state, "submission-uncertain");
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(pi.nativeMessages.length, 1, "stable identity prevents a blind duplicate submission");
+	assert.equal(saved.size, 1);
+});
+
+test("uncertain Review session transition keeps the export and fences retry", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const branch = [];
+	let saves = 0;
+	let transitions = 0;
+	let leaf = "leaf-1";
+	ctx.sessionManager = {
+		getBranch: () => branch, getSessionId: () => ctx.sessionId, getLeafId: () => leaf, getSessionFile: () => "/state/parent.jsonl",
+		async saveArtifact() { saves++; return "19"; }, async getArtifactPath() { return "/state/artifacts/19.review-handoff"; },
+	};
+	ctx.newSession = async () => { transitions++; ctx.sessionId = "session-child"; leaf = "child-leaf"; throw new Error("transition outcome uncertain"); };
+	const append = pi.appendEntry.bind(pi);
+	pi.appendEntry = (type, data) => { append(type, data); branch.push({ type: "custom", customType: type, data }); };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(saves, 1);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.equal(branch.at(-1).data.state, "transition-uncertain");
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(transitions, 1);
+	assert.equal(saves, 1);
+	assert.equal(pi.nativeMessages.length, 0);
+});
+
+test("handoff target setup rejects a mismatched child and sends nothing", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const sourceBranch = [];
+	const targetBranch = [];
+	let activeBranch = sourceBranch;
+	let leaf = "source-leaf";
+	ctx.sessionManager = {
+		getBranch: () => activeBranch, getSessionId: () => ctx.sessionId, getLeafId: () => leaf, getSessionFile: () => "/state/source.jsonl",
+		async saveArtifact() { return "21"; }, async getArtifactPath() { return "/state/artifacts/21.review-handoff"; },
+	};
+	ctx.newSession = async (options) => {
+		ctx.sessionId = "session-child"; leaf = "child-leaf"; activeBranch = targetBranch;
+		await options.setup({ getBranch: () => targetBranch, getSessionId: () => "session-1", getLeafId: () => leaf, getSessionFile: () => "/state/source.jsonl" });
+		return { cancelled: false };
+	};
+	const append = pi.appendEntry.bind(pi);
+	pi.appendEntry = (type, data) => { append(type, data); activeBranch.push({ type: "custom", customType: type, data }); };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.ok(targetBranch.some((entry) => entry.customType === HANDOFF_ENTRY && entry.data.state === "transition-uncertain"));
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(pi.nativeMessages.length, 0, "mismatched target identity fences a later resend");
+});
+
+test("Review handoff rejects source branch changes during durable export", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	let leaf = "leaf-1";
+	ctx.sessionManager = {
+		getBranch: () => [], getSessionId: () => "session-1", getLeafId: () => leaf, getSessionFile: () => "/state/parent.jsonl",
+		async saveArtifact() { leaf = "leaf-moved"; return "9"; }, async getArtifactPath() { return "/state/artifacts/9.review-handoff"; },
+	};
+	ctx.newSession = async () => { throw new Error("must not fork stale source"); };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.equal(ctx.sessionManager.getLeafId(), "leaf-moved");
+	assert.equal(pi.entries.some((entry) => entry.customType === HANDOFF_ENTRY), false);
+});
+
+test("ordinary Review recap uses a read-only operator view and never enters model input", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	const pending = pi.commands.get("review").handler("recap", ctx);
+	const view = ctx.overlays.at(-1);
+	assert.ok(view);
+	const initialView = view.render(120).join("\n");
+	assert.match(initialView, /Review recap .* read only/);
+	assert.match(initialView, /queue=unavailable: Review queue has not been observed/);
+	assert.ok(view.render(16).every((line) => visibleWidth(line) <= 16), "the read-only recap remains within a narrow terminal width");
+	assert.equal(ctx.editorCalls.length, 0, "the recap does not open the model prompt editor");
+	assert.equal(ctx.pasted.length, 0);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.equal(pi.messages.length, 0);
+	const requestsBeforeScroll = ctx.renderRequests;
+	view.handleInput("j");
+	assert.ok(ctx.renderRequests > requestsBeforeScroll, "scrolling invalidates the read-only overlay");
+	view.handleInput("q");
+	await pending;
+});
+
+test("recap bounds old branch history and uses the latest state per persisted identity", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const batch = (state) => ({ id: "batch-latest", kind: "slay", state, completedItems: state === "complete" ? 1 : 0, totalItems: 1, startedAt: NOW, currentWave: 0, waves: [] });
+	const comment = (state, receipts = []) => ({ version: 1, state, plan: { id: "comment-plan", targets: [{ repo: "acme/widgets", number: 17, type: "issue" }] }, receipts });
+	const branch = [
+		{ type: "custom", customType: BATCH_ENTRY, data: batch("running") },
+		...Array.from({ length: 510 }, () => ({ type: "message", message: { role: "user", content: "old" } })),
+		{ type: "custom", customType: BATCH_ENTRY, data: batch("running") },
+		{ type: "custom", customType: COMMENT_ENTRY, data: comment("previewed") },
+		{ type: "custom", customType: BATCH_ENTRY, data: batch("complete") },
+		{ type: "custom", customType: COMMENT_ENTRY, data: comment("complete", ["https://github.com/acme/widgets/issues/17#issuecomment-19"]) },
+	];
+	ctx.sessionManager = { getBranch: () => branch, getSessionId: () => "session-1", getLeafId: () => "leaf-1" };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	const pending = pi.commands.get("review").handler("recap", ctx);
+	const view = ctx.overlays.at(-1);
+	const rendered = view.render(240).join("\n");
+	assert.match(rendered, /batch-latest: complete/);
+	assert.doesNotMatch(rendered, /batch-latest: running/);
+	view.handleInput("\u0004");
+	view.handleInput("q");
+	await pending;
+});
+
+test("Review resolves only native truncation artifacts against the source session", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const lookups = [];
+	ctx.sessionManager = {
+		getBranch: () => [], getSessionId: () => "session-native",
+		async getArtifactPath(id) { lookups.push(id); return id === "17" ? "/state/session-native/artifacts/17.bash.log" : null; },
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	pi.events.get("tool_execution_start")({ toolCallId: "native-artifact", toolName: "bash", args: { command: "printf output" } }, ctx);
+	await pi.events.get("tool_execution_end")({
+		toolCallId: "native-artifact", isError: false,
+		result: { content: [{ type: "text", text: "sample" }], details: { meta: { truncation: { direction: "tail", truncatedBy: "bytes", totalLines: 10, totalBytes: 100, outputLines: 1, outputBytes: 6, artifactId: "17" } } } },
+	}, ctx);
+	const trace = await pi.tools.get("review_workbench_trace").execute("trace", {});
+	assert.deepEqual(lookups, ["17"]);
+	assert.match(trace.content[0].text, /artifact:\/\/17.*session-native.*17\.bash\.log/);
+
+	pi.events.get("tool_execution_start")({ toolCallId: "native-error", toolName: "bash", args: {} }, ctx);
+	await pi.events.get("tool_execution_end")({
+		toolCallId: "native-error", isError: false,
+		result: { content: [], details: { meta: { artifactError: "storage unavailable", truncation: { direction: "tail", truncatedBy: "bytes", totalLines: 10, totalBytes: 100, outputLines: 1, outputBytes: 6, artifactId: "must-not-resolve" } } } },
+	}, ctx);
+	assert.deepEqual(lookups, ["17"]);
+});
+
+test("cancelled Review handoff keeps the export and sends no message", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	let exported = false;
+	ctx.sessionManager = {
+		getBranch: () => [], getSessionId: () => "session-1", getLeafId: () => "leaf-1", getSessionFile: () => "/state/parent.jsonl",
+		async saveArtifact() { exported = true; return "8"; }, async getArtifactPath() { return "/state/artifacts/8.review-handoff"; },
+	};
+	ctx.newSession = async (options) => { assert.equal(typeof options.setup, "function"); return { cancelled: true }; };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("handoff", ctx);
+	assert.equal(exported, true);
+	assert.equal(pi.nativeMessages.length, 0);
+	assert.equal(pi.entries.filter((entry) => entry.customType === HANDOFF_ENTRY).at(-1).data.state, "cancelled");
+});
+
+test("positive handoff cancellation supersedes opening in-process and after branch restoration", async () => {
+	for (const restored of [false, true]) {
+		const branchFile = join(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, `handoff-${restored}.json`);
+		writeFileSync(branchFile, "[]");
+		const sourceCtx = fakeCtx();
+		let activeBranch = JSON.parse(readFileSync(branchFile, "utf8"));
+		let leaf = "source-leaf";
+		let attempts = 0;
+		const sourceManager = {
+			getBranch: () => activeBranch, getSessionId: () => sourceCtx.sessionId,
+			getLeafId: () => leaf, getSessionFile: () => sourceCtx.sessionId === "session-1" ? "/source.jsonl" : "/child.jsonl",
+			saveArtifact: async () => "29", getArtifactPath: async () => "/artifacts/29",
+		};
+		sourceCtx.sessionManager = sourceManager;
+		const attach = (pi) => {
+			pi.appendEntry = (customType, data) => {
+				activeBranch.push({ type: "custom", customType, data });
+				writeFileSync(branchFile, JSON.stringify(activeBranch));
+			};
+			createReviewExtension(pi, { env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+		};
+		const first = fakeHost();
+		attach(first);
+		sourceCtx.newSession = async () => { attempts++; return { cancelled: true }; };
+		await first.commands.get("review").handler("handoff", sourceCtx);
+		assert.deepEqual(activeBranch.filter((entry) => entry.customType === HANDOFF_ENTRY).map((entry) => entry.data.state), ["opening", "cancelled"]);
+		const retry = restored ? fakeHost() : first;
+		if (restored) { activeBranch = JSON.parse(readFileSync(branchFile, "utf8")); attach(retry); }
+		sourceCtx.newSession = async (options) => {
+			attempts++;
+			sourceCtx.sessionId = "child"; leaf = "child-leaf"; activeBranch = [];
+			await options.setup(sourceManager);
+			return { cancelled: false };
+		};
+		await retry.commands.get("review").handler("handoff", sourceCtx);
+		assert.equal(attempts, 2);
+		assert.equal(retry.nativeMessages.length, 1);
+		await retry.commands.get("review").handler("handoff", sourceCtx);
+		assert.equal(retry.nativeMessages.length, 1, "uncertain submission still fences duplicate delivery");
+	}
+});
+
+test("artifact lookup cannot resume into a reset mutable session or its current Review wave", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	const deferred = Promise.withResolvers<string>();
+	const targetLookup = Promise.withResolvers<string>();
+	ctx.sessionManager = {
+		getBranch: () => [], getSessionId: () => ctx.sessionId,
+		getArtifactPath: () => ctx.sessionId === "session-1" ? deferred.promise : targetLookup.promise,
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({ "projectbluefin/review#77": { title: "target wave", submittedPrs: [] } }), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	const result = { content: [{ text: "sample" }], details: { meta: { truncation: { artifactId: "17", totalBytes: 100, outputBytes: 6 } } } };
+	pi.events.get("tool_execution_start")({ toolCallId: "reused", toolName: "bash", args: {} }, ctx);
+	const pending = pi.events.get("tool_execution_end")({ toolCallId: "reused", result, isError: false }, ctx);
+	ctx.sessionId = "target";
+	pi.events.get("session_switch")({}, ctx);
+	await pi.commands.get("review").handler("slay", ctx);
+	pi.events.get("tool_execution_start")({ toolCallId: "reused", toolName: "bash", args: {} }, ctx);
+	const targetPending = pi.events.get("tool_execution_end")({ toolCallId: "reused", result, isError: false }, ctx);
+	const entriesBefore = JSON.stringify(pi.entries);
+	assert.ok(pi.entries.some((entry) => entry.customType === BATCH_ENTRY && entry.data.state === "running"), "the target owns a new native wave");
+	deferred.resolve("/source/artifact");
+	await pending;
+	const after = await pi.tools.get("review_workbench_trace").execute("trace", {});
+	assert.equal(JSON.stringify(pi.entries), entriesBefore, "old result must not re-enter target wave bookkeeping");
+	assert.doesNotMatch(after.content[0].text, /session-1|\/source\/artifact/);
+	targetLookup.resolve("/target/artifact");
+	await targetPending;
+	const resolved = await pi.tools.get("review_workbench_trace").execute("trace", {});
+	assert.match(resolved.content[0].text, /target.*\/target\/artifact/);
+});
 
 test("duration formatting follows Dagger's units", () => {
 	assert.equal(formatDuration(340), "0.3s");
@@ -858,6 +1234,51 @@ test("bounded named PR reads carry expensive evidence after lightweight discover
 	assert.equal(result.items[0]?.headSha, "a".repeat(40));
 	assert.deepEqual(result.items[0]?.workflowFiles, [".github/workflows/ci.yml"]);
 	assert.deepEqual(result.items[0]?.closingIssues, ["owner/repo#2"]);
+});
+
+test("exact PR effect reads accept GitHub MERGED state and preserve null aggregate review decision", async () => {
+	const item = queueItem({ id: 350, repo: "owner/repo", url: "https://github.com/owner/repo/pull/350", headSha: "a".repeat(40) });
+	const effects = { 350: { state: "MERGED", merged: true, headSha: item.headSha, reviewDecision: null, reviews: [] } };
+	const fetchImpl = recoveredPrSlayFetch([item], effects);
+	const effect = await fetchPullRequestEffect("owner/repo", 350, { token: "t", fetchImpl });
+	assert.equal(effect.kind, "observed");
+	if (effect.kind === "observed") {
+		assert.equal(effect.pullRequest.state, "MERGED");
+		assert.equal(effect.pullRequest.merged, true);
+		assert.equal(effect.pullRequest.reviewDecision, null);
+	}
+	const queue = await fetchItemsByKey(["owner/repo#350"], "prs", { token: "t", fetchImpl });
+	assert.deepEqual(queue.items, [], "merged PRs remain absent from named open-queue reads");
+});
+
+test("exact PR effect reads reject contradictory GitHub state, merged, and mergedAt combinations", async () => {
+	const item = queueItem({ id: 350, repo: "owner/repo", url: "https://github.com/owner/repo/pull/350", headSha: "a".repeat(40) });
+	for (const effect of [
+		{ state: "MERGED", merged: false, mergedAt: null },
+		{ state: "MERGED", merged: true, mergedAt: null },
+		{ state: "CLOSED", merged: true, mergedAt: new Date().toISOString() },
+		{ state: "OPEN", merged: true, mergedAt: new Date().toISOString() },
+	]) {
+		const result = await fetchPullRequestEffect("owner/repo", 350, {
+			token: "t",
+			fetchImpl: recoveredPrSlayFetch([item], { 350: { ...effect, headSha: item.headSha, reviews: [] } }),
+		});
+		assert.equal(result.kind, "unknown", JSON.stringify(effect));
+	}
+});
+
+test("exact PR effect reads retain closed state without changing the open queue projection", async () => {
+	const item = queueItem({ id: 350, repo: "owner/repo", url: "https://github.com/owner/repo/pull/350", headSha: "a".repeat(40) });
+	const effects = { 350: { state: "CLOSED", merged: false, headSha: item.headSha, reviewDecision: "REVIEW_REQUIRED", reviews: [] } };
+	const fetchImpl = recoveredPrSlayFetch([item], effects);
+	const effect = await fetchPullRequestEffect("owner/repo", 350, { token: "t", fetchImpl });
+	assert.equal(effect.kind, "observed");
+	if (effect.kind === "observed") {
+		assert.equal(effect.pullRequest.state, "CLOSED");
+		assert.equal(effect.pullRequest.merged, false);
+	}
+	const queue = await fetchItemsByKey(["owner/repo#350"], "prs", { token: "t", fetchImpl });
+	assert.deepEqual(queue.items, [], "closed PRs remain absent from named open-queue reads");
 });
 
 
@@ -2897,6 +3318,11 @@ test("active slay blocks privileged and credential-bearing bash mutations", asyn
 	const guard = pi.events.get("tool_call");
 	const call = (command) => guard({ toolName: "bash", input: { command } }, ctx);
 
+	// Target checkout ownership is independent of OMP's coordinator-repo isolation.
+	for (const input of [{ isolated: false }, {}, { isolated: true }, { tasks: [{ task: "one", solutionSpace: "bounded" }] }]) {
+		assert.equal(await guard({ toolName: "task", input }, ctx), undefined);
+	}
+
 	assert.match((await call("gh pr merge 42 --repo projectbluefin/review --admin --squash")).reason, /admin merge bypass/);
 	const forcePushBlock = await call("git push origin repair --force-with-lease");
 	assert.match(forcePushBlock.reason, /force-pushing/);
@@ -3102,12 +3528,12 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.equal(pi.messages.length, 1);
 	const dispatchedBatch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(pi.messageOptions[0]?.waveId, `${dispatchedBatch.id}:0`, "dispatch carries exact wave identity to OMP");
-	pi.events.get("tool_call")({ toolCallId: "worker-1", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "worker-1", toolName: "task", input: { isolated: false } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["worker-1"];
 	ctx.asyncJobs.recent = [{ id: "worker-1", status: "completed", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "worker-1", "worker-1");
 	await pi.events.get("turn_end")({}, ctx);
-	pi.events.get("tool_call")({ toolCallId: "worker-2", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "worker-2", toolName: "task", input: { isolated: false } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["worker-1", "worker-2"];
 	ctx.asyncJobs.recent = [
 		{ id: "worker-1", status: "completed", startTime: Date.now() + 1 },
@@ -3129,6 +3555,8 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.messages.length, 1, "unfinished workers must settle before another repository starts");
 	ctx.asyncJobs.running = [];
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.messages.length, 1, "pending async-result deliveries must hold repository advancement");
 
 	dashboard.handleInput("p");
 	ctx.asyncJobs.recent = [{ id: "hive-wave", status: "completed", startTime: Date.now() + 1 }];
@@ -3136,6 +3564,9 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.equal(pi.messages.length, 1, "pause prevents the next repository from starting");
 	dashboard.handleInput("p");
 	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1, "resume waits for pending async-result deliveries");
+	await deliverTaskResults(pi, ctx, ["worker-1", "worker-2"]);
+	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.messages.length, 2);
 	assert.match(pi.messages[1], /projectbluefin\/b/);
 	assert.doesNotMatch(pi.messages[1], /projectbluefin\/a/);
@@ -3358,7 +3789,7 @@ test("tool invocation without a job keeps the Review claims UNKNOWN", async () =
 
 test("a started job without terminal evidence remains an unaccounted UNKNOWN worker", async () => {
 	const fixture = await preToolFailureFixture();
-	fixture.pi.events.get("tool_call")({ toolCallId: "task-call", toolName: "task", input: {} }, fixture.ctx);
+	fixture.pi.events.get("tool_call")({ toolCallId: "task-call", toolName: "task", input: { isolated: false } }, fixture.ctx);
 	fixture.ctx.asyncJobs.running = [{ id: "job-1", agentId: "Worker", type: "task", status: "running", startTime: Date.now() }];
 	fixture.pi.events.get("tool_result")({ toolCallId: "task-call", details: {
 		async: { type: "task", state: "running", jobId: "job-1" },
@@ -3553,7 +3984,7 @@ test("a late job contradiction invalidates a recorded pre-tool proof", async () 
 	const fixture = await preToolFailureFixture();
 	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
 	assert.equal(fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.wavePreToolTerminal, "error");
-	fixture.pi.events.get("tool_call")({ toolCallId: "late-job", toolName: "task", input: {} }, fixture.ctx);
+	fixture.pi.events.get("tool_call")({ toolCallId: "late-job", toolName: "task", input: { isolated: false } }, fixture.ctx);
 
 	const contradicted = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(contradicted.wavePreToolTerminal, undefined);
@@ -3754,11 +4185,14 @@ test("restart uses persisted terminal evidence for one Factory retry", async () 
 	await new Promise((resolve) => setImmediate(resolve));
 	const first = pi1.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	const owner = `review:${first.id}:0`;
-	pi1.events.get("tool_call")({ toolCallId: "worker-command", toolName: "task", input: {} }, ctx1);
+	pi1.events.get("tool_call")({ toolCallId: "worker-command", toolName: "task", input: { isolated: false } }, ctx1);
 	ctx1.asyncJobs.delivery.pendingJobIds = ["worker-command"];
 	ctx1.asyncJobs.recent = [{ id: "worker-command", status: "failed", startTime: Date.now() + 1 }];
 	observeTask(pi1, ctx1, "worker-command", "worker-command");
 	await pi1.events.get("turn_end")({}, ctx1);
+	await pi1.events.get("agent_end")({}, ctx1);
+	assert.equal(pi1.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "running");
+	await deliverTaskResults(pi1, ctx1, ["worker-command"]);
 	await pi1.events.get("agent_end")({}, ctx1);
 	const factory = fakeHost();
 	factory.commands = new Map();
@@ -3801,7 +4235,7 @@ async function interruptedIssueSlay(states) {
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	pi.events.get("tool_call")({ toolCallId: "issue-worker", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "issue-worker", toolName: "task", input: { isolated: false } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["issue-worker"];
 	ctx.asyncJobs.recent = [{ id: "issue-worker", status: "completed", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "issue-worker", "issue-worker");
@@ -3809,6 +4243,191 @@ async function interruptedIssueSlay(states) {
 	await pi.events.get("session_shutdown")?.({}, ctx);
 	return { env, entries: pi.entries, batch };
 }
+
+async function blockedPrSlayWave() {
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const items = [350, 352, 353, 354].map((id) => queueItem({
+		id,
+		repo: "projectbluefin/review",
+		title: `recovery target ${id}`,
+		author: "contributor",
+		url: `https://github.com/projectbluefin/review/pull/${id}`,
+		headSha: String(id).repeat(40).slice(0, 40),
+		ciStatus: "success",
+		changedFiles: 1,
+		changedFilesComplete: true,
+	}));
+	const effects = Object.fromEntries(items.map((item) => [item.id, {
+		state: item.id === 354 ? "CLOSED" : "OPEN",
+		merged: false,
+		headSha: item.headSha,
+		autoMerge: false,
+		reviewDecision: "REVIEW_REQUIRED",
+		reviews: [],
+	}]));
+	const pi = fakeHost();
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	ctx.overlays.at(-1).handleInput("A");
+	ctx.overlays.at(-1).handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1);
+	const dispatched = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.deepEqual(dispatched.waves[0].items.map((item) => item.id), [350, 352, 353]);
+	const workers = [350, 352, 353].map((id) => ({ id: `reviewer-${id}`, agentId: `reviewer-${id}`, type: "task", status: "completed", startTime: Date.now() + 1 }));
+	ctx.asyncJobs.recent = workers;
+	pi.events.get("tool_call")({ toolCallId: "review-call", toolName: "task", input: { isolated: false } }, ctx);
+	await pi.events.get("tool_execution_end")({ toolCallId: "review-call", result: { details: {
+		async: { type: "task", state: "completed", jobId: workers[0].id },
+		progress: workers.map((worker, index) => ({ id: worker.agentId, index, status: "completed" })),
+	} }, isError: false }, ctx);
+	await pi.events.get("agent_end")({}, ctx);
+	const blocked = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(blocked.state, "blocked");
+	assert.ok(blocked.waveTerminalJobStatuses && Object.keys(blocked.waveTerminalJobStatuses).length === 3);
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
+	assert.deepEqual(claims.map((claim) => claim.resource).sort(), [
+		"item:projectbluefin/review#350", "item:projectbluefin/review#352", "item:projectbluefin/review#353", "repo:projectbluefin/review",
+	]);
+	assert.ok(claims.every((claim) => claim.owner === `review:${blocked.id}:0`));
+	await pi.events.get("session_shutdown")?.({}, ctx);
+	return { env, items, effects, entries: pi.entries, batch: blocked };
+}
+
+async function reconcileBlockedPrSlayWave(prepare, options = {}, beforeReconcile = () => {}) {
+	const { env, items, effects, entries, batch } = await blockedPrSlayWave();
+	prepare({ env, items, effects, batch });
+	beforeReconcile(env, batch, items);
+	const pi = fakeHost();
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager = { getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects, options), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("reconcile", ctx);
+	return {
+		batch,
+		recovered: pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data ?? batch,
+		claims: new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list(),
+		ctx,
+	};
+}
+
+test("/review reconcile recovers a merged three-PR Slay wave and admits the next mutation", async () => {
+	const { env, items, effects, entries, batch } = await blockedPrSlayWave();
+	for (const item of batch.waves[0].items) {
+		effects[item.id] = { state: "MERGED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: null, reviews: [] };
+	}
+	const pi = fakeHost();
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager = { getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("reconcile", ctx);
+	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(recovered.state, "complete");
+	assert.equal(recovered.completedItems, 3);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+
+	effects[354] = { state: "OPEN", merged: false, headSha: items[3].headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED", reviews: [] };
+	ctx.overlays.at(-1).handleInput("r");
+	await new Promise((resolve) => setImmediate(resolve));
+	await pi.commands.get("review").handler("slay", ctx);
+	assert.equal(pi.messages.length, 1, "a new Slay dispatch is not blocked by the recovered wave's old claims");
+	assert.match(ctx.notifications.map((notification) => notification.message).join("\n"), /Reconciled/);
+});
+
+test("reconcile accepts open auto-merge at a changed head with fresh head-bound review", async () => {
+	const { recovered, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const headSha = "f".repeat(40);
+			effects[item.id] = {
+				state: "OPEN", merged: false, headSha, autoMerge: true, reviewDecision: "REVIEW_REQUIRED",
+				reviews: [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: headSha } }],
+			};
+		}
+	});
+	assert.equal(recovered.state, "complete");
+	assert.equal(recovered.completedItems, 3);
+	assert.equal(claims.length, 0);
+});
+
+test("reconcile accepts changed-head MERGED only with a fresh current-head approval", async () => {
+	const { recovered, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const headSha = "f".repeat(40);
+			effects[item.id] = {
+				state: "MERGED", merged: true, headSha, autoMerge: false, reviewDecision: null,
+				reviews: [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: headSha } }],
+			};
+		}
+	});
+	assert.equal(recovered.state, "complete");
+	assert.equal(recovered.completedItems, 3);
+	assert.equal(claims.length, 0);
+});
+
+for (const scenario of ["unreviewed", "stale", "changes-requested"]) test(`changed-head MERGED retains UNKNOWN claims for ${scenario} review evidence`, async () => {
+	const { batch, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const headSha = "f".repeat(40);
+			effects[item.id] = {
+				state: "MERGED", merged: true, headSha, autoMerge: false,
+				reviewDecision: scenario === "changes-requested" ? "CHANGES_REQUESTED" : null,
+				reviews: scenario === "unreviewed" ? [] : [{
+					state: "APPROVED",
+					submittedAt: new Date(Date.now() + 100).toISOString(),
+					author: { login: "maintainer" },
+					commit: { oid: scenario === "stale" ? item.headSha : headSha },
+				}],
+			};
+		}
+	});
+	assert.equal(batch.state, "blocked");
+	assert.equal(claims.length, 4);
+	assert.ok(claims.every((claim) => claim.owner === `review:${batch.id}:0`));
+});
+
+test("closed unmerged Slay PRs release claims without counting as completed", async () => {
+	const { recovered, claims, ctx } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) effects[item.id] = { state: "CLOSED", merged: false, headSha: item.headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED", reviewsIncomplete: true, reviews: [] };
+	});
+	assert.equal(recovered.state, "cancelled");
+	assert.equal(recovered.completedItems, 0);
+	assert.equal(claims.length, 0);
+	assert.ok(ctx.notifications.some((notification) => /terminal outcome not satisfied.*closed without merging/i.test(notification.message)));
+});
+
+for (const scenario of ["unreviewed-head-change", "stale-review-head", "unreadable"]) test(`Slay PR reconciliation retains UNKNOWN claims for ${scenario}`, async () => {
+	const { batch, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) {
+			const changedHead = "e".repeat(40);
+			effects[item.id] = {
+				state: "OPEN", merged: false, headSha: changedHead, autoMerge: true, reviewDecision: "REVIEW_REQUIRED",
+				reviews: scenario === "stale-review-head" ? [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: item.headSha } }] : [],
+			};
+		}
+	}, { unreadable: scenario === "unreadable" });
+	assert.equal(claims.length, 4);
+	assert.ok(claims.every((claim) => claim.owner === `review:${batch.id}:0`));
+});
+
+test("reconcile never releases a Slay claim whose owner changed", async () => {
+	const { batch, claims } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+		for (const item of items.slice(0, 3)) effects[item.id] = {
+			state: "MERGED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: null, reviews: [],
+		};
+	}, {}, (testEnv, currentBatch, items) => {
+		const store = new ResourceClaims(testEnv.LUNA_FACTORY_STATE_ROOT, testEnv.LUNA_FACTORY_CLAIMS_ROOT);
+		const resource = `item:${items[0].repo}#${items[0].id}`;
+		store.release(resource, `review:${currentBatch.id}:0`);
+		store.claim(resource, "review:other-wave:0");
+	});
+	assert.equal(claims.length, 1);
+	assert.equal(claims[0].owner, "review:other-wave:0");
+	assert.equal(claims[0].resource, "item:projectbluefin/review#350");
+	assert.equal(batch.state, "blocked");
+});
 
 for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retains distinct task/job identity after result consumption via ${delivery}`, async () => {
 	const states = { "projectbluefin/review#77": { title: "consumed worker", submittedPrs: [] } };
@@ -3821,7 +4440,7 @@ for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retain
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	pi.events.get("tool_call")({ toolCallId: "call-123", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "call-123", toolName: "task", input: { isolated: false } }, ctx);
 	ctx.asyncJobs.running = [{ id: "FixIssue", agentId: "FixIssue", type: "task", status: "running", startTime: Date.now() }];
 	await pi.events.get("tool_execution_end")({ toolCallId: "call-123", result: { details: {
 		async: { type: "task", state: "running", jobId: "FixIssue" },
@@ -3838,6 +4457,33 @@ for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retain
 	assert.equal(pi.messages.length, 1, "the worker is never replayed");
 });
 
+test("OMP 18.4 primary async job id survives without a transient job snapshot", async () => {
+	const states = { "projectbluefin/review#77": { title: "direct job identity", submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	pi.events.get("tool_call")({ toolCallId: "direct-call", toolName: "task", input: { isolated: false } }, ctx);
+	ctx.asyncJobs.running = [];
+	ctx.asyncJobs.recent = [];
+	await pi.events.get("tool_execution_end")({ toolCallId: "direct-call", result: { details: {
+		async: { type: "task", state: "completed", jobId: "DirectWorker-2" },
+		progress: [{ id: "DirectWorker", index: 0, status: "completed" }],
+	} }, isError: false }, ctx);
+	const recorded = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.deepEqual(recorded.waveJobIds, ["DirectWorker-2"]);
+	assert.deepEqual(recorded.waveTaskWorkers, {
+		"direct-call": [{ agentId: "DirectWorker", jobId: "DirectWorker-2", resultStatus: "completed" }],
+	});
+	assert.deepEqual(recorded.waveTerminalJobStatuses, { "DirectWorker-2": "completed" });
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
+});
+
 test("Review recovers a consumed worker from host evidence without session entries", async () => {
 	const states = { "projectbluefin/review#77": { title: "lost projection", submittedPrs: [] } };
 	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
@@ -3847,7 +4493,7 @@ test("Review recovers a consumed worker from host evidence without session entri
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	pi.events.get("tool_call")({ toolCallId: "lost-call", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "lost-call", toolName: "task", input: { isolated: false } }, ctx);
 	ctx.asyncJobs.recent = [{ id: "LostWorker", agentId: "LostWorker", type: "task", status: "completed", startTime: Date.now() }];
 	await pi.events.get("tool_execution_end")({ toolCallId: "lost-call", result: { details: {
 		async: { type: "task", state: "completed", jobId: "LostWorker" }, progress: [{ id: "LostWorker", index: 0, status: "completed" }],
@@ -3863,7 +4509,7 @@ test("Review recovers a consumed worker from host evidence without session entri
 	assert.equal(restarted.messages.length, 0);
 });
 
-for (const count of [1, 8]) test(`packaged OMP 18.3.2 delivers and evicts ${count} Slay workers without losing Review evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
+for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts ${count} Slay workers without losing Review evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
 	const Manager = await loadPackagedJobManager(process.env.REVIEW_OMP_SOURCE!);
 	const states = Object.fromEntries(Array.from({ length: count }, (_, index) => [`projectbluefin/review#${77 + index}`, { title: `real manager ${index}`, submittedPrs: [] }]));
 	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
@@ -3879,7 +4525,7 @@ for (const count of [1, 8]) test(`packaged OMP 18.3.2 delivers and evicts ${coun
 		await manager.getJob(baselineId).promise;
 		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 		await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-		pi.events.get("tool_call")({ toolCallId: "real-call", toolName: "task", input: {} }, ctx);
+		pi.events.get("tool_call")({ toolCallId: "real-call", toolName: "task", input: { isolated: false } }, ctx);
 		const pending = Array.from({ length: count }, () => Promise.withResolvers<string>());
 		const progress = pending.map((_, index) => ({ id: `RealWorker${index}`, index, status: "running" }));
 		const jobIds = pending.map((done, index) => manager.register("task", progress[index].id, () => done.promise, { id: progress[index].id, agentId: progress[index].id }));
@@ -3955,7 +4601,10 @@ test("one task fan-out retains every sibling job independently across consumptio
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	pi.events.get("tool_call")({ toolName: "task", toolCallId: "fan-out", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolName: "task", toolCallId: "fan-out", input: { tasks: [
+		{ task: "first", isolated: false },
+		{ task: "second", isolated: false },
+	] } }, ctx);
 	ctx.asyncJobs.running = ["First", "Second"].map((agentId) => ({ id: `${agentId}-2`, agentId, type: "task", status: "running", startTime: Date.now() }));
 	pi.events.get("tool_result")({ toolName: "task", toolCallId: "fan-out", details: {
 		async: { type: "task", state: "running", jobId: "First-2" }, progress: [{ id: "First", index: 0 }, { id: "Second", index: 1 }],
@@ -4048,11 +4697,14 @@ test("blocked issue Slay can be revised and re-Slayed in the same Review session
 	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	const first = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	pi.events.get("tool_call")({ toolCallId: "failed-issue-worker", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "failed-issue-worker", toolName: "task", input: { isolated: false } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["failed-issue-worker"];
 	ctx.asyncJobs.recent = [{ id: "failed-issue-worker", status: "failed", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "failed-issue-worker", "failed-issue-worker");
 	await pi.events.get("turn_end")({}, ctx);
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "running");
+	await deliverTaskResults(pi, ctx, ["failed-issue-worker"]);
 	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "blocked");
 
@@ -4083,7 +4735,7 @@ test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	pi.events.get("tool_call")({ toolCallId: "drain-worker", toolName: "task", input: {} }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "drain-worker", toolName: "task", input: { isolated: false } }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["drain-worker"];
 	ctx.asyncJobs.running = [{ id: "drain-worker", status: "running", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "drain-worker", "drain-worker");
@@ -4096,13 +4748,16 @@ test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async
 	ctx.asyncJobs.running = [];
 	ctx.asyncJobs.recent = [{ id: "drain-worker", status: "failed", startTime: Date.now() + 2 }];
 	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "paused");
+	await deliverTaskResults(pi, ctx, ["drain-worker"]);
+	await pi.events.get("agent_end")({}, ctx);
 	const cancelled = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(cancelled.state, "cancelled");
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
 	assert.match(claims.conflict("repo:projectbluefin/review", "review:other:0") ?? "", /owned by review:/);
 });
 
-test("slay prompts define bounded review, isolated repair, and live-rule landing", () => {
+test("slay prompts require unique target checkouts and live-rule landing", () => {
 	const item = queueItem();
 	const sibling = queueItem({ id: 7, repo: item.repo });
 	const slay = actionPrompt({ kind: "slay", item, items: [item, sibling] });
@@ -4112,10 +4767,13 @@ test("slay prompts define bounded review, isolated repair, and live-rule landing
 		assert.match(prompt, /Evidence is bounded and read once/);
 		assert.match(prompt, /--name-only/);
 		assert.doesNotMatch(prompt, /--json [\w,]*\bbody\b/);
+		assert.doesNotMatch(prompt, /isolated: true/);
 	}
 	assert.match(slay, /`task` tool once with one fresh reviewer item per pull request/);
 	assert.match(slay, /Do not use eval workpool/);
-	assert.match(slay, /fresh isolated fixer/);
+	assert.match(slay, /fresh fixer/);
+	assert.doesNotMatch(slay, /Do not request OMP-native/);
+	assert.match(slay, /distinct target checkout/);
 	assert.match(slay, /both `pull_request` and explicit `repo`/);
 	assert.match(slay, /\$HOME\/worktrees/);
 	assert.match(slay, /rules\/branches\/<branch>/);

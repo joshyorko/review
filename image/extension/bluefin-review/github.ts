@@ -68,6 +68,31 @@ export interface QueueResult {
 	viewerLogin?: string;
 }
 
+export interface PullRequestEffect {
+	readonly id: string;
+	readonly repo: string;
+	readonly number: number;
+	readonly url: string;
+	readonly state: "OPEN" | "CLOSED" | "MERGED";
+	readonly merged: boolean;
+	readonly headSha: string | null;
+	readonly autoMergeEnabled: boolean;
+	/** GitHub omits aggregate review policy when reviewDecision is null. */
+	readonly reviewDecision: ReviewState | null;
+	readonly authorLogin: string | null;
+	readonly reviewsComplete: boolean;
+	readonly latestReviews: readonly {
+		readonly authorLogin: string;
+		readonly state: string;
+		readonly submittedAt: number;
+		readonly commitSha: string | null;
+	}[];
+}
+
+export type PullRequestEffectResult =
+	| { readonly kind: "observed"; readonly pullRequest: PullRequestEffect }
+	| { readonly kind: "unknown"; readonly error: string };
+
 
 
 const QUEUE_FIELDS = `
@@ -622,6 +647,100 @@ export async function fetchItemsByKey(
 		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		return { items, error: error instanceof Error ? error.message : String(error), fetchedAt: Date.now() };
 	}
+}
+
+/**
+ * Observe the external effect of one Slay PR by identity. This deliberately
+ * bypasses the open-only queue projection so CLOSED and MERGED remain visible.
+ */
+export async function fetchPullRequestEffect(
+	repo: string,
+	number: number,
+	options: FetchOptions = {},
+): Promise<PullRequestEffectResult> {
+	const { token, signal } = options;
+	if (!token) return { kind: "unknown", error: "no GitHub credential (set GH_TOKEN or run gh auth login)" };
+	const [owner, name] = repo.split("/");
+	if (!owner || !name || !Number.isSafeInteger(number) || number < 1) return { kind: "unknown", error: "invalid pull-request identity" };
+	const query = `query { repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { nameWithOwner pullRequest(number: ${number}) {
+	id number url state merged mergedAt headRefOid autoMergeRequest { enabledAt } reviewDecision author { login }
+	latestReviews(first: 100) { pageInfo { hasNextPage } nodes { state submittedAt author { login } commit { oid } } }
+	} } }`;
+	const doFetch = options.fetchImpl ?? fetch;
+	try {
+		const response = await doFetch("https://api.github.com/graphql", {
+			method: "POST",
+			headers: { ...headers(token), "Content-Type": "application/json" },
+			body: JSON.stringify({ query }),
+			signal: deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal),
+			redirect: "error",
+		});
+		if (!response.ok) return { kind: "unknown", error: `GitHub GraphQL ${response.status} ${response.statusText}` };
+		const payload: unknown = await response.json();
+		if (!isRecord(payload) || !isRecord(payload.data)
+			|| !isRecord(payload.data.repository) || !isRecord(payload.data.repository.pullRequest)) {
+			return { kind: "unknown", error: "GitHub returned incomplete pull-request effect evidence" };
+		}
+		const node = payload.data.repository.pullRequest;
+		if (typeof node.id !== "string" || node.id.length === 0 || node.number !== number || node.url !== `https://github.com/${owner}/${name}/pull/${number}`
+			|| (node.state !== "OPEN" && node.state !== "CLOSED" && node.state !== "MERGED") || typeof node.merged !== "boolean"
+			|| node.state === "OPEN" && (node.merged || node.mergedAt !== null)
+			|| node.state === "CLOSED" && (node.merged || node.mergedAt !== null)
+			|| node.state === "MERGED" && (!node.merged || typeof node.mergedAt !== "string" || !Number.isFinite(Date.parse(node.mergedAt)))
+			|| (node.headRefOid !== null && typeof node.headRefOid !== "string")
+			|| payload.data.repository.nameWithOwner !== `${owner}/${name}`) {
+			return { kind: "unknown", error: "GitHub returned ambiguous pull-request effect evidence" };
+		}
+		const latestReviews: PullRequestEffect["latestReviews"][number][] = [];
+		const latestReviewNodes = isRecord(node.latestReviews) && isRecord(node.latestReviews.pageInfo)
+			&& node.latestReviews.pageInfo.hasNextPage === false && Array.isArray(node.latestReviews.nodes)
+			? node.latestReviews.nodes
+			: undefined;
+		let reviewsComplete = !(Array.isArray(payload.errors) && payload.errors.length > 0)
+			&& (node.autoMergeRequest === null || isRecord(node.autoMergeRequest))
+			&& (node.reviewDecision === null || node.reviewDecision === "APPROVED" || node.reviewDecision === "CHANGES_REQUESTED" || node.reviewDecision === "REVIEW_REQUIRED")
+			&& latestReviewNodes !== undefined;
+		for (const review of latestReviewNodes ?? []) {
+			if (!isRecord(review) || typeof review.state !== "string" || typeof review.submittedAt !== "string"
+				|| !Number.isFinite(Date.parse(review.submittedAt)) || !isRecord(review.author) || typeof review.author.login !== "string"
+				|| (review.commit !== null && review.commit !== undefined && (!isRecord(review.commit) || typeof review.commit.oid !== "string"))) {
+				reviewsComplete = false;
+				latestReviews.length = 0;
+				break;
+			}
+			const commitSha = isRecord(review.commit) && typeof review.commit.oid === "string" ? review.commit.oid : null;
+			latestReviews.push({
+				authorLogin: review.author.login,
+				state: review.state,
+				submittedAt: Date.parse(review.submittedAt),
+				commitSha,
+			});
+		}
+		return {
+			kind: "observed",
+			pullRequest: {
+				id: node.id,
+				repo: `${owner}/${name}`,
+				number,
+				url: node.url,
+				state: node.state,
+				merged: node.merged,
+				headSha: typeof node.headRefOid === "string" ? node.headRefOid : null,
+				autoMergeEnabled: isRecord(node.autoMergeRequest),
+				reviewDecision: node.reviewDecision === null ? null : toReviewState(typeof node.reviewDecision === "string" ? node.reviewDecision : undefined),
+				authorLogin: isRecord(node.author) && typeof node.author.login === "string" ? node.author.login : null,
+				reviewsComplete,
+				latestReviews,
+			},
+		};
+	} catch (error) {
+		if (signal?.aborted) return { kind: "unknown", error: "pull-request effect read cancelled" };
+		return { kind: "unknown", error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export interface IssueAdmissionTarget {

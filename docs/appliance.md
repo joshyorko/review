@@ -10,6 +10,8 @@ bin/omp-review org:acme
 
 The rootless launcher prefers Podman with `krun` and KVM, then reports missing prerequisites and falls back to isolated Apptainer. Runs stay in the foreground. `Ctrl-C` stops only the active invocation.
 
+When `LUNA_FACTORY_ENABLED=1`, the packaged launcher and entrypoint qualify the selected runtime with Factory's bubblewrap preflight and a harmless sandbox test before OMP opens. `just review-doctor` reports runtime prerequisites and packaged verifier qualification separately. A failed probe refuses Factory-enabled startup; Apptainer is qualified independently when selected.
+
 ## Scope, mode, and authentication
 
 A fresh interactive session without an explicit, restored, or configured scope asks for one. Headless callers must pass `owner/repo` or `org:<name>`. `REVIEW_DEFAULT_SCOPE` supplies an explicit generic default; the launcher does not infer an organization from this fork, the GitHub login, or image metadata.
@@ -70,7 +72,8 @@ Persistent OMP state lives under the appliance-owned home (`/home/bluefin`, a re
 
 ## Image and personal package
 
-The image derives from a digest-pinned FSDK base, verifies fetched OMP and GitHub CLI artifacts against per-architecture SHA-256 pins, and includes the Review and Luna Factory extensions. The TypeSafe OMP loader is optional; Review starts without a TypeSafe key. Audio is included for OMP voice support when the host exposes a supported PulseAudio socket or `/dev/snd`.
+The image derives from a digest-pinned FSDK base, builds OMP from pinned source plus the generic registration patch on each native architecture, and verifies GitHub CLI artifacts against per-architecture SHA-256 pins. The derived binary and its source, patch, and native-package provenance are recorded in the SBOM. Review and Luna Factory extensions remain packaged; MemoryD's adapter is not included pending distribution authorization. The TypeSafe OMP loader is optional; Review starts without a TypeSafe key. Audio is included for OMP voice support when the host exposes a supported PulseAudio socket or `/dev/snd`.
+The image includes checksum-verified Node.js 24 with its bundled npm/npx and the checksum-verified pinned Bun runtime used to build OMP. These runtimes are staged into the shared root filesystem used by both OCI and Apptainer packaging; no system package manager is added.
 
 Current source and SBOM provenance identify [`joshyorko/review`](https://github.com/joshyorko/review). The personal Homebrew workflow builds an immutable OCI image and matching native SIF from the selected committed ref on `self-hosted`, then publishes the package to `joshyorko/homebrew-review-dev`.
 

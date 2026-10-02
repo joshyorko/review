@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createBatch, digest, type Batch, type BatchItem } from "../image/extension/luna-factory/core/batch.ts";
 import { requiredChecks, packageCheckScripts } from "../image/extension/luna-factory/omp/batch-checks.ts";
-import { sandboxPreflight } from "../image/extension/luna-factory/omp/batch-native.ts";
+import { NativeExecutionError, sandboxPreflight } from "../image/extension/luna-factory/omp/batch-native.ts";
 import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
 
 function fixture(preflight: typeof sandboxPreflight = sandboxPreflight) {
@@ -19,7 +19,7 @@ function fixture(preflight: typeof sandboxPreflight = sandboxPreflight) {
  return { root, batch, item, path, service, cleanup: async () => { await service.shutdown(); rmSync(root,{recursive:true,force:true}); } };
 }
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@localhost", ...args], {cwd,encoding:"utf8"}).trim();
-function ready(f: ReturnType<typeof fixture>) {
+function ready(f: { path: string; item: BatchItem }) {
  mkdirSync(f.path,{recursive:true}); git(f.path,"init","-q");writeFileSync(join(f.path,"value.txt"),"retained\n");git(f.path,"add",".");git(f.path,"commit","-qm","fixture");git(f.path,"remote","add","origin","https://github.com/org/repo");
  const head=git(f.path,"rev-parse","HEAD");f.item.selected.head=head;f.item.selected.base=head;f.item.ledger.subject={repo:"org/repo",base:head,head};f.item.workspace=f.path;
 }
@@ -74,6 +74,38 @@ test("SDK/model preflight refuses dispatch before preparation and attempt alloca
  }finally{await f.cleanup();}
 });
 
+test("unavailable verifier blocks a selected mutation before model calls or attempt allocation", async () => {
+ const root = mkdtempSync(join(tmpdir(), "factory-verifier-blocked-"));
+ let modelCalls = 0;
+ const sdk = {
+  Settings: { isolated: () => ({}) },
+  SessionManager: { create: () => ({}) },
+  AgentRegistry: class {},
+  async createAgentSession() { modelCalls++; throw new Error("model session must not start"); },
+ };
+ const schema = { object: () => ({}), string: () => ({}), array: () => ({}), number: () => ({}), boolean: () => ({}) };
+ const unavailable = async () => { throw new NativeExecutionError("capability-unavailable", "verification sandbox capability unavailable: bwrap --unshare-all: Operation not permitted"); };
+ const batch = createBatch([{ key: "org/repo#1", repo: "org/repo", number: 1, kind: "pr", action: "patch", overlaps: [], acceptanceRevision: "r1", head: "a".repeat(40), base: "a".repeat(40), requiredChecks: ["node --test"] }], { id: "batch-cdefab", capacity: 1, maxAttempts: 3, maxTotalAttempts: 3, mode: "retain" });
+ const service = new BatchService(root, { assertFresh: async () => {}, snapshot: async (x: unknown) => x } as never, sdk as never, schema as never, 1, root, unavailable);
+ service.store.acquire(); service.store.write(batch);
+ const item = batch.items[0]!;
+ const path = join(root, "workspaces", batch.id, digest(item.selected.key).slice(0, 16));
+ const fixtureState = { root, batch, item, path, service, cleanup: async () => { await service.shutdown(); rmSync(root, { recursive: true, force: true }); } };
+ ready(fixtureState);
+ item.preparation = { phase: "ready", owner: `${batch.id}:${item.selected.key}`, head: item.selected.head! };
+ service.store.write(batch);
+ try {
+  await service.resume(batch.id, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } } as never);
+  await service.waitForIdle();
+  const blocked = service.store.read(batch.id).items[0]!;
+  assert.equal(blocked.stage, "BLOCKED");
+  assert.match(blocked.blocker!, /verification sandbox capability unavailable/);
+  assert.equal(blocked.attempts, 0);
+  assert.equal(blocked.ledger.tasks.length, 0);
+  assert.equal(modelCalls, 0);
+ } finally { await fixtureState.cleanup(); }
+});
+
 test("an independent rejection survives queue clearing and reaches the bounded repair worker",async()=>{
  const f=fixture();let workers=0;let reviews=0;const prompts:string[]=[];
  try{
@@ -97,6 +129,25 @@ test("an independent rejection survives queue clearing and reaches the bounded r
   const final=service.store.read(f.batch.id).items[0]!;
   assert.equal(workers,2);assert.equal(reviews,2);assert.match(prompts[1]!,/DISTINCTIVE_REJECTION/);assert.equal(final.attempts,2);assert.equal(final.ledger.tasks[0]!.attempts.length,2);
   await service.shutdown();
+ }finally{await f.cleanup();}
+});
+
+test("failed native Advisor escalation persists an unknown blocked operation and retains mutation claims", async () => {
+ const f=fixture();try{
+  const internals=f.service as unknown as {execute(batch:Batch,item:BatchItem,signal:AbortSignal,binding:unknown,bindingError?:string):Promise<void>};
+  internals.execute=async(_batch,item)=>{
+   item.operation={...intent(f),state:"intent"};
+   item.stage="RUNNING";
+   throw new NativeExecutionError("advisor-blocked","native Advisor route unavailable");
+  };
+  await f.service.resume(f.batch.id,{model:{provider:"worker",id:"worker"},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});
+  await f.service.waitForIdle();
+  const persisted=f.service.store.read(f.batch.id).items[0]!;
+  assert.equal(persisted.stage,"BLOCKED");
+  assert.equal(persisted.operation?.state,"unknown");
+  assert.match(persisted.blocker!,/native Advisor escalation blocked/);
+  assert.deepEqual(f.service.claims.list().map(claim=>claim.resource).filter(Boolean).sort(),[`item:${f.item.selected.key}`,`repo:${f.item.selected.repo}`].sort());
+  assert.equal(persisted.attempts,0,"failed escalation does not fabricate an attempt receipt");
  }finally{await f.cleanup();}
 });
 

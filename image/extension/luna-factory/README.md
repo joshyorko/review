@@ -70,6 +70,14 @@ submitted as a batch. Missing toolchains or known unprepared dependencies block
 before a worker attempt. Worker-proposed checks are added to the captured list;
 they cannot replace it.
 
+For consequential unresolved judgment, a worker can make one bounded
+`factory_escalate` request per attempt. The coordinator enables OMP's native
+Advisor only on that same worker session, records native routing/history
+evidence, then disables it and resumes the same task and attempt. Normal worker
+and acceptance-reviewer sessions keep Advisor disabled; Advisor advice never
+changes acceptance or authority. Missing or unverified native Advisor routing
+blocks the current attempt without a worker-model fallback.
+
 The packaged OMP host registers `/factory`, `/factory status`, `/factory why
 <task-id>`, `/factory pause`, `/factory drain`, `/factory resume`, and
 `/factory abort`. Older or

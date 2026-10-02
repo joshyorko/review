@@ -187,6 +187,15 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
   exit 0
 fi
 printf '%s\n' "\$*" >>"$mock_podman_log"
+if [[ "\${1:-}" == run && "\$*" == *--entrypoint\ /usr/bin/test* ]]; then exit 0; fi
+if [[ "\${1:-}" == run && "\$*" == *--factory-verifier-probe* ]]; then
+  if [[ "\${FAKE_FACTORY_VERIFIER_BLOCKED:-0}" == 1 ]]; then
+    echo "verification sandbox capability unavailable: bwrap: Can't mount proc on /proc: Operation not permitted" >&2
+    exit 78
+  fi
+  echo '{"kind":"review-factory-verifier","status":"available"}'
+  exit 0
+fi
 if [[ "\${1:-}" == run ]]; then
   previous=""
   home_mount=""
@@ -223,6 +232,11 @@ mock_apptainer_log="$scratch/apptainer.log"
 cat >"$scratch/bin/apptainer" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$mock_apptainer_log"
+if [[ "\$*" == *"/usr/bin/test -r /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts"* ]]; then exit 0; fi
+if [[ "\$*" == *--factory-verifier-probe* ]]; then
+  echo '{"kind":"review-factory-verifier","status":"available"}'
+  exit 0
+fi
 previous=""
 for arg in "\$@"; do
   [[ "\$previous" != --home ]] || runtime_home="\${arg%%:*}"
@@ -364,6 +378,45 @@ assert_bluefin_review() {
     fail "shorthand reached the appliance as prompt text: $passed_flags"
   fi
 }
+
+: >"$mock_podman_log"
+set +e
+factory_probe_output="$(FAKE_FACTORY_VERIFIER_BLOCKED=1 LUNA_FACTORY_ENABLED=1 \
+  "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+factory_probe_status=$?
+set -e
+[[ "$factory_probe_status" -ne 0 ]] || fail "Factory-enabled Review started after its verifier probe failed"
+[[ "$factory_probe_output" == *"Factory verifier capability unavailable"* ]] ||
+  fail "Factory verifier failure lacked an actionable blocker: $factory_probe_output"
+factory_probe_calls="$(grep '^run ' "$mock_podman_log" || true)"
+[[ "$(grep -c '^run ' "$mock_podman_log" || true)" == 2 ]] ||
+  fail "Factory-enabled Review started the appliance after its verifier probe failed: $factory_probe_calls"
+[[ "$factory_probe_calls" == *"--runtime=krun"* &&
+  "$factory_probe_calls" == *"--userns keep-id:uid=65532,gid=65532"* &&
+  "$factory_probe_calls" == *"--factory-verifier-probe"* ]] ||
+  fail "Factory verifier probe did not use the packaged krun launch profile: $factory_probe_calls"
+[[ "$factory_probe_calls" == *"--network=none"* ]] ||
+  fail "Factory verifier probe did not disable external network access: $factory_probe_calls"
+[[ "$factory_probe_calls" != *"--env"* && "$factory_probe_calls" != *"GH_TOKEN"* ]] ||
+  fail "Factory verifier probe inherited a credential environment: $factory_probe_calls"
+[[ "$factory_probe_calls" != *"--interactive --tty"* ]] ||
+  fail "Factory verifier probe incorrectly started an interactive OMP session"
+
+: >"$mock_podman_log"
+factory_success_output="$(LUNA_FACTORY_ENABLED=1 "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "Factory-enabled Review refused a successful packaged verifier probe: $factory_success_output"
+factory_probe_calls="$(grep '^run ' "$mock_podman_log" || true)"
+[[ "$(grep -c '^run ' "$mock_podman_log" || true)" == 3 ]] ||
+  fail "Factory-enabled Review did not perform package check, verifier probe, then OMP launch: $factory_probe_calls"
+factory_probe_package="$(sed -n '1p' <<<"$factory_probe_calls")"
+factory_probe_runtime="$(sed -n '2p' <<<"$factory_probe_calls")"
+factory_probe_omp="$(sed -n '3p' <<<"$factory_probe_calls")"
+[[ "$factory_probe_package" == *"--entrypoint /usr/bin/test"* && "$factory_probe_package" == *"verifier-probe.ts"* ]] ||
+  fail "Factory launch did not verify the packaged probe exists: $factory_probe_package"
+[[ "$factory_probe_runtime" == *"--runtime=krun"* && "$factory_probe_runtime" == *"--factory-verifier-probe"* && "$factory_probe_runtime" != *"--interactive --tty"* ]] ||
+  fail "Factory launch did not qualify the noninteractive krun profile: $factory_probe_runtime"
+[[ "$factory_probe_omp" == *"--runtime=krun --rm --interactive --tty"* ]] ||
+  fail "OMP session did not start after verifier qualification: $factory_probe_omp"
 
 bedrock_token="test-bedrock-bearer"
 aws_access_key="test-access-key"
@@ -696,6 +749,9 @@ mock_omp_log="$scratch/omp.log"
 cat >"$scratch/bin/omp" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$mock_omp_log"
+if [[ -n "\${REVIEW_CONTRACT_CWD_FILE:-}" ]]; then
+  printf '%s\n' "\$PWD" >"\$REVIEW_CONTRACT_CWD_FILE"
+fi
 exit 0
 EOF
 chmod +x "$scratch/bin/omp"
@@ -756,6 +812,79 @@ assert_eq "$(grep -o -- '--extension' <<<"$absent_call" | wc -l | xargs)" "1" "b
   fail "bin/omp-review did not pass the Review extension without Factory: $absent_call"
 [[ "$absent_stderr" == *"Luna Factory extension is not packaged"* ]] ||
   fail "bin/omp-review did not report the missing Factory package: $absent_stderr"
+
+# Native task isolation needs a Git baseline. Keep an existing caller checkout
+# as-is, including its current HEAD and uncommitted files.
+caller_checkout="$scratch/caller-checkout"
+mkdir -p "$caller_checkout"
+git -C "$caller_checkout" init -q
+git -C "$caller_checkout" config user.name "Review Contract"
+git -C "$caller_checkout" config user.email "review-contract@localhost"
+printf 'committed input\n' >"$caller_checkout/input.txt"
+git -C "$caller_checkout" add input.txt
+git -C "$caller_checkout" commit -qm "test: caller baseline"
+caller_head="$(git -C "$caller_checkout" rev-parse HEAD)"
+printf 'caller edit\n' >>"$caller_checkout/input.txt"
+printf 'caller data\n' >"$caller_checkout/keep.txt"
+caller_status="$(git -C "$caller_checkout" status --porcelain)"
+caller_cwd_file="$scratch/caller.cwd"
+(
+  cd "$caller_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token REVIEW_CONTRACT_CWD_FILE="$caller_cwd_file" \
+    HOME="$scratch/caller-home" PATH="$scratch/bin:$PATH" "$source_only/bin/omp-review" --repo owner/repo >/dev/null 2>&1
+) || fail "bin/omp-review failed inside an existing caller checkout"
+[[ "$(cat "$caller_cwd_file")" == "$caller_checkout" ]] ||
+  fail "bin/omp-review did not retain the caller Git checkout"
+[[ "$(git -C "$caller_checkout" rev-parse HEAD)" == "$caller_head" ]] ||
+  fail "bin/omp-review changed the caller checkout baseline"
+[[ "$(git -C "$caller_checkout" status --porcelain)" == "$caller_status" ]] ||
+  fail "bin/omp-review changed caller checkout files"
+[[ "$(cat "$caller_checkout/keep.txt")" == 'caller data' ]] ||
+  fail "bin/omp-review removed caller data"
+
+# Outside a Git checkout, source mode creates its own committed isolation
+# baseline under user state and leaves the invocation directory untouched.
+outside_checkout="$scratch/outside-checkout"
+mkdir -p "$outside_checkout"
+printf 'keep me\n' >"$outside_checkout/caller.txt"
+outside_home="$scratch/outside-home"
+outside_cwd_file="$scratch/outside.cwd"
+(
+  cd "$outside_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token REVIEW_CONTRACT_CWD_FILE="$outside_cwd_file" \
+    HOME="$outside_home" PATH="$scratch/bin:$PATH" "$source_only/bin/omp-review" --repo owner/repo >/dev/null 2>&1
+) || fail "bin/omp-review failed outside a Git checkout"
+source_coordinator="$outside_home/.local/state/review/coordinator"
+[[ "$(cat "$outside_cwd_file")" == "$source_coordinator" ]] ||
+  fail "bin/omp-review did not enter its source coordinator repository"
+[[ "$(git -C "$source_coordinator" rev-parse --is-inside-work-tree)" == true ]] ||
+  fail "bin/omp-review source coordinator is not a Git repository"
+[[ "$(git -C "$source_coordinator" log -1 --format=%s)" == 'chore: initialize Review coordinator' ]] ||
+  fail "bin/omp-review source coordinator has no baseline commit"
+[[ -z "$(git -C "$source_coordinator" status --porcelain)" ]] ||
+  fail "bin/omp-review source coordinator is not clean"
+source_coordinator_head="$(git -C "$source_coordinator" rev-parse HEAD)"
+(
+  cd "$outside_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token REVIEW_CONTRACT_CWD_FILE="$outside_cwd_file" \
+    HOME="$outside_home" PATH="$scratch/bin:$PATH" "$source_only/bin/omp-review" --repo owner/repo >/dev/null 2>&1
+) || fail "bin/omp-review failed when reusing its source coordinator"
+[[ "$(git -C "$source_coordinator" rev-parse HEAD)" == "$source_coordinator_head" ]] ||
+  fail "bin/omp-review changed the reused source coordinator baseline"
+printf 'keep coordinator data\n' >"$source_coordinator/operator-data.txt"
+dirty_coordinator_stderr="$(
+  cd "$outside_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token HOME="$outside_home" PATH="$scratch/bin:$PATH" \
+    "$source_only/bin/omp-review" --repo owner/repo 2>&1 >/dev/null
+)" && fail "bin/omp-review accepted a dirty source coordinator"
+[[ "$dirty_coordinator_stderr" == *"source coordinator has uncommitted files"* ]] ||
+  fail "bin/omp-review did not explain its dirty source coordinator refusal: $dirty_coordinator_stderr"
+[[ "$(git -C "$source_coordinator" rev-parse HEAD)" == "$source_coordinator_head" ]] ||
+  fail "bin/omp-review changed the dirty source coordinator baseline"
+[[ "$(cat "$source_coordinator/operator-data.txt")" == 'keep coordinator data' ]] ||
+  fail "bin/omp-review removed source coordinator data"
+[[ "$(cat "$outside_checkout/caller.txt")" == 'keep me' ]] ||
+  fail "bin/omp-review changed the non-repository caller directory"
 rm -rf "$source_only"
 
 # --- 3b. Factory runtime config crosses the appliance boundary ---------------
@@ -794,9 +923,9 @@ default_podman_call="$(grep '^run ' "$mock_podman_log")"
 # The generic Apptainer fallback and the packaged SIF share one environment
 # seam, so a non-default capacity has to survive both.
 : >"$mock_apptainer_log"
-LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1 \
-  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
-  fail "Apptainer fallback did not forward Factory configuration"
+factory_apptainer_output="$(LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1 \
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "Apptainer fallback did not forward Factory configuration: $factory_apptainer_output"
 
 factory_sif="$scratch/factory.sif"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$factory_sif"

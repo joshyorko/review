@@ -52,15 +52,46 @@ Review defaults to GitHub-only mode. `REVIEW_MODE=hive` explicitly enables optio
 | `v` | Open the focused GitHub item |
 | `?`, `q` / `Esc` | Show help / close the workbench |
 
+`/review recap` opens a deterministic, bounded summary of the current Review
+selection, persisted Review operations, native OMP outcomes, and resolved
+artifact references. It does not call a model or add the recap to model
+context. `/review handoff` writes the same safety-bounded handoff through OMP's
+session artifact API, opens a fresh child session, and sends one visible custom
+message with `triggerTurn: false`. The new context must revalidate the current
+repository, head, selection, claims, budget, and external effects and obtain
+explicit human authorization. A handoff grants no approval, merge, comment,
+publish, or deploy authority. OMP's `sendMessage` has no delivery receipt, so
+Review reports submission without claiming acknowledgement and blocks blind
+duplicate sends. If new-session creation is positively cancelled, the export
+remains, no message is sent, and a later retry is allowed, including after
+restoring the source branch. Uncertain transitions and submissions remain fenced.
+Source identity, revalidation/no-authority instructions, and unresolved effects
+are reserved before optional history; each history section has its own UTF-8
+budget. Native trace facts prioritize recent failed, cancelled, and unknown
+outcomes and disclose omitted descendants, not just omitted turns.
+
+The ordinary Review trace bounds UTF-8 previews, total retained trace bytes,
+accumulated per-tool output bytes, turns, tools, and task spans at ingestion.
+Credentials are masked using their original source ranges before head/tail
+clipping. Omitted work retains bounded aggregate lifecycle evidence; lost or
+unsettled outcomes keep the enclosing turn UNKNOWN rather than successful.
+Truncation metadata includes bytes lost to line and byte budgets plus known
+native clipping, and is shown in both the tree and text projection. Native
+artifact links are resolved against the source session; a session/branch reset
+rejects pending lookups from the old trace. Expired or unresolved artifacts stay
+unavailable. Native totals are shown only when OMP supplied
+`details.meta.truncation` totals, and `details.meta.artifactError` suppresses the
+full-output link.
+
 The normal Review help and status bars omit Hive controls and status. Do not add controls that imply optional integrations are required.
 
 ## Bounded execution
 
-Review specialists use neutral definitions in `image/extension/bluefin-review/agents/`: `reviewer`, `review-security`, `review-correctness`, `review-test-coverage`, `review-simplicity`, `review-ci-triage`, and `review-queue-triage`. They remain read-only; the coordinator may dispatch isolated fixers only after explicit user intent and current evidence.
+Review specialists use neutral definitions in `image/extension/bluefin-review/agents/`: `reviewer`, `review-security`, `review-correctness`, `review-test-coverage`, `review-simplicity`, `review-ci-triage`, and `review-queue-triage`. They remain read-only; the coordinator may dispatch fresh fixers only after explicit user intent and current evidence.
 
 A pull-request lifecycle verifies the exact head and live repository rules before mutation. Returned pull requests from the authenticated user stay in a repair-only lane: never self-review, self-approve, or self-merge. Preserve workflow-file permission checks, incomplete-file-list fail-closed behavior, mutation claims, and ambiguous-effect reconciliation.
 
-Issue work reads the GitHub issue and bounded discussion. A multi-issue wave uses OMP workflowz tasks with repository-local isolated workspaces. Workers may submit changes through pull requests; they do not approve or merge their own work. A settled job or empty queue alone is not terminal proof.
+Issue work reads the GitHub issue and bounded discussion. A multi-issue wave uses OMP workflowz tasks with one fresh worker per item and unique target checkouts under `$HOME/worktrees`. Workers may submit changes through pull requests; they do not approve or merge their own work. A settled job or empty queue alone is not terminal proof.
 
 ## Interrupted wave recovery
 
@@ -78,6 +109,10 @@ Normal Review commands provide recovery without claim-file or Factory archaeolog
 If OMP records a coordinator error or abort before any tool invocation, Review binds that terminal event to the unique dispatched prompt and saves the proof. Explicit reconciliation can release its claims after checking that GitHub effects are unchanged and no worker is running or awaiting delivery. The wave is cancelled, not completed. Missing terminal proof, tool activity, or uncertain effects keep ownership protected. Existing records without this proof remain fenced.
 
 Reconciliation releases only claims with settled evidence. Changing instance keys or scopes does not bypass a host-wide claim.
+
+For a PR Slay wave, reconciliation observes the exact PR effect independently of the open queue. A MERGED PR at the captured head settles when authoritative effect evidence and terminal worker coverage are valid; it does not require a fresh approval, and a null aggregate review decision is valid. A MERGED PR whose head changed, or an OPEN PR accepted for auto-merge, settles only when complete latest-review history contains a fresh non-author APPROVED review bound to the current head and submitted during that wave; an explicit CHANGES_REQUESTED decision rejects success, while GitHub may still await additional required human reviews. A CLOSED unmerged PR settles its claims but archives Slay as cancelled without increasing completed-item counts. An unexplained OPEN head, missing or stale required review, incomplete review history, unreadable effect, or contradictory state remains UNKNOWN and keeps its claims.
+
+OMP native `isolated:true` is not required: it isolates the coordinator repository, not the target checkout. Worker communication and async delivery are independent of that option.
 
 Task invocation IDs, agent IDs, and async job IDs are distinct. Review maps
 structured task progress to OMP job snapshots and persists terminal status at

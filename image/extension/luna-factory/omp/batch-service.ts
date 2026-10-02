@@ -480,7 +480,16 @@ export class BatchService {
 					} catch (error) { item.stage = "BLOCKED"; item.blocker = message(error); this.persist(batch); continue; }
 					item.stage = "QUEUED"; item.blocker = undefined; this.persist(batch);
 					const controller = new AbortController();
+					let advisorEscalationBlocked = false;
 					const promise = Promise.resolve().then(() => this.execute(batch, item, controller.signal, binding, bindingError)).catch((error) => {
+						if (error instanceof NativeExecutionError && error.code === "advisor-blocked") {
+							advisorEscalationBlocked = true;
+							if (item.operation?.state === "intent") transitionOperation(item, { state: "unknown" });
+							item.stage = "BLOCKED";
+							item.blocker = `native Advisor escalation blocked: ${message(error)}`;
+							if (!this.fatal) this.persist(batch);
+							return;
+						}
 						if (item.operation?.phase === "push" || item.operation?.phase === "pr" || item.operation?.state === "unknown") {
 							item.stage = "UNKNOWN";
 							if (item.operation.state !== "unknown") transitionOperation(item, { state: "unknown" });
@@ -505,11 +514,11 @@ export class BatchService {
 								item.stage = "QUEUED";
 							}
 						}
-						item.blocker = message(error);
+						if (!(error instanceof NativeExecutionError && error.code === "advisor-blocked")) item.blocker = message(error);
 						if (!this.fatal) this.persist(batch);
 					}).finally(() => {
 						this.running.delete(owner);
-						if (!this.fatal && item.stage !== "UNKNOWN" && item.operation?.state !== "unknown") this.release(item, owner);
+						if (!this.fatal && !advisorEscalationBlocked && item.stage !== "UNKNOWN" && item.operation?.state !== "unknown") this.release(item, owner);
 						this.notifyChanged(batch.id);
 					});
 					this.running.set(owner, { batch, item, controller, promise });
@@ -650,8 +659,21 @@ export class BatchService {
 			if (phase === "worker") item.stage = "RUNNING";
 			this.persist(batch);
 		};
-		const worker = await runNative(this.sdk, this.schema, binding, item, this.root, "worker", signal, onSession("worker", attempt), onExecutionStart("worker", attempt), repairFeedback, { attemptId: attempt, repairFeedback, artifacts: protocolRepair?.artifacts });
-		batch.usage.modelCalls += worker.calls;
+		const worker = await runNative(this.sdk, this.schema, binding, item, this.root, "worker", signal, onSession("worker", attempt), onExecutionStart("worker", attempt), repairFeedback, {
+			attemptId: attempt,
+			repairFeedback,
+			artifacts: protocolRepair?.artifacts,
+			escalationIdentity: {
+				taskId: "T1",
+				itemKey: item.selected.key,
+				attemptId: attempt,
+				generation: item.ledger.generation,
+				subject: item.ledger.subject,
+				acceptanceRevision: item.selected.acceptanceRevision ?? "",
+				acceptance: item.selected.acceptance ?? "",
+			},
+		});
+		batch.usage.modelCalls += worker.calls + (worker.advisor?.usage.calls ?? 0);
 		item.stage = "VERIFY"; transitionOperation(item, { phase: "verify", state: "applied" }); this.persist(batch);
 		if (item.checkScripts !== undefined && packageCheckScripts(directory) !== item.checkScripts) throw new NativeExecutionError("report-checks-changed", "Worker changed the captured mandatory package test scripts; restore the original checks. A changed verification contract requires explicit operator selection.");
 		if (item.selected.action !== "inspect" && !mandatory.length && !worker.tests.length) throw new Error("worker supplied no executable verification; inspect and retry within original appetite");
@@ -661,11 +683,23 @@ export class BatchService {
 		mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
 		const patch = await this.git(directory, ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--binary", item.selected.head!], signal);
 		const patchFile = join(evidenceDir, "patch.diff"); writeFileSync(patchFile, patch, { flag: "wx", mode: 0o600 });
+		const artifacts = [patchFile];
+		if (worker.advisor) {
+			const advisorFile = join(evidenceDir, "advisor-escalation.json");
+			writeFileSync(advisorFile, JSON.stringify({
+				taskId: "T1",
+				attemptId: attempt,
+				generation: item.ledger.generation,
+				subject: item.ledger.subject,
+				acceptanceRevision: item.selected.acceptanceRevision,
+				...worker.advisor,
+			}, null, 2), { flag: "wx", mode: 0o600 });
+			artifacts.push(advisorFile);
+		}
 		const testWorkspace = join(evidenceDir, "verification-workspace");
 		cpSync(directory, testWorkspace, { recursive: true, dereference: false, filter: (path) => !path.endsWith("/.git") });
 		const tests: EvidenceReceipt["tests"][number][] = [];
 		const verificationPredicates: PredicateEvidence[] = [];
-		const artifacts = [patchFile];
 		let verification = `Verified tree: ${tree}\nPatch preview (${Math.min(patch.length, 131072)} of ${patch.length} characters; full content is retained as evidence-0):\n${patch.slice(0, 131072)}\n`;
 		for (const [index, test] of [...new Set([...mandatory, ...worker.tests])].entries()) {
 			const result = await sandboxTest(testWorkspace, test, signal);

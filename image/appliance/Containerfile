@@ -19,30 +19,42 @@
 # what Renovate can compare against, and a pin no tool can track is a stale pin.
 
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/base
-ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:d4c5cd82f168932d7bce1381a40797f2b696a6088c521c9e982ec135df04f097
+ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:5b4a14177e866440f23984e395adb75e64ba54905a8a0e0d80746918763771ed
 # The builder is the shell-enabled sibling of the same FSDK series, so the
 # binaries staged out of it link against the base's own glibc.
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/lab-runner
-ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:882b0c2f4aa3188ef27af812ee0c064a90b71b32f03d79299d92a59e0541037f
+ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:7c4a93cb6c40d995af81d3ef705a874211883668cf504db3fb64ae3d72e12c9f
 # Linux audio packages are absent from the FSDK runtime seam. The pinned audio
 # stage contributes only the PulseAudio/ALSA libraries and configuration.
 # renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
-ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:244fd607c728019cb82ebcad46637e1c672f6c9fe2888989a10c5e4f9ce7cf88
+ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:35f36cc92b99eca31314b1268a6551be9522884d3fccfe6b73f82a5d7f217d72
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
-ARG OMP_VERSION=18.4.2
-ARG OMP_X86_64_SHA256=55016ef5317af556975f3a3dce02c8db41fc1d05d15b65147814fde019c2e203
-ARG OMP_AARCH64_SHA256=2c16dc4c146bf80d962e88ebefe87c2d5b30b42f0513eba100d7c1b161abd05b
-ARG TYPESAFE_VERSION=0.7.4
-ARG TYPESAFE_SHA256=e1b0a571722de877208f80f759792da4ffb90feded4f8f52dde479bc8f6c9483
+ARG OMP_VERSION=18.4.12
+ARG OMP_SOURCE_COMMIT=7318a70cf4ed04133366884d2723f72d9d490a15
+ARG OMP_SOURCE_SHA256=9953de030081285776424fb7f08698e5147023a213f38108cd6dc8bf0df19f4b
+ARG OMP_PATCH_SHA256=c4b7cc81811b17519d56865ab50e85675299a1f138dd08444f4173c202ce0a51
+ARG OMP_BUN_VERSION=1.4.2
+ARG OMP_BUN_X86_64_SHA256=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
+ARG OMP_BUN_AARCH64_SHA256=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7
+ARG NODE_VERSION=24.21.0
+ARG NODE_X86_64_SHA256=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff
+ARG NODE_AARCH64_SHA256=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5
+ARG OMP_NATIVES_VERSION=18.4.12
+ARG OMP_NATIVES_X86_64_SHA512=0d1cca25957390e4bf7aa0a3100b681df62005d6533b46fb95196b67fcdb240214e49f39f3803a3df7392ee494f67261384b7306ead0b5d576a832c772f71173
+ARG OMP_NATIVES_AARCH64_SHA512=7b381ce2e4c224b953faa6cbc358145c397e50fb9cdfaa0471f660b816f550e473210363c264a82fb186f4d6dc5b0aea02352fef5d7c31c5d7f105cb4313356e
+ARG MEMORYD_SOURCE_COMMIT=e7f8d431797973afbdf4d0530aa14a25f43acf35
+ARG MEMORYD_SOURCE_SHA256=155ec09537e941e4c71a65b738650b0419ae86f12cc86e28761d10553627d692
+ARG TYPESAFE_VERSION=0.8.0
+ARG TYPESAFE_SHA256=b9c7223c3793b1edf686205acb5d3cb8c2fa308ce0dadddfccb2caf75661534d
 ARG TYPESAFE_SDK_VERSION=0.6.0
 ARG TYPESAFE_SDK_SHA256=ccd94517c911c58ed5284b15838a001393e304ea3b784f6e8fb5a79f6365378e
 ARG TYPESAFE_TYPEBOX_VERSION=1.3.34
 ARG TYPESAFE_TYPEBOX_SHA256=58a270296bc4e185ee3a04328447a9ffa12e22ae6abaa31a03fd3273b800c7f0
 # renovate: datasource=github-releases depName=cli/cli
-ARG GH_VERSION=2.101.0
-ARG GH_X86_64_SHA256=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
-ARG GH_AARCH64_SHA256=b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
+ARG GH_VERSION=2.102.0
+ARG GH_X86_64_SHA256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
+ARG GH_AARCH64_SHA256=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484
 
 ARG REVIEW_VERSION=0.0.0
 ARG REVIEW_REVISION=unknown
@@ -62,8 +74,20 @@ RUN microdnf --assumeyes --setopt=install_weak_deps=0 --nodocs install \
 FROM ${FSDK_BUILDER_IMAGE} AS build
 
 ARG OMP_VERSION
-ARG OMP_X86_64_SHA256
-ARG OMP_AARCH64_SHA256
+ARG OMP_SOURCE_COMMIT
+ARG OMP_SOURCE_SHA256
+ARG OMP_PATCH_SHA256
+ARG OMP_BUN_VERSION
+ARG OMP_BUN_X86_64_SHA256
+ARG OMP_BUN_AARCH64_SHA256
+ARG NODE_VERSION
+ARG NODE_X86_64_SHA256
+ARG NODE_AARCH64_SHA256
+ARG OMP_NATIVES_VERSION
+ARG OMP_NATIVES_X86_64_SHA512
+ARG OMP_NATIVES_AARCH64_SHA512
+ARG MEMORYD_SOURCE_COMMIT
+ARG MEMORYD_SOURCE_SHA256
 ARG TYPESAFE_VERSION
 ARG TYPESAFE_SHA256
 ARG TYPESAFE_SDK_VERSION
@@ -79,28 +103,42 @@ ARG REVIEW_REVISION
 # `SHELL` is ignored for the OCI image format, so every RUN sets its own shell
 # options rather than trusting an instruction the builder drops on the floor.
 #
-# One layer fetches both artifacts. Every artifact is checked against a digest
-# recorded above before it is allowed to become executable.
+# OMP is rebuilt from the pinned source on this native architecture. Every
+# build input is checked before the derived executable is installed.
+COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp
+COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts
+COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch
+RUN set -eu; \
+    mkdir -p /out/usr/bin /out/usr/share/bluefin/review; \
+    OMP_VERSION="$OMP_VERSION" \
+    OMP_SOURCE_COMMIT="$OMP_SOURCE_COMMIT" \
+    OMP_SOURCE_SHA256="$OMP_SOURCE_SHA256" \
+    OMP_PATCH_SHA256="$OMP_PATCH_SHA256" \
+    OMP_BUN_VERSION="$OMP_BUN_VERSION" \
+    OMP_BUN_X86_64_SHA256="$OMP_BUN_X86_64_SHA256" \
+    OMP_BUN_AARCH64_SHA256="$OMP_BUN_AARCH64_SHA256" \
+    OMP_NATIVES_VERSION="$OMP_NATIVES_VERSION" \
+    OMP_NATIVES_X86_64_SHA512="$OMP_NATIVES_X86_64_SHA512" \
+    OMP_NATIVES_AARCH64_SHA512="$OMP_NATIVES_AARCH64_SHA512" \
+    MEMORYD_SOURCE_COMMIT="$MEMORYD_SOURCE_COMMIT" \
+    MEMORYD_SOURCE_SHA256="$MEMORYD_SOURCE_SHA256" \
+    OMP_PATCH_PATH=/usr/local/share/bluefin/omp/memory-backend-registration.patch \
+    OMP_OUTPUT_PATH=/out/usr/bin/omp \
+    /usr/local/libexec/build-derived-omp; \
+    omp_hash="$(sha256sum /out/usr/bin/omp)"; \
+    printf '%s\n' "${omp_hash%% *}" > /out/usr/share/bluefin/review/omp-derived-sha256
+
 RUN set -eu; \
     arch="$(uname -m)"; \
     case "$arch" in \
-      x86_64) omp_asset=omp-linux-x64; omp_sha="$OMP_X86_64_SHA256"; \
-              gh_arch=amd64; gh_sha="$GH_X86_64_SHA256" ;; \
-      aarch64) omp_asset=omp-linux-arm64; omp_sha="$OMP_AARCH64_SHA256"; \
-               gh_arch=arm64; gh_sha="$GH_AARCH64_SHA256" ;; \
+      x86_64) gh_arch=amd64; gh_sha="$GH_X86_64_SHA256" ;; \
+      aarch64) gh_arch=arm64; gh_sha="$GH_AARCH64_SHA256" ;; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     workdir="$(mktemp -d)"; \
-    mkdir -p /out/usr/bin; \
-    \
-    curl --fail --location --show-error --silent \
-      "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/${omp_asset}" \
-      -o "$workdir/omp"; \
-    echo "${omp_sha}  $workdir/omp" | sha256sum --check --status; \
-    install -m 0755 "$workdir/omp" /out/usr/bin/omp; \
-    \
     mkdir -p /out/usr/share/bluefin/review/pi-typesafe/node_modules/@typesafe-ai/sdk \
       /out/usr/share/bluefin/review/pi-typesafe/node_modules/typebox; \
+    \
     curl --fail --location --show-error --silent \
       "https://registry.npmjs.org/pi-typesafe/-/pi-typesafe-${TYPESAFE_VERSION}.tgz" \
       -o "$workdir/pi-typesafe.tgz"; \
@@ -137,13 +175,35 @@ RUN set -eu; \
 # the pinned FSDK builder by an explicit allowlist. Nothing is installed into
 # the final image; it is assembled from binaries already present at that seam.
 COPY --chmod=0755 image/appliance/stage-runtime.sh /usr/local/libexec/stage-runtime
+RUN set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) node_arch=x64; node_sha="$NODE_X86_64_SHA256" ;; \
+      aarch64) node_arch=arm64; node_sha="$NODE_AARCH64_SHA256" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    curl --fail --location --show-error --silent \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
+      -o "$workdir/node.tar.gz"; \
+    echo "${node_sha}  $workdir/node.tar.gz" | sha256sum --check --status; \
+    tar --no-same-owner --extract --gzip --file "$workdir/node.tar.gz" --directory "$workdir"; \
+    node_dir="$workdir/node-v${NODE_VERSION}-linux-${node_arch}"; \
+    install -D -m 0755 "$node_dir/bin/node" /usr/local/bin/node; \
+    install -d -m 0755 /out/usr/lib/node_modules; \
+    cp -a "$node_dir/lib/node_modules/npm" /out/usr/lib/node_modules/npm; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /out/usr/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /out/usr/bin/npx; \
+    rm -rf "$workdir"
 RUN /usr/local/libexec/stage-runtime /out \
     /usr/sbin/actionlint \
     /usr/sbin/shellcheck \
     /usr/sbin/yq \
     /usr/sbin/jq \
     /usr/sbin/just \
-    /usr/sbin/openssl
+    /usr/sbin/openssl \
+    /usr/local/bin/node \
+    /usr/local/bin/bun
 COPY --from=audio /audio-out/ /out/
 
 # The in-image SBOM. syft can only see package-manager metadata, and every
@@ -151,18 +211,32 @@ COPY --from=audio /audio-out/ /out/
 # provenance is recorded here or it is recorded nowhere.
 COPY --chmod=0755 scripts/generate-appliance-sbom.py /usr/local/libexec/appliance-sbom
 RUN arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) native_package=pi-natives-linux-x64; native_sha="$OMP_NATIVES_X86_64_SHA512"; gh_sha="$GH_X86_64_SHA256"; node_sha="$NODE_X86_64_SHA256"; bun_sha="$OMP_BUN_X86_64_SHA256" ;; \
+      aarch64) native_package=pi-natives-linux-arm64; native_sha="$OMP_NATIVES_AARCH64_SHA512"; gh_sha="$GH_AARCH64_SHA256"; node_sha="$NODE_AARCH64_SHA256"; bun_sha="$OMP_BUN_AARCH64_SHA256" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
     mkdir -p /out/usr/share/bluefin/review; \
     /usr/local/libexec/appliance-sbom \
       --arch "$arch" \
       --version "$REVIEW_VERSION" \
       --revision "$REVIEW_REVISION" \
       --omp-version "$OMP_VERSION" \
-      --omp-sha256-x86-64 "$OMP_X86_64_SHA256" \
-      --omp-sha256-aarch64 "$OMP_AARCH64_SHA256" \
+      --omp-sha256 "$(cat /out/usr/share/bluefin/review/omp-derived-sha256)" \
+      --omp-source-commit "$OMP_SOURCE_COMMIT" \
+      --omp-source-sha256 "$OMP_SOURCE_SHA256" \
+      --omp-patch-sha256 "$OMP_PATCH_SHA256" \
+      --omp-bun-version "$OMP_BUN_VERSION" \
+      --node-version "$NODE_VERSION" \
+      --node-sha256 "$node_sha" \
+      --bun-sha256 "$bun_sha" \
+      --omp-natives-version "$OMP_NATIVES_VERSION" \
+      --omp-native-package "$native_package" \
+      --omp-native-sha512 "$native_sha" \
       --gh-version "$GH_VERSION" \
-      --gh-sha256-x86-64 "$GH_X86_64_SHA256" \
-      --gh-sha256-aarch64 "$GH_AARCH64_SHA256" \
+      --gh-sha256 "$gh_sha" \
       --out /out/usr/share/bluefin/review/sbom.spdx.json; \
+    rm /out/usr/share/bluefin/review/omp-derived-sha256; \
     python3 -m json.tool /out/usr/share/bluefin/review/sbom.spdx.json >/dev/null
 
 # The mode itself, plus the identity files the base does not carry. FSDK's
@@ -189,7 +263,7 @@ RUN set -eu; \
       aarch64) audio_triplet=aarch64-linux-gnu ;; \
       *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
-    for binary in /out/usr/bin/omp /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash /out/usr/bin/python3; do \
+    for binary in /out/usr/bin/omp /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash /out/usr/bin/python3 /out/usr/bin/node /out/usr/bin/bun /out/usr/bin/npm /out/usr/bin/npx; do \
       test -x "$binary" || { echo "missing $binary" >&2; exit 1; }; \
     done; \
     test -e "/out/usr/lib/${audio_triplet}/libpulse-simple.so.0"; \
@@ -198,6 +272,7 @@ RUN set -eu; \
     test -e /out/usr/share/bluefin/review/extension/index.ts; \
     test -d /out/usr/share/bluefin/review/extension/agents; \
     test -e /out/usr/share/bluefin/review/luna-factory/index.ts; \
+    test -e /out/usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts; \
     test -d /out/usr/share/bluefin/review/luna-factory/agents; \
     test -L /out/usr/share/bluefin/review/bluefin-review; \
     test -e /out/usr/share/bluefin/review/bluefin-review/github.ts
@@ -210,6 +285,10 @@ ARG REVIEW_VERSION
 ARG REVIEW_REVISION
 ARG FSDK_BASE_IMAGE
 ARG OMP_VERSION
+ARG OMP_SOURCE_COMMIT
+ARG OMP_PATCH_SHA256
+ARG NODE_VERSION
+ARG OMP_BUN_VERSION
 ARG TYPESAFE_VERSION
 ARG AUDIO_BUILDER_IMAGE
 
@@ -241,6 +320,10 @@ LABEL org.opencontainers.image.title="Review" \
       io.github.joshyorko.review.appliance="true" \
       io.github.joshyorko.review.harness="omp" \
       io.github.joshyorko.review.omp.version="${OMP_VERSION}" \
+      io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}" \
+      io.github.joshyorko.review.node.version="${NODE_VERSION}" \
+      io.github.joshyorko.review.bun.version="${OMP_BUN_VERSION}" \
+      io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}" \
       io.github.joshyorko.review.typesafe.version="${TYPESAFE_VERSION}" \
       io.github.joshyorko.review.audio.source="${AUDIO_BUILDER_IMAGE}" \
       io.github.joshyorko.review.audio.packages="pulseaudio-libs,alsa-lib"

@@ -70,6 +70,10 @@ and separate Review/Factory authority.
   boundary by name, and neither value is ever rendered into argv. Loading
   Factory with the opt-in absent leaves it registered and discoverable, with
   execution disabled.
+- A Factory-enabled appliance qualifies the selected packaged runtime with the
+  production `sandboxPreflight()` and a harmless `sandboxTest()` before OMP
+  starts. A failed qualification refuses startup; krun and Apptainer remain
+  independent runtime profiles.
 - Review advertises its Factory handoff only while a Factory controller is
   registered. When the handoff is unreachable, startup and the first
   invocation report the bounded cause — package absent or not passed as an

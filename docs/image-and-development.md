@@ -4,7 +4,7 @@ The repository ships one OCI appliance from `image/appliance/Containerfile`. It 
 
 The image does not select a provider, model, or thinking effort. OMP resolves them from the user's active configuration. The launcher prefers Podman's `krun` runtime with KVM and falls back to isolated Apptainer when necessary. Review and Factory remain in the same appliance but keep separate authority and state.
 
-The Containerfile pins its FSDK base by tag and digest and verifies downloaded OMP and GitHub CLI artifacts with per-architecture SHA-256 values. Renovate updates those releases through `scripts/update-omp-pins.mjs` and `scripts/update-gh-pins.mjs`; CI requirement hashes are refreshed by `scripts/update-requirements-ci-hashes.mjs`.
+The Containerfile pins OMP's source tag/commit, source archive, generic registration patch, Bun toolchain, and per-architecture native packages. It builds the derived OMP binary on each native image architecture; it does not fetch a prebuilt OMP binary. GitHub CLI artifacts remain per-architecture SHA-256 verified. `scripts/update-omp-pins.mjs` refreshes the OMP source/native pins and `scripts/update-gh-pins.mjs` refreshes GitHub CLI pins; CI requirement hashes are refreshed by `scripts/update-requirements-ci-hashes.mjs`.
 
 ## Development
 
@@ -18,6 +18,11 @@ bin/omp-review acme/widgets
 # Build the personal Homebrew bundle from a committed ref
 scripts/brew-dev build self-hosted
 ```
+
+The source launcher keeps an existing Git checkout as OMP's isolation baseline.
+When launched outside Git, it prepares a committed coordinator at
+`$HOME/.local/state/review/coordinator`; it leaves the caller's directory and
+files unchanged.
 
 The personal package workflow publishes an immutable OCI image and native SIF from the same committed source ref, then updates the existing `bluefin-review-dev` formula in `joshyorko/homebrew-review-dev`. Those formula and `bluefin review` names remain compatibility aliases; `bin/omp-review` is the neutral source entry point.
 

@@ -10,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import { loadWave, saveWave } from "./wave-store.ts";
 import type { QueueItem } from "./github.ts";
-import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, orgScope, parseScope, resolveToken } from "./github.ts";
+import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, orgScope, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
 import { registerFactoryClaimInspector, registerFactoryReconciler, registeredFactoryReconciler, registerFactorySelection, factoryBatchSubmitterRegistered, factoryCommand, factoryControllerRegistered, factoryDashboardOpenerRegistered, factoryLoadDiagnostic, openFactoryDashboard, submitFactoryBatch, type ClaimOwnerObservation, type ClaimOwnerWorkerObservation } from "../luna-factory/omp/batch-bridge.ts";
@@ -21,6 +21,8 @@ import type { KeyMatcher } from "./keys.ts";
 import { type ToolHost, registerTools } from "./tools.ts";
 import { hiveFailureStatus } from "./hive.ts";
 import { landingState, landingReason } from "./landing.ts";
+import { buildReviewRecap, type ReviewRecapInput } from "./recap.ts";
+import { truncateToWidth } from "./width.ts";
 import { GENERIC_WORKBENCH_POLICY, managedPolicyFor, type WorkbenchPolicy } from "./policy.ts";
 import {
 	commentInvocation,
@@ -49,9 +51,16 @@ export {
 export const STATE_ENTRY = "com.hive.workbench.selection";
 export const BATCH_ENTRY = "com.hive.workbench.batch";
 export const COMMENT_ENTRY = "com.hive.workbench.comment";
+export const HANDOFF_ENTRY = "com.hive.workbench.handoff";
+const RECAP_BRANCH_ENTRY_LIMIT = 512;
 
 export type RepositoryBatchKind = "slay" | "fix" | "diff";
 export type RepositoryBatchState = "running" | "paused" | "blocked" | "complete" | "cancelled";
+type ReconcileObservation =
+	| { readonly kind: "unknown" }
+	| { readonly kind: "settled"; readonly outcome: "success" }
+	| { readonly kind: "settled"; readonly outcome: "non-success"; readonly items: readonly string[] };
+type ReconciliationResult = { settled: string[]; unknown: string[]; submittedPrs: string[]; nonSuccessItems?: string[] };
 
 export interface PersistedRepositoryBatch {
 	readonly version: 1;
@@ -168,10 +177,18 @@ interface UiLike {
 	readonly theme: { fg(color: string, text: string): string; bold(text: string): string; inverse(text: string): string };
 }
 
+interface SessionSetupManager {
+	getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>;
+	getSessionId(): string;
+	getLeafId(): string | null;
+	getSessionFile(): string | undefined;
+}
+
 interface CtxLike {
 	hasUI: boolean;
 	ui: UiLike;
-	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>; getSessionId?(): string };
+	newSession?(options?: { parentSession?: string; setup?: (sessionManager: SessionSetupManager) => Promise<void> }): Promise<{ cancelled: boolean }>;
+	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>; getSessionId?(): string; getLeafId?(): string | null; getSessionFile?(): string | undefined; saveArtifact?(content: string, toolType: string): Promise<string | undefined>; getArtifactPath?(id: string): Promise<string | null>; getArtifactsDir?(): string | null };
 	getAsyncJobSnapshot?(): {
 		running: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
 		recent: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
@@ -192,6 +209,7 @@ export interface ReviewExtensionHost {
 	registerCommand?(name: string, definition: { description?: string; handler(args: string, ctx: CtxLike): unknown }): void;
 	appendEntry(customType: string, data?: unknown): void;
 	sendUserMessage(content: string, options?: { deliverAs?: string; waveId?: string }): void;
+	sendMessage?(message: { customType: string; content: string; display?: boolean; details?: unknown }, options?: { triggerTurn?: boolean }): void;
 }
 
 function readLatestCustom<T>(ctx: CtxLike, customType: string): T | undefined {
@@ -214,6 +232,16 @@ function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
 
 function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined {
 	return readLatestCustom<PersistedCommentResult>(ctx, COMMENT_ENTRY);
+}
+
+function nativeArtifactId(value: unknown): string | undefined {
+	if (!isRecord(value) || !isRecord(value.details) || !isRecord(value.details.meta) || !isRecord(value.details.meta.truncation)) return undefined;
+	const id = value.details.meta.truncation.artifactId;
+	return typeof id === "string" && /^\d{1,128}$/.test(id) ? id : undefined;
+}
+
+function hasNativeArtifactError(value: unknown): boolean {
+	return isRecord(value) && isRecord(value.details) && isRecord(value.details.meta) && Boolean(value.details.meta.artifactError);
 }
 export async function reconcileBlockedRepositoryClaim(
 	claims: ResourceClaims,
@@ -462,15 +490,15 @@ export function actionPrompt(
 	const evidence = `Evidence is bounded and read once. Start with \`${evidenceTool}\` using both \`pull_request\` and explicit \`repo\`; child agents do not inherit the coordinator's selected repository. Use \`gh pr diff <n> --repo <r> --name-only\` only to confirm filenames, inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Never assume a checkout exists. Check a repository-specific validator once; if the minimal appliance lacks that toolchain, use hosted check evidence and report the local verification gap instead of installing packages or retrying the absent command. Treat \`merge=dirty\` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose \`--ours\`/\`--theirs\` wholesale. Revalidate live state before any comment, label, assignment, close, push, approval, or merge.`;
 	const reviewFinish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
 	const slayContinuation = "Review Slay coordinator ownership persists through the selected lifecycle's declared terminal condition. Review completion, a fixer return, a push, green checks, or knowing the next action is progress, not completion. Continue already-authorized in-scope work without asking for confirmation already supplied by the objective; authorized actions need no second confirmation, while new scope or effects still require authority. A partial status report is not terminal. If one lane is blocked, finish independent authorized work before reporting that lane's exact blocker and evidence. Stop only when the requested terminal outcome is satisfied and verified, a concrete external blocker prevents further authorized progress, or continuing requires authority or scope the operator did not grant. Existing live GitHub policy, permissions, exact-head checks, holds, self-review rules, and mutation guards still bind terminal conditions. Never sleep or poll. Workers remain bounded and return to the coordinator.";
-	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent}. If it has findings, dispatch one fresh isolated fixer with the exact repository, pull-request number, and head. Fixers use \`gh repo clone\` and \`gh pr checkout\` under \`$HOME/worktrees\`; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --auto --squash\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
-	const repairFinish = "These pull requests were returned to their authenticated author with requested changes. Read the review threads and failing checks, diagnose every requested correction, then dispatch one fresh isolated fixer per pull request. Fixers use `gh repo clone` and `gh pr checkout` under `$HOME/worktrees`, make the smallest complete correction, run focused verification, and push a new head without force. Never review, approve, auto-merge, or merge the author's own pull request. A repair is terminal only after GitHub shows a new head SHA. Report the pushed head and pull-request URL for every item, then stop; the workbench owns the next repository wave.";
+	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent}. If it has findings, dispatch one fresh fixer with the exact repository, pull-request number, and head. Each fixer must use its own distinct target checkout under \`$HOME/worktrees\`, created with \`gh repo clone\` and \`gh pr checkout\`, and no two workers may share a checkout or conversation; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --auto --squash\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
+	const repairFinish = "These pull requests were returned to their authenticated author with requested changes. Read the review threads and failing checks, diagnose every requested correction, then dispatch one fresh fixer per pull request. Each fixer owns one unique target checkout under `$HOME/worktrees`, created with `gh repo clone` and `gh pr checkout`; no two workers share a checkout or conversation. Make the smallest complete correction, run focused verification, and push a new head without force. Never review, approve, auto-merge, or merge the author's own pull request. A repair is terminal only after GitHub shows a new head SHA. Report the pushed head and pull-request URL for every item, then stop; the workbench owns the next repository wave.";
 	const issueContext = options?.workbenchMode === "hive"
 		? "Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it."
 		: "Inspect the complete GitHub issue description before deciding how to implement it.";
 	const issueEvidence = `Evidence is bounded and read once. ${issueContext} Never assume the working directory is a checkout: use \`gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>\` to materialize one unique workspace per issue under \`$HOME/worktrees\`, then enter that checkout before examining relevant source files and tests. Never clone into \`/tmp\`. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes <owner/repo>#<number>\`. Never merge or approve your own pull request.`;
 	const issueWorkflow = options?.workbenchMode === "hive"
-		? "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items."
-		: "Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique checkout named in its prompt; do not share a checkout or conversation between items.";
+		? "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique target checkout named in its prompt; do not share a checkout or conversation between items."
+		: "Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique target checkout named in its prompt; do not share a checkout or conversation between items.";
 	const issueInspectSource = toolPrefix === "review"
 		? "Call `review_workbench_issue` with explicit `issue` and `repo` to read the complete issue body, discussion, and linked pull requests."
 		: "Read the complete issue body and discussion with `gh issue view <n> --repo <r> --comments`, and list the pull requests linked to it.";
@@ -491,17 +519,17 @@ export function actionPrompt(
 					return `Implement this issue wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\n${slayContinuation} ${issueWorkflow} Copy this block verbatim into every worker prompt:\n${issueRules}`;
 				}
 				if (repairWave) {
-					return `Repair this returned pull-request wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh isolated fixer per pull request through OMP workflowz. Do not share a checkout or conversation between items. Copy this block verbatim into every worker prompt:\n${repairRules}`;
+					return `Repair this returned pull-request wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh fixer per pull request through OMP workflowz. Do not share a checkout or conversation between items. Copy this block verbatim into every worker prompt:\n${repairRules}`;
 				}
-				return `Slay this repository wave for ${repository} through review, repair, and landing:\n\n${list}\n\n${slayContinuation} Use the \`task\` tool once with one fresh reviewer item per pull request through OMP workflowz. Do not use eval workpool: its generated boolean output schema is rejected by the current Copilot provider. Keep repair agents isolated, and never reuse a reviewer for the post-fix head. Coordinate the complete lifecycle after the review workers return. Copy this block verbatim into every worker prompt:\n${slayRules}`;
+				return `Slay this repository wave for ${repository} through review, repair, and landing:\n\n${list}\n\n${slayContinuation} Use the \`task\` tool once with one fresh reviewer item per pull request through OMP workflowz. Do not use eval workpool: its generated boolean output schema is rejected by the current Copilot provider. Keep every repair agent in its own unique \`$HOME/worktrees\` checkout, and never reuse a reviewer for the post-fix head. Coordinate the complete lifecycle after the review workers return. Copy this block verbatim into every worker prompt:\n${slayRules}`;
 			case "diff":
 				return allIssues
 					? `Inspect this issue wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Do not reuse a worker across repositories. Read each issue's body, discussion, and linked pull requests, and report the request, its current state, and concrete risks. Copy this block verbatim into every worker prompt:\n${issueInspectRules}`
 					: `Inspect this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Do not reuse a worker across repositories. Use ${evidenceTool} and report the object evidence and concrete risks. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 			case "fix":
 				return allIssues
-					? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Each worker must use its unique checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${issueRules}`
-					: `Fix this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Each worker must use its unique checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
+					? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Each worker must use its unique target checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${issueRules}`
+					: `Fix this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Each worker must use its unique target checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 		}
 	}
 
@@ -523,7 +551,7 @@ export function actionPrompt(
 			if (repairWave) {
 				return `Repair ${cite(item)} after requested changes. Use ${evidenceTool} and read the review threads, then push a corrected head. ${workflow} ${authority} ${repairFinish}`;
 			}
-			return `Slay ${cite(item)} through review, repair, and landing. ${slayContinuation} Use ${evidenceTool} and ${traceTool}, then run the complete lifecycle with fresh review and isolated fix agents. ${workflow} ${authority} ${slayFinish}`;
+			return `Slay ${cite(item)} through review, repair, and landing. ${slayContinuation} Use ${evidenceTool} and ${traceTool}, then run the complete lifecycle with fresh review and fix agents; each fixer owns a distinct \`$HOME/worktrees\` checkout. ${workflow} ${authority} ${slayFinish}`;
 		case "diff":
 			return item.type === "issue"
 				? `Inspect ${cite(item)} as an issue. ${issueInspectEvidence.replace("<n>", String(item.id)).replace("<r>", item.repo)} ${workflow} ${authority} ${reviewFinish}`
@@ -531,7 +559,7 @@ export function actionPrompt(
 		case "fix":
 			return item.type === "issue"
 				? `Implement ${cite(item)}. ${issueWorkflow} ${authority} ${issueEvidence} ${reviewFinish}`
-				: `Fix ${cite(item)} in an isolated workspace. Re-read the live diff and failing checks, diagnose each root cause, run focused verification, and push one clean commit for independent review. ${workflow} ${authority} ${reviewFinish}`;
+				: `Fix ${cite(item)} in its own unique \`$HOME/worktrees\` target checkout. Re-read the live diff and failing checks, diagnose each root cause, run focused verification, and push one clean commit for independent review. ${workflow} ${authority} ${reviewFinish}`;
 		case "request_reviewer":
 			return `Request review on ${cite(action.item)} from repository collaborators. Use \`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-reviewer <reviewer>\` to assign reviewers and prioritize in their maintainer queue.`;
 	}
@@ -570,6 +598,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
 	let traceSessionId: string | undefined;
+	let traceGeneration = 0;
 	const traceContext = (ctx?: CtxLike): CtxLike | undefined => {
 		const candidate = ctx ?? activeCtx;
 		if (!candidate) return undefined;
@@ -579,6 +608,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return candidate;
 	};
 	const resetTrace = (ctx: CtxLike): void => {
+		traceGeneration++;
 		mode.session.clear();
 		traceSessionId = ctx.sessionManager?.getSessionId?.();
 	};
@@ -590,6 +620,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeBatch: PersistedRepositoryBatch | undefined;
 	let batchRequestGeneration = 0;
 	let commentInFlight = false;
+	const uncertainHandoffIds = new Set<string>();
 	pi.setLabel(mode.isReviewMode() ? "Review Workbench" : "Hive Workbench");
 	pi.registerFlag("pr", { description: "Preselect a pull request or issue number", type: "string" });
 	pi.registerFlag("issues", { description: "Start in issues mode instead of pull requests", type: "boolean", default: false });
@@ -727,7 +758,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			batch,
 			owner,
 			resource,
-			() => authoritativeReconcile(ctx, batch, resource),
+			async () => (await authoritativeReconcile(ctx, batch, resource)).kind === "settled" ? "settled" : "unknown",
 		);
 	};
 	const unregisterFactoryReconciler = registerFactoryReconciler(reconcileMutationClaim);
@@ -857,7 +888,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		ctx: CtxLike,
 		batch: PersistedRepositoryBatch,
 		resource: string,
-	): Promise<"settled" | "unknown"> => {
+	): Promise<ReconcileObservation> => {
 		const wave = batch.waves[batch.currentWave];
 		const expectedResources = resourcesForBatch(batch);
 		if (
@@ -866,48 +897,83 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			|| !batch.waveEffectResources
 			|| JSON.stringify(batch.waveEffectResources) !== JSON.stringify(expectedResources)
 			|| !expectedResources.includes(resource.toLowerCase())
-		) return "unknown";
+		) return { kind: "unknown" };
 		const preTool = preToolProofValid(batch);
-		if (preTool && !preToolRuntimeSettled(ctx, batch)) return "unknown";
-		if (!preTool && !waveWorkerCoverageComplete(batch.waveJobIds, batch.waveToolCallIds, batch.waveTaskWorkers)) return "unknown";
+		if (preTool && !preToolRuntimeSettled(ctx, batch)) return { kind: "unknown" };
+		if (!preTool && !waveWorkerCoverageComplete(batch.waveJobIds, batch.waveToolCallIds, batch.waveTaskWorkers)) return { kind: "unknown" };
 		const jobs = ctx.getAsyncJobSnapshot?.();
-		if (!preTool && !waveWorkersSettled(jobs, batch.waveJobIds, batch.waveTerminalJobStatuses)) return "unknown";
-		if (batch.kind === "diff") return "settled";
+		if (!preTool && !waveWorkersSettled(jobs, batch.waveJobIds, batch.waveTerminalJobStatuses)) return { kind: "unknown" };
+		if (batch.kind === "diff") return { kind: "settled", outcome: "success" };
 
 		const targetItems = resource.toLowerCase().startsWith("repo:")
 			? wave.items
 			: wave.items.filter((item) => `item:${item.repo.toLowerCase()}#${item.id}` === resource.toLowerCase());
-		if (targetItems.length === 0) return "unknown";
+		if (targetItems.length === 0) return { kind: "unknown" };
+		let outcome: ReconcileObservation["outcome"] = "success";
+		const nonSuccessItems: string[] = [];
 		for (const type of ["pr", "issue"] as const) {
 			const items = targetItems.filter((item) => item.type === type);
 			if (items.length === 0) continue;
+			if (type === "pr" && batch.kind === "slay" && !preTool) {
+				for (const item of items) {
+					const observed = await fetchPullRequestEffect(item.repo, item.id, mode.tokenOptions());
+					if (observed.kind !== "observed") return { kind: "unknown" };
+					const pullRequest = observed.pullRequest;
+					if (pullRequest.repo.toLowerCase() !== item.repo.toLowerCase()
+						|| pullRequest.number !== item.id
+						|| pullRequest.url !== item.url) return { kind: "unknown" };
+					if (pullRequest.state === "CLOSED" && !pullRequest.merged) {
+						outcome = "non-success";
+						nonSuccessItems.push(`${item.repo}#${item.id}`);
+						continue;
+					}
+					if (pullRequest.authorLogin === null
+						|| pullRequest.authorLogin.toLowerCase() !== item.author.toLowerCase()
+						|| !pullRequest.reviewsComplete
+						|| pullRequest.reviewDecision === "unknown"
+						|| pullRequest.reviewDecision === "changes_requested") return { kind: "unknown" };
+					const headSha = pullRequest.headSha;
+					if (pullRequest.state === "MERGED" && headSha === item.headSha) continue;
+					const reviewedHead = headSha !== null && pullRequest.latestReviews.some((review) =>
+						review.state === "APPROVED"
+						&& review.authorLogin.toLowerCase() !== pullRequest.authorLogin.toLowerCase()
+						&& review.commitSha === headSha
+						&& review.submittedAt >= batch.waveStartedAt,
+					);
+					if (!reviewedHead) return { kind: "unknown" };
+					if (pullRequest.state === "OPEN" && !pullRequest.autoMergeEnabled) return { kind: "unknown" };
+				}
+				continue;
+			}
 			const live = await fetchItemsByKey(
 				items.map((item) => `${item.repo}#${item.id}`),
 				type === "pr" ? "prs" : "issues",
 				mode.tokenOptions(),
 			);
-			if (live.error) return "unknown";
+			if (live.error) return { kind: "unknown" };
 			for (const item of items) {
 				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
-				if (!current) return "unknown";
+				if (!current) return { kind: "unknown" };
 				if (
 					type === "pr"
 					&& (current.headSha !== item.headSha
 						|| current.autoMergeEnabled !== item.autoMergeEnabled
 						|| current.reviewState !== item.reviewState)
-				) return "unknown";
+				) return { kind: "unknown" };
 				if (type === "issue" && (batch.kind === "slay" || (preTool && batch.kind === "fix"))) {
 					const submission = expectedIssueSubmission(batch, item, current);
-					if (preTool ? !issueSubmissionsMatch(batch, item, current) : submission === undefined) return "unknown";
+					if (preTool ? !issueSubmissionsMatch(batch, item, current) : submission === undefined) return { kind: "unknown" };
 				}
 			}
 		}
 		if (preTool) {
 			const latest = loadWave(factoryClaimsRoot(env), `review:${batch.waveIdentity}`);
 			if (!latest || latest.wavePromptDigest !== batch.wavePromptDigest
-				|| !preToolProofValid(latest) || !preToolRuntimeSettled(ctx, latest)) return "unknown";
+				|| !preToolProofValid(latest) || !preToolRuntimeSettled(ctx, latest)) return { kind: "unknown" };
 		}
-		return "settled";
+		return outcome === "success"
+			? { kind: "settled", outcome }
+			: { kind: "settled", outcome, items: nonSuccessItems };
 	};
 
 	const every = (intervalMs: number, work: () => void) => {
@@ -984,12 +1050,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (JSON.stringify(activeBatch.waveTaskWorkers ?? {}) === JSON.stringify(workers) && JSON.stringify(activeBatch.waveJobIds ?? []) === JSON.stringify(ids) && JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) === JSON.stringify(terminal) && JSON.stringify(activeBatch.waveEffectResources ?? []) === JSON.stringify(resources)) return;
 		persistBatch(ctx, { ...activeBatch, waveTaskWorkers: workers, waveJobIds: ids, waveTerminalJobStatuses: terminal, waveEffectResources: resources });
 	};
-	// OMP 18.3 task results identify each spawned agent in progress; snapshots
-	// expose the actual job id, including the manager's collision suffix.
+	// OMP 18.4 task details expose the primary async job id directly. Persist it
+	// immediately for single-spawn calls instead of racing the transient job
+	// snapshot; the snapshot remains the authoritative mapper for batch siblings.
 	const rememberTaskResult = (ctx: CtxLike, call: string, result: unknown): void => {
 		if (!activeBatch?.waveToolCallIds?.includes(call) || !result || typeof result !== "object" || !("details" in result)) return;
 		const details = result.details;
 		if (!details || typeof details !== "object" || !("async" in details) || !details.async || typeof details.async !== "object" || !("type" in details.async) || details.async.type !== "task" || !("progress" in details) || !Array.isArray(details.progress)) return;
+		const asyncJobId = "jobId" in details.async && typeof details.async.jobId === "string" && details.async.jobId ? details.async.jobId : undefined;
+		const asyncState = "state" in details.async && typeof details.async.state === "string" ? details.async.state : undefined;
 		const workers: { agentId: string; jobId?: string; resultStatus?: "completed" | "failed" | "cancelled" }[] = [];
 		for (const row of details.progress) {
 			if (!row || typeof row !== "object" || typeof row.id !== "string" || !row.id) return;
@@ -1000,8 +1069,27 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			persistBatch(ctx, { ...activeBatch, waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: [] } });
 			return;
 		}
-		const updated = workers.map((worker, index) => ({ ...previous?.[index], ...worker }));
-		if (JSON.stringify(previous) !== JSON.stringify(updated)) persistBatch(ctx, { ...activeBatch, waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: updated } });
+		const updated = workers.map((worker, index) => ({
+			...previous?.[index],
+			...worker,
+			...(workers.length === 1 && asyncJobId ? { jobId: asyncJobId } : {}),
+		}));
+		const jobIds = [...new Set([...(activeBatch.waveJobIds ?? []), ...updated.flatMap((worker) => worker.jobId ? [worker.jobId] : [])])].sort();
+		const terminal = { ...(activeBatch.waveTerminalJobStatuses ?? {}) };
+		if (workers.length === 1 && asyncJobId && asyncState !== "running") {
+			const status = updated[0]?.resultStatus;
+			if (status) terminal[asyncJobId] = status;
+		}
+		if (JSON.stringify(previous) !== JSON.stringify(updated)
+			|| JSON.stringify(activeBatch.waveJobIds ?? []) !== JSON.stringify(jobIds)
+			|| JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) !== JSON.stringify(terminal)) {
+			persistBatch(ctx, {
+				...activeBatch,
+				waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: updated },
+				waveJobIds: jobIds,
+				waveTerminalJobStatuses: terminal,
+			});
+		}
 		rememberWaveEvidence(ctx);
 	};
 	const rememberDeliveredJobs = (event: unknown, ctx: CtxLike): void => {
@@ -1068,23 +1156,29 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const owner = `review:${batch.id}:${batch.currentWave}`;
 		const settled: string[] = [];
 		const unknown: string[] = [];
+		const nonSuccessItems: string[] = [];
 		const preTool = preToolProofValid(batch);
 		for (const resource of resourcesForBatch(batch)) {
 			if (resourceClaims().conflict(resource, owner)) {
 				unknown.push(resource);
 				continue;
 			}
+			let observation: ReconcileObservation = { kind: "unknown" };
 			const result = preTool
-				? await authoritativeReconcile(ctx, batch, resource)
+				? (observation = await authoritativeReconcile(ctx, batch, resource)).kind === "settled" ? "settled" : "unknown"
 				: await reconcileBlockedRepositoryClaim(
 					resourceClaims(),
 					batch,
 					owner,
 					resource,
-					() => authoritativeReconcile(ctx, batch, resource),
+					async () => {
+						observation = await authoritativeReconcile(ctx, batch, resource);
+						return observation.kind === "settled" ? "settled" : "unknown";
+					},
 				);
 			if (result === "settled") {
 				settled.push(resource);
+				if (observation.kind === "settled" && observation.outcome === "non-success") nonSuccessItems.push(...observation.items);
 			} else {
 				unknown.push(resource);
 			}
@@ -1108,15 +1202,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			settled,
 			unknown: [...new Set(unknown)],
 			submittedPrs,
+			nonSuccessItems: [...new Set(nonSuccessItems)],
 		};
 	};
 
 	const finishRecoveredBatch = async (
 		ctx: CtxLike,
 		batch: PersistedRepositoryBatch,
-		result: { settled: string[]; unknown: string[]; submittedPrs: string[] },
+		result: ReconciliationResult,
 	): Promise<void> => {
 		if (result.unknown.length > 0 || activeBatch?.id !== batch.id) return;
+		if (result.nonSuccessItems?.length) {
+			archiveSlayNonSuccess(ctx, batch, result);
+			return;
+		}
 		const nextWave = batch.currentWave + 1;
 		const completedItems = batch.completedItems + (batch.waves[batch.currentWave]?.items.length ?? 0);
 		const evidence = result.submittedPrs.length > 0
@@ -1167,7 +1266,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		ctx: CtxLike,
 		batch: PersistedRepositoryBatch,
 		action: "cancel" | "revise",
-		result: { settled: string[]; unknown: string[]; submittedPrs: string[] },
+		result: ReconciliationResult,
 	): string => {
 		const evidence = result.submittedPrs.length > 0
 			? `; observed submitted PRs ${result.submittedPrs.join(", ")}`
@@ -1194,6 +1293,24 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				resourceClaims().reconcile(resource, owner);
 			}
 		}
+		if (wasActive) {
+			activeBatch = undefined;
+			mode.setBatchProgress(undefined);
+		}
+		syncStatus(ctx);
+		return message;
+	};
+	const archiveSlayNonSuccess = (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		result: ReconciliationResult,
+	): string => {
+		const latest = latestWaveForArchive(batch);
+		if (!latest) return `Slay ${batch.id} was not archived because wave evidence changed; UNKNOWN claims remain fenced`;
+		const items = [...new Set(result.nonSuccessItems ?? [])].sort();
+		const message = `Slay terminal outcome not satisfied: closed without merging ${items.join(", ")}; settled claims released`;
+		const archived = { ...latest, state: "cancelled", error: message, cancelRequested: undefined } satisfies PersistedRepositoryBatch;
+		const wasActive = persistArchivedBatch(ctx, archived);
 		if (wasActive) {
 			activeBatch = undefined;
 			mode.setBatchProgress(undefined);
@@ -1262,8 +1379,202 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return archiveCancelledBatch(ctx, batch, action, result);
 	};
 
+	const buildRecap = (ctx: CtxLike) => {
+		const branch = ctx.sessionManager?.getBranch() ?? [];
+		const branchStart = Math.max(0, branch.length - RECAP_BRANCH_ENTRY_LIMIT);
+		const olderBranchEntriesOmitted = branchStart;
+		const sessionId = ctx.sessionManager?.getSessionId?.() ?? "unknown-session";
+		const latestCustom = <T>(customType: string, limit: number, identity: (data: Record<string, unknown>) => string | undefined): { values: T[]; omitted: number } => {
+			const values: T[] = [];
+			const seen = new Set<string>();
+			let count = 0;
+			for (let index = branch.length - 1; index >= branchStart; index--) {
+				const entry = branch[index]!;
+				if (entry.type !== "custom" || entry.customType !== customType || !isRecord(entry.data)) continue;
+				const key = identity(entry.data);
+				if (!key || seen.has(key)) continue;
+				seen.add(key);
+				count++;
+				if (values.length < limit) values.push(entry.data as T);
+			}
+			values.reverse();
+			return { values, omitted: Math.max(0, count - limit) };
+		};
+		const batches = latestCustom<PersistedRepositoryBatch>(BATCH_ENTRY, 12, (data) => typeof data.id === "string" ? data.id : undefined);
+		const comments = latestCustom<PersistedCommentResult>(COMMENT_ENTRY, 24, (data) => isRecord(data.plan) && typeof data.plan.id === "string" ? data.plan.id : undefined);
+		const selectedItems = mode.chosenItems();
+		const focused = mode.selected();
+		if (focused && !selectedItems.some((item) => item.repo === focused.repo && item.id === focused.id)) selectedItems.push(focused);
+		const artifacts: ReviewRecapInput["artifacts"] = [];
+		const visit = (span: import("./trace.ts").Span): void => {
+			const ref = span.output?.reference;
+			if (ref?.kind === "available") artifacts.push({ kind: "available", sessionId: ref.sourceSessionId, uri: ref.uri, path: ref.path, complete: ref.complete });
+			else if (ref?.kind === "unavailable") artifacts.push({ kind: "unavailable", sessionId: ref.sourceSessionId, uri: ref.uri, reason: ref.reason });
+			for (const child of span.children ?? []) visit(child);
+		};
+		for (const span of mode.session.roots()) visit(span);
+		return buildReviewRecap({
+			source: { sessionId, branchId: ctx.sessionManager?.getLeafId?.() ?? "unknown-branch", authoritySource: "Review persisted selection, batch, and comment custom entries" },
+			observedAt: Date.now(),
+			scope: mode.scopeLabel(),
+			queue: mode.queueError ? { kind: "unavailable", reason: mode.queueError, observedAt: mode.fetchedAt } : mode.fetchedAt > 0 ? { kind: "available", itemCount: mode.items.length, observedAt: mode.fetchedAt } : { kind: "unavailable", reason: "Review queue has not been observed in this session", observedAt: 0 },
+			selection: selectedItems.map((item) => ({ repo: item.repo, id: item.id, type: item.type === "pr" ? "pr" as const : "issue" as const, title: item.title, url: item.url, headSha: item.type === "pr" ? item.headSha : undefined })),
+			observations: (mode.fetchedAt > 0 ? selectedItems.slice(0, 25) : []).map((item) => ({
+				subject: `${item.repo}#${item.id}${item.type === "pr" ? ` head=${item.headSha ?? "unknown"}` : ""}`,
+				observedAt: mode.fetchedAt > 0 ? mode.fetchedAt : undefined,
+				status: `current queue observation; ci=${item.ciStatus ?? "unknown"}; review=${item.reviewState}; merge=${item.mergeState}`,
+				sourceUrl: item.url,
+			})),
+			operations: batches.values.map((batch) => ({ id: batch.id, kind: batch.kind, state: batch.state, completedItems: batch.completedItems, totalItems: batch.totalItems, startedAt: batch.startedAt, items: batch.waves.slice(0, 12).flatMap((wave) => wave.items.slice(0, 25).map((item) => ({ repo: item.repo, id: item.id, type: item.type, headSha: item.type === "pr" ? item.headSha : undefined }))), error: batch.error })),
+			comments: comments.values.map((comment) => ({ state: comment.state, targets: comment.plan.targets.slice(0, 100).map((target) => `${target.repo}#${target.number}`), receipts: (comment.receipts ?? []).slice(0, 100) })),
+			trace: mode.session.roots(),
+			artifacts,
+			verification: [],
+			remaining: [
+				...(olderBranchEntriesOmitted > 0 ? [`${olderBranchEntriesOmitted} older session branch entries were not scanned for recap history.`] : []),
+				...(batches.omitted > 0 ? [`${batches.omitted} older Review operation records omitted from the recap.`] : []),
+				...(comments.omitted > 0 ? [`${comments.omitted} older publication records omitted from the recap.`] : []),
+				...(mode.queueError ? [`Refresh queue: ${mode.queueError}`] : []),
+				...(activeBatch && activeBatch.state !== "complete" && activeBatch.state !== "cancelled" ? [`Reconcile Review wave ${activeBatch.id}; its current outcome may be unknown`] : []),
+				...resourceClaims().list().filter((claim) => claim.owner.startsWith("review:")).slice(0, 16).map((claim) => `Retained claim ${claim.resource}: ${claim.status}; revalidate before work.`),
+				"Refresh selected repositories and pull request heads before continuing.",
+			],
+		});
+	};
+
+	const handoffReviewState = (): string => {
+		const selected = mode.chosenItems();
+		const focused = mode.selected();
+		if (focused && !selected.some((item) => item.repo === focused.repo && item.id === focused.id)) selected.push(focused);
+		return JSON.stringify({
+			scope: mode.scope,
+			queueMode: mode.queueMode,
+			filter: mode.filter,
+			selection: selected.map((item) => [item.repo, item.id, item.type, item.type === "pr" ? item.headSha ?? "unknown" : undefined]).sort((a, b) => `${a[0]}#${a[1]}`.localeCompare(`${b[0]}#${b[1]}`)),
+		});
+	};
+
+	const markUncertainTransition = (recapId: string, sourceSessionId: string, sourceBranchId: string, exportPath: string): void => {
+		uncertainHandoffIds.add(recapId);
+		pi.appendEntry(HANDOFF_ENTRY, { recapId, state: "transition-uncertain", sourceSessionId, sourceBranchId, exportPath });
+	};
+
+	const handoff = async (ctx: CtxLike): Promise<string> => {
+		if (!mode.isReviewMode()) return "Review recap handoff is available only in ordinary Review mode";
+		const sessionManager = ctx.sessionManager;
+		if (!sessionManager?.saveArtifact || !sessionManager.getArtifactPath || !sessionManager.getSessionFile || !ctx.newSession || !pi.sendMessage) return "OMP public session artifact or native handoff API is unavailable";
+		const sourceSessionId = sessionManager.getSessionId?.();
+		const sourceBranchId = sessionManager.getLeafId?.();
+		const sourceSessionFile = sessionManager.getSessionFile();
+		if (!sourceSessionId || !sourceBranchId || !sourceSessionFile || (traceSessionId && traceSessionId !== sourceSessionId)) return "Source session or branch is stale; refresh Review before handoff";
+		const recap = buildRecap(ctx);
+		const reviewStateAtStart = handoffReviewState();
+		const latestAttempts = new Map<string, Record<string, unknown>>();
+		for (const entry of sessionManager.getBranch() ?? []) {
+			if (entry.type !== "custom" || entry.customType !== HANDOFF_ENTRY || !isRecord(entry.data) || typeof entry.data.recapId !== "string") continue;
+			latestAttempts.set(JSON.stringify([entry.data.sourceSessionId, entry.data.sourceBranchId, entry.data.recapId]), entry.data);
+		}
+		const prior = uncertainHandoffIds.has(recap.id) || [...latestAttempts.values()].some((attempt) => attempt.state !== "cancelled" && (attempt.recapId === recap.id || attempt.state === "opening" || attempt.state === "submission-uncertain" || attempt.state === "transition-uncertain"));
+		if (prior) return `Handoff ${recap.id} already has a submission attempt; inspect the fresh session before retrying`;
+		const artifactId = await sessionManager.saveArtifact(recap.handoffText, "review-handoff");
+		if (!artifactId) return "Could not create durable handoff export; no new session or message was created";
+		const exportPath = await sessionManager.getArtifactPath(artifactId);
+		if (!exportPath) return `Handoff export ${artifactId} was created but its path is unavailable; no message was sent`;
+		if (sessionManager.getSessionId?.() !== sourceSessionId || sessionManager.getLeafId?.() !== sourceBranchId || handoffReviewState() !== reviewStateAtStart || buildRecap(ctx).id !== recap.id) return `Source, queue, claims, or selection changed during export; durable recap remains at ${exportPath}, no message was sent`;
+		pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "opening", sourceSessionId, sourceBranchId, exportPath });
+		let setupOutcome: "not-run" | "blocked" | "uncertain" | "submitted" = "not-run";
+		let setupReason = "target session setup did not run";
+		uncertainHandoffIds.add(recap.id);
+		let opened: { cancelled: boolean };
+		try {
+			opened = await ctx.newSession({
+				parentSession: sourceSessionFile,
+				setup: async (targetSession) => {
+					const targetSessionId = targetSession.getSessionId();
+					const targetBranchBeforeWrite = targetSession.getLeafId();
+					const targetSessionFile = targetSession.getSessionFile();
+					if (!targetSessionId || targetSessionId === sourceSessionId || !targetSessionFile || targetSessionFile === sourceSessionFile || handoffReviewState() !== reviewStateAtStart) {
+						setupOutcome = "blocked";
+						setupReason = "target session identity, scope, or selection did not match";
+						pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "transition-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, exportPath });
+						return;
+					}
+					pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "submission-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, freshBranchId: targetBranchBeforeWrite, exportPath });
+					const sendBranchId = targetSession.getLeafId();
+					const attemptRecorded = targetSession.getBranch().some((entry) => entry.type === "custom" && entry.customType === HANDOFF_ENTRY && isRecord(entry.data) && entry.data.recapId === recap.id && entry.data.freshSessionId === targetSessionId && entry.data.state === "submission-uncertain");
+					if (!attemptRecorded || targetSession.getSessionId() !== targetSessionId || targetSession.getLeafId() !== sendBranchId || handoffReviewState() !== reviewStateAtStart) {
+						setupOutcome = "blocked";
+						setupReason = "target session, branch, scope, or selection changed at the send boundary";
+						pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "transition-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, exportPath });
+						return;
+					}
+					try {
+						pi.sendMessage({ customType: "review-handoff", content: recap.handoffText, display: true, details: { reviewHandoffId: recap.id, exportPath } }, { triggerTurn: false });
+						setupOutcome = "submitted";
+						setupReason = "";
+					} catch {
+						setupOutcome = "uncertain";
+						setupReason = "message submission threw without an acknowledgement";
+						pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "transition-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, exportPath });
+					}
+				},
+			});
+		} catch {
+			markUncertainTransition(recap.id, sourceSessionId, sourceBranchId, exportPath);
+			if (setupOutcome === "submitted") return `Fresh session transition is uncertain after message submission; delivery acknowledgement is unavailable. Export: ${exportPath}. Do not retry blindly.`;
+			return `Fresh session transition is uncertain (${setupReason}); export remains at ${exportPath}; do not retry blindly`;
+		}
+		if (opened.cancelled) {
+			uncertainHandoffIds.delete(recap.id);
+			pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "cancelled", sourceSessionId, sourceBranchId, exportPath });
+			return `Fresh Review session cancelled; export remains at ${exportPath}; no message was sent`;
+		}
+		if (setupOutcome !== "submitted") return `Fresh session opened but the handoff was not sent (${setupReason}); export remains at ${exportPath}; do not retry blindly`;
+		return `Fresh session opened and handoff ${recap.id} submitted without triggering a model turn; delivery acknowledgement is unavailable. Export: ${exportPath}`;
+	};
+
+	const showReadOnlyRecap = async (ctx: CtxLike, id: string, text: string): Promise<void> => {
+		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+			const painter = theme as { fg(color: string, value: string): string; bold(value: string): string };
+			let scroll = 0;
+			const lines = text.split("\n");
+			const screenHeight = isRecord(tui) && typeof tui.height === "number" ? tui.height : 24;
+			const requestRender = (): void => {
+				if (isRecord(tui) && typeof tui.requestRender === "function") (tui.requestRender as () => void).call(tui);
+			};
+			return {
+				render(width: number): readonly string[] {
+					const bodyHeight = Math.max(1, Math.min(18, screenHeight - 4));
+					const content = lines.slice(scroll, scroll + bodyHeight).map((line) => truncateToWidth(painter.fg("text", line), width));
+					while (content.length < bodyHeight) content.push("");
+					return [
+						truncateToWidth(painter.bold(painter.fg("accent", `Review recap ${id} · read only`)), width),
+						truncateToWidth(painter.fg("border", "─".repeat(width)), width),
+						...content,
+						truncateToWidth(painter.fg("dim", `${scroll + 1}-${Math.min(lines.length, scroll + bodyHeight)} of ${lines.length} · j/k scroll · q/Esc close`), width),
+					];
+				},
+				handleInput(data: string): void {
+					if (data === "q" || data === "\u001b" || data === "\u001b[27;5;27~") { done(undefined); return; }
+					const previous = scroll;
+					if (data === "j" || data === "\u001b[B") scroll = Math.min(Math.max(0, lines.length - 1), scroll + 1);
+					else if (data === "k" || data === "\u001b[A") scroll = Math.max(0, scroll - 1);
+					else if (data === "\u0004" || data === "\u001b[6~") scroll = Math.min(Math.max(0, lines.length - 1), scroll + 16);
+					else if (data === "\u0015" || data === "\u001b[5~") scroll = Math.max(0, scroll - 16);
+					if (scroll !== previous) requestRender();
+				},
+			};
+		}, { overlay: true, overlayOptions: { fullscreen: true, width: "100%", maxHeight: "100%", anchor: "center" } });
+	};
+
 	const reviewCommand = async (rawArgs: string, ctx: CtxLike): Promise<string> => {
 		const args = rawArgs.trim().toLowerCase();
+		if (args === "recap") {
+			const recap = buildRecap(ctx);
+			if (ctx.hasUI) await showReadOnlyRecap(ctx, recap.id, recap.text);
+			return `Review recap ${recap.id}${ctx.hasUI ? " opened for inspection" : `\n${recap.text}`}`;
+		}
+		if (args === "handoff") return handoff(ctx);
 		if (args === "slay" || args === "re-slay") {
 			activeCtx = ctx;
 			await startSlay(ctx, mode.slayableItems(BATCH_LIMIT));
@@ -1284,14 +1595,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const batch of candidates) {
 				const result = await reconcileBatchClaims(ctx, batch);
 				if (result.settled.length > 0) lines.push(`Reconciled ${result.settled.join(", ")} for ${batch.id}`);
+				if (result.nonSuccessItems?.length) lines.push(`Slay did not satisfy its terminal outcome for ${[...new Set(result.nonSuccessItems)].sort().join(", ")}`);
 				if (result.submittedPrs.length > 0) lines.push(`Observed submitted PRs ${result.submittedPrs.join(", ")}`);
 				if (result.unknown.length > 0) lines.push(`Retained UNKNOWN claims ${result.unknown.join(", ")} for ${batch.id}`);
 				if (activeBatch?.id === batch.id && result.unknown.length === 0) {
 					if (preToolProofValid(batch)) lines.push(archivePreToolBatch(ctx, batch, result));
+					else if (result.nonSuccessItems?.length) lines.push(archiveSlayNonSuccess(ctx, batch, result));
 					else await finishRecoveredBatch(ctx, batch, result);
 				}
 				else if (result.unknown.length === 0 && result.settled.length > 0) {
 					if (preToolProofValid(batch)) lines.push(archivePreToolBatch(ctx, batch, result));
+					else if (result.nonSuccessItems?.length) lines.push(archiveSlayNonSuccess(ctx, batch, result));
 					else if (batch.state !== "cancelled") {
 						recoveryBatches.delete(batch.id);
 						const currentWave = batch.currentWave + 1;
@@ -1314,7 +1628,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					: "No Review mutation claims",
 			].join("\n");
 		}
-		return "usage: /review status | reconcile | drain | cancel | revise | slay";
+		return "usage: /review status | recap | handoff | reconcile | drain | cancel | revise | slay";
 	};
 	pi.registerCommand?.("review", {
 		description: "Inspect or recover an interrupted Review repository wave",
@@ -2026,6 +2340,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const jobs = ctx.getAsyncJobSnapshot?.();
 		rememberWaveEvidence(ctx);
 		if (jobs?.running.some((job) => job.startTime >= activeBatch!.waveStartedAt)) return;
+		const knownWaveJobs = new Set(activeBatch.waveJobIds ?? []);
+		if (jobs?.delivery?.pendingJobIds.some((id) => knownWaveJobs.has(id))) return;
 		const covered = waveWorkerCoverageComplete(activeBatch.waveJobIds, activeBatch.waveToolCallIds, activeBatch.waveTaskWorkers);
 		const settled = waveWorkersSettled(jobs, activeBatch.waveJobIds, activeBatch.waveTerminalJobStatuses);
 		const failed = (activeBatch.waveJobIds ?? []).filter((id) => ["failed", "cancelled", "canceled"].includes(activeBatch!.waveTerminalJobStatuses?.[id] ?? ""));
@@ -2222,6 +2538,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.on("session_branch", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
 	pi.on("session_tree", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
 	pi.on("session_shutdown", (_event, ctx) => {
+		traceGeneration++;
 		mode.session.clear();
 		traceSessionId = undefined;
 		activeCtx = ctx;
@@ -2280,18 +2597,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		rememberWaveEvidence(ctxToUse);
 	});
 	pi.on("tool_call", (event) => {
-		const { toolCallId, toolName, input } = event as { toolCallId?: string; toolName?: string; input?: { command?: unknown } };
+		const { toolCallId, toolName, input } = event as { toolCallId?: string; toolName?: string; input?: unknown };
+		const batchActive = activeBatch?.state === "running" || activeBatch?.state === "paused";
 		if (toolCallId && activeCtx) rememberToolInvocation(activeCtx, toolCallId);
 		if (toolName === "task" && toolCallId && activeBatch?.state === "running" && activeCtx) {
 			const ids = [...new Set([...(activeBatch.waveToolCallIds ?? []), toolCallId])].sort();
 			persistBatch(activeCtx, { ...activeBatch, waveToolCallIds: ids });
 		}
-		if (
-			activeBatch?.kind !== "slay"
-			|| (activeBatch.state !== "running" && activeBatch.state !== "paused")
-		) return;
+		if (activeBatch?.kind !== "slay" || !batchActive) return;
 		if (toolName !== "bash") return;
-		const command = String(input?.command ?? "");
+		const command = String(isRecord(input) ? input.command ?? "" : "");
 		const reason = slayBashBlockReason(command);
 		if (reason) return { block: true, reason: `Review Slay guard: ${reason}` };
 		const wave = activeBatch.waves[activeBatch.currentWave];
@@ -2320,10 +2635,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		rememberTaskResult(ctxToUse, toolCallId, partialResult);
 		repaint();
 	});
-	pi.on("tool_execution_end", (event, eventCtx) => {
+	pi.on("tool_execution_end", async (event, eventCtx) => {
 		const { toolCallId, result, isError } = event as { toolCallId: string; result: unknown; isError: boolean };
 		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
 		if (!ctxToUse) return;
+		const generation = traceGeneration;
+		const sourceSessionId = ctxToUse.sessionManager?.getSessionId?.();
 		mode.session.endTool(toolCallId, result, isError === true, Date.now());
 		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
 		rememberToolInvocation(ctxToUse, toolCallId);
@@ -2331,6 +2648,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		rememberWaveEvidence(ctxToUse);
 		syncBatchProgress(ctxToUse);
 		repaint();
+		const artifactId = hasNativeArtifactError(result) ? undefined : nativeArtifactId(result);
+		if (artifactId) {
+			let path: string | null = null;
+			try { path = await ctxToUse.sessionManager?.getArtifactPath?.(artifactId) ?? null; } catch { path = null; }
+			if (generation !== traceGeneration || ctxToUse.sessionManager?.getSessionId?.() !== sourceSessionId || traceSessionId !== sourceSessionId) return;
+			mode.session.setArtifactReference(toolCallId, sourceSessionId ?? "unknown-session", path);
+			repaint();
+		}
 	});
 
 	// ---- keyboard ------------------------------------------------------------

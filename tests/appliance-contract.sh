@@ -21,8 +21,8 @@ containerfile="image/appliance/Containerfile"
 image=""
 expect_arch=""
 expect_version=""
-# The appliance carries OMP and review tools, not an alternate agent runtime.
-size_ceiling_bytes=$((500 * 1024 * 1024))
+# Node.js 24/npm/npx and the pinned Bun runtime add their immutable runtime closures to the image.
+size_ceiling_bytes=$((750 * 1024 * 1024))
 
 while (($#)); do
   case "$1" in
@@ -78,18 +78,47 @@ grep -qE '^ARG FSDK_BASE_IMAGE=ghcr\.io/projectbluefin/base:[^@[:space:]]+@sha25
 grep -qE '^ARG FSDK_BUILDER_IMAGE=ghcr\.io/projectbluefin/lab-runner:[^@[:space:]]+@sha256:[0-9a-f]{64}$' "$containerfile" ||
   fail "FSDK_BUILDER_IMAGE must be pinned as tag@sha256 digest"
 
-# Every fetched artifact carries a per-architecture digest. A download this
-# build cannot verify is a download it must not execute.
-for pin in OMP_X86_64_SHA256 OMP_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256; do
+# Source and build inputs are pinned; architecture-specific addons and runtime
+# artifacts carry independent checksums and verified package integrity.
+for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 NODE_X86_64_SHA256 NODE_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256; do
   grep -qE "^ARG ${pin}=[0-9a-f]{64}$" "$containerfile" ||
     fail "ARG ${pin} must be a lowercase sha256 digest"
 done
+for pin in OMP_NATIVES_X86_64_SHA512 OMP_NATIVES_AARCH64_SHA512; do
+  grep -qE "^ARG ${pin}=[0-9a-f]{128}$" "$containerfile" ||
+    fail "ARG ${pin} must be a lowercase sha512 digest"
+done
+for pin in OMP_SOURCE_COMMIT MEMORYD_SOURCE_COMMIT; do
+  grep -qE "^ARG ${pin}=[0-9a-f]{40}$" "$containerfile" ||
+    fail "ARG ${pin} must be a full lowercase commit SHA"
+done
+for pin in OMP_VERSION OMP_BUN_VERSION NODE_VERSION OMP_NATIVES_VERSION; do
+  grep -qE "^ARG ${pin}=[0-9]+\\.[0-9]+\\.[0-9]+$" "$containerfile" ||
+    fail "ARG ${pin} must be a semantic version"
+done
+node_major="$(sed -nE 's/^ARG NODE_VERSION=([0-9]+)\..*/\1/p' "$containerfile")"
+if [[ ! "$node_major" =~ ^[0-9]+$ ]] || ((node_major < 24)); then
+  fail "NODE_VERSION must be at least 24"
+fi
 
 # shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
 require "$containerfile" \
   'FROM ${FSDK_BUILDER_IMAGE} AS build' \
   'FROM ${FSDK_BASE_IMAGE}' \
-  'sha256sum --check --status' \
+  'COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp' \
+  'COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts' \
+  'COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch' \
+  'OMP_PATCH_PATH=/usr/local/share/bluefin/omp/memory-backend-registration.patch' \
+  'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
+  'https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz' \
+  'cp -a "$node_dir/lib/node_modules/npm" /out/usr/lib/node_modules/npm' \
+  'ln -s ../lib/node_modules/npm/bin/npm-cli.js /out/usr/bin/npm' \
+  'ln -s ../lib/node_modules/npm/bin/npx-cli.js /out/usr/bin/npx' \
+  '/usr/local/bin/node' \
+  '/usr/local/bin/bun' \
+  'io.github.joshyorko.review.node.version="${NODE_VERSION}"' \
+  'io.github.joshyorko.review.bun.version="${OMP_BUN_VERSION}"' \
+  '--omp-source-commit "$OMP_SOURCE_COMMIT"' \
   'USER 65532:65532' \
   'WORKDIR /workspace' \
   'ENTRYPOINT ["/usr/bin/bluefin-review-appliance"]' \
@@ -99,14 +128,44 @@ require "$containerfile" \
   'io.github.joshyorko.review.appliance="true"' \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"' \
+  'io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}"' \
+  'io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}"' \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
-  'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory'
+  'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory' \
+  'test -e /out/usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts'
+# shellcheck disable=SC2016 # These are literal source strings, not expansions.
+require scripts/build-derived-omp.sh \
+  'git ls-remote --exit-code' \
+  'sha256sum --check --status' \
+  'sha512sum --check --status' \
+  'git -C "$source_dir" apply --check "$OMP_PATCH_PATH"' \
+  'bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests' \
+  'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"' \
+  'install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun' \
+  'bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"'
+grep -qF 'runner: ubuntu-26.04-arm' .github/workflows/publish-appliance.yml ||
+  fail "the appliance must keep its native aarch64 build runner"
+grep -qF 'arch: arm64' .github/workflows/publish-appliance.yml ||
+  fail "the appliance matrix must build the aarch64 image"
+grep -qF 'needs: [metadata, build]' .github/workflows/publish-appliance.yml ||
+  fail "OCI promotion must wait for both native architecture builds"
+# shellcheck disable=SC2016 # This is a literal workflow source string.
+grep -qF 'for digest in "$amd64" "$arm64"; do' .github/workflows/publish-appliance.yml ||
+  fail "OCI promotion must reject a missing architecture digest"
+# shellcheck disable=SC2016 # These are literal source strings, not expansions.
 require image/appliance/entrypoint.sh \
   'if ((EUID == 0)); then' \
   'os.setgroups([65532])' \
   'os.setgid(65532)' \
   'os.setuid(65532)' \
-  'prepare_factory_state_dir'
+  '--factory-verifier-probe' \
+  'verifier-probe.ts' \
+  'refusing opt-in startup before work selection' \
+  'prepare_factory_state_dir' \
+  'coordinator_root="$factory_home/.local/state/review/coordinator"' \
+  'git -C "$coordinator_root" init -q' \
+  'cd "$coordinator_root"'
+forbid image/appliance/entrypoint.sh 'review-entrypoint'
 forbid "$containerfile" 'image/contribute' 'bin/bluefin-contribute' 'ghcr.io/projectbluefin/contribute'
 for retired in \
   bin/bluefin-contribute \
@@ -146,8 +205,9 @@ require image/appliance/entrypoint.sh \
   '"${extension_args[@]}"' \
   'Luna Factory extension is not packaged at /usr/share/bluefin/review/luna-factory'
 require image/appliance/config.yml \
-  'enabled: false' \
-  'apply: false'
+  'enabled: true' \
+  'apply: false' \
+  'backend: auto'
 grep -qE '^ARG AUDIO_BUILDER_IMAGE=registry\.fedoraproject\.org/fedora-minimal:[^@[:space:]]+@sha256:[0-9a-f]{64}$' "$containerfile" ||
   fail "AUDIO_BUILDER_IMAGE must be pinned as tag@sha256 digest"
 # shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
@@ -201,7 +261,16 @@ forbid "$containerfile" \
   'apk add' \
   'RUN curl | ' \
   'curl -sL |'
-forbid "$containerfile" 'PI_VERSION' 'NODE_VERSION' 'pi-coding-agent' '/usr/bin/pi' '/usr/bin/node'
+# shellcheck disable=SC2016 # Literal Containerfile text, not shell expansion.
+require "$containerfile" \
+  '"https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"' \
+  'echo "${node_sha}  $workdir/node.tar.gz" | sha256sum --check --status' \
+  'ARG NODE_VERSION' \
+  'ARG NODE_X86_64_SHA256' \
+  'ARG NODE_AARCH64_SHA256' \
+  'ARG OMP_BUN_VERSION' \
+  '/usr/local/bin/bun'
+forbid "$containerfile" 'PI_VERSION' 'pi-coding-agent' '/usr/bin/pi'
 
 # `SHELL` is silently ignored for the OCI image format; a RUN that relies on it
 # for `set -e` is a RUN whose failures are invisible.
@@ -226,6 +295,14 @@ grep -qE '^[0-9]+$' image/appliance/REVISION || fail "image/appliance/REVISION m
 [[ -d image/extension/luna-factory/agents ]] || fail "the Luna Factory companion agents are missing"
 grep -qF '!scripts/generate-appliance-sbom.py' .dockerignore ||
   fail ".dockerignore must let the appliance SBOM generator into the build context"
+grep -qF '!scripts/' .dockerignore ||
+  fail ".dockerignore must reopen scripts before allowlisting build inputs"
+grep -qF '!scripts/build-derived-omp.sh' .dockerignore ||
+  fail ".dockerignore must let the derived OMP builder into the build context"
+grep -qF '!scripts/derived-omp-canary.ts' .dockerignore ||
+  fail ".dockerignore must let the derived OMP canary into the build context"
+grep -qF '!patches/omp/memory-backend-registration.patch' .dockerignore ||
+  fail ".dockerignore must let the OMP registration patch into the build context"
 
 # The generator that fills that SBOM. Its own contract runs here rather than as
 # a separate validate.yml step: the document it writes is part of this image's
@@ -249,12 +326,23 @@ trap 'rm -rf "$entrypoint_tmp"' EXIT
 mkdir -m 0700 "$entrypoint_tmp/home"
 cat >"$entrypoint_tmp/omp" <<'EOF'
 #!/usr/bin/bash
+if [[ -n "${REVIEW_CONTRACT_CWD_FILE:-}" ]]; then
+  printf '%s\n' "$PWD" >"$REVIEW_CONTRACT_CWD_FILE"
+fi
 printf '%s\n' "$@"
 EOF
 chmod +x "$entrypoint_tmp/omp"
-default_args="$(env -u REVIEW_INHERIT_OMP_CONFIG -u BLUEFIN_REVIEW_INHERIT_OMP_CONFIG HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+coordinator_cwd_file="$entrypoint_tmp/coordinator.cwd"
+default_args="$(env -u REVIEW_INHERIT_OMP_CONFIG -u BLUEFIN_REVIEW_INHERIT_OMP_CONFIG REVIEW_CONTRACT_CWD_FILE="$coordinator_cwd_file" HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'bluefin-review-appliance' <<<"$default_args" ||
   fail "the appliance entrypoint did not select its isolated profile"
+coordinator_root="$entrypoint_tmp/home/.local/state/review/coordinator"
+[[ "$(cat "$coordinator_cwd_file")" == "$coordinator_root" ]] ||
+  fail "the appliance did not launch OMP from its coordinator Git repository"
+git -C "$coordinator_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+  fail "the appliance coordinator path is not a Git worktree"
+[[ -z "$(git -C "$coordinator_root" status --porcelain)" ]] ||
+  fail "the appliance coordinator Git worktree is not clean"
 [[ "$(grep -cx -- '--advisor' <<<"$default_args")" -eq 1 ]] ||
   fail "the appliance did not enable exactly one OMP advisor"
 inherited_args="$(REVIEW_INHERIT_OMP_CONFIG=1 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
@@ -343,6 +431,14 @@ omp_label="$(inspect '{{index .Labels "io.github.joshyorko.review.omp.version"}}
 omp_version="$(run 'omp --version')"
 test "$omp_version" = "omp/${omp_label}" ||
   fail "the omp binary reports '${omp_version}', but this image claims to ship ${omp_label}"
+node_label="$(inspect '{{index .Labels "io.github.joshyorko.review.node.version"}}')"
+bun_label="$(inspect '{{index .Labels "io.github.joshyorko.review.bun.version"}}')"
+test "$(run 'node --version')" = "v${node_label}" ||
+  fail "node version does not match the pinned appliance version"
+test "$(run 'bun --version')" = "$bun_label" ||
+  fail "bun version does not match the pinned OMP build runtime"
+run 'npm --version && npx --version' >/dev/null ||
+  fail "npm or npx failed to execute"
 
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
@@ -361,6 +457,30 @@ run '
   test "$(readlink -f /bin/sh)" = /usr/bin/bash
 
 ' >/dev/null || fail "a bundled binary failed to execute"
+bwrap_capability="${REVIEW_APPLIANCE_BWRAP_CAPABILITY:-available}"
+case "$bwrap_capability" in
+available)
+  # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+  run '
+      set -eu
+      mounts=()
+      for path in /usr /bin /lib /lib64; do
+        [[ ! -e "$path" ]] || mounts+=(--ro-bind "$path" "$path")
+      done
+      bwrap --unshare-all --die-with-parent --new-session --clearenv \
+        "${mounts[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home \
+        --dir /home/worker --setenv HOME /home/worker \
+        --setenv PATH /usr/bin:/bin /usr/bin/bash --noprofile --norc -c \
+        "node --version && bun --version && npm --version && npx --version"
+    ' >/dev/null || fail "Node, Bun, npm, or npx is unavailable inside the Factory bubblewrap verifier"
+  ;;
+blocked)
+  echo "appliance-contract: generic OCI bubblewrap contract blocked by runner user-namespace capability; krun Factory qualification is separate"
+  ;;
+*)
+  fail "REVIEW_APPLIANCE_BWRAP_CAPABILITY must be available or blocked"
+  ;;
+esac
 
 # git is here to land fixes, which means it has to be able to commit and to
 # reach GitHub over https — the remote helper and its TLS closure included.
@@ -394,6 +514,7 @@ cat >"$identity_fixture/omp" <<'EOF'
 #!/usr/bin/bash
 has_version=false
 for arg; do
+  [[ "$arg" != review-entrypoint ]] || exit 21
   [[ "$arg" == --version ]] && has_version=true
 done
 $has_version || exit 19
@@ -549,11 +670,11 @@ run '
   test -f /usr/share/bluefin/review/sbom.spdx.json
 ' >/dev/null || fail "the review mode or its SBOM is missing from the image"
 
-# Nothing inside may install anything.
+# No OS package manager may enter the final image; npm is the requested Node runtime toolchain, not an OS installer.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
-  for forbidden in dnf microdnf apt apt-get apk rpm yum pip pip3 npm; do
+  for forbidden in dnf microdnf apt apt-get apk rpm yum pip pip3; do
     if command -v "$forbidden" >/dev/null 2>&1; then
       echo "found package manager: $forbidden" >&2
       exit 1
@@ -566,8 +687,8 @@ import json,sys
 document = json.load(sys.stdin)
 print(" ".join(sorted(package["name"] for package in document["packages"])))
 ')"
-for component in omp gh review-workbench; do
-  grep -qF -- "$component" <<<"$sbom_packages" ||
+for component in omp omp-source omp-memory-backend-patch omp-native-addon node bun gh review-workbench; do
+  grep -qwF -- "$component" <<<"$sbom_packages" ||
     fail "the in-image SBOM does not record ${component}"
 done
 grep -qF -- headroom <<<"$sbom_packages" && fail "the in-image SBOM still records Headroom"

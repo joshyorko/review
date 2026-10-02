@@ -44,7 +44,23 @@ export interface Span {
 	endedAt?: number;
 	/** Streamed output; tailed under the span while it is expanded. */
 	logs?: string[];
+	/** Bounded-ingestion accounting and native output references. */
+	output?: OutputRetention;
 	children?: Span[];
+}
+
+export type NativeOutputReference =
+	| { readonly kind: "available"; readonly uri: string; readonly path: string; readonly sourceSessionId: string; readonly complete: boolean }
+	| { readonly kind: "unavailable"; readonly uri?: string; readonly sourceSessionId: string; readonly reason: string };
+
+export interface OutputRetention {
+	readonly omittedBytes: number;
+	readonly omittedSpans: number;
+	readonly omittedJobs?: number;
+	readonly omittedUnknown: boolean;
+	readonly nativeTotalBytes?: number;
+	readonly nativeArtifactElidedBytes?: number;
+	readonly reference?: NativeOutputReference;
 }
 
 export interface RenderedRow {
@@ -85,7 +101,8 @@ export function hasChildren(span: Span): boolean {
  * settled and uninteresting stays one line.
  */
 export function defaultExpanded(span: Span): boolean {
-	return span.status === "running" || span.status === "failure" || span.status === "findings";
+	const hasRetention = (node: Span): boolean => Boolean(node.output && (node.output.omittedBytes || node.output.omittedSpans || node.output.omittedJobs || node.output.omittedUnknown || node.output.reference)) || (node.children ?? []).some(hasRetention);
+	return span.status === "running" || span.status === "failure" || span.status === "findings" || hasRetention(span);
 }
 
 function isExpanded(span: Span, expansion?: ReadonlyMap<string, boolean>): boolean {
@@ -122,32 +139,56 @@ function renderSpanRow(span: Span, prefix: string, options: TreeOptions): string
 
 function renderLogRows(span: Span, prefix: string, options: TreeOptions): RenderedRow[] {
 	const logs = span.logs ?? [];
-	if (logs.length === 0) return [];
-
 	const { painter } = options;
-	const limit = Math.max(1, options.maxLogLines ?? 8);
 	const gutterRole = restrainedRole(span.status);
 	const rows: RenderedRow[] = [];
-	const hidden = logs.length - limit;
+	if (logs.length > 0) {
+		const limit = Math.max(1, options.maxLogLines ?? 8);
+		const hidden = logs.length - limit;
 
-	if (hidden > 0) {
-		const bar = painter.fg(gutterRole, GLYPH.logDashed);
-		rows.push({
-			spanId: span.id,
-			depth: 0,
-			kind: "log",
-			text: truncateToWidth(`${prefix}${bar}${painter.fg("dim", `…${hidden} lines hidden…`)}`, options.width),
-		});
+		if (hidden > 0) {
+			const bar = painter.fg(gutterRole, GLYPH.logDashed);
+			rows.push({
+				spanId: span.id,
+				depth: 0,
+				kind: "log",
+				text: truncateToWidth(`${prefix}${bar}${painter.fg("dim", `…${hidden} lines hidden…`)}`, options.width),
+			});
+		}
+
+		for (const log of logs.slice(Math.max(0, hidden))) {
+			const bar = painter.fg(gutterRole, GLYPH.logBar);
+			rows.push({
+				spanId: span.id,
+				depth: 0,
+				kind: "log",
+				text: truncateToWidth(`${prefix}${bar}${painter.fg("toolTitle", log)}`, options.width),
+			});
+		}
 	}
 
-	for (const log of logs.slice(Math.max(0, hidden))) {
-		const bar = painter.fg(gutterRole, GLYPH.logBar);
-		rows.push({
+	const retention = span.output;
+	if (retention) {
+		const bar = painter.fg(gutterRole, GLYPH.logDashed);
+		const add = (text: string) => rows.push({
 			spanId: span.id,
 			depth: 0,
 			kind: "log",
-			text: truncateToWidth(`${prefix}${bar}${painter.fg("toolTitle", log)}`, options.width),
+			text: truncateToWidth(`${prefix}${bar}${painter.fg("dim", text)}`, options.width),
 		});
+		if (retention.omittedBytes > 0) add(`preview clipped: ${retention.omittedBytes} bytes omitted`);
+		if (retention.omittedSpans > 0) add(`trace bound: ${retention.omittedSpans} spans omitted`);
+		if ((retention.omittedJobs ?? 0) > 0) add(`async job snapshot bound: ${retention.omittedJobs} jobs omitted`);
+		if (retention.omittedUnknown) add("additional output omitted; byte count unavailable");
+		if (retention.nativeTotalBytes !== undefined) add(`native output size observed: ${retention.nativeTotalBytes} bytes`);
+		if ((retention.nativeArtifactElidedBytes ?? 0) > 0) add(`native artifact sample: ${retention.nativeArtifactElidedBytes} bytes elided`);
+		if (retention.reference?.kind === "available") {
+			const completeness = retention.reference.complete ? "complete" : "sample only";
+			add(`native output ${completeness}: ${retention.reference.uri} · session ${retention.reference.sourceSessionId} · ${retention.reference.path}`);
+		} else if (retention.reference?.kind === "unavailable") {
+			const uri = retention.reference.uri ? ` ${retention.reference.uri}` : "";
+			add(`native output unavailable${uri} · session ${retention.reference.sourceSessionId} · ${retention.reference.reason}`);
+		}
 	}
 	return rows;
 }

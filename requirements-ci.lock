@@ -8,9 +8,9 @@ distlib==0.4.3 \
     --hash=sha256:4b0ce306c966eb73bc3a7b6abad017c556dadd92c44701562cd528ac7fde4d5b \
     --hash=sha256:f152097224a0ae24be5a0f6bae1b9359af82133bce63f98a95f86cae1aede9ed
     # via virtualenv
-filelock==4.0.5 \
-    --hash=sha256:2b155f098c4f285fb41954a22c616c4e8a0635b78c184338ba3023c1c91a4b4d \
-    --hash=sha256:be9166068623636cedcad7b2ef735b04e5fb4344d978e09fd6fbd6ede06f14f0
+filelock==4.0.8 \
+    --hash=sha256:325ff22f358c18443b1fcdfa0a7aa3faec4b500c2807c554719da4567b533d31 \
+    --hash=sha256:733d9b6b153fc63672f86104324186818b6bbe9dd7db84e9bb9887b6a04a2775
     # via
     #   python-discovery
     #   virtualenv
@@ -22,9 +22,9 @@ nodeenv==1.11.0 \
     --hash=sha256:3ce8fe5b71d16e8af7039ca65257354100bc772965d6bc549070649e53b1b146 \
     --hash=sha256:edaa16e6c14d7cf395d75d4bbd5a26390f4dc06501a33b4e76282b02cc688a25
     # via pre-commit
-platformdirs==4.12.1 \
-    --hash=sha256:38da801a4af303033cbffccb39030db22bf0473e6414309b02acebeee7ca8bf1 \
-    --hash=sha256:7f251621befae78b2cb74616f9fc99d3fa3db0afba5035987731f8dcd430337d
+platformdirs==4.12.2 \
+    --hash=sha256:29dbf06d96c500bc6bdbce75fb0a14d63279c93b1842f97e72a135b33e856983 \
+    --hash=sha256:eab5f70271a490ef74618bb314fbb86e3c7e82fa3b9c922c2ea0e0a1a155d329
     # via virtualenv
 pre-commit==4.6.2 \
     --hash=sha256:8f5d7bfb021ecdbcd9d49d89847082dd24172ccde534390081a679ad046e2441 \

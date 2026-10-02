@@ -48,6 +48,11 @@ cat >"$fake_bin/podman" <<'EOF'
 set -eu
 [[ "${1:-}" == info ]] && { [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]]; exit; }
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
+if [[ "${1:-}" == run && "$*" == *--entrypoint\ /usr/bin/test* ]]; then exit 0; fi
+if [[ "${1:-}" == run && "$*" == *--factory-verifier-probe* ]]; then
+  echo '{"kind":"review-factory-verifier","status":"available"}'
+  exit 0
+fi
 if [[ "${1:-}" == run && "${FAKE_REMOTE_DEFAULT:-}" != 1 ]]; then
   previous=""
   home_mount=""
@@ -91,6 +96,9 @@ if [[ "${1:-}" == run && "${EXPECT_EMPTY_SCOPE:-}" == 1 ]]; then
   count="${#args[@]}"
   [[ "$count" -ge 2 && "${args[count - 2]}" == ghcr.io/projectbluefin/review:stable && "${args[count - 1]}" == --advisor ]] || exit 19
 fi
+if [[ "${1:-}" == run && "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
+  [[ "$*" == *"--env LUNA_FACTORY_ENABLED"* && "$*" == *"--env LUNA_FACTORY_CAPACITY"* ]] || exit 19
+fi
 case "${1:-} ${2:-} ${3:-}" in
   "system connection list")
     [[ "${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\tidentity\ttrue\n'
@@ -106,8 +114,18 @@ exit 0
 EOF
 cat >"$fake_bin/apptainer" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == *"/usr/bin/test -r /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts"* ]]; then exit 0; fi
+if [[ "$*" == *--factory-verifier-probe* ]]; then
+  printf '%s\n' "$*" >>"${HOME:?}/apptainer-verifier.log"
+  echo '{"kind":"review-factory-verifier","status":"available"}'
+  exit 0
+fi
+if [[ "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
+  [[ "${APPTAINERENV_LUNA_FACTORY_ENABLED:-}" == 1 && "${APPTAINERENV_LUNA_FACTORY_CAPACITY:-}" == 7 ]] || exit 19
+  [[ "$*" != *LUNA_FACTORY* && "$*" != *" 7 "* ]] || exit 19
+fi
 [[ "${APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT:-}" == /claims ]] || exit 19
-printf '%s\n' "$*" >>"${APPTAINER_LOG:?}"
+printf '%s\n' "$*" >>"${APPTAINER_LOG:-/dev/null}"
 previous=""
 for arg in "$@"; do
   [[ "$previous" != --home ]] || runtime_home="${arg%%:*}"
@@ -244,12 +262,33 @@ for retired in contribute review-container; do
   fi
 done
 
-scenario="doctor verifies the KVM runtime"
+scenario="doctor reports infrastructure readiness and qualified verifier state separately"
 run_just review-doctor
 [[ "$status" -eq 0 ]] || fail "review-doctor failed: $output"
-contains 'Podman krun KVM runtime ready' "$output"
+contains 'Podman krun KVM infrastructure prerequisites ready' "$output"
+contains 'Packaged Factory verifier qualified in krun profile' "$output"
 contains '=== Review image ===' "$output"
 contains 'ghcr.io/projectbluefin/review:stable is resolvable' "$output"
+
+scenario="doctor does not claim verifier readiness without a local image"
+FAKE_IMAGE_MISSING=1 run_just review-doctor
+[[ "$status" -eq 0 ]] || fail "doctor failed when verifier qualification was unavailable: $output"
+contains 'Factory verifier unqualified' "$output"
+
+scenario="just launcher qualifies Factory before passing opt-in configuration"
+export LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1
+run_just review-appliance owner/repo
+[[ "$status" -eq 17 ]] || fail "Factory-enabled just launcher did not reach OMP after verifier qualification: $output"
+grep -q '^run .*--factory-verifier-probe' "$podman_log" || fail "just launcher skipped the packaged verifier probe"
+grep -q '^run .*--interactive --tty' "$podman_log" || fail "just launcher did not start the OMP session after the probe"
+unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY EXPECT_FACTORY_ENV
+
+scenario="just Apptainer launch forwards opted-in Factory settings after its independent probe"
+export LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1
+FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
+[[ "$status" -eq 18 ]] || fail "Factory-enabled Apptainer launcher did not reach OMP after its verifier probe: $output"
+grep -q -- '--factory-verifier-probe' "$home/apptainer-verifier.log" || fail "just Apptainer launch skipped the verifier probe"
+unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY EXPECT_FACTORY_ENV
 
 scenario="doctor diagnoses missing squashfuse"
 mv "$fake_bin/squashfuse_ll" "$scratch/squashfuse_ll"

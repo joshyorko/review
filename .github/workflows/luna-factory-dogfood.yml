@@ -48,18 +48,74 @@ jobs:
             --build-arg "REVIEW_REVISION=${{ github.event.pull_request.head.sha }}" \
             -f image/appliance/Containerfile \
             -t "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" .
-          tests/appliance-contract.sh --image "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
-          REVIEW_APPLIANCE_IMAGE="localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}" \
-            tests/review-factory-coload-smoke.sh
+          # This host user-namespace result classifies the generic OCI contract only;
+          # Factory's krun verifier boundary is qualified against the packaged image below.
+          REVIEW_APPLIANCE_BWRAP_CAPABILITY="${{ steps.capabilities.outputs.userNamespace }}" \
+            tests/appliance-contract.sh --image "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}"
           label_format='{{index .Labels "org.opencontainers.image.revision"}}'
           test "$(podman image inspect --format "$label_format" "localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}")" = "${{ github.event.pull_request.head.sha }}"
+      - name: Qualify the packaged Factory verifier on the krun profile
+        if: always()
+        env:
+          REVIEW_APPLIANCE_IMAGE: localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
+          LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OCI_BOUNDARY: ${{ steps.capabilities.outputs.oci }}
+          KVM_BOUNDARY: ${{ steps.capabilities.outputs.kvm }}
+          KRUN_BOUNDARY: ${{ steps.capabilities.outputs.krun }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/luna-factory-dogfood"
+          mkdir -p "$evidence"
+          if [[ "$OCI_BOUNDARY" != available || "$KVM_BOUNDARY" != available || "$KRUN_BOUNDARY" != available ]]; then
+            printf '{"status":"blocked","profile":"podman-krun-keep-id","headSha":"%s","reason":"host prerequisites unavailable: oci=%s kvm=%s krun=%s"}\n' \
+              "$LUNA_FACTORY_HEAD_SHA" "$OCI_BOUNDARY" "$KVM_BOUNDARY" "$KRUN_BOUNDARY" \
+              > "$evidence/factory-verifier.json"
+            echo 'Factory verifier: BLOCKED (host prerequisites unavailable).' >> "$GITHUB_STEP_SUMMARY"
+            echo "Factory verifier qualification BLOCKED by host prerequisites: oci=$OCI_BOUNDARY kvm=$KVM_BOUNDARY krun=$KRUN_BOUNDARY"
+            exit 0
+          fi
+          if bin/bluefin factory-verifier-probe krun "$REVIEW_APPLIANCE_IMAGE" > "$evidence/factory-verifier.log" 2>&1; then
+            printf '{"status":"available","profile":"podman-krun-keep-id","headSha":"%s"}\n' \
+              "$LUNA_FACTORY_HEAD_SHA" > "$evidence/factory-verifier.json"
+            echo 'Factory verifier: available on the packaged podman+krun+keep-id profile.' >> "$GITHUB_STEP_SUMMARY"
+            cat "$evidence/factory-verifier.log"
+          else
+            status=$?
+            printf '{"status":"failed","profile":"podman-krun-keep-id","headSha":"%s","exitCode":%s}\n' \
+              "$LUNA_FACTORY_HEAD_SHA" "$status" > "$evidence/factory-verifier.json"
+            echo 'Factory verifier: FAILED on a runnable krun profile.' >> "$GITHUB_STEP_SUMMARY"
+            cat "$evidence/factory-verifier.log"
+            echo "Factory verifier qualification failed on a runnable krun profile (exit $status)" >&2
+            exit 1
+          fi
+      - name: Run packaged Review Factory co-load smoke under generic OCI
+        if: steps.capabilities.outputs.oci == 'available' && steps.capabilities.outputs.userNamespace == 'available'
+        env:
+          REVIEW_APPLIANCE_IMAGE: localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
+        run: tests/review-factory-coload-smoke.sh
+      - name: Record blocked generic OCI Review Factory co-load smoke
+        if: steps.capabilities.outputs.oci == 'available' && steps.capabilities.outputs.userNamespace != 'available'
+        run: |
+          set -euo pipefail
+          printf '{"status":"blocked","profile":"generic-oci","headSha":"%s","reason":"runner user-namespace capability unavailable"}\n' \
+            "${{ github.event.pull_request.head.sha }}" \
+            > "$RUNNER_TEMP/luna-factory-dogfood/factory-coload.json"
+          echo "Packaged Review Factory co-load smoke BLOCKED by generic OCI user-namespace capability."
       - name: Run no-publish OCI dogfood
-        if: steps.capabilities.outputs.oci == 'available'
+        if: steps.capabilities.outputs.oci == 'available' && steps.capabilities.outputs.userNamespace == 'available'
         env:
           REVIEW_APPLIANCE_IMAGE: localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}
           LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           LUNA_PROBE_ROUTE: selected-batch
         run: tests/luna-factory-dogfood.sh oci
+      - name: Record blocked generic OCI selected-batch dogfood
+        if: steps.capabilities.outputs.oci == 'available' && steps.capabilities.outputs.userNamespace != 'available'
+        run: |
+          set -euo pipefail
+          printf '{"status":"blocked","profile":"generic-oci","headSha":"%s","reason":"runner user-namespace capability unavailable"}\n' \
+            "${{ github.event.pull_request.head.sha }}" \
+            > "$RUNNER_TEMP/luna-factory-dogfood/oci-dogfood.json"
+          echo "Generic OCI Factory dogfood BLOCKED by runner user-namespace capability; the packaged krun verifier result remains independent."
       - name: Reclaim OCI build storage before SIF
         if: steps.capabilities.outputs.oci == 'available' && steps.capabilities.outputs.sif == 'available'
         run: |
