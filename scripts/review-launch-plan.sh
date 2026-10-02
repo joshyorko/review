@@ -32,6 +32,27 @@ review_launch_boolean() {
   esac
 }
 
+review_launch_text_file() {
+  # Bash read/mapfile discard NUL bytes, so compare raw bytes before parsing.
+  local bytes text_bytes
+  bytes="$(wc -c <"$1")" || {
+    review_launch_fail "unreadable launch intent file"
+    return 1
+  }
+  ((bytes <= $2)) || {
+    review_launch_fail "launch intent file exceeds the supported size"
+    return 1
+  }
+  text_bytes="$(LC_ALL=C tr -d '\000' <"$1" | wc -c)" || {
+    review_launch_fail "unreadable launch intent file"
+    return 1
+  }
+  if ((bytes != text_bytes)); then
+    review_launch_fail "binary-corrupt launch intent file"
+    return 1
+  fi
+}
+
 review_launch_validate() {
   [[ "${REVIEW_LAUNCH_PLAN[version]}" == 1 ]] || review_launch_fail "unsupported launch profile version" || return
   case "${REVIEW_LAUNCH_PLAN[runtime]}" in auto | krun | apptainer) ;; *)
@@ -52,10 +73,12 @@ review_launch_validate() {
     return 1
   fi
   REVIEW_LAUNCH_SELECTED_NAMES=()
+  REVIEW_LAUNCH_SELECTED_GROUPS=()
+  REVIEW_LAUNCH_INDIVIDUAL_NAMES=()
   declare -A selected=()
   local -a entries=() names=()
   if [[ -n "${REVIEW_LAUNCH_PLAN[env_groups]}" ]]; then
-    [[ "${REVIEW_LAUNCH_PLAN[env_groups]}" != ,* && "${REVIEW_LAUNCH_PLAN[env_groups]}" != *, && "${REVIEW_LAUNCH_PLAN[env_groups]}" != *,,* ]] ||
+    [[ "${REVIEW_LAUNCH_PLAN[env_groups]}" =~ ^[a-z][a-z0-9-]*(,[a-z][a-z0-9-]*)*$ ]] ||
       {
         review_launch_fail "environment groups must be a comma-separated list of supported groups"
         return 1
@@ -70,12 +93,13 @@ review_launch_validate() {
         review_launch_fail "unknown environment capability group"
         return 1
       }
+      REVIEW_LAUNCH_SELECTED_GROUPS+=("$group")
       read -r -a names <<<"${REVIEW_LAUNCH_GROUP_NAMES[$group]}"
       for name in "${names[@]}"; do selected["$name"]=1; done
     done
   fi
   if [[ -n "${REVIEW_LAUNCH_PLAN[env_names]}" ]]; then
-    [[ "${REVIEW_LAUNCH_PLAN[env_names]}" != ,* && "${REVIEW_LAUNCH_PLAN[env_names]}" != *, && "${REVIEW_LAUNCH_PLAN[env_names]}" != *,,* ]] ||
+    [[ "${REVIEW_LAUNCH_PLAN[env_names]}" =~ ^[A-Z][A-Z0-9_]*(,[A-Z][A-Z0-9_]*)*$ ]] ||
       {
         review_launch_fail "environment names must be a comma-separated list of approved names"
         return 1
@@ -98,6 +122,7 @@ review_launch_validate() {
         return 1
       }
       selected["$name"]=1
+      REVIEW_LAUNCH_INDIVIDUAL_NAMES+=("$name")
     done
   fi
   for name in "${!selected[@]}"; do REVIEW_LAUNCH_SELECTED_NAMES+=("$name"); done
@@ -111,10 +136,7 @@ review_launch_read_profile() {
     review_launch_fail "selected launch profile is missing or unreadable"
     return 1
   }
-  (($(wc -c <"$path") <= 16384)) || {
-    review_launch_fail "launch profile exceeds the supported size"
-    return 1
-  }
+  review_launch_text_file "$path" 16384 || return
   declare -A seen=()
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -n "$line" && "$line" != \#* ]] || continue
@@ -223,16 +245,13 @@ review_launch_resolve() {
   done
   REVIEW_LAUNCH_PROFILE="${cli[profile]-$profile_env}"
   ((${#cli[@]} == 0)) || REVIEW_LAUNCH_CUSTOM=1
-  if [[ -z "$REVIEW_LAUNCH_PROFILE" && -e "$REVIEW_LAUNCH_CONFIG/default" ]]; then
+  if [[ -z "$REVIEW_LAUNCH_PROFILE" && (-e "$REVIEW_LAUNCH_CONFIG/default" || -L "$REVIEW_LAUNCH_CONFIG/default") ]]; then
     local -a defaults=()
     [[ -f "$REVIEW_LAUNCH_CONFIG/default" && ! -L "$REVIEW_LAUNCH_CONFIG/default" ]] || {
       review_launch_fail "invalid default launch profile selector"
       return 1
     }
-    (($(wc -c <"$REVIEW_LAUNCH_CONFIG/default") <= 65)) || {
-      review_launch_fail "invalid default launch profile selector"
-      return 1
-    }
+    review_launch_text_file "$REVIEW_LAUNCH_CONFIG/default" 65 || return
     mapfile -t defaults <"$REVIEW_LAUNCH_CONFIG/default"
     ((${#defaults[@]} == 1)) || {
       review_launch_fail "invalid default launch profile selector"
@@ -307,7 +326,7 @@ review_launch_summary() {
     selected=0
     present=0
     missing=()
-    if ((REVIEW_LAUNCH_FILTERED == 0)) || [[ ",${REVIEW_LAUNCH_PLAN[env_groups]}," == *",$group,"* ]]; then selected=1; fi
+    if ((REVIEW_LAUNCH_FILTERED == 0)) || [[ " ${REVIEW_LAUNCH_SELECTED_GROUPS[*]} " == *" $group "* ]]; then selected=1; fi
     for name in "${names[@]}"; do
       if ((selected)); then
         if [[ -v "$name" ]]; then present=1; else missing+=("$name"); fi
@@ -323,12 +342,9 @@ review_launch_summary() {
       printf '\n' >&2
     fi
   done
-  if [[ -n "${REVIEW_LAUNCH_PLAN[env_names]}" ]]; then
-    IFS=, read -r -a names <<<"${REVIEW_LAUNCH_PLAN[env_names]}"
-    for name in "${names[@]}"; do
-      printf '  %s: selected / %s (individual name)\n' "$name" "$([[ -v "$name" ]] && printf present || printf missing)" >&2
-    done
-  fi
+  for name in "${REVIEW_LAUNCH_INDIVIDUAL_NAMES[@]}"; do
+    printf '  %s: selected / %s (individual name)\n' "$name" "$([[ -v "$name" ]] && printf present || printf missing)" >&2
+  done
 }
 
 review_launch_profiles() {
@@ -343,13 +359,25 @@ review_launch_profiles() {
   done
 }
 
+review_launch_destination() {
+  if [[ -e "$1" || -L "$1" ]]; then
+    [[ -f "$1" && ! -L "$1" ]] || {
+      review_launch_fail "launch intent destination must be a regular file or absent"
+      return 1
+    }
+  fi
+}
+
 review_launch_configure() {
   [[ -t 0 && -t 1 ]] || {
     review_launch_fail "configure requires an interactive terminal; scripted callers may write the documented profile format"
     exit 1
   }
-  local field answer value save make_default temp_profile="" temp_default=""
-  trap '[[ -z "$temp_profile" ]] || rm -f -- "$temp_profile"; [[ -z "$temp_default" ]] || rm -f -- "$temp_default"' EXIT
+  local field answer value save make_default
+  # Wait for the foreground save transaction to settle before exiting on a
+  # signal. Its own traps restore previous files before the parent returns.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   printf 'Review launcher profile: %s\n' "$REVIEW_LAUNCH_PROFILE"
   for field in runtime github_auth inherit_omp factory_enabled factory_capacity env_groups env_names; do
     read -r -p "$field [${REVIEW_LAUNCH_PLAN[$field]}]: " answer || {
@@ -374,21 +402,71 @@ review_launch_configure() {
     review_launch_fail "configuration cancelled; previous profile is unchanged"
     exit 1
   }
-  umask 077
-  mkdir -p "$REVIEW_LAUNCH_CONFIG/profiles"
-  chmod 0700 "$REVIEW_LAUNCH_CONFIG" "$REVIEW_LAUNCH_CONFIG/profiles"
-  temp_profile="$(mktemp "$REVIEW_LAUNCH_CONFIG/profiles/.profile.XXXXXXXX")"
-  for field in version runtime github_auth inherit_omp factory_enabled factory_capacity env_groups env_names; do
-    printf '%s=%s\n' "$field" "${REVIEW_LAUNCH_PLAN[$field]}"
-  done >"$temp_profile"
-  case "$make_default" in
-  y | Y | yes)
-    temp_default="$(mktemp "$REVIEW_LAUNCH_CONFIG/.default.XXXXXXXX")"
-    printf '%s\n' "$REVIEW_LAUNCH_PROFILE" >"$temp_default"
-    ;;
-  esac
-  mv -f -- "$temp_profile" "$REVIEW_LAUNCH_CONFIG/profiles/$REVIEW_LAUNCH_PROFILE.profile"
-  [[ -z "$temp_default" ]] || mv -f -- "$temp_default" "$REVIEW_LAUNCH_CONFIG/default"
+  (
+    # Keep save state in this subshell: errexit cannot unwind it before EXIT.
+    temp_profile=""
+    temp_default=""
+    profile_backup=""
+    default_backup=""
+    transaction_started=0
+    committed=0
+    save_default=0
+    profile_destination="$REVIEW_LAUNCH_CONFIG/profiles/$REVIEW_LAUNCH_PROFILE.profile"
+    default_destination="$REVIEW_LAUNCH_CONFIG/default"
+    case "$make_default" in y | Y | yes) save_default=1 ;; esac
+    finish_launch_save() {
+      save_status=$?
+      trap - EXIT
+      trap '' INT TERM
+      rollback_failed=0
+      if ((transaction_started && !committed)); then
+        if [[ -n "$profile_backup" ]]; then
+          mv -fT -- "$profile_backup" "$profile_destination" || rollback_failed=1
+        else rm -f -- "$profile_destination" || rollback_failed=1; fi
+        if ((save_default)); then
+          if [[ -n "$default_backup" ]]; then
+            mv -fT -- "$default_backup" "$default_destination" || rollback_failed=1
+          else rm -f -- "$default_destination" || rollback_failed=1; fi
+        fi
+      fi
+      for pending in "$temp_profile" "$temp_default"; do [[ -z "$pending" ]] || rm -f -- "$pending"; done
+      if ((rollback_failed)); then
+        printf 'ERROR: launch intent rollback failed; private recovery files were retained\n' >&2
+        exit 1
+      fi
+      for pending in "$profile_backup" "$default_backup"; do [[ -z "$pending" ]] || rm -f -- "$pending"; done
+      exit "$save_status"
+    }
+    trap 'finish_launch_save' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    review_launch_destination "$profile_destination"
+    ((save_default == 0)) || review_launch_destination "$default_destination"
+    umask 077
+    mkdir -p "$REVIEW_LAUNCH_CONFIG/profiles"
+    chmod 0700 "$REVIEW_LAUNCH_CONFIG" "$REVIEW_LAUNCH_CONFIG/profiles"
+    temp_profile="$(mktemp "$REVIEW_LAUNCH_CONFIG/profiles/.profile.XXXXXXXX")"
+    for field in version runtime github_auth inherit_omp factory_enabled factory_capacity env_groups env_names; do
+      printf '%s=%s\n' "$field" "${REVIEW_LAUNCH_PLAN[$field]}"
+    done >"$temp_profile"
+    if ((save_default)); then
+      temp_default="$(mktemp "$REVIEW_LAUNCH_CONFIG/.default.XXXXXXXX")"
+      printf '%s\n' "$REVIEW_LAUNCH_PROFILE" >"$temp_default"
+    fi
+    if [[ -f "$profile_destination" ]]; then
+      profile_backup="$(mktemp "$REVIEW_LAUNCH_CONFIG/profiles/.profile-backup.XXXXXXXX")"
+      cp -p -- "$profile_destination" "$profile_backup"
+    fi
+    if ((save_default)) && [[ -f "$default_destination" ]]; then
+      default_backup="$(mktemp "$REVIEW_LAUNCH_CONFIG/.default-backup.XXXXXXXX")"
+      cp -p -- "$default_destination" "$default_backup"
+    fi
+    # Arm rollback before mv: a queued trap can run before its next command.
+    transaction_started=1
+    mv -fT -- "$temp_profile" "$profile_destination"
+    ((save_default == 0)) || mv -fT -- "$temp_default" "$default_destination"
+    committed=1
+  )
   printf 'Saved launch intent for %s. No runtime was started.\n' "$REVIEW_LAUNCH_PROFILE"
   exit 0
 }

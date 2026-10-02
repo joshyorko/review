@@ -7,6 +7,7 @@ from pathlib import Path
 import pty
 import secrets
 import select
+import signal
 import subprocess
 import tempfile
 import time
@@ -60,6 +61,27 @@ print(json.dumps({"runtime": tool, "args": args, "names": sorted(forwarded), "co
                   "stored_authority": forwarded.get("GH_TOKEN") == os.environ["FIXTURE_STORED_TOKEN"],
                   "environment_authority": forwarded.get("GH_TOKEN") == os.environ.get("FIXTURE_ENV_TOKEN"),
                   "same_authority": forwarded.get("GH_TOKEN") == forwarded.get("GITHUB_TOKEN")}))
+'''
+
+RENAME_INTERRUPTION = r'''#!/usr/bin/python3
+import os, signal, subprocess, sys
+from pathlib import Path
+destination = sys.argv[-1]
+mode = os.environ["FIXTURE_RENAME_MODE"]
+marker = Path(os.environ["FIXTURE_RENAME_MARKER"])
+matching = ((mode.startswith("profile") and destination.endswith("personal.profile")) or
+            (mode.startswith("default") and destination.endswith("/default")))
+inject = matching and not marker.exists()
+if inject and mode.endswith("fail"):
+    marker.touch()
+    sys.exit(19)
+if inject and mode.endswith("before"):
+    marker.touch()
+    signal.pause()
+subprocess.run(["/usr/bin/mv", *sys.argv[1:]], check=True)
+if inject and mode.endswith("after"):
+    marker.touch()
+    signal.pause()
 '''
 
 
@@ -154,6 +176,30 @@ print(os.environ['FIXTURE_STORED_TOKEN'])
         self.assertEqual(result["controls"]["LUNA_FACTORY_ENABLED"], "1")
         self.assertEqual(result["controls"]["LUNA_FACTORY_CAPACITY"], "100")
         self.assertEqual(sum("--factory-verifier-probe" in c["args"] for c in self.calls()), 1)
+
+    def test_apptainer_factory_probe_keeps_the_verifier_device_mount(self):
+        # The probe intentionally starts with a clean environment, so its
+        # controlled executable uses a fixed fixture sink instead of env input.
+        tool = self.root / "tools/apptainer"
+        probe = """import json, sys
+args = sys.argv[1:]
+if '--factory-verifier-probe' in args or (args and args[0] == 'exec'):
+    with open(%r, 'a') as f:
+        f.write(json.dumps({'tool': 'apptainer', 'args': args}) + '\\n')
+    if '/dev/full:/dev/full' not in args:
+        print('verifier device missing', file=sys.stderr)
+        sys.exit(78)
+    if '--factory-verifier-probe' in args:
+        print('{"kind":"review-factory-verifier","status":"available"}')
+    sys.exit(0)
+""" % str(self.calls_path)
+        tool.write_text(RUNTIME.replace("import json, os, sys\n", probe + "\nimport json, os, sys\n", 1))
+        self.profile(runtime="apptainer", factory_enabled="true")
+        result = self.receipt(self.run_launch("--launcher-profile", "personal", "owner/repo"))
+        self.assertEqual(result["runtime"], "apptainer")
+        probes = [c for c in self.calls() if '--factory-verifier-probe' in c['args'] or c['args'][0] == 'exec']
+        self.assertEqual(len(probes), 2)
+        self.assertTrue(all('/dev/full:/dev/full' in c['args'] for c in probes))
 
     def test_explicit_environment_zero_disables_profile_factory_and_inheritance(self):
         self.profile(factory_enabled="true", inherit_omp="true")
@@ -308,13 +354,79 @@ print(os.environ['FIXTURE_STORED_TOKEN'])
         self.run_launch("--launcher-profile", "personal", "owner/repo", ok=False)
         self.assertFalse(marker.exists())
 
+    def test_binary_corruption_is_rejected_before_shell_parsing(self):
+        path = self.profile()
+        for contents in (PROFILE.encode().replace(b"runtime=auto", b"runtime=au\0to"),
+                         PROFILE.encode().replace(b"version=1", b"ver\0sion=1"),
+                         PROFILE.encode() + b"\0\n"):
+            with self.subTest(contents=repr(contents[:30])):
+                self.calls_path.unlink(missing_ok=True)
+                path.write_bytes(contents)
+                self.run_launch("--launcher-profile", "personal", "owner/repo", ok=False)
+                self.assertEqual(self.calls(), [])
+        path.write_text(PROFILE)
+        for contents in (b"per\0sonal\n", b"personal\0unapproved\n"):
+            with self.subTest(selector=repr(contents)):
+                self.calls_path.unlink(missing_ok=True)
+                (self.config / "default").write_bytes(contents)
+                self.run_launch("owner/repo", ok=False)
+                self.assertEqual(self.calls(), [])
+
+    def test_multiline_capability_intent_is_rejected_without_truncation(self):
+        cases = [("--env-groups", "openai\nFOO_SECRET"),
+                 ("--env-names", "OPENAI_API_KEY\nFOO_SECRET")]
+        for flag, value in cases:
+            with self.subTest(flag=flag):
+                self.calls_path.unlink(missing_ok=True)
+                self.run_launch(flag, value, "owner/repo", ok=False)
+                self.assertEqual(self.calls(), [])
+        for name, value in (("REVIEW_ENV_GROUPS", "openai\nFOO_SECRET"),
+                            ("REVIEW_ENV_NAMES", "OPENAI_API_KEY\nFOO_SECRET")):
+            with self.subTest(variable=name):
+                self.calls_path.unlink(missing_ok=True)
+                env = dict(self.env, **{name: value})
+                self.run_launch("owner/repo", env=env, ok=False)
+                self.assertEqual(self.calls(), [])
+
+    def test_dangling_default_selector_never_restores_compatibility_authority(self):
+        self.profile(runtime="apptainer", github_auth="gh-cli", env_groups="")
+        (self.config / "default").symlink_to(self.root / "missing-selector")
+        self.run_launch("owner/repo", ok=False)
+        self.assertEqual(self.calls(), [])
+
+    def test_configure_refuses_invalid_destinations_before_changing_profile(self):
+        path = self.profile()
+        original = path.read_bytes()
+        destination = self.config / "default"
+        outside = self.root / "outside"
+        outside.mkdir()
+        for kind in ("directory", "directory-link", "dangling-link"):
+            with self.subTest(kind=kind):
+                path.write_bytes(original)
+                if kind == "directory": destination.mkdir()
+                elif kind == "directory-link": destination.symlink_to(outside, target_is_directory=True)
+                else: destination.symlink_to(self.root / "missing-selector")
+                try:
+                    status, _ = self.configure_tty("apptainer\n\n\n\n\n\n\ny\ny\n")
+                    self.assertNotEqual(status, 0)
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(list(outside.iterdir()), [])
+                    if kind == "directory": self.assertEqual(list(destination.iterdir()), [])
+                    self.assertEqual(self.calls(), [])
+                finally:
+                    if kind == "directory":
+                        for nested in destination.iterdir(): nested.unlink()
+                        destination.rmdir()
+                    else: destination.unlink()
+                    for nested in outside.iterdir(): nested.unlink()
+
     def test_profiles_lists_only_intent_without_resolving_credentials_or_starting_runtime(self):
         self.profile()
         result = self.run_launch("profiles")
         self.assertIn("personal", result.stdout)
         self.assertEqual(self.calls(), [])
 
-    def configure_tty(self, answers):
+    def configure_tty(self, answers, interrupt_at=None):
         master, slave = pty.openpty()
         process = subprocess.Popen([str(LAUNCHER), "review", "configure", "personal"], env=self.env,
                                    stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
@@ -322,19 +434,51 @@ print(os.environ['FIXTURE_STORED_TOKEN'])
         os.write(master, answers.encode())
         output = bytearray()
         deadline = time.monotonic() + 15
+        interrupted = False
         while time.monotonic() < deadline:
             if select.select([master], [], [], 0.1)[0]:
                 try:
                     output.extend(os.read(master, 65536))
                 except OSError:
                     break
+            if interrupt_at is not None and interrupt_at.exists() and not interrupted:
+                os.killpg(process.pid, signal.SIGINT)
+                interrupted = True
             if process.poll() is not None:
                 break
         if process.poll() is None:
             process.kill()
         process.wait(timeout=5)
         os.close(master)
+        if interrupt_at is not None:
+            self.assertTrue(interrupted, "did not reach the controlled publication boundary")
         return process.returncode, output.decode(errors="replace")
+
+    def test_save_rolls_back_both_files_on_commit_interruption_or_failure(self):
+        path = self.profile()
+        original_profile = path.read_bytes()
+        (self.config / "profiles/older.profile").write_bytes(original_profile)
+        destination = self.config / "default"
+        original_default = b"older\n"
+        destination.write_bytes(original_default)
+        tool = self.root / "tools/mv"
+        tool.write_text(RENAME_INTERRUPTION)
+        tool.chmod(0o755)
+        marker = self.root / "rename-marker"
+        self.env["FIXTURE_RENAME_MARKER"] = str(marker)
+        for mode in ("profile-after", "default-before", "default-after", "default-fail"):
+            with self.subTest(mode=mode):
+                path.write_bytes(original_profile)
+                destination.write_bytes(original_default)
+                marker.unlink(missing_ok=True)
+                self.env["FIXTURE_RENAME_MODE"] = mode
+                status, _ = self.configure_tty("apptainer\n\n\n\n3\n-\n-\ny\ny\n",
+                                               None if mode.endswith("fail") else marker)
+                self.assertNotEqual(status, 0)
+                self.assertEqual(path.read_bytes(), original_profile)
+                self.assertEqual(destination.read_bytes(), original_default)
+                self.assertEqual(list(self.config.rglob(".*")), [])
+                self.assertEqual(self.calls(), [])
 
     def test_configure_is_private_atomic_and_stores_no_credentials(self):
         status, output = self.configure_tty("apptainer\ngh-cli\ntrue\nfalse\n3\naws-sdk,typesafe\n\ny\ny\n")

@@ -57,13 +57,13 @@ factory_verifier_probe() (
       mkdir -m 0700 "$scratch/home" "$scratch/tmp"
       if ! timeout --foreground --signal=TERM --kill-after=5s 180s env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
         apptainer exec --containall --cleanenv --home "$scratch/home:/home/bluefin" \
-        --bind "$scratch/tmp:/tmp" "$image" /usr/bin/test -r \
+        --bind /dev/full:/dev/full --bind "$scratch/tmp:/tmp" "$image" /usr/bin/test -r \
         /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts; then
         fail "Review image lacks the packaged Factory verifier probe or Apptainer could not prepare it: ${image}"
       fi
       if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
         timeout --foreground --signal=TERM --kill-after=5s 45s apptainer run --containall --no-eval \
-        --home "$scratch/home:/home/bluefin" --bind "$scratch/tmp:/tmp" "$image" \
+        --home "$scratch/home:/home/bluefin" --bind /dev/full:/dev/full --bind "$scratch/tmp:/tmp" "$image" \
         --factory-verifier-probe >"$scratch/result.stdout" 2>"$scratch/result.stderr"; then
         status=0
       else
