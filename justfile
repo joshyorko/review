@@ -45,13 +45,18 @@ kvm_device_ready() {
 }
 kvm_runtime_ready() {
   local device="${REVIEW_TEST_KVM_DEVICE:-/dev/kvm}"
+  local runtime
   command -v podman &>/dev/null || { KVM_FAILURE="Podman is unavailable"; return 1; }
   podman info &>/dev/null || { KVM_FAILURE="Podman is not reachable"; return 1; }
   local selected uri
   selected="$(podman_selected_connection)" || { KVM_FAILURE="Podman connections could not be resolved"; return 1; }
   IFS=$'\t' read -r uri _ <<<"$selected"
   if [[ -z "$uri" || "$uri" == unix://* ]]; then
-    command -v krun &>/dev/null || { KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; }
+    runtime="$(podman info --runtime=krun --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null)" || {
+      KVM_FAILURE="the krun OCI runtime is unavailable"
+      return 1
+    }
+    [[ "$runtime" == krun ]] || { KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; }
     kvm_device_ready || { KVM_FAILURE="${device} is not readable and writable"; return 1; }
   fi
   return 0
