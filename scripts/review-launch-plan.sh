@@ -414,6 +414,8 @@ review_launch_configure() {
     profile_destination="$REVIEW_LAUNCH_CONFIG/profiles/$REVIEW_LAUNCH_PROFILE.profile"
     default_destination="$REVIEW_LAUNCH_CONFIG/default"
     case "$make_default" in y | Y | yes) save_default=1 ;; esac
+    # Invoked only by this transaction's EXIT trap below.
+    # shellcheck disable=SC2329
     finish_launch_save() {
       save_status=$?
       trap - EXIT
