@@ -480,6 +480,146 @@ if '--factory-verifier-probe' in args or (args and args[0] == 'exec'):
                 self.assertEqual(list(self.config.rglob(".*")), [])
                 self.assertEqual(self.calls(), [])
 
+    def test_concurrent_save_refuses_busy_transaction_then_retains_its_successful_retry(self):
+        profile = self.profile()
+        old_profile = profile.read_bytes()
+        (self.config / "default").write_text("personal\n")
+        lock_file = self.config / 'configure.lock'
+        lock_file.write_bytes(b'fixture lock content\n')
+        lock_inode = lock_file.stat().st_ino
+        published = self.root / "A-published"
+        waiting = self.root / "B-lock-requested"
+        restoring = self.root / "A-restoring"
+        release = self.root / "A-release"
+        mv = self.root / "tools/mv"
+        mv.write_text("""#!/usr/bin/python3
+import os, signal, subprocess, sys
+from pathlib import Path
+subprocess.run(['/usr/bin/mv', *sys.argv[1:]], check=True)
+marker = os.environ.get('FIXTURE_A_MARKER')
+if marker and sys.argv[-1].endswith('/A.profile') and not Path(marker).exists():
+    Path(marker).touch()
+    signal.pause()
+if marker and sys.argv[-1].endswith('/default') and Path(marker).exists():
+    Path(os.environ['FIXTURE_A_RESTORING']).touch()
+    while not Path(os.environ['FIXTURE_A_RELEASE']).exists():
+        import time
+        time.sleep(0.01)
+""")
+        mv.chmod(0o755)
+        lock = self.root / "tools/flock"
+        lock.write_text("""#!/usr/bin/python3
+import os, sys
+from pathlib import Path
+marker = os.environ.get('FIXTURE_B_MARKER')
+if marker: Path(marker).touch()
+os.execv('/usr/bin/flock', ['/usr/bin/flock', *sys.argv[1:]])
+""")
+        lock.chmod(0o755)
+        processes = []
+        masters = []
+
+        def start(name, **variables):
+            master, slave = pty.openpty()
+            env = dict(self.env, **variables)
+            process = subprocess.Popen([str(LAUNCHER), 'review', 'configure', name], env=env,
+                                       stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+            os.close(slave)
+            masters.append(master)
+            processes.append(process)
+            os.write(master, b'apptainer\n\n\n\n3\n-\n-\ny\ny\n')
+            return process
+
+        def await_marker(marker, process):
+            deadline = time.monotonic() + 5
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                select.select([], [], [], 0.01)
+            return marker.exists()
+
+        try:
+            a = start('A', FIXTURE_A_MARKER=str(published),
+                      FIXTURE_A_RESTORING=str(restoring), FIXTURE_A_RELEASE=str(release))
+            self.assertTrue(await_marker(published, a), 'first save did not reach real profile publication')
+            b = start('B', FIXTURE_B_MARKER=str(waiting))
+            self.assertNotEqual(b.wait(timeout=5), 0, 'later configure published while an earlier rollback still owned the default')
+            self.assertTrue(waiting.exists(), 'later save did not request the publication lock')
+            self.assertFalse((self.config / 'profiles/B.profile').exists())
+            os.killpg(a.pid, signal.SIGINT)
+            self.assertTrue(await_marker(restoring, a), 'first save did not reach real rollback')
+            b = start('B')
+            self.assertNotEqual(b.wait(timeout=5), 0, 'publication lock was released before rollback settled')
+            release.touch()
+            self.assertNotEqual(a.wait(timeout=5), 0)
+            b = start('B')
+            self.assertEqual(b.wait(timeout=5), 0)
+            self.assertEqual((self.config / 'default').read_bytes(), b'B\n')
+            self.assertTrue((self.config / 'profiles/B.profile').is_file())
+            self.assertFalse((self.config / 'profiles/A.profile').exists())
+            self.assertEqual(profile.read_bytes(), old_profile)
+            self.assertEqual(lock_file.read_bytes(), b'fixture lock content\n')
+            self.assertEqual(lock_file.stat().st_ino, lock_inode)
+            self.assertEqual(self.calls(), [])
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=5)
+            for master in masters:
+                os.close(master)
+
+    def test_invalid_lock_destinations_refuse_before_profile_publication(self):
+        profile = self.profile()
+        original = profile.read_bytes()
+        lock = self.config / 'configure.lock'
+        outside = self.root / 'outside-lock'
+        outside.write_bytes(b'outside unchanged\n')
+        for kind in ('directory', 'symlink', 'dangling-link', 'fifo'):
+            with self.subTest(kind=kind):
+                if kind == 'directory': lock.mkdir()
+                elif kind == 'fifo': os.mkfifo(lock)
+                else: lock.symlink_to(outside if kind == 'symlink' else self.root / 'missing-lock')
+                try:
+                    status, _ = self.configure_tty('apptainer\n\n\n\n\n\n\ny\ny\n')
+                    self.assertNotEqual(status, 0)
+                    self.assertEqual(profile.read_bytes(), original)
+                    self.assertFalse((self.config / 'default').exists())
+                    self.assertEqual(outside.read_bytes(), b'outside unchanged\n')
+                    self.assertEqual(self.calls(), [])
+                finally:
+                    if kind == 'directory': lock.rmdir()
+                    else: lock.unlink()
+
+    def test_lock_acquisition_error_is_not_reported_as_contention(self):
+        profile = self.profile()
+        original = profile.read_bytes()
+        tool = self.root / 'tools/flock'
+        tool.write_text('#!/bin/sh\nexit 69\n')
+        tool.chmod(0o755)
+        status, output = self.configure_tty('apptainer\n\n\n\n\n\n\ny\ny\n')
+        self.assertNotEqual(status, 0)
+        self.assertIn('could not acquire the launch profile save lock', output)
+        self.assertNotIn('save is in progress', output)
+        self.assertEqual(profile.read_bytes(), original)
+        self.assertEqual(self.calls(), [])
+
+    def test_missing_flock_blocks_only_configuration_before_storage_mutation(self):
+        hook = self.root / 'missing-flock.sh'
+        hook.write_text('''command() {
+  if [[ "$1" == -v && "${2:-}" == flock ]]; then return 1; fi
+  builtin command "$@"
+}
+''')
+        self.env['BASH_ENV'] = str(hook)
+        status, output = self.configure_tty('apptainer\n\n\n\n\n\n\ny\ny\n')
+        self.assertNotEqual(status, 0)
+        self.assertIn('flock is required', output)
+        self.assertFalse(self.config.exists())
+        self.assertEqual(self.calls(), [])
+        self.profile()
+        self.assertIn('personal', self.run_launch('profiles').stdout)
+        self.run_launch('owner/repo')
+        self.assertFalse((self.config / 'configure.lock').exists())
+
     def test_configure_is_private_atomic_and_stores_no_credentials(self):
         status, output = self.configure_tty("apptainer\ngh-cli\ntrue\nfalse\n3\naws-sdk,typesafe\n\ny\ny\n")
         self.assertEqual(status, 0, output)
@@ -487,6 +627,7 @@ if '--factory-verifier-probe' in args or (args and args[0] == 'exec'):
         contents = path.read_text()
         self.assertIn("runtime=apptainer\n", contents)
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.config / 'configure.lock').stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.config / "default").read_text(), "personal\n")
         for value in (self.env_token, self.stored_token, self.provider_token):
             self.assertNotIn(value, contents + output)

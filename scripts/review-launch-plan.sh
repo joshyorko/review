@@ -373,6 +373,10 @@ review_launch_configure() {
     review_launch_fail "configure requires an interactive terminal; scripted callers may write the documented profile format"
     exit 1
   }
+  command -v flock >/dev/null 2>&1 || {
+    review_launch_fail "flock is required to safely save launch profiles"
+    exit 1
+  }
   local field answer value save make_default
   # Wait for the foreground save transaction to settle before exiting on a
   # signal. Its own traps restore previous files before the parent returns.
@@ -447,6 +451,22 @@ review_launch_configure() {
     umask 077
     mkdir -p "$REVIEW_LAUNCH_CONFIG/profiles"
     chmod 0700 "$REVIEW_LAUNCH_CONFIG" "$REVIEW_LAUNCH_CONFIG/profiles"
+    # Retain one inode: unlinking a lock file would let later saves bypass
+    # owners still using its old descriptor. The kernel releases it on exit.
+    review_launch_destination "$REVIEW_LAUNCH_CONFIG/configure.lock"
+    exec {save_lock_fd}>>"$REVIEW_LAUNCH_CONFIG/configure.lock"
+    if flock --exclusive --nonblock --conflict-exit-code 75 "$save_lock_fd" 2>/dev/null; then
+      :
+    else
+      save_lock_status=$?
+      if ((save_lock_status == 75)); then
+        review_launch_fail "a launch profile save is in progress; retry after it exits"
+      else review_launch_fail "could not acquire the launch profile save lock"; fi
+      exit 1
+    fi
+    # A prior transaction may have changed these paths before lock acquisition.
+    review_launch_destination "$profile_destination"
+    ((save_default == 0)) || review_launch_destination "$default_destination"
     temp_profile="$(mktemp "$REVIEW_LAUNCH_CONFIG/profiles/.profile.XXXXXXXX")"
     for field in version runtime github_auth inherit_omp factory_enabled factory_capacity env_groups env_names; do
       printf '%s=%s\n' "$field" "${REVIEW_LAUNCH_PLAN[$field]}"

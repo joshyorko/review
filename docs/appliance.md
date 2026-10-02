@@ -35,6 +35,8 @@ bluefin review --runtime apptainer acme/widgets
 
 `configure` runs only on an interactive host terminal and starts no isolation runtime or login. Press Enter to retain a setting, or enter `-` to clear `env_groups` or `env_names`. It asks whether to save and make the profile the default before writing private files atomically. EOF or Ctrl-C before saving leaves the previous profile intact.
 
+Configuration requires the host's native `flock`. A concurrent save reports busy before publishing any intent; retry after the active save exits. Cancellation retains the lock until rollback settles, then the kernel releases it. Normal launches do not acquire this save lock.
+
 Profiles live at `${XDG_CONFIG_HOME:-$HOME/.config}/review/launcher/profiles/<name>.profile`. A `default` file beside `profiles/` contains one profile name. Headless setup may write this complete v1 format directly:
 
 ```text
