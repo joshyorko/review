@@ -1299,7 +1299,12 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			} else {
 				if (!["inspect", "patch", "pr-ready"].includes(id ?? "")) throw new Error("choose start inspect|patch|pr-ready; selection never grants merge/deploy authority");
 				items = selectedFactoryItems(id as FactoryAction);
-				if (verb === "converge") settings.converge = true;
+				if (verb === "converge") {
+					if (rest.length !== 2 || rest[0] !== "--target-ref") throw new Error("usage: /factory converge inspect|patch --target-ref <branch>; target ref must be explicit before observation or dispatch");
+					const targetRef = rest[1]!;
+					items = items.map((item) => ({ ...item, targetRef }));
+					settings.converge = true;
+				}
 			}
 			const batch = await service.submit(items, { capacity: settings.capacity ?? service.capacity, maxAttempts: settings.maxAttempts ?? 3, maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3, mode: settings.mode ?? "once", dependencies: settings.dependencies, converge: settings.converge });
 			const preflight = service.status(batch.id);
@@ -1406,7 +1411,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					return;
 				}
 				if (args === "help" || args === "--help") {
-					notifyCommand(ctx, "Selected batches: /factory (dashboard), Review Shift+F, /factory start inspect|patch|pr-ready. Finite convergence: /factory converge inspect|patch over the explicit Review selection. Controls: status|inspect <batch>, reconcile <batch>, pause|resume|stop <batch>, retry|exclude <batch> <item>, claims status|reconcile, export|discard <batch>. Diagnostics: /factory debug. Conversational objective: /factory -- <objective>.");
+					notifyCommand(ctx, "Selected batches: /factory (dashboard), Review Shift+F, /factory start inspect|patch|pr-ready. Finite convergence: /factory converge inspect|patch --target-ref <branch> over the explicit Review selection. Headless /factory run JSON supplies targetRef on every convergence item. Controls: status|inspect <batch>, reconcile <batch>, pause|resume|stop <batch>, retry|exclude <batch> <item>, claims status|reconcile, export|discard <batch>. Diagnostics: /factory debug. Conversational objective: /factory -- <objective>.");
 					return;
 				}
 				if (args === "debug" || args === "--debug") {

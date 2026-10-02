@@ -39,9 +39,11 @@ revision link is the skill itself.
 | Typed convergence graph keeps prerequisite, overlap, inferred, and subject/generation evidence separate | `core/graph.ts` — `evaluateWorkGraph`; `tests/luna_factory.test.ts` |
 
 Finite convergence uses the existing BatchService and state root. Select up to
-ten explicit Review items, then use `/factory converge patch` or
-`/factory converge inspect`. Headless `/factory run` accepts `converge: true`
-beside its explicit items, target refs and original limits. `/factory reconcile
+ten explicit Review items, then use `/factory converge patch --target-ref
+<branch>` or `/factory converge inspect --target-ref <branch>`. The target ref
+is required and captured before GitHub observation; convergence never infers
+the repository default branch. Headless `/factory run` accepts `converge: true`
+beside explicit items with `targetRef` set on every item. `/factory reconcile
 <batch>` refreshes authoritative observations without a model heartbeat.
 
 Authoritative `requires` and `stacked-on` relations gate READY work. `contains`

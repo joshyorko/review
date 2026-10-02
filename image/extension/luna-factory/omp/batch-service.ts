@@ -99,14 +99,16 @@ export class BatchService {
 	private bindings = new Map<string, { binding: NativeBinding } | { error: string }>();
 	private fatal?: string;
 	private readonly preflight: typeof sandboxPreflight;
+	private readonly runVerification: typeof sandboxTest;
 
-	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root, preflight: typeof sandboxPreflight = sandboxPreflight) {
+	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root, preflight: typeof sandboxPreflight = sandboxPreflight, runVerification: typeof sandboxTest = sandboxTest) {
 		this.root = root;
 		this.github = github;
 		this.sdk = sdk;
 		this.schema = schema;
 		this.capacity = capacity;
 		this.preflight = preflight;
+		this.runVerification = runVerification;
 		if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("invalid shared Factory capacity");
 		this.store = new BatchStore(root);
 		this.claims = new ResourceClaims(root, claimsRoot);
@@ -767,7 +769,7 @@ export class BatchService {
 		const verificationPredicates: PredicateEvidence[] = [];
 		let verification = `Verified tree: ${tree}\nPatch preview (${Math.min(patch.length, 131072)} of ${patch.length} characters; full content is retained as evidence-0):\n${patch.slice(0, 131072)}\n`;
 		for (const [index, test] of [...new Set([...mandatory, ...worker.tests])].entries()) {
-			const result = await sandboxTest(testWorkspace, test, signal);
+			const result = await this.runVerification(testWorkspace, test, signal);
 			const artifact = join(evidenceDir, `test-${index}.txt`);
 			writeFileSync(artifact, `command: ${test}\nexit: ${result.exitCode}\n${result.output}`, { flag: "wx", mode: 0o600 });
 			artifacts.push(artifact); tests.push({ command: test, outcome: result.exitCode === 0 ? "pass" : "fail", artifact });

@@ -9,15 +9,37 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
 import { BatchGitHub } from "../image/extension/luna-factory/omp/batch-github.ts";
-import { type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
+import { createBatch, type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { digest } from "../image/extension/luna-factory/core/batch.ts";
 import { projectBatch } from "../image/extension/luna-factory/ui/projection.ts";
 import { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { registerFactorySelection } from "../image/extension/luna-factory/omp/batch-bridge.ts";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const subject = { repo: "example/repo", base: "a".repeat(40), head: "b".repeat(40) };
+const execFileAsync = promisify(execFile);
+const localExecutablePreflight = async (_workspace: string, required: readonly string[], signal: AbortSignal) => {
+	const available: string[] = [], missing: string[] = [];
+	for (const executable of required) {
+		try { await execFileAsync("bash", ["--noprofile", "--norc", "-c", 'command -v -- "$1" >/dev/null', "factory-test-preflight", executable], { signal, timeout: 5000, env: { PATH: process.env.PATH } }); available.push(executable); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") missing.push(executable); else throw error; }
+	}
+	return { available, missing, scope: "executable-presence-only" as const };
+};
+const runFixtureVerification = async (workspace: string, command: string, signal: AbortSignal) => {
+	if (command !== "bash ./tests/acceptance.sh") throw new Error("portable convergence fixture refused an unrecognized verification command");
+	try {
+		const result = await execFileAsync("bash", ["--noprofile", "--norc", "-c", command], { cwd: workspace, signal, timeout: 120_000, maxBuffer: 262144, env: { PATH: process.env.PATH } });
+		return { exitCode: 0, output: `${result.stdout}${result.stderr}` };
+	} catch (error) {
+		const failure = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
+		if (typeof failure.code !== "number") throw error;
+		return { exitCode: failure.code, output: `${failure.stdout ?? ""}${failure.stderr ?? ""}` };
+	}
+};
 const source = { kind: "github-pull-request" as const, identity: "PR_example_1", predicate: "merged-upstream" as const };
 const initial = () => emptyLedger("run-observed" as RunId, {
 	statement: "Observe the declared PR outcome", nonGoals: ["implementation", "merge"], permittedEffects: ["read"],
@@ -84,10 +106,26 @@ test("explicit non-default target is resolved through the GitHub observation sea
 	assert.ok(paths.some((path) => path.endsWith("git/ref/heads/self-hosted")));
 });
 
+test("graph snapshot refuses a missing target before any GitHub request", async () => {
+	let calls = 0;
+	const github = new BatchGitHub("fixture", (async () => { calls += 1; return { ok: true, json: async () => ({}) }; }) as typeof fetch);
+	await assert.rejects(() => github.snapshot({ key: "example/repo#1", repo: "example/repo", number: 1, kind: "issue", action: "patch", overlaps: [], graphObservation: true }), /explicit target ref/i);
+	assert.equal(calls, 0);
+});
+
+test("finite convergence requires an explicit target ref before creating a batch", () => {
+	const selected: SelectedItem = { key: "example/repo#1", repo: "example/repo", number: 1, kind: "issue", action: "patch", overlaps: [] };
+	assert.throws(() => createBatch([selected], { id: "batch-target", capacity: 1, maxAttempts: 1, maxTotalAttempts: 1, mode: "once", converge: true }), /explicit target ref/i);
+	const explicit = createBatch([{ ...selected, targetRef: "stable/2026" }], { id: "batch-target-explicit", capacity: 1, maxAttempts: 1, maxTotalAttempts: 1, mode: "once", converge: true });
+	assert.equal(explicit.items[0]!.selected.targetRef, "stable/2026");
+	assert.throws(() => createBatch([{ ...selected, kind: "pr", baseRef: "main", targetRef: "staging" }], { id: "batch-target-conflict", capacity: 1, maxAttempts: 1, maxTotalAttempts: 1, mode: "once", converge: true }), /contradicts selected PR base/i);
+	assert.throws(() => createBatch([{ ...selected, action: "pr-ready", targetRef: "main" }], { id: "batch-target-unsupported", capacity: 1, maxAttempts: 1, maxTotalAttempts: 1, mode: "once", converge: true }), /hosted PR-ready/i);
+});
+
 test("selected mechanical convergence completes and re-observes without SDK or mutation claims", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-observed-convergence-"));
 	let merged = true;
-	const selected: SelectedItem = { key: "example/repo#1", repo: "example/repo", number: 1, kind: "pr", action: "inspect", overlaps: [], repositoryId: "R_repo", itemId: source.identity, acceptanceRevision: "acceptance-1", base: subject.base, head: subject.head, baseRef: "self-hosted", observe: "merged-upstream" };
+	const selected: SelectedItem = { key: "example/repo#1", repo: "example/repo", number: 1, kind: "pr", action: "inspect", overlaps: [], repositoryId: "R_repo", itemId: source.identity, acceptanceRevision: "acceptance-1", base: subject.base, head: subject.head, baseRef: "self-hosted", observe: "merged-upstream", targetRef: "self-hosted" };
 	const github = { snapshot: async () => selected, assertFresh: async () => {}, observeGraph: async () => ({ generation: "G1", relations: [], nodes: [{ key: selected.key, generation: "G1", subject, acceptanceRevision: selected.acceptanceRevision, required: true, target: "merged-upstream", state: merged ? "DONE" : "QUEUED", proof: merged ? "merged-upstream" : undefined, proofCurrent: merged }] }) };
 	const service = new BatchService(root, github as never, undefined, {} as never, 2, join(root, "claims"));
 	try {
@@ -108,7 +146,7 @@ test("selected mechanical convergence completes and re-observes without SDK or m
 	} finally { await service.shutdown(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("one selected graph drives real native sessions, verification and bounded repair without follow-up", async () => {
+test("portable selected graph runs actual fixture checks and repair without follow-up; sandbox qualification is separate", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-convergence-vertical-"));
 	const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@localhost", ...args], { cwd, encoding: "utf8" }).trim();
 	const seed = join(root, "seed"); mkdirSync(join(seed, "tests"), { recursive: true });
@@ -151,7 +189,9 @@ test("one selected graph drives real native sessions, verification and bounded r
 		} } };
 	} };
 	const github = { snapshot: async (item: SelectedItem) => item, assertFresh: async () => {}, observeGraph: async () => ({ generation: "G1", nodes: items.map((item) => ({ key: item.key, generation: "G1", required: true, target: "verified-patch", acceptanceRevision: item.acceptanceRevision, subject: { repo: item.repo, base: sha, head: sha }, state: item.repo.endsWith("/held") && heldUnavailable ? "UNKNOWN" : "QUEUED", blocker: item.repo.endsWith("/held") && heldUnavailable ? "authoritative held fixture is unavailable; restore its source" : undefined })), relations: [{ from: items[1]!.key, to: items[0]!.key, kind: "requires", authority: "authoritative", source: "captured native dependency", stage: "verified-patch" }] }) };
-	const service = new BatchService(root, github as never, sdk as never, schema as never, 2, join(root, "claims"));
+	// This controller regression executes its checked-in Bash acceptance fixture
+	// as a real subprocess, but does not claim to qualify verifier containment.
+	const service = new BatchService(root, github as never, sdk as never, schema as never, 2, join(root, "claims"), localExecutablePreflight, runFixtureVerification);
 	try {
 		const batch = await service.submit(items, { capacity: 2, maxAttempts: 3, maxTotalAttempts: 8, mode: "retain", converge: true });
 		for (const item of batch.items) {
@@ -192,23 +232,33 @@ test("headless and selected Review commands enter the same explicit convergence 
 	const originalFetch = globalThis.fetch;
 	const selected: SelectedItem = { key: "example/repo#1", repo: "example/repo", number: 1, kind: "pr", action: "inspect", overlaps: [], observe: "merged-upstream" };
 	const notices: string[] = [];
+	const requests: string[] = [];
 	const commands = new Map<string, { handler(raw: string, context: unknown): Promise<void> }>();
 	const shutdowns: Array<() => Promise<void>> = [];
 	const fluent = new Proxy(() => fluent, { get: () => fluent, apply: () => fluent });
 	const unregister = registerFactorySelection(() => [selected]);
 	try {
-		globalThis.fetch = (async () => ({ ok: true, json: async () => ({ data: { repository: {
+		globalThis.fetch = (async (input: string | URL | Request) => { requests.push(String(input)); return { ok: true, json: async () => String(input).endsWith("/git/ref/heads/self-hosted") ? { object: { sha: subject.base } } : ({ data: { repository: {
 			id: "R_repo", nameWithOwner: "example/repo", defaultBranchRef: { name: "self-hosted", target: { oid: subject.base } },
 			issueOrPullRequest: { id: source.identity, __typename: "PullRequest", title: "Declared mechanical acceptance", body: "Observe only the named merge", closed: true, merged: true, url: "https://github.com/example/repo/pull/1", baseRefOid: subject.base, headRefOid: subject.head, baseRefName: "self-hosted", labels: { nodes: [], pageInfo: { hasNextPage: false } }, files: { nodes: [], pageInfo: { hasNextPage: false } }, closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } } },
-		} } }) })) as typeof fetch;
+		} } }) }; }) as typeof fetch;
 		createLunaFactoryExtension({ zod: new Proxy({}, { get: () => fluent }), registerTool() {}, registerCommand(name: string, definition: { handler(raw: string, context: unknown): Promise<void> }) { commands.set(name, definition); }, appendEntry() {}, setLabel() {}, on(name: string, callback: () => Promise<void>) { if (name === "session_shutdown") shutdowns.push(callback); } } as never,
 			{ env: { LUNA_FACTORY_ENABLED: "1", LUNA_FACTORY_STATE_ROOT: root, LUNA_FACTORY_CLAIMS_ROOT: join(root, "claims"), GH_TOKEN: "fixture-local-only" } });
 		const command = commands.get("factory")!;
 		const context = { hasUI: false, ui: { notify(message: string) { notices.push(message); } } };
 		await command.handler(`run ${JSON.stringify({ items: [selected], converge: true })}`, context);
+		assert.match(notices.at(-1)!, /explicit target ref/i);
+		assert.equal(requests.length, 0, "missing target is rejected before GitHub observation");
+		await command.handler("converge inspect", context);
+		assert.match(notices.at(-1)!, /--target-ref/i);
+		assert.equal(requests.length, 0, "CLI requires a target before GitHub observation");
+		await command.handler("converge inspect --target-ref ../bad", context);
+		assert.match(notices.at(-1)!, /target ref is unsupported/i);
+		assert.equal(requests.length, 0, "invalid target is rejected before GitHub observation");
+		await command.handler(`run ${JSON.stringify({ items: [{ ...selected, targetRef: "self-hosted" }], converge: true })}`, context);
 		assert.match(notices.at(-1)!, /CONVERGED/);
 		assert.match(notices.at(-1)!, /Mechanically observed/);
-		await command.handler("converge inspect", context);
+		await command.handler("converge inspect --target-ref self-hosted", context);
 		assert.match(notices.at(-1)!, /CONVERGED/);
 		assert.match(notices.at(-1)!, /0 observed model calls/);
 	} finally { for (const shutdown of shutdowns) await shutdown(); unregister(); globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
@@ -217,8 +267,8 @@ test("headless and selected Review commands enter the same explicit convergence 
 test("an unrepresentable prerequisite proof withholds its lane without freezing independent observation", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-convergence-assumption-bound-"));
 	const items: SelectedItem[] = [
-		{ key: "example/a#1", repo: "example/a", number: 1, kind: "issue", action: "patch", overlaps: [], acceptanceRevision: "acceptance-1", base: subject.base, head: subject.head },
-		{ key: "example/repo#2", repo: "example/repo", number: 2, kind: "pr", action: "inspect", observe: "merged-upstream", itemId: source.identity, overlaps: [], acceptanceRevision: "acceptance-1", base: subject.base, head: subject.head },
+		{ key: "example/a#1", repo: "example/a", number: 1, kind: "issue", action: "patch", overlaps: [], acceptanceRevision: "acceptance-1", base: subject.base, head: subject.head, targetRef: "self-hosted" },
+		{ key: "example/repo#2", repo: "example/repo", number: 2, kind: "pr", action: "inspect", observe: "merged-upstream", itemId: source.identity, overlaps: [], acceptanceRevision: "acceptance-1", base: subject.base, head: subject.head, targetRef: "self-hosted" },
 	];
 	const prerequisites = Array.from({ length: 16 }, (_, index) => ({ key: `example/dependency#${index + 1}`, generation: "G1", selected: false, required: false, subject, target: "merged-upstream", state: "DONE", proof: "merged-upstream", proofCurrent: true }));
 	const github = { snapshot: async (item: SelectedItem) => item, assertFresh: async () => {}, observeGraph: async () => ({ generation: "G1", nodes: [
