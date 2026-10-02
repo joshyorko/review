@@ -28,6 +28,14 @@ metadata:
 
 The `bluefin review` Homebrew command and `bluefin-review-dev` formula are retained install aliases. They are not the recommended source or product names.
 
+## Host launch intent
+
+`bin/bluefin review` and the installed alias consume `scripts/review-launch-plan.sh` before credential resolution, scope parsing or runtime startup. `configure [name]` and `profiles` run on the host and start no runtime. The complete profile format, flags and precedence are documented in [`docs/appliance.md`](../appliance.md#host-launch-profiles). Profiles do not configure `just review-appliance` or native `bin/omp-review`.
+
+Keep one nonexecutable XDG resolver and canonical approved environment mapping for both runtime branches. CLI overrides explicit environment, then profile, then defaults. Preserve explicit zero, OMP's separate `--profile`, legacy no-profile forwarding, instance identity and the existing krun detection owner. Explicit `krun` never downgrades or runs a SIF; explicit `apptainer` bypasses KVM probing but retains Apptainer/FUSE and verifier gates.
+
+GitHub `gh-cli` selection removes ambient token aliases only for the stored-credential child query and normalizes both aliases to the selected credential. `environment` never falls through. Profiles and diagnostics contain no credential values; auth-source selection does not change Factory's Git author/committer policy. Ambient Apptainer/Singularity environment overrides cannot bypass the resolved capability set. Configure collects confirmation before private atomic writes, and headless launch never prompts.
+
 ## Scope and mode
 
 `scripts/parse-review-args.sh` is the shared argument parser. Repository and organization scopes use `owner/repo` and `org:<name>`. A fresh interactive session asks for scope if none is explicit, restored, or configured; a headless caller must pass one. `REVIEW_DEFAULT_SCOPE` is the generic environment setting. The launcher must not infer scope from the fork parent, GitHub login, or image metadata.
@@ -56,6 +64,7 @@ The current personal package workflow builds an immutable OCI image and matching
 just --list
 bash tests/just-onboarding.sh
 bash tests/launcher-contract.sh
+python3 tests/launcher_profiles_contract.py
 bash tests/appliance-contract.sh
 python3 tests/brew_dev_contract.py
 ```

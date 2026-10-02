@@ -72,6 +72,8 @@ PY
     mkdir -p "$work/payload/launcher/scripts"
     cp "$work/source/scripts/parse-review-args.sh" \
       "$work/payload/launcher/scripts/parse-review-args.sh"
+    cp "$work/source/scripts/review-launch-plan.sh" \
+      "$work/payload/launcher/scripts/review-launch-plan.sh"
     python3 - "$work/payload" "$source_ref" "$sha" "$arch" "$oci_image" "$oci_arch_image" "$oci_digest" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
