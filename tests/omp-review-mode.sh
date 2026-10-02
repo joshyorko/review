@@ -64,6 +64,7 @@ for test_file in "${test_files[@]}"; do
   node --test --test-reporter=tap --disable-warning=MODULE_TYPELESS_PACKAGE_JSON "$test_file"
 done
 python3 tests/personal_brew_oci_contract.py
+python3 tests/launcher_profiles_contract.py
 bash tests/launcher-contract.sh
 
 # The installed-runtime ABI probe is opt-in because normal hermetic tests have no
