@@ -8,6 +8,43 @@ derived OMP per native architecture, but no image or aarch64 build was run here.
 The MemoryD adapter is not packaged: its pinned source commit has no license, so
 packaged MemoryD behavior is not claimed.
 
+## Native qualification on 2026-10-02
+
+This is partial progress on #293. The retained OCI image
+`05ed66d221bbdc9062cd121beb4bb9163e97c05e986e770ba2c0443429b2a904`
+was built from Review `6635a1501fc236a1ce3c7a15e02a8af04c365d3f`, with derived
+OMP 18.4.12 from source `7318a70cf4ed04133366884d2723f72d9d490a15` and
+registration patch SHA-256
+`c4b7cc81811b17519d56865ab50e85675299a1f138dd08444f4173c202ce0a51`.
+The extended build canary ran against those existing bytes without rebuilding.
+Its adapter remains the checksum-verified ephemeral test source below, not a
+packaged or redistributed adapter.
+
+The native canary now invokes `ctx.memory.status`, `search`, and explicit `save`
+through a test-only extension command in the actual derived executable. An
+isolated loopback fixture proves active/writable/searchable status, a scoped
+search result, one explicit saved ID with current session identity, and no
+automatic or unexpected write requests. First-turn recall must appear in the
+provider's system/developer context with `recall_not_authority`, preserving the
+original daemon-down fail-open control. The runtime regression first failed
+because these native operations were absent, then passed against the retained
+image. Network access was disabled and no real model/provider was called.
+
+Native cancellation, superseded-result rejection, session/rebind, compaction,
+and subagent lifecycle controls remain unproved by this slice. ARM, advertised
+Podman/krun and Apptainer transport/storage, extension coexistence, and complete
+packaged MemoryD acceptance also remain separate gates. The retained x86 fixture
+does not satisfy them.
+
+The historical claim below that MemoryD has no release is superseded: MemoryD
+#245 is closed and its immutable v0.1.0 native release exists at source
+`45b5ef31e0d027bd03260d0731d7d5da09a611ef`; its Cargo manifest declares MIT.
+That release does not provide an independently licensed adapter package among
+its published native assets. Adapter distribution authorization and a pinned
+release-shaped adapter artifact remain required; this work infers neither.
+MemoryD #241 still owns adapter semantics, and automatic observation remains
+disabled pending MemoryD #233.
+
 ## Exact heads
 
 | Component | Identity |
@@ -193,7 +230,7 @@ hosted CI, and image publication remain unverified.
 | Derived x86_64 binary selects the adapter and recalls a synthetic fact on the first provider request | TESTED — provider-boundary trace above |
 | Daemon-down recall is fail-open | TESTED — second loopback canary process exited 0 without recalled context |
 | Adapter cancellation, stale/root invalidation, status/search/save, and write policy | TESTED — pinned adapter unit tests only; no live daemon lifecycle integration |
-| Native status/search/explicit save against MemoryD | REMAINING — no runtime exercise; automatic writeback remains disabled |
+| Native status/search/explicit save against MemoryD | TESTED — current derived x86 executable through native runtime, synthetic loopback fixture only; live daemon and packaged integration remain unproved |
 | Derived image build and native aarch64 lane | IMPLEMENTED, NOT RUN — local builder was x86_64; hosted native arm64 build remains pending |
 | Promotion waits for both native builds and both digests | TESTED — static workflow contract only; no hosted promotion |
 | MemoryD adapter distribution authorization | BLOCKED — pinned commit contains no license; adapter is not packaged |
