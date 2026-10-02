@@ -30,6 +30,8 @@ export interface GraphNodeObservation {
 	readonly subject?: GraphSubject;
 	readonly acceptanceRevision?: string;
 	readonly required: boolean;
+	/** False for an observed prerequisite outside the selected execution scope. */
+	readonly selected?: boolean;
 	readonly target: GraphOutcomeStage;
 	readonly state: GraphObservedState;
 	readonly proof?: GraphOutcomeStage;
@@ -80,10 +82,12 @@ function assertGraph(input: WorkGraphObservation): void {
 	const keys = new Set<string>();
 	for (const node of input.nodes) {
 		if (!node.key.trim() || keys.has(node.key)) throw new Error(`duplicate graph node ${node.key}`);
+		if (!["QUEUED", "RUNNING", "VERIFY", "DONE", "BLOCKED", "UNKNOWN", "EXCLUDED"].includes(node.state) || !STAGES.includes(node.target) || typeof node.required !== "boolean" || node.selected !== undefined && typeof node.selected !== "boolean" || node.proof !== undefined && !STAGES.includes(node.proof)) throw new Error(`unsupported graph state/outcome for ${node.key}`);
 		keys.add(node.key);
 		if (node.subject !== undefined && (!node.subject.repo || !node.subject.base)) throw new Error(`node ${node.key} has an incomplete subject`);
 	}
 	for (const relation of input.relations) {
+		if (!["contains", "requires", "implements", "stacked-on", "overlaps"].includes(relation.kind) || !["authoritative", "inferred"].includes(relation.authority) || relation.stage !== undefined && !STAGES.includes(relation.stage)) throw new Error("unsupported graph relation authority/kind/outcome");
 		if (!keys.has(relation.from)) throw new Error(`graph relation has no observed source: ${relationLabel(relation)}`);
 		if (!relation.source.trim()) throw new Error(`graph relation source is required: ${relationLabel(relation)}`);
 	}
@@ -184,12 +188,12 @@ export function evaluateWorkGraph(input: WorkGraphObservation): WorkGraphDecisio
 		if ([...base].every(([key, node]) => node.decision === previous.get(key)?.decision)) break;
 	}
 	const nodes: GraphNodeDecision[] = [...base.values()].map((node) => ({ ...node, blockers: [...node.blockers], softHints: [...node.softHints] }));
-	const ready = nodes.filter((node) => node.decision === "READY").map((node) => node.key);
+	const ready = nodes.filter((node) => node.selected !== false && node.decision === "READY").map((node) => node.key);
 	const blockers = nodes.flatMap((node) => node.blockers.map((blocker) => `${node.key}: ${blocker}`));
 	const softHints = nodes.flatMap((node) => node.softHints);
 	const mandatory = nodes.filter((node) => node.required);
 	const converged = mandatory.length > 0 && mandatory.every((node) => node.decision === "DONE");
-	const active = nodes.some((node) => node.decision === "READY" || node.decision === "RUNNING" || node.decision === "VERIFY");
+	const active = nodes.some((node) => node.selected !== false && (node.decision === "READY" || node.decision === "RUNNING" || node.decision === "VERIFY"));
 	return {
 		generation: input.generation,
 		nodes,

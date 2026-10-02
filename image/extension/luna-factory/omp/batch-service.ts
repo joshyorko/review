@@ -288,6 +288,10 @@ export class BatchService {
 						const taskId = `graph-${digest(`${edge.to}:${stage}`).slice(0, 16)}` as TaskId;
 						values.set(taskId, { kind: "dependency-outcome", taskId, value: satisfied ? "proven" : "unproven", ...(node?.subject ? { binding: { subject: node.subject, stage, ...(previous?.proof?.tree ? { tree: previous.proof.tree } : {}) } } : {}) });
 					}
+					if (values.size > 15) {
+						batch.convergence.observation = { ...batch.convergence.observation!, nodes: batch.convergence.observation!.nodes.map((node) => node.key === item.selected.key ? { ...node, state: "UNKNOWN", blocker: "bounded canonical proof assumption capacity exceeded; preserve the original scope and explicitly resolve its prerequisite representation" } : node) };
+						continue;
+					}
 					item.ledger = { ...item.ledger, assumptionValues: [...values.values()] };
 					const criterion = item.ledger.criteria[0]!;
 					const assumptions = [...(criterion.assumptions ?? []).filter((entry) => entry.kind !== "dependency-outcome" || !entry.taskId.startsWith("graph-")), ...values.values()];

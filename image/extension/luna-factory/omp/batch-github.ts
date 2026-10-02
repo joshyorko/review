@@ -87,9 +87,9 @@ export class BatchGitHub {
 				const current = await this.snapshot({ ...item, graphObservation: true }, !selectedKeys.has(item.key));
 				const implementation = !selectedKeys.has(item.key) ? current.sourcePullRequests?.find((pull) => pull.implements && pull.state === "merged" && pull.baseRef === current.baseRef) : undefined;
 				const proven = current.kind === "pr" && current.sourceState === "merged" || implementation !== undefined;
-				nodes.set(current.key, { key: current.key, generation, acceptanceRevision: current.acceptanceRevision, subject: { repo: current.repo, base: current.base!, head: current.head }, required: selectedKeys.has(current.key), target: current.observe ?? "merged-upstream", state: proven ? "DONE" : current.sourceState === "closed" ? "UNKNOWN" : "QUEUED", proof: proven ? "merged-upstream" : undefined, proofCurrent: proven, blocker: current.sourceState === "closed" && !proven ? "closed issue alone does not prove implementation; observe its actual outcome" : undefined });
+				nodes.set(current.key, { key: current.key, generation, acceptanceRevision: current.acceptanceRevision, subject: { repo: current.repo, base: current.base!, head: current.head }, required: selectedKeys.has(current.key), selected: selectedKeys.has(current.key), target: current.observe ?? "merged-upstream", state: proven ? "DONE" : current.sourceState === "closed" ? "UNKNOWN" : "QUEUED", proof: proven ? "merged-upstream" : undefined, proofCurrent: proven, blocker: current.sourceState === "closed" && !proven ? "closed issue alone does not prove implementation; observe its actual outcome" : undefined });
 				for (const pull of current.sourcePullRequests ?? []) {
-					if (!nodes.has(pull.key)) nodes.set(pull.key, { key: pull.key, generation, subject: { repo: pull.key.split("#")[0]!, base: pull.base, head: pull.head }, required: selectedKeys.has(pull.key), target: "merged-upstream", state: pull.state === "merged" ? "DONE" : pull.state === "open" ? "QUEUED" : "UNKNOWN", proof: pull.state === "merged" ? "merged-upstream" : undefined, proofCurrent: pull.state === "merged" });
+					if (!nodes.has(pull.key)) nodes.set(pull.key, { key: pull.key, generation, subject: { repo: pull.key.split("#")[0]!, base: pull.base, head: pull.head }, required: selectedKeys.has(pull.key), selected: selectedKeys.has(pull.key), target: "merged-upstream", state: pull.state === "merged" ? "DONE" : pull.state === "open" ? "QUEUED" : "UNKNOWN", proof: pull.state === "merged" ? "merged-upstream" : undefined, proofCurrent: pull.state === "merged" });
 					relations.push({ from: pull.key, to: current.key, kind: "implements", authority: pull.implements ? "authoritative" : "inferred", source: `github:closing-reference:${pull.identity}` });
 					if (pull.implements && pull.state === "open") relations.push({ from: current.key, to: pull.key, kind: "overlaps", authority: "authoritative", source: `github:open-implementation:${pull.identity}` });
 				}
@@ -110,7 +110,7 @@ export class BatchGitHub {
 				}
 				return current;
 			} catch (error) {
-				nodes.set(item.key, { key: item.key, generation, required: selectedKeys.has(item.key), target: "merged-upstream", state: "UNKNOWN", blocker: error instanceof Error ? error.message : String(error) });
+				nodes.set(item.key, { key: item.key, generation, required: selectedKeys.has(item.key), selected: selectedKeys.has(item.key), target: "merged-upstream", state: "UNKNOWN", blocker: error instanceof Error ? error.message : String(error) });
 				return undefined;
 			}
 		};

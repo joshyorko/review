@@ -2986,3 +2986,18 @@ test("a settled proof does not become stale from non-load-bearing overlap observ
 		assert.equal(evaluateWorkGraph({ generation: "G1", nodes, relations: [relation] }).nodes[0]!.decision, "DONE");
 	}
 });
+
+test("read-only external prerequisite observations are not authorized READY work", () => {
+	const decision = evaluateWorkGraph({ generation: "G1", nodes: [
+		graphNode("selected", "BLOCKED"),
+		graphNode("external", "QUEUED", { required: false, selected: false }),
+	], relations: [{ from: "selected", to: "external", kind: "requires", authority: "authoritative", source: "native dependency", stage: "merged-upstream" }] });
+	assert.deepEqual(decision.ready, []);
+	assert.equal(decision.verdict, "AUTONOMOUSLY_QUIESCENT");
+	assert.ok(decision.blockers.length > 0);
+});
+
+test("malformed persisted graph state cannot become READY or grant an outcome", () => {
+	assert.throws(() => evaluateWorkGraph({ generation: "G1", nodes: [{ ...graphNode("corrupt"), state: "INVENTED" } as never], relations: [] }), /unsupported|invalid/);
+	assert.throws(() => evaluateWorkGraph({ generation: "G1", nodes: [graphNode("a"), graphNode("b")], relations: [{ from: "a", to: "b", kind: "invented", authority: "authoritative", source: "corrupt retained relationship" } as never] }), /unsupported|invalid/);
+});

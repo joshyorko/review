@@ -411,7 +411,7 @@ export async function runNative(
 		const handles = packet.artifacts ?? [];
 		if (handles.length > MAX_EVIDENCE_HANDLES || handles.reduce((total, handle) => total + handle.bytes, 0) > MAX_EVIDENCE_TOTAL_BYTES || new Set(handles.map((handle) => handle.id)).size !== handles.length) throw new NativeExecutionError("capability-unavailable", "attempt evidence packet exceeds safe bounds or has duplicate handles");
 		const byId = new Map(handles.map((handle) => [handle.id, handle]));
-		for (const handle of handles) if (!Number.isSafeInteger(handle.bytes) || handle.bytes < 0 || handle.bytes > MAX_EVIDENCE_BYTES || !handle.id || !handle.attemptId || !/^[a-f0-9]{64}$/i.test(handle.digest)) throw new NativeExecutionError("capability-unavailable", "attempt evidence packet contains an invalid handle");
+		for (const handle of handles) if (!Number.isSafeInteger(handle.bytes) || handle.bytes < 0 || handle.bytes > MAX_EVIDENCE_BYTES || typeof handle.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(handle.id) || typeof handle.attemptId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(handle.attemptId) || typeof handle.path !== "string" || Buffer.byteLength(handle.path) > 4096 || !/^[a-f0-9]{64}$/i.test(handle.digest)) throw new NativeExecutionError("capability-unavailable", "attempt evidence packet contains an invalid handle");
 		for (const handle of handles) {
 			const parts = relative(resolve(root), resolve(handle.path)).split(sep);
 			if (parts[0] === "evidence" && (parts[2] !== createHash("sha256").update(item.selected.key).digest("hex").slice(0, 16) || parts[3] !== handle.attemptId)) throw new NativeExecutionError("capability-unavailable", "foreign item/attempt evidence ownership in admitted repair packet");

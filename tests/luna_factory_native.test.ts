@@ -228,6 +228,21 @@ test("escaped repository and evidence pages fit the native model transport witho
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("admitted evidence identifiers cannot overwhelm complete native JSON pages", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-evidence-identities-"));
+	try {
+		const { createHash } = await import("node:crypto");
+		const path = join(root, "proof.txt"); const bytes = Buffer.from("proof"); await writeFile(path, bytes);
+		const handle = { id: "evidence-0", attemptId: "attempt-1", path, bytes: bytes.length, digest: createHash("sha256").update(bytes).digest("hex") };
+		for (const field of ["id", "attemptId"] as const) {
+			let creations = 0;
+			const sdk = fake(async () => { creations++; });
+			await assert.rejects(() => runNative(sdk.sdk, schema, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } }, item(root), root, "worker", new AbortController().signal, () => {}, () => {}, "", { attemptId: "attempt-2", artifacts: [{ ...handle, [field]: "x".repeat(32768) }] }), /invalid.*handle|identity|bounded/i);
+			assert.equal(creations, 0);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("missing worker report has a typed correctable protocol failure", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-native-report-"));
 	try {

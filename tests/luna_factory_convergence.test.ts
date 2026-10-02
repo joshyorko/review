@@ -208,3 +208,25 @@ test("headless and selected Review commands enter the same explicit convergence 
 		assert.match(notices.at(-1)!, /0 observed model calls/);
 	} finally { for (const shutdown of shutdowns) await shutdown(); unregister(); globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
 });
+
+test("an unrepresentable prerequisite proof withholds its lane without freezing independent observation", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-convergence-assumption-bound-"));
+	const items: SelectedItem[] = [
+		{ key: "example/a#1", repo: "example/a", number: 1, kind: "issue", action: "patch", overlaps: [], acceptanceRevision: "acceptance-1", base: subject.base, head: subject.head },
+		{ key: "example/repo#2", repo: "example/repo", number: 2, kind: "pr", action: "inspect", observe: "merged-upstream", itemId: source.identity, overlaps: [], acceptanceRevision: "acceptance-1", base: subject.base, head: subject.head },
+	];
+	const prerequisites = Array.from({ length: 16 }, (_, index) => ({ key: `example/dependency#${index + 1}`, generation: "G1", selected: false, required: false, subject, target: "merged-upstream", state: "DONE", proof: "merged-upstream", proofCurrent: true }));
+	const github = { snapshot: async (item: SelectedItem) => item, assertFresh: async () => {}, observeGraph: async () => ({ generation: "G1", nodes: [
+		...items.map((item) => ({ key: item.key, generation: "G1", required: true, subject: { ...subject, repo: item.repo }, acceptanceRevision: item.acceptanceRevision, target: item.observe ?? "verified-patch", state: item.observe ? "DONE" : "QUEUED", proof: item.observe, proofCurrent: Boolean(item.observe) })), ...prerequisites,
+	], relations: prerequisites.map((node) => ({ from: items[0]!.key, to: node.key, kind: "requires", authority: "authoritative", stage: "merged-upstream", source: "native prerequisite" })) }) };
+	const service = new BatchService(root, github as never, undefined, {} as never, 2, join(root, "claims"));
+	try {
+		const batch = await service.submit(items, { capacity: 2, maxAttempts: 1, maxTotalAttempts: 2, mode: "retain", converge: true });
+		await service.resume(batch.id, {}); await service.waitForIdle();
+		const final = service.store.read(batch.id);
+		assert.equal(final.items[1]!.stage, "DONE");
+		assert.equal(final.usage.modelCalls, 0);
+		assert.match(service.status(batch.id), /bounded.*assumption|assumption.*bound/i);
+		assert.equal(projectBatch(final).items.find((item) => item.key === items[0]!.key)?.stage, "UNKNOWN");
+	} finally { await service.shutdown(); await rm(root, { recursive: true, force: true }); }
+});
