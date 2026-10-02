@@ -80,9 +80,10 @@ class LauncherProfilesContract(unittest.TestCase):
                         FIXTURE_ENV_TOKEN=self.env_token, FIXTURE_STORED_TOKEN=self.stored_token,
                         FIXTURE_CALLS=str(self.calls_path), REVIEW_TEST_KVM_DEVICE=str(self.root / "kvm"),
                         REVIEW_TEST_FUSE_DEVICE="/dev/null", OPENAI_API_KEY=self.provider_token,
-                        TYPESAFE_API_KEY=self.provider_token, AWS_ACCESS_KEY_ID=self.provider_token,
+                        AWS_ACCESS_KEY_ID=self.provider_token,
                         AWS_SECRET_ACCESS_KEY=self.provider_token, AWS_SESSION_TOKEN=self.provider_token,
                         AWS_REGION="us-east-1")
+        self.env["TYPESAFE_API_KEY"] = self.provider_token
         Path(self.env["HOME"]).mkdir()
         Path(self.env["REVIEW_TEST_KVM_DEVICE"]).touch()
         for name in ("podman", "apptainer"):
