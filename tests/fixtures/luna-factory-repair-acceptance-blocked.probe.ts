@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { NativeSDK } from "../../image/extension/luna-factory/omp/batch-native.ts";
-import { BatchService, binding, createBatch, currentItem, digest, readArtifacts, repairFixture, report, runNative, schema, tool, toolText } from "./luna-factory-repair-acceptance-support.ts";
+import { BatchService, binding, createBatch, currentItem, digest, readArtifacts, portableRepairFixture, report, runNative, schema, tool, toolText } from "./luna-factory-repair-acceptance-support.ts";
 
 type FixtureTool = { name: string; execute(id: string, args: unknown): Promise<unknown> };
 
@@ -53,7 +53,7 @@ test("a supplied repair handle from another admitted item cannot be read", async
 });
 
 test("long hostile repository names keep directory pages below the native spill boundary", async () => {
-	const fixture = repairFixture(async (tools) => {
+	const fixture = portableRepairFixture(async (tools) => {
 		const raw = toolText(await tool(tools, "factory_files").execute("files", { path: "hostile-names", offset: 0, limit: 100 }));
 		assert.ok(Buffer.byteLength(raw, "utf8") <= 32_768, "an advertised directory page must reach the model as complete JSON, not a native head/tail spill");
 		const page = JSON.parse(raw);
@@ -69,7 +69,7 @@ test("long hostile repository names keep directory pages below the native spill 
 
 test("UTF-8 continuation preserves the complete source at a multibyte page boundary", async () => {
 	const expected = `${"a".repeat(4095)}🦕${"b".repeat(9000)}`;
-	const fixture = repairFixture(async (tools) => {
+	const fixture = portableRepairFixture(async (tools) => {
 		let actual = ""; let offset = 0;
 		for (;;) {
 			const page = JSON.parse(toolText(await tool(tools, "factory_read").execute("read", { path: "unicode-source.txt", offset, limit: 131072 })));
@@ -90,7 +90,7 @@ test("persist and reload quarantine a repair packet copied from another admitted
 	let paused = false;
 	let foreignFeedbackDelivered = false;
 	let foreignArtifactDelivered = false;
-	const fixture = repairFixture(async (tools, prompt) => {
+	const fixture = portableRepairFixture(async (tools, prompt) => {
 		const foreign = prompt.includes("Item: example/repo#2");
 		if (prompt.startsWith("Implement/inspect")) {
 			if (!foreign) {
@@ -139,7 +139,7 @@ test("persist and reload quarantine a repair packet copied from another admitted
 test("an empty worker verification command receives bounded repair without operator follow-up", async () => {
 	let workers = 0;
 	const repairPrompts: string[] = [];
-	const fixture = repairFixture(async (tools, prompt) => {
+	const fixture = portableRepairFixture(async (tools, prompt) => {
 		if (prompt.startsWith("Implement/inspect")) {
 			workers += 1; repairPrompts.push(prompt);
 			await tool(tools, "factory_write").execute("write", { path: "value.txt", content: "1\n" });
@@ -165,7 +165,7 @@ test("an empty worker verification command receives bounded repair without opera
 
 test("an independent transport failure after a rejected report cannot become a protocol retry", async () => {
 	let workers = 0;
-	const fixture = repairFixture(async (tools, prompt) => {
+	const fixture = portableRepairFixture(async (tools, prompt) => {
 		assert.ok(prompt.startsWith("Implement/inspect")); workers += 1;
 		await assert.rejects(() => tool(tools, "factory_report").execute("invalid-report", {
 			report: "A malformed report was handled by the SDK.", tests: [], accepted: "invalid", semanticOutcome: "none",

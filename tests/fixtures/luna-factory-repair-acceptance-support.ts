@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { cpSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import type { Batch } from "../../image/extension/luna-factory/core/batch.ts";
 import type { NativeSDK, SchemaBuilder } from "../../image/extension/luna-factory/omp/batch-native.ts";
 
@@ -15,6 +16,35 @@ export const { runNative } = await import(join(factory, "omp/batch-native.ts"));
 export type FixtureTool = { name: string; execute(id: string, args: unknown): Promise<unknown> };
 export const schema = { object: (value: unknown) => value, string: () => ({}), number: () => ({}), array: (value: unknown) => value, boolean: () => ({}) } as unknown as SchemaBuilder;
 export const binding = { model: { provider: "fixture", id: "fixture" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } } as never;
+
+const execFileAsync = promisify(execFile);
+
+// Portable FakeSDK fixtures still run the checked-in Bash acceptance command as a real subprocess.
+// This test-only injection does not sandbox that process and does not qualify production containment.
+const fixturePreflight = async (_workspace: string, required: readonly string[], signal: AbortSignal) => {
+	const available: string[] = [], missing: string[] = [];
+	for (const executable of required) {
+		try {
+			await execFileAsync("bash", ["--noprofile", "--norc", "-c", 'command -v -- "$1" >/dev/null', "factory-fixture-preflight", executable], { signal, timeout: 5000, env: { PATH: process.env.PATH } });
+			available.push(executable);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") missing.push(executable);
+			else throw error;
+		}
+	}
+	return { available, missing, scope: "executable-presence-only" as const };
+};
+const runFixtureVerification = async (workspace: string, command: string, signal: AbortSignal) => {
+	if (!/^bash \.\/tests\/[A-Za-z0-9._-]+$/.test(command)) throw new Error("portable FakeSDK fixture refused an unrecognized verification command");
+	try {
+		const result = await execFileAsync("bash", ["--noprofile", "--norc", "-c", command], { cwd: workspace, signal, timeout: 120_000, maxBuffer: 262144, env: { PATH: process.env.PATH } });
+		return { exitCode: 0, output: `${result.stdout}${result.stderr}` };
+	} catch (error) {
+		const failure = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
+		if (typeof failure.code !== "number") throw error;
+		return { exitCode: failure.code, output: `${failure.stdout ?? ""}${failure.stderr ?? ""}` };
+	}
+};
 
 export function tool(tools: readonly FixtureTool[], name: string): FixtureTool {
 	const found = tools.find((candidate) => candidate.name === name);
@@ -55,7 +85,7 @@ export async function report(tools: readonly FixtureTool[], options: { accepted?
 	});
 }
 
-export function repairFixture(respond: (tools: readonly FixtureTool[], prompt: string) => Promise<void>, options: { acceptanceScript?: string; maxAttempts?: number; root?: string; sdk?: NativeSDK; schema?: SchemaBuilder; additionalItems?: number[] } = {}) {
+function createRepairFixture(respond: (tools: readonly FixtureTool[], prompt: string) => Promise<void>, options: { acceptanceScript?: string; maxAttempts?: number; root?: string; sdk?: NativeSDK; schema?: SchemaBuilder; additionalItems?: number[] } = {}, portable = false) {
 	const root = options.root ?? mkdtempSync(join(tmpdir(), "factory-repair-acceptance-"));
 	mkdirSync(root, { recursive: true });
 	const batch = createBatch([1, ...(options.additionalItems ?? [])].map((number) => ({
@@ -82,9 +112,19 @@ export function repairFixture(respond: (tools: readonly FixtureTool[], prompt: s
 	}
 	const github = { assertFresh: async () => {}, snapshot: async (selected: unknown) => selected } as never;
 	const sdk = options.sdk ?? fixtureSDK(root, respond);
-	const service = new BatchService(root, github, sdk, options.schema ?? schema, 1);
+	const service = portable
+		? new BatchService(root, github, sdk, options.schema ?? schema, 1, root, fixturePreflight, runFixtureVerification)
+		: new BatchService(root, github, sdk, options.schema ?? schema, 1);
 	service.store.acquire(); service.store.write(batch);
 	return { root, workspace, batch, item, github, sdk, service, async cleanup() { if (service.isWriterAcquired()) await service.shutdown(); rmSync(root, { recursive: true, force: true }); } };
+}
+
+export function repairFixture(respond: (tools: readonly FixtureTool[], prompt: string) => Promise<void>, options: { acceptanceScript?: string; maxAttempts?: number; root?: string; sdk?: NativeSDK; schema?: SchemaBuilder; additionalItems?: number[] } = {}) {
+	return createRepairFixture(respond, options);
+}
+
+export function portableRepairFixture(respond: (tools: readonly FixtureTool[], prompt: string) => Promise<void>, options: { acceptanceScript?: string; maxAttempts?: number; root?: string; sdk?: NativeSDK; schema?: SchemaBuilder; additionalItems?: number[] } = {}) {
+	return createRepairFixture(respond, options, true);
 }
 
 export function git(workspace: string, ...args: string[]): string {
