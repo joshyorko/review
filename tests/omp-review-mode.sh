@@ -24,6 +24,7 @@ test_files=(
   tests/luna_factory_dogfood_contract.test.ts
   tests/luna_factory_native.test.ts
   tests/luna_factory_native_sdk_contract.test.ts
+  tests/derived_omp_native_acceptance.test.ts
   tests/luna_factory_batch.test.ts
   tests/luna_factory_corrective.test.ts
   tests/luna_factory_projection.test.ts
