@@ -6,7 +6,7 @@ export const selected = [
 	{ key: "example/a#1", repo: "example/a", number: 1, kind: "issue", action: "patch", overlaps: [], requiredChecks: ["bash ./tests/acceptance.sh"], targetRef: "main" },
 	{ key: "example/b#1", repo: "example/b", number: 1, kind: "issue", action: "patch", overlaps: [], requiredChecks: ["bash ./tests/acceptance.sh"], targetRef: "main" },
 	{ key: "example/a#2", repo: "example/a", number: 2, kind: "issue", action: "patch", overlaps: [], requiredChecks: ["bash ./tests/acceptance.sh"], targetRef: "main" },
-	{ key: "example/observed#1", repo: "example/observed", number: 1, kind: "pr", action: "inspect", overlaps: [], observe: "merged-upstream" },
+	{ key: "example/observed#1", repo: "example/observed", number: 1, kind: "pr", action: "inspect", overlaps: [], observe: "merged-upstream", targetRef: "main" },
 ];
 
 export function seedRepos(root) {
