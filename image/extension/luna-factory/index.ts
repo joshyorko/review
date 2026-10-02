@@ -1259,6 +1259,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3,
 			mode: settings.mode ?? "once",
 			dependencies: settings.dependencies,
+			converge: settings.converge,
 		});
 		const preflight = service.status(batch.id);
 		notifyCommand(ctx, preflight);
@@ -1287,7 +1288,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			return `Reconciled ${resource} for ${owner}; claim released`;
 		}
 		const service = batches();
-		if (verb === "start" || verb === "selected" || verb === "run") {
+		if (verb === "start" || verb === "selected" || verb === "run" || verb === "converge") {
 			let items: SelectedItem[];
 			let settings: Partial<BatchOptions> = {};
 			if (verb === "run") {
@@ -1298,8 +1299,9 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			} else {
 				if (!["inspect", "patch", "pr-ready"].includes(id ?? "")) throw new Error("choose start inspect|patch|pr-ready; selection never grants merge/deploy authority");
 				items = selectedFactoryItems(id as FactoryAction);
+				if (verb === "converge") settings.converge = true;
 			}
-			const batch = await service.submit(items, { capacity: settings.capacity ?? service.capacity, maxAttempts: settings.maxAttempts ?? 3, maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3, mode: settings.mode ?? "once", dependencies: settings.dependencies });
+			const batch = await service.submit(items, { capacity: settings.capacity ?? service.capacity, maxAttempts: settings.maxAttempts ?? 3, maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3, mode: settings.mode ?? "once", dependencies: settings.dependencies, converge: settings.converge });
 			const preflight = service.status(batch.id);
 			notifyCommand(ctx, preflight);
 			await service.resume(batch.id, ctx);
@@ -1309,6 +1311,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		if (verb === "status" || verb === "inspect") return service.status(id);
 		if (!id) throw new Error("an exact batch id is required; use /factory status");
 		if (verb === "pause" || verb === "stop") await service.control(id, verb);
+		else if (verb === "reconcile") { await service.reconcile(id); if (!ctx.hasUI) await service.waitForIdle(); }
 		else if (verb === "resume") { await service.resume(id, ctx); if (!ctx.hasUI) await service.waitForIdle(); }
 		else if (verb === "retry") { if (!rest[0]) throw new Error("retry requires an exact item key"); await service.retry(id, rest[0], ctx); if (!ctx.hasUI) await service.waitForIdle(); }
 		else if (verb === "exclude") service.exclude(id, rest[0] ?? "", rest.slice(1).join(" "));
@@ -1393,7 +1396,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
 					return;
 				}
-				if (!ledger && (args.length === 0 || /^(start|selected|run|status|inspect|claims|pause|resume|stop|retry|exclude|export|discard)(\s|$)/.test(args))) {
+				if (!ledger && (args.length === 0 || /^(start|selected|run|converge|reconcile|status|inspect|claims|pause|resume|stop|retry|exclude|export|discard)(\s|$)/.test(args))) {
 					try { notifyCommand(ctx, await batchCommand(args || "status", ctx)); }
 					catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
 					return;
@@ -1403,7 +1406,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					return;
 				}
 				if (args === "help" || args === "--help") {
-					notifyCommand(ctx, "Selected batches: /factory (dashboard), Review Shift+F, /factory start inspect|patch|pr-ready. Controls: status|inspect <batch>, pause|resume|stop <batch>, retry|exclude <batch> <item>, claims status|reconcile, export|discard <batch>. Diagnostics: /factory debug. Conversational objective: /factory -- <objective>.");
+					notifyCommand(ctx, "Selected batches: /factory (dashboard), Review Shift+F, /factory start inspect|patch|pr-ready. Finite convergence: /factory converge inspect|patch over the explicit Review selection. Controls: status|inspect <batch>, reconcile <batch>, pause|resume|stop <batch>, retry|exclude <batch> <item>, claims status|reconcile, export|discard <batch>. Diagnostics: /factory debug. Conversational objective: /factory -- <objective>.");
 					return;
 				}
 				if (args === "debug" || args === "--debug") {

@@ -38,11 +38,32 @@ revision link is the skill itself.
 | Completion creates no merge or deploy authority | `core/receipt.ts` — the receipt says so explicitly |
 | Typed convergence graph keeps prerequisite, overlap, inferred, and subject/generation evidence separate | `core/graph.ts` — `evaluateWorkGraph`; `tests/luna_factory.test.ts` |
 
-The convergence graph is currently a pure decision contract. Authoritative
-`requires` and `stacked-on` edges gate READY work; `contains` and `implements`
-are descriptive; inferred edges are hints only and never authorize mutation.
-Unknown subject, proof, or overlap state remains non-authorizing, and a graph
-with no ready or active lane is `AUTONOMOUSLY_QUIESCENT`, not converged.
+Finite convergence uses the existing BatchService and state root. Select up to
+ten explicit Review items, then use `/factory converge patch` or
+`/factory converge inspect`. Headless `/factory run` accepts `converge: true`
+beside its explicit items, target refs and original limits. `/factory reconcile
+<batch>` refreshes authoritative observations without a model heartbeat.
+
+Authoritative `requires` and `stacked-on` relations gate READY work. `contains`
+and `implements` remain distinct, and inferred relations are visible hints.
+Out-of-scope prerequisites are observed without becoming implementation work.
+Unknown evidence withholds its lane; original capacity, writer claims and
+attempt budgets still govern dispatch. The existing dashboard and status show
+CONVERGED or AUTONOMOUSLY_QUIESCENT with the current blockers.
+
+Verified-patch convergence ends at the independently checked retained tree and
+grants no integration, push or merge authority. An explicitly selected PR
+inspection may declare `observe: "merged-upstream"` when that exact mechanical
+predicate is its complete acceptance. It creates no worker, attempt or capacity
+reservation. Hosted PR-ready continuation and automatic landing require their
+separate qualified contracts; this mode refuses them before dispatch.
+
+Version-3 convergence batches retain exact observation provenance and canonical
+proof assumptions; old selected batches do not gain convergence authority.
+Evidence tools return complete bounded JSON pages below the pinned native spill
+threshold. Follow `nextOffset` to EOF; one clipped preview never proves full
+artifact coverage. Source/SDK tests and packaged runtime qualification remain
+separate evidence, recorded at the exact candidate and image.
 
 ## Command surface
 

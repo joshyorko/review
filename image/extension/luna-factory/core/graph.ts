@@ -28,6 +28,7 @@ export interface GraphNodeObservation {
 	readonly key: string;
 	readonly generation: string;
 	readonly subject?: GraphSubject;
+	readonly acceptanceRevision?: string;
 	readonly required: boolean;
 	readonly target: GraphOutcomeStage;
 	readonly state: GraphObservedState;
@@ -110,24 +111,24 @@ export function evaluateWorkGraph(input: WorkGraphObservation): WorkGraphDecisio
 		}
 	}
 	const cyclic = new Set<string>();
-	const visited = new Set<string>();
-	const visit = (key: string, path: string[]): void => {
-		const start = path.indexOf(key);
-		if (start >= 0) { for (const member of path.slice(start)) cyclic.add(member); return; }
-		if (visited.has(key)) return;
-		for (const relation of relationByFrom.get(key) ?? []) {
-			if (HARD_KINDS[relation.kind] === true && relation.authority === "authoritative") visit(relation.to, [...path, key]);
+	for (const node of input.nodes) {
+		const seen = new Set<string>();
+		const pending = (relationByFrom.get(node.key) ?? []).filter((edge) => HARD_KINDS[edge.kind] === true && edge.authority === "authoritative").map((edge) => edge.to);
+		while (pending.length) {
+			const key = pending.pop()!;
+			if (key === node.key) { cyclic.add(node.key); break; }
+			if (seen.has(key)) continue;
+			seen.add(key);
+			pending.push(...(relationByFrom.get(key) ?? []).filter((edge) => HARD_KINDS[edge.kind] === true && edge.authority === "authoritative").map((edge) => edge.to));
 		}
-		visited.add(key);
-	};
-	for (const node of input.nodes) visit(node.key, []);
+	}
 	const base = new Map<string, MutableGraphNodeDecision>();
 	for (const node of input.nodes) {
 		let decision: GraphDecisionState;
 		const blockers: string[] = [];
-		if (cyclic.has(node.key)) { decision = "BLOCKED"; blockers.push(`graph dependency cycle at ${node.key}; resolve authoritative prerequisites`); }
-		else if (node.state === "RUNNING") decision = "RUNNING";
+		if (node.state === "RUNNING") decision = "RUNNING";
 		else if (node.state === "VERIFY") decision = "VERIFY";
+		else if (cyclic.has(node.key)) { decision = "BLOCKED"; blockers.push(`graph dependency cycle at ${node.key}; resolve authoritative prerequisites`); }
 		else if (node.state === "BLOCKED" || node.state === "EXCLUDED") { decision = "BLOCKED"; blockers.push(node.blocker ?? "authoritative policy or ownership blocker"); }
 		else if (node.state === "UNKNOWN" || node.generation !== input.generation || node.subject === undefined) {
 			decision = "UNKNOWN";
@@ -151,13 +152,13 @@ export function evaluateWorkGraph(input: WorkGraphObservation): WorkGraphDecisio
 				continue;
 			}
 			if (relation.kind === "contains" || relation.kind === "implements" || !["READY", "DONE"].includes(original.decision)) continue;
+			if (relation.kind === "overlaps" && original.decision === "DONE") continue;
 			const prerequisite = previous.get(relation.to);
 			if (prerequisite === undefined) {
 				current.blockers.push(`missing authoritative observation for ${relation.to}; observe prerequisite without expanding mutation scope`);
 				unknown = true; continue;
 			}
 			if (relation.kind === "overlaps") {
-				if (original.decision === "DONE") continue;
 				if (prerequisite.decision === "DONE") continue;
 				if (prerequisite.decision === "UNKNOWN") {
 					current.blockers.push(`overlap with ${relation.to} is UNKNOWN`);

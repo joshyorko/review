@@ -2957,3 +2957,32 @@ test("all hard-edge blockers and UNKNOWN precedence are independent of relation 
 	assert.equal(before.nodes[0]!.decision, "UNKNOWN");
 	assert.equal(before.nodes[0]!.blockers.length, 2);
 });
+
+test("graph never reports quiescence while an observed execution is RUNNING or VERIFY", () => {
+	for (const state of ["RUNNING", "VERIFY"] as const) {
+		const decision = evaluateWorkGraph({ generation: "G1", nodes: [graphNode("a", state), graphNode("b")], relations: [
+			{ from: "a", to: "b", kind: "requires", authority: "authoritative", source: "native dependency" },
+			{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "native dependency" },
+		] });
+		assert.equal(decision.nodes[0]!.decision, state);
+		assert.equal(decision.verdict, "ACTIVE");
+	}
+});
+
+test("graph finds every cyclic component member independently of captured node order", () => {
+	const nodes = [graphNode("a"), graphNode("b"), graphNode("c", "DONE", { proof: "verified-patch", proofCurrent: true })];
+	const relations = [["a", "b"], ["b", "a"], ["a", "c"], ["c", "b"]].map(([from, to]) => ({ from: from!, to: to!, kind: "requires" as const, authority: "authoritative" as const, source: "native dependency" }));
+	for (const captured of [nodes, [nodes[2]!, nodes[0]!, nodes[1]!]]) {
+		const decision = evaluateWorkGraph({ generation: "G1", nodes: captured, relations });
+		assert.ok(decision.nodes.every((node) => node.decision === "BLOCKED"));
+		assert.ok(decision.nodes.every((node) => node.blockers.some((reason) => reason.includes("graph dependency cycle"))));
+	}
+});
+
+test("a settled proof does not become stale from non-load-bearing overlap observation absence", () => {
+	const node = graphNode("settled", "DONE", { proof: "verified-patch", proofCurrent: true });
+	const relation: GraphRelation = { from: node.key, to: "external", kind: "overlaps", authority: "authoritative", source: "writer observation" };
+	for (const nodes of [[node], [node, graphNode("external", "UNKNOWN", { required: false })]]) {
+		assert.equal(evaluateWorkGraph({ generation: "G1", nodes, relations: [relation] }).nodes[0]!.decision, "DONE");
+	}
+});

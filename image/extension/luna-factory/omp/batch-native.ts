@@ -31,7 +31,7 @@ type OmpZod = typeof import("@oh-my-pi/omptype/zod");
 export type SchemaBuilder = Pick<OmpZod, "object" | "string" | "number" | "array" | "boolean">;
 export interface NativeContext { model?: CreateAgentSessionOptions["model"]; modelRegistry?: ModelRegistry; }
 export interface NativeBinding { readonly model: NonNullable<CreateAgentSessionOptions["model"]>; readonly modelRegistry: ModelRegistry; }
-export type NativeFailureCode = "capability-unavailable" | "model-unavailable" | "model-registry-unavailable" | "model-auth-unconfigured" | "cancelled-before-start" | "cancellation-settled" | "report-missing" | "report-invalid" | "report-checks-changed" | "advisor-blocked";
+export type NativeFailureCode = "capability-unavailable" | "model-unavailable" | "model-registry-unavailable" | "model-auth-unconfigured" | "cancelled-before-start" | "cancellation-settled" | "report-missing" | "report-invalid" | "report-checks-changed" | "repair-packet-invalid" | "advisor-blocked";
 export class NativeExecutionError extends Error {
 	readonly code: NativeFailureCode;
 	constructor(code: NativeFailureCode, message: string) { super(message); this.code = code; this.name = "NativeExecutionError"; }
@@ -63,7 +63,7 @@ function nativeAgentIdentity(item: BatchItem, phase: "worker" | "acceptance", at
 }
 export interface NativeEvidenceHandle { readonly id: string; readonly path: string; readonly digest: string; readonly bytes: number; readonly attemptId: string; }
 export interface NativeEscalationIdentity { readonly taskId: string; readonly itemKey: string; readonly attemptId: string; readonly generation: string; readonly subject: Subject; readonly acceptanceRevision: string; readonly acceptance: string; }
-export interface NativeAttemptPacket { readonly attemptId?: string; readonly repairFeedback?: string; readonly artifacts?: readonly NativeEvidenceHandle[]; readonly escalationIdentity?: NativeEscalationIdentity; }
+export interface NativeAttemptPacket { readonly attemptId?: string; readonly repairFeedback?: string; readonly artifacts?: readonly NativeEvidenceHandle[]; readonly evidenceRoot?: string; readonly escalationIdentity?: NativeEscalationIdentity; }
 export type SemanticOutcome = "none" | "no-finding" | "supported" | "disproven" | "uncertain";
 export interface NativeAdvisorEvidence {
 	readonly packetDigest: string;
@@ -79,6 +79,9 @@ export interface NativeAdvisorEvidence {
 export interface NativeResult { report: string; tests: string[]; session: string; calls: number; model?: string; advisor?: NativeAdvisorEvidence; evidenceCoverageComplete?: boolean; accepted?: boolean; semanticOutcome: SemanticOutcome; predicates: readonly PredicateEvidence[]; publicationBlocker?: string }
 
 const MAX_READ_BYTES = 128 * 1024;
+// JSON escaping can expand each raw byte sixfold. Keep the complete page below
+// pinned OMP's native spill threshold; coverage counts only this actual page.
+const MODEL_PAGE_BYTES = 4 * 1024;
 const MAX_LIST_ENTRIES = 100;
 const MAX_EVIDENCE_HANDLES = 32;
 const MAX_EVIDENCE_BYTES = 32 * 1024 * 1024;
@@ -177,6 +180,7 @@ function isObjectArgs(value: unknown): value is Record<string, unknown> {
 function stringArg(args: Record<string, unknown>, key: string): string {
 	const value = args[key];
 	if (typeof value !== "string") throw new Error(`${key} must be a string`);
+	if (key === "path" && Buffer.byteLength(value) > 4096) throw new Error("repository path exceeds its bounded byte length");
 	return value;
 }
 function stringArrayArg(args: Record<string, unknown>, key: string): string[] {
@@ -338,8 +342,8 @@ export async function runNative(
 	let allowReport = true;
 	let forceTurnYield = false;
 	const tools: ToolDefinition[] = [
-		{ name: "factory_read", label: "Read repository file range", description: `Read a repository-relative UTF-8 byte range (maximum ${MAX_READ_BYTES} bytes). Continue at nextOffset until eof to establish full coverage.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const file = repositoryPath(workspace, path); const offset = pageNumber(rawArgs.offset, 0, Number.MAX_SAFE_INTEGER); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); return result(JSON.stringify({ path, ...readRange(file, offset, limit) })); } },
-		{ name: "factory_files", label: "Repository files page", description: `List up to ${MAX_LIST_ENTRIES} entries from one repository directory. Continue at nextOffset; each page reports whether enumeration reached EOF.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const directory = path === "." ? workspace : repositoryPath(workspace, path); if (!lstatSync(directory).isDirectory()) throw new Error("repository directory required"); const offset = pageNumber(rawArgs.offset, 0, 1_000_000); const limit = pageNumber(rawArgs.limit, MAX_LIST_ENTRIES, MAX_LIST_ENTRIES); if (limit === 0) throw new Error("list limit must be positive"); const entries: string[] = []; let visible = 0; let eof = true; const dir = opendirSync(directory); try { for await (const entry of dir) { if ([".git", ".omp", ".pi", ".claude", "node_modules"].includes(entry.name) || entry.isSymbolicLink()) continue; if (visible++ < offset) continue; if (entries.length === limit) { eof = false; break; } entries.push(`${entry.name}${entry.isDirectory() ? "/" : ""}`); } } finally { await dir.close().catch(() => {}); } const nextOffset = eof ? null : offset + entries.length; return result(JSON.stringify({ path, entries, offset, nextOffset, eof })); } },
+		{ name: "factory_read", label: "Read repository file range", description: `Read a repository-relative UTF-8 byte range (requests up to ${MAX_READ_BYTES} bytes; returned pages at most ${MODEL_PAGE_BYTES} bytes to preserve complete native transport). Continue at nextOffset until eof to establish full coverage.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const file = repositoryPath(workspace, path); const offset = pageNumber(rawArgs.offset, 0, Number.MAX_SAFE_INTEGER); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); return result(JSON.stringify({ path, ...readRange(file, offset, Math.min(limit, MODEL_PAGE_BYTES)) })); } },
+		{ name: "factory_files", label: "Repository files page", description: `List up to ${MAX_LIST_ENTRIES} entries from one repository directory. Continue at nextOffset; each page reports whether enumeration reached EOF.`, parameters: schema.object({ path: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const directory = path === "." ? workspace : repositoryPath(workspace, path); if (!lstatSync(directory).isDirectory()) throw new Error("repository directory required"); const offset = pageNumber(rawArgs.offset, 0, 1_000_000); const limit = pageNumber(rawArgs.limit, MAX_LIST_ENTRIES, MAX_LIST_ENTRIES); if (limit === 0) throw new Error("list limit must be positive"); const entries: string[] = []; let visible = 0; let eof = true; const dir = opendirSync(directory); try { for await (const entry of dir) { if ([".git", ".omp", ".pi", ".claude", "node_modules"].includes(entry.name) || entry.isSymbolicLink()) continue; if (visible++ < offset) continue; const name = `${entry.name}${entry.isDirectory() ? "/" : ""}`; if (entries.length === limit || Buffer.byteLength(JSON.stringify({ path, entries: [...entries, name], offset, nextOffset: offset + entries.length + 1, eof: false })) > 32 * 1024) { if (!entries.length) throw new Error("directory page exceeds bounded native transport"); eof = false; break; } entries.push(name); } } finally { await dir.close().catch(() => {}); } const nextOffset = eof ? null : offset + entries.length; return result(JSON.stringify({ path, entries, offset, nextOffset, eof })); } },
 		{
 			name: "factory_report",
 			label: "Submit evidence candidate",
@@ -359,6 +363,7 @@ export async function runNative(
 			if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object");
 			const report = stringArg(rawArgs, "report");
 			const tests = stringArrayArg(rawArgs, "tests");
+			if (tests.some((command) => !command.trim())) throw new Error("verification command must not be blank; retain the original mandatory checks");
 			const publicationBlocker = stringArg(rawArgs, "publicationBlocker");
 			const rawSemanticOutcome = stringArg(rawArgs, "semanticOutcome");
 			const accepted = rawArgs.accepted;
@@ -377,7 +382,7 @@ export async function runNative(
 			if (phase === "acceptance" && accepted && !coverageComplete()) throw new Error("acceptance cannot be accepted until all supplied evidence handles are read in full");
 			submitted = { report, tests, semanticOutcome, predicates: parsedPredicates.value, ...(phase === "acceptance" ? { accepted: accepted && parsedPredicates.value.every((predicate) => predicate.ok) } : {}), ...(normalizedPublicationBlocker ? { publicationBlocker: normalizedPublicationBlocker } : {}) };
 			return result("Evidence candidate recorded; coordinator independently checks outcomes.");
-			} catch (error) { reportFailure = error instanceof Error ? error.message : String(error); throw error; }
+			} catch (error) { reportFailure = error instanceof Error ? error.message : String(error); throw new NativeExecutionError("report-invalid", `native report rejected: ${reportFailure}`); }
 		},
 	},
 	];
@@ -407,7 +412,15 @@ export async function runNative(
 		if (handles.length > MAX_EVIDENCE_HANDLES || handles.reduce((total, handle) => total + handle.bytes, 0) > MAX_EVIDENCE_TOTAL_BYTES || new Set(handles.map((handle) => handle.id)).size !== handles.length) throw new NativeExecutionError("capability-unavailable", "attempt evidence packet exceeds safe bounds or has duplicate handles");
 		const byId = new Map(handles.map((handle) => [handle.id, handle]));
 		for (const handle of handles) if (!Number.isSafeInteger(handle.bytes) || handle.bytes < 0 || handle.bytes > MAX_EVIDENCE_BYTES || !handle.id || !handle.attemptId || !/^[a-f0-9]{64}$/i.test(handle.digest)) throw new NativeExecutionError("capability-unavailable", "attempt evidence packet contains an invalid handle");
-		tools.push({ name: "factory_evidence_read", label: "Read retained attempt evidence", description: "Read a digest-checked byte range from an explicitly supplied attempt artifact handle. Paths and unrelated artifacts are inaccessible.", parameters: schema.object({ id: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const id = stringArg(rawArgs, "id"); const handle = byId.get(id); if (!handle) throw new Error("evidence handle unavailable for this attempt"); const offset = pageNumber(rawArgs.offset, 0, handle.bytes); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); const chunk = readEvidenceRange(root, handle, offset, limit); if (chunk.bytes > 0) coverage.set(handle.id, [...(coverage.get(handle.id) ?? []), { start: chunk.offset, end: chunk.offset + chunk.bytes }]); return result(JSON.stringify({ id: handle.id, attemptId: handle.attemptId, digest: handle.digest, artifactBytes: handle.bytes, readBytes: chunk.bytes, offset: chunk.offset, text: chunk.text, nextOffset: chunk.nextOffset, eof: chunk.eof })); } });
+		for (const handle of handles) {
+			const parts = relative(resolve(root), resolve(handle.path)).split(sep);
+			if (parts[0] === "evidence" && (parts[2] !== createHash("sha256").update(item.selected.key).digest("hex").slice(0, 16) || parts[3] !== handle.attemptId)) throw new NativeExecutionError("capability-unavailable", "foreign item/attempt evidence ownership in admitted repair packet");
+			if (packet.evidenceRoot) {
+				const child = relative(resolve(packet.evidenceRoot), resolve(handle.path));
+				if (!child || child === ".." || child.startsWith(`..${sep}`) || resolve(handle.path) === resolve(packet.evidenceRoot)) throw new NativeExecutionError("capability-unavailable", "evidence ownership escapes the admitted run/item");
+			}
+		}
+		tools.push({ name: "factory_evidence_read", label: "Read retained attempt evidence", description: "Read a digest-checked byte range from an explicitly supplied attempt artifact handle. Paths and unrelated artifacts are inaccessible.", parameters: schema.object({ id: schema.string(), offset: schema.number(), limit: schema.number() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const id = stringArg(rawArgs, "id"); const handle = byId.get(id); if (!handle) throw new Error("evidence handle unavailable for this attempt"); const offset = pageNumber(rawArgs.offset, 0, handle.bytes); const limit = pageNumber(rawArgs.limit, MAX_READ_BYTES, MAX_READ_BYTES); if (limit === 0) throw new Error("read limit must be positive"); const chunk = readEvidenceRange(root, handle, offset, Math.min(limit, MODEL_PAGE_BYTES)); if (chunk.bytes > 0) coverage.set(handle.id, [...(coverage.get(handle.id) ?? []), { start: chunk.offset, end: chunk.offset + chunk.bytes }]); return result(JSON.stringify({ id: handle.id, attemptId: handle.attemptId, digest: handle.digest, artifactBytes: handle.bytes, readBytes: chunk.bytes, offset: chunk.offset, text: chunk.text, nextOffset: chunk.nextOffset, eof: chunk.eof })); } });
 	}
 	if (writable) tools.push({ name: "factory_write", label: "Write repository file", description: "Replace a repository-relative text file; changes remain in this item workspace.", parameters: schema.object({ path: schema.string(), content: schema.string() }), async execute(_id, rawArgs) { if (!isObjectArgs(rawArgs)) throw new Error("tool arguments must be an object"); const path = stringArg(rawArgs, "path"); const content = stringArg(rawArgs, "content"); if (content.length > 131072) throw new Error("file exceeds 128KiB"); const rel = path.replace(/\\/g, "/"); if (item.selected.action === "pr-ready" && (rel === ".github/workflows" || rel.startsWith(".github/workflows/"))) throw new Error("Factory cannot publish workflow-changing work; use patch-only inspection and human Review"); const file = repositoryPath(workspace, path); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, content); return result(`Wrote ${path}`); } });
 	for (const tool of tools) {

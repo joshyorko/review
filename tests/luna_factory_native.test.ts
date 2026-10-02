@@ -202,6 +202,32 @@ test("evidence handles are attempt-scoped, digest-checked, and ranged", async ()
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("escaped repository and evidence pages fit the native model transport without false coverage", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-wire-pages-"));
+	try {
+		const bytes = Buffer.alloc(128 * 1024, 0);
+		const path = join(root, "escaped.txt"); await writeFile(path, bytes);
+		const { createHash } = await import("node:crypto");
+		const artifact = { id: "escaped-1", path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: "attempt-1" };
+		let tools: Tool[] = [];
+		const sdk = fake(async (registered) => { tools = registered; });
+		await runNative(sdk.sdk, schema, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } }, item(root), root, "worker", new AbortController().signal, () => {}, () => {}, "", { attemptId: "attempt-2", artifacts: [artifact] });
+		for (const name of ["factory_read", "factory_evidence_read"]) {
+			const read = tools.find((tool) => tool.name === name)!;
+			let offset = 0, total = 0;
+			for (;;) {
+				const result = await read.execute("read", { path: "escaped.txt", id: "escaped-1", offset, limit: 128 * 1024 }) as { content: { text: string }[] };
+				const wire = result.content[0]!.text;
+				assert.ok(Buffer.byteLength(wire) <= 32 * 1024, "complete serialized JSON fits below the pinned OMP spill threshold even with sixfold escaping");
+				const chunk = JSON.parse(wire);
+				total += chunk.readBytes ?? chunk.bytes;
+				if (chunk.eof) break; offset = chunk.nextOffset;
+			}
+			assert.equal(total, bytes.length);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("missing worker report has a typed correctable protocol failure", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-native-report-"));
 	try {

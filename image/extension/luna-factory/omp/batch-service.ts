@@ -4,10 +4,10 @@ import { promisify } from "node:util";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { batchConverged, batchSummary, createBatch, dependencyBlocker, digest, selectionIdentity, type Batch, type BatchItem, type SelectedItem, type Prerequisite } from "../core/batch.ts";
+import { batchConverged, batchItemProofCurrent, batchSummary, createBatch, dependencyBlocker, digest, evaluateBatchGraph, selectionIdentity, type Batch, type BatchItem, type SelectedItem, type Prerequisite } from "../core/batch.ts";
 import { reconcileReceipt } from "../core/evidence.ts";
 import { reduce } from "../core/reducer.ts";
-import type { AttemptId, CriterionId, EvidenceReceipt, LedgerEvent, OperationReceipt, PredicateEvidence, TaskId } from "../core/model.ts";
+import type { AttemptId, CriterionId, EvidenceReceipt, LedgerEvent, OperationReceipt, PredicateEvidence, ProofAssumption, TaskId } from "../core/model.ts";
 import { BatchStore, ResourceClaims } from "./batch-store.ts";
 import { requiredChecks, packageCheckScripts } from "./batch-checks.ts";
 import { BatchGitHub } from "./batch-github.ts";
@@ -53,7 +53,7 @@ function hasPreparationRecoveryEvidence(batch: Batch, item: BatchItem): boolean 
 		operation.subject.repo === item.ledger.subject.repo && operation.subject.base === item.ledger.subject.base &&
 		operation.subject.head === item.ledger.subject.head);
 }
-export interface BatchOptions { capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[] }
+export interface BatchOptions { capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[]; converge?: boolean }
 interface Running { batch: Batch; item: BatchItem; controller: AbortController; promise: Promise<void> }
 
 export interface BatchSnapshotError {
@@ -239,9 +239,11 @@ export class BatchService {
 		const preliminary = createBatch(selected, { ...options, capacity: Math.min(options.capacity, this.capacity), id: `batch-${randomUUID()}` });
 		const existing = this.store.list();
 		const duplicate = existing.find((batch) => batch.selection === preliminary.selection && !batchConverged(batch) && batch.scopeRevisions.length === 0);
-		if (duplicate) {
+			if (duplicate) {
+				if (Boolean(duplicate.convergence) !== Boolean(options.converge)) throw new Error(`selection is already tracked by ${duplicate.id} with a different outcome contract`);
 			for (const proposed of preliminary.items) {
-				const prior = duplicate.items.find((item) => item.selected.key === proposed.selected.key);
+					const prior = duplicate.items.find((item) => item.selected.key === proposed.selected.key);
+					if (prior?.selected.observe !== proposed.selected.observe || proposed.selected.targetRef !== undefined && prior?.selected.targetRef !== proposed.selected.targetRef) throw new Error(`selection is already tracked by ${duplicate.id} with a different target or mechanical acceptance; preserve original generation`);
 				if (proposed.selected.requiredChecks && JSON.stringify(prior?.selected.requiredChecks) !== JSON.stringify(proposed.selected.requiredChecks)) throw new Error(`selection is already tracked by ${duplicate.id} with different required checks; inspect existing contract`);
 			}
 			if (JSON.stringify(duplicate.dependencies) !== JSON.stringify(preliminary.dependencies)) throw new Error(`selection is already tracked by ${duplicate.id} with different prerequisites; inspect existing scope`);
@@ -263,10 +265,59 @@ export class BatchService {
 			const conflict = existing.find((other) => other.items.some((candidate) => candidate.stage !== "EXCLUDED" && candidate.stage !== "DONE" && (candidate.selected.key === item.selected.key || candidate.selected.overlaps.includes(item.selected.key) || item.selected.overlaps.includes(candidate.selected.key))));
 			if (conflict) { item.stage = "BLOCKED"; item.blocker = `already tracked by ${conflict.id}; attach there instead of competing execution`; }
 		}
-		this.persist(batch);
-		this.batches.set(batch.id, batch);
-		return batch;
-	}
+			this.persist(batch);
+			this.batches.set(batch.id, batch);
+			if (batch.convergence) await this.observeConvergence(batch);
+			return batch;
+		}
+
+		private async observeConvergence(batch: Batch): Promise<void> {
+			if (!batch.convergence) return;
+			const observation = await this.github.observeGraph(batch.items.map((item) => item.selected), batch.convergence.generation);
+			batch.convergence.observation = observation;
+			for (const item of batch.items) {
+				if (!this.running.has(`${batch.id}:${item.selected.key}`)) {
+					const graph = evaluateBatchGraph(batch);
+					const prerequisites = [...observation.relations.filter((edge) => edge.from === item.selected.key && edge.authority === "authoritative" && (edge.kind === "requires" || edge.kind === "stacked-on")), ...batch.dependencies.filter((edge) => edge.item === item.selected.key).map((edge) => ({ to: edge.requires, stage: edge.stage }))];
+					const values = new Map<string, ProofAssumption>();
+					for (const edge of prerequisites) {
+						const node = graph.nodes.find((entry) => entry.key === edge.to);
+						const previous = batch.items.find((entry) => entry.selected.key === edge.to);
+						const stage = edge.stage ?? "verified-patch";
+						const satisfied = node?.decision === "DONE" && ["verified-patch", "pr-ready", "merged-upstream"].indexOf(node.proof ?? "verified-patch") >= ["verified-patch", "pr-ready", "merged-upstream"].indexOf(stage);
+						const taskId = `graph-${digest(`${edge.to}:${stage}`).slice(0, 16)}` as TaskId;
+						values.set(taskId, { kind: "dependency-outcome", taskId, value: satisfied ? "proven" : "unproven", ...(node?.subject ? { binding: { subject: node.subject, stage, ...(previous?.proof?.tree ? { tree: previous.proof.tree } : {}) } } : {}) });
+					}
+					item.ledger = { ...item.ledger, assumptionValues: [...values.values()] };
+					const criterion = item.ledger.criteria[0]!;
+					const assumptions = [...(criterion.assumptions ?? []).filter((entry) => entry.kind !== "dependency-outcome" || !entry.taskId.startsWith("graph-")), ...values.values()];
+					if (JSON.stringify(criterion.assumptions ?? []) !== JSON.stringify(assumptions)) {
+						this.event(item, { kind: "revise_criterion_assumptions", expectedRevision: item.ledger.revision, criterionId: criterion.id, assumptions, reason: "current authoritative graph prerequisite outcome changed" });
+						if (item.stage === "DONE" && !batchItemProofCurrent(item)) { item.stage = "QUEUED"; item.blocker = "dependency proof moved; bounded re-verification under original limits"; }
+					}
+				}
+				const criterion = item.ledger.criteria.find((entry) => entry.observation);
+				if (!criterion?.observation || this.running.has(`${batch.id}:${item.selected.key}`)) continue;
+				const current = observation.nodes.find((node) => node.key === item.selected.key);
+				const same = current?.subject?.base === item.selected.base && current?.subject?.head === item.selected.head && current.acceptanceRevision === item.selected.acceptanceRevision;
+				const status = current?.state === "UNKNOWN" || !same ? "unknown" : current.proofCurrent && current.proof === "merged-upstream" ? "proven" : "unproved";
+				this.event(item, { kind: "record_observation", expectedRevision: item.ledger.revision, observation: {
+					criterionId: criterion.id, generation: item.ledger.generation, subject: item.ledger.subject, source: criterion.observation,
+					revision: item.selected.head!, status, note: current?.blocker ?? `${criterion.observation.identity} ${status} at the captured subject`, assumptions: criterion.assumptions ?? [],
+				} });
+				item.stage = status === "proven" ? "DONE" : status === "unknown" ? "UNKNOWN" : "BLOCKED";
+				item.blocker = status === "proven" ? undefined : `graph observation ${status}; resume after ${criterion.observation.identity} is authoritatively ${criterion.observation.predicate}`;
+			}
+			this.persist(batch);
+		}
+		/** Read-only current-state reconciliation consumes no worker slot or model call. */
+		async reconcile(id: string): Promise<void> {
+			this.store.acquire();
+			const batch = this.batches.get(id) ?? this.store.read(id);
+			this.batches.set(id, batch);
+			await this.observeConvergence(batch);
+			if (batch.control === "active") void this.pump();
+		}
 	private artifactDigest(item: BatchItem): string {
 		if (!item.proof || !item.proof.artifacts.length || !item.sessions.includes(item.proof.reviewerSession)) throw new Error("independent proof/session unavailable");
 		return digest(item.proof.artifacts.map((path) => {
@@ -304,10 +355,11 @@ export class BatchService {
 		catch (error) { this.bindings.set(id, { error: message(error) }); }
 		const batch = this.batches.get(id) ?? this.store.read(id);
 		this.batches.set(id, batch);
-		for (const item of batch.items) {
+			for (const item of batch.items) {
 			const owner = `${id}:${item.selected.key}`;
 			if (this.running.has(owner) || item.stage === "CANCELLED" || item.stage === "EXCLUDED") continue;
 			try {
+				if (item.selected.observe) continue;
 				if (item.stage === "DONE") {
 					await this.validateProof(item);
 					if (item.operation?.phase === "pr") await this.reconcileEffect(item);
@@ -362,8 +414,9 @@ export class BatchService {
 			}
 			if (!demoted) break;
 		}
-		batch.control = "active";
-		this.persist(batch);
+			batch.control = "active";
+			this.persist(batch);
+			if (batch.convergence) await this.observeConvergence(batch);
 		void this.pump();
 	}
 	async control(id: string, action: "pause" | "stop"): Promise<void> {
@@ -457,11 +510,16 @@ export class BatchService {
 	private async drain(): Promise<void> {
 		while (!this.fatal) {
 			let dispatched = false;
-			for (const batch of this.batches.values()) {
-				if (batch.control !== "active") continue;
+				for (const batch of this.batches.values()) {
+					if (batch.control !== "active") continue;
+					if (batch.convergence) await this.observeConvergence(batch);
 				if (this.running.size >= this.capacity) break;
 				if ([...this.running.values()].filter((active) => active.batch.id === batch.id).length >= batch.capacity) continue;
-				for (const item of batch.items.filter((candidate) => candidate.stage === "QUEUED").sort((a, b) => a.attempts - b.attempts)) {
+					for (const item of batch.items.filter((candidate) => candidate.stage === "QUEUED").sort((a, b) => a.attempts - b.attempts)) {
+						if (batch.convergence) {
+							const decision = evaluateBatchGraph(batch).nodes.find((node) => node.key === item.selected.key);
+							if (decision?.decision !== "READY") { item.blocker = decision?.blockers.join("; ") || "current graph transition is not READY"; continue; }
+						}
 					const dependency = dependencyBlocker(batch, item.selected.key);
 						if (dependency) { item.blocker = dependency; continue; }
 						if (item.attempts >= batch.maxAttempts || batch.items.reduce((sum, candidate) => sum + candidate.attempts, 0) >= batch.maxTotalAttempts) { item.stage = "BLOCKED"; item.blocker = "original attempt budget exhausted; retry never resets it"; this.persist(batch); continue; }
@@ -631,7 +689,8 @@ export class BatchService {
 		if (!item.selected.requiredChecks && mandatory.length) { item.selected.requiredChecks = mandatory; this.persist(batch); }
 		const previous = item.ledger.tasks.flatMap((task) => task.attempts).filter((attempt) => attempt.generation === item.ledger.generation && attempt.subject.head === item.selected.head).at(-1);
 		const previousReceipt = previous?.receipt;
-		const protocolRepair = item.repair && item.repair.generation === item.ledger.generation && item.repair.head === item.selected.head && item.repair.acceptanceRevision === item.selected.acceptanceRevision ? item.repair : undefined;
+			const protocolRepair = item.repair && item.repair.generation === item.ledger.generation && item.repair.head === item.selected.head && item.repair.acceptanceRevision === item.selected.acceptanceRevision ? item.repair : undefined;
+			if (protocolRepair && !item.ledger.tasks.some((task) => task.attempts.some((attempt) => attempt.id === protocolRepair.attemptId && attempt.generation === item.ledger.generation && attempt.subject.head === item.selected.head && attempt.privateSessions.some((session) => session.started)))) throw new NativeExecutionError("repair-packet-invalid", "retained repair packet has no matching admitted item/attempt execution; quarantine foreign recovery input");
 		const repairFeedback = previousReceipt ? JSON.stringify({ attempt: previous!.id, subject: previousReceipt.subject, acceptanceRevision: item.selected.acceptanceRevision, result: previousReceipt.result, failed: previousReceipt.predicates?.filter((predicate) => !predicate.ok), tests: previousReceipt.tests.filter((test) => test.outcome !== "pass"), unresolved: previousReceipt.unresolved }).slice(0, 32768) : protocolRepair?.reason ?? "";
 		if (item.ledger.noProgressAttempts >= 2) {
 			if (item.ledger.replans >= 1) throw new Error("plateau after one bounded replan; new evidence or explicit scope decision required");
@@ -663,7 +722,8 @@ export class BatchService {
 		const worker = await runNative(this.sdk, this.schema, binding, item, this.root, "worker", signal, onSession("worker", attempt), onExecutionStart("worker", attempt), repairFeedback, {
 			attemptId: attempt,
 			repairFeedback,
-			artifacts: protocolRepair?.artifacts,
+				artifacts: protocolRepair?.artifacts,
+				evidenceRoot: join(this.root, "evidence", batch.id, digest(item.selected.key).slice(0, 16)),
 			escalationIdentity: {
 				taskId: "T1",
 				itemKey: item.selected.key,
@@ -718,7 +778,7 @@ export class BatchService {
 		const handles = artifacts.map((path, index) => { const bytes = readFileSync(path); return { id: `evidence-${index}`, path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: attempt }; });
 		item.repair = { generation: item.ledger.generation, head: item.selected.head!, acceptanceRevision: item.selected.acceptanceRevision!, attemptId: attempt, reason: "Acceptance pending for retained candidate", artifacts: handles };
 		transitionOperation(item, { phase: "acceptance" }); this.persist(batch);
-		const reviewer = await runNative(this.sdk, this.schema, binding, item, this.root, "acceptance", signal, onSession("acceptance", attempt), onExecutionStart("acceptance", attempt), verification, { attemptId: attempt, artifacts: handles });
+			const reviewer = await runNative(this.sdk, this.schema, binding, item, this.root, "acceptance", signal, onSession("acceptance", attempt), onExecutionStart("acceptance", attempt), verification, { attemptId: attempt, artifacts: handles, evidenceRoot: evidenceDir });
 		batch.usage.modelCalls += reviewer.calls;
 		if (reviewer.accepted && reviewer.evidenceCoverageComplete !== true) throw new NativeExecutionError("report-invalid", "acceptance did not establish full coverage of the retained candidate artifacts");
 		for (const artifact of handles) if (createHash("sha256").update(readFileSync(artifact.path)).digest("hex") !== artifact.digest) throw new Error("retained evidence changed during acceptance; proof stale");
@@ -735,9 +795,7 @@ export class BatchService {
 			...(reviewer.accepted ? [] : [reviewer.report]),
 			...(semanticOutcome === "uncertain" ? ["semantic result remains uncertain"] : []),
 		];
-		const assumptions = item.selected.acceptanceRevision
-			? [{ kind: "acceptance-revision" as const, value: item.selected.acceptanceRevision }]
-			: [];
+			const assumptions = item.ledger.criteria[0]?.assumptions ?? [];
 		const receipt: EvidenceReceipt = {
 			version: 2,
 			taskId: "T1" as TaskId,
@@ -777,7 +835,7 @@ export class BatchService {
 			this.persist(batch); return;
 		}
 		const verifiedProof: NonNullable<Batch["items"][number]["proof"]> = { acceptanceRevision: item.selected.acceptanceRevision!, subject: item.selected.head!, tree, digest: digest(artifacts.map((path) => digest(readFileSync(path, "utf8"))).join("")), artifacts, stage: "verified-patch", reviewerSession: reviewer.session };
-		if (item.selected.action === "inspect") {
+			if (item.selected.action === "inspect" || batch.convergence && item.selected.action === "patch") {
 			this.event(item, { kind: "finish_task", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId });
 			item.proof = verifiedProof;
 			item.stage = "DONE"; item.blocker = undefined; this.persist(batch);
