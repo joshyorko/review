@@ -1,6 +1,7 @@
 import { open as openAsync } from "node:fs/promises";
 import { constants, closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { evaluateWorkGraph } from "../core/graph.ts";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createBatch, digest, type Batch } from "../core/batch.ts";
@@ -166,14 +167,21 @@ export class BatchStore {
 	}
 	private decode(id: string, contents: string): Batch {
 		const batch = JSON.parse(contents) as Omit<Batch, "version"> & { version: number };
-		if ((batch.version !== 1 && batch.version !== 2) || batch.id !== id || !Array.isArray(batch.items) || !Number.isSafeInteger(batch.revision)) {
+		if ((batch.version !== 1 && batch.version !== 2 && batch.version !== 3) || batch.id !== id || !Array.isArray(batch.items) || !Number.isSafeInteger(batch.revision)) {
 			throw new Error("unsupported or corrupt batch; preserve original state and export for inspection");
 		}
 		if (!Array.isArray(batch.dependencies) || !Array.isArray(batch.scopeRevisions) || !["paused", "active", "stopped"].includes(batch.control) || !batch.usage || !Number.isSafeInteger(batch.usage.modelCalls) || batch.usage.modelCalls < 0) {
 			throw new Error("unsupported or corrupt batch control/state");
 		}
 		const legacy = batch.version === 1;
-		createBatch(batch.items.map((item) => item.selected), { id, capacity: batch.capacity, maxAttempts: batch.maxAttempts, maxTotalAttempts: batch.maxTotalAttempts, mode: batch.mode, dependencies: batch.dependencies });
+		if (batch.version === 3) {
+			if (!batch.convergence || batch.convergence.generation !== "G1") throw new Error("version-3 convergence contract is unreadable; preserve original state");
+			if (batch.convergence.observation) {
+				if (batch.convergence.observation.nodes.length > 42 || batch.convergence.observation.relations.length > 512) throw new Error("convergence observation exceeds its bounded contract");
+				evaluateWorkGraph(batch.convergence.observation);
+			}
+		} else if (batch.convergence !== undefined) throw new Error("old selected batch cannot acquire convergence authority implicitly");
+		createBatch(batch.items.map((item) => item.selected), { id, capacity: batch.capacity, maxAttempts: batch.maxAttempts, maxTotalAttempts: batch.maxTotalAttempts, mode: batch.mode, dependencies: batch.dependencies, converge: batch.version === 3 });
 		for (const item of batch.items) {
 			if (!item.selected || !Array.isArray(item.sessions) || !item.sessions.every((session) => typeof session === "string") || !Number.isSafeInteger(item.attempts) || item.attempts < 0 || !["QUEUED", "RUNNING", "VERIFY", "DONE", "BLOCKED", "UNKNOWN", "CANCELLED", "EXCLUDED"].includes(item.stage)) {
 				throw new Error("invalid item state; no execution allowed");
@@ -206,7 +214,7 @@ export class BatchStore {
 				throw new Error("invalid proof record; no execution allowed");
 			}
 		}
-		batch.version = 2;
+		batch.version = batch.version === 3 ? 3 : 2;
 		return batch as Batch;
 	}
 	write(batch: Batch): void {
