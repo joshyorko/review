@@ -253,6 +253,12 @@ for tool in actionlint shellcheck yq jq just openssl; do
     fail "${tool} must be staged from the pinned FSDK builder"
 done
 
+# Git clone needs the FSDK's upload-pack builtin even for a local bare source.
+# Keep its exec-path helper in the same explicit closure as the HTTPS helper.
+require image/appliance/stage-runtime.sh \
+  '/usr/libexec/git-core/git-remote-http' \
+  '/usr/libexec/git-core/git-upload-pack'
+
 # The point of a distroless appliance is that nothing inside it can install
 # anything. Not one of these may appear, in any stage that reaches the image.
 forbid "$containerfile" \
@@ -482,8 +488,9 @@ blocked)
   ;;
 esac
 
-# git is here to land fixes, which means it has to be able to commit and to
-# reach GitHub over https — the remote helper and its TLS closure included.
+# git is here to land fixes, which means it has to be able to commit, clone
+# local bare repositories, and reach GitHub over https — with each helper's
+# FSDK executable and library closure included.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
@@ -495,10 +502,16 @@ run '
   git add file
   git commit -qm "smoke"
   git log --oneline | grep -q smoke
+  test "$(git --exec-path)" = /usr/libexec/git-core
+  test -x /usr/libexec/git-core/git-upload-pack
+  git --list-cmds=builtins | tr " " "\n" | grep -qx upload-pack
   test -x /usr/libexec/git-core/git-remote-https
   ldd /usr/libexec/git-core/git-remote-https | grep -q "not found" && exit 1
+  ldd /usr/libexec/git-core/git-upload-pack | grep -q "not found" && exit 1
+  git clone --quiet --bare "$HOME/repo" "$HOME/repo.git"
+  git --git-dir="$HOME/repo.git" log --oneline | grep -q smoke
   exit 0
-' >/dev/null || fail "git cannot commit, or its https remote helper is missing libraries"
+' >/dev/null || fail "git helper closure cannot commit, clone local bare repositories, or reach GitHub over https"
 
 # The agent writes sessions, logs and caches under HOME on every run.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
