@@ -509,7 +509,8 @@ run '
   ldd /usr/libexec/git-core/git-remote-https | grep -q "not found" && exit 1
   ldd /usr/libexec/git-core/git-upload-pack | grep -q "not found" && exit 1
   git clone --quiet --bare "$HOME/repo" "$HOME/repo.git"
-  git --git-dir="$HOME/repo.git" log --oneline | grep -q smoke
+  git clone --quiet --no-local "$HOME/repo.git" "$HOME/checkout"
+  git -C "$HOME/checkout" log --oneline | grep -q smoke
   exit 0
 ' >/dev/null || fail "git helper closure cannot commit, clone local bare repositories, or reach GitHub over https"
 
