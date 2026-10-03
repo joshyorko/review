@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { cpSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { Batch } from "../../image/extension/luna-factory/core/batch.ts";
 import type { NativeSDK, SchemaBuilder } from "../../image/extension/luna-factory/omp/batch-native.ts";
@@ -85,6 +85,19 @@ export async function report(tools: readonly FixtureTool[], options: { accepted?
 	});
 }
 
+export async function withMissingBwrap<T>(root: string, run: () => Promise<T>): Promise<T> {
+	const directory = join(root, "fixture-missing-bwrap-bin");
+	mkdirSync(directory, { recursive: true });
+	writeFileSync(join(directory, "bwrap"), "#!/bin/sh\nprintf 'fixture-local bwrap unavailable sentinel\\n' >&2\nexit 127\n", { mode: 0o755 });
+	const previousPath = process.env.PATH;
+	process.env.PATH = [directory, previousPath].filter(Boolean).join(delimiter);
+	try { return await run(); }
+	finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+	}
+}
+
 function createRepairFixture(respond: (tools: readonly FixtureTool[], prompt: string) => Promise<void>, options: { acceptanceScript?: string; maxAttempts?: number; root?: string; sdk?: NativeSDK; schema?: SchemaBuilder; additionalItems?: number[] } = {}, portable = false) {
 	const root = options.root ?? mkdtempSync(join(tmpdir(), "factory-repair-acceptance-"));
 	mkdirSync(root, { recursive: true });
@@ -112,11 +125,14 @@ function createRepairFixture(respond: (tools: readonly FixtureTool[], prompt: st
 	}
 	const github = { assertFresh: async () => {}, snapshot: async (selected: unknown) => selected } as never;
 	const sdk = options.sdk ?? fixtureSDK(root, respond);
-	const service = portable
+	// Keep fixture-only verification injection attached to every persisted reload.
+	// repairFixture() still uses BatchService's production sandbox defaults.
+	const createService = () => portable
 		? new BatchService(root, github, sdk, options.schema ?? schema, 1, root, fixturePreflight, runFixtureVerification)
 		: new BatchService(root, github, sdk, options.schema ?? schema, 1);
+	const service = createService();
 	service.store.acquire(); service.store.write(batch);
-	return { root, workspace, batch, item, github, sdk, service, async cleanup() { if (service.isWriterAcquired()) await service.shutdown(); rmSync(root, { recursive: true, force: true }); } };
+	return { root, workspace, batch, item, github, sdk, service, createService, async cleanup() { if (service.isWriterAcquired()) await service.shutdown(); rmSync(root, { recursive: true, force: true }); } };
 }
 
 export function repairFixture(respond: (tools: readonly FixtureTool[], prompt: string) => Promise<void>, options: { acceptanceScript?: string; maxAttempts?: number; root?: string; sdk?: NativeSDK; schema?: SchemaBuilder; additionalItems?: number[] } = {}) {

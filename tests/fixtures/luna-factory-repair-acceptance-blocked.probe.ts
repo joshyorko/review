@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { NativeSDK } from "../../image/extension/luna-factory/omp/batch-native.ts";
-import { BatchService, binding, createBatch, currentItem, digest, readArtifacts, portableRepairFixture, report, runNative, schema, tool, toolText } from "./luna-factory-repair-acceptance-support.ts";
+import { BatchService, binding, createBatch, currentItem, digest, readArtifacts, portableRepairFixture, report, runNative, schema, tool, toolText, withMissingBwrap } from "./luna-factory-repair-acceptance-support.ts";
 
 type FixtureTool = { name: string; execute(id: string, args: unknown): Promise<unknown> };
 
@@ -128,9 +128,11 @@ test("persist and reload quarantine a repair packet copied from another admitted
 		const recovered = fixture.service.store.read(fixture.batch.id);
 		recovered.items[1]!.repair = structuredClone(recovered.items[0]!.repair);
 		await writeFile(join(fixture.root, `${fixture.batch.id}.json`), `${JSON.stringify(recovered)}\n`);
-		resumed = new BatchService(fixture.root, fixture.github, fixture.sdk, schema, 1);
-		try { await resumed.resume(fixture.batch.id, binding); await resumed.waitForIdle(); }
-		catch (error) { assert.ok(error instanceof Error); assert.match(error.message, /repair|ownership|foreign|packet|artifact/i); }
+		await withMissingBwrap(fixture.root, async () => {
+			resumed = fixture.createService();
+			try { await resumed.resume(fixture.batch.id, binding); await resumed.waitForIdle(); }
+			catch (error) { assert.ok(error instanceof Error); assert.match(error.message, /repair|ownership|foreign|packet|artifact/i); }
+		});
 		assert.equal(foreignFeedbackDelivered, false, "reload must not bind another item's repair feedback to this worker");
 		assert.equal(foreignArtifactDelivered, false, "reload must not expose another item's retained artifacts");
 	} finally { if (resumed?.isWriterAcquired()) await resumed.shutdown(); await fixture.cleanup(); }

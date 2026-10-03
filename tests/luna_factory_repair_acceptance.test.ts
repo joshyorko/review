@@ -3,7 +3,7 @@ import test from "node:test";
 import { createHash } from "node:crypto";
 import { linkSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { BatchService, binding, currentItem, digest, readArtifacts, portableRepairFixture, report, runNative, tool, toolText } from "./fixtures/luna-factory-repair-acceptance-support.ts";
+import { BatchService, binding, currentItem, digest, readArtifacts, portableRepairFixture, report, runNative, tool, toolText, withMissingBwrap } from "./fixtures/luna-factory-repair-acceptance-support.ts";
 
 test("a failed mutating candidate repairs from complete retained evidence after persist and reload", async () => {
 	let workers = 0;
@@ -65,10 +65,13 @@ test("a failed mutating candidate repairs from complete retained evidence after 
 		const originalGeneration = rejected.ledger.generation;
 		const originalSubject = structuredClone(rejected.ledger.subject);
 		await fixture.service.shutdown();
-		resumed = new BatchService(fixture.root, fixture.github, fixture.sdk, fixture.service.schema, 1);
-		await resumed.resume(fixture.batch.id, binding); await resumed.waitForIdle();
+		await withMissingBwrap(fixture.root, async () => {
+			resumed = fixture.createService();
+			await resumed.resume(fixture.batch.id, binding); await resumed.waitForIdle();
+		});
+		assert.ok(resumed);
 		const final = currentItem(resumed.store.read(fixture.batch.id));
-		assert.equal(workers, 2); assert.equal(reviewers, 2);
+		assert.equal(workers, 2, `persisted repair did not continue: stage=${final.stage}; blocker=${final.blocker?.slice(0, 1024) ?? "(none)"}`); assert.equal(reviewers, 2);
 		assert.match(repairPrompts[1]!, /DISTINCTIVE_REJECTION/);
 		assert.equal(final.attempts, 2); assert.equal(final.ledger.tasks[0]!.attempts.length, 2);
 		assert.equal(final.ledger.generation, originalGeneration); assert.deepEqual(final.ledger.subject, originalSubject);
@@ -159,8 +162,11 @@ test("failed acceptance and restart spend the same original attempt budget", asy
 		assert.equal(exhausted.stage, "BLOCKED"); assert.match(exhausted.blocker!, /original attempt budget exhausted/);
 		await assert.rejects(() => fixture.service.retry(fixture.batch.id, exhausted.selected.key, binding), /original attempt budget exhausted/);
 		await fixture.service.shutdown();
-		resumed = new BatchService(fixture.root, fixture.github, fixture.sdk, fixture.service.schema, 1);
-		await resumed.resume(fixture.batch.id, binding); await resumed.waitForIdle();
+		await withMissingBwrap(fixture.root, async () => {
+			resumed = fixture.createService();
+			await resumed.resume(fixture.batch.id, binding); await resumed.waitForIdle();
+		});
+		assert.ok(resumed);
 		const final = currentItem(resumed.store.read(fixture.batch.id));
 		assert.equal(workers, 2, "restart cannot replenish the original budget"); assert.equal(final.attempts, 2);
 		assert.equal(final.stage, "BLOCKED"); assert.equal(final.proof, undefined);
