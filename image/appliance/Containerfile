@@ -23,7 +23,7 @@ ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:11754f1a31e4d36b2e9
 # The builder is the shell-enabled sibling of the same FSDK series, so the
 # binaries staged out of it link against the base's own glibc.
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/lab-runner
-ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:7c4a93cb6c40d995af81d3ef705a874211883668cf504db3fb64ae3d72e12c9f
+ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:e3259944878c53f4d95352e340257eb3024888d7107dd8f9d16feac3daaabb65
 # Linux audio packages are absent from the FSDK runtime seam. The pinned audio
 # stage contributes only the PulseAudio/ALSA libraries and configuration.
 # renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
