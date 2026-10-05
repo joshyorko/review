@@ -19,7 +19,7 @@
 # what Renovate can compare against, and a pin no tool can track is a stale pin.
 
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/base
-ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:11754f1a31e4d36b2e917529dee66538c5594d7ee359cbf744c2297879e9fbd5
+ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:9ef262a9039b756d0af91bf1fc851576a56ea7657f8f8a5020fa9dc2bf54b3bb
 # The builder is the shell-enabled sibling of the same FSDK series, so the
 # binaries staged out of it link against the base's own glibc.
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/lab-runner
