@@ -17,8 +17,8 @@
  */
 
 import { admit, attemptsRemaining } from "./admission.ts";
-import { criterionProven, receiptAcceptable, reconcileReceipt, taskProofCurrent } from "./evidence.ts";
-import { parseProofAssumptions } from "./schema.ts";
+import { criterionProven, currentAssumptionsFor, receiptAcceptable, reconcileCurrentVerification, reconcileObservedProof, reconcileReceipt, taskProofCurrent } from "./evidence.ts";
+import { parseCurrentVerification, parseObservedProof, parseProofAssumptions } from "./schema.ts";
 import type {
 	Attempt,
 	Candidate,
@@ -120,6 +120,16 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 	}
 
 	switch (event.kind) {
+		case "record_observation": {
+			const parsed = parseObservedProof(event.observation);
+			if (!parsed.ok) return { ok: false, error: `observation rejected: ${parsed.errors.join("; ")}` };
+			const reconciliation = reconcileObservedProof(ledger, parsed.value);
+			if (reconciliation.status === "contradicted") return { ok: false, error: reconciliation.reasons.join("; ") };
+			const observations = ledger.observations ?? [];
+			if (JSON.stringify(observations.at(-1)) === JSON.stringify(parsed.value)) return { ok: true, ledger };
+			if (observations.length >= 64) return { ok: false, error: "original bounded observation history is full; retain proof and explicitly revise the run" };
+			return bump({ ...ledger, observations: [...observations, parsed.value] });
+		}
 		case "record_candidate": {
 			const verdict = admit(ledger, event.candidate);
 			// A dismissed candidate tracks nothing: it either duplicates existing
@@ -171,7 +181,14 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 				if (previous?.receipt === undefined) {
 					return { ok: false, error: `task ${task.id} is VERIFY without a returned receipt to repair` };
 				}
-				const reconciliation = reconcileReceipt(ledger, previous.receipt, {
+				const currentReconciliation = previous.currentVerification === undefined ? undefined : reconcileCurrentVerification(ledger, previous.currentVerification, {
+					taskId: task.id,
+					attemptId: previous.id,
+					subject: ledger.subject,
+					acceptanceRevision: previous.currentVerification.acceptanceRevision,
+					assumptions: previous.currentVerification.assumptions,
+				});
+				const reconciliation = currentReconciliation ?? reconcileReceipt(ledger, previous.receipt, {
 					taskId: task.id,
 					attemptId: previous.id,
 					subject: ledger.subject,
@@ -386,6 +403,32 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			}));
 		}
 
+		case "record_current_verification": {
+			const task = findTask(ledger, event.taskId);
+			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
+			if (!task || !attempt) return { ok: false, error: `unknown attempt ${event.taskId}#${event.attemptId}` };
+			if (task.state !== "VERIFY" || attempt.state !== "returned" || lastReturned(task) !== attempt || task.attempts.at(-1) !== attempt || task.attempts.some((candidate) => candidate.state === "started")) {
+				return { ok: false, error: `current verification requires the latest returned attempt on a VERIFY task` };
+			}
+			if (!attempt.receipt || !attempt.integrated) return { ok: false, error: `attempt ${attempt.id} has not been returned and integrated` };
+			if (attempt.currentVerification !== undefined) return { ok: false, error: `attempt ${attempt.id} already has immutable current-subject verification` };
+			const parsed = parseCurrentVerification(event.receipt);
+			if (!parsed.ok) return { ok: false, error: `current verification rejected: ${parsed.errors.join("; ")}` };
+			const criterion = ledger.criteria.find((entry) => entry.id === task.criterionId);
+			const assumptions = currentAssumptionsFor(ledger, task.id);
+			const acceptanceRevision = criterion?.assumptions?.find((assumption) => assumption.kind === "acceptance-revision")?.value;
+			if (acceptanceRevision === undefined) return { ok: false, error: "current verification requires a declared acceptance revision" };
+			const reconciliation = reconcileCurrentVerification(ledger, parsed.value, {
+				taskId: task.id,
+				attemptId: attempt.id,
+				subject: ledger.subject,
+				acceptanceRevision,
+				assumptions,
+			});
+			if (reconciliation.status !== "proven") return { ok: false, error: `current verification is ${reconciliation.status}: ${reconciliation.reasons.join("; ")}` };
+			return bump(replaceAttempt(ledger, task.id, attempt.id, (current) => ({ ...current, currentVerification: parsed.value })));
+		}
+
 		case "integrate_attempt": {
 			const task = findTask(ledger, event.taskId);
 			const attempt = task?.attempts.find((candidate) => candidate.id === event.attemptId);
@@ -412,6 +455,9 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (event.subject.head === attempt.subject.head) {
 				return { ok: false, error: `integration subject must identify an externally changed head; ${attempt.id} remains on its original subject` };
 			}
+			if (attempt.state !== "returned" || lastReturned(task) !== attempt || task.attempts.at(-1) !== attempt || task.attempts.some((candidate) => candidate.state === "started")) {
+				return { ok: false, error: `attempt ${attempt.id} is not the latest returned attempt` };
+			}
 			const reconciliation = reconcileReceipt(ledger, attempt.receipt, {
 				taskId: task.id,
 				attemptId: attempt.id,
@@ -422,7 +468,10 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 				return { ok: false, error: `attempt ${attempt.id} is ${reconciliation.status}, not proven: ${reconciliation.reasons.join("; ")}` };
 			}
 
-			const integrated = replaceAttempt(ledger, task.id, attempt.id, (current) => ({ ...current, integrated: true }));
+			const integrated = replaceAttempt(ledger, task.id, attempt.id, (current) => ({
+				...current,
+				integrated: true,
+			}));
 			// Proof is about a head. Moving the head leaves earlier proof stale, so
 			// every task certified at the old subject returns to VERIFY.
 			const demoted = integrated.tasks.map((candidate) => {
@@ -448,29 +497,42 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			}
 			const attempt = lastReturned(task);
 			if (!attempt?.receipt) return { ok: false, error: `task ${task.id} has no returned receipt; completion is unproved` };
+			if (ledger.goal.finishAuthority === "pr-ready" && attempt.integrated && attempt.currentVerification === undefined) {
+				return { ok: false, error: `PR-ready proof for ${task.id} requires fresh current-subject verification and acceptance` };
+			}
 			if (attempt.steeredAgentId !== undefined) {
 				return { ok: false, error: `attempt ${attempt.id} was steered by OMP; its proof cannot finish this task` };
 			}
-			if (task.effect === "write" && !attempt.integrated) {
+			if (task.effect === "write" && !attempt.integrated && ledger.goal.finishAuthority !== "verified-patch") {
 				return { ok: false, error: `write task ${task.id} must be integrated before it can complete` };
 			}
-			if (subjectChanged(attempt.subject, ledger.subject)) {
+			if (subjectChanged(attempt.subject, ledger.subject) && attempt.currentVerification === undefined) {
 				return { ok: false, error: `proof for ${task.id} is at an older subject; reverify before completing` };
 			}
 			const criterion = ledger.criteria.find((candidate) => candidate.id === task.criterionId);
 			const currentAssumptions = (criterion?.assumptions ?? []).map((assumption) => {
 				if (assumption.kind !== "dependency-outcome") return assumption;
+				const observed = ledger.assumptionValues?.find((entry) => entry.kind === "dependency-outcome" && entry.taskId === assumption.taskId);
+				if (observed) return observed;
 				const dependency = ledger.tasks.find((candidate) => candidate.id === assumption.taskId);
 				return { ...assumption, value: dependency !== undefined && criterionProven(ledger, dependency.criterionId) ? "proven" : "unproven" };
 			});
-			const reconciliation = reconcileReceipt(ledger, attempt.receipt, {
-				taskId: task.id,
-				attemptId: attempt.id,
-				subject: ledger.subject,
-				artifactRoots: context.artifactRoots,
-				assumptions: currentAssumptions,
-				requiredAssumptions: criterion?.assumptions,
-			});
+			const reconciliation = attempt.currentVerification !== undefined
+				? reconcileCurrentVerification(ledger, attempt.currentVerification, {
+					taskId: task.id,
+					attemptId: attempt.id,
+					subject: ledger.subject,
+					acceptanceRevision: criterion?.assumptions?.find((assumption) => assumption.kind === "acceptance-revision")?.value ?? "",
+					assumptions: currentAssumptions,
+				})
+				: reconcileReceipt(ledger, attempt.receipt, {
+					taskId: task.id,
+					attemptId: attempt.id,
+					subject: ledger.subject,
+					artifactRoots: context.artifactRoots,
+					assumptions: currentAssumptions,
+					requiredAssumptions: criterion?.assumptions,
+				});
 			if (reconciliation.status !== "proven") {
 				return { ok: false, error: `evidence is ${reconciliation.status}: ${reconciliation.reasons.join("; ")}` };
 			}
@@ -501,9 +563,18 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 		case "reopen_task": {
 			const task = findTask(ledger, event.taskId);
 			if (task === undefined) return { ok: false, error: `unknown task ${event.taskId}` };
-			if (task.state !== "DONE") return { ok: false, error: `task ${task.id} is ${task.state}, not DONE` };
+			if (task.state !== "DONE" && task.state !== "VERIFY") return { ok: false, error: `task ${task.id} is ${task.state}, not DONE or VERIFY` };
 			if (event.reason.trim().length === 0) {
 				return { ok: false, error: "a reopen must name the new evidence that justifies it" };
+			}
+			if (task.state === "VERIFY") {
+				const latest = task.attempts.at(-1);
+				const returned = lastReturned(task);
+				if (!latest || latest !== returned || latest.state !== "returned" || !latest.receipt || !latest.integrated || task.attempts.some((attempt) => attempt.state === "started")) {
+					return { ok: false, error: `task ${task.id} has no latest integrated returned attempt to reopen from VERIFY` };
+				}
+				if (event.attemptId !== latest.id) return { ok: false, error: `task ${task.id} VERIFY reopen is bound to a different attempt` };
+				if (!event.subject || subjectChanged(event.subject, ledger.subject)) return { ok: false, error: `task ${task.id} VERIFY reopen is stale for the current subject` };
 			}
 			return bump(
 				replaceTask(ledger, task.id, (current) => ({

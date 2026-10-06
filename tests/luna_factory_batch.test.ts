@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync } from "node:fs";
+import { cpSync, existsSync, readdirSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	batchConverged,
+	batchItemProofCurrent,
 	batchSummary,
 	createBatch,
 	dependencyBlocker,
@@ -16,12 +17,14 @@ import {
 	type Batch,
 	type SelectedItem,
 } from "../image/extension/luna-factory/core/batch.ts";
-import type { AttemptId, EvidenceReceipt, TaskId } from "../image/extension/luna-factory/core/model.ts";
+import type { AttemptId, CurrentVerificationReceipt, EvidenceReceipt, TaskId } from "../image/extension/luna-factory/core/model.ts";
+import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
 import { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { BatchStore, ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { captureWaveJobIds, reconcileBlockedRepositoryClaim, waveWorkerCoverageComplete, waveWorkersSettled } from "../image/extension/bluefin-review/extension.ts";
 import { BatchService, semanticOutcomeFor } from "../image/extension/luna-factory/omp/batch-service.ts";
 import { BatchGitHub } from "../image/extension/luna-factory/omp/batch-github.ts";
+import { binding as repairBinding, git as fixtureGit, portableRepairFixture, readArtifacts as readRepairArtifacts, report as repairReport, tool as repairTool } from "./fixtures/luna-factory-repair-acceptance-support.ts";
 
 const selected = (key: string, action: SelectedItem["action"] = "patch", extra: Partial<SelectedItem> = {}): SelectedItem => {
 	const match = /^([^#]+)#(\d+)$/.exec(key);
@@ -31,6 +34,21 @@ const selected = (key: string, action: SelectedItem["action"] = "patch", extra: 
 	return { key: `${repo}#${number}`, repo, number, kind: "issue", action, overlaps: [], acceptanceRevision: "r1", base: "a".repeat(40), head: "a".repeat(40), ...extra };
 };
 const options = (id = "a") => ({ id: `batch-${id.replace(/[^a-f0-9-]/gi, "a")}`, capacity: 2, maxAttempts: 3, maxTotalAttempts: 10, mode: "once" as const });
+function storedZip(name: string, text: string): Buffer {
+	const filename = Buffer.from(name); const body = Buffer.from(text);
+	let crc = 0xffffffff;
+	for (const byte of body) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0); }
+	crc = (crc ^ 0xffffffff) >>> 0;
+	const local = Buffer.alloc(30 + filename.length + body.length);
+	local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt32LE(crc, 14);
+	local.writeUInt32LE(body.length, 18); local.writeUInt32LE(body.length, 22); local.writeUInt16LE(filename.length, 26);
+	filename.copy(local, 30); body.copy(local, 30 + filename.length);
+	const central = Buffer.alloc(46 + filename.length);
+	central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt32LE(crc, 16);
+	central.writeUInt32LE(body.length, 20); central.writeUInt32LE(body.length, 24); central.writeUInt16LE(filename.length, 28); filename.copy(central, 46);
+	const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10); end.writeUInt32LE(central.length, 12); end.writeUInt32LE(local.length, 16);
+	return Buffer.concat([local, central, end]);
+}
 const done = (batch: Batch, key: string, stage: "verified-patch" | "pr-ready" | "merged-upstream" = "verified-patch"): void => {
 	const item = batch.items.find((candidate) => candidate.selected.key === key)!;
 	const taskId = "T1" as TaskId;
@@ -103,7 +121,28 @@ const done = (batch: Batch, key: string, stage: "verified-patch" | "pr-ready" | 
 	};
 	item.stage = "DONE";
 	item.proof = { acceptanceRevision: item.selected.acceptanceRevision!, subject: item.selected.head!, digest: "d", artifacts: [], stage, reviewerSession: "reviewer" };
+	if (item.selected.action === "pr-ready") bindCurrentVerification(item, item.selected.head ?? item.selected.base!);
 };
+
+function bindCurrentVerification(item: Batch["items"][number], head: string): void {
+	const task = item.ledger.tasks[0]!;
+	const attempt = task.attempts.at(-1)!;
+	const subject = { ...item.ledger.subject, head };
+	const criterion = item.ledger.criteria.find((entry) => entry.id === task.criterionId)!;
+	const tree = item.proof?.tree ?? "c".repeat(40);
+	const currentVerification: CurrentVerificationReceipt = {
+		version: 1, taskId: task.id, attemptId: attempt.id, generation: item.ledger.generation, subject,
+		tree, acceptanceRevision: item.selected.acceptanceRevision!, assumptions: criterion.assumptions ?? [],
+		predicates: [
+			{ phase: "verification", item: "deterministic verification", ok: true, note: "exact commit passed" },
+			{ phase: "acceptance", item: "independent acceptance", ok: true, note: "exact commit accepted" },
+		], acceptanceSession: "/state/sessions/current-acceptance.jsonl", checkedAt: "2026-10-06T00:00:00.000Z",
+	};
+	item.ledger.subject = subject;
+	attempt.integrated = true;
+	attempt.currentVerification = currentVerification;
+	if (item.proof) { item.proof.subject = head; item.proof.tree = tree; }
+}
 
 test("selection identity is canonical, duplicate selected keys are refused, and retained batches keep all ten items", () => {
 	const items = Array.from({ length: 10 }, (_, index) => selected(`org/repo-${Math.floor(index / 2)}#${index % 2 + 1}`));
@@ -119,6 +158,39 @@ test("absence of a semantic result is neutral for patches but uncertain for insp
 	assert.equal(semanticOutcomeFor("pr-ready", "none"), "none");
 	assert.equal(semanticOutcomeFor("inspect", "none"), "uncertain");
 	assert.equal(semanticOutcomeFor("inspect", "disproven"), "disproven");
+});
+test("hosted evidence reopens VERIFY only for its latest integrated attempt and never resets appetite", () => {
+	const key = "org/reopen#1";
+	const base = () => {
+		const batch = createBatch([selected(key)], options("reopen")); done(batch, key);
+		const ledger = batch.items[0]!.ledger; ledger.tasks[0]!.state = "VERIFY";
+		return ledger;
+	};
+	const reopen = (ledger: Batch["items"][number]["ledger"], attemptId: string, subject = ledger.subject, reason = "complete hosted failure packet requires repair") =>
+		reduce(ledger, { kind: "reopen_task", expectedRevision: ledger.revision, taskId: "T1" as TaskId, attemptId: attemptId as AttemptId, subject, reason }, { artifactRoots: [] });
+	const unintegrated = base(); unintegrated.tasks[0]!.attempts[0]!.integrated = false;
+	assert.match((reopen(unintegrated, "T1-a1") as { ok: false; error: string }).error, /integrated returned attempt/);
+	const unreturned = base(); unreturned.tasks[0]!.attempts[0]!.state = "started";
+	assert.match((reopen(unreturned, "T1-a1") as { ok: false; error: string }).error, /integrated returned attempt/);
+	const wrong = reopen(base(), "T1-a2");
+	assert.match((wrong as { ok: false; error: string }).error, /different attempt/);
+	const missingAttemptLedger = base();
+	const missingAttempt = reduce(missingAttemptLedger, { kind: "reopen_task", expectedRevision: missingAttemptLedger.revision, taskId: "T1" as TaskId, subject: missingAttemptLedger.subject, reason: "hosted evidence" }, { artifactRoots: [] });
+	assert.match((missingAttempt as { ok: false; error: string }).error, /different attempt/);
+	const missingSubjectLedger = base();
+	const missingSubject = reduce(missingSubjectLedger, { kind: "reopen_task", expectedRevision: missingSubjectLedger.revision, taskId: "T1" as TaskId, attemptId: "T1-a1" as AttemptId, reason: "hosted evidence" }, { artifactRoots: [] });
+	assert.match((missingSubject as { ok: false; error: string }).error, /stale for the current subject/);
+	const staleLedger = base(); const stale = reopen(staleLedger, "T1-a1", { ...staleLedger.subject, head: "f".repeat(40) });
+	assert.match((stale as { ok: false; error: string }).error, /stale for the current subject/);
+	const blank = reopen(base(), "T1-a1", undefined, " ");
+	assert.match((blank as { ok: false; error: string }).error, /new evidence/);
+	const exhausted = base(); exhausted.goal = { ...exhausted.goal, appetite: { ...exhausted.goal.appetite, attemptsPerTask: 1 } };
+	const reopened = reopen(exhausted, "T1-a1");
+	assert.equal(reopened.ok, true);
+	if (!reopened.ok) return;
+	assert.equal(reopened.ledger.tasks[0]!.attempts.length, 1);
+	const replay = reduce(reopened.ledger, { kind: "start_attempt", expectedRevision: reopened.ledger.revision, taskId: "T1" as TaskId, attemptId: "T1-a2" as AttemptId, subject: reopened.ledger.subject }, { artifactRoots: [] });
+	assert.equal(replay.ok, false); assert.match(replay.ok ? "" : replay.error, /exhausted its attempt appetite/);
 });
 test("batch status exposes Factory session role and retained identity alongside native Hub guidance", () => {
 	const batch = createBatch([selected("org/a#1", "inspect")], options("session"));
@@ -190,6 +262,196 @@ test("freshness rejects a newly introduced GitHub overlap", async () => {
 	})) as unknown as typeof fetch);
 	const snapshot = await github.snapshot(selected("org/repo#1", "inspect"));
 	await assert.rejects(() => github.assertFresh(snapshot), /overlap|scope|stale/i);
+});
+
+test("freshness permits only the recorded same-repository PR link after exact owner/head/target recheck", async () => {
+	const oid = "a".repeat(40);
+	const candidate = "b".repeat(40);
+	const repository = { id: "repo-1", nameWithOwner: "org/repo", defaultBranchRef: { name: "main", target: { oid } } };
+	const issue = (withOwnedLink: boolean) => ({
+		id: "item-1", __typename: "Issue", title: "same title", body: "same body", closed: false,
+		url: "https://github.com/org/repo/issues/1", labels: { nodes: [], pageInfo: { hasNextPage: false } },
+		timelineItems: { nodes: withOwnedLink ? [{ source: { number: 2, state: "OPEN", repository: { nameWithOwner: "org/repo" } } }] : [], pageInfo: { hasNextPage: false } },
+	});
+	const pull = { repository: "org/repo", identity: "PR_node_2", number: 2, url: "https://github.com/org/repo/pull/2", branch: "factory/batch-a/1", headSha: candidate, baseRef: "main", baseSha: oid };
+	const currentPr = { id: 2, node_id: pull.identity, number: 2, html_url: pull.url, state: "open", merged: false, draft: false, head: { ref: pull.branch, sha: candidate, repo: { full_name: "org/repo" } }, base: { ref: "main", sha: oid, repo: { full_name: "org/repo" } } };
+	const make = (headSha: string) => {
+		const responses = [issue(false), issue(true)];
+		return new BatchGitHub("token", (async (input) => {
+			const url = new URL(String(input));
+			const body = url.pathname === "/graphql" ? { data: { repository: { ...repository, issueOrPullRequest: responses.shift() } } } : { ...currentPr, head: { ...currentPr.head, sha: headSha } };
+			return { ok: true, status: 200, headers: new Headers(), json: async () => body };
+		}) as typeof fetch);
+	};
+	const selectedItem = selected("org/repo#1", "pr-ready", { baseRef: "main", base: oid, head: oid });
+	const accepted = make(candidate);
+	const snapshot = await accepted.snapshot(selectedItem);
+	await accepted.assertFresh(snapshot, pull);
+	const humanPush = make("c".repeat(40));
+	const humanPushSnapshot = await humanPush.snapshot(selectedItem);
+	await assert.rejects(() => humanPush.assertFresh(humanPushSnapshot, pull), /owned PR identity, target, or head changed/);
+});
+
+test("hosted checks combine classic/ruleset policy and select the exact eligible PR subject/source", async () => {
+	const repo = "org/a";
+	const head = "a".repeat(40);
+	const merge = "b".repeat(40);
+	const pull = { repository: repo, identity: "PR_node_7", number: 7, url: `https://github.com/${repo}/pull/7`, branch: "factory/batch-test/1", headSha: head, baseRef: "self-hosted", baseSha: "c".repeat(40), mergeSha: merge };
+	const currentPull = { id: 7, node_id: pull.identity, number: 7, html_url: pull.url, state: "open", merged: false, draft: false, head: { ref: pull.branch, sha: head, repo: { full_name: repo } }, base: { ref: pull.baseRef, sha: pull.baseSha, repo: { full_name: repo } }, merge_commit_sha: merge };
+	const checkRun = (overrides: Record<string, unknown> = {}) => ({ id: 1, name: "CI", head_sha: head, status: "completed", conclusion: "success", created_at: "2026-10-06T12:00:00.000Z", started_at: "2026-10-06T12:00:00.000Z", app: { id: 42 }, check_suite: { id: 5 }, ...overrides });
+	const observe = async (options: { policy?: unknown; policySequence?: unknown[]; headRuns?: unknown[]; mergeRuns?: unknown[]; total?: number; current?: unknown; link?: boolean; withoutRecordedMerge?: boolean; rulesets?: unknown[]; ruleset?: unknown; workflowRuns?: unknown; logUnavailable?: boolean }) => {
+		let policyReads = 0;
+		const github = new BatchGitHub("token", (async (input) => {
+			const url = new URL(String(input));
+			if (url.hostname === "logs.example.test") return new Response(storedZip("runner.log", `${"routine\n".repeat(20_000)}DISTINCTIVE_FAILURE_AFTER_PREVIEW`), { status: 200, headers: { "content-type": "application/zip" } });
+			let body: unknown;
+			if (url.pathname.endsWith("/pulls/7")) body = options.current ?? currentPull;
+			else if (url.pathname.endsWith("/protection/required_status_checks")) body = options.policySequence?.[policyReads++] ?? options.policy ?? { strict: true, contexts: [], checks: [{ context: "CI", app_id: 42 }] };
+			else if (url.pathname.endsWith("/rulesets")) body = options.rulesets ?? [];
+			else if (/\/rulesets\/[0-9]+$/.test(url.pathname)) body = options.ruleset ?? {};
+			else if (url.pathname.endsWith("/actions/runs")) body = options.workflowRuns ?? { total_count: 0, workflow_runs: [] };
+			else if (/\/actions\/runs\/[0-9]+\/attempts\/[0-9]+\/jobs$/.test(url.pathname)) body = { total_count: 1, jobs: [{ id: 77, name: "test", conclusion: "failure", steps: [{ number: 1, name: "typecheck", conclusion: "failure" }] }] };
+			else if (/\/actions\/jobs\/[0-9]+\/logs$/.test(url.pathname)) return options.logUnavailable ? new Response(null, { status: 404 }) : new Response(null, { status: 302, headers: { location: "https://logs.example.test/job.zip" } });
+			else if (url.pathname.endsWith("/annotations")) body = [];
+			else if (/\/check-runs\/[0-9]+$/.test(url.pathname)) {
+				const id = Number(url.pathname.split("/").at(-1));
+				const matching = [...(options.headRuns ?? [checkRun()]), ...(options.mergeRuns ?? [checkRun({ head_sha: merge })])].find((run) => (run as { id: number }).id === id) as ReturnType<typeof checkRun>;
+				body = { id, name: matching.name, head_sha: matching.head_sha, conclusion: matching.conclusion, app: matching.app, output: { title: "CI failed", summary: "Compiler diagnostic", text: "src/main.ts:10: error TS2322" }, annotations_count: 0 };
+			}
+			else if (url.pathname.endsWith("/check-runs")) {
+				const isHead = url.pathname.includes(`/commits/${head}/`);
+				const check_runs = isHead ? options.headRuns ?? [checkRun()] : options.mergeRuns ?? [checkRun({ head_sha: merge })];
+				body = { total_count: options.total ?? check_runs.length, check_runs };
+			} else throw new Error(`unexpected fixture request ${url.pathname}`);
+			return { ok: true, headers: new Headers(options.link ? { link: '<https://api.github.com/next>; rel="next"' } : {}), json: async () => body } as Response;
+		}) as typeof fetch);
+		return github.observeHostedChecks(repo, options.withoutRecordedMerge ? { ...pull, mergeSha: undefined } : pull, "2026-10-06T12:00:01.000Z");
+	};
+
+	assert.equal((await observe({})).result, "passed");
+	assert.deepEqual((await observe({})).eligibleSubject, { sha: merge, subject: "merge" });
+	assert.equal((await observe({ withoutRecordedMerge: true })).mergeSha, merge, "first observed synthetic merge subject is retained when GitHub creates it after PR publication");
+	const failed = await observe({ mergeRuns: [checkRun({ id: 2, head_sha: merge, conclusion: "failure", created_at: "2026-10-06T12:01:00.000Z" }), checkRun({ head_sha: merge })] });
+	assert.equal(failed.result, "failed", "the newest exact-source run controls despite an older green attempt");
+	assert.equal(failed.failures?.[0]?.checkRun.id, 2);
+	assert.match(failed.failures?.[0]?.checkRun.text ?? "", /TS2322/);
+	assert.equal(failed.failures?.[0]?.annotationsComplete, true);
+	assert.equal((await observe({ mergeRuns: [checkRun({ head_sha: merge, status: "in_progress", conclusion: null })] })).result, "pending");
+	assert.equal((await observe({ mergeRuns: [checkRun({ head_sha: merge, status: "queued", conclusion: null, started_at: null })] })).result, "pending", "queued attempts remain pending before started_at exists");
+	assert.match((await observe({ mergeRuns: [checkRun({ head_sha: merge, app: { id: 99 } })] })).reason!, /exact-source/);
+	assert.match((await observe({ mergeRuns: [checkRun({ head_sha: merge, conclusion: "skipped" })] })).reason!, /execution proof is incomplete/);
+	assert.match((await observe({ mergeRuns: [checkRun({ head_sha: merge, conclusion: "cancelled" })] })).reason!, /execution proof is incomplete/);
+	assert.equal((await observe({ headRuns: [checkRun()], mergeRuns: [] })).eligibleSubject?.subject, "head", "head is eligible when no declared context ran on the merge SHA");
+	assert.match((await observe({ mergeRuns: Array.from({ length: 100 }, (_, index) => checkRun({ id: index + 1, head_sha: merge })), total: 100 })).reason!, /page is incomplete/);
+	assert.match((await observe({ policy: { strict: true, contexts: [], checks: [] } })).reason!, /no declared required-check policy/);
+	assert.match((await observe({ link: true })).reason!, /incomplete paginated/);
+	assert.match((await observe({ current: { ...currentPull, head: { ...currentPull.head, sha: "d".repeat(40) } } })).reason!, /identity, target, or head changed/);
+	assert.match((await observe({ current: { ...currentPull, draft: true } })).reason!, /identity, target, or head changed/);
+	assert.match((await observe({ current: { ...currentPull, base: { ...currentPull.base, ref: "release" } } })).reason!, /identity, target, or head changed/);
+	assert.match((await observe({ rulesets: [{ id: 9, enforcement: "active" }], ruleset: { id: 9, enforcement: "active", target: "branch", source: "org", source_type: "Organization", conditions: { ref_name: { include: ["refs/heads/self-hosted"], exclude: [] } }, rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "Security", integration_id: 77 }] } }] } })).reason!, /Security.*eligible/);
+	assert.match((await observe({ rulesets: [{ id: 9, enforcement: "active" }], ruleset: { id: 9, enforcement: "active", target: "branch", source: "org", source_type: "Organization", conditions: { ref_name: { include: ["refs/heads/self-hosted"], exclude: [] } }, rules: [{ type: "workflows", parameters: { workflows: [{ path: ".github/workflows/security.yml", ref: "refs/heads/main", repository_id: 7 }] } }] } })).reason!, /unproved policy rule workflows/);
+	assert.equal((await observe({ rulesets: [{ id: 9, enforcement: "active" }], ruleset: { id: 9, enforcement: "active", target: "branch", source: "org", source_type: "Organization", conditions: { ref_name: { include: ["refs/heads/release"], exclude: [] } }, rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "Security", integration_id: 77 }] } }] } })).result, "passed", "a complete but inapplicable ruleset does not add checks to this target");
+	assert.match((await observe({ rulesets: Array.from({ length: 100 }, (_, id) => ({ id: id + 1, enforcement: "active" })) })).reason!, /ruleset policy page is incomplete/);
+	assert.match((await observe({ policySequence: [{ strict: true, contexts: [], checks: [{ context: "CI", app_id: 42 }] }, { strict: true, contexts: [], checks: [{ context: "Security", app_id: 77 }] }] })).reason!, /policy changed during hosted observation/);
+	const actions = await observe({ policy: { strict: true, contexts: [], checks: [{ context: "CI", app_id: 15368 }] }, withoutRecordedMerge: true, current: { ...currentPull, merge_commit_sha: null }, headRuns: [checkRun({ app: { id: 15368, slug: "github-actions" } })], workflowRuns: { total_count: 1, workflow_runs: [{ id: 200, check_suite_id: 5, workflow_id: 12, run_attempt: 2, event: "pull_request", status: "completed", conclusion: "success", head_sha: head, path: ".github/workflows/ci.yml" }] } });
+	assert.equal(actions.result, "passed");
+	assert.equal(actions.runs[0]?.workflow?.attempt, 2);
+	const actionFailure = await observe({ policy: { strict: true, contexts: [], checks: [{ context: "CI", app_id: 15368 }] }, withoutRecordedMerge: true, current: { ...currentPull, merge_commit_sha: null }, headRuns: [checkRun({ app: { id: 15368, slug: "github-actions" }, conclusion: "failure" })], workflowRuns: { total_count: 1, workflow_runs: [{ id: 200, check_suite_id: 5, workflow_id: 12, run_attempt: 3, event: "pull_request", status: "completed", conclusion: "failure", head_sha: head, path: ".github/workflows/ci.yml" }] } });
+	assert.equal(actionFailure.result, "failed", actionFailure.reason);
+	assert.equal(actionFailure.failures?.[0]?.workflow?.id, 200);
+	assert.equal(actionFailure.failures?.[0]?.workflow?.attempt, 3);
+	assert.equal(actionFailure.failures?.[0]?.workflow?.jobs[0]?.steps[0]?.name, "typecheck");
+	assert.equal(actionFailure.failures?.[0]?.workflow?.jobs[0]?.logsAvailable, true);
+	assert.equal(actionFailure.failures?.[0]?.workflow?.jobs[0]?.logComplete, true);
+	assert.match(actionFailure.failures?.[0]?.workflow?.jobs[0]?.logContent ?? "", /DISTINCTIVE_FAILURE_AFTER_PREVIEW/);
+	const unavailableLogs = await observe({ policy: { strict: true, contexts: [], checks: [{ context: "CI", app_id: 15368 }] }, withoutRecordedMerge: true, current: { ...currentPull, merge_commit_sha: null }, headRuns: [checkRun({ app: { id: 15368, slug: "github-actions" }, conclusion: "failure" })], workflowRuns: { total_count: 1, workflow_runs: [{ id: 200, check_suite_id: 5, workflow_id: 12, run_attempt: 3, event: "pull_request", status: "completed", conclusion: "failure", head_sha: head, path: ".github/workflows/ci.yml" }] }, logUnavailable: true });
+	assert.equal(unavailableLogs.result, "unknown", "an advertised job log URL without readable content never authorizes repair");
+	assert.match(unavailableLogs.reason!, /no complete diagnostic log content/);
+	assert.match((await observe({ policy: { strict: true, contexts: [], checks: [{ context: "CI", app_id: 15368 }] }, withoutRecordedMerge: true, current: { ...currentPull, merge_commit_sha: null }, headRuns: [checkRun({ app: { id: 15368, slug: "github-actions" } })], workflowRuns: { total_count: 1, workflow_runs: [{ id: 200, check_suite_id: 5, workflow_id: 12, run_attempt: 2, event: "workflow_dispatch", status: "completed", conclusion: "success", head_sha: head, path: ".github/workflows/ci.yml" }] } })).reason!, /workflow event\/attempt/);
+	assert.match((await observe({ policy: { strict: true, contexts: [], checks: [{ context: "CI", app_id: 15368 }] }, withoutRecordedMerge: true, current: { ...currentPull, merge_commit_sha: null }, headRuns: [checkRun({ app: { id: 15368, slug: "github-actions" } })], workflowRuns: { total_count: 1, workflow_runs: [{ id: 200, check_suite_id: 5, workflow_id: 12, run_attempt: 2, event: "merge_group", status: "completed", conclusion: "success", head_sha: head, path: ".github/workflows/ci.yml" }] } })).reason!, /workflow event\/attempt/);
+});
+
+test("multiple large Actions job logs stay within one aggregate diagnostic budget and persist UNKNOWN without repair", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-actions-log-budget-"));
+	const limit = 1024 * 1024;
+	const repo = "org/log-budget";
+	const head = "a".repeat(40);
+	const base = "b".repeat(40);
+	const batchId = options("logbudget").id;
+	const pull = { repository: repo, identity: "PR_node_9", number: 9, url: `https://github.com/${repo}/pull/9`, branch: `factory/${batchId}/9`, headSha: head, baseRef: "main", baseSha: base };
+	const currentPull = { id: 9, node_id: pull.identity, number: 9, html_url: pull.url, state: "open", merged: false, draft: false, head: { ref: pull.branch, sha: head, repo: { full_name: repo } }, base: { ref: "main", sha: base, repo: { full_name: repo } } };
+	const jobCount = 5;
+	const logText = `${"routine diagnostic line\n".repeat(8_500)}src/main.ts:10: error TS2322`;
+	const archive = storedZip("runner.log", logText);
+	let diagnosticRequests = 0;
+	let archiveBytesDownloaded = 0;
+	let completedArchives = 0;
+	let activeArchiveReads = 0;
+	let peakArchiveReads = 0;
+	const jobs = Array.from({ length: jobCount }, (_, index) => ({ id: 700 + index, name: `typecheck-${index}`, conclusion: "failure", steps: [{ number: 1, name: "typecheck", conclusion: "failure" }] }));
+	const failedRun = { id: 501, name: "CI", head_sha: head, status: "completed", conclusion: "failure", created_at: "2026-10-06T12:00:00.000Z", started_at: "2026-10-06T12:00:00.000Z", app: { id: 15368, slug: "github-actions" }, check_suite: { id: 5 } };
+	const workflowRun = { id: 200, check_suite_id: 5, workflow_id: 12, run_attempt: 3, event: "pull_request", status: "completed", conclusion: "failure", head_sha: head, path: ".github/workflows/ci.yml" };
+	const fetchImpl = (async (input: RequestInfo | URL) => {
+		const url = new URL(String(input));
+		const response = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+		if (url.hostname === "logs.example.test") {
+			diagnosticRequests++;
+			let offset = 0;
+			const stream = new ReadableStream<Uint8Array>({
+				async pull(controller) {
+					if (offset >= archive.length) { controller.close(); completedArchives++; return; }
+					activeArchiveReads++; peakArchiveReads = Math.max(peakArchiveReads, activeArchiveReads);
+					await new Promise((resolve) => setTimeout(resolve, 1));
+					const chunk = archive.subarray(offset, Math.min(offset + 32 * 1024, archive.length));
+					offset += chunk.length; archiveBytesDownloaded += chunk.length; activeArchiveReads--;
+					controller.enqueue(chunk);
+				},
+			}, { highWaterMark: 0 });
+			return new Response(stream, { status: 200, headers: { "content-type": "application/zip", "content-length": String(archive.length) } });
+		}
+		if (/\/check-runs\/\d+(?:\/annotations)?$/.test(url.pathname) || url.pathname.endsWith("/actions/runs") || /\/actions\/runs\/\d+\/attempts\/\d+\/jobs$/.test(url.pathname) || /\/actions\/jobs\/\d+\/logs$/.test(url.pathname)) diagnosticRequests++;
+		if (url.pathname.endsWith("/pulls/9")) return response(currentPull);
+		if (url.pathname.endsWith("/protection/required_status_checks")) return response({ strict: true, contexts: [], checks: [{ context: "CI", app_id: 15368 }] });
+		if (url.pathname.endsWith("/rulesets")) return response([]);
+		if (url.pathname.endsWith("/actions/runs")) return response({ total_count: 1, workflow_runs: [workflowRun] });
+		if (/\/actions\/runs\/200\/attempts\/3\/jobs$/.test(url.pathname)) return response({ total_count: jobs.length, jobs });
+		if (/\/actions\/jobs\/\d+\/logs$/.test(url.pathname)) return new Response(null, { status: 302, headers: { location: `https://logs.example.test/${url.pathname.split("/").at(-2)}.zip` } });
+		if (url.pathname.endsWith("/check-runs/501/annotations")) return response([]);
+		if (url.pathname.endsWith("/check-runs/501")) return response({ id: 501, name: "CI", head_sha: head, conclusion: "failure", app: { id: 15368 }, output: { title: "CI failed", summary: "complete compiler diagnostics", text: "src/main.ts:10: error TS2322" }, annotations_count: 0 });
+		if (url.pathname.endsWith("/check-runs")) return response({ total_count: 1, check_runs: [failedRun] });
+		throw new Error(`unexpected diagnostic-budget request ${url.pathname}`);
+	}) as typeof fetch;
+	try {
+		const github = new BatchGitHub("token", fetchImpl);
+		const observation = await github.observeHostedChecks(repo, pull, "2026-10-06T12:00:01.000Z");
+		assert.equal(observation.result, "unknown");
+		assert.match(observation.reason ?? "", /aggregate|bound|budget/i);
+		assert.equal(peakArchiveReads, 1, "the shared archive/expanded-byte budget serializes job-log consumption");
+		const accountedLogBytes = archiveBytesDownloaded + completedArchives * Buffer.byteLength(`===== runner.log =====\n${logText}`);
+		assert.ok(accountedLogBytes <= limit, `aggregate archive/expanded diagnostics were ${accountedLogBytes} bytes (archives=${archiveBytesDownloaded}, completed=${completedArchives}, peak=${peakArchiveReads}, requests=${diagnosticRequests})`);
+		assert.ok(diagnosticRequests <= 256);
+
+		const batch = createBatch([selected(`${repo}#9`, "pr-ready", { baseRef: "main", targetRef: "main", base, head })], options("logbudget"));
+		const item = batch.items[0]!;
+		const owner = `${batch.id}:${item.selected.key}`;
+		const operationId = `${owner}:pr`;
+		item.stage = "VERIFY";
+		item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo, base, head }, effect: "pull-request-create", phase: "pr", owner, state: "applied", branch: pull.branch, sha: head, url: pull.url, resultHandle: pull.url };
+		item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: { ...pull, operationId } };
+		const store = new BatchStore(root); store.acquire(); store.write(batch); store.release();
+		const service = new BatchService(root, github, undefined, {} as never, 1);
+		(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		github.observeHostedChecks = async () => observation;
+		await service.reconcile(batch.id, () => new Date("2026-10-06T12:00:01.000Z"));
+		const persisted = new BatchStore(root).read(batch.id).items[0]!;
+		assert.equal(persisted.stage, "UNKNOWN");
+		assert.equal(persisted.prLifecycle?.phase, "unknown");
+		assert.equal(persisted.prLifecycle?.nextSafeAction, "investigate");
+		assert.equal(persisted.repair, undefined);
+		assert.equal(persisted.attempts, 0);
+		assert.equal(persisted.ledger.tasks.length, 0);
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("selected batches preserve oversized GitHub acceptance through persistence", async () => {
@@ -337,6 +599,29 @@ test("BatchStore rejects an invalid new ledger before creating durable state", a
 	}
 });
 
+test("version-four PR lifecycle is explicit and legacy retained batches never gain it during decode", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-pr-lifecycle-version-"));
+	const store = new BatchStore(root);
+	try {
+		store.acquire();
+		const modern = createBatch([selected("org/a#1", "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("cafe"));
+		assert.equal(modern.version, 4);
+		assert.equal(modern.items[0]!.prLifecycle?.target.ref, "self-hosted");
+		const legacy = createBatch([selected("org/b#2", "pr-ready", { baseRef: "main" })], options("f00d")) as Batch;
+		legacy.version = 2;
+		delete legacy.items[0]!.prLifecycle;
+		store.write(legacy);
+		assert.equal(store.read(legacy.id).version, 2);
+		assert.equal(store.read(legacy.id).items[0]!.prLifecycle, undefined);
+
+		const contradictory = createBatch([selected("org/a#1", "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("dead"));
+		contradictory.version = 2;
+		store.write(contradictory);
+		assert.throws(() => store.read(contradictory.id), /cannot acquire owned-PR lifecycle authority/);
+		store.release();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 
 test("BatchStore migrates version-one operations before persisting version two", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-batch-migration-"));
@@ -382,15 +667,18 @@ test("BatchStore migrates version-one operations before persisting version two",
 });
 test("ambiguous PR settlement reconciles only one exact marker/head/base match and refuses duplicates", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-pr-reconcile-"));
+	const decoyCount = 7;
 	try {
-		const run = async (duplicate: boolean) => {
+		const run = async (mode: "exact" | "duplicate" | number) => {
 			const key = "org/a#1";
 			const selectedItem = selected(key, "pr-ready", { baseRef: "main" });
-			const batch = createBatch([selectedItem], options(duplicate ? "dupe" : "exact"));
+			const batch = createBatch([selectedItem], options(typeof mode === "number" ? `decoy${mode}` : mode));
 			const item = batch.items[0]!;
 			done(batch, key, "pr-ready");
 			const branch = `factory/${batch.id}/1`;
 			const sha = "b".repeat(40);
+			bindCurrentVerification(item, sha);
+			item.workspace = "fixture-workspace";
 			const marker = `${batch.id}:${key}:pr`;
 			item.operation = {
 				id: `${batch.id}:${key}:push`,
@@ -405,10 +693,12 @@ test("ambiguous PR settlement reconciles only one exact marker/head/base match a
 			};
 			item.stage = "UNKNOWN";
 			let requests = 0;
-			const exactPull = { html_url: "https://github.com/org/a/pull/7", head: { sha }, base: { ref: "main" }, body: `Factory operation: ${marker}` };
+			const exactPull = { id: 70, node_id: "PR_node_70", number: 7, html_url: "https://github.com/org/a/pull/7", state: "open", draft: false, head: { sha, ref: branch, repo: { full_name: "org/a" } }, base: { sha: "a".repeat(40), ref: "main", repo: { full_name: "org/a" } }, body: `Factory operation: ${marker}` };
 			const decoys = [
-				{ ...exactPull, head: { sha: "c".repeat(40) } },
-				{ ...exactPull, base: { ref: "release" } },
+				{ ...exactPull, head: { ...exactPull.head, sha: "c".repeat(40) } },
+				{ ...exactPull, head: { ...exactPull.head, repo: { full_name: "fork/a" } } },
+				{ ...exactPull, head: { ...exactPull.head, ref: "human-branch" } },
+				{ ...exactPull, base: { ...exactPull.base, ref: "release" } },
 				{ ...exactPull, body: "Factory operation: unrelated" },
 				{ ...exactPull, body: `Factory operation: ${marker}:extra` },
 				{ ...exactPull, body: `prefix Factory operation: ${marker}` },
@@ -418,35 +708,669 @@ test("ambiguous PR settlement reconciles only one exact marker/head/base match a
 					requests += 1;
 					return path.includes("/git/ref/heads/")
 						? { object: { sha } }
-						: duplicate ? [exactPull, { ...exactPull, html_url: "https://github.com/org/a/pull/8" }] : [...decoys, exactPull];
+					: mode === "exact" ? [exactPull] : mode === "duplicate" ? [exactPull, { ...exactPull, id: 80, node_id: "PR_node_80", number: 8, html_url: "https://github.com/org/a/pull/8" }] : [decoys[mode]!];
 				},
 			};
 			const service = new BatchService(root, github as never, undefined, {} as never, 1);
 			// Exercise exact-effect reconciliation while bypassing only artifact revalidation.
 			const internals = service as unknown as {
 				validateProof(item: Batch["items"][number]): Promise<void>;
-				reconcileEffect(item: Batch["items"][number]): Promise<void>;
+				reconcileEffect(batch: Batch, item: Batch["items"][number]): Promise<void>;
+				git(workspace: string, args: string[]): Promise<string>;
 			};
 			internals.validateProof = async () => {};
-			await internals.reconcileEffect(item);
+			internals.git = async (_workspace: string, args: string[]) => args[1] === "HEAD" ? sha : item.ledger.tasks[0]!.attempts.at(-1)!.currentVerification!.tree;
+			await internals.reconcileEffect(batch, item);
 			return { item, requests, marker };
 		};
 
-		const exact = await run(false);
+		const exact = await run("exact");
 		assert.equal(exact.requests, 2);
-		assert.equal(exact.item.stage, "VERIFY");
+		assert.equal(exact.item.stage, "VERIFY", exact.item.blocker);
 		assert.equal(exact.item.operation?.phase, "pr");
 		assert.equal(exact.item.operation?.state, "applied");
 		assert.equal(exact.item.operation?.id, exact.marker);
 		assert.equal(exact.item.operation?.url, "https://github.com/org/a/pull/7");
+		assert.equal(exact.item.prLifecycle?.pullRequest?.identity, "PR_node_70");
+		assert.equal(exact.item.prLifecycle?.pullRequest?.headSha, "b".repeat(40));
 
-		const duplicate = await run(true);
+		const duplicate = await run("duplicate");
 		assert.equal(duplicate.requests, 2, "ambiguous settlement does not repeat publication");
 		assert.equal(duplicate.item.stage, "UNKNOWN");
 		assert.equal(duplicate.item.operation?.state, "unknown");
-		assert.ok(duplicate.item.blocker?.includes("exact PR/effect identity unproven"));
+		assert.ok(duplicate.item.blocker?.includes("not uniquely reconciled"));
+		for (let index = 0; index < decoyCount; index++) {
+			const decoy = await run(index);
+			assert.equal(decoy.item.stage, "UNKNOWN", `decoy ${index} is not adopted as the logical operation`);
+			assert.equal(decoy.item.operation?.state, "unknown");
+		}
+
+		const legacy = createBatch([selected("org/a#1", "pr-ready", { baseRef: "main" })], options("legacy"));
+		legacy.version = 2;
+		delete legacy.items[0]!.prLifecycle;
+		const legacyItem = legacy.items[0]!;
+		legacyItem.operation = { id: `${legacy.id}:org/a#1:push`, generation: legacyItem.ledger.generation, subject: { ...legacyItem.ledger.subject, head: "b".repeat(40) }, effect: "git-push", phase: "push", owner: `${legacy.id}:org/a#1`, state: "unknown", branch: `factory/${legacy.id}/1`, sha: "b".repeat(40) };
+		let legacyRequests = 0;
+		const legacyService = new BatchService(root, { request: async () => { legacyRequests += 1; return {}; } } as never, undefined, {} as never, 1);
+		const legacyInternals = legacyService as unknown as { validateProof(item: Batch["items"][number]): Promise<void>; reconcileEffect(batch: Batch, item: Batch["items"][number]): Promise<void> };
+		legacyInternals.validateProof = async () => {};
+		await legacyInternals.reconcileEffect(legacy, legacyItem);
+		assert.equal(legacyRequests, 0, "legacy operation is not adopted into version-four authority");
+		assert.equal(legacyItem.operation?.state, "unknown");
 	} finally {
 		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("read-only reconciliation never creates a PR; explicit resume creates one owned PR", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-pr-next-effect-"));
+	const batch = createBatch([selected("org/a#1", "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("cafe"));
+	try {
+		const item = batch.items[0]!;
+		done(batch, item.selected.key, "verified-patch");
+		item.stage = "VERIFY";
+		const sha = "b".repeat(40);
+		bindCurrentVerification(item, sha);
+		item.workspace = "fixture-workspace";
+		const branch = `factory/${batch.id}/1`;
+		const url = "https://github.com/org/a/pull/7";
+		item.operation = { id: `${batch.id}:${item.selected.key}:push`, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: sha }, effect: "git-push", phase: "push", owner: `${batch.id}:${item.selected.key}`, state: "applied", branch, sha };
+		batch.control = "active";
+		let creates = 0;
+		const requests: string[] = [];
+		let service: BatchService;
+		const github = {
+			token: "fake", assertFresh: async () => {},
+			observeHostedChecks: async (_repo: string, pull: { headSha: string; mergeSha?: string }, observedAt: string) => {
+				await service.control(batch.id, "pause");
+				return { observedAt, headSha: pull.headSha, mergeSha: pull.mergeSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policy: [{ context: "CI", appId: 42, source: "classic" as const }], policyFingerprint: "f".repeat(64), runs: [], coverage: "complete" as const, result: "pending" as const };
+			},
+			request: async (path: string, body?: unknown, signal?: AbortSignal) => {
+				requests.push(path);
+				if (path.includes("/git/ref/heads/")) return { object: { sha } };
+				if (path.includes("/pulls?state=all")) return [];
+				if (path.endsWith("/pulls") && body) {
+					creates += 1;
+					const owner = `${batch.id}:${item.selected.key}`;
+					assert.equal(service.store.read(batch.id).control, "active");
+					assert.equal(signal?.aborted, false);
+					assert.ok(service.claims.list().some((claim) => claim.resource === `repo:${item.selected.repo}` && claim.owner === owner));
+					assert.ok(service.claims.list().some((claim) => claim.resource === `item:${item.selected.key}` && claim.owner === owner));
+					return { id: 70, node_id: "PR_node_70", number: 7, html_url: url, state: "open", merged: false, draft: false,
+						head: { sha, ref: branch, repo: { full_name: "org/a" } }, base: { sha: "a".repeat(40), ref: "self-hosted", repo: { full_name: "org/a" } }, merge_commit_sha: "c".repeat(40) };
+				}
+				throw new Error(`unexpected fake GitHub request ${path}`);
+			},
+		};
+		service = new BatchService(root, github as never, undefined, {} as never, 1);
+		const internals = service as unknown as { validateProof(current: Batch["items"][number]): Promise<void>; git(workspace: string, args: string[]): Promise<string> };
+		internals.validateProof = async () => {};
+		internals.git = async (_workspace, args) => args[1] === "HEAD" ? sha : item.ledger.tasks[0]!.attempts.at(-1)!.currentVerification!.tree;
+		service.store.acquire(); service.store.write(batch);
+		service.store.release();
+		await service.reconcile(batch.id);
+		let current = service.store.read(batch.id).items[0]!;
+		assert.equal(creates, 0, "reconcile only observes and persists nextSafeAction");
+		assert.equal(current.operation?.phase, "push");
+		assert.equal(current.operation?.state, "applied", current.blocker);
+		assert.equal(current.prLifecycle?.nextSafeAction, "publish");
+		await service.resume(batch.id, {} as never);
+		await service.waitForIdle();
+		current = service.store.read(batch.id).items[0]!;
+		assert.equal(creates, 1, current.blocker);
+		assert.equal(requests.filter((path) => path.endsWith("/pulls") && !path.includes("?state=")).length, 1);
+		assert.equal(current.operation?.phase, "pr");
+		assert.equal(current.operation?.state, "applied", current.blocker);
+		assert.equal(current.prLifecycle?.phase, "published");
+		assert.equal(current.prLifecycle?.nextSafeAction, "observe-after");
+		assert.equal(current.prLifecycle?.pullRequest?.identity, "PR_node_70");
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("PR POST is refused after stop, on pause reconciliation, after deadline, without claims, or after in-flight control", async () => {
+	const run = async (mode: "pause" | "stop" | "expired" | "no-claim" | "stop-race" | "pause-race") => {
+		const root = await mkdtemp(join(tmpdir(), `factory-pr-guard-${mode}-`));
+		try {
+			const batch = createBatch([selected("org/a#1", "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options(mode));
+			const item = batch.items[0]!;
+			done(batch, item.selected.key, "verified-patch"); item.stage = "VERIFY";
+			const sha = "b".repeat(40); const branch = `factory/${batch.id}/1`;
+			item.operation = { id: `${batch.id}:${item.selected.key}:push`, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: sha }, effect: "git-push", phase: "push", owner: `${batch.id}:${item.selected.key}`, state: "applied", branch, sha };
+			if (mode === "expired") Object.assign(item.prLifecycle!, { deadlineAt: "2026-10-05T00:00:00.000Z" });
+			let creates = 0; let searchCount = 0; let service!: BatchService;
+			const github = {
+				token: "fake", assertFresh: async () => {},
+				request: async (path: string, body?: unknown) => {
+					if (path.includes("/git/ref/heads/")) return { object: { sha } };
+					if (path.includes("/pulls?state=all")) {
+						searchCount += 1;
+						if ((mode === "stop-race" || mode === "pause-race") && searchCount === 2) await service.control(batch.id, mode === "pause-race" ? "pause" : "stop");
+						return [];
+					}
+					if (path.endsWith("/pulls") && body) {
+						creates += 1;
+						return { id: 70, node_id: "PR_node_70", number: 7, html_url: "https://github.com/org/a/pull/7", state: "open", merged: false, draft: false,
+							head: { sha, ref: branch, repo: { full_name: "org/a" } }, base: { sha: "a".repeat(40), ref: "self-hosted", repo: { full_name: "org/a" } } };
+					}
+					throw new Error(`unexpected fake GitHub request ${path}`);
+				},
+			};
+			service = new BatchService(root, github as never, undefined, {} as never, 1);
+			(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+			service.store.acquire(); service.store.write(batch); service.store.release();
+			if (mode === "pause") { await service.control(batch.id, "pause"); await service.reconcile(batch.id); }
+			else if (mode === "stop") { await service.control(batch.id, "stop"); await service.reconcile(batch.id); await service.resume(batch.id, {} as never); }
+			else {
+				if (mode === "no-claim") service.claims.list = () => [];
+				await service.resume(batch.id, {} as never); await service.waitForIdle();
+			}
+			const current = service.store.read(batch.id).items[0]!;
+			await service.shutdown();
+			return { creates, item: current };
+		} finally { await rm(root, { recursive: true, force: true }); }
+	};
+	for (const mode of ["pause", "stop", "expired", "no-claim", "stop-race", "pause-race"] as const) {
+		const result = await run(mode);
+		assert.equal(result.creates, 0, `${mode} must not POST a PR`);
+		assert.equal(result.item.operation?.phase, "push");
+		assert.equal(result.item.operation?.state, "applied");
+	}
+});
+
+test("a POST accepted before its response abort becomes UNKNOWN, retains claims, and reconciles without reposting", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-pr-post-abort-"));
+	const key = "org/a#1"; const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("cafe"));
+	try {
+		const item = batch.items[0]!; done(batch, key, "verified-patch"); item.stage = "VERIFY";
+		const owner = `${batch.id}:${key}`; const branch = `factory/${batch.id}/1`; const sha = "b".repeat(40); const url = "https://github.com/org/a/pull/7";
+		bindCurrentVerification(item, sha);
+		item.workspace = "fixture-workspace";
+		item.operation = { id: `${owner}:push`, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: sha }, effect: "git-push", phase: "push", owner, state: "applied", branch, sha };
+		let posts = 0; let createdPull: Record<string, unknown> | undefined; let service!: BatchService;
+		const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const requestUrl = new URL(String(input));
+			const response = (body: unknown) => ({ ok: true, status: 200, headers: new Headers(), json: async () => body }) as Response;
+			if (requestUrl.pathname.includes("/git/ref/heads/")) return response({ object: { sha } });
+			if (requestUrl.pathname.endsWith("/pulls") && init?.method === "POST") {
+				posts += 1;
+				createdPull = { id: 70, node_id: "PR_node_70", number: 7, html_url: url, state: "open", merged: false, draft: false,
+					head: { sha, ref: branch, repo: { full_name: "org/a" } }, base: { sha: "a".repeat(40), ref: "self-hosted", repo: { full_name: "org/a" } }, body: `Factory operation: ${batch.id}:${key}:pr` };
+				await service.control(batch.id, "stop");
+				assert.equal(init.signal?.aborted, true, "stop reaches the in-flight network request");
+				throw new DOMException("response interrupted after remote acceptance", "AbortError");
+			}
+			if (requestUrl.pathname.endsWith("/pulls")) return response(createdPull ? [createdPull] : []);
+			throw new Error(`unexpected transport fixture request ${requestUrl.pathname}`);
+		}) as typeof fetch;
+		const serviceInstance = new BatchService(root, new BatchGitHub("token", fetchImpl), undefined, {} as never, 1);
+		service = serviceInstance;
+		const internals = service as unknown as { validateProof(current: Batch["items"][number]): Promise<void>; git(workspace: string, args: string[]): Promise<string> };
+		internals.validateProof = async () => {};
+		internals.git = async (_workspace, args) => args[1] === "HEAD" ? sha : item.ledger.tasks[0]!.attempts.at(-1)!.currentVerification!.tree;
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		await service.resume(batch.id, {} as never); await service.waitForIdle();
+		let current = service.store.read(batch.id).items[0]!;
+		assert.equal(posts, 1);
+		assert.equal(current.operation?.phase, "pr");
+		assert.equal(current.operation?.state, "unknown");
+		assert.equal(current.stage, "UNKNOWN");
+		assert.ok(service.claims.list().some((claim) => claim.resource === `repo:org/a` && claim.owner === owner));
+		assert.ok(service.claims.list().some((claim) => claim.resource === `item:${key}` && claim.owner === owner));
+
+		await service.resume(batch.id, {} as never); await service.waitForIdle();
+		current = service.store.read(batch.id).items[0]!;
+		assert.equal(posts, 1, "exact effect settlement is read-only; no duplicate PR request");
+		assert.equal(current.operation?.state, "applied");
+		assert.equal(current.prLifecycle?.pullRequest?.identity, "PR_node_70");
+		assert.equal(service.claims.list().some((claim) => claim.owner === owner), false, "settled writer claim is released before hosted waiting");
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a check success is demoted to UNKNOWN when acceptance or the owned PR changes before persistence", async () => {
+	for (const drift of ["acceptance", "owned PR head"] as const) {
+		const root = await mkdtemp(join(tmpdir(), `factory-pr-stale-${drift.replaceAll(" ", "-")}-`));
+		try {
+			const key = "org/a#1"; const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options(`stale${drift}`));
+			const item = batch.items[0]!; done(batch, key, "verified-patch"); item.stage = "VERIFY";
+			const branch = `factory/${batch.id}/1`; const headSha = "b".repeat(40); const url = "https://github.com/org/a/pull/7"; const operationId = `${batch.id}:${key}:pr`;
+			item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: headSha }, effect: "pull-request-create", phase: "pr", owner: `${batch.id}:${key}`, state: "applied", branch, sha: headSha, url, resultHandle: url };
+			item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: { repository: "org/a", identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: "a".repeat(40), operationId } };
+			const github = {
+				token: "fake",
+				assertFresh: async () => { throw new Error(`${drift} changed during observation`); },
+				observeHostedChecks: async (_repo: string, pull: { headSha: string }, observedAt: string) => ({
+					observedAt, headSha: pull.headSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policy: [{ context: "CI", appId: 42, source: "classic" as const }],
+					policyFingerprint: "e".repeat(64), runs: [{ id: 1, suiteId: 2, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: "completed", conclusion: "success", createdAt: observedAt, startedAt: observedAt, subject: "head" as const }], coverage: "complete" as const, result: "passed" as const,
+				}),
+			};
+			const service = new BatchService(root, github as never, undefined, {} as never, 1);
+			(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+			service.store.acquire(); service.store.write(batch); service.store.release();
+			await service.reconcile(batch.id, () => new Date("2026-10-06T12:00:00.000Z"));
+			const current = service.store.read(batch.id).items[0]!;
+			assert.equal(current.stage, "UNKNOWN", drift);
+			assert.equal(current.proof?.stage, "verified-patch", drift);
+			assert.equal(current.prLifecycle?.phase, "unknown", drift);
+			assert.equal(current.prLifecycle?.observation?.result, "unknown", drift);
+			assert.match(current.blocker!, new RegExp(`${drift} changed`));
+			await service.shutdown();
+		} finally { await rm(root, { recursive: true, force: true }); }
+	}
+});
+
+test("owned hosted-PR observation persists its next action across restart and only completes after current checks", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-owned-pr-lifecycle-"));
+	try {
+		const key = "org/a#1";
+		const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("cafe"));
+		const item = batch.items[0]!;
+		done(batch, key, "verified-patch");
+		item.stage = "VERIFY";
+		const branch = `factory/${batch.id}/1`;
+		const headSha = "b".repeat(40);
+		bindCurrentVerification(item, headSha);
+		const url = "https://github.com/org/a/pull/7";
+		const operationId = `${batch.id}:${key}:pr`;
+		item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: headSha }, effect: "pull-request-create", phase: "pr", owner: `${batch.id}:${key}`, state: "applied", branch, sha: headSha, url, resultHandle: url };
+		item.prLifecycle = { ...item.prLifecycle!, phase: "published", target: { ref: "self-hosted", sha: "a".repeat(40) }, deadlineAt: "2026-10-07T12:00:00.000Z", nextSafeAction: "observe-after", pullRequest: {
+			repository: "org/a", identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: "a".repeat(40), mergeSha: "c".repeat(40), operationId,
+		} };
+		let calls = 0;
+		let hostedPolicyCurrent = true;
+		const github = {
+			token: "fake", snapshot: async (value: SelectedItem) => value, assertFresh: async () => {}, hostedCheckPolicyCurrent: async () => hostedPolicyCurrent,
+			observeHostedChecks: async (_repo: string, pull: { headSha: string; mergeSha?: string }, observedAt: string) => {
+				calls += 1;
+				return { observedAt, headSha: pull.headSha, mergeSha: pull.mergeSha, eligibleSubject: pull.mergeSha ? { sha: pull.mergeSha, subject: "merge" as const } : { sha: pull.headSha, subject: "head" as const }, policyFingerprint: "f".repeat(64), policy: [{ context: "CI", appId: 42, source: "classic" as const }], runs: [
+					{ id: calls, suiteId: 5, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: calls === 1 ? "in_progress" : "completed", conclusion: calls === 1 ? null : "success", createdAt: observedAt, startedAt: observedAt, subject: "head" as const },
+					...(pull.mergeSha ? [{ id: 10 + calls, suiteId: 6, appId: 42, appSlug: null, name: "CI", headSha: pull.mergeSha, status: "completed", conclusion: "success", createdAt: observedAt, startedAt: observedAt, subject: "merge" as const }] : []),
+				], coverage: "complete" as const, result: calls === 1 ? "pending" as const : "passed" as const };
+			},
+		};
+		const service = new BatchService(root, github as never, undefined, {} as never, 1);
+		(service as unknown as { validateProof(item: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		const firstNow = new Date("2026-10-06T12:00:00.000Z");
+		await service.reconcile(batch.id, () => firstNow);
+		assert.equal(service.store.read(batch.id).items[0]!.prLifecycle?.phase, "waiting");
+		assert.equal(service.store.read(batch.id).items[0]!.prLifecycle?.nextSafeAction, "observe-after");
+		assert.equal(service.store.read(batch.id).items[0]!.prLifecycle?.observationCount, 1);
+		await service.shutdown();
+
+		const restarted = new BatchService(root, github as never, undefined, {} as never, 1);
+		(restarted as unknown as { validateProof(item: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		await restarted.reconcile(batch.id, () => new Date("2026-10-06T12:00:14.000Z"));
+		assert.equal(calls, 1, "resume before nextObservationAt does not poll GitHub");
+		await restarted.reconcile(batch.id, () => new Date("2026-10-06T12:00:16.000Z"));
+		const current = restarted.store.read(batch.id).items[0]!;
+		assert.equal(calls, 2);
+		assert.equal(current.stage, "DONE");
+		assert.equal(current.proof?.stage, "pr-ready");
+		assert.equal(current.prLifecycle?.phase, "ready");
+		assert.equal(current.prLifecycle?.pullRequest?.identity, "PR_node_7");
+		assert.equal(current.prLifecycle?.observation?.headSha, headSha);
+		assert.equal(current.prLifecycle?.observation?.mergeSha, "c".repeat(40));
+		hostedPolicyCurrent = false;
+		await restarted.reconcile(batch.id, () => new Date("2026-10-06T12:06:00.000Z"));
+		const policyChanged = restarted.store.read(batch.id).items[0]!;
+		assert.equal(policyChanged.stage, "UNKNOWN");
+		assert.equal(policyChanged.proof?.stage, "verified-patch");
+		assert.match(policyChanged.blocker!, /policy changed or became unavailable/);
+		await restarted.shutdown();
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("active Factory automatically waits and observes hosted PR checks without a reconcile follow-up", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-owned-pr-auto-observe-"));
+	try {
+		const key = "org/a#1";
+		const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("autoci"));
+		const item = batch.items[0]!;
+		done(batch, key, "verified-patch"); item.stage = "VERIFY";
+		const branch = `factory/${batch.id}/1`; const headSha = "b".repeat(40); const url = "https://github.com/org/a/pull/7";
+		bindCurrentVerification(item, headSha);
+		const operationId = `${batch.id}:${key}:pr`;
+		item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: headSha }, effect: "pull-request-create", phase: "pr", owner: `${batch.id}:${key}`, state: "applied", branch, sha: headSha, url, resultHandle: url };
+		item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: { repository: "org/a", identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: "a".repeat(40), operationId } };
+		let now = new Date("2026-10-06T12:00:00.000Z"); let calls = 0; const waits: number[] = [];
+		const github = { token: "fake", assertFresh: async () => {}, hostedCheckPolicyCurrent: async () => true, observeHostedChecks: async (_repo: string, pull: { headSha: string }, observedAt: string) => {
+			calls++;
+			return { observedAt, headSha: pull.headSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policyFingerprint: "f".repeat(64), policy: [{ context: "CI", appId: 42, source: "classic" as const }], runs: [{ id: calls, suiteId: 5, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: calls === 1 ? "in_progress" : "completed", conclusion: calls === 1 ? null : "success", createdAt: observedAt, startedAt: observedAt, subject: "head" as const }], coverage: "complete" as const, result: calls === 1 ? "pending" as const : "passed" as const };
+		} };
+		const service = new BatchService(root, github as never, undefined, {} as never, 1, root, undefined, undefined, {
+			now: () => now,
+			wait: async (milliseconds: number) => { waits.push(milliseconds); now = new Date(now.getTime() + milliseconds); },
+		});
+		(service as unknown as { validateProof(item: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		await service.resume(batch.id, {} as never); await service.waitForIdle();
+		const current = service.store.read(batch.id).items[0]!;
+		assert.equal(calls, 2);
+		assert.deepEqual(waits, [15_000]);
+		assert.equal(current.prLifecycle?.phase, "ready");
+		assert.equal(current.stage, "DONE");
+		assert.equal(service.claims.list().some((claim) => claim.owner === `${batch.id}:${key}`), false, "hosted waiting and observation hold no writer claim");
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("active GitHub Retry-After survives shutdown and restarts only at its persisted due time", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-owned-pr-restart-wait-"));
+	try {
+		const key = "org/a#1"; const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("restartwait"));
+		const item = batch.items[0]!; done(batch, key, "verified-patch"); item.stage = "VERIFY";
+		const branch = `factory/${batch.id}/1`; const headSha = "b".repeat(40); const url = "https://github.com/org/a/pull/7"; const operationId = `${batch.id}:${key}:pr`;
+		bindCurrentVerification(item, headSha);
+		item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: headSha }, effect: "pull-request-create", phase: "pr", owner: `${batch.id}:${key}`, state: "applied", branch, sha: headSha, url, resultHandle: url };
+		item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: { repository: "org/a", identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: "a".repeat(40), operationId } };
+		let now = new Date("2026-10-06T12:00:00.000Z"); let calls = 0; let timerStarted!: () => void;
+		const started = new Promise<void>((resolve) => { timerStarted = resolve; });
+		const github = { token: "fake", assertFresh: async () => {}, hostedCheckPolicyCurrent: async () => true, observeHostedChecks: async (_repo: string, pull: { headSha: string }, observedAt: string) => {
+			calls++;
+			return { observedAt, headSha: pull.headSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policyFingerprint: "f".repeat(64), policy: [{ context: "CI", appId: 42, source: "classic" as const }],
+				runs: calls === 1 ? [] : [{ id: calls, suiteId: 5, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: "completed", conclusion: "success", createdAt: observedAt, startedAt: observedAt, subject: "head" as const }],
+				...(calls === 1 ? { coverage: "unavailable" as const, result: "unknown" as const, retryAfter: "2026-10-06T12:00:30.000Z", reason: "fixture GitHub rate limit" } : { coverage: "complete" as const, result: "passed" as const }) };
+		} };
+		const store = new BatchStore(root); store.acquire(); store.write(batch); store.release();
+		const first = new BatchService(root, github as never, undefined, {} as never, 1, root, undefined, undefined, { now: () => now, wait: async () => { timerStarted(); await new Promise<void>(() => {}); } });
+		(first as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		await first.resume(batch.id, {} as never); await started;
+		const scheduled = first.store.read(batch.id).items[0]!.prLifecycle!.nextObservationAt;
+		assert.equal(calls, 1); assert.equal(scheduled, "2026-10-06T12:00:30.000Z");
+		await first.shutdown(); await first.waitForIdle();
+		assert.equal(first.store.read(batch.id).control, "paused");
+		const waits: number[] = [];
+		const restarted = new BatchService(root, github as never, undefined, {} as never, 1, root, undefined, undefined, { now: () => now, wait: async (milliseconds) => { waits.push(milliseconds); now = new Date(now.getTime() + milliseconds); } });
+		(restarted as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		await restarted.resume(batch.id, {} as never); await restarted.waitForIdle();
+		assert.deepEqual(waits, [30_000]); assert.equal(calls, 2);
+		assert.equal(restarted.store.read(batch.id).items[0]!.prLifecycle?.phase, "ready");
+		await restarted.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("pausing an active hosted-check wait wakes the foreground pump without another GitHub poll", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-owned-pr-pause-wait-"));
+	try {
+		const key = "org/a#1"; const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("pausewait"));
+		const item = batch.items[0]!; done(batch, key, "verified-patch"); item.stage = "VERIFY";
+		const branch = `factory/${batch.id}/1`; const headSha = "b".repeat(40); const url = "https://github.com/org/a/pull/7"; const operationId = `${batch.id}:${key}:pr`;
+		item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: headSha }, effect: "pull-request-create", phase: "pr", owner: `${batch.id}:${key}`, state: "applied", branch, sha: headSha, url, resultHandle: url };
+		item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: { repository: "org/a", identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: "a".repeat(40), operationId } };
+		let polls = 0; let releaseWait!: () => void; let waiting!: () => void;
+		const waitStarted = new Promise<void>((resolve) => { waiting = resolve; });
+		const github = { token: "fake", assertFresh: async () => {}, hostedCheckPolicyCurrent: async () => true, observeHostedChecks: async (_repo: string, pull: { headSha: string }, observedAt: string) => {
+			polls++;
+			return { observedAt, headSha: pull.headSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policyFingerprint: "f".repeat(64), policy: [{ context: "CI", appId: 42, source: "classic" as const }], runs: [], coverage: "complete" as const, result: "pending" as const };
+		} };
+		const service = new BatchService(root, github as never, undefined, {} as never, 1, root, undefined, undefined, { now: () => new Date("2026-10-06T12:00:00.000Z"), wait: async () => { waiting(); await new Promise<void>((resolve) => { releaseWait = resolve; }); } });
+		(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		await service.resume(batch.id, {} as never); await waitStarted;
+		await service.control(batch.id, "pause"); releaseWait(); await service.waitForIdle();
+		assert.equal(polls, 1);
+		assert.equal(service.store.read(batch.id).control, "paused");
+		assert.equal(service.claims.list().some((claim) => claim.owner === `${batch.id}:${key}`), false);
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("pause or stop during the final hosted PR read cannot persist readiness or overwrite cancellation", async () => {
+	for (const action of ["pause", "stop"] as const) {
+		const root = await mkdtemp(join(tmpdir(), `factory-owned-pr-final-read-${action}-`));
+		try {
+			const key = "org/a#1"; const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options(`final${action}`));
+			const item = batch.items[0]!; done(batch, key, "verified-patch"); item.stage = "VERIFY";
+			const branch = `factory/${batch.id}/1`; const headSha = item.selected.head!; const url = "https://github.com/org/a/pull/7"; const operationId = `${batch.id}:${key}:pr`;
+			item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: "org/a", base: item.selected.base!, head: headSha }, effect: "pull-request-create", phase: "pr", owner: `${batch.id}:${key}`, state: "applied", branch, sha: headSha, url, resultHandle: url };
+			item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: { repository: item.selected.repo, identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: item.selected.base!, operationId } };
+			let enteredFinalRead!: () => void; const entered = new Promise<void>((resolve) => { enteredFinalRead = resolve; });
+			const github = { token: "fake", assertFresh: async (_selected: SelectedItem, _pull: unknown, signal?: AbortSignal) => {
+				enteredFinalRead();
+				await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new DOMException("cancelled during final PR read", "AbortError")), { once: true }));
+			}, hostedCheckPolicyCurrent: async () => true, observeHostedChecks: async (_repo: string, pull: { headSha: string }, observedAt: string) => ({
+				observedAt, headSha: pull.headSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policyFingerprint: "f".repeat(64), policy: [{ context: "CI", appId: 42, source: "classic" as const }],
+				runs: [{ id: 1, suiteId: 2, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: "completed", conclusion: "success", createdAt: observedAt, startedAt: observedAt, subject: "head" as const }], coverage: "complete" as const, result: "passed" as const,
+			}) };
+			const service = new BatchService(root, github as never, undefined, {} as never, 1);
+			(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+			service.store.acquire(); service.store.write(batch); service.store.release();
+			await service.resume(batch.id, {} as never); await entered;
+			await service.control(batch.id, action); await service.waitForIdle();
+			const current = service.store.read(batch.id).items[0]!;
+			assert.equal(current.prLifecycle?.observationCount, 0, action);
+			assert.equal(current.prLifecycle?.phase, "published", action);
+			assert.equal(current.stage, action === "stop" ? "CANCELLED" : "VERIFY", action);
+			assert.notEqual(current.proof?.stage, "pr-ready", action);
+			await service.shutdown();
+		} finally { await rm(root, { recursive: true, force: true }); }
+	}
+});
+
+test("hosted CI waiting releases claims and lets independent selected work advance", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-owned-pr-independent-work-"));
+	try {
+		const key = "org/a#1";
+		const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" }), selected("org/b#2", "inspect")], { ...options("independent"), capacity: 1 });
+		const item = batch.items[0]!;
+		done(batch, key, "verified-patch"); item.stage = "VERIFY";
+		const branch = `factory/${batch.id}/1`; const headSha = "b".repeat(40); const url = "https://github.com/org/a/pull/7"; const operationId = `${batch.id}:${key}:pr`;
+		item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: headSha }, effect: "pull-request-create", phase: "pr", owner: `${batch.id}:${key}`, state: "applied", branch, sha: headSha, url, resultHandle: url };
+		item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: { repository: "org/a", identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: "a".repeat(40), operationId } };
+		let now = new Date("2026-10-06T12:00:00.000Z"); let polls = 0; let independentRanAt = -1; const waits: number[] = [];
+		const github = { token: "fake", assertFresh: async () => {}, hostedCheckPolicyCurrent: async () => true, observeHostedChecks: async (_repo: string, pull: { headSha: string; mergeSha?: string }, observedAt: string) => {
+			polls++;
+			return { observedAt, headSha: pull.headSha, mergeSha: pull.mergeSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policyFingerprint: "f".repeat(64), policy: [{ context: "CI", appId: 42, source: "classic" as const }], runs: [], coverage: polls === 1 ? "complete" as const : "unavailable" as const, result: polls === 1 ? "pending" as const : "unknown" as const, ...(polls === 2 ? { reason: "fixture unknown after independent work" } : {}) };
+		} };
+		const service = new BatchService(root, github as never, undefined, {} as never, 1, root, undefined, undefined, { now: () => now, wait: async (milliseconds) => { waits.push(milliseconds); now = new Date(now.getTime() + milliseconds); } });
+		(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		(service as unknown as { execute(batch: Batch, current: Batch["items"][number]): Promise<void> }).execute = async (_batch, current) => {
+			independentRanAt = polls;
+			assert.equal(service.claims.list().some((claim) => claim.owner === `${batch.id}:${key}`), false, "hosted waiting must not retain the PR writer claim");
+			current.stage = "DONE";
+		};
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		await service.resume(batch.id, {} as never); await service.waitForIdle();
+		assert.equal(independentRanAt, 1, "independent work ran after the first pending observation and before the next CI poll");
+		assert.equal(polls, 2); assert.deepEqual(waits, [15_000]);
+		assert.equal(service.store.read(batch.id).items[0]!.stage, "UNKNOWN");
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an identical current hosted failure is retained for review instead of redispatching the same repair", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-owned-pr-duplicate-failure-"));
+	try {
+		const key = "org/a#1"; const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("duplicate"));
+		const item = batch.items[0]!; done(batch, key, "verified-patch"); item.stage = "VERIFY";
+		const headSha = item.selected.head!; const branch = `factory/${batch.id}/1`; const url = "https://github.com/org/a/pull/7"; const owner = `${batch.id}:${key}`; const operationId = `${owner}:pr`;
+		item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: item.selected.repo, base: item.selected.base!, head: headSha }, effect: "pull-request-create", phase: "pr", owner, state: "applied", branch, sha: headSha, url, resultHandle: url };
+		const failure = { key: "a".repeat(64), candidateHead: headSha, checkSubjectSha: headSha, classification: "repairable-code" as const, checkRun: { id: 501, suiteId: 502, name: "CI", appId: 42, conclusion: "failure" as const, title: "CI failed", summary: "details", text: "complete failure", outputTruncated: false }, annotations: [], annotationsComplete: true };
+		const failureKey = digest(failure.key);
+		item.repair = { generation: item.ledger.generation, head: item.selected.head!, acceptanceRevision: item.selected.acceptanceRevision!, attemptId: "T1-a1", reason: "the identical exact run/attempt already has an admitted repair", candidateHead: headSha, failureKey, artifacts: [] };
+		item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: { repository: item.selected.repo, identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: item.selected.base!, operationId }, repair: { failureKey, candidateHead: headSha, runIds: [501], attemptId: "T1-a1", state: "dispatched" } };
+		const github = { token: "fake", assertFresh: async () => {}, hostedCheckPolicyCurrent: async () => true, observeHostedChecks: async (_repo: string, pull: { headSha: string }, observedAt: string) => ({
+			observedAt, headSha: pull.headSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policyFingerprint: "f".repeat(64), policy: [{ context: "CI", appId: 42, source: "classic" as const },],
+			runs: [{ id: 501, suiteId: 502, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: "completed", conclusion: "failure", createdAt: observedAt, startedAt: observedAt, subject: "head" as const }], coverage: "complete" as const, result: "failed" as const, failures: [failure], reason: "current source-bound CI failure",
+		}) };
+		const service = new BatchService(root, github as never, undefined, {} as never, 1);
+		(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		await service.reconcile(batch.id, () => new Date("2026-10-06T12:00:00.000Z"));
+		const current = service.store.read(batch.id).items[0]!;
+		assert.equal(current.prLifecycle?.phase, "repair-required");
+		assert.equal(current.prLifecycle?.nextSafeAction, "repair-review");
+		assert.match(current.blocker!, /already dispatched/);
+		assert.equal(current.attempts, 0, "a duplicate failure cannot start another worker");
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("hosted failure diagnostics flow through retained handles into a fresh same-PR repair", async () => {
+	const failureMarker = "DISTINCTIVE_HOSTED_FAILURE_AFTER_OLD_PREVIEW";
+	let workerRuns = 0; let acceptanceRuns = 0; let polls = 0; let now = new Date("2026-10-06T12:00:00.000Z");
+	const fixture = portableRepairFixture(async (tools, prompt) => {
+		if (prompt.startsWith("Implement/inspect")) {
+			if (prompt.includes("example/independent#2")) {
+				await repairTool(tools, "factory_report").execute("independent-inspection", { report: "No finding for this independent inspection.", tests: [], accepted: true, semanticOutcome: "no-finding", predicates: [{ item: "independent observation", ok: true, note: "read-only fixture evidence checked" }], publicationBlocker: "" });
+				return;
+			}
+			workerRuns++;
+			if (workerRuns === 1) await repairTool(tools, "factory_write").execute("initial", { path: "value.txt", content: "1\n" });
+			else {
+				const artifacts = await readRepairArtifacts(tools, prompt);
+				assert.ok([...artifacts.values()].some((text) => text.includes(failureMarker)), "the repair worker reads full hosted diagnostics through #176 artifact handles");
+				await repairTool(tools, "factory_write").execute("fix-ci", { path: "ci-fix.txt", content: "fixed\n" });
+			}
+			await repairReport(tools);
+		} else {
+			acceptanceRuns++;
+			await readRepairArtifacts(tools, prompt);
+			await repairReport(tools);
+		}
+	}, { acceptanceScript: "#!/usr/bin/env bash\nset -euo pipefail\ntest \"$(cat value.txt)\" = 1\n" });
+	let remote = ""; let branch = ""; let targetSha = ""; let candidateSha = ""; let pullIdentity = "PR_node_70"; let hideExistingPullOnce = false;
+	const hostedFailure = (headSha: string) => ({
+		key: "f".repeat(64), candidateHead: headSha, checkSubjectSha: headSha, classification: "repairable-code" as const,
+		checkRun: { id: 501, suiteId: 502, name: "CI", appId: 42, conclusion: "failure" as const, title: "Compile failed", summary: "Compiler output retained", text: `${"old preview\n".repeat(2_000)}${failureMarker}`, outputTruncated: false },
+		annotations: [{ path: "src/runtime.ts", startLine: 42, endLine: 42, level: "failure", title: "Compile", message: failureMarker }], annotationsComplete: true,
+	});
+	try {
+		await fixture.service.resume(fixture.batch.id, repairBinding); await fixture.service.waitForIdle();
+		await fixture.service.control(fixture.batch.id, "pause");
+		let batch = fixture.service.store.read(fixture.batch.id);
+		const item = batch.items[0]!; const owner = `${batch.id}:${item.selected.key}`;
+		const originalSourceHead = item.selected.head!; targetSha = item.selected.base!;
+		branch = `factory/${batch.id}/${item.selected.number}`;
+		fixtureGit(fixture.workspace, "checkout", "-b", branch);
+		fixtureGit(fixture.workspace, "commit", "--allow-empty", "-m", "fixture owned PR candidate");
+		candidateSha = fixtureGit(fixture.workspace, "rev-parse", "HEAD");
+		remote = join(fixture.root, "owned-pr.git");
+		execFileSync("git", ["init", "--bare", "--quiet", remote]);
+		execFileSync("git", ["-C", fixture.workspace, "remote", "set-url", "origin", `file://${remote}`]);
+		fixtureGit(fixture.workspace, "push", "origin", `HEAD:refs/heads/${branch}`);
+		execFileSync("git", ["-C", fixture.workspace, "remote", "set-url", "origin", "https://github.com/example/repo"]);
+		execFileSync("git", ["-C", fixture.workspace, "config", "--add", `url.file://${remote}.insteadOf`, "https://github.com/example/repo"]);
+		item.selected.action = "pr-ready"; item.selected.baseRef = "self-hosted"; item.selected.targetRef = "self-hosted";
+		item.stage = "VERIFY"; item.ledger.tasks[0]!.state = "VERIFY";
+		(fixture.service as unknown as { integrateLatestAttempt(item: Batch["items"][number], head: string): void }).integrateLatestAttempt(item, candidateSha);
+		bindCurrentVerification(item, candidateSha);
+		batch.version = 4;
+		item.operations.push(item.operation!);
+		const url = "https://github.com/example/repo/pull/7";
+		item.operation = { id: `${owner}:pr`, generation: item.ledger.generation, subject: { repo: item.selected.repo, base: targetSha, head: candidateSha }, effect: "pull-request-create", phase: "pr", owner, state: "applied", branch, sha: candidateSha, url, resultHandle: url };
+		item.prLifecycle = { version: 1, generation: item.ledger.generation, owner, outcome: "pr-ready", target: { ref: "self-hosted", sha: targetSha }, phase: "published", pullRequest: { repository: item.selected.repo, identity: pullIdentity, number: 7, url, branch, headSha: candidateSha, baseRef: "self-hosted", baseSha: targetSha, operationId: `${owner}:pr` }, observationCount: 0, deadlineAt: "2026-10-07T12:00:00.000Z", nextSafeAction: "observe-after" };
+		item.workspace = fixture.workspace;
+		item.preparation = { phase: "ready", owner, head: originalSourceHead };
+		const independent = createBatch([selected("example/independent#2", "inspect")], { id: batch.id, capacity: batch.capacity, maxAttempts: batch.maxAttempts, maxTotalAttempts: batch.maxTotalAttempts, mode: batch.mode }).items[0]!;
+		independent.selected.base = targetSha; independent.selected.baseRef = "self-hosted"; independent.selected.head = candidateSha;
+		independent.ledger.subject = { repo: independent.selected.repo, base: targetSha, head: candidateSha };
+		independent.workspace = join(fixture.root, "workspaces", batch.id, digest(independent.selected.key).slice(0, 16));
+		cpSync(fixture.workspace, independent.workspace, { recursive: true });
+		execFileSync("git", ["-C", independent.workspace, "remote", "set-url", "origin", "https://github.com/example/independent"]);
+		independent.preparation = { phase: "ready", owner: `${batch.id}:${independent.selected.key}`, head: candidateSha };
+		batch.items.push(independent); batch.selection = selectionIdentity(batch.items.map((entry) => entry.selected));
+		fixture.service.store.write(batch);
+		(fixture.service as unknown as { batches: Map<string, Batch> }).batches.set(batch.id, batch);
+		await fixture.service.shutdown();
+		fixture.service = fixture.createService();
+		const apiRequests: string[] = [];
+		const github = fixture.github as unknown as {
+			request(path: string): Promise<unknown>; assertFresh(selected: SelectedItem, pull?: { identity?: string; headSha: string }): Promise<void>;
+			observeHostedChecks(repo: string, pull: { headSha: string; mergeSha?: string }, observedAt: string): Promise<unknown>;
+			hostedCheckPolicyCurrent(): Promise<boolean>;
+		};
+		const remoteHead = () => execFileSync("git", ["--git-dir", remote, "rev-parse", `refs/heads/${branch}`], { encoding: "utf8" }).trim();
+		github.assertFresh = async (_selected, pull) => { if (pull && (pull.identity !== pullIdentity || pull.headSha !== remoteHead())) throw new Error("owned PR changed"); };
+		github.hostedCheckPolicyCurrent = async () => true;
+		github.request = async (path) => {
+			apiRequests.push(path);
+			if (path.includes("/git/ref/heads/")) return { object: { sha: remoteHead() } };
+			if (path.includes("/pulls?state=all")) {
+				if (hideExistingPullOnce) { hideExistingPullOnce = false; return []; }
+				return [{ id: 70, node_id: pullIdentity, number: 7, html_url: "https://github.com/example/repo/pull/7", state: "open", draft: false,
+					head: { sha: remoteHead(), ref: branch, repo: { full_name: "example/repo" } }, base: { sha: targetSha, ref: "self-hosted", repo: { full_name: "example/repo" } }, body: `Factory operation: ${owner}:pr` }];
+			}
+			throw new Error(`unexpected fixture API request: ${path}`);
+		};
+		github.observeHostedChecks = async (_repo, pull, observedAt) => {
+			polls++;
+			const policy = [{ context: "CI", appId: 42, source: "classic" as const }]; const policyFingerprint = "f".repeat(64);
+			if (polls === 1) return { observedAt, headSha: pull.headSha, policy, policyFingerprint, runs: [], coverage: "complete" as const, result: "pending" as const };
+			if (polls === 2) {
+				const failure = hostedFailure(pull.headSha);
+				return { observedAt, headSha: pull.headSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policy, policyFingerprint,
+					runs: [{ id: 501, suiteId: 502, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: "completed", conclusion: "failure", createdAt: observedAt, startedAt: observedAt, subject: "head" as const }], coverage: "complete" as const, result: "failed" as const, failures: [failure], reason: "hosted CI exposed a complete source-bound compiler failure" };
+			}
+			return { observedAt, headSha: pull.headSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policy, policyFingerprint,
+				runs: [{ id: 503, suiteId: 504, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: "completed", conclusion: "success", createdAt: observedAt, startedAt: observedAt, subject: "head" as const }], coverage: "complete" as const, result: "passed" as const };
+		};
+		(fixture.service as unknown as { validateProof(item: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		const ledgerEvents: string[] = [];
+		const originalEvent = (fixture.service as unknown as { event(item: Batch["items"][number], event: { kind: string }): void }).event.bind(fixture.service);
+		(fixture.service as unknown as { event(item: Batch["items"][number], event: { kind: string }): void }).event = (current, event) => { ledgerEvents.push(`${event.kind}:${current.ledger.tasks[0]?.state}`); originalEvent(current, event); };
+		(fixture.service as unknown as { timing: { now: () => Date; wait: (milliseconds: number) => Promise<void> } }).timing = { now: () => now, wait: async (milliseconds) => { now = new Date(now.getTime() + milliseconds); } };
+		const originalGit = (fixture.service as unknown as { git(workspace: string, args: string[], signal?: AbortSignal): Promise<string> }).git.bind(fixture.service);
+		(fixture.service as unknown as { git(workspace: string, args: string[], signal?: AbortSignal): Promise<string> }).git = (workspace, args, signal) => args[0] === "fetch"
+			? Promise.resolve(execFileSync("git", ["-C", workspace, "-c", "protocol.file.allow=always", ...args], { encoding: "utf8" }).trimEnd())
+			: originalGit(workspace, args, signal);
+		let repairPushes = 0;
+		const originalPush = (fixture.service as unknown as { pushOwnedBranch(workspace: string, branch: string, signal: AbortSignal): Promise<void> }).pushOwnedBranch.bind(fixture.service);
+		(fixture.service as unknown as { pushOwnedBranch(workspace: string, branch: string, signal: AbortSignal): Promise<void> }).pushOwnedBranch = async (workspace, targetBranch, signal) => {
+			repairPushes++;
+			const candidateHead = fixtureGit(workspace, "rev-parse", "HEAD");
+			const currentVerification = fixture.service.store.read(batch.id).items[0]!.ledger.tasks[0]!.attempts.at(-1)!.currentVerification;
+			assert.equal(currentVerification?.subject.head, candidateHead, "the current-subject receipt is persisted before the push call");
+			assert.equal(currentVerification?.tree, fixtureGit(workspace, "rev-parse", "HEAD^{tree}"), "the current-subject receipt names the exact committed tree");
+			assert.equal(currentVerification?.acceptanceRevision, "original-r1");
+			await originalPush(workspace, targetBranch, signal);
+			if (repairPushes === 1) { hideExistingPullOnce = true; throw new Error("fixture lost the push response after the remote accepted it"); }
+		};
+		await fixture.service.resume(batch.id, repairBinding);
+		try { await fixture.service.waitForIdle(); }
+		catch (error) {
+			const current = (fixture.service as unknown as { batches: Map<string, Batch> }).batches.get(batch.id)?.items[0];
+			throw new Error(`${error instanceof Error ? error.message : String(error)}; stage=${current?.stage}; attempts=${current?.attempts}; operation=${JSON.stringify(current?.operation)}; pr=${JSON.stringify(current?.prLifecycle?.pullRequest)}; repair=${JSON.stringify(current?.repair)}; lifecycleRepair=${JSON.stringify(current?.prLifecycle?.repair)}; artifacts=${JSON.stringify(current?.repair?.artifacts)}; failureKeys=${JSON.stringify(current?.prLifecycle?.observation?.failures?.map((failure) => failure.key))}; phase=${current?.prLifecycle?.phase}; blocker=${current?.blocker}; workers=${workerRuns}; acceptances=${acceptanceRuns}; polls=${polls}`);
+		}
+		const uncertain = fixture.service.store.read(batch.id).items[0]!;
+		assert.equal(uncertain.stage, "UNKNOWN", `${uncertain.blocker}; op=${uncertain.operation?.phase}/${uncertain.operation?.state}; pushes=${repairPushes}`); assert.equal(uncertain.operation?.phase, "push"); assert.equal(uncertain.operation?.state, "unknown");
+		assert.notEqual(remoteHead(), candidateSha, "the fixture branch advanced before its push response was lost");
+		assert.equal(repairPushes, 1);
+		await fixture.service.resume(batch.id, repairBinding); await fixture.service.waitForIdle();
+		const reconciliationPending = fixture.service.store.read(batch.id).items[0]!;
+		assert.equal(reconciliationPending.stage, "UNKNOWN"); assert.equal(reconciliationPending.operation?.phase, "push"); assert.equal(reconciliationPending.operation?.state, "unknown");
+		assert.notEqual(reconciliationPending.prLifecycle?.nextSafeAction, "publish", "a temporarily absent PR search cannot re-enter PR creation");
+		assert.equal(repairPushes, 1);
+		await fixture.service.resume(batch.id, repairBinding); await fixture.service.waitForIdle();
+		const finalBatch = fixture.service.store.read(batch.id); const final = finalBatch.items[0]!; const newPrHead = remoteHead();
+		assert.equal(polls, 3, `one initial dispatch observes pending, failure, then checks on the repaired head: stage=${final.stage}, phase=${final.prLifecycle?.phase}, action=${final.prLifecycle?.nextSafeAction}, blocker=${final.blocker ?? "none"}, attempts=${final.ledger.tasks[0]?.attempts.map((attempt) => attempt.id)}, repair=${final.repair?.reason}, events=${ledgerEvents.join(",")}`);
+		assert.equal(workerRuns, 2, "initial patch and one bounded hosted repair ran");
+		assert.equal(acceptanceRuns, 4, "initial work, independent inspection, changed repair candidate, and exact committed repair each receive fresh acceptance");
+		assert.notEqual(newPrHead, candidateSha, "the repair created an actual new commit");
+		assert.equal(final.prLifecycle?.pullRequest?.identity, pullIdentity);
+		assert.equal(final.prLifecycle?.pullRequest?.branch, branch);
+		assert.equal(final.prLifecycle?.pullRequest?.headSha, newPrHead);
+		assert.equal(final.prLifecycle?.target.sha, targetSha);
+		assert.equal(final.selected.acceptanceRevision, "original-r1");
+		assert.equal(final.ledger.generation, fixture.item.ledger.generation);
+		assert.equal(final.attempts, 2); assert.equal(final.ledger.tasks[0]?.attempts.length, 2);
+		assert.equal(final.stage, "DONE"); assert.equal(final.proof?.stage, "pr-ready");
+		assert.equal(batchItemProofCurrent(final), true, "repair readiness retains the canonical current-subject reducer proof");
+		assert.equal(batchConverged(finalBatch), true, "both selected items finish with current proof after repair and independent work");
+		assert.equal(finalBatch.items[1]!.stage, "DONE", `independent work advanced during hosted CI waiting: ${finalBatch.items[1]!.blocker ?? "no blocker"}`);
+		assert.equal(final.operation?.phase, "pr"); assert.equal(final.operation?.sha, newPrHead);
+		assert.ok(final.operations.some((operation) => operation.phase === "push" && operation.state === "applied" && operation.sha === newPrHead && operation.branch === branch), "the repaired head is retained as a confirmed expected push effect");
+		assert.equal(repairPushes, 1, "resume reconciles the uncertain push and never repeats it");
+		assert.equal(apiRequests.some((path) => path.includes("/merges") || path.endsWith("/pulls")), false, "repair does not call GitHub merge or PR-create endpoints");
+		assert.equal(fixtureGit(fixture.workspace, "show", "HEAD:ci-fix.txt"), "fixed");
+		await fixture.service.shutdown();
+	} finally {
+		if (fixture.service.isWriterAcquired()) fixture.service.store.release();
+		await fixture.cleanup();
 	}
 });
 
@@ -656,6 +1580,7 @@ test("dependency-deferred work remains queued when an unrelated prerequisite is 
 		service.store.acquire();
 		service.store.write(batch);
 		await service.resume(batch.id, {});
+		await service.waitForIdle();
 		const resumed = service.store.read(batch.id);
 		assert.equal(resumed.items.find((item) => item.selected.key === prerequisite.key)?.stage, "BLOCKED");
 		const dependentState = resumed.items.find((item) => item.selected.key === dependent.key)!;
@@ -664,6 +1589,23 @@ test("dependency-deferred work remains queued when an unrelated prerequisite is 
 		await service.shutdown();
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("automatic dispatch refuses exhausted original budgets before native setup", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-dispatch-budget-"));
+	const github = { snapshot: async (item: SelectedItem) => item, assertFresh: async () => {} };
+	const service = new BatchService(root, github as never, undefined, {} as never, 1);
+	try {
+		const batch = createBatch([selected("org/a#1", "inspect")], options("fade"));
+		batch.items[0]!.attempts = batch.maxAttempts;
+		service.store.acquire(); service.store.write(batch);
+		await service.resume(batch.id, {}); await service.waitForIdle();
+		const item = service.store.read(batch.id).items[0]!;
+		assert.equal(item.stage, "BLOCKED");
+		assert.match(item.blocker!, /original attempt budget exhausted/);
+		assert.equal(item.attempts, batch.maxAttempts);
+	} finally { await service.shutdown(); await rm(root, { recursive: true, force: true }); }
+});
+
 
 test("an unconfirmed stop keeps the item unknown and the repository claim", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-cancel-"));

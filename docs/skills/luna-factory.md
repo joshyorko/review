@@ -109,3 +109,45 @@ reviewer tasks; unrelated Review work remains usable. Resource ownership is
 keyed by the lower-case repository and item identity in the state root.
 Remote, gateway, and distributed workers are deferred, as are parent #111 gates;
 this skill does not claim dogfood or packaged-runtime success without evidence.
+
+Newly admitted `/factory start pr-ready` work retains a version-4 owned-PR
+lifecycle bound to its original generation, operation, same-repository PR,
+target ref/SHA, branch and head. PR creation alone remains `VERIFY`. While a
+batch is active, the foreground OMP-owned pump observes pending hosted checks
+automatically. Backoff, `Retry-After`, and the lifecycle deadline are persisted;
+waiting consumes no worker capacity or resource claims and makes no model call.
+Pause, stop, and shutdown wake the wait. A restarted or explicitly paused batch
+continues only after `/factory resume`; `/factory reconcile <batch>` stays
+read-only and never substitutes for initial dispatch continuity.
+
+The observed policy combines classic branch protection with applicable
+repository/parent rulesets, and each check must match its declared GitHub App
+source. A required context observed on the current synthetic merge SHA selects
+that subject; otherwise the head SHA is eligible. GitHub Actions checks also
+require a matching workflow run, eligible event, exact attempt, complete jobs
+and steps, and readable bounded logs. Failure repair requires exact check-run
+details and complete bounded annotations; unavailable, truncated, cancelled,
+infrastructure, or superseded evidence remains `UNKNOWN`. GitHub rate-limit
+responses retain that unknown observation and wait until their persisted
+`Retry-After` time before retrying. A log URL or job summary alone never
+authorizes repair.
+
+Every PR-ready publication, initial or repair, commits its local candidate and
+reruns deterministic verification plus independent acceptance against the exact
+committed SHA and tree before any push or PR effect. The separate typed
+current-subject receipt preserves the worker authorization receipt; tree
+equality alone never transfers proof.
+
+A complete current code failure reopens the same admitted task under its
+original generation and attempt appetite. Factory gives the worker an immutable
+failure packet through the existing evidence handles, rechecks the exact PR,
+base, head, acceptance, policy, verifier, and claims. The existing PR identity,
+target, and acceptance revision stay bound; Factory never creates a second PR
+or merges it. Ambiguous push/PR effects stay `UNKNOWN` until exact
+reconciliation and are never blindly repeated. Duplicate failures or
+incomplete diagnostics select `repair-review`. An applicable
+ruleset rule this slice cannot model, including `workflows`, or a `merge_group`
+workflow event remains `UNKNOWN`. Missing policy/source/subject coverage,
+skipped jobs, incomplete pages, or changes during observation remain
+`UNKNOWN`. Legacy PR-ready receipts without a separate current-subject
+verification remain stale during decode.

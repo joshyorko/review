@@ -15,12 +15,14 @@ import test from "node:test";
 
 import { admit } from "../image/extension/luna-factory/core/admission.ts";
 import { evaluateRun } from "../image/extension/luna-factory/core/convergence.ts";
-import { criterionProven, reconcileReceipt } from "../image/extension/luna-factory/core/evidence.ts";
+import { evaluateWorkGraph, type GraphRelation, type WorkGraphObservation } from "../image/extension/luna-factory/core/graph.ts";
+import { criterionProven, currentAssumptionsFor, reconcileCurrentVerification, reconcileReceipt } from "../image/extension/luna-factory/core/evidence.ts";
 import { JOURNAL_ENTRY, durabilityOf, journalRecord, parseJournal, readJournal } from "../image/extension/luna-factory/core/journal.ts";
 import { emptyLedger, findTask } from "../image/extension/luna-factory/core/model.ts";
 import type {
 	Candidate,
 	CriterionId,
+	CurrentVerificationReceipt,
 	EvidenceReceipt,
 	GenerationId,
 	Ledger,
@@ -32,7 +34,7 @@ import type {
 import { createBatch, type FactoryAction, type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
 import { renderCompletionReceipt } from "../image/extension/luna-factory/core/receipt.ts";
 import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
-import { artifactRefError, changedPathError, parseCandidate, parseReceipt, parseSubject } from "../image/extension/luna-factory/core/schema.ts";
+import { artifactRefError, changedPathError, parseCandidate, parseCurrentVerification, parseReceipt, parseSubject } from "../image/extension/luna-factory/core/schema.ts";
 import { buildDispatchPrompt, dispatchMarker, RECEIPT_CONTRACT } from "../image/extension/luna-factory/omp/adapter.ts";
 import { DISPATCH_COVERAGE, coverageFor, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
 import { renderStatus, renderStatusDetail, renderWhy } from "../image/extension/luna-factory/ui/status.ts";
@@ -104,6 +106,26 @@ function receipt(overrides: Partial<EvidenceReceipt> = {}): EvidenceReceipt {
 		],
 	};
 	return { ...base, ...overrides };
+}
+
+function currentVerification(overrides: Partial<CurrentVerificationReceipt> = {}): CurrentVerificationReceipt {
+	return {
+		version: 1,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		generation: "G1" as GenerationId,
+		subject: { ...SUBJECT, head: "b".repeat(40) },
+		tree: "c".repeat(40),
+		acceptanceRevision: "acceptance-r1",
+		assumptions: [],
+		predicates: [
+			{ phase: "verification", item: "npm test", ok: true, note: "exit 0" },
+			{ phase: "acceptance", item: "independent acceptance", ok: true, note: "accepted" },
+		],
+		acceptanceSession: "session-current-acceptance",
+		checkedAt: "2026-10-06T00:00:00.000Z",
+		...overrides,
+	};
 }
 
 /** Apply one event, failing the test if the ledger rejects it. */
@@ -855,10 +877,123 @@ test("a proven write cannot integrate without an externally changed head", () =>
 	const writer = candidate({ effect: "write" });
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
 	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
-	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
 	const integrated = reduce(returned, { kind: "integrate_attempt", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
 	assert.equal(integrated.ok, false);
 	assert.match(integrated.ok ? "" : integrated.error, /externally changed head|concrete changed head/);
+});
+
+test("current-subject verification is a separate proof and preserves the worker authorization receipt", () => {
+	const base = ledger();
+	const bound: Ledger = { ...base, criteria: base.criteria.map((criterion) => criterion.id === ("A1" as CriterionId)
+		? { ...criterion, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }
+		: criterion) };
+	const admitted = step(bound, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ effect: "write" }) }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
+	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
+	const head = "b".repeat(40);
+	const premature = reduce(returned, { kind: "record_current_verification", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ subject: { ...SUBJECT, head }, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }, REDUCE);
+	assert.equal(premature.ok, false);
+	assert.match(premature.ok ? "" : premature.error, /not been returned and integrated/);
+	const integrated = step(returned, (revision) => ({ kind: "integrate_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: { ...SUBJECT, head } }));
+	const priorAttempt = reduce(integrated, { kind: "record_current_verification", expectedRevision: integrated.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ attemptId: "T1-a0" as CurrentVerificationReceipt["attemptId"], subject: { ...SUBJECT, head }, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }, REDUCE);
+	assert.equal(priorAttempt.ok, false);
+	assert.match(priorAttempt.ok ? "" : priorAttempt.error, /attempt/);
+	const verified = step(integrated, (revision) => ({ kind: "record_current_verification", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ subject: { ...SUBJECT, head }, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
+	const attempt = findTask(verified, "T1" as TaskId)?.attempts.at(-1)!;
+	assert.equal(attempt.receipt?.subject.head, undefined);
+	assert.equal(attempt.currentVerification?.subject.head, head);
+	assert.equal(criterionProven(verified, "A1" as CriterionId), false, "VERIFY is not proof completion");
+	const finished = step(verified, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+	assert.equal(findTask(finished, "T1" as TaskId)?.state, "DONE");
+	assert.equal(criterionProven(finished, "A1" as CriterionId), true);
+	assert.equal(findTask(finished, "T1" as TaskId)?.attempts.at(-1)?.receipt?.subject.head, undefined);
+	const reloaded = parseJournal(journalRecord(finished));
+	assert.equal(reloaded.ok, true);
+	assert.equal(reloaded.ok && findTask(reloaded.ledger, "T1" as TaskId)?.attempts.at(-1)?.currentVerification?.subject.head, head);
+});
+
+test("legacy PR-ready receipt subject transfer does not become current proof after reload", () => {
+	const base = ledger();
+	const bound: Ledger = { ...base, goal: { ...base.goal, finishAuthority: "pr-ready" }, criteria: base.criteria.map((criterion) => criterion.id === ("A1" as CriterionId)
+		? { ...criterion, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }
+		: criterion) };
+	const admitted = step(bound, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ effect: "write" }) }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
+	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
+	const head = "b".repeat(40);
+	const moved = step(returned, (revision) => ({ kind: "integrate_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: { ...SUBJECT, head } }));
+	const task = findTask(moved, "T1" as TaskId)!;
+	const attempt = task.attempts.at(-1)!;
+	const legacyTransferred: Ledger = {
+		...moved,
+		tasks: moved.tasks.map((candidate) => candidate.id !== task.id ? candidate : {
+			...candidate,
+			state: "DONE",
+			attempts: candidate.attempts.map((entry) => entry.id !== attempt.id ? entry : {
+				...entry,
+				subject: { ...entry.subject, head },
+				receipt: { ...entry.receipt!, subject: { ...entry.subject, head } },
+				integrated: true,
+			}),
+		}),
+	};
+	assert.equal(criterionProven(legacyTransferred, "A1" as CriterionId), false);
+	const reloaded = parseJournal(journalRecord(legacyTransferred));
+	assert.equal(reloaded.ok, true);
+	assert.equal(reloaded.ok && criterionProven(reloaded.ledger, "A1" as CriterionId), false);
+});
+
+test("current-subject verification rejects a stale head and changed acceptance assumption", () => {
+	const base = ledger();
+	const bound: Ledger = { ...base, criteria: base.criteria.map((criterion) => criterion.id === ("A1" as CriterionId)
+		? { ...criterion, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }
+		: criterion) };
+	const admitted = step(bound, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ effect: "write" }) }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
+	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
+	const integrated = step(returned, (revision) => ({ kind: "integrate_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: { ...SUBJECT, head: "b".repeat(40) } }));
+	const stale = reduce(integrated, { kind: "record_current_verification", expectedRevision: integrated.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ subject: { ...SUBJECT, head: "d".repeat(40) }, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }, REDUCE);
+	assert.equal(stale.ok, false);
+	assert.match(stale.ok ? "" : stale.error, /exact current subject/);
+	const changedAcceptance = reduce(integrated, { kind: "record_current_verification", expectedRevision: integrated.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ subject: integrated.subject, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r2" }] }) }, REDUCE);
+	assert.equal(changedAcceptance.ok, false);
+	assert.match(changedAcceptance.ok ? "" : changedAcceptance.error, /assumption|acceptance revision/);
+});
+
+test("current-subject verification expires when a declared dependency outcome changes", () => {
+	const base = ledger();
+	const dependency = { kind: "dependency-outcome" as const, taskId: "T0" as TaskId, value: "proven" };
+	const bound: Ledger = {
+		...base,
+		subject: { ...base.subject, head: "b".repeat(40) },
+		assumptionValues: [dependency],
+		tasks: [{ id: "T1" as TaskId, generation: base.generation, criterionId: "A1" as CriterionId, title: "fix", deps: [], effect: "write", owner: "test", state: "DONE", attempts: [], decision: "ADMIT", decisionReason: "selected" }],
+		criteria: base.criteria.map((criterion) => criterion.id === ("A1" as CriterionId)
+			? { ...criterion, assumptions: [{ kind: "acceptance-revision" as const, value: "acceptance-r1" }, dependency] }
+			: criterion),
+	};
+	const task = { id: "T1" as TaskId, criterionId: "A1" as CriterionId };
+	const current = currentVerification({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }, dependency] });
+	assert.equal(reconcileCurrentVerification(bound, current, {
+		taskId: task.id, attemptId: "T1-a1", subject: current.subject, acceptanceRevision: "acceptance-r1", assumptions: currentAssumptionsFor(bound, task.id),
+	}).status, "proven");
+	const changed = { ...bound, assumptionValues: [{ ...dependency, value: "unproven" }] };
+	assert.equal(reconcileCurrentVerification(changed, current, {
+		taskId: task.id, attemptId: "T1-a1", subject: current.subject, acceptanceRevision: "acceptance-r1", assumptions: currentAssumptionsFor(changed, task.id),
+	}).status, "unproved");
+});
+
+test("current-subject verification parser requires positive deterministic and independent acceptance evidence", () => {
+	const parsed = parseCurrentVerification(currentVerification());
+	assert.equal(parsed.ok, true);
+	const missingAcceptance = parseCurrentVerification(currentVerification({ predicates: [{ phase: "verification", item: "npm test", ok: true, note: "exit 0" }] }));
+	assert.equal(missingAcceptance.ok, false);
+	const failedAcceptance = parseCurrentVerification(currentVerification({ predicates: [
+		{ phase: "verification", item: "npm test", ok: true, note: "exit 0" },
+		{ phase: "acceptance", item: "independent acceptance", ok: false, note: "rejected" },
+	] }));
+	assert.equal(failedAcceptance.ok, false);
 });
 
 test("attempt intent stays READY until a bound OMP execution identity is recorded", () => {
@@ -2835,4 +2970,168 @@ test("OMP task running status without a request remains unknown, not RUNNING", a
 	assert.equal(final.tasks[0]!.attempts[0]!.state, "abandoned");
 	assert.deepEqual(final.tasks[0]!.attempts[0]!.nativeJobIds, ["job-setup"]);
 	assert.deepEqual(final.tasks[0]!.attempts[0]!.nativeAgentIds, []);
+});
+
+function graphNode(key: string, state: WorkGraphObservation["nodes"][number]["state"] = "QUEUED", overrides: Partial<WorkGraphObservation["nodes"][number]> = {}) {
+	return {
+		key,
+		generation: "G1",
+		subject: { repo: "example/repo", base: "a".repeat(40) },
+		required: true,
+		target: "verified-patch" as const,
+		state,
+		...overrides,
+	};
+}
+
+test("typed work graph keeps true prerequisites, parallel READY work, and isolated UNKNOWN lanes", () => {
+	const relations: GraphRelation[] = [
+		{ from: "example/repo#2", to: "example/repo#1", kind: "requires", authority: "authoritative", source: "selected dependency" },
+		{ from: "example/repo#3", to: "example/repo#1", kind: "requires", authority: "authoritative", source: "selected dependency" },
+	];
+	const observation: WorkGraphObservation = {
+		generation: "G1",
+		nodes: [
+			graphNode("example/repo#1"),
+			graphNode("example/repo#2"),
+			graphNode("example/repo#3"),
+			graphNode("example/repo#4", "UNKNOWN"),
+		],
+		relations,
+	};
+	const before = evaluateWorkGraph(observation);
+	assert.deepEqual(before.ready, ["example/repo#1"]);
+	assert.equal(before.nodes.find((node) => node.key === "example/repo#2")?.decision, "BLOCKED");
+	assert.equal(before.nodes.find((node) => node.key === "example/repo#4")?.decision, "UNKNOWN");
+	assert.equal(before.verdict, "ACTIVE");
+
+	const after = evaluateWorkGraph({
+		...observation,
+		nodes: observation.nodes.map((node) => node.key === "example/repo#1"
+			? { ...node, state: "DONE" as const, proof: "verified-patch" as const, proofCurrent: true }
+			: node),
+	});
+	assert.deepEqual(after.ready, ["example/repo#2", "example/repo#3"]);
+	assert.equal(after.nodes.find((node) => node.key === "example/repo#4")?.decision, "UNKNOWN");
+});
+
+test("graph relation vocabulary preserves non-gating edges and marks inferred order as a hint", () => {
+	const relations: GraphRelation[] = [
+		{ from: "pr#2", to: "issue#1", kind: "implements", authority: "authoritative", source: "closing reference" },
+		{ from: "issue#3", to: "issue#1", kind: "contains", authority: "authoritative", source: "parent reference" },
+		{ from: "pr#4", to: "pr#2", kind: "requires", authority: "inferred", source: "model proposal", reason: "textual ordering only" },
+	];
+	const decision = evaluateWorkGraph({
+		generation: "G1",
+		nodes: [graphNode("issue#1"), graphNode("pr#2"), graphNode("issue#3"), graphNode("pr#4")],
+		relations,
+	});
+	assert.deepEqual(decision.ready, ["issue#1", "pr#2", "issue#3", "pr#4"]);
+	assert.equal(decision.softHints.length, 1);
+	assert.match(decision.softHints[0]!, /model proposal/);
+});
+
+test("graph re-observation invalidates stale proof and withholds authoritative cycles", () => {
+	const base: WorkGraphObservation = {
+		generation: "G1",
+		nodes: [graphNode("a", "DONE", { proof: "verified-patch", proofCurrent: false }), graphNode("b")],
+		relations: [{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "dependency" }],
+	};
+	assert.equal(evaluateWorkGraph(base).nodes.find((node) => node.key === "a")?.decision, "UNKNOWN");
+	const cycle = evaluateWorkGraph({
+		...base,
+		relations: [
+			{ from: "a", to: "b", kind: "requires", authority: "authoritative", source: "dependency" },
+			{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "dependency" },
+		],
+	});
+	assert.deepEqual(cycle.ready, []);
+	assert.match(cycle.blockers.join("; "), /graph dependency cycle/);
+});
+
+test("graph distinguishes converged from autonomously quiescent", () => {
+	const done = graphNode("done", "DONE", { proof: "verified-patch", proofCurrent: true });
+	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [done], relations: [] }).verdict, "CONVERGED");
+	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [graphNode("blocked", "BLOCKED")], relations: [] }).verdict, "AUTONOMOUSLY_QUIESCENT");
+});
+
+test("empty typed scope cannot manufacture convergence", () => {
+	assert.equal(evaluateWorkGraph({ generation: "G1", nodes: [], relations: [] }).verdict, "AUTONOMOUSLY_QUIESCENT");
+});
+
+test("graph rejects stale dependent proof while retaining independent READY work", () => {
+	const decision = evaluateWorkGraph({ generation: "G1", nodes: [
+		graphNode("a", "DONE", { proof: "verified-patch", proofCurrent: false }),
+		graphNode("b", "DONE", { proof: "verified-patch", proofCurrent: true }),
+		graphNode("independent"),
+	], relations: [{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "native dependency" }] });
+	assert.notEqual(decision.nodes.find((node) => node.key === "b")?.decision, "DONE");
+	assert.deepEqual(decision.ready, ["independent"]);
+});
+
+test("missing prerequisite and cyclic components do not freeze independent READY work", () => {
+	for (const relations of [
+		[{ from: "a", to: "external", kind: "requires", authority: "authoritative", source: "native dependency" }],
+		[{ from: "a", to: "b", kind: "requires", authority: "authoritative", source: "native dependency" }, { from: "b", to: "a", kind: "requires", authority: "authoritative", source: "native dependency" }],
+	] satisfies GraphRelation[][]) {
+		const decision = evaluateWorkGraph({ generation: "G1", nodes: [graphNode("a"), graphNode("b"), graphNode("independent")], relations });
+		assert.ok(decision.ready.includes("independent"));
+		assert.ok(!decision.ready.includes("a"));
+		assert.ok(decision.blockers.length > 0);
+	}
+});
+
+test("all hard-edge blockers and UNKNOWN precedence are independent of relation order", () => {
+	const observation: WorkGraphObservation = { generation: "G1", nodes: [graphNode("a"), graphNode("blocked", "BLOCKED"), graphNode("unknown", "UNKNOWN")], relations: [
+		{ from: "a", to: "blocked", kind: "requires", authority: "authoritative", source: "native dependency" },
+		{ from: "a", to: "unknown", kind: "requires", authority: "authoritative", source: "native dependency" },
+	] };
+	const before = evaluateWorkGraph(observation);
+	assert.deepEqual(before, evaluateWorkGraph({ ...observation, relations: [...observation.relations].reverse() }));
+	assert.equal(before.nodes[0]!.decision, "UNKNOWN");
+	assert.equal(before.nodes[0]!.blockers.length, 2);
+});
+
+test("graph never reports quiescence while an observed execution is RUNNING or VERIFY", () => {
+	for (const state of ["RUNNING", "VERIFY"] as const) {
+		const decision = evaluateWorkGraph({ generation: "G1", nodes: [graphNode("a", state), graphNode("b")], relations: [
+			{ from: "a", to: "b", kind: "requires", authority: "authoritative", source: "native dependency" },
+			{ from: "b", to: "a", kind: "requires", authority: "authoritative", source: "native dependency" },
+		] });
+		assert.equal(decision.nodes[0]!.decision, state);
+		assert.equal(decision.verdict, "ACTIVE");
+	}
+});
+
+test("graph finds every cyclic component member independently of captured node order", () => {
+	const nodes = [graphNode("a"), graphNode("b"), graphNode("c", "DONE", { proof: "verified-patch", proofCurrent: true })];
+	const relations = [["a", "b"], ["b", "a"], ["a", "c"], ["c", "b"]].map(([from, to]) => ({ from: from!, to: to!, kind: "requires" as const, authority: "authoritative" as const, source: "native dependency" }));
+	for (const captured of [nodes, [nodes[2]!, nodes[0]!, nodes[1]!]]) {
+		const decision = evaluateWorkGraph({ generation: "G1", nodes: captured, relations });
+		assert.ok(decision.nodes.every((node) => node.decision === "BLOCKED"));
+		assert.ok(decision.nodes.every((node) => node.blockers.some((reason) => reason.includes("graph dependency cycle"))));
+	}
+});
+
+test("a settled proof does not become stale from non-load-bearing overlap observation absence", () => {
+	const node = graphNode("settled", "DONE", { proof: "verified-patch", proofCurrent: true });
+	const relation: GraphRelation = { from: node.key, to: "external", kind: "overlaps", authority: "authoritative", source: "writer observation" };
+	for (const nodes of [[node], [node, graphNode("external", "UNKNOWN", { required: false })]]) {
+		assert.equal(evaluateWorkGraph({ generation: "G1", nodes, relations: [relation] }).nodes[0]!.decision, "DONE");
+	}
+});
+
+test("read-only external prerequisite observations are not authorized READY work", () => {
+	const decision = evaluateWorkGraph({ generation: "G1", nodes: [
+		graphNode("selected", "BLOCKED"),
+		graphNode("external", "QUEUED", { required: false, selected: false }),
+	], relations: [{ from: "selected", to: "external", kind: "requires", authority: "authoritative", source: "native dependency", stage: "merged-upstream" }] });
+	assert.deepEqual(decision.ready, []);
+	assert.equal(decision.verdict, "AUTONOMOUSLY_QUIESCENT");
+	assert.ok(decision.blockers.length > 0);
+});
+
+test("malformed persisted graph state cannot become READY or grant an outcome", () => {
+	assert.throws(() => evaluateWorkGraph({ generation: "G1", nodes: [{ ...graphNode("corrupt"), state: "INVENTED" } as never], relations: [] }), /unsupported|invalid/);
+	assert.throws(() => evaluateWorkGraph({ generation: "G1", nodes: [graphNode("a"), graphNode("b")], relations: [{ from: "a", to: "b", kind: "invented", authority: "authoritative", source: "corrupt retained relationship" } as never] }), /unsupported|invalid/);
 });
