@@ -21,6 +21,12 @@ mkdir -p "$host_fixture/etc"
 touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
 filesystem_hook="$scratch/filesystem.sh"
 cat >"$filesystem_hook" <<'EOF'
+if [[ "${REVIEW_TEST_HIDE_KRUN:-0}" == 1 ]]; then
+  command() {
+    if [[ "$#" == 2 && "$1" == -v && "$2" == krun ]]; then return 1; fi
+    builtin command "$@"
+  }
+fi
 test() {
   if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
     builtin test -e "$HOST_FIXTURE$2"
@@ -46,7 +52,16 @@ EOF
 cat >"$fake_bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -eu
-[[ "${1:-}" == info ]] && { [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]]; exit; }
+if [[ "${1:-}" == info ]]; then
+  if [[ "$*" == *--runtime=krun* ]]; then
+    printf 'runtime-probe %s %s\n' "$*" "${FAKE_KRUN_RUNTIME:-krun}" >>"${PODMAN_LOG:?}"
+    [[ "${FAKE_KRUN_RUNTIME:-krun}" == unavailable ]] && exit 1
+    printf '%s\n' "${FAKE_KRUN_RUNTIME:-krun}"
+    exit 0
+  fi
+  [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]]
+  exit
+fi
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
 if [[ "${1:-}" == run && "$*" == *--entrypoint\ /usr/bin/test* ]]; then exit 0; fi
 if [[ "${1:-}" == run && "$*" == *--factory-verifier-probe* ]]; then
@@ -264,7 +279,7 @@ run_just() {
   : >"$podman_log"
   export APPTAINER_LOG="$apptainer_log"
   set +e
-  output="$(env HOME="$home" XDG_STATE_HOME="$home/.local/state" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
+  output="$(env HOME="$home" XDG_STATE_HOME="$home/.local/state" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_HIDE_KRUN=1 REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_KRUN_RUNTIME="${FAKE_KRUN_RUNTIME:-krun}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
   status=$?
   set -e
 }
@@ -289,6 +304,21 @@ contains 'Podman krun KVM infrastructure prerequisites ready' "$output"
 contains 'Packaged Factory verifier qualified in krun profile' "$output"
 contains '=== Review image ===' "$output"
 contains 'ghcr.io/projectbluefin/review:stable is resolvable' "$output"
+
+scenario="registered krun runtime works without a literal executable on PATH"
+FAKE_KRUN_RUNTIME=krun run_just review-appliance owner/repo
+[[ "$status" -eq 17 ]] || fail "registered krun runtime was not selected without a literal krun executable: $output"
+log_contains 'run --runtime=krun --rm --interactive --tty' "$podman_log"
+log_contains 'runtime-probe info --runtime=krun' "$podman_log"
+[[ ! -s "$apptainer_log" ]] || fail "registered krun runtime fell back to Apptainer"
+
+scenario="unregistered krun runtime keeps the precise Apptainer fallback diagnostic"
+FAKE_KRUN_RUNTIME=unavailable run_just review-doctor
+[[ "$status" -eq 0 ]] || fail "doctor failed while reporting an unavailable krun runtime: $output"
+if [[ "$output" != *"the krun OCI runtime is unavailable"* ]]; then
+  fail "doctor output omitted krun diagnostic; podman log: $(cat "$podman_log"); output: $output"
+fi
+log_contains 'runtime-probe info --runtime=krun' "$podman_log"
 
 scenario="doctor does not claim verifier readiness without a local image"
 FAKE_IMAGE_MISSING=1 run_just review-doctor

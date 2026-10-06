@@ -166,6 +166,12 @@ mkdir -p "$host_fixture/etc"
 touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
 filesystem_hook="$scratch/filesystem.sh"
 cat >"$filesystem_hook" <<'EOF'
+if [[ "${REVIEW_TEST_HIDE_KRUN:-0}" == 1 ]]; then
+  command() {
+    if [[ "$#" == 2 && "$1" == -v && "$2" == krun ]]; then return 1; fi
+    builtin command "$@"
+  }
+fi
 test() {
   if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
     builtin test -e "$HOST_FIXTURE$2"
@@ -181,7 +187,13 @@ touch "$kvm"
 chmod 0666 "$kvm"
 cat >"$scratch/bin/podman" <<EOF
 #!/usr/bin/env bash
-[[ "\${1:-}" == info ]] && exit 0
+if [[ "\${1:-}" == info ]]; then
+  if [[ "\$*" == *--runtime=krun* ]]; then
+    [[ "\${FAKE_KRUN_RUNTIME:-krun}" == unavailable ]] && exit 1
+    printf '%s\\n' "\${FAKE_KRUN_RUNTIME:-krun}"
+  fi
+  exit 0
+fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
   [[ "\${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\ttrue\n'
   exit 0
@@ -403,6 +415,28 @@ assert_bluefin_review() {
     fail "shorthand reached the appliance as prompt text: $passed_flags"
   fi
 }
+
+# A Podman-registered runtime remains eligible without a literal `krun` binary.
+mv "$scratch/bin/krun" "$scratch/krun"
+: >"$mock_podman_log"
+: >"$mock_apptainer_log"
+registered_runtime_output="$(FAKE_KRUN_RUNTIME=krun REVIEW_TEST_HIDE_KRUN=1 \
+  REVIEW_TEST_KVM_DEVICE="$kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "review did not select Podman's registered krun runtime without a literal krun executable"
+[[ "$registered_runtime_output" != *"using the isolated Apptainer fallback"* ]] ||
+  fail "registered krun runtime incorrectly fell back to Apptainer: $registered_runtime_output"
+registered_runtime_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$registered_runtime_call" == *"run --runtime=krun --rm --interactive --tty"* ]] ||
+  fail "review did not use the registered krun runtime: $registered_runtime_call"
+[[ ! -s "$mock_apptainer_log" ]] || fail "registered krun runtime fell back to Apptainer"
+unregistered_runtime_output="$(FAKE_KRUN_RUNTIME=unavailable REVIEW_TEST_KVM_DEVICE="$kvm" \
+  "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "review did not preserve Apptainer fallback for an unregistered krun runtime"
+[[ "$unregistered_runtime_output" == *"the krun OCI runtime is unavailable"* ]] ||
+  fail "unregistered krun runtime did not report the existing diagnostic: $unregistered_runtime_output"
+[[ "$unregistered_runtime_output" == *"using the isolated Apptainer fallback"* ]] ||
+  fail "unregistered krun runtime did not select Apptainer"
+mv "$scratch/krun" "$scratch/bin/krun"
 
 : >"$mock_podman_log"
 set +e
@@ -1071,6 +1105,10 @@ mock_cred_bin="$scratch/cred-bin"
 mkdir -p "$mock_cred_bin"
 cat >"$mock_cred_bin/podman" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == info && "$*" == *--runtime=krun* ]]; then
+  printf 'krun\n'
+  exit 0
+fi
 case "${1:-} ${2:-}" in
   "info "|"pull "*|"image exists") exit 0 ;;
   "run "*) echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"; exit 0 ;;

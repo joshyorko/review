@@ -238,10 +238,18 @@ if [[ ${1:-} == events ]]; then
       exit_code="${mode#exit}"
       printf 'container|create|@CONTAINER@|<nil>|<nil>|%s\n' "$owner"
       printf 'container|died|@CONTAINER@|%s|false|%s\n' "$exit_code" "$owner" ;;
+    kill-clean)
+      printf 'container|create|@CONTAINER@|<nil>|<nil>|%s\n' "$owner"
+      printf 'container|kill|@CONTAINER@|<nil>|<nil>|%s\n' "$owner"
+      printf 'container|died|@CONTAINER@|0|false|%s\n' "$owner" ;;
     clean)
       printf 'container|create|@CONTAINER@|<nil>|<nil>|%s\n' "$owner"
       printf 'container|died|@CONTAINER@|0|false|%s\n' "$owner" ;;
   esac
+  exit 0
+fi
+if [[ "${1:-}" == info && "$*" == *--runtime=krun* ]]; then
+  printf 'krun\n'
   exit 0
 fi
 case "${1:-} ${2:-} ${3:-}" in
@@ -630,6 +638,27 @@ exit 0
         self.assertNotIn(SECRET, run_log + stdout.decode(errors="replace") + stderr.decode(errors="replace"))
         self.assertFalse(Path(fixture["rm.log"]).exists(), "launcher attempted post-exit cleanup")
         self.assertIn("outcome=nonclean_unknown", self.launcher_report(fixture))
+
+    @unittest.skipUnless(COLLECTOR.is_file(), "collector implementation follows this red test")
+    def test_owned_kill_event_prevents_clean_zero_exit_and_retains_bounded_identity(self) -> None:
+        fixture = self.launch_fixture(run_status=0, event_mode="kill-clean")
+        proc = subprocess.run(
+            [str(LAUNCHER), "review", "owner/repo"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            env=fixture["env"],
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = self.launcher_report(fixture)
+        self.assertIn("outcome=signal_observed", report)
+        self.assertIn("container_exit=0", report)
+        self.assertIn(f"container_id={CONTAINER_ID}", report)
+        self.assertIn("kill_seen=true", report)
+        self.assertLess(len(report), 240)
+        self.assertNotIn(SECRET, report + proc.stdout + proc.stderr)
 
     @unittest.skipUnless(COLLECTOR.is_file(), "collector implementation follows this red test")
     def test_launcher_name_collision_and_failed_runtime_start_remain_unknown(self) -> None:

@@ -179,10 +179,10 @@ elif ((create_count == 1 && died_count == 1)) && [[ -n "$container_exit" ]]; the
   evidence="podman_event"
   if [[ "$oom_seen" == true ]]; then
     outcome="podman_oom_reported"
-  elif [[ "$container_exit" == 0 ]]; then
-    outcome="clean"
   elif [[ "$kill_seen" == true ]]; then
     outcome="signal_observed"
+  elif [[ "$container_exit" == 0 ]]; then
+    outcome="clean"
   else
     outcome="nonclean_unknown"
   fi
@@ -192,10 +192,13 @@ if ((event_status != 0)); then
   container_exit=""
   outcome="unknown"
 fi
-if [[ -n "$container_exit" ]]; then
-  report="Review post-exit diagnostic: outcome=${outcome} settlement=${settlement} evidence=${evidence} container_exit=${container_exit}"
-else
-  report="Review post-exit diagnostic: outcome=${outcome} settlement=${settlement} evidence=${evidence}"
+report="Review post-exit diagnostic: outcome=${outcome} settlement=${settlement} evidence=${evidence}"
+[[ -n "$container_exit" ]] && report+=" container_exit=${container_exit}"
+if [[ "$container_id" =~ ^[0-9a-f]{64}$ ]]; then
+  report+=" container_id=${container_id}"
+  if [[ "$kill_seen" == true || "$evidence" == podman_event ]]; then
+    report+=" kill_seen=${kill_seen}"
+  fi
 fi
 [[ -f "$report_file" && ! -L "$report_file" && -O "$report_file" ]] || exit 2
 [[ "$(stat -c '%a' -- "$report_file" 2>/dev/null)" == 600 ]] || exit 2
