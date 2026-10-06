@@ -205,6 +205,9 @@ require image/appliance/entrypoint.sh \
   '"${extension_args[@]}"' \
   'Luna Factory extension is not packaged at /usr/share/bluefin/review/luna-factory'
 require image/appliance/config.yml \
+  'startup:' \
+  'checkUpdate: false' \
+  'setupWizard: false' \
   'enabled: true' \
   'apply: false' \
   'backend: auto'

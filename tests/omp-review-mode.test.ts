@@ -7022,6 +7022,10 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 	assert.match(pi.messages[0], /targeting that same base/);
 	assert.match(pi.messages[0], /Do not write directly to the base branch/);
 	assert.match(pi.messages[0], /never assume it is `main`/i);
+	assert.match(pi.messages[0], /Before running `gh pr create`, verify the current branch/);
+	assert.match(pi.messages[0], /the explicit proposed base matches that resolved target/);
+	assert.match(pi.messages[0], /do not run `gh pr create`/);
+	assert.match(pi.messages[0], /report BLOCKED with the observed head branch, intended and proposed bases, and the policy source/);
 	assert.match(pi.messages[0], /Never force-push/);
 	assert.match(pi.messages[0], /one review-ready pull request per issue/);
 	assert.match(pi.messages[0], /SUBAGENT-RULES/);
