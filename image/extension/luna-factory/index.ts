@@ -37,6 +37,39 @@ import { readBoundedEvidence, sessionEvidence } from "./ui/evidence.ts";
 import { EvidenceViewer } from "./ui/evidence-viewer.ts";
 import { dashboardActionAllowed } from "./ui/actions.ts";
 import { rawKeyMatcher, type KeyMatcher } from "../bluefin-review/keys.ts";
+import { opendirSync, readFileSync, statSync } from "node:fs";
+
+interface FactoryAutocompleteItem {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+function retainedBatchIds(stateRoot: string, prefix: string): string[] {
+	let directory: ReturnType<typeof opendirSync> | undefined;
+	const matches: string[] = [];
+	try {
+		directory = opendirSync(stateRoot);
+		for (let scanned = 0; scanned < 128 && matches.length < 32; scanned++) {
+			const entry = directory.readSync();
+			if (entry === null) break;
+			if (!entry.isFile() || !/^batch-[a-f0-9-]+\.json$/.test(entry.name)) continue;
+			const id = entry.name.slice(0, -5);
+			if (!id.startsWith(prefix)) continue;
+			const path = `${stateRoot}/${entry.name}`;
+			const file = statSync(path);
+			if (!file.isFile() || file.size > 256 * 1024) return [];
+			const batch: unknown = JSON.parse(readFileSync(path, "utf8"));
+			if (!isRecord(batch) || batch.id !== id || !Array.isArray(batch.items)) return [];
+			matches.push(id);
+		}
+		return matches.sort();
+	} catch {
+		return [];
+	} finally {
+		try { directory?.closeSync(); } catch { /* closed by directory exhaustion */ }
+	}
+}
 
 const FACTORY_OWNER_HANDOFF = "Opening or owning a Factory run means the coordinator retains ownership of the recorded objective and drives it until CONVERGED, or honestly QUIESCENT/blocked because no authorized autonomous step can reduce the remaining gap. A plan, worker return, patch, pushed head, green check, review result, compaction, or knowing the next action is progress, not completion. Continue already-authorized in-scope work without re-requesting authority already present in the objective; new scope or effects still require authority. If one lane is blocked, finish independent authorized work first, then report that lane's exact blocker, evidence, and resumption condition. Stop only when the requested terminal outcome is satisfied and verified, a concrete external blocker prevents further authorized progress, or continuing requires authority or scope not granted. Completion, merge, publish, deploy, and scope authority remain separate; persistence adds no mutation authority. Workers remain bounded and return to the owner.";
 
@@ -129,7 +162,7 @@ export interface FactoryHost {
 	/** OMP 18.x tool activation seam. Optional for older/headless test hosts. */
 	getActiveTools?(): string[];
 	setActiveTools?(toolNames: string[]): Promise<void> | void;
-	registerCommand?(name: string, definition: { description: string; handler(args: string, ctx: FactoryCtx): unknown }): void;
+	registerCommand?(name: string, definition: { description: string; getArgumentCompletions?(argumentPrefix: string): FactoryAutocompleteItem[] | null; handler(args: string, ctx: FactoryCtx): unknown }): void;
 	appendEntry(customType: string, data?: unknown): void;
 	setLabel(label: string): void;
 	on(event: string, handler: (event: unknown, ctx: FactoryCtx) => unknown): void;
@@ -176,6 +209,12 @@ const FACTORY_TOOL_NAMES = [
 	"luna_factory_control",
 	"luna_factory_completion",
 ] as const;
+const FACTORY_START_MODES = ["inspect", "patch", "pr-ready"] as const;
+const FACTORY_CLAIMS_COMMANDS = ["status", "inspect", "reconcile"] as const;
+const FACTORY_START_COMMANDS = ["start", "selected", "run"] as const;
+const FACTORY_BATCH_COMMANDS = ["start", "selected", "run", "status", "inspect", "claims", "pause", "resume", "stop", "retry", "exclude", "export", "discard"] as const;
+const FACTORY_BATCH_ID_COMMANDS = ["status", "inspect", "resume", "pause", "stop", "retry", "exclude", "export", "discard"] as const;
+const FACTORY_COMPLETION_VERBS = ["status", "start", "selected", "run", "inspect", "resume", "pause", "drain", "abort", "stop", "retry", "exclude", "export", "discard", "claims", "help", "--help", "debug", "--debug", "why", "--"] as const;
 
 function text(value: string): ToolContent[] {
 	return [{ type: "text", text: value }];
@@ -1287,7 +1326,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			return `Reconciled ${resource} for ${owner}; claim released`;
 		}
 		const service = batches();
-		if (verb === "start" || verb === "selected" || verb === "run") {
+		if (FACTORY_START_COMMANDS.includes(verb as typeof FACTORY_START_COMMANDS[number])) {
 			let items: SelectedItem[];
 			let settings: Partial<BatchOptions> = {};
 			if (verb === "run") {
@@ -1296,7 +1335,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				items = payload.items as SelectedItem[];
 				settings = payload as Partial<BatchOptions>;
 			} else {
-				if (!["inspect", "patch", "pr-ready"].includes(id ?? "")) throw new Error("choose start inspect|patch|pr-ready; selection never grants merge/deploy authority");
+				if (!FACTORY_START_MODES.includes(id as typeof FACTORY_START_MODES[number])) throw new Error("choose start inspect|patch|pr-ready; selection never grants merge/deploy authority");
 				items = selectedFactoryItems(id as FactoryAction);
 			}
 			const batch = await service.submit(items, { capacity: settings.capacity ?? service.capacity, maxAttempts: settings.maxAttempts ?? 3, maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3, mode: settings.mode ?? "once", dependencies: settings.dependencies });
@@ -1316,6 +1355,33 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		else if (verb === "discard") { service.store.acquire(); service.store.discard(id); return `Archived ${id}; native logs and workspaces retained`; }
 		else throw new Error("usage: /factory start inspect|patch|pr-ready | status | inspect/resume/pause/stop <batch> | retry <batch> <item> | exclude <batch> <item> <reason> | export <batch> <directory> | discard <batch>");
 		return service.status(id);
+	};
+	const getArgumentCompletions = (argumentPrefix: string): FactoryAutocompleteItem[] | null => {
+		const hasTrailingSpace = /\s$/.test(argumentPrefix);
+		const tokens = argumentPrefix.trim() ? argumentPrefix.trim().split(/\s+/) : [];
+		const current = hasTrailingSpace ? "" : tokens.pop() ?? "";
+		const base = hasTrailingSpace ? argumentPrefix : argumentPrefix.slice(0, argumentPrefix.length - current.length);
+		const choices = (values: readonly string[]): FactoryAutocompleteItem[] | null => {
+			const lower = current.toLowerCase();
+			const matches = values.filter((value) => value.startsWith(lower));
+			return matches.length === 0 ? null : matches.map((value) => ({ value: `${base}${value} `, label: value }));
+		};
+		if (tokens.length === 2 && ["retry", "exclude"].includes(tokens[0]!)) return null;
+		if (tokens.length === 0) return choices(FACTORY_COMPLETION_VERBS);
+		if (tokens.length === 1) {
+			const [verb] = tokens;
+			if (verb === "start" || verb === "selected") return choices(FACTORY_START_MODES);
+			if (verb === "claims") return choices(FACTORY_CLAIMS_COMMANDS);
+			if (FACTORY_BATCH_ID_COMMANDS.includes(verb as typeof FACTORY_BATCH_ID_COMMANDS[number])) {
+				const ids = retainedBatchIds(factoryStateRoot(env), current);
+				return ids.length === 0 ? null : ids.map((id) => ({ value: `${base}${id} `, label: id }));
+			}
+		}
+		if (tokens.length === 2 && ["retry", "exclude"].includes(tokens[0]!)) {
+			const ids = retainedBatchIds(factoryStateRoot(env), current);
+			return ids.length === 0 ? null : ids.map((id) => ({ value: `${base}${id} `, label: id }));
+		}
+		return null;
 	};
 	const unregisterBatchController = registerFactoryController(batchCommand);
 	const unregisterBatchSubmitter = registerFactoryBatchSubmitter((action, context, selectedItems) => submitSelectedBatch(action, context, selectedItems));
@@ -1386,6 +1452,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 	if (host.registerCommand !== undefined) {
 		host.registerCommand("factory", {
 			description: "Open Factory batches, inspect diagnostics, or pass an explicit conversational objective with --",
+			getArgumentCompletions,
 			handler: async (rawArgs, ctx) => {
 				const args = rawArgs.trim();
 				if (args.length === 0 && ctx.hasUI && ctx.ui?.custom) {
@@ -1393,7 +1460,8 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
 					return;
 				}
-				if (!ledger && (args.length === 0 || /^(start|selected|run|status|inspect|claims|pause|resume|stop|retry|exclude|export|discard)(\s|$)/.test(args))) {
+				const commandVerb = args.match(/^\S+/)?.[0];
+				if (!ledger && (args.length === 0 || FACTORY_BATCH_COMMANDS.includes(commandVerb as typeof FACTORY_BATCH_COMMANDS[number]))) {
 					try { notifyCommand(ctx, await batchCommand(args || "status", ctx)); }
 					catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
 					return;
