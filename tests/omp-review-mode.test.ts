@@ -18,7 +18,7 @@ import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/exten
 import { workbenchPainter } from "../image/extension/bluefin-review/paint.ts";
 import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
+import { classifyCi, fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
@@ -1197,6 +1197,21 @@ test("check suites surface failures and pending runs without rollup contexts", a
 	};
 	const result = await fetchQueue("prs", { token: "t", scope: { kind: "org", value: "acme" }, fetchImpl });
 	assert.deepEqual(result.items.map((item) => item.ciStatus), ["failure", "pending", "success"]);
+	assert.deepEqual(result.items.map((item) => item.ciEvidenceSource), ["checkSuites", "checkSuites", "checkSuites"]);
+});
+
+test("unknown CI enum values remain incomplete instead of becoming skip-eligible", () => {
+	const completeSuites = { pageInfo: { hasNextPage: false }, nodes: [{ status: "COMPLETED", conclusion: "SUCCESS" }] };
+	assert.deepEqual(classifyCi("EXPECTED", completeSuites), { status: "pending", complete: true, source: "statusCheckRollup" });
+	assert.deepEqual(classifyCi("FUTURE_ROLLUP_STATE", completeSuites), { complete: false, source: "statusCheckRollup" });
+	assert.deepEqual(classifyCi(undefined, {
+		pageInfo: { hasNextPage: false },
+		nodes: [{ status: "FUTURE_SUITE_STATUS", conclusion: null }],
+	}), { status: undefined, complete: false, source: "checkSuites" });
+	assert.deepEqual(classifyCi(undefined, {
+		pageInfo: { hasNextPage: false },
+		nodes: [{ status: "COMPLETED", conclusion: "FUTURE_SUITE_CONCLUSION" }],
+	}), { status: undefined, complete: false, source: "checkSuites" });
 });
 test("bounded named PR reads carry expensive evidence after lightweight discovery", async () => {
 	let query = "";
@@ -1320,6 +1335,7 @@ test("successful statusCheckRollup takes precedence over unrelated queued check 
 	};
 	const result = await fetchQueue("prs", { token: "t", scope: { kind: "org", value: "acme" }, fetchImpl });
 	assert.equal(result.items[0].ciStatus, "success");
+	assert.equal(result.items[0].ciEvidenceSource, "statusCheckRollup");
 });
 
 test("toCiStatus prioritizes decisive rollup and falls back to check suites (#592)", () => {
@@ -3076,6 +3092,309 @@ test("ordinary PR slay blocks failed CI before reviewer dispatch", async () => {
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0);
 	assert.ok(ctx.notifications.some((notification) => /CI is failure/.test(notification.message)));
+});
+
+test("slay skips known red and pending ordinary PRs without blocking eligible waves or repairs", async () => {
+	const items = [
+		{ id: 41, repo: "projectbluefin/review", title: "red ordinary PR", headSha: "1".repeat(40), ciStatus: "failure" },
+		{ id: 42, repo: "projectbluefin/review", title: "red requested-changes repair", headSha: "2".repeat(40), ciStatus: "failure" },
+		{ id: 43, repo: "projectbluefin/review", title: "eligible same-repo PR", headSha: "3".repeat(40), ciStatus: "success" },
+		{ id: 44, repo: "projectbluefin/other", title: "pending ordinary PR", headSha: "4".repeat(40), ciStatus: "pending" },
+		{ id: 45, repo: "projectbluefin/other", title: "eligible later-repo PR", headSha: "5".repeat(40), ciStatus: "success" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const annotate = (node) => {
+			if (node?.number === 42) return { ...node, reviewDecision: "CHANGES_REQUESTED", author: { login: "reviewer" } };
+			if (node?.number === 44) return {
+				...node,
+				commits: { nodes: [{ commit: {
+					statusCheckRollup: null,
+					checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "IN_PROGRESS", conclusion: null }] },
+				} }] },
+			};
+			return node;
+		};
+		const data = { ...result.data, viewer: { login: "reviewer" } };
+		if (data.search) {
+			data.search = { ...data.search, nodes: data.search.nodes.map(annotate) };
+		} else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: annotate(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1, "the repair remains the first runnable wave");
+	assert.match(pi.messages[0], /#42/);
+	assert.doesNotMatch(pi.messages[0], /#41|#43|#44|#45/);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "running");
+	assert.equal(batch.totalItems, 5, JSON.stringify(batch));
+	assert.deepEqual(batch.waves.map((wave) => wave.items.map((item) => item.id)), [[42], [43], [45]]);
+	assert.deepEqual(batch.skippedItems.map(({ number, headSha, ciStatus, ciEvidenceSource }) => ({ number, headSha, ciStatus, ciEvidenceSource })), [
+		{ number: 41, headSha: "1".repeat(40), ciStatus: "failure", ciEvidenceSource: "statusCheckRollup" },
+		{ number: 44, headSha: "4".repeat(40), ciStatus: "pending", ciEvidenceSource: "checkSuites" },
+	]);
+	assert.ok(batch.skippedItems.every((item) => Number.isFinite(item.observedAt)));
+	assert.ok(ctx.notifications.some((notification) => /skipping .*#41 head=1{40}: CI is failure \(source=statusCheckRollup\)/i.test(notification.message)));
+	assert.ok(ctx.notifications.some((notification) => /skipping .*#44 head=4{40}: CI is pending \(source=checkSuites\)/i.test(notification.message)));
+	await pi.commands.get("review").handler("status", ctx);
+	const status = ctx.notifications.at(-1).message;
+	assert.match(status, /Skipped CI: projectbluefin\/review#41 head=1{40} ci=failure source=statusCheckRollup observedAt=/);
+	assert.match(status, /Skipped CI: projectbluefin\/other#44 head=4{40} ci=pending source=checkSuites observedAt=/);
+});
+
+test("slay rechecks and skips a later-wave PR that turns pending after an earlier accepted auto-merge wave", async () => {
+	let firstAutoMerge = false;
+	let laterCi = "success";
+	const items = [
+		{ id: 61, repo: "projectbluefin/review", title: "first eligible PR", headSha: "a".repeat(40), ciStatus: "success" },
+		{ id: 62, repo: "projectbluefin/other", title: "later ordinary PR", headSha: "c".repeat(40), ciStatus: laterCi },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const updateQueueItem = (node) => {
+			if (node?.number === 61) return {
+				...node,
+				autoMergeRequest: firstAutoMerge ? { enabledAt: new Date(NOW).toISOString() } : null,
+			};
+			if (node?.number === 62) return {
+				...node,
+				commits: { nodes: [{ commit: { statusCheckRollup: { state: laterCi.toUpperCase() } } }] },
+			};
+			return node;
+		};
+		const data = { ...result.data, viewer: { login: "reviewer" } };
+		if (data.search) {
+			data.search = { ...data.search, nodes: data.search.nodes.map(updateQueueItem) };
+		} else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: updateQueueItem(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /#61/);
+
+	firstAutoMerge = true;
+	laterCi = "pending";
+	ctx.asyncJobs.recent = [{ id: "first-review", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "first-review");
+	await pi.events.get("agent_end")({}, ctx);
+
+	assert.equal(pi.messages.length, 1, "a newly pending later wave is skipped before any dispatch");
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "complete", JSON.stringify(batch));
+	assert.equal(batch.currentWave, 1);
+	assert.equal(batch.completedItems, 1);
+	assert.equal(batch.totalItems, 2);
+	assert.deepEqual(batch.skippedItems, [{
+		repo: "projectbluefin/other",
+		number: 62,
+		headSha: "c".repeat(40),
+		ciStatus: "pending",
+		ciEvidenceSource: "statusCheckRollup",
+		observedAt: batch.skippedItems[0].observedAt,
+	}]);
+	assert.ok(ctx.notifications.some((notification) => /skipping .*#62 head=c{40}: CI is pending \(source=statusCheckRollup\)/i.test(notification.message)));
+});
+
+test("all known red and pending selections persist a terminal skipped-only batch", async () => {
+	const items = [
+		{ id: 63, repo: "projectbluefin/review", title: "red PR", headSha: "d".repeat(40), ciStatus: "failure" },
+		{ id: 64, repo: "projectbluefin/review", title: "pending PR", headSha: "e".repeat(40), ciStatus: "pending" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const suitesOnlyPending = (node) => node?.number === 64
+			? { ...node, commits: { nodes: [{ commit: {
+				statusCheckRollup: null,
+				checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "IN_PROGRESS", conclusion: null }] },
+			} }] } }
+			: node;
+		const data = { ...result.data };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(suitesOnlyPending) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: suitesOnlyPending(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 0);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "complete");
+	assert.deepEqual(batch.waves, []);
+	assert.equal(batch.completedItems, 0);
+	assert.equal(batch.totalItems, 2);
+	assert.deepEqual(batch.skippedItems.map(({ number, ciStatus, ciEvidenceSource }) => ({ number, ciStatus, ciEvidenceSource })), [
+		{ number: 63, ciStatus: "failure", ciEvidenceSource: "statusCheckRollup" },
+		{ number: 64, ciStatus: "pending", ciEvidenceSource: "checkSuites" },
+	]);
+});
+
+test("slay keeps unknown CI as a hard blocker while prefiltering known red CI", async () => {
+	const items = [
+		{ id: 46, repo: "projectbluefin/review", title: "known red PR", headSha: "6".repeat(40), ciStatus: "failure" },
+		{ id: 47, repo: "projectbluefin/review", title: "unknown CI PR", headSha: "7".repeat(40), ciStatus: "unknown" },
+		{ id: 48, repo: "projectbluefin/review", title: "otherwise eligible PR", headSha: "8".repeat(40), ciStatus: "success" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const makeUnknown = (node) => node?.number === 47
+			? {
+				...node,
+				commits: { nodes: [{ commit: {
+					statusCheckRollup: null,
+					checkSuites: { pageInfo: { hasNextPage: true }, nodes: [] },
+				} }] },
+			}
+			: node;
+		const data = { ...result.data };
+		if (data.search) {
+			data.search = { ...data.search, nodes: data.search.nodes.map(makeUnknown) };
+		} else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: makeUnknown(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 0);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "blocked");
+	assert.match(batch.error, /CI state is incomplete or unknown/);
+});
+
+test("slay does not CI-skip an item with an unresolved mutation claim", async () => {
+	const items = [
+		{ id: 49, repo: "projectbluefin/review", title: "claimed red PR", headSha: "9".repeat(40), ciStatus: "failure" },
+		{ id: 50, repo: "projectbluefin/review", title: "eligible PR", headSha: "a".repeat(40), ciStatus: "success" },
+	];
+	const claims = new ResourceClaims(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT);
+	claims.claim("item:projectbluefin/review#49", "review:other:0");
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: hiveBackedFetch(items), env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 0);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "blocked");
+	assert.match(batch.error, /owned by review:other:0/);
+	assert.equal(claims.list().length, 1, "the other owner's unresolved claim remains intact");
+	assert.equal(ctx.notifications.some((notification) => /skipping .*#49/i.test(notification.message)), false);
+});
+
+test("slay keeps workflow permission as a batch blocker after skipping failed CI", async () => {
+	const items = [
+		{ id: 51, repo: "projectbluefin/review", title: "red ordinary PR", headSha: "b".repeat(40), ciStatus: "failure" },
+		{ id: 52, repo: "projectbluefin/review", title: "workflow PR without scope", headSha: "c".repeat(40), ciStatus: "success" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		if (String(url) === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => null }, json: async () => ({}) };
+		}
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const markWorkflow = (node) => node?.number === 52
+			? { ...node, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: ".github/workflows/build.yml" }] } }
+			: node;
+		const data = { ...result.data };
+		if (data.search) {
+			data.search = { ...data.search, nodes: data.search.nodes.map(markWorkflow) };
+		} else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: markWorkflow(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl,
+		env: ISOLATED_ENV,
+		policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: true },
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 0);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "blocked");
+	assert.match(batch.error, /workflow\/Actions write permission could not be verified/);
 });
 
 test("self-hosted slay and fix dispatch workflow pull requests while incomplete lists stay blocked", async () => {
