@@ -1698,9 +1698,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
 				}
-				if (current.changedFilesComplete !== true) {
-					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
-				}
 				if (!wasRepair && (current.ciEvidenceComplete === false || current.ciStatus === undefined)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: CI state is incomplete or unknown`;
 				}
@@ -1722,6 +1719,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					}
 					skippedCi.push({ item: current, status: current.ciStatus, evidenceSource: current.ciEvidenceSource, observedAt: Date.now() });
 					continue;
+				}
+				if (current.changedFilesComplete !== true) {
+					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
 				}
 				dispatchableLiveItems.push(current);
 			}

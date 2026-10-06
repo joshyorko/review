@@ -3349,6 +3349,73 @@ test("slay does not CI-skip an item with an unresolved mutation claim", async ()
 	assert.equal(ctx.notifications.some((notification) => /skipping .*#49/i.test(notification.message)), false);
 });
 
+test("slay skips red and pending PRs with incomplete fresh file evidence before unrelated work", async () => {
+	const items = [
+		{ id: 81, repo: "projectbluefin/red", title: "red PR with truncated live files", headSha: "8".repeat(40), ciStatus: "success" },
+		{ id: 82, repo: "projectbluefin/pending", title: "pending PR with unavailable live files", headSha: "9".repeat(40), ciStatus: "success" },
+		{ id: 83, repo: "projectbluefin/eligible", title: "eligible unrelated PR", headSha: "a".repeat(40), ciStatus: "success" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const liveReads = new Set<number>();
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		const search = body.variables?.search !== undefined;
+		const annotate = (node) => {
+			if (!node) return node;
+			if (search) return { ...node, files: undefined };
+			if (node.number === 83) return { ...node, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] } };
+			if (node.number === 81 || node.number === 82) {
+				liveReads.add(node.number);
+				const commits = node.number === 81
+					? { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] }
+					: { nodes: [{ commit: {
+						statusCheckRollup: null,
+						checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: "IN_PROGRESS", conclusion: null }] },
+					} }] };
+				const files = { pageInfo: { hasNextPage: true }, nodes: [{ path: "README.md" }] };
+				return { ...node, commits, files };
+			}
+			return node;
+		};
+		const data = { ...result.data };
+		if (data.search) {
+			data.search = { ...data.search, nodes: data.search.nodes.map(annotate) };
+		} else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: annotate(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.ok(liveReads.has(81), "fresh exact-head failure evidence is fetched before the file-mutation gate");
+	assert.ok(liveReads.has(82), "fresh exact-head pending evidence is fetched before the file-mutation gate");
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /#83/);
+	assert.doesNotMatch(pi.messages[0], /#81|#82/);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "running", JSON.stringify(batch));
+	assert.equal(batch.totalItems, 3, "skipped selections remain in the original denominator");
+	assert.deepEqual(batch.skippedItems.map(({ number, headSha, ciStatus, ciEvidenceSource }) => ({ number, headSha, ciStatus, ciEvidenceSource })), [
+		{ number: 81, headSha: "8".repeat(40), ciStatus: "failure", ciEvidenceSource: "statusCheckRollup" },
+		{ number: 82, headSha: "9".repeat(40), ciStatus: "pending", ciEvidenceSource: "checkSuites" },
+	]);
+	assert.deepEqual(batch.waves.map((wave) => wave.items.map((item) => item.id)), [[83]]);
+});
+
 test("slay keeps workflow permission as a batch blocker after skipping failed CI", async () => {
 	const items = [
 		{ id: 51, repo: "projectbluefin/review", title: "red ordinary PR", headSha: "b".repeat(40), ciStatus: "failure" },
