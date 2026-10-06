@@ -112,23 +112,42 @@ this skill does not claim dogfood or packaged-runtime success without evidence.
 
 Newly admitted `/factory start pr-ready` work retains a version-4 owned-PR
 lifecycle bound to its original generation, operation, same-repository PR,
-target ref/SHA, branch and head. PR creation alone remains `VERIFY`; explicit
-`/factory reconcile <batch>` is observation-only and records one bounded
-hosted-check observation, backoff and next safe action without a model
-heartbeat. A confirmed push can create its one PR only through active Factory
-execution after `/factory resume` reacquires repository/item claims; this
-partial slice does not provide the complete no-follow-up lifecycle. The
-observed policy combines classic branch protection with applicable
+target ref/SHA, branch and head. PR creation alone remains `VERIFY`. While a
+batch is active, the foreground OMP-owned pump observes pending hosted checks
+automatically. Backoff, `Retry-After`, and the lifecycle deadline are persisted;
+waiting consumes no worker capacity or resource claims and makes no model call.
+Pause, stop, and shutdown wake the wait. A restarted or explicitly paused batch
+continues only after `/factory resume`; `/factory reconcile <batch>` stays
+read-only and never substitutes for initial dispatch continuity.
+
+The observed policy combines classic branch protection with applicable
 repository/parent rulesets, and each check must match its declared GitHub App
 source. A required context observed on the current synthetic merge SHA selects
 that subject; otherwise the head SHA is eligible. GitHub Actions checks also
-require a matching successful workflow run, eligible event and exact attempt.
-An active applicable ruleset rule this slice cannot model, including `workflows`,
-and a `merge_group` workflow event remain `UNKNOWN`. The complete policy
-fingerprint is checked again after run observation and before readiness is
-stored, and the independent local proof plus current selection/PR are also
-revalidated. Missing policy/source/subject coverage, skipped jobs, cancelled
-runs, incomplete pages, or changes during observation remain `UNKNOWN`. A real
-failure exposes `repair-review`; repair dispatch remains unimplemented in this
-partial slice. Old retained versions never gain PR-ready authority during
-decode.
+require a matching workflow run, eligible event, exact attempt, complete jobs
+and steps, and readable bounded logs. Failure repair requires exact check-run
+details and complete bounded annotations; unavailable, truncated, cancelled,
+infrastructure, or superseded evidence remains `UNKNOWN`. GitHub rate-limit
+responses retain that unknown observation and wait until their persisted
+`Retry-After` time before retrying. A log URL or job summary alone never
+authorizes repair.
+
+Every PR-ready publication, initial or repair, commits its local candidate and
+reruns deterministic verification plus independent acceptance against the exact
+committed SHA and tree before any push or PR effect. The separate typed
+current-subject receipt preserves the worker authorization receipt; tree
+equality alone never transfers proof.
+
+A complete current code failure reopens the same admitted task under its
+original generation and attempt appetite. Factory gives the worker an immutable
+failure packet through the existing evidence handles, rechecks the exact PR,
+base, head, acceptance, policy, verifier, and claims. The existing PR identity,
+target, and acceptance revision stay bound; Factory never creates a second PR
+or merges it. Ambiguous push/PR effects stay `UNKNOWN` until exact
+reconciliation and are never blindly repeated. Duplicate failures or
+incomplete diagnostics select `repair-review`. An applicable
+ruleset rule this slice cannot model, including `workflows`, or a `merge_group`
+workflow event remains `UNKNOWN`. Missing policy/source/subject coverage,
+skipped jobs, incomplete pages, or changes during observation remain
+`UNKNOWN`. Legacy PR-ready receipts without a separate current-subject
+verification remain stale during decode.

@@ -8,7 +8,7 @@
  */
 
 import { artifactRefError, changedPathError } from "./schema.ts";
-import type { CriterionId, EvidenceReceipt, Ledger, ObservedProof, ProofAssumption, Subject, TaskId } from "./model.ts";
+import type { CriterionId, CurrentVerificationReceipt, EvidenceReceipt, Ledger, ObservedProof, ProofAssumption, Subject, TaskId } from "./model.ts";
 
 export type EvidenceStatus = "proven" | "unproved" | "failed" | "contradicted";
 
@@ -27,6 +27,14 @@ export interface SubjectBinding {
 	readonly requiredAssumptions?: readonly ProofAssumption[];
 	/** Run-owned roots for receipt admission; omitted for durable proof projections. */
 	readonly artifactRoots?: readonly string[];
+}
+
+export interface CurrentVerificationBinding {
+	readonly taskId: TaskId;
+	readonly attemptId: string;
+	readonly subject: Subject;
+	readonly acceptanceRevision: string;
+	readonly assumptions: readonly ProofAssumption[];
 }
 
 function assumptionKey(assumption: ProofAssumption): string {
@@ -65,7 +73,7 @@ export function reconcileObservedProof(ledger: Ledger, proof: ObservedProof): Re
 	return reasons.length ? { status: "unproved", reasons } : { status: "proven", reasons: [] };
 }
 
-function currentAssumptionsFor(ledger: Ledger, taskId: TaskId): readonly ProofAssumption[] {
+export function currentAssumptionsFor(ledger: Ledger, taskId: TaskId): readonly ProofAssumption[] {
 	const task = ledger.tasks.find((entry) => entry.id === taskId);
 	const criterion = task && ledger.criteria.find((entry) => entry.id === task.criterionId);
 	return (criterion?.assumptions ?? []).flatMap<ProofAssumption>((assumption) => {
@@ -186,15 +194,43 @@ export function reconcileReceipt(ledger: Ledger, receipt: EvidenceReceipt, bindi
 	return reasons.length === 0 ? { status: "proven", reasons: [] } : { status: "unproved", reasons };
 }
 
+/** Reconcile package-owned post-commit verification against the exact current acceptance contract. */
+export function reconcileCurrentVerification(
+	ledger: Ledger,
+	receipt: CurrentVerificationReceipt,
+	binding: CurrentVerificationBinding,
+): Reconciliation {
+	if (receipt.taskId !== binding.taskId) return { status: "contradicted", reasons: [`current verification names task ${receipt.taskId}, not ${binding.taskId}`] };
+	if (receipt.attemptId !== binding.attemptId) return { status: "contradicted", reasons: [`current verification names attempt ${receipt.attemptId}, not ${binding.attemptId}`] };
+	if (receipt.generation !== ledger.generation) return { status: "contradicted", reasons: ["current verification has a stale generation"] };
+	if (!sameSubject(receipt.subject, binding.subject) || !sameSubject(binding.subject, ledger.subject)) return { status: "contradicted", reasons: ["current verification is not for the exact current subject"] };
+	if (!/^[0-9a-f]{40,64}$/.test(receipt.tree)) return { status: "contradicted", reasons: ["current verification tree is not a git object identity"] };
+	if (!receipt.predicates.length || receipt.predicates.some((predicate) => predicate.phase === "worker" || !predicate.ok)) {
+		return { status: "failed", reasons: ["current verification contains a failed or worker-authored predicate"] };
+	}
+	if (!receipt.predicates.some((predicate) => predicate.phase === "verification") || !receipt.predicates.some((predicate) => predicate.phase === "acceptance")) {
+		return { status: "unproved", reasons: ["current verification lacks deterministic verification or independent acceptance"] };
+	}
+	const criterion = ledger.criteria.find((entry) => entry.id === ledger.tasks.find((task) => task.id === binding.taskId)?.criterionId);
+	const acceptance = criterion?.assumptions?.find((assumption) => assumption.kind === "acceptance-revision");
+	if (!acceptance || acceptance.value !== binding.acceptanceRevision || receipt.acceptanceRevision !== binding.acceptanceRevision) {
+		return { status: "unproved", reasons: ["current verification acceptance revision is absent or stale"] };
+	}
+	const reasons = assumptionReasons(receipt.assumptions, binding.assumptions, criterion?.assumptions ?? []);
+	return reasons.length ? { status: "unproved", reasons } : { status: "proven", reasons: [] };
+}
+
 function taskProofCurrentIn(ledger: Ledger, task: Ledger["tasks"][number], visiting: Set<string>): boolean {
 	if (task.state !== "DONE" || task.generation !== ledger.generation || visiting.has(task.id)) return false;
 	visiting.add(task.id);
 	const criterion = ledger.criteria.find((entry) => entry.id === task.criterionId);
 	const attempt = task.attempts.at(-1);
 	const receipt = attempt?.receipt;
+	const currentVerification = attempt?.currentVerification;
 	if (
 		attempt === undefined || attempt.state !== "returned" || attempt.taskId !== task.id ||
-		attempt.generation !== ledger.generation || !sameSubject(attempt.subject, ledger.subject) ||
+		attempt.generation !== ledger.generation || (!sameSubject(attempt.subject, ledger.subject) && currentVerification === undefined) ||
+		(ledger.goal.finishAuthority === "pr-ready" && attempt.integrated && currentVerification === undefined) ||
 		receipt === undefined
 	) {
 		visiting.delete(task.id);
@@ -208,6 +244,20 @@ function taskProofCurrentIn(ledger: Ledger, task: Ledger["tasks"][number], visit
 		const proven = dependency !== undefined && criterionProofCurrentIn(ledger, dependency.criterionId, visiting);
 		return { ...assumption, value: proven ? "proven" : "unproven" };
 	});
+	if (currentVerification !== undefined) {
+		const acceptanceRevision = criterion?.assumptions?.find((assumption) => assumption.kind === "acceptance-revision")?.value;
+		const current = attempt.integrated && acceptanceRevision !== undefined
+			? reconcileCurrentVerification(ledger, currentVerification, {
+				taskId: task.id,
+				attemptId: attempt.id,
+				subject: ledger.subject,
+				acceptanceRevision,
+				assumptions: currentAssumptions,
+			})
+			: { status: "unproved" as const, reasons: ["current verification is not integrated or acceptance revision is unavailable"] };
+		visiting.delete(task.id);
+		return current.status === "proven";
+	}
 	const reconciliation = reconcileReceipt(ledger, receipt, {
 		taskId: task.id,
 		attemptId: attempt.id,

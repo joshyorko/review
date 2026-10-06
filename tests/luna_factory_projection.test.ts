@@ -6,7 +6,7 @@ import {
 	type BatchItem,
 	type SelectedItem,
 } from "../image/extension/luna-factory/core/batch.ts";
-import type { AttemptId, EvidenceReceipt, TaskId } from "../image/extension/luna-factory/core/model.ts";
+import type { AttemptId, CurrentVerificationReceipt, EvidenceReceipt, TaskId } from "../image/extension/luna-factory/core/model.ts";
 import { projectBatch, projectItem } from "../image/extension/luna-factory/ui/projection.ts";
 import { dashboardActionAllowed } from "../image/extension/luna-factory/ui/actions.ts";
 
@@ -106,6 +106,16 @@ function prove(item: BatchItem, stage: "verified-patch" | "pr-ready" = "verified
 		stage,
 		reviewerSession: "/factory/sessions/reviewer.jsonl",
 	};
+	if (item.selected.action === "pr-ready") {
+		item.ledger.tasks[0]!.attempts[0]!.currentVerification = {
+			version: 1, taskId, attemptId, generation: item.ledger.generation, subject: item.ledger.subject,
+			tree: "c".repeat(40), acceptanceRevision: item.selected.acceptanceRevision!, assumptions: criterion.assumptions ?? [],
+			predicates: [
+				{ phase: "verification", item: "npm test", ok: true, note: "exact committed head passed" },
+				{ phase: "acceptance", item: "acceptance", ok: true, note: "exact committed head accepted" },
+			], acceptanceSession: "/factory/sessions/current-reviewer.jsonl", checkedAt: "2026-10-06T00:00:00.000Z",
+		} satisfies CurrentVerificationReceipt;
+	}
 }
 
 test("empty batches project without inventing progress or usage", () => {

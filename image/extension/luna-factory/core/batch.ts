@@ -40,7 +40,8 @@ export interface OwnedPullRequestLifecycle {
 	readonly owner: string;
 	readonly outcome: "pr-ready";
 	readonly target: { readonly ref: string; readonly sha: string };
-	readonly phase: "admitted" | "published" | "waiting" | "repair-required" | "unknown" | "ready";
+	readonly phase: "admitted" | "published" | "waiting" | "repair-required" | "repairing" | "unknown" | "ready";
+	readonly repair?: { readonly failureKey: string; readonly candidateHead: string; readonly runIds: number[]; readonly attemptId: string; readonly state: "queued" | "dispatched" };
 	readonly pullRequest?: { readonly repository: string; readonly identity: string; readonly number: number; readonly url: string; readonly branch: string; readonly headSha: string; readonly baseRef: string; readonly baseSha: string; readonly mergeSha?: string; readonly operationId: string };
 	readonly observation?: {
 		readonly observedAt: string;
@@ -52,13 +53,24 @@ export interface OwnedPullRequestLifecycle {
 		readonly runs: { readonly id: number; readonly suiteId: number; readonly appId: number | null; readonly appSlug: string | null; readonly name: string; readonly headSha: string; readonly status: string; readonly conclusion: string | null; readonly createdAt: string; readonly startedAt: string | null; readonly subject: "head" | "merge"; readonly workflow?: { readonly id: number; readonly attempt: number; readonly workflowId: number; readonly event: string; readonly path: string; readonly checkSuiteId: number; readonly status: string; readonly conclusion: string | null } }[];
 		readonly coverage: "complete" | "incomplete" | "unavailable";
 		readonly result: "pending" | "failed" | "unknown" | "passed";
+		readonly retryAfter?: string;
+		readonly failures?: {
+			readonly key: string;
+			readonly candidateHead: string;
+			readonly checkSubjectSha: string;
+			readonly classification: "repairable-code";
+			readonly checkRun: { readonly id: number; readonly suiteId: number; readonly name: string; readonly appId: number; readonly conclusion: "failure"; readonly title: string; readonly summary: string; readonly text: string; readonly outputTruncated: boolean };
+			readonly annotations: { readonly path: string; readonly startLine: number | null; readonly endLine: number | null; readonly level: string; readonly title: string; readonly message: string }[];
+			readonly annotationsComplete: boolean;
+				readonly workflow?: { readonly id: number; readonly attempt: number; readonly workflowId: number; readonly event: string; readonly path: string; readonly jobs: { readonly id: number; readonly name: string; readonly conclusion: string | null; readonly steps: { readonly number: number; readonly name: string; readonly conclusion: string | null }[]; readonly logStatus: number | null; readonly logsAvailable: boolean | null; readonly logContent?: string; readonly logBytes?: number; readonly logComplete?: boolean; readonly logTruncated?: boolean }[] };
+		}[];
 		readonly reason?: string;
 	};
 	readonly observedAt?: string;
 	readonly nextObservationAt?: string;
 	readonly observationCount: number;
 	readonly deadlineAt: string;
-	readonly nextSafeAction: "publish" | "observe-after" | "repair-review" | "investigate" | "pr-ready";
+	readonly nextSafeAction: "publish" | "observe-after" | "repair" | "repair-review" | "investigate" | "pr-ready";
 }
 export interface BatchItem {
 	selected: SelectedItem;
@@ -69,7 +81,7 @@ export interface BatchItem {
 	checkScripts?: string;
 	preparation?: { phase: "clone" | "checkout" | "ready"; owner: string; head: string };
 	settlement?: { attemptId: string; sessionFiles: string[]; outcome: "cancelled" };
-	repair?: { generation: string; head: string; acceptanceRevision: string; attemptId: string; reason: string; artifacts: { id: string; path: string; digest: string; bytes: number; attemptId: string }[] };
+	repair?: { generation: string; head: string; acceptanceRevision: string; attemptId: string; reason: string; candidateHead?: string; failureKey?: string; artifacts: { id: string; path: string; digest: string; bytes: number; attemptId: string }[] };
 	attempts: number;
 	operation?: OperationReceipt;
 	operations: OperationReceipt[];
@@ -186,16 +198,20 @@ export function dependencyBlocker(batch: Batch, key: string): string | undefined
 		if (!prerequisite) return `missing prerequisite ${edge.requires}`;
 		const proof = prerequisite.proof;
 		const stages: OutcomeStage[] = ["verified-patch", "pr-ready", "merged-upstream"];
-		if (prerequisite.stage !== "DONE" || !proof || proof.acceptanceRevision !== prerequisite.selected.acceptanceRevision || proof.subject !== prerequisite.selected.head || stages.indexOf(proof.stage) < stages.indexOf(edge.stage)) {
+		if (prerequisite.stage !== "DONE" || !proof || proof.acceptanceRevision !== prerequisite.selected.acceptanceRevision || proof.subject !== currentProofSubject(prerequisite) || stages.indexOf(proof.stage) < stages.indexOf(edge.stage)) {
 			return `${edge.requires} must reach ${edge.stage}${edge.stage === "merged-upstream" ? "; human/Review landing required" : ""}`;
 		}
 	}
 	return undefined;
 }
+function currentProofSubject(item: BatchItem): string | undefined {
+	if (item.selected.action === "pr-ready" && item.prLifecycle?.phase === "ready") return item.prLifecycle.pullRequest?.headSha;
+	return item.selected.head;
+}
 export function batchItemProofCurrent(item: BatchItem): boolean {
 	if (item.selected.observe) return item.stage === "DONE" && item.ledger.criteria.some((criterion) => criterion.observation && criterionProven(item.ledger, criterion.id));
 	const proof = item.proof;
-	if (item.stage !== "DONE" || proof === undefined || proof.acceptanceRevision !== item.selected.acceptanceRevision || proof.subject !== item.selected.head) return false;
+	if (item.stage !== "DONE" || proof === undefined || proof.acceptanceRevision !== item.selected.acceptanceRevision || proof.subject !== currentProofSubject(item)) return false;
 	return item.ledger.tasks.some((task) => task.state === "DONE" && criterionProven(item.ledger, task.criterionId));
 }
 

@@ -221,10 +221,10 @@ export class BatchStore {
 					lifecycle.owner !== `${batch.id}:${item.selected.key}` || lifecycle.outcome !== "pr-ready" || !lifecycle.target ||
 					typeof lifecycle.target.ref !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(lifecycle.target.ref) || lifecycle.target.ref.includes("..") ||
 					!/^([a-f0-9]{40}|[a-f0-9]{64})$/.test(lifecycle.target.sha) ||
-					!["admitted", "published", "waiting", "repair-required", "unknown", "ready"].includes(lifecycle.phase) ||
+					!["admitted", "published", "waiting", "repair-required", "repairing", "unknown", "ready"].includes(lifecycle.phase) ||
 					!Number.isSafeInteger(lifecycle.observationCount) || lifecycle.observationCount < 0 || lifecycle.observationCount > 100 ||
 					!Number.isFinite(Date.parse(lifecycle.deadlineAt)) ||
-					!["publish", "observe-after", "repair-review", "investigate", "pr-ready"].includes(lifecycle.nextSafeAction)) {
+					!["publish", "observe-after", "repair", "repair-review", "investigate", "pr-ready"].includes(lifecycle.nextSafeAction)) {
 					throw new Error("invalid owned-PR lifecycle identity or limits; preserve original state");
 				}
 				if (lifecycle.pullRequest && (lifecycle.phase === "admitted" || lifecycle.pullRequest.repository.toLowerCase() !== item.selected.repo ||
@@ -242,6 +242,23 @@ export class BatchStore {
 						!Number.isSafeInteger(workflow.id) || !Number.isSafeInteger(workflow.attempt) || workflow.attempt < 1 || !Number.isSafeInteger(workflow.workflowId) ||
 						workflow.checkSuiteId < 1 || typeof workflow.event !== "string" || typeof workflow.path !== "string" || !["queued", "in_progress", "completed"].includes(workflow.status) ||
 						(workflow.conclusion !== null && typeof workflow.conclusion !== "string");
+					const invalidFailure = (failure: NonNullable<typeof observation.failures>[number]): boolean => {
+						if (!/^[a-f0-9]{64}$/.test(failure.key) || failure.candidateHead !== observation.headSha || failure.checkSubjectSha !== eligible?.sha || !Number.isSafeInteger(failure.checkRun.id) || !Number.isSafeInteger(failure.checkRun.suiteId) ||
+							failure.checkRun.conclusion !== "failure" || !Number.isSafeInteger(failure.checkRun.appId) || typeof failure.checkRun.name !== "string" ||
+							typeof failure.checkRun.title !== "string" || failure.checkRun.title.length > 16_384 || typeof failure.checkRun.summary !== "string" || failure.checkRun.summary.length > 32_768 ||
+							typeof failure.checkRun.text !== "string" || failure.checkRun.text.length > 32_768 || failure.checkRun.outputTruncated !== false || !failure.annotationsComplete ||
+							!Array.isArray(failure.annotations) || failure.annotations.length > 100 || failure.annotations.some((annotation) => typeof annotation.path !== "string" ||
+								annotation.startLine !== null && !Number.isSafeInteger(annotation.startLine) || annotation.endLine !== null && !Number.isSafeInteger(annotation.endLine) ||
+								typeof annotation.level !== "string" || typeof annotation.title !== "string" || typeof annotation.message !== "string" || annotation.message.length > 8_192)) return true;
+						const workflow = failure.workflow;
+						return workflow !== undefined && (!Number.isSafeInteger(workflow.id) || !Number.isSafeInteger(workflow.attempt) || workflow.attempt < 1 || !Number.isSafeInteger(workflow.workflowId) ||
+							typeof workflow.event !== "string" || typeof workflow.path !== "string" || !Array.isArray(workflow.jobs) || workflow.jobs.length > 100 || workflow.jobs.some((job) => {
+								if (!Number.isSafeInteger(job.id) || typeof job.name !== "string" || job.conclusion !== null && typeof job.conclusion !== "string" || !Array.isArray(job.steps) || job.steps.length > 100 ||
+									job.logStatus !== null && ![200, 302, 404].includes(job.logStatus) || job.logsAvailable !== null && typeof job.logsAvailable !== "boolean" ||
+									job.conclusion === "failure" && (typeof job.logContent !== "string" || !job.logContent.trim() || Buffer.byteLength(job.logContent) > 256 * 1024 || job.logBytes !== Buffer.byteLength(job.logContent) || job.logComplete !== true || job.logTruncated !== false || job.logsAvailable !== true)) return true;
+								return job.steps.some((step) => !Number.isSafeInteger(step.number) || typeof step.name !== "string" || step.conclusion !== null && typeof step.conclusion !== "string");
+							}));
+					};
 					if (!Number.isFinite(Date.parse(observation.observedAt)) || observation.headSha !== lifecycle.pullRequest?.headSha || observation.mergeSha !== lifecycle.pullRequest?.mergeSha ||
 						observation.policyFingerprint !== undefined && !/^[a-f0-9]{64}$/.test(observation.policyFingerprint) ||
 						!Array.isArray(observation.policy) || observation.policy.length > 100 ||
@@ -253,9 +270,23 @@ export class BatchStore {
 							(run.appSlug === null || typeof run.appSlug === "string") && typeof run.name === "string" && /^([a-f0-9]{40}|[a-f0-9]{64})$/.test(run.headSha) && ["queued", "in_progress", "completed"].includes(run.status) &&
 							(run.conclusion === null || typeof run.conclusion === "string") && Number.isFinite(Date.parse(run.createdAt)) && (run.startedAt === null || Number.isFinite(Date.parse(run.startedAt))) && ["head", "merge"].includes(run.subject) &&
 							(run.subject === "head" ? run.headSha === observation.headSha : observation.mergeSha !== undefined && run.headSha === observation.mergeSha) && (run.workflow === undefined || !invalidWorkflow(run.workflow))) ||
+						observation.retryAfter !== undefined && !Number.isFinite(Date.parse(observation.retryAfter)) ||
+						observation.result === "failed" && (!Array.isArray(observation.failures) || observation.failures.length === 0) ||
+						observation.failures !== undefined && (!Array.isArray(observation.failures) || observation.failures.length === 0 || observation.failures.length > 20 || observation.result !== "failed" || !eligible || observation.failures.some(invalidFailure)) ||
 						!["complete", "incomplete", "unavailable"].includes(observation.coverage) || !["pending", "failed", "unknown", "passed"].includes(observation.result)) throw new Error("invalid hosted-check observation; preserve original state");
 				}
 				if (lifecycle.observedAt !== undefined && !Number.isFinite(Date.parse(lifecycle.observedAt)) || lifecycle.nextObservationAt !== undefined && !Number.isFinite(Date.parse(lifecycle.nextObservationAt))) throw new Error("invalid hosted-check observation schedule");
+				if (lifecycle.repair && (!/^[a-f0-9]{64}$/.test(lifecycle.repair.failureKey) || lifecycle.repair.candidateHead !== lifecycle.pullRequest?.headSha || !Array.isArray(lifecycle.repair.runIds) || !lifecycle.repair.runIds.length || lifecycle.repair.runIds.length > 20 ||
+					lifecycle.repair.runIds.some((runId) => !Number.isSafeInteger(runId)) || typeof lifecycle.repair.attemptId !== "string" || !["queued", "dispatched"].includes(lifecycle.repair.state))) throw new Error("invalid owned-PR repair binding; preserve original state");
+				if (lifecycle.phase === "repairing") {
+					const failures = lifecycle.observation?.failures;
+					const failureKey = failures?.length ? digest(failures.map((failure) => failure.key).sort().join("\n")) : undefined;
+					const packetName = lifecycle.repair ? `hosted-failure-${lifecycle.repair.failureKey.slice(0, 16)}.json` : "";
+					if (!lifecycle.repair || lifecycle.nextSafeAction !== "repair" || !item.repair || item.repair.failureKey !== lifecycle.repair.failureKey ||
+						item.repair.candidateHead !== lifecycle.repair.candidateHead || lifecycle.repair.candidateHead !== lifecycle.pullRequest?.headSha || failureKey !== lifecycle.repair.failureKey ||
+						!failures || JSON.stringify([...lifecycle.repair.runIds].sort((a, b) => a - b)) !== JSON.stringify(failures.map((failure) => failure.checkRun.id).sort((a, b) => a - b)) ||
+						!item.repair.artifacts.some((artifact) => artifact.attemptId === lifecycle.repair!.attemptId && artifact.path.endsWith(`/${packetName}`))) throw new Error("repair phase lacks its exact source-bound hosted failure packet");
+				}
 				if (lifecycle.phase === "ready" && (lifecycle.observation?.result !== "passed" || lifecycle.observation.coverage !== "complete" || !lifecycle.observation.eligibleSubject || lifecycle.nextSafeAction !== "pr-ready" || item.proof?.stage !== "pr-ready" || item.stage !== "DONE")) throw new Error("PR-ready lifecycle lacks complete eligible-subject checks and current independent acceptance");
 				if (lifecycle.observation?.result === "passed") {
 					const observation = lifecycle.observation;
@@ -273,7 +304,14 @@ export class BatchStore {
 						throw new Error("passed hosted-check observation lacks complete policy/source/eligible-subject proof");
 					}
 				}
-				if (lifecycle.pullRequest && (!item.operation || item.operation.phase !== "pr" || item.operation.state !== "applied" || item.operation.id !== lifecycle.pullRequest.operationId || item.operation.owner !== lifecycle.owner || item.operation.generation !== lifecycle.generation || item.operation.branch !== lifecycle.pullRequest.branch || item.operation.sha !== lifecycle.pullRequest.headSha)) throw new Error("owned PR is not bound to its confirmed logical operation");
+				if (lifecycle.pullRequest) {
+					const currentPrBound = Boolean(item.operation && item.operation.phase === "pr" && item.operation.state === "applied" && item.operation.id === lifecycle.pullRequest.operationId &&
+						item.operation.owner === lifecycle.owner && item.operation.generation === lifecycle.generation && item.operation.branch === lifecycle.pullRequest.branch && item.operation.sha === lifecycle.pullRequest.headSha);
+					const repairBound = lifecycle.phase === "repairing" && lifecycle.repair?.state === "dispatched" && Boolean(item.operation && item.operation.owner === lifecycle.owner && item.operation.generation === lifecycle.generation &&
+						["worker", "verify", "acceptance", "push"].includes(item.operation.phase) && item.operations.some((operation) => operation.phase === "pr" && operation.state === "applied" && operation.id === lifecycle.pullRequest!.operationId &&
+							operation.owner === lifecycle.owner && operation.generation === lifecycle.generation && operation.branch === lifecycle.pullRequest!.branch && operation.url === lifecycle.pullRequest!.url));
+					if (!currentPrBound && !repairBound) throw new Error("owned PR is not bound to its confirmed logical operation or dispatched same-PR repair lineage");
+				}
 			}
 		}
 		batch.version = batch.version === 3 ? 3 : batch.version === 4 ? 4 : 2;

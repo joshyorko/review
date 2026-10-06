@@ -16,12 +16,13 @@ import test from "node:test";
 import { admit } from "../image/extension/luna-factory/core/admission.ts";
 import { evaluateRun } from "../image/extension/luna-factory/core/convergence.ts";
 import { evaluateWorkGraph, type GraphRelation, type WorkGraphObservation } from "../image/extension/luna-factory/core/graph.ts";
-import { criterionProven, reconcileReceipt } from "../image/extension/luna-factory/core/evidence.ts";
+import { criterionProven, currentAssumptionsFor, reconcileCurrentVerification, reconcileReceipt } from "../image/extension/luna-factory/core/evidence.ts";
 import { JOURNAL_ENTRY, durabilityOf, journalRecord, parseJournal, readJournal } from "../image/extension/luna-factory/core/journal.ts";
 import { emptyLedger, findTask } from "../image/extension/luna-factory/core/model.ts";
 import type {
 	Candidate,
 	CriterionId,
+	CurrentVerificationReceipt,
 	EvidenceReceipt,
 	GenerationId,
 	Ledger,
@@ -33,7 +34,7 @@ import type {
 import { createBatch, type FactoryAction, type SelectedItem } from "../image/extension/luna-factory/core/batch.ts";
 import { renderCompletionReceipt } from "../image/extension/luna-factory/core/receipt.ts";
 import { reduce } from "../image/extension/luna-factory/core/reducer.ts";
-import { artifactRefError, changedPathError, parseCandidate, parseReceipt, parseSubject } from "../image/extension/luna-factory/core/schema.ts";
+import { artifactRefError, changedPathError, parseCandidate, parseCurrentVerification, parseReceipt, parseSubject } from "../image/extension/luna-factory/core/schema.ts";
 import { buildDispatchPrompt, dispatchMarker, RECEIPT_CONTRACT } from "../image/extension/luna-factory/omp/adapter.ts";
 import { DISPATCH_COVERAGE, coverageFor, enforcedPaths, unsupportedPaths } from "../image/extension/luna-factory/omp/capabilities.ts";
 import { renderStatus, renderStatusDetail, renderWhy } from "../image/extension/luna-factory/ui/status.ts";
@@ -105,6 +106,26 @@ function receipt(overrides: Partial<EvidenceReceipt> = {}): EvidenceReceipt {
 		],
 	};
 	return { ...base, ...overrides };
+}
+
+function currentVerification(overrides: Partial<CurrentVerificationReceipt> = {}): CurrentVerificationReceipt {
+	return {
+		version: 1,
+		taskId: "T1" as TaskId,
+		attemptId: "T1-a1",
+		generation: "G1" as GenerationId,
+		subject: { ...SUBJECT, head: "b".repeat(40) },
+		tree: "c".repeat(40),
+		acceptanceRevision: "acceptance-r1",
+		assumptions: [],
+		predicates: [
+			{ phase: "verification", item: "npm test", ok: true, note: "exit 0" },
+			{ phase: "acceptance", item: "independent acceptance", ok: true, note: "accepted" },
+		],
+		acceptanceSession: "session-current-acceptance",
+		checkedAt: "2026-10-06T00:00:00.000Z",
+		...overrides,
+	};
 }
 
 /** Apply one event, failing the test if the ledger rejects it. */
@@ -856,10 +877,123 @@ test("a proven write cannot integrate without an externally changed head", () =>
 	const writer = candidate({ effect: "write" });
 	const admitted = step(ledger(), (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: writer }));
 	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
-	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt() }));
+	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
 	const integrated = reduce(returned, { kind: "integrate_attempt", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: SUBJECT }, REDUCE);
 	assert.equal(integrated.ok, false);
 	assert.match(integrated.ok ? "" : integrated.error, /externally changed head|concrete changed head/);
+});
+
+test("current-subject verification is a separate proof and preserves the worker authorization receipt", () => {
+	const base = ledger();
+	const bound: Ledger = { ...base, criteria: base.criteria.map((criterion) => criterion.id === ("A1" as CriterionId)
+		? { ...criterion, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }
+		: criterion) };
+	const admitted = step(bound, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ effect: "write" }) }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
+	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
+	const head = "b".repeat(40);
+	const premature = reduce(returned, { kind: "record_current_verification", expectedRevision: returned.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ subject: { ...SUBJECT, head }, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }, REDUCE);
+	assert.equal(premature.ok, false);
+	assert.match(premature.ok ? "" : premature.error, /not been returned and integrated/);
+	const integrated = step(returned, (revision) => ({ kind: "integrate_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: { ...SUBJECT, head } }));
+	const priorAttempt = reduce(integrated, { kind: "record_current_verification", expectedRevision: integrated.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ attemptId: "T1-a0" as CurrentVerificationReceipt["attemptId"], subject: { ...SUBJECT, head }, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }, REDUCE);
+	assert.equal(priorAttempt.ok, false);
+	assert.match(priorAttempt.ok ? "" : priorAttempt.error, /attempt/);
+	const verified = step(integrated, (revision) => ({ kind: "record_current_verification", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ subject: { ...SUBJECT, head }, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
+	const attempt = findTask(verified, "T1" as TaskId)?.attempts.at(-1)!;
+	assert.equal(attempt.receipt?.subject.head, undefined);
+	assert.equal(attempt.currentVerification?.subject.head, head);
+	assert.equal(criterionProven(verified, "A1" as CriterionId), false, "VERIFY is not proof completion");
+	const finished = step(verified, (revision) => ({ kind: "finish_task", expectedRevision: revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId }));
+	assert.equal(findTask(finished, "T1" as TaskId)?.state, "DONE");
+	assert.equal(criterionProven(finished, "A1" as CriterionId), true);
+	assert.equal(findTask(finished, "T1" as TaskId)?.attempts.at(-1)?.receipt?.subject.head, undefined);
+	const reloaded = parseJournal(journalRecord(finished));
+	assert.equal(reloaded.ok, true);
+	assert.equal(reloaded.ok && findTask(reloaded.ledger, "T1" as TaskId)?.attempts.at(-1)?.currentVerification?.subject.head, head);
+});
+
+test("legacy PR-ready receipt subject transfer does not become current proof after reload", () => {
+	const base = ledger();
+	const bound: Ledger = { ...base, goal: { ...base.goal, finishAuthority: "pr-ready" }, criteria: base.criteria.map((criterion) => criterion.id === ("A1" as CriterionId)
+		? { ...criterion, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }
+		: criterion) };
+	const admitted = step(bound, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ effect: "write" }) }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
+	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
+	const head = "b".repeat(40);
+	const moved = step(returned, (revision) => ({ kind: "integrate_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: { ...SUBJECT, head } }));
+	const task = findTask(moved, "T1" as TaskId)!;
+	const attempt = task.attempts.at(-1)!;
+	const legacyTransferred: Ledger = {
+		...moved,
+		tasks: moved.tasks.map((candidate) => candidate.id !== task.id ? candidate : {
+			...candidate,
+			state: "DONE",
+			attempts: candidate.attempts.map((entry) => entry.id !== attempt.id ? entry : {
+				...entry,
+				subject: { ...entry.subject, head },
+				receipt: { ...entry.receipt!, subject: { ...entry.subject, head } },
+				integrated: true,
+			}),
+		}),
+	};
+	assert.equal(criterionProven(legacyTransferred, "A1" as CriterionId), false);
+	const reloaded = parseJournal(journalRecord(legacyTransferred));
+	assert.equal(reloaded.ok, true);
+	assert.equal(reloaded.ok && criterionProven(reloaded.ledger, "A1" as CriterionId), false);
+});
+
+test("current-subject verification rejects a stale head and changed acceptance assumption", () => {
+	const base = ledger();
+	const bound: Ledger = { ...base, criteria: base.criteria.map((criterion) => criterion.id === ("A1" as CriterionId)
+		? { ...criterion, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }
+		: criterion) };
+	const admitted = step(bound, (revision) => ({ kind: "record_candidate", expectedRevision: revision, candidate: candidate({ effect: "write" }) }));
+	const started = executedAttempt(admitted, "T1" as TaskId, "T1-a1");
+	const returned = step(started, (revision) => ({ kind: "record_receipt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: receipt({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }));
+	const integrated = step(returned, (revision) => ({ kind: "integrate_attempt", expectedRevision: revision, taskId: "T1" as TaskId, attemptId: "T1-a1", subject: { ...SUBJECT, head: "b".repeat(40) } }));
+	const stale = reduce(integrated, { kind: "record_current_verification", expectedRevision: integrated.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ subject: { ...SUBJECT, head: "d".repeat(40) }, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }] }) }, REDUCE);
+	assert.equal(stale.ok, false);
+	assert.match(stale.ok ? "" : stale.error, /exact current subject/);
+	const changedAcceptance = reduce(integrated, { kind: "record_current_verification", expectedRevision: integrated.revision, taskId: "T1" as TaskId, attemptId: "T1-a1", receipt: currentVerification({ subject: integrated.subject, assumptions: [{ kind: "acceptance-revision", value: "acceptance-r2" }] }) }, REDUCE);
+	assert.equal(changedAcceptance.ok, false);
+	assert.match(changedAcceptance.ok ? "" : changedAcceptance.error, /assumption|acceptance revision/);
+});
+
+test("current-subject verification expires when a declared dependency outcome changes", () => {
+	const base = ledger();
+	const dependency = { kind: "dependency-outcome" as const, taskId: "T0" as TaskId, value: "proven" };
+	const bound: Ledger = {
+		...base,
+		subject: { ...base.subject, head: "b".repeat(40) },
+		assumptionValues: [dependency],
+		tasks: [{ id: "T1" as TaskId, generation: base.generation, criterionId: "A1" as CriterionId, title: "fix", deps: [], effect: "write", owner: "test", state: "DONE", attempts: [], decision: "ADMIT", decisionReason: "selected" }],
+		criteria: base.criteria.map((criterion) => criterion.id === ("A1" as CriterionId)
+			? { ...criterion, assumptions: [{ kind: "acceptance-revision" as const, value: "acceptance-r1" }, dependency] }
+			: criterion),
+	};
+	const task = { id: "T1" as TaskId, criterionId: "A1" as CriterionId };
+	const current = currentVerification({ assumptions: [{ kind: "acceptance-revision", value: "acceptance-r1" }, dependency] });
+	assert.equal(reconcileCurrentVerification(bound, current, {
+		taskId: task.id, attemptId: "T1-a1", subject: current.subject, acceptanceRevision: "acceptance-r1", assumptions: currentAssumptionsFor(bound, task.id),
+	}).status, "proven");
+	const changed = { ...bound, assumptionValues: [{ ...dependency, value: "unproven" }] };
+	assert.equal(reconcileCurrentVerification(changed, current, {
+		taskId: task.id, attemptId: "T1-a1", subject: current.subject, acceptanceRevision: "acceptance-r1", assumptions: currentAssumptionsFor(changed, task.id),
+	}).status, "unproved");
+});
+
+test("current-subject verification parser requires positive deterministic and independent acceptance evidence", () => {
+	const parsed = parseCurrentVerification(currentVerification());
+	assert.equal(parsed.ok, true);
+	const missingAcceptance = parseCurrentVerification(currentVerification({ predicates: [{ phase: "verification", item: "npm test", ok: true, note: "exit 0" }] }));
+	assert.equal(missingAcceptance.ok, false);
+	const failedAcceptance = parseCurrentVerification(currentVerification({ predicates: [
+		{ phase: "verification", item: "npm test", ok: true, note: "exit 0" },
+		{ phase: "acceptance", item: "independent acceptance", ok: false, note: "rejected" },
+	] }));
+	assert.equal(failedAcceptance.ok, false);
 });
 
 test("attempt intent stays READY until a bound OMP execution identity is recorded", () => {

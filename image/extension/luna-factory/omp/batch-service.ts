@@ -5,9 +5,9 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, re
 import { join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { batchConverged, batchItemProofCurrent, batchSummary, createBatch, dependencyBlocker, digest, evaluateBatchGraph, selectionIdentity, type Batch, type BatchItem, type SelectedItem, type Prerequisite } from "../core/batch.ts";
-import { reconcileReceipt } from "../core/evidence.ts";
+import { criterionProven, currentAssumptionsFor, reconcileCurrentVerification, reconcileReceipt } from "../core/evidence.ts";
 import { reduce } from "../core/reducer.ts";
-import type { AttemptId, CriterionId, EvidenceReceipt, LedgerEvent, OperationReceipt, PredicateEvidence, ProofAssumption, TaskId } from "../core/model.ts";
+import type { AttemptId, CriterionId, CurrentVerificationReceipt, EvidenceReceipt, LedgerEvent, OperationReceipt, PredicateEvidence, ProofAssumption, TaskId } from "../core/model.ts";
 import { BatchStore, ResourceClaims } from "./batch-store.ts";
 import { requiredChecks, packageCheckScripts } from "./batch-checks.ts";
 import { BatchGitHub } from "./batch-github.ts";
@@ -58,6 +58,10 @@ function hasPreparationRecoveryEvidence(batch: Batch, item: BatchItem): boolean 
 		operation.subject.head === item.ledger.subject.head);
 }
 export interface BatchOptions { capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[]; converge?: boolean }
+export interface BatchTiming {
+	now: () => Date;
+	wait: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+}
 interface Running { batch: Batch; item: BatchItem; controller: AbortController; promise: Promise<void> }
 
 export interface BatchSnapshotError {
@@ -97,6 +101,7 @@ export class BatchService {
 	readonly capacity: number;
 	private batches = new Map<string, Batch>();
 	private running = new Map<string, Running>();
+	private observing = new Map<string, AbortController>();
 	private pumping?: Promise<void>;
 	private submitTail: Promise<void> = Promise.resolve();
 	private changed = new Set<BatchChangeListener>();
@@ -104,8 +109,19 @@ export class BatchService {
 	private fatal?: string;
 	private readonly preflight: typeof sandboxPreflight;
 	private readonly runVerification: typeof sandboxTest;
+	private readonly timing: BatchTiming;
+	private readonly continuationWakeups = new Set<() => void>();
 
-	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root, preflight: typeof sandboxPreflight = sandboxPreflight, runVerification: typeof sandboxTest = sandboxTest) {
+	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root, preflight: typeof sandboxPreflight = sandboxPreflight, runVerification: typeof sandboxTest = sandboxTest, timing: BatchTiming = {
+		now: () => new Date(),
+		wait: (milliseconds, signal) => new Promise<void>((resolve) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const finish = () => { if (timer) clearTimeout(timer); signal?.removeEventListener("abort", finish); resolve(); };
+			timer = setTimeout(finish, Math.min(milliseconds, 2_147_000_000));
+			signal?.addEventListener("abort", finish, { once: true });
+			if (signal?.aborted) finish();
+		}),
+	}) {
 		this.root = root;
 		this.github = github;
 		this.sdk = sdk;
@@ -113,6 +129,7 @@ export class BatchService {
 		this.capacity = capacity;
 		this.preflight = preflight;
 		this.runVerification = runVerification;
+		this.timing = timing;
 		if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("invalid shared Factory capacity");
 		this.store = new BatchStore(root);
 		this.claims = new ResourceClaims(root, claimsRoot);
@@ -322,7 +339,7 @@ export class BatchService {
 			this.persist(batch);
 		}
 		/** Read-only current-state reconciliation consumes no worker slot or model call. */
-		async reconcile(id: string, clock: () => Date = () => new Date()): Promise<void> {
+		async reconcile(id: string, clock: () => Date = this.timing.now): Promise<void> {
 			this.store.acquire();
 			const batch = this.batches.get(id) ?? this.store.read(id);
 			this.batches.set(id, batch);
@@ -335,7 +352,11 @@ export class BatchService {
 			this.persist(batch);
 			if (batch.control === "active") void this.pump();
 		}
-	private async observeOwnedPullRequest(batch: Batch, item: BatchItem, now: Date): Promise<void> {
+	private async observeOwnedPullRequest(batch: Batch, item: BatchItem, now: Date, signal?: AbortSignal): Promise<void> {
+		const wasActive = batch.control === "active";
+		const cancelled = () => signal?.aborted === true || batch.control === "stopped" || item.stage === "CANCELLED" ||
+			(signal !== undefined && batch.control !== "active") || (signal === undefined && wasActive && batch.control !== "active");
+		if (cancelled()) return;
 		const lifecycle = item.prLifecycle!;
 		const pull = lifecycle.pullRequest;
 		if (!pull) return;
@@ -346,8 +367,9 @@ export class BatchService {
 			this.persist(batch); return;
 		}
 		if (lifecycle.nextObservationAt && Date.parse(nowText) < Date.parse(lifecycle.nextObservationAt)) return;
-		try { await this.validateProof(item); }
+		try { await this.validateProof(item, signal); }
 		catch (error) {
+			if (cancelled()) return;
 			item.prLifecycle = { ...lifecycle, phase: "unknown", nextSafeAction: "investigate" };
 			item.stage = "UNKNOWN"; item.blocker = `owned PR proof is stale: ${message(error)}`;
 			this.persist(batch); return;
@@ -356,7 +378,8 @@ export class BatchService {
 			repository: pull.repository, identity: pull.identity, number: pull.number, url: pull.url,
 			branch: pull.branch, headSha: pull.headSha, baseRef: lifecycle.target.ref, baseSha: lifecycle.target.sha,
 			...(pull.mergeSha ? { mergeSha: pull.mergeSha } : {}),
-		}, nowText, item.selected.sourceDefaultRef);
+		}, nowText, item.selected.sourceDefaultRef, signal);
+		if (cancelled()) return;
 		const observedLifecycle = observation.mergeSha && !pull.mergeSha
 			? { ...lifecycle, pullRequest: { ...pull, mergeSha: observation.mergeSha } }
 			: lifecycle;
@@ -366,30 +389,65 @@ export class BatchService {
 		}
 		if (observation.result !== "unknown") {
 			try {
-				await this.validateProof(item);
-				await this.github.assertFresh(item.selected, observedPull);
+				await this.validateProof(item, signal);
+				await this.github.assertFresh(item.selected, observedPull, signal);
 			} catch (error) {
+				if (cancelled()) return;
 				observation = { ...observation, result: "unknown", reason: `subject changed during hosted-check observation: ${message(error)}` };
 			}
 		}
-		if (observation.result === "passed" && (!observation.policyFingerprint || !await this.github.hostedCheckPolicyCurrent(item.selected.repo, lifecycle.target.ref, item.selected.sourceDefaultRef, observation.policyFingerprint))) {
-			observation = { ...observation, result: "unknown", reason: "effective classic/ruleset check policy changed or became unavailable before PR-ready persistence" };
+		if (["passed", "failed"].includes(observation.result) && (!observation.policyFingerprint || typeof this.github.hostedCheckPolicyCurrent !== "function" || !await this.github.hostedCheckPolicyCurrent(item.selected.repo, lifecycle.target.ref, item.selected.sourceDefaultRef, observation.policyFingerprint, signal))) {
+			if (cancelled()) return;
+			observation = { ...observation, result: "unknown", failures: undefined, reason: "effective classic/ruleset check policy changed or became unavailable before the hosted result was persisted" };
 		}
+		if (cancelled()) return;
 		const observationCount = lifecycle.observationCount + 1;
 		const delayMs = Math.min(5 * 60_000, 15_000 * (2 ** Math.min(observationCount - 1, 5)));
-		const schedule = { observedAt: nowText, nextObservationAt: new Date(now.getTime() + (observation.result === "passed" ? 5 * 60_000 : delayMs)).toISOString() };
-		if (observation.result === "passed" && observation.coverage === "complete" && observation.eligibleSubject !== undefined && observation.eligibleSubject.sha === (observation.eligibleSubject.subject === "head" ? pull.headSha : pull.mergeSha) && observation.headSha === pull.headSha && ["verified-patch", "pr-ready"].includes(item.proof?.stage ?? "")) {
+		const retryAfter = observation.retryAfter && Number.isFinite(Date.parse(observation.retryAfter)) ? Date.parse(observation.retryAfter) : undefined;
+		const requestedAt = Math.max(now.getTime() + (observation.result === "passed" ? 5 * 60_000 : delayMs), retryAfter ?? 0);
+		const schedule = { observedAt: nowText, nextObservationAt: new Date(Math.min(requestedAt, Date.parse(lifecycle.deadlineAt))).toISOString() };
+		if (observation.result === "passed" && observation.coverage === "complete" && observation.eligibleSubject !== undefined && observation.eligibleSubject.sha === (observation.eligibleSubject.subject === "head" ? observedPull.headSha : observedPull.mergeSha) && observation.headSha === observedPull.headSha && ["verified-patch", "pr-ready"].includes(item.proof?.stage ?? "")) {
+			try {
+				if (item.ledger.subject.head !== observedPull.headSha || item.proof?.subject !== observedPull.headSha) throw new Error("current proof receipt is not bound to the exact passing PR head");
+				const task = item.ledger.tasks[0];
+				if (!task) throw new Error("current Factory task is unavailable for canonical PR-ready completion");
+				const currentAttempt = task.attempts.at(-1);
+				if (currentAttempt?.currentVerification?.subject.head !== observedPull.headSha || currentAttempt.currentVerification.generation !== item.ledger.generation) throw new Error("fresh current-subject verification receipt is unavailable for the exact passing PR head");
+				if (task.state === "VERIFY") this.event(item, { kind: "finish_task", expectedRevision: item.ledger.revision, taskId: task.id, criterionId: task.criterionId });
+				if (item.ledger.tasks[0]?.state !== "DONE" || !item.ledger.tasks[0]?.attempts.at(-1)?.receipt || item.ledger.subject.head !== observedPull.headSha || !criterionProven(item.ledger, task.criterionId)) throw new Error("current-subject reducer proof did not reach canonical DONE");
+			} catch (error) {
+				observation = { ...observation, result: "unknown", reason: `hosted checks passed but canonical current-subject proof could not finish: ${message(error)}` };
+			}
+		}
+		if (observation.result === "passed" && observation.coverage === "complete" && observation.eligibleSubject !== undefined && observation.eligibleSubject.sha === (observation.eligibleSubject.subject === "head" ? observedPull.headSha : observedPull.mergeSha) && observation.headSha === observedPull.headSha && ["verified-patch", "pr-ready"].includes(item.proof?.stage ?? "")) {
 			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "ready", nextSafeAction: "pr-ready" };
 			if (item.proof) item.proof.stage = "pr-ready";
-			item.stage = "DONE"; item.blocker = undefined; this.persist(batch); return;
+			item.stage = "DONE";
+			if (!batchItemProofCurrent(item)) {
+				item.prLifecycle = { ...item.prLifecycle, phase: "unknown", nextSafeAction: "investigate" };
+				item.stage = "UNKNOWN"; item.blocker = "hosted checks passed without current canonical batch proof; preserve UNKNOWN";
+				this.persist(batch); return;
+			}
+			item.blocker = undefined; this.persist(batch); return;
 		}
 		if (item.proof?.stage === "pr-ready") item.proof.stage = "verified-patch";
 		if (observation.result === "pending") {
 			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "waiting", nextSafeAction: "observe-after" };
 			item.stage = "VERIFY"; item.blocker = `hosted checks pending; next bounded observation ${schedule.nextObservationAt}`;
 		} else if (observation.result === "failed") {
-			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "repair-required", nextSafeAction: "repair-review" };
-			item.stage = "VERIFY"; item.blocker = `owned PR has a current required check failure; repair packet/dispatch is not implemented in this slice: ${observation.reason ?? "required check failed"}`;
+			const failures = observation.failures;
+			const candidateCurrent = observation.headSha === observedPull.headSha && observation.eligibleSubject?.sha !== undefined && failures?.length && failures.every((failure) =>
+				failure.classification === "repairable-code" && failure.candidateHead === observedPull.headSha && observation.runs.some((run) => run.id === failure.checkRun.id && run.headSha === failure.checkSubjectSha && run.conclusion === "failure" && run.appId === failure.checkRun.appId) && failure.annotationsComplete);
+			const failureKey = candidateCurrent ? digest(failures.map((failure) => failure.key).sort().join("\n")) : undefined;
+			const duplicate = failureKey !== undefined && (lifecycle.repair?.failureKey === failureKey || item.repair?.failureKey === failureKey);
+			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "repair-required", nextSafeAction: candidateCurrent && !duplicate ? "repair" : "repair-review" };
+			item.stage = "VERIFY";
+			item.blocker = duplicate ? "the exact current check-run/attempt failure was already dispatched; preserve the existing repair lineage" : candidateCurrent
+				? `owned PR has complete current required-check diagnostics; bounded same-PR repair is queued: ${observation.reason ?? "required check failed"}`
+				: `required check failed but source-bound repair evidence is incomplete; keep UNKNOWN for explicit investigation: ${observation.reason ?? "diagnostics unavailable"}`;
+		} else if (observation.retryAfter && Date.parse(observation.retryAfter) > now.getTime()) {
+			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "waiting", nextSafeAction: "observe-after" };
+			item.stage = "VERIFY"; item.blocker = `GitHub requested a bounded read retry; next observation ${schedule.nextObservationAt}`;
 		} else {
 			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "unknown", nextSafeAction: "investigate" };
 			item.stage = "UNKNOWN"; item.blocker = `hosted check coverage or independent acceptance is inconclusive: ${observation.reason ?? "current verified-patch proof unavailable"}`;
@@ -405,23 +463,35 @@ export class BatchService {
 			return digest(readFileSync(actual, "utf8"));
 		}).join(""));
 	}
-	private async validateProof(item: BatchItem): Promise<void> {
-		if (!item.proof || item.proof.acceptanceRevision !== item.selected.acceptanceRevision || item.proof.subject !== item.selected.head || this.artifactDigest(item) !== item.proof.digest) {
-			throw new Error("proof artifact unavailable, modified or stale; restore exact evidence or explicitly reverify");
-		}
+	private async validateProof(item: BatchItem, signal?: AbortSignal): Promise<void> {
 		const task = item.ledger.tasks[0];
 		const attempt = task?.attempts.at(-1);
+		const expectedSubject = attempt?.currentVerification?.subject.head ?? attempt?.subject.head ?? item.selected.head ?? attempt?.subject.base ?? item.selected.base;
+		if (!item.proof || item.proof.acceptanceRevision !== item.selected.acceptanceRevision || item.proof.subject !== expectedSubject || this.artifactDigest(item) !== item.proof.digest) {
+			throw new Error("proof artifact unavailable, modified or stale; restore exact evidence or explicitly reverify");
+		}
 		if (!task || !attempt?.receipt) throw new Error("current Factory proof receipt unavailable");
-		const current = reconcileReceipt(item.ledger, attempt.receipt, {
-			taskId: task.id,
-			attemptId: attempt.id,
-			subject: attempt.subject,
-			artifactRoots: [this.root],
-		});
+		if (attempt.currentVerification && (item.proof.tree !== attempt.currentVerification.tree || item.proof.subject !== attempt.currentVerification.subject.head)) {
+			throw new Error("current Factory proof SHA/tree differs from its separate current-subject verification receipt");
+		}
+		const current = attempt.currentVerification
+			? reconcileCurrentVerification(item.ledger, attempt.currentVerification, {
+				taskId: task.id,
+				attemptId: attempt.id,
+				subject: item.ledger.subject,
+				acceptanceRevision: item.selected.acceptanceRevision ?? "",
+				assumptions: currentAssumptionsFor(item.ledger, task.id),
+			})
+			: reconcileReceipt(item.ledger, attempt.receipt, {
+				taskId: task.id,
+				attemptId: attempt.id,
+				subject: attempt.subject,
+				artifactRoots: [this.root],
+			});
 		if (current.status !== "proven") throw new Error(`Factory proof is ${current.status}: ${current.reasons.join("; ")}`);
-		await this.github.assertFresh(item.selected, item.prLifecycle?.pullRequest);
+		await this.github.assertFresh(item.selected, item.prLifecycle?.pullRequest, signal);
 		if (!item.workspace || !item.proof.tree) throw new Error("verified workspace tree unavailable");
-		if (await this.git(item.workspace, ["write-tree"]) !== item.proof.tree || await this.git(item.workspace, ["diff", "--no-ext-diff", "--no-textconv", "--name-only"]) || await this.git(item.workspace, ["ls-files", "--others", "--exclude-standard"])) {
+		if (await this.git(item.workspace, ["write-tree"], signal) !== item.proof.tree || await this.git(item.workspace, ["diff", "--no-ext-diff", "--no-textconv", "--name-only"], signal) || await this.git(item.workspace, ["ls-files", "--others", "--exclude-standard"], signal)) {
 			throw new Error("retained workspace differs from verified tree; preserve and explicitly reverify");
 		}
 	}
@@ -435,11 +505,16 @@ export class BatchService {
 		this.batches.set(id, batch);
 		batch.control = "active";
 		this.persist(batch);
-			for (const item of batch.items) {
+		for (const item of batch.items) {
 			const owner = `${id}:${item.selected.key}`;
 			if (this.running.has(owner) || item.stage === "CANCELLED" || item.stage === "EXCLUDED") continue;
 			try {
 				if (item.selected.observe) continue;
+				if (item.prLifecycle?.phase === "repairing" && item.prLifecycle.repair?.state === "queued" && item.operation?.phase === "pr" && item.operation.state === "applied" && item.prLifecycle.pullRequest) {
+					const latest = item.ledger.tasks[0]?.attempts.at(-1);
+					if (latest?.id !== item.prLifecycle.repair.attemptId || latest.state !== "returned" || item.ledger.tasks[0]?.attempts.some((attempt) => attempt.state === "started")) throw new Error("queued repair has an unexpected current attempt; preserve UNKNOWN and inspect");
+					item.stage = "VERIFY"; item.blocker = "retained hosted repair packet is queued; resume will reacquire claims before attempt allocation";
+				}
 				if (item.stage === "DONE") {
 					await this.validateProof(item);
 					if (item.operation?.phase === "pr" && !item.prLifecycle?.pullRequest) await this.reconcileEffect(batch, item);
@@ -457,7 +532,7 @@ export class BatchService {
 					}
 					continue;
 				}
-				if (item.stage === "VERIFY" && item.proof && item.operation?.state === "applied") {
+				if (item.stage === "VERIFY" && item.proof && item.operation?.state === "applied" && !(item.prLifecycle?.phase === "repair-required" && item.prLifecycle.nextSafeAction === "repair")) {
 					await this.validateProof(item);
 					continue;
 				}
@@ -511,6 +586,8 @@ export class BatchService {
 			else if (!["DONE", "EXCLUDED", "UNKNOWN"].includes(item.stage)) { item.stage = "CANCELLED"; item.blocker = "operator stopped item; explicit retry required"; }
 		}
 		this.batches.set(id, batch); this.persist(batch);
+		for (const [owner, controller] of this.observing) if (owner.startsWith(`${id}:`)) controller.abort();
+		for (const wake of [...this.continuationWakeups]) wake();
 		if (action === "stop") for (const active of this.running.values()) if (active.batch.id === id) active.controller.abort();
 	}
 	exclude(id: string, key: string, reason: string): void {
@@ -570,8 +647,11 @@ export class BatchService {
 	async shutdown(): Promise<void> {
 		try { for (const batch of this.batches.values()) { batch.control = "paused"; this.persist(batch); } }
 		finally {
+			for (const controller of this.observing.values()) controller.abort();
+			for (const wake of [...this.continuationWakeups]) wake();
 			for (const active of this.running.values()) active.controller.abort();
 			await Promise.allSettled([...this.running.values()].map((active) => active.promise));
+			await this.pumping;
 			this.bindings.clear();
 			if (!this.fatal) this.store.release();
 		}
@@ -596,14 +676,27 @@ export class BatchService {
 				for (const batch of this.batches.values()) {
 					if (batch.control !== "active") continue;
 					if (batch.convergence) await this.observeConvergence(batch);
+					for (const item of batch.items) {
+						const lifecycle = item.prLifecycle;
+						if (!lifecycle?.pullRequest || !["published", "waiting"].includes(lifecycle.phase) || lifecycle.nextSafeAction !== "observe-after") continue;
+						const now = this.timing.now();
+						if (lifecycle.nextObservationAt && Date.parse(lifecycle.nextObservationAt) > now.getTime() && Date.parse(lifecycle.deadlineAt) > now.getTime()) continue;
+						const owner = `${batch.id}:${item.selected.key}`;
+						const observer = new AbortController();
+						this.observing.set(owner, observer);
+						try { await this.observeOwnedPullRequest(batch, item, now, observer.signal); }
+						finally { if (this.observing.get(owner) === observer) this.observing.delete(owner); }
+					}
+					if (batch.control !== "active") continue;
 				if (this.running.size >= this.capacity) break;
 				if ([...this.running.values()].filter((active) => active.batch.id === batch.id).length >= batch.capacity) continue;
-					for (const item of batch.items.filter((candidate) => candidate.stage === "QUEUED").sort((a, b) => a.attempts - b.attempts)) {
+					for (const item of batch.items.filter((candidate) => candidate.stage === "QUEUED" || candidate.stage === "VERIFY" && (candidate.prLifecycle?.phase === "repair-required" && candidate.prLifecycle.nextSafeAction === "repair" || candidate.prLifecycle?.phase === "repairing" && candidate.prLifecycle.repair?.state === "queued")).sort((a, b) => a.attempts - b.attempts)) {
 						if (batch.convergence) {
 							const decision = evaluateBatchGraph(batch).nodes.find((node) => node.key === item.selected.key);
 							if (decision?.decision !== "READY") { item.blocker = decision?.blockers.join("; ") || "current graph transition is not READY"; continue; }
 						}
 					const publishOnly = item.selected.action === "pr-ready" && item.operation?.phase === "push" && item.operation.state === "applied" && item.prLifecycle?.nextSafeAction === "publish";
+					const automaticRepair = item.prLifecycle?.phase === "repair-required" && item.prLifecycle.nextSafeAction === "repair" || item.prLifecycle?.phase === "repairing" && item.prLifecycle.repair?.state === "queued";
 					const dependency = dependencyBlocker(batch, item.selected.key);
 						if (dependency) { item.blocker = dependency; continue; }
 						if (!publishOnly && (item.attempts >= batch.maxAttempts || batch.items.reduce((sum, candidate) => sum + candidate.attempts, 0) >= batch.maxTotalAttempts)) { item.stage = "BLOCKED"; item.blocker = "original attempt budget exhausted; retry never resets it"; this.persist(batch); continue; }
@@ -621,7 +714,7 @@ export class BatchService {
 							catch (error) { this.claims.release(`repo:${item.selected.repo}`, owner); throw error; }
 						}
 					} catch (error) { item.stage = "BLOCKED"; item.blocker = message(error); this.persist(batch); continue; }
-					item.stage = publishOnly ? "RUNNING" : "QUEUED"; item.blocker = undefined; this.persist(batch);
+					item.stage = publishOnly || automaticRepair ? "RUNNING" : "QUEUED"; item.blocker = undefined; this.persist(batch);
 					const controller = new AbortController();
 					let advisorEscalationBlocked = false;
 					const promise = Promise.resolve().then(() => publishOnly ? this.createPRFromConfirmedPush(batch, item, controller.signal) : this.execute(batch, item, controller.signal, binding, bindingError)).catch((error) => {
@@ -634,9 +727,14 @@ export class BatchService {
 							return;
 						}
 						if (item.operation?.phase === "push" && item.operation.state === "applied") {
-							item.stage = controller.signal.aborted ? "CANCELLED" : "BLOCKED";
-							item.prLifecycle = item.prLifecycle ? { ...item.prLifecycle, nextSafeAction: "publish" } : undefined;
-						} else if (item.operation?.phase === "push" || item.operation?.phase === "pr" || item.operation?.state === "unknown") {
+							if (item.prLifecycle?.phase === "repairing") {
+								item.stage = "UNKNOWN";
+							item.blocker = `same-PR repair push is confirmed but its original PR effect remains unresolved: ${message(error)}`;
+							} else {
+								item.stage = controller.signal.aborted ? "CANCELLED" : "BLOCKED";
+								item.prLifecycle = item.prLifecycle ? { ...item.prLifecycle, nextSafeAction: "publish" } : undefined;
+							}
+					} else if (item.operation?.phase === "push" || item.operation?.phase === "pr" || item.operation?.state === "unknown") {
 							item.stage = "UNKNOWN";
 							if (item.operation.state !== "unknown") transitionOperation(item, { state: "unknown" });
 						} else if (controller.signal.aborted && !(error instanceof NativeExecutionError && error.code === "cancellation-settled")) {
@@ -674,12 +772,28 @@ export class BatchService {
 				}
 			}
 			if (dispatched && this.running.size < this.capacity) continue;
-			if (!this.running.size) break;
+			if (!this.running.size) {
+				const now = this.timing.now().getTime();
+				const next = [...this.batches.values()].filter((batch) => batch.control === "active").flatMap((batch) => batch.items)
+					.filter((item) => item.prLifecycle?.pullRequest && ["published", "waiting"].includes(item.prLifecycle.phase) && item.prLifecycle.nextSafeAction === "observe-after")
+					.map((item) => Math.max(now + 1, Math.min(Date.parse(item.prLifecycle!.nextObservationAt ?? new Date(now).toISOString()), Date.parse(item.prLifecycle!.deadlineAt))))
+					.sort((a, b) => a - b)[0];
+				if (next === undefined) break;
+				await this.waitForContinuation(Math.max(1, next - now));
+				continue;
+			}
 			await Promise.race([...this.running.values()].map((active) => active.promise));
 		}
 		for (const batch of this.batches.values()) {
 			if (!this.fatal) this.persist(batch);
 		}
+	}
+	private async waitForContinuation(milliseconds: number): Promise<void> {
+		let wake!: () => void;
+		const controller = new AbortController();
+		const interrupted = new Promise<void>((resolve) => { wake = resolve; this.continuationWakeups.add(resolve); });
+		try { await Promise.race([this.timing.wait(milliseconds, controller.signal), interrupted]); }
+		finally { controller.abort(); this.continuationWakeups.delete(wake); }
 	}
 	private event(item: BatchItem, event: LedgerEvent): void {
 		const result = reduce(item.ledger, event, { artifactRoots: [this.root] });
@@ -696,12 +810,17 @@ export class BatchService {
 		const result = await command("git", ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", ...credential, ...args], { cwd: workspace, signal, timeout: 60_000, maxBuffer: 4 * 1024 * 1024, env: { PATH: process.env.PATH, HOME: this.root, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", ...(fetching ? { GH_TOKEN: this.github.token } : {}) } });
 		return result.stdout.trimEnd();
 	}
+	private async pushOwnedBranch(workspace: string, branch: string, signal: AbortSignal): Promise<void> {
+		await command("git", ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=!gh auth git-credential", "push", "origin", `HEAD:refs/heads/${branch}`], { cwd: workspace, signal, timeout: 120_000, env: { PATH: process.env.PATH, HOME: this.root, GH_TOKEN: this.github.token, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+	}
 	private async cloneWorkspace(item: BatchItem, directory: string, signal: AbortSignal): Promise<void> {
 		await command("gh", ["repo", "clone", item.selected.repo, directory, "--", "--no-checkout"], { timeout: 120_000, signal, env: { PATH: process.env.PATH, HOME: this.root, GH_TOKEN: this.github.token, GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
 	}
 	private async prepareWorkspace(batch: Batch, item: BatchItem, signal: AbortSignal): Promise<string> {
 		const directory = join(this.root, "workspaces", batch.id, digest(item.selected.key).slice(0, 16));
 		const owner = `${batch.id}:${item.selected.key}`;
+		const repairPull = item.prLifecycle?.pullRequest && (item.prLifecycle.phase === "repair-required" || item.prLifecycle.phase === "repairing") ? item.prLifecycle.pullRequest : undefined;
+		let expectedHead = repairPull?.headSha ?? item.selected.head!;
 		const noWorker = item.attempts === 0 && item.sessions.length === 0 && item.ledger.tasks.every((task) => task.attempts.length === 0);
 		const evidenced = [...item.operations, ...(item.operation ? [item.operation] : [])].some((operation) =>
 			operation.owner === owner && operation.generation === item.ledger.generation && operation.phase === "worker" && (operation.state === "not-applied" || operation.state === "unknown" && item.preparation?.phase !== undefined && item.preparation.phase !== "ready") && operation.subject.repo === item.ledger.subject.repo && operation.subject.head === item.ledger.subject.head && operation.subject.base === item.ledger.subject.base);
@@ -733,10 +852,11 @@ export class BatchService {
 		const metadata = join(directory, ".git");
 		if (!existsSync(metadata) || lstatSync(metadata).isSymbolicLink() || !lstatSync(metadata).isDirectory()) throw new Error("partial workspace has no owned Git directory; preserve files and inspect initialization");
 		if (process.getuid && (lstatSync(directory).uid !== process.getuid() || lstatSync(metadata).uid !== process.getuid())) throw new Error("Git workspace ownership differs from the executing user; inspect runtime ownership before retry");
-		const origin = await this.git(directory, ["remote", "get-url", "origin"], signal);
+		const origin = await this.git(directory, ["config", "--get", "remote.origin.url"], signal);
 		if (origin.replace(/\.git$/, "").toLowerCase() !== `https://github.com/${item.selected.repo}`) throw new Error("workspace origin mismatch; preserve and inspect");
 		let head: string | undefined;
 		try { head = await this.git(directory, ["rev-parse", "HEAD"], signal); } catch { /* An evidenced partial clone may have no checked-out HEAD. */ }
+		if (!repairPull) expectedHead = item.selected.head!;
 		const initializing = item.preparation?.phase !== "ready" && noWorker && (evidenced || item.operation?.state === "intent");
 		const entries = readdirSync(directory).filter((name) => name !== ".git");
 		if (initializing && entries.length === 0) {
@@ -745,18 +865,73 @@ export class BatchService {
 			if (item.selected.kind === "pr") await this.git(directory, ["fetch", "origin", `pull/${item.selected.number}/head`], signal);
 			await this.git(directory, ["checkout", "--detach", item.selected.head!], signal);
 			head = await this.git(directory, ["rev-parse", "HEAD"], signal);
-		} else if (head !== item.selected.head) {
+		} else if (head !== expectedHead) {
 			throw new Error("partial workspace or selected head mismatch with retained files; preserve and inspect before preparation");
 		}
-		if (head !== item.selected.head) throw new Error("workspace head differs from selected subject; preserve and inspect");
+		if (repairPull) {
+			if (repairPull.repository !== item.selected.repo || repairPull.branch !== `factory/${batch.id}/${item.selected.number}` || repairPull.baseRef !== item.prLifecycle?.target.ref || repairPull.baseSha !== item.prLifecycle?.target.sha || expectedHead !== item.prLifecycle?.observation?.headSha) throw new Error("repair workspace is not bound to the exact admitted PR identity, base and observed candidate head");
+			const remote = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${encodeURIComponent(repairPull.branch)}`);
+			if (remote.object.sha !== expectedHead) throw new Error("owned PR branch moved after failure observation; repair remains UNKNOWN");
+			await this.git(directory, ["fetch", "origin", `refs/heads/${repairPull.branch}:refs/remotes/origin/${repairPull.branch}`], signal);
+			if (await this.git(directory, ["rev-parse", `refs/remotes/origin/${repairPull.branch}`], signal) !== expectedHead) throw new Error("fetched owned branch differs from the observed PR head; preserve the workspace");
+		}
+		if (head !== expectedHead) throw new Error("workspace head differs from selected/owned-PR subject; preserve and inspect");
 		if (noWorker && await this.git(directory, ["status", "--porcelain"], signal)) throw new Error("partial or dirty reused checkout; preserve user files");
 		item.preparation = { phase: "ready", owner, head: item.selected.head! }; this.persist(batch);
 		return directory;
 	}
+	private async queueAutomaticRepair(batch: Batch, item: BatchItem, signal: AbortSignal): Promise<void> {
+		const lifecycle = item.prLifecycle;
+		const pull = lifecycle?.pullRequest;
+		const observation = lifecycle?.observation;
+		const owner = `${batch.id}:${item.selected.key}`;
+		const claims = this.claims.list();
+		if (!lifecycle || lifecycle.phase !== "repair-required" || lifecycle.nextSafeAction !== "repair" || !pull || !observation || observation.result !== "failed" || observation.coverage !== "complete" ||
+			!observation.eligibleSubject || !observation.failures?.length || observation.failures.some((failure) => !failure.annotationsComplete || failure.candidateHead !== pull.headSha) ||
+			batch.control !== "active" || signal.aborted || this.running.get(owner)?.item !== item || Date.parse(this.timing.now().toISOString()) >= Date.parse(lifecycle.deadlineAt) || lifecycle.observationCount >= 100 ||
+			!claims.some((claim) => claim.resource === `repo:${item.selected.repo}` && claim.owner === owner) || !claims.some((claim) => claim.resource === `item:${item.selected.key}` && claim.owner === owner) ||
+			item.attempts >= batch.maxAttempts || batch.items.reduce((sum, candidate) => sum + candidate.attempts, 0) >= batch.maxTotalAttempts) {
+			throw new Error("hosted repair authority expired before dispatch; preserve the owned PR and failure evidence");
+		}
+		const failureKey = digest(observation.failures.map((failure) => failure.key).sort().join("\n"));
+		if (lifecycle.repair?.failureKey === failureKey) throw new Error("exact hosted failure attempt was already dispatched; preserve its repair lineage");
+		await this.github.assertFresh(item.selected, pull, signal);
+		if (!observation.policyFingerprint || typeof this.github.hostedCheckPolicyCurrent !== "function" || !await this.github.hostedCheckPolicyCurrent(item.selected.repo, lifecycle.target.ref, item.selected.sourceDefaultRef, observation.policyFingerprint, signal)) throw new Error("hosted check policy changed before automatic repair; keep UNKNOWN for investigation");
+		await this.validateProof(item, signal);
+		const freshClaims = this.claims.list();
+		if (signal.aborted || batch.control !== "active" || Date.parse(this.timing.now().toISOString()) >= Date.parse(lifecycle.deadlineAt) ||
+			!freshClaims.some((claim) => claim.resource === `repo:${item.selected.repo}` && claim.owner === owner) || !freshClaims.some((claim) => claim.resource === `item:${item.selected.key}` && claim.owner === owner)) throw new Error("hosted repair lost active authority before its packet was queued");
+		const attempt = item.ledger.tasks[0]?.attempts.at(-1);
+		if (!attempt?.receipt || attempt.generation !== item.ledger.generation) throw new Error("current admitted repair attempt/receipt is unavailable");
+		const packet = {
+			version: 1, batch: batch.id, item: item.selected.key, generation: item.ledger.generation,
+			acceptanceRevision: item.selected.acceptanceRevision, target: lifecycle.target, pullRequest: pull,
+			candidateHead: pull.headSha, observedAt: observation.observedAt, failureKey, failures: observation.failures,
+		};
+		const bytes = Buffer.from(`${JSON.stringify(packet, null, 2)}\n`);
+		if (bytes.length > 1024 * 1024) throw new Error("hosted repair packet exceeds its immutable evidence bound");
+		const directory = join(this.root, "evidence", batch.id, digest(item.selected.key).slice(0, 16), attempt.id);
+		mkdirSync(directory, { recursive: true, mode: 0o700 });
+		const path = join(directory, `hosted-failure-${failureKey.slice(0, 16)}.json`);
+		if (existsSync(path)) {
+			const existing = readFileSync(path);
+			if (!existing.equals(bytes)) throw new Error("hosted repair artifact path already contains different failure evidence");
+		} else writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
+		const handle = { id: `evidence-${item.repair?.artifacts.length ?? 0}`, path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: attempt.id };
+		item.repair = {
+			generation: item.ledger.generation, head: item.ledger.subject.head ?? item.ledger.subject.base, acceptanceRevision: item.selected.acceptanceRevision!, attemptId: attempt.id,
+			reason: `Hosted failure packet ${handle.id} binds candidate ${pull.headSha} to check-run/attempt evidence; read the complete retained artifact.`,
+			candidateHead: pull.headSha, failureKey, artifacts: [...(item.repair?.artifacts ?? []), handle],
+		};
+		item.prLifecycle = { ...lifecycle, phase: "repairing", nextSafeAction: "repair", repair: { failureKey, candidateHead: pull.headSha, runIds: observation.failures.map((failure) => failure.checkRun.id), attemptId: attempt.id, state: "queued" } };
+		const task = item.ledger.tasks[0];
+		if (task?.state === "VERIFY" || task?.state === "DONE") this.event(item, { kind: "reopen_task", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId: attempt.id as AttemptId, subject: item.ledger.subject, reason: `complete current hosted check diagnostics ${failureKey} require a bounded same-PR repair` });
+		this.persist(batch);
+	}
 	private async execute(batch: Batch, item: BatchItem, signal: AbortSignal, binding?: NativeBinding, bindingError?: string): Promise<void> {
 		validateNativeSDK(this.sdk);
 		if (!binding) throw new Error(bindingError ?? "OMP execution binding unavailable");
-		await this.github.assertFresh(item.selected);
+		await this.github.assertFresh(item.selected, undefined, signal);
 		const directory = await this.prepareWorkspace(batch, item, signal);
 		const mandatory = requiredChecks(item.selected, directory);
 		if (mandatory.length) {
@@ -769,21 +944,33 @@ export class BatchService {
 			const missing = [...new Set(executables)].filter((name) => !capability.available.includes(name));
 			if (missing.length) throw new Error(`task readiness: verifier lacks required executable(s): ${missing.join(", ")}; prepare the supported toolchain before retry`);
 		}
+		if (item.prLifecycle?.phase === "repair-required" && item.prLifecycle.nextSafeAction === "repair") await this.queueAutomaticRepair(batch, item, signal);
+		if (item.prLifecycle?.phase === "repairing") {
+			const lifecycle = item.prLifecycle;
+			this.assertRepairAuthority(batch, item, signal);
+			await this.github.assertFresh(item.selected, lifecycle.pullRequest, signal);
+			const fingerprint = lifecycle.observation?.policyFingerprint;
+			if (!lifecycle.pullRequest || !fingerprint || typeof this.github.hostedCheckPolicyCurrent !== "function" ||
+				!await this.github.hostedCheckPolicyCurrent(item.selected.repo, lifecycle.target.ref, item.selected.sourceDefaultRef, fingerprint, signal)) throw new Error("hosted check policy or owned PR changed before repair worker dispatch");
+			const branch = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${encodeURIComponent(lifecycle.pullRequest.branch)}`, undefined, signal);
+			if (branch.object.sha !== lifecycle.pullRequest.headSha) throw new Error("owned PR branch moved before repair worker dispatch; preserve and reconcile");
+		}
 		if (mandatory.includes("npm test") && item.checkScripts === undefined) {
 			if (item.attempts > 0) throw new Error("original package check definition is unavailable for this retained attempt; inspect and declare explicit requiredChecks before retry");
 			item.checkScripts = packageCheckScripts(directory); this.persist(batch);
 		}
 		if (!item.selected.requiredChecks && mandatory.length) { item.selected.requiredChecks = mandatory; this.persist(batch); }
-		const previous = item.ledger.tasks.flatMap((task) => task.attempts).filter((attempt) => attempt.generation === item.ledger.generation && attempt.subject.head === item.selected.head).at(-1);
+		const previous = item.ledger.tasks.flatMap((task) => task.attempts).filter((attempt) => attempt.generation === item.ledger.generation && attempt.subject.head === item.ledger.subject.head).at(-1);
 		const previousReceipt = previous?.receipt;
-			const protocolRepair = item.repair && item.repair.generation === item.ledger.generation && item.repair.head === item.selected.head && item.repair.acceptanceRevision === item.selected.acceptanceRevision ? item.repair : undefined;
-			if (protocolRepair && !item.ledger.tasks.some((task) => task.attempts.some((attempt) => attempt.id === protocolRepair.attemptId && attempt.generation === item.ledger.generation && attempt.subject.head === item.selected.head && attempt.privateSessions.some((session) => session.started)))) throw new NativeExecutionError("repair-packet-invalid", "retained repair packet has no matching admitted item/attempt execution; quarantine foreign recovery input");
+		const protocolRepair = item.repair && item.repair.generation === item.ledger.generation && item.repair.head === (item.ledger.subject.head ?? item.ledger.subject.base) && item.repair.acceptanceRevision === item.selected.acceptanceRevision ? item.repair : undefined;
+			if (protocolRepair && !item.ledger.tasks.some((task) => task.attempts.some((attempt) => attempt.id === protocolRepair.attemptId && attempt.generation === item.ledger.generation && attempt.privateSessions.some((session) => session.phase === "worker" && session.started)))) throw new NativeExecutionError("repair-packet-invalid", "retained repair packet has no matching admitted item/attempt execution; quarantine foreign recovery input");
 		const repairFeedback = previousReceipt ? JSON.stringify({ attempt: previous!.id, subject: previousReceipt.subject, acceptanceRevision: item.selected.acceptanceRevision, result: previousReceipt.result, failed: previousReceipt.predicates?.filter((predicate) => !predicate.ok), tests: previousReceipt.tests.filter((test) => test.outcome !== "pass"), unresolved: previousReceipt.unresolved }).slice(0, 32768) : protocolRepair?.reason ?? "";
 		if (item.ledger.noProgressAttempts >= 2) {
 			if (item.ledger.replans >= 1) throw new Error("plateau after one bounded replan; new evidence or explicit scope decision required");
 			this.event(item, { kind: "use_replan", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId });
 		}
 		if (!item.ledger.tasks.length) this.event(item, { kind: "record_candidate", expectedRevision: item.ledger.revision, candidate: { taskId: "T1" as TaskId, generation: item.ledger.generation, criterionId: "A1" as CriterionId, title: item.selected.key, deps: [], effect: item.selected.action === "inspect" ? "read" : "write", owner: batch.id, necessity: "explicit selected acceptance remains unproved" } });
+		if (item.prLifecycle?.phase === "repairing") this.assertRepairAuthority(batch, item, signal);
 		item.settlement = undefined;
 		item.attempts += 1;
 		const attempt = `T1-a${item.attempts}` as AttemptId;
@@ -795,7 +982,9 @@ export class BatchService {
 			if (item.operation) item.operations.push(item.operation);
 			item.operation = operationReceipt(batch, item, "worker", "intent", workOperationId, { attemptId: attempt });
 		}
+		if (item.prLifecycle?.phase === "repairing" && item.prLifecycle.repair?.state === "queued") item.prLifecycle = { ...item.prLifecycle, repair: { ...item.prLifecycle.repair, state: "dispatched" } };
 		this.persist(batch);
+		if (item.prLifecycle?.phase === "repairing") this.assertRepairAuthority(batch, item, signal);
 		const onSession = (phase: "worker" | "acceptance", attemptId: AttemptId) => (sessionFile: string) => {
 			if (!item.sessions.includes(sessionFile)) item.sessions.push(sessionFile);
 			this.event(item, { kind: "record_private_session", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId, phase, sessionFile });
@@ -862,15 +1051,16 @@ export class BatchService {
 			});
 			verification += `\n${test}: exit ${result.exitCode}; preview is the last ${Math.min(result.output.length, 16384)} of ${result.output.length} characters. Read the complete retained test artifact.\n${result.output.slice(-16384)}`;
 		}
-		const handles = artifacts.map((path, index) => { const bytes = readFileSync(path); return { id: `evidence-${index}`, path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: attempt }; });
-		item.repair = { generation: item.ledger.generation, head: item.selected.head!, acceptanceRevision: item.selected.acceptanceRevision!, attemptId: attempt, reason: "Acceptance pending for retained candidate", artifacts: handles };
+		const handleOffset = protocolRepair?.failureKey ? protocolRepair.artifacts.length : 0;
+		const handles = artifacts.map((path, index) => { const bytes = readFileSync(path); return { id: `evidence-${handleOffset + index}`, path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: attempt }; });
+		item.repair = { generation: item.ledger.generation, head: item.selected.head!, acceptanceRevision: item.selected.acceptanceRevision!, attemptId: attempt, reason: `${protocolRepair?.reason ?? ""}\nAcceptance pending for retained candidate`, ...(protocolRepair?.candidateHead ? { candidateHead: protocolRepair.candidateHead } : {}), ...(protocolRepair?.failureKey ? { failureKey: protocolRepair.failureKey } : {}), artifacts: [...(protocolRepair?.artifacts ?? []), ...handles] };
 		transitionOperation(item, { phase: "acceptance" }); this.persist(batch);
 			const reviewer = await runNative(this.sdk, this.schema, binding, item, this.root, "acceptance", signal, onSession("acceptance", attempt), onExecutionStart("acceptance", attempt), verification, { attemptId: attempt, artifacts: handles, evidenceRoot: evidenceDir });
 		batch.usage.modelCalls += reviewer.calls;
 		if (reviewer.accepted && reviewer.evidenceCoverageComplete !== true) throw new NativeExecutionError("report-invalid", "acceptance did not establish full coverage of the retained candidate artifacts");
 		for (const artifact of handles) if (createHash("sha256").update(readFileSync(artifact.path)).digest("hex") !== artifact.digest) throw new Error("retained evidence changed during acceptance; proof stale");
 		const reviewFile = join(evidenceDir, "acceptance.txt"); writeFileSync(reviewFile, reviewer.report, { flag: "wx", mode: 0o600 }); artifacts.push(reviewFile);
-		await this.github.assertFresh(item.selected);
+		await this.github.assertFresh(item.selected, undefined, signal);
 		if (await this.git(directory, ["write-tree"], signal) !== tree || await this.git(directory, ["diff", "--no-ext-diff", "--no-textconv", "--name-only"], signal) || await this.git(directory, ["ls-files", "--others", "--exclude-standard"], signal)) throw new Error("workspace changed during verification; proof stale");
 		const changed = (await this.git(directory, ["diff", "--cached", "--name-only", item.selected.head!], signal)).split("\n").filter(Boolean);
 		const workerReportFile = join(evidenceDir, "worker-report.txt");
@@ -921,7 +1111,7 @@ export class BatchService {
 			item.repair.reason = JSON.stringify({ reviewer: reviewer.report, failed: receipt.predicates?.filter((predicate) => !predicate.ok), tests: receipt.tests.filter((test) => test.outcome !== "pass") }).slice(0, 32768);
 			this.persist(batch); return;
 		}
-		const verifiedProof: NonNullable<Batch["items"][number]["proof"]> = { acceptanceRevision: item.selected.acceptanceRevision!, subject: item.selected.head!, tree, digest: digest(artifacts.map((path) => digest(readFileSync(path, "utf8"))).join("")), artifacts, stage: "verified-patch", reviewerSession: reviewer.session };
+		const verifiedProof: NonNullable<Batch["items"][number]["proof"]> = { acceptanceRevision: item.selected.acceptanceRevision!, subject: item.ledger.subject.head ?? item.selected.head ?? item.ledger.subject.base, tree, digest: digest(artifacts.map((path) => digest(readFileSync(path, "utf8"))).join("")), artifacts, stage: "verified-patch", reviewerSession: reviewer.session };
 			if (item.selected.action === "inspect" || batch.convergence && item.selected.action === "patch") {
 			this.event(item, { kind: "finish_task", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, criterionId: "A1" as CriterionId });
 			item.proof = verifiedProof;
@@ -932,12 +1122,156 @@ export class BatchService {
 		item.stage = "VERIFY"; item.blocker = "verified patch retained; explicit owner integration is required before completion";
 		this.persist(batch);
 		if (item.selected.action === "pr-ready") {
-			await this.publish(batch, item, changed, signal);
-			item.blocker = "owned PR created; hosted checks require bounded reconciliation before PR-ready";
+			if (item.prLifecycle?.phase === "repairing") await this.publishRepair(batch, item, changed, signal, binding);
+			else await this.publish(batch, item, changed, signal, binding);
+			item.blocker = item.prLifecycle?.phase === "repairing" ? "same owned PR branch fast-forwarded; hosted checks are being observed automatically" : "owned PR created; hosted checks are being observed automatically";
 			this.persist(batch);
 		}
 	}
-	private async publish(batch: Batch, item: BatchItem, changed: string[], signal: AbortSignal): Promise<void> {
+	private integrateLatestAttempt(item: BatchItem, head: string): void {
+		const task = item.ledger.tasks[0];
+		const attempt = task?.attempts.at(-1);
+		if (item.ledger.subject.head === head && attempt?.integrated) return;
+		if (task?.state === "DONE") throw new Error("completed task cannot be rebound to a publication head without fresh current verification");
+		if (!attempt?.receipt || attempt.generation !== item.ledger.generation || attempt.subject.head !== item.ledger.subject.head) throw new Error("current accepted Factory attempt cannot be integrated into the confirmed PR head");
+		this.event(item, { kind: "integrate_attempt", expectedRevision: item.ledger.revision, taskId: "T1" as TaskId, attemptId: attempt.id, subject: { ...attempt.subject, head } });
+	}
+	private async verifyCommittedHead(batch: Batch, item: BatchItem, binding: NativeBinding, head: string, expectedTree: string, signal: AbortSignal): Promise<void> {
+		if (!item.workspace || !item.proof || item.proof.tree !== expectedTree) throw new Error("committed candidate lacks the previously accepted tree and workspace");
+		const task = item.ledger.tasks[0];
+		const attempt = task?.attempts.at(-1);
+		if (!task || !attempt?.receipt || attempt.state !== "returned" || attempt.generation !== item.ledger.generation || !attempt.integrated || item.ledger.subject.head !== head) throw new Error("post-commit verification is not bound to the latest integrated admitted attempt");
+		if (await this.git(item.workspace, ["rev-parse", "HEAD"], signal) !== head || await this.git(item.workspace, ["rev-parse", "HEAD^{tree}"], signal) !== expectedTree) throw new Error("committed workspace identity changed before current-subject verification");
+		const checks = [...new Set([...(item.selected.requiredChecks ?? []), ...attempt.receipt.tests.filter((claim) => claim.outcome === "pass").map((claim) => claim.command)])];
+		if (!checks.length || checks.length > 32) throw new Error("current-subject verification has no bounded deterministic check set");
+		const executables = checks.map((check) => /^([A-Za-z0-9][A-Za-z0-9._+-]*)(?:\s|$)/.exec(check.trim())?.[1]);
+		if (executables.some((name) => !name)) throw new Error("current-subject verifier command lacks an explicit executable name");
+		const preflight = await this.preflight(item.workspace, executables as string[], signal);
+		if (executables.some((name) => !preflight.available.includes(name!))) throw new Error("current-subject verifier capability is unavailable after commit");
+		const evidenceDir = join(this.root, "evidence", batch.id, digest(item.selected.key).slice(0, 16), attempt.id, `current-head-${head.slice(0, 12)}`);
+		mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+		const testWorkspace = join(evidenceDir, "verification-workspace");
+		if (existsSync(testWorkspace)) throw new Error("retained current-subject verification workspace exists; preserve and inspect before retry");
+		cpSync(item.workspace, testWorkspace, { recursive: true, dereference: false, filter: (path) => !path.endsWith("/.git") });
+		const predicates: PredicateEvidence[] = [];
+		const handles: { id: string; path: string; digest: string; bytes: number; attemptId: string }[] = [];
+		const verificationText: string[] = [`Exact committed subject: ${item.selected.repo}@${head}`, `Exact tree: ${expectedTree}`, `Acceptance revision: ${item.selected.acceptanceRevision}`];
+		for (const [index, check] of checks.entries()) {
+			const result = await this.runVerification(testWorkspace, check, signal);
+			const bytes = Buffer.from(`command: ${check}\nexit: ${result.exitCode}\n${result.output}`);
+			const path = join(evidenceDir, `current-test-${index}.txt`);
+			writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
+			const id = `evidence-${item.proof.artifacts.length + index}`;
+			handles.push({ id, path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: attempt.id });
+			predicates.push({ phase: "verification", item: check, ok: result.exitCode === 0, note: `exit ${result.exitCode}; retained artifact ${path}` });
+			verificationText.push(`${check}: exit ${result.exitCode}; complete output is retained as ${id}.`);
+			if (result.exitCode !== 0) throw new Error(`deterministic verification failed on exact committed head ${head}: ${check}`);
+		}
+		if (item.prLifecycle?.phase === "repairing") this.assertRepairAuthority(batch, item, signal);
+		else this.assertPublicationAuthority(batch, item, signal, this.timing.now());
+		if (await this.git(item.workspace, ["rev-parse", "HEAD"], signal) !== head || await this.git(item.workspace, ["rev-parse", "HEAD^{tree}"], signal) !== expectedTree || await this.git(item.workspace, ["status", "--porcelain", "--untracked-files=all"], signal)) throw new Error("workspace changed during current-subject verification; proof is stale");
+		const onSession = (session: string) => { if (!item.sessions.includes(session)) item.sessions.push(session); this.persist(batch); };
+		const reviewer = await runNative(this.sdk!, this.schema, binding, item, this.root, "acceptance", signal, onSession, () => {}, verificationText.join("\n"), { attemptId: attempt.id, artifacts: handles, evidenceRoot: evidenceDir });
+		batch.usage.modelCalls += reviewer.calls;
+		if (item.prLifecycle?.phase === "repairing") this.assertRepairAuthority(batch, item, signal);
+		else this.assertPublicationAuthority(batch, item, signal, this.timing.now());
+		if (!reviewer.accepted || reviewer.evidenceCoverageComplete !== true || !reviewer.predicates.some((predicate) => predicate.phase === "acceptance" && predicate.ok) || reviewer.predicates.some((predicate) => predicate.phase === "acceptance" && !predicate.ok)) throw new NativeExecutionError("report-invalid", "fresh acceptance did not positively cover every exact committed-head verification artifact");
+		for (const handle of handles) if (createHash("sha256").update(readFileSync(handle.path)).digest("hex") !== handle.digest) throw new Error("current-subject verification artifact changed during independent acceptance");
+		const acceptancePath = join(evidenceDir, "current-acceptance.txt");
+		writeFileSync(acceptancePath, reviewer.report, { flag: "wx", mode: 0o600 });
+		const criterionAssumptions = item.ledger.criteria.find((criterion) => criterion.id === task.criterionId)?.assumptions ?? [];
+		const assumptions = criterionAssumptions.map((assumption) => {
+			if (assumption.kind !== "dependency-outcome") return assumption;
+			const observed = item.ledger.assumptionValues?.find((entry) => entry.kind === "dependency-outcome" && entry.taskId === assumption.taskId);
+			if (observed) return observed;
+			const dependency = item.ledger.tasks.find((candidate) => candidate.id === assumption.taskId);
+			return { ...assumption, value: dependency && criterionProven(item.ledger, dependency.criterionId) ? "proven" : "unproven" };
+		});
+		const current: CurrentVerificationReceipt = {
+			version: 1, taskId: task.id, attemptId: attempt.id, generation: item.ledger.generation,
+			subject: { ...item.ledger.subject, head }, tree: expectedTree,
+			acceptanceRevision: item.selected.acceptanceRevision!, assumptions,
+			predicates: [...predicates, ...reviewer.predicates], acceptanceSession: reviewer.session, checkedAt: this.timing.now().toISOString(),
+		};
+		this.event(item, { kind: "record_current_verification", expectedRevision: item.ledger.revision, taskId: task.id, attemptId: attempt.id, receipt: current });
+		if (task.state === "VERIFY") this.event(item, { kind: "finish_task", expectedRevision: item.ledger.revision, taskId: task.id, criterionId: task.criterionId });
+		const artifacts = [...new Set([...item.proof.artifacts, ...handles.map((handle) => handle.path), acceptancePath])];
+		item.proof = { ...item.proof, subject: head, tree: expectedTree, artifacts, reviewerSession: reviewer.session, digest: digest(artifacts.map((path) => digest(readFileSync(path, "utf8"))).join("")) };
+		if (!item.sessions.includes(reviewer.session)) item.sessions.push(reviewer.session);
+		if (!item.ledger.tasks[0]?.attempts.at(-1)?.currentVerification || item.ledger.tasks[0]?.attempts.at(-1)?.receipt?.subject.head === head) throw new Error("current verification failed to preserve a distinct worker receipt and proof identity");
+		this.persist(batch);
+		await this.validateProof(item, signal);
+	}
+	private assertRepairAuthority(batch: Batch, item: BatchItem, signal: AbortSignal): void {
+		const owner = `${batch.id}:${item.selected.key}`;
+		const lifecycle = item.prLifecycle;
+		const claims = this.claims.list();
+		const packet = item.repair?.artifacts.find((artifact) => lifecycle?.repair && artifact.path.endsWith(`/hosted-failure-${lifecycle.repair.failureKey.slice(0, 16)}.json`));
+		let packetCurrent = false;
+		if (packet) {
+			try {
+				const actual = realpathSync(packet.path); const stat = lstatSync(actual); const bytes = readFileSync(actual);
+				packetCurrent = actual === resolve(packet.path) && stat.isFile() && stat.nlink === 1 && stat.size === packet.bytes && bytes.length === packet.bytes && createHash("sha256").update(bytes).digest("hex") === packet.digest;
+			} catch { packetCurrent = false; }
+		}
+		if (signal.aborted || batch.control !== "active" || this.running.get(owner)?.item !== item || item.stage !== "RUNNING" && item.stage !== "VERIFY" ||
+			!lifecycle || lifecycle.phase !== "repairing" || lifecycle.nextSafeAction !== "repair" || !lifecycle.repair || !["queued", "dispatched"].includes(lifecycle.repair.state) || !lifecycle.pullRequest ||
+			lifecycle.owner !== owner || lifecycle.generation !== item.ledger.generation || lifecycle.target.ref !== item.selected.baseRef || lifecycle.target.sha !== item.selected.base ||
+			Date.parse(this.timing.now().toISOString()) >= Date.parse(lifecycle.deadlineAt) || lifecycle.observationCount >= 100 ||
+			!packetCurrent ||
+			!claims.some((claim) => claim.resource === `repo:${item.selected.repo}` && claim.owner === owner) || !claims.some((claim) => claim.resource === `item:${item.selected.key}` && claim.owner === owner)) {
+			throw new Error("same-PR repair authority expired or lost; preserve the confirmed branch and resume only through active claimed execution");
+		}
+	}
+	private async publishRepair(batch: Batch, item: BatchItem, changed: string[], signal: AbortSignal, binding: NativeBinding): Promise<void> {
+		const lifecycle = item.prLifecycle;
+		const pull = lifecycle?.pullRequest;
+		if (!changed.length || changed.some((path) => path.startsWith(".github/workflows/"))) throw new Error("repair produced no publishable source change or touched workflow policy; preserve the verified workspace");
+		if (!pull || lifecycle?.phase !== "repairing" || item.workspace === undefined) throw new Error("same-PR repair lacks its original pull request and workspace binding");
+		await this.validateProof(item, signal);
+		this.assertRepairAuthority(batch, item, signal);
+		const checks = requiredChecks(item.selected, item.workspace);
+		if (checks.length) {
+			const executables = checks.map((check) => {
+				const executable = /^([A-Za-z0-9][A-Za-z0-9._+-]*)(?:\s|$)/.exec(check.trim())?.[1];
+				if (!executable) throw new Error("repair verifier capability cannot be revalidated before the same-PR push");
+				return executable;
+			});
+			const available = await this.preflight(item.workspace, executables, signal);
+			if ([...new Set(executables)].some((name) => !available.available.includes(name))) throw new Error("repair verifier capability changed before the same-PR push");
+		}
+		const parent = await this.git(item.workspace, ["rev-parse", "HEAD"], signal);
+		if (parent !== pull.headSha) throw new Error("repair workspace parent differs from the exact observed PR head; no fast-forward attempted");
+		await this.git(item.workspace, ["-c", "user.name=Luna Factory", "-c", "user.email=factory@localhost", "commit", "-m", `fix: repair ${item.selected.key} hosted check failure`], signal);
+		const sha = await this.git(item.workspace, ["rev-parse", "HEAD"], signal);
+		const tree = await this.git(item.workspace, ["rev-parse", "HEAD^{tree}"], signal);
+		if (tree !== item.proof!.tree) throw new Error("repair publication tree differs from independently verified candidate");
+		this.integrateLatestAttempt(item, sha);
+		await this.verifyCommittedHead(batch, item, binding, sha, tree, signal);
+		await this.github.assertFresh(item.selected, pull, signal);
+		const remote = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${encodeURIComponent(pull.branch)}`, undefined, signal);
+		if (remote.object.sha !== pull.headSha) throw new Error("owned PR branch moved before repair push; preserve and reconcile");
+		if (!item.operation) throw new Error("repair worker operation receipt unavailable");
+		item.operations.push(item.operation);
+		item.operation = operationReceipt(batch, item, "push", "intent", `${batch.id}:${item.selected.key}:push`, { branch: pull.branch, sha, subject: { ...item.ledger.subject, head: sha } });
+		this.persist(batch);
+		this.assertRepairAuthority(batch, item, signal);
+		await this.validateProof(item, signal);
+		await this.github.assertFresh(item.selected, pull, signal);
+		const policyFingerprint = item.prLifecycle?.observation?.policyFingerprint;
+		if (!policyFingerprint || typeof this.github.hostedCheckPolicyCurrent !== "function" || !await this.github.hostedCheckPolicyCurrent(item.selected.repo, lifecycle.target.ref, item.selected.sourceDefaultRef, policyFingerprint, signal)) throw new Error("hosted check policy changed before the same-PR push; preserve the verified candidate");
+		const currentBranch = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${encodeURIComponent(pull.branch)}`, undefined, signal);
+		if (currentBranch.object.sha !== pull.headSha) throw new Error("owned PR branch moved immediately before repair push; do not overwrite it");
+		this.assertRepairAuthority(batch, item, signal);
+		await this.pushOwnedBranch(item.workspace, pull.branch, signal);
+		transitionOperation(item, { state: "applied" }); this.persist(batch);
+		await this.reconcileEffect(batch, item, signal);
+		if (item.operation?.phase !== "pr" || item.operation.state !== "applied" || item.prLifecycle?.pullRequest?.identity !== pull.identity || item.prLifecycle.pullRequest.headSha !== sha) throw new Error("same-PR repair push could not be confirmed on the original PR; preserve claims and reconcile");
+		item.prLifecycle = { ...item.prLifecycle, phase: "published", nextSafeAction: "observe-after", repair: undefined, observedAt: undefined, observation: undefined, nextObservationAt: this.timing.now().toISOString(), pullRequest: { ...item.prLifecycle.pullRequest, mergeSha: undefined } };
+		item.stage = "VERIFY";
+		this.persist(batch);
+	}
+	private async publish(batch: Batch, item: BatchItem, changed: string[], signal: AbortSignal, binding: NativeBinding): Promise<void> {
 		if (!changed.length) throw new Error("no patch to publish; retained inspection is not PR-ready");
 		if (changed.some((path) => path.startsWith(".github/workflows/"))) throw new Error("Factory refuses workflow publication; retained patch remains inspectable");
 		const lifecycle = item.prLifecycle;
@@ -945,20 +1279,23 @@ export class BatchService {
 			lifecycle.outcome !== "pr-ready" || lifecycle.target.ref !== item.selected.baseRef || lifecycle.target.sha !== item.selected.base) {
 			throw new Error("PR publication lacks an admitted exact target/outcome lifecycle; preserve the verified patch");
 		}
-		await this.validateProof(item);
+		await this.validateProof(item, signal);
 		this.assertPublicationAuthority(batch, item, signal, new Date());
 		const branch = `factory/${batch.id}/${item.selected.number}`;
 		await this.git(item.workspace!, ["-c", "user.name=Luna Factory", "-c", "user.email=factory@localhost", "commit", "-m", `fix: address ${item.selected.key}`], signal);
 		const sha = await this.git(item.workspace!, ["rev-parse", "HEAD"], signal);
-		if (await this.git(item.workspace!, ["rev-parse", "HEAD^{tree}"], signal) !== item.proof!.tree) throw new Error("publication tree differs from verified patch");
+		const tree = await this.git(item.workspace!, ["rev-parse", "HEAD^{tree}"], signal);
+		if (tree !== item.proof!.tree) throw new Error("publication tree differs from verified patch");
+		this.integrateLatestAttempt(item, sha);
+		await this.verifyCommittedHead(batch, item, binding, sha, tree, signal);
 		if (!item.operation) throw new Error("verified work operation receipt unavailable");
 		item.operations.push(item.operation);
 		const subject = { ...item.ledger.subject, head: sha };
 		item.operation = operationReceipt(batch, item, "push", "intent", `${batch.id}:${item.selected.key}:push`, { branch, sha, subject });
 		this.persist(batch);
-		await this.validateProof(item);
+		await this.validateProof(item, signal);
 		this.assertPublicationAuthority(batch, item, signal, new Date());
-		await command("git", ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=!gh auth git-credential", "push", "origin", `HEAD:refs/heads/${branch}`], { cwd: item.workspace, signal, timeout: 120_000, env: { PATH: process.env.PATH, HOME: this.root, GH_TOKEN: this.github.token, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+		await this.pushOwnedBranch(item.workspace!, branch, signal);
 		transitionOperation(item, { state: "applied" }); this.persist(batch);
 		await this.createPRFromConfirmedPush(batch, item, signal);
 	}
@@ -988,13 +1325,18 @@ export class BatchService {
 			throw new Error("confirmed push is not bound to the original admitted outcome, generation and branch");
 		}
 		this.assertPublicationAuthority(batch, item, signal, new Date());
-		await this.validateProof(item);
-		const ref = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${operation.branch}`);
+		await this.validateProof(item, signal);
+		const ref = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${operation.branch}`, undefined, signal);
 		if (ref.object.sha !== operation.sha) throw new Error("remote branch differs from the confirmed push; preserve and reconcile");
-		const existing = await this.github.request<Array<unknown>>(`repos/${item.selected.repo}/pulls?state=all&head=${encodeURIComponent(`${item.selected.repo.split("/")[0]}:${operation.branch}`)}&per_page=100`);
+		const existing = await this.github.request<Array<unknown>>(`repos/${item.selected.repo}/pulls?state=all&head=${encodeURIComponent(`${item.selected.repo.split("/")[0]}:${operation.branch}`)}&per_page=100`, undefined, signal);
 		if (existing.length >= 100 || existing.length > 0) throw new Error("a PR candidate or incomplete search exists on the owned branch; reconcile it before publication");
-		await this.validateProof(item);
+		await this.validateProof(item, signal);
 		this.assertPublicationAuthority(batch, item, signal, new Date());
+		const localHead = await this.git(item.workspace!, ["rev-parse", "HEAD"], signal);
+		const localTree = await this.git(item.workspace!, ["rev-parse", "HEAD^{tree}"], signal);
+		if (localHead !== operation.sha || !item.proof?.tree || localTree !== item.proof.tree) throw new Error("confirmed initial branch does not preserve its independently accepted tree");
+		if (item.ledger.subject.head !== operation.sha || !item.ledger.tasks[0]?.attempts.at(-1)?.currentVerification) throw new Error("confirmed branch has no persisted exact current-subject verification; do not promote it during reconciliation");
+		this.persist(batch);
 		item.operations.push(operation);
 		item.operation = operationReceipt(batch, item, "pr", "intent", `${owner}:pr`, { branch, sha: operation.sha, subject: operation.subject });
 		this.persist(batch);
@@ -1018,7 +1360,7 @@ export class BatchService {
 		item.stage = "VERIFY"; item.blocker = "owned PR created; hosted checks require bounded reconciliation before PR-ready";
 		this.persist(batch);
 	}
-	private async reconcileEffect(batch: Batch, item: BatchItem): Promise<void> {
+	private async reconcileEffect(batch: Batch, item: BatchItem, signal?: AbortSignal): Promise<void> {
 		const operation = item.operation!;
 		try {
 			const separator = operation.owner?.indexOf(":") ?? -1;
@@ -1028,9 +1370,9 @@ export class BatchService {
 				!item.prLifecycle || item.prLifecycle.owner !== operation.owner || item.prLifecycle.generation !== operation.generation || item.prLifecycle.outcome !== "pr-ready") {
 				throw new Error("publication effect is not bound to the original admitted owner, generation, target and outcome");
 			}
-			const ref = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${operation.branch}`);
+			const ref = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${operation.branch}`, undefined, signal);
 			if (ref.object.sha !== operation.sha) throw new Error("remote branch differs from recorded effect");
-			const pulls = await this.github.request<Array<{ id: number; node_id: string; number: number; html_url: string; state: string; draft: boolean; head: { sha: string; ref: string; repo: { full_name: string } | null }; base: { sha: string; ref: string; repo: { full_name: string } | null }; merge_commit_sha?: string | null; body: string; merged_at?: string | null }>>(`repos/${item.selected.repo}/pulls?state=all&head=${encodeURIComponent(`${item.selected.repo.split("/")[0]}:${operation.branch}`)}&per_page=100`);
+			const pulls = await this.github.request<Array<{ id: number; node_id: string; number: number; html_url: string; state: string; draft: boolean; head: { sha: string; ref: string; repo: { full_name: string } | null }; base: { sha: string; ref: string; repo: { full_name: string } | null }; merge_commit_sha?: string | null; body: string; merged_at?: string | null }>>(`repos/${item.selected.repo}/pulls?state=all&head=${encodeURIComponent(`${item.selected.repo.split("/")[0]}:${operation.branch}`)}&per_page=100`, undefined, signal);
 			if (pulls.length >= 100) throw new Error("owned PR search reached its bound; exact operation reconciliation remains UNKNOWN");
 			const marker = operation.id.replace(/:push$/, ":pr");
 			const markerText = `Factory operation: ${marker}`;
@@ -1038,6 +1380,9 @@ export class BatchService {
 				canonicalPullUrl(pull.html_url, item.selected.repo, pull.number) && pull.head.sha === operation.sha && pull.head.ref === operation.branch && pull.head.repo?.full_name.toLowerCase() === item.selected.repo &&
 				pull.base.ref === item.prLifecycle!.target.ref && pull.base.sha === item.prLifecycle!.target.sha && pull.base.repo?.full_name.toLowerCase() === item.selected.repo &&
 				pull.body?.split(/\r?\n/).includes(markerText));
+			if (pulls.length === 0 && operation.phase === "push" && operation.state === "applied" && item.prLifecycle?.phase === "repairing") {
+				throw new Error("the existing owned PR is not yet visible on its confirmed repair branch; preserve UNKNOWN and reconcile before retry");
+			}
 			if (pulls.length === 0 && operation.phase === "push" && operation.state === "applied") {
 				if (item.stage !== "CANCELLED" && item.stage !== "EXCLUDED") item.stage = "VERIFY";
 				item.prLifecycle = { ...item.prLifecycle!, phase: "admitted", nextSafeAction: "publish" };
@@ -1048,6 +1393,17 @@ export class BatchService {
 			if (pulls.length !== 1 || matches.length !== 1) throw new Error("same-repository PR, owned branch, target, head, and logical operation identity are not uniquely reconciled; do not repeat publication");
 			const pull = matches[0]!;
 			if (pull.state !== "open" || pull.merged_at) throw new Error("owned PR is no longer open; preserve its exact state for explicit reconciliation");
+			const repairPush = operation.phase === "push" && item.prLifecycle!.phase === "repairing" && item.prLifecycle!.repair?.state === "dispatched";
+			if (operation.phase === "push") {
+				const currentVerification = item.ledger.tasks[0]?.attempts.at(-1)?.currentVerification;
+				if (item.ledger.subject.head !== operation.sha || currentVerification?.subject.head !== operation.sha) throw new Error("confirmed branch lacks persisted exact current-subject verification; preserve UNKNOWN rather than promoting a prior receipt");
+				if (!item.workspace || !item.proof) throw new Error("confirmed branch cannot be reconciled without retained proof and workspace");
+				await this.validateProof(item);
+				const localHead = await this.git(item.workspace, ["rev-parse", "HEAD"]);
+				const localTree = await this.git(item.workspace, ["rev-parse", "HEAD^{tree}"]);
+				if (localHead !== operation.sha || localTree !== item.proof.tree || localTree !== currentVerification.tree) throw new Error("confirmed branch tree differs from its persisted current-subject verification");
+				item.operations.push(operation.state === "applied" ? operation : { ...operation, state: "applied" });
+			}
 			if (operation.phase === "push") {
 				item.operation = {
 					...operation, id: marker, phase: "pr", effect: "pull-request-create", state: "applied",
@@ -1056,7 +1412,7 @@ export class BatchService {
 			} else {
 				transitionOperation(item, { state: "applied", url: pull.html_url, resultHandle: pull.html_url });
 			}
-			item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: {
+			item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", ...(repairPush ? { repair: undefined, observedAt: undefined, observation: undefined, nextObservationAt: this.timing.now().toISOString() } : {}), pullRequest: {
 				repository: item.selected.repo, identity: pull.node_id, number: pull.number, url: pull.html_url, branch: pull.head.ref, headSha: pull.head.sha,
 				baseRef: pull.base.ref, baseSha: pull.base.sha, ...(pull.merge_commit_sha ? { mergeSha: pull.merge_commit_sha } : {}), operationId: marker,
 			} };
