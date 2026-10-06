@@ -99,6 +99,14 @@ fi
 if [[ "${1:-}" == run && "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
   [[ "$*" == *"--env LUNA_FACTORY_ENABLED"* && "$*" == *"--env LUNA_FACTORY_CAPACITY"* ]] || exit 19
 fi
+if [[ "${1:-}" == run && -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "$EXPECT_RTK_DISABLED" == unset ]]; then
+    [[ "$*" != *"--env RTK_DISABLED"* ]] || exit 19
+  else
+    [[ "${RTK_DISABLED:-}" == "$EXPECT_RTK_DISABLED" && "$*" == *"--env RTK_DISABLED"* ]] || exit 19
+    [[ "$*" != *"RTK_DISABLED=$EXPECT_RTK_DISABLED"* ]] || exit 19
+  fi
+fi
 case "${1:-} ${2:-} ${3:-}" in
   "system connection list")
     [[ "${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\tidentity\ttrue\n'
@@ -123,6 +131,18 @@ fi
 if [[ "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
   [[ "${APPTAINERENV_LUNA_FACTORY_ENABLED:-}" == 1 && "${APPTAINERENV_LUNA_FACTORY_CAPACITY:-}" == 7 ]] || exit 19
   [[ "$*" != *LUNA_FACTORY* && "$*" != *" 7 "* ]] || exit 19
+fi
+if [[ -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "$EXPECT_RTK_DISABLED" == unset ]]; then
+    [[ ! -v APPTAINERENV_RTK_DISABLED ]] || exit 19
+  else
+    [[ "${APPTAINERENV_RTK_DISABLED:-}" == "$EXPECT_RTK_DISABLED" ]] || exit 19
+    for arg in "$@"; do
+      case "$arg" in
+        RTK_DISABLED|RTK_DISABLED=*|"$EXPECT_RTK_DISABLED") exit 19 ;;
+      esac
+    done
+  fi
 fi
 [[ "${APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT:-}" == /claims ]] || exit 19
 printf '%s\n' "$*" >>"${APPTAINER_LOG:-/dev/null}"
@@ -289,6 +309,33 @@ FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
 [[ "$status" -eq 18 ]] || fail "Factory-enabled Apptainer launcher did not reach OMP after its verifier probe: $output"
 grep -q -- '--factory-verifier-probe' "$home/apptainer-verifier.log" || fail "just Apptainer launch skipped the verifier probe"
 unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY EXPECT_FACTORY_ENV
+
+scenario="just launcher forwards only explicit RTK_DISABLED by name to Podman"
+for rtk_value in 0 1; do
+  export RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value"
+  run_just review-appliance owner/repo
+  [[ "$status" -eq 17 ]] || fail "Podman launch failed with explicit RTK_DISABLED=$rtk_value: $output"
+  log_contains '--env RTK_DISABLED' "$podman_log"
+  log_not_contains "RTK_DISABLED=$rtk_value" "$podman_log"
+done
+unset RTK_DISABLED EXPECT_RTK_DISABLED
+export EXPECT_RTK_DISABLED=unset
+run_just review-appliance owner/repo
+[[ "$status" -eq 17 ]] || fail "Podman launch failed with RTK_DISABLED unset: $output"
+if grep -q -- '--env RTK_DISABLED' "$podman_log"; then fail "Podman launcher invented an RTK_DISABLED default"; fi
+
+scenario="just Apptainer forwards and clears only explicit RTK_DISABLED"
+for rtk_value in 0 1; do
+  export RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" APPTAINERENV_RTK_DISABLED=stale
+  FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
+  [[ "$status" -eq 18 ]] || fail "Apptainer launch failed with explicit RTK_DISABLED=$rtk_value: $output"
+done
+unset RTK_DISABLED
+export EXPECT_RTK_DISABLED=unset APPTAINERENV_RTK_DISABLED=stale FAKE_PODMAN_INFO_FAIL=1
+run_just review-appliance owner/repo
+[[ "$status" -eq 18 ]] || fail "Apptainer launch failed with RTK_DISABLED unset: $output"
+unset EXPECT_RTK_DISABLED APPTAINERENV_RTK_DISABLED
+export FAKE_PODMAN_INFO_FAIL=0
 
 scenario="doctor diagnoses missing squashfuse"
 mv "$fake_bin/squashfuse_ll" "$scratch/squashfuse_ll"
