@@ -19,15 +19,15 @@
 # what Renovate can compare against, and a pin no tool can track is a stale pin.
 
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/base
-ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:9ef262a9039b756d0af91bf1fc851576a56ea7657f8f8a5020fa9dc2bf54b3bb
+ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:f6d95ea075affb8031ca8fa8929d95cae45588d507c239b2bb2967f9925e14a5
 # The builder is the shell-enabled sibling of the same FSDK series, so the
 # binaries staged out of it link against the base's own glibc.
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/lab-runner
-ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:b6fdb5ea6f3a72cde19bb81b137c0db622b656b316f09c6f0e418ad65dd665f0
+ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:1436bce126a1faa67cd13e13ebce710c1c24811d02a3074a427f28628f413162
 # Linux audio packages are absent from the FSDK runtime seam. The pinned audio
 # stage contributes only the PulseAudio/ALSA libraries and configuration.
 # renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
-ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:35f36cc92b99eca31314b1268a6551be9522884d3fccfe6b73f82a5d7f217d72
+ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:b3188b17a2b94c6a5484c02582a9f3b045110d57b3c0e87a14a4f0ab291723c0
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
 ARG OMP_VERSION=18.5.0
