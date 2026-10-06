@@ -1036,4 +1036,6 @@ assert_eq "$bluefin_cred_out" "custom-omp-token copilot-developer-cli" "bin/blue
 omp_cred_out="$(env -i PATH="$mock_cred_bin:/usr/bin:/bin" HOME="$scratch/home" BLUEFIN_OMP_STATE="$custom_state" "${repo_root}/bin/omp-review" projectbluefin/review 2>/dev/null)" || fail "bin/omp-review credential test failed"
 assert_eq "$omp_cred_out" "custom-omp-token copilot-developer-cli" "bin/omp-review resolves BLUEFIN_OMP_STATE and COPILOT_INTEGRATION_ID"
 
+python3 tests/fixtures/launcher_diagnostic_collector.py
+
 echo "launcher-contract: all shorthand forms and launcher parity assertions passed"

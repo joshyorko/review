@@ -10,6 +10,8 @@ bin/omp-review org:acme
 
 The rootless launcher prefers Podman with `krun` and KVM, then reports missing prerequisites and falls back to isolated Apptainer. Runs stay in the foreground. `Ctrl-C` stops only the active invocation.
 
+After a Podman/krun run, a private sibling collector waits for the direct launcher PID and Linux process start time to settle, then makes a label-scoped, non-streaming Podman event query with a three-second command deadline and up to 250 ms for TERM before KILL. Its mode-0600 scalar receipt remains under `${XDG_STATE_HOME:-$HOME/.local/state}/bluefin/instances/<instance>/diagnostics/`. Clean exits and exit 130 stay quiet. Other evidenced non-clean results print one bounded diagnostic line; unavailable collection and event-query results remain quiet in the terminal and are recorded as unknown. The `podman_oom_reported` result records Podman's OOM flag and does not attribute guest-kernel or host memory pressure. A terminated query with status 137 is labeled `query_terminated`; a container exit code 137 alone remains unknown. The launcher keeps direct foreground `exec`, `--rm`, TTY and signal delivery; Apptainer is unchanged.
+
 When `LUNA_FACTORY_ENABLED=1`, the packaged launcher and entrypoint qualify the selected runtime with Factory's bubblewrap preflight and a harmless sandbox test before OMP opens. `just review-doctor` reports runtime prerequisites and packaged verifier qualification separately. A failed probe refuses Factory-enabled startup; Apptainer is qualified independently when selected.
 
 ## Scope, mode, and authentication
