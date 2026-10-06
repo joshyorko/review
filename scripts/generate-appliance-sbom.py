@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write the SPDX manifest for the review appliance's derived OMP and fetched components.
 
-This runs inside the build, where each source, patch, addon, and runtime
+This runs inside the build, where each source archive, patch, add-on, and runtime
 artifact has already passed its pinned integrity check. It writes SPDX 2.3 JSON
 to ``/usr/share/bluefin/review/sbom.spdx.json`` for the publication workflow.
 """
@@ -91,9 +91,25 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     node_version = require_non_empty(args.node_version, "Node.js version")
     gh_version = require_non_empty(args.gh_version, "gh version")
     source_commit = require_commit(args.omp_source_commit, "omp source commit")
+    clipboard_patch_source_commit = require_commit(
+        args.omp_clipboard_patch_source_commit, "omp clipboard patch source commit"
+    )
+    if clipboard_patch_source_commit != source_commit:
+        raise SystemExit(
+            "omp clipboard patch source commit must match the pinned OMP source commit"
+        )
     omp_sha = require_sha256(args.omp_sha256, "omp_sha256")
     source_sha = require_sha256(args.omp_source_sha256, "omp_source_sha256")
     patch_sha = require_sha256(args.omp_patch_sha256, "omp_patch_sha256")
+    clipboard_patch_sha = require_sha256(
+        args.omp_clipboard_patch_sha256, "omp_clipboard_patch_sha256"
+    )
+    clipboard_patch_path = require_non_empty(
+        args.omp_clipboard_patch_path, "omp clipboard patch path"
+    )
+    clipboard_patch_name = pathlib.PurePosixPath(clipboard_patch_path).name
+    if not re.fullmatch(r"[A-Za-z0-9._-]+\.patch", clipboard_patch_name):
+        raise SystemExit("omp clipboard patch path must end in a patch filename")
     native_sha = require_sha512(args.omp_native_sha512, "omp_native_sha512")
     gh_sha = require_sha256(args.gh_sha256, "gh_sha256")
     node_sha = require_sha256(args.node_sha256, "node_sha256")
@@ -118,6 +134,10 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
         f"https://github.com/joshyorko/review/blob/{args.revision}/"
         "patches/omp/memory-backend-registration.patch"
     )
+    clipboard_patch_url = (
+        f"https://github.com/joshyorko/review/blob/{args.revision}/"
+        f"patches/omp/{clipboard_patch_name}"
+    )
 
     return [
         package(
@@ -127,8 +147,9 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             f"pkg:generic/omp-derived@{omp_version}",
             "Review-derived OMP executable built locally from the pinned source archive "
             f"at {source_commit} (SHA-256 {source_sha}) with the generic memory registration "
-            f"patch (SHA-256 {patch_sha}), Bun {omp_bun_version}, and verified native addon "
-            f"{native_package}@{natives_version}. Installed to /usr/bin/omp.",
+            f"patch (SHA-256 {patch_sha}) and clipboard truthfulness patch "
+            f"(SHA-256 {clipboard_patch_sha}), Bun {omp_bun_version}, and verified native "
+            f"addon {native_package}@{natives_version}. Installed to /usr/bin/omp.",
             "SHA256",
             omp_sha,
         ),
@@ -151,6 +172,17 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             "its SHA-256 is verified before application.",
             "SHA256",
             patch_sha,
+        ),
+        package(
+            "omp-clipboard-truthfulness-patch",
+            clipboard_patch_source_commit,
+            clipboard_patch_url,
+            f"pkg:generic/omp-clipboard-truthfulness-patch@{clipboard_patch_source_commit}",
+            "Review patch for the pinned OMP source that changes /dump and /dump all status "
+            "messages to report unconfirmed clipboard delivery; its SHA-256 is verified "
+            "before application.",
+            "SHA256",
+            clipboard_patch_sha,
         ),
         package(
             "omp-native-addon",
@@ -213,6 +245,9 @@ def main() -> int:
     parser.add_argument("--omp-source-commit", required=True)
     parser.add_argument("--omp-source-sha256", required=True)
     parser.add_argument("--omp-patch-sha256", required=True)
+    parser.add_argument("--omp-clipboard-patch-source-commit", required=True)
+    parser.add_argument("--omp-clipboard-patch-sha256", required=True)
+    parser.add_argument("--omp-clipboard-patch-path", required=True)
     parser.add_argument("--omp-bun-version", required=True)
     parser.add_argument("--node-version", required=True)
     parser.add_argument("--node-sha256", required=True)
