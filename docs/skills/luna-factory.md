@@ -109,3 +109,26 @@ reviewer tasks; unrelated Review work remains usable. Resource ownership is
 keyed by the lower-case repository and item identity in the state root.
 Remote, gateway, and distributed workers are deferred, as are parent #111 gates;
 this skill does not claim dogfood or packaged-runtime success without evidence.
+
+Newly admitted `/factory start pr-ready` work retains a version-4 owned-PR
+lifecycle bound to its original generation, operation, same-repository PR,
+target ref/SHA, branch and head. PR creation alone remains `VERIFY`; explicit
+`/factory reconcile <batch>` is observation-only and records one bounded
+hosted-check observation, backoff and next safe action without a model
+heartbeat. A confirmed push can create its one PR only through active Factory
+execution after `/factory resume` reacquires repository/item claims; this
+partial slice does not provide the complete no-follow-up lifecycle. The
+observed policy combines classic branch protection with applicable
+repository/parent rulesets, and each check must match its declared GitHub App
+source. A required context observed on the current synthetic merge SHA selects
+that subject; otherwise the head SHA is eligible. GitHub Actions checks also
+require a matching successful workflow run, eligible event and exact attempt.
+An active applicable ruleset rule this slice cannot model, including `workflows`,
+and a `merge_group` workflow event remain `UNKNOWN`. The complete policy
+fingerprint is checked again after run observation and before readiness is
+stored, and the independent local proof plus current selection/PR are also
+revalidated. Missing policy/source/subject coverage, skipped jobs, cancelled
+runs, incomplete pages, or changes during observation remain `UNKNOWN`. A real
+failure exposes `repair-review`; repair dispatch remains unimplemented in this
+partial slice. Old retained versions never gain PR-ready authority during
+decode.

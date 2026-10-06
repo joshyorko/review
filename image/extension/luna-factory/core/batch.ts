@@ -34,6 +34,32 @@ export interface SelectedItem {
 	blocker?: string;
 }
 export interface Prerequisite { item: string; requires: string; stage: OutcomeStage }
+export interface OwnedPullRequestLifecycle {
+	readonly version: 1;
+	readonly generation: string;
+	readonly owner: string;
+	readonly outcome: "pr-ready";
+	readonly target: { readonly ref: string; readonly sha: string };
+	readonly phase: "admitted" | "published" | "waiting" | "repair-required" | "unknown" | "ready";
+	readonly pullRequest?: { readonly repository: string; readonly identity: string; readonly number: number; readonly url: string; readonly branch: string; readonly headSha: string; readonly baseRef: string; readonly baseSha: string; readonly mergeSha?: string; readonly operationId: string };
+	readonly observation?: {
+		readonly observedAt: string;
+		readonly headSha: string;
+		readonly mergeSha?: string;
+		readonly eligibleSubject?: { readonly sha: string; readonly subject: "head" | "merge" };
+		readonly policy: { readonly context: string; readonly appId: number | null; readonly source: "classic" | "ruleset"; readonly rulesetId?: number }[];
+		readonly policyFingerprint?: string;
+		readonly runs: { readonly id: number; readonly suiteId: number; readonly appId: number | null; readonly appSlug: string | null; readonly name: string; readonly headSha: string; readonly status: string; readonly conclusion: string | null; readonly createdAt: string; readonly startedAt: string | null; readonly subject: "head" | "merge"; readonly workflow?: { readonly id: number; readonly attempt: number; readonly workflowId: number; readonly event: string; readonly path: string; readonly checkSuiteId: number; readonly status: string; readonly conclusion: string | null } }[];
+		readonly coverage: "complete" | "incomplete" | "unavailable";
+		readonly result: "pending" | "failed" | "unknown" | "passed";
+		readonly reason?: string;
+	};
+	readonly observedAt?: string;
+	readonly nextObservationAt?: string;
+	readonly observationCount: number;
+	readonly deadlineAt: string;
+	readonly nextSafeAction: "publish" | "observe-after" | "repair-review" | "investigate" | "pr-ready";
+}
 export interface BatchItem {
 	selected: SelectedItem;
 	ledger: Ledger;
@@ -48,10 +74,12 @@ export interface BatchItem {
 	operation?: OperationReceipt;
 	operations: OperationReceipt[];
 	proof?: { acceptanceRevision: string; subject: string; tree?: string; digest: string; artifacts: string[]; stage: OutcomeStage; reviewerSession: string };
+	/** Version-4 owned hosted-PR lifecycle; legacy records never gain this authority during decode. */
+	prLifecycle?: OwnedPullRequestLifecycle;
 	sessions: string[];
 }
 export interface Batch {
-	version: 2 | 3;
+	version: 2 | 3 | 4;
 	id: string;
 	revision: number;
 	selection: string;
@@ -116,28 +144,34 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 	const dependencies = (options.dependencies ?? []).map((edge) => ({ ...edge, item: edge.item.toLowerCase(), requires: edge.requires.toLowerCase() }));
 	validateDependencies(items, dependencies);
 	return {
-		version: options.converge ? 3 : 2, ...(options.converge ? { convergence: { generation: "G1" } } : {}), id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
+		version: options.converge ? 3 : items.some((item) => item.action === "pr-ready") ? 4 : 2, ...(options.converge ? { convergence: { generation: "G1" } } : {}), id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
 		mode: options.mode, control: "paused", capacity: options.capacity, maxAttempts: options.maxAttempts, maxTotalAttempts: options.maxTotalAttempts,
 		dependencies, scopeRevisions: [], usage: { modelCalls: 0, peakWorkers: 0, inputTokens: null, outputTokens: null, cost: null },
 		items: items.map((selected) => {
 			const overlap = selected.overlaps.find((key) => items.some((item) => item.key === key));
 			const blocker = selected.blocker ?? (overlap ? `overlapping selected work ${overlap}; resolve scope explicitly before execution` : undefined);
 			const acceptanceReference = selected.observe ? `Observe ${selected.key} ${selected.observe} @ ${selected.acceptanceRevision ?? "unresolved"}` : `Satisfy ${selected.key} acceptance @ ${selected.acceptanceRevision ?? "unresolved"}`;
+			const ledger = emptyLedger(`${options.id}:${digest(selected.key).slice(0, 16)}` as RunId, {
+				statement: acceptanceReference, nonGoals: ["unselected work", "merge", "deploy", "publish"],
+				permittedEffects: selected.action === "inspect" ? ["read"] : ["read", "write"],
+				finishAuthority: options.converge && selected.action === "patch" ? "verified-patch" : selected.action, appetite: { tasks: 1, attemptsPerTask: options.maxAttempts },
+			}, [{
+				id: "A1" as CriterionId, statement: acceptanceReference, mandatory: true,
+				...(selected.acceptanceRevision ? { assumptions: [{ kind: "acceptance-revision" as const, value: selected.acceptanceRevision }] } : {}),
+				...(selected.observe && selected.itemId ? { observation: { kind: "github-pull-request" as const, identity: selected.itemId, predicate: selected.observe } } : {}),
+			}], {
+				repo: selected.repo,
+				base: selected.base ?? "unavailable",
+				...(selected.head === undefined ? {} : { head: selected.head }),
+			});
+			const owner = `${options.id}:${selected.key}`;
+			const targetRef = selected.targetRef ?? selected.baseRef;
 			return {
 				selected, stage: blocker ? "BLOCKED" : "QUEUED", blocker, attempts: 0, operation: undefined, operations: [], sessions: [],
-				ledger: emptyLedger(`${options.id}:${digest(selected.key).slice(0, 16)}` as RunId, {
-					statement: acceptanceReference, nonGoals: ["unselected work", "merge", "deploy", "publish"],
-					permittedEffects: selected.action === "inspect" ? ["read"] : ["read", "write"],
-					finishAuthority: options.converge && selected.action === "patch" ? "verified-patch" : selected.action, appetite: { tasks: 1, attemptsPerTask: options.maxAttempts },
-				}, [{
-					id: "A1" as CriterionId, statement: acceptanceReference, mandatory: true,
-					...(selected.acceptanceRevision ? { assumptions: [{ kind: "acceptance-revision" as const, value: selected.acceptanceRevision }] } : {}),
-					...(selected.observe && selected.itemId ? { observation: { kind: "github-pull-request" as const, identity: selected.itemId, predicate: selected.observe } } : {}),
-				}], {
-					repo: selected.repo,
-					base: selected.base ?? "unavailable",
-					...(selected.head === undefined ? {} : { head: selected.head }),
-				}),
+				ledger,
+				...(selected.action === "pr-ready" && targetRef && selected.base && /^[a-f0-9]{40,64}$/.test(selected.base) ? {
+					prLifecycle: { version: 1 as const, generation: ledger.generation, owner, outcome: "pr-ready" as const, target: { ref: targetRef, sha: selected.base }, phase: "admitted" as const, observationCount: 0, deadlineAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), nextSafeAction: "publish" as const },
+				} : {}),
 			};
 		}),
 	};

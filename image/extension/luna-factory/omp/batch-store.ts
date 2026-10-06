@@ -167,7 +167,7 @@ export class BatchStore {
 	}
 	private decode(id: string, contents: string): Batch {
 		const batch = JSON.parse(contents) as Omit<Batch, "version"> & { version: number };
-		if ((batch.version !== 1 && batch.version !== 2 && batch.version !== 3) || batch.id !== id || !Array.isArray(batch.items) || !Number.isSafeInteger(batch.revision)) {
+		if ((batch.version !== 1 && batch.version !== 2 && batch.version !== 3 && batch.version !== 4) || batch.id !== id || !Array.isArray(batch.items) || !Number.isSafeInteger(batch.revision)) {
 			throw new Error("unsupported or corrupt batch; preserve original state and export for inspection");
 		}
 		if (!Array.isArray(batch.dependencies) || !Array.isArray(batch.scopeRevisions) || !["paused", "active", "stopped"].includes(batch.control) || !batch.usage || !Number.isSafeInteger(batch.usage.modelCalls) || batch.usage.modelCalls < 0) {
@@ -213,8 +213,70 @@ export class BatchStore {
 			if (item.proof && (!Array.isArray(item.proof.artifacts) || !item.proof.artifacts.every((artifact) => typeof artifact === "string") || typeof item.proof.digest !== "string" || typeof item.proof.reviewerSession !== "string" || !["verified-patch", "pr-ready", "merged-upstream"].includes(item.proof.stage))) {
 				throw new Error("invalid proof record; no execution allowed");
 			}
+			if (batch.version < 4 && item.prLifecycle !== undefined) throw new Error("legacy retained batch cannot acquire owned-PR lifecycle authority during decode");
+			if (batch.version === 4 && item.operation && ["push", "pr"].includes(item.operation.phase) && !item.prLifecycle) throw new Error("version-4 publication is missing its admitted owned-PR lifecycle");
+			if (item.prLifecycle) {
+				const lifecycle = item.prLifecycle;
+				if (batch.version !== 4 || item.selected.action !== "pr-ready" || lifecycle.version !== 1 || lifecycle.generation !== item.ledger.generation ||
+					lifecycle.owner !== `${batch.id}:${item.selected.key}` || lifecycle.outcome !== "pr-ready" || !lifecycle.target ||
+					typeof lifecycle.target.ref !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(lifecycle.target.ref) || lifecycle.target.ref.includes("..") ||
+					!/^([a-f0-9]{40}|[a-f0-9]{64})$/.test(lifecycle.target.sha) ||
+					!["admitted", "published", "waiting", "repair-required", "unknown", "ready"].includes(lifecycle.phase) ||
+					!Number.isSafeInteger(lifecycle.observationCount) || lifecycle.observationCount < 0 || lifecycle.observationCount > 100 ||
+					!Number.isFinite(Date.parse(lifecycle.deadlineAt)) ||
+					!["publish", "observe-after", "repair-review", "investigate", "pr-ready"].includes(lifecycle.nextSafeAction)) {
+					throw new Error("invalid owned-PR lifecycle identity or limits; preserve original state");
+				}
+				if (lifecycle.pullRequest && (lifecycle.phase === "admitted" || lifecycle.pullRequest.repository.toLowerCase() !== item.selected.repo ||
+					!lifecycle.pullRequest.identity || !Number.isSafeInteger(lifecycle.pullRequest.number) || lifecycle.pullRequest.number < 1 ||
+					lifecycle.pullRequest.url.toLowerCase() !== `https://github.com/${item.selected.repo}/pull/${lifecycle.pullRequest.number}` ||
+					!/^factory\/batch-[a-f0-9-]+\/[1-9][0-9]*$/.test(lifecycle.pullRequest.branch) || !/^([a-f0-9]{40}|[a-f0-9]{64})$/.test(lifecycle.pullRequest.headSha) ||
+					lifecycle.pullRequest.baseRef === undefined || lifecycle.pullRequest.baseRef !== lifecycle.target.ref || lifecycle.pullRequest.baseSha !== lifecycle.target.sha ||
+					lifecycle.pullRequest.mergeSha !== undefined && !/^([a-f0-9]{40}|[a-f0-9]{64})$/.test(lifecycle.pullRequest.mergeSha) || !lifecycle.pullRequest.operationId)) {
+					throw new Error("owned PR identity contradicts its operation or target; preserve original state");
+				}
+				if (lifecycle.observation) {
+					const observation = lifecycle.observation;
+					const eligible = observation.eligibleSubject;
+					const invalidWorkflow = (workflow: NonNullable<typeof observation.runs[number]["workflow"]>): boolean =>
+						!Number.isSafeInteger(workflow.id) || !Number.isSafeInteger(workflow.attempt) || workflow.attempt < 1 || !Number.isSafeInteger(workflow.workflowId) ||
+						workflow.checkSuiteId < 1 || typeof workflow.event !== "string" || typeof workflow.path !== "string" || !["queued", "in_progress", "completed"].includes(workflow.status) ||
+						(workflow.conclusion !== null && typeof workflow.conclusion !== "string");
+					if (!Number.isFinite(Date.parse(observation.observedAt)) || observation.headSha !== lifecycle.pullRequest?.headSha || observation.mergeSha !== lifecycle.pullRequest?.mergeSha ||
+						observation.policyFingerprint !== undefined && !/^[a-f0-9]{64}$/.test(observation.policyFingerprint) ||
+						!Array.isArray(observation.policy) || observation.policy.length > 100 ||
+						!observation.policy.every((check) => typeof check.context === "string" && check.context.length > 0 && (check.appId === null || Number.isSafeInteger(check.appId)) &&
+							["classic", "ruleset"].includes(check.source) && (check.source !== "ruleset" || Number.isSafeInteger(check.rulesetId))) ||
+						eligible !== undefined && (!/^([a-f0-9]{40}|[a-f0-9]{64})$/.test(eligible.sha) || !["head", "merge"].includes(eligible.subject) || eligible.subject === "head" && eligible.sha !== observation.headSha || eligible.subject === "merge" && eligible.sha !== observation.mergeSha) ||
+						!Array.isArray(observation.runs) || observation.runs.length > 200 ||
+						!observation.runs.every((run) => Number.isSafeInteger(run.id) && Number.isSafeInteger(run.suiteId) && (run.appId === null || Number.isSafeInteger(run.appId)) &&
+							(run.appSlug === null || typeof run.appSlug === "string") && typeof run.name === "string" && /^([a-f0-9]{40}|[a-f0-9]{64})$/.test(run.headSha) && ["queued", "in_progress", "completed"].includes(run.status) &&
+							(run.conclusion === null || typeof run.conclusion === "string") && Number.isFinite(Date.parse(run.createdAt)) && (run.startedAt === null || Number.isFinite(Date.parse(run.startedAt))) && ["head", "merge"].includes(run.subject) &&
+							(run.subject === "head" ? run.headSha === observation.headSha : observation.mergeSha !== undefined && run.headSha === observation.mergeSha) && (run.workflow === undefined || !invalidWorkflow(run.workflow))) ||
+						!["complete", "incomplete", "unavailable"].includes(observation.coverage) || !["pending", "failed", "unknown", "passed"].includes(observation.result)) throw new Error("invalid hosted-check observation; preserve original state");
+				}
+				if (lifecycle.observedAt !== undefined && !Number.isFinite(Date.parse(lifecycle.observedAt)) || lifecycle.nextObservationAt !== undefined && !Number.isFinite(Date.parse(lifecycle.nextObservationAt))) throw new Error("invalid hosted-check observation schedule");
+				if (lifecycle.phase === "ready" && (lifecycle.observation?.result !== "passed" || lifecycle.observation.coverage !== "complete" || !lifecycle.observation.eligibleSubject || lifecycle.nextSafeAction !== "pr-ready" || item.proof?.stage !== "pr-ready" || item.stage !== "DONE")) throw new Error("PR-ready lifecycle lacks complete eligible-subject checks and current independent acceptance");
+				if (lifecycle.observation?.result === "passed") {
+					const observation = lifecycle.observation;
+					const eligible = observation.eligibleSubject;
+					const latestSuccessful = Boolean(eligible) && observation.policy.every((check) => {
+						if (check.appId === null) return false;
+						const matching = observation.runs.filter((run) => run.name === check.context && run.appId === check.appId && run.headSha === eligible!.sha && run.subject === eligible!.subject);
+						matching.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id - a.id);
+						const latest = matching[0];
+						const workflowValid = latest?.appSlug !== "github-actions" && latest?.appId !== 15368 || Boolean(latest?.workflow && latest.workflow.checkSuiteId === latest.suiteId &&
+							["pull_request", "pull_request_target", "push"].includes(latest.workflow.event) && latest.workflow.status === "completed" && latest.workflow.conclusion === "success");
+						return latest?.status === "completed" && latest.conclusion === "success" && workflowValid;
+					});
+					if (observation.coverage !== "complete" || !/^[a-f0-9]{64}$/.test(observation.policyFingerprint ?? "") || observation.policy.length === 0 || !eligible || !latestSuccessful) {
+						throw new Error("passed hosted-check observation lacks complete policy/source/eligible-subject proof");
+					}
+				}
+				if (lifecycle.pullRequest && (!item.operation || item.operation.phase !== "pr" || item.operation.state !== "applied" || item.operation.id !== lifecycle.pullRequest.operationId || item.operation.owner !== lifecycle.owner || item.operation.generation !== lifecycle.generation || item.operation.branch !== lifecycle.pullRequest.branch || item.operation.sha !== lifecycle.pullRequest.headSha)) throw new Error("owned PR is not bound to its confirmed logical operation");
+			}
 		}
-		batch.version = batch.version === 3 ? 3 : 2;
+		batch.version = batch.version === 3 ? 3 : batch.version === 4 ? 4 : 2;
 		return batch as Batch;
 	}
 	write(batch: Batch): void {

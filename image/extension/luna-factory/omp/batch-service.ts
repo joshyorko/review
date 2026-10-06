@@ -15,6 +15,10 @@ import { runNative, sandboxTest, sandboxPreflight, NativeExecutionError, resolve
 
 const command = promisify(execFile);
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
+function canonicalPullUrl(url: string, repo: string, number: number): boolean {
+	try { const parsed = new URL(url); return parsed.origin === "https://github.com" && parsed.pathname.toLowerCase() === `/${repo.toLowerCase()}/pull/${number}`; }
+	catch { return false; }
+}
 function operationReceipt(
 	batch: Batch,
 	item: BatchItem,
@@ -242,6 +246,7 @@ export class BatchService {
 		const existing = this.store.list();
 		const duplicate = existing.find((batch) => batch.selection === preliminary.selection && !batchConverged(batch) && batch.scopeRevisions.length === 0);
 			if (duplicate) {
+				if (preliminary.version === 4 && duplicate.version < 4) throw new Error(`selection is already retained by legacy ${duplicate.id} without owned-PR lifecycle authority; inspect it rather than upgrading its outcome`);
 				if (Boolean(duplicate.convergence) !== Boolean(options.converge)) throw new Error(`selection is already tracked by ${duplicate.id} with a different outcome contract`);
 			for (const proposed of preliminary.items) {
 					const prior = duplicate.items.find((item) => item.selected.key === proposed.selected.key);
@@ -317,13 +322,80 @@ export class BatchService {
 			this.persist(batch);
 		}
 		/** Read-only current-state reconciliation consumes no worker slot or model call. */
-		async reconcile(id: string): Promise<void> {
+		async reconcile(id: string, clock: () => Date = () => new Date()): Promise<void> {
 			this.store.acquire();
 			const batch = this.batches.get(id) ?? this.store.read(id);
 			this.batches.set(id, batch);
+			for (const item of batch.items) {
+				if (item.selected.action !== "pr-ready" || !item.prLifecycle) continue;
+				if (item.operation && (item.operation.phase === "push" && item.operation.state === "applied" || ["push", "pr"].includes(item.operation.phase) && ["intent", "unknown"].includes(item.operation.state))) await this.reconcileEffect(batch, item);
+				if (item.prLifecycle.pullRequest && item.prLifecycle.phase !== "repair-required" && item.operation?.phase === "pr" && item.operation.state === "applied") await this.observeOwnedPullRequest(batch, item, clock());
+			}
 			await this.observeConvergence(batch);
+			this.persist(batch);
 			if (batch.control === "active") void this.pump();
 		}
+	private async observeOwnedPullRequest(batch: Batch, item: BatchItem, now: Date): Promise<void> {
+		const lifecycle = item.prLifecycle!;
+		const pull = lifecycle.pullRequest;
+		if (!pull) return;
+		const nowText = now.toISOString();
+		if (lifecycle.phase !== "ready" && Date.parse(nowText) >= Date.parse(lifecycle.deadlineAt) || lifecycle.observationCount >= 100) {
+			item.prLifecycle = { ...lifecycle, phase: "unknown", nextSafeAction: "investigate" };
+			item.stage = "UNKNOWN"; item.blocker = "hosted-check observation deadline or bound exhausted; preserve the owned PR and explicitly reconcile";
+			this.persist(batch); return;
+		}
+		if (lifecycle.nextObservationAt && Date.parse(nowText) < Date.parse(lifecycle.nextObservationAt)) return;
+		try { await this.validateProof(item); }
+		catch (error) {
+			item.prLifecycle = { ...lifecycle, phase: "unknown", nextSafeAction: "investigate" };
+			item.stage = "UNKNOWN"; item.blocker = `owned PR proof is stale: ${message(error)}`;
+			this.persist(batch); return;
+		}
+		let observation = await this.github.observeHostedChecks(item.selected.repo, {
+			repository: pull.repository, identity: pull.identity, number: pull.number, url: pull.url,
+			branch: pull.branch, headSha: pull.headSha, baseRef: lifecycle.target.ref, baseSha: lifecycle.target.sha,
+			...(pull.mergeSha ? { mergeSha: pull.mergeSha } : {}),
+		}, nowText, item.selected.sourceDefaultRef);
+		const observedLifecycle = observation.mergeSha && !pull.mergeSha
+			? { ...lifecycle, pullRequest: { ...pull, mergeSha: observation.mergeSha } }
+			: lifecycle;
+		const observedPull = observedLifecycle.pullRequest ?? pull;
+		if (observation.result === "passed" && (!observation.eligibleSubject || observation.eligibleSubject.sha !== (observation.eligibleSubject.subject === "head" ? observedPull.headSha : observedPull.mergeSha))) {
+			observation = { ...observation, result: "unknown", reason: "GitHub did not establish one exact eligible PR check subject" };
+		}
+		if (observation.result !== "unknown") {
+			try {
+				await this.validateProof(item);
+				await this.github.assertFresh(item.selected, observedPull);
+			} catch (error) {
+				observation = { ...observation, result: "unknown", reason: `subject changed during hosted-check observation: ${message(error)}` };
+			}
+		}
+		if (observation.result === "passed" && (!observation.policyFingerprint || !await this.github.hostedCheckPolicyCurrent(item.selected.repo, lifecycle.target.ref, item.selected.sourceDefaultRef, observation.policyFingerprint))) {
+			observation = { ...observation, result: "unknown", reason: "effective classic/ruleset check policy changed or became unavailable before PR-ready persistence" };
+		}
+		const observationCount = lifecycle.observationCount + 1;
+		const delayMs = Math.min(5 * 60_000, 15_000 * (2 ** Math.min(observationCount - 1, 5)));
+		const schedule = { observedAt: nowText, nextObservationAt: new Date(now.getTime() + (observation.result === "passed" ? 5 * 60_000 : delayMs)).toISOString() };
+		if (observation.result === "passed" && observation.coverage === "complete" && observation.eligibleSubject !== undefined && observation.eligibleSubject.sha === (observation.eligibleSubject.subject === "head" ? pull.headSha : pull.mergeSha) && observation.headSha === pull.headSha && ["verified-patch", "pr-ready"].includes(item.proof?.stage ?? "")) {
+			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "ready", nextSafeAction: "pr-ready" };
+			if (item.proof) item.proof.stage = "pr-ready";
+			item.stage = "DONE"; item.blocker = undefined; this.persist(batch); return;
+		}
+		if (item.proof?.stage === "pr-ready") item.proof.stage = "verified-patch";
+		if (observation.result === "pending") {
+			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "waiting", nextSafeAction: "observe-after" };
+			item.stage = "VERIFY"; item.blocker = `hosted checks pending; next bounded observation ${schedule.nextObservationAt}`;
+		} else if (observation.result === "failed") {
+			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "repair-required", nextSafeAction: "repair-review" };
+			item.stage = "VERIFY"; item.blocker = `owned PR has a current required check failure; repair packet/dispatch is not implemented in this slice: ${observation.reason ?? "required check failed"}`;
+		} else {
+			item.prLifecycle = { ...observedLifecycle, ...schedule, observationCount, observation, phase: "unknown", nextSafeAction: "investigate" };
+			item.stage = "UNKNOWN"; item.blocker = `hosted check coverage or independent acceptance is inconclusive: ${observation.reason ?? "current verified-patch proof unavailable"}`;
+		}
+		this.persist(batch);
+	}
 	private artifactDigest(item: BatchItem): string {
 		if (!item.proof || !item.proof.artifacts.length || !item.sessions.includes(item.proof.reviewerSession)) throw new Error("independent proof/session unavailable");
 		return digest(item.proof.artifacts.map((path) => {
@@ -347,7 +419,7 @@ export class BatchService {
 			artifactRoots: [this.root],
 		});
 		if (current.status !== "proven") throw new Error(`Factory proof is ${current.status}: ${current.reasons.join("; ")}`);
-		await this.github.assertFresh(item.selected);
+		await this.github.assertFresh(item.selected, item.prLifecycle?.pullRequest);
 		if (!item.workspace || !item.proof.tree) throw new Error("verified workspace tree unavailable");
 		if (await this.git(item.workspace, ["write-tree"]) !== item.proof.tree || await this.git(item.workspace, ["diff", "--no-ext-diff", "--no-textconv", "--name-only"]) || await this.git(item.workspace, ["ls-files", "--others", "--exclude-standard"])) {
 			throw new Error("retained workspace differs from verified tree; preserve and explicitly reverify");
@@ -361,6 +433,8 @@ export class BatchService {
 		catch (error) { this.bindings.set(id, { error: message(error) }); }
 		const batch = this.batches.get(id) ?? this.store.read(id);
 		this.batches.set(id, batch);
+		batch.control = "active";
+		this.persist(batch);
 			for (const item of batch.items) {
 			const owner = `${id}:${item.selected.key}`;
 			if (this.running.has(owner) || item.stage === "CANCELLED" || item.stage === "EXCLUDED") continue;
@@ -368,7 +442,7 @@ export class BatchService {
 				if (item.selected.observe) continue;
 				if (item.stage === "DONE") {
 					await this.validateProof(item);
-					if (item.operation?.phase === "pr") await this.reconcileEffect(item);
+					if (item.operation?.phase === "pr" && !item.prLifecycle?.pullRequest) await this.reconcileEffect(batch, item);
 					continue;
 				}
 				if (item.operation?.state === "not-applied") {
@@ -376,7 +450,11 @@ export class BatchService {
 					item.operation = undefined;
 				}
 				if (item.operation?.phase === "push" || item.operation?.phase === "pr") {
-					await this.reconcileEffect(item);
+					if (item.operation.phase === "pr" && item.operation.state === "applied" && item.prLifecycle?.pullRequest) continue;
+					await this.reconcileEffect(batch, item);
+					if (this.mayQueueConfirmedPush(batch, item)) {
+						item.stage = "QUEUED"; item.blocker = "confirmed publication recovered; executing the admitted PR effect under active claims";
+					}
 					continue;
 				}
 				if (item.stage === "VERIFY" && item.proof && item.operation?.state === "applied") {
@@ -420,7 +498,6 @@ export class BatchService {
 			}
 			if (!demoted) break;
 		}
-			batch.control = "active";
 			this.persist(batch);
 			if (batch.convergence) await this.observeConvergence(batch);
 		void this.pump();
@@ -526,9 +603,10 @@ export class BatchService {
 							const decision = evaluateBatchGraph(batch).nodes.find((node) => node.key === item.selected.key);
 							if (decision?.decision !== "READY") { item.blocker = decision?.blockers.join("; ") || "current graph transition is not READY"; continue; }
 						}
+					const publishOnly = item.selected.action === "pr-ready" && item.operation?.phase === "push" && item.operation.state === "applied" && item.prLifecycle?.nextSafeAction === "publish";
 					const dependency = dependencyBlocker(batch, item.selected.key);
 						if (dependency) { item.blocker = dependency; continue; }
-						if (item.attempts >= batch.maxAttempts || batch.items.reduce((sum, candidate) => sum + candidate.attempts, 0) >= batch.maxTotalAttempts) { item.stage = "BLOCKED"; item.blocker = "original attempt budget exhausted; retry never resets it"; this.persist(batch); continue; }
+						if (!publishOnly && (item.attempts >= batch.maxAttempts || batch.items.reduce((sum, candidate) => sum + candidate.attempts, 0) >= batch.maxTotalAttempts)) { item.stage = "BLOCKED"; item.blocker = "original attempt budget exhausted; retry never resets it"; this.persist(batch); continue; }
 					const approved = this.bindings.get(batch.id);
 					const binding = approved && "binding" in approved ? approved.binding : undefined;
 					const bindingError = approved && "error" in approved ? approved.error : "OMP execution binding unavailable; explicitly resume from the current session";
@@ -543,10 +621,10 @@ export class BatchService {
 							catch (error) { this.claims.release(`repo:${item.selected.repo}`, owner); throw error; }
 						}
 					} catch (error) { item.stage = "BLOCKED"; item.blocker = message(error); this.persist(batch); continue; }
-					item.stage = "QUEUED"; item.blocker = undefined; this.persist(batch);
+					item.stage = publishOnly ? "RUNNING" : "QUEUED"; item.blocker = undefined; this.persist(batch);
 					const controller = new AbortController();
 					let advisorEscalationBlocked = false;
-					const promise = Promise.resolve().then(() => this.execute(batch, item, controller.signal, binding, bindingError)).catch((error) => {
+					const promise = Promise.resolve().then(() => publishOnly ? this.createPRFromConfirmedPush(batch, item, controller.signal) : this.execute(batch, item, controller.signal, binding, bindingError)).catch((error) => {
 						if (error instanceof NativeExecutionError && error.code === "advisor-blocked") {
 							advisorEscalationBlocked = true;
 							if (item.operation?.state === "intent") transitionOperation(item, { state: "unknown" });
@@ -555,7 +633,10 @@ export class BatchService {
 							if (!this.fatal) this.persist(batch);
 							return;
 						}
-						if (item.operation?.phase === "push" || item.operation?.phase === "pr" || item.operation?.state === "unknown") {
+						if (item.operation?.phase === "push" && item.operation.state === "applied") {
+							item.stage = controller.signal.aborted ? "CANCELLED" : "BLOCKED";
+							item.prLifecycle = item.prLifecycle ? { ...item.prLifecycle, nextSafeAction: "publish" } : undefined;
+						} else if (item.operation?.phase === "push" || item.operation?.phase === "pr" || item.operation?.state === "unknown") {
 							item.stage = "UNKNOWN";
 							if (item.operation.state !== "unknown") transitionOperation(item, { state: "unknown" });
 						} else if (controller.signal.aborted && !(error instanceof NativeExecutionError && error.code === "cancellation-settled")) {
@@ -852,14 +933,20 @@ export class BatchService {
 		this.persist(batch);
 		if (item.selected.action === "pr-ready") {
 			await this.publish(batch, item, changed, signal);
-			item.blocker = "PR created; explicit owner integration and fresh acceptance are required before completion";
+			item.blocker = "owned PR created; hosted checks require bounded reconciliation before PR-ready";
 			this.persist(batch);
 		}
 	}
 	private async publish(batch: Batch, item: BatchItem, changed: string[], signal: AbortSignal): Promise<void> {
 		if (!changed.length) throw new Error("no patch to publish; retained inspection is not PR-ready");
 		if (changed.some((path) => path.startsWith(".github/workflows/"))) throw new Error("Factory refuses workflow publication; retained patch remains inspectable");
+		const lifecycle = item.prLifecycle;
+		if (!lifecycle || lifecycle.phase !== "admitted" || lifecycle.generation !== item.ledger.generation || lifecycle.owner !== `${batch.id}:${item.selected.key}` ||
+			lifecycle.outcome !== "pr-ready" || lifecycle.target.ref !== item.selected.baseRef || lifecycle.target.sha !== item.selected.base) {
+			throw new Error("PR publication lacks an admitted exact target/outcome lifecycle; preserve the verified patch");
+		}
 		await this.validateProof(item);
+		this.assertPublicationAuthority(batch, item, signal, new Date());
 		const branch = `factory/${batch.id}/${item.selected.number}`;
 		await this.git(item.workspace!, ["-c", "user.name=Luna Factory", "-c", "user.email=factory@localhost", "commit", "-m", `fix: address ${item.selected.key}`], signal);
 		const sha = await this.git(item.workspace!, ["rev-parse", "HEAD"], signal);
@@ -869,29 +956,98 @@ export class BatchService {
 		const subject = { ...item.ledger.subject, head: sha };
 		item.operation = operationReceipt(batch, item, "push", "intent", `${batch.id}:${item.selected.key}:push`, { branch, sha, subject });
 		this.persist(batch);
+		await this.validateProof(item);
+		this.assertPublicationAuthority(batch, item, signal, new Date());
 		await command("git", ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=!gh auth git-credential", "push", "origin", `HEAD:refs/heads/${branch}`], { cwd: item.workspace, signal, timeout: 120_000, env: { PATH: process.env.PATH, HOME: this.root, GH_TOKEN: this.github.token, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
 		transitionOperation(item, { state: "applied" }); this.persist(batch);
-		await this.github.assertFresh(item.selected);
-		item.operations.push(item.operation);
-		item.operation = operationReceipt(batch, item, "pr", "intent", `${batch.id}:${item.selected.key}:pr`, { branch, sha, subject });
-		this.persist(batch);
-		const result = await this.github.request<{ html_url: string; head: { sha: string }; base: { ref: string } }>(`repos/${item.selected.repo}/pulls`, { title: `fix: address ${item.selected.key}`, head: branch, base: item.selected.baseRef, body: `Selected Factory acceptance: ${item.selected.key}\n\n${item.selected.kind === "issue" ? "Closes" : "Related to"} ${item.selected.key}\n\nFactory operation: ${item.operation.id}\n\nVerified tree: ${item.proof!.tree}\nIndependent native acceptance recorded in ${batch.id}. No merge/deploy authority.`, draft: false });
-		if (result.head.sha !== sha || result.base.ref !== item.selected.baseRef) throw new Error("created PR subject differs from recorded operation");
-		transitionOperation(item, { state: "applied", url: result.html_url, resultHandle: result.html_url });
-		item.proof!.stage = "pr-ready"; this.persist(batch);
+		await this.createPRFromConfirmedPush(batch, item, signal);
 	}
-	private async reconcileEffect(item: BatchItem): Promise<void> {
+	private assertPublicationAuthority(batch: Batch, item: BatchItem, signal: AbortSignal, now: Date): void {
+		const owner = `${batch.id}:${item.selected.key}`;
+		const lifecycle = item.prLifecycle;
+		const claims = this.claims.list();
+		if (signal.aborted || batch.control !== "active" || this.running.get(owner)?.batch !== batch || this.running.get(owner)?.item !== item ||
+			item.selected.action !== "pr-ready" || item.stage !== "RUNNING" && item.stage !== "VERIFY" || !lifecycle || lifecycle.phase !== "admitted" ||
+			lifecycle.owner !== owner || lifecycle.generation !== item.ledger.generation || lifecycle.outcome !== "pr-ready" || lifecycle.nextSafeAction !== "publish" ||
+			lifecycle.target.ref !== item.selected.baseRef || lifecycle.target.sha !== item.selected.base || Date.parse(now.toISOString()) >= Date.parse(lifecycle.deadlineAt) || lifecycle.observationCount >= 100 ||
+			!claims.some((claim) => claim.resource === `repo:${item.selected.repo}` && claim.owner === owner) ||
+			!claims.some((claim) => claim.resource === `item:${item.selected.key}` && claim.owner === owner)) {
+			throw new Error("PR publication authority expired or lost; preserve the confirmed branch and resume only through the active claimed effect lane");
+		}
+	}
+	private mayQueueConfirmedPush(batch: Batch, item: BatchItem): boolean {
+		return batch.control === "active" && !["CANCELLED", "EXCLUDED"].includes(item.stage) && item.operation?.phase === "push" && item.operation.state === "applied" && item.prLifecycle?.nextSafeAction === "publish";
+	}
+	private async createPRFromConfirmedPush(batch: Batch, item: BatchItem, signal: AbortSignal): Promise<void> {
+		const operation = item.operation;
+		const lifecycle = item.prLifecycle;
+		const owner = `${batch.id}:${item.selected.key}`;
+		const branch = `factory/${batch.id}/${item.selected.number}`;
+		if (!operation || operation.phase !== "push" || operation.state !== "applied" || operation.id !== `${owner}:push` || operation.owner !== owner || operation.generation !== item.ledger.generation ||
+			operation.subject.repo !== item.selected.repo || operation.subject.base !== item.ledger.subject.base || operation.subject.head !== operation.sha || operation.branch !== branch || !lifecycle) {
+			throw new Error("confirmed push is not bound to the original admitted outcome, generation and branch");
+		}
+		this.assertPublicationAuthority(batch, item, signal, new Date());
+		await this.validateProof(item);
+		const ref = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${operation.branch}`);
+		if (ref.object.sha !== operation.sha) throw new Error("remote branch differs from the confirmed push; preserve and reconcile");
+		const existing = await this.github.request<Array<unknown>>(`repos/${item.selected.repo}/pulls?state=all&head=${encodeURIComponent(`${item.selected.repo.split("/")[0]}:${operation.branch}`)}&per_page=100`);
+		if (existing.length >= 100 || existing.length > 0) throw new Error("a PR candidate or incomplete search exists on the owned branch; reconcile it before publication");
+		await this.validateProof(item);
+		this.assertPublicationAuthority(batch, item, signal, new Date());
+		item.operations.push(operation);
+		item.operation = operationReceipt(batch, item, "pr", "intent", `${owner}:pr`, { branch, sha: operation.sha, subject: operation.subject });
+		this.persist(batch);
+		await this.createOwnedPullRequest(batch, item, lifecycle, branch, operation.sha!, signal);
+	}
+	private async createOwnedPullRequest(batch: Batch, item: BatchItem, lifecycle: NonNullable<BatchItem["prLifecycle"]>, branch: string, sha: string, signal: AbortSignal): Promise<void> {
+		const operation = item.operation;
+		if (!operation || operation.phase !== "pr" || operation.state !== "intent" || operation.owner !== lifecycle.owner || operation.generation !== lifecycle.generation ||
+			operation.id !== `${batch.id}:${item.selected.key}:pr` || operation.branch !== branch || operation.sha !== sha || item.selected.action !== lifecycle.outcome) throw new Error("PR create intent is not bound to the admitted owned lifecycle");
+		this.assertPublicationAuthority(batch, item, signal, new Date());
+		const result = await this.github.request<{ id: number; node_id: string; number: number; html_url: string; state: string; merged: boolean; draft: boolean; head: { sha: string; ref: string; repo: { full_name: string } | null }; base: { sha: string; ref: string; repo: { full_name: string } | null }; merge_commit_sha?: string | null }>(`repos/${item.selected.repo}/pulls`, { title: `fix: address ${item.selected.key}`, head: branch, base: lifecycle.target.ref, body: `Selected Factory acceptance: ${item.selected.key}\n\n${item.selected.kind === "issue" ? "Closes" : "Related to"} ${item.selected.key}\n\nFactory operation: ${operation.id}\n\nVerified tree: ${item.proof?.tree ?? "unavailable"}\nIndependent native acceptance recorded in ${batch.id}. No merge/deploy authority.`, draft: false }, signal);
+		if (!Number.isSafeInteger(result.id) || typeof result.node_id !== "string" || !Number.isSafeInteger(result.number) || result.number < 1 ||
+			result.head.sha !== sha || result.head.ref !== branch || result.head.repo?.full_name.toLowerCase() !== item.selected.repo ||
+			result.base.sha !== lifecycle.target.sha || result.base.ref !== lifecycle.target.ref || result.base.repo?.full_name.toLowerCase() !== item.selected.repo ||
+			!canonicalPullUrl(result.html_url, item.selected.repo, result.number) || result.state !== "open" || result.merged || result.draft !== false) throw new Error("created PR identity or subject differs from the admitted same-repository operation");
+		transitionOperation(item, { state: "applied", url: result.html_url, resultHandle: result.html_url });
+		item.prLifecycle = { ...lifecycle, phase: "published", pullRequest: {
+			repository: item.selected.repo, identity: result.node_id, number: result.number, url: result.html_url, branch, headSha: sha,
+			baseRef: result.base.ref, baseSha: result.base.sha, ...(result.merge_commit_sha ? { mergeSha: result.merge_commit_sha } : {}), operationId: operation.id,
+		}, nextSafeAction: "observe-after" };
+		item.stage = "VERIFY"; item.blocker = "owned PR created; hosted checks require bounded reconciliation before PR-ready";
+		this.persist(batch);
+	}
+	private async reconcileEffect(batch: Batch, item: BatchItem): Promise<void> {
 		const operation = item.operation!;
 		try {
-			await this.validateProof(item);
+			const separator = operation.owner?.indexOf(":") ?? -1;
+			const batchId = separator > 0 ? operation.owner!.slice(0, separator) : "";
+			if (!batchId || operation.owner !== `${batchId}:${item.selected.key}` || operation.id !== `${batchId}:${item.selected.key}:${operation.phase}` || operation.generation !== item.ledger.generation || operation.subject.repo !== item.selected.repo ||
+				operation.subject.base !== item.ledger.subject.base || operation.subject.head !== operation.sha || operation.branch !== `factory/${batchId}/${item.selected.number}` ||
+				!item.prLifecycle || item.prLifecycle.owner !== operation.owner || item.prLifecycle.generation !== operation.generation || item.prLifecycle.outcome !== "pr-ready") {
+				throw new Error("publication effect is not bound to the original admitted owner, generation, target and outcome");
+			}
 			const ref = await this.github.request<{ object: { sha: string } }>(`repos/${item.selected.repo}/git/ref/heads/${operation.branch}`);
 			if (ref.object.sha !== operation.sha) throw new Error("remote branch differs from recorded effect");
-			const pulls = await this.github.request<Array<{ html_url: string; head: { sha: string }; base: { ref: string }; body: string; merged_at?: string }>>(`repos/${item.selected.repo}/pulls?state=all&head=${encodeURIComponent(`${item.selected.repo.split("/")[0]}:${operation.branch}`)}`);
+			const pulls = await this.github.request<Array<{ id: number; node_id: string; number: number; html_url: string; state: string; draft: boolean; head: { sha: string; ref: string; repo: { full_name: string } | null }; base: { sha: string; ref: string; repo: { full_name: string } | null }; merge_commit_sha?: string | null; body: string; merged_at?: string | null }>>(`repos/${item.selected.repo}/pulls?state=all&head=${encodeURIComponent(`${item.selected.repo.split("/")[0]}:${operation.branch}`)}&per_page=100`);
+			if (pulls.length >= 100) throw new Error("owned PR search reached its bound; exact operation reconciliation remains UNKNOWN");
 			const marker = operation.id.replace(/:push$/, ":pr");
 			const markerText = `Factory operation: ${marker}`;
-			const matches = pulls.filter((pull) => pull.head.sha === operation.sha && pull.base.ref === item.selected.baseRef && pull.body?.split(/\r?\n/).includes(markerText));
-			if (matches.length !== 1) throw new Error("exact PR/effect identity unproven; inspect GitHub, do not repeat");
+			const matches = pulls.filter((pull) => Number.isSafeInteger(pull.id) && Number.isSafeInteger(pull.number) && pull.number > 0 && typeof pull.node_id === "string" && pull.node_id.length > 0 && pull.draft === false &&
+				canonicalPullUrl(pull.html_url, item.selected.repo, pull.number) && pull.head.sha === operation.sha && pull.head.ref === operation.branch && pull.head.repo?.full_name.toLowerCase() === item.selected.repo &&
+				pull.base.ref === item.prLifecycle!.target.ref && pull.base.sha === item.prLifecycle!.target.sha && pull.base.repo?.full_name.toLowerCase() === item.selected.repo &&
+				pull.body?.split(/\r?\n/).includes(markerText));
+			if (pulls.length === 0 && operation.phase === "push" && operation.state === "applied") {
+				if (item.stage !== "CANCELLED" && item.stage !== "EXCLUDED") item.stage = "VERIFY";
+				item.prLifecycle = { ...item.prLifecycle!, phase: "admitted", nextSafeAction: "publish" };
+				if (item.stage !== "CANCELLED" && item.stage !== "EXCLUDED") item.blocker = "confirmed owned branch has no PR; awaiting the admitted effect lane";
+				if (!this.running.has(`${batch.id}:${item.selected.key}`)) this.release(item, operation.owner!);
+				return;
+			}
+			if (pulls.length !== 1 || matches.length !== 1) throw new Error("same-repository PR, owned branch, target, head, and logical operation identity are not uniquely reconciled; do not repeat publication");
 			const pull = matches[0]!;
+			if (pull.state !== "open" || pull.merged_at) throw new Error("owned PR is no longer open; preserve its exact state for explicit reconciliation");
 			if (operation.phase === "push") {
 				item.operation = {
 					...operation, id: marker, phase: "pr", effect: "pull-request-create", state: "applied",
@@ -900,9 +1056,18 @@ export class BatchService {
 			} else {
 				transitionOperation(item, { state: "applied", url: pull.html_url, resultHandle: pull.html_url });
 			}
-			item.proof!.stage = pull.merged_at ? "merged-upstream" : "pr-ready";
-			item.stage = "VERIFY";
-			item.blocker = "external effect is identified; explicit owner integration and fresh acceptance are required before completion";
-		} catch (error) { transitionOperation(item, { state: "unknown" }); item.stage = "UNKNOWN"; item.blocker = `external effect unresolved: ${message(error)}`; }
+			item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: {
+				repository: item.selected.repo, identity: pull.node_id, number: pull.number, url: pull.html_url, branch: pull.head.ref, headSha: pull.head.sha,
+				baseRef: pull.base.ref, baseSha: pull.base.sha, ...(pull.merge_commit_sha ? { mergeSha: pull.merge_commit_sha } : {}), operationId: marker,
+			} };
+			if (item.stage !== "CANCELLED" && item.stage !== "EXCLUDED") {
+				item.stage = "VERIFY";
+				item.blocker = "owned same-repository PR effect is reconciled; bounded hosted-check observation is next";
+			}
+			if (!this.running.has(`${batch.id}:${item.selected.key}`)) this.release(item, operation.owner!);
+		} catch (error) {
+			if (!(operation.phase === "push" && operation.state === "applied" && item.operation === operation)) transitionOperation(item, { state: "unknown" });
+			item.stage = "UNKNOWN"; item.blocker = `external effect unresolved: ${message(error)}`;
+		}
 	}
 }

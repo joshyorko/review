@@ -192,6 +192,89 @@ test("freshness rejects a newly introduced GitHub overlap", async () => {
 	await assert.rejects(() => github.assertFresh(snapshot), /overlap|scope|stale/i);
 });
 
+test("freshness permits only the recorded same-repository PR link after exact owner/head/target recheck", async () => {
+	const oid = "a".repeat(40);
+	const candidate = "b".repeat(40);
+	const repository = { id: "repo-1", nameWithOwner: "org/repo", defaultBranchRef: { name: "main", target: { oid } } };
+	const issue = (withOwnedLink: boolean) => ({
+		id: "item-1", __typename: "Issue", title: "same title", body: "same body", closed: false,
+		url: "https://github.com/org/repo/issues/1", labels: { nodes: [], pageInfo: { hasNextPage: false } },
+		timelineItems: { nodes: withOwnedLink ? [{ source: { number: 2, state: "OPEN", repository: { nameWithOwner: "org/repo" } } }] : [], pageInfo: { hasNextPage: false } },
+	});
+	const pull = { repository: "org/repo", identity: "PR_node_2", number: 2, url: "https://github.com/org/repo/pull/2", branch: "factory/batch-a/1", headSha: candidate, baseRef: "main", baseSha: oid };
+	const currentPr = { id: 2, node_id: pull.identity, number: 2, html_url: pull.url, state: "open", merged: false, draft: false, head: { ref: pull.branch, sha: candidate, repo: { full_name: "org/repo" } }, base: { ref: "main", sha: oid, repo: { full_name: "org/repo" } } };
+	const make = (headSha: string) => {
+		const responses = [issue(false), issue(true)];
+		return new BatchGitHub("token", (async (input) => {
+			const url = new URL(String(input));
+			const body = url.pathname === "/graphql" ? { data: { repository: { ...repository, issueOrPullRequest: responses.shift() } } } : { ...currentPr, head: { ...currentPr.head, sha: headSha } };
+			return { ok: true, status: 200, headers: new Headers(), json: async () => body };
+		}) as typeof fetch);
+	};
+	const selectedItem = selected("org/repo#1", "pr-ready", { baseRef: "main", base: oid, head: oid });
+	const accepted = make(candidate);
+	const snapshot = await accepted.snapshot(selectedItem);
+	await accepted.assertFresh(snapshot, pull);
+	const humanPush = make("c".repeat(40));
+	const humanPushSnapshot = await humanPush.snapshot(selectedItem);
+	await assert.rejects(() => humanPush.assertFresh(humanPushSnapshot, pull), /owned PR identity, target, or head changed/);
+});
+
+test("hosted checks combine classic/ruleset policy and select the exact eligible PR subject/source", async () => {
+	const repo = "org/a";
+	const head = "a".repeat(40);
+	const merge = "b".repeat(40);
+	const pull = { repository: repo, identity: "PR_node_7", number: 7, url: `https://github.com/${repo}/pull/7`, branch: "factory/batch-test/1", headSha: head, baseRef: "self-hosted", baseSha: "c".repeat(40), mergeSha: merge };
+	const currentPull = { id: 7, node_id: pull.identity, number: 7, html_url: pull.url, state: "open", merged: false, draft: false, head: { ref: pull.branch, sha: head, repo: { full_name: repo } }, base: { ref: pull.baseRef, sha: pull.baseSha, repo: { full_name: repo } }, merge_commit_sha: merge };
+	const checkRun = (overrides: Record<string, unknown> = {}) => ({ id: 1, name: "CI", head_sha: head, status: "completed", conclusion: "success", created_at: "2026-10-06T12:00:00.000Z", started_at: "2026-10-06T12:00:00.000Z", app: { id: 42 }, check_suite: { id: 5 }, ...overrides });
+	const observe = async (options: { policy?: unknown; policySequence?: unknown[]; headRuns?: unknown[]; mergeRuns?: unknown[]; total?: number; current?: unknown; link?: boolean; withoutRecordedMerge?: boolean; rulesets?: unknown[]; ruleset?: unknown; workflowRuns?: unknown }) => {
+		let policyReads = 0;
+		const github = new BatchGitHub("token", (async (input) => {
+			const url = new URL(String(input));
+			let body: unknown;
+			if (url.pathname.endsWith("/pulls/7")) body = options.current ?? currentPull;
+			else if (url.pathname.endsWith("/protection/required_status_checks")) body = options.policySequence?.[policyReads++] ?? options.policy ?? { strict: true, contexts: [], checks: [{ context: "CI", app_id: 42 }] };
+			else if (url.pathname.endsWith("/rulesets")) body = options.rulesets ?? [];
+			else if (/\/rulesets\/[0-9]+$/.test(url.pathname)) body = options.ruleset ?? {};
+			else if (url.pathname.endsWith("/actions/runs")) body = options.workflowRuns ?? { total_count: 0, workflow_runs: [] };
+			else if (url.pathname.endsWith("/check-runs")) {
+				const isHead = url.pathname.includes(`/commits/${head}/`);
+				const check_runs = isHead ? options.headRuns ?? [checkRun()] : options.mergeRuns ?? [checkRun({ head_sha: merge })];
+				body = { total_count: options.total ?? check_runs.length, check_runs };
+			} else throw new Error(`unexpected fixture request ${url.pathname}`);
+			return { ok: true, headers: new Headers(options.link ? { link: '<https://api.github.com/next>; rel="next"' } : {}), json: async () => body } as Response;
+		}) as typeof fetch);
+		return github.observeHostedChecks(repo, options.withoutRecordedMerge ? { ...pull, mergeSha: undefined } : pull, "2026-10-06T12:00:01.000Z");
+	};
+
+	assert.equal((await observe({})).result, "passed");
+	assert.deepEqual((await observe({})).eligibleSubject, { sha: merge, subject: "merge" });
+	assert.equal((await observe({ withoutRecordedMerge: true })).mergeSha, merge, "first observed synthetic merge subject is retained when GitHub creates it after PR publication");
+	assert.equal((await observe({ mergeRuns: [checkRun({ id: 2, head_sha: merge, conclusion: "failure", created_at: "2026-10-06T12:01:00.000Z" }), checkRun({ head_sha: merge })] })).result, "failed", "the newest exact-source run controls despite an older green attempt");
+	assert.equal((await observe({ mergeRuns: [checkRun({ head_sha: merge, status: "in_progress", conclusion: null })] })).result, "pending");
+	assert.equal((await observe({ mergeRuns: [checkRun({ head_sha: merge, status: "queued", conclusion: null, started_at: null })] })).result, "pending", "queued attempts remain pending before started_at exists");
+	assert.match((await observe({ mergeRuns: [checkRun({ head_sha: merge, app: { id: 99 } })] })).reason!, /exact-source/);
+	assert.match((await observe({ mergeRuns: [checkRun({ head_sha: merge, conclusion: "skipped" })] })).reason!, /execution proof is incomplete/);
+	assert.match((await observe({ mergeRuns: [checkRun({ head_sha: merge, conclusion: "cancelled" })] })).reason!, /execution proof is incomplete/);
+	assert.equal((await observe({ headRuns: [checkRun()], mergeRuns: [] })).eligibleSubject?.subject, "head", "head is eligible when no declared context ran on the merge SHA");
+	assert.match((await observe({ mergeRuns: Array.from({ length: 100 }, (_, index) => checkRun({ id: index + 1, head_sha: merge })), total: 100 })).reason!, /page is incomplete/);
+	assert.match((await observe({ policy: { strict: true, contexts: [], checks: [] } })).reason!, /no declared required-check policy/);
+	assert.match((await observe({ link: true })).reason!, /incomplete paginated/);
+	assert.match((await observe({ current: { ...currentPull, head: { ...currentPull.head, sha: "d".repeat(40) } } })).reason!, /identity, target, or head changed/);
+	assert.match((await observe({ current: { ...currentPull, draft: true } })).reason!, /identity, target, or head changed/);
+	assert.match((await observe({ current: { ...currentPull, base: { ...currentPull.base, ref: "release" } } })).reason!, /identity, target, or head changed/);
+	assert.match((await observe({ rulesets: [{ id: 9, enforcement: "active" }], ruleset: { id: 9, enforcement: "active", target: "branch", source: "org", source_type: "Organization", conditions: { ref_name: { include: ["refs/heads/self-hosted"], exclude: [] } }, rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "Security", integration_id: 77 }] } }] } })).reason!, /Security.*eligible/);
+	assert.match((await observe({ rulesets: [{ id: 9, enforcement: "active" }], ruleset: { id: 9, enforcement: "active", target: "branch", source: "org", source_type: "Organization", conditions: { ref_name: { include: ["refs/heads/self-hosted"], exclude: [] } }, rules: [{ type: "workflows", parameters: { workflows: [{ path: ".github/workflows/security.yml", ref: "refs/heads/main", repository_id: 7 }] } }] } })).reason!, /unproved policy rule workflows/);
+	assert.equal((await observe({ rulesets: [{ id: 9, enforcement: "active" }], ruleset: { id: 9, enforcement: "active", target: "branch", source: "org", source_type: "Organization", conditions: { ref_name: { include: ["refs/heads/release"], exclude: [] } }, rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "Security", integration_id: 77 }] } }] } })).result, "passed", "a complete but inapplicable ruleset does not add checks to this target");
+	assert.match((await observe({ rulesets: Array.from({ length: 100 }, (_, id) => ({ id: id + 1, enforcement: "active" })) })).reason!, /ruleset policy page is incomplete/);
+	assert.match((await observe({ policySequence: [{ strict: true, contexts: [], checks: [{ context: "CI", app_id: 42 }] }, { strict: true, contexts: [], checks: [{ context: "Security", app_id: 77 }] }] })).reason!, /policy changed during hosted observation/);
+	const actions = await observe({ policy: { strict: true, contexts: [], checks: [{ context: "CI", app_id: 15368 }] }, withoutRecordedMerge: true, current: { ...currentPull, merge_commit_sha: null }, headRuns: [checkRun({ app: { id: 15368, slug: "github-actions" } })], workflowRuns: { total_count: 1, workflow_runs: [{ id: 200, check_suite_id: 5, workflow_id: 12, run_attempt: 2, event: "pull_request", status: "completed", conclusion: "success", head_sha: head, path: ".github/workflows/ci.yml" }] } });
+	assert.equal(actions.result, "passed");
+	assert.equal(actions.runs[0]?.workflow?.attempt, 2);
+	assert.match((await observe({ policy: { strict: true, contexts: [], checks: [{ context: "CI", app_id: 15368 }] }, withoutRecordedMerge: true, current: { ...currentPull, merge_commit_sha: null }, headRuns: [checkRun({ app: { id: 15368, slug: "github-actions" } })], workflowRuns: { total_count: 1, workflow_runs: [{ id: 200, check_suite_id: 5, workflow_id: 12, run_attempt: 2, event: "workflow_dispatch", status: "completed", conclusion: "success", head_sha: head, path: ".github/workflows/ci.yml" }] } })).reason!, /workflow event\/attempt/);
+	assert.match((await observe({ policy: { strict: true, contexts: [], checks: [{ context: "CI", app_id: 15368 }] }, withoutRecordedMerge: true, current: { ...currentPull, merge_commit_sha: null }, headRuns: [checkRun({ app: { id: 15368, slug: "github-actions" } })], workflowRuns: { total_count: 1, workflow_runs: [{ id: 200, check_suite_id: 5, workflow_id: 12, run_attempt: 2, event: "merge_group", status: "completed", conclusion: "success", head_sha: head, path: ".github/workflows/ci.yml" }] } })).reason!, /workflow event\/attempt/);
+});
+
 test("selected batches preserve oversized GitHub acceptance through persistence", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-batch-long-"));
 	try {
@@ -337,6 +420,29 @@ test("BatchStore rejects an invalid new ledger before creating durable state", a
 	}
 });
 
+test("version-four PR lifecycle is explicit and legacy retained batches never gain it during decode", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-pr-lifecycle-version-"));
+	const store = new BatchStore(root);
+	try {
+		store.acquire();
+		const modern = createBatch([selected("org/a#1", "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("cafe"));
+		assert.equal(modern.version, 4);
+		assert.equal(modern.items[0]!.prLifecycle?.target.ref, "self-hosted");
+		const legacy = createBatch([selected("org/b#2", "pr-ready", { baseRef: "main" })], options("f00d")) as Batch;
+		legacy.version = 2;
+		delete legacy.items[0]!.prLifecycle;
+		store.write(legacy);
+		assert.equal(store.read(legacy.id).version, 2);
+		assert.equal(store.read(legacy.id).items[0]!.prLifecycle, undefined);
+
+		const contradictory = createBatch([selected("org/a#1", "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("dead"));
+		contradictory.version = 2;
+		store.write(contradictory);
+		assert.throws(() => store.read(contradictory.id), /cannot acquire owned-PR lifecycle authority/);
+		store.release();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 
 test("BatchStore migrates version-one operations before persisting version two", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-batch-migration-"));
@@ -382,11 +488,12 @@ test("BatchStore migrates version-one operations before persisting version two",
 });
 test("ambiguous PR settlement reconciles only one exact marker/head/base match and refuses duplicates", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-pr-reconcile-"));
+	const decoyCount = 7;
 	try {
-		const run = async (duplicate: boolean) => {
+		const run = async (mode: "exact" | "duplicate" | number) => {
 			const key = "org/a#1";
 			const selectedItem = selected(key, "pr-ready", { baseRef: "main" });
-			const batch = createBatch([selectedItem], options(duplicate ? "dupe" : "exact"));
+			const batch = createBatch([selectedItem], options(typeof mode === "number" ? `decoy${mode}` : mode));
 			const item = batch.items[0]!;
 			done(batch, key, "pr-ready");
 			const branch = `factory/${batch.id}/1`;
@@ -405,10 +512,12 @@ test("ambiguous PR settlement reconciles only one exact marker/head/base match a
 			};
 			item.stage = "UNKNOWN";
 			let requests = 0;
-			const exactPull = { html_url: "https://github.com/org/a/pull/7", head: { sha }, base: { ref: "main" }, body: `Factory operation: ${marker}` };
+			const exactPull = { id: 70, node_id: "PR_node_70", number: 7, html_url: "https://github.com/org/a/pull/7", state: "open", draft: false, head: { sha, ref: branch, repo: { full_name: "org/a" } }, base: { sha: "a".repeat(40), ref: "main", repo: { full_name: "org/a" } }, body: `Factory operation: ${marker}` };
 			const decoys = [
-				{ ...exactPull, head: { sha: "c".repeat(40) } },
-				{ ...exactPull, base: { ref: "release" } },
+				{ ...exactPull, head: { ...exactPull.head, sha: "c".repeat(40) } },
+				{ ...exactPull, head: { ...exactPull.head, repo: { full_name: "fork/a" } } },
+				{ ...exactPull, head: { ...exactPull.head, ref: "human-branch" } },
+				{ ...exactPull, base: { ...exactPull.base, ref: "release" } },
 				{ ...exactPull, body: "Factory operation: unrelated" },
 				{ ...exactPull, body: `Factory operation: ${marker}:extra` },
 				{ ...exactPull, body: `prefix Factory operation: ${marker}` },
@@ -418,33 +527,302 @@ test("ambiguous PR settlement reconciles only one exact marker/head/base match a
 					requests += 1;
 					return path.includes("/git/ref/heads/")
 						? { object: { sha } }
-						: duplicate ? [exactPull, { ...exactPull, html_url: "https://github.com/org/a/pull/8" }] : [...decoys, exactPull];
+					: mode === "exact" ? [exactPull] : mode === "duplicate" ? [exactPull, { ...exactPull, id: 80, node_id: "PR_node_80", number: 8, html_url: "https://github.com/org/a/pull/8" }] : [decoys[mode]!];
 				},
 			};
 			const service = new BatchService(root, github as never, undefined, {} as never, 1);
 			// Exercise exact-effect reconciliation while bypassing only artifact revalidation.
 			const internals = service as unknown as {
 				validateProof(item: Batch["items"][number]): Promise<void>;
-				reconcileEffect(item: Batch["items"][number]): Promise<void>;
+				reconcileEffect(batch: Batch, item: Batch["items"][number]): Promise<void>;
 			};
 			internals.validateProof = async () => {};
-			await internals.reconcileEffect(item);
+			await internals.reconcileEffect(batch, item);
 			return { item, requests, marker };
 		};
 
-		const exact = await run(false);
+		const exact = await run("exact");
 		assert.equal(exact.requests, 2);
 		assert.equal(exact.item.stage, "VERIFY");
 		assert.equal(exact.item.operation?.phase, "pr");
 		assert.equal(exact.item.operation?.state, "applied");
 		assert.equal(exact.item.operation?.id, exact.marker);
 		assert.equal(exact.item.operation?.url, "https://github.com/org/a/pull/7");
+		assert.equal(exact.item.prLifecycle?.pullRequest?.identity, "PR_node_70");
+		assert.equal(exact.item.prLifecycle?.pullRequest?.headSha, "b".repeat(40));
 
-		const duplicate = await run(true);
+		const duplicate = await run("duplicate");
 		assert.equal(duplicate.requests, 2, "ambiguous settlement does not repeat publication");
 		assert.equal(duplicate.item.stage, "UNKNOWN");
 		assert.equal(duplicate.item.operation?.state, "unknown");
-		assert.ok(duplicate.item.blocker?.includes("exact PR/effect identity unproven"));
+		assert.ok(duplicate.item.blocker?.includes("not uniquely reconciled"));
+		for (let index = 0; index < decoyCount; index++) {
+			const decoy = await run(index);
+			assert.equal(decoy.item.stage, "UNKNOWN", `decoy ${index} is not adopted as the logical operation`);
+			assert.equal(decoy.item.operation?.state, "unknown");
+		}
+
+		const legacy = createBatch([selected("org/a#1", "pr-ready", { baseRef: "main" })], options("legacy"));
+		legacy.version = 2;
+		delete legacy.items[0]!.prLifecycle;
+		const legacyItem = legacy.items[0]!;
+		legacyItem.operation = { id: `${legacy.id}:org/a#1:push`, generation: legacyItem.ledger.generation, subject: { ...legacyItem.ledger.subject, head: "b".repeat(40) }, effect: "git-push", phase: "push", owner: `${legacy.id}:org/a#1`, state: "unknown", branch: `factory/${legacy.id}/1`, sha: "b".repeat(40) };
+		let legacyRequests = 0;
+		const legacyService = new BatchService(root, { request: async () => { legacyRequests += 1; return {}; } } as never, undefined, {} as never, 1);
+		const legacyInternals = legacyService as unknown as { validateProof(item: Batch["items"][number]): Promise<void>; reconcileEffect(batch: Batch, item: Batch["items"][number]): Promise<void> };
+		legacyInternals.validateProof = async () => {};
+		await legacyInternals.reconcileEffect(legacy, legacyItem);
+		assert.equal(legacyRequests, 0, "legacy operation is not adopted into version-four authority");
+		assert.equal(legacyItem.operation?.state, "unknown");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("read-only reconciliation never creates a PR; explicit resume uses active claims for one create", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-pr-next-effect-"));
+	const batch = createBatch([selected("org/a#1", "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("cafe"));
+	try {
+		const item = batch.items[0]!;
+		done(batch, item.selected.key, "verified-patch");
+		item.stage = "VERIFY";
+		const sha = "b".repeat(40);
+		const branch = `factory/${batch.id}/1`;
+		const url = "https://github.com/org/a/pull/7";
+		item.operation = { id: `${batch.id}:${item.selected.key}:push`, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: sha }, effect: "git-push", phase: "push", owner: `${batch.id}:${item.selected.key}`, state: "applied", branch, sha };
+		batch.control = "active";
+		let creates = 0;
+		const requests: string[] = [];
+		let service: BatchService;
+		const github = {
+			token: "fake", assertFresh: async () => {},
+			request: async (path: string, body?: unknown, signal?: AbortSignal) => {
+				requests.push(path);
+				if (path.includes("/git/ref/heads/")) return { object: { sha } };
+				if (path.includes("/pulls?state=all")) return [];
+				if (path.endsWith("/pulls") && body) {
+					creates += 1;
+					const owner = `${batch.id}:${item.selected.key}`;
+					assert.equal(service.store.read(batch.id).control, "active");
+					assert.equal(signal?.aborted, false);
+					assert.ok(service.claims.list().some((claim) => claim.resource === `repo:${item.selected.repo}` && claim.owner === owner));
+					assert.ok(service.claims.list().some((claim) => claim.resource === `item:${item.selected.key}` && claim.owner === owner));
+					return { id: 70, node_id: "PR_node_70", number: 7, html_url: url, state: "open", merged: false, draft: false,
+						head: { sha, ref: branch, repo: { full_name: "org/a" } }, base: { sha: "a".repeat(40), ref: "self-hosted", repo: { full_name: "org/a" } }, merge_commit_sha: "c".repeat(40) };
+				}
+				throw new Error(`unexpected fake GitHub request ${path}`);
+			},
+		};
+		service = new BatchService(root, github as never, undefined, {} as never, 1);
+		(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		service.store.acquire(); service.store.write(batch);
+		service.store.release();
+		await service.reconcile(batch.id);
+		let current = service.store.read(batch.id).items[0]!;
+		assert.equal(creates, 0, "reconcile only observes and persists nextSafeAction");
+		assert.equal(current.operation?.phase, "push");
+		assert.equal(current.operation?.state, "applied", current.blocker);
+		assert.equal(current.prLifecycle?.nextSafeAction, "publish");
+		await service.resume(batch.id, {} as never);
+		await service.waitForIdle();
+		current = service.store.read(batch.id).items[0]!;
+		assert.equal(creates, 1);
+		assert.equal(requests.filter((path) => path.endsWith("/pulls") && !path.includes("?state=")).length, 1);
+		assert.equal(current.operation?.phase, "pr");
+		assert.equal(current.operation?.state, "applied", current.blocker);
+		assert.equal(current.prLifecycle?.phase, "published");
+		assert.equal(current.prLifecycle?.nextSafeAction, "observe-after");
+		assert.equal(current.prLifecycle?.pullRequest?.identity, "PR_node_70");
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("PR POST is refused after stop, on pause reconciliation, after deadline, without claims, or after in-flight control", async () => {
+	const run = async (mode: "pause" | "stop" | "expired" | "no-claim" | "stop-race" | "pause-race") => {
+		const root = await mkdtemp(join(tmpdir(), `factory-pr-guard-${mode}-`));
+		try {
+			const batch = createBatch([selected("org/a#1", "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options(mode));
+			const item = batch.items[0]!;
+			done(batch, item.selected.key, "verified-patch"); item.stage = "VERIFY";
+			const sha = "b".repeat(40); const branch = `factory/${batch.id}/1`;
+			item.operation = { id: `${batch.id}:${item.selected.key}:push`, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: sha }, effect: "git-push", phase: "push", owner: `${batch.id}:${item.selected.key}`, state: "applied", branch, sha };
+			if (mode === "expired") Object.assign(item.prLifecycle!, { deadlineAt: "2026-10-05T00:00:00.000Z" });
+			let creates = 0; let searchCount = 0; let service!: BatchService;
+			const github = {
+				token: "fake", assertFresh: async () => {},
+				request: async (path: string, body?: unknown) => {
+					if (path.includes("/git/ref/heads/")) return { object: { sha } };
+					if (path.includes("/pulls?state=all")) {
+						searchCount += 1;
+						if ((mode === "stop-race" || mode === "pause-race") && searchCount === 2) await service.control(batch.id, mode === "pause-race" ? "pause" : "stop");
+						return [];
+					}
+					if (path.endsWith("/pulls") && body) {
+						creates += 1;
+						return { id: 70, node_id: "PR_node_70", number: 7, html_url: "https://github.com/org/a/pull/7", state: "open", merged: false, draft: false,
+							head: { sha, ref: branch, repo: { full_name: "org/a" } }, base: { sha: "a".repeat(40), ref: "self-hosted", repo: { full_name: "org/a" } } };
+					}
+					throw new Error(`unexpected fake GitHub request ${path}`);
+				},
+			};
+			service = new BatchService(root, github as never, undefined, {} as never, 1);
+			(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+			service.store.acquire(); service.store.write(batch); service.store.release();
+			if (mode === "pause") { await service.control(batch.id, "pause"); await service.reconcile(batch.id); }
+			else if (mode === "stop") { await service.control(batch.id, "stop"); await service.reconcile(batch.id); await service.resume(batch.id, {} as never); }
+			else {
+				if (mode === "no-claim") service.claims.list = () => [];
+				await service.resume(batch.id, {} as never); await service.waitForIdle();
+			}
+			const current = service.store.read(batch.id).items[0]!;
+			await service.shutdown();
+			return { creates, item: current };
+		} finally { await rm(root, { recursive: true, force: true }); }
+	};
+	for (const mode of ["pause", "stop", "expired", "no-claim", "stop-race", "pause-race"] as const) {
+		const result = await run(mode);
+		assert.equal(result.creates, 0, `${mode} must not POST a PR`);
+		assert.equal(result.item.operation?.phase, "push");
+		assert.equal(result.item.operation?.state, "applied");
+	}
+});
+
+test("a POST accepted before its response abort becomes UNKNOWN, retains claims, and reconciles without reposting", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-pr-post-abort-"));
+	const key = "org/a#1"; const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("cafe"));
+	try {
+		const item = batch.items[0]!; done(batch, key, "verified-patch"); item.stage = "VERIFY";
+		const owner = `${batch.id}:${key}`; const branch = `factory/${batch.id}/1`; const sha = "b".repeat(40); const url = "https://github.com/org/a/pull/7";
+		item.operation = { id: `${owner}:push`, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: sha }, effect: "git-push", phase: "push", owner, state: "applied", branch, sha };
+		let posts = 0; let createdPull: Record<string, unknown> | undefined; let service!: BatchService;
+		const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const requestUrl = new URL(String(input));
+			const response = (body: unknown) => ({ ok: true, status: 200, headers: new Headers(), json: async () => body }) as Response;
+			if (requestUrl.pathname.includes("/git/ref/heads/")) return response({ object: { sha } });
+			if (requestUrl.pathname.endsWith("/pulls") && init?.method === "POST") {
+				posts += 1;
+				createdPull = { id: 70, node_id: "PR_node_70", number: 7, html_url: url, state: "open", merged: false, draft: false,
+					head: { sha, ref: branch, repo: { full_name: "org/a" } }, base: { sha: "a".repeat(40), ref: "self-hosted", repo: { full_name: "org/a" } }, body: `Factory operation: ${batch.id}:${key}:pr` };
+				await service.control(batch.id, "stop");
+				assert.equal(init.signal?.aborted, true, "stop reaches the in-flight network request");
+				throw new DOMException("response interrupted after remote acceptance", "AbortError");
+			}
+			if (requestUrl.pathname.endsWith("/pulls")) return response(createdPull ? [createdPull] : []);
+			throw new Error(`unexpected transport fixture request ${requestUrl.pathname}`);
+		}) as typeof fetch;
+		const serviceInstance = new BatchService(root, new BatchGitHub("token", fetchImpl), undefined, {} as never, 1);
+		service = serviceInstance;
+		(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		await service.resume(batch.id, {} as never); await service.waitForIdle();
+		let current = service.store.read(batch.id).items[0]!;
+		assert.equal(posts, 1);
+		assert.equal(current.operation?.phase, "pr");
+		assert.equal(current.operation?.state, "unknown");
+		assert.equal(current.stage, "UNKNOWN");
+		assert.ok(service.claims.list().some((claim) => claim.resource === `repo:org/a` && claim.owner === owner));
+		assert.ok(service.claims.list().some((claim) => claim.resource === `item:${key}` && claim.owner === owner));
+
+		await service.resume(batch.id, {} as never); await service.waitForIdle();
+		current = service.store.read(batch.id).items[0]!;
+		assert.equal(posts, 1, "exact effect settlement is read-only; no duplicate PR request");
+		assert.equal(current.operation?.state, "applied");
+		assert.equal(current.prLifecycle?.pullRequest?.identity, "PR_node_70");
+		assert.equal(service.claims.list().some((claim) => claim.owner === owner), false, "settled writer claim is released before hosted waiting");
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a check success is demoted to UNKNOWN when acceptance or the owned PR changes before persistence", async () => {
+	for (const drift of ["acceptance", "owned PR head"] as const) {
+		const root = await mkdtemp(join(tmpdir(), `factory-pr-stale-${drift.replaceAll(" ", "-")}-`));
+		try {
+			const key = "org/a#1"; const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options(`stale${drift}`));
+			const item = batch.items[0]!; done(batch, key, "verified-patch"); item.stage = "VERIFY";
+			const branch = `factory/${batch.id}/1`; const headSha = "b".repeat(40); const url = "https://github.com/org/a/pull/7"; const operationId = `${batch.id}:${key}:pr`;
+			item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: headSha }, effect: "pull-request-create", phase: "pr", owner: `${batch.id}:${key}`, state: "applied", branch, sha: headSha, url, resultHandle: url };
+			item.prLifecycle = { ...item.prLifecycle!, phase: "published", nextSafeAction: "observe-after", pullRequest: { repository: "org/a", identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: "a".repeat(40), operationId } };
+			const github = {
+				token: "fake",
+				assertFresh: async () => { throw new Error(`${drift} changed during observation`); },
+				observeHostedChecks: async (_repo: string, pull: { headSha: string }, observedAt: string) => ({
+					observedAt, headSha: pull.headSha, eligibleSubject: { sha: pull.headSha, subject: "head" as const }, policy: [{ context: "CI", appId: 42, source: "classic" as const }],
+					policyFingerprint: "e".repeat(64), runs: [{ id: 1, suiteId: 2, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: "completed", conclusion: "success", createdAt: observedAt, startedAt: observedAt, subject: "head" as const }], coverage: "complete" as const, result: "passed" as const,
+				}),
+			};
+			const service = new BatchService(root, github as never, undefined, {} as never, 1);
+			(service as unknown as { validateProof(current: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+			service.store.acquire(); service.store.write(batch); service.store.release();
+			await service.reconcile(batch.id, () => new Date("2026-10-06T12:00:00.000Z"));
+			const current = service.store.read(batch.id).items[0]!;
+			assert.equal(current.stage, "UNKNOWN", drift);
+			assert.equal(current.proof?.stage, "verified-patch", drift);
+			assert.equal(current.prLifecycle?.phase, "unknown", drift);
+			assert.equal(current.prLifecycle?.observation?.result, "unknown", drift);
+			assert.match(current.blocker!, new RegExp(`${drift} changed`));
+			await service.shutdown();
+		} finally { await rm(root, { recursive: true, force: true }); }
+	}
+});
+
+test("owned hosted-PR observation persists its next action across restart and only completes after current checks", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-owned-pr-lifecycle-"));
+	try {
+		const key = "org/a#1";
+		const batch = createBatch([selected(key, "pr-ready", { baseRef: "self-hosted", targetRef: "self-hosted" })], options("cafe"));
+		const item = batch.items[0]!;
+		done(batch, key, "verified-patch");
+		item.stage = "VERIFY";
+		const branch = `factory/${batch.id}/1`;
+		const headSha = "b".repeat(40);
+		const url = "https://github.com/org/a/pull/7";
+		const operationId = `${batch.id}:${key}:pr`;
+		item.operation = { id: operationId, generation: item.ledger.generation, subject: { repo: "org/a", base: "a".repeat(40), head: headSha }, effect: "pull-request-create", phase: "pr", owner: `${batch.id}:${key}`, state: "applied", branch, sha: headSha, url, resultHandle: url };
+		item.prLifecycle = { ...item.prLifecycle!, phase: "published", target: { ref: "self-hosted", sha: "a".repeat(40) }, deadlineAt: "2026-10-07T12:00:00.000Z", nextSafeAction: "observe-after", pullRequest: {
+			repository: "org/a", identity: "PR_node_7", number: 7, url, branch, headSha, baseRef: "self-hosted", baseSha: "a".repeat(40), mergeSha: "c".repeat(40), operationId,
+		} };
+		let calls = 0;
+		let hostedPolicyCurrent = true;
+		const github = {
+			token: "fake", snapshot: async (value: SelectedItem) => value, assertFresh: async () => {}, hostedCheckPolicyCurrent: async () => hostedPolicyCurrent,
+			observeHostedChecks: async (_repo: string, pull: { headSha: string; mergeSha?: string }, observedAt: string) => {
+				calls += 1;
+				return { observedAt, headSha: pull.headSha, mergeSha: pull.mergeSha, eligibleSubject: pull.mergeSha ? { sha: pull.mergeSha, subject: "merge" as const } : { sha: pull.headSha, subject: "head" as const }, policyFingerprint: "f".repeat(64), policy: [{ context: "CI", appId: 42, source: "classic" as const }], runs: [
+					{ id: calls, suiteId: 5, appId: 42, appSlug: null, name: "CI", headSha: pull.headSha, status: calls === 1 ? "in_progress" : "completed", conclusion: calls === 1 ? null : "success", createdAt: observedAt, startedAt: observedAt, subject: "head" as const },
+					...(pull.mergeSha ? [{ id: 10 + calls, suiteId: 6, appId: 42, appSlug: null, name: "CI", headSha: pull.mergeSha, status: "completed", conclusion: "success", createdAt: observedAt, startedAt: observedAt, subject: "merge" as const }] : []),
+				], coverage: "complete" as const, result: calls === 1 ? "pending" as const : "passed" as const };
+			},
+		};
+		const service = new BatchService(root, github as never, undefined, {} as never, 1);
+		(service as unknown as { validateProof(item: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		const firstNow = new Date("2026-10-06T12:00:00.000Z");
+		await service.reconcile(batch.id, () => firstNow);
+		assert.equal(service.store.read(batch.id).items[0]!.prLifecycle?.phase, "waiting");
+		assert.equal(service.store.read(batch.id).items[0]!.prLifecycle?.nextSafeAction, "observe-after");
+		assert.equal(service.store.read(batch.id).items[0]!.prLifecycle?.observationCount, 1);
+		await service.shutdown();
+
+		const restarted = new BatchService(root, github as never, undefined, {} as never, 1);
+		(restarted as unknown as { validateProof(item: Batch["items"][number]): Promise<void> }).validateProof = async () => {};
+		await restarted.reconcile(batch.id, () => new Date("2026-10-06T12:00:14.000Z"));
+		assert.equal(calls, 1, "resume before nextObservationAt does not poll GitHub");
+		await restarted.reconcile(batch.id, () => new Date("2026-10-06T12:00:16.000Z"));
+		const current = restarted.store.read(batch.id).items[0]!;
+		assert.equal(calls, 2);
+		assert.equal(current.stage, "DONE");
+		assert.equal(current.proof?.stage, "pr-ready");
+		assert.equal(current.prLifecycle?.phase, "ready");
+		assert.equal(current.prLifecycle?.pullRequest?.identity, "PR_node_7");
+		assert.equal(current.prLifecycle?.observation?.headSha, headSha);
+		assert.equal(current.prLifecycle?.observation?.mergeSha, "c".repeat(40));
+		hostedPolicyCurrent = false;
+		await restarted.reconcile(batch.id, () => new Date("2026-10-06T12:06:00.000Z"));
+		const policyChanged = restarted.store.read(batch.id).items[0]!;
+		assert.equal(policyChanged.stage, "UNKNOWN");
+		assert.equal(policyChanged.proof?.stage, "verified-patch");
+		assert.match(policyChanged.blocker!, /policy changed or became unavailable/);
+		await restarted.shutdown();
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
