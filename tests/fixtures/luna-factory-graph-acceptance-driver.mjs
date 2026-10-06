@@ -5,7 +5,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { accessSync, constants, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
-import { installGhShim, seedRepos } from "./luna-factory-graph-acceptance-support.mjs";
+import { graphAcceptanceChildEnvironment, installGhShim, seedRepos } from "./luna-factory-graph-acceptance-support.mjs";
 
 const repository = resolve(import.meta.dirname, "../..");
 const source = process.env.REVIEW_TEST_SOURCE ?? repository;
@@ -143,14 +143,14 @@ try {
 	const launcherSha256 = execFileSync("sha256sum", [binary], { encoding: "utf8" }).split(/\s/)[0];
 	const binaryIdentity = mode === "native" ? { binary, binaryDigest: launcherSha256 } : { launcher: binary, launcherSha256, launcherVersion: version };
 	writeFileSync(join(root, "runtime-identity.json"), JSON.stringify({ mode, ...binaryIdentity, sourceHead: head, sourceDirty: sourceDiff.length !== 0, sourceDiffDigest, harnessHead, harnessDigest: initialHarnessDigest, evidence: root, runtimeKind }, null, 2));
-	const env = { PATH: `${shim}:${process.env.PATH}`, HOME: join(root, "home"), XDG_CONFIG_HOME: join(root, "home/.config"), XDG_CACHE_HOME: join(root, "home/.cache"), XDG_STATE_HOME: join(root, "state"), GRAPH130_ROOT: root, LUNA_FACTORY_ENABLED: "1", LUNA_FACTORY_CAPACITY: "2", LUNA_FACTORY_STATE_ROOT: join(root, "state"), LUNA_FACTORY_CLAIMS_ROOT: join(root, "claims"), REVIEW_DEFAULT_SCOPE: "example/a", GH_TOKEN: "captured-fixture-token", REVIEW_TEST_FACTORY_ROOT: join(source, "image/extension/luna-factory") };
+	const krunRuntimeEnvironment = {};
 	if (mode === "krun-host-provider") {
-		env.REVIEW_TEST_HARNESS_ROOT = repository;
 		for (const name of ["REVIEW_TEST_KRUN_ROOT_REVIEWED", "REVIEW_TEST_KRUN_SLOT_GRANTED", "REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH", "REVIEW_TEST_KRUN_IMAGE_ID", "REVIEW_TEST_KRUN_IMAGE_DIGEST", "REVIEW_TEST_KRUN_OMP_SHA256", "REVIEW_TEST_KRUN_GRANT_FILE"]) {
 			assert.ok(process.env[name], `krun host-provider mode requires ${name}`);
-			env[name] = process.env[name];
+			krunRuntimeEnvironment[name] = process.env[name];
 		}
 	}
+	const env = graphAcceptanceChildEnvironment({ pathPrefix: shim, home: join(root, "home"), configHome: join(root, "home/.config"), cacheHome: join(root, "home/.cache"), stateHome: join(root, "state"), root, source, harnessRoot: mode === "krun-host-provider" ? repository : undefined, krunRuntimeEnvironment });
 	const args = ["--mode", "rpc", "--no-ui", "--no-skills", "--no-rules", "--no-extensions", "--no-pty", "--config", join(root, "home/.config/omp/omp.yml"), "--model", "local-probe/deterministic", "--extension", join(source, "image/extension/luna-factory"), "--extension", join(repository, "tests/fixtures/luna-factory-graph-acceptance-runtime.ts")];
 	const output = createWriteStream(join(root, "native-graph.log"));
 	child = spawn(binary, args, { cwd: join(root, "omp-cwd"), env, stdio: ["pipe", "pipe", "pipe"] });

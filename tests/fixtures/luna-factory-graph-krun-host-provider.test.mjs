@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { graphAcceptanceChildEnvironment } from "./luna-factory-graph-acceptance-support.mjs";
 
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
 const repository = resolve(fixtureDir, "../..");
@@ -83,6 +84,37 @@ function calls(fixture) {
 	if (!existsSync(fixture.capture)) return [];
 	return readFileSync(fixture.capture, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
+
+test("graph driver carries the validated production source into its actual child environment", (t) => {
+	const f = setup(); t.after(() => rmSync(f.temp, { recursive: true, force: true }));
+	const env = graphAcceptanceChildEnvironment({
+		pathPrefix: join(f.temp, "shim"),
+		home: f.home,
+		configHome: join(f.home, ".config"),
+		cacheHome: join(f.home, ".cache"),
+		stateHome: join(f.home, ".local/state"),
+		root: f.root,
+		source: f.source,
+		harnessRoot: repository,
+		krunRuntimeEnvironment: {
+			REVIEW_TEST_KRUN_ROOT_REVIEWED: "1",
+			REVIEW_TEST_KRUN_SLOT_GRANTED: "1",
+			REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH: f.env.REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH,
+			REVIEW_TEST_KRUN_IMAGE_ID: f.env.REVIEW_TEST_KRUN_IMAGE_ID,
+			REVIEW_TEST_KRUN_IMAGE_DIGEST: f.env.REVIEW_TEST_KRUN_IMAGE_DIGEST,
+			REVIEW_TEST_KRUN_OMP_SHA256: f.env.REVIEW_TEST_KRUN_OMP_SHA256,
+			REVIEW_TEST_KRUN_GRANT_FILE: f.env.REVIEW_TEST_KRUN_GRANT_FILE,
+		},
+	});
+	const child = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify({source:process.env.REVIEW_TEST_SOURCE,factory:process.env.REVIEW_TEST_FACTORY_ROOT,harness:process.env.REVIEW_TEST_HARNESS_ROOT,token:process.env.GH_TOKEN}))"], { encoding: "utf8", env });
+	assert.equal(child.status, 0, child.stderr);
+	assert.deepEqual(JSON.parse(child.stdout), {
+		source: f.source,
+		factory: join(f.source, "image/extension/luna-factory"),
+		harness: repository,
+		token: "captured-fixture-token",
+	});
+});
 
 test("krun host transport sends the unchanged fixture route through host networking", (t) => {
 	const f = setup(); t.after(() => rmSync(f.temp, { recursive: true, force: true }));
