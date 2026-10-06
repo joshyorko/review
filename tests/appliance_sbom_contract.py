@@ -27,6 +27,10 @@ NATIVE_X86 = "e" * 128
 NATIVE_ARM = "f" * 128
 GH_X86 = "1" * 64
 GH_ARM = "2" * 64
+RTK_X86 = "7" * 64
+RTK_ARM = "8" * 64
+RTK_HOOK = "9" * 64
+RTK_LICENSE_SHA = "0" * 64
 NODE_X86 = "3" * 64
 NODE_ARM = "4" * 64
 BUN_X86 = "5" * 64
@@ -50,6 +54,10 @@ BASE_ARGS = {
     "--omp-native-sha512": NATIVE_X86,
     "--gh-version": "2.80.1",
     "--gh-sha256": GH_X86,
+    "--rtk-version": "0.51.0",
+    "--rtk-archive-sha256": RTK_X86,
+    "--rtk-hook-sha256": RTK_HOOK,
+    "--rtk-license-sha256": RTK_LICENSE_SHA,
 }
 
 
@@ -65,6 +73,7 @@ def args_for_arch(arch: str, **overrides: str) -> dict[str, str]:
                 "--node-sha256": NODE_ARM,
                 "--bun-sha256": BUN_ARM,
                 "--gh-sha256": GH_ARM,
+                "--rtk-archive-sha256": RTK_ARM,
             }
         )
     args.update(overrides)
@@ -130,10 +139,13 @@ class PerArchitectureDigests(unittest.TestCase):
         self.assertEqual(found["omp"]["checksums"][0]["checksumValue"], OMP_X86)
         self.assertEqual(found["omp-native-addon"]["checksums"][0]["checksumValue"], NATIVE_X86)
         self.assertEqual(found["gh"]["checksums"][0]["checksumValue"], GH_X86)
+        self.assertEqual(found["rtk"]["checksums"][0]["checksumValue"], RTK_X86)
+        self.assertEqual(found["rtk-omp-hook"]["checksums"][0]["checksumValue"], RTK_HOOK)
+        self.assertEqual(found["rtk-license"]["checksums"][0]["checksumValue"], RTK_LICENSE_SHA)
         self.assertEqual(found["node"]["checksums"][0]["checksumValue"], NODE_X86)
         self.assertEqual(found["bun"]["checksums"][0]["checksumValue"], BUN_X86)
         serialized = json.dumps(found)
-        for foreign in (OMP_ARM, NATIVE_ARM, GH_ARM, NODE_ARM, BUN_ARM):
+        for foreign in (OMP_ARM, NATIVE_ARM, GH_ARM, RTK_ARM, NODE_ARM, BUN_ARM):
             self.assertNotIn(foreign, serialized, "an aarch64 digest reached an x86_64 SBOM")
 
     def test_aarch64_records_its_derived_binary_native_addon_and_gh_hashes(self):
@@ -141,16 +153,22 @@ class PerArchitectureDigests(unittest.TestCase):
         self.assertEqual(found["omp"]["checksums"][0]["checksumValue"], OMP_ARM)
         self.assertEqual(found["omp-native-addon"]["checksums"][0]["checksumValue"], NATIVE_ARM)
         self.assertEqual(found["gh"]["checksums"][0]["checksumValue"], GH_ARM)
+        self.assertEqual(found["rtk"]["checksums"][0]["checksumValue"], RTK_ARM)
+        self.assertEqual(found["rtk-omp-hook"]["checksums"][0]["checksumValue"], RTK_HOOK)
+        self.assertEqual(found["rtk-license"]["checksums"][0]["checksumValue"], RTK_LICENSE_SHA)
         self.assertEqual(found["node"]["checksums"][0]["checksumValue"], NODE_ARM)
         self.assertEqual(found["bun"]["checksums"][0]["checksumValue"], BUN_ARM)
         serialized = json.dumps(found)
-        for foreign in (OMP_X86, NATIVE_X86, GH_X86, NODE_X86, BUN_X86):
+        for foreign in (OMP_X86, NATIVE_X86, GH_X86, RTK_X86, NODE_X86, BUN_X86):
             self.assertNotIn(foreign, serialized, "an x86_64 digest reached an aarch64 SBOM")
 
     def test_every_verified_component_has_its_actual_checksum_algorithm(self):
         found = packages_by_name(generate(self, "x86_64"))
-        for name in ("omp", "omp-source", "omp-memory-backend-patch", "gh"):
+        for name in ("omp", "omp-source", "omp-memory-backend-patch", "gh", "rtk", "rtk-omp-hook", "rtk-license"):
             self.assertEqual(found[name]["checksums"][0]["algorithm"], "SHA256")
+        self.assertEqual(found["rtk"]["licenseDeclared"], "Apache-2.0")
+        self.assertEqual(found["rtk-omp-hook"]["licenseDeclared"], "Apache-2.0")
+        self.assertEqual(found["rtk-license"]["licenseDeclared"], "Apache-2.0")
         self.assertEqual(found["omp-native-addon"]["checksums"][0]["algorithm"], "SHA512")
         self.assertEqual(found["node"]["checksums"][0]["algorithm"], "SHA256")
         self.assertEqual(found["bun"]["checksums"][0]["algorithm"], "SHA256")
@@ -179,6 +197,9 @@ class DigestValidation(unittest.TestCase):
         self.assert_rejected("omp_source_sha256", **{"--omp-source-sha256": "c" * 63})
         self.assert_rejected("omp_patch_sha256", **{"--omp-patch-sha256": "z" * 64})
         self.assert_rejected("gh_sha256", **{"--gh-sha256": "sha256:" + GH_X86})
+        self.assert_rejected("rtk_archive_sha256", **{"--rtk-archive-sha256": "A" * 64})
+        self.assert_rejected("rtk_hook_sha256", **{"--rtk-hook-sha256": "z" * 64})
+        self.assert_rejected("rtk_license_sha256", **{"--rtk-license-sha256": "z" * 64})
         self.assert_rejected("node_sha256", **{"--node-sha256": "Z" * 64})
         self.assert_rejected("bun_sha256", **{"--bun-sha256": "Z" * 64})
 
@@ -267,19 +288,44 @@ class DownloadLocations(unittest.TestCase):
             "https://github.com/cli/cli/releases/download/v2.80.1/gh_2.80.1_linux_arm64.tar.gz",
         )
 
+    def test_rtk_binary_and_hook_urls_are_versioned_and_architecture_specific(self):
+        x86 = packages_by_name(generate(self, "x86_64"))
+        arm = packages_by_name(generate(self, "aarch64"))
+        self.assertEqual(
+            x86["rtk"]["downloadLocation"],
+            "https://github.com/rtk-ai/rtk/releases/download/v0.51.0/rtk-x86_64-unknown-linux-musl.tar.gz",
+        )
+        self.assertEqual(
+            arm["rtk"]["downloadLocation"],
+            "https://github.com/rtk-ai/rtk/releases/download/v0.51.0/rtk-aarch64-unknown-linux-gnu.tar.gz",
+        )
+        self.assertEqual(
+            x86["rtk-omp-hook"]["downloadLocation"],
+            "https://raw.githubusercontent.com/rtk-ai/rtk/v0.51.0/hooks/pi/rtk.ts",
+        )
+        self.assertEqual(x86["rtk-omp-hook"]["downloadLocation"], arm["rtk-omp-hook"]["downloadLocation"])
+        self.assertEqual(
+            x86["rtk-license"]["downloadLocation"],
+            "https://raw.githubusercontent.com/rtk-ai/rtk/v0.51.0/LICENSE",
+        )
+        self.assertEqual(x86["rtk-license"]["downloadLocation"], arm["rtk-license"]["downloadLocation"])
+
 
 class PackageIdentity(unittest.TestCase):
     def test_all_build_inputs_and_runtime_components_are_recorded(self):
         found = packages_by_name(generate(self, "x86_64"))
         self.assertEqual(
             sorted(found),
-            ["bun", "gh", "node", "omp", "omp-memory-backend-patch", "omp-native-addon", "omp-source", "review-workbench"],
+            ["bun", "gh", "node", "omp", "omp-memory-backend-patch", "omp-native-addon", "omp-source", "review-workbench", "rtk", "rtk-license", "rtk-omp-hook"],
         )
         self.assertEqual(found["omp"]["versionInfo"], "1.2.3")
         self.assertEqual(found["omp-source"]["versionInfo"], SOURCE_COMMIT)
         self.assertEqual(found["omp-memory-backend-patch"]["versionInfo"], REVIEW_REVISION)
         self.assertEqual(found["omp-native-addon"]["versionInfo"], "1.2.3")
         self.assertEqual(found["gh"]["versionInfo"], "2.80.1")
+        self.assertEqual(found["rtk"]["versionInfo"], "0.51.0")
+        self.assertEqual(found["rtk-omp-hook"]["versionInfo"], "0.51.0")
+        self.assertEqual(found["rtk-license"]["versionInfo"], "0.51.0")
         self.assertEqual(found["node"]["versionInfo"], "24.21.0")
         self.assertEqual(found["bun"]["versionInfo"], "1.4.2")
         self.assertEqual(found["review-workbench"]["versionInfo"], "26.08.03")
@@ -313,6 +359,9 @@ class PackageIdentity(unittest.TestCase):
             f"pkg:npm/%40oh-my-pi/pi-natives-linux-arm64@1.2.3?checksum=sha512:{NATIVE_ARM}",
         )
         self.assertEqual(locator("gh"), f"pkg:github/cli/cli@v2.80.1?checksum=sha256:{GH_ARM}")
+        self.assertEqual(locator("rtk"), f"pkg:github/rtk-ai/rtk@v0.51.0?checksum=sha256:{RTK_ARM}")
+        self.assertEqual(locator("rtk-omp-hook"), f"pkg:generic/rtk-omp-hook@0.51.0?checksum=sha256:{RTK_HOOK}")
+        self.assertEqual(locator("rtk-license"), f"pkg:generic/rtk-license@0.51.0?checksum=sha256:{RTK_LICENSE_SHA}")
         self.assertEqual(locator("node"), f"pkg:generic/node@24.21.0?checksum=sha256:{NODE_ARM}")
         self.assertEqual(locator("bun"), f"pkg:github/oven-sh/bun@bun-v1.4.2?checksum=sha256:{BUN_ARM}")
         self.assertEqual(locator("review-workbench"), f"pkg:github/joshyorko/review@{REVIEW_REVISION}")

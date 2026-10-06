@@ -15,9 +15,27 @@ import {
 	updateLockfileContent,
 } from "../scripts/update-requirements-ci-hashes.mjs";
 import { syncTypesafePins, TYPESAFE_PACKAGES } from "../scripts/update-typesafe-pins.mjs";
+import {
+	releasePins as rtkReleasePins,
+	syncRtkPins,
+	updateContainerfile as updateRtkContainerfile,
+} from "../scripts/update-rtk-pins.mjs";
 
 const X64 = "a".repeat(64);
 const ARM64 = "b".repeat(64);
+const RTK_X64 = "7".repeat(64);
+const RTK_ARM64 = "8".repeat(64);
+const RTK_HOOK = 'pi.on("tool_call", () => {}); pi.exec("rtk", ["rewrite", cmd]); process.env.RTK_DISABLED === "1"';
+const RTK_LICENSE = "                                 Apache License\n                           Version 2.0, January 2004\n";
+const RTK_RELEASE = {
+	tag_name: "v0.51.0",
+	draft: false,
+	prerelease: false,
+	assets: [
+		{ name: "rtk-x86_64-unknown-linux-musl.tar.gz", digest: `sha256:${RTK_X64}` },
+		{ name: "rtk-aarch64-unknown-linux-gnu.tar.gz", digest: `sha256:${RTK_ARM64}` },
+	],
+};
 const GH_RELEASE = {
 	tag_name: "v2.97.0",
 	draft: false,
@@ -73,6 +91,114 @@ test("updateGhContainerfile replaces one complete GH pin set", () => {
 		() => updateGhContainerfile(`${OLD_GH_CONTAINERFILE}ARG GH_VERSION=2.0.0\n`, { version: "2.97.0", x86_64: X64, aarch64: ARM64 }),
 		/expected one ARG GH_VERSION pin/,
 	);
+});
+
+test("rtkReleasePins validates both Linux assets, the upstream OMP hook, and Apache license", () => {
+	assert.deepEqual(rtkReleasePins(RTK_RELEASE, RTK_HOOK, RTK_LICENSE), {
+		version: "0.51.0",
+		x86_64: RTK_X64,
+		aarch64: RTK_ARM64,
+		hook: createHash("sha256").update(RTK_HOOK).digest("hex"),
+		license: createHash("sha256").update(RTK_LICENSE).digest("hex"),
+	});
+	assert.throws(() => rtkReleasePins({ ...RTK_RELEASE, prerelease: true }, RTK_HOOK, RTK_LICENSE), /published stable release/);
+	assert.throws(() => rtkReleasePins(RTK_RELEASE, RTK_HOOK, RTK_LICENSE, "0.50.0"), /requested RTK 0\.50\.0/);
+	assert.throws(() => rtkReleasePins({ ...RTK_RELEASE, assets: RTK_RELEASE.assets.slice(0, 1) }, RTK_HOOK, RTK_LICENSE), /has no rtk-aarch64/);
+	assert.throws(() => rtkReleasePins(RTK_RELEASE, "export default () => {}", RTK_LICENSE), /no tool_call subscription/);
+	assert.throws(() => rtkReleasePins(RTK_RELEASE, 'pi.on("tool_call"); process.env.RTK_DISABLED === "1"', RTK_LICENSE), /no longer delegates to rtk rewrite/);
+	assert.throws(() => rtkReleasePins(RTK_RELEASE, RTK_HOOK, ""), /Apache License 2.0/);
+	assert.throws(() => rtkReleasePins(RTK_RELEASE, RTK_HOOK, "MIT License"), /Apache License 2.0/);
+});
+
+test("updateRtkContainerfile replaces the complete binary and hook pin set", () => {
+	const source = [
+		"ARG RTK_VERSION=0.50.0",
+		`ARG RTK_X86_64_SHA256=${"1".repeat(64)}`,
+		`ARG RTK_AARCH64_SHA256=${"2".repeat(64)}`,
+		`ARG RTK_HOOK_SHA256=${"3".repeat(64)}`,
+		`ARG RTK_LICENSE_SHA256=${"4".repeat(64)}`,
+		"",
+	].join("\n");
+	const pins = rtkReleasePins(RTK_RELEASE, RTK_HOOK, RTK_LICENSE);
+	const updated = updateRtkContainerfile(source, pins);
+	assert.match(updated, /^ARG RTK_VERSION=0\.51\.0$/m);
+	assert.match(updated, new RegExp(`^ARG RTK_X86_64_SHA256=${RTK_X64}$`, "m"));
+	assert.match(updated, new RegExp(`^ARG RTK_AARCH64_SHA256=${RTK_ARM64}$`, "m"));
+	assert.match(updated, new RegExp(`^ARG RTK_HOOK_SHA256=${pins.hook}$`, "m"));
+	assert.match(updated, new RegExp(`^ARG RTK_LICENSE_SHA256=${pins.license}$`, "m"));
+	assert.throws(() => updateRtkContainerfile(`${source}ARG RTK_VERSION=0.51.0\n`, pins), /expected one ARG RTK_VERSION/);
+});
+
+test("syncRtkPins refreshes stable release assets and the matching hook", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "rtk-pins-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	await mkdir(join(root, "image/appliance"), { recursive: true });
+	await mkdir(join(root, "image/extension/rtk"), { recursive: true });
+	await writeFile(join(root, "image/extension/rtk/LICENSE"), "old license\n");
+	await writeFile(join(root, "image/appliance/Containerfile"), [
+		"ARG RTK_VERSION=0.51.0",
+		`ARG RTK_X86_64_SHA256=${"1".repeat(64)}`,
+		`ARG RTK_AARCH64_SHA256=${"2".repeat(64)}`,
+		`ARG RTK_HOOK_SHA256=${"3".repeat(64)}`,
+		`ARG RTK_LICENSE_SHA256=${"4".repeat(64)}`,
+		"",
+	].join("\n"));
+	const urls = [];
+	const pins = await syncRtkPins({
+		root,
+		fetchImpl: async (url) => {
+			urls.push(String(url));
+			if (String(url).includes("api.github.com")) return response(RTK_RELEASE);
+			return String(url).endsWith("/hooks/pi/rtk.ts") ? response(RTK_HOOK) : response(RTK_LICENSE);
+		},
+	});
+	assert.deepEqual(pins, rtkReleasePins(RTK_RELEASE, RTK_HOOK, RTK_LICENSE));
+	assert.deepEqual(urls, [
+		"https://api.github.com/repos/rtk-ai/rtk/releases/tags/v0.51.0",
+		"https://raw.githubusercontent.com/rtk-ai/rtk/v0.51.0/hooks/pi/rtk.ts",
+		"https://raw.githubusercontent.com/rtk-ai/rtk/v0.51.0/LICENSE",
+	]);
+	const appliance = await readFile(join(root, "image/appliance/Containerfile"), "utf8");
+	assert.equal(await readFile(join(root, "image/extension/rtk/LICENSE"), "utf8"), RTK_LICENSE);
+	assert.match(appliance, /^ARG RTK_VERSION=0\.51\.0$/m);
+	assert.match(appliance, new RegExp(`^ARG RTK_X86_64_SHA256=${RTK_X64}$`, "m"));
+	assert.match(appliance, new RegExp(`^ARG RTK_AARCH64_SHA256=${RTK_ARM64}$`, "m"));
+	assert.match(appliance, new RegExp(`^ARG RTK_HOOK_SHA256=${pins.hook}$`, "m"));
+	assert.match(appliance, new RegExp(`^ARG RTK_LICENSE_SHA256=${pins.license}$`, "m"));
+});
+
+test("syncRtkPins rejects missing or mismatched license text without changing pins", async (t) => {
+	for (const [name, licenseResponse, error] of [
+		["missing", response("Not Found", { status: 404, statusText: "Not Found" }), /RTK source lookup failed: 404/],
+		["mismatched", response("MIT License"), /RTK LICENSE must identify Apache License 2\.0/],
+	]) {
+		const root = await mkdtemp(join(tmpdir(), `rtk-license-${name}-`));
+		t.after(() => rm(root, { recursive: true, force: true }));
+		await mkdir(join(root, "image/appliance"), { recursive: true });
+		await mkdir(join(root, "image/extension/rtk"), { recursive: true });
+		const oldLicense = "previous valid license\n";
+		await writeFile(join(root, "image/extension/rtk/LICENSE"), oldLicense);
+		const initial = [
+			"ARG RTK_VERSION=0.51.0",
+			`ARG RTK_X86_64_SHA256=${"1".repeat(64)}`,
+			`ARG RTK_AARCH64_SHA256=${"2".repeat(64)}`,
+			`ARG RTK_HOOK_SHA256=${"3".repeat(64)}`,
+			`ARG RTK_LICENSE_SHA256=${"4".repeat(64)}`,
+			"",
+		].join("\n");
+		const filePath = join(root, "image/appliance/Containerfile");
+		await writeFile(filePath, initial);
+		await assert.rejects(() => syncRtkPins({
+			root,
+			fetchImpl: async (url) => {
+				if (String(url).includes("api.github.com")) return response(RTK_RELEASE);
+				if (String(url).endsWith("/hooks/pi/rtk.ts")) return response(RTK_HOOK);
+				return licenseResponse;
+			},
+		}), error);
+		assert.equal(await readFile(filePath, "utf8"), initial, `${name} license rejection left all pins unchanged`);
+		assert.equal(await readFile(join(root, "image/extension/rtk/LICENSE"), "utf8"), oldLicense, `${name} license rejection preserved the existing license`);
+	}
 });
 
 test("syncGhPins updates the Review appliance from the selected release", async (t) => {
@@ -189,25 +315,31 @@ test("Renovate tracks only shipped Review and CI dependencies", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
 	const ompManager = config.customManagers.find((manager) => manager.depNameTemplate === "can1357/oh-my-pi");
 	const ghManager = config.customManagers.find((manager) => manager.depNameTemplate === "cli/cli");
+	const rtkManager = config.customManagers.find((manager) => manager.depNameTemplate === "rtk-ai/rtk");
 	const typesafeManagers = ["pi-typesafe", "@typesafe-ai/sdk", "typebox"].map((depName) =>
 		config.customManagers.find((manager) => manager.depNameTemplate === depName),
 	);
 	const pypiManager = config.customManagers.find((manager) => manager.datasourceTemplate === "pypi");
 	assert.ok(ompManager);
 	assert.ok(ghManager);
+	assert.ok(rtkManager);
 	assert.ok(typesafeManagers.every(Boolean), "all packaged TypeSafe npm pins need Renovate managers");
 	assert.ok(pypiManager);
 	assert.match(ompManager.managerFilePatterns[0], /image\/appliance\/Containerfile/);
 	assert.match(ghManager.managerFilePatterns[0], /image\/appliance\/Containerfile/);
+	assert.match(rtkManager.managerFilePatterns[0], /image\/appliance\/Containerfile/);
 
 	const ompRule = config.packageRules.find((rule) => rule.matchPackageNames?.includes("can1357/oh-my-pi"));
 	const ghRule = config.packageRules.find((rule) => rule.matchPackageNames?.includes("cli/cli"));
+	const rtkRule = config.packageRules.find((rule) => rule.matchPackageNames?.includes("rtk-ai/rtk"));
 	const typesafeRule = config.packageRules.find((rule) => rule.groupName === "TypeSafe runtime");
 	const pypiRule = config.packageRules.find((rule) => rule.matchDatasources?.includes("pypi"));
 	assert.deepEqual(ompRule.postUpgradeTasks.commands, ["node scripts/update-omp-pins.mjs"]);
 	assert.deepEqual(ompRule.postUpgradeTasks.fileFilters, ["image/appliance/Containerfile"]);
 	assert.deepEqual(ghRule.postUpgradeTasks.commands, ["node scripts/update-gh-pins.mjs"]);
 	assert.deepEqual(ghRule.postUpgradeTasks.fileFilters, ["image/appliance/Containerfile"]);
+	assert.deepEqual(rtkRule.postUpgradeTasks.commands, ["node scripts/update-rtk-pins.mjs"]);
+	assert.deepEqual(rtkRule.postUpgradeTasks.fileFilters, ["image/appliance/Containerfile", "image/extension/rtk/LICENSE"]);
 	assert.deepEqual(typesafeRule.matchDatasources, ["npm"]);
 	assert.deepEqual(typesafeRule.matchPackageNames, ["pi-typesafe", "@typesafe-ai/sdk", "typebox"]);
 	assert.deepEqual(typesafeRule.postUpgradeTasks.commands, ["node scripts/update-typesafe-pins.mjs"]);
@@ -225,6 +357,7 @@ test("Renovate extracts appliance pins and CI package versions", async () => {
 	const expectedVersions = [
 		["can1357/oh-my-pi", readVersionArg(appliance, "OMP_VERSION")],
 		["cli/cli", readVersionArg(appliance, "GH_VERSION")],
+		["rtk-ai/rtk", readVersionArg(appliance, "RTK_VERSION")],
 		["pi-typesafe", readVersionArg(appliance, "TYPESAFE_VERSION")],
 		["@typesafe-ai/sdk", readVersionArg(appliance, "TYPESAFE_SDK_VERSION")],
 		["typebox", readVersionArg(appliance, "TYPESAFE_TYPEBOX_VERSION")],

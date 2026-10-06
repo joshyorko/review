@@ -142,18 +142,33 @@ No adoption default follows from the fixture alone. Decide default-on,
 opt-in/binary-only, or reject only after the required packaged OMP dogfood and
 the exact-head RTK-on/raw comparison complete.
 
-## Packaging follow-up write set
+## Source package checkpoint (2026-10-06)
 
-Packaging remains outside this slice because the appliance `Containerfile` is
-shared with active OMP pin work. Once that file has a single writer, the
-packaging packet should touch only the necessary seams:
-`image/appliance/Containerfile` for the verified per-architecture release and
-staged upstream extension;
-`image/appliance/entrypoint.sh` for explicit immutable-path loading and the
-telemetry-off default; `scripts/generate-appliance-sbom.py` plus
-`tests/appliance_sbom_contract.py` for version/source/checksum provenance; and
-a focused RTK pin/update contract with its own test. Extend the existing
-appliance and launcher contracts only where they need to prove loading,
-`RTK_DISABLED=1` propagation, and unchanged inherited `.omp` state. No Factory
-worker capability, second rewrite registry, or operator profile setting is
-needed for this packet.
+The source pins RTK v0.51.0 with separate x86_64-musl and aarch64-GNU archive
+digests, the matching upstream `hooks/pi/rtk.ts` digest, and the Apache-2.0
+license digest `4044ade9c21d8b084d3d16a03375cf3b7e166b946a327bb37a3fbbdb53287cfd`
+from `https://raw.githubusercontent.com/rtk-ai/rtk/v0.51.0/LICENSE`. It stages
+the binary, hook, and exact upstream license text at
+`/usr/bin/rtk`, `/usr/share/bluefin/review/rtk/rtk.ts`, and
+`/usr/share/licenses/rtk/LICENSE`. Build-time version and `gain` probes run
+after private HOME/XDG paths and telemetry-off are set. The SPDX generator
+records binary, hook, and license version/source/checksums and Apache-2.0
+declarations; OCI labels include each digest. The Renovate post-upgrade task
+refreshes both architecture hashes, the matching hook, and the checked-in
+version-matched license text and hash.
+
+The entrypoint sets `RTK_DISABLED=1` and `RTK_TELEMETRY_DISABLED=1` by default.
+It adds the immutable RTK extension only for explicit `RTK_DISABLED=0`; missing
+files fall back to native OMP command execution. It does not initialize or
+modify any `.omp` tree. The existing host launcher environment allowlist does
+not yet carry the explicit override, so operator-facing opt-in and explicit
+host `RTK_DISABLED` forwarding must be serialized after #154; this source
+checkpoint adds no new launch control.
+
+These are source/static contract changes only. No appliance image was built,
+and no packaged OMP hook load, runtime output comparison, or Factory gate was
+run. The separate clipboard package change at `77352dc` was not folded into
+this branch; it overlaps the Containerfile, SPDX generator, and appliance
+contracts and must be reconciled if it lands before this packet. No
+`.dockerignore` change was needed because the pinned hook is fetched and
+verified in the builder stage rather than copied from another source file.

@@ -45,8 +45,8 @@ ARG OMP_NATIVES_X86_64_SHA512=1c433e06f82f9032222aace5272954c5f12071f5ae15ff6a64
 ARG OMP_NATIVES_AARCH64_SHA512=61f5d765eb1619fbcd55d161f2c16bcbe29c4bb7da1edebcb4d839be4eca038bb3ffd2a7efc1ae7f496400e8056744ac0b5be121ab1afa90371226983d461ba5
 ARG MEMORYD_SOURCE_COMMIT=e7f8d431797973afbdf4d0530aa14a25f43acf35
 ARG MEMORYD_SOURCE_SHA256=155ec09537e941e4c71a65b738650b0419ae86f12cc86e28761d10553627d692
-ARG TYPESAFE_VERSION=0.8.0
-ARG TYPESAFE_SHA256=b9c7223c3793b1edf686205acb5d3cb8c2fa308ce0dadddfccb2caf75661534d
+ARG TYPESAFE_VERSION=0.9.0
+ARG TYPESAFE_SHA256=679865885ba4d86957792ac9aa163fd085142a4395b72a7cf7f39067743455c1
 ARG TYPESAFE_SDK_VERSION=0.6.0
 ARG TYPESAFE_SDK_SHA256=ccd94517c911c58ed5284b15838a001393e304ea3b784f6e8fb5a79f6365378e
 ARG TYPESAFE_TYPEBOX_VERSION=1.3.34
@@ -55,6 +55,12 @@ ARG TYPESAFE_TYPEBOX_SHA256=58a270296bc4e185ee3a04328447a9ffa12e22ae6abaa31a03fd
 ARG GH_VERSION=2.102.0
 ARG GH_X86_64_SHA256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
 ARG GH_AARCH64_SHA256=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484
+# renovate: datasource=github-releases depName=rtk-ai/rtk
+ARG RTK_VERSION=0.51.0
+ARG RTK_X86_64_SHA256=5028d3b19a8f0990d30fec9fbb07e32782bc5698e618fb1861aad8a9ccba4eb5
+ARG RTK_AARCH64_SHA256=8d6d1aad9e69b42481eda7039507d1f7ee93698f87713cecd873d287c1931632
+ARG RTK_HOOK_SHA256=d1555e0af5872a30ed04059423350bdb38302f200a9642c5a9bcc519c95a2257
+ARG RTK_LICENSE_SHA256=4044ade9c21d8b084d3d16a03375cf3b7e166b946a327bb37a3fbbdb53287cfd
 
 ARG REVIEW_VERSION=0.0.0
 ARG REVIEW_REVISION=unknown
@@ -97,6 +103,11 @@ ARG TYPESAFE_TYPEBOX_SHA256
 ARG GH_VERSION
 ARG GH_X86_64_SHA256
 ARG GH_AARCH64_SHA256
+ARG RTK_VERSION
+ARG RTK_X86_64_SHA256
+ARG RTK_AARCH64_SHA256
+ARG RTK_HOOK_SHA256
+ARG RTK_LICENSE_SHA256
 ARG REVIEW_VERSION
 ARG REVIEW_REVISION
 
@@ -171,6 +182,46 @@ RUN set -eu; \
     \
     rm -rf "$workdir"
 
+# RTK is shipped for an explicit evaluation; the immutable OMP hook remains
+# disabled by default in the entrypoint until representative value is proved.
+COPY image/extension/rtk/LICENSE /tmp/rtk-LICENSE
+RUN set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) rtk_asset=rtk-x86_64-unknown-linux-musl.tar.gz; rtk_sha="$RTK_X86_64_SHA256" ;; \
+      aarch64) rtk_asset=rtk-aarch64-unknown-linux-gnu.tar.gz; rtk_sha="$RTK_AARCH64_SHA256" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    mkdir -p /out/usr/bin /out/usr/share/bluefin/review/rtk "$workdir/home" "$workdir/config" "$workdir/data" "$workdir/state"; \
+    export HOME="$workdir/home" \
+      XDG_CONFIG_HOME="$workdir/config" \
+      XDG_DATA_HOME="$workdir/data" \
+      XDG_STATE_HOME="$workdir/state" \
+      RTK_TELEMETRY_DISABLED=1; \
+    mkdir -p /out/usr/share/licenses/rtk; \
+    echo "${RTK_LICENSE_SHA256}  /tmp/rtk-LICENSE" | sha256sum --check --status; \
+    grep -qF 'Version 2.0, January 2004' /tmp/rtk-LICENSE; \
+    install -m 0644 /tmp/rtk-LICENSE /out/usr/share/licenses/rtk/LICENSE; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/${rtk_asset}" \
+      -o "$workdir/rtk.tar.gz"; \
+    echo "${rtk_sha}  $workdir/rtk.tar.gz" | sha256sum --check --status; \
+    tar --no-same-owner -xzf "$workdir/rtk.tar.gz" -C "$workdir" rtk; \
+    install -m 0755 "$workdir/rtk" /out/usr/bin/rtk; \
+    curl --fail --location --show-error --silent \
+      "https://raw.githubusercontent.com/rtk-ai/rtk/v${RTK_VERSION}/hooks/pi/rtk.ts" \
+      -o "$workdir/rtk.ts"; \
+    echo "${RTK_HOOK_SHA256}  $workdir/rtk.ts" | sha256sum --check --status; \
+    grep -qF 'pi.on("tool_call"' "$workdir/rtk.ts"; \
+    grep -qF 'process.env.RTK_DISABLED === "1"' "$workdir/rtk.ts"; \
+    install -m 0644 "$workdir/rtk.ts" /out/usr/share/bluefin/review/rtk/rtk.ts; \
+    rtk_version="$(/out/usr/bin/rtk --version)"; \
+    test "$rtk_version" = "rtk ${RTK_VERSION}"; \
+    /out/usr/bin/rtk gain >"$workdir/gain.txt" 2>&1; \
+    grep -Eq 'RTK Token Savings|No tracking data yet' "$workdir/gain.txt"; \
+    rm -rf "$workdir"
+
 # The shell, git, review validators, and their library closure are staged from
 # the pinned FSDK builder by an explicit allowlist. Nothing is installed into
 # the final image; it is assembled from binaries already present at that seam.
@@ -212,8 +263,8 @@ COPY --from=audio /audio-out/ /out/
 COPY --chmod=0755 scripts/generate-appliance-sbom.py /usr/local/libexec/appliance-sbom
 RUN arch="$(uname -m)"; \
     case "$arch" in \
-      x86_64) native_package=pi-natives-linux-x64; native_sha="$OMP_NATIVES_X86_64_SHA512"; gh_sha="$GH_X86_64_SHA256"; node_sha="$NODE_X86_64_SHA256"; bun_sha="$OMP_BUN_X86_64_SHA256" ;; \
-      aarch64) native_package=pi-natives-linux-arm64; native_sha="$OMP_NATIVES_AARCH64_SHA512"; gh_sha="$GH_AARCH64_SHA256"; node_sha="$NODE_AARCH64_SHA256"; bun_sha="$OMP_BUN_AARCH64_SHA256" ;; \
+      x86_64) native_package=pi-natives-linux-x64; native_sha="$OMP_NATIVES_X86_64_SHA512"; gh_sha="$GH_X86_64_SHA256"; rtk_sha="$RTK_X86_64_SHA256"; node_sha="$NODE_X86_64_SHA256"; bun_sha="$OMP_BUN_X86_64_SHA256" ;; \
+      aarch64) native_package=pi-natives-linux-arm64; native_sha="$OMP_NATIVES_AARCH64_SHA512"; gh_sha="$GH_AARCH64_SHA256"; rtk_sha="$RTK_AARCH64_SHA256"; node_sha="$NODE_AARCH64_SHA256"; bun_sha="$OMP_BUN_AARCH64_SHA256" ;; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     mkdir -p /out/usr/share/bluefin/review; \
@@ -235,6 +286,10 @@ RUN arch="$(uname -m)"; \
       --omp-native-sha512 "$native_sha" \
       --gh-version "$GH_VERSION" \
       --gh-sha256 "$gh_sha" \
+      --rtk-version "$RTK_VERSION" \
+      --rtk-archive-sha256 "$rtk_sha" \
+      --rtk-hook-sha256 "$RTK_HOOK_SHA256" \
+      --rtk-license-sha256 "$RTK_LICENSE_SHA256" \
       --out /out/usr/share/bluefin/review/sbom.spdx.json; \
     rm /out/usr/share/bluefin/review/omp-derived-sha256; \
     python3 -m json.tool /out/usr/share/bluefin/review/sbom.spdx.json >/dev/null
@@ -264,8 +319,11 @@ RUN set -eu; \
       *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
     for binary in /out/usr/bin/omp /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash /out/usr/bin/python3 /out/usr/bin/node /out/usr/bin/bun /out/usr/bin/npm /out/usr/bin/npx; do \
-      test -x "$binary" || { echo "missing $binary" >&2; exit 1; }; \
+    test -x "$binary" || { echo "missing $binary" >&2; exit 1; }; \
     done; \
+    test -x /out/usr/bin/rtk; \
+    test -s /out/usr/share/bluefin/review/rtk/rtk.ts; \
+    test -s /out/usr/share/licenses/rtk/LICENSE; \
     test -e "/out/usr/lib/${audio_triplet}/libpulse-simple.so.0"; \
     test -e "/out/usr/lib/${audio_triplet}/libasound.so.2"; \
     test -e /out/usr/share/alsa/alsa.conf; \
@@ -290,6 +348,11 @@ ARG OMP_PATCH_SHA256
 ARG NODE_VERSION
 ARG OMP_BUN_VERSION
 ARG TYPESAFE_VERSION
+ARG RTK_VERSION
+ARG RTK_X86_64_SHA256
+ARG RTK_AARCH64_SHA256
+ARG RTK_HOOK_SHA256
+ARG RTK_LICENSE_SHA256
 ARG AUDIO_BUILDER_IMAGE
 
 COPY --from=build /out /
@@ -325,6 +388,11 @@ LABEL org.opencontainers.image.title="Review" \
       io.github.joshyorko.review.bun.version="${OMP_BUN_VERSION}" \
       io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}" \
       io.github.joshyorko.review.typesafe.version="${TYPESAFE_VERSION}" \
+      io.github.joshyorko.review.rtk.version="${RTK_VERSION}" \
+      io.github.joshyorko.review.rtk.x86_64.sha256="${RTK_X86_64_SHA256}" \
+      io.github.joshyorko.review.rtk.aarch64.sha256="${RTK_AARCH64_SHA256}" \
+      io.github.joshyorko.review.rtk.hook.sha256="${RTK_HOOK_SHA256}" \
+      io.github.joshyorko.review.rtk.license.sha256="${RTK_LICENSE_SHA256}" \
       io.github.joshyorko.review.audio.source="${AUDIO_BUILDER_IMAGE}" \
       io.github.joshyorko.review.audio.packages="pulseaudio-libs,alsa-lib"
 
