@@ -17,8 +17,8 @@
  */
 
 import { admit, attemptsRemaining } from "./admission.ts";
-import { criterionProven, receiptAcceptable, reconcileReceipt, taskProofCurrent } from "./evidence.ts";
-import { parseProofAssumptions } from "./schema.ts";
+import { criterionProven, receiptAcceptable, reconcileObservedProof, reconcileReceipt, taskProofCurrent } from "./evidence.ts";
+import { parseObservedProof, parseProofAssumptions } from "./schema.ts";
 import type {
 	Attempt,
 	Candidate,
@@ -120,6 +120,16 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 	}
 
 	switch (event.kind) {
+		case "record_observation": {
+			const parsed = parseObservedProof(event.observation);
+			if (!parsed.ok) return { ok: false, error: `observation rejected: ${parsed.errors.join("; ")}` };
+			const reconciliation = reconcileObservedProof(ledger, parsed.value);
+			if (reconciliation.status === "contradicted") return { ok: false, error: reconciliation.reasons.join("; ") };
+			const observations = ledger.observations ?? [];
+			if (JSON.stringify(observations.at(-1)) === JSON.stringify(parsed.value)) return { ok: true, ledger };
+			if (observations.length >= 64) return { ok: false, error: "original bounded observation history is full; retain proof and explicitly revise the run" };
+			return bump({ ...ledger, observations: [...observations, parsed.value] });
+		}
 		case "record_candidate": {
 			const verdict = admit(ledger, event.candidate);
 			// A dismissed candidate tracks nothing: it either duplicates existing
@@ -451,7 +461,7 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			if (attempt.steeredAgentId !== undefined) {
 				return { ok: false, error: `attempt ${attempt.id} was steered by OMP; its proof cannot finish this task` };
 			}
-			if (task.effect === "write" && !attempt.integrated) {
+			if (task.effect === "write" && !attempt.integrated && ledger.goal.finishAuthority !== "verified-patch") {
 				return { ok: false, error: `write task ${task.id} must be integrated before it can complete` };
 			}
 			if (subjectChanged(attempt.subject, ledger.subject)) {
@@ -460,6 +470,8 @@ export function reduce(ledger: Ledger, event: LedgerEvent, context: ReduceContex
 			const criterion = ledger.criteria.find((candidate) => candidate.id === task.criterionId);
 			const currentAssumptions = (criterion?.assumptions ?? []).map((assumption) => {
 				if (assumption.kind !== "dependency-outcome") return assumption;
+				const observed = ledger.assumptionValues?.find((entry) => entry.kind === "dependency-outcome" && entry.taskId === assumption.taskId);
+				if (observed) return observed;
 				const dependency = ledger.tasks.find((candidate) => candidate.id === assumption.taskId);
 				return { ...assumption, value: dependency !== undefined && criterionProven(ledger, dependency.criterionId) ? "proven" : "unproven" };
 			});
