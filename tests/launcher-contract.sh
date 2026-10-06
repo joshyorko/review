@@ -313,7 +313,11 @@ if [[ -v EXPECT_RTK_DISABLED ]]; then
     [[ ! -v APPTAINERENV_RTK_DISABLED ]] || exit 19
   else
     [[ "\${APPTAINERENV_RTK_DISABLED:-}" == "\${EXPECT_RTK_DISABLED}" ]] || exit 19
-    [[ "\$*" != *RTK_DISABLED* && "\$*" != *"\${EXPECT_RTK_DISABLED}"* ]] || exit 19
+    for arg in "\$@"; do
+      case "\$arg" in
+        RTK_DISABLED|RTK_DISABLED=*|"\${EXPECT_RTK_DISABLED}") exit 19 ;;
+      esac
+    done
   fi
 fi
 if [[ "\${EXPECT_NO_FACTORY_ENV:-}" == 1 ]]; then
