@@ -39,6 +39,7 @@ test_files=(
   tests/luna_factory_claim_owner_bridge.test.ts
   tests/luna_factory_history.test.ts
   tests/luna_factory_operator.test.ts
+  tests/fixtures/luna-factory-graph-krun-host-provider.test.mjs
 )
 
 if ! command -v node >/dev/null 2>&1; then

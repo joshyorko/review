@@ -35,6 +35,7 @@ bash scripts/check-skill-frontmatter.sh
 bash tests/generate-skills.sh
 bash tests/test-registry.sh
 bash tests/omp-review-mode.sh
+bash tests/luna-factory-graph-acceptance.sh --transport-check
 node --test tests/update-omp-pins.test.mjs
 node --test tests/update-derived-pins.test.mjs
 node --test tests/luna_factory.test.ts
@@ -49,3 +50,5 @@ git diff --check
 ```
 
 Hosted validation builds the appliance and exercises Review/Factory co-load. Native image and package evidence is reported by the corresponding workflow; do not claim runtime coverage that did not execute.
+
+`bash tests/luna-factory-graph-acceptance.sh --transport-check` tests the krun host-provider boundary with a fake Podman CLI and does not start a container. The opt-in `krun-host-provider` profile requires root-owned exclusive runtime admission and an immutable packaged image.

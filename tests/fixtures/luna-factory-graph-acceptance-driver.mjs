@@ -10,7 +10,13 @@ import { installGhShim, seedRepos } from "./luna-factory-graph-acceptance-suppor
 const repository = resolve(import.meta.dirname, "../..");
 const source = process.env.REVIEW_TEST_SOURCE ?? repository;
 const mode = process.argv[2] ?? "native";
-assert.equal(mode, "native", "short host acceptance only; packaged image/VM runs are root-owned after freeze");
+assert.ok(["native", "krun-host-provider"].includes(mode), "select native source or explicitly granted packaged krun transport");
+if (mode === "krun-host-provider") {
+	assert.equal(resolve(process.env.OMP_BINARY ?? ""), join(repository, "tests/fixtures/luna-factory-graph-krun-host-provider.sh"), "krun mode uses the reviewed host-provider shim");
+}
+const runtimeKind = mode === "native"
+	? "native OMP 18.4.12 with mounted source; not packaged-image proof"
+	: "packaged OCI OMP via krun host-loopback provider; mounted source identity checked in guest";
 const root = resolve(process.env.GRAPH130_EVIDENCE ?? join("/var/tmp", `luna-factory-graph-acceptance-${process.pid}`));
 mkdirSync(root, { recursive: true });
 const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim();
@@ -21,9 +27,12 @@ const harnessFiles = [
 	"tests/fixtures/luna-factory-graph-acceptance-driver.mjs",
 	"tests/fixtures/luna-factory-graph-acceptance-runtime.ts",
 	"tests/fixtures/luna-factory-graph-acceptance-support.mjs",
+	"tests/fixtures/luna-factory-graph-krun-host-provider.sh",
+	"tests/fixtures/luna-factory-graph-krun-host-provider.test.mjs",
 ];
 const harnessDigest = () => createHash("sha256").update(harnessFiles.map((file) => `${file}:${createHash("sha256").update(readFileSync(join(repository, file))).digest("hex")}`).join("\n")).digest("hex");
 const initialHarnessDigest = harnessDigest();
+const harnessHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
 const initialSourceHead = head;
 const expectedVersion = /^ARG OMP_VERSION=(.+)$/m.exec(readFileSync(join(source, "image/appliance/Containerfile"), "utf8"))?.[1];
 mkdirSync(join(root, "home/.config/omp"), { recursive: true });
@@ -131,9 +140,17 @@ try {
 	const binary = executable(process.env.OMP_BINARY ?? "omp");
 	const version = execFileSync(binary, ["--version"], { encoding: "utf8" }).trim();
 	assert.equal(version, `omp/${expectedVersion}`, "fixture runtime must match the packaged OMP version");
-	const binaryDigest = execFileSync("sha256sum", [binary], { encoding: "utf8" }).split(/\s/)[0];
-	writeFileSync(join(root, "runtime-identity.json"), JSON.stringify({ mode, binary, version, binaryDigest, sourceHead: head, sourceDirty: sourceDiff.length !== 0, sourceDiffDigest, harnessHead: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim(), harnessDigest: initialHarnessDigest, evidence: root, runtimeKind: "native-OMP-source-probe-only" }, null, 2));
+	const launcherSha256 = execFileSync("sha256sum", [binary], { encoding: "utf8" }).split(/\s/)[0];
+	const binaryIdentity = mode === "native" ? { binary, binaryDigest: launcherSha256 } : { launcher: binary, launcherSha256, launcherVersion: version };
+	writeFileSync(join(root, "runtime-identity.json"), JSON.stringify({ mode, ...binaryIdentity, sourceHead: head, sourceDirty: sourceDiff.length !== 0, sourceDiffDigest, harnessHead, harnessDigest: initialHarnessDigest, evidence: root, runtimeKind }, null, 2));
 	const env = { PATH: `${shim}:${process.env.PATH}`, HOME: join(root, "home"), XDG_CONFIG_HOME: join(root, "home/.config"), XDG_CACHE_HOME: join(root, "home/.cache"), XDG_STATE_HOME: join(root, "state"), GRAPH130_ROOT: root, LUNA_FACTORY_ENABLED: "1", LUNA_FACTORY_CAPACITY: "2", LUNA_FACTORY_STATE_ROOT: join(root, "state"), LUNA_FACTORY_CLAIMS_ROOT: join(root, "claims"), REVIEW_DEFAULT_SCOPE: "example/a", GH_TOKEN: "captured-fixture-token", REVIEW_TEST_FACTORY_ROOT: join(source, "image/extension/luna-factory") };
+	if (mode === "krun-host-provider") {
+		env.REVIEW_TEST_HARNESS_ROOT = repository;
+		for (const name of ["REVIEW_TEST_KRUN_ROOT_REVIEWED", "REVIEW_TEST_KRUN_SLOT_GRANTED", "REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH", "REVIEW_TEST_KRUN_IMAGE_ID", "REVIEW_TEST_KRUN_IMAGE_DIGEST", "REVIEW_TEST_KRUN_OMP_SHA256", "REVIEW_TEST_KRUN_GRANT_FILE"]) {
+			assert.ok(process.env[name], `krun host-provider mode requires ${name}`);
+			env[name] = process.env[name];
+		}
+	}
 	const args = ["--mode", "rpc", "--no-ui", "--no-skills", "--no-rules", "--no-extensions", "--no-pty", "--config", join(root, "home/.config/omp/omp.yml"), "--model", "local-probe/deterministic", "--extension", join(source, "image/extension/luna-factory"), "--extension", join(repository, "tests/fixtures/luna-factory-graph-acceptance-runtime.ts")];
 	const output = createWriteStream(join(root, "native-graph.log"));
 	child = spawn(binary, args, { cwd: join(root, "omp-cwd"), env, stdio: ["pipe", "pipe", "pipe"] });
@@ -141,14 +158,25 @@ try {
 	let forced; const timeout = setTimeout(() => { child.kill("SIGTERM"); forced = setTimeout(() => child.kill("SIGKILL"), 5000); }, 180_000);
 	const [code] = await once(child, "exit"); clearTimeout(timeout); clearTimeout(forced); child.stdin.end(); output.end();
 	assert.equal(code, 0, "native OMP command exited successfully; inspect native-graph.log and retained provider audit");
+	let packagedOmpIdentity = null;
+	if (mode === "krun-host-provider") {
+		const packagedVersion = readFileSync(join(root, "krun-omp-version.txt"), "utf8").trim();
+		const packagedOmpSha256 = readFileSync(join(root, "krun-omp-binary.sha256"), "utf8").split(/\s/)[0];
+		assert.equal(readFileSync(join(root, "krun-effective-uid.txt"), "utf8").trim(), "65532", "actual packaged OMP process uses the required UID");
+		assert.equal(packagedVersion, `omp/${expectedVersion}`, "packaged OMP version matches source pins");
+		assert.equal(packagedOmpSha256, process.env.REVIEW_TEST_KRUN_OMP_SHA256, "actual packaged OMP bytes match the immutable runtime pin");
+		assert.equal(readFileSync(join(root, "krun-factory-source.diff"), "utf8"), "", "mounted Factory source matches packaged bytes");
+		assert.match(readFileSync(join(root, "krun-bwrap-version.txt"), "utf8"), /^bubblewrap/);
+		packagedOmpIdentity = { version: packagedVersion, sha256: packagedOmpSha256, effectiveUid: 65532, productionEntrypoint: "/usr/bin/bluefin-review-appliance", factorySourceMatch: true };
+	}
 	const result = JSON.parse(readFileSync(join(root, "result.json"), "utf8")); assert.equal(result.status, "passed");
 	assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim(), initialSourceHead, "production source head stayed fixed during acceptance");
 	assert.equal(createHash("sha256").update(execFileSync("git", ["diff", "--binary", "HEAD", "--", "image/extension/luna-factory"], { cwd: source })).digest("hex"), sourceDiffDigest, "production source stayed fixed during acceptance");
 	assert.equal(harnessDigest(), initialHarnessDigest, "acceptance fixture stayed fixed during its run");
 	assert.ok(audit.some((entry) => entry.tool === "factory_write")); assert.ok(audit.some((entry) => entry.tool === "factory_evidence_read"));
 	assert.ok(execFileSync("bwrap", ["--version"], { encoding: "utf8" }).trim().startsWith("bubblewrap"), "mandatory verifier requires host bwrap");
-	writeFileSync(join(root, "driver-result.json"), JSON.stringify({ status: "passed", mode, sourceHead: head, sourceDirty: sourceDiff.length !== 0, sourceDiffDigest, runtimeKind: "native OMP 18.4.12 with mounted source; not packaged-image proof", binary, binaryDigest, modelRequests: requests, loopbackOnlyProvider: true, githubEvidence: "captured scripted snapshot; not live GitHub", git: "real local repositories, commits, and workspace clones", verifier: "production sandboxPreflight/sandboxTest invoked bwrap; see item evidence", ...result }, null, 2));
-	console.log(JSON.stringify({ status: "passed", mode, sourceHead: head, runtimeKind: "native OMP source probe only", modelRequests: requests, outcome: result.outcome, operatorFollowups: 0 }));
+	writeFileSync(join(root, "driver-result.json"), JSON.stringify({ status: "passed", mode, sourceHead: head, sourceDirty: sourceDiff.length !== 0, sourceDiffDigest, harnessHead, harnessDigest: initialHarnessDigest, runtimeKind, ...binaryIdentity, ...(mode === "krun-host-provider" ? { packagedOmp: packagedOmpIdentity } : {}), modelRequests: requests, loopbackOnlyProvider: true, providerNetworkScope: mode === "krun-host-provider" ? "host loopback; not network isolated" : "native loopback", githubEvidence: "captured scripted snapshot; not live GitHub", git: "real local repositories, commits, and workspace clones", verifier: "production sandboxPreflight/sandboxTest invoked bwrap; see item evidence", ...result }, null, 2));
+	console.log(JSON.stringify({ status: "passed", mode, sourceHead: head, runtimeKind, modelRequests: requests, outcome: result.outcome, operatorFollowups: 0 }));
 } catch (error) {
 	writeFileSync(join(root, "driver-result.json"), JSON.stringify({ status: "failed", mode, sourceHead: head, reason: error instanceof Error ? error.message : String(error), evidence: root }, null, 2)); throw error;
 } finally { writeFileSync(join(root, "provider-audit.json"), JSON.stringify(audit, null, 2)); server.close(); }
