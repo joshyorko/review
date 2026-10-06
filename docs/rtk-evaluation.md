@@ -160,10 +160,14 @@ version-matched license text and hash.
 The entrypoint sets `RTK_DISABLED=1` and `RTK_TELEMETRY_DISABLED=1` by default.
 It adds the immutable RTK extension only for explicit `RTK_DISABLED=0`; missing
 files fall back to native OMP command execution. It does not initialize or
-modify any `.omp` tree. The existing host launcher environment allowlist does
-not yet carry the explicit override, so operator-facing opt-in and explicit
-host `RTK_DISABLED` forwarding must be serialized after #154; this source
-checkpoint adds no new launch control.
+modify any `.omp` tree. Set `RTK_DISABLED=0` on either launcher to opt in:
+`bluefin review` and `just review-appliance` pass the variable by name only.
+When it is unset, both launchers add no override.
+
+When the ready #151 launch-profile resolver is composed, it must keep
+`RTK_DISABLED` as an explicit fixed-name host input and must not store or
+synthesize a profile default. The reviewed combined #358 source demonstrates
+that behavior, but its profile/collector code is not part of this #167 branch.
 
 These are source/static contract changes only. No appliance image was built,
 and no packaged OMP hook load, runtime output comparison, or Factory gate was
