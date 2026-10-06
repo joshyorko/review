@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-fail() { printf 'graph krun host-provider: %s\n' "$*" >&2; exit 78; }
+fail() {
+  printf 'graph krun host-provider: %s\n' "$*" >&2
+  exit 78
+}
 readonly expected_uid='65532'
 readonly expected_repo_suffix='/image/extension/luna-factory'
 readonly expected_model='local-probe/deterministic'
@@ -9,7 +12,7 @@ readonly expected_model='local-probe/deterministic'
 [[ "${REVIEW_TEST_KRUN_ROOT_REVIEWED:-}" == 1 && "${REVIEW_TEST_KRUN_SLOT_GRANTED:-}" == 1 ]] || fail 'fresh root review and exclusive shared-slot grant are required'
 [[ "${REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH:-}" =~ ^[0-9]+$ ]] || fail 'shared-slot expiry is missing'
 now="$(date +%s)"
-(( REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH > now && REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH <= now + 3600 )) || fail 'shared-slot grant is expired or outside its one-hour window'
+((REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH > now && REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH <= now + 3600)) || fail 'shared-slot grant is expired or outside its one-hour window'
 
 image_id="${REVIEW_TEST_KRUN_IMAGE_ID:-}"
 image_sha="${REVIEW_TEST_KRUN_OMP_SHA256:-}"
@@ -28,7 +31,7 @@ fi
 [[ "$image_sha" =~ ^[0-9a-f]{64}$ ]] || fail 'expected packaged OMP SHA-256 is missing'
 [[ "$grant" == /* && -f "$grant" && ! -L "$grant" ]] || fail 'read-only root grant file is missing'
 mode="$(stat -c '%a' "$grant")"
-(( (8#$mode & 0222) == 0 )) || fail 'root grant file must be read-only'
+(((8#$mode & 0222) == 0)) || fail 'root grant file must be read-only'
 source="$(realpath -e "$source" 2>/dev/null)" || fail 'production source checkout is missing'
 [[ -d "$source/.git" && -z "$(git -C "$source" status --porcelain=v1)" ]] || fail 'production source checkout must be a clean standalone clone'
 [[ ! -e "$source/.git/objects/info/alternates" ]] || fail 'production source checkout must not use external Git objects'
@@ -57,7 +60,7 @@ grep -Fxq 'root-review=1' "$grant" || fail 'root review marker is absent'
 grep -Fxq 'shared-slot=1' "$grant" || fail 'exclusive shared-slot marker is absent'
 granted_expiry="$(sed -nE 's/^expires-epoch=([0-9]+)$/\1/p' "$grant")"
 [[ "$granted_expiry" == "$REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH" ]] || fail 'slot expiry differs from the read-only root grant'
-(( granted_expiry > now && granted_expiry <= now + 3600 )) || fail 'read-only root grant is expired or outside its one-hour window'
+((granted_expiry > now && granted_expiry <= now + 3600)) || fail 'read-only root grant is expired or outside its one-hour window'
 
 model_file="$HOME/.omp/agent/models.yml"
 route_count="$(grep -Ec '^[[:space:]]*baseUrl:' "$model_file")"
@@ -65,7 +68,7 @@ route_count="$(grep -Ec '^[[:space:]]*baseUrl:' "$model_file")"
 provider_url="$(sed -nE 's/^[[:space:]]*baseUrl:[[:space:]]*([^[:space:]]+).*$/\1/p' "$model_file")"
 [[ "$provider_url" =~ ^http://127\.0\.0\.1:([0-9]{1,5})/v1$ ]] || fail 'provider endpoint must use the unchanged dynamic loopback fixture route'
 port="${BASH_REMATCH[1]}"
-(( 10#$port >= 1 && 10#$port <= 65535 )) || fail 'fixture provider port is out of range'
+((10#$port >= 1 && 10#$port <= 65535)) || fail 'fixture provider port is out of range'
 [[ "$(grep -Fc 'apiKey: luna-factory-probe' "$model_file")" == 1 ]] || fail 'fixture-only provider key is absent or duplicated'
 [[ "$(grep -Fc 'id: deterministic' "$model_file")" == 1 ]] || fail 'fixture-only model ID is absent or duplicated'
 [[ "$(grep -Fc "$expected_model" "$root/home/.config/omp/omp.yml")" == 6 ]] || fail 'five fixture roles and their task override must retain the fixture-only model'
@@ -86,7 +89,7 @@ expected_version="$(sed -nE 's/^ARG OMP_VERSION=([^[:space:]]+).*$/\1/p' "$sourc
 [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || fail 'expected OMP version cannot be derived from the selected source'
 
 args=("$@")
-if (( ! version_only )); then
+if ((!version_only)); then
   expected=(
     --mode rpc --no-ui --no-skills --no-rules --no-extensions --no-pty
     --config "$root/home/.config/omp/omp.yml"
@@ -104,7 +107,7 @@ fi
 podman="$(command -v podman || true)"
 [[ -n "$podman" && -x "$podman" ]] || fail 'Podman CLI is unavailable'
 image_inspect="$root/krun-image-inspect.json"
-"$podman" image inspect "$image_id" > "$image_inspect" || fail 'immutable OCI image inspect failed'
+"$podman" image inspect "$image_id" >"$image_inspect" || fail 'immutable OCI image inspect failed'
 image_digest="$(jq -er '.[0].Digest' "$image_inspect")" || fail 'immutable OCI image has no manifest digest'
 jq -e --arg id "$image_id_bare" --arg digest "$image_digest" --arg source "$source_sha" --arg version "$expected_version" '
   (.[0].Id | sub("^sha256:"; "")) == $id and .[0].Digest == $digest and .[0].Config.User == "65532:65532" and
@@ -115,7 +118,7 @@ grep -Fxq "image-digest=$image_digest" "$grant" || fail 'image inspect digest di
 
 identity="$root/krun-host-transport-identity.txt"
 printf 'image_id=%s\nimage_ref=%s\nimage_digest=%s\nsource_sha=%s\nharness_head=%s\nfactory_tree_digest=%s\nomp_version=%s\nexpected_omp_sha256=%s\nprovider_endpoint=%s\nnetwork_scope=host-loopback-fixture; not network isolated\n' \
-  "$image_id_bare" "$image_id" "$image_digest" "$source_sha" "$harness_head" "$source_factory_digest" "$expected_version" "$image_sha" "$provider_url" > "$identity"
+  "$image_id_bare" "$image_id" "$image_digest" "$source_sha" "$harness_head" "$source_factory_digest" "$expected_version" "$image_sha" "$provider_url" >"$identity"
 
 mounts=(--volume "$source:$source:ro,z")
 if [[ "$harness_root" != "$source" ]]; then
@@ -130,31 +133,31 @@ common=(
   --volume "$grant:/tmp/graph130-root-slot-grant.txt:ro,z"
   --env "HOME=$HOME" --env "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
   --env "XDG_CACHE_HOME=$XDG_CACHE_HOME" --env "XDG_STATE_HOME=$XDG_STATE_HOME"
-  --env "GRAPH130_ROOT=$root" --env GRAPH130_GRANT_FILE=/tmp/graph130-root-slot-grant.txt \
-  --env "GRAPH130_EXPECTED_IMAGE_ID=$image_id_bare" --env "GRAPH130_EXPECTED_IMAGE_DIGEST=$image_digest" \
+  --env "GRAPH130_ROOT=$root" --env GRAPH130_GRANT_FILE=/tmp/graph130-root-slot-grant.txt
+  --env "GRAPH130_EXPECTED_IMAGE_ID=$image_id_bare" --env "GRAPH130_EXPECTED_IMAGE_DIGEST=$image_digest"
   --env "GRAPH130_EXPECTED_OMP_SHA=$image_sha" --env "GRAPH130_EXPECTED_OMP_VERSION=omp/$expected_version"
   --env "REVIEW_TEST_SOURCE=$source" --env "REVIEW_TEST_FACTORY_ROOT=$fixture_root"
   --env "REVIEW_TEST_HARNESS_ROOT=$harness_root"
   --env "GRAPH130_PROVIDER_URL=$provider_url" --env "PATH=$root/shim:/usr/bin:/bin"
 )
-if (( version_only )); then
+if ((version_only)); then
   exec "$podman" "${common[@]}" --entrypoint /usr/bin/omp "$image_id" --version
 fi
 
 filtered=()
-for ((index=0; index<${#args[@]}; index++)); do
+for ((index = 0; index < ${#args[@]}; index++)); do
   case "${args[$index]}" in
-    --no-extensions) ;;
-    --extension)
-      (( index + 1 < ${#args[@]} )) || fail 'OMP extension path is missing'
-      if [[ "${args[$((index+1))]}" == "$fixture_root" ]]; then
-        ((index+=1))
-      else
-        filtered+=(--extension "${args[$((index+1))]}")
-        ((index+=1))
-      fi
-      ;;
-    *) filtered+=("${args[$index]}") ;;
+  --no-extensions) ;;
+  --extension)
+    ((index + 1 < ${#args[@]})) || fail 'OMP extension path is missing'
+    if [[ "${args[$((index + 1))]}" == "$fixture_root" ]]; then
+      ((index += 1))
+    else
+      filtered+=(--extension "${args[$((index + 1))]}")
+      ((index += 1))
+    fi
+    ;;
+  *) filtered+=("${args[$index]}") ;;
   esac
 done
 
