@@ -80,7 +80,7 @@ grep -qE '^ARG FSDK_BUILDER_IMAGE=ghcr\.io/projectbluefin/lab-runner:[^@[:space:
 
 # Source and build inputs are pinned; architecture-specific addons and runtime
 # artifacts carry independent checksums and verified package integrity.
-for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 NODE_X86_64_SHA256 NODE_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256; do
+for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 NODE_X86_64_SHA256 NODE_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256 RTK_X86_64_SHA256 RTK_AARCH64_SHA256 RTK_HOOK_SHA256 RTK_LICENSE_SHA256; do
   grep -qE "^ARG ${pin}=[0-9a-f]{64}$" "$containerfile" ||
     fail "ARG ${pin} must be a lowercase sha256 digest"
 done
@@ -92,7 +92,7 @@ for pin in OMP_SOURCE_COMMIT MEMORYD_SOURCE_COMMIT; do
   grep -qE "^ARG ${pin}=[0-9a-f]{40}$" "$containerfile" ||
     fail "ARG ${pin} must be a full lowercase commit SHA"
 done
-for pin in OMP_VERSION OMP_BUN_VERSION NODE_VERSION OMP_NATIVES_VERSION; do
+for pin in OMP_VERSION OMP_BUN_VERSION NODE_VERSION OMP_NATIVES_VERSION RTK_VERSION; do
   grep -qE "^ARG ${pin}=[0-9]+\\.[0-9]+\\.[0-9]+$" "$containerfile" ||
     fail "ARG ${pin} must be a semantic version"
 done
@@ -110,6 +110,28 @@ require "$containerfile" \
   'COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'OMP_PATCH_PATH=/usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
+  'https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/${rtk_asset}' \
+  'https://raw.githubusercontent.com/rtk-ai/rtk/v${RTK_VERSION}/hooks/pi/rtk.ts' \
+  'install -m 0755 "$workdir/rtk" /out/usr/bin/rtk' \
+  'install -m 0644 "$workdir/rtk.ts" /out/usr/share/bluefin/review/rtk/rtk.ts' \
+  'grep -qF '\''process.env.RTK_DISABLED === "1"'\'' "$workdir/rtk.ts"' \
+  'test -x /out/usr/bin/rtk' \
+  'test -s /out/usr/share/bluefin/review/rtk/rtk.ts' \
+  'COPY image/extension/rtk/LICENSE /tmp/rtk-LICENSE' \
+  'echo "${RTK_LICENSE_SHA256}  /tmp/rtk-LICENSE" | sha256sum --check --status' \
+  'RTK_TELEMETRY_DISABLED=1;' \
+  'rtk_version="$(/out/usr/bin/rtk --version)"' \
+  '/out/usr/bin/rtk gain >"$workdir/gain.txt" 2>&1' \
+  'install -m 0644 /tmp/rtk-LICENSE /out/usr/share/licenses/rtk/LICENSE' \
+  'test -s /out/usr/share/licenses/rtk/LICENSE' \
+  '--rtk-archive-sha256 "$rtk_sha"' \
+  '--rtk-hook-sha256 "$RTK_HOOK_SHA256"' \
+  '--rtk-license-sha256 "$RTK_LICENSE_SHA256"' \
+  'io.github.joshyorko.review.rtk.version="${RTK_VERSION}"' \
+  'io.github.joshyorko.review.rtk.x86_64.sha256="${RTK_X86_64_SHA256}"' \
+  'io.github.joshyorko.review.rtk.aarch64.sha256="${RTK_AARCH64_SHA256}"' \
+  'io.github.joshyorko.review.rtk.hook.sha256="${RTK_HOOK_SHA256}"' \
+  'io.github.joshyorko.review.rtk.license.sha256="${RTK_LICENSE_SHA256}"' \
   'https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz' \
   'cp -a "$node_dir/lib/node_modules/npm" /out/usr/lib/node_modules/npm' \
   'ln -s ../lib/node_modules/npm/bin/npm-cli.js /out/usr/bin/npm' \
@@ -133,6 +155,69 @@ require "$containerfile" \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
   'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory' \
   'test -e /out/usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts'
+
+# Every build-time RTK probe must run after the isolated filesystem and
+# telemetry boundary is established. Also reject missing or substituted
+# license text and exercise the same check against representative bad inputs.
+python3 - "$containerfile" image/extension/rtk/LICENSE <<'PY'
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+containerfile = Path(sys.argv[1]).read_text(encoding="utf-8")
+license_path = Path(sys.argv[2])
+start = containerfile.index("# RTK is shipped for an explicit evaluation")
+end = containerfile.index("# The shell, git, review validators", start)
+rtk_build = containerfile[start:end]
+
+def private_env_precedes_every_probe(source):
+    required = (
+        'export HOME="$workdir/home"',
+        'XDG_CONFIG_HOME="$workdir/config"',
+        'XDG_DATA_HOME="$workdir/data"',
+        'XDG_STATE_HOME="$workdir/state"',
+        "RTK_TELEMETRY_DISABLED=1;",
+    )
+    try:
+        setup_offsets = [source.index(marker) for marker in required]
+        probes = [match.start() for match in re.finditer(r"/out/usr/bin/rtk (?:--version|gain)", source)]
+    except ValueError:
+        return False
+    return bool(probes) and max(setup_offsets) < min(probes)
+
+if not private_env_precedes_every_probe(rtk_build):
+    raise SystemExit("RTK build probes must follow isolated HOME/XDG and telemetry-off setup")
+
+lines = rtk_build.splitlines(keepends=True)
+env_start = next(index for index, line in enumerate(lines) if 'export HOME="$workdir/home"' in line)
+env_end = next(index for index, line in enumerate(lines) if "RTK_TELEMETRY_DISABLED=1;" in line)
+env_block = lines[env_start : env_end + 1]
+misordered = lines[:env_start] + lines[env_end + 1 :]
+version_index = next(index for index, line in enumerate(misordered) if "/out/usr/bin/rtk --version" in line)
+misordered[version_index + 1 : version_index + 1] = env_block
+if private_env_precedes_every_probe("".join(misordered)):
+    raise SystemExit("RTK environment-order contract accepted HOME/XDG/telemetry setup moved after a probe")
+
+pin = re.search(r"^ARG RTK_LICENSE_SHA256=([0-9a-f]{64})$", containerfile, re.MULTILINE)
+if not pin:
+    raise SystemExit("Containerfile must pin the RTK license SHA-256")
+
+def valid_license(contents):
+    return (
+        contents is not None
+        and hashlib.sha256(contents).hexdigest() == pin.group(1)
+        and b"Apache License" in contents
+        and b"Version 2.0, January 2004" in contents
+    )
+
+contents = license_path.read_bytes() if license_path.is_file() else None
+if not valid_license(contents):
+    raise SystemExit("RTK license is missing or does not match its pinned Apache-2.0 source")
+if valid_license(None) or valid_license(b"MIT License\n"):
+    raise SystemExit("RTK license contract accepted a missing or mismatched license")
+PY
+
 # shellcheck disable=SC2016 # These are literal source strings, not expansions.
 require scripts/build-derived-omp.sh \
   'git ls-remote --exit-code' \
@@ -162,6 +247,11 @@ require image/appliance/entrypoint.sh \
   'verifier-probe.ts' \
   'refusing opt-in startup before work selection' \
   'prepare_factory_state_dir' \
+  'export RTK_DISABLED="${RTK_DISABLED:-1}"' \
+  'export RTK_TELEMETRY_DISABLED="${RTK_TELEMETRY_DISABLED:-1}"' \
+  'if [[ "$RTK_DISABLED" == 0 ]]; then' \
+  'extension_args+=(--extension /usr/share/bluefin/review/rtk/rtk.ts)' \
+  'RTK was explicitly enabled but its binary or immutable hook is missing' \
   'coordinator_root="$factory_home/.local/state/review/coordinator"' \
   'git -C "$coordinator_root" init -q' \
   'cd "$coordinator_root"'
@@ -329,13 +419,24 @@ cat >"$entrypoint_tmp/omp" <<'EOF'
 if [[ -n "${REVIEW_CONTRACT_CWD_FILE:-}" ]]; then
   printf '%s\n' "$PWD" >"$REVIEW_CONTRACT_CWD_FILE"
 fi
+if [[ -n "${REVIEW_CONTRACT_ENV_FILE:-}" ]]; then
+  printf 'RTK_DISABLED=%s\nRTK_TELEMETRY_DISABLED=%s\n' "${RTK_DISABLED:-unset}" "${RTK_TELEMETRY_DISABLED:-unset}" >"$REVIEW_CONTRACT_ENV_FILE"
+fi
 printf '%s\n' "$@"
 EOF
 chmod +x "$entrypoint_tmp/omp"
 coordinator_cwd_file="$entrypoint_tmp/coordinator.cwd"
-default_args="$(env -u REVIEW_INHERIT_OMP_CONFIG -u BLUEFIN_REVIEW_INHERIT_OMP_CONFIG REVIEW_CONTRACT_CWD_FILE="$coordinator_cwd_file" HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+default_env_file="$entrypoint_tmp/default.env"
+default_args="$(env -u REVIEW_INHERIT_OMP_CONFIG -u BLUEFIN_REVIEW_INHERIT_OMP_CONFIG -u RTK_DISABLED -u RTK_TELEMETRY_DISABLED REVIEW_CONTRACT_CWD_FILE="$coordinator_cwd_file" REVIEW_CONTRACT_ENV_FILE="$default_env_file" HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'bluefin-review-appliance' <<<"$default_args" ||
   fail "the appliance entrypoint did not select its isolated profile"
+grep -Fxq 'RTK_DISABLED=1' "$default_env_file" ||
+  fail "RTK rewriting was not disabled by default"
+grep -Fxq 'RTK_TELEMETRY_DISABLED=1' "$default_env_file" ||
+  fail "RTK telemetry was not disabled by default"
+if grep -Fq '/usr/share/bluefin/review/rtk/rtk.ts' <<<"$default_args"; then
+  fail "the disabled-by-default appliance loaded the RTK hook"
+fi
 coordinator_root="$entrypoint_tmp/home/.local/state/review/coordinator"
 [[ "$(cat "$coordinator_cwd_file")" == "$coordinator_root" ]] ||
   fail "the appliance did not launch OMP from its coordinator Git repository"
@@ -345,9 +446,23 @@ git -C "$coordinator_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
   fail "the appliance coordinator Git worktree is not clean"
 [[ "$(grep -cx -- '--advisor' <<<"$default_args")" -eq 1 ]] ||
   fail "the appliance did not enable exactly one OMP advisor"
+mkdir -p "$entrypoint_tmp/home/.omp/profiles/review"
+printf '%s\n' 'operator config sentinel' >"$entrypoint_tmp/home/.omp/profiles/review/settings.json"
+inherited_before="$(sha256sum "$entrypoint_tmp/home/.omp/profiles/review/settings.json")"
 inherited_args="$(REVIEW_INHERIT_OMP_CONFIG=1 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'review' <<<"$inherited_args" ||
   fail "the explicit host omp configuration opt-in did not select the review profile"
+[[ "$(sha256sum "$entrypoint_tmp/home/.omp/profiles/review/settings.json")" == "$inherited_before" ]] ||
+  fail "the inherited OMP profile changed during appliance startup"
+enabled_env_file="$entrypoint_tmp/enabled.env"
+env -u RTK_TELEMETRY_DISABLED RTK_DISABLED=0 REVIEW_CONTRACT_ENV_FILE="$enabled_env_file" HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version >"$entrypoint_tmp/enabled.args" 2>"$entrypoint_tmp/enabled.stderr"
+grep -Fxq 'RTK_DISABLED=0' "$enabled_env_file" ||
+  fail "an explicit RTK evaluation override did not reach OMP"
+grep -Fxq 'RTK_TELEMETRY_DISABLED=1' "$enabled_env_file" ||
+  fail "an RTK evaluation override enabled telemetry"
+if grep -Fq '/usr/share/bluefin/review/rtk/rtk.ts' "$entrypoint_tmp/enabled.args"; then
+  fail "the entrypoint loaded an RTK hook that is absent from the test host"
+fi
 autoslay_args="$(HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --autoslay)"
 [[ "$(grep -cx -- '--advisor' <<<"$autoslay_args")" -eq 1 ]] ||
   fail "autoslay duplicated the always-on OMP advisor"
@@ -431,6 +546,13 @@ omp_label="$(inspect '{{index .Labels "io.github.joshyorko.review.omp.version"}}
 omp_version="$(run 'omp --version')"
 test "$omp_version" = "omp/${omp_label}" ||
   fail "the omp binary reports '${omp_version}', but this image claims to ship ${omp_label}"
+rtk_label="$(inspect '{{index .Labels "io.github.joshyorko.review.rtk.version"}}')"
+# shellcheck disable=SC2016 # Expanded by run() inside the temporary image.
+rtk_version="$(run 'work="$(mktemp -d)"; mkdir -p "$work/home" "$work/config" "$work/data" "$work/state"; env HOME="$work/home" XDG_CONFIG_HOME="$work/config" XDG_DATA_HOME="$work/data" XDG_STATE_HOME="$work/state" RTK_TELEMETRY_DISABLED=1 /usr/bin/rtk --version')"
+test "$rtk_version" = "rtk ${rtk_label}" ||
+  fail "the RTK binary does not match the pinned appliance version ${rtk_label}"
+run 'test -x /usr/bin/rtk && test -s /usr/share/bluefin/review/rtk/rtk.ts && test -s /usr/share/licenses/rtk/LICENSE' ||
+  fail "the RTK binary, immutable OMP hook, or license text is missing"
 node_label="$(inspect '{{index .Labels "io.github.joshyorko.review.node.version"}}')"
 bun_label="$(inspect '{{index .Labels "io.github.joshyorko.review.bun.version"}}')"
 test "$(run 'node --version')" = "v${node_label}" ||
@@ -687,7 +809,7 @@ import json,sys
 document = json.load(sys.stdin)
 print(" ".join(sorted(package["name"] for package in document["packages"])))
 ')"
-for component in omp omp-source omp-memory-backend-patch omp-native-addon node bun gh review-workbench; do
+for component in omp omp-source omp-memory-backend-patch omp-native-addon node bun gh rtk rtk-omp-hook rtk-license review-workbench; do
   grep -qwF -- "$component" <<<"$sbom_packages" ||
     fail "the in-image SBOM does not record ${component}"
 done

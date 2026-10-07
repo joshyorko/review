@@ -29,6 +29,19 @@
       "versioningTemplate": "semver-coerced"
     },
     {
+      "description": "Track the RTK release bundled for evaluation; the post-upgrade task refreshes both architecture archive checksums, matching OMP hook checksum, and Apache-2.0 license checksum.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=github-releases depName=rtk-ai/rtk\\nARG RTK_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "rtk-ai/rtk",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
       "description": "Track the packaged pi-typesafe extension version; the post-upgrade task refreshes the verified npm tarball SHA-256.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -142,6 +155,27 @@
         ],
         "fileFilters": [
           "image/appliance/Containerfile"
+        ],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "description": "Track the upstream RTK runtime and hook pins for the opt-in appliance evaluation.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "rtk-ai/rtk"
+      ],
+      "groupName": "RTK evaluation runtime",
+      "rangeStrategy": "replace",
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-rtk-pins.mjs"
+        ],
+        "fileFilters": [
+          "image/appliance/Containerfile",
+          "image/extension/rtk/LICENSE"
         ],
         "executionMode": "branch"
       }

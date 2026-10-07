@@ -25,6 +25,10 @@ NATIVE_PACKAGE = {
     "x86_64": "pi-natives-linux-x64",
     "aarch64": "pi-natives-linux-arm64",
 }
+RTK_ARCHIVE = {
+    "x86_64": "rtk-x86_64-unknown-linux-musl.tar.gz",
+    "aarch64": "rtk-aarch64-unknown-linux-gnu.tar.gz",
+}
 
 
 def require_sha256(value: str, label: str) -> str:
@@ -63,6 +67,7 @@ def package(
     comment: str,
     checksum_algorithm: str = "",
     checksum_value: str = "",
+    license_declared: str = "",
 ) -> dict:
     entry = {
         "name": name,
@@ -81,6 +86,8 @@ def package(
     }
     if checksum_value:
         entry["checksums"] = [{"algorithm": checksum_algorithm.upper(), "checksumValue": checksum_value}]
+    if license_declared:
+        entry["licenseDeclared"] = license_declared
     return entry
 
 
@@ -90,12 +97,16 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     natives_version = require_non_empty(args.omp_natives_version, "omp native addon version")
     node_version = require_non_empty(args.node_version, "Node.js version")
     gh_version = require_non_empty(args.gh_version, "gh version")
+    rtk_version = require_non_empty(args.rtk_version, "rtk version")
     source_commit = require_commit(args.omp_source_commit, "omp source commit")
     omp_sha = require_sha256(args.omp_sha256, "omp_sha256")
     source_sha = require_sha256(args.omp_source_sha256, "omp_source_sha256")
     patch_sha = require_sha256(args.omp_patch_sha256, "omp_patch_sha256")
     native_sha = require_sha512(args.omp_native_sha512, "omp_native_sha512")
     gh_sha = require_sha256(args.gh_sha256, "gh_sha256")
+    rtk_archive_sha = require_sha256(args.rtk_archive_sha256, "rtk_archive_sha256")
+    rtk_hook_sha = require_sha256(args.rtk_hook_sha256, "rtk_hook_sha256")
+    rtk_license_sha = require_sha256(args.rtk_license_sha256, "rtk_license_sha256")
     node_sha = require_sha256(args.node_sha256, "node_sha256")
     bun_sha = require_sha256(args.bun_sha256, "bun_sha256")
 
@@ -109,6 +120,10 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
         f"{native_package}/-/{native_package}-{natives_version}.tgz"
     )
     gh_arch = GH_ARCH[arch]
+    rtk_asset = RTK_ARCHIVE[arch]
+    rtk_url = f"https://github.com/rtk-ai/rtk/releases/download/v{rtk_version}/{rtk_asset}"
+    rtk_hook_url = f"https://raw.githubusercontent.com/rtk-ai/rtk/v{rtk_version}/hooks/pi/rtk.ts"
+    rtk_license_url = f"https://raw.githubusercontent.com/rtk-ai/rtk/v{rtk_version}/LICENSE"
     node_arch = NODE_ARCH[arch]
     node_url = f"https://nodejs.org/dist/v{node_version}/node-v{node_version}-linux-{node_arch}.tar.gz"
     bun_asset = BUN_ARCHIVE[arch]
@@ -191,6 +206,36 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             gh_sha,
         ),
         package(
+            "rtk",
+            rtk_version,
+            rtk_url,
+            f"pkg:github/rtk-ai/rtk@v{rtk_version}",
+            f"Rust Token Killer executable from the verified architecture-specific release archive; the OMP rewrite hook is disabled by default. Installed to /usr/bin/rtk. Upstream license: Apache-2.0.",
+            "SHA256",
+            rtk_archive_sha,
+            "Apache-2.0",
+        ),
+        package(
+            "rtk-omp-hook",
+            rtk_version,
+            rtk_hook_url,
+            f"pkg:generic/rtk-omp-hook@{rtk_version}",
+            "Unmodified upstream RTK OMP/Pi compatibility extension, pinned to the matching RTK tag and verified by SHA-256. It is loaded only when RTK_DISABLED=0; the appliance default leaves rewriting off. Upstream license: Apache-2.0.",
+            "SHA256",
+            rtk_hook_sha,
+            "Apache-2.0",
+        ),
+        package(
+            "rtk-license",
+            rtk_version,
+            rtk_license_url,
+            f"pkg:generic/rtk-license@{rtk_version}",
+            "Exact upstream Apache-2.0 license text distributed at /usr/share/licenses/rtk/LICENSE; source tag and bytes are pinned and verified.",
+            "SHA256",
+            rtk_license_sha,
+            "Apache-2.0",
+        ),
+        package(
             "review-workbench",
             args.version,
             f"https://github.com/joshyorko/review/tree/{args.revision}/image/extension/bluefin-review",
@@ -222,6 +267,10 @@ def main() -> int:
     parser.add_argument("--omp-native-sha512", required=True)
     parser.add_argument("--gh-version", required=True)
     parser.add_argument("--gh-sha256", required=True)
+    parser.add_argument("--rtk-version", required=True)
+    parser.add_argument("--rtk-archive-sha256", required=True)
+    parser.add_argument("--rtk-hook-sha256", required=True)
+    parser.add_argument("--rtk-license-sha256", required=True)
     args = parser.parse_args()
 
     arch = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(args.arch)

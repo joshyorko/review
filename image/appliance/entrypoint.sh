@@ -26,6 +26,12 @@ os.execv("/usr/bin/bash", ["/usr/bin/bash", "/usr/bin/bluefin-review-appliance",
 ' "$@"
 fi
 
+# RTK is packaged for evaluation only. Ship the binary while leaving its OMP
+# command rewrites disabled until the adoption gate is met. Setting the
+# upstream switch to exactly 0 explicitly loads the immutable hook.
+export RTK_DISABLED="${RTK_DISABLED:-1}"
+export RTK_TELEMETRY_DISABLED="${RTK_TELEMETRY_DISABLED:-1}"
+
 if [[ "${1:-}" == --factory-verifier-probe ]]; then
   [[ $# -eq 1 ]] || {
     echo "Review appliance: --factory-verifier-probe accepts no additional arguments." >&2
@@ -139,6 +145,13 @@ else
   # The image is the only place the packaged layout is observable: say which
   # extension is missing instead of letting the handoff fail inside the session.
   echo "Review appliance: Luna Factory extension is not packaged at /usr/share/bluefin/review/luna-factory; the Factory handoff will be unavailable." >&2
+fi
+if [[ "$RTK_DISABLED" == 0 ]]; then
+  if [[ -x /usr/bin/rtk && -s /usr/share/bluefin/review/rtk/rtk.ts ]]; then
+    extension_args+=(--extension /usr/share/bluefin/review/rtk/rtk.ts)
+  else
+    echo "Review appliance: RTK was explicitly enabled but its binary or immutable hook is missing; continuing with native command output." >&2
+  fi
 fi
 case "${1:-}" in
 update)
