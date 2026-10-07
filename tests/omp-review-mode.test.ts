@@ -6697,6 +6697,13 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 	assert.match(pi.messages[0], /Implement this repository wave for projectbluefin\/unmanaged/);
 	assert.match(pi.messages[0], /Use the `task` tool once with one fresh item/);
 	assert.match(pi.messages[0], /gh repo clone <owner\/repo>/);
+	assert.match(pi.messages[0], /Read the target repository's `AGENTS\.md`/);
+	assert.match(pi.messages[0], /dedicated feature branch/);
+	assert.match(pi.messages[0], /target base/);
+	assert.match(pi.messages[0], /targeting that same base/);
+	assert.match(pi.messages[0], /Do not write directly to the base branch/);
+	assert.match(pi.messages[0], /never assume it is `main`/i);
+	assert.match(pi.messages[0], /Never force-push/);
 	assert.match(pi.messages[0], /one review-ready pull request per issue/);
 	assert.match(pi.messages[0], /SUBAGENT-RULES/);
 	assert.match(pi.messages[0], /Never merge or approve your own pull request/);
