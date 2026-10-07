@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# Private sibling collector for one direct Podman launcher invocation.
+set -uo pipefail
+trap '' INT TERM HUP
+
+if [[ $# -ne 7 ]]; then exit 2; fi
+launcher_pid="$1"
+launcher_start="$2"
+owner="$3"
+report_root="$4"
+report_dir="$5"
+proc_root="$6"
+started_at="$7"
+
+[[ "$launcher_pid" =~ ^[0-9]+$ && "$launcher_start" =~ ^[0-9]+$ ]] || exit 2
+[[ "$owner" =~ ^[A-Za-z0-9_-]{16,64}$ ]] || exit 2
+[[ "$report_root" == /* && "$report_dir" == "$report_root/review-launch-diagnostic.$owner" ]] || exit 2
+[[ -d "$report_root" && ! -L "$report_root" && -O "$report_root" ]] || exit 2
+[[ "$(stat -c '%a' -- "$report_root" 2>/dev/null)" == 700 ]] || exit 2
+[[ "$(cd -- "$report_root" 2>/dev/null && pwd -P)" == "$report_root" ]] || exit 2
+[[ -d "$report_dir" && ! -L "$report_dir" && -O "$report_dir" ]] || exit 2
+[[ "$(stat -c '%a' -- "$report_dir" 2>/dev/null)" == 700 ]] || exit 2
+[[ "$(cd -- "$report_dir" 2>/dev/null && pwd -P)" == "$report_dir" ]] || exit 2
+[[ -d "$proc_root" ]] || exit 2
+
+identity_file="$report_dir/collector.identity"
+launcher_file="$report_dir/launcher.identity"
+report_file="$report_dir/collector.report"
+[[ -f "$launcher_file" && ! -L "$launcher_file" && -O "$launcher_file" ]] || exit 2
+[[ "$(stat -c '%a' -- "$launcher_file" 2>/dev/null)" == 600 ]] || exit 2
+[[ "$(stat -c '%h' -- "$launcher_file" 2>/dev/null)" == 1 ]] || exit 2
+[[ -f "$report_file" && ! -L "$report_file" && -O "$report_file" ]] || exit 2
+[[ "$(stat -c '%a' -- "$report_file" 2>/dev/null)" == 600 ]] || exit 2
+[[ "$(stat -c '%h' -- "$report_file" 2>/dev/null)" == 1 ]] || exit 2
+[[ ! -e "$identity_file" && ! -L "$identity_file" ]] || exit 2
+launcher_identity="$(<"$launcher_file")"
+[[ "$launcher_identity" == "launcher_pid=$launcher_pid launcher_start=$launcher_start owner=$owner" ]] || exit 2
+[[ "$(<"$report_file")" == 'Review post-exit diagnostic: outcome=unknown evidence=collector_pending' ]] || exit 2
+
+if ! (umask 077; set -C; printf 'collector_pid=%s launcher_pid=%s launcher_start=%s owner=%s\n' \
+  "$$" "$launcher_pid" "$launcher_start" "$owner" >"$identity_file"); then
+  exit 2
+fi
+chmod 600 "$identity_file" 2>/dev/null || exit 2
+
+read_proc_identity() {
+  local line rest
+  local -a fields
+  [[ -r "$proc_root/$launcher_pid/stat" ]] || return 1
+  IFS= read -r line <"$proc_root/$launcher_pid/stat" || return 1
+  rest="${line##*) }"
+  read -r -a fields <<<"$rest"
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ && "${fields[0]:-}" =~ ^[A-Za-z]$ ]] || return 1
+  printf '%s|%s\n' "${fields[0]}" "${fields[19]}"
+}
+
+settlement="exited"
+while current_identity="$(read_proc_identity 2>/dev/null)"; do
+  current_state="${current_identity%%|*}"
+  current_start="${current_identity#*|}"
+  if [[ "$current_start" != "$launcher_start" ]]; then
+    settlement="pid_reused"
+    break
+  fi
+  if [[ "$current_state" == Z || "$current_state" == X || "$current_state" == x ]]; then
+    settlement="exited"
+    break
+  fi
+  sleep 0.1 || break
+done
+
+event_format='{{.Type}}|{{.Status}}|{{.ID}}|{{.ContainerExitCode}}|{{.OOMKilled}}|{{index .Attributes "io.review.launch.owner"}}'
+event_output=""
+event_status=125
+event_overflow=0
+event_bytes=0
+event_lines=0
+event_line=""
+if command -v timeout >/dev/null 2>&1; then
+  event_env=("PATH=${PATH:-/usr/bin:/bin}" "HOME=${HOME:-/tmp}" "LC_ALL=C")
+  for name in XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME CONTAINER_HOST CONTAINER_CONNECTION CONTAINERS_CONF CONTAINERS_STORAGE_CONF; do
+    [[ -v "$name" ]] && event_env+=("$name=${!name}")
+  done
+  event_until="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  if [[ -n "$event_until" ]]; then
+    SECONDS=0
+    coproc review_events {
+      trap - INT TERM HUP
+      exec timeout --foreground --signal=TERM --kill-after=0.25s 3s \
+        env -i "${event_env[@]}" podman events --since "$started_at" --until "$event_until" \
+        --stream=false --filter "label=io.review.launch.owner=$owner" --format "$event_format" 2>/dev/null
+    }
+    exec {event_fd}<&"${review_events[0]}"
+    # shellcheck disable=SC2154 # Bash populates the named coprocess PID.
+    event_pid="$review_events_PID"
+    while ((SECONDS < 4 && !event_overflow)); do
+      event_char=""
+      if IFS= read -r -N 1 -t 0.2 -u "$event_fd" event_char; then
+        if [[ "$event_char" == $'\n' ]]; then
+          ((event_lines += 1))
+          if ((event_lines > 64)); then
+            event_overflow=1
+            break
+          fi
+          event_output+="${event_line}"$'\n'
+          event_line=""
+        else
+          ((event_bytes += 1))
+          if ((event_bytes > 16384 || ${#event_line} >= 512)); then
+            event_overflow=1
+            break
+          fi
+          event_line+="$event_char"
+        fi
+      else
+        read_status=$?
+        if ((read_status == 1)); then
+          if [[ -n "$event_line" ]]; then
+            ((event_lines += 1))
+            if ((event_lines <= 64)); then event_output+="${event_line}"$'\n'; else event_overflow=1; fi
+          fi
+          break
+        fi
+      fi
+    done
+    exec {event_fd}<&-
+    if wait "$event_pid" 2>/dev/null; then
+      event_status=0
+    else
+      event_status=$?
+    fi
+    if ((event_overflow)); then event_status=126; fi
+  fi
+fi
+
+outcome="unknown"
+evidence="unavailable"
+container_exit=""
+container_id=""
+create_count=0
+died_count=0
+oom_seen=false
+kill_seen=false
+while IFS='|' read -r type status id exit_code oom owner_seen; do
+  [[ "$owner_seen" == "$owner" && "$type" == container && "$id" =~ ^[0-9a-f]{64}$ ]] || continue
+  case "$status" in
+    create)
+      if [[ -z "$container_id" || "$container_id" == "$id" ]]; then
+        container_id="$id"
+        ((create_count += 1))
+      else
+        create_count=99
+      fi
+      ;;
+    died)
+      [[ -z "$container_id" || "$container_id" == "$id" ]] || continue
+      container_id="$id"
+      [[ "$exit_code" =~ ^[0-9]{1,3}$ ]] && container_exit="$exit_code"
+      oom_seen="$oom"
+      ((died_count += 1))
+      ;;
+    kill)
+      [[ -z "$container_id" || "$container_id" == "$id" ]] || continue
+      container_id="$id"
+      kill_seen=true
+      ;;
+  esac
+done <<<"$event_output"
+
+if ((event_status == 124)); then
+  evidence="timeout"
+elif ((event_status == 137)); then
+  evidence="query_terminated"
+elif ((event_status == 126)); then
+  evidence="event_limit"
+elif ((event_status != 0)); then
+  evidence="events_unavailable"
+elif ((create_count == 1 && died_count == 1)) && [[ -n "$container_exit" ]]; then
+  evidence="podman_event"
+  if [[ "$oom_seen" == true ]]; then
+    outcome="podman_oom_reported"
+  elif [[ "$container_exit" == 0 ]]; then
+    outcome="clean"
+  elif [[ "$kill_seen" == true ]]; then
+    outcome="signal_observed"
+  else
+    outcome="nonclean_unknown"
+  fi
+fi
+
+if ((event_status != 0)); then
+  container_exit=""
+  outcome="unknown"
+fi
+if [[ -n "$container_exit" ]]; then
+  report="Review post-exit diagnostic: outcome=${outcome} settlement=${settlement} evidence=${evidence} container_exit=${container_exit}"
+else
+  report="Review post-exit diagnostic: outcome=${outcome} settlement=${settlement} evidence=${evidence}"
+fi
+[[ -f "$report_file" && ! -L "$report_file" && -O "$report_file" ]] || exit 2
+[[ "$(stat -c '%a' -- "$report_file" 2>/dev/null)" == 600 ]] || exit 2
+printf '%s\n' "$report" >"$report_file"
+if [[ "$outcome" != clean && "$container_exit" != 130 &&
+  "$evidence" != unavailable && "$evidence" != events_unavailable &&
+  "$evidence" != timeout && "$evidence" != event_limit && "$evidence" != query_terminated ]]; then
+  printf '%s\n' "$report" >&2
+fi

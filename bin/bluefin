@@ -425,6 +425,16 @@ slugify() {
   printf '%s-%s\n' "$slug" "$digest"
 }
 
+linux_proc_starttime() {
+  local pid="$1" proc_root="${2:-/proc}" line rest
+  local -a fields
+  IFS= read -r line <"${proc_root}/${pid}/stat" 2>/dev/null || return 1
+  rest="${line##*) }"
+  read -r -a fields <<<"$rest"
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${fields[19]}"
+}
+
 
 resolve_tokens() {
   if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
@@ -599,6 +609,58 @@ run_review() {
     fi
     [[ -z "$REVIEW_OMP_CONFIG_VOLUME" ]] ||
       podman_args+=(--volume "$REVIEW_OMP_CONFIG_VOLUME")
+    local diagnostic_root="" diagnostic_dir="" diagnostic_owner diagnostic_start diagnostic_starttime
+    local diagnostic_proc_root="${REVIEW_TEST_PROC_ROOT:-/proc}"
+    if [[ -d "$root" && ! -L "$root" && -O "$root" ]]; then
+      diagnostic_root="$(cd -- "$root" 2>/dev/null && pwd -P)/diagnostics"
+      if [[ ! -e "$diagnostic_root" && ! -L "$diagnostic_root" ]]; then
+        mkdir -m 0700 -- "$diagnostic_root" 2>/dev/null || true
+      fi
+      if [[ -d "$diagnostic_root" && ! -L "$diagnostic_root" && -O "$diagnostic_root" &&
+        "$(stat -c '%a' -- "$diagnostic_root" 2>/dev/null)" == 700 &&
+        "$(cd -- "$diagnostic_root" 2>/dev/null && pwd -P)" == "$diagnostic_root" ]]; then
+        diagnostic_dir="$(mktemp -d "$diagnostic_root/review-launch-diagnostic.XXXXXXXXXXXXXXXX" 2>/dev/null || true)"
+        if [[ -n "$diagnostic_dir" && ( ! -d "$diagnostic_dir" || -L "$diagnostic_dir" || ! -O "$diagnostic_dir" ||
+          "$(stat -c '%a' -- "$diagnostic_dir" 2>/dev/null)" != 700 ||
+          "$(cd -- "$diagnostic_dir" 2>/dev/null && pwd -P)" != "$diagnostic_dir" ) ]]; then
+          diagnostic_dir=""
+        fi
+      fi
+    fi
+    if [[ -n "$diagnostic_dir" ]]; then
+      diagnostic_owner="${diagnostic_dir##*.}"
+      diagnostic_starttime="$(linux_proc_starttime "$$" "$diagnostic_proc_root" 2>/dev/null || true)"
+      diagnostic_start="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+      local identity_start="$diagnostic_starttime"
+      [[ "$identity_start" =~ ^[0-9]+$ ]] || identity_start=unavailable
+      if [[ "$diagnostic_owner" =~ ^[A-Za-z0-9_-]{16,64}$ ]] &&
+        (umask 077; set -C; \
+          printf 'launcher_pid=%s launcher_start=%s owner=%s\n' "$$" "$identity_start" "$diagnostic_owner" >"$diagnostic_dir/launcher.identity" && \
+          printf 'Review post-exit diagnostic: outcome=unknown evidence=collector_pending\n' >"$diagnostic_dir/collector.report"); then
+        chmod 0600 "$diagnostic_dir/launcher.identity" "$diagnostic_dir/collector.report"
+        if [[ "$diagnostic_starttime" =~ ^[0-9]+$ && -n "$diagnostic_start" &&
+          -x "$repo_root/bin/bluefin-diagnostic-collector" ]]; then
+          podman_args+=(--label "io.review.launch.owner=$diagnostic_owner")
+          local -a diagnostic_env=("PATH=${PATH:-/usr/bin:/bin}" "HOME=${HOME:-/tmp}" "LC_ALL=C")
+          for arg in XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME CONTAINER_HOST CONTAINER_CONNECTION CONTAINERS_CONF CONTAINERS_STORAGE_CONF; do
+            [[ -v "$arg" ]] && diagnostic_env+=("$arg=${!arg}")
+          done
+          env -i "${diagnostic_env[@]}" "$repo_root/bin/bluefin-diagnostic-collector" \
+            "$$" "$diagnostic_starttime" "$diagnostic_owner" "$diagnostic_root" \
+            "$diagnostic_dir" "$diagnostic_proc_root" "$diagnostic_start" \
+            </dev/null >/dev/null &
+        else
+          (umask 077; set -C; \
+            printf 'collector_pid=unavailable launcher_pid=%s launcher_start=%s owner=%s\n' \
+              "$$" "$identity_start" "$diagnostic_owner" >"$diagnostic_dir/collector.identity") || true
+          chmod 0600 "$diagnostic_dir/collector.identity" 2>/dev/null || true
+          printf 'Review post-exit diagnostic: outcome=unknown settlement=unavailable evidence=collector_unavailable\n' \
+            >"$diagnostic_dir/collector.report"
+        fi
+      else
+        diagnostic_dir=""
+      fi
+    fi
     podman_args+=("$image")
     podman_args+=("${PARSED_REVIEW_ARGS[@]}")
     exec "$engine" "${podman_args[@]}"
