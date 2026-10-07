@@ -15,6 +15,7 @@ import type { PrDetail, PrComment, PrReview } from "./reader.ts";
 
 export type QueueMode = "prs" | "issues";
 export type CiStatus = "success" | "failure" | "pending";
+export type CiEvidenceSource = "statusCheckRollup" | "checkSuites";
 /** GitHub's mergeability, normalized to the dashboard's vocabulary. */
 export type MergeState = "clean" | "dirty" | "unknown";
 /** GitHub's review decision, normalized to the dashboard's vocabulary. */
@@ -32,6 +33,8 @@ export interface QueueItem {
 	ciStatus?: CiStatus;
 	/** Whether fallback check-suite evidence was complete at read time. */
 	ciEvidenceComplete?: boolean;
+	/** Which GitHub CI field supplied the classified status. */
+	ciEvidenceSource?: CiEvidenceSource;
 	mergeState: MergeState;
 	reviewState: ReviewState;
 	/** Direct requested-user logins; team requests are not personal requests. */
@@ -329,31 +332,53 @@ interface SearchNode {
 export interface CiClassification {
 	status?: CiStatus;
 	complete: boolean;
+	source?: CiEvidenceSource;
 }
+
+const KNOWN_ROLLUP_STATES = new Set(["SUCCESS", "FAILURE", "ERROR", "PENDING", "EXPECTED"]);
+const KNOWN_SUITE_STATUSES = new Set(["COMPLETED", "IN_PROGRESS", "PENDING", "QUEUED", "REQUESTED", "WAITING"]);
+const KNOWN_SUITE_CONCLUSIONS = new Set([
+	"ACTION_REQUIRED", "CANCELLED", "FAILURE", "NEUTRAL", "SKIPPED", "STALE",
+	"STARTUP_FAILURE", "SUCCESS", "TIMED_OUT",
+]);
+const FAILED_SUITE_CONCLUSIONS = new Set([
+	"ACTION_REQUIRED", "CANCELLED", "FAILURE", "STALE", "STARTUP_FAILURE", "TIMED_OUT",
+]);
+const SUCCESSFUL_SUITE_CONCLUSIONS = new Set(["NEUTRAL", "SKIPPED", "SUCCESS"]);
 
 export function classifyCi(
 	state?: string,
 	checkSuites?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ status?: string; conclusion?: string | null }> } | null,
 ): CiClassification {
 	const rollup = state?.trim().toUpperCase();
-	if (rollup === "SUCCESS") return { status: "success", complete: true };
-	if (rollup === "FAILURE" || rollup === "ERROR") return { status: "failure", complete: true };
-	if (rollup) return { status: "pending", complete: true };
+	if (rollup) {
+		if (!KNOWN_ROLLUP_STATES.has(rollup)) return { complete: false, source: "statusCheckRollup" };
+		if (rollup === "SUCCESS") return { status: "success", complete: true, source: "statusCheckRollup" };
+		if (rollup === "FAILURE" || rollup === "ERROR") return { status: "failure", complete: true, source: "statusCheckRollup" };
+		return { status: "pending", complete: true, source: "statusCheckRollup" };
+	}
 
 	const suites = checkSuites?.nodes ?? [];
 	const suitesComplete = checkSuites !== undefined && checkSuites !== null && checkSuites.pageInfo?.hasNextPage === false;
-	const explicitSuccess = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
-
 	if (!suitesComplete) return { status: undefined, complete: false };
-	const failedSuite = suites.some((suite) => {
-		if (suite.status?.toUpperCase() !== "COMPLETED") return false;
-		const conclusion = suite.conclusion?.toUpperCase();
-		return conclusion !== undefined && !explicitSuccess.has(conclusion);
-	});
-	if (failedSuite) return { status: "failure", complete: true };
-	const pendingSuite = suites.some((suite) => suite.status?.toUpperCase() !== "COMPLETED" || !suite.conclusion);
-	if (pendingSuite) return { status: "pending", complete: true };
-	if (suites.length > 0) return { status: "success", complete: true };
+	const normalizedSuites = suites.map((suite) => ({
+		status: suite.status?.trim().toUpperCase(),
+		conclusion: suite.conclusion?.trim().toUpperCase() ?? null,
+	}));
+	if (normalizedSuites.some(({ status, conclusion }) =>
+		!status || !KNOWN_SUITE_STATUSES.has(status)
+		|| (conclusion !== null && !KNOWN_SUITE_CONCLUSIONS.has(conclusion))
+		|| (status === "COMPLETED" && conclusion === null))) {
+		return { status: undefined, complete: false, source: "checkSuites" };
+	}
+	const failedSuite = normalizedSuites.some(({ status, conclusion }) =>
+		status === "COMPLETED" && conclusion !== null && FAILED_SUITE_CONCLUSIONS.has(conclusion));
+	if (failedSuite) return { status: "failure", complete: true, source: "checkSuites" };
+	const pendingSuite = normalizedSuites.some(({ status }) => status !== "COMPLETED");
+	if (pendingSuite) return { status: "pending", complete: true, source: "checkSuites" };
+	if (normalizedSuites.some(({ conclusion }) => conclusion !== null && SUCCESSFUL_SUITE_CONCLUSIONS.has(conclusion))) {
+		return { status: "success", complete: true, source: "checkSuites" };
+	}
 	return { status: undefined, complete: true };
 }
 
@@ -407,6 +432,7 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 		draft: node.isDraft === true,
 		ciStatus: ci.status,
 		ciEvidenceComplete: mode === "prs" ? ci.complete : undefined,
+		ciEvidenceSource: mode === "prs" ? ci.source : undefined,
 		mergeState: toMergeState(node.mergeable),
 		reviewState: toReviewState(node.reviewDecision),
 		requestedReviewers: mode === "prs"

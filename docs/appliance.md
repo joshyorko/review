@@ -10,6 +10,8 @@ bin/omp-review org:acme
 
 The rootless launcher prefers Podman with `krun` and KVM, then reports missing prerequisites and falls back to isolated Apptainer. Runs stay in the foreground. `Ctrl-C` stops only the active invocation.
 
+The immutable appliance skips OMP's first-run setup wizard, but you must still authenticate with each provider before using it.
+
 When `LUNA_FACTORY_ENABLED=1`, the packaged launcher and entrypoint qualify the selected runtime with Factory's bubblewrap preflight and a harmless sandbox test before OMP opens. `just review-doctor` reports runtime prerequisites and packaged verifier qualification separately. A failed probe refuses Factory-enabled startup; Apptainer is qualified independently when selected.
 
 ## Scope, mode, and authentication
