@@ -187,6 +187,10 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
   exit 0
 fi
 printf '%s\n' "\$*" >>"$mock_podman_log"
+if [[ "\${1:-}" == events ]]; then
+  [[ ! -v RTK_DISABLED ]] || printf '%s\n' 'observer-rtk-disabled-leak' >>"$mock_podman_log"
+  exit 0
+fi
 if [[ "\${1:-}" == run && "\$*" == *--entrypoint\ /usr/bin/test* ]]; then exit 0; fi
 if [[ "\${1:-}" == run && "\$*" == *--factory-verifier-probe* ]]; then
   if [[ "\${FAKE_FACTORY_VERIFIER_BLOCKED:-0}" == 1 ]]; then
@@ -214,6 +218,14 @@ if [[ "\${1:-}" == run && "\${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
   [[ "\${AWS_REGION:-}" == us-east-1 ]] || exit 19
   [[ "\${AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
   [[ "\$*" != *test-bedrock-bearer* && "\$*" != *test-access-key* && "\$*" != *test-secret-key* && "\$*" != *test-session-token* && "\$*" != *us-east-1* ]] || exit 19
+fi
+if [[ "\${1:-}" == run && -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "\$EXPECT_RTK_DISABLED" == unset ]]; then
+    [[ ! -v RTK_DISABLED && "\$*" != *"--env RTK_DISABLED"* ]] || exit 19
+  else
+    [[ "\${RTK_DISABLED:-}" == "\$EXPECT_RTK_DISABLED" && "\$*" == *"--env RTK_DISABLED"* ]] || exit 19
+    [[ "\$*" != *"RTK_DISABLED=\$EXPECT_RTK_DISABLED"* ]] || exit 19
+  fi
 fi
 [[ -z "\${FAKE_PODMAN_DELAY:-}" ]] || sleep "\$FAKE_PODMAN_DELAY"
 case "\${1:-} \${2:-}" in
@@ -296,6 +308,18 @@ if [[ "\${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
   # Names, never values: the appliance boundary carries the setting, not argv.
   [[ "\$*" != *LUNA_FACTORY* && "\$*" != *" 7 "* ]] || exit 19
 fi
+if [[ -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "\${EXPECT_RTK_DISABLED}" == unset ]]; then
+    [[ ! -v APPTAINERENV_RTK_DISABLED ]] || exit 19
+  else
+    [[ "\${APPTAINERENV_RTK_DISABLED:-}" == "\${EXPECT_RTK_DISABLED}" ]] || exit 19
+    for arg in "\$@"; do
+      case "\$arg" in
+        RTK_DISABLED|RTK_DISABLED=*|"\${EXPECT_RTK_DISABLED}") exit 19 ;;
+      esac
+    done
+  fi
+fi
 if [[ "\${EXPECT_NO_FACTORY_ENV:-}" == 1 ]]; then
   [[ ! -v APPTAINERENV_LUNA_FACTORY_ENABLED && ! -v APPTAINERENV_LUNA_FACTORY_CAPACITY ]] || exit 19
 fi
@@ -333,6 +357,7 @@ export REVIEW_TEST_KVM_DEVICE="$kvm"
 export GH_TOKEN=mock-token GITHUB_TOKEN=mock-token
 unset HIVE_HUB
 unset BLUEFIN_REVIEW_INHERIT_OMP_CONFIG REVIEW_INHERIT_OMP_CONFIG
+unset RTK_DISABLED APPTAINERENV_RTK_DISABLED EXPECT_RTK_DISABLED
 export REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime"
 export REVIEW_TEST_SND_DEVICE="$scratch/no-snd"
 unset BLUEFIN_REVIEW_SIF
@@ -439,6 +464,43 @@ AWS_BEARER_TOKEN_BEDROCK="$bedrock_token" AWS_ACCESS_KEY_ID="$aws_access_key" AW
 bedrock_fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$bedrock_fallback_call" != *"$bedrock_token"* && "$bedrock_fallback_call" != *"$aws_access_key"* && "$bedrock_fallback_call" != *"$aws_secret_key"* && "$bedrock_fallback_call" != *"$aws_session_token"* && "$bedrock_fallback_call" != *us-east-1* ]] ||
   fail "Apptainer fallback exposed AWS credentials in argv/log output"
+
+: >"$mock_podman_log"
+
+# RTK_DISABLED is an existing opt-in/bypass control, not a launcher default.
+for rtk_value in 0 1; do
+  : >"$mock_podman_log"
+  rtk_output="$(RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" \
+    "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+    fail "Podman launcher failed with explicit RTK_DISABLED=$rtk_value: $rtk_output"
+  rtk_podman_call="$(grep '^run ' "$mock_podman_log")"
+  [[ "$rtk_podman_call" == *"--env RTK_DISABLED"* ]] || fail "Podman did not forward RTK_DISABLED by name: $rtk_podman_call"
+  [[ "$rtk_podman_call" != *"RTK_DISABLED=$rtk_value"* && "$rtk_output" != *"RTK_DISABLED=$rtk_value"* ]] ||
+    fail "RTK_DISABLED value appeared in Podman argv or launcher output"
+  ! grep -qFx 'observer-rtk-disabled-leak' "$mock_podman_log" ||
+    fail "diagnostic collector inherited RTK_DISABLED"
+
+  : >"$mock_apptainer_log"
+  rtk_output="$(RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" APPTAINERENV_RTK_DISABLED=1 \
+    REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+    fail "Apptainer launcher failed with explicit RTK_DISABLED=$rtk_value: $rtk_output"
+  rtk_apptainer_call="$(cat "$mock_apptainer_log")"
+  [[ "$rtk_apptainer_call" == *"run --containall"* ]] || fail "RTK Apptainer case did not select Apptainer"
+  [[ "$rtk_apptainer_call" != *"RTK_DISABLED"* && "$rtk_apptainer_call" != *"RTK_DISABLED=$rtk_value"* ]] ||
+    fail "RTK_DISABLED appeared in Apptainer argv"
+done
+
+: >"$mock_podman_log"
+rtk_output="$(env EXPECT_RTK_DISABLED=unset "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "Podman launcher failed with RTK_DISABLED unset: $rtk_output"
+rtk_podman_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$rtk_podman_call" != *"--env RTK_DISABLED"* ]] || fail "Podman invented a default RTK_DISABLED override"
+! grep -qFx 'observer-rtk-disabled-leak' "$mock_podman_log" || fail "collector inherited an unset RTK_DISABLED"
+
+: >"$mock_apptainer_log"
+EXPECT_RTK_DISABLED=unset APPTAINERENV_RTK_DISABLED=0 REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" \
+  "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 || fail "Apptainer launcher failed with RTK_DISABLED unset"
+[[ "$(cat "$mock_apptainer_log")" == *"run --containall"* ]] || fail "unset RTK_DISABLED did not select Apptainer"
 
 : >"$mock_podman_log"
 offline_output="$(FAKE_PULL_FAIL=1 "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
@@ -1035,5 +1097,7 @@ assert_eq "$bluefin_cred_out" "custom-omp-token copilot-developer-cli" "bin/blue
 
 omp_cred_out="$(env -i PATH="$mock_cred_bin:/usr/bin:/bin" HOME="$scratch/home" BLUEFIN_OMP_STATE="$custom_state" "${repo_root}/bin/omp-review" projectbluefin/review 2>/dev/null)" || fail "bin/omp-review credential test failed"
 assert_eq "$omp_cred_out" "custom-omp-token copilot-developer-cli" "bin/omp-review resolves BLUEFIN_OMP_STATE and COPILOT_INTEGRATION_ID"
+
+python3 tests/fixtures/launcher_diagnostic_collector.py
 
 echo "launcher-contract: all shorthand forms and launcher parity assertions passed"
