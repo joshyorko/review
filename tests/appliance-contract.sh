@@ -80,7 +80,7 @@ grep -qE '^ARG FSDK_BUILDER_IMAGE=ghcr\.io/projectbluefin/lab-runner:[^@[:space:
 
 # Source and build inputs are pinned; architecture-specific addons and runtime
 # artifacts carry independent checksums and verified package integrity.
-for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 NODE_X86_64_SHA256 NODE_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256; do
+for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 OMP_CLIPBOARD_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 NODE_X86_64_SHA256 NODE_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256; do
   grep -qE "^ARG ${pin}=[0-9a-f]{64}$" "$containerfile" ||
     fail "ARG ${pin} must be a lowercase sha256 digest"
 done
@@ -88,10 +88,16 @@ for pin in OMP_NATIVES_X86_64_SHA512 OMP_NATIVES_AARCH64_SHA512; do
   grep -qE "^ARG ${pin}=[0-9a-f]{128}$" "$containerfile" ||
     fail "ARG ${pin} must be a lowercase sha512 digest"
 done
-for pin in OMP_SOURCE_COMMIT MEMORYD_SOURCE_COMMIT; do
+for pin in OMP_SOURCE_COMMIT OMP_CLIPBOARD_PATCH_SOURCE_COMMIT MEMORYD_SOURCE_COMMIT; do
   grep -qE "^ARG ${pin}=[0-9a-f]{40}$" "$containerfile" ||
     fail "ARG ${pin} must be a full lowercase commit SHA"
 done
+omp_source_commit="$(sed -nE 's/^ARG OMP_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
+clipboard_patch_source_commit="$(sed -nE 's/^ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
+[[ "$clipboard_patch_source_commit" == "$omp_source_commit" ]] ||
+  fail "clipboard patch must be reviewed against the exact pinned OMP source commit"
+[[ "$(sed -nE 's|^ARG OMP_CLIPBOARD_PATCH_PATH=([^[:space:]]+)$|\1|p' "$containerfile")" == "/usr/local/share/bluefin/omp/clipboard-truthful-18.5.0.patch" ]] ||
+  fail "clipboard patch path must name the pinned 18.5.0 patch input"
 for pin in OMP_VERSION OMP_BUN_VERSION NODE_VERSION OMP_NATIVES_VERSION; do
   grep -qE "^ARG ${pin}=[0-9]+\\.[0-9]+\\.[0-9]+$" "$containerfile" ||
     fail "ARG ${pin} must be a semantic version"
@@ -108,7 +114,11 @@ require "$containerfile" \
   'COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp' \
   'COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts' \
   'COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch' \
+  'COPY patches/omp/clipboard-truthful-18.5.0.patch /usr/local/share/bluefin/omp/clipboard-truthful-18.5.0.patch' \
   'OMP_PATCH_PATH=/usr/local/share/bluefin/omp/memory-backend-registration.patch' \
+  'OMP_CLIPBOARD_PATCH_PATH="$OMP_CLIPBOARD_PATCH_PATH"' \
+  'OMP_CLIPBOARD_PATCH_SOURCE_COMMIT="$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"' \
+  'OMP_CLIPBOARD_PATCH_SHA256="$OMP_CLIPBOARD_PATCH_SHA256"' \
   'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
   'https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz' \
   'cp -a "$node_dir/lib/node_modules/npm" /out/usr/lib/node_modules/npm' \
@@ -130,6 +140,11 @@ require "$containerfile" \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"' \
   'io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}"' \
   'io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}"' \
+  'io.github.joshyorko.review.omp.clipboard.patch.source.commit="${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}"' \
+  'io.github.joshyorko.review.omp.clipboard.patch.sha256="${OMP_CLIPBOARD_PATCH_SHA256}"' \
+  '--omp-clipboard-patch-source-commit "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"' \
+  '--omp-clipboard-patch-sha256 "$OMP_CLIPBOARD_PATCH_SHA256"' \
+  '--omp-clipboard-patch-path "$OMP_CLIPBOARD_PATCH_PATH"' \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
   'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory' \
   'test -e /out/usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts'
@@ -137,12 +152,21 @@ require "$containerfile" \
 require scripts/build-derived-omp.sh \
   'git ls-remote --exit-code' \
   'sha256sum --check --status' \
+  'sha256sum "$OMP_CLIPBOARD_PATCH_PATH"' \
   'sha512sum --check --status' \
   'git -C "$source_dir" apply --check "$OMP_PATCH_PATH"' \
+  'git -C "$source_dir" apply --check "$OMP_CLIPBOARD_PATCH_PATH"' \
+  'clipboard patch was reviewed for OMP source' \
   'bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests' \
   'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"' \
   'install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun' \
   'bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"'
+# shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
+memory_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply "$OMP_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
+# shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
+clipboard_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply "$OMP_CLIPBOARD_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
+[[ -n "$memory_patch_apply_line" && -n "$clipboard_patch_apply_line" && "$memory_patch_apply_line" -lt "$clipboard_patch_apply_line" ]] ||
+  fail "the clipboard patch must apply after the unchanged MemoryBackend patch"
 grep -qF 'runner: ubuntu-26.04-arm' .github/workflows/publish-appliance.yml ||
   fail "the appliance must keep its native aarch64 build runner"
 grep -qF 'arch: arm64' .github/workflows/publish-appliance.yml ||
@@ -303,6 +327,8 @@ grep -qF '!scripts/derived-omp-canary.ts' .dockerignore ||
   fail ".dockerignore must let the derived OMP canary into the build context"
 grep -qF '!patches/omp/memory-backend-registration.patch' .dockerignore ||
   fail ".dockerignore must let the OMP registration patch into the build context"
+grep -qF '!patches/omp/clipboard-truthful-18.5.0.patch' .dockerignore ||
+  fail ".dockerignore must let the OMP clipboard patch into the build context"
 
 # The generator that fills that SBOM. Its own contract runs here rather than as
 # a separate validate.yml step: the document it writes is part of this image's

@@ -6,6 +6,9 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 : "${OMP_SOURCE_COMMIT:?OMP_SOURCE_COMMIT is required}"
 : "${OMP_SOURCE_SHA256:?OMP_SOURCE_SHA256 is required}"
 : "${OMP_PATCH_SHA256:?OMP_PATCH_SHA256 is required}"
+: "${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT:?OMP_CLIPBOARD_PATCH_SOURCE_COMMIT is required}"
+: "${OMP_CLIPBOARD_PATCH_SHA256:?OMP_CLIPBOARD_PATCH_SHA256 is required}"
+: "${OMP_CLIPBOARD_PATCH_PATH:?OMP_CLIPBOARD_PATCH_PATH is required}"
 : "${OMP_BUN_VERSION:?OMP_BUN_VERSION is required}"
 : "${OMP_BUN_X86_64_SHA256:?OMP_BUN_X86_64_SHA256 is required}"
 : "${OMP_BUN_AARCH64_SHA256:?OMP_BUN_AARCH64_SHA256 is required}"
@@ -17,8 +20,12 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 : "${OMP_PATCH_PATH:?OMP_PATCH_PATH is required}"
 : "${OMP_OUTPUT_PATH:?OMP_OUTPUT_PATH is required}"
 
-if [[ ! "$OMP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$OMP_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$MEMORYD_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "invalid OMP or MemoryD version/commit pin" >&2
+if [[ ! "$OMP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$OMP_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$MEMORYD_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "invalid OMP, clipboard patch, or MemoryD version/commit pin" >&2
+  exit 1
+fi
+if [[ "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" != "$OMP_SOURCE_COMMIT" ]]; then
+  echo "clipboard patch was reviewed for OMP source ${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}, not pinned source ${OMP_SOURCE_COMMIT}; requalify the patch before changing the OMP pin" >&2
   exit 1
 fi
 for tool in curl git python3 tar sha256sum sha512sum install; do
@@ -31,8 +38,15 @@ done
   echo "OMP patch not found: $OMP_PATCH_PATH" >&2
   exit 1
 }
+[[ -f "$OMP_CLIPBOARD_PATCH_PATH" ]] || {
+  echo "OMP clipboard patch not found: $OMP_CLIPBOARD_PATCH_PATH" >&2
+  exit 1
+}
 if [[ "$OMP_PATCH_PATH" != /* ]]; then
   OMP_PATCH_PATH="$PWD/$OMP_PATCH_PATH"
+fi
+if [[ "$OMP_CLIPBOARD_PATCH_PATH" != /* ]]; then
+  OMP_CLIPBOARD_PATCH_PATH="$PWD/$OMP_CLIPBOARD_PATCH_PATH"
 fi
 
 case "$(uname -m)" in
@@ -96,6 +110,15 @@ sha256sum "$OMP_PATCH_PATH" | {
 }
 git -C "$source_dir" apply --check "$OMP_PATCH_PATH"
 git -C "$source_dir" apply "$OMP_PATCH_PATH"
+sha256sum "$OMP_CLIPBOARD_PATCH_PATH" | {
+  read -r actual _
+  [[ "$actual" == "$OMP_CLIPBOARD_PATCH_SHA256" ]]
+} || {
+  echo "OMP clipboard patch digest mismatch" >&2
+  exit 1
+}
+git -C "$source_dir" apply --check "$OMP_CLIPBOARD_PATCH_PATH"
+git -C "$source_dir" apply "$OMP_CLIPBOARD_PATCH_PATH"
 
 memoryd_archive="$workdir/memoryd-source.tar.gz"
 curl --fail --location --show-error --silent \
@@ -167,6 +190,7 @@ install -D -m 0755 "$candidate" "$OMP_OUTPUT_PATH"
 
 printf 'OMP derived build: version=%s commit=%s arch=%s\n' "$OMP_VERSION" "$OMP_SOURCE_COMMIT" "$omp_target"
 printf 'OMP patch SHA-256: %s\n' "$OMP_PATCH_SHA256"
+printf 'OMP clipboard patch: path=%s source=%s SHA-256=%s\n' "$OMP_CLIPBOARD_PATCH_PATH" "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" "$OMP_CLIPBOARD_PATCH_SHA256"
 printf 'MemoryD source: %s (archive SHA-256 %s)\n' "$MEMORYD_SOURCE_COMMIT" "$MEMORYD_SOURCE_SHA256"
 printf 'Bun version: %s (archive SHA-256 %s)\n' "$OMP_BUN_VERSION" "$bun_sha"
 printf 'Native package: @oh-my-pi/%s@%s (archive SHA-512 %s)\n' "$native_package" "$OMP_NATIVES_VERSION" "$native_sha"
