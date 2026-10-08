@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tarfile
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/brew-dev"
@@ -149,6 +150,58 @@ class BrewDevContract(unittest.TestCase):
         script = SCRIPT.read_text()
         self.assertIn("parse-review-args.sh", script)
         self.assertNotIn("/usr/bin/headroom", script)
+
+    def test_built_package_resolves_profiles_from_its_installed_helper(self):
+        for name in ("parse-review-args.sh", "review-launch-plan.sh"):
+            shutil.copy2(SCRIPT.with_name(name), self.repo / "scripts" / name)
+        shutil.copy2(SCRIPT.parents[1] / "bin/bluefin", self.repo / "bin/bluefin")
+        self.git("add", "scripts", "bin")
+        self.git("commit", "-qm", "package launcher fixture")
+        sha = self.git("rev-parse", "HEAD").strip()
+        tools = self.root / "tools"
+        (tools / "podman").write_text("#!/usr/bin/env bash\nset -eu\n"
+                                      "if [[ $1 == save ]]; then : > \"$5\"; fi\n")
+        (tools / "apptainer").write_text(
+            "#!/usr/bin/env bash\nset -eu\n"
+            "case $1 in\n"
+            "build) printf '#!/bin/sh\\nexit 0\\n' > \"$2\";;\n"
+            "inspect) printf '{\"data\":{\"attributes\":{\"labels\":{\"org.opencontainers.image.revision\":\"%s\"}}}}\\n' \"$FIXTURE_SHA\";;\n"
+            "exec) exit 0;;\n"
+            "*) exit 19;;\nesac\n"
+        )
+        self.env["FIXTURE_SHA"] = sha
+        self.env["XDG_CONFIG_HOME"] = str(self.root / "config")
+        profile = self.root / "config/review/launcher/profiles/personal.profile"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("version=1\nruntime=apptainer\ngithub_auth=auto\ninherit_omp=false\n"
+                           "factory_enabled=false\nfactory_capacity=2\nenv_groups=\nenv_names=\n")
+        output = self.root / "bundle"
+        result = self.run_cli("build", "main", str(output))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        package = self.root / "Cellar/bluefin-review-dev/fixture"
+        payload = self.root / "payload"
+        with tarfile.open(next(output.glob("bluefin-review-dev-*.tar.gz"))) as archive:
+            archive.extractall(payload, filter="data")
+        (package / "bin").mkdir(parents=True)
+        (package / "libexec").mkdir()
+        shutil.move(str(payload / "bluefin"), package / "bin/bluefin")
+        for name in ("launcher", "build.json", "build.txt"):
+            shutil.move(str(payload / name), package / "libexec" / name)
+        helper = package / "libexec/launcher/scripts/review-launch-plan.sh"
+        self.assertEqual(helper.read_bytes(), SCRIPT.with_name("review-launch-plan.sh").read_bytes())
+        self.assertTrue(os.access(helper, os.R_OK), "packaged resolver must be readable")
+        self.assertFalse(os.access(helper, os.X_OK), "packaged resolver must be sourced, not executable")
+        sourced = subprocess.run(
+            ["bash", "-c", 'source "$1"; [[ " ${REVIEW_LAUNCH_FIXED_NAMES[*]} " == *" RTK_DISABLED "* ]]',
+             "bash", str(helper)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(sourced.returncode, 0, sourced.stderr)
+        launched = subprocess.run([str(package / "bin/bluefin"), "review", "profiles"],
+                                  env=self.env, capture_output=True, text=True)
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        self.assertIn("personal", launched.stdout)
 
     def test_personal_workflow_builds_the_self_hosted_branch(self):
         workflow = (SCRIPT.parents[1] / ".github/workflows/review-dev.yml").read_text()

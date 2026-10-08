@@ -21,6 +21,12 @@ mkdir -p "$host_fixture/etc"
 touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
 filesystem_hook="$scratch/filesystem.sh"
 cat >"$filesystem_hook" <<'EOF'
+if [[ "${REVIEW_TEST_HIDE_KRUN:-0}" == 1 ]]; then
+  command() {
+    if [[ "$#" == 2 && "$1" == -v && "$2" == krun ]]; then return 1; fi
+    builtin command "$@"
+  }
+fi
 test() {
   if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
     builtin test -e "$HOST_FIXTURE$2"
@@ -46,7 +52,16 @@ EOF
 cat >"$fake_bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -eu
-[[ "${1:-}" == info ]] && { [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]]; exit; }
+if [[ "${1:-}" == info ]]; then
+  if [[ "$*" == *--runtime=krun* ]]; then
+    printf 'runtime-probe %s %s\n' "$*" "${FAKE_KRUN_RUNTIME:-krun}" >>"${PODMAN_LOG:?}"
+    [[ "${FAKE_KRUN_RUNTIME:-krun}" == unavailable ]] && exit 1
+    printf '%s\n' "${FAKE_KRUN_RUNTIME:-krun}"
+    exit 0
+  fi
+  [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]]
+  exit
+fi
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
 if [[ "${1:-}" == run && "$*" == *--entrypoint\ /usr/bin/test* ]]; then exit 0; fi
 if [[ "${1:-}" == run && "$*" == *--factory-verifier-probe* ]]; then
@@ -99,6 +114,14 @@ fi
 if [[ "${1:-}" == run && "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
   [[ "$*" == *"--env LUNA_FACTORY_ENABLED"* && "$*" == *"--env LUNA_FACTORY_CAPACITY"* ]] || exit 19
 fi
+if [[ "${1:-}" == run && -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "$EXPECT_RTK_DISABLED" == unset ]]; then
+    [[ "$*" != *"--env RTK_DISABLED"* ]] || exit 19
+  else
+    [[ "${RTK_DISABLED:-}" == "$EXPECT_RTK_DISABLED" && "$*" == *"--env RTK_DISABLED"* ]] || exit 19
+    [[ "$*" != *"RTK_DISABLED=$EXPECT_RTK_DISABLED"* ]] || exit 19
+  fi
+fi
 case "${1:-} ${2:-} ${3:-}" in
   "system connection list")
     [[ "${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\tidentity\ttrue\n'
@@ -123,6 +146,18 @@ fi
 if [[ "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
   [[ "${APPTAINERENV_LUNA_FACTORY_ENABLED:-}" == 1 && "${APPTAINERENV_LUNA_FACTORY_CAPACITY:-}" == 7 ]] || exit 19
   [[ "$*" != *LUNA_FACTORY* && "$*" != *" 7 "* ]] || exit 19
+fi
+if [[ -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "$EXPECT_RTK_DISABLED" == unset ]]; then
+    [[ ! -v APPTAINERENV_RTK_DISABLED ]] || exit 19
+  else
+    [[ "${APPTAINERENV_RTK_DISABLED:-}" == "$EXPECT_RTK_DISABLED" ]] || exit 19
+    for arg in "$@"; do
+      case "$arg" in
+        RTK_DISABLED|RTK_DISABLED=*|"$EXPECT_RTK_DISABLED") exit 19 ;;
+      esac
+    done
+  fi
 fi
 [[ "${APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT:-}" == /claims ]] || exit 19
 printf '%s\n' "$*" >>"${APPTAINER_LOG:-/dev/null}"
@@ -244,7 +279,7 @@ run_just() {
   : >"$podman_log"
   export APPTAINER_LOG="$apptainer_log"
   set +e
-  output="$(env HOME="$home" XDG_STATE_HOME="$home/.local/state" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
+  output="$(env HOME="$home" XDG_STATE_HOME="$home/.local/state" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_HIDE_KRUN=1 REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_KRUN_RUNTIME="${FAKE_KRUN_RUNTIME:-krun}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
   status=$?
   set -e
 }
@@ -270,6 +305,21 @@ contains 'Packaged Factory verifier qualified in krun profile' "$output"
 contains '=== Review image ===' "$output"
 contains 'ghcr.io/projectbluefin/review:stable is resolvable' "$output"
 
+scenario="registered krun runtime works without a literal executable on PATH"
+FAKE_KRUN_RUNTIME=krun run_just review-appliance owner/repo
+[[ "$status" -eq 17 ]] || fail "registered krun runtime was not selected without a literal krun executable: $output"
+log_contains 'run --runtime=krun --rm --interactive --tty' "$podman_log"
+log_contains 'runtime-probe info --runtime=krun' "$podman_log"
+[[ ! -s "$apptainer_log" ]] || fail "registered krun runtime fell back to Apptainer"
+
+scenario="unregistered krun runtime keeps the precise Apptainer fallback diagnostic"
+FAKE_KRUN_RUNTIME=unavailable run_just review-doctor
+[[ "$status" -eq 0 ]] || fail "doctor failed while reporting an unavailable krun runtime: $output"
+if [[ "$output" != *"the krun OCI runtime is unavailable"* ]]; then
+  fail "doctor output omitted krun diagnostic; podman log: $(cat "$podman_log"); output: $output"
+fi
+log_contains 'runtime-probe info --runtime=krun' "$podman_log"
+
 scenario="doctor does not claim verifier readiness without a local image"
 FAKE_IMAGE_MISSING=1 run_just review-doctor
 [[ "$status" -eq 0 ]] || fail "doctor failed when verifier qualification was unavailable: $output"
@@ -289,6 +339,33 @@ FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
 [[ "$status" -eq 18 ]] || fail "Factory-enabled Apptainer launcher did not reach OMP after its verifier probe: $output"
 grep -q -- '--factory-verifier-probe' "$home/apptainer-verifier.log" || fail "just Apptainer launch skipped the verifier probe"
 unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY EXPECT_FACTORY_ENV
+
+scenario="just launcher forwards only explicit RTK_DISABLED by name to Podman"
+for rtk_value in 0 1; do
+  export RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value"
+  run_just review-appliance owner/repo
+  [[ "$status" -eq 17 ]] || fail "Podman launch failed with explicit RTK_DISABLED=$rtk_value: $output"
+  log_contains '--env RTK_DISABLED' "$podman_log"
+  log_not_contains "RTK_DISABLED=$rtk_value" "$podman_log"
+done
+unset RTK_DISABLED EXPECT_RTK_DISABLED
+export EXPECT_RTK_DISABLED=unset
+run_just review-appliance owner/repo
+[[ "$status" -eq 17 ]] || fail "Podman launch failed with RTK_DISABLED unset: $output"
+if grep -q -- '--env RTK_DISABLED' "$podman_log"; then fail "Podman launcher invented an RTK_DISABLED default"; fi
+
+scenario="just Apptainer forwards and clears only explicit RTK_DISABLED"
+for rtk_value in 0 1; do
+  export RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" APPTAINERENV_RTK_DISABLED=stale
+  FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
+  [[ "$status" -eq 18 ]] || fail "Apptainer launch failed with explicit RTK_DISABLED=$rtk_value: $output"
+done
+unset RTK_DISABLED
+export EXPECT_RTK_DISABLED=unset APPTAINERENV_RTK_DISABLED=stale FAKE_PODMAN_INFO_FAIL=1
+run_just review-appliance owner/repo
+[[ "$status" -eq 18 ]] || fail "Apptainer launch failed with RTK_DISABLED unset: $output"
+unset EXPECT_RTK_DISABLED APPTAINERENV_RTK_DISABLED
+export FAKE_PODMAN_INFO_FAIL=0
 
 scenario="doctor diagnoses missing squashfuse"
 mv "$fake_bin/squashfuse_ll" "$scratch/squashfuse_ll"

@@ -45,13 +45,18 @@ kvm_device_ready() {
 }
 kvm_runtime_ready() {
   local device="${REVIEW_TEST_KVM_DEVICE:-/dev/kvm}"
+  local runtime
   command -v podman &>/dev/null || { KVM_FAILURE="Podman is unavailable"; return 1; }
   podman info &>/dev/null || { KVM_FAILURE="Podman is not reachable"; return 1; }
   local selected uri
   selected="$(podman_selected_connection)" || { KVM_FAILURE="Podman connections could not be resolved"; return 1; }
   IFS=$'\t' read -r uri _ <<<"$selected"
   if [[ -z "$uri" || "$uri" == unix://* ]]; then
-    command -v krun &>/dev/null || { KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; }
+    runtime="$(podman info --runtime=krun --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null)" || {
+      KVM_FAILURE="the krun OCI runtime is unavailable"
+      return 1
+    }
+    [[ "$runtime" == krun ]] || { KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; }
     kvm_device_ready || { KVM_FAILURE="${device} is not readable and writable"; return 1; }
   fi
   return 0
@@ -77,7 +82,8 @@ require_apptainer_fallback() {
 }
 prepare_apptainer_environment() {
   local name host_file
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY CONTEXT7_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION HIVE_HUB REVIEW_DEFAULT_SCOPE REVIEW_MODE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY BLUEFIN_REVIEW_ORG BLUEFIN_REVIEW_MODE BLUEFIN_REVIEW_INHERIT_OMP_CONFIG BLUEFIN_REVIEW_SKIP_REPOS TERM COLORTERM; do
+  unset APPTAINERENV_RTK_DISABLED
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY CONTEXT7_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION HIVE_HUB REVIEW_DEFAULT_SCOPE REVIEW_MODE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY BLUEFIN_REVIEW_ORG BLUEFIN_REVIEW_MODE BLUEFIN_REVIEW_INHERIT_OMP_CONFIG BLUEFIN_REVIEW_SKIP_REPOS RTK_DISABLED TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   APPTAINER_HOST_ARGS=()
@@ -467,6 +473,7 @@ review-appliance *appliance_args:
         --env BLUEFIN_REVIEW_ORG --env BLUEFIN_REVIEW_MODE --env BLUEFIN_REVIEW_INHERIT_OMP_CONFIG --env BLUEFIN_REVIEW_SKIP_REPOS
         --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}"
       )
+      [[ -v RTK_DISABLED ]] && ARGS+=(--env RTK_DISABLED)
       [[ -v LUNA_FACTORY_ENABLED ]] && ARGS+=(--env LUNA_FACTORY_ENABLED)
       [[ -v LUNA_FACTORY_CAPACITY ]] && ARGS+=(--env LUNA_FACTORY_CAPACITY)
       exec podman "${ARGS[@]}" "$IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}

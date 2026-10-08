@@ -10,6 +10,8 @@ bin/omp-review org:acme
 
 The rootless launcher prefers Podman with `krun` and KVM, then reports missing prerequisites and falls back to isolated Apptainer. Runs stay in the foreground. `Ctrl-C` stops only the active invocation.
 
+After a Podman/krun run, a private sibling collector waits for the direct launcher PID and Linux process start time to settle, then makes a label-scoped, non-streaming Podman event query with a three-second command deadline and up to 250 ms for TERM before KILL. Its mode-0600 scalar receipt remains under `${XDG_STATE_HOME:-$HOME/.local/state}/bluefin/instances/<instance>/diagnostics/`. Clean exits and exit 130 stay quiet. Other evidenced non-clean results print one bounded diagnostic line; unavailable collection and event-query results remain quiet in the terminal and are recorded as unknown. The `podman_oom_reported` result records Podman's OOM flag and does not attribute guest-kernel or host memory pressure. A terminated query with status 137 is labeled `query_terminated`; a container exit code 137 alone remains unknown. The launcher keeps direct foreground `exec`, `--rm`, TTY and signal delivery; Apptainer is unchanged.
+
 When `LUNA_FACTORY_ENABLED=1`, the packaged launcher and entrypoint qualify the selected runtime with Factory's bubblewrap preflight and a harmless sandbox test before OMP opens. `just review-doctor` reports runtime prerequisites and packaged verifier qualification separately. A failed probe refuses Factory-enabled startup; Apptainer is qualified independently when selected.
 
 ## Scope, mode, and authentication
@@ -21,6 +23,48 @@ GitHub credentials come from `gh auth token` or inherited `GH_TOKEN`/`GITHUB_TOK
 Review defaults to GitHub-only mode. It makes no Hive request and does not search `~/.config/hive` for contributor registration. Existing users may explicitly set `REVIEW_MODE=hive` and `HIVE_HUB` to opt into the optional read-side integration. That integration supplies context only; it does not assign or complete contributor work. The old Hive contributor image and launcher are not part of this product.
 
 Luna Factory is packaged beside Review. Loading it starts no work; execution requires `LUNA_FACTORY_ENABLED=1`. Factory retains its own admission, claims, evidence, and durable state boundaries.
+
+## Host launch profiles
+
+The installed `bluefin review` alias and source `bin/bluefin review` launcher can save host launch intent. Profiles do not apply to `just review-appliance` or native `bin/omp-review`; those entrypoints retain their existing configuration.
+
+```bash
+bluefin review configure personal
+bluefin review profiles
+bluefin review --launcher-profile personal acme/widgets
+bluefin review --runtime apptainer acme/widgets
+```
+
+`configure` runs only on an interactive host terminal and starts no isolation runtime or login. Press Enter to retain a setting, or enter `-` to clear `env_groups` or `env_names`. It asks whether to save and make the profile the default before writing private files atomically. EOF or Ctrl-C before saving leaves the previous profile intact.
+
+Configuration requires the host's native `flock`. A concurrent save reports busy before publishing any intent; retry after the active save exits. Cancellation retains the lock until rollback settles, then the kernel releases it. Normal launches do not acquire this save lock.
+
+Profiles live at `${XDG_CONFIG_HOME:-$HOME/.config}/review/launcher/profiles/<name>.profile`. A `default` file beside `profiles/` contains one profile name. Headless setup may write this complete v1 format directly:
+
+```text
+version=1
+runtime=apptainer
+github_auth=gh-cli
+inherit_omp=true
+factory_enabled=false
+factory_capacity=2
+env_groups=aws-sdk,typesafe
+env_names=
+```
+
+All eight fields are required. Profiles contain choices and approved variable names, never credential values or executable shell. Unknown fields, duplicate fields, invalid values, unreadable files and unsafe names fail before runtime creation. Profile names use 1–64 letters, digits, dots, underscores or hyphens and start with a letter or digit. `none` is reserved: `--launcher-profile none` ignores a saved default for one launch.
+
+Launcher CLI choices override explicit environment settings, which override the selected profile, then current defaults. `REVIEW_LAUNCH_PROFILE` selects a profile. The supported pairs are `--runtime` / `REVIEW_RUNTIME`, `--github-auth` / `REVIEW_GITHUB_AUTH`, `--inherit-omp` / `REVIEW_INHERIT_OMP_CONFIG`, `--factory` / `LUNA_FACTORY_ENABLED`, `--factory-capacity` / `LUNA_FACTORY_CAPACITY`, `--env-groups` / `REVIEW_ENV_GROUPS`, and `--env-names` / `REVIEW_ENV_NAMES`. Booleans accept `true`, `false`, `1` or `0`; an explicit zero overrides an enabled profile. Existing `BLUEFIN_REVIEW_INHERIT_OMP_CONFIG` remains a compatibility alias. Factory capacity retains its existing range of 1–100. OMP's `--profile` is separate and is forwarded unchanged.
+
+Runtime `auto` preserves the current krun/KVM preference and isolated Apptainer fallback. `krun` requires that supported boundary and an OCI image; it never silently downgrades. `apptainer` selects its normal SIF/OCI path directly and still requires Apptainer, squashfuse and accessible FUSE. Factory-enabled startup still qualifies the selected verifier before OMP opens. Enabling Factory never dispatches work by itself.
+
+GitHub source `auto` preserves the existing environment, stored CLI and bounded OMP fallback order. `environment` uses only `GH_TOKEN`, then `GITHUB_TOKEN`, and refuses a missing credential. `gh-cli` queries the stored github.com login with both token variables removed only from that child process, then forwards the selected authority through both GitHub token aliases. It can deliberately ignore a Codespaces-injected token without changing the parent environment. Review never logs in automatically, stores tokens in profiles, or silently falls through from a selected missing source. GitHub permissions remain authoritative. GitHub authentication does not select commit metadata: Factory publication currently uses `Luna Factory / factory@localhost`.
+
+Provider groups are `aws-sdk`, `bedrock-bearer`, `openai`, `anthropic`, `gemini`, `typesafe` and `copilot`. They select only the launcher's existing canonical approved names from the current host environment; `env_names` may select individual approved names. Unselected provider names stay outside both runtime paths. GitHub auth, Review/Factory controls and terminal settings retain their separate launcher contracts. Ambient `APPTAINERENV_*` and `SINGULARITYENV_*` overrides cannot inject additional capabilities. No AWS directory or generic host environment is mounted or inherited.
+
+`RTK_DISABLED` remains a fixed approved launcher control, not a profile field or provider group. The host value crosses Podman/krun or Apptainer only when it is explicitly set.
+
+Configured launches print a bounded preflight with the resolved runtime, credential source, Factory settings and selected/present/missing capabilities. Variable presence does not prove provider authentication. `--launcher-quiet` suppresses this launch-plan summary; runtime and safety diagnostics remain visible. With no profile or host override, existing environment-driven launches retain their behavior and scope-keyed persistent paths.
 
 ## Factory dashboard
 
