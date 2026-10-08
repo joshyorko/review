@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1686,7 +1686,7 @@ interface FakeHost {
 	tools: Map<string, FakeTool>;
 	nativeTaskCalls: { count: number };
 	events: Map<string, (event: unknown, ctx: unknown) => unknown>;
-	commands: Map<string, { description?: string; handler(args: string, ctx: unknown): unknown }>;
+	commands: Map<string, { description?: string; getArgumentCompletions?(argumentPrefix: string): Array<{ value: string; label: string }> | null; handler(args: string, ctx: unknown): unknown }>;
 	entries: Array<{ customType: string; data: unknown }>;
 	notifications: string[];
 	sentMessages: Array<{ content: string; options?: unknown }>;
@@ -1705,7 +1705,7 @@ interface FakeHost {
 	registerTool(definition: FakeTool): void;
 	appendEntry(customType: string, data: unknown): void;
 	on(name: string, handler: (event: unknown, ctx: unknown) => unknown): void;
-	registerCommand(name: string, definition: { description?: string; handler(args: string, ctx: unknown): unknown }): void;
+	registerCommand(name: string, definition: { description?: string; getArgumentCompletions?(argumentPrefix: string): Array<{ value: string; label: string }> | null; handler(args: string, ctx: unknown): unknown }): void;
 	sendUserMessage(content: string, options?: unknown): void;
 	notify(message: string): void;
 }
@@ -1713,7 +1713,7 @@ interface FakeHost {
 function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
 	const tools = new Map<string, FakeTool>();
 	const events = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-	const commands = new Map<string, { description?: string; handler(args: string, ctx: unknown): unknown }>();
+	const commands = new Map<string, { description?: string; getArgumentCompletions?(argumentPrefix: string): Array<{ value: string; label: string }> | null; handler(args: string, ctx: unknown): unknown }>();
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	const notifications: string[] = [];
 	const sentMessages: Array<{ content: string; options?: unknown }> = [];
@@ -1790,7 +1790,7 @@ function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
 		on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
 			events.set(name, handler);
 		},
-		registerCommand(name: string, definition: { description?: string; handler(args: string, ctx: unknown): unknown }) {
+		registerCommand(name: string, definition: { description?: string; getArgumentCompletions?(argumentPrefix: string): Array<{ value: string; label: string }> | null; handler(args: string, ctx: unknown): unknown }) {
 			commands.set(name, definition);
 		},
 		sendUserMessage(content: string, options?: unknown) {
@@ -2317,6 +2317,44 @@ test("selected batch command remains opt-in", async () => {
 	assert.ok(command);
 	await command.handler("run {\"items\":[]}", startCtx(host));
 	assert.ok(host.notifications.some((message) => /LUNA_FACTORY_ENABLED=1|Factory is disabled/.test(message)));
+});
+
+test("Factory command completion follows the accepted grammar and reads retained IDs without writing state", () => {
+	const root = join(tmpdir(), `luna-factory-completion-missing-${process.pid}`);
+	const host = fakeHost();
+	createLunaFactoryExtension(host as never, { env: { LUNA_FACTORY_STATE_ROOT: root }, artifactRoots: ROOTS });
+	const complete = host.commands.get("factory")?.getArgumentCompletions;
+	assert.ok(complete);
+	assert.deepEqual(complete("")?.map((item) => item.label), [
+		"status", "start", "selected", "run", "inspect", "resume", "pause", "drain", "abort", "stop", "retry", "exclude", "export", "discard", "claims", "help", "--help", "debug", "--debug", "why", "--",
+	]);
+	assert.deepEqual(complete("start ")?.map((item) => item.label), ["inspect", "patch", "pr-ready"]);
+	assert.deepEqual(complete("claims ")?.map((item) => item.label), ["status", "inspect", "reconcile"]);
+	assert.deepEqual(complete("start p")?.map((item) => item.label), ["patch", "pr-ready"]);
+	assert.deepEqual(complete("typo "), null);
+	assert.equal(existsSync(root), false, "completion must not create the state root");
+
+	const retainedRoot = mkdtempSync(join(tmpdir(), "luna-factory-completion-"));
+	try {
+		const batch = createBatch([{ key: "example/repo#1", repo: "example/repo", number: 1, kind: "issue", action: "inspect", overlaps: [], base: "a".repeat(40), head: "a".repeat(40), acceptanceRevision: "r1" }], {
+			id: "batch-aaaaaaaa", capacity: 2, maxAttempts: 3, maxTotalAttempts: 3, mode: "retain",
+		});
+		const statePath = join(retainedRoot, `${batch.id}.json`);
+		writeFileSync(statePath, JSON.stringify(batch));
+		const retainedHost = fakeHost();
+		createLunaFactoryExtension(retainedHost as never, { env: { LUNA_FACTORY_STATE_ROOT: retainedRoot }, artifactRoots: ROOTS });
+		const retainedComplete = retainedHost.commands.get("factory")?.getArgumentCompletions;
+		assert.ok(retainedComplete);
+		assert.deepEqual(retainedComplete("inspect ")?.map((item) => item.label), [batch.id]);
+		assert.deepEqual(retainedComplete("retry batch-a")?.map((item) => item.label), [batch.id]);
+		assert.deepEqual(retainedComplete("retry batch-aaaaaaaa "), null);
+		assert.deepEqual(retainedComplete("retry batch-aaaaaaaa batch-a"), null);
+		assert.deepEqual(retainedComplete("exclude batch-aaaaaaaa "), null);
+		assert.deepEqual(retainedComplete("exclude batch-aaaaaaaa batch-a"), null);
+		assert.equal(readFileSync(statePath, "utf8"), JSON.stringify(batch), "completion must not rewrite retained state");
+		writeFileSync(join(retainedRoot, "batch-bbbbbbbb.json"), "not-json");
+		assert.deepEqual(retainedComplete("inspect "), null, "unreadable persisted state falls back to no batch suggestions");
+	} finally { rmSync(retainedRoot, { recursive: true, force: true }); }
 });
 
 test("execution is refused while the opt-in flag is absent", async () => {
