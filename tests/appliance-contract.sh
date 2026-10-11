@@ -155,7 +155,7 @@ require scripts/build-derived-omp.sh \
   'sha256sum "$OMP_CLIPBOARD_PATCH_PATH"' \
   'sha512sum --check --status' \
   'git -C "$source_dir" apply --check "$OMP_PATCH_PATH"' \
-  'git -C "$source_dir" apply --check "$OMP_CLIPBOARD_PATCH_PATH"' \
+  'git -C "$source_dir" apply --unidiff-zero --check "$OMP_CLIPBOARD_PATCH_PATH"' \
   'clipboard patch was reviewed for OMP source' \
   'bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests' \
   'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"' \
@@ -164,7 +164,7 @@ require scripts/build-derived-omp.sh \
 # shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
 memory_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply "$OMP_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
 # shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
-clipboard_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply "$OMP_CLIPBOARD_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
+clipboard_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply --unidiff-zero "$OMP_CLIPBOARD_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
 [[ -n "$memory_patch_apply_line" && -n "$clipboard_patch_apply_line" && "$memory_patch_apply_line" -lt "$clipboard_patch_apply_line" ]] ||
   fail "the clipboard patch must apply after the unchanged MemoryBackend patch"
 grep -qF 'runner: ubuntu-26.04-arm' .github/workflows/publish-appliance.yml ||

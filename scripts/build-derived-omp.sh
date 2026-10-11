@@ -117,8 +117,8 @@ sha256sum "$OMP_CLIPBOARD_PATCH_PATH" | {
   echo "OMP clipboard patch digest mismatch" >&2
   exit 1
 }
-git -C "$source_dir" apply --check "$OMP_CLIPBOARD_PATCH_PATH"
-git -C "$source_dir" apply "$OMP_CLIPBOARD_PATCH_PATH"
+git -C "$source_dir" apply --unidiff-zero --check "$OMP_CLIPBOARD_PATCH_PATH"
+git -C "$source_dir" apply --unidiff-zero "$OMP_CLIPBOARD_PATCH_PATH"
 
 memoryd_archive="$workdir/memoryd-source.tar.gz"
 curl --fail --location --show-error --silent \

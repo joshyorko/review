@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const expectedArchiveSha256 = "06a569467c1793e2c7f9f3d20807b5ddca60d59633b9be0748ad05851ccf4c00";
 const expectedSourceCommit = "a4d6f0adc63dda4ccdf4d25c26422219820f865b";
 const expectedMemoryPatchSha256 = "d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f";
-const expectedPatchSha256 = "d940497114f783c95d95256c6e0e73642d3c6b1ead5e193d07c57da7df8b733d";
+const expectedPatchSha256 = "9e2f74c989f7d2f86d8dff73eb99a1888188f72c00b7ba7147758669021328b7";
 const expectedOmpVersion = "18.9.1";
 const sourceCheckout = process.env.REVIEW_OMP_SOURCE;
 const cachedArchive = process.env.ISSUE140_OMP_ARCHIVE;
@@ -107,9 +107,9 @@ assert.equal(applyMemory.status, 0, `check OMP MemoryBackend patch: ${applyMemor
 const installMemory = spawnSync("git", ["-C", sourceRoot, "apply", memoryPatchPath], { encoding: "utf8" });
 assert.equal(installMemory.status, 0, `apply OMP MemoryBackend patch: ${installMemory.stderr}`);
 if (process.env.ISSUE140_APPLY_PATCH !== "0") {
-	const applyClipboard = spawnSync("git", ["-C", sourceRoot, "apply", "--check", patchPath], { encoding: "utf8" });
+	const applyClipboard = spawnSync("git", ["-C", sourceRoot, "apply", "--unidiff-zero", "--check", patchPath], { encoding: "utf8" });
 	assert.equal(applyClipboard.status, 0, `check OMP clipboard patch after MemoryBackend: ${applyClipboard.stderr}`);
-	const installClipboard = spawnSync("git", ["-C", sourceRoot, "apply", patchPath], { encoding: "utf8" });
+	const installClipboard = spawnSync("git", ["-C", sourceRoot, "apply", "--unidiff-zero", patchPath], { encoding: "utf8" });
 	assert.equal(installClipboard.status, 0, `apply OMP clipboard patch: ${installClipboard.stderr}`);
 }
 
