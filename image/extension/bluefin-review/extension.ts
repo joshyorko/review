@@ -70,6 +70,14 @@ export type PersistedCiSkippedItem = {
 	readonly ciEvidenceSource: CiEvidenceSource;
 	readonly observedAt: number;
 };
+export type PersistedCandidateExclusion = {
+	readonly repo: string;
+	readonly number: number;
+	readonly headSha?: string;
+	readonly reason: "incomplete changed-file list" | "workflow file change" | "pull request already submitted";
+	readonly detail?: string;
+	readonly observedAt: number;
+};
 type ReconcileObservation =
 	| { readonly kind: "unknown" }
 	| { readonly kind: "settled"; readonly outcome: "success" }
@@ -86,6 +94,8 @@ export interface PersistedRepositoryBatch {
 	readonly totalItems: number;
 	/** Fresh CI exclusions retained separately from completed work. */
 	readonly skippedItems?: readonly PersistedCiSkippedItem[];
+	/** Candidate-selection exclusions retained separately from CI evidence. */
+	readonly excludedItems?: readonly PersistedCandidateExclusion[];
 	readonly state: RepositoryBatchState;
 	readonly startedAt: number;
 	readonly waveStartedAt: number;
@@ -1144,6 +1154,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		return wasActive;
 	};
+	const persistSelectionReceipt = (ctx: CtxLike, batch: PersistedRepositoryBatch): void => {
+		const preserveActive = activeBatch !== undefined && ["running", "paused", "blocked"].includes(activeBatch.state);
+		if (!preserveActive) {
+			persistBatch(ctx, batch);
+			return;
+		}
+		const receipt = activeBatch.id === batch.id || recoveryBatches.has(batch.id)
+			? { ...batch, id: `${batch.id}-${randomUUID()}` }
+			: batch;
+		persistArchivedBatch(ctx, receipt);
+	};
 	const rememberToolInvocation = (ctx: CtxLike, toolCallId: string): void => {
 		if (!activeBatch?.waveIdentity || (!["running", "paused"].includes(activeBatch.state) && !(activeBatch.state === "blocked" && preToolProofValid(activeBatch)))) return;
 		const ids = [...new Set([...(activeBatch.waveToolInvocationIds ?? []), toolCallId])].sort();
@@ -1443,7 +1464,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				status: `current queue observation; ci=${item.ciStatus ?? "unknown"}; review=${item.reviewState}; merge=${item.mergeState}`,
 				sourceUrl: item.url,
 			})),
-			operations: batches.values.map((batch) => ({ id: batch.id, kind: batch.kind, state: batch.state, completedItems: batch.completedItems, totalItems: batch.totalItems, startedAt: batch.startedAt, items: batch.waves.slice(0, 12).flatMap((wave) => wave.items.slice(0, 25).map((item) => ({ repo: item.repo, id: item.id, type: item.type, headSha: item.type === "pr" ? item.headSha : undefined }))), skippedItems: (batch.skippedItems ?? []).slice(0, 25), error: batch.error })),
+			operations: batches.values.map((batch) => ({ id: batch.id, kind: batch.kind, state: batch.state, completedItems: batch.completedItems, totalItems: batch.totalItems, startedAt: batch.startedAt, items: batch.waves.slice(0, 12).flatMap((wave) => wave.items.slice(0, 25).map((item) => ({ repo: item.repo, id: item.id, type: item.type, headSha: item.type === "pr" ? item.headSha : undefined }))), skippedItems: (batch.skippedItems ?? []).slice(0, 25), excludedItems: (batch.excludedItems ?? []).slice(0, 25), error: batch.error })),
 			comments: comments.values.map((comment) => ({ state: comment.state, targets: comment.plan.targets.slice(0, 100).map((target) => `${target.repo}#${target.number}`), receipts: (comment.receipts ?? []).slice(0, 100) })),
 			trace: mode.session.roots(),
 			artifacts,
@@ -1636,9 +1657,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (args === "" || args === "status") {
 			restoreClaimWaves();
 			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
-			const skippedSummary = (batch: PersistedRepositoryBatch): string => (batch.skippedItems?.length ?? 0) > 0
-				? `\n${batch.skippedItems!.slice(0, 5).map((item) => `  Skipped CI: ${item.repo}#${item.number} head=${item.headSha} ci=${item.ciStatus} source=${item.ciEvidenceSource} observedAt=${item.observedAt}`).join("\n")}${batch.skippedItems!.length > 5 ? `\n  ${batch.skippedItems!.length - 5} additional CI skips omitted` : ""}`
-				: "";
+			const skippedSummary = (batch: PersistedRepositoryBatch): string => {
+				const ci = (batch.skippedItems ?? []).slice(0, 5).map((item) => `  Skipped CI: ${item.repo}#${item.number} head=${item.headSha} ci=${item.ciStatus} source=${item.ciEvidenceSource} observedAt=${item.observedAt}`);
+				const incompleteFiles = (batch.excludedItems ?? []).slice(0, 5).map((item) => `  Excluded candidate: ${item.repo}#${item.number}${item.headSha ? ` head=${item.headSha}` : ""} reason=${item.reason}${item.detail ? ` detail=${item.detail}` : ""} observedAt=${item.observedAt}`);
+				const omittedCi = Math.max(0, (batch.skippedItems?.length ?? 0) - 5);
+				const omittedFiles = Math.max(0, (batch.excludedItems?.length ?? 0) - 5);
+				const lines = [...ci, ...incompleteFiles,
+					...(omittedCi ? [`  ${omittedCi} additional CI skips omitted`] : []),
+					...(omittedFiles ? [`  ${omittedFiles} additional incomplete-file exclusions omitted`] : []),
+				];
+				return lines.length > 0 ? `\n${lines.join("\n")}` : "";
+			};
 			const batches = [...recoveryBatches.values()].map((batch) =>
 				`${batch.id} ${batch.state}${batch.error ? ` — ${batch.error}` : ""}${skippedSummary(batch)}`);
 			return [
@@ -1933,7 +1962,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		rememberWaveEvidence(ctx);
 	};
 
-	const startRepositoryBatch = async (ctx: CtxLike, kind: RepositoryBatchKind, items: readonly QueueItem[]) => {
+	const startRepositoryBatch = async (
+		ctx: CtxLike,
+		kind: RepositoryBatchKind,
+		items: readonly QueueItem[],
+		selection: { totalItems?: number; excludedItems?: readonly PersistedCandidateExclusion[] } = {},
+	) => {
 		const generation = ++batchRequestGeneration;
 		if (activeBatch?.state === "running" || activeBatch?.state === "paused") {
 			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
@@ -1964,7 +1998,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			waves,
 			currentWave: 0,
 			completedItems: 0,
-			totalItems: items.length,
+			totalItems: selection.totalItems ?? items.length,
+			excludedItems: selection.excludedItems,
 			state: mode.paused ? "paused" : "running",
 			startedAt,
 			waveStartedAt: startedAt,
@@ -2030,7 +2065,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		);
 	};
 
-	const filterUnsupportedSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
+	const filterUnsupportedSlayItems = (
+		ctx: CtxLike,
+		items: readonly QueueItem[],
+		excludedItems?: PersistedCandidateExclusion[],
+	): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
 			if (item.type !== "pr") {
@@ -2039,11 +2078,28 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			const wasRepair = isRepairRequested(item, mode.currentUserLogin);
 			if (!wasRepair && (item.workflowFiles?.length ?? 0) > 0 && !policy.allowWorkflowSlay) {
-				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`, "warning");
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					headSha: item.headSha,
+					reason: "workflow file change",
+					detail: item.workflowFiles![0],
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${excluded.detail}`, "warning");
 				continue;
 			}
 			if (item.changedFilesComplete === false) {
-				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: complete changed-file list unavailable`, "warning");
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					headSha: item.headSha,
+					reason: "incomplete changed-file list",
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}${item.headSha ? ` head=${item.headSha}` : ""}: ${excluded.reason}`, "warning");
 				continue;
 			}
 			eligible.push(item);
@@ -2051,12 +2107,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return eligible;
 	};
 
-	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
+	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[], excludedItems?: PersistedCandidateExclusion[]): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
 			if (item.type === "issue" && (item.submittedPrs?.length ?? 0) > 0) {
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					reason: "pull request already submitted",
+					detail: item.submittedPrs!.join(", "),
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
 				ctx.ui.notify(
-					`Skipping ${item.repo}#${item.id}: pull request already submitted (${item.submittedPrs!.join(", ")})`,
+					`Skipping ${item.repo}#${item.id}: pull request already submitted (${excluded.detail})`,
 					"warning",
 				);
 				continue;
@@ -2071,11 +2135,37 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify("No queue items available to slay", "warning");
 			return;
 		}
-		const supported = filterUnsupportedSlayItems(ctx, candidates);
-		if (supported.length === 0) return;
-		const items = filterCompletedIssueSlayItems(ctx, supported);
-		if (items.length === 0) return;
-		await startRepositoryBatch(ctx, "slay", items);
+		const excludedItems: PersistedCandidateExclusion[] = [];
+		const persistExcludedSelection = () => {
+			if (excludedItems.length === 0) return;
+			const startedAt = Date.now();
+			mode.clearSelected();
+			persist();
+			persistSelectionReceipt(ctx, {
+				version: 1,
+				id: `batch-${startedAt.toString(36)}`,
+				kind: "slay",
+				waves: [],
+				currentWave: 0,
+				completedItems: 0,
+				totalItems: candidates.length,
+				state: "complete",
+				startedAt,
+				waveStartedAt: startedAt,
+				excludedItems,
+			});
+		};
+		const eligible = filterUnsupportedSlayItems(ctx, candidates, excludedItems);
+		if (eligible.length === 0) {
+			persistExcludedSelection();
+			return;
+		}
+		const items = filterCompletedIssueSlayItems(ctx, eligible, excludedItems);
+		if (items.length === 0) {
+			persistExcludedSelection();
+			return;
+		}
+		await startRepositoryBatch(ctx, "slay", items, { totalItems: candidates.length, excludedItems });
 	};
 
 	const startAutoslay = async (ctx: CtxLike) => {
@@ -2313,9 +2403,30 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		if (action.kind === "fix") {
 			activeCtx = ctx;
-			const supported = filterUnsupportedSlayItems(ctx, capturedItems);
-			if (supported.length === 0) return;
-			await startRepositoryBatch(ctx, action.kind, supported);
+			const excludedItems: PersistedCandidateExclusion[] = [];
+			const supported = filterUnsupportedSlayItems(ctx, capturedItems, excludedItems);
+			if (supported.length === 0) {
+				if (excludedItems.length > 0) {
+					const startedAt = Date.now();
+					mode.clearSelected();
+					persist();
+					persistSelectionReceipt(ctx, {
+						version: 1,
+						id: `batch-${startedAt.toString(36)}`,
+						kind: action.kind,
+						waves: [],
+						currentWave: 0,
+						completedItems: 0,
+						totalItems: capturedItems.length,
+						state: "complete",
+						startedAt,
+						waveStartedAt: startedAt,
+						excludedItems,
+					});
+				}
+				return;
+			}
+			await startRepositoryBatch(ctx, action.kind, supported, { totalItems: capturedItems.length, excludedItems });
 			return;
 		}
 		if (action.kind === "diff") {
