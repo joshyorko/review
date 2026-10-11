@@ -32,7 +32,7 @@ The `bluefin review` Homebrew command and `bluefin-review-dev` formula are retai
 
 `bin/bluefin review` and the installed alias consume `scripts/review-launch-plan.sh` before credential resolution, scope parsing or runtime startup. `configure [name]` and `profiles` run on the host and start no runtime. The complete profile format, flags and precedence are documented in [`docs/appliance.md`](../appliance.md#host-launch-profiles). Profiles do not configure `just review-appliance` or native `bin/omp-review`.
 
-Keep one nonexecutable XDG resolver and canonical approved environment mapping for both runtime branches. CLI overrides explicit environment, then profile, then defaults. Preserve explicit zero, OMP's separate `--profile`, legacy no-profile forwarding, instance identity and the existing krun detection owner. Explicit `krun` never downgrades or runs a SIF; explicit `apptainer` bypasses KVM probing but retains Apptainer/FUSE and verifier gates.
+Keep one sourced XDG resolver and canonical approved environment mapping for both runtime branches. CLI overrides explicit environment, then profile, then defaults. Preserve explicit zero, OMP's separate `--profile`, legacy no-profile forwarding, instance identity and the existing krun detection owner. Explicit `krun` never downgrades or runs a SIF; explicit `apptainer` bypasses KVM probing but retains Apptainer/FUSE and verifier gates.
 
 `RTK_DISABLED` is a fixed approved launcher control, not a profile field or provider group. Forward it by name only when explicitly set, and do not include its value in runtime arguments.
 

@@ -190,7 +190,7 @@ class BrewDevContract(unittest.TestCase):
         helper = package / "libexec/launcher/scripts/review-launch-plan.sh"
         self.assertEqual(helper.read_bytes(), SCRIPT.with_name("review-launch-plan.sh").read_bytes())
         self.assertTrue(os.access(helper, os.R_OK), "packaged resolver must be readable")
-        self.assertFalse(os.access(helper, os.X_OK), "packaged resolver must be sourced, not executable")
+        self.assertTrue(os.access(helper, os.X_OK), "packaged resolver must retain the validated executable mode")
         sourced = subprocess.run(
             ["bash", "-c", 'source "$1"; [[ " ${REVIEW_LAUNCH_FIXED_NAMES[*]} " == *" RTK_DISABLED "* ]]',
              "bash", str(helper)],
