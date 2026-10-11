@@ -2107,30 +2107,35 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 		const excludedItems: PersistedIncompleteFilesItem[] = [];
+		const persistExcludedSelection = () => {
+			if (excludedItems.length === 0) return;
+			const startedAt = Date.now();
+			mode.clearSelected();
+			persist();
+			persistBatch(ctx, {
+				version: 1,
+				id: `batch-${startedAt.toString(36)}`,
+				kind: "slay",
+				waves: [],
+				currentWave: 0,
+				completedItems: 0,
+				totalItems: candidates.length,
+				state: "complete",
+				startedAt,
+				waveStartedAt: startedAt,
+				excludedItems,
+			});
+		};
 		const eligible = filterUnsupportedSlayItems(ctx, candidates, excludedItems);
 		if (eligible.length === 0) {
-			if (excludedItems.length > 0) {
-				const startedAt = Date.now();
-				mode.clearSelected();
-				persist();
-				persistBatch(ctx, {
-					version: 1,
-					id: `batch-${startedAt.toString(36)}`,
-					kind: "slay",
-					waves: [],
-					currentWave: 0,
-					completedItems: 0,
-					totalItems: candidates.length,
-					state: "complete",
-					startedAt,
-					waveStartedAt: startedAt,
-					excludedItems,
-				});
-			}
+			persistExcludedSelection();
 			return;
 		}
 		const items = filterCompletedIssueSlayItems(ctx, eligible);
-		if (items.length === 0) return;
+		if (items.length === 0) {
+			persistExcludedSelection();
+			return;
+		}
 		await startRepositoryBatch(ctx, "slay", items, { totalItems: candidates.length, excludedItems });
 	};
 

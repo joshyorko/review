@@ -3481,6 +3481,94 @@ test("slay reports incomplete-file candidates separately while preserving select
 	assert.doesNotMatch(ctx.notifications.at(-1).message, /Skipped CI: projectbluefin\/incomplete#84/);
 });
 
+test("slay retains incomplete-file exclusions when every remaining selected issue is already submitted", async () => {
+	const incompletePr = queueItem({
+		id: 86,
+		repo: "projectbluefin/incomplete",
+		title: "PR with unavailable file evidence",
+		headSha: "d".repeat(40),
+		ciStatus: "success",
+		author: "reviewer",
+		reviewState: "changes_requested",
+		changedFilesComplete: false,
+	});
+	const submittedIssue = queueItem({
+		id: 87,
+		type: "issue",
+		repo: "projectbluefin/already-submitted",
+		title: "issue with an existing PR",
+		submittedPrs: ["projectbluefin/already-submitted#10"],
+	});
+	const branch = [{
+		type: "custom",
+		customType: STATE_ENTRY,
+		data: {
+			mode: "prs",
+			selectedKeys: [`${incompletePr.repo}#${incompletePr.id}`, `${submittedIssue.repo}#${submittedIssue.id}`],
+			selected: [incompletePr, submittedIssue],
+		},
+	}];
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	ctx.sessionManager = { getBranch: () => branch, getSessionId: () => "session-1" };
+	const baseFetch = hiveBackedFetch([incompletePr]);
+	const issueFetch = issueBackedFetch({ [`${submittedIssue.repo}#${submittedIssue.id}`]: {
+		title: submittedIssue.title,
+		submittedPrs: submittedIssue.submittedPrs,
+	} });
+	const fetchImpl = async (url, init) => {
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (typeof body.variables?.search === "string" && body.variables.search.includes("is:issue")) {
+			return issueFetch(url, init);
+		}
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const annotate = (node) => node?.number === incompletePr.id
+			? {
+				...node,
+				author: { login: "reviewer" },
+				reviewDecision: "CHANGES_REQUESTED",
+				files: { pageInfo: { hasNextPage: true }, nodes: [{ path: "README.md" }] },
+			}
+			: node;
+		const data = { ...result.data, viewer: { login: "reviewer" } };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(annotate) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: annotate(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl,
+		env: ISOLATED_ENV,
+	});
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	assert.equal(pi.messages.length, 0, "no wave is dispatched after the remaining issue is filtered");
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(batch, "the excluded selection remains available in the Review status receipt");
+	assert.equal(batch.state, "complete");
+	assert.equal(batch.totalItems, 2, "the original mixed selection remains the denominator");
+	assert.deepEqual(batch.waves, []);
+	assert.deepEqual(batch.excludedItems, [{
+		repo: incompletePr.repo,
+		number: incompletePr.id,
+		headSha: incompletePr.headSha,
+		reason: "incomplete changed-file list",
+		observedAt: batch.excludedItems[0].observedAt,
+	}]);
+	await pi.commands.get("review").handler("status", ctx);
+	assert.match(ctx.notifications.at(-1).message, /Excluded candidate: projectbluefin\/incomplete#86 head=d{40} reason=incomplete changed-file list observedAt=/);
+});
+
 test("slay keeps workflow permission as a batch blocker after skipping failed CI", async () => {
 	const items = [
 		{ id: 51, repo: "projectbluefin/review", title: "red ordinary PR", headSha: "b".repeat(40), ciStatus: "failure" },
