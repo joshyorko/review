@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { emptyLedger, type Ledger, type OperationReceipt, type RunId, type CriterionId } from "./model.ts";
 import { criterionProven } from "./evidence.ts";
+import type { ExecutionPolicy, RequestAccounting } from "../omp/policy.ts";
 import { evaluateWorkGraph, type WorkGraphObservation, type WorkGraphDecision } from "./graph.ts";
 
 export type FactoryAction = "inspect" | "patch" | "pr-ready";
@@ -105,6 +106,11 @@ export interface Batch {
 	dependencies: Prerequisite[];
 	scopeRevisions: { item: string; reason: string; at: string }[];
 	usage: { modelCalls: number; peakWorkers: number; inputTokens: number | null; outputTokens: number | null; cost: number | null };
+	/** Fixed route and non-monetary limits captured before the first provider request. */
+	executionPolicy?: ExecutionPolicy;
+	/** Pre-request reservations survive crashes and are shared by workers and acceptance sessions. */
+	requestAccounting: RequestAccounting;
+	policyBlocker?: string;
 	/** Version-3 finite convergence contract. Older selected batches gain no authority. */
 	convergence?: { generation: string; observation?: WorkGraphObservation };
 }
@@ -159,6 +165,7 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 		version: options.converge ? 3 : items.some((item) => item.action === "pr-ready") ? 4 : 2, ...(options.converge ? { convergence: { generation: "G1" } } : {}), id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
 		mode: options.mode, control: "paused", capacity: options.capacity, maxAttempts: options.maxAttempts, maxTotalAttempts: options.maxTotalAttempts,
 		dependencies, scopeRevisions: [], usage: { modelCalls: 0, peakWorkers: 0, inputTokens: null, outputTokens: null, cost: null },
+		requestAccounting: { sequence: 0, reservations: [] },
 		items: items.map((selected) => {
 			const overlap = selected.overlaps.find((key) => items.some((item) => item.key === key));
 			const blocker = selected.blocker ?? (overlap ? `overlapping selected work ${overlap}; resolve scope explicitly before execution` : undefined);
@@ -275,7 +282,9 @@ export function batchSummary(batch: Batch, root: string): string {
 		}),
 		...(batch.scopeRevisions.length ? [`Original scope NOT converged: ${batch.scopeRevisions.map((entry) => `${entry.item}: ${entry.reason}`).join("; ")}`] : []),
 		"Live Factory workers use the host OMP Agent Hub for status, transcript focus, and cancellation; retained session evidence remains available here.",
-		`Usage: ${batch.usage.modelCalls} observed model calls; tokens/cost ${batch.usage.cost === null ? "unknown" : batch.usage.cost}. Stop-dispatch limits do not bound in-flight cost.`,
+		...(batch.executionPolicy ? [`Execution policy: ${batch.executionPolicy.route.provider}/${batch.executionPolicy.route.model} via ${batch.executionPolicy.route.api}; ${batch.requestAccounting.reservations.length}/${batch.executionPolicy.maxRequests} requests reserved; payload at most ${batch.executionPolicy.maxInputBytes} UTF-8 bytes/request; output at most ${batch.executionPolicy.maxOutputTokens} tokens/request and ${batch.executionPolicy.maxReservedOutputTokens} reserved output tokens in aggregate; deadline ${new Date(batch.executionPolicy.deadlineAt).toISOString()}.`] : ["Execution policy: not yet resolved; no provider request is admitted."]),
+		`Usage: ${batch.usage.modelCalls} durable request reservations; input/output tokens ${batch.usage.inputTokens === null || batch.usage.outputTokens === null ? "unknown or unresolved" : `${batch.usage.inputTokens}/${batch.usage.outputTokens}`}; estimated cost ${batch.usage.cost === null ? "unknown" : batch.usage.cost}. No hard-dollar ceiling is claimed.`,
+		...(batch.policyBlocker ? [`Policy blocker: ${batch.policyBlocker}`] : []),
 		`/factory resume ${batch.id} · /factory inspect ${batch.id} · /factory pause ${batch.id} · /factory stop ${batch.id}`,
 	];
 	if (graph) {

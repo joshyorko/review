@@ -11,7 +11,8 @@ import type { AttemptId, CriterionId, CurrentVerificationReceipt, EvidenceReceip
 import { BatchStore, ResourceClaims } from "./batch-store.ts";
 import { requiredChecks, packageCheckScripts } from "./batch-checks.ts";
 import { BatchGitHub } from "./batch-github.ts";
-import { runNative, sandboxTest, sandboxPreflight, NativeExecutionError, resolveNativeBinding, validateNativeSDK, type NativeBinding, type NativeContext, type NativeSDK, type SchemaBuilder, type SemanticOutcome } from "./batch-native.ts";
+import { runNative, sandboxTest, sandboxPreflight, NativeExecutionError, resolveNativeBinding, validateNativeSDK, type NativeBinding, type NativeContext, type NativeRequestPolicy, type NativeSDK, type SchemaBuilder, type SemanticOutcome } from "./batch-native.ts";
+import { createExecutionPolicy, observeProviderResponse, reserveProviderRequest, routeForModel, settleProviderUsage } from "./policy.ts";
 
 const command = promisify(execFile);
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -155,6 +156,42 @@ export class BatchService {
 			throw error;
 		}
 		this.notifyChanged(batch.id);
+	}
+	private updateUsageFromRequests(batch: Batch): void {
+		const reservations = batch.requestAccounting.reservations;
+		batch.usage.modelCalls = reservations.length;
+		const settled = reservations.filter((entry) => entry.usage !== undefined);
+		batch.usage.inputTokens = settled.length === reservations.length && reservations.length > 0 ? settled.reduce((sum, entry) => sum + entry.usage!.inputTokens, 0) : null;
+		batch.usage.outputTokens = settled.length === reservations.length && reservations.length > 0 ? settled.reduce((sum, entry) => sum + entry.usage!.outputTokens, 0) : null;
+		batch.usage.cost = settled.length === reservations.length && reservations.length > 0 && settled.every((entry) => entry.usage!.estimatedCost !== null)
+			? settled.reduce((sum, entry) => sum + entry.usage!.estimatedCost!, 0)
+			: null;
+	}
+	private requestPolicy(batch: Batch): NativeRequestPolicy {
+		return {
+			before: (route, payload) => {
+				if (!batch.executionPolicy) return { allowed: false, reason: "durable Factory execution policy is missing" };
+				const result = reserveProviderRequest(batch.executionPolicy, batch.requestAccounting, route, payload);
+				if (!result.ok) return { allowed: false, reason: result.reason };
+				batch.requestAccounting = result.accounting;
+				this.updateUsageFromRequests(batch);
+				this.persist(batch);
+				return { allowed: true, payload: result.payload };
+			},
+			response: (route) => {
+				batch.requestAccounting = observeProviderResponse(batch.requestAccounting, route);
+				this.persist(batch);
+			},
+			usage: (route, usage) => {
+				batch.requestAccounting = settleProviderUsage(batch.requestAccounting, route, usage);
+				this.updateUsageFromRequests(batch);
+				this.persist(batch);
+			},
+			blocked: (reason) => {
+				batch.policyBlocker = reason.slice(0, 4096);
+				this.persist(batch);
+			},
+		};
 	}
 	/**
 	 * Read persisted state without acquiring the writer lock, resuming work, or
@@ -498,11 +535,11 @@ export class BatchService {
 	async resume(id: string, context: NativeContext): Promise<void> {
 		this.store.acquire();
 		if (this.fatal) throw new Error(this.fatal);
-		// Snapshot only the approved execution references, never a handler's UI/signal.
-		try { this.bindings.set(id, { binding: resolveNativeBinding(context) }); }
-		catch (error) { this.bindings.set(id, { error: message(error) }); }
 		const batch = this.batches.get(id) ?? this.store.read(id);
 		this.batches.set(id, batch);
+		// Resume authorizes foreground reconciliation immediately. The pump is not
+		// started until policy checks finish below, but confirmed effects need the
+		// active control state to be re-queued safely during reconciliation.
 		batch.control = "active";
 		this.persist(batch);
 		for (const item of batch.items) {
@@ -573,6 +610,42 @@ export class BatchService {
 			}
 			if (!demoted) break;
 		}
+		const totalAttempts = batch.items.reduce((sum, item) => sum + item.attempts, 0);
+		const dispatchCandidates = batch.items.filter((item) => item.stage === "QUEUED" && !item.selected.observe &&
+			!(item.selected.action === "pr-ready" && item.operation?.phase === "push" && item.operation.state === "applied" && item.prLifecycle?.nextSafeAction === "publish") &&
+			!dependencyBlocker(batch, item.selected.key) && item.attempts < batch.maxAttempts && totalAttempts < batch.maxTotalAttempts &&
+			!this.running.has(`${id}:${item.selected.key}`));
+		if (dispatchCandidates.length) {
+			let binding: NativeBinding | undefined;
+			let bindingError: string | undefined;
+			try { binding = resolveNativeBinding(context); }
+			catch (error) { bindingError = message(error); }
+			if (bindingError) this.bindings.set(id, { error: bindingError });
+			else if (binding) {
+				// Resolve the route only when a request could actually be dispatched. Deferred
+				// dependencies and exhausted budgets must retain their own truthful states.
+				try {
+				const route = routeForModel(binding.model);
+				if (batch.executionPolicy) {
+					if (JSON.stringify(route) !== JSON.stringify(batch.executionPolicy.route)) throw new Error("active OMP route or endpoint changed since Factory admission; explicit new batch required");
+					if (Date.now() >= batch.executionPolicy.deadlineAt) throw new Error("Factory execution deadline expired; resume cannot renew it");
+				} else {
+					if (batch.requestAccounting.reservations.length || batch.items.some((item) => item.attempts > 0 || item.sessions.length > 0)) {
+						throw new Error("existing Factory work has no durable original execution policy; preserve it and create a new admitted batch");
+					}
+					batch.executionPolicy = createExecutionPolicy(route, Date.now());
+					batch.policyBlocker = undefined;
+					this.persist(batch);
+				}
+				this.bindings.set(id, { binding });
+				} catch (error) {
+				const policyError = message(error);
+				this.bindings.set(id, { error: policyError });
+				for (const item of dispatchCandidates) { item.stage = "BLOCKED"; item.blocker = policyError; }
+			}
+		}
+		}
+			batch.control = "active";
 			this.persist(batch);
 			if (batch.convergence) await this.observeConvergence(batch);
 		void this.pump();
@@ -995,6 +1068,7 @@ export class BatchService {
 			if (phase === "worker") item.stage = "RUNNING";
 			this.persist(batch);
 		};
+		const requestPolicy = this.requestPolicy(batch);
 		const worker = await runNative(this.sdk, this.schema, binding, item, this.root, "worker", signal, onSession("worker", attempt), onExecutionStart("worker", attempt), repairFeedback, {
 			attemptId: attempt,
 			repairFeedback,
@@ -1009,8 +1083,7 @@ export class BatchService {
 				acceptanceRevision: item.selected.acceptanceRevision ?? "",
 				acceptance: item.selected.acceptance ?? "",
 			},
-		});
-		batch.usage.modelCalls += worker.calls + (worker.advisor?.usage.calls ?? 0);
+		}, requestPolicy);
 		item.stage = "VERIFY"; transitionOperation(item, { phase: "verify", state: "applied" }); this.persist(batch);
 		if (item.checkScripts !== undefined && packageCheckScripts(directory) !== item.checkScripts) throw new NativeExecutionError("report-checks-changed", "Worker changed the captured mandatory package test scripts; restore the original checks. A changed verification contract requires explicit operator selection.");
 		if (item.selected.action !== "inspect" && !mandatory.length && !worker.tests.length) throw new Error("worker supplied no executable verification; inspect and retry within original appetite");
@@ -1055,8 +1128,7 @@ export class BatchService {
 		const handles = artifacts.map((path, index) => { const bytes = readFileSync(path); return { id: `evidence-${handleOffset + index}`, path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: attempt }; });
 		item.repair = { generation: item.ledger.generation, head: item.selected.head!, acceptanceRevision: item.selected.acceptanceRevision!, attemptId: attempt, reason: `${protocolRepair?.reason ?? ""}\nAcceptance pending for retained candidate`, ...(protocolRepair?.candidateHead ? { candidateHead: protocolRepair.candidateHead } : {}), ...(protocolRepair?.failureKey ? { failureKey: protocolRepair.failureKey } : {}), artifacts: [...(protocolRepair?.artifacts ?? []), ...handles] };
 		transitionOperation(item, { phase: "acceptance" }); this.persist(batch);
-			const reviewer = await runNative(this.sdk, this.schema, binding, item, this.root, "acceptance", signal, onSession("acceptance", attempt), onExecutionStart("acceptance", attempt), verification, { attemptId: attempt, artifacts: handles, evidenceRoot: evidenceDir });
-		batch.usage.modelCalls += reviewer.calls;
+			const reviewer = await runNative(this.sdk, this.schema, binding, item, this.root, "acceptance", signal, onSession("acceptance", attempt), onExecutionStart("acceptance", attempt), verification, { attemptId: attempt, artifacts: handles, evidenceRoot: evidenceDir }, requestPolicy);
 		if (reviewer.accepted && reviewer.evidenceCoverageComplete !== true) throw new NativeExecutionError("report-invalid", "acceptance did not establish full coverage of the retained candidate artifacts");
 		for (const artifact of handles) if (createHash("sha256").update(readFileSync(artifact.path)).digest("hex") !== artifact.digest) throw new Error("retained evidence changed during acceptance; proof stale");
 		const reviewFile = join(evidenceDir, "acceptance.txt"); writeFileSync(reviewFile, reviewer.report, { flag: "wx", mode: 0o600 }); artifacts.push(reviewFile);

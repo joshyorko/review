@@ -189,6 +189,15 @@ class BrewDevContract(unittest.TestCase):
             shutil.move(str(payload / name), package / "libexec" / name)
         helper = package / "libexec/launcher/scripts/review-launch-plan.sh"
         self.assertEqual(helper.read_bytes(), SCRIPT.with_name("review-launch-plan.sh").read_bytes())
+        self.assertTrue(os.access(helper, os.R_OK), "packaged resolver must be readable")
+        self.assertTrue(os.access(helper, os.X_OK), "packaged resolver must retain the validated executable mode")
+        sourced = subprocess.run(
+            ["bash", "-c", 'source "$1"; [[ " ${REVIEW_LAUNCH_FIXED_NAMES[*]} " == *" RTK_DISABLED "* ]]',
+             "bash", str(helper)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(sourced.returncode, 0, sourced.stderr)
         launched = subprocess.run([str(package / "bin/bluefin"), "review", "profiles"],
                                   env=self.env, capture_output=True, text=True)
         self.assertEqual(launched.returncode, 0, launched.stderr)

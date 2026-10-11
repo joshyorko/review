@@ -6,6 +6,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createBatch, digest, type Batch } from "../core/batch.ts";
 import { parseJournal, type JournalRead } from "../core/journal.ts";
+import { validateExecutionPolicy, validateRequestAccounting } from "./policy.ts";
 import { parseOperationReceipt } from "../core/schema.ts";
 import type { Ledger, OperationReceipt } from "../core/model.ts";
 
@@ -315,11 +316,17 @@ export class BatchStore {
 			}
 		}
 		batch.version = batch.version === 3 ? 3 : batch.version === 4 ? 4 : 2;
+		batch.requestAccounting ??= { sequence: 0, reservations: [] };
+		if (batch.executionPolicy !== undefined) validateExecutionPolicy(batch.executionPolicy);
+		validateRequestAccounting(batch.requestAccounting);
+		if (batch.policyBlocker !== undefined && (typeof batch.policyBlocker !== "string" || !batch.policyBlocker.trim() || batch.policyBlocker.length > 4096)) throw new Error("invalid durable Factory policy blocker");
 		return batch as Batch;
 	}
 	write(batch: Batch): void {
 		if (!this.held || this.failed) throw new Error("Factory persistence is not writable; new effects refused");
 		if (!/^batch-[a-f0-9-]+$/.test(batch.id)) throw new Error("invalid batch identity");
+		if (batch.executionPolicy !== undefined) validateExecutionPolicy(batch.executionPolicy);
+		validateRequestAccounting(batch.requestAccounting);
 		for (const item of batch.items) validateItemLedger(item);
 		const file = join(this.root, `${batch.id}.json`);
 		if (existsSync(file) && this.read(batch.id).revision !== batch.revision) throw new Error("stale batch revision");

@@ -1,0 +1,100 @@
+# Generated for one isolated, local-only OMP request-hook probe. The runner
+# substitutes an ephemeral loopback port for __PORT__ and starts no real model.
+modelRoles:
+  default: local-probe/deterministic
+advisor:
+  enabled: false
+async:
+  enabled: false
+disabledProviders:
+  - abliteration
+  - aiand
+  - aimlapi
+  - alibaba-coding-plan
+  - alibaba-token-plan
+  - amazon-bedrock
+  - anthropic
+  - azure
+  - baseten
+  - bedrock-mantle
+  - cerebras
+  - charm-hyper
+  - cline-pass
+  - cloudflare-ai-gateway
+  - commandcode
+  - coreweave
+  - cursor
+  - deepinfra
+  - deepseek
+  - devin
+  - firepass
+  - fireworks
+  - gitlab-duo
+  - gitlab-duo-agent
+  - github-copilot
+  - gmi-cloud
+  - google
+  - google-antigravity
+  - google-gemini-cli
+  - google-vertex
+  - groq
+  - huggingface
+  - kilo
+  - kimi-code
+  - litellm
+  - lm-studio
+  - meta
+  - minimax
+  - minimax-code
+  - minimax-code-cn
+  - mistral
+  - moonshot
+  - nanogpt
+  - nvidia
+  - novita
+  - ollama
+  - ollama-cloud
+  - openai
+  - openai-codex
+  - opencode-go
+  - opencode-zen
+  - openrouter
+  - qianfan
+  - sakana
+  - siliconflow
+  - siliconflow-cn
+  - synthetic
+  - together
+  - umans
+  - venice
+  - vercel-ai-gateway
+  - vllm
+  - wafer-serverless
+  - xai
+  - xai-oauth
+  - xiaomi
+  - xiaomi-token-plan-ams
+  - xiaomi-token-plan-cn
+  - xiaomi-token-plan-sgp
+  - yolo-auto
+  - zai
+  - zenmux
+  - zhipu-coding-plan
+providers:
+  local-probe:
+    baseUrl: http://127.0.0.1:__PORT__/v1
+    apiKey: fixture-placeholder
+    api: openai-completions
+    models:
+      - id: deterministic
+        name: Deterministic policy hook probe
+        api: openai-completions
+        reasoning: false
+        input: [text]
+        cost:
+          input: 0
+          output: 0
+          cacheRead: 0
+          cacheWrite: 0
+        contextWindow: 4096
+        maxTokens: 128
