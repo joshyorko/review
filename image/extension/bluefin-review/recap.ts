@@ -12,7 +12,7 @@ export interface ReviewRecapInput {
 	queue: { kind: "available" | "unavailable"; observedAt: number; itemCount?: number; reason?: string };
 	selection: Array<{ repo: string; id: number; type: "issue" | "pr"; title: string; url: string; headSha?: string }>;
 	observations: Array<{ subject: string; observedAt?: number; status: string; sourceUrl?: string }>;
-	operations: Array<{ id: string; kind: string; state: string; completedItems: number; totalItems: number; startedAt: number; items?: Array<{ repo: string; id: number; type: string; headSha?: string }>; error?: string }>;
+	operations: Array<{ id: string; kind: string; state: string; completedItems: number; totalItems: number; startedAt: number; items?: Array<{ repo: string; id: number; type: string; headSha?: string }>; excludedItems?: Array<{ repo: string; number: number; headSha?: string; reason: string; detail?: string }>; error?: string }>;
 	comments: Array<{ state: string; targets: string[]; receipts: string[]; body?: string }>;
 	trace: Span[];
 	artifacts: Array<{ kind: "available" | "unavailable"; sessionId: string; uri?: string; path?: string; reason?: string; complete?: boolean }>;
@@ -44,7 +44,8 @@ export function buildReviewRecap(input: ReviewRecapInput): ReviewRecap {
 	}));
 	const operations = input.operations.slice(-12).map((op) => {
 		const targets = (op.items ?? []).slice(0, 8).map((item) => `${safePreview(item.repo, 128, "head").text}#${item.id}${item.headSha ? ` head=${safePreview(item.headSha, 80, "head").text}` : ""}`);
-		return `${safePreview(op.kind, 32, "head").text} ${safePreview(op.id, 64, "head").text}: ${safePreview(op.state, 32, "head").text} (${op.completedItems}/${op.totalItems}; started=${op.startedAt})${targets.length ? ` targets=${targets.join(",")}${(op.items?.length ?? 0) > 8 ? `; ${(op.items?.length ?? 0) - 8} more omitted` : ""}` : ""}${op.error ? `; ${safePreview(op.error, 160).text}` : ""}`;
+		const excluded = (op.excludedItems ?? []).slice(0, 8).map((item) => `${safePreview(item.repo, 128, "head").text}#${item.number}${item.headSha ? ` head=${safePreview(item.headSha, 80, "head").text}` : ""} reason=${safePreview(item.reason, 80, "head").text}${item.detail ? ` detail=${safePreview(item.detail, 160, "head").text}` : ""}`);
+		return `${safePreview(op.kind, 32, "head").text} ${safePreview(op.id, 64, "head").text}: ${safePreview(op.state, 32, "head").text} (${op.completedItems}/${op.totalItems}; ${op.totalItems} candidates; started=${op.startedAt})${targets.length ? ` targets=${targets.join(",")}${(op.items?.length ?? 0) > 8 ? `; ${(op.items?.length ?? 0) - 8} more omitted` : ""}` : ""}${excluded.length ? ` excluded=${excluded.join("; ")}${(op.excludedItems?.length ?? 0) > 8 ? `; ${(op.excludedItems?.length ?? 0) - 8} more excluded omitted` : ""}` : ""}${op.error ? `; ${safePreview(op.error, 160).text}` : ""}`;
 	});
 	const refs = input.artifacts.slice(-24).map((artifact) => ({
 		kind: artifact.kind,

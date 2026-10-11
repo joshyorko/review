@@ -70,11 +70,12 @@ export type PersistedCiSkippedItem = {
 	readonly ciEvidenceSource: CiEvidenceSource;
 	readonly observedAt: number;
 };
-export type PersistedIncompleteFilesItem = {
+export type PersistedCandidateExclusion = {
 	readonly repo: string;
 	readonly number: number;
 	readonly headSha?: string;
-	readonly reason: "incomplete changed-file list";
+	readonly reason: "incomplete changed-file list" | "workflow file change" | "pull request already submitted";
+	readonly detail?: string;
 	readonly observedAt: number;
 };
 type ReconcileObservation =
@@ -94,7 +95,7 @@ export interface PersistedRepositoryBatch {
 	/** Fresh CI exclusions retained separately from completed work. */
 	readonly skippedItems?: readonly PersistedCiSkippedItem[];
 	/** Candidate-selection exclusions retained separately from CI evidence. */
-	readonly excludedItems?: readonly PersistedIncompleteFilesItem[];
+	readonly excludedItems?: readonly PersistedCandidateExclusion[];
 	readonly state: RepositoryBatchState;
 	readonly startedAt: number;
 	readonly waveStartedAt: number;
@@ -1452,7 +1453,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				status: `current queue observation; ci=${item.ciStatus ?? "unknown"}; review=${item.reviewState}; merge=${item.mergeState}`,
 				sourceUrl: item.url,
 			})),
-			operations: batches.values.map((batch) => ({ id: batch.id, kind: batch.kind, state: batch.state, completedItems: batch.completedItems, totalItems: batch.totalItems, startedAt: batch.startedAt, items: batch.waves.slice(0, 12).flatMap((wave) => wave.items.slice(0, 25).map((item) => ({ repo: item.repo, id: item.id, type: item.type, headSha: item.type === "pr" ? item.headSha : undefined }))), skippedItems: (batch.skippedItems ?? []).slice(0, 25), error: batch.error })),
+			operations: batches.values.map((batch) => ({ id: batch.id, kind: batch.kind, state: batch.state, completedItems: batch.completedItems, totalItems: batch.totalItems, startedAt: batch.startedAt, items: batch.waves.slice(0, 12).flatMap((wave) => wave.items.slice(0, 25).map((item) => ({ repo: item.repo, id: item.id, type: item.type, headSha: item.type === "pr" ? item.headSha : undefined }))), skippedItems: (batch.skippedItems ?? []).slice(0, 25), excludedItems: (batch.excludedItems ?? []).slice(0, 25), error: batch.error })),
 			comments: comments.values.map((comment) => ({ state: comment.state, targets: comment.plan.targets.slice(0, 100).map((target) => `${target.repo}#${target.number}`), receipts: (comment.receipts ?? []).slice(0, 100) })),
 			trace: mode.session.roots(),
 			artifacts,
@@ -1647,7 +1648,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
 			const skippedSummary = (batch: PersistedRepositoryBatch): string => {
 				const ci = (batch.skippedItems ?? []).slice(0, 5).map((item) => `  Skipped CI: ${item.repo}#${item.number} head=${item.headSha} ci=${item.ciStatus} source=${item.ciEvidenceSource} observedAt=${item.observedAt}`);
-				const incompleteFiles = (batch.excludedItems ?? []).slice(0, 5).map((item) => `  Excluded candidate: ${item.repo}#${item.number}${item.headSha ? ` head=${item.headSha}` : ""} reason=${item.reason} observedAt=${item.observedAt}`);
+				const incompleteFiles = (batch.excludedItems ?? []).slice(0, 5).map((item) => `  Excluded candidate: ${item.repo}#${item.number}${item.headSha ? ` head=${item.headSha}` : ""} reason=${item.reason}${item.detail ? ` detail=${item.detail}` : ""} observedAt=${item.observedAt}`);
 				const omittedCi = Math.max(0, (batch.skippedItems?.length ?? 0) - 5);
 				const omittedFiles = Math.max(0, (batch.excludedItems?.length ?? 0) - 5);
 				const lines = [...ci, ...incompleteFiles,
@@ -1954,7 +1955,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		ctx: CtxLike,
 		kind: RepositoryBatchKind,
 		items: readonly QueueItem[],
-		selection: { totalItems?: number; excludedItems?: readonly PersistedIncompleteFilesItem[] } = {},
+		selection: { totalItems?: number; excludedItems?: readonly PersistedCandidateExclusion[] } = {},
 	) => {
 		const generation = ++batchRequestGeneration;
 		if (activeBatch?.state === "running" || activeBatch?.state === "paused") {
@@ -2056,7 +2057,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const filterUnsupportedSlayItems = (
 		ctx: CtxLike,
 		items: readonly QueueItem[],
-		excludedItems?: PersistedIncompleteFilesItem[],
+		excludedItems?: PersistedCandidateExclusion[],
 	): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
@@ -2066,11 +2067,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			const wasRepair = isRepairRequested(item, mode.currentUserLogin);
 			if (!wasRepair && (item.workflowFiles?.length ?? 0) > 0 && !policy.allowWorkflowSlay) {
-				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`, "warning");
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					headSha: item.headSha,
+					reason: "workflow file change",
+					detail: item.workflowFiles![0],
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${excluded.detail}`, "warning");
 				continue;
 			}
 			if (item.changedFilesComplete === false) {
-				const excluded: PersistedIncompleteFilesItem = {
+				const excluded: PersistedCandidateExclusion = {
 					repo: item.repo,
 					number: item.id,
 					headSha: item.headSha,
@@ -2086,12 +2096,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return eligible;
 	};
 
-	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
+	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[], excludedItems?: PersistedCandidateExclusion[]): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
 			if (item.type === "issue" && (item.submittedPrs?.length ?? 0) > 0) {
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					reason: "pull request already submitted",
+					detail: item.submittedPrs!.join(", "),
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
 				ctx.ui.notify(
-					`Skipping ${item.repo}#${item.id}: pull request already submitted (${item.submittedPrs!.join(", ")})`,
+					`Skipping ${item.repo}#${item.id}: pull request already submitted (${excluded.detail})`,
 					"warning",
 				);
 				continue;
@@ -2106,7 +2124,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify("No queue items available to slay", "warning");
 			return;
 		}
-		const excludedItems: PersistedIncompleteFilesItem[] = [];
+		const excludedItems: PersistedCandidateExclusion[] = [];
 		const persistExcludedSelection = () => {
 			if (excludedItems.length === 0) return;
 			const startedAt = Date.now();
@@ -2131,7 +2149,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			persistExcludedSelection();
 			return;
 		}
-		const items = filterCompletedIssueSlayItems(ctx, eligible);
+		const items = filterCompletedIssueSlayItems(ctx, eligible, excludedItems);
 		if (items.length === 0) {
 			persistExcludedSelection();
 			return;

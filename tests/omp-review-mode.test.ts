@@ -3558,15 +3558,59 @@ test("slay retains incomplete-file exclusions when every remaining selected issu
 	assert.equal(batch.state, "complete");
 	assert.equal(batch.totalItems, 2, "the original mixed selection remains the denominator");
 	assert.deepEqual(batch.waves, []);
-	assert.deepEqual(batch.excludedItems, [{
+	assert.deepEqual(batch.excludedItems[0], {
 		repo: incompletePr.repo,
 		number: incompletePr.id,
 		headSha: incompletePr.headSha,
 		reason: "incomplete changed-file list",
 		observedAt: batch.excludedItems[0].observedAt,
-	}]);
+	});
+	assert.deepEqual(batch.excludedItems.map(({ number, reason, detail }) => ({ number, reason, detail })), [
+		{ number: incompletePr.id, reason: "incomplete changed-file list", detail: undefined },
+		{ number: submittedIssue.id, reason: "pull request already submitted", detail: submittedIssue.submittedPrs.join(", ") },
+	]);
 	await pi.commands.get("review").handler("status", ctx);
 	assert.match(ctx.notifications.at(-1).message, /Excluded candidate: projectbluefin\/incomplete#86 head=d{40} reason=incomplete changed-file list observedAt=/);
+	assert.match(ctx.notifications.at(-1).message, /Excluded candidate: projectbluefin\/already-submitted#87 reason=pull request already submitted detail=projectbluefin\/already-submitted#10 observedAt=/);
+});
+
+test("slay durably accounts for workflow-file candidates when no work is dispatched", async () => {
+	const items = [{ id: 88, repo: "projectbluefin/workflow", title: "workflow PR", headSha: "e".repeat(40), ciStatus: "success" }];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const markWorkflow = (node) => node?.number === 88
+			? { ...node, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: ".github/workflows/build.yml" }] } }
+			: node;
+		const data = { ...result.data };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(markWorkflow) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: markWorkflow(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: false } });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 0);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(batch, "a complete no-wave batch retains workflow selection accounting");
+	assert.equal(batch.totalItems, 1);
+	assert.deepEqual(batch.excludedItems.map(({ number, reason, detail }) => ({ number, reason, detail })), [
+		{ number: 88, reason: "workflow file change", detail: ".github/workflows/build.yml" },
+	]);
 });
 
 test("slay keeps workflow permission as a batch blocker after skipping failed CI", async () => {
