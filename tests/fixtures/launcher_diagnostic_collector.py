@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import subprocess
@@ -408,7 +409,12 @@ exit 0
         report = report_dir / "collector.report"
         if not identity.is_file() or not report.is_file():
             return False
-        return report.read_text().strip() != "Review post-exit diagnostic: outcome=unknown evidence=collector_pending"
+        final_report = report.read_text().strip()
+        return re.fullmatch(
+            r"Review post-exit diagnostic: outcome=[a-z_]+ settlement=[a-z_]+ evidence=[a-z_]+"
+            r"(?: container_exit=\d{1,3})?(?: container_id=[0-9a-f]{64})?(?: kill_seen=(?:true|false))?",
+            final_report,
+        ) is not None
 
     def launcher_report(self, fixture: dict[str, str]) -> str:
         return self.diagnostic_report_path(fixture).read_text().strip()
