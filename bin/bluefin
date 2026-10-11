@@ -122,7 +122,12 @@ kvm_runtime_ready() {
     KVM_FAILURE="remote Podman engines are unsupported by the packaged launcher"
     return 1
   fi
-  if ! command -v krun >/dev/null 2>&1; then KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; fi
+  local runtime
+  runtime="$("$engine" info --runtime=krun --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null)" || {
+    KVM_FAILURE="the krun OCI runtime is unavailable"
+    return 1
+  }
+  if [[ "$runtime" != krun ]]; then KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; fi
   if [[ ! -r "$device" || ! -w "$device" ]]; then KVM_FAILURE="${device} is not readable and writable"; return 1; fi
   return 0
 }

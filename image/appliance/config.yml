@@ -3,6 +3,7 @@
 # in-place update that cannot survive appliance replacement.
 startup:
   checkUpdate: false
+  setupWizard: false
 
 modelRoles:
   advisor: "@default"
