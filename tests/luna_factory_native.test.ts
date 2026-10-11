@@ -464,8 +464,18 @@ test("bounded escalation activates native Advisor on the same worker session and
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("native Advisor resolution and catch-up failures block the existing attempt without worker fallback", async () => {
-	for (const failure of ["no-advisor-model", "catchup"] as const) {
+test("native Advisor resolution, catch-up, and usage failures block the existing attempt without worker fallback", async () => {
+	const invalidUsage: Record<string, Partial<{ input: number; output: number; cost: number; calls: number }>> = {
+		"input-regressed": { input: 90 },
+		"output-regressed": { output: 40 },
+		"cost-regressed": { cost: 0.9 },
+		"nonfinite-input": { input: NaN },
+		"nonfinite-output": { output: Infinity },
+		"nonfinite-cost": { cost: NaN },
+		"nonfinite-calls": { calls: NaN },
+		"fractional-tokens": { input: 120.5 },
+	};
+	for (const failure of ["no-advisor-model", "catchup", "nonfinite-baseline", ...Object.keys(invalidUsage)]) {
 		const root = await mkdtemp(join(tmpdir(), `factory-native-advisor-${failure}-`));
 		try {
 			const events: string[] = [];
@@ -474,6 +484,7 @@ test("native Advisor resolution and catch-up failures block the existing attempt
 			const configuredModel = { provider: "configured-provider", id: "configured-advisor" };
 			const resolves = failure !== "no-advisor-model";
 			let enabled = false;
+			let caughtUp = false;
 			let tools: Tool[] = [];
 			let escalations = 0;
 			const session = {
@@ -484,21 +495,24 @@ test("native Advisor resolution and catch-up failures block the existing attempt
 				setAdvisorEnabled(value: boolean) { enabled = value; events.push(value ? "advisor-on" : "advisor-off"); return value && resolves; },
 				isAdvisorEnabled: () => enabled,
 				isAdvisorActive: () => enabled && resolves,
-				async waitForAdvisorCatchup() { events.push("advisor-catchup"); return false; },
+				async waitForAdvisorCatchup() { events.push("advisor-catchup"); caughtUp = true; return failure !== "catchup"; },
 				getAdvisorStats() {
+					const usage = caughtUp
+						? { input: 120, output: 60, cost: 1.02, calls: 1, ...invalidUsage[failure] }
+						: { input: failure === "nonfinite-baseline" ? NaN : 100, output: 50, cost: 1, calls: 0 };
 					return {
 						configured: enabled,
 						active: enabled && resolves,
 						model: enabled && resolves ? configuredModel : undefined,
 						contextWindow: 0, contextTokens: 0,
-						tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						cost: 0,
-						messages: { user: 0, assistant: 0, total: 0 },
+						tokens: { input: usage.input, output: usage.output, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						cost: usage.cost,
+						messages: { user: 0, assistant: usage.calls, total: 0 },
 						advisors: enabled && resolves ? [{ name: "Configured", status: "running", model: configuredModel, contextWindow: 100_000, contextTokens: 0, tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0, messages: { user: 0, assistant: 0, total: 0 } }] : [],
 					};
 				},
 				formatAdvisorStatus: () => enabled && resolves ? "Advisor active" : "Advisor model unavailable",
-				formatAdvisorHistoryAsText: () => null,
+				formatAdvisorHistoryAsText: () => "Native advisory with unavailable usage evidence",
 				async prompt(text: string) {
 					prompts.push(text);
 					for (const listener of listeners) listener({ type: "turn_start" });
@@ -534,7 +548,7 @@ test("native Advisor resolution and catch-up failures block the existing attempt
 			assert.equal(enabled, false, "Advisor is disabled after the failed escalation");
 			assert.ok(events.includes("advisor-off"));
 			assert.equal(prompts.some((prompt) => prompt.startsWith("Resume")), false, "blocked escalation never resumes with a worker-model substitute");
-			assert.equal(prompts.length, failure === "catchup" ? 2 : 1);
+			assert.equal(prompts.length, failure === "no-advisor-model" || failure === "nonfinite-baseline" ? 1 : 2);
 		} finally { await rm(root, { recursive: true, force: true }); }
 	}
 });
