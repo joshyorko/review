@@ -19,15 +19,15 @@
 # what Renovate can compare against, and a pin no tool can track is a stale pin.
 
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/base
-ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:f6d95ea075affb8031ca8fa8929d95cae45588d507c239b2bb2967f9925e14a5
+ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:b0792e684c8e33f59ef511020be89d1e91f568967c5eb19bc3db0ca7d54d72a8
 # The builder is the shell-enabled sibling of the same FSDK series, so the
 # binaries staged out of it link against the base's own glibc.
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/lab-runner
-ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:1436bce126a1faa67cd13e13ebce710c1c24811d02a3074a427f28628f413162
+ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:f509338a2e71a77bd375459afb26ed4e77b9677858a43a99f9d017c8ded9ad97
 # Linux audio packages are absent from the FSDK runtime seam. The pinned audio
 # stage contributes only the PulseAudio/ALSA libraries and configuration.
 # renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
-ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:b3188b17a2b94c6a5484c02582a9f3b045110d57b3c0e87a14a4f0ab291723c0
+ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:26553fd14e79c61093bd2ccf7ea30bf866b27ad5f68e84693fd0402c85edae5a
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
 ARG OMP_VERSION=18.5.0
@@ -45,12 +45,12 @@ ARG OMP_NATIVES_X86_64_SHA512=1c433e06f82f9032222aace5272954c5f12071f5ae15ff6a64
 ARG OMP_NATIVES_AARCH64_SHA512=61f5d765eb1619fbcd55d161f2c16bcbe29c4bb7da1edebcb4d839be4eca038bb3ffd2a7efc1ae7f496400e8056744ac0b5be121ab1afa90371226983d461ba5
 ARG MEMORYD_SOURCE_COMMIT=e7f8d431797973afbdf4d0530aa14a25f43acf35
 ARG MEMORYD_SOURCE_SHA256=155ec09537e941e4c71a65b738650b0419ae86f12cc86e28761d10553627d692
-ARG TYPESAFE_VERSION=0.9.0
-ARG TYPESAFE_SHA256=679865885ba4d86957792ac9aa163fd085142a4395b72a7cf7f39067743455c1
+ARG TYPESAFE_VERSION=0.9.1
+ARG TYPESAFE_SHA256=00d4bd8779aa3dae4ea9a7fcd47074f3dba100086a339047fe8989d6daa393df
 ARG TYPESAFE_SDK_VERSION=0.6.0
 ARG TYPESAFE_SDK_SHA256=ccd94517c911c58ed5284b15838a001393e304ea3b784f6e8fb5a79f6365378e
-ARG TYPESAFE_TYPEBOX_VERSION=1.3.34
-ARG TYPESAFE_TYPEBOX_SHA256=58a270296bc4e185ee3a04328447a9ffa12e22ae6abaa31a03fd3273b800c7f0
+ARG TYPESAFE_TYPEBOX_VERSION=1.3.36
+ARG TYPESAFE_TYPEBOX_SHA256=3c02a80579c0fa7908e3aff9d07b6a1f20aab7ad1c019539edd0f5c50d92f85b
 # renovate: datasource=github-releases depName=cli/cli
 ARG GH_VERSION=2.102.0
 ARG GH_X86_64_SHA256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
