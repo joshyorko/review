@@ -110,6 +110,8 @@ test("native adapter uses the OMP 18.4.4 restricted custom-tool contract", async
 		assert.equal(captured.enableMCP, false);
 		assert.equal(captured.enableLsp, false);
 		assert.equal(captured.enableIrc, false);
+		assert.equal(captured.thinkingLevel, undefined, "Factory must not pass an unsupported thinking selector");
+		assert.equal(captured.thinkingLevelCeiling, undefined, "Factory must not pass an unsupported thinking ceiling");
 		assert.deepEqual(captured.toolNames, ["factory_read", "factory_files", "factory_escalate", "factory_report", "factory_write"]);
 		const tools = captured.customTools as Tool[];
 		assert.deepEqual(tools.map((tool) => tool.name), captured.toolNames);

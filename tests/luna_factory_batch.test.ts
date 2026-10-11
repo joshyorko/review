@@ -875,7 +875,7 @@ test("accepted aggregate cannot override a false native acceptance predicate", a
 		} as never, 1);
 		service.store.acquire();
 		service.store.write(batch);
-		await service.resume(batch.id, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } });
+		await service.resume(batch.id, { model: { provider: "anthropic", id: "claude-test", api: "anthropic-messages" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } });
 		await service.waitForIdle();
 		const rejected = service.store.read(batch.id).items[0]!;
 		assert.notEqual(rejected.stage, "DONE");
@@ -955,7 +955,7 @@ test("a replacement inspection worker reuses its operation identity and retains 
 	};
 	const schema = { object: () => ({}), string: () => ({}), array: () => ({}), number: () => ({}), boolean: () => ({}) };
 	const github = { token: "probe-token", snapshot: async (value: SelectedItem) => value, assertFresh: async () => {} };
-	const context = { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } };
+	const context = { model: { provider: "anthropic", id: "claude-test", api: "anthropic-messages" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } };
 	try {
 		await mkdir(workspace, { recursive: true, mode: 0o700 });
 		const git = (...args: string[]): string => execFileSync("git", [
