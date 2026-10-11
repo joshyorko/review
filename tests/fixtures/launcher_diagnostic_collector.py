@@ -398,6 +398,18 @@ exit 0
             self.assertEqual(collector_field, "unavailable")
         return report
 
+    def diagnostic_receipt_ready(self, fixture: dict[str, str]) -> bool:
+        report_roots = list(Path(fixture["state_home"]).glob("bluefin/instances/*/diagnostics"))
+        report_dirs = [path for root in report_roots for path in root.glob("review-launch-diagnostic.*")]
+        if len(report_dirs) != 1:
+            return False
+        report_dir = report_dirs[0]
+        identity = report_dir / "collector.identity"
+        report = report_dir / "collector.report"
+        if not identity.is_file() or not report.is_file():
+            return False
+        return report.read_text().strip() != "Review post-exit diagnostic: outcome=unknown evidence=collector_pending"
+
     def launcher_report(self, fixture: dict[str, str]) -> str:
         return self.diagnostic_report_path(fixture).read_text().strip()
 
@@ -809,7 +821,7 @@ exit 0
             if not main_settled:
                 wait_result = os.waitpid(pid, os.WNOHANG)
                 main_settled = wait_result[0] == pid
-            if main_settled and self.diagnostic_report_path(fixture).exists():
+            if main_settled and self.diagnostic_receipt_ready(fixture):
                 break
         if not main_settled:
             os.kill(pid, signal.SIGKILL)
@@ -840,7 +852,7 @@ exit 0
             if not main_settled:
                 wait_result = os.waitpid(pid, os.WNOHANG)
                 main_settled = wait_result[0] == pid
-            if main_settled and self.diagnostic_report_path(ctrl_c).exists():
+            if main_settled and self.diagnostic_receipt_ready(ctrl_c):
                 break
         if not main_settled:
             os.kill(pid, signal.SIGKILL)
