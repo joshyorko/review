@@ -149,9 +149,9 @@ if [[ "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
 fi
 if [[ -v EXPECT_RTK_DISABLED ]]; then
   if [[ "$EXPECT_RTK_DISABLED" == unset ]]; then
-    [[ ! -v APPTAINERENV_RTK_DISABLED ]] || exit 19
+    [[ ! -v APPTAINERENV_RTK_DISABLED && ! -v SINGULARITYENV_RTK_DISABLED ]] || exit 19
   else
-    [[ "${APPTAINERENV_RTK_DISABLED:-}" == "$EXPECT_RTK_DISABLED" ]] || exit 19
+    [[ "${APPTAINERENV_RTK_DISABLED:-}" == "$EXPECT_RTK_DISABLED" && ! -v SINGULARITYENV_RTK_DISABLED ]] || exit 19
     for arg in "$@"; do
       case "$arg" in
         RTK_DISABLED|RTK_DISABLED=*|"$EXPECT_RTK_DISABLED") exit 19 ;;
@@ -354,17 +354,17 @@ run_just review-appliance owner/repo
 [[ "$status" -eq 17 ]] || fail "Podman launch failed with RTK_DISABLED unset: $output"
 if grep -q -- '--env RTK_DISABLED' "$podman_log"; then fail "Podman launcher invented an RTK_DISABLED default"; fi
 
-scenario="just Apptainer forwards and clears only explicit RTK_DISABLED"
+scenario="just Apptainer forwards only explicit RTK_DISABLED and clears ambient aliases"
 for rtk_value in 0 1; do
-  export RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" APPTAINERENV_RTK_DISABLED=stale
+  export RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" APPTAINERENV_RTK_DISABLED=stale SINGULARITYENV_RTK_DISABLED=stale
   FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
   [[ "$status" -eq 18 ]] || fail "Apptainer launch failed with explicit RTK_DISABLED=$rtk_value: $output"
 done
 unset RTK_DISABLED
-export EXPECT_RTK_DISABLED=unset APPTAINERENV_RTK_DISABLED=stale FAKE_PODMAN_INFO_FAIL=1
+export EXPECT_RTK_DISABLED=unset APPTAINERENV_RTK_DISABLED=stale SINGULARITYENV_RTK_DISABLED=stale FAKE_PODMAN_INFO_FAIL=1
 run_just review-appliance owner/repo
 [[ "$status" -eq 18 ]] || fail "Apptainer launch failed with RTK_DISABLED unset: $output"
-unset EXPECT_RTK_DISABLED APPTAINERENV_RTK_DISABLED
+unset EXPECT_RTK_DISABLED APPTAINERENV_RTK_DISABLED SINGULARITYENV_RTK_DISABLED
 export FAKE_PODMAN_INFO_FAIL=0
 
 scenario="doctor diagnoses missing squashfuse"

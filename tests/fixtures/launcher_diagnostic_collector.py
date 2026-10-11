@@ -94,7 +94,14 @@ case "$mode" in
     done
     printf '%s\n' "$event_until" >"$fixture_dir/event-until"
     event_time='2026-10-11T12:00:00.600000000Z'
-    if [[ "$event_time" < "$event_until" ]]; then
+    if python3 - "$event_time" "$event_until" <<'PY'
+from datetime import datetime
+import sys
+
+event_time, until = (datetime.fromisoformat(value.replace("Z", "+00:00")) for value in sys.argv[1:])
+raise SystemExit(0 if event_time < until else 1)
+PY
+    then
       printf 'container|create|%s|<nil>|<nil>|%s\n' '${CONTAINER_ID}' "$owner"
       printf 'container|died|%s|23|false|%s\n' '${CONTAINER_ID}' "$owner"
     fi
@@ -483,10 +490,10 @@ exit 0
         self.settle(pid)
         report = self.finish(proc, report_dir)
 
-        self.assertEqual((self.fixture_dir / "event-until").read_text(), "2026-10-11T12:00:00.700000000Z\n")
         self.assertIn("outcome=nonclean_unknown", report)
         self.assertIn("evidence=podman_event", report)
         self.assertIn("container_exit=23", report)
+        self.assertEqual((self.fixture_dir / "event-until").read_text(), "2026-10-11T12:00:00.700000000Z\n")
 
     @unittest.skipUnless(COLLECTOR.is_file(), "collector implementation follows this red test")
     def test_podman_oom_flag_is_reported_but_exit_137_alone_stays_unknown(self) -> None:
