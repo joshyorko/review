@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Contract tests for the derived-OMP appliance SPDX generator.
 
-The manifest records the built OMP executable, exact source archive and patch,
+The manifest records the built OMP executable, exact source archive and patches,
 architecture-specific native addon input, fetched GitHub CLI, and Review
 workbench. These checks validate artifact identity and provenance, not incidental
 serialization.
@@ -23,11 +23,12 @@ OMP_X86 = "a" * 64
 OMP_ARM = "b" * 64
 OMP_SOURCE = "c" * 64
 OMP_PATCH = "d" * 64
+OMP_CLIPBOARD_PATCH = "7" * 64
 NATIVE_X86 = "e" * 128
 NATIVE_ARM = "f" * 128
 GH_X86 = "1" * 64
 GH_ARM = "2" * 64
-RTK_X86 = "7" * 64
+RTK_X86 = "ab" * 32
 RTK_ARM = "8" * 64
 RTK_HOOK = "9" * 64
 RTK_LICENSE_SHA = "0" * 64
@@ -45,6 +46,9 @@ BASE_ARGS = {
     "--omp-source-commit": SOURCE_COMMIT,
     "--omp-source-sha256": OMP_SOURCE,
     "--omp-patch-sha256": OMP_PATCH,
+    "--omp-clipboard-patch-source-commit": SOURCE_COMMIT,
+    "--omp-clipboard-patch-sha256": OMP_CLIPBOARD_PATCH,
+    "--omp-clipboard-patch-path": "/usr/local/share/bluefin/omp/clipboard-truthful-18.9.2.patch",
     "--omp-bun-version": "1.4.2",
     "--bun-sha256": BUN_X86,
     "--node-version": "24.21.0",
@@ -164,7 +168,16 @@ class PerArchitectureDigests(unittest.TestCase):
 
     def test_every_verified_component_has_its_actual_checksum_algorithm(self):
         found = packages_by_name(generate(self, "x86_64"))
-        for name in ("omp", "omp-source", "omp-memory-backend-patch", "gh", "rtk", "rtk-omp-hook", "rtk-license"):
+        for name in (
+            "omp",
+            "omp-source",
+            "omp-memory-backend-patch",
+            "omp-clipboard-truthfulness-patch",
+            "gh",
+            "rtk",
+            "rtk-omp-hook",
+            "rtk-license",
+        ):
             self.assertEqual(found[name]["checksums"][0]["algorithm"], "SHA256")
         self.assertEqual(found["rtk"]["licenseDeclared"], "Apache-2.0")
         self.assertEqual(found["rtk-omp-hook"]["licenseDeclared"], "Apache-2.0")
@@ -177,9 +190,14 @@ class PerArchitectureDigests(unittest.TestCase):
     def test_derived_binary_records_its_exact_source_patch_and_bun_inputs(self):
         found = packages_by_name(generate(self, "x86_64"))
         comment = found["omp"]["comment"]
+        self.assertEqual(
+            found["omp-clipboard-truthfulness-patch"]["checksums"][0]["checksumValue"],
+            OMP_CLIPBOARD_PATCH,
+        )
         self.assertIn(SOURCE_COMMIT, comment)
         self.assertIn(OMP_SOURCE, comment)
         self.assertIn(OMP_PATCH, comment)
+        self.assertIn(OMP_CLIPBOARD_PATCH, comment)
         self.assertIn("Bun 1.4.2", comment)
 
 
@@ -196,6 +214,10 @@ class DigestValidation(unittest.TestCase):
         self.assert_rejected("omp_sha256", **{"--omp-sha256": "A" * 64})
         self.assert_rejected("omp_source_sha256", **{"--omp-source-sha256": "c" * 63})
         self.assert_rejected("omp_patch_sha256", **{"--omp-patch-sha256": "z" * 64})
+        self.assert_rejected(
+            "omp_clipboard_patch_sha256",
+            **{"--omp-clipboard-patch-sha256": "z" * 64},
+        )
         self.assert_rejected("gh_sha256", **{"--gh-sha256": "sha256:" + GH_X86})
         self.assert_rejected("rtk_archive_sha256", **{"--rtk-archive-sha256": "A" * 64})
         self.assert_rejected("rtk_hook_sha256", **{"--rtk-hook-sha256": "z" * 64})
@@ -209,6 +231,12 @@ class DigestValidation(unittest.TestCase):
 
     def test_source_commit_must_be_a_full_lowercase_sha(self):
         self.assert_rejected("omp source commit", **{"--omp-source-commit": "abc123"})
+
+    def test_clipboard_patch_must_be_bound_to_the_pinned_omp_source(self):
+        self.assert_rejected(
+            "omp clipboard patch source commit must match",
+            **{"--omp-clipboard-patch-source-commit": "1" * 40},
+        )
 
     def test_empty_versions_are_refused_by_name(self):
         for flag, label in (
@@ -243,6 +271,10 @@ class DownloadLocations(unittest.TestCase):
         self.assertEqual(
             found["omp-memory-backend-patch"]["downloadLocation"],
             f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/memory-backend-registration.patch",
+        )
+        self.assertEqual(
+            found["omp-clipboard-truthfulness-patch"]["downloadLocation"],
+            f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/clipboard-truthful-18.9.2.patch",
         )
 
     def test_node_download_is_versioned_and_architecture_specific(self):
@@ -316,11 +348,25 @@ class PackageIdentity(unittest.TestCase):
         found = packages_by_name(generate(self, "x86_64"))
         self.assertEqual(
             sorted(found),
-            ["bun", "gh", "node", "omp", "omp-memory-backend-patch", "omp-native-addon", "omp-source", "review-workbench", "rtk", "rtk-license", "rtk-omp-hook"],
+            [
+                "bun",
+                "gh",
+                "node",
+                "omp",
+                "omp-clipboard-truthfulness-patch",
+                "omp-memory-backend-patch",
+                "omp-native-addon",
+                "omp-source",
+                "review-workbench",
+                "rtk",
+                "rtk-license",
+                "rtk-omp-hook",
+            ],
         )
         self.assertEqual(found["omp"]["versionInfo"], "1.2.3")
         self.assertEqual(found["omp-source"]["versionInfo"], SOURCE_COMMIT)
         self.assertEqual(found["omp-memory-backend-patch"]["versionInfo"], REVIEW_REVISION)
+        self.assertEqual(found["omp-clipboard-truthfulness-patch"]["versionInfo"], SOURCE_COMMIT)
         self.assertEqual(found["omp-native-addon"]["versionInfo"], "1.2.3")
         self.assertEqual(found["gh"]["versionInfo"], "2.80.1")
         self.assertEqual(found["rtk"]["versionInfo"], "0.51.0")
@@ -353,6 +399,10 @@ class PackageIdentity(unittest.TestCase):
         self.assertEqual(
             locator("omp-memory-backend-patch"),
             f"pkg:generic/omp-memory-backend-registration-patch@{REVIEW_REVISION}?checksum=sha256:{OMP_PATCH}",
+        )
+        self.assertEqual(
+            locator("omp-clipboard-truthfulness-patch"),
+            f"pkg:generic/omp-clipboard-truthfulness-patch@{SOURCE_COMMIT}?checksum=sha256:{OMP_CLIPBOARD_PATCH}",
         )
         self.assertEqual(
             locator("omp-native-addon"),

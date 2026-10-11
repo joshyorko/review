@@ -202,6 +202,118 @@ test("evidence handles are attempt-scoped, digest-checked, and ranged", async ()
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("escaped repository and evidence pages fit the native model transport without false coverage", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-wire-pages-"));
+	try {
+		const bytes = Buffer.alloc(128 * 1024, 0);
+		const path = join(root, "escaped.txt"); await writeFile(path, bytes);
+		const { createHash } = await import("node:crypto");
+		const artifact = { id: "escaped-1", path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: "attempt-1" };
+		let tools: Tool[] = [];
+		const sdk = fake(async (registered) => { tools = registered; });
+		await runNative(sdk.sdk, schema, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } }, item(root), root, "worker", new AbortController().signal, () => {}, () => {}, "", { attemptId: "attempt-2", artifacts: [artifact] });
+		for (const name of ["factory_read", "factory_evidence_read"]) {
+			const read = tools.find((tool) => tool.name === name)!;
+			let offset = 0, total = 0;
+			for (;;) {
+				const result = await read.execute("read", { path: "escaped.txt", id: "escaped-1", offset, limit: 128 * 1024 }) as { content: { text: string }[] };
+				const wire = result.content[0]!.text;
+				assert.ok(Buffer.byteLength(wire) <= 32 * 1024, "complete serialized JSON fits below the pinned OMP spill threshold even with sixfold escaping");
+				const chunk = JSON.parse(wire);
+				total += chunk.readBytes ?? chunk.bytes;
+				if (chunk.eof) break; offset = chunk.nextOffset;
+			}
+			assert.equal(total, bytes.length);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("repository and evidence pages preserve UTF-8 characters across byte boundaries", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-utf8-pages-"));
+	try {
+		const { createHash } = await import("node:crypto");
+		const cases = ["é", "€", "🦕"];
+		const handles = [] as { id: string; path: string; digest: string; bytes: number; attemptId: string }[];
+		for (let index = 0; index < cases.length; index++) {
+			const path = join(root, `utf8-${index}.txt`);
+			const bytes = Buffer.from(`${"a".repeat(4095)}${cases[index]}tail`);
+			await writeFile(path, bytes);
+			handles.push({ id: `utf8-${index}`, path, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, attemptId: "attempt-1" });
+		}
+		const bomPath = join(root, "bom.txt");
+		const bomBytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("text")]);
+		await writeFile(bomPath, bomBytes);
+		handles.push({ id: "bom", path: bomPath, digest: createHash("sha256").update(bomBytes).digest("hex"), bytes: bomBytes.length, attemptId: "attempt-1" });
+		let tools: Tool[] = [];
+		const sdk = fake(async (registered) => { tools = registered; });
+		await runNative(sdk.sdk, schema, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } }, item(root), root, "worker", new AbortController().signal, () => {}, () => {}, "", { attemptId: "attempt-2", artifacts: handles });
+		const repositoryRead = tools.find((tool) => tool.name === "factory_read")!;
+		const evidenceRead = tools.find((tool) => tool.name === "factory_evidence_read")!;
+		for (let index = 0; index < cases.length; index++) {
+			const prefix = "a".repeat(4095) + cases[index];
+			const expectedBytes = Buffer.byteLength(prefix);
+			const repositoryPage = JSON.parse((await repositoryRead.execute("id", { path: `utf8-${index}.txt`, offset: 0, limit: 4096 }) as { content: { text: string }[] }).content[0].text);
+			assert.equal(repositoryPage.text, prefix);
+			assert.equal(repositoryPage.bytes, expectedBytes);
+			assert.equal(repositoryPage.nextOffset, expectedBytes);
+			assert.equal(repositoryPage.eof, false);
+			const evidencePage = JSON.parse((await evidenceRead.execute("id", { id: `utf8-${index}`, offset: 0, limit: 4096 }) as { content: { text: string }[] }).content[0].text);
+			assert.equal(evidencePage.text, prefix);
+			assert.equal(evidencePage.readBytes, expectedBytes);
+			assert.equal(evidencePage.nextOffset, expectedBytes);
+			const smallLimit = JSON.parse((await repositoryRead.execute("id", { path: `utf8-${index}.txt`, offset: 4095, limit: 1 }) as { content: { text: string }[] }).content[0].text);
+			assert.equal(smallLimit.text, cases[index]);
+			assert.equal(smallLimit.bytes, Buffer.byteLength(cases[index]));
+		}
+		const bomPage = JSON.parse((await repositoryRead.execute("id", { path: "bom.txt", offset: 0, limit: 7 }) as { content: { text: string }[] }).content[0].text);
+		assert.equal(bomPage.text, "\uFEFFtext");
+		const evidenceBomPage = JSON.parse((await evidenceRead.execute("id", { id: "bom", offset: 0, limit: 7 }) as { content: { text: string }[] }).content[0].text);
+		assert.equal(evidenceBomPage.text, "\uFEFFtext");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("native UTF-8 reads reject invalid bytes, incomplete EOF, and continuation-byte offsets", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-utf8-invalid-"));
+	try {
+		const { createHash } = await import("node:crypto");
+		const inputs = [
+			{ id: "invalid", bytes: Buffer.from([0x61, 0xff, 0x62]), offset: 0 },
+			{ id: "incomplete", bytes: Buffer.from([0x61, 0xf0, 0x9f]), offset: 0 },
+			{ id: "continuation", bytes: Buffer.from("🦕"), offset: 1 },
+		];
+		const handles = [] as { id: string; path: string; digest: string; bytes: number; attemptId: string }[];
+		for (const input of inputs) {
+			const path = join(root, `${input.id}.txt`);
+			await writeFile(path, input.bytes);
+			handles.push({ id: input.id, path, digest: createHash("sha256").update(input.bytes).digest("hex"), bytes: input.bytes.length, attemptId: "attempt-1" });
+		}
+		let tools: Tool[] = [];
+		const sdk = fake(async (registered) => { tools = registered; });
+		await runNative(sdk.sdk, schema, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } }, item(root), root, "worker", new AbortController().signal, () => {}, () => {}, "", { attemptId: "attempt-2", artifacts: handles });
+		const repositoryRead = tools.find((tool) => tool.name === "factory_read")!;
+		const evidenceRead = tools.find((tool) => tool.name === "factory_evidence_read")!;
+		for (const input of inputs) {
+			await assert.rejects(() => repositoryRead.execute("id", { path: `${input.id}.txt`, offset: input.offset, limit: 2 }), /UTF-8 range is invalid/);
+			await assert.rejects(() => evidenceRead.execute("id", { id: input.id, offset: input.offset, limit: 2 }), /UTF-8 range is invalid/);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("admitted evidence identifiers cannot overwhelm complete native JSON pages", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-native-evidence-identities-"));
+	try {
+		const { createHash } = await import("node:crypto");
+		const path = join(root, "proof.txt"); const bytes = Buffer.from("proof"); await writeFile(path, bytes);
+		const handle = { id: "evidence-0", attemptId: "attempt-1", path, bytes: bytes.length, digest: createHash("sha256").update(bytes).digest("hex") };
+		for (const field of ["id", "attemptId"] as const) {
+			let creations = 0;
+			const sdk = fake(async () => { creations++; });
+			await assert.rejects(() => runNative(sdk.sdk, schema, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } }, item(root), root, "worker", new AbortController().signal, () => {}, () => {}, "", { attemptId: "attempt-2", artifacts: [{ ...handle, [field]: "x".repeat(32768) }] }), /invalid.*handle|identity|bounded/i);
+			assert.equal(creations, 0);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("missing worker report has a typed correctable protocol failure", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-native-report-"));
 	try {
@@ -246,9 +358,10 @@ test("sandbox preflight distinguishes a missing tool from an absent sandbox with
 			assert.deepEqual(result.missing, ["definitely-not-a-real-factory-tool"]);
 			assert.ok(result.available.includes("bash"));
 		} catch (error) {
-			// Hermetic CI does not install bwrap; require the precise missing-boundary diagnostic.
+			// A hermetic runner can have bwrap installed while policy prevents its UID map.
+			// Require the stable fail-closed classification, not one host-specific errno.
 			assert.ok(error instanceof Error && "code" in error && error.code === "capability-unavailable");
-			assert.match(error.message, /spawn bwrap ENOENT/);
+			assert.match(error.message, /verification sandbox capability unavailable:/);
 		}
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -352,8 +465,18 @@ test("bounded escalation activates native Advisor on the same worker session and
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("native Advisor resolution and catch-up failures block the existing attempt without worker fallback", async () => {
-	for (const failure of ["no-advisor-model", "catchup"] as const) {
+test("native Advisor resolution, catch-up, and usage failures block the existing attempt without worker fallback", async () => {
+	const invalidUsage: Record<string, Partial<{ input: number; output: number; cost: number; calls: number }>> = {
+		"input-regressed": { input: 90 },
+		"output-regressed": { output: 40 },
+		"cost-regressed": { cost: 0.9 },
+		"nonfinite-input": { input: NaN },
+		"nonfinite-output": { output: Infinity },
+		"nonfinite-cost": { cost: NaN },
+		"nonfinite-calls": { calls: NaN },
+		"fractional-tokens": { input: 120.5 },
+	};
+	for (const failure of ["no-advisor-model", "catchup", "nonfinite-baseline", ...Object.keys(invalidUsage)]) {
 		const root = await mkdtemp(join(tmpdir(), `factory-native-advisor-${failure}-`));
 		try {
 			const events: string[] = [];
@@ -362,6 +485,7 @@ test("native Advisor resolution and catch-up failures block the existing attempt
 			const configuredModel = { provider: "configured-provider", id: "configured-advisor" };
 			const resolves = failure !== "no-advisor-model";
 			let enabled = false;
+			let caughtUp = false;
 			let tools: Tool[] = [];
 			let escalations = 0;
 			const session = {
@@ -372,21 +496,24 @@ test("native Advisor resolution and catch-up failures block the existing attempt
 				setAdvisorEnabled(value: boolean) { enabled = value; events.push(value ? "advisor-on" : "advisor-off"); return value && resolves; },
 				isAdvisorEnabled: () => enabled,
 				isAdvisorActive: () => enabled && resolves,
-				async waitForAdvisorCatchup() { events.push("advisor-catchup"); return false; },
+				async waitForAdvisorCatchup() { events.push("advisor-catchup"); caughtUp = true; return failure !== "catchup"; },
 				getAdvisorStats() {
+					const usage = caughtUp
+						? { input: 120, output: 60, cost: 1.02, calls: 1, ...invalidUsage[failure] }
+						: { input: failure === "nonfinite-baseline" ? NaN : 100, output: 50, cost: 1, calls: 0 };
 					return {
 						configured: enabled,
 						active: enabled && resolves,
 						model: enabled && resolves ? configuredModel : undefined,
 						contextWindow: 0, contextTokens: 0,
-						tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						cost: 0,
-						messages: { user: 0, assistant: 0, total: 0 },
+						tokens: { input: usage.input, output: usage.output, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						cost: usage.cost,
+						messages: { user: 0, assistant: usage.calls, total: 0 },
 						advisors: enabled && resolves ? [{ name: "Configured", status: "running", model: configuredModel, contextWindow: 100_000, contextTokens: 0, tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0, messages: { user: 0, assistant: 0, total: 0 } }] : [],
 					};
 				},
 				formatAdvisorStatus: () => enabled && resolves ? "Advisor active" : "Advisor model unavailable",
-				formatAdvisorHistoryAsText: () => null,
+				formatAdvisorHistoryAsText: () => "Native advisory with unavailable usage evidence",
 				async prompt(text: string) {
 					prompts.push(text);
 					for (const listener of listeners) listener({ type: "turn_start" });
@@ -422,7 +549,7 @@ test("native Advisor resolution and catch-up failures block the existing attempt
 			assert.equal(enabled, false, "Advisor is disabled after the failed escalation");
 			assert.ok(events.includes("advisor-off"));
 			assert.equal(prompts.some((prompt) => prompt.startsWith("Resume")), false, "blocked escalation never resumes with a worker-model substitute");
-			assert.equal(prompts.length, failure === "catchup" ? 2 : 1);
+			assert.equal(prompts.length, failure === "no-advisor-model" || failure === "nonfinite-baseline" ? 1 : 2);
 		} finally { await rm(root, { recursive: true, force: true }); }
 	}
 });

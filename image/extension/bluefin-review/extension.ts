@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import { loadWave, saveWave } from "./wave-store.ts";
-import type { QueueItem } from "./github.ts";
+import type { CiEvidenceSource, QueueItem } from "./github.ts";
 import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, orgScope, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
@@ -56,6 +56,28 @@ const RECAP_BRANCH_ENTRY_LIMIT = 512;
 
 export type RepositoryBatchKind = "slay" | "fix" | "diff";
 export type RepositoryBatchState = "running" | "paused" | "blocked" | "complete" | "cancelled";
+type CiSkippedItem = {
+	readonly item: QueueItem;
+	readonly status: "failure" | "pending";
+	readonly evidenceSource: CiEvidenceSource;
+	readonly observedAt: number;
+};
+export type PersistedCiSkippedItem = {
+	readonly repo: string;
+	readonly number: number;
+	readonly headSha: string;
+	readonly ciStatus: "failure" | "pending";
+	readonly ciEvidenceSource: CiEvidenceSource;
+	readonly observedAt: number;
+};
+export type PersistedCandidateExclusion = {
+	readonly repo: string;
+	readonly number: number;
+	readonly headSha?: string;
+	readonly reason: "incomplete changed-file list" | "workflow file change" | "pull request already submitted";
+	readonly detail?: string;
+	readonly observedAt: number;
+};
 type ReconcileObservation =
 	| { readonly kind: "unknown" }
 	| { readonly kind: "settled"; readonly outcome: "success" }
@@ -70,6 +92,10 @@ export interface PersistedRepositoryBatch {
 	readonly currentWave: number;
 	readonly completedItems: number;
 	readonly totalItems: number;
+	/** Fresh CI exclusions retained separately from completed work. */
+	readonly skippedItems?: readonly PersistedCiSkippedItem[];
+	/** Candidate-selection exclusions retained separately from CI evidence. */
+	readonly excludedItems?: readonly PersistedCandidateExclusion[];
 	readonly state: RepositoryBatchState;
 	readonly startedAt: number;
 	readonly waveStartedAt: number;
@@ -495,7 +521,7 @@ export function actionPrompt(
 	const issueContext = options?.workbenchMode === "hive"
 		? "Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it."
 		: "Inspect the complete GitHub issue description before deciding how to implement it.";
-	const issueEvidence = `Evidence is bounded and read once. ${issueContext} Never assume the working directory is a checkout: use \`gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>\` to materialize one unique workspace per issue under \`$HOME/worktrees\`, then enter that checkout before examining relevant source files and tests. Never clone into \`/tmp\`. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request whose body contains \`Closes <owner/repo>#<number>\`. Never merge or approve your own pull request.`;
+	const issueEvidence = `Evidence is bounded and read once. ${issueContext} Read the target repository's \`AGENTS.md\` and applicable contribution or pull-request guidance before creating a branch. Never assume the working directory is a checkout: use \`gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>\` to materialize one unique workspace per issue under \`$HOME/worktrees\`, then enter that checkout before examining relevant source files and tests. Never clone into \`/tmp\`. Create a dedicated feature branch from the correct target base specified by current operator instructions or repository guidance; use live repository integration state when the base is not explicit, and never assume it is \`main\`. Do not write directly to the base branch. Before running \`gh pr create\`, verify the current branch is the dedicated feature branch and the explicit proposed base matches that resolved target. If the current branch is the integration branch, the intended base is ambiguous or conflicting, or the proposed base differs from policy, do not run \`gh pr create\`; stop and report BLOCKED with the observed head branch, intended and proposed bases, and the policy source. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request targeting that same base whose body contains \`Closes <owner/repo>#<number>\`. Never force-push. Never merge or approve your own pull request.`;
 	const issueWorkflow = options?.workbenchMode === "hive"
 		? "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique target checkout named in its prompt; do not share a checkout or conversation between items."
 		: "Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique target checkout named in its prompt; do not share a checkout or conversation between items.";
@@ -670,6 +696,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			expected.waveTerminalJobStatuses,
 			expected.waveEffectResources,
 			expected.issueSubmittedPrs,
+			expected.skippedItems,
 			expected.cancelRequested,
 		]) === JSON.stringify([
 			current.kind,
@@ -687,6 +714,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			current.waveTerminalJobStatuses,
 			current.waveEffectResources,
 			current.issueSubmittedPrs,
+			current.skippedItems,
 			current.cancelRequested,
 		]);
 	const latestWaveForArchive = (batch: PersistedRepositoryBatch): PersistedRepositoryBatch | undefined => {
@@ -1126,6 +1154,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		return wasActive;
 	};
+	const persistSelectionReceipt = (ctx: CtxLike, batch: PersistedRepositoryBatch): void => {
+		const preserveActive = activeBatch !== undefined && ["running", "paused", "blocked"].includes(activeBatch.state);
+		if (!preserveActive) {
+			persistBatch(ctx, batch);
+			return;
+		}
+		const receipt = activeBatch.id === batch.id || recoveryBatches.has(batch.id)
+			? { ...batch, id: `${batch.id}-${randomUUID()}` }
+			: batch;
+		persistArchivedBatch(ctx, receipt);
+	};
 	const rememberToolInvocation = (ctx: CtxLike, toolCallId: string): void => {
 		if (!activeBatch?.waveIdentity || (!["running", "paused"].includes(activeBatch.state) && !(activeBatch.state === "blocked" && preToolProofValid(activeBatch)))) return;
 		const ids = [...new Set([...(activeBatch.waveToolInvocationIds ?? []), toolCallId])].sort();
@@ -1425,7 +1464,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				status: `current queue observation; ci=${item.ciStatus ?? "unknown"}; review=${item.reviewState}; merge=${item.mergeState}`,
 				sourceUrl: item.url,
 			})),
-			operations: batches.values.map((batch) => ({ id: batch.id, kind: batch.kind, state: batch.state, completedItems: batch.completedItems, totalItems: batch.totalItems, startedAt: batch.startedAt, items: batch.waves.slice(0, 12).flatMap((wave) => wave.items.slice(0, 25).map((item) => ({ repo: item.repo, id: item.id, type: item.type, headSha: item.type === "pr" ? item.headSha : undefined }))), error: batch.error })),
+			operations: batches.values.map((batch) => ({ id: batch.id, kind: batch.kind, state: batch.state, completedItems: batch.completedItems, totalItems: batch.totalItems, startedAt: batch.startedAt, items: batch.waves.slice(0, 12).flatMap((wave) => wave.items.slice(0, 25).map((item) => ({ repo: item.repo, id: item.id, type: item.type, headSha: item.type === "pr" ? item.headSha : undefined }))), skippedItems: (batch.skippedItems ?? []).slice(0, 25), excludedItems: (batch.excludedItems ?? []).slice(0, 25), error: batch.error })),
 			comments: comments.values.map((comment) => ({ state: comment.state, targets: comment.plan.targets.slice(0, 100).map((target) => `${target.repo}#${target.number}`), receipts: (comment.receipts ?? []).slice(0, 100) })),
 			trace: mode.session.roots(),
 			artifacts,
@@ -1618,10 +1657,21 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (args === "" || args === "status") {
 			restoreClaimWaves();
 			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
+			const skippedSummary = (batch: PersistedRepositoryBatch): string => {
+				const ci = (batch.skippedItems ?? []).slice(0, 5).map((item) => `  Skipped CI: ${item.repo}#${item.number} head=${item.headSha} ci=${item.ciStatus} source=${item.ciEvidenceSource} observedAt=${item.observedAt}`);
+				const incompleteFiles = (batch.excludedItems ?? []).slice(0, 5).map((item) => `  Excluded candidate: ${item.repo}#${item.number}${item.headSha ? ` head=${item.headSha}` : ""} reason=${item.reason}${item.detail ? ` detail=${item.detail}` : ""} observedAt=${item.observedAt}`);
+				const omittedCi = Math.max(0, (batch.skippedItems?.length ?? 0) - 5);
+				const omittedFiles = Math.max(0, (batch.excludedItems?.length ?? 0) - 5);
+				const lines = [...ci, ...incompleteFiles,
+					...(omittedCi ? [`  ${omittedCi} additional CI skips omitted`] : []),
+					...(omittedFiles ? [`  ${omittedFiles} additional incomplete-file exclusions omitted`] : []),
+				];
+				return lines.length > 0 ? `\n${lines.join("\n")}` : "";
+			};
 			const batches = [...recoveryBatches.values()].map((batch) =>
-				`${batch.id} ${batch.state}${batch.error ? ` — ${batch.error}` : ""}`);
+				`${batch.id} ${batch.state}${batch.error ? ` — ${batch.error}` : ""}${skippedSummary(batch)}`);
 			return [
-				activeBatch ? `Active Review wave: ${activeBatch.id} ${activeBatch.state}` : "No active Review wave",
+				activeBatch ? `Active Review wave: ${activeBatch.id} ${activeBatch.state}${skippedSummary(activeBatch)}` : "No active Review wave",
 				...batches,
 				claims.length > 0
 					? claims.map((claim) => `${claim.resource} is owned by ${claim.owner} [${claim.status}]`).join("\n")
@@ -1642,7 +1692,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		},
 	});
 
-	const batchBlocker = async (kind: RepositoryBatchKind, items: readonly QueueItem[]): Promise<string | undefined> => {
+	const batchBlocker = async (
+		kind: RepositoryBatchKind,
+		items: readonly QueueItem[],
+		skippedCi: CiSkippedItem[] = [],
+	): Promise<string | undefined> => {
 		if (kind === "diff") return undefined;
 		const allPullRequests = items.every((item) => item.type === "pr");
 		const allIssues = items.every((item) => item.type === "issue");
@@ -1658,14 +1712,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
 				}
 			}
-			const workflowPermission = await workflowPermissionBlocker(items);
-			if (workflowPermission) return workflowPermission;
 			const live = await fetchItemsByKey(
 				items.map((item) => `${item.repo}#${item.id}`),
 				"prs",
 				mode.tokenOptions(),
 			);
 			if (live.error) return `Live pull-request check failed: ${live.error}`;
+			const dispatchableLiveItems: QueueItem[] = [];
 			for (const item of items) {
 				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
 				if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
@@ -1674,23 +1727,40 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
 				}
-				if (current.changedFilesComplete !== true) {
-					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
-				}
 				if (!wasRepair && (current.ciEvidenceComplete === false || current.ciStatus === undefined)) {
 					return `Cannot dispatch ${item.repo}#${item.id}: CI state is incomplete or unknown`;
 				}
 				if (!wasRepair && (current.ciStatus === "failure" || current.ciStatus === "pending")) {
-					return `Cannot dispatch ${item.repo}#${item.id}: CI is ${current.ciStatus}`;
+					if (current.ciEvidenceSource !== "statusCheckRollup" && current.ciEvidenceSource !== "checkSuites") {
+						return `Cannot dispatch ${item.repo}#${item.id}: CI evidence source is unknown`;
+					}
+					if (!current.headSha) return `Cannot skip ${item.repo}#${item.id}: exact pull-request head is unavailable`;
+					const itemKey = `item:${item.repo.toLowerCase()}#${item.id}`;
+					const repoKey = `repo:${item.repo.toLowerCase()}`;
+					let claimConflict: string | undefined;
+					try {
+						claimConflict = resourceClaims().conflict(repoKey) ?? resourceClaims().conflict(itemKey);
+					} catch (error) {
+						return `Cannot verify mutation ownership for ${item.repo}#${item.id}: ${error instanceof Error ? error.message : String(error)}`;
+					}
+					if (claimConflict) {
+						return `Cannot skip ${item.repo}#${item.id}: ${claimConflict}; inspect/reconcile that work before continuing`;
+					}
+					skippedCi.push({ item: current, status: current.ciStatus, evidenceSource: current.ciEvidenceSource, observedAt: Date.now() });
+					continue;
 				}
+				if (current.changedFilesComplete !== true) {
+					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+				}
+				dispatchableLiveItems.push(current);
 			}
-			for (const current of live.items) {
+			for (const current of dispatchableLiveItems) {
 				const wasRepair = isRepairRequested(current, mode.currentUserLogin);
 				if (!wasRepair && !policy.allowWorkflowSlay && (current.workflowFiles?.length ?? 0) > 0) {
 					return `Cannot dispatch ${current.repo}#${current.id}: changes ${current.workflowFiles![0]}`;
 				}
 			}
-			const liveWorkflowPermission = await workflowPermissionBlocker(live.items);
+			const liveWorkflowPermission = await workflowPermissionBlocker(dispatchableLiveItems);
 			if (liveWorkflowPermission) return liveWorkflowPermission;
 			return undefined;
 		}
@@ -1803,18 +1873,60 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			persistBatch(ctx, { ...activeBatch, state: "paused" });
 			return;
 		}
-		const wave = activeBatch.waves[activeBatch.currentWave];
+		let wave = activeBatch.waves[activeBatch.currentWave];
 		if (!wave) {
 			persistBatch(ctx, { ...activeBatch, state: "complete" });
 			ctx.ui.notify(activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
 			return;
 		}
 		if (!prevalidated) {
-			const blocker = await batchBlocker(activeBatch.kind, wave.items);
+			const skippedCi: CiSkippedItem[] = [];
+			const blocker = await batchBlocker(activeBatch.kind, wave.items, skippedCi);
 			if (blocker) {
 				persistBatch(ctx, { ...activeBatch, state: "blocked", error: blocker });
 				ctx.ui.notify(blocker, "error");
 				return;
+			}
+			if (skippedCi.length > 0) {
+				for (const skipped of skippedCi) notifyCiSkip(ctx, skipped);
+				const skippedKeys = new Set(skippedCi.map(({ item }) => `${item.repo.toLowerCase()}#${item.id}`));
+				const remainingItems = wave.items.filter((item) => !skippedKeys.has(`${item.repo.toLowerCase()}#${item.id}`));
+				const currentWave = activeBatch.currentWave;
+				const waves = remainingItems.length === 0
+					? activeBatch.waves.filter((_candidate, index) => index !== currentWave)
+					: activeBatch.waves.map((candidate, index) => index === currentWave ? { ...candidate, items: remainingItems } : candidate);
+				const skippedItems = [...(activeBatch.skippedItems ?? []), ...skippedCi.map(persistedCiSkip)];
+				const waveReset = {
+					waveIdentity: undefined,
+					wavePromptDigest: undefined,
+					waveToolCallIds: undefined,
+					waveToolInvocationIds: undefined,
+					waveTaskWorkers: undefined,
+					waveJobBaselineIds: undefined,
+					waveJobIds: undefined,
+					waveTerminalJobStatuses: undefined,
+					wavePreToolTerminal: undefined,
+					waveEffectResources: undefined,
+				};
+				if (currentWave >= waves.length) {
+					persistBatch(ctx, {
+						...activeBatch,
+						...waveReset,
+						waves,
+						currentWave: waves.length,
+						skippedItems,
+						state: "complete",
+						error: undefined,
+					});
+					ctx.ui.notify("No eligible PRs remain after current CI checks", "warning");
+					return;
+				}
+				persistBatch(ctx, { ...activeBatch, ...waveReset, waves, skippedItems });
+				if (remainingItems.length === 0) {
+					await dispatchCurrentWave(ctx, deliverAs);
+					return;
+				}
+				wave = activeBatch.waves[activeBatch.currentWave]!;
 			}
 		}
 		const retryingBlockedWave = activeBatch.state === "blocked";
@@ -1850,7 +1962,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		rememberWaveEvidence(ctx);
 	};
 
-	const startRepositoryBatch = async (ctx: CtxLike, kind: RepositoryBatchKind, items: readonly QueueItem[]) => {
+	const startRepositoryBatch = async (
+		ctx: CtxLike,
+		kind: RepositoryBatchKind,
+		items: readonly QueueItem[],
+		selection: { totalItems?: number; excludedItems?: readonly PersistedCandidateExclusion[] } = {},
+	) => {
 		const generation = ++batchRequestGeneration;
 		if (activeBatch?.state === "running" || activeBatch?.state === "paused") {
 			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
@@ -1881,14 +1998,19 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			waves,
 			currentWave: 0,
 			completedItems: 0,
-			totalItems: items.length,
+			totalItems: selection.totalItems ?? items.length,
+			excludedItems: selection.excludedItems,
 			state: mode.paused ? "paused" : "running",
 			startedAt,
 			waveStartedAt: startedAt,
 			issueSubmittedPrs,
 		};
-		const blockers = await Promise.all(waves.map((wave) => batchBlocker(kind, wave.items)));
-		const blocker = blockers.find((reason) => reason !== undefined);
+		const validations = await Promise.all(waves.map(async (wave) => {
+			const skippedCi: CiSkippedItem[] = [];
+			const blocker = await batchBlocker(kind, wave.items, skippedCi);
+			return { blocker, skippedCi };
+		}));
+		const blocker = validations.find((validation) => validation.blocker !== undefined)?.blocker;
 		if (generation !== batchRequestGeneration) return;
 		if (activeBatch?.state === "running" || activeBatch?.state === "paused") return;
 		if (blocker) {
@@ -1896,9 +2018,24 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(blocker, "error");
 			return;
 		}
+		const runnableWaves = waves.flatMap((wave, index) => {
+			const skippedKeys = new Set(validations[index]!.skippedCi.map(({ item }) => `${item.repo.toLowerCase()}#${item.id}`));
+			const runnableItems = wave.items.filter((item) => !skippedKeys.has(`${item.repo.toLowerCase()}#${item.id}`));
+			return runnableItems.length > 0 ? [{ ...wave, items: runnableItems }] : [];
+		});
+		const skippedCi = validations.flatMap((validation) => validation.skippedCi);
+		for (const skipped of skippedCi) notifyCiSkip(ctx, skipped);
+		const skippedItems = skippedCi.map(persistedCiSkip);
+		if (runnableWaves.length === 0) {
+			mode.clearSelected();
+			persist();
+			persistBatch(ctx, { ...batch, waves: [], skippedItems, state: "complete" });
+			ctx.ui.notify("No selected PRs are eligible for dispatch; no work was started", "warning");
+			return;
+		}
 		mode.clearSelected();
 		persist();
-		persistBatch(ctx, batch);
+		persistBatch(ctx, { ...batch, waves: runnableWaves, skippedItems });
 		await dispatchCurrentWave(ctx, undefined, true);
 	};
 	const workflowPermissionBlocker = async (items: readonly QueueItem[]): Promise<string | undefined> => {
@@ -1913,8 +2050,26 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token workflow/Actions write permission could not be verified; grant workflow scope or Actions/Contents write access`;
 	};
+	const persistedCiSkip = ({ item, status, evidenceSource, observedAt }: CiSkippedItem): PersistedCiSkippedItem => ({
+		repo: item.repo,
+		number: item.id,
+		headSha: item.headSha!,
+		ciStatus: status,
+		ciEvidenceSource: evidenceSource,
+		observedAt,
+	});
+	const notifyCiSkip = (ctx: CtxLike, skipped: CiSkippedItem): void => {
+		ctx.ui.notify(
+			`Skipping ${skipped.item.repo}#${skipped.item.id} head=${skipped.item.headSha}: CI is ${skipped.status} (source=${skipped.evidenceSource}); ordinary PR review/landing waits for checks`,
+			"warning",
+		);
+	};
 
-	const filterUnsupportedSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
+	const filterUnsupportedSlayItems = (
+		ctx: CtxLike,
+		items: readonly QueueItem[],
+		excludedItems?: PersistedCandidateExclusion[],
+	): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
 			if (item.type !== "pr") {
@@ -1923,11 +2078,28 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			const wasRepair = isRepairRequested(item, mode.currentUserLogin);
 			if (!wasRepair && (item.workflowFiles?.length ?? 0) > 0 && !policy.allowWorkflowSlay) {
-				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`, "warning");
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					headSha: item.headSha,
+					reason: "workflow file change",
+					detail: item.workflowFiles![0],
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${excluded.detail}`, "warning");
 				continue;
 			}
 			if (item.changedFilesComplete === false) {
-				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: complete changed-file list unavailable`, "warning");
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					headSha: item.headSha,
+					reason: "incomplete changed-file list",
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}${item.headSha ? ` head=${item.headSha}` : ""}: ${excluded.reason}`, "warning");
 				continue;
 			}
 			eligible.push(item);
@@ -1935,12 +2107,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return eligible;
 	};
 
-	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
+	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[], excludedItems?: PersistedCandidateExclusion[]): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
 			if (item.type === "issue" && (item.submittedPrs?.length ?? 0) > 0) {
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					reason: "pull request already submitted",
+					detail: item.submittedPrs!.join(", "),
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
 				ctx.ui.notify(
-					`Skipping ${item.repo}#${item.id}: pull request already submitted (${item.submittedPrs!.join(", ")})`,
+					`Skipping ${item.repo}#${item.id}: pull request already submitted (${excluded.detail})`,
 					"warning",
 				);
 				continue;
@@ -1955,11 +2135,37 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify("No queue items available to slay", "warning");
 			return;
 		}
-		const supported = filterUnsupportedSlayItems(ctx, candidates);
-		if (supported.length === 0) return;
-		const items = filterCompletedIssueSlayItems(ctx, supported);
-		if (items.length === 0) return;
-		await startRepositoryBatch(ctx, "slay", items);
+		const excludedItems: PersistedCandidateExclusion[] = [];
+		const persistExcludedSelection = () => {
+			if (excludedItems.length === 0) return;
+			const startedAt = Date.now();
+			mode.clearSelected();
+			persist();
+			persistSelectionReceipt(ctx, {
+				version: 1,
+				id: `batch-${startedAt.toString(36)}`,
+				kind: "slay",
+				waves: [],
+				currentWave: 0,
+				completedItems: 0,
+				totalItems: candidates.length,
+				state: "complete",
+				startedAt,
+				waveStartedAt: startedAt,
+				excludedItems,
+			});
+		};
+		const eligible = filterUnsupportedSlayItems(ctx, candidates, excludedItems);
+		if (eligible.length === 0) {
+			persistExcludedSelection();
+			return;
+		}
+		const items = filterCompletedIssueSlayItems(ctx, eligible, excludedItems);
+		if (items.length === 0) {
+			persistExcludedSelection();
+			return;
+		}
+		await startRepositoryBatch(ctx, "slay", items, { totalItems: candidates.length, excludedItems });
 	};
 
 	const startAutoslay = async (ctx: CtxLike) => {
@@ -2197,9 +2403,30 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		if (action.kind === "fix") {
 			activeCtx = ctx;
-			const supported = filterUnsupportedSlayItems(ctx, capturedItems);
-			if (supported.length === 0) return;
-			await startRepositoryBatch(ctx, action.kind, supported);
+			const excludedItems: PersistedCandidateExclusion[] = [];
+			const supported = filterUnsupportedSlayItems(ctx, capturedItems, excludedItems);
+			if (supported.length === 0) {
+				if (excludedItems.length > 0) {
+					const startedAt = Date.now();
+					mode.clearSelected();
+					persist();
+					persistSelectionReceipt(ctx, {
+						version: 1,
+						id: `batch-${startedAt.toString(36)}`,
+						kind: action.kind,
+						waves: [],
+						currentWave: 0,
+						completedItems: 0,
+						totalItems: capturedItems.length,
+						state: "complete",
+						startedAt,
+						waveStartedAt: startedAt,
+						excludedItems,
+					});
+				}
+				return;
+			}
+			await startRepositoryBatch(ctx, action.kind, supported, { totalItems: capturedItems.length, excludedItems });
 			return;
 		}
 		if (action.kind === "diff") {

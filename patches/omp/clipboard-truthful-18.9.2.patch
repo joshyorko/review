@@ -1,0 +1,14 @@
+diff --git a/packages/coding-agent/src/modes/controllers/command-controller.ts b/packages/coding-agent/src/modes/controllers/command-controller.ts
+index dd12831..c19dc93 100644
+--- a/packages/coding-agent/src/modes/controllers/command-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/command-controller.ts
+@@ -405 +405,3 @@ export class CommandController {
+-			const statusParts = ["Session copied to clipboard"];
++			const statusParts = [
++				"Clipboard copy requested; delivery is unconfirmed. Use /dump all to create a persistent session archive and display its path.",
++			];
+@@ -430 +432,3 @@ export class CommandController {
+-			this.ctx.showStatus([...formatDumpArchiveReport(archive), "Archive path copied to clipboard"].join("\n"));
++			this.ctx.showStatus(
++				[...formatDumpArchiveReport(archive), "Clipboard copy requested; delivery is unconfirmed."].join("\n"),
++			);

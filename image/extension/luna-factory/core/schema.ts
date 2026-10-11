@@ -15,6 +15,7 @@ import { isRecord } from "./guard.ts";
 import type {
 	Candidate,
 	CriterionId,
+	CurrentVerificationReceipt,
 	Effect,
 	EvidenceReceipt,
 	GenerationId,
@@ -27,6 +28,8 @@ import type {
 	TestClaim,
 	AttemptId,
 	OperationReceipt,
+	ObservationSource,
+	ObservedProof,
 } from "./model.ts";
 
 /** Bounds. A receipt is a bounded summary, not a transport for a log. */
@@ -122,6 +125,31 @@ export function parseSubject(value: unknown): ParseResult<Subject> {
 	return parsed === undefined || errors.length > 0 ? { ok: false, errors } : { ok: true, value: parsed };
 }
 
+export function parseObservationSource(value: unknown): ParseResult<ObservationSource> {
+	if (!isRecord(value) || value.kind !== "github-pull-request" || value.predicate !== "merged-upstream" || typeof value.identity !== "string" || !IDENTITY_RE.test(value.identity)) {
+		return { ok: false, errors: ["observation source must name a bounded canonical PR identity and merged-upstream predicate"] };
+	}
+	return { ok: true, value: { kind: value.kind, identity: value.identity, predicate: value.predicate } };
+}
+
+export function parseObservedProof(value: unknown): ParseResult<ObservedProof> {
+	if (!isRecord(value)) return { ok: false, errors: ["observation must be an object"] };
+	const errors: string[] = [];
+	const criterionId = identity(value.criterionId, "criterionId", errors);
+	const generation = identity(value.generation, "generation", errors);
+	const observedSubject = subject(value.subject, errors);
+	const source = parseObservationSource(value.source);
+	const assumptions = parseProofAssumptions(value.assumptions);
+	const revision = identity(value.revision, "revision", errors);
+	const note = text(value.note, "note", errors);
+	if (!source.ok) errors.push(...source.errors);
+	if (!assumptions.ok) errors.push(...assumptions.errors);
+	if (!["proven", "unproved", "unknown"].includes(String(value.status))) errors.push("observation status is unsupported");
+	if (errors.length || !criterionId || !generation || !observedSubject || !source.ok || !assumptions.ok || !revision || !note) return { ok: false, errors };
+	if (value.status !== "proven" && value.status !== "unproved" && value.status !== "unknown") return { ok: false, errors: ["observation status is unsupported"] };
+	return { ok: true, value: { criterionId: criterionId as CriterionId, generation: generation as GenerationId, subject: observedSubject, source: source.value, revision, status: value.status, note, assumptions: assumptions.value } };
+}
+
 function routing(value: unknown, errors: string[]): Routing | undefined {
 	if (!isRecord(value)) {
 		errors.push("routing must be an object");
@@ -203,7 +231,17 @@ function assumptions(value: unknown, errors: string[]): readonly ProofAssumption
 				return undefined;
 			}
 			seen.add(key);
-			out.push({ kind, taskId: taskId as TaskId, value: parsedValue });
+			let binding: Extract<ProofAssumption, { kind: "dependency-outcome" }>["binding"];
+			if (entry.binding !== undefined) {
+				if (!isRecord(entry.binding)) { errors.push("dependency binding must be an object"); return undefined; }
+				const boundSubject = subject(entry.binding.subject, errors);
+				const stage = entry.binding.stage;
+				if (!boundSubject || stage !== "verified-patch" && stage !== "pr-ready" && stage !== "merged-upstream") { errors.push("dependency binding needs an exact subject and outcome stage"); return undefined; }
+				const tree = entry.binding.tree;
+				if (tree !== undefined && (typeof tree !== "string" || !REVISION_RE.test(tree))) { errors.push("dependency candidate tree must be a git revision"); return undefined; }
+				binding = { subject: boundSubject, stage, ...(typeof tree === "string" ? { tree } : {}) };
+			}
+			out.push({ kind, taskId: taskId as TaskId, value: parsedValue, ...(binding ? { binding } : {}) });
 			continue;
 		}
 		if (kind !== "acceptance-revision") {
@@ -431,6 +469,46 @@ export function parseReceipt(value: unknown): ParseResult<EvidenceReceipt> {
 			...(parsedPredicates?.ok ? { predicates: parsedPredicates.value } : {}),
 		},
 	};
+}
+
+/** Parse Factory-owned verification of a committed subject and fresh acceptance. */
+export function parseCurrentVerification(value: unknown): ParseResult<CurrentVerificationReceipt> {
+	const errors: string[] = [];
+	if (!isRecord(value)) return { ok: false, errors: ["current verification must be an object"] };
+	if (value.version !== 1) errors.push("current verification version must be 1");
+	const taskId = identity(value.taskId, "currentVerification.taskId", errors);
+	const attemptId = identity(value.attemptId, "currentVerification.attemptId", errors);
+	const generation = identity(value.generation, "currentVerification.generation", errors);
+	const parsedSubject = subject(value.subject, errors);
+	const tree = typeof value.tree === "string" && REVISION_RE.test(value.tree) ? value.tree : undefined;
+	if (tree === undefined) errors.push("currentVerification.tree must be a git object identity");
+	const acceptanceRevision = text(value.acceptanceRevision, "currentVerification.acceptanceRevision", errors);
+	const parsedAssumptions = assumptions(value.assumptions, errors);
+	const parsedPredicates = predicateRows(value.predicates, errors);
+	const acceptanceSession = text(value.acceptanceSession, "currentVerification.acceptanceSession", errors);
+	const checkedAt = text(value.checkedAt, "currentVerification.checkedAt", errors);
+	if (checkedAt !== undefined && !Number.isFinite(Date.parse(checkedAt))) errors.push("currentVerification.checkedAt must be a timestamp");
+	if (parsedPredicates !== undefined) {
+		if (!parsedPredicates.length || parsedPredicates.some((predicate) => predicate.phase === "worker" || !predicate.ok)) errors.push("current verification predicates must all be positive verifier or independent acceptance results");
+		if (!parsedPredicates.some((predicate) => predicate.phase === "verification")) errors.push("current verification requires deterministic verification evidence");
+		if (!parsedPredicates.some((predicate) => predicate.phase === "acceptance")) errors.push("current verification requires independent acceptance evidence");
+	}
+	if (errors.length || !taskId || !attemptId || !generation || !parsedSubject || !tree || !acceptanceRevision || !parsedAssumptions || !parsedPredicates || !acceptanceSession || !checkedAt) {
+		return { ok: false, errors };
+	}
+	return { ok: true, value: {
+		version: 1,
+		taskId: taskId as TaskId,
+		attemptId: attemptId as CurrentVerificationReceipt["attemptId"],
+		generation: generation as CurrentVerificationReceipt["generation"],
+		subject: parsedSubject,
+		tree,
+		acceptanceRevision,
+		assumptions: parsedAssumptions,
+		predicates: parsedPredicates,
+		acceptanceSession,
+		checkedAt,
+	} };
 }
 
 /** Parse a discovery candidate before it can reach the ladder. */

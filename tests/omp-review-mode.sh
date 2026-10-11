@@ -24,8 +24,13 @@ test_files=(
   tests/luna_factory_dogfood_contract.test.ts
   tests/luna_factory_native.test.ts
   tests/luna_factory_native_sdk_contract.test.ts
+  tests/derived_omp_native_acceptance.test.ts
   tests/luna_factory_batch.test.ts
+  tests/luna_factory_policy.test.ts
   tests/luna_factory_corrective.test.ts
+  tests/luna_factory_convergence.test.ts
+  tests/luna_factory_repair_acceptance.test.ts
+  tests/fixtures/luna-factory-repair-acceptance-blocked.probe.ts
   tests/luna_factory_projection.test.ts
   tests/luna_factory_dashboard.test.ts
   tests/luna_factory_dashboard_integration.test.ts
@@ -36,6 +41,7 @@ test_files=(
   tests/luna_factory_claim_owner_bridge.test.ts
   tests/luna_factory_history.test.ts
   tests/luna_factory_operator.test.ts
+  tests/fixtures/luna-factory-graph-krun-host-provider.test.mjs
 )
 
 if ! command -v node >/dev/null 2>&1; then
@@ -64,7 +70,18 @@ for test_file in "${test_files[@]}"; do
   node --test --test-reporter=tap --disable-warning=MODULE_TYPELESS_PACKAGE_JSON "$test_file"
 done
 python3 tests/personal_brew_oci_contract.py
+python3 tests/launcher_profiles_contract.py
 bash tests/launcher-contract.sh
+
+# Exact native/packaged repair qualification is explicit; hermetic checks above
+# run every deterministic regression without requiring an installed OMP binary.
+if [[ "${REVIEW_NATIVE_REPAIR_ACCEPTANCE:-0}" == "1" ]]; then
+  bash tests/luna-factory-repair-acceptance.sh "${REVIEW_NATIVE_REPAIR_PROFILE:-native}"
+fi
+
+if [[ "${REVIEW_NATIVE_GRAPH_ACCEPTANCE:-0}" == "1" ]]; then
+  bash tests/luna-factory-graph-acceptance.sh "${REVIEW_NATIVE_GRAPH_PROFILE:-native}"
+fi
 
 # The installed-runtime ABI probe is opt-in because normal hermetic tests have no
 # authenticated OMP profile. This is a separate gate, never inferred from mocks.

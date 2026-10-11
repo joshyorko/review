@@ -44,6 +44,9 @@ export function conciseFailureCause(value: string): string {
 	return shortCause(meaningful[0] ?? safe) || "The last attempt could not continue";
 }
 export function itemOverview(item: ProjectedItem, active = false): ItemOverview {
+	if (item.observation) return item.stage === "DONE"
+		? { caption: "merge observed", heading: "Merge observed", explanation: "The declared PR outcome is proven by current GitHub state. No worker was dispatched.", next: "No action needed. Observed evidence remains available.", needsYou: false }
+		: { caption: "awaiting current PR state", heading: "PR outcome is unproved", explanation: item.blocker ?? "Current authoritative PR state does not prove the declared outcome.", next: "Restore the named evidence or wait for the declared PR outcome, then reconcile.", needsYou: false };
 	const owner = item.claims.find((claim) => claim.conflict);
 	if (owner) return {
 		caption: "repository owned by another run", heading: "Repository locked",

@@ -166,6 +166,12 @@ mkdir -p "$host_fixture/etc"
 touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
 filesystem_hook="$scratch/filesystem.sh"
 cat >"$filesystem_hook" <<'EOF'
+if [[ "${REVIEW_TEST_HIDE_KRUN:-0}" == 1 ]]; then
+  command() {
+    if [[ "$#" == 2 && "$1" == -v && "$2" == krun ]]; then return 1; fi
+    builtin command "$@"
+  }
+fi
 test() {
   if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
     builtin test -e "$HOST_FIXTURE$2"
@@ -181,7 +187,13 @@ touch "$kvm"
 chmod 0666 "$kvm"
 cat >"$scratch/bin/podman" <<EOF
 #!/usr/bin/env bash
-[[ "\${1:-}" == info ]] && exit 0
+if [[ "\${1:-}" == info ]]; then
+  if [[ "\$*" == *--runtime=krun* ]]; then
+    [[ "\${FAKE_KRUN_RUNTIME:-krun}" == unavailable ]] && exit 1
+    printf '%s\\n' "\${FAKE_KRUN_RUNTIME:-krun}"
+  fi
+  exit 0
+fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
   [[ "\${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\ttrue\n'
   exit 0
@@ -404,6 +416,26 @@ assert_bluefin_review() {
   fi
 }
 
+# Podman can resolve the registered krun runtime even when its executable is
+# named crun-krun and no literal `krun` command is available to the launcher.
+mv "$scratch/bin/krun" "$scratch/krun"
+: >"$mock_podman_log"
+: >"$mock_apptainer_log"
+registered_runtime_output="$(FAKE_KRUN_RUNTIME=krun REVIEW_TEST_HIDE_KRUN=1 REVIEW_TEST_KVM_DEVICE="$kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "review did not select Podman's registered krun runtime without a literal krun executable"
+registered_runtime_call="$(grep '^run ' "$mock_podman_log")"
+if [[ "$registered_runtime_call" != *"run --runtime=krun --rm --interactive --tty"* ]]; then
+  fail "review did not use registered krun runtime: $registered_runtime_call ($registered_runtime_output)"
+fi
+[[ ! -s "$mock_apptainer_log" ]] || fail "review fell back to Apptainer despite registered krun: $(cat "$mock_apptainer_log")"
+unregistered_runtime_output="$(FAKE_KRUN_RUNTIME=unavailable REVIEW_TEST_KVM_DEVICE="$kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "review did not preserve the Apptainer fallback for an unregistered krun runtime"
+[[ "$unregistered_runtime_output" == *"the krun OCI runtime is unavailable"* ]] ||
+  fail "unregistered krun runtime did not report the existing diagnostic: $unregistered_runtime_output"
+[[ "$unregistered_runtime_output" == *"using the isolated Apptainer fallback"* ]] ||
+  fail "unregistered krun runtime did not select Apptainer: $unregistered_runtime_output"
+mv "$scratch/krun" "$scratch/bin/krun"
+
 : >"$mock_podman_log"
 set +e
 factory_probe_output="$(FAKE_FACTORY_VERIFIER_BLOCKED=1 LUNA_FACTORY_ENABLED=1 \
@@ -464,6 +496,40 @@ AWS_BEARER_TOKEN_BEDROCK="$bedrock_token" AWS_ACCESS_KEY_ID="$aws_access_key" AW
 bedrock_fallback_call="$(cat "$mock_apptainer_log")"
 [[ "$bedrock_fallback_call" != *"$bedrock_token"* && "$bedrock_fallback_call" != *"$aws_access_key"* && "$bedrock_fallback_call" != *"$aws_secret_key"* && "$bedrock_fallback_call" != *"$aws_session_token"* && "$bedrock_fallback_call" != *us-east-1* ]] ||
   fail "Apptainer fallback exposed AWS credentials in argv/log output"
+
+# RTK_DISABLED remains an opt-in control and is not inherited by the collector.
+for rtk_value in 0 1; do
+  : >"$mock_podman_log"
+  rtk_output="$(RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" \
+    "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+    fail "Podman launcher failed with explicit RTK_DISABLED=$rtk_value: $rtk_output"
+  rtk_podman_call="$(grep '^run ' "$mock_podman_log")"
+  [[ "$rtk_podman_call" == *"--env RTK_DISABLED"* ]] || fail "Podman did not forward RTK_DISABLED by name: $rtk_podman_call"
+  [[ "$rtk_podman_call" != *"RTK_DISABLED=$rtk_value"* && "$rtk_output" != *"RTK_DISABLED=$rtk_value"* ]] ||
+    fail "RTK_DISABLED value appeared in Podman argv or launcher output"
+  ! grep -qFx 'observer-rtk-disabled-leak' "$mock_podman_log" || fail "diagnostic collector inherited RTK_DISABLED"
+
+  : >"$mock_apptainer_log"
+  rtk_output="$(RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" APPTAINERENV_RTK_DISABLED=1 \
+    REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+    fail "Apptainer launcher failed with explicit RTK_DISABLED=$rtk_value: $rtk_output"
+  rtk_apptainer_call="$(cat "$mock_apptainer_log")"
+  [[ "$rtk_apptainer_call" == *"run --containall"* ]] || fail "RTK Apptainer case did not select Apptainer"
+  [[ "$rtk_apptainer_call" != *"RTK_DISABLED"* && "$rtk_apptainer_call" != *"RTK_DISABLED=$rtk_value"* ]] ||
+    fail "RTK_DISABLED appeared in Apptainer argv"
+done
+
+: >"$mock_podman_log"
+rtk_output="$(env EXPECT_RTK_DISABLED=unset "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+  fail "Podman launcher failed with RTK_DISABLED unset: $rtk_output"
+rtk_podman_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$rtk_podman_call" != *"--env RTK_DISABLED"* ]] || fail "Podman invented a default RTK_DISABLED override"
+! grep -qFx 'observer-rtk-disabled-leak' "$mock_podman_log" || fail "diagnostic collector inherited an unset RTK_DISABLED"
+
+: >"$mock_apptainer_log"
+EXPECT_RTK_DISABLED=unset APPTAINERENV_RTK_DISABLED=0 REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" \
+  "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 || fail "Apptainer launcher failed with RTK_DISABLED unset"
+[[ "$(cat "$mock_apptainer_log")" == *"run --containall"* ]] || fail "unset RTK_DISABLED did not select Apptainer"
 
 : >"$mock_podman_log"
 
@@ -1071,6 +1137,10 @@ mock_cred_bin="$scratch/cred-bin"
 mkdir -p "$mock_cred_bin"
 cat >"$mock_cred_bin/podman" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == info && "$*" == *--runtime=krun* ]]; then
+  printf 'krun\n'
+  exit 0
+fi
 case "${1:-} ${2:-}" in
   "info "|"pull "*|"image exists") exit 0 ;;
   "run "*) echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"; exit 0 ;;
