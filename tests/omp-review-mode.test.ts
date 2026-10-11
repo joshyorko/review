@@ -3660,6 +3660,58 @@ test("dashboard fix persists filtered PRs beside dispatched work using the origi
 	assert.deepEqual(batch.waves.map((wave) => wave.items.map((item) => item.id)), [[90]]);
 });
 
+for (const [actionKey, actionName] of [["s", "Slay"], ["f", "fix"]] as const) test(`an all-excluded dashboard ${actionName} receipt does not replace an active Review wave`, async () => {
+	const items = [
+		{ id: 101, repo: "projectbluefin/eligible", title: "eligible PR", headSha: "2".repeat(40), ciStatus: "success" },
+		{ id: 102, repo: "projectbluefin/incomplete", title: "incomplete PR", headSha: "3".repeat(40), ciStatus: "success" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const annotate = (node) => node?.number === 102
+			? { ...node, files: { pageInfo: { hasNextPage: true }, nodes: [{ path: "README.md" }] } }
+			: node;
+		const data = { ...result.data };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(annotate) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: annotate(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput(actionKey);
+	await new Promise((resolve) => setImmediate(resolve));
+	const active = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(active);
+	assert.equal(active.state, "running");
+	assert.deepEqual(active.waves.map((wave) => wave.items.map((item) => item.id)), [[101]]);
+
+	ctx.overlays[0].handleInput("j");
+	ctx.overlays[0].handleInput(actionKey);
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1, "the second all-excluded selection does not dispatch work");
+	const receipt = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(receipt);
+	assert.equal(receipt.totalItems, 1);
+	assert.deepEqual(receipt.excludedItems.map(({ number, reason }) => ({ number, reason })), [
+		{ number: 102, reason: "incomplete changed-file list" },
+	]);
+	await pi.commands.get("review").handler("status", ctx);
+	assert.match(ctx.notifications.at(-1).message, new RegExp(`Active Review wave: ${active.id} `));
+	assert.notEqual(receipt.id, active.id);
+});
+
 test("slay keeps workflow permission as a batch blocker after skipping failed CI", async () => {
 	const items = [
 		{ id: 51, repo: "projectbluefin/review", title: "red ordinary PR", headSha: "b".repeat(40), ciStatus: "failure" },

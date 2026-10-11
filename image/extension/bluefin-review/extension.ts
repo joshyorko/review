@@ -1154,6 +1154,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		return wasActive;
 	};
+	const persistSelectionReceipt = (ctx: CtxLike, batch: PersistedRepositoryBatch): void => {
+		const preserveActive = activeBatch !== undefined && ["running", "paused", "blocked"].includes(activeBatch.state);
+		if (!preserveActive) {
+			persistBatch(ctx, batch);
+			return;
+		}
+		const receipt = activeBatch.id === batch.id || recoveryBatches.has(batch.id)
+			? { ...batch, id: `${batch.id}-${randomUUID()}` }
+			: batch;
+		persistArchivedBatch(ctx, receipt);
+	};
 	const rememberToolInvocation = (ctx: CtxLike, toolCallId: string): void => {
 		if (!activeBatch?.waveIdentity || (!["running", "paused"].includes(activeBatch.state) && !(activeBatch.state === "blocked" && preToolProofValid(activeBatch)))) return;
 		const ids = [...new Set([...(activeBatch.waveToolInvocationIds ?? []), toolCallId])].sort();
@@ -2130,7 +2141,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const startedAt = Date.now();
 			mode.clearSelected();
 			persist();
-			persistBatch(ctx, {
+			persistSelectionReceipt(ctx, {
 				version: 1,
 				id: `batch-${startedAt.toString(36)}`,
 				kind: "slay",
@@ -2399,7 +2410,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					const startedAt = Date.now();
 					mode.clearSelected();
 					persist();
-					persistBatch(ctx, {
+					persistSelectionReceipt(ctx, {
 						version: 1,
 						id: `batch-${startedAt.toString(36)}`,
 						kind: action.kind,
