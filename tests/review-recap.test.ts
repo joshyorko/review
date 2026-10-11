@@ -52,6 +52,19 @@ test("the deterministic recap keeps source identities and truthful blocked/unkno
 	assert.doesNotMatch(recap.text, /private comment text/);
 });
 
+test("candidate exclusions and their reasons remain visible in native operation recaps", () => {
+	const input = base();
+	input.operations[0]!.totalItems = 3;
+	input.operations[0]!.excludedItems = [
+		{ repo: "acme/widgets", number: 19, reason: "workflow file change", detail: ".github/workflows/ci.yml" },
+		{ repo: "acme/widgets", number: 20, reason: "pull request already submitted", detail: "acme/widgets#21" },
+	];
+	const recap = buildReviewRecap(input);
+	assert.match(recap.text, /3 candidates/);
+	assert.match(recap.text, /excluded=acme\/widgets#19 reason=workflow file change detail=\.github\/workflows\/ci\.yml/);
+	assert.match(recap.handoffText, /acme\/widgets#20 reason=pull request already submitted detail=acme\/widgets#21/);
+});
+
 test("a failed native result and unavailable publication evidence cannot produce a false-green recap", () => {
 	const input = base();
 	input.queue = { kind: "unavailable", reason: "offline", observedAt: input.observedAt };
