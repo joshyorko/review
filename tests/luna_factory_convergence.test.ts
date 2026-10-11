@@ -201,7 +201,7 @@ test("portable selected graph runs actual fixture checks and repair without foll
 			item.workspace = workspace; item.preparation = { phase: "ready", owner: `${batch.id}:${item.selected.key}`, head: sha };
 		}
 		service.store.write(batch);
-		await service.resume(batch.id, { model: { provider: "fixture", id: "fixture" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } } as never);
+		await service.resume(batch.id, { model: { provider: "fixture", id: "fixture", api: "anthropic-messages" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } } as never);
 		await service.waitForIdle();
 		const final = service.store.read(batch.id);
 		const selectedStages = final.items.slice(0, 3).map((item) => ({
@@ -260,7 +260,7 @@ test("headless and selected Review commands enter the same explicit convergence 
 		assert.match(notices.at(-1)!, /Mechanically observed/);
 		await command.handler("converge inspect --target-ref self-hosted", context);
 		assert.match(notices.at(-1)!, /CONVERGED/);
-		assert.match(notices.at(-1)!, /0 observed model calls/);
+		assert.match(notices.at(-1)!, /0 durable request reservations/);
 	} finally { for (const shutdown of shutdowns) await shutdown(); unregister(); globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
 });
 
