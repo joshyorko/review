@@ -371,7 +371,7 @@ export class FactoryDashboard {
 		const queued = projected?.items.filter((entry) => entry.stage === "QUEUED").length ?? 0;
 		const cancelled = projected?.items.filter((entry) => entry.stage === "CANCELLED").length ?? 0;
 		const excluded = projected?.items.filter((entry) => entry.stage === "EXCLUDED").length ?? 0;
-		const runState = projected?.converged ? "CONVERGED" : projected?.control ?? "unknown";
+		const runState = projected?.convergence?.verdict ?? (projected?.converged ? "CONVERGED" : projected?.control ?? "unknown");
 		const repoCount = batch ? new Set(batch.items.map((entry) => entry.selected.repo)).size : 0;
 		const cause = item.blocker ? copy.caption : copy.explanation;
 		const model = this.observedModel(item);
