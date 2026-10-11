@@ -76,8 +76,76 @@ index 7f386726db4f70c951ead9b94b1cc8258f0fbe70..43ec08243fcb9347cc8a3f800e8a0a81
  export * from "./resolve";
 +export * from "./registry";
  export * from "./runtime";
+diff --git a/packages/coding-agent/src/memory-backend/registry.ts b/packages/coding-agent/src/memory-backend/registry.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3695e360d43ff50d28fb69bff86b7f26915380a8
+--- /dev/null
++++ b/packages/coding-agent/src/memory-backend/registry.ts
+@@ -0,0 +1,62 @@
++import type { AgentSession } from "../session/agent-session";
++import type { MemoryBackendRegistration } from "./types";
++
++const BUILTIN_IDS = new Set(["off", "local", "hindsight", "mnemopi", "sharpshooter"]);
++type OwnedRegistration = { owner: string; registration: MemoryBackendRegistration };
++type PendingRegistration = { sourceId: string; registration: MemoryBackendRegistration };
++const sessionRegistrations = new WeakMap<AgentSession, Map<string, OwnedRegistration>>();
++
++export function validateMemoryBackendRegistration(registration: MemoryBackendRegistration): void {
++	if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(registration.id)) {
++		throw new TypeError(`Invalid memory backend id: ${registration.id}`);
++	}
++	if (BUILTIN_IDS.has(registration.id)) {
++		throw new Error(`Memory backend id is reserved by OMP: ${registration.id}`);
++	}
++	if (typeof registration.create !== "function") {
++		throw new TypeError(`Memory backend ${registration.id} must provide a factory`);
++	}
++	const settingIds = new Set<string>();
++	for (const setting of registration.settings) {
++		if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(setting.id) || settingIds.has(setting.id)) {
++			throw new TypeError(`Memory backend ${registration.id} has an invalid or duplicate setting id`);
++		}
++		if (!["string", "boolean", "number"].includes(setting.type)) {
++			throw new TypeError(`Memory backend ${registration.id} has an unsupported setting type: ${setting.type}`);
++		}
++		if (setting.default !== undefined && typeof setting.default !== setting.type) {
++			throw new TypeError(`Memory backend ${registration.id} setting "${setting.id}" has an invalid default type`);
++		}
++		if (setting.required !== undefined && typeof setting.required !== "boolean") {
++			throw new TypeError(`Memory backend ${registration.id} setting "${setting.id}" has an invalid required flag`);
++		}
++		settingIds.add(setting.id);
++	}
++}
++
++/** Bind only this AgentSession's successfully loaded extension registrations. */
++export function bindMemoryBackendRegistrations(
++	session: AgentSession,
++	pending: readonly PendingRegistration[],
++): void {
++	const registrations = new Map<string, OwnedRegistration>();
++	for (const { registration, sourceId } of pending) {
++		validateMemoryBackendRegistration(registration);
++		if (registrations.has(registration.id)) {
++			throw new Error(`Memory backend ${registration.id} is registered more than once by ${sourceId}`);
++		}
++		registrations.set(registration.id, { owner: sourceId, registration });
++	}
++	sessionRegistrations.set(session, registrations);
++}
++
++export function getMemoryBackendRegistration(
++	id: string,
++	session: AgentSession,
++): MemoryBackendRegistration | undefined {
++	return sessionRegistrations.get(session)?.get(id)?.registration;
++}
++/** Release the extension registrations after this session is disposed. */
++export function unbindMemoryBackendRegistrations(session: AgentSession): void {
++	sessionRegistrations.delete(session);
++}
 diff --git a/packages/coding-agent/src/memory-backend/resolve.ts b/packages/coding-agent/src/memory-backend/resolve.ts
-index c38c4aef395a661664c6cd4354fd8d1e272dc525..52a45a76ec341c46cf6bb5c3930efde6eb8d6e40 100644
+index c38c4aef395a661664c6cd4354fd8d1e272dc525..00042a604565f78153b24303b771ff5bc4a36cd1 100644
 --- a/packages/coding-agent/src/memory-backend/resolve.ts
 +++ b/packages/coding-agent/src/memory-backend/resolve.ts
 @@ -1,23 +1,40 @@
@@ -140,7 +208,7 @@ index c38c4aef395a661664c6cd4354fd8d1e272dc525..52a45a76ec341c46cf6bb5c3930efde6
 +	context?: MemoryBackendResolutionContext,
 +): Promise<MemoryBackend> {
  	const id = cfgMemoryBackend.get(settings);
-@@ -27,3 +44,181 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
+@@ -27,3 +44,182 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
  	if (id === "local") return localBackend;
 -	return offBackend;
 +	if (id === "off") return offBackend;
@@ -180,7 +248,8 @@ index c38c4aef395a661664c6cd4354fd8d1e272dc525..52a45a76ec341c46cf6bb5c3930efde6
 +	}
 +	const cached = byId.get(id);
 +	if (
-+		cached?.registration === registration &&
++		cached &&
++		cached.registration === registration &&
 +		cached.agentDir === context.agentDir &&
 +		cached.cwd === context.cwd &&
 +		cached.taskDepth === context.taskDepth &&
