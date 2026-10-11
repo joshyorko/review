@@ -57,13 +57,13 @@ factory_verifier_probe() (
       mkdir -m 0700 "$scratch/home" "$scratch/tmp"
       if ! timeout --foreground --signal=TERM --kill-after=5s 180s env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
         apptainer exec --containall --cleanenv --home "$scratch/home:/home/bluefin" \
-        --bind "$scratch/tmp:/tmp" "$image" /usr/bin/test -r \
+        --bind /dev/full:/dev/full --bind "$scratch/tmp:/tmp" "$image" /usr/bin/test -r \
         /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts; then
         fail "Review image lacks the packaged Factory verifier probe or Apptainer could not prepare it: ${image}"
       fi
       if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
         timeout --foreground --signal=TERM --kill-after=5s 45s apptainer run --containall --no-eval \
-        --home "$scratch/home:/home/bluefin" --bind "$scratch/tmp:/tmp" "$image" \
+        --home "$scratch/home:/home/bluefin" --bind /dev/full:/dev/full --bind "$scratch/tmp:/tmp" "$image" \
         --factory-verifier-probe >"$scratch/result.stdout" 2>"$scratch/result.stderr"; then
         status=0
       else
@@ -143,14 +143,23 @@ apptainer_fallback_ready() {
   return 0
 }
 require_fallback() {
+  if [[ "${REVIEW_LAUNCH_PLAN[runtime]:-auto}" == apptainer ]]; then
+    apptainer_fallback_ready || fail "${APPTAINER_FAILURE}."
+    return 0
+  fi
   apptainer_fallback_ready || fail "${KVM_FAILURE}; ${APPTAINER_FAILURE}."
   echo "WARNING: ${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary." >&2
 }
 prepare_apptainer_environment() {
   local name host_file
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION HIVE_HUB REVIEW_DEFAULT_SCOPE REVIEW_MODE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY TERM COLORTERM; do
+  # Ambient runtime-specific overrides cannot add capabilities to the plan.
+  while IFS= read -r name; do
+    case "$name" in APPTAINERENV_* | SINGULARITYENV_*) unset "$name" ;; esac
+  done < <(compgen -e)
+  for name in "${REVIEW_LAUNCH_ENV_NAMES[@]}"; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
+  export APPTAINERENV_TERM="${TERM:-xterm-256color}" APPTAINERENV_COLORTERM="${COLORTERM:-truecolor}"
   APPTAINER_HOST_ARGS=()
   for host_file in /etc/localtime /etc/hosts; do
     test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
@@ -427,9 +436,26 @@ slugify() {
 
 
 resolve_tokens() {
+  REVIEW_GITHUB_AUTH_SOURCE=environment
+  case "${REVIEW_LAUNCH_PLAN[github_auth]}" in
+    environment)
+      [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] || fail "selected environment GitHub source has no credential"
+      export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+      export GITHUB_TOKEN="$GH_TOKEN"
+      ;;
+    gh-cli)
+      command -v gh >/dev/null 2>&1 || fail "selected GitHub CLI source is unavailable"
+      local selected_token
+      selected_token="$(env -u GH_TOKEN -u GITHUB_TOKEN gh auth token --hostname github.com 2>/dev/null)" || fail "selected GitHub CLI source has no stored login"
+      [[ -n "$selected_token" ]] || fail "selected GitHub CLI source has no stored login"
+      export GH_TOKEN="$selected_token" GITHUB_TOKEN="$selected_token"
+      REVIEW_GITHUB_AUTH_SOURCE="GitHub CLI (environment tokens ignored for Review)"
+      ;;
+  esac
   if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
     GH_TOKEN="$(gh auth token 2>/dev/null || true)"
     export GH_TOKEN
+    REVIEW_GITHUB_AUTH_SOURCE="GitHub CLI"
   fi
   if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] && command -v python3 >/dev/null 2>&1; then
     GH_TOKEN="$(python3 -c '
@@ -451,9 +477,11 @@ if os.path.exists(db_path):
         pass
 ' 2>/dev/null || true)"
     export GH_TOKEN
+    REVIEW_GITHUB_AUTH_SOURCE="OMP credential fallback"
   fi
   export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
   export GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if ((REVIEW_LAUNCH_AUTH_EXPLICIT)); then export GITHUB_TOKEN="${GH_TOKEN:-}"; fi
   export COPILOT_GITHUB_TOKEN="${COPILOT_GITHUB_TOKEN:-${GH_TOKEN:-}}"
   export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-${COPILOT_GITHUB_TOKEN:-}}"
   export COPILOT_INTEGRATION_ID="${COPILOT_INTEGRATION_ID:-copilot-developer-cli}"
@@ -481,13 +509,21 @@ review_args() {
 }
 
 run_review() {
+  # shellcheck source=scripts/review-launch-plan.sh
+  source "$repo_root/scripts/review-launch-plan.sh"
+  review_launch_resolve "$@"
+  case "$REVIEW_LAUNCH_COMMAND" in
+    configure) review_launch_configure ;;
+    profiles) review_launch_profiles; return ;;
+  esac
   resolve_tokens
+  review_launch_environment
   if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
     echo "WARNING: no GitHub credential found; the queue will load empty." >&2
     echo "  Run 'gh auth login' or export GH_TOKEN." >&2
   fi
 
-  review_args "$@"
+  review_args "${REVIEW_LAUNCH_ARGS[@]}"
   local scope="${REVIEW_DEFAULT_SCOPE:-review}" arg previous=""
   for arg in "${PARSED_REVIEW_ARGS[@]}"; do
     if [[ "$previous" == --repo ]]; then scope="$arg"; break; fi
@@ -516,6 +552,9 @@ run_review() {
     image="ghcr.io/projectbluefin/review:stable"
   fi
   fallback_sif="${REVIEW_APPLIANCE_FALLBACK_SIF:-${BLUEFIN_REVIEW_FALLBACK_SIF:-}}"
+  if [[ "${REVIEW_LAUNCH_PLAN[runtime]}" == krun && ( "$image" == *.sif || -f "$image" ) ]]; then
+    fail "krun requires an OCI image; select auto or apptainer for a SIF"
+  fi
   mkdir -p "$home" "$workspace" "$scratch"
   migrate_legacy_state "${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review" "$home" "bluefin-review.sif"
   prepare_factory_state_home "$home"
@@ -531,6 +570,7 @@ run_review() {
     [[ -x "$selected_sif" ]] || fail "review SIF is missing or not executable: ${selected_sif}"
     KVM_FAILURE="the packaged Review SIF was selected"
     require_fallback
+    review_launch_summary apptainer "$scope"
     factory_verifier_ready apptainer "$selected_sif"
     prepare_apptainer_environment
     [[ -z "$REVIEW_AUDIO_PULSE_SERVER" ]] ||
@@ -558,7 +598,8 @@ run_review() {
     launch_sif "$sif"
   fi
 
-  if kvm_runtime_ready && [[ "$image" != *.sif && ! -f "$image" ]]; then
+  if [[ "${REVIEW_LAUNCH_PLAN[runtime]}" != apptainer ]] && kvm_runtime_ready && [[ "$image" != *.sif && ! -f "$image" ]]; then
+    review_launch_summary krun "$scope"
     ensure_image "$image" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
     report_podman_image_identity "$image" "review appliance" "$is_override" "$MIN_REVIEW_APPLIANCE_VERSION"
     factory_verifier_ready krun "$image"
@@ -571,24 +612,14 @@ run_review() {
     podman_args+=(--volume "${scratch}:/tmp:rw,z")
     podman_args+=(--volume "${claims_root}:/claims:rw,z")
     podman_args+=(--env LUNA_FACTORY_CLAIMS_ROOT=/claims)
-    podman_args+=(--env GH_TOKEN --env GITHUB_TOKEN)
-    podman_args+=(--env COPILOT_GITHUB_TOKEN --env GITHUB_COPILOT_TOKEN)
-    podman_args+=(--env COPILOT_INTEGRATION_ID)
-    podman_args+=(--env ANTHROPIC_API_KEY --env ANTHROPIC_OAUTH_TOKEN)
-    podman_args+=(--env OPENAI_API_KEY --env GEMINI_API_KEY)
-    podman_args+=(--env TYPESAFE_API_KEY)
-    podman_args+=(--env AWS_BEARER_TOKEN_BEDROCK --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY --env AWS_SESSION_TOKEN --env AWS_REGION --env AWS_DEFAULT_REGION)
-    podman_args+=(--env HIVE_HUB --env REVIEW_DEFAULT_SCOPE --env REVIEW_MODE --env REVIEW_SKIP_REPOS)
+    for arg in "${REVIEW_LAUNCH_ENV_NAMES[@]}"; do
+      case "$arg" in
+        REVIEW_INHERIT_OMP_CONFIG | LUNA_FACTORY_ENABLED | LUNA_FACTORY_CAPACITY) [[ -v "$arg" ]] || continue ;;
+      esac
+      podman_args+=(--env "$arg")
+    done
     podman_args+=(--env "TERM=${TERM:-xterm-256color}")
     podman_args+=(--env "COLORTERM=${COLORTERM:-truecolor}")
-    [[ -v REVIEW_INHERIT_OMP_CONFIG ]] &&
-      podman_args+=(--env REVIEW_INHERIT_OMP_CONFIG)
-    [[ -v LUNA_FACTORY_ENABLED ]] &&
-      podman_args+=(--env LUNA_FACTORY_ENABLED)
-    # Factory's execution bound is user configuration, not launcher policy: a
-    # non-default value must cross the appliance boundary unchanged.
-    [[ -v LUNA_FACTORY_CAPACITY ]] &&
-      podman_args+=(--env LUNA_FACTORY_CAPACITY)
     if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
       podman_args+=(--volume "${REVIEW_AUDIO_PULSE_SOCKET}:/run/bluefin/pulse/native:rw")
       [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
@@ -604,10 +635,12 @@ run_review() {
     exec "$engine" "${podman_args[@]}"
   fi
 
+  if [[ "${REVIEW_LAUNCH_PLAN[runtime]}" == krun ]]; then fail "${KVM_FAILURE}; choose auto or apptainer"; fi
   if [[ -n "$fallback_sif" ]]; then
     launch_sif "$fallback_sif"
   fi
   require_fallback
+  review_launch_summary apptainer "$scope"
   local apptainer_image="$image"
   [[ "$apptainer_image" == *://* || "$apptainer_image" == *.sif || -f "$apptainer_image" ]] || apptainer_image="docker://${apptainer_image}"
   report_apptainer_image_identity "$image" "review appliance" "$is_override" "$MIN_REVIEW_APPLIANCE_VERSION"
