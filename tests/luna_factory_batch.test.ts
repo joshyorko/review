@@ -1126,6 +1126,39 @@ test("resume admission fences a concurrent drain until the current binding is ch
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("stop during resume admission cannot requeue or retry the cancelled item", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-resume-stop-fence-"));
+	try {
+		const key = "org/a#1";
+		const batch = createBatch([selected(key, "patch")], options("stopfence"));
+		batch.items[0]!.stage = "QUEUED";
+		let enterProof!: () => void;
+		let releaseProof!: () => void;
+		const proofEntered = new Promise<void>((resolve) => { enterProof = resolve; });
+		const proofGate = new Promise<void>((resolve) => { releaseProof = resolve; });
+		const github = { snapshot: async (value: SelectedItem) => value, assertFresh: async () => { enterProof(); await proofGate; } };
+		const service = new BatchService(root, github as never, undefined, {} as never, 1);
+		let nativeStarts = 0;
+		(service as unknown as { execute(...args: unknown[]): Promise<void> }).execute = async (...args: unknown[]) => {
+			if (args[3]) nativeStarts++;
+			(args[1] as Batch["items"][number]).stage = "BLOCKED";
+		};
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		const resuming = service.resume(batch.id, {} as never);
+		await proofEntered;
+		await service.control(batch.id, "stop");
+		releaseProof();
+		await resuming;
+		await service.waitForIdle();
+		assert.equal(service.store.read(batch.id).items[0]!.stage, "CANCELLED", "the resume continuation cannot overwrite the operator stop");
+		await service.resume(batch.id, {} as never);
+		await service.waitForIdle();
+		assert.equal(service.store.read(batch.id).items[0]!.stage, "CANCELLED", "ordinary resume does not convert stopped work back to queued work");
+		assert.equal(nativeStarts, 0);
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("pausing an active hosted-check wait wakes the foreground pump without another GitHub poll", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-owned-pr-pause-wait-"));
 	try {
