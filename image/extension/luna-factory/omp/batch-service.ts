@@ -102,6 +102,8 @@ export class BatchService {
 	readonly capacity: number;
 	private batches = new Map<string, Batch>();
 	private running = new Map<string, Running>();
+	private resuming = new Set<string>();
+	private resumeCancelled = new Set<string>();
 	private observing = new Map<string, AbortController>();
 	private pumping?: Promise<void>;
 	private submitTail: Promise<void> = Promise.resolve();
@@ -533,14 +535,26 @@ export class BatchService {
 		}
 	}
 	async resume(id: string, context: NativeContext): Promise<void> {
+		if (this.resuming.has(id)) throw new Error("Factory batch resume is already in progress");
+		this.resumeCancelled.delete(id);
+		this.resuming.add(id);
+		this.bindings.delete(id);
+		try {
+			await this.resumeAdmitted(id, context);
+		} finally {
+			this.resuming.delete(id);
+			this.resumeCancelled.delete(id);
+			if (!this.fatal) void this.pump();
+		}
+	}
+	private async resumeAdmitted(id: string, context: NativeContext): Promise<void> {
 		this.store.acquire();
 		if (this.fatal) throw new Error(this.fatal);
 		const batch = this.batches.get(id) ?? this.store.read(id);
 		this.batches.set(id, batch);
-		// Resume authorizes foreground reconciliation immediately. The pump is not
-		// started until policy checks finish below, but confirmed effects need the
-		// active control state to be re-queued safely during reconciliation.
-		batch.control = "active";
+		// Keep the batch out of drain while awaited ownership and route checks run.
+		// Confirmed pushes can still be reconciled through the resume fence below.
+		batch.control = "paused";
 		this.persist(batch);
 		for (const item of batch.items) {
 			const owner = `${id}:${item.selected.key}`;
@@ -645,13 +659,15 @@ export class BatchService {
 			}
 		}
 		}
-			batch.control = "active";
-			this.persist(batch);
-			if (batch.convergence) await this.observeConvergence(batch);
-		void this.pump();
+			if (!this.resumeCancelled.has(id)) {
+				batch.control = "active";
+				this.persist(batch);
+				if (batch.convergence) await this.observeConvergence(batch);
+			} else this.persist(batch);
 	}
 	async control(id: string, action: "pause" | "stop"): Promise<void> {
 		this.store.acquire();
+		if (this.resuming.has(id)) this.resumeCancelled.add(id);
 		const batch = this.batches.get(id) ?? this.store.read(id);
 		batch.control = action === "pause" ? "paused" : "stopped";
 		if (action === "stop") for (const item of batch.items) {
@@ -747,7 +763,7 @@ export class BatchService {
 		while (!this.fatal) {
 			let dispatched = false;
 				for (const batch of this.batches.values()) {
-					if (batch.control !== "active") continue;
+					if (batch.control !== "active" || this.resuming.has(batch.id)) continue;
 					if (batch.convergence) await this.observeConvergence(batch);
 					for (const item of batch.items) {
 						const lifecycle = item.prLifecycle;
@@ -760,7 +776,7 @@ export class BatchService {
 						try { await this.observeOwnedPullRequest(batch, item, now, observer.signal); }
 						finally { if (this.observing.get(owner) === observer) this.observing.delete(owner); }
 					}
-					if (batch.control !== "active") continue;
+					if (batch.control !== "active" || this.resuming.has(batch.id)) continue;
 				if (this.running.size >= this.capacity) break;
 				if ([...this.running.values()].filter((active) => active.batch.id === batch.id).length >= batch.capacity) continue;
 					for (const item of batch.items.filter((candidate) => candidate.stage === "QUEUED" || candidate.stage === "VERIFY" && (candidate.prLifecycle?.phase === "repair-required" && candidate.prLifecycle.nextSafeAction === "repair" || candidate.prLifecycle?.phase === "repairing" && candidate.prLifecycle.repair?.state === "queued")).sort((a, b) => a.attempts - b.attempts)) {
@@ -1243,8 +1259,8 @@ export class BatchService {
 		else this.assertPublicationAuthority(batch, item, signal, this.timing.now());
 		if (await this.git(item.workspace, ["rev-parse", "HEAD"], signal) !== head || await this.git(item.workspace, ["rev-parse", "HEAD^{tree}"], signal) !== expectedTree || await this.git(item.workspace, ["status", "--porcelain", "--untracked-files=all"], signal)) throw new Error("workspace changed during current-subject verification; proof is stale");
 		const onSession = (session: string) => { if (!item.sessions.includes(session)) item.sessions.push(session); this.persist(batch); };
-		const reviewer = await runNative(this.sdk!, this.schema, binding, item, this.root, "acceptance", signal, onSession, () => {}, verificationText.join("\n"), { attemptId: attempt.id, artifacts: handles, evidenceRoot: evidenceDir });
-		batch.usage.modelCalls += reviewer.calls;
+		const requestPolicy = this.requestPolicy(batch);
+		const reviewer = await runNative(this.sdk!, this.schema, binding, item, this.root, "acceptance", signal, onSession, () => {}, verificationText.join("\n"), { attemptId: attempt.id, artifacts: handles, evidenceRoot: evidenceDir }, requestPolicy);
 		if (item.prLifecycle?.phase === "repairing") this.assertRepairAuthority(batch, item, signal);
 		else this.assertPublicationAuthority(batch, item, signal, this.timing.now());
 		if (!reviewer.accepted || reviewer.evidenceCoverageComplete !== true || !reviewer.predicates.some((predicate) => predicate.phase === "acceptance" && predicate.ok) || reviewer.predicates.some((predicate) => predicate.phase === "acceptance" && !predicate.ok)) throw new NativeExecutionError("report-invalid", "fresh acceptance did not positively cover every exact committed-head verification artifact");
@@ -1385,7 +1401,7 @@ export class BatchService {
 		}
 	}
 	private mayQueueConfirmedPush(batch: Batch, item: BatchItem): boolean {
-		return batch.control === "active" && !["CANCELLED", "EXCLUDED"].includes(item.stage) && item.operation?.phase === "push" && item.operation.state === "applied" && item.prLifecycle?.nextSafeAction === "publish";
+		return (batch.control === "active" || this.resuming.has(batch.id)) && !["CANCELLED", "EXCLUDED"].includes(item.stage) && item.operation?.phase === "push" && item.operation.state === "applied" && item.prLifecycle?.nextSafeAction === "publish";
 	}
 	private async createPRFromConfirmedPush(batch: Batch, item: BatchItem, signal: AbortSignal): Promise<void> {
 		const operation = item.operation;

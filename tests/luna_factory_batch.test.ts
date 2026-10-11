@@ -1093,6 +1093,39 @@ test("active GitHub Retry-After survives shutdown and restarts only at its persi
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("resume admission fences a concurrent drain until the current binding is checked", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-resume-admission-fence-"));
+	try {
+		const key = "org/a#1";
+		const batch = createBatch([selected(key, "patch")], options("admissionfence"));
+		batch.items[0]!.stage = "QUEUED";
+		let enterProof!: () => void;
+		let releaseProof!: () => void;
+		const proofEntered = new Promise<void>((resolve) => { enterProof = resolve; });
+		const proofGate = new Promise<void>((resolve) => { releaseProof = resolve; });
+		const github = { snapshot: async (value: SelectedItem) => value, assertFresh: async () => { enterProof(); await proofGate; } };
+		const service = new BatchService(root, github as never, undefined, {} as never, 1);
+		let nativeStarts = 0;
+		(service as unknown as { execute(...args: unknown[]): Promise<void> }).execute = async (...args: unknown[]) => {
+			if (args[3]) nativeStarts++;
+			(args[1] as Batch["items"][number]).stage = "BLOCKED";
+		};
+		service.store.acquire(); service.store.write(batch); service.store.release();
+		(service as unknown as { bindings: Map<string, unknown> }).bindings.set(batch.id, { binding: { model: { provider: "stale" } } });
+		const resuming = service.resume(batch.id, {} as never);
+		await proofEntered;
+		await (service as unknown as { pump(): Promise<void> }).pump();
+		assert.equal(nativeStarts, 0, "a concurrent drain cannot dispatch with the cached pre-resume binding");
+		assert.equal(service.store.read(batch.id).control, "paused", "resume stays out of active drain while proof freshness is pending");
+		releaseProof();
+		await resuming;
+		await service.waitForIdle();
+		assert.equal(nativeStarts, 0, "failed current-binding admission leaves no native work started");
+		assert.equal(service.store.read(batch.id).items[0]!.stage, "BLOCKED");
+		await service.shutdown();
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("pausing an active hosted-check wait wakes the foreground pump without another GitHub poll", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-owned-pr-pause-wait-"));
 	try {
@@ -1233,6 +1266,13 @@ test("hosted failure diagnostics flow through retained handles into a fresh same
 			await repairReport(tools);
 		}
 	}, { acceptanceScript: "#!/usr/bin/env bash\nset -euo pipefail\ntest \"$(cat value.txt)\" = 1\n" });
+	const requestPolicyExtensions: number[] = [];
+	const sdk = fixture.sdk as unknown as { createAgentSession(options: { extensions?: readonly unknown[] }): Promise<unknown> };
+	const originalCreateAgentSession = sdk.createAgentSession.bind(fixture.sdk);
+	sdk.createAgentSession = async (options) => {
+		requestPolicyExtensions.push(options.extensions?.length ?? 0);
+		return originalCreateAgentSession(options as never);
+	};
 	let remote = ""; let branch = ""; let targetSha = ""; let candidateSha = ""; let pullIdentity = "PR_node_70"; let hideExistingPullOnce = false;
 	const hostedFailure = (headSha: string) => ({
 		key: "f".repeat(64), candidateHead: headSha, checkSubjectSha: headSha, classification: "repairable-code" as const,
@@ -1350,6 +1390,7 @@ test("hosted failure diagnostics flow through retained handles into a fresh same
 		assert.equal(polls, 3, `one initial dispatch observes pending, failure, then checks on the repaired head: stage=${final.stage}, phase=${final.prLifecycle?.phase}, action=${final.prLifecycle?.nextSafeAction}, blocker=${final.blocker ?? "none"}, attempts=${final.ledger.tasks[0]?.attempts.map((attempt) => attempt.id)}, repair=${final.repair?.reason}, events=${ledgerEvents.join(",")}`);
 		assert.equal(workerRuns, 2, "initial patch and one bounded hosted repair ran");
 		assert.equal(acceptanceRuns, 4, "initial work, independent inspection, changed repair candidate, and exact committed repair each receive fresh acceptance");
+		assert.deepEqual(requestPolicyExtensions, Array(workerRuns + acceptanceRuns + 1).fill(1), "every worker, independent inspection, and exact committed-head native session installs the fail-closed request policy extension");
 		assert.notEqual(newPrHead, candidateSha, "the repair created an actual new commit");
 		assert.equal(final.prLifecycle?.pullRequest?.identity, pullIdentity);
 		assert.equal(final.prLifecycle?.pullRequest?.branch, branch);
