@@ -8,7 +8,7 @@
  */
 
 import { artifactRefError, changedPathError } from "./schema.ts";
-import type { CriterionId, EvidenceReceipt, Ledger, ProofAssumption, Subject, TaskId } from "./model.ts";
+import type { CriterionId, EvidenceReceipt, Ledger, ObservedProof, ProofAssumption, Subject, TaskId } from "./model.ts";
 
 export type EvidenceStatus = "proven" | "unproved" | "failed" | "contradicted";
 
@@ -34,11 +34,35 @@ function assumptionKey(assumption: ProofAssumption): string {
 }
 
 function sameAssumption(left: ProofAssumption, right: ProofAssumption): boolean {
-	return assumptionKey(left) === assumptionKey(right) && left.value === right.value;
+	if (assumptionKey(left) !== assumptionKey(right) || left.value !== right.value) return false;
+	if (left.kind !== "dependency-outcome" || right.kind !== "dependency-outcome") return true;
+	if (!left.binding || !right.binding) return left.binding === right.binding;
+	return sameSubject(left.binding.subject, right.binding.subject) && left.binding.stage === right.binding.stage && left.binding.tree === right.binding.tree;
 
 }
 function sameSubject(left: Subject, right: Subject): boolean {
 	return left.repo === right.repo && left.base === right.base && left.head === right.head;
+}
+
+function assumptionReasons(declared: readonly ProofAssumption[], current: readonly ProofAssumption[], required: readonly ProofAssumption[]): string[] {
+	const reasons: string[] = [];
+	for (const assumption of declared) {
+		const value = current.find((entry) => assumptionKey(entry) === assumptionKey(assumption));
+		if (value === undefined) reasons.push(`load-bearing assumption ${assumptionKey(assumption)} is unavailable`);
+		else if (!sameAssumption(assumption, value)) reasons.push(`load-bearing assumption ${assumptionKey(assumption)} changed`);
+	}
+	for (const assumption of required) if (!declared.some((entry) => assumptionKey(entry) === assumptionKey(assumption))) reasons.push(`required load-bearing assumption ${assumptionKey(assumption)} was not declared`);
+	return reasons;
+}
+
+export function reconcileObservedProof(ledger: Ledger, proof: ObservedProof): Reconciliation {
+	const criterion = ledger.criteria.find((entry) => entry.id === proof.criterionId);
+	if (!criterion?.observation || JSON.stringify(criterion.observation) !== JSON.stringify(proof.source)) return { status: "contradicted", reasons: ["observation source does not match the explicitly declared complete criterion"] };
+	if (proof.generation !== ledger.generation || !sameSubject(proof.subject, ledger.subject)) return { status: "contradicted", reasons: ["observation has a stale generation or exact subject"] };
+	const reasons = assumptionReasons(proof.assumptions, criterion.assumptions ?? [], criterion.assumptions ?? []);
+	if (proof.revision !== (ledger.subject.head ?? ledger.subject.base)) reasons.push("authoritative observation revision does not match the exact subject");
+	if (proof.status !== "proven") reasons.push(proof.note);
+	return reasons.length ? { status: "unproved", reasons } : { status: "proven", reasons: [] };
 }
 
 function currentAssumptionsFor(ledger: Ledger, taskId: TaskId): readonly ProofAssumption[] {
@@ -46,6 +70,8 @@ function currentAssumptionsFor(ledger: Ledger, taskId: TaskId): readonly ProofAs
 	const criterion = task && ledger.criteria.find((entry) => entry.id === task.criterionId);
 	return (criterion?.assumptions ?? []).flatMap<ProofAssumption>((assumption) => {
 		if (assumption.kind !== "dependency-outcome") return [assumption];
+		const observed = ledger.assumptionValues?.find((entry) => assumptionKey(entry) === assumptionKey(assumption));
+		if (observed) return [observed];
 		const dependency = ledger.tasks.find((entry) => entry.id === assumption.taskId);
 		if (dependency === undefined) return [];
 		return [{ ...assumption, value: criterionProven(ledger, dependency.criterionId) ? "proven" : "unproven" }];
@@ -79,20 +105,10 @@ export function reconcileReceipt(ledger: Ledger, receipt: EvidenceReceipt, bindi
 			reasons: [`receipt subject ${receipt.subject.repo}@${receipt.subject.head ?? receipt.subject.base} is not the certified subject`],
 		};
 	}
-	const assumptionReasons: string[] = [];
 	const criterion = ledger.criteria.find((entry) => entry.id === ledger.tasks.find((task) => task.id === binding.taskId)?.criterionId);
 	const currentAssumptions = binding.assumptions ?? currentAssumptionsFor(ledger, binding.taskId);
 	const requiredAssumptions = binding.requiredAssumptions ?? criterion?.assumptions ?? [];
-	for (const declared of receipt.assumptions ?? []) {
-		const current = currentAssumptions.find((assumption) => assumptionKey(assumption) === assumptionKey(declared));
-		if (current === undefined) assumptionReasons.push(`load-bearing assumption ${assumptionKey(declared)} is unavailable`);
-		else if (!sameAssumption(declared, current)) assumptionReasons.push(`load-bearing assumption ${assumptionKey(declared)} changed`);
-	}
-	for (const required of requiredAssumptions) {
-		if (!(receipt.assumptions ?? []).some((declared) => assumptionKey(declared) === assumptionKey(required))) {
-			assumptionReasons.push(`required load-bearing assumption ${assumptionKey(required)} was not declared`);
-		}
-	}
+	const bindingAssumptionReasons = assumptionReasons(receipt.assumptions ?? [], currentAssumptions, requiredAssumptions);
 
 	if (binding.artifactRoots !== undefined) {
 		for (const reference of receipt.evidence) {
@@ -120,7 +136,7 @@ export function reconcileReceipt(ledger: Ledger, receipt: EvidenceReceipt, bindi
 	if (receipt.version === 2 && !receipt.predicates?.some((predicate) => predicate.phase === "acceptance" && predicate.ok)) {
 		return { status: "unproved", reasons: ["version-2 receipt lacks a positive acceptance predicate"] };
 	}
-	if (assumptionReasons.length > 0) return { status: "unproved", reasons: assumptionReasons };
+	if (bindingAssumptionReasons.length > 0) return { status: "unproved", reasons: bindingAssumptionReasons };
 
 	if (receipt.aborted) return { status: "unproved", reasons: ["attempt was aborted"] };
 	if (receipt.truncated) return { status: "unproved", reasons: ["attempt output was truncated"] };
@@ -186,6 +202,8 @@ function taskProofCurrentIn(ledger: Ledger, task: Ledger["tasks"][number], visit
 	}
 	const currentAssumptions: readonly ProofAssumption[] = (criterion?.assumptions ?? []).map((assumption) => {
 		if (assumption.kind !== "dependency-outcome") return assumption;
+		const observed = ledger.assumptionValues?.find((entry) => assumptionKey(entry) === assumptionKey(assumption));
+		if (observed) return observed;
 		const dependency = ledger.tasks.find((entry) => entry.id === assumption.taskId);
 		const proven = dependency !== undefined && criterionProofCurrentIn(ledger, dependency.criterionId, visiting);
 		return { ...assumption, value: proven ? "proven" : "unproven" };
@@ -202,6 +220,10 @@ function taskProofCurrentIn(ledger: Ledger, task: Ledger["tasks"][number], visit
 }
 
 function criterionProofCurrentIn(ledger: Ledger, criterionId: CriterionId, visiting: Set<string>): boolean {
+	if (ledger.criteria.find((criterion) => criterion.id === criterionId)?.observation) {
+		const latest = ledger.observations?.findLast((proof) => proof.criterionId === criterionId);
+		return latest !== undefined && reconcileObservedProof(ledger, latest).status === "proven";
+	}
 	return ledger.tasks.some((task) => task.criterionId === criterionId && taskProofCurrentIn(ledger, task, visiting));
 }
 
