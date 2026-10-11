@@ -81,7 +81,7 @@ if command -v timeout >/dev/null 2>&1; then
   for name in XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME CONTAINER_HOST CONTAINER_CONNECTION CONTAINERS_CONF CONTAINERS_STORAGE_CONF; do
     [[ -v "$name" ]] && event_env+=("$name=${!name}")
   done
-  event_until="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  event_until="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ 2>/dev/null || true)"
   if [[ -n "$event_until" ]]; then
     SECONDS=0
     coproc review_events {

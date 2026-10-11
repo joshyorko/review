@@ -82,6 +82,23 @@ case "$mode" in
   long-line) printf '%10000s' x; exec sleep 10 ;;
   query137) exit 137 ;;
   no-events) exit 0 ;;
+  subsecond-until)
+    event_until=""
+    while (($#)); do
+      if [[ "$1" == --until && $# -gt 1 ]]; then
+        event_until="$2"
+        shift 2
+      else
+        shift
+      fi
+    done
+    printf '%s\n' "$event_until" >"$fixture_dir/event-until"
+    event_time='2026-10-11T12:00:00.600000000Z'
+    if [[ "$event_time" < "$event_until" ]]; then
+      printf 'container|create|%s|<nil>|<nil>|%s\n' '${CONTAINER_ID}' "$owner"
+      printf 'container|died|%s|23|false|%s\n' '${CONTAINER_ID}' "$owner"
+    fi
+    ;;
   flood)
     for ((index = 0; index < 80; index += 1)); do
       printf 'container|init|%s|<nil>|<nil>|%s\\n' '${CONTAINER_ID}' "$owner"
@@ -445,6 +462,31 @@ exit 0
         self.assertIn(f"label=io.review.launch.owner={OWNER}", event_call)
         self.assertIn("--stream=false", event_call)
         self.assertEqual((self.fixture_dir / "event-credentials").read_text(), "absent\n")
+
+    @unittest.skipUnless(COLLECTOR.is_file(), "collector implementation follows this red test")
+    def test_event_query_until_preserves_fractional_utc_precision(self) -> None:
+        pid, starttime = 41008, 778
+        self.write_proc(pid, starttime)
+        (self.fixture_dir / "event-mode").write_text("subsecond-until\n")
+        fake_date = self.bin / "date"
+        fake_date.write_text(
+            "#!/usr/bin/env bash\n"
+            "case \"$*\" in\n"
+            "  *.%NZ*) printf '2026-10-11T12:00:00.700000000Z\\n' ;;\n"
+            "  *) printf '2026-10-11T12:00:00Z\\n' ;;\n"
+            "esac\n"
+        )
+        fake_date.chmod(0o700)
+
+        proc, report_dir = self.launch_collector(pid, starttime)
+        time.sleep(0.05)
+        self.settle(pid)
+        report = self.finish(proc, report_dir)
+
+        self.assertEqual((self.fixture_dir / "event-until").read_text(), "2026-10-11T12:00:00.700000000Z\n")
+        self.assertIn("outcome=nonclean_unknown", report)
+        self.assertIn("evidence=podman_event", report)
+        self.assertIn("container_exit=23", report)
 
     @unittest.skipUnless(COLLECTOR.is_file(), "collector implementation follows this red test")
     def test_podman_oom_flag_is_reported_but_exit_137_alone_stays_unknown(self) -> None:
