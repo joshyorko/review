@@ -358,9 +358,10 @@ test("sandbox preflight distinguishes a missing tool from an absent sandbox with
 			assert.deepEqual(result.missing, ["definitely-not-a-real-factory-tool"]);
 			assert.ok(result.available.includes("bash"));
 		} catch (error) {
-			// Hermetic CI does not install bwrap; require the precise missing-boundary diagnostic.
+			// A hermetic runner can have bwrap installed while policy prevents its UID map.
+			// Require the stable fail-closed classification, not one host-specific errno.
 			assert.ok(error instanceof Error && "code" in error && error.code === "capability-unavailable");
-			assert.match(error.message, /spawn bwrap ENOENT/);
+			assert.match(error.message, /verification sandbox capability unavailable:/);
 		}
 	} finally { await rm(root, { recursive: true, force: true }); }
 });

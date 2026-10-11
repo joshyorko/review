@@ -13,7 +13,7 @@
 
 import { isRecord } from "./guard.ts";
 import { DEFAULT_FINISH_AUTHORITY } from "./model.ts";
-import { parseObservedProof, parseObservationSource, parseProofAssumptions, parseReceipt } from "./schema.ts";
+import { parseCurrentVerification, parseObservedProof, parseObservationSource, parseProofAssumptions, parseReceipt } from "./schema.ts";
 import type {
 	AdmissionDecision,
 	Attempt,
@@ -162,6 +162,12 @@ function parseTask(value: unknown): TaskRecord | undefined {
 			if (!parsedReceipt.ok) return undefined;
 			receipt = parsedReceipt.value;
 		}
+		let currentVerification: Attempt["currentVerification"];
+		if (rawAttempt.currentVerification !== undefined) {
+			const parsedCurrentVerification = parseCurrentVerification(rawAttempt.currentVerification);
+			if (!parsedCurrentVerification.ok) return undefined;
+			currentVerification = parsedCurrentVerification.value;
+		}
 		attemptIds.add(rawAttempt.id);
 		attempts.push({
 			id: rawAttempt.id as Attempt["id"],
@@ -174,6 +180,7 @@ function parseTask(value: unknown): TaskRecord | undefined {
 			nativeAgentIds: nativeAgentIds.map((id) => id as Attempt["nativeAgentIds"][number]),
 			privateSessions,
 			...(receipt === undefined ? {} : { receipt }),
+			...(currentVerification === undefined ? {} : { currentVerification }),
 			...(steeredAgentId === undefined ? {} : { steeredAgentId: steeredAgentId as NativeAgentId }),
 			integrated: rawAttempt.integrated,
 		});
