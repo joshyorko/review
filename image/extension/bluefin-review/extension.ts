@@ -2392,9 +2392,30 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		if (action.kind === "fix") {
 			activeCtx = ctx;
-			const supported = filterUnsupportedSlayItems(ctx, capturedItems);
-			if (supported.length === 0) return;
-			await startRepositoryBatch(ctx, action.kind, supported);
+			const excludedItems: PersistedCandidateExclusion[] = [];
+			const supported = filterUnsupportedSlayItems(ctx, capturedItems, excludedItems);
+			if (supported.length === 0) {
+				if (excludedItems.length > 0) {
+					const startedAt = Date.now();
+					mode.clearSelected();
+					persist();
+					persistBatch(ctx, {
+						version: 1,
+						id: `batch-${startedAt.toString(36)}`,
+						kind: action.kind,
+						waves: [],
+						currentWave: 0,
+						completedItems: 0,
+						totalItems: capturedItems.length,
+						state: "complete",
+						startedAt,
+						waveStartedAt: startedAt,
+						excludedItems,
+					});
+				}
+				return;
+			}
+			await startRepositoryBatch(ctx, action.kind, supported, { totalItems: capturedItems.length, excludedItems });
 			return;
 		}
 		if (action.kind === "diff") {

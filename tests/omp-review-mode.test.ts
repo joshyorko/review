@@ -3613,6 +3613,53 @@ test("slay durably accounts for workflow-file candidates when no work is dispatc
 	]);
 });
 
+test("dashboard fix persists filtered PRs beside dispatched work using the original selection denominator", async () => {
+	const items = [
+		{ id: 89, repo: "projectbluefin/incomplete", title: "incomplete PR", headSha: "f".repeat(40), ciStatus: "success" },
+		{ id: 90, repo: "projectbluefin/eligible", title: "eligible PR", headSha: "1".repeat(40), ciStatus: "success" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const annotate = (node) => {
+			if (node?.number === 89) return { ...node, files: { pageInfo: { hasNextPage: true }, nodes: [{ path: "README.md" }] } };
+			if (node?.number === 90) return { ...node, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] } };
+			return node;
+		};
+		const data = { ...result.data };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(annotate) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: annotate(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: false } });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /projectbluefin\/eligible#90/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/incomplete#89/);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(batch);
+	assert.equal(batch.totalItems, 2, "filtered selected PR remains in the denominator");
+	assert.deepEqual(batch.excludedItems.map(({ number, reason }) => ({ number, reason })), [
+		{ number: 89, reason: "incomplete changed-file list" },
+	]);
+	assert.deepEqual(batch.waves.map((wave) => wave.items.map((item) => item.id)), [[90]]);
+});
+
 test("slay keeps workflow permission as a batch blocker after skipping failed CI", async () => {
 	const items = [
 		{ id: 51, repo: "projectbluefin/review", title: "red ordinary PR", headSha: "b".repeat(40), ciStatus: "failure" },
