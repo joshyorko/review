@@ -99,7 +99,9 @@ Advisor only on that same worker session, records native routing/history
 evidence, then disables it and resumes the same task and attempt. Normal worker
 and acceptance-reviewer sessions keep Advisor disabled; Advisor advice never
 changes acceptance or authority. Missing or unverified native Advisor routing
-blocks the current attempt without a worker-model fallback.
+blocks the current attempt without a worker-model fallback. Usage evidence must
+have finite, nonnegative counters that do not regress during escalation; invalid
+accounting blocks the attempt instead of being reported as zero usage.
 
 The packaged OMP host registers `/factory`, `/factory status`, `/factory why
 <task-id>`, `/factory pause`, `/factory drain`, `/factory resume`, and

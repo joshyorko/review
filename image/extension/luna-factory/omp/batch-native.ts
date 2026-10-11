@@ -233,6 +233,16 @@ function advisorModelId(model: { provider: string; id: string } | undefined): st
 	return model?.provider && model.id ? `${model.provider}/${model.id}` : undefined;
 }
 
+function advisorUsage(stats: ReturnType<NativeSession["getAdvisorStats"]>): NativeAdvisorEvidence["usage"] {
+	const usage = { calls: stats.messages.assistant, inputTokens: stats.tokens.input, outputTokens: stats.tokens.output, cost: stats.cost };
+	for (const [counter, value] of Object.entries(usage)) {
+		if (!Number.isFinite(value) || value < 0 || (counter !== "cost" && !Number.isSafeInteger(value))) {
+			throw new NativeExecutionError("advisor-blocked", "OMP native Advisor usage accounting is unavailable or invalid; preserve this attempt as blocked");
+		}
+	}
+	return usage;
+}
+
 async function runNativeAdvisorEscalation(
 	session: NativeSession,
 	request: NativeEscalationRequest,
@@ -277,6 +287,7 @@ async function runNativeAdvisorEscalation(
 		if (!before.configured || !before.active || liveBefore.length === 0 || models.length !== liveBefore.length) {
 			throw new NativeExecutionError("advisor-blocked", "OMP native Advisor effective configured model routing could not be verified");
 		}
+		const beforeUsage = advisorUsage(before);
 		if (signal.aborted) throw new NativeExecutionError("advisor-blocked", "native Advisor escalation was cancelled before packet delivery; the attempt remains blocked for reconciliation");
 		await session.prompt(
 			`Factory judgment escalation packet (bounded, coordinator-stamped identity):\n${packetText}\n\nDo not decide the unresolved judgment or submit factory_report. Restate the packet only as needed for native OMP Advisor review, then end this turn.`,
@@ -286,10 +297,20 @@ async function runNativeAdvisorEscalation(
 		if (!caughtUp) throw new NativeExecutionError("advisor-blocked", "OMP native Advisor did not catch up within the bounded wait");
 		if (!session.isAdvisorEnabled() || !session.isAdvisorActive()) throw new NativeExecutionError("advisor-blocked", "OMP native Advisor became inactive before advisory evidence was established");
 		const after = session.getAdvisorStats();
+		const afterUsage = advisorUsage(after);
 		const liveAfter = after.advisors.filter((advisor) => advisor.status === "running");
 		const effectiveModels = [...new Set(liveAfter.map((advisor) => advisorModelId(advisor.model)).filter((model): model is string => Boolean(model)))];
 		if (!after.configured || !after.active || liveAfter.length === 0 || effectiveModels.length !== liveAfter.length || after.messages.assistant <= before.messages.assistant || models.sort().join("\0") !== effectiveModels.sort().join("\0")) {
 			throw new NativeExecutionError("advisor-blocked", "OMP native Advisor produced no verifiable advisory or stable effective routing evidence");
+		}
+		const usage = {
+			calls: afterUsage.calls - beforeUsage.calls,
+			inputTokens: afterUsage.inputTokens - beforeUsage.inputTokens,
+			outputTokens: afterUsage.outputTokens - beforeUsage.outputTokens,
+			cost: afterUsage.cost - beforeUsage.cost,
+		};
+		if (Object.values(usage).some((value) => value < 0)) {
+			throw new NativeExecutionError("advisor-blocked", "OMP native Advisor usage accounting regressed; preserve this attempt as blocked");
 		}
 		const fullHistory = session.formatAdvisorHistoryAsText({ compact: true });
 		if (!fullHistory) throw new NativeExecutionError("advisor-blocked", "OMP native Advisor history is unavailable after catch-up");
@@ -303,12 +324,7 @@ async function runNativeAdvisorEscalation(
 			status: session.formatAdvisorStatus().slice(0, 2_000),
 			history,
 			historyDigest: createHash("sha256").update(history).digest("hex"),
-			usage: {
-				calls: after.messages.assistant - before.messages.assistant,
-				inputTokens: Math.max(0, after.tokens.input - before.tokens.input),
-				outputTokens: Math.max(0, after.tokens.output - before.tokens.output),
-				cost: Math.max(0, after.cost - before.cost),
-			},
+			usage,
 		};
 	} catch (error) {
 		primaryError = error;
