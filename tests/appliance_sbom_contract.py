@@ -44,7 +44,7 @@ BASE_ARGS = {
     "--omp-patch-sha256": OMP_PATCH,
     "--omp-clipboard-patch-source-commit": SOURCE_COMMIT,
     "--omp-clipboard-patch-sha256": OMP_CLIPBOARD_PATCH,
-    "--omp-clipboard-patch-path": "/usr/local/share/bluefin/omp/clipboard-truthful-18.5.0.patch",
+    "--omp-clipboard-patch-path": "/usr/local/share/bluefin/omp/clipboard-truthful-18.9.1.patch",
     "--omp-bun-version": "1.4.2",
     "--bun-sha256": BUN_X86,
     "--node-version": "24.21.0",
@@ -250,7 +250,7 @@ class DownloadLocations(unittest.TestCase):
         )
         self.assertEqual(
             found["omp-clipboard-truthfulness-patch"]["downloadLocation"],
-            f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/clipboard-truthful-18.5.0.patch",
+            f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/clipboard-truthful-18.9.1.patch",
         )
 
     def test_node_download_is_versioned_and_architecture_specific(self):

@@ -19,41 +19,41 @@
 # what Renovate can compare against, and a pin no tool can track is a stale pin.
 
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/base
-ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:f6d95ea075affb8031ca8fa8929d95cae45588d507c239b2bb2967f9925e14a5
+ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:b0792e684c8e33f59ef511020be89d1e91f568967c5eb19bc3db0ca7d54d72a8
 # The builder is the shell-enabled sibling of the same FSDK series, so the
 # binaries staged out of it link against the base's own glibc.
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/lab-runner
-ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:1436bce126a1faa67cd13e13ebce710c1c24811d02a3074a427f28628f413162
+ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:f509338a2e71a77bd375459afb26ed4e77b9677858a43a99f9d017c8ded9ad97
 # Linux audio packages are absent from the FSDK runtime seam. The pinned audio
 # stage contributes only the PulseAudio/ALSA libraries and configuration.
 # renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
-ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:b3188b17a2b94c6a5484c02582a9f3b045110d57b3c0e87a14a4f0ab291723c0
+ARG AUDIO_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:26553fd14e79c61093bd2ccf7ea30bf866b27ad5f68e84693fd0402c85edae5a
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
-ARG OMP_VERSION=18.5.0
-ARG OMP_SOURCE_COMMIT=9348320cc4a30a7195d36a1f05a6c11bcb701a17
-ARG OMP_SOURCE_SHA256=60ead7acc6185f5c06942d3f56d82dd0f41081e749f03b73547c6ed537407b46
-ARG OMP_PATCH_SHA256=c4b7cc81811b17519d56865ab50e85675299a1f138dd08444f4173c202ce0a51
-ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=9348320cc4a30a7195d36a1f05a6c11bcb701a17
-ARG OMP_CLIPBOARD_PATCH_SHA256=118612c41e9a3d8d68d15f4451d798a4fbe1e948bed60bc87e5eaf1eb7693214
-ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/bluefin/omp/clipboard-truthful-18.5.0.patch
+ARG OMP_VERSION=18.9.1
+ARG OMP_SOURCE_COMMIT=a4d6f0adc63dda4ccdf4d25c26422219820f865b
+ARG OMP_SOURCE_SHA256=06a569467c1793e2c7f9f3d20807b5ddca60d59633b9be0748ad05851ccf4c00
+ARG OMP_PATCH_SHA256=d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f
+ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=a4d6f0adc63dda4ccdf4d25c26422219820f865b
+ARG OMP_CLIPBOARD_PATCH_SHA256=d940497114f783c95d95256c6e0e73642d3c6b1ead5e193d07c57da7df8b733d
+ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/bluefin/omp/clipboard-truthful-18.9.1.patch
 ARG OMP_BUN_VERSION=1.4.2
 ARG OMP_BUN_X86_64_SHA256=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
 ARG OMP_BUN_AARCH64_SHA256=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7
 ARG NODE_VERSION=24.21.0
 ARG NODE_X86_64_SHA256=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff
 ARG NODE_AARCH64_SHA256=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5
-ARG OMP_NATIVES_VERSION=18.5.0
-ARG OMP_NATIVES_X86_64_SHA512=1c433e06f82f9032222aace5272954c5f12071f5ae15ff6a642c8a2479efcef6e2b1d318c19bc53b34eabf437940d9d5910d35c0bb1ac9ceb16f4628f5396c94
-ARG OMP_NATIVES_AARCH64_SHA512=61f5d765eb1619fbcd55d161f2c16bcbe29c4bb7da1edebcb4d839be4eca038bb3ffd2a7efc1ae7f496400e8056744ac0b5be121ab1afa90371226983d461ba5
+ARG OMP_NATIVES_VERSION=18.9.1
+ARG OMP_NATIVES_X86_64_SHA512=703c3409b36ce193de41060a8deba12a106607bf41cded8e694d1690dadbd93ade08196a7e86a6d9f9f7e0daa9ac472f1011ebf2c569db7227c63f84ea84d8e9
+ARG OMP_NATIVES_AARCH64_SHA512=017e2893bc65f5f146eb9c1c4eb409c8632fe0fc933c806691ef3f5a61d6eb3d700263e1ee7b3152bda8e9b19b04e04109d7abe1340eb57abb7a144a38ae30d5
 ARG MEMORYD_SOURCE_COMMIT=e7f8d431797973afbdf4d0530aa14a25f43acf35
 ARG MEMORYD_SOURCE_SHA256=155ec09537e941e4c71a65b738650b0419ae86f12cc86e28761d10553627d692
-ARG TYPESAFE_VERSION=0.9.0
-ARG TYPESAFE_SHA256=679865885ba4d86957792ac9aa163fd085142a4395b72a7cf7f39067743455c1
+ARG TYPESAFE_VERSION=0.9.1
+ARG TYPESAFE_SHA256=00d4bd8779aa3dae4ea9a7fcd47074f3dba100086a339047fe8989d6daa393df
 ARG TYPESAFE_SDK_VERSION=0.6.0
 ARG TYPESAFE_SDK_SHA256=ccd94517c911c58ed5284b15838a001393e304ea3b784f6e8fb5a79f6365378e
-ARG TYPESAFE_TYPEBOX_VERSION=1.3.34
-ARG TYPESAFE_TYPEBOX_SHA256=58a270296bc4e185ee3a04328447a9ffa12e22ae6abaa31a03fd3273b800c7f0
+ARG TYPESAFE_TYPEBOX_VERSION=1.3.36
+ARG TYPESAFE_TYPEBOX_SHA256=3c02a80579c0fa7908e3aff9d07b6a1f20aab7ad1c019539edd0f5c50d92f85b
 # renovate: datasource=github-releases depName=cli/cli
 ARG GH_VERSION=2.102.0
 ARG GH_X86_64_SHA256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
@@ -114,7 +114,7 @@ ARG REVIEW_REVISION
 COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp
 COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts
 COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch
-COPY patches/omp/clipboard-truthful-18.5.0.patch /usr/local/share/bluefin/omp/clipboard-truthful-18.5.0.patch
+COPY patches/omp/clipboard-truthful-18.9.1.patch /usr/local/share/bluefin/omp/clipboard-truthful-18.9.1.patch
 RUN set -eu; \
     mkdir -p /out/usr/bin /out/usr/share/bluefin/review; \
     OMP_VERSION="$OMP_VERSION" \

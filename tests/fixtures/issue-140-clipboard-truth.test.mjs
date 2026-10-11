@@ -7,16 +7,16 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const expectedArchiveSha256 = "60ead7acc6185f5c06942d3f56d82dd0f41081e749f03b73547c6ed537407b46";
-const expectedSourceCommit = "9348320cc4a30a7195d36a1f05a6c11bcb701a17";
-const expectedMemoryPatchSha256 = "c4b7cc81811b17519d56865ab50e85675299a1f138dd08444f4173c202ce0a51";
-const expectedPatchSha256 = "118612c41e9a3d8d68d15f4451d798a4fbe1e948bed60bc87e5eaf1eb7693214";
-const expectedOmpVersion = "18.5.0";
+const expectedArchiveSha256 = "06a569467c1793e2c7f9f3d20807b5ddca60d59633b9be0748ad05851ccf4c00";
+const expectedSourceCommit = "a4d6f0adc63dda4ccdf4d25c26422219820f865b";
+const expectedMemoryPatchSha256 = "d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f";
+const expectedPatchSha256 = "d940497114f783c95d95256c6e0e73642d3c6b1ead5e193d07c57da7df8b733d";
+const expectedOmpVersion = "18.9.1";
 const sourceCheckout = process.env.REVIEW_OMP_SOURCE;
 const cachedArchive = process.env.ISSUE140_OMP_ARCHIVE;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const memoryPatchPath = path.join(repoRoot, "patches/omp/memory-backend-registration.patch");
-const patchPath = path.join(repoRoot, "patches/omp/clipboard-truthful-18.5.0.patch");
+const patchPath = path.join(repoRoot, "patches/omp/clipboard-truthful-18.9.1.patch");
 const containerfile = await readFile(path.join(repoRoot, "image/appliance/Containerfile"), "utf8");
 function pinnedArg(name) {
 	const matches = [...containerfile.matchAll(new RegExp(`^ARG ${name}=([^\\n]+)$`, "gm"))];
@@ -32,7 +32,7 @@ assert.equal(pinnedArg("OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"), expectedSourceCommi
 assert.equal(pinnedArg("OMP_CLIPBOARD_PATCH_SHA256"), expectedPatchSha256);
 assert.equal(
 	pinnedArg("OMP_CLIPBOARD_PATCH_PATH"),
-	"/usr/local/share/bluefin/omp/clipboard-truthful-18.5.0.patch",
+	"/usr/local/share/bluefin/omp/clipboard-truthful-18.9.1.patch",
 );
 assert.ok(!(sourceCheckout && cachedArchive), "set REVIEW_OMP_SOURCE or ISSUE140_OMP_ARCHIVE, not both");
 const patch = await readFile(patchPath);
@@ -125,7 +125,7 @@ assert.ok(reportMatch, "formatDumpArchiveReport exists in pinned source");
 const formatDumpArchiveReport = new Function("archive", reportMatch[1]);
 
 function actualHandler(name, followingMethod, dependencies) {
-	const start = controllerSource.indexOf(`\tasync ${name}(): Promise<void> {`);
+	const start = controllerSource.indexOf(`\tasync ${name}(`);
 	assert.notEqual(start, -1, `${name} exists in pinned command controller`);
 	const following = controllerSource.indexOf(followingMethod, start);
 	const end = following === -1 ? -1 : controllerSource.lastIndexOf("\n\t}", following);
@@ -187,14 +187,19 @@ test("pinned /dump all keeps its persistent archive report and does not confirm 
 		files: ["session.md", "llm-request.json", "subagents/reviewer.md"],
 		subagentCount: 1,
 	};
+	assert.match(
+		controllerSource,
+		/handleDumpAllCommand\(\): Promise<void> \{\s+return this\.#writeDumpArchive\(\(\) => this\.ctx\.session\.dumpSessionArchiveToTmpDir\(\)\);/,
+		"/dump all routes the persistent session archive through the shared report helper",
+	);
 	const ctx = {
-		session: { dumpSessionArchiveToTmpDir: async () => archiveResult },
 		showStatus: message => (status = message),
 		showError: message => assert.fail(message),
 	};
-	const handler = actualHandler("handleDumpAllCommand", "handleAdvisorDumpCommand", {
+	const handler = actualHandler("#writeDumpArchive", "handleAdvisorDumpCommand", {
 		copyToClipboard: async value => (copied = value),
 		formatDumpArchiveReport,
+		write: async () => archiveResult,
 	});
 	await handler.call({ ctx });
 	assert.equal(copied, archiveResult.path);

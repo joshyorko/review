@@ -96,8 +96,8 @@ omp_source_commit="$(sed -nE 's/^ARG OMP_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$
 clipboard_patch_source_commit="$(sed -nE 's/^ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
 [[ "$clipboard_patch_source_commit" == "$omp_source_commit" ]] ||
   fail "clipboard patch must be reviewed against the exact pinned OMP source commit"
-[[ "$(sed -nE 's|^ARG OMP_CLIPBOARD_PATCH_PATH=([^[:space:]]+)$|\1|p' "$containerfile")" == "/usr/local/share/bluefin/omp/clipboard-truthful-18.5.0.patch" ]] ||
-  fail "clipboard patch path must name the pinned 18.5.0 patch input"
+[[ "$(sed -nE 's|^ARG OMP_CLIPBOARD_PATCH_PATH=([^[:space:]]+)$|\1|p' "$containerfile")" == "/usr/local/share/bluefin/omp/clipboard-truthful-18.9.1.patch" ]] ||
+  fail "clipboard patch path must name the pinned 18.9.1 patch input"
 for pin in OMP_VERSION OMP_BUN_VERSION NODE_VERSION OMP_NATIVES_VERSION; do
   grep -qE "^ARG ${pin}=[0-9]+\\.[0-9]+\\.[0-9]+$" "$containerfile" ||
     fail "ARG ${pin} must be a semantic version"
@@ -114,7 +114,7 @@ require "$containerfile" \
   'COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp' \
   'COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts' \
   'COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch' \
-  'COPY patches/omp/clipboard-truthful-18.5.0.patch /usr/local/share/bluefin/omp/clipboard-truthful-18.5.0.patch' \
+  'COPY patches/omp/clipboard-truthful-18.9.1.patch /usr/local/share/bluefin/omp/clipboard-truthful-18.9.1.patch' \
   'OMP_PATCH_PATH=/usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'OMP_CLIPBOARD_PATCH_PATH="$OMP_CLIPBOARD_PATCH_PATH"' \
   'OMP_CLIPBOARD_PATCH_SOURCE_COMMIT="$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"' \
@@ -229,6 +229,9 @@ require image/appliance/entrypoint.sh \
   '"${extension_args[@]}"' \
   'Luna Factory extension is not packaged at /usr/share/bluefin/review/luna-factory'
 require image/appliance/config.yml \
+  'startup:' \
+  'checkUpdate: false' \
+  'setupWizard: false' \
   'enabled: true' \
   'apply: false' \
   'backend: auto'
@@ -276,6 +279,12 @@ for tool in actionlint shellcheck yq jq just openssl; do
   grep -qF "/usr/sbin/${tool}" "$containerfile" ||
     fail "${tool} must be staged from the pinned FSDK builder"
 done
+
+# Git clone needs the FSDK's upload-pack builtin even for a local bare source.
+# Keep its exec-path helper in the same explicit closure as the HTTPS helper.
+require image/appliance/stage-runtime.sh \
+  '/usr/libexec/git-core/git-remote-http' \
+  '/usr/libexec/git-core/git-upload-pack'
 
 # The point of a distroless appliance is that nothing inside it can install
 # anything. Not one of these may appear, in any stage that reaches the image.
@@ -327,7 +336,7 @@ grep -qF '!scripts/derived-omp-canary.ts' .dockerignore ||
   fail ".dockerignore must let the derived OMP canary into the build context"
 grep -qF '!patches/omp/memory-backend-registration.patch' .dockerignore ||
   fail ".dockerignore must let the OMP registration patch into the build context"
-grep -qF '!patches/omp/clipboard-truthful-18.5.0.patch' .dockerignore ||
+grep -qF '!patches/omp/clipboard-truthful-18.9.1.patch' .dockerignore ||
   fail ".dockerignore must let the OMP clipboard patch into the build context"
 
 # The generator that fills that SBOM. Its own contract runs here rather than as
@@ -508,8 +517,9 @@ blocked)
   ;;
 esac
 
-# git is here to land fixes, which means it has to be able to commit and to
-# reach GitHub over https — the remote helper and its TLS closure included.
+# git is here to land fixes, which means it has to be able to commit, clone
+# local bare repositories, and reach GitHub over https — with each helper's
+# FSDK executable and library closure included.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
@@ -521,10 +531,17 @@ run '
   git add file
   git commit -qm "smoke"
   git log --oneline | grep -q smoke
+  test "$(git --exec-path)" = /usr/libexec/git-core
+  test -x /usr/libexec/git-core/git-upload-pack
+  git --list-cmds=builtins | tr " " "\n" | grep -qx upload-pack
   test -x /usr/libexec/git-core/git-remote-https
   ldd /usr/libexec/git-core/git-remote-https | grep -q "not found" && exit 1
+  ldd /usr/libexec/git-core/git-upload-pack | grep -q "not found" && exit 1
+  git clone --quiet --bare "$HOME/repo" "$HOME/repo.git"
+  git clone --quiet --no-local "$HOME/repo.git" "$HOME/checkout"
+  git -C "$HOME/checkout" log --oneline | grep -q smoke
   exit 0
-' >/dev/null || fail "git cannot commit, or its https remote helper is missing libraries"
+' >/dev/null || fail "git helper closure cannot commit, clone local bare repositories, or reach GitHub over https"
 
 # The agent writes sessions, logs and caches under HOME on every run.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.

@@ -13,7 +13,7 @@
 
 import { isRecord } from "./guard.ts";
 import { DEFAULT_FINISH_AUTHORITY } from "./model.ts";
-import { parseProofAssumptions, parseReceipt } from "./schema.ts";
+import { parseObservedProof, parseObservationSource, parseProofAssumptions, parseReceipt } from "./schema.ts";
 import type {
 	AdmissionDecision,
 	Attempt,
@@ -28,6 +28,7 @@ import type {
 	TaskRecord,
 	TaskState,
 	NativeAgentId,
+	ObservedProof,
 } from "./model.ts";
 
 /** Namespaced custom entry. A new key means a different shape, not a migration. */
@@ -98,10 +99,13 @@ function parseSubject(value: unknown): Subject | undefined {
 function parseCriterion(value: unknown): Criterion | undefined {
 	if (!isRecord(value)) return undefined;
 	if (!identity(value.id) || !boundedText(value.statement) || typeof value.mandatory !== "boolean") return undefined;
-	if (value.assumptions === undefined) return { id: value.id as CriterionId, statement: value.statement, mandatory: value.mandatory };
-	const parsed = parseProofAssumptions(value.assumptions);
+	const parsed = parseProofAssumptions(value.assumptions ?? []);
 	if (!parsed.ok) return undefined;
-	return { id: value.id as CriterionId, statement: value.statement, mandatory: value.mandatory, assumptions: parsed.value };
+	const observation = value.observation === undefined ? undefined : parseObservationSource(value.observation);
+	if (observation && !observation.ok) return undefined;
+	return { id: value.id as CriterionId, statement: value.statement, mandatory: value.mandatory,
+		...(value.assumptions === undefined ? {} : { assumptions: parsed.value }),
+		...(observation?.ok ? { observation: observation.value } : {}) };
 }
 
 function parseTask(value: unknown): TaskRecord | undefined {
@@ -270,6 +274,17 @@ export function parseJournal(value: unknown): JournalRead {
 		if (!task.attempts.every((attempt) => attempt.taskId === task.id)) return { ok: false, reason: "journal attempt identity is inconsistent" };
 		if (task.state === "DONE" && !task.attempts.some((attempt) => attempt.state === "returned" && attempt.receipt !== undefined)) return { ok: false, reason: "journal DONE task has no returned receipt" };
 	}
+	const observations: ObservedProof[] = [];
+	const assumptionValues = value.assumptionValues === undefined ? undefined : parseProofAssumptions(value.assumptionValues);
+	if (assumptionValues && !assumptionValues.ok) return { ok: false, reason: "journal authoritative assumption values are unreadable" };
+	if (value.observations !== undefined) {
+		if (!Array.isArray(value.observations) || value.observations.length > MAX_ITEMS) return { ok: false, reason: "journal observation history is unreadable" };
+		for (const entry of value.observations) {
+			const parsed = parseObservedProof(entry);
+			if (!parsed.ok || !criterionIds.has(parsed.value.criterionId)) return { ok: false, reason: "journal holds an unreadable observation" };
+			observations.push(parsed.value);
+		}
+	}
 
 	return {
 		ok: true,
@@ -288,6 +303,8 @@ export function parseJournal(value: unknown): JournalRead {
 			},
 			criteria,
 			tasks,
+			...(value.observations === undefined ? {} : { observations }),
+			...(assumptionValues?.ok ? { assumptionValues: assumptionValues.value } : {}),
 			control: value.control as Ledger["control"],
 			subject,
 			noProgressAttempts,

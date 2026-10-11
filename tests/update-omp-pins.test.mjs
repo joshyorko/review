@@ -26,7 +26,7 @@ ARG OMP_SOURCE_SHA256=${"1".repeat(64)}
 ARG OMP_PATCH_SHA256=${"2".repeat(64)}
 ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=${"3".repeat(40)}
 ARG OMP_CLIPBOARD_PATCH_SHA256=${"4".repeat(64)}
-ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/bluefin/omp/clipboard-truthful-18.5.0.patch
+ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/bluefin/omp/clipboard-truthful-18.9.1.patch
 ARG OMP_NATIVES_VERSION=18.1.22
 ARG OMP_NATIVES_X86_64_SHA512=${"a".repeat(128)}
 ARG OMP_NATIVES_AARCH64_SHA512=${"b".repeat(128)}
@@ -82,7 +82,7 @@ test("updateContainerfile replaces the exact version, source, and native-addon p
 	assert.match(updated, new RegExp(`^ARG OMP_PATCH_SHA256=${"2".repeat(64)}$`, "m"));
 	assert.match(updated, new RegExp(`^ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=${"3".repeat(40)}$`, "m"));
 	assert.match(updated, new RegExp(`^ARG OMP_CLIPBOARD_PATCH_SHA256=${"4".repeat(64)}$`, "m"));
-	assert.match(updated, /^ARG OMP_CLIPBOARD_PATCH_PATH=\/usr\/local\/share\/bluefin\/omp\/clipboard-truthful-18\.5\.0\.patch$/m);
+	assert.match(updated, /^ARG OMP_CLIPBOARD_PATCH_PATH=\/usr\/local\/share\/bluefin\/omp\/clipboard-truthful-18\.9\.1\.patch$/m);
 	assert.match(updated, /^ARG OMP_NATIVES_VERSION=18\.2\.1$/m);
 	assert.match(updated, new RegExp(`^ARG OMP_NATIVES_X86_64_SHA512=${NATIVE_X64_SHA512}$`, "m"));
 	assert.match(updated, new RegExp(`^ARG OMP_NATIVES_AARCH64_SHA512=${NATIVE_ARM64_SHA512}$`, "m"));
@@ -113,7 +113,7 @@ test("syncOmpPins resolves stable tag source and both scoped npm integrity pins"
 	assert.match(appliance, new RegExp(`^ARG OMP_PATCH_SHA256=${"2".repeat(64)}$`, "m"));
 	assert.match(appliance, new RegExp(`^ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=${"3".repeat(40)}$`, "m"));
 	assert.match(appliance, new RegExp(`^ARG OMP_CLIPBOARD_PATCH_SHA256=${"4".repeat(64)}$`, "m"));
-	assert.match(appliance, /^ARG OMP_CLIPBOARD_PATCH_PATH=\/usr\/local\/share\/bluefin\/omp\/clipboard-truthful-18\.5\.0\.patch$/m);
+	assert.match(appliance, /^ARG OMP_CLIPBOARD_PATCH_PATH=\/usr\/local\/share\/bluefin\/omp\/clipboard-truthful-18\.9\.1\.patch$/m);
 	assert.match(appliance, new RegExp(`^ARG OMP_NATIVES_X86_64_SHA512=${NATIVE_X64_SHA512}$`, "m"));
 	assert.match(appliance, new RegExp(`^ARG OMP_NATIVES_AARCH64_SHA512=${NATIVE_ARM64_SHA512}$`, "m"));
 });
