@@ -1,11 +1,12 @@
 # RTK evaluation for Review (#167)
 
-This is an optional, bounded efficiency experiment. The current OMP 18.5.0
-baseline (upstream source commit
-`9348320cc4a30a7195d36a1f05a6c11bcb701a17`) already exposes `tool_call` input
-rewriting and `tool_result` content transforms. Its bash tool also caps inline
-output while retaining the full raw stream artifact when truncation occurs.
-RTK adds command-specific rewrite rules; it must not replace OMP's approval,
+This is an optional, bounded efficiency experiment. The initial 2026-10-06
+API review used OMP 18.5.0 (upstream source commit
+`9348320cc4a30a7195d36a1f05a6c11bcb701a17`); that is historical research,
+not the current appliance pin. The refreshed source candidate is based on
+`self-hosted@9dcb813d4acc800c6280a27bc630072a621ed2b7` and carries OMP 18.9.2
+from source commit `bd4dffd5e617ce732f8a14249b0be1e6c7621886`. RTK adds
+command-specific rewrite rules; it must not replace OMP's approval,
 execution, or raw-artifact behavior.
 
 ## Current upstream identity
@@ -142,7 +143,7 @@ No adoption default follows from the fixture alone. Decide default-on,
 opt-in/binary-only, or reject only after the required packaged OMP dogfood and
 the exact-head RTK-on/raw comparison complete.
 
-## Source package checkpoint (2026-10-06)
+## Source package checkpoint (2026-10-11)
 
 The source pins RTK v0.51.0 with separate x86_64-musl and aarch64-GNU archive
 digests, the matching upstream `hooks/pi/rtk.ts` digest, and the Apache-2.0
@@ -164,15 +165,18 @@ modify any `.omp` tree. Set `RTK_DISABLED=0` on either launcher to opt in:
 `bluefin review` and `just review-appliance` pass the variable by name only.
 When it is unset, both launchers add no override.
 
-When the ready #151 launch-profile resolver is composed, it must keep
-`RTK_DISABLED` as an explicit fixed-name host input and must not store or
-synthesize a profile default. The reviewed combined #358 source demonstrates
-that behavior, but its profile/collector code is not part of this #167 branch.
+The refreshed base already composes #328 host launch profiles, #358 launcher
+and diagnostic collector changes, and #351 clipboard provenance. The profile
+resolver treats `RTK_DISABLED` as an explicit fixed-name host input and does
+not store or synthesize a profile default. The launcher still forwards it only
+when set, by variable name; the Apptainer path clears ambient
+`APPTAINERENV_` and `SINGULARITYENV_` overrides before forwarding the explicit
+host setting. The #351 clipboard patch and its source-bound SBOM provenance
+remain alongside RTK in the shared appliance build.
 
 These are source/static contract changes only. No appliance image was built,
 and no packaged OMP hook load, runtime output comparison, or Factory gate was
-run. The separate clipboard package change at `77352dc` was not folded into
-this branch; it overlaps the Containerfile, SPDX generator, and appliance
-contracts and must be reconciled if it lands before this packet. No
-`.dockerignore` change was needed because the pinned hook is fetched and
-verified in the builder stage rather than copied from another source file.
+run. The hook remains opt-in, and no savings, adoption, or native fidelity
+claim is made. No `.dockerignore` change was needed because the pinned hook is
+fetched and verified in the builder stage rather than copied from another
+source file.
