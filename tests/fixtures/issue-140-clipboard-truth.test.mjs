@@ -7,16 +7,16 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const expectedArchiveSha256 = "06a569467c1793e2c7f9f3d20807b5ddca60d59633b9be0748ad05851ccf4c00";
-const expectedSourceCommit = "a4d6f0adc63dda4ccdf4d25c26422219820f865b";
+const expectedArchiveSha256 = "5dc800d5f5af80d775664915356f3073e7b9d110c9822aa63884b365eaf035fb";
+const expectedSourceCommit = "bd4dffd5e617ce732f8a14249b0be1e6c7621886";
 const expectedMemoryPatchSha256 = "d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f";
 const expectedPatchSha256 = "9e2f74c989f7d2f86d8dff73eb99a1888188f72c00b7ba7147758669021328b7";
-const expectedOmpVersion = "18.9.1";
+const expectedOmpVersion = "18.9.2";
 const sourceCheckout = process.env.REVIEW_OMP_SOURCE;
 const cachedArchive = process.env.ISSUE140_OMP_ARCHIVE;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const memoryPatchPath = path.join(repoRoot, "patches/omp/memory-backend-registration.patch");
-const patchPath = path.join(repoRoot, "patches/omp/clipboard-truthful-18.9.1.patch");
+const patchPath = path.join(repoRoot, "patches/omp/clipboard-truthful-18.9.2.patch");
 const containerfile = await readFile(path.join(repoRoot, "image/appliance/Containerfile"), "utf8");
 function pinnedArg(name) {
 	const matches = [...containerfile.matchAll(new RegExp(`^ARG ${name}=([^\\n]+)$`, "gm"))];
@@ -32,7 +32,7 @@ assert.equal(pinnedArg("OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"), expectedSourceCommi
 assert.equal(pinnedArg("OMP_CLIPBOARD_PATCH_SHA256"), expectedPatchSha256);
 assert.equal(
 	pinnedArg("OMP_CLIPBOARD_PATCH_PATH"),
-	"/usr/local/share/bluefin/omp/clipboard-truthful-18.9.1.patch",
+	"/usr/local/share/bluefin/omp/clipboard-truthful-18.9.2.patch",
 );
 assert.ok(!(sourceCheckout && cachedArchive), "set REVIEW_OMP_SOURCE or ISSUE140_OMP_ARCHIVE, not both");
 const patch = await readFile(patchPath);

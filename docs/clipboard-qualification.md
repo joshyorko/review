@@ -1,10 +1,10 @@
 # Qualify the #140 clipboard patch
 
-This source check runs in repository validation for the Review appliance's pinned OMP source. It verifies `/dump` and `/dump all` status messages against the exact OMP 18.9.1 handlers. It does not prove clipboard delivery or packaged behavior.
+This source check runs in repository validation for the Review appliance's pinned OMP source. It verifies `/dump` and `/dump all` status messages against the exact OMP 18.9.2 handlers. It does not prove clipboard delivery or packaged behavior.
 
 ## Pinned inputs
 
-The source archive is OMP 18.9.1 at commit `a4d6f0adc63dda4ccdf4d25c26422219820f865b`, with SHA-256 `06a569467c1793e2c7f9f3d20807b5ddca60d59633b9be0748ad05851ccf4c00`. The MemoryBackend registration patch remains a separate input with SHA-256 `d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f`. The clipboard candidate is [`patches/omp/clipboard-truthful-18.9.1.patch`](../patches/omp/clipboard-truthful-18.9.1.patch), with SHA-256 `9e2f74c989f7d2f86d8dff73eb99a1888188f72c00b7ba7147758669021328b7`.
+The source archive is OMP 18.9.2 at commit `bd4dffd5e617ce732f8a14249b0be1e6c7621886`, with SHA-256 `5dc800d5f5af80d775664915356f3073e7b9d110c9822aa63884b365eaf035fb`. The MemoryBackend registration patch remains a separate input with SHA-256 `d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f`. The clipboard candidate is [`patches/omp/clipboard-truthful-18.9.2.patch`](../patches/omp/clipboard-truthful-18.9.2.patch), with SHA-256 `9e2f74c989f7d2f86d8dff73eb99a1888188f72c00b7ba7147758669021328b7`.
 
 The source fixture verifies the OMP source and archive, both patch hashes, their order, and the patch path against `image/appliance/Containerfile`. The clipboard patch is bound to the current OMP commit; an OMP pin change must be requalified before the build accepts it.
 
