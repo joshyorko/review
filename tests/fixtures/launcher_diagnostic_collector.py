@@ -101,6 +101,9 @@ case "$mode" in
     printf 'container|died|%s|137|true|%s\\n' '${CONTAINER_ID}' "$owner"
     ;;
   clean)
+    printf 'container|init|%s|<nil>|<nil>|%s\\n' '${CONTAINER_ID}' "$owner"
+    printf 'container|start|%s|<nil>|<nil>|%s\\n' '${CONTAINER_ID}' "$owner"
+    printf 'container|attach|%s|<nil>|<nil>|%s\\n' '${CONTAINER_ID}' "$owner"
     printf 'container|create|%s|<nil>|<nil>|%s\\n' '${CONTAINER_ID}' "$owner"
     printf 'container|died|%s|0|false|%s\\n' '${CONTAINER_ID}' "$owner"
     ;;
@@ -243,6 +246,9 @@ if [[ ${1:-} == events ]]; then
       printf 'container|kill|@CONTAINER@|<nil>|<nil>|%s\n' "$owner"
       printf 'container|died|@CONTAINER@|0|false|%s\n' "$owner" ;;
     clean)
+      printf 'container|init|@CONTAINER@|<nil>|<nil>|%s\n' "$owner"
+      printf 'container|start|@CONTAINER@|<nil>|<nil>|%s\n' "$owner"
+      printf 'container|attach|@CONTAINER@|<nil>|<nil>|%s\n' "$owner"
       printf 'container|create|@CONTAINER@|<nil>|<nil>|%s\n' "$owner"
       printf 'container|died|@CONTAINER@|0|false|%s\n' "$owner" ;;
   esac
@@ -372,10 +378,22 @@ exit 0
         collector_field = collector_identity.split("collector_pid=", 1)[1].split()[0]
         if collector_field.isdigit():
             collector_pid = int(collector_field)
+            proc_stat = Path(f"/proc/{collector_pid}/stat")
             deadline = time.monotonic() + 2.0
-            while Path(f"/proc/{collector_pid}").exists() and time.monotonic() < deadline:
+            state = ""
+            while time.monotonic() < deadline:
+                try:
+                    state = proc_stat.read_text().rsplit(")", 1)[1].split()[0]
+                except (FileNotFoundError, IndexError):
+                    break
+                # A zombie has exited and cannot update the receipt. Some
+                # container PID 1 processes do not reap orphaned children.
+                if state in ("Z", "X", "x"):
+                    break
                 time.sleep(0.01)
-            self.assertFalse(Path(f"/proc/{collector_pid}").exists(), "collector report existed before collector settlement")
+            if proc_stat.exists():
+                state = proc_stat.read_text().rsplit(")", 1)[1].split()[0]
+                self.assertIn(state, ("Z", "X", "x"), "collector report existed before collector settlement")
         else:
             self.assertEqual(collector_field, "unavailable")
         return report

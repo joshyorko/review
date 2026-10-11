@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { emptyLedger, type Ledger, type OperationReceipt, type RunId, type CriterionId } from "./model.ts";
 import { criterionProven } from "./evidence.ts";
+import { evaluateWorkGraph, type WorkGraphObservation, type WorkGraphDecision } from "./graph.ts";
 
 export type FactoryAction = "inspect" | "patch" | "pr-ready";
 export type OutcomeStage = "verified-patch" | "pr-ready" | "merged-upstream";
@@ -16,6 +17,15 @@ export interface SelectedItem {
 	acceptance?: string;
 	base?: string;
 	baseRef?: string;
+	/** Explicit resolved operator target; source text cannot redirect it. */
+	targetRef?: string;
+	/** Entire acceptance is the explicitly requested mechanical PR predicate. */
+	observe?: "merged-upstream";
+	/** Authoritative snapshot facts, never accepted as execution permission. */
+	sourceState?: "open" | "closed" | "merged";
+	sourceDefaultRef?: string;
+	graphObservation?: boolean;
+	sourcePullRequests?: { key: string; identity: string; base: string; head: string; baseRef: string; state: "open" | "closed" | "merged"; implements: boolean }[];
 	head?: string;
 	url?: string;
 	overlaps: string[];
@@ -41,7 +51,7 @@ export interface BatchItem {
 	sessions: string[];
 }
 export interface Batch {
-	version: 2;
+	version: 2 | 3;
 	id: string;
 	revision: number;
 	selection: string;
@@ -55,6 +65,8 @@ export interface Batch {
 	dependencies: Prerequisite[];
 	scopeRevisions: { item: string; reason: string; at: string }[];
 	usage: { modelCalls: number; peakWorkers: number; inputTokens: number | null; outputTokens: number | null; cost: number | null };
+	/** Version-3 finite convergence contract. Older selected batches gain no authority. */
+	convergence?: { generation: string; observation?: WorkGraphObservation };
 }
 export function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 export function selectionIdentity(items: readonly SelectedItem[]): string {
@@ -78,12 +90,19 @@ export function validateDependencies(items: readonly SelectedItem[], dependencie
 	}
 	for (const key of keys) visit(key);
 }
-export function createBatch(items: SelectedItem[], options: { id: string; capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[] }): Batch {
+export function createBatch(items: SelectedItem[], options: { id: string; capacity: number; maxAttempts: number; maxTotalAttempts: number; mode: "once" | "retain"; dependencies?: Prerequisite[]; converge?: boolean }): Batch {
 	if (!items.length || items.length > 100) throw new Error("select between 1 and 100 explicit items");
+	if (options.converge !== undefined && typeof options.converge !== "boolean") throw new Error("converge must be explicit boolean intent");
 	items = structuredClone(items);
+	if (options.converge) for (const item of items) item.graphObservation = true;
+	if (options.converge && (items.length > 10 || items.some((item) => item.action === "pr-ready"))) throw new Error("finite convergence supports at most ten inspect/verified-patch outcomes; hosted PR-ready requires its qualified lifecycle");
 	for (const item of items) {
 		if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(item.repo) || !Number.isSafeInteger(item.number) || item.number < 1 || !["inspect", "patch", "pr-ready"].includes(item.action) || !["issue", "pr", "unknown"].includes(item.kind) || !Array.isArray(item.overlaps)) throw new Error("invalid selected identity/action; explicitly resolve selection");
+		if (options.converge && (typeof item.targetRef !== "string" || !item.targetRef.trim())) throw new Error(`finite convergence requires an explicit target ref for ${item.key}`);
+		if (options.converge && item.kind === "pr" && item.baseRef !== undefined && item.targetRef !== item.baseRef) throw new Error(`explicit target ref contradicts selected PR base for ${item.key}`);
 		if (item.requiredChecks !== undefined && (!Array.isArray(item.requiredChecks) || item.requiredChecks.length === 0 || item.requiredChecks.length > 8 || item.requiredChecks.some((check) => typeof check !== "string" || !check.trim() || check.length > 4096))) throw new Error("requiredChecks must contain one to eight bounded commands");
+		if (item.targetRef !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(item.targetRef) || item.targetRef.includes("..") || item.targetRef.endsWith(".lock"))) throw new Error("explicit target ref is unsupported");
+		if (item.observe !== undefined && (item.observe !== "merged-upstream" || item.kind !== "pr" || item.action !== "inspect" || !options.converge)) throw new Error("mechanical acceptance requires an explicitly selected PR inspection in convergence mode");
 		const key = `${item.repo.toLowerCase()}#${item.number}`;
 		if (item.key.toLowerCase() !== key) throw new Error("selected key does not match repository/item identity");
 		item.repo = item.repo.toLowerCase(); item.key = key;
@@ -97,22 +116,23 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 	const dependencies = (options.dependencies ?? []).map((edge) => ({ ...edge, item: edge.item.toLowerCase(), requires: edge.requires.toLowerCase() }));
 	validateDependencies(items, dependencies);
 	return {
-		version: 2, id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
+		version: options.converge ? 3 : 2, ...(options.converge ? { convergence: { generation: "G1" } } : {}), id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
 		mode: options.mode, control: "paused", capacity: options.capacity, maxAttempts: options.maxAttempts, maxTotalAttempts: options.maxTotalAttempts,
 		dependencies, scopeRevisions: [], usage: { modelCalls: 0, peakWorkers: 0, inputTokens: null, outputTokens: null, cost: null },
 		items: items.map((selected) => {
 			const overlap = selected.overlaps.find((key) => items.some((item) => item.key === key));
 			const blocker = selected.blocker ?? (overlap ? `overlapping selected work ${overlap}; resolve scope explicitly before execution` : undefined);
-			const acceptanceReference = `Satisfy ${selected.key} acceptance @ ${selected.acceptanceRevision ?? "unresolved"}`;
+			const acceptanceReference = selected.observe ? `Observe ${selected.key} ${selected.observe} @ ${selected.acceptanceRevision ?? "unresolved"}` : `Satisfy ${selected.key} acceptance @ ${selected.acceptanceRevision ?? "unresolved"}`;
 			return {
 				selected, stage: blocker ? "BLOCKED" : "QUEUED", blocker, attempts: 0, operation: undefined, operations: [], sessions: [],
 				ledger: emptyLedger(`${options.id}:${digest(selected.key).slice(0, 16)}` as RunId, {
 					statement: acceptanceReference, nonGoals: ["unselected work", "merge", "deploy", "publish"],
 					permittedEffects: selected.action === "inspect" ? ["read"] : ["read", "write"],
-					finishAuthority: selected.action, appetite: { tasks: 1, attemptsPerTask: options.maxAttempts },
+					finishAuthority: options.converge && selected.action === "patch" ? "verified-patch" : selected.action, appetite: { tasks: 1, attemptsPerTask: options.maxAttempts },
 				}, [{
 					id: "A1" as CriterionId, statement: acceptanceReference, mandatory: true,
 					...(selected.acceptanceRevision ? { assumptions: [{ kind: "acceptance-revision" as const, value: selected.acceptanceRevision }] } : {}),
+					...(selected.observe && selected.itemId ? { observation: { kind: "github-pull-request" as const, identity: selected.itemId, predicate: selected.observe } } : {}),
 				}], {
 					repo: selected.repo,
 					base: selected.base ?? "unavailable",
@@ -123,6 +143,10 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 	};
 }
 export function dependencyBlocker(batch: Batch, key: string): string | undefined {
+	if (batch.convergence) {
+		const node = evaluateBatchGraph(batch).nodes.find((entry) => entry.key === key);
+		return node?.blockers.length ? node.blockers.join("; ") : undefined;
+	}
 	for (const edge of batch.dependencies.filter((edge) => edge.item === key)) {
 		const prerequisite = batch.items.find((item) => item.selected.key === edge.requires);
 		if (!prerequisite) return `missing prerequisite ${edge.requires}`;
@@ -135,23 +159,44 @@ export function dependencyBlocker(batch: Batch, key: string): string | undefined
 	return undefined;
 }
 export function batchItemProofCurrent(item: BatchItem): boolean {
+	if (item.selected.observe) return item.stage === "DONE" && item.ledger.criteria.some((criterion) => criterion.observation && criterionProven(item.ledger, criterion.id));
 	const proof = item.proof;
 	if (item.stage !== "DONE" || proof === undefined || proof.acceptanceRevision !== item.selected.acceptanceRevision || proof.subject !== item.selected.head) return false;
 	return item.ledger.tasks.some((task) => task.state === "DONE" && criterionProven(item.ledger, task.criterionId));
 }
 
+
 export function batchConverged(batch: Batch): boolean {
+	if (batch.convergence) return batch.scopeRevisions.length === 0 && evaluateBatchGraph(batch).verdict === "CONVERGED";
 	return batch.items.length > 0 && batch.scopeRevisions.length === 0 && batch.items.every((item) =>
 		batchItemProofCurrent(item) && dependencyBlocker(batch, item.selected.key) === undefined,
 	);
 }
+export function evaluateBatchGraph(batch: Batch): WorkGraphDecision {
+	const generation = batch.convergence?.generation ?? "G1";
+	const captured = batch.convergence?.observation;
+	const nodes = batch.items.map((item) => {
+		const observed = captured?.nodes.find((node) => node.key === item.selected.key);
+		const moved = observed?.subject && (observed.subject.base !== item.selected.base || observed.subject.head !== item.selected.head);
+		const changedAcceptance = observed && observed.acceptanceRevision !== item.selected.acceptanceRevision;
+		const unavailable = observed?.state === "UNKNOWN" || moved || changedAcceptance;
+		return { key: item.selected.key, generation: item.ledger.generation, subject: item.ledger.subject, required: true,
+			target: item.selected.observe ?? "verified-patch" as const,
+			state: unavailable && item.stage !== "RUNNING" ? "UNKNOWN" as const : item.stage === "CANCELLED" ? "BLOCKED" as const : item.stage,
+			proof: item.selected.observe ?? item.proof?.stage, proofCurrent: batchItemProofCurrent(item),
+			blocker: unavailable ? moved ? "exact repository subject moved; rebind affected proof before mutation" : changedAcceptance ? "captured acceptance revision is missing or changed; re-observe the original contract" : observed?.blocker : item.blocker };
+	});
+	return evaluateWorkGraph({ generation, nodes: [...nodes, ...(captured?.nodes.filter((node) => !batch.items.some((item) => item.selected.key === node.key)) ?? [])],
+		relations: [...(captured?.relations ?? []), ...batch.dependencies.map((edge) => ({ from: edge.item, to: edge.requires, kind: "requires" as const, authority: "authoritative" as const, source: "explicit selected dependency", stage: edge.stage }))] });
+}
 export function batchSummary(batch: Batch, root: string): string {
+	const graph = batch.convergence ? evaluateBatchGraph(batch) : undefined;
 	const excluded = batch.items.filter((item) => item.stage === "EXCLUDED").length;
 	const scope = batch.items.length - excluded;
-	const proven = batch.items.filter(batchItemProofCurrent).length;
-	const active = batch.items.filter((item) => ["QUEUED", "RUNNING", "VERIFY"].includes(item.stage)).length;
-	const blocked = batch.items.filter((item) => item.stage === "BLOCKED").length;
-	const unknown = batch.items.filter((item) => item.stage === "UNKNOWN" || (item.stage === "DONE" && !batchItemProofCurrent(item))).length;
+	const proven = graph ? graph.nodes.filter((node) => node.required && node.decision === "DONE").length : batch.items.filter(batchItemProofCurrent).length;
+	const active = graph ? graph.nodes.filter((node) => node.required && ["READY", "RUNNING", "VERIFY"].includes(node.decision)).length : batch.items.filter((item) => ["QUEUED", "RUNNING", "VERIFY"].includes(item.stage)).length;
+	const blocked = graph ? graph.nodes.filter((node) => node.required && node.decision === "BLOCKED").length : batch.items.filter((item) => item.stage === "BLOCKED").length;
+	const unknown = graph ? graph.nodes.filter((node) => node.required && node.decision === "UNKNOWN").length : batch.items.filter((item) => item.stage === "UNKNOWN" || (item.stage === "DONE" && !batchItemProofCurrent(item))).length;
 	const cancelled = batch.items.filter((item) => item.stage === "CANCELLED").length;
 	const lines = [
 		`Factory ${batch.id}: ${batchConverged(batch) ? "CONVERGED" : batch.control} · ${proven}/${scope} proven · capacity ${batch.capacity}`,
@@ -159,7 +204,7 @@ export function batchSummary(batch: Batch, root: string): string {
 		`State: ${root}; ${batch.mode === "once" ? "run once (unfinished work retained)" : "keep for resume"}. No detached service; process termination interrupts work.`,
 		...batch.items.flatMap((item) => {
 			const attempts = item.ledger.tasks.flatMap((task) => task.attempts.map((attempt) => ({ task, attempt })));
-			const stage = item.stage === "DONE" && !batchItemProofCurrent(item) ? "UNKNOWN (stored proof is not current)" : item.stage;
+				const stage = graph?.nodes.find((node) => node.key === item.selected.key)?.decision ?? (item.stage === "DONE" && !batchItemProofCurrent(item) ? "UNKNOWN (stored proof is not current)" : item.stage);
 			return [
 				`${item.selected.key} ${item.selected.action}: ${stage}${item.blocker ? ` — ${item.blocker}` : ""}${item.workspace ? ` · ${item.workspace}` : ""}${item.operation ? ` · ${item.operation.phase} ${item.operation.state} (${item.operation.id})` : ""}`,
 				...attempts.flatMap(({ task, attempt }) => {
@@ -183,5 +228,11 @@ export function batchSummary(batch: Batch, root: string): string {
 		`Usage: ${batch.usage.modelCalls} observed model calls; tokens/cost ${batch.usage.cost === null ? "unknown" : batch.usage.cost}. Stop-dispatch limits do not bound in-flight cost.`,
 		`/factory resume ${batch.id} · /factory inspect ${batch.id} · /factory pause ${batch.id} · /factory stop ${batch.id}`,
 	];
+	if (graph) {
+		lines.splice(1, 0, `Convergence: ${graph.verdict}; READY ${graph.ready.join(", ") || "none"}`,
+			...graph.nodes.filter((node) => node.required).map((node) => `Graph ${node.key}: ${node.decision}${node.blockers.length ? `; ${node.blockers.join("; ")}` : ""}`),
+			...graph.softHints.map((hint) => `Inferred, non-authorizing: ${hint}`),
+			...batch.items.flatMap((item) => item.ledger.observations?.slice(-1).map((proof) => `Mechanically observed ${item.selected.key} ${proof.source.predicate}: ${proof.status}; ${proof.source.identity}@${proof.revision}. No worker/attempt.`) ?? []));
+	}
 	return lines.join("\n");
 }

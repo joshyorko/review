@@ -1,4 +1,4 @@
-# shellcheck shell=bash
+#!/usr/bin/env bash
 # Host launch intent only. Profiles are data, never shell input.
 set -euo pipefail
 
@@ -175,8 +175,6 @@ review_launch_resolve() {
   REVIEW_LAUNCH_QUIET=0
   REVIEW_LAUNCH_FILTERED=0
   REVIEW_LAUNCH_CUSTOM=0
-  # Shared with bin/bluefin credential resolution after this sourced helper returns.
-  # shellcheck disable=SC2034
   REVIEW_LAUNCH_AUTH_EXPLICIT=0
   REVIEW_LAUNCH_ARGS=()
   declare -gA REVIEW_LAUNCH_PLAN=([version]=1 [runtime]=auto [github_auth]=auto [inherit_omp]=false [factory_enabled]=false [factory_capacity]=2 [env_groups]="" [env_names]="")
@@ -275,8 +273,6 @@ review_launch_resolve() {
       REVIEW_LAUNCH_PLAN["$field"]="${cli[$field]}"
     elif [[ -v "$name" ]]; then REVIEW_LAUNCH_PLAN["$field"]="${!name}"; fi
     if [[ "$field" == github_auth ]] && { [[ -v "cli[$field]" ]] || [[ -v "$name" ]]; }; then
-      # Shared with bin/bluefin credential resolution after this sourced helper returns.
-      # shellcheck disable=SC2034
       REVIEW_LAUNCH_AUTH_EXPLICIT=1
       REVIEW_LAUNCH_CUSTOM=1
     fi

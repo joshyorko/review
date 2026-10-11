@@ -10,10 +10,12 @@ import {
 	batchConverged,
 	batchItemProofCurrent,
 	dependencyBlocker,
+	evaluateBatchGraph,
 	type Batch,
 	type BatchItem,
 	type OutcomeStage,
 } from "../core/batch.ts";
+import type { WorkGraphDecision } from "../core/graph.ts";
 import type {
 	Attempt,
 	EvidenceReceipt,
@@ -130,6 +132,7 @@ export interface ProjectedClaim {
 }
 
 export interface ProjectedItem {
+	readonly observation?: { readonly status: "proven" | "unproved" | "unknown"; readonly source: string; readonly revision: string };
 	readonly key: string;
 	readonly repo: string;
 	readonly number: number;
@@ -172,6 +175,7 @@ export interface ProjectedUsage {
 }
 
 export interface ProjectedBatch {
+	readonly convergence?: WorkGraphDecision;
 	readonly id: string;
 	readonly control: Batch["control"];
 	readonly converged: boolean;
@@ -456,9 +460,11 @@ function discardEligible(batch: Batch, options: ProjectionOptions): boolean {
 
 /** Project one persisted item without performing any Factory action. */
 export function projectItem(batch: Batch, item: BatchItem, options: ProjectionOptions = {}): ProjectedItem {
-	const proofCurrent = batchItemProofCurrent(item);
+	const graph = batch.convergence ? evaluateBatchGraph(batch) : undefined;
+	const graphNode = graph?.nodes.find((node) => node.key === item.selected.key);
+	const proofCurrent = graphNode ? graphNode.decision === "DONE" : batchItemProofCurrent(item);
 	const storedStage = item.stage;
-	const stage: ProjectedStage = storedStage === "DONE" && !proofCurrent ? "UNKNOWN" : storedStage;
+	const stage: ProjectedStage = graphNode && storedStage !== "EXCLUDED" && storedStage !== "CANCELLED" ? graphNode.decision === "READY" ? "QUEUED" : graphNode.decision : storedStage === "DONE" && !proofCurrent ? "UNKNOWN" : storedStage;
 	const dependency = dependencyBlocker(batch, item.selected.key);
 	const dependencies = batch.dependencies
 		.filter((edge) => edge.item === item.selected.key)
@@ -486,7 +492,7 @@ export function projectItem(batch: Batch, item: BatchItem, options: ProjectionOp
 		acceptanceRevision: item.proof?.acceptanceRevision ?? item.selected.acceptanceRevision ?? "unknown",
 		subject: item.proof?.subject ?? item.selected.head ?? item.selected.base ?? "unknown",
 		digest: item.proof?.digest ?? "unknown",
-		stage: item.proof?.stage ?? "unknown",
+		stage: item.selected.observe ?? item.proof?.stage ?? "unknown",
 		artifacts: [...(item.proof?.artifacts ?? [])],
 		reviewerSession: item.proof?.reviewerSession ?? "unknown",
 		...(item.proof?.tree === undefined ? {} : { tree: item.proof.tree }),
@@ -514,6 +520,12 @@ export function projectItem(batch: Batch, item: BatchItem, options: ProjectionOp
 	if (!options.readOnly && item.selected.action !== "inspect" && ["BLOCKED", "QUEUED", "CANCELLED"].includes(item.stage) && !uncertainOperation) actions.push("exclude");
 	const next = nextSafeAction(batch, item, stage, dependency, claims, options.readOnly === true, options.activeItemKeys?.includes(item.selected.key) === true, retry);
 	const details = detailRows(batch, item, stage, proof, dependency, claims, attemptHistory, historyForDetails, options.readOnly === true);
+	if (graph) {
+		details.push(`convergence: ${graph.verdict}; ${graphNode?.decision ?? "UNKNOWN"}`,
+			...(batch.convergence?.observation?.relations.filter((edge) => edge.from === item.selected.key || edge.to === item.selected.key).map((edge) => `${edge.authority === "authoritative" ? "Authoritative" : "Inferred, non-authorizing"} ${edge.kind}: ${edge.from} -> ${edge.to}; ${edge.source}`) ?? []));
+	}
+	const observation = item.ledger.observations?.findLast((proof) => proof.criterionId === item.ledger.criteria[0]?.id);
+	if (observation) details.push(`Mechanically observed ${observation.source.predicate}: ${observation.status}; ${observation.source.identity}@${observation.revision}. No worker or attempt.`);
 	const activeKeys = options.activeItemKeys?.map((key) => key.toLowerCase());
 	const executionLiveness = stage !== "RUNNING"
 		? "not-running" as const
@@ -521,6 +533,7 @@ export function projectItem(batch: Batch, item: BatchItem, options: ProjectionOp
 			? "unknown" as const
 			: activeKeys.includes(item.selected.key.toLowerCase()) ? "active" as const : "unknown" as const;
 	return {
+		...(observation ? { observation: { status: observation.status, source: observation.source.identity, revision: observation.revision } } : {}),
 		key: item.selected.key,
 		repo: item.selected.repo,
 		number: item.selected.number,
@@ -568,13 +581,14 @@ export function projectBatch(batch: Batch, options: ProjectionOptions = {}): Pro
 	if (!options.readOnly && discardEligible(batch, options)) actions.push("discard");
 	return {
 		id: batch.id,
+		...(batch.convergence ? { convergence: evaluateBatchGraph(batch) } : {}),
 		control: batch.control,
 		converged,
-		proven: batch.items.filter(batchItemProofCurrent).length,
+		proven: items.filter((item) => item.proof.current).length,
 		total: batch.items.length,
 		inScope: batch.items.filter((item) => item.stage !== "EXCLUDED").length,
 		running: batch.items.filter((item) => item.stage === "RUNNING").length,
-		blocked: batch.items.filter((item) => item.stage === "BLOCKED").length,
+		blocked: items.filter((item) => item.stage === "BLOCKED").length,
 		unknown: items.filter((item) => item.stage === "UNKNOWN").length,
 		capacity: batch.capacity,
 		attempts,
