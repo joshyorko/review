@@ -70,6 +70,13 @@ export type PersistedCiSkippedItem = {
 	readonly ciEvidenceSource: CiEvidenceSource;
 	readonly observedAt: number;
 };
+export type PersistedIncompleteFilesItem = {
+	readonly repo: string;
+	readonly number: number;
+	readonly headSha?: string;
+	readonly reason: "incomplete changed-file list";
+	readonly observedAt: number;
+};
 type ReconcileObservation =
 	| { readonly kind: "unknown" }
 	| { readonly kind: "settled"; readonly outcome: "success" }
@@ -86,6 +93,8 @@ export interface PersistedRepositoryBatch {
 	readonly totalItems: number;
 	/** Fresh CI exclusions retained separately from completed work. */
 	readonly skippedItems?: readonly PersistedCiSkippedItem[];
+	/** Candidate-selection exclusions retained separately from CI evidence. */
+	readonly excludedItems?: readonly PersistedIncompleteFilesItem[];
 	readonly state: RepositoryBatchState;
 	readonly startedAt: number;
 	readonly waveStartedAt: number;
@@ -1636,9 +1645,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (args === "" || args === "status") {
 			restoreClaimWaves();
 			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
-			const skippedSummary = (batch: PersistedRepositoryBatch): string => (batch.skippedItems?.length ?? 0) > 0
-				? `\n${batch.skippedItems!.slice(0, 5).map((item) => `  Skipped CI: ${item.repo}#${item.number} head=${item.headSha} ci=${item.ciStatus} source=${item.ciEvidenceSource} observedAt=${item.observedAt}`).join("\n")}${batch.skippedItems!.length > 5 ? `\n  ${batch.skippedItems!.length - 5} additional CI skips omitted` : ""}`
-				: "";
+			const skippedSummary = (batch: PersistedRepositoryBatch): string => {
+				const ci = (batch.skippedItems ?? []).slice(0, 5).map((item) => `  Skipped CI: ${item.repo}#${item.number} head=${item.headSha} ci=${item.ciStatus} source=${item.ciEvidenceSource} observedAt=${item.observedAt}`);
+				const incompleteFiles = (batch.excludedItems ?? []).slice(0, 5).map((item) => `  Excluded candidate: ${item.repo}#${item.number}${item.headSha ? ` head=${item.headSha}` : ""} reason=${item.reason} observedAt=${item.observedAt}`);
+				const omittedCi = Math.max(0, (batch.skippedItems?.length ?? 0) - 5);
+				const omittedFiles = Math.max(0, (batch.excludedItems?.length ?? 0) - 5);
+				const lines = [...ci, ...incompleteFiles,
+					...(omittedCi ? [`  ${omittedCi} additional CI skips omitted`] : []),
+					...(omittedFiles ? [`  ${omittedFiles} additional incomplete-file exclusions omitted`] : []),
+				];
+				return lines.length > 0 ? `\n${lines.join("\n")}` : "";
+			};
 			const batches = [...recoveryBatches.values()].map((batch) =>
 				`${batch.id} ${batch.state}${batch.error ? ` — ${batch.error}` : ""}${skippedSummary(batch)}`);
 			return [
@@ -1933,7 +1950,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		rememberWaveEvidence(ctx);
 	};
 
-	const startRepositoryBatch = async (ctx: CtxLike, kind: RepositoryBatchKind, items: readonly QueueItem[]) => {
+	const startRepositoryBatch = async (
+		ctx: CtxLike,
+		kind: RepositoryBatchKind,
+		items: readonly QueueItem[],
+		selection: { totalItems?: number; excludedItems?: readonly PersistedIncompleteFilesItem[] } = {},
+	) => {
 		const generation = ++batchRequestGeneration;
 		if (activeBatch?.state === "running" || activeBatch?.state === "paused") {
 			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
@@ -1964,7 +1986,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			waves,
 			currentWave: 0,
 			completedItems: 0,
-			totalItems: items.length,
+			totalItems: selection.totalItems ?? items.length,
+			excludedItems: selection.excludedItems,
 			state: mode.paused ? "paused" : "running",
 			startedAt,
 			waveStartedAt: startedAt,
@@ -2030,7 +2053,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		);
 	};
 
-	const filterUnsupportedSlayItems = (ctx: CtxLike, items: readonly QueueItem[]): QueueItem[] => {
+	const filterUnsupportedSlayItems = (
+		ctx: CtxLike,
+		items: readonly QueueItem[],
+		excludedItems?: PersistedIncompleteFilesItem[],
+	): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
 			if (item.type !== "pr") {
@@ -2043,7 +2070,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				continue;
 			}
 			if (item.changedFilesComplete === false) {
-				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: complete changed-file list unavailable`, "warning");
+				const excluded: PersistedIncompleteFilesItem = {
+					repo: item.repo,
+					number: item.id,
+					headSha: item.headSha,
+					reason: "incomplete changed-file list",
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}${item.headSha ? ` head=${item.headSha}` : ""}: ${excluded.reason}`, "warning");
 				continue;
 			}
 			eligible.push(item);
@@ -2071,11 +2106,32 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify("No queue items available to slay", "warning");
 			return;
 		}
-		const supported = filterUnsupportedSlayItems(ctx, candidates);
-		if (supported.length === 0) return;
-		const items = filterCompletedIssueSlayItems(ctx, supported);
+		const excludedItems: PersistedIncompleteFilesItem[] = [];
+		const eligible = filterUnsupportedSlayItems(ctx, candidates, excludedItems);
+		if (eligible.length === 0) {
+			if (excludedItems.length > 0) {
+				const startedAt = Date.now();
+				mode.clearSelected();
+				persist();
+				persistBatch(ctx, {
+					version: 1,
+					id: `batch-${startedAt.toString(36)}`,
+					kind: "slay",
+					waves: [],
+					currentWave: 0,
+					completedItems: 0,
+					totalItems: candidates.length,
+					state: "complete",
+					startedAt,
+					waveStartedAt: startedAt,
+					excludedItems,
+				});
+			}
+			return;
+		}
+		const items = filterCompletedIssueSlayItems(ctx, eligible);
 		if (items.length === 0) return;
-		await startRepositoryBatch(ctx, "slay", items);
+		await startRepositoryBatch(ctx, "slay", items, { totalItems: candidates.length, excludedItems });
 	};
 
 	const startAutoslay = async (ctx: CtxLike) => {
