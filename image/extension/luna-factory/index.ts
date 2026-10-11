@@ -210,11 +210,12 @@ const FACTORY_TOOL_NAMES = [
 	"luna_factory_completion",
 ] as const;
 const FACTORY_START_MODES = ["inspect", "patch", "pr-ready"] as const;
+const FACTORY_CONVERGE_MODES = ["inspect", "patch"] as const;
 const FACTORY_CLAIMS_COMMANDS = ["status", "inspect", "reconcile"] as const;
-const FACTORY_START_COMMANDS = ["start", "selected", "run"] as const;
-const FACTORY_BATCH_COMMANDS = ["start", "selected", "run", "status", "inspect", "claims", "pause", "resume", "stop", "retry", "exclude", "export", "discard"] as const;
-const FACTORY_BATCH_ID_COMMANDS = ["status", "inspect", "resume", "pause", "stop", "retry", "exclude", "export", "discard"] as const;
-const FACTORY_COMPLETION_VERBS = ["status", "start", "selected", "run", "inspect", "resume", "pause", "drain", "abort", "stop", "retry", "exclude", "export", "discard", "claims", "help", "--help", "debug", "--debug", "why", "--"] as const;
+const FACTORY_START_COMMANDS = ["start", "selected", "run", "converge"] as const;
+const FACTORY_BATCH_COMMANDS = ["start", "selected", "run", "converge", "reconcile", "status", "inspect", "claims", "pause", "resume", "stop", "retry", "exclude", "export", "discard"] as const;
+const FACTORY_BATCH_ID_COMMANDS = ["status", "inspect", "resume", "pause", "stop", "retry", "exclude", "export", "discard", "reconcile"] as const;
+const FACTORY_COMPLETION_VERBS = ["status", "start", "selected", "run", "converge", "reconcile", "inspect", "resume", "pause", "drain", "abort", "stop", "retry", "exclude", "export", "discard", "claims", "help", "--help", "debug", "--debug", "why", "--"] as const;
 
 function text(value: string): ToolContent[] {
 	return [{ type: "text", text: value }];
@@ -1298,6 +1299,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3,
 			mode: settings.mode ?? "once",
 			dependencies: settings.dependencies,
+			converge: settings.converge,
 		});
 		const preflight = service.status(batch.id);
 		notifyCommand(ctx, preflight);
@@ -1335,10 +1337,17 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 				items = payload.items as SelectedItem[];
 				settings = payload as Partial<BatchOptions>;
 			} else {
-				if (!FACTORY_START_MODES.includes(id as typeof FACTORY_START_MODES[number])) throw new Error("choose start inspect|patch|pr-ready; selection never grants merge/deploy authority");
+				if (verb === "converge" && !FACTORY_CONVERGE_MODES.includes(id as typeof FACTORY_CONVERGE_MODES[number])) throw new Error("choose converge inspect|patch; target ref must be explicit before observation or dispatch");
+				if (verb !== "converge" && !FACTORY_START_MODES.includes(id as typeof FACTORY_START_MODES[number])) throw new Error("choose start inspect|patch|pr-ready; selection never grants merge/deploy authority");
 				items = selectedFactoryItems(id as FactoryAction);
+				if (verb === "converge") {
+					if (rest.length !== 2 || rest[0] !== "--target-ref") throw new Error("usage: /factory converge inspect|patch --target-ref <branch>; target ref must be explicit before observation or dispatch");
+					const targetRef = rest[1]!;
+					items = items.map((item) => ({ ...item, targetRef }));
+					settings.converge = true;
+				}
 			}
-			const batch = await service.submit(items, { capacity: settings.capacity ?? service.capacity, maxAttempts: settings.maxAttempts ?? 3, maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3, mode: settings.mode ?? "once", dependencies: settings.dependencies });
+			const batch = await service.submit(items, { capacity: settings.capacity ?? service.capacity, maxAttempts: settings.maxAttempts ?? 3, maxTotalAttempts: settings.maxTotalAttempts ?? items.length * 3, mode: settings.mode ?? "once", dependencies: settings.dependencies, converge: settings.converge });
 			const preflight = service.status(batch.id);
 			notifyCommand(ctx, preflight);
 			await service.resume(batch.id, ctx);
@@ -1348,6 +1357,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		if (verb === "status" || verb === "inspect") return service.status(id);
 		if (!id) throw new Error("an exact batch id is required; use /factory status");
 		if (verb === "pause" || verb === "stop") await service.control(id, verb);
+		else if (verb === "reconcile") { await service.reconcile(id); if (!ctx.hasUI) await service.waitForIdle(); }
 		else if (verb === "resume") { await service.resume(id, ctx); if (!ctx.hasUI) await service.waitForIdle(); }
 		else if (verb === "retry") { if (!rest[0]) throw new Error("retry requires an exact item key"); await service.retry(id, rest[0], ctx); if (!ctx.hasUI) await service.waitForIdle(); }
 		else if (verb === "exclude") service.exclude(id, rest[0] ?? "", rest.slice(1).join(" "));
@@ -1371,6 +1381,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		if (tokens.length === 1) {
 			const [verb] = tokens;
 			if (verb === "start" || verb === "selected") return choices(FACTORY_START_MODES);
+			if (verb === "converge") return choices(FACTORY_CONVERGE_MODES);
 			if (verb === "claims") return choices(FACTORY_CLAIMS_COMMANDS);
 			if (FACTORY_BATCH_ID_COMMANDS.includes(verb as typeof FACTORY_BATCH_ID_COMMANDS[number])) {
 				const ids = retainedBatchIds(factoryStateRoot(env), current);
@@ -1471,7 +1482,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					return;
 				}
 				if (args === "help" || args === "--help") {
-					notifyCommand(ctx, "Selected batches: /factory (dashboard), Review Shift+F, /factory start inspect|patch|pr-ready. Controls: status|inspect <batch>, pause|resume|stop <batch>, retry|exclude <batch> <item>, claims status|reconcile, export|discard <batch>. Diagnostics: /factory debug. Conversational objective: /factory -- <objective>.");
+					notifyCommand(ctx, "Selected batches: /factory (dashboard), Review Shift+F, /factory start inspect|patch|pr-ready. Finite convergence: /factory converge inspect|patch --target-ref <branch> over the explicit Review selection. Headless /factory run JSON supplies targetRef on every convergence item. Controls: status|inspect <batch>, reconcile <batch>, pause|resume|stop <batch>, retry|exclude <batch> <item>, claims status|reconcile, export|discard <batch>. Diagnostics: /factory debug. Conversational objective: /factory -- <objective>.");
 					return;
 				}
 				if (args === "debug" || args === "--debug") {
