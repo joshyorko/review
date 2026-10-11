@@ -34,6 +34,8 @@ args = sys.argv[1:]
 with open(os.environ["FIXTURE_CALLS"], "a") as f:
     f.write(json.dumps({"tool": tool, "args": args}) + "\n")
 if tool == "podman":
+    if args == ["info", "--runtime=krun", "--format", "{{.Host.OCIRuntime.Name}}"]:
+        print("krun"); sys.exit(0)
     if args[0] in ("info", "system", "pull"): sys.exit(0)
     if args[:2] == ["image", "exists"]: sys.exit(0)
     if args[:2] == ["image", "inspect"]:
@@ -157,6 +159,10 @@ print(os.environ['FIXTURE_STORED_TOKEN'])
             return []
         return [json.loads(line) for line in self.calls_path.read_text().splitlines()]
 
+    def assert_registered_krun_probe(self):
+        expected = ["info", "--runtime=krun", "--format", "{{.Host.OCIRuntime.Name}}"]
+        self.assertIn(expected, [call["args"] for call in self.calls() if call["tool"] == "podman"])
+
     def test_explicit_apptainer_never_probes_krun(self):
         result = self.receipt(self.run_launch("--runtime", "apptainer", "owner/repo"))
         self.assertEqual(result["runtime"], "apptainer")
@@ -176,6 +182,7 @@ print(os.environ['FIXTURE_STORED_TOKEN'])
         self.assertEqual(result["controls"]["LUNA_FACTORY_ENABLED"], "1")
         self.assertEqual(result["controls"]["LUNA_FACTORY_CAPACITY"], "100")
         self.assertEqual(sum("--factory-verifier-probe" in c["args"] for c in self.calls()), 1)
+        self.assert_registered_krun_probe()
 
     def test_apptainer_factory_probe_keeps_the_verifier_device_mount(self):
         # The probe intentionally starts with a clean environment, so its
@@ -230,6 +237,7 @@ if '--factory-verifier-probe' in args or (args and args[0] == 'exec'):
         self.env["REVIEW_LAUNCH_PROFILE"] = "personal"
         self.assertEqual(self.receipt(self.run_launch("owner/repo"))["runtime"], "apptainer")
         self.assertEqual(self.receipt(self.run_launch("--launcher-profile", "none", "owner/repo"))["runtime"], "podman")
+        self.assert_registered_krun_probe()
 
     def test_explicit_krun_rejects_sif_before_any_runtime(self):
         sif = self.root / "review.sif"
