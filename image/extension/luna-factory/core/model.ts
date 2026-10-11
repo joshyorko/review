@@ -62,6 +62,26 @@ export interface Criterion {
 	readonly mandatory: boolean;
 	/** Current authoritative values; only proof declaring a changed value becomes stale. */
 	readonly assumptions?: readonly ProofAssumption[];
+	/** Explicitly declared mechanically decidable criterion, never inferred by a worker. */
+	readonly observation?: ObservationSource;
+}
+
+export interface ObservationSource {
+	readonly kind: "github-pull-request";
+	readonly identity: string;
+	readonly predicate: "merged-upstream";
+}
+
+/** Trusted read-only proof, distinct from every native execution receipt. */
+export interface ObservedProof {
+	readonly criterionId: CriterionId;
+	readonly generation: GenerationId;
+	readonly subject: Subject;
+	readonly source: ObservationSource;
+	readonly revision: string;
+	readonly status: "proven" | "unproved" | "unknown";
+	readonly note: string;
+	readonly assumptions: readonly ProofAssumption[];
 }
 
 /** The exact thing evidence is about. A git SHA and a semantic goal are different identities. */
@@ -108,7 +128,9 @@ export interface Routing {
 /** Load-bearing state a proof explicitly depends on; absent declarations do not invalidate it. */
 export type ProofAssumption =
 	| { readonly kind: "acceptance-revision"; readonly value: string }
-	| { readonly kind: "dependency-outcome"; readonly taskId: TaskId; readonly value: string };
+	| { readonly kind: "dependency-outcome"; readonly taskId: TaskId; readonly value: string;
+		/** Exact external outcome represented by this same canonical assumption. */
+		readonly binding?: { readonly subject: Subject; readonly stage: "verified-patch" | "pr-ready" | "merged-upstream"; readonly tree?: string } };
 
 /** A checked predicate preserves positive and negative observations verbatim. */
 export interface PredicateEvidence {
@@ -237,6 +259,10 @@ export interface Ledger {
 	readonly goal: Goal;
 	readonly criteria: readonly Criterion[];
 	readonly tasks: readonly TaskRecord[];
+	/** Bounded observation history. Latest authoritative state controls current proof. */
+	readonly observations?: readonly ObservedProof[];
+	/** #130 maps current external graph facts into the existing #145 vocabulary. */
+	readonly assumptionValues?: readonly ProofAssumption[];
 	readonly control: RunControl;
 	/**
 	 * The exact subject current proof is about.
@@ -258,6 +284,7 @@ export interface Ledger {
  * writer is rejected instead of overwriting a newer decision.
  */
 export type LedgerEvent =
+	| { readonly kind: "record_observation"; readonly expectedRevision: number; readonly observation: ObservedProof }
 	| { readonly kind: "record_candidate"; readonly expectedRevision: number; readonly candidate: Candidate }
 	| {
 			readonly kind: "start_attempt";

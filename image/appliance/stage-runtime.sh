@@ -63,10 +63,11 @@ for binary in "$@"; do
   binaries+=("$binary")
 done
 
-# git's helpers live on GIT_EXEC_PATH. Only the HTTPS remote helper is kept:
-# the appliance talks to GitHub over https and nothing else.
+# git's helpers live on GIT_EXEC_PATH. Keep the HTTPS remote helper for GitHub
+# and upload-pack for local bare clones used by the packaged Factory workflow.
 helpers=(
   /usr/libexec/git-core/git-remote-http
+  /usr/libexec/git-core/git-upload-pack
 )
 
 # Libraries the distroless base already ships as part of its own glibc. Copying

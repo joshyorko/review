@@ -656,6 +656,7 @@ test("dependency-deferred work remains queued when an unrelated prerequisite is 
 		service.store.acquire();
 		service.store.write(batch);
 		await service.resume(batch.id, {});
+		await service.waitForIdle();
 		const resumed = service.store.read(batch.id);
 		assert.equal(resumed.items.find((item) => item.selected.key === prerequisite.key)?.stage, "BLOCKED");
 		const dependentState = resumed.items.find((item) => item.selected.key === dependent.key)!;
@@ -664,6 +665,23 @@ test("dependency-deferred work remains queued when an unrelated prerequisite is 
 		await service.shutdown();
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("automatic dispatch refuses exhausted original budgets before native setup", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-dispatch-budget-"));
+	const github = { snapshot: async (item: SelectedItem) => item, assertFresh: async () => {} };
+	const service = new BatchService(root, github as never, undefined, {} as never, 1);
+	try {
+		const batch = createBatch([selected("org/a#1", "inspect")], options("fade"));
+		batch.items[0]!.attempts = batch.maxAttempts;
+		service.store.acquire(); service.store.write(batch);
+		await service.resume(batch.id, {}); await service.waitForIdle();
+		const item = service.store.read(batch.id).items[0]!;
+		assert.equal(item.stage, "BLOCKED");
+		assert.match(item.blocker!, /original attempt budget exhausted/);
+		assert.equal(item.attempts, batch.maxAttempts);
+	} finally { await service.shutdown(); await rm(root, { recursive: true, force: true }); }
+});
+
 
 test("an unconfirmed stop keeps the item unknown and the repository claim", async () => {
 	const root = await mkdtemp(join(tmpdir(), "factory-cancel-"));
