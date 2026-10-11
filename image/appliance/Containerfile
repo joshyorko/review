@@ -34,6 +34,9 @@ ARG OMP_VERSION=18.9.2
 ARG OMP_SOURCE_COMMIT=bd4dffd5e617ce732f8a14249b0be1e6c7621886
 ARG OMP_SOURCE_SHA256=5dc800d5f5af80d775664915356f3073e7b9d110c9822aa63884b365eaf035fb
 ARG OMP_PATCH_SHA256=d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f
+ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=bd4dffd5e617ce732f8a14249b0be1e6c7621886
+ARG OMP_CLIPBOARD_PATCH_SHA256=9e2f74c989f7d2f86d8dff73eb99a1888188f72c00b7ba7147758669021328b7
+ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/bluefin/omp/clipboard-truthful-18.9.2.patch
 ARG OMP_BUN_VERSION=1.4.2
 ARG OMP_BUN_X86_64_SHA256=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
 ARG OMP_BUN_AARCH64_SHA256=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7
@@ -77,6 +80,9 @@ ARG OMP_VERSION
 ARG OMP_SOURCE_COMMIT
 ARG OMP_SOURCE_SHA256
 ARG OMP_PATCH_SHA256
+ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT
+ARG OMP_CLIPBOARD_PATCH_SHA256
+ARG OMP_CLIPBOARD_PATCH_PATH
 ARG OMP_BUN_VERSION
 ARG OMP_BUN_X86_64_SHA256
 ARG OMP_BUN_AARCH64_SHA256
@@ -108,12 +114,16 @@ ARG REVIEW_REVISION
 COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp
 COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts
 COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch
+COPY patches/omp/clipboard-truthful-18.9.2.patch /usr/local/share/bluefin/omp/clipboard-truthful-18.9.2.patch
 RUN set -eu; \
     mkdir -p /out/usr/bin /out/usr/share/bluefin/review; \
     OMP_VERSION="$OMP_VERSION" \
     OMP_SOURCE_COMMIT="$OMP_SOURCE_COMMIT" \
     OMP_SOURCE_SHA256="$OMP_SOURCE_SHA256" \
     OMP_PATCH_SHA256="$OMP_PATCH_SHA256" \
+    OMP_CLIPBOARD_PATCH_SOURCE_COMMIT="$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" \
+    OMP_CLIPBOARD_PATCH_SHA256="$OMP_CLIPBOARD_PATCH_SHA256" \
+    OMP_CLIPBOARD_PATCH_PATH="$OMP_CLIPBOARD_PATCH_PATH" \
     OMP_BUN_VERSION="$OMP_BUN_VERSION" \
     OMP_BUN_X86_64_SHA256="$OMP_BUN_X86_64_SHA256" \
     OMP_BUN_AARCH64_SHA256="$OMP_BUN_AARCH64_SHA256" \
@@ -226,6 +236,9 @@ RUN arch="$(uname -m)"; \
       --omp-source-commit "$OMP_SOURCE_COMMIT" \
       --omp-source-sha256 "$OMP_SOURCE_SHA256" \
       --omp-patch-sha256 "$OMP_PATCH_SHA256" \
+      --omp-clipboard-patch-source-commit "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" \
+      --omp-clipboard-patch-sha256 "$OMP_CLIPBOARD_PATCH_SHA256" \
+      --omp-clipboard-patch-path "$OMP_CLIPBOARD_PATCH_PATH" \
       --omp-bun-version "$OMP_BUN_VERSION" \
       --node-version "$NODE_VERSION" \
       --node-sha256 "$node_sha" \
@@ -287,6 +300,8 @@ ARG FSDK_BASE_IMAGE
 ARG OMP_VERSION
 ARG OMP_SOURCE_COMMIT
 ARG OMP_PATCH_SHA256
+ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT
+ARG OMP_CLIPBOARD_PATCH_SHA256
 ARG NODE_VERSION
 ARG OMP_BUN_VERSION
 ARG TYPESAFE_VERSION
@@ -324,6 +339,8 @@ LABEL org.opencontainers.image.title="Review" \
       io.github.joshyorko.review.node.version="${NODE_VERSION}" \
       io.github.joshyorko.review.bun.version="${OMP_BUN_VERSION}" \
       io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}" \
+      io.github.joshyorko.review.omp.clipboard.patch.source.commit="${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}" \
+      io.github.joshyorko.review.omp.clipboard.patch.sha256="${OMP_CLIPBOARD_PATCH_SHA256}" \
       io.github.joshyorko.review.typesafe.version="${TYPESAFE_VERSION}" \
       io.github.joshyorko.review.audio.source="${AUDIO_BUILDER_IMAGE}" \
       io.github.joshyorko.review.audio.packages="pulseaudio-libs,alsa-lib"
