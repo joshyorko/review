@@ -3416,6 +3416,302 @@ test("slay skips red and pending PRs with incomplete fresh file evidence before 
 	assert.deepEqual(batch.waves.map((wave) => wave.items.map((item) => item.id)), [[83]]);
 });
 
+test("slay reports incomplete-file candidates separately while preserving selection denominator and subject", async () => {
+	const items = [
+		{ id: 84, repo: "projectbluefin/incomplete", title: "PR with truncated file list", headSha: "b".repeat(40), ciStatus: "success" },
+		{ id: 85, repo: "projectbluefin/eligible", title: "eligible PR", headSha: "c".repeat(40), ciStatus: "success" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		const search = body.variables?.search !== undefined;
+		const annotate = (node) => {
+			if (node?.number === 84) return {
+				...node,
+				files: { pageInfo: { hasNextPage: true }, nodes: [{ path: "README.md" }] },
+			};
+			if (node?.number === 85 && search) return {
+				...node,
+				files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
+			};
+			return node;
+		};
+		const data = { ...result.data };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(annotate) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: annotate(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /#85/);
+	assert.doesNotMatch(pi.messages[0], /#84/);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.totalItems, 2, "the excluded selection remains in the original denominator");
+	assert.deepEqual(batch.waves.map((wave) => wave.items.map((item) => item.id)), [[85]]);
+	assert.deepEqual(batch.skippedItems ?? [], [], "incomplete file evidence is not a CI skip");
+	assert.deepEqual(batch.excludedItems, [{
+		repo: "projectbluefin/incomplete",
+		number: 84,
+		headSha: "b".repeat(40),
+		reason: "incomplete changed-file list",
+		observedAt: batch.excludedItems[0].observedAt,
+	}]);
+	assert.ok(Number.isFinite(batch.excludedItems[0].observedAt));
+	assert.ok(ctx.notifications.some((notification) => /skipping .*#84 head=b{40}: incomplete changed-file list/i.test(notification.message)));
+	assert.equal(ctx.notifications.some((notification) => /#84.*CI is/i.test(notification.message)), false);
+	await pi.commands.get("review").handler("status", ctx);
+	assert.match(ctx.notifications.at(-1).message, /Excluded candidate: projectbluefin\/incomplete#84 head=b{40} reason=incomplete changed-file list observedAt=/);
+	assert.doesNotMatch(ctx.notifications.at(-1).message, /Skipped CI: projectbluefin\/incomplete#84/);
+});
+
+test("slay retains incomplete-file exclusions when every remaining selected issue is already submitted", async () => {
+	const incompletePr = queueItem({
+		id: 86,
+		repo: "projectbluefin/incomplete",
+		title: "PR with unavailable file evidence",
+		headSha: "d".repeat(40),
+		ciStatus: "success",
+		author: "reviewer",
+		reviewState: "changes_requested",
+		changedFilesComplete: false,
+	});
+	const submittedIssue = queueItem({
+		id: 87,
+		type: "issue",
+		repo: "projectbluefin/already-submitted",
+		title: "issue with an existing PR",
+		submittedPrs: ["projectbluefin/already-submitted#10"],
+	});
+	const branch = [{
+		type: "custom",
+		customType: STATE_ENTRY,
+		data: {
+			mode: "prs",
+			selectedKeys: [`${incompletePr.repo}#${incompletePr.id}`, `${submittedIssue.repo}#${submittedIssue.id}`],
+			selected: [incompletePr, submittedIssue],
+		},
+	}];
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	ctx.sessionManager = { getBranch: () => branch, getSessionId: () => "session-1" };
+	const baseFetch = hiveBackedFetch([incompletePr]);
+	const issueFetch = issueBackedFetch({ [`${submittedIssue.repo}#${submittedIssue.id}`]: {
+		title: submittedIssue.title,
+		submittedPrs: submittedIssue.submittedPrs,
+	} });
+	const fetchImpl = async (url, init) => {
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (typeof body.variables?.search === "string" && body.variables.search.includes("is:issue")) {
+			return issueFetch(url, init);
+		}
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const annotate = (node) => node?.number === incompletePr.id
+			? {
+				...node,
+				author: { login: "reviewer" },
+				reviewDecision: "CHANGES_REQUESTED",
+				files: { pageInfo: { hasNextPage: true }, nodes: [{ path: "README.md" }] },
+			}
+			: node;
+		const data = { ...result.data, viewer: { login: "reviewer" } };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(annotate) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: annotate(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl,
+		env: ISOLATED_ENV,
+	});
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	assert.equal(pi.messages.length, 0, "no wave is dispatched after the remaining issue is filtered");
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(batch, "the excluded selection remains available in the Review status receipt");
+	assert.equal(batch.state, "complete");
+	assert.equal(batch.totalItems, 2, "the original mixed selection remains the denominator");
+	assert.deepEqual(batch.waves, []);
+	assert.deepEqual(batch.excludedItems[0], {
+		repo: incompletePr.repo,
+		number: incompletePr.id,
+		headSha: incompletePr.headSha,
+		reason: "incomplete changed-file list",
+		observedAt: batch.excludedItems[0].observedAt,
+	});
+	assert.deepEqual(batch.excludedItems.map(({ number, reason, detail }) => ({ number, reason, detail })), [
+		{ number: incompletePr.id, reason: "incomplete changed-file list", detail: undefined },
+		{ number: submittedIssue.id, reason: "pull request already submitted", detail: submittedIssue.submittedPrs.join(", ") },
+	]);
+	await pi.commands.get("review").handler("status", ctx);
+	assert.match(ctx.notifications.at(-1).message, /Excluded candidate: projectbluefin\/incomplete#86 head=d{40} reason=incomplete changed-file list observedAt=/);
+	assert.match(ctx.notifications.at(-1).message, /Excluded candidate: projectbluefin\/already-submitted#87 reason=pull request already submitted detail=projectbluefin\/already-submitted#10 observedAt=/);
+});
+
+test("slay durably accounts for workflow-file candidates when no work is dispatched", async () => {
+	const items = [{ id: 88, repo: "projectbluefin/workflow", title: "workflow PR", headSha: "e".repeat(40), ciStatus: "success" }];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const markWorkflow = (node) => node?.number === 88
+			? { ...node, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: ".github/workflows/build.yml" }] } }
+			: node;
+		const data = { ...result.data };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(markWorkflow) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: markWorkflow(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: false } });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 0);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(batch, "a complete no-wave batch retains workflow selection accounting");
+	assert.equal(batch.totalItems, 1);
+	assert.deepEqual(batch.excludedItems.map(({ number, reason, detail }) => ({ number, reason, detail })), [
+		{ number: 88, reason: "workflow file change", detail: ".github/workflows/build.yml" },
+	]);
+});
+
+test("dashboard fix persists filtered PRs beside dispatched work using the original selection denominator", async () => {
+	const items = [
+		{ id: 89, repo: "projectbluefin/incomplete", title: "incomplete PR", headSha: "f".repeat(40), ciStatus: "success" },
+		{ id: 90, repo: "projectbluefin/eligible", title: "eligible PR", headSha: "1".repeat(40), ciStatus: "success" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const annotate = (node) => {
+			if (node?.number === 89) return { ...node, files: { pageInfo: { hasNextPage: true }, nodes: [{ path: "README.md" }] } };
+			if (node?.number === 90) return { ...node, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] } };
+			return node;
+		};
+		const data = { ...result.data };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(annotate) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: annotate(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV, policy: { ...GENERIC_WORKBENCH_POLICY, allowWorkflowSlay: false } });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("A");
+	ctx.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /projectbluefin\/eligible#90/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/incomplete#89/);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(batch);
+	assert.equal(batch.totalItems, 2, "filtered selected PR remains in the denominator");
+	assert.deepEqual(batch.excludedItems.map(({ number, reason }) => ({ number, reason })), [
+		{ number: 89, reason: "incomplete changed-file list" },
+	]);
+	assert.deepEqual(batch.waves.map((wave) => wave.items.map((item) => item.id)), [[90]]);
+});
+
+for (const [actionKey, actionName] of [["s", "Slay"], ["f", "fix"]] as const) test(`an all-excluded dashboard ${actionName} receipt does not replace an active Review wave`, async () => {
+	const items = [
+		{ id: 101, repo: "projectbluefin/eligible", title: "eligible PR", headSha: "2".repeat(40), ciStatus: "success" },
+		{ id: 102, repo: "projectbluefin/incomplete", title: "incomplete PR", headSha: "3".repeat(40), ciStatus: "success" },
+	];
+	const baseFetch = hiveBackedFetch(items);
+	const fetchImpl = async (url, init) => {
+		const response = await baseFetch(url, init);
+		if (!String(url).includes("/graphql")) return response;
+		const result = await response.json();
+		const annotate = (node) => node?.number === 102
+			? { ...node, files: { pageInfo: { hasNextPage: true }, nodes: [{ path: "README.md" }] } }
+			: node;
+		const data = { ...result.data };
+		if (data.search) data.search = { ...data.search, nodes: data.search.nodes.map(annotate) };
+		else {
+			for (const [key, value] of Object.entries(data)) {
+				if (value?.issueOrPullRequest) data[key] = { ...value, issueOrPullRequest: annotate(value.issueOrPullRequest) };
+			}
+		}
+		return { ...response, json: async () => ({ ...result, data }) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput(actionKey);
+	await new Promise((resolve) => setImmediate(resolve));
+	const active = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(active);
+	assert.equal(active.state, "running");
+	assert.deepEqual(active.waves.map((wave) => wave.items.map((item) => item.id)), [[101]]);
+
+	ctx.overlays[0].handleInput("j");
+	ctx.overlays[0].handleInput(actionKey);
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(pi.messages.length, 1, "the second all-excluded selection does not dispatch work");
+	const receipt = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.ok(receipt);
+	assert.equal(receipt.totalItems, 1);
+	assert.deepEqual(receipt.excludedItems.map(({ number, reason }) => ({ number, reason })), [
+		{ number: 102, reason: "incomplete changed-file list" },
+	]);
+	await pi.commands.get("review").handler("status", ctx);
+	assert.match(ctx.notifications.at(-1).message, new RegExp(`Active Review wave: ${active.id} `));
+	assert.notEqual(receipt.id, active.id);
+});
+
 test("slay keeps workflow permission as a batch blocker after skipping failed CI", async () => {
 	const items = [
 		{ id: 51, repo: "projectbluefin/review", title: "red ordinary PR", headSha: "b".repeat(40), ciStatus: "failure" },

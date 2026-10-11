@@ -12,7 +12,7 @@ declare -A REVIEW_LAUNCH_GROUP_NAMES=(
   [copilot]="COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID"
 )
 REVIEW_LAUNCH_GROUPS=(aws-sdk bedrock-bearer openai anthropic gemini typesafe copilot)
-REVIEW_LAUNCH_FIXED_NAMES=(GH_TOKEN GITHUB_TOKEN HIVE_HUB REVIEW_DEFAULT_SCOPE REVIEW_MODE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY)
+REVIEW_LAUNCH_FIXED_NAMES=(GH_TOKEN GITHUB_TOKEN HIVE_HUB REVIEW_DEFAULT_SCOPE REVIEW_MODE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY RTK_DISABLED)
 
 review_launch_fail() {
   printf 'ERROR: %s\n' "$1" >&2
@@ -306,6 +306,7 @@ review_launch_environment() {
   for name in "${names[@]}"; do
     [[ "$name" != TERM && "$name" != COLORTERM && ! -v "seen[$name]" ]] || continue
     seen["$name"]=1
+    [[ "$name" != RTK_DISABLED || -v RTK_DISABLED ]] || continue
     if ((REVIEW_LAUNCH_FILTERED)); then [[ -v "$name" ]] || continue; fi
     REVIEW_LAUNCH_ENV_NAMES+=("$name")
   done
