@@ -182,6 +182,21 @@ export interface EvidenceReceipt {
 	readonly predicates?: readonly PredicateEvidence[];
 }
 
+/** Package-owned proof after a deterministic verifier and independent acceptance inspected one committed subject. */
+export interface CurrentVerificationReceipt {
+	readonly version: 1;
+	readonly taskId: TaskId;
+	readonly attemptId: AttemptId;
+	readonly generation: GenerationId;
+	readonly subject: Subject;
+	readonly tree: string;
+	readonly acceptanceRevision: string;
+	readonly assumptions: readonly ProofAssumption[];
+	readonly predicates: readonly PredicateEvidence[];
+	readonly acceptanceSession: string;
+	readonly checkedAt: string;
+}
+
 /** Durable intent/settlement for one logical external effect, independent of retry owner. */
 export interface OperationReceipt {
 	readonly id: string;
@@ -233,6 +248,8 @@ export interface Attempt {
 	/** Factory SDK session records; live execution is visible through OMP Agent Hub. */
 	readonly privateSessions: readonly FactoryPrivateSession[];
 	readonly receipt?: EvidenceReceipt;
+	/** Fresh package-owned proof for the exact committed subject; never rewrites the worker's authorization receipt. */
+	readonly currentVerification?: CurrentVerificationReceipt;
 	/** Integration is an explicit owner act; auto-apply is never assumed. */
 	readonly integrated: boolean;
 }
@@ -346,6 +363,13 @@ export type LedgerEvent =
 			readonly receipt: EvidenceReceipt;
 		}
 	| {
+			readonly kind: "record_current_verification";
+			readonly expectedRevision: number;
+			readonly taskId: TaskId;
+			readonly attemptId: AttemptId;
+			readonly receipt: CurrentVerificationReceipt;
+		}
+	| {
 			readonly kind: "integrate_attempt";
 			readonly expectedRevision: number;
 			readonly taskId: TaskId;
@@ -365,7 +389,7 @@ export type LedgerEvent =
 			readonly assumptions: readonly ProofAssumption[];
 			readonly reason: string;
 		}
-	| { readonly kind: "reopen_task"; readonly expectedRevision: number; readonly taskId: TaskId; readonly reason: string }
+	| { readonly kind: "reopen_task"; readonly expectedRevision: number; readonly taskId: TaskId; readonly reason: string; readonly attemptId?: AttemptId; readonly subject?: Subject }
 	| { readonly kind: "use_replan"; readonly expectedRevision: number; readonly taskId: TaskId }
 	| { readonly kind: "reevaluate_candidate"; readonly expectedRevision: number; readonly taskId: TaskId }
 	| {

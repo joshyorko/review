@@ -15,7 +15,7 @@ export const { runNative } = await import(join(factory, "omp/batch-native.ts"));
 
 export type FixtureTool = { name: string; execute(id: string, args: unknown): Promise<unknown> };
 export const schema = { object: (value: unknown) => value, string: () => ({}), number: () => ({}), array: (value: unknown) => value, boolean: () => ({}) } as unknown as SchemaBuilder;
-export const binding = { model: { provider: "fixture", id: "fixture" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } } as never;
+export const binding = { model: { provider: "fixture", id: "fixture", api: "anthropic-messages" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } } as never;
 
 const execFileAsync = promisify(execFile);
 

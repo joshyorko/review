@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { emptyLedger, type Ledger, type OperationReceipt, type RunId, type CriterionId } from "./model.ts";
 import { criterionProven } from "./evidence.ts";
+import type { ExecutionPolicy, RequestAccounting } from "../omp/policy.ts";
 import { evaluateWorkGraph, type WorkGraphObservation, type WorkGraphDecision } from "./graph.ts";
 
 export type FactoryAction = "inspect" | "patch" | "pr-ready";
@@ -34,6 +35,44 @@ export interface SelectedItem {
 	blocker?: string;
 }
 export interface Prerequisite { item: string; requires: string; stage: OutcomeStage }
+export interface OwnedPullRequestLifecycle {
+	readonly version: 1;
+	readonly generation: string;
+	readonly owner: string;
+	readonly outcome: "pr-ready";
+	readonly target: { readonly ref: string; readonly sha: string };
+	readonly phase: "admitted" | "published" | "waiting" | "repair-required" | "repairing" | "unknown" | "ready";
+	readonly repair?: { readonly failureKey: string; readonly candidateHead: string; readonly runIds: number[]; readonly attemptId: string; readonly state: "queued" | "dispatched" };
+	readonly pullRequest?: { readonly repository: string; readonly identity: string; readonly number: number; readonly url: string; readonly branch: string; readonly headSha: string; readonly baseRef: string; readonly baseSha: string; readonly mergeSha?: string; readonly operationId: string };
+	readonly observation?: {
+		readonly observedAt: string;
+		readonly headSha: string;
+		readonly mergeSha?: string;
+		readonly eligibleSubject?: { readonly sha: string; readonly subject: "head" | "merge" };
+		readonly policy: { readonly context: string; readonly appId: number | null; readonly source: "classic" | "ruleset"; readonly rulesetId?: number }[];
+		readonly policyFingerprint?: string;
+		readonly runs: { readonly id: number; readonly suiteId: number; readonly appId: number | null; readonly appSlug: string | null; readonly name: string; readonly headSha: string; readonly status: string; readonly conclusion: string | null; readonly createdAt: string; readonly startedAt: string | null; readonly subject: "head" | "merge"; readonly workflow?: { readonly id: number; readonly attempt: number; readonly workflowId: number; readonly event: string; readonly path: string; readonly checkSuiteId: number; readonly status: string; readonly conclusion: string | null } }[];
+		readonly coverage: "complete" | "incomplete" | "unavailable";
+		readonly result: "pending" | "failed" | "unknown" | "passed";
+		readonly retryAfter?: string;
+		readonly failures?: {
+			readonly key: string;
+			readonly candidateHead: string;
+			readonly checkSubjectSha: string;
+			readonly classification: "repairable-code";
+			readonly checkRun: { readonly id: number; readonly suiteId: number; readonly name: string; readonly appId: number; readonly conclusion: "failure"; readonly title: string; readonly summary: string; readonly text: string; readonly outputTruncated: boolean };
+			readonly annotations: { readonly path: string; readonly startLine: number | null; readonly endLine: number | null; readonly level: string; readonly title: string; readonly message: string }[];
+			readonly annotationsComplete: boolean;
+				readonly workflow?: { readonly id: number; readonly attempt: number; readonly workflowId: number; readonly event: string; readonly path: string; readonly jobs: { readonly id: number; readonly name: string; readonly conclusion: string | null; readonly steps: { readonly number: number; readonly name: string; readonly conclusion: string | null }[]; readonly logStatus: number | null; readonly logsAvailable: boolean | null; readonly logContent?: string; readonly logBytes?: number; readonly logComplete?: boolean; readonly logTruncated?: boolean }[] };
+		}[];
+		readonly reason?: string;
+	};
+	readonly observedAt?: string;
+	readonly nextObservationAt?: string;
+	readonly observationCount: number;
+	readonly deadlineAt: string;
+	readonly nextSafeAction: "publish" | "observe-after" | "repair" | "repair-review" | "investigate" | "pr-ready";
+}
 export interface BatchItem {
 	selected: SelectedItem;
 	ledger: Ledger;
@@ -43,15 +82,17 @@ export interface BatchItem {
 	checkScripts?: string;
 	preparation?: { phase: "clone" | "checkout" | "ready"; owner: string; head: string };
 	settlement?: { attemptId: string; sessionFiles: string[]; outcome: "cancelled" };
-	repair?: { generation: string; head: string; acceptanceRevision: string; attemptId: string; reason: string; artifacts: { id: string; path: string; digest: string; bytes: number; attemptId: string }[] };
+	repair?: { generation: string; head: string; acceptanceRevision: string; attemptId: string; reason: string; candidateHead?: string; failureKey?: string; artifacts: { id: string; path: string; digest: string; bytes: number; attemptId: string }[] };
 	attempts: number;
 	operation?: OperationReceipt;
 	operations: OperationReceipt[];
 	proof?: { acceptanceRevision: string; subject: string; tree?: string; digest: string; artifacts: string[]; stage: OutcomeStage; reviewerSession: string };
+	/** Version-4 owned hosted-PR lifecycle; legacy records never gain this authority during decode. */
+	prLifecycle?: OwnedPullRequestLifecycle;
 	sessions: string[];
 }
 export interface Batch {
-	version: 2 | 3;
+	version: 2 | 3 | 4;
 	id: string;
 	revision: number;
 	selection: string;
@@ -65,6 +106,11 @@ export interface Batch {
 	dependencies: Prerequisite[];
 	scopeRevisions: { item: string; reason: string; at: string }[];
 	usage: { modelCalls: number; peakWorkers: number; inputTokens: number | null; outputTokens: number | null; cost: number | null };
+	/** Fixed route and non-monetary limits captured before the first provider request. */
+	executionPolicy?: ExecutionPolicy;
+	/** Pre-request reservations survive crashes and are shared by workers and acceptance sessions. */
+	requestAccounting: RequestAccounting;
+	policyBlocker?: string;
 	/** Version-3 finite convergence contract. Older selected batches gain no authority. */
 	convergence?: { generation: string; observation?: WorkGraphObservation };
 }
@@ -116,28 +162,35 @@ export function createBatch(items: SelectedItem[], options: { id: string; capaci
 	const dependencies = (options.dependencies ?? []).map((edge) => ({ ...edge, item: edge.item.toLowerCase(), requires: edge.requires.toLowerCase() }));
 	validateDependencies(items, dependencies);
 	return {
-		version: options.converge ? 3 : 2, ...(options.converge ? { convergence: { generation: "G1" } } : {}), id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
+		version: options.converge ? 3 : items.some((item) => item.action === "pr-ready") ? 4 : 2, ...(options.converge ? { convergence: { generation: "G1" } } : {}), id: options.id, revision: 0, selection: selectionIdentity(items), createdAt: new Date().toISOString(),
 		mode: options.mode, control: "paused", capacity: options.capacity, maxAttempts: options.maxAttempts, maxTotalAttempts: options.maxTotalAttempts,
 		dependencies, scopeRevisions: [], usage: { modelCalls: 0, peakWorkers: 0, inputTokens: null, outputTokens: null, cost: null },
+		requestAccounting: { sequence: 0, reservations: [] },
 		items: items.map((selected) => {
 			const overlap = selected.overlaps.find((key) => items.some((item) => item.key === key));
 			const blocker = selected.blocker ?? (overlap ? `overlapping selected work ${overlap}; resolve scope explicitly before execution` : undefined);
 			const acceptanceReference = selected.observe ? `Observe ${selected.key} ${selected.observe} @ ${selected.acceptanceRevision ?? "unresolved"}` : `Satisfy ${selected.key} acceptance @ ${selected.acceptanceRevision ?? "unresolved"}`;
+			const ledger = emptyLedger(`${options.id}:${digest(selected.key).slice(0, 16)}` as RunId, {
+				statement: acceptanceReference, nonGoals: ["unselected work", "merge", "deploy", "publish"],
+				permittedEffects: selected.action === "inspect" ? ["read"] : ["read", "write"],
+				finishAuthority: options.converge && selected.action === "patch" ? "verified-patch" : selected.action, appetite: { tasks: 1, attemptsPerTask: options.maxAttempts },
+			}, [{
+				id: "A1" as CriterionId, statement: acceptanceReference, mandatory: true,
+				...(selected.acceptanceRevision ? { assumptions: [{ kind: "acceptance-revision" as const, value: selected.acceptanceRevision }] } : {}),
+				...(selected.observe && selected.itemId ? { observation: { kind: "github-pull-request" as const, identity: selected.itemId, predicate: selected.observe } } : {}),
+			}], {
+				repo: selected.repo,
+				base: selected.base ?? "unavailable",
+				...(selected.head === undefined ? {} : { head: selected.head }),
+			});
+			const owner = `${options.id}:${selected.key}`;
+			const targetRef = selected.targetRef ?? selected.baseRef;
 			return {
 				selected, stage: blocker ? "BLOCKED" : "QUEUED", blocker, attempts: 0, operation: undefined, operations: [], sessions: [],
-				ledger: emptyLedger(`${options.id}:${digest(selected.key).slice(0, 16)}` as RunId, {
-					statement: acceptanceReference, nonGoals: ["unselected work", "merge", "deploy", "publish"],
-					permittedEffects: selected.action === "inspect" ? ["read"] : ["read", "write"],
-					finishAuthority: options.converge && selected.action === "patch" ? "verified-patch" : selected.action, appetite: { tasks: 1, attemptsPerTask: options.maxAttempts },
-				}, [{
-					id: "A1" as CriterionId, statement: acceptanceReference, mandatory: true,
-					...(selected.acceptanceRevision ? { assumptions: [{ kind: "acceptance-revision" as const, value: selected.acceptanceRevision }] } : {}),
-					...(selected.observe && selected.itemId ? { observation: { kind: "github-pull-request" as const, identity: selected.itemId, predicate: selected.observe } } : {}),
-				}], {
-					repo: selected.repo,
-					base: selected.base ?? "unavailable",
-					...(selected.head === undefined ? {} : { head: selected.head }),
-				}),
+				ledger,
+				...(selected.action === "pr-ready" && targetRef && selected.base && /^[a-f0-9]{40,64}$/.test(selected.base) ? {
+					prLifecycle: { version: 1 as const, generation: ledger.generation, owner, outcome: "pr-ready" as const, target: { ref: targetRef, sha: selected.base }, phase: "admitted" as const, observationCount: 0, deadlineAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), nextSafeAction: "publish" as const },
+				} : {}),
 			};
 		}),
 	};
@@ -152,16 +205,20 @@ export function dependencyBlocker(batch: Batch, key: string): string | undefined
 		if (!prerequisite) return `missing prerequisite ${edge.requires}`;
 		const proof = prerequisite.proof;
 		const stages: OutcomeStage[] = ["verified-patch", "pr-ready", "merged-upstream"];
-		if (prerequisite.stage !== "DONE" || !proof || proof.acceptanceRevision !== prerequisite.selected.acceptanceRevision || proof.subject !== prerequisite.selected.head || stages.indexOf(proof.stage) < stages.indexOf(edge.stage)) {
+		if (prerequisite.stage !== "DONE" || !proof || proof.acceptanceRevision !== prerequisite.selected.acceptanceRevision || proof.subject !== currentProofSubject(prerequisite) || stages.indexOf(proof.stage) < stages.indexOf(edge.stage)) {
 			return `${edge.requires} must reach ${edge.stage}${edge.stage === "merged-upstream" ? "; human/Review landing required" : ""}`;
 		}
 	}
 	return undefined;
 }
+function currentProofSubject(item: BatchItem): string | undefined {
+	if (item.selected.action === "pr-ready" && item.prLifecycle?.phase === "ready") return item.prLifecycle.pullRequest?.headSha;
+	return item.selected.head;
+}
 export function batchItemProofCurrent(item: BatchItem): boolean {
 	if (item.selected.observe) return item.stage === "DONE" && item.ledger.criteria.some((criterion) => criterion.observation && criterionProven(item.ledger, criterion.id));
 	const proof = item.proof;
-	if (item.stage !== "DONE" || proof === undefined || proof.acceptanceRevision !== item.selected.acceptanceRevision || proof.subject !== item.selected.head) return false;
+	if (item.stage !== "DONE" || proof === undefined || proof.acceptanceRevision !== item.selected.acceptanceRevision || proof.subject !== currentProofSubject(item)) return false;
 	return item.ledger.tasks.some((task) => task.state === "DONE" && criterionProven(item.ledger, task.criterionId));
 }
 
@@ -225,7 +282,9 @@ export function batchSummary(batch: Batch, root: string): string {
 		}),
 		...(batch.scopeRevisions.length ? [`Original scope NOT converged: ${batch.scopeRevisions.map((entry) => `${entry.item}: ${entry.reason}`).join("; ")}`] : []),
 		"Live Factory workers use the host OMP Agent Hub for status, transcript focus, and cancellation; retained session evidence remains available here.",
-		`Usage: ${batch.usage.modelCalls} observed model calls; tokens/cost ${batch.usage.cost === null ? "unknown" : batch.usage.cost}. Stop-dispatch limits do not bound in-flight cost.`,
+		...(batch.executionPolicy ? [`Execution policy: ${batch.executionPolicy.route.provider}/${batch.executionPolicy.route.model} via ${batch.executionPolicy.route.api}; ${batch.requestAccounting.reservations.length}/${batch.executionPolicy.maxRequests} requests reserved; payload at most ${batch.executionPolicy.maxInputBytes} UTF-8 bytes/request; output at most ${batch.executionPolicy.maxOutputTokens} tokens/request and ${batch.executionPolicy.maxReservedOutputTokens} reserved output tokens in aggregate; deadline ${new Date(batch.executionPolicy.deadlineAt).toISOString()}.`] : ["Execution policy: not yet resolved; no provider request is admitted."]),
+		`Usage: ${batch.usage.modelCalls} durable request reservations; input/output tokens ${batch.usage.inputTokens === null || batch.usage.outputTokens === null ? "unknown or unresolved" : `${batch.usage.inputTokens}/${batch.usage.outputTokens}`}; estimated cost ${batch.usage.cost === null ? "unknown" : batch.usage.cost}. No hard-dollar ceiling is claimed.`,
+		...(batch.policyBlocker ? [`Policy blocker: ${batch.policyBlocker}`] : []),
 		`/factory resume ${batch.id} · /factory inspect ${batch.id} · /factory pause ${batch.id} · /factory stop ${batch.id}`,
 	];
 	if (graph) {

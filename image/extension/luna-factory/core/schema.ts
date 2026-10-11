@@ -15,6 +15,7 @@ import { isRecord } from "./guard.ts";
 import type {
 	Candidate,
 	CriterionId,
+	CurrentVerificationReceipt,
 	Effect,
 	EvidenceReceipt,
 	GenerationId,
@@ -468,6 +469,46 @@ export function parseReceipt(value: unknown): ParseResult<EvidenceReceipt> {
 			...(parsedPredicates?.ok ? { predicates: parsedPredicates.value } : {}),
 		},
 	};
+}
+
+/** Parse Factory-owned verification of a committed subject and fresh acceptance. */
+export function parseCurrentVerification(value: unknown): ParseResult<CurrentVerificationReceipt> {
+	const errors: string[] = [];
+	if (!isRecord(value)) return { ok: false, errors: ["current verification must be an object"] };
+	if (value.version !== 1) errors.push("current verification version must be 1");
+	const taskId = identity(value.taskId, "currentVerification.taskId", errors);
+	const attemptId = identity(value.attemptId, "currentVerification.attemptId", errors);
+	const generation = identity(value.generation, "currentVerification.generation", errors);
+	const parsedSubject = subject(value.subject, errors);
+	const tree = typeof value.tree === "string" && REVISION_RE.test(value.tree) ? value.tree : undefined;
+	if (tree === undefined) errors.push("currentVerification.tree must be a git object identity");
+	const acceptanceRevision = text(value.acceptanceRevision, "currentVerification.acceptanceRevision", errors);
+	const parsedAssumptions = assumptions(value.assumptions, errors);
+	const parsedPredicates = predicateRows(value.predicates, errors);
+	const acceptanceSession = text(value.acceptanceSession, "currentVerification.acceptanceSession", errors);
+	const checkedAt = text(value.checkedAt, "currentVerification.checkedAt", errors);
+	if (checkedAt !== undefined && !Number.isFinite(Date.parse(checkedAt))) errors.push("currentVerification.checkedAt must be a timestamp");
+	if (parsedPredicates !== undefined) {
+		if (!parsedPredicates.length || parsedPredicates.some((predicate) => predicate.phase === "worker" || !predicate.ok)) errors.push("current verification predicates must all be positive verifier or independent acceptance results");
+		if (!parsedPredicates.some((predicate) => predicate.phase === "verification")) errors.push("current verification requires deterministic verification evidence");
+		if (!parsedPredicates.some((predicate) => predicate.phase === "acceptance")) errors.push("current verification requires independent acceptance evidence");
+	}
+	if (errors.length || !taskId || !attemptId || !generation || !parsedSubject || !tree || !acceptanceRevision || !parsedAssumptions || !parsedPredicates || !acceptanceSession || !checkedAt) {
+		return { ok: false, errors };
+	}
+	return { ok: true, value: {
+		version: 1,
+		taskId: taskId as TaskId,
+		attemptId: attemptId as CurrentVerificationReceipt["attemptId"],
+		generation: generation as CurrentVerificationReceipt["generation"],
+		subject: parsedSubject,
+		tree,
+		acceptanceRevision,
+		assumptions: parsedAssumptions,
+		predicates: parsedPredicates,
+		acceptanceSession,
+		checkedAt,
+	} };
 }
 
 /** Parse a discovery candidate before it can reach the ladder. */

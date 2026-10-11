@@ -8,6 +8,7 @@ import { createBatch, digest, type Batch, type BatchItem } from "../image/extens
 import { requiredChecks, packageCheckScripts } from "../image/extension/luna-factory/omp/batch-checks.ts";
 import { NativeExecutionError, sandboxPreflight } from "../image/extension/luna-factory/omp/batch-native.ts";
 import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
+import { createExecutionPolicy, routeForModel } from "../image/extension/luna-factory/omp/policy.ts";
 
 function fixture(preflight: typeof sandboxPreflight = sandboxPreflight) {
  const root = mkdtempSync(join(tmpdir(), "factory-corrective-"));
@@ -95,7 +96,7 @@ test("unavailable verifier blocks a selected mutation before model calls or atte
  item.preparation = { phase: "ready", owner: `${batch.id}:${item.selected.key}`, head: item.selected.head! };
  service.store.write(batch);
  try {
-  await service.resume(batch.id, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } } as never);
+  await service.resume(batch.id, { model: { provider: "anthropic", id: "claude-test", api: "anthropic-messages" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } } as never);
   await service.waitForIdle();
   const blocked = service.store.read(batch.id).items[0]!;
   assert.equal(blocked.stage, "BLOCKED");
@@ -125,7 +126,7 @@ test("an independent rejection survives queue clearing and reaches the bounded r
   await f.service.shutdown();
   const service=new BatchService(f.root,{assertFresh:async()=>{}} as never,sdk as never,{object:()=>({}),string:()=>({}),array:()=>({}),number:()=>({}),boolean:()=>({})} as never,1);
   service.store.acquire();service.store.write(f.batch);
-  await service.resume(f.batch.id,{model:{},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});await service.waitForIdle();
+  await service.resume(f.batch.id,{model:{provider:"anthropic",id:"claude-test",api:"anthropic-messages"},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});await service.waitForIdle();
   const final=service.store.read(f.batch.id).items[0]!;
   assert.equal(workers,2);assert.equal(reviews,2);assert.match(prompts[1]!,/DISTINCTIVE_REJECTION/);assert.equal(final.attempts,2);assert.equal(final.ledger.tasks[0]!.attempts.length,2);
   await service.shutdown();
@@ -140,7 +141,7 @@ test("failed native Advisor escalation persists an unknown blocked operation and
    item.stage="RUNNING";
    throw new NativeExecutionError("advisor-blocked","native Advisor route unavailable");
   };
-  await f.service.resume(f.batch.id,{model:{provider:"worker",id:"worker"},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});
+  await f.service.resume(f.batch.id,{model:{provider:"worker",id:"worker",api:"anthropic-messages"},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});
   await f.service.waitForIdle();
   const persisted=f.service.store.read(f.batch.id).items[0]!;
   assert.equal(persisted.stage,"BLOCKED");
@@ -159,9 +160,9 @@ test("resuming a second batch cannot replace an in-flight attempt's model bindin
   const seen:string[]=[];
   const internal=f.service as unknown as {execute(batch:Batch,item:BatchItem,signal:AbortSignal,binding:{model:{id:string}}):Promise<void>};
   internal.execute=async(batch,item,_signal,binding)=>{if(batch.id===f.batch.id){firstStarted.resolve();await release.promise;}seen.push(`${batch.id}:${binding.model.id}`);item.stage="BLOCKED";};
-  let model={id:"model-A"};const ctx=Object.create({get model(){return model;},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});
+  let model={provider:"anthropic",id:"model-A",api:"anthropic-messages"};const ctx=Object.create({get model(){return model;},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});
   await f.service.resume(f.batch.id,ctx);await firstStarted.promise;
-  model={id:"model-B"};await f.service.resume(second.id,ctx);release.resolve();await f.service.waitForIdle();
+  model={provider:"anthropic",id:"model-B",api:"anthropic-messages"};await f.service.resume(second.id,ctx);release.resolve();await f.service.waitForIdle();
   assert.deepEqual(seen,[`${f.batch.id}:model-A`,`${second.id}:model-B`]);
  }finally{await f.cleanup();}
 });
@@ -206,8 +207,10 @@ test("changed mandatory checks block retained work without an automatic second w
    },async abort(){},async dispose(){}}};
   }};
   Object.defineProperty(f.service,"sdk",{value:sdk,writable:true});
+  const model={provider:"anthropic",id:"claude-test",api:"anthropic-messages"};
+  f.batch.executionPolicy=createExecutionPolicy(routeForModel(model),Date.now());
   f.service.store.write(f.batch);
-  await f.service.resume(f.batch.id,{model:{},modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});await f.service.waitForIdle();
+  await f.service.resume(f.batch.id,{model,modelRegistry:{authStorage:{},hasConfiguredAuth:()=>true}});await f.service.waitForIdle();
   const final=f.service.store.read(f.batch.id).items[0]!;
   assert.equal(workers,1);assert.equal(final.stage,"BLOCKED");assert.match(final.blocker!,/changed the captured mandatory package test scripts/);
   assert.equal(final.workspace,f.path);assert.equal(JSON.parse(readFileSync(join(f.path,"package.json"),"utf8")).scripts.test,"true");

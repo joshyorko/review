@@ -58,7 +58,7 @@ else:
                  if k.startswith("SINGULARITYENV_")}
     forwarded.update({k.removeprefix("APPTAINERENV_"): v for k,v in os.environ.items()
                       if k.startswith("APPTAINERENV_")})
-controls = {k: forwarded.get(k) for k in ("LUNA_FACTORY_ENABLED", "LUNA_FACTORY_CAPACITY", "REVIEW_INHERIT_OMP_CONFIG")}
+controls = {k: forwarded.get(k) for k in ("LUNA_FACTORY_ENABLED", "LUNA_FACTORY_CAPACITY", "REVIEW_INHERIT_OMP_CONFIG", "RTK_DISABLED")}
 print(json.dumps({"runtime": tool, "args": args, "names": sorted(forwarded), "controls": controls,
                   "stored_authority": forwarded.get("GH_TOKEN") == os.environ["FIXTURE_STORED_TOKEN"],
                   "environment_authority": forwarded.get("GH_TOKEN") == os.environ.get("FIXTURE_ENV_TOKEN"),
@@ -252,6 +252,46 @@ if '--factory-verifier-probe' in args or (args and args[0] == 'exec'):
         result = self.receipt(self.run_launch("owner/repo"))
         for name in ("OPENAI_API_KEY", "TYPESAFE_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN"):
             self.assertIn(name, result["names"])
+
+    def test_rtk_disabled_is_fixed_approved_name_and_only_forwards_explicit_host_value(self):
+        self.profile(env_groups="", env_names="")
+        self.env["APPTAINERENV_RTK_DISABLED"] = "stale"
+        for value in ("0", "1"):
+            with self.subTest(value=value):
+                self.env["RTK_DISABLED"] = value
+                for runtime in ("podman", "apptainer"):
+                    with self.subTest(runtime=runtime):
+                        args = ["--launcher-profile", "personal"]
+                        if runtime == "apptainer":
+                            args += ["--runtime", "apptainer"]
+                        args += ["owner/repo"]
+                        result = self.receipt(self.run_launch(*args))
+                        self.assertIn("RTK_DISABLED", result["names"])
+                        self.assertEqual(result["controls"]["RTK_DISABLED"], value)
+                        if runtime == "podman":
+                            env_names = [result["args"][i + 1] for i, arg in enumerate(result["args"][:-1]) if arg == "--env"]
+                            self.assertIn("RTK_DISABLED", env_names)
+                            self.assertNotIn(f"RTK_DISABLED={value}", result["args"])
+                        else:
+                            self.assertNotIn("RTK_DISABLED", result["args"])
+                            self.assertNotIn(value, result["args"])
+        self.profile(env_groups="", env_names="RTK_DISABLED")
+        selected = self.receipt(self.run_launch("--launcher-profile", "personal", "owner/repo"))
+        self.assertIn("RTK_DISABLED", selected["names"])
+        self.assertEqual(selected["controls"]["RTK_DISABLED"], "1")
+        self.env.pop("RTK_DISABLED")
+        for runtime in ("podman", "apptainer"):
+            with self.subTest(runtime=runtime, host="unset"):
+                args = ["--launcher-profile", "personal"]
+                if runtime == "apptainer":
+                    args += ["--runtime", "apptainer"]
+                args += ["owner/repo"]
+                result = self.receipt(self.run_launch(*args))
+                self.assertNotIn("RTK_DISABLED", result["names"])
+                self.assertIsNone(result["controls"]["RTK_DISABLED"])
+        default_launch = self.receipt(self.run_launch("owner/repo"))
+        self.assertNotIn("RTK_DISABLED", default_launch["names"])
+        self.assertIsNone(default_launch["controls"]["RTK_DISABLED"])
 
     def test_profile_forwards_only_selected_present_approved_names(self):
         self.profile()
