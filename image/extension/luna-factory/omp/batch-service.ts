@@ -568,9 +568,9 @@ export class BatchService {
 				}
 				if (item.stage === "DONE") {
 					await this.validateProof(item);
-					if (this.resumeCancelled.has(id) || item.stage === "CANCELLED") continue;
+					if (this.isResumeCancelled(id, item)) continue;
 					if (item.operation?.phase === "pr" && !item.prLifecycle?.pullRequest) await this.reconcileEffect(batch, item);
-					if (this.resumeCancelled.has(id) || item.stage === "CANCELLED") continue;
+					if (this.isResumeCancelled(id, item)) continue;
 					continue;
 				}
 				if (item.operation?.state === "not-applied") {
@@ -580,7 +580,7 @@ export class BatchService {
 				if (item.operation?.phase === "push" || item.operation?.phase === "pr") {
 					if (item.operation.phase === "pr" && item.operation.state === "applied" && item.prLifecycle?.pullRequest) continue;
 					await this.reconcileEffect(batch, item);
-					if (this.resumeCancelled.has(id) || item.stage === "CANCELLED") continue;
+					if (this.isResumeCancelled(id, item)) continue;
 					if (this.mayQueueConfirmedPush(batch, item)) {
 						item.stage = "QUEUED"; item.blocker = "confirmed publication recovered; executing the admitted PR effect under active claims";
 					}
@@ -606,17 +606,17 @@ export class BatchService {
 				if (item.selected.acceptanceRevision) await this.github.assertFresh(item.selected);
 				else {
 					const snapshot = await this.github.snapshot(item.selected);
-					if (this.resumeCancelled.has(id) || item.stage === "CANCELLED") continue;
+					if (this.isResumeCancelled(id, item)) continue;
 					item.selected = snapshot;
 					// No attempt exists yet: fill unavailable admission without resetting lineage.
 					if (item.attempts === 0) item.ledger = createBatch([item.selected], { id: batch.id, capacity: batch.capacity, maxAttempts: batch.maxAttempts, maxTotalAttempts: batch.maxTotalAttempts, mode: batch.mode }).items[0]!.ledger;
 				}
-				if (this.resumeCancelled.has(id) || item.stage === "CANCELLED") continue;
+				if (this.isResumeCancelled(id, item)) continue;
 				const overlap = item.selected.overlaps.find((key) => batch.items.some((candidate) => candidate.selected.key === key && candidate.stage !== "EXCLUDED"));
 				if (overlap) throw new Error(`overlaps ${overlap}; explicitly revise scope before execution`);
 				item.stage = "QUEUED"; item.blocker = undefined;
 			} catch (error) {
-				if (this.resumeCancelled.has(id) || item.stage === "CANCELLED") continue;
+				if (this.isResumeCancelled(id, item)) continue;
 				item.stage = item.operation?.state === "unknown" || item.operation?.state === "intent" || item.stage === "UNKNOWN" ? "UNKNOWN" : "BLOCKED";
 				item.blocker = message(error);
 				if (item.proof) item.proof = undefined;
@@ -1406,6 +1406,9 @@ export class BatchService {
 			!claims.some((claim) => claim.resource === `item:${item.selected.key}` && claim.owner === owner)) {
 			throw new Error("PR publication authority expired or lost; preserve the confirmed branch and resume only through the active claimed effect lane");
 		}
+	}
+	private isResumeCancelled(id: string, item: BatchItem): boolean {
+		return this.resumeCancelled.has(id) || item.stage === "CANCELLED";
 	}
 	private mayQueueConfirmedPush(batch: Batch, item: BatchItem): boolean {
 		return (batch.control === "active" || this.resuming.has(batch.id)) && !["CANCELLED", "EXCLUDED"].includes(item.stage) && item.operation?.phase === "push" && item.operation.state === "applied" && item.prLifecycle?.nextSafeAction === "publish";
