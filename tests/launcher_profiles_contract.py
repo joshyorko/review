@@ -184,11 +184,10 @@ print(os.environ['FIXTURE_STORED_TOKEN'])
         self.assertEqual(sum("--factory-verifier-probe" in c["args"] for c in self.calls()), 1)
         self.assert_registered_krun_probe()
 
-    def test_apptainer_factory_probe_keeps_the_verifier_device_mount(self):
-        # The probe intentionally starts with a clean environment, so its
-        # controlled executable uses a fixed fixture sink instead of env input.
-        tool = self.root / "tools/apptainer"
-        probe = """import json, sys
+    def install_apptainer_probe(self, exec_status=0, run_status=0, receipt=None):
+        # Probe children have env -i; fixture configuration stays in the
+        # executable, never in the production launcher's environment boundary.
+        probe = """import json, os, sys
 args = sys.argv[1:]
 if '--factory-verifier-probe' in args or (args and args[0] == 'exec'):
     with open(%r, 'a') as f:
@@ -196,17 +195,110 @@ if '--factory-verifier-probe' in args or (args and args[0] == 'exec'):
     if '/dev/full:/dev/full' not in args:
         print('verifier device missing', file=sys.stderr)
         sys.exit(78)
+    if any(k.startswith(('APPTAINER', 'SINGULARITY')) or k in
+           ('GH_TOKEN', 'GITHUB_TOKEN', 'OPENAI_API_KEY', 'LUNA_FACTORY_ENABLED') for k in os.environ):
+        print('preflight environment leaked', file=sys.stderr)
+        sys.exit(78)
+    status = %r if args[0] == 'exec' else %r
+    if status:
+        print('fixture runtime diagnostic', file=sys.stderr)
+        sys.exit(status)
     if '--factory-verifier-probe' in args:
-        print('{"kind":"review-factory-verifier","status":"available"}')
+        print(%r)
     sys.exit(0)
-""" % str(self.calls_path)
+""" % (str(self.calls_path), exec_status, run_status,
+       receipt if receipt is not None else '{"kind":"review-factory-verifier","status":"available"}')
+        tool = self.root / "tools/apptainer"
         tool.write_text(RUNTIME.replace("import json, os, sys\n", probe + "\nimport json, os, sys\n", 1))
+
+    def test_apptainer_factory_probe_keeps_the_verifier_device_mount(self):
+        self.install_apptainer_probe()
         self.profile(runtime="apptainer", factory_enabled="true")
         result = self.receipt(self.run_launch("--launcher-profile", "personal", "owner/repo"))
         self.assertEqual(result["runtime"], "apptainer")
         probes = [c for c in self.calls() if '--factory-verifier-probe' in c['args'] or c['args'][0] == 'exec']
         self.assertEqual(len(probes), 2)
         self.assertTrue(all('/dev/full:/dev/full' in c['args'] for c in probes))
+
+    def test_factory_apptainer_host_binds_match_every_preflight_and_final_invocation(self):
+        self.install_apptainer_probe()
+        self.profile(runtime="apptainer", factory_enabled="true")
+        host = self.root / 'host/etc'
+        host.mkdir(parents=True)
+        hook = self.root / 'host-files.sh'
+        hook.write_text('''test() {
+  if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
+    builtin test -e "$HOST_FIXTURE$2"
+  else
+    builtin test "$@"
+  fi
+}
+''')
+        self.env.update(BASH_ENV=str(hook), HOST_FIXTURE=str(host.parent),
+                        APPTAINERENV_UNAPPROVED='ambient', SINGULARITYENV_GH_TOKEN=self.env_token)
+        sif = self.root / 'review.sif'
+        sif.write_bytes(b'fixture')
+        sif.chmod(0o755)
+        for artifact in ('oci', 'sif'):
+            for fixture in (0, 1, 2, 3, 'dangling-localtime'):
+                with self.subTest(artifact=artifact, fixture=fixture):
+                    for path in host.iterdir():
+                        path.unlink()
+                    mask = 2 if fixture == 'dangling-localtime' else fixture
+                    for bit, name in ((1, 'localtime'), (2, 'hosts')):
+                        if mask & bit:
+                            (host / name).touch()
+                    if fixture == 'dangling-localtime':
+                        (host / 'localtime').symlink_to(host / 'missing-zoneinfo')
+                    self.calls_path.unlink(missing_ok=True)
+                    if artifact == 'sif':
+                        self.env.pop('REVIEW_APPLIANCE_IMAGE', None)
+                        self.env['REVIEW_APPLIANCE_SIF'] = str(sif)
+                    else:
+                        self.env.pop('REVIEW_APPLIANCE_SIF', None)
+                        self.env['REVIEW_APPLIANCE_IMAGE'] = 'example.invalid/review:fixture'
+                    result = self.receipt(self.run_launch('--launcher-profile', 'personal', 'owner/repo'))
+                    self.assertEqual(result['runtime'], 'apptainer')
+                    invocations = [c['args'] for c in self.calls()
+                                   if c['tool'] == 'apptainer' and c['args'][0] in ('exec', 'run')]
+                    self.assertEqual(len(invocations), 3)
+                    self.assertEqual(invocations[0][0], 'exec')
+                    self.assertIn('--cleanenv', invocations[0])
+                    self.assertIn('--factory-verifier-probe', invocations[1])
+                    for args in invocations:
+                        exclusions = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == '--no-mount']
+                        self.assertEqual(exclusions, [path for bit, path in ((1, '/etc/localtime'), (2, '/etc/hosts'))
+                                                      if not mask & bit])
+                        self.assertIn('--containall', args)
+                        self.assertIn('/dev/full:/dev/full', args)
+                    self.assertIn('--no-eval', invocations[1])
+                    self.assertIn('--no-eval', invocations[2])
+
+    def test_apptainer_preflight_distinguishes_missing_probe_from_runtime_setup_failure(self):
+        self.profile(runtime='apptainer', factory_enabled='true')
+        for status, message in ((1, 'image lacks the packaged Factory verifier probe'),
+                                (255, 'Apptainer could not prepare the packaged Factory verifier probe')):
+            with self.subTest(status=status):
+                self.calls_path.unlink(missing_ok=True)
+                self.install_apptainer_probe(exec_status=status)
+                result = self.run_launch('--launcher-profile', 'personal', 'owner/repo', ok=False)
+                self.assertIn(message, result.stderr)
+                self.assertIn('fixture runtime diagnostic', result.stderr)
+                self.assertIn('refusing Factory-enabled startup before work selection', result.stderr)
+                self.assertEqual(sum(c['tool'] == 'apptainer' and c['args'][0] == 'run' for c in self.calls()), 0)
+
+    def test_apptainer_verifier_failure_or_invalid_receipt_refuses_final_startup(self):
+        self.profile(runtime='apptainer', factory_enabled='true')
+        for status, receipt, message in ((78, None, 'fixture runtime diagnostic'),
+                                         (0, '{"kind":"review-factory-verifier","status":"blocked"}',
+                                          'no valid packaged success receipt')):
+            with self.subTest(status=status):
+                self.calls_path.unlink(missing_ok=True)
+                self.install_apptainer_probe(run_status=status, receipt=receipt)
+                result = self.run_launch('--launcher-profile', 'personal', 'owner/repo', ok=False)
+                self.assertIn(message, result.stderr)
+                self.assertIn('refusing Factory-enabled startup before work selection', result.stderr)
+                self.assertEqual(sum(c['tool'] == 'apptainer' and c['args'][0] == 'run' for c in self.calls()), 1)
 
     def test_explicit_environment_zero_disables_profile_factory_and_inheritance(self):
         self.profile(factory_enabled="true", inherit_omp="true")

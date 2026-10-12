@@ -256,6 +256,13 @@ mock_apptainer_log="$scratch/apptainer.log"
 cat >"$scratch/bin/apptainer" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$mock_apptainer_log"
+# Mirror Apptainer's default host bind failure before either verifier or UI.
+for host_file in /etc/localtime /etc/hosts; do
+  if [[ ! -e "$host_fixture\$host_file" && " \$* " != *" --no-mount \$host_file "* ]]; then
+    echo "mount source \$host_file is absent" >&2
+    exit 255
+  fi
+done
 if [[ "\$*" == *"/usr/bin/test -r /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts"* ]]; then exit 0; fi
 if [[ "\$*" == *--factory-verifier-probe* ]]; then
   echo '{"kind":"review-factory-verifier","status":"available"}'
@@ -1070,20 +1077,33 @@ env -u LUNA_FACTORY_ENABLED -u LUNA_FACTORY_CAPACITY EXPECT_NO_FACTORY_ENV=1 \
   fail "Apptainer fallback did not launch without Factory configuration"
 
 mv "$scratch/bin/krun" "$scratch/krun"
-for mask in 0 1 2 3; do
-  configure_host_files "$mask"
-  : >"$mock_apptainer_log"
-  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
-    fail "review fallback failed for host-file mask $mask"
-  assert_apptainer_host_files "$(cat "$mock_apptainer_log")" "$mask"
-
+for factory_enabled in 0 1; do
+  for selected_artifact in oci sif; do
+    for fixture in 0 1 2 3 dangling-localtime; do
+      mask="$fixture"
+      if [[ "$fixture" == dangling-localtime ]]; then mask=2; fi
+      configure_host_files "$mask"
+      if [[ "$fixture" == dangling-localtime ]]; then
+        ln -s missing-zoneinfo "$host_fixture/etc/localtime"
+      fi
+      selected_sif=""
+      [[ "$selected_artifact" != sif ]] || selected_sif="$factory_sif"
+      : >"$mock_apptainer_log"
+      host_files_output="$(LUNA_FACTORY_ENABLED="$factory_enabled" BLUEFIN_REVIEW_SIF="$selected_sif" \
+        REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
+        fail "Factory=$factory_enabled $selected_artifact failed for host fixture $fixture: $host_files_output"
+      calls=0
+      while IFS= read -r call; do
+        [[ "$call" == exec\ * || "$call" == run\ * ]] || continue
+        calls=$((calls + 1))
+        assert_apptainer_host_files "$call" "$mask"
+        [[ "$call" == *"--bind /dev/full:/dev/full"* ]] || fail "Apptainer call lost verifier device: $call"
+      done <"$mock_apptainer_log"
+      assert_eq "$calls" "$((1 + 2 * factory_enabled))" "preflight/final invocation count"
+    done
+  done
 done
-configure_host_files 2
-ln -s missing-zoneinfo "$host_fixture/etc/localtime"
-: >"$mock_apptainer_log"
-REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
-  fail "review fallback failed with dangling localtime"
-assert_apptainer_host_files "$(cat "$mock_apptainer_log")" 2
+configure_host_files 3
 
 mv "$scratch/bin/squashfuse_ll" "$scratch/squashfuse_ll"
 set +e
