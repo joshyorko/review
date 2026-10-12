@@ -16,6 +16,8 @@ The immutable appliance skips OMP's first-run setup wizard, but you must still a
 
 When `LUNA_FACTORY_ENABLED=1`, the packaged launcher and entrypoint qualify the selected runtime with Factory's bubblewrap preflight and a harmless sandbox test before OMP opens. `just review-doctor` reports runtime prerequisites and packaged verifier qualification separately. A failed probe refuses Factory-enabled startup; Apptainer is qualified independently when selected.
 
+For Apptainer, verifier preflight and normal SIF/OCI startup suppress the default `/etc/localtime` and `/etc/hosts` binds only when the host source is absent, including a dangling symlink. Present host files retain their normal mounts. Preflight runs with an isolated environment and reports runtime setup errors with their exit status and diagnostics before refusing startup.
+
 ## Scope, mode, and authentication
 
 A fresh interactive session without an explicit, restored, or configured scope asks for one. Headless callers must pass `owner/repo` or `org:<name>`. `REVIEW_DEFAULT_SCOPE` supplies an explicit generic default; the launcher does not infer an organization from this fork, the GitHub login, or image metadata.

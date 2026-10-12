@@ -55,14 +55,24 @@ factory_verifier_probe() (
     apptainer)
       command -v apptainer >/dev/null 2>&1 || fail "Apptainer is unavailable for the Factory verifier probe"
       mkdir -m 0700 "$scratch/home" "$scratch/tmp"
-      if ! timeout --foreground --signal=TERM --kill-after=5s 180s env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
+      local -a APPTAINER_HOST_ARGS=()
+      prepare_apptainer_host_args
+      if timeout --foreground --signal=TERM --kill-after=5s 180s env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
         apptainer exec --containall --cleanenv --home "$scratch/home:/home/bluefin" \
+        "${APPTAINER_HOST_ARGS[@]}" \
         --bind /dev/full:/dev/full --bind "$scratch/tmp:/tmp" "$image" /usr/bin/test -r \
         /usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts; then
-        fail "Review image lacks the packaged Factory verifier probe or Apptainer could not prepare it: ${image}"
+        status=0
+      else
+        status=$?
+        if ((status == 1)); then
+          fail "Review image lacks the packaged Factory verifier probe: ${image}"
+        fi
+        fail "Apptainer could not prepare the packaged Factory verifier probe (exit ${status}): ${image}"
       fi
       if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
         timeout --foreground --signal=TERM --kill-after=5s 45s apptainer run --containall --no-eval \
+        "${APPTAINER_HOST_ARGS[@]}" \
         --home "$scratch/home:/home/bluefin" --bind /dev/full:/dev/full --bind "$scratch/tmp:/tmp" "$image" \
         --factory-verifier-probe >"$scratch/result.stdout" 2>"$scratch/result.stderr"; then
         status=0
@@ -155,8 +165,17 @@ require_fallback() {
   apptainer_fallback_ready || fail "${KVM_FAILURE}; ${APPTAINER_FAILURE}."
   echo "WARNING: ${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary." >&2
 }
+prepare_apptainer_host_args() {
+  local host_file
+  APPTAINER_HOST_ARGS=()
+  for host_file in /etc/localtime /etc/hosts; do
+    test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
+  done
+  return 0
+}
+
 prepare_apptainer_environment() {
-  local name host_file
+  local name
   # Ambient runtime-specific overrides cannot add capabilities to the plan.
   while IFS= read -r name; do
     case "$name" in APPTAINERENV_* | SINGULARITYENV_*) unset "$name" ;; esac
@@ -165,10 +184,7 @@ prepare_apptainer_environment() {
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   export APPTAINERENV_TERM="${TERM:-xterm-256color}" APPTAINERENV_COLORTERM="${COLORTERM:-truecolor}"
-  APPTAINER_HOST_ARGS=()
-  for host_file in /etc/localtime /etc/hosts; do
-    test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
-  done
+  prepare_apptainer_host_args
   return 0
 }
 
