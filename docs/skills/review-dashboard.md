@@ -107,8 +107,10 @@ snapshot do not. Mutating admission requires packaged OMP shutdown lifecycle v1.
 A stopped wave still needs current GitHub effect reconciliation. Unchanged
 subjects, a uniquely linked issue PR, or the existing exact PR terminal-effect
 contract can release claims without marking cancelled workers or paused work
-complete. Missing or ambiguous effects remain fenced. Startup offers saved
-work explicitly. `/review resume` rechecks repositories, heads, submissions,
+complete. Missing or ambiguous effects remain fenced. Startup reconciles positive stopped
+receipts before offering saved paused work, so leaving verified work paused
+retains no execution claim. Cancelled intent is reconciled without a resume
+picker. `/review resume` rechecks repositories, heads, submissions,
 and admission before dispatching a fresh run with fresh ownership. Existing
 issue submissions are excluded, so resume cannot recreate their PRs. Restoring
 work never replays the old prompt or worker delivery. Legacy records without

@@ -7516,6 +7516,9 @@ test("Review restart offers saved paused work and preserves stop proof across un
 	const review = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await restarted.events.get("session_start")({}, next); await review.whenStarted();
 	assert.ok(next.selectCalls.some(([title]) => title.includes("Saved Review work")));
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0, "Leave paused needs no manual reconciliation to release verified stopped ownership");
+	assert.equal(restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.completedItems, 0);
+	assert.equal(restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "paused");
 	restarted.events.get("tool_call")({ toolCallId: "unrelated-later-tool", toolName: "bash", input: { command: "pwd" } }, next);
 	await restarted.events.get("agent_end")({ messages: [{ role: "assistant", stopReason: "error" }] }, next);
 	await restarted.commands.get("review").handler("reconcile", next);
@@ -7635,4 +7638,25 @@ test("Review failed resume capability check retains saved paused selection", asy
 	assert.equal(pi.messages.length, 1);
 	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.id, saved.id);
 	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.state, "paused");
+});
+
+for (const ambiguous of [false, true]) test(`Review startup reconciles cancelled stopped work without resume picker (ambiguous=${ambiguous})`, async () => {
+	const { pi, ctx, env, states } = await exitFixture();
+	ctx.selectResponses.push("Cancel run and exit");
+	await pi.events.get("session_before_shutdown")({ sessionId: ctx.sessionId, reason: "shutdown" }, ctx);
+	pi.events.get("session_shutdown")({}, ctx);
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	if (ambiguous) states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#99", "projectbluefin/review#100"];
+	const restarted = fakeHost(); restarted.flagValues.set("issues", true);
+	const next = fakeCtx(); next.ui.parent = next; next.sessionId = "reopened";
+	next.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
+	const review = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await restarted.events.get("session_start")({}, next); await review.whenStarted();
+	assert.ok(!next.selectCalls.some(([title]) => title.includes("Saved Review work")));
+	assert.equal(restarted.messages.length, 0);
+	const saved = restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(saved.completedItems, 0);
+	assert.equal(saved.state, ambiguous ? "blocked" : "cancelled");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, ambiguous ? 2 : 0);
+	if (ambiguous) assert.match(saved.error, /GitHub effect proof remains unresolved for .*projectbluefin\/review/);
 });

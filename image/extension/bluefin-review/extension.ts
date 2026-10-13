@@ -2662,7 +2662,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				}
 			}
 		}
-		if (activeBatch?.waveExit || (activeBatch?.state === "paused" && !activeBatch.waveIdentity)) {
+		if (activeBatch && sessionStopped(activeBatch)) {
+			mode.setPaused(true);
+			const saved = activeBatch;
+			const result = await reconcileBatchClaims(ctx, saved);
+			if (activeBatch?.id === saved.id && latestWaveForArchive(saved)) {
+				if (result.unknown.length === 0) settleStoppedBatch(ctx, saved, result);
+				else persistBatch(ctx, { ...saved, state: "blocked", error: `Execution stopped; GitHub effect proof remains unresolved for ${result.unknown.join(", ")}; claims retained` });
+			}
+		}
+		if ((activeBatch?.waveExit && activeBatch.waveExit.choice === "pause") || (activeBatch?.state === "paused" && !activeBatch.waveIdentity)) {
 			mode.setPaused(true);
 			if (sessionStopped(activeBatch) || !activeBatch.waveIdentity) {
 				const choice = await ctx.ui.select("Saved Review work (execution stopped)", ["Leave paused", "Resume saved work", "Cancel saved work"]);
