@@ -87,6 +87,8 @@ prepare_apptainer_environment() {
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   APPTAINER_HOST_ARGS=()
+  # Match the packaged probe: a bindable root and bubblewrap's device sources.
+  [[ "${LUNA_FACTORY_ENABLED:-0}" != 1 ]] || APPTAINER_HOST_ARGS+=(--underlay --bind /dev/full:/dev/full)
   for host_file in /etc/localtime /etc/hosts; do
     test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
   done

@@ -338,7 +338,15 @@ export LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1
 FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
 [[ "$status" -eq 18 ]] || fail "Factory-enabled Apptainer launcher did not reach OMP after its verifier probe: $output"
 grep -q -- '--factory-verifier-probe' "$home/apptainer-verifier.log" || fail "just Apptainer launch skipped the verifier probe"
+log_contains '--underlay' "$apptainer_log"
+log_contains '--bind /dev/full:/dev/full' "$apptainer_log"
 unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY EXPECT_FACTORY_ENV
+
+scenario="Factory-disabled just Apptainer launch keeps the default mount mode"
+: >"$apptainer_log"
+FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
+[[ "$status" -eq 18 ]] || fail "Factory-disabled Apptainer launcher failed: $output"
+log_not_contains '--underlay' "$apptainer_log"
 
 scenario="just launcher forwards only explicit RTK_DISABLED by name to Podman"
 for rtk_value in 0 1; do

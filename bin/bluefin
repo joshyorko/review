@@ -56,7 +56,7 @@ factory_verifier_probe() (
       command -v apptainer >/dev/null 2>&1 || fail "Apptainer is unavailable for the Factory verifier probe"
       mkdir -m 0700 "$scratch/home" "$scratch/tmp"
       local -a APPTAINER_HOST_ARGS=()
-      prepare_apptainer_host_args
+      prepare_apptainer_host_args 1
       if timeout --foreground --signal=TERM --kill-after=5s 180s env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
         apptainer exec --containall --cleanenv --home "$scratch/home:/home/bluefin" \
         "${APPTAINER_HOST_ARGS[@]}" \
@@ -166,8 +166,11 @@ require_fallback() {
   echo "WARNING: ${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary." >&2
 }
 prepare_apptainer_host_args() {
-  local host_file
+  local host_file factory_enabled="${1:-${LUNA_FACTORY_ENABLED:-0}}"
   APPTAINER_HOST_ARGS=()
+  # Apptainer's overlay root is MS_UNBINDABLE, so bubblewrap cannot bind /usr.
+  # Underlay preserves the read-only image and allows the nested verifier.
+  [[ "$factory_enabled" != 1 ]] || APPTAINER_HOST_ARGS+=(--underlay)
   for host_file in /etc/localtime /etc/hosts; do
     test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
   done
