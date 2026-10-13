@@ -98,7 +98,7 @@ class LauncherProfilesContract(unittest.TestCase):
         self.env_token = secrets.token_hex(24)
         self.stored_token = secrets.token_hex(24)
         self.provider_token = secrets.token_hex(24)
-        self.env = dict(PATH=f"{tools}:/usr/bin:/bin", HOME=str(self.root / "home"),
+        self.env = dict(PATH=f"{tools}:/usr/bin:/bin", HOME=str(self.root / "home"), TMPDIR=str(self.root),
                         XDG_CONFIG_HOME=str(self.root / "config"), XDG_STATE_HOME=str(self.root / "state"),
                         REVIEW_APPLIANCE_IMAGE="example.invalid/review:fixture", GH_TOKEN=self.env_token,
                         FIXTURE_ENV_TOKEN=self.env_token, FIXTURE_STORED_TOKEN=self.stored_token,
@@ -219,6 +219,42 @@ if '--factory-verifier-probe' in args or (args and args[0] == 'exec'):
         probes = [c for c in self.calls() if '--factory-verifier-probe' in c['args'] or c['args'][0] == 'exec']
         self.assertEqual(len(probes), 2)
         self.assertTrue(all('/dev/full:/dev/full' in c['args'] for c in probes))
+
+    def test_apptainer_factory_uses_bindable_root_for_probe_and_final_startup(self):
+        self.install_apptainer_probe()
+        sif = self.root / 'review.sif'
+        sif.write_bytes(b'fixture')
+        sif.chmod(0o755)
+        for artifact in ('oci', 'sif'):
+            for enabled in ('true', 'false'):
+                with self.subTest(artifact=artifact, enabled=enabled):
+                    self.calls_path.unlink(missing_ok=True)
+                    self.profile(runtime='apptainer', factory_enabled=enabled)
+                    if artifact == 'sif':
+                        self.env.pop('REVIEW_APPLIANCE_IMAGE', None)
+                        self.env['REVIEW_APPLIANCE_SIF'] = str(sif)
+                    else:
+                        self.env.pop('REVIEW_APPLIANCE_SIF', None)
+                        self.env['REVIEW_APPLIANCE_IMAGE'] = 'example.invalid/review:fixture'
+                    self.run_launch('--launcher-profile', 'personal', 'owner/repo')
+                    invocations = [c['args'] for c in self.calls()
+                                   if c['tool'] == 'apptainer' and c['args'][0] in ('exec', 'run')]
+                    self.assertEqual(len(invocations), 3 if enabled == 'true' else 1)
+                    for args in invocations:
+                        self.assertEqual('--underlay' in args, enabled == 'true')
+                        self.assertIn('--containall', args)
+                        self.assertNotIn('--fakeroot', args)
+                        self.assertNotIn('--writable', args)
+
+    def test_direct_apptainer_probe_selects_bindable_root_without_factory_environment(self):
+        self.install_apptainer_probe()
+        result = subprocess.run([str(LAUNCHER), 'factory-verifier-probe', 'apptainer', 'fixture.sif'],
+                                env=self.env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'], 'available')
+        invocations = [c['args'] for c in self.calls()]
+        self.assertEqual(len(invocations), 2)
+        self.assertTrue(all('--underlay' in args for args in invocations))
 
     def test_factory_apptainer_host_binds_match_every_preflight_and_final_invocation(self):
         self.install_apptainer_probe()
