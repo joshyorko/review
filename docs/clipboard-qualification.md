@@ -1,10 +1,12 @@
 # Qualify the #140 clipboard patch
 
-This source check runs in repository validation for the Review appliance's pinned OMP source. It verifies `/dump` and `/dump all` status messages against the exact OMP 18.9.2 handlers. It does not prove clipboard delivery or packaged behavior.
+This source check runs in repository validation for the Review appliance's pinned OMP source. It verifies `/dump` and `/dump all` status messages against the exact OMP 18.10.3 handlers. It does not prove clipboard delivery or packaged behavior.
 
 ## Pinned inputs
 
-The source archive is OMP 18.9.2 at commit `bd4dffd5e617ce732f8a14249b0be1e6c7621886`, with SHA-256 `5dc800d5f5af80d775664915356f3073e7b9d110c9822aa63884b365eaf035fb`. The MemoryBackend registration patch remains a separate input with SHA-256 `d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f`. The clipboard candidate is [`patches/omp/clipboard-truthful-18.9.2.patch`](../patches/omp/clipboard-truthful-18.9.2.patch), with SHA-256 `9e2f74c989f7d2f86d8dff73eb99a1888188f72c00b7ba7147758669021328b7`.
+The source archive is OMP 18.10.3 at commit `81e1d8927a3c16cfaff2e9456baa8c060e1e0e9b`, with SHA-256 `e4fa3c621fd6ef21b71e1b048f056bf7845dd9bada19199cbf698b84d3d70e15`. The MemoryBackend registration patch remains a separate input with SHA-256 `d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f`. The clipboard candidate is [`patches/omp/clipboard-truthful-18.10.3.patch`](../patches/omp/clipboard-truthful-18.10.3.patch), with SHA-256 `608959e93b132d50aa9b6d015b1b6fecc6dbb644e7295628bee1f11640cf224e`.
+
+The 18.10.3 refresh was checked against the verified source archive. Both unpatched handlers still report successful delivery; both regression cases fail without the clipboard patch and pass with it. The MemoryBackend patch is unchanged.
 
 The source fixture verifies the OMP source and archive, both patch hashes, their order, and the patch path against `image/appliance/Containerfile`. The clipboard patch is bound to the current OMP commit; an OMP pin change must be requalified before the build accepts it.
 
