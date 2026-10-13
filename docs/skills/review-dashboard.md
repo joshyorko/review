@@ -97,10 +97,30 @@ Issue work reads the GitHub issue and bounded discussion. A multi-issue wave use
 
 Review persists the selected wave, worker identities, issue-submission baseline, and host-wide mutation resources before dispatch. On restart, a running wave becomes blocked and is reconciled against live GitHub state; an issue Slay settles only when exactly one new submitted pull request is identified for each issue. Missing, duplicate, unrelated, stale, or otherwise ambiguous effects remain `UNKNOWN` and keep their claims.
 
+Normal interactive OMP exit offers **Pause and exit**, **Cancel run and exit**, and
+**Stay**. Dismissal means Stay. Signals freeze admission and default to pause
+without opening a dialog. Review saves the owning session and choice before
+OMP cancels owned execution. Only the matching native post-shutdown settlement
+receipt proves execution stopped; timeout, cancelled status, and an empty job
+snapshot do not. Mutating admission requires packaged OMP shutdown lifecycle v1.
+
+A stopped wave still needs current GitHub effect reconciliation. Unchanged
+subjects, a uniquely linked issue PR, or the existing exact PR terminal-effect
+contract can release claims without marking cancelled workers or paused work
+complete. Missing or ambiguous effects remain fenced. Startup reconciles positive stopped
+receipts before offering saved paused work, so leaving verified work paused
+retains no execution claim. Cancelled intent is reconciled without a resume
+picker. `/review resume` rechecks repositories, heads, submissions,
+and admission before dispatching a fresh run with fresh ownership. Existing
+issue submissions are excluded, so resume cannot recreate their PRs. Restoring
+work never replays the old prompt or worker delivery. Legacy records without
+session proof still require their existing authoritative worker/effect evidence.
+
 Normal Review commands provide recovery without claim-file or Factory archaeology:
 
 - `/review status` shows the active/recoverable waves and Review-owned claims.
 - `/review reconcile` re-checks authoritative worker and GitHub evidence.
+- `/review resume` explicitly resumes saved paused work after revalidation.
 - `/review drain` pauses admission and waits for the current wave to settle.
 - `/review cancel` drains active work, then archives the wave while retaining UNKNOWN claims.
 - `/review revise` cancels a blocked wave after the same safe reconciliation and leaves the session ready for a new selection.
