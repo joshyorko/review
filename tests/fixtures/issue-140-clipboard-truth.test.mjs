@@ -7,16 +7,16 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const expectedArchiveSha256 = "5dc800d5f5af80d775664915356f3073e7b9d110c9822aa63884b365eaf035fb";
-const expectedSourceCommit = "bd4dffd5e617ce732f8a14249b0be1e6c7621886";
+const expectedArchiveSha256 = "e4fa3c621fd6ef21b71e1b048f056bf7845dd9bada19199cbf698b84d3d70e15";
+const expectedSourceCommit = "81e1d8927a3c16cfaff2e9456baa8c060e1e0e9b";
 const expectedMemoryPatchSha256 = "d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f";
-const expectedPatchSha256 = "9e2f74c989f7d2f86d8dff73eb99a1888188f72c00b7ba7147758669021328b7";
-const expectedOmpVersion = "18.9.2";
+const expectedPatchSha256 = "608959e93b132d50aa9b6d015b1b6fecc6dbb644e7295628bee1f11640cf224e";
+const expectedOmpVersion = "18.10.3";
 const sourceCheckout = process.env.REVIEW_OMP_SOURCE;
 const cachedArchive = process.env.ISSUE140_OMP_ARCHIVE;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const memoryPatchPath = path.join(repoRoot, "patches/omp/memory-backend-registration.patch");
-const patchPath = path.join(repoRoot, "patches/omp/clipboard-truthful-18.9.2.patch");
+const patchPath = path.join(repoRoot, "patches/omp/clipboard-truthful-18.10.3.patch");
 const containerfile = await readFile(path.join(repoRoot, "image/appliance/Containerfile"), "utf8");
 function pinnedArg(name) {
 	const matches = [...containerfile.matchAll(new RegExp(`^ARG ${name}=([^\\n]+)$`, "gm"))];
@@ -32,7 +32,7 @@ assert.equal(pinnedArg("OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"), expectedSourceCommi
 assert.equal(pinnedArg("OMP_CLIPBOARD_PATCH_SHA256"), expectedPatchSha256);
 assert.equal(
 	pinnedArg("OMP_CLIPBOARD_PATCH_PATH"),
-	"/usr/local/share/bluefin/omp/clipboard-truthful-18.9.2.patch",
+	"/usr/local/share/bluefin/omp/clipboard-truthful-18.10.3.patch",
 );
 assert.ok(!(sourceCheckout && cachedArchive), "set REVIEW_OMP_SOURCE or ISSUE140_OMP_ARCHIVE, not both");
 const patch = await readFile(patchPath);

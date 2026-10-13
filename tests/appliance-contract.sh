@@ -96,8 +96,8 @@ omp_source_commit="$(sed -nE 's/^ARG OMP_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$
 clipboard_patch_source_commit="$(sed -nE 's/^ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
 [[ "$clipboard_patch_source_commit" == "$omp_source_commit" ]] ||
   fail "clipboard patch must be reviewed against the exact pinned OMP source commit"
-[[ "$(sed -nE 's|^ARG OMP_CLIPBOARD_PATCH_PATH=([^[:space:]]+)$|\1|p' "$containerfile")" == "/usr/local/share/bluefin/omp/clipboard-truthful-18.9.2.patch" ]] ||
-  fail "clipboard patch path must name the pinned 18.9.2 patch input"
+[[ "$(sed -nE 's|^ARG OMP_CLIPBOARD_PATCH_PATH=([^[:space:]]+)$|\1|p' "$containerfile")" == "/usr/local/share/bluefin/omp/clipboard-truthful-18.10.3.patch" ]] ||
+  fail "clipboard patch path must name the pinned 18.10.3 patch input"
 for pin in OMP_VERSION OMP_BUN_VERSION NODE_VERSION OMP_NATIVES_VERSION RTK_VERSION; do
   grep -qE "^ARG ${pin}=[0-9]+\\.[0-9]+\\.[0-9]+$" "$containerfile" ||
     fail "ARG ${pin} must be a semantic version"
@@ -114,7 +114,7 @@ require "$containerfile" \
   'COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp' \
   'COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts' \
   'COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch' \
-  'COPY patches/omp/clipboard-truthful-18.9.2.patch /usr/local/share/bluefin/omp/clipboard-truthful-18.9.2.patch' \
+  'COPY patches/omp/clipboard-truthful-18.10.3.patch /usr/local/share/bluefin/omp/clipboard-truthful-18.10.3.patch' \
   'OMP_PATCH_PATH=/usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'OMP_CLIPBOARD_PATCH_PATH="$OMP_CLIPBOARD_PATCH_PATH"' \
   'OMP_CLIPBOARD_PATCH_SOURCE_COMMIT="$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"' \
@@ -426,7 +426,7 @@ grep -qF '!scripts/derived-omp-canary.ts' .dockerignore ||
   fail ".dockerignore must let the derived OMP canary into the build context"
 grep -qF '!patches/omp/memory-backend-registration.patch' .dockerignore ||
   fail ".dockerignore must let the OMP registration patch into the build context"
-grep -qF '!patches/omp/clipboard-truthful-18.9.2.patch' .dockerignore ||
+grep -qF '!patches/omp/clipboard-truthful-18.10.3.patch' .dockerignore ||
   fail ".dockerignore must let the OMP clipboard patch into the build context"
 
 # The generator that fills that SBOM. Its own contract runs here rather than as
