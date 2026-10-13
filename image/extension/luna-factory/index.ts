@@ -38,6 +38,7 @@ import { EvidenceViewer } from "./ui/evidence-viewer.ts";
 import { dashboardActionAllowed } from "./ui/actions.ts";
 import { rawKeyMatcher, type KeyMatcher } from "../bluefin-review/keys.ts";
 import { opendirSync, readFileSync, statSync } from "node:fs";
+import type { Type as OmpSchema } from "@oh-my-pi/omptype";
 
 interface FactoryAutocompleteItem {
 	value: string;
@@ -126,7 +127,7 @@ interface ZodLike {
 	array(item: unknown): SchemaLike;
 	enum(values: readonly [string, ...string[]]): SchemaLike;
 	literal(value: string | number | boolean): SchemaLike;
-	union(values: readonly unknown[]): SchemaLike;
+	union(values: readonly unknown[]): SchemaLike & Pick<OmpSchema, "toJsonSchema">;
 }
 
 /** The tool definition shape the host accepts. Named here so consumers do not rebuild it. */
@@ -403,6 +404,10 @@ function factoryToolSchemas(z: ZodLike): FactoryToolSchemas {
 			predicates,
 		}),
 	]);
+	// Keep native validation and provider normalization, including closed objects.
+	// Bedrock also requires an explicit object root for this union of objects.
+	const receiptJsonSchema = receipt.toJsonSchema.bind(receipt);
+	receipt.toJsonSchema = (options) => ({ ...receiptJsonSchema(options), type: "object" });
 	return {
 		empty: z.object({}),
 		open: z.object({

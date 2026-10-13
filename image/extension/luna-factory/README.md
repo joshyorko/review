@@ -123,6 +123,11 @@ the stable fallback:
 | Replan or reopen a task | `luna_factory_replan`, `luna_factory_reopen` |
 | Read a completion receipt | `luna_factory_completion` |
 
+The receipt tool advertises an explicit object root for Bedrock while retaining
+OMP's native versioned schema validation and provider normalization. Arguments
+remain flat: version 1 and version 2 keep their existing fields, and version 2
+still requires `assumptions` and `predicates`.
+
 Bare text such as `/factory debug` never starts a conversational objective. Use
 the explicit `--` form; the older implicit `/factory <objective>` spelling is
 rejected with guidance.

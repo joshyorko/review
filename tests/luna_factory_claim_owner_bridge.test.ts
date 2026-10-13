@@ -69,7 +69,7 @@ function host() {
 		zod: { object: () => leaf(), string: () => leaf(), number: () => leaf(), boolean: () => leaf(), array: () => leaf(), enum: () => leaf(), literal: () => leaf(), union: () => leaf() },
 	};
 }
-function leaf() { return { optional: () => leaf(), describe: () => leaf() }; }
+function leaf() { return { optional: () => leaf(), describe: () => leaf(), toJsonSchema: () => ({}) }; }
 function context(branch: readonly { type: string; customType?: string; data?: unknown }[], snapshot: unknown) {
 	return { hasUI: false, ui: { notify() {} }, sessionManager: { getBranch: () => [...branch] }, getAsyncJobSnapshot: () => snapshot };
 }

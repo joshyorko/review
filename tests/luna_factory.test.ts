@@ -1898,7 +1898,9 @@ function fakeHost(options: { nativeTask?: boolean } = {}): FakeHost {
 			array: (item: unknown) => schema("array", { item }),
 			enum: (values: readonly string[]) => schema("enum", { values }),
 			literal: (value: string | number | boolean) => schema("literal", { value }),
-			union: (values: readonly unknown[]) => schema("union", { values }),
+			union: (values: readonly unknown[]) => Object.assign(schema("union", { values }), {
+				toJsonSchema: () => ({ anyOf: values }),
+			}),
 		},
 		arktype: options.nativeTask ? ((schema: unknown) => schema) : undefined,
 		setLabel() {},
@@ -2230,16 +2232,17 @@ test("Factory exposes typed tool contracts and accepts an object on the first ca
 	assert.equal(parameters.shape.options?.shape?.finishDeliverable?.isOptional, true);
 	const receiptTool = host.tools.get("luna_factory_receipt");
 	assert.ok(receiptTool);
-	const receiptParameters = receiptTool.parameters as {
-		kind: string;
-		values: ReadonlyArray<{ shape?: Record<string, { value?: unknown; isOptional?: boolean }> }>;
-	};
-	assert.equal(receiptParameters.kind, "union");
-	assert.deepEqual(receiptParameters.values.map((variant) => variant.shape?.version?.value), [1, 2]);
-	assert.equal(receiptParameters.values[0]?.shape?.assumptions, undefined);
-	assert.notEqual(receiptParameters.values[1]?.shape?.assumptions?.isOptional, true);
-	assert.notEqual(receiptParameters.values[1]?.shape?.predicates?.isOptional, true);
-	assert.equal(receiptParameters.values[1]?.shape?.semanticResult?.isOptional, true);
+	const receiptSchema = receiptTool.parameters as { toJsonSchema(): {
+		type: string;
+		anyOf: ReadonlyArray<{ shape?: Record<string, { value?: unknown; isOptional?: boolean }> }>;
+	} };
+	const receiptParameters = receiptSchema.toJsonSchema();
+	assert.equal(receiptParameters.type, "object", "Bedrock requires an explicit object root");
+	assert.deepEqual(receiptParameters.anyOf.map((variant) => variant.shape?.version?.value), [1, 2]);
+	assert.equal(receiptParameters.anyOf[0]?.shape?.assumptions, undefined);
+	assert.notEqual(receiptParameters.anyOf[1]?.shape?.assumptions?.isOptional, true);
+	assert.notEqual(receiptParameters.anyOf[1]?.shape?.predicates?.isOptional, true);
+	assert.equal(receiptParameters.anyOf[1]?.shape?.semanticResult?.isOptional, true);
 	const opened = await callTool(host, "luna_factory_open", {
 		objective: "use the typed contract",
 		criteria: [{ id: "A1", statement: "the first call opens the run" }],

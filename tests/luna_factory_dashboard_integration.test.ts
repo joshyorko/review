@@ -90,7 +90,7 @@ type Command = Parameters<NonNullable<FactoryHost["registerCommand"]>>[1];
 function extensionHost(root: string, enabled = true) {
 	const commands = new Map<string, Command>();
 	const events = new Map<string, Parameters<FactoryHost["on"]>[1]>();
-	const schema = { optional() { return this; }, describe() { return this; } };
+	const schema = { optional() { return this; }, describe() { return this; }, toJsonSchema() { return {}; } };
 	let modelCalls = 0;
 	const host: FactoryHost = {
 		zod: { object: () => schema, string: () => schema, number: () => schema, boolean: () => schema, array: () => schema, enum: () => schema, literal: () => schema, union: () => schema },
