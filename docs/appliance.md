@@ -18,6 +18,8 @@ When `LUNA_FACTORY_ENABLED=1`, the packaged launcher and entrypoint qualify the 
 
 For Apptainer, verifier preflight and normal SIF/OCI startup suppress the default `/etc/localtime` and `/etc/hosts` binds only when the host source is absent, including a dangling symlink. Present host files retain their normal mounts. Preflight runs with an isolated environment and reports runtime setup errors with their exit status and diagnostics before refusing startup.
 
+Factory-enabled Apptainer launches select underlay mode for both preflight and the final process. Apptainer's default overlay root is unbindable, which prevents bubblewrap from mounting the image's `/usr` into its verifier sandbox. Underlay retains the read-only image, containment and bubblewrap checks; it does not require root or a writable image. Apptainer 1.5 emits a deprecation warning for this supported option. Factory-disabled launches keep the default mount mode.
+
 ## Scope, mode, and authentication
 
 A fresh interactive session without an explicit, restored, or configured scope asks for one. Headless callers must pass `owner/repo` or `org:<name>`. `REVIEW_DEFAULT_SCOPE` supplies an explicit generic default; the launcher does not infer an organization from this fork, the GitHub login, or image metadata.
