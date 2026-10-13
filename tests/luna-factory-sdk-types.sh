@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile the production adapter against declarations from the exact packaged SDK.
+# Check adapter types and tool schemas against the exact packaged SDK.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 modules="${OMP_SDK_NODE_MODULES:?Set OMP_SDK_NODE_MODULES to an isolated installation of the pinned SDK, TypeScript and @types/node}"
@@ -24,3 +24,4 @@ fs.writeFileSync(config, JSON.stringify({compilerOptions: {
 console.log(`Checking production adapter against OMP ${version}`);
 JS
 "$modules/.bin/tsc" -p "$work/tsconfig.json"
+node --test "$root/tests/fixtures/luna-factory-tool-schema.test.mjs"

@@ -414,7 +414,7 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 
 /** Fake omp extension host recording every registration. */
 function fakeHost() {
-	const zodLeaf = () => ({ optional: () => zodLeaf(), describe: () => zodLeaf() });
+	const zodLeaf = () => ({ optional: () => zodLeaf(), describe: () => zodLeaf(), toJsonSchema: () => ({}) });
 	return {
 		labels: [],
 		events: new Map(),
