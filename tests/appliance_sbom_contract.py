@@ -24,6 +24,7 @@ OMP_ARM = "b" * 64
 OMP_SOURCE = "c" * 64
 OMP_PATCH = "d" * 64
 OMP_CLIPBOARD_PATCH = "7" * 64
+OMP_SESSION_LIFECYCLE_PATCH = "12" * 32
 NATIVE_X86 = "e" * 128
 NATIVE_ARM = "f" * 128
 GH_X86 = "1" * 64
@@ -49,6 +50,9 @@ BASE_ARGS = {
     "--omp-clipboard-patch-source-commit": SOURCE_COMMIT,
     "--omp-clipboard-patch-sha256": OMP_CLIPBOARD_PATCH,
     "--omp-clipboard-patch-path": "/usr/local/share/bluefin/omp/clipboard-truthful-18.9.2.patch",
+    "--omp-session-lifecycle-patch-source-commit": SOURCE_COMMIT,
+    "--omp-session-lifecycle-patch-sha256": OMP_SESSION_LIFECYCLE_PATCH,
+    "--omp-session-lifecycle-patch-path": "/usr/local/share/bluefin/omp/session-lifecycle-18.10.3.patch",
     "--omp-bun-version": "1.4.2",
     "--bun-sha256": BUN_X86,
     "--node-version": "24.21.0",
@@ -170,6 +174,7 @@ class PerArchitectureDigests(unittest.TestCase):
         found = packages_by_name(generate(self, "x86_64"))
         for name in (
             "omp",
+            "omp-session-lifecycle-patch",
             "omp-source",
             "omp-memory-backend-patch",
             "omp-clipboard-truthfulness-patch",
@@ -198,6 +203,15 @@ class PerArchitectureDigests(unittest.TestCase):
         self.assertIn(OMP_SOURCE, comment)
         self.assertIn(OMP_PATCH, comment)
         self.assertIn(OMP_CLIPBOARD_PATCH, comment)
+        self.assertIn(OMP_SESSION_LIFECYCLE_PATCH, comment)
+        patch = found["omp-session-lifecycle-patch"]
+        self.assertEqual(patch["checksums"][0]["checksumValue"], OMP_SESSION_LIFECYCLE_PATCH)
+        self.assertEqual(patch["versionInfo"], SOURCE_COMMIT)
+        self.assertEqual(
+            patch["externalRefs"][0]["referenceLocator"],
+            f"pkg:generic/omp-session-lifecycle-patch@{SOURCE_COMMIT}?checksum=sha256:{OMP_SESSION_LIFECYCLE_PATCH}",
+        )
+        self.assertEqual(patch["downloadLocation"], f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/session-lifecycle-18.10.3.patch")
         self.assertIn("Bun 1.4.2", comment)
 
 
@@ -237,6 +251,10 @@ class DigestValidation(unittest.TestCase):
             "omp clipboard patch source commit must match",
             **{"--omp-clipboard-patch-source-commit": "1" * 40},
         )
+
+    def test_session_lifecycle_patch_requires_qualified_source_and_digest(self):
+        self.assert_rejected("omp session lifecycle patch source commit must match", **{"--omp-session-lifecycle-patch-source-commit": "1" * 40})
+        self.assert_rejected("omp_session_lifecycle_patch_sha256", **{"--omp-session-lifecycle-patch-sha256": "z" * 64})
 
     def test_empty_versions_are_refused_by_name(self):
         for flag, label in (
@@ -356,6 +374,7 @@ class PackageIdentity(unittest.TestCase):
                 "omp-clipboard-truthfulness-patch",
                 "omp-memory-backend-patch",
                 "omp-native-addon",
+                "omp-session-lifecycle-patch",
                 "omp-source",
                 "review-workbench",
                 "rtk",

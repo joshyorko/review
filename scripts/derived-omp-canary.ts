@@ -205,6 +205,9 @@ await Bun.write(
 import { registerMemoryD } from ${JSON.stringify(adapterIndex)};
 
 export default function (api: ExtensionAPI & Parameters<typeof registerMemoryD>[0]) {
+  if (api.sessionShutdownLifecycleVersion !== 1) {
+    throw new Error("native session shutdown lifecycle v1 is unavailable");
+  }
   registerMemoryD(api);
   api.registerCommand("native-memory-canary", {
     description: "Exercise synthetic native MemoryD operations",
@@ -316,6 +319,7 @@ try {
     throw new Error("canary observed automatic or unexpected MemoryD writes");
   }
 
+  console.log("Derived OMP native session shutdown lifecycle capability v1: passed");
   console.log("Derived OMP provider-boundary canary: recall and daemon-down fail-open passed");
   console.log("Derived OMP native memory canary: status, search, explicit save, and disabled automatic writes passed");
 } finally {

@@ -416,6 +416,7 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 function fakeHost() {
 	const zodLeaf = () => ({ optional: () => zodLeaf(), describe: () => zodLeaf(), toJsonSchema: () => ({}) });
 	return {
+		sessionShutdownLifecycleVersion: 1,
 		labels: [],
 		events: new Map(),
 		shortcuts: new Map(),
@@ -4812,7 +4813,7 @@ test("production Review-to-Factory reconcile releases a failed wave only after e
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
 	ctx.asyncJobs.recent = [{ id: "worker-command", status: "failed", startTime: NOW + 1 }];
-	ctx.sessionManager = {
+	ctx.sessionManager = { getSessionId: () => ctx.sessionId,
 		getBranch: () => [{
 			type: "custom",
 			customType: BATCH_ENTRY,
@@ -4886,7 +4887,7 @@ test("restart uses persisted terminal evidence for one Factory retry", async () 
 	const pi2 = fakeHost();
 	const ctx2 = fakeCtx();
 	ctx2.ui.parent = ctx2;
-	ctx2.sessionManager = { getBranch: () => [
+	ctx2.sessionManager = { getSessionId: () => ctx2.sessionId, getBranch: () => [
 		{ type: "custom", customType: STATE_ENTRY, data: { mode: "prs", repo: item.repo, id: item.id } },
 		...pi1.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })),
 	] };
@@ -4922,7 +4923,7 @@ async function interruptedIssueSlay(states) {
 	ctx.asyncJobs.recent = [{ id: "issue-worker", status: "completed", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "issue-worker", "issue-worker");
 	await pi.events.get("turn_end")({}, ctx);
-	await pi.events.get("session_shutdown")?.({}, ctx);
+	// Simulate abrupt process loss: no graceful shutdown lifecycle was delivered.
 	return { env, entries: pi.entries, batch };
 }
 
@@ -4973,7 +4974,7 @@ async function blockedPrSlayWave() {
 		"item:projectbluefin/review#350", "item:projectbluefin/review#352", "item:projectbluefin/review#353", "repo:projectbluefin/review",
 	]);
 	assert.ok(claims.every((claim) => claim.owner === `review:${blocked.id}:0`));
-	await pi.events.get("session_shutdown")?.({}, ctx);
+	// Simulate abrupt process loss, preserving the pre-shutdown recovery contract.
 	return { env, items, effects, entries: pi.entries, batch: blocked };
 }
 
@@ -5002,7 +5003,7 @@ test("/review reconcile recovers a merged three-PR Slay wave and admits the next
 	}
 	const pi = fakeHost();
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
-	ctx.sessionManager = { getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
+	ctx.sessionManager = { getSessionId: () => ctx.sessionId, getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
 	await pi.commands.get("review").handler("reconcile", ctx);
@@ -5181,6 +5182,7 @@ test("Review recovers a consumed worker from host evidence without session entri
 		async: { type: "task", state: "completed", jobId: "LostWorker" }, progress: [{ id: "LostWorker", index: 0, status: "completed" }],
 	} }, isError: false }, ctx);
 	await pi.events.get("session_shutdown")({}, ctx);
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
 	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
 	const restarted = fakeHost(); restarted.flagValues.set("issues", true);
 	const next = fakeCtx(); next.ui.parent = next;
@@ -7399,4 +7401,238 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 		false,
 		"must not block with 'Hive is unavailable'",
 	);
+});
+
+async function exitFixture() {
+	const fixture = await preToolFailureFixture();
+	fixture.ctx.sessionManager.getSessionId = () => fixture.ctx.sessionId;
+	return fixture;
+}
+
+for (const choice of ["Stay", undefined]) test(`Review exit ${choice ?? "dismiss"} preserves wave and claims`, async () => {
+	const { pi, ctx, env } = await exitFixture();
+	const before = pi.entries.length;
+	ctx.selectResponses.push(choice);
+	assert.deepEqual(await pi.events.get("session_before_shutdown")({ sessionId: ctx.sessionId, reason: "shutdown" }, ctx), { cancel: true });
+	assert.equal(pi.entries.length, before);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+for (const jobs of [0, 1, 100]) for (const choice of ["Pause and exit", "Cancel run and exit"]) test(`Review ${choice} reconciles authoritative stop of ${jobs} workers without completing work`, async () => {
+	const { pi, ctx, env } = await exitFixture();
+	ctx.asyncJobs.running = Array.from({ length: jobs }, (_, i) => ({ id: `worker-${i}`, status: "running", startTime: Date.now() }));
+	ctx.selectResponses.push(choice);
+	await pi.events.get("session_before_shutdown")({ sessionId: ctx.sessionId, reason: "shutdown" }, ctx);
+	pi.events.get("session_shutdown")({}, ctx);
+	ctx.asyncJobs.running = [];
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	const receipt = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(receipt.waveShutdown.settled, true);
+	await pi.commands.get("review").handler("reconcile", ctx);
+	const saved = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(saved.state, choice === "Pause and exit" ? "paused" : "cancelled");
+	assert.equal(saved.completedItems, 0);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+});
+
+test("Review signal exit defaults pause; foreign, premature and duplicate settlement cannot change ownership", async () => {
+	const { pi, ctx } = await exitFixture();
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.waveShutdown, undefined);
+	pi.events.get("session_shutdown")({}, ctx);
+	assert.equal(ctx.selectCalls.length, 0);
+	pi.events.get("session_shutdown_settled")({ sessionId: "foreign", settled: true, pendingJobIds: [] }, ctx);
+	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.waveShutdown, undefined);
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: false, pendingJobIds: ["worker"], reason: "timeout" }, ctx);
+	const count = pi.entries.length;
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	assert.equal(pi.entries.length, count);
+	await pi.commands.get("review").handler("reconcile", ctx);
+	assert.match(ctx.notifications.at(-1).message, /missing positive owning-session/);
+});
+
+test("Review stopped worker receipt retains changed GitHub effect claims", async () => {
+	const { pi, ctx, env, states } = await exitFixture();
+	pi.events.get("session_shutdown")({}, ctx);
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	states["projectbluefin/review#77"].submittedPrs.push("https://github.com/projectbluefin/review/pull/99", "https://github.com/projectbluefin/review/pull/100");
+	await pi.commands.get("review").handler("reconcile", ctx);
+	assert.match(ctx.notifications.at(-1).message, /execution stopped; GitHub effect proof/);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+	await pi.commands.get("review").handler("resume", ctx);
+	assert.equal(pi.messages.length, 1);
+});
+
+test("Review resumed stopped work uses a fresh claim owner and prompt after current evidence", async () => {
+	const { pi, ctx, env, review } = await exitFixture();
+	pi.events.get("session_shutdown")({}, ctx);
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	const old = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
+	ctx.sessionId = "new-session";
+	ctx.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("resume", ctx);
+	const current = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
+	assert.notEqual(current.id, old.id);
+	assert.equal(current.waveSessionId, "new-session");
+	assert.equal(current.waveShutdown, undefined);
+	assert.notEqual(current.wavePromptDigest, old.wavePromptDigest);
+	assert.equal(pi.messages.length, 2);
+	assert.ok(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().every((claim) => claim.owner.includes(current.id)));
+	const restarted = fakeHost(); restarted.flagValues.set("issues", true);
+	const next = fakeCtx(); next.ui.parent = next; next.sessionId = ctx.sessionId;
+	next.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
+	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch({ "projectbluefin/review#77": { title: "issue", submittedPrs: [] } }), env });
+	await restarted.events.get("session_start")({}, next); await restored.whenStarted();
+	assert.equal(restarted.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.id, current.id);
+	restarted.events.get("session_shutdown")({}, next);
+	restarted.events.get("session_shutdown_settled")({ sessionId: next.sessionId, settled: true, pendingJobIds: [] }, next);
+	assert.equal(restarted.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.waveShutdown, undefined, "reused session ID cannot certify workers owned by the previous runtime");
+});
+
+test("Review missing native lifecycle capability blocks mutation before claims", async () => {
+	const pi = fakeHost();
+	pi.sessionShutdownLifecycleVersion = undefined;
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({ "projectbluefin/review#77": { title: "issue", submittedPrs: [] } }), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	ctx.overlays[0].handleInput("A"); ctx.overlays[0].handleInput("f");
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	assert.equal(pi.messages.length, 0);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	assert.ok(ctx.notifications.some((notice) => /upgrade to the packaged Review OMP/.test(notice.message)));
+});
+
+test("Review restart offers saved paused work and preserves stop proof across unrelated chat", async () => {
+	const { pi, ctx, env, states } = await exitFixture();
+	pi.events.get("session_shutdown")({}, ctx);
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	const restarted = fakeHost(); restarted.flagValues.set("issues", true);
+	const next = fakeCtx(); next.ui.parent = next; next.sessionId = ctx.sessionId;
+	next.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
+	next.selectResponses.push("Leave paused");
+	const review = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await restarted.events.get("session_start")({}, next); await review.whenStarted();
+	assert.ok(next.selectCalls.some(([title]) => title.includes("Saved Review work")));
+	restarted.events.get("tool_call")({ toolCallId: "unrelated-later-tool", toolName: "bash", input: { command: "pwd" } }, next);
+	await restarted.events.get("agent_end")({ messages: [{ role: "assistant", stopReason: "error" }] }, next);
+	await restarted.commands.get("review").handler("reconcile", next);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	assert.equal(restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "paused");
+	assert.equal(restarted.messages.length, 0);
+});
+
+test("Review stopped issue with one linked PR releases claims and resume never duplicates publication", async () => {
+	const { pi, ctx, env, states, review } = await exitFixture();
+	pi.events.get("session_shutdown")({}, ctx);
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#99"];
+	await pi.commands.get("review").handler("reconcile", ctx);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.completedItems, 0);
+	ctx.sessionId = "session-2";
+	ctx.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("resume", ctx);
+	assert.equal(pi.messages.length, 1);
+	assert.match(ctx.notifications.at(-1).message, /already has submitted PRs/);
+});
+
+test("Review late same-owner tool contradicts settlement and duplicate receipt cannot revive it", async () => {
+	const { pi, ctx, env } = await exitFixture();
+	pi.events.get("session_shutdown")({}, ctx);
+	const event = { sessionId: ctx.sessionId, settled: true, pendingJobIds: [] };
+	pi.events.get("session_shutdown_settled")(event, ctx);
+	pi.events.get("tool_call")({ toolCallId: "late", toolName: "bash", input: { command: "pwd" } }, ctx);
+	pi.events.get("session_shutdown_settled")(event, ctx);
+	await pi.commands.get("review").handler("reconcile", ctx);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.waveShutdown.settled, false);
+});
+
+test("Review pre-exit choice is not committed when another extension vetoes", async () => {
+	const { pi, ctx } = await exitFixture();
+	const before = pi.entries.length;
+	ctx.selectResponses.push("Cancel run and exit");
+	await pi.events.get("session_before_shutdown")({ sessionId: ctx.sessionId, reason: "restart" }, ctx);
+	assert.equal(pi.entries.length, before);
+	pi.events.get("session_shutdown_cancelled")({ sessionId: ctx.sessionId }, ctx);
+	assert.equal(pi.entries.length, before);
+	pi.events.get("session_shutdown")({}, ctx);
+	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.waveExit.choice, "pause", "a later signal must not reuse a vetoed cancellation");
+});
+
+test("Review accepted cancel exit survives late evidence updates before shutdown", async () => {
+	const { pi, ctx } = await exitFixture();
+	ctx.selectResponses.push("Cancel run and exit");
+	await pi.events.get("session_before_shutdown")({ sessionId: ctx.sessionId, reason: "shutdown" }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "still-finishing", toolName: "bash", input: {} }, ctx);
+	pi.events.get("session_shutdown")({}, ctx);
+	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.waveExit.choice, "cancel");
+});
+
+test("Review between-wave exit keeps undispatched work resumable without fabricated stop proof", async () => {
+	const item = queueItem({ id: 42, repo: "projectbluefin/review", headSha: "a".repeat(40) });
+	const saved = { version: 1, id: "undispatched", kind: "fix", waves: [{ repo: item.repo, items: [item] }], currentWave: 0, completedItems: 0, totalItems: 1, startedAt: Date.now(), waveStartedAt: Date.now(), state: "paused" };
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost(); const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager.getBranch = () => [{ type: "custom", customType: BATCH_ENTRY, data: saved }];
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: hiveBackedFetch([item]), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	ctx.selectResponses.push("Pause and exit");
+	await pi.events.get("session_before_shutdown")({ sessionId: ctx.sessionId, reason: "shutdown" }, ctx);
+	pi.events.get("session_shutdown")({}, ctx);
+	const paused = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(paused.state, "paused"); assert.equal(paused.waveShutdown, undefined);
+	const next = fakeCtx(); next.ui.parent = next;
+	next.sessionManager.getBranch = () => [{ type: "custom", customType: BATCH_ENTRY, data: paused }];
+	next.selectResponses.push("Resume saved work");
+	const restarted = fakeHost();
+	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: hiveBackedFetch([item]), env });
+	await restarted.events.get("session_start")({}, next); await restored.whenStarted();
+	assert.equal(restarted.messages.length, 1);
+	assert.equal(restarted.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.waveSessionId, next.sessionId);
+});
+
+test("Review missing native session identity blocks mutation despite lifecycle capability", async () => {
+	const pi = fakeHost(); pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx; ctx.sessionManager.getSessionId = () => "";
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({ "projectbluefin/review#77": { title: "issue", submittedPrs: [] } }), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	ctx.overlays[0].handleInput("A"); ctx.overlays[0].handleInput("f");
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	assert.equal(pi.messages.length, 0);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+});
+
+test("Review undispatched issue fix resume excludes a PR published while paused", async () => {
+	const item = queueItem({ type: "issue", id: 77, repo: "projectbluefin/independent", submittedPrs: [] });
+	const saved = { version: 1, id: "undispatched-issue", kind: "fix", waves: [{ repo: item.repo, items: [item] }], currentWave: 0, completedItems: 0, totalItems: 1, startedAt: Date.now(), waveStartedAt: Date.now(), state: "paused" };
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost(); pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager.getBranch = () => [{ type: "custom", customType: BATCH_ENTRY, data: saved }];
+	ctx.selectResponses.push("Resume saved work");
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({ "projectbluefin/independent#77": { title: "issue", submittedPrs: ["projectbluefin/independent#99"] } }), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some((notice) => /already has submitted PRs/.test(notice.message)));
+});
+
+test("Review failed resume capability check retains saved paused selection", async () => {
+	const { pi, ctx, review } = await exitFixture();
+	pi.events.get("session_shutdown")({}, ctx);
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	await pi.commands.get("review").handler("reconcile", ctx);
+	const saved = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
+	ctx.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	pi.sessionShutdownLifecycleVersion = undefined;
+	await pi.commands.get("review").handler("resume", ctx);
+	assert.equal(pi.messages.length, 1);
+	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.id, saved.id);
+	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.state, "paused");
 });

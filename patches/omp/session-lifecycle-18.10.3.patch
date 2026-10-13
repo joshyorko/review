@@ -1,0 +1,931 @@
+diff --git a/packages/coding-agent/src/async/job-manager.ts b/packages/coding-agent/src/async/job-manager.ts
+index e6bb504..d8084db 100644
+--- a/packages/coding-agent/src/async/job-manager.ts
++++ b/packages/coding-agent/src/async/job-manager.ts
+@@ -775,8 +775,20 @@ export class AsyncJobManager {
+ 		return true;
+ 	}
+ 
++	/** A child finishing its task does not prove its local execution finished disposing. */
++	readonly shutdownExecutionFailures = new Map<string, readonly string[]>();
++	recordShutdownExecutionFailure(sessionId: string, reasons: readonly string[]): void {
++		if (reasons.length > 0) this.shutdownExecutionFailures.set(sessionId, [...reasons]);
++	}
++
++	/** Actual unresolved promises, including hidden foreground jobs; independent of cancellation status. */
++	readonly pendingShutdownJobIds = new Set<string>();
+ 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
+ 		this.#disposed = true;
++		for (const job of this.#jobs.values()) {
++			this.pendingShutdownJobIds.add(job.id);
++			void job.promise.then(() => this.pendingShutdownJobIds.delete(job.id), () => this.pendingShutdownJobIds.delete(job.id));
++		}
+ 		this.#clearEvictionTimers();
+ 		this.#cancelJobs(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
+ 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);
+diff --git a/packages/coding-agent/src/exec/bash-executor.ts b/packages/coding-agent/src/exec/bash-executor.ts
+index 29645f2..7683670 100644
+--- a/packages/coding-agent/src/exec/bash-executor.ts
++++ b/packages/coding-agent/src/exec/bash-executor.ts
+@@ -194,6 +194,21 @@ export async function applyDirenvPreflight(
+ const shellSessions = new Map<string, Shell>();
+ const brokenShellSessions = new Set<string>();
+ const shellSessionQuarantines = new Map<string, Promise<unknown>>();
++// Unlike quarantine eviction, these records end only when native execution really settles.
++const unsettledShellRuns = new Map<string, Set<Promise<unknown>>>();
++const executingShells = new Map<Shell, string>();
++const failedShellCleanupOwners = new Set<string>();
++
++function trackShellWork(sessionKey: string, work: Promise<unknown>): void {
++	let pending = unsettledShellRuns.get(sessionKey);
++	if (!pending) unsettledShellRuns.set(sessionKey, pending = new Set());
++	pending.add(work);
++	const remove = () => {
++		pending.delete(work);
++		if (pending.size === 0 && unsettledShellRuns.get(sessionKey) === pending) unsettledShellRuns.delete(sessionKey);
++	};
++	void work.then(remove, remove);
++}
+ /** Session keys with a command currently in flight on the persistent Shell. */
+ const shellSessionsInUse = new Set<string>();
+ 
+@@ -205,7 +220,7 @@ const shellSessionsInUse = new Set<string>();
+  * background job exits (reaped by the poll loop below). Children stay
+  * kill-on-drop, so they still die when the harness tears the Shell down on exit.
+  */
+-const retainedShells = new Set<Shell>();
++const retainedShells = new Map<Shell, string>();
+ const RETAIN_REAP_INTERVAL_MS = 5_000;
+ // Native cancellation may spend two seconds unwinding the shell before its
+ // N-API chunk bridge drains. The JS watchdog must not race that teardown.
+@@ -218,15 +233,17 @@ const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
+ // (#10308). The backing timer is unref'd so it never keeps the process alive.
+ const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
+ 
+-async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
++async function retainShellWithLiveBackgroundJobs(shell: Shell, sessionKey: string): Promise<void> {
+ 	let live: number;
+ 	try {
+ 		live = await shell.liveBackgroundJobCount();
+ 	} catch {
++		// Keep ownership when the native backend cannot prove its children stopped.
++		retainedShells.set(shell, sessionKey);
+ 		return;
+ 	}
+ 	if (live <= 0) return;
+-	retainedShells.add(shell);
++	retainedShells.set(shell, sessionKey);
+ 	const interval = setInterval(() => {
+ 		void shell
+ 			.liveBackgroundJobCount()
+@@ -237,7 +254,7 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
+ 			})
+ 			.catch(() => {
+ 				clearInterval(interval);
+-				retainedShells.delete(shell);
++				// Unknown is still owned; a later shutdown count must prove settlement.
+ 			});
+ 	}, RETAIN_REAP_INTERVAL_MS);
+ 	interval.unref?.();
+@@ -264,6 +281,7 @@ function quarantineShellSession(
+ 	const settled = abortCleanupPromise
+ 		? Promise.allSettled([runPromise, abortCleanupPromise])
+ 		: Promise.allSettled([runPromise]);
++
+ 	// Defensive bound: a never-settling `runPromise` must not pin the quarantine
+ 	// record for the life of the process (#10308).
+ 	const cleanup = Promise.race([settled, quarantineCleanupDeadline()]);
+@@ -278,6 +296,27 @@ function quarantineShellSession(
+ 		.catch(() => undefined);
+ }
+ 
++/** Abort owned shells and await actual native runs; a deadline belongs to the caller. */
++export async function settleShellSessions(agentSessionKey: string): Promise<boolean> {
++	const owned = (key: string) => key.startsWith(`${agentSessionKey}\n`) || key.startsWith(`${agentSessionKey}:async:`);
++	const shells = new Set<Shell>();
++	for (const [key, shell] of shellSessions) if (owned(key)) shells.add(shell);
++	for (const [shell, key] of retainedShells) if (owned(key)) shells.add(shell);
++	for (const [shell, key] of executingShells) if (owned(key)) shells.add(shell);
++	await Promise.all([...shells].map(shell => shell.abort()));
++	for (; ;) {
++		const pending = [...unsettledShellRuns].filter(([key]) => owned(key)).flatMap(([, runs]) => [...runs]);
++		if (pending.length === 0) break;
++		await Promise.allSettled(pending);
++	}
++	// A finishing one-shot run may have transferred background children to retention.
++	for (const [shell, key] of retainedShells) if (owned(key)) shells.add(shell);
++	const counts = await Promise.all([...shells].map(shell => shell.liveBackgroundJobCount()));
++	return !counts.some(count => count > 0)
++		&& ![...shellSessionsInUse].some(owned) && ![...unsettledShellRuns.keys()].some(owned)
++		&& ![...failedShellCleanupOwners].some(owned);
++}
++
+ /**
+  * Drops every persistent Shell owned by an agent session (keys built with
+  * `agentSessionKey` as the {@link BashExecutorOptions.sessionKey}). The map is
+@@ -292,7 +331,7 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void
+ 	for (const [key, shell] of shellSessions) {
+ 		if (!key.startsWith(prefix)) continue;
+ 		shellSessions.delete(key);
+-		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
++		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell, key);
+ 	}
+ }
+ 
+@@ -680,7 +719,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
+ 	const runAbortController = new AbortController();
+ 	let abortCleanupPromise: Promise<void> | undefined;
+ 	const abortShell = (): Promise<void> => {
+-		abortCleanupPromise ??= executionShell.abort().catch(() => undefined);
++		if (!abortCleanupPromise) {
++			abortCleanupPromise = executionShell.abort().catch(() => { failedShellCleanupOwners.add(sessionKey); });
++			trackShellWork(sessionKey, abortCleanupPromise);
++		}
+ 		return abortCleanupPromise;
+ 	};
+ 	const abortCurrentExecution = () => {
+@@ -737,6 +779,13 @@ export async function executeBash(command: string, options?: BashExecutorOptions
+ 				}
+ 			},
+ 		);
++		executingShells.set(executionShell, sessionKey);
++		// Track all native runs, including concurrent/quarantined one-shot shells.
++		// The JS cancellation result can return long before either promise settles.
++		const nativeSettlement = Promise.allSettled([runPromise])
++			.then(() => retainShellWithLiveBackgroundJobs(executionShell, sessionKey))
++			.finally(() => executingShells.delete(executionShell));
++		trackShellWork(sessionKey, nativeSettlement);
+ 		options?.onStart?.(() => executionShell.pids());
+ 
+ 		const ey = new ExponentialYield();
+@@ -868,7 +917,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
+ 				// turns; it is reaped once its last job exits and still dies with the
+ 				// harness. Skip on resetSession (cancel/error) — those tear down.
+ 				if (!resetSession && shellSession) {
+-					await retainShellWithLiveBackgroundJobs(shellSession);
++					await retainShellWithLiveBackgroundJobs(shellSession, sessionKey);
+ 				}
+ 			}
+ 		}
+diff --git a/packages/coding-agent/src/extensibility/extensions/loader.ts b/packages/coding-agent/src/extensibility/extensions/loader.ts
+index 94ee01f..2458781 100644
+--- a/packages/coding-agent/src/extensibility/extensions/loader.ts
++++ b/packages/coding-agent/src/extensibility/extensions/loader.ts
+@@ -189,6 +189,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
+  * Action methods delegate to the shared runtime.
+  */
+ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
++	readonly sessionShutdownLifecycleVersion = 1 as const;
+ 	readonly logger = logger;
+ 	readonly typebox = TypeBox;
+ 	readonly arktype = type;
+diff --git a/packages/coding-agent/src/extensibility/extensions/runner.ts b/packages/coding-agent/src/extensibility/extensions/runner.ts
+index 7389084..a485761 100644
+--- a/packages/coding-agent/src/extensibility/extensions/runner.ts
++++ b/packages/coding-agent/src/extensibility/extensions/runner.ts
+@@ -88,6 +88,7 @@ import type {
+ 	ResourcesDiscoverResult,
+ 	SessionBeforeBranchResult,
+ 	SessionBeforeCompactResult,
++	SessionBeforeShutdownResult,
+ 	SessionBeforeSwitchResult,
+ 	SessionBeforeTreeResult,
+ 	SessionCompactingResult,
+@@ -399,16 +400,19 @@ type RunnerEmitEvent = Exclude<
+ 
+ type SessionBeforeEvent = Extract<
+ 	RunnerEmitEvent,
+-	{ type: "session_before_switch" | "session_before_branch" | "session_before_compact" | "session_before_tree" }
++	{ type: "session_before_shutdown" | "session_before_switch" | "session_before_branch" | "session_before_compact" | "session_before_tree" }
+ >;
+ 
+ type SessionBeforeEventResult =
++	| SessionBeforeShutdownResult
+ 	| SessionBeforeSwitchResult
+ 	| SessionBeforeBranchResult
+ 	| SessionBeforeCompactResult
+ 	| SessionBeforeTreeResult;
+ 
+-type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_switch" }
++type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_shutdown" }
++	? SessionBeforeShutdownResult | undefined
++	: TEvent extends { type: "session_before_switch" }
+ 	? SessionBeforeSwitchResult | undefined
+ 	: TEvent extends { type: "session_before_branch" }
+ 		? SessionBeforeBranchResult | undefined
+@@ -1496,6 +1500,7 @@ export class ExtensionRunner {
+ 
+ 	#isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
+ 		return (
++			event.type === "session_before_shutdown" ||
+ 			event.type === "session_before_switch" ||
+ 			event.type === "session_before_branch" ||
+ 			event.type === "session_before_compact" ||
+@@ -1629,6 +1634,7 @@ export class ExtensionRunner {
+ 					ctx,
+ 					ext,
+ 					handlerTimeoutForEvent(event.type),
++					event.type === "session_before_shutdown" ? () => ({ cancel: true }) : undefined,
+ 				);
+ 
+ 				if (this.#isSessionBeforeEvent(event) && handlerResult) {
+diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
+index 516caf4..abc7608 100644
+--- a/packages/coding-agent/src/extensibility/extensions/types.ts
++++ b/packages/coding-agent/src/extensibility/extensions/types.ts
+@@ -123,6 +123,10 @@ import type {
+ 	SessionCompactingEvent,
+ 	SessionCompactingResult,
+ 	SessionEvent,
++	SessionBeforeShutdownEvent,
++	SessionBeforeShutdownResult,
++	SessionShutdownCancelledEvent,
++	SessionShutdownSettledEvent,
+ 	SessionShutdownEvent,
+ 	SessionStartEvent,
+ 	SessionStopEvent,
+@@ -946,6 +950,10 @@ export type {
+ 	SessionCompactEvent,
+ 	SessionCompactingEvent,
+ 	SessionEvent,
++	SessionBeforeShutdownEvent,
++	SessionBeforeShutdownResult,
++	SessionShutdownCancelledEvent,
++	SessionShutdownSettledEvent,
+ 	SessionShutdownEvent,
+ 	SessionStartEvent,
+ 	SessionSwitchEvent,
+@@ -1496,6 +1504,8 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
+  * Methods retain their extension binding when destructured or passed as callbacks.
+  */
+ export interface ExtensionAPI {
++	/** Native cancellable exit and execution-settlement events. */
++	readonly sessionShutdownLifecycleVersion: 1;
+ 	// =========================================================================
+ 	// Module Access
+ 	// =========================================================================
+@@ -1541,6 +1551,9 @@ export interface ExtensionAPI {
+ 		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
+ 	): void;
+ 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
++	on(event: "session_before_shutdown", handler: ExtensionHandler<SessionBeforeShutdownEvent, SessionBeforeShutdownResult>): void;
++	on(event: "session_shutdown_cancelled", handler: ExtensionHandler<SessionShutdownCancelledEvent>): void;
++	on(event: "session_shutdown_settled", handler: ExtensionHandler<SessionShutdownSettledEvent>): void;
+ 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
+ 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
+ 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): void;
+diff --git a/packages/coding-agent/src/extensibility/shared-events.ts b/packages/coding-agent/src/extensibility/shared-events.ts
+index 6317bc3..53996a6 100644
+--- a/packages/coding-agent/src/extensibility/shared-events.ts
++++ b/packages/coding-agent/src/extensibility/shared-events.ts
+@@ -101,6 +101,29 @@ export interface SessionCompactEvent {
+ 	fromExtension: boolean;
+ }
+ 
++/** Interactive exit gate; signals and noninteractive disposal do not prompt. */
++export interface SessionBeforeShutdownEvent {
++	type: "session_before_shutdown";
++	sessionId: string;
++	reason: "shutdown" | "restart";
++}
++export interface SessionBeforeShutdownResult {
++	cancel?: boolean;
++}
++/** A preflight veto; handlers must discard any tentative exit choice. */
++export interface SessionShutdownCancelledEvent {
++	type: "session_shutdown_cancelled";
++	sessionId: string;
++}
++/** Execution settlement, not task success or proof of remote-effect reconciliation. */
++export interface SessionShutdownSettledEvent {
++	type: "session_shutdown_settled";
++	sessionId: string;
++	settled: boolean;
++	reason?: string;
++	pendingJobIds: string[];
++}
++
+ /** Fired on process exit (SIGINT/SIGTERM) */
+ export interface SessionShutdownEvent {
+ 	type: "session_shutdown";
+@@ -172,6 +195,9 @@ export type SessionEvent =
+ 	| SessionCompactingEvent
+ 	| SessionCompactEvent
+ 	| SessionStopEvent
++	| SessionBeforeShutdownEvent
++	| SessionShutdownCancelledEvent
++	| SessionShutdownSettledEvent
+ 	| SessionShutdownEvent
+ 	| SessionBeforeTreeEvent
+ 	| SessionTreeEvent
+diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
+index 97793ed..25e4d39 100644
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -6847,6 +6847,31 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		this.isInitialized = false;
+ 	}
+ 
++	#exitGatePending = false;
++	async #cancelExit(): Promise<false> {
++		this.shutdownRequested = false;
++		if (!this.session.isDisposed) {
++			await this.session.extensionRunner?.emit({
++				type: "session_shutdown_cancelled", sessionId: this.sessionManager.getSessionId(),
++			});
++		}
++		return false;
++	}
++	async #approveExit(reason: "shutdown" | "restart"): Promise<boolean> {
++		if (this.#exitGatePending) return false;
++		this.#exitGatePending = true;
++		try {
++			const result = await this.session.extensionRunner?.emit({
++				type: "session_before_shutdown", sessionId: this.sessionManager.getSessionId(), reason,
++			});
++			if (result?.cancel || this.session.isDisposed) return await this.#cancelExit();
++			return true;
++		} catch (error) {
++			this.showError(`Exit cancelled: ${String(error)}`);
++			return await this.#cancelExit();
++		} finally { this.#exitGatePending = false; }
++	}
++
+ 	async shutdown(): Promise<void> {
+ 		if (this.#isShuttingDown) return;
+ 		// The previous graceful teardown failed AT the memoized session.dispose()
+@@ -6865,6 +6890,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			}
+ 			return;
+ 		}
++		if (!(await this.#approveExit("shutdown"))) return;
+ 		this.#beginClose();
+ 		const worktreePlan = await this.#planOwnedWorktreeExit();
+ 		try {
+@@ -6941,6 +6967,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	 */
+ 	async restart(): Promise<void> {
+ 		if (this.#isShuttingDown) return;
++		if (!(await this.#approveExit("restart"))) return;
+ 		this.#beginClose();
+ 		try {
+ 			await this.#teardown();
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index 238e385..d44bf65 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -139,7 +139,7 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
+ import type { PythonResult } from "../eval/py/executor";
+ import { formatEvalStateContext } from "../eval/state";
+ import { WorkPoolRegistry } from "../task/workpool";
+-import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
++import { type BashPtyOptions, type BashResult, releaseShellSessions, settleShellSessions } from "../exec/bash-executor";
+ import type { TtsrManager } from "../export/ttsr";
+ import type { LoadedCustomCommand } from "../extensibility/custom-commands";
+ import type { CustomTool } from "../extensibility/custom-tools/types";
+@@ -5463,13 +5463,15 @@ export class AgentSession implements SettingsScope {
+ 		this.#autolearnCaptureAbortController?.abort();
+ 	}
+ 
+-	async #drainAutolearnCapture(): Promise<void> {
++	async #drainAutolearnCapture(): Promise<boolean> {
+ 		const task = this.#autolearnCaptureTask;
+-		if (!task) return;
++		if (!task) return true;
+ 		try {
+ 			await withTimeout(task, 3_000, "Timed out draining auto-learn capture during dispose");
++			return true;
+ 		} catch (error) {
+ 			logger.warn("Auto-learn capture did not settle during dispose", { error: String(error) });
++			return false;
+ 		}
+ 	}
+ 
+@@ -5518,6 +5520,7 @@ export class AgentSession implements SettingsScope {
+ 		this.agent.hasQueuedAsides = undefined;
+ 		this.#advisors.stopRuntime();
+ 		this.#eval.beginDispose();
++		this.#bash.beginDispose();
+ 	}
+ 
+ 	/**
+@@ -5536,7 +5539,7 @@ export class AgentSession implements SettingsScope {
+ 		return this.#disposeCall;
+ 	}
+ 
+-	async #disposeOwnedAsyncJobs(): Promise<void> {
++	async #disposeOwnedAsyncJobs(): Promise<boolean> {
+ 		// Unregister before cancelling: a job completing during teardown must
+ 		// dead-letter rather than enqueue a follow-up into a disposing session.
+ 		this.#unregisterAsyncDeliverySink?.();
+@@ -5549,7 +5552,7 @@ export class AgentSession implements SettingsScope {
+ 		// explicit hard kill) leaves `#ownedAsyncJobManager` undefined and must
+ 		// propagate a generic cancellation so its nested children stay terminal.
+ 		this.#cancelOwnAsyncJobs(manager ? ASYNC_JOB_MANAGER_SHUTDOWN_REASON : undefined);
+-		if (!manager) return;
++		if (!manager) return !this.#asyncJobManager;
+ 
+ 		try {
+ 			const drained = await manager.dispose({ timeoutMs: 3_000 });
+@@ -5557,6 +5560,7 @@ export class AgentSession implements SettingsScope {
+ 			if (drained === false && deliveryState) {
+ 				logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
+ 			}
++			return drained;
+ 		} finally {
+ 			if (AsyncJobManager.instance() === manager) {
+ 				AsyncJobManager.setInstance(undefined);
+@@ -5564,8 +5568,8 @@ export class AgentSession implements SettingsScope {
+ 		}
+ 	}
+ 
+-	async #releaseOwnedBrowserTabs(ownerId: string | undefined): Promise<void> {
+-		if (!ownerId) return;
++	async #releaseOwnedBrowserTabs(ownerId: string | undefined): Promise<boolean> {
++		if (!ownerId) return true;
+ 		try {
+ 			const released = await withTimeout(
+ 				releaseTabsForOwner(ownerId, { kill: true }),
+@@ -5575,8 +5579,10 @@ export class AgentSession implements SettingsScope {
+ 			if (released > 0) {
+ 				logger.debug("Released owned browser tabs during dispose", { ownerId, released });
+ 			}
++			return true;
+ 		} catch (error) {
+ 			logger.warn("Failed to release owned browser tabs during dispose", { error: String(error) });
++			return false;
+ 		}
+ 	}
+ 
+@@ -5623,29 +5629,33 @@ export class AgentSession implements SettingsScope {
+ 		}
+ 	}
+ 
+-	async #releaseOwnedComputerSessions(ownerId: string | undefined): Promise<void> {
+-		if (!ownerId) return;
++	async #releaseOwnedComputerSessions(ownerId: string | undefined): Promise<boolean> {
++		if (!ownerId) return true;
+ 		try {
+ 			await withTimeout(
+ 				releaseComputerSessionsForOwner(ownerId),
+ 				3_000,
+ 				"Timed out releasing native computer session during dispose",
+ 			);
++			return true;
+ 		} catch (error) {
+ 			logger.warn("Failed to release native computer session during dispose", { error: String(error) });
++			return false;
+ 		}
+ 	}
+ 
+-	async #disconnectOwnedMcp(): Promise<void> {
+-		if (!this.#disconnectOwnedMcpManager) return;
++	async #disconnectOwnedMcp(): Promise<boolean> {
++		if (!this.#disconnectOwnedMcpManager) return true;
+ 		try {
+ 			await withTimeout(
+ 				this.#disconnectOwnedMcpManager(),
+ 				3_000,
+ 				"Timed out disconnecting owned MCP manager during dispose",
+ 			);
++			return true;
+ 		} catch (error) {
+ 			logger.warn("Failed to disconnect owned MCP manager during dispose", { error: String(error) });
++			return false;
+ 		}
+ 	}
+ 
+@@ -5687,6 +5697,7 @@ export class AgentSession implements SettingsScope {
+ 		this.#fallbackExtensionTimers?.clearAll();
+ 		this.abortRetry();
+ 		this.abortCompaction();
++		const settlementFailures: string[] = [];
+ 		const postPromptDrain = this.#cancelPostPromptTasks();
+ 		this.agent.abort();
+ 		try {
+@@ -5696,9 +5707,10 @@ export class AgentSession implements SettingsScope {
+ 				"Timed out draining post-prompt tasks during dispose",
+ 			);
+ 		} catch (error) {
++			settlementFailures.push("post-prompt tasks did not settle");
+ 			logger.warn("Post-prompt tasks still draining at dispose deadline", { error: String(error) });
+ 		}
+-		await this.#drainAutolearnCapture();
++		if (!(await this.#drainAutolearnCapture())) settlementFailures.push("auto-learn capture did not settle");
+ 		await this.#memory.transition;
+ 
+ 		const hindsightState = this.getHindsightSessionState();
+@@ -5712,7 +5724,6 @@ export class AgentSession implements SettingsScope {
+ 			logger.warn("Session dispose: Sharpshooter release failed", { error: String(error) });
+ 		}
+ 		const advisorRecorderClosed = this.#advisors.recorderClosed();
+-		releaseShellSessions(this.sessionManager.getSessionId());
+ 		const results = await Promise.allSettled([
+ 			this.#disposeOwnedAsyncJobs(),
+ 			this.#eval.disposeKernels(),
+@@ -5724,9 +5735,17 @@ export class AgentSession implements SettingsScope {
+ 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+ 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
+ 			sharpshooterFlushed,
++			withTimeout(this.#bash.dispose(), 3_000, "User bash execution or persistence did not settle"),
+ 		]);
++		if (results[0]?.status !== "fulfilled" || results[0].value !== true) settlementFailures.push("async jobs not settled or manager not owned");
++		if (results[1]?.status !== "fulfilled" || results[1].value !== true) settlementFailures.push("eval execution not settled");
++		for (const [index, name] of [[2, "browser tabs"], [3, "computer sessions"], [4, "MCP connections"]] as const) {
++			const result = results[index];
++			if (result.status !== "fulfilled" || result.value !== true) settlementFailures.push(`owned ${name} teardown not proven`);
++		}
+ 		for (const result of results) {
+ 			if (result.status === "rejected") {
++				settlementFailures.push("subsystem teardown failed; consult the session teardown log");
+ 				logger.warn("Session dispose subsystem failed during parallel teardown", {
+ 					error: String(result.reason),
+ 				});
+@@ -5743,9 +5762,6 @@ export class AgentSession implements SettingsScope {
+ 		this.#disconnectFromAgent();
+ 		// beginDispose() drained the rest; this catches registrations made during teardown.
+ 		for (const dispose of this.#disposers.splice(0)) dispose();
+-		this.#eventListeners = [];
+-		this.#runStateListeners.clear();
+-		this.#sessionChangeCallbacks.clear();
+ 
+ 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
+ 		// only *signals* the agent loop via the earlier abort(); the loop and the
+@@ -5773,6 +5789,34 @@ export class AgentSession implements SettingsScope {
+ 			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
+ 		}
+ 
++		if (!drained) settlementFailures.push("foreground execution or persistence handlers not settled");
++		try {
++			const shellsSettled = await withTimeout(settleShellSessions(this.sessionManager.getSessionId()), 3_000, "Shell settlement timed out");
++			if (!shellsSettled) settlementFailures.push("owned shell execution not settled");
++		} catch { settlementFailures.push("owned shell settlement failed or timed out"); }
++		releaseShellSessions(this.sessionManager.getSessionId());
++		// Shared-manager ownership is intentionally unproven for a child, but its
++		// local execution failures must also block the owning parent's receipt.
++		if (!this.#ownedAsyncJobManager) {
++			this.#asyncJobManager?.recordShutdownExecutionFailure(
++				this.sessionManager.getSessionId(),
++				settlementFailures.filter(reason => reason !== "async jobs not settled or manager not owned"),
++			);
++		} else {
++			for (const [sessionId, reasons] of this.#ownedAsyncJobManager.shutdownExecutionFailures) {
++				settlementFailures.push(`child session ${sessionId}: ${reasons.join("; ")}`);
++			}
++		}
++		await this.#extensionRunner?.emit({
++			type: "session_shutdown_settled",
++			sessionId: this.sessionManager.getSessionId(),
++			settled: settlementFailures.length === 0,
++			reason: settlementFailures.length ? settlementFailures.join("; ") : undefined,
++			pendingJobIds: [...(this.#ownedAsyncJobManager?.pendingShutdownJobIds ?? [])],
++		});
++		this.#eventListeners = [];
++		this.#runStateListeners.clear();
++		this.#sessionChangeCallbacks.clear();
+ 		// Event handlers can reopen the append writer while they persist their
+ 		// terminal message; that pipeline has drained (or hit the deadline).
+ 		// Raise the write barrier BEFORE the final close: a handler that
+diff --git a/packages/coding-agent/src/session/bash-runner.ts b/packages/coding-agent/src/session/bash-runner.ts
+index f676bee..9ab38f3 100644
+--- a/packages/coding-agent/src/session/bash-runner.ts
++++ b/packages/coding-agent/src/session/bash-runner.ts
+@@ -57,6 +57,8 @@ export class BashRunner {
+ 	#abortControllers = new Set<AbortController>();
+ 	#pendingMessages: PendingBashMessage[] = [];
+ 	#sessionTarget: BashSessionTarget;
++	#disposing = false;
++	#executions = new Set<Promise<BashResult>>();
+ 
+ 	constructor(host: BashRunnerHost) {
+ 		this.#host = host;
+@@ -67,8 +69,31 @@ export class BashRunner {
+ 		};
+ 	}
+ 
++	beginDispose(): void {
++		this.#disposing = true;
++		this.abort();
++	}
++
++	async dispose(): Promise<void> {
++		this.beginDispose();
++		await Promise.allSettled([...this.#executions]);
++		await this.flushPending();
++	}
++
++	executeBash(
++		command: string,
++		onChunk?: (chunk: string) => void,
++		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
++	): Promise<BashResult> {
++		if (this.#disposing) return Promise.reject(new Error("Session is disposing"));
++		const execution = this.#executeBash(command, onChunk, options);
++		this.#executions.add(execution);
++		void execution.then(() => this.#executions.delete(execution), () => this.#executions.delete(execution));
++		return execution;
++	}
++
+ 	/** Executes a bash command while retaining the session and branch that owned its start. */
+-	async executeBash(
++	async #executeBash(
+ 		command: string,
+ 		onChunk?: (chunk: string) => void,
+ 		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
+@@ -109,6 +134,7 @@ export class BashRunner {
+ 							?.definition.shellEnv?.({ command, cwd, env: { ...this.#host.settings.getShellConfig().env } })
+ 					: undefined;
+ 
++			if (this.#disposing) throw new Error("Session is disposing");
+ 			const abortController = new AbortController();
+ 			this.#abortControllers.add(abortController);
+ 			let result: BashResult;
+diff --git a/packages/coding-agent/src/session/eval-runner.ts b/packages/coding-agent/src/session/eval-runner.ts
+index 5f8771f..cac29bc 100644
+--- a/packages/coding-agent/src/session/eval-runner.ts
++++ b/packages/coding-agent/src/session/eval-runner.ts
+@@ -167,7 +167,7 @@ export class EvalRunner {
+ 	}
+ 
+ 	/** Waits for active work and disposes every retained eval kernel owned by the session. */
+-	async disposeKernels(): Promise<void> {
++	async disposeKernels(): Promise<boolean> {
+ 		const settled = await this.#prepareExecutionsForDispose();
+ 		if (!settled) {
+ 			logger.warn("Detaching retained eval-kernel ownership during dispose while eval execution is still active");
+@@ -179,6 +179,7 @@ export class EvalRunner {
+ 		const errors: unknown[] = [];
+ 		for (const result of results) if (result.status === "rejected") errors.push(result.reason);
+ 		if (errors.length > 0) throw new AggregateError(errors, "Failed to dispose one or more eval kernels");
++		return settled;
+ 	}
+ 
+ 	async #waitForExecutionsToSettle(timeoutMs: number): Promise<boolean> {
+diff --git a/packages/coding-agent/test/session-exit-lifecycle.test.ts b/packages/coding-agent/test/session-exit-lifecycle.test.ts
+new file mode 100644
+index 0000000..df17e6c
+--- /dev/null
++++ b/packages/coding-agent/test/session-exit-lifecycle.test.ts
+@@ -0,0 +1,262 @@
++import { afterEach, describe, expect, it, vi } from "bun:test";
++import * as path from "node:path";
++import { Agent } from "@oh-my-pi/pi-agent-core";
++import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
++import { AsyncJobManager } from "../src/async/job-manager";
++import { resetSettingsForTest, Settings } from "../src/config/settings";
++import { ModelRegistry } from "../src/config/model-registry";
++import { ExtensionRuntime, loadExtensionFromFactory } from "../src/extensibility/extensions/loader";
++import { ExtensionRunner, testSetExtensionHandlerTimeoutMs } from "../src/extensibility/extensions/runner";
++import type { ExtensionAPI } from "../src/extensibility/extensions/types";
++import type { SessionShutdownSettledEvent } from "../src/extensibility/shared-events";
++import { Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
++import { executeBash, settleShellSessions } from "../src/exec/bash-executor";
++import { EvalRunner } from "../src/session/eval-runner";
++import { AgentSession } from "../src/session/agent-session";
++import { SessionManager } from "../src/session/session-manager";
++import { InteractiveMode } from "../src/modes/interactive-mode";
++import { EventBus } from "../src/utils/event-bus";
++import { TempDir } from "@oh-my-pi/pi-utils";
++import { initTheme } from "@oh-my-pi/pi-tui/theme";
++import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
++
++const cleanups: Array<() => Promise<void>> = [];
++afterEach(async () => {
++	testSetExtensionHandlerTimeoutMs(30_000);
++	for (const cleanup of cleanups.splice(0)) await cleanup();
++	vi.restoreAllMocks();
++	resetSettingsForTest();
++});
++async function fixture(options: { owned?: AsyncJobManager; shared?: AsyncJobManager; hooks?: (pi: ExtensionAPI) => void } = {}) {
++	const dir = TempDir.createSync("session-exit-");
++	const auth = createInMemoryAuthStorage();
++	const store = SessionManager.inMemory(dir.path());
++	const registry = new ModelRegistry(auth, path.join(dir.path(), "models.yml"));
++	const runtime = new ExtensionRuntime();
++	const receipts: SessionShutdownSettledEvent[] = [];
++	const ordering: string[] = [];
++	const ext = await loadExtensionFromFactory(pi => {
++		pi.on("session_shutdown", () => { ordering.push("shutdown"); });
++		pi.on("session_shutdown_settled", event => {
++			receipts.push(event);
++			store.appendCustomEntry("settlement", event);
++			ordering.push("settled");
++		});
++		options.hooks?.(pi);
++	}, dir.path(), new EventBus(), runtime, "exit-test");
++	const runner = new ExtensionRunner([ext], runtime, dir.path(), store, registry);
++	const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
++	const session = new AgentSession({
++		agent: new Agent({ initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["test"], tools: [] }, streamFn: mock.stream }),
++		sessionManager: store, modelRegistry: registry, settings: Settings.isolated(), extensionRunner: runner,
++		agentId: "Main", ownedAsyncJobManager: options.owned, asyncJobManager: options.shared,
++	});
++	const originalClose = store.close.bind(store);
++	vi.spyOn(store, "close").mockImplementation(async () => { ordering.push("close"); await originalClose(); });
++	cleanups.push(async () => { await session.dispose(); auth.close(); dir.removeSync(); });
++	return { session, store, runner, receipts, ordering };
++}
++
++describe("session exit lifecycle", () => {
++	it("persists one positive receipt before closing storage on concurrent noninteractive zero-job exit", async () => {
++		let prompts = 0;
++		const f = await fixture({ hooks: pi => pi.on("session_before_shutdown", () => { prompts++; return { cancel: true }; }) });
++		await Promise.all([f.session.dispose(), f.session.dispose()]);
++		expect(prompts).toBe(0);
++		expect(f.receipts).toEqual([{ type: "session_shutdown_settled", sessionId: f.store.getSessionId(), settled: true, reason: undefined, pendingJobIds: [] }]);
++		expect(f.ordering).toEqual(["shutdown", "settled", "close"]);
++	});
++	for (const count of [1, 3]) it(`waits for ${count} actual job promises after cancellation before the receipt`, async () => {
++		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
++		const release = Promise.withResolvers<void>();
++		const aborted = Promise.withResolvers<void>();
++		let cancelled = 0;
++		for (let i = 0; i < count; i++) manager.register("task", `child ${i}`, async ({ signal }) => {
++			signal.addEventListener("abort", () => { if (++cancelled === count) aborted.resolve(); }, { once: true });
++			await release.promise;
++			return "stopped";
++		}, { ownerId: "Main" });
++		const f = await fixture({ owned: manager });
++		const disposal = f.session.dispose();
++		await aborted.promise;
++		expect(manager.getAllJobs().every(job => job.status === "cancelled")).toBe(true);
++		expect(f.receipts).toEqual([]);
++		release.resolve();
++		await disposal;
++		expect(f.receipts[0]?.settled).toBe(true);
++		expect(f.receipts[0]?.pendingJobIds).toEqual([]);
++	});
++	it("retains the exact pending job ID when cancellation times out, even after manager clears its rows", async () => {
++		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
++		const release = Promise.withResolvers<void>();
++		const id = manager.register("task", "ignores cancellation", async () => { await release.promise; return "late"; }, { ownerId: "Main" });
++		const f = await fixture({ owned: manager });
++		try {
++			await f.session.dispose();
++			expect(f.receipts[0]?.settled).toBe(false);
++			expect(f.receipts[0]?.pendingJobIds).toEqual([id]);
++			expect(f.receipts[0]?.reason).toContain("async jobs");
++		} finally { release.resolve(); }
++		await Promise.resolve();
++		expect(f.receipts).toHaveLength(1);
++	}, 10_000);
++	it("does not certify another session's manager", async () => {
++		const shared = new AsyncJobManager({ maxRunningJobs: 1 });
++		const f = await fixture({ shared });
++		await f.session.dispose();
++		expect(f.receipts[0]?.settled).toBe(false);
++		expect(f.receipts[0]?.reason).toContain("manager not owned");
++		await shared.dispose();
++	});
++	it("does not hide a child's unproven eval teardown behind its settled task promise", async () => {
++		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
++		const child = await fixture({ shared: manager });
++		const parent = await fixture({ owned: manager });
++		const evalDispose = vi.spyOn(EvalRunner.prototype, "disposeKernels").mockResolvedValueOnce(false);
++		await child.session.dispose();
++		evalDispose.mockRestore();
++		await parent.session.dispose();
++		expect(parent.receipts[0]?.settled).toBe(false);
++		expect(parent.receipts[0]?.reason).toContain(child.store.getSessionId());
++		expect(parent.receipts[0]?.reason).toContain("eval execution");
++	});
++	it("does not certify an eval disposal that returns an execution timeout", async () => {
++		vi.spyOn(EvalRunner.prototype, "disposeKernels").mockResolvedValue(false);
++		const f = await fixture();
++		await f.session.dispose();
++		expect(f.receipts[0]?.settled).toBe(false);
++		expect(f.receipts[0]?.reason).toContain("eval execution");
++	});
++	it("certifies a completed native shell command without leaving every shell invocation unproven", async () => {
++		const f = await fixture();
++		const result = await executeBash("printf settled", { sessionKey: f.store.getSessionId() });
++		expect(result.exitCode).toBe(0);
++		await f.session.dispose();
++		expect(f.receipts[0]?.settled).toBe(true);
++	});
++	it("aborts user bash and waits for its result writer before notifying extensions", async () => {
++		const f = await fixture();
++		const started = Promise.withResolvers<void>();
++		const command = f.session.executeBash("printf ready; sleep 20", () => started.resolve());
++		await started.promise;
++		await f.session.dispose();
++		const result = await command;
++		expect(result.cancelled).toBe(true);
++		expect(f.receipts[0]?.settled).toBe(true);
++		expect(f.ordering).toEqual(["shutdown", "settled", "close"]);
++	}, 10_000);
++	it("keeps post-prompt timeout unproven even when the foreground agent is idle", async () => {
++		const f = await fixture();
++		const gate = Promise.withResolvers<void>();
++		f.session.trackPostPromptTaskForTests(gate.promise);
++		try {
++			await f.session.dispose();
++			expect(f.receipts[0]?.settled).toBe(false);
++			expect(f.receipts[0]?.reason).toContain("post-prompt");
++		} finally { gate.resolve(); }
++	}, 10_000);
++	it("reports a rejected owned-manager teardown as unproven", async () => {
++		const owned = new AsyncJobManager({ maxRunningJobs: 1 });
++		vi.spyOn(owned, "dispose").mockRejectedValue(new Error("failed"));
++		const f = await fixture({ owned });
++		await f.session.dispose();
++		expect(f.receipts[0]?.settled).toBe(false);
++	});
++	for (const reason of ["shutdown", "restart"] as const) it(`Stay vetoes ${reason} before disposal, including concurrent requests`, async () => {
++		initTheme();
++		await Settings.init({ inMemory: true });
++		const answer = Promise.withResolvers<{ cancel: boolean }>();
++		let prompts = 0;
++		let cancelled = 0;
++		const f = await fixture({
++			hooks: pi => {
++				pi.on("session_before_shutdown", () => { prompts++; return answer.promise; });
++				pi.on("session_shutdown_cancelled", () => { cancelled++; });
++			}
++		});
++		const mode = new InteractiveMode(f.session, "test");
++		mode.ui.requestRender = () => { };
++		mode.shutdownRequested = true;
++		const first = mode[reason]();
++		await mode[reason]();
++		expect(prompts).toBe(1);
++		answer.resolve({ cancel: true });
++		await first;
++		expect(f.session.isDisposed).toBe(false);
++		expect(mode.isShuttingDown).toBe(false);
++		expect(mode.shutdownRequested).toBe(false);
++		expect(cancelled).toBe(1);
++		await mode[reason]();
++		expect(prompts).toBe(2);
++		expect(f.receipts).toEqual([]);
++	});
++	it("vetoes exit on handler error and timeout rather than treating missing consent as approval", async () => {
++		const error = await fixture({ hooks: pi => pi.on("session_before_shutdown", () => { throw new Error("UI failed"); }) });
++		expect(await error.runner.emit({ type: "session_before_shutdown", sessionId: error.store.getSessionId(), reason: "shutdown" })).toEqual({ cancel: true });
++		testSetExtensionHandlerTimeoutMs(10);
++		const timeout = await fixture({ hooks: pi => pi.on("session_before_shutdown", () => new Promise(() => { })) });
++		expect(await timeout.runner.emit({ type: "session_before_shutdown", sessionId: timeout.store.getSessionId(), reason: "shutdown" })).toEqual({ cancel: true });
++	});
++});
++
++
++describe("native shell exit ownership", () => {
++	for (const reuseAfterEviction of [false, true]) it(reuseAfterEviction
++		? "keeps an older unresolved native run after quarantine eviction and key reuse"
++		: "waits for a concurrent one-shot native run after its JS cancellation result", async () => {
++			const f = await fixture();
++			const runs = [Promise.withResolvers<ShellRunResult>(), Promise.withResolvers<ShellRunResult>()];
++			const starts = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
++			let calls = 0;
++			vi.spyOn(Shell.prototype, "run").mockImplementation(() => {
++				const index = calls++;
++				starts[index]!.resolve();
++				return runs[index]!.promise;
++			});
++			vi.spyOn(Shell.prototype, "abort").mockResolvedValue();
++			vi.spyOn(Shell.prototype, "liveBackgroundJobCount").mockResolvedValue(0);
++			const abort1 = new AbortController();
++			const first = executeBash("first", { sessionKey: f.store.getSessionId(), signal: abort1.signal });
++			await starts[0]!.promise;
++			if (reuseAfterEviction) {
++				vi.useFakeTimers();
++				abort1.abort();
++				await first;
++				vi.advanceTimersByTime(30_001);
++				await Promise.resolve();
++				vi.useRealTimers();
++			}
++			const abort2 = new AbortController();
++			const second = executeBash("second", { sessionKey: f.store.getSessionId(), signal: abort2.signal });
++			await starts[1]!.promise;
++			abort1.abort();
++			abort2.abort();
++			await Promise.all([first, second]);
++			let settled = false;
++			const proof = settleShellSessions(f.store.getSessionId()).then(value => { settled = true; return value; });
++			const complete = { exitCode: 0, cancelled: false, timedOut: false };
++			runs[reuseAfterEviction ? 1 : 0]!.resolve(complete);
++			await Bun.sleep(0);
++			expect(settled).toBe(false);
++			runs[reuseAfterEviction ? 0 : 1]!.resolve(complete);
++			expect(await proof).toBe(true);
++		});
++	it("never promotes a rejected native abort cleanup to positive settlement", async () => {
++		const f = await fixture();
++		const run = Promise.withResolvers<ShellRunResult>();
++		const started = Promise.withResolvers<void>();
++		vi.spyOn(Shell.prototype, "run").mockImplementation(() => { started.resolve(); return run.promise; });
++		vi.spyOn(Shell.prototype, "abort").mockRejectedValueOnce(new Error("native abort failed")).mockResolvedValue();
++		vi.spyOn(Shell.prototype, "liveBackgroundJobCount").mockResolvedValue(0);
++		const abort = new AbortController();
++		const result = executeBash("pending", { sessionKey: f.store.getSessionId(), signal: abort.signal });
++		await started.promise;
++		abort.abort();
++		await result;
++		run.resolve({ exitCode: 0, cancelled: false, timedOut: false });
++		expect(await settleShellSessions(f.store.getSessionId())).toBe(false);
++		await f.session.dispose();
++		expect(f.receipts[0]?.settled).toBe(false);
++	});
++});

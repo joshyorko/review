@@ -131,6 +131,7 @@ function makeFetch(
 function fakeHost() {
 	const leaf = (): any => ({ optional: () => leaf(), describe: () => leaf() });
 	return {
+		sessionShutdownLifecycleVersion: 1,
 		events: new Map<string, any>(),
 		flags: new Map<string, any>(),
 		flagValues: new Map<string, unknown>(),
@@ -172,7 +173,7 @@ function fakeCtx() {
 			},
 		},
 		getAsyncJobSnapshot: () => ({ running: [], recent: [], delivery: { pending: 0 } }),
-		sessionManager: { getBranch: () => [] },
+		sessionManager: { getBranch: () => [], getSessionId: () => "personal-policy-session" },
 	};
 }
 

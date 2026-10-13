@@ -106,6 +106,13 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
         raise SystemExit(
             "omp clipboard patch source commit must match the pinned OMP source commit"
         )
+    session_lifecycle_patch_source_commit = require_commit(
+        args.omp_session_lifecycle_patch_source_commit, "omp session lifecycle patch source commit"
+    )
+    if session_lifecycle_patch_source_commit != source_commit:
+        raise SystemExit(
+            "omp session lifecycle patch source commit must match the pinned OMP source commit"
+        )
     omp_sha = require_sha256(args.omp_sha256, "omp_sha256")
     source_sha = require_sha256(args.omp_source_sha256, "omp_source_sha256")
     patch_sha = require_sha256(args.omp_patch_sha256, "omp_patch_sha256")
@@ -118,6 +125,15 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     clipboard_patch_name = pathlib.PurePosixPath(clipboard_patch_path).name
     if not re.fullmatch(r"[A-Za-z0-9._-]+\.patch", clipboard_patch_name):
         raise SystemExit("omp clipboard patch path must end in a patch filename")
+    session_lifecycle_patch_sha = require_sha256(
+        args.omp_session_lifecycle_patch_sha256, "omp_session_lifecycle_patch_sha256"
+    )
+    session_lifecycle_patch_path = require_non_empty(
+        args.omp_session_lifecycle_patch_path, "omp session lifecycle patch path"
+    )
+    session_lifecycle_patch_name = pathlib.PurePosixPath(session_lifecycle_patch_path).name
+    if not re.fullmatch(r"[A-Za-z0-9._-]+\.patch", session_lifecycle_patch_name):
+        raise SystemExit("omp session lifecycle patch path must end in a patch filename")
     native_sha = require_sha512(args.omp_native_sha512, "omp_native_sha512")
     gh_sha = require_sha256(args.gh_sha256, "gh_sha256")
     rtk_archive_sha = require_sha256(args.rtk_archive_sha256, "rtk_archive_sha256")
@@ -153,6 +169,10 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
         f"https://github.com/joshyorko/review/blob/{args.revision}/"
         f"patches/omp/{clipboard_patch_name}"
     )
+    session_lifecycle_patch_url = (
+        f"https://github.com/joshyorko/review/blob/{args.revision}/"
+        f"patches/omp/{session_lifecycle_patch_name}"
+    )
 
     return [
         package(
@@ -163,7 +183,8 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             "Review-derived OMP executable built locally from the pinned source archive "
             f"at {source_commit} (SHA-256 {source_sha}) with the generic memory registration "
             f"patch (SHA-256 {patch_sha}) and clipboard truthfulness patch "
-            f"(SHA-256 {clipboard_patch_sha}), Bun {omp_bun_version}, and verified native "
+            f"(SHA-256 {clipboard_patch_sha}) and session lifecycle patch "
+            f"(SHA-256 {session_lifecycle_patch_sha}), Bun {omp_bun_version}, and verified native "
             f"addon {native_package}@{natives_version}. Installed to /usr/bin/omp.",
             "SHA256",
             omp_sha,
@@ -198,6 +219,16 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             "before application.",
             "SHA256",
             clipboard_patch_sha,
+        ),
+        package(
+            "omp-session-lifecycle-patch",
+            session_lifecycle_patch_source_commit,
+            session_lifecycle_patch_url,
+            f"pkg:generic/omp-session-lifecycle-patch@{session_lifecycle_patch_source_commit}",
+            "Native session exit and cancellation lifecycle patch qualified against the exact "
+            "pinned OMP source; its SHA-256 is verified before application.",
+            "SHA256",
+            session_lifecycle_patch_sha,
         ),
         package(
             "omp-native-addon",
@@ -293,6 +324,9 @@ def main() -> int:
     parser.add_argument("--omp-clipboard-patch-source-commit", required=True)
     parser.add_argument("--omp-clipboard-patch-sha256", required=True)
     parser.add_argument("--omp-clipboard-patch-path", required=True)
+    parser.add_argument("--omp-session-lifecycle-patch-source-commit", required=True)
+    parser.add_argument("--omp-session-lifecycle-patch-sha256", required=True)
+    parser.add_argument("--omp-session-lifecycle-patch-path", required=True)
     parser.add_argument("--omp-bun-version", required=True)
     parser.add_argument("--node-version", required=True)
     parser.add_argument("--node-sha256", required=True)

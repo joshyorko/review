@@ -34,6 +34,20 @@ export function loadWave(root: string, owner: string): PersistedRepositoryBatch 
 			|| !["running", "paused", "blocked", "cancelled"].includes(batch.state)
 			|| !["slay", "fix", "diff"].includes(batch.kind) || !Array.isArray(batch.waves)
 			|| !batch.waves[batch.currentWave]?.items?.length) return;
+		if (batch.waveSessionId !== undefined && (typeof batch.waveSessionId !== "string" || !batch.waveSessionId)) return;
+		if (batch.waveExit !== undefined) {
+			const exit = batch.waveExit;
+			if (!exit || typeof exit.sessionId !== "string" || !exit.sessionId || typeof exit.waveIdentity !== "string" || !exit.waveIdentity || exit.sessionId !== batch.waveSessionId || exit.waveIdentity !== batch.waveIdentity
+				|| !["pause", "cancel"].includes(exit.choice) || !Number.isFinite(exit.requestedAt)) return;
+		}
+		if (batch.waveShutdown !== undefined) {
+			const receipt = batch.waveShutdown;
+			if (!receipt || !batch.waveExit || typeof receipt.sessionId !== "string" || !receipt.sessionId || typeof receipt.waveIdentity !== "string" || !receipt.waveIdentity || receipt.sessionId !== batch.waveSessionId || receipt.waveIdentity !== batch.waveIdentity
+				|| typeof receipt.settled !== "boolean" || !Array.isArray(receipt.pendingJobIds)
+				|| !receipt.pendingJobIds.every((id: unknown) => typeof id === "string")
+				|| (receipt.settled && receipt.pendingJobIds.length > 0) || !Number.isFinite(receipt.observedAt)
+				|| (receipt.reason !== undefined && typeof receipt.reason !== "string")) return;
+		}
 		return batch;
 	} catch { return undefined; }
 }

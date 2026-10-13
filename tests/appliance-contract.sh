@@ -80,7 +80,7 @@ grep -qE '^ARG FSDK_BUILDER_IMAGE=ghcr\.io/projectbluefin/lab-runner:[^@[:space:
 
 # Source and build inputs are pinned; architecture-specific addons and runtime
 # artifacts carry independent checksums and verified package integrity.
-for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 OMP_CLIPBOARD_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 NODE_X86_64_SHA256 NODE_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256 RTK_X86_64_SHA256 RTK_AARCH64_SHA256 RTK_HOOK_SHA256 RTK_LICENSE_SHA256; do
+for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 OMP_SESSION_LIFECYCLE_PATCH_SHA256 OMP_CLIPBOARD_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 NODE_X86_64_SHA256 NODE_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256 RTK_X86_64_SHA256 RTK_AARCH64_SHA256 RTK_HOOK_SHA256 RTK_LICENSE_SHA256; do
   grep -qE "^ARG ${pin}=[0-9a-f]{64}$" "$containerfile" ||
     fail "ARG ${pin} must be a lowercase sha256 digest"
 done
@@ -88,7 +88,7 @@ for pin in OMP_NATIVES_X86_64_SHA512 OMP_NATIVES_AARCH64_SHA512; do
   grep -qE "^ARG ${pin}=[0-9a-f]{128}$" "$containerfile" ||
     fail "ARG ${pin} must be a lowercase sha512 digest"
 done
-for pin in OMP_SOURCE_COMMIT OMP_CLIPBOARD_PATCH_SOURCE_COMMIT MEMORYD_SOURCE_COMMIT; do
+for pin in OMP_SOURCE_COMMIT OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT OMP_CLIPBOARD_PATCH_SOURCE_COMMIT MEMORYD_SOURCE_COMMIT; do
   grep -qE "^ARG ${pin}=[0-9a-f]{40}$" "$containerfile" ||
     fail "ARG ${pin} must be a full lowercase commit SHA"
 done
@@ -115,10 +115,14 @@ require "$containerfile" \
   'COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts' \
   'COPY patches/omp/memory-backend-registration.patch /usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'COPY patches/omp/clipboard-truthful-18.10.3.patch /usr/local/share/bluefin/omp/clipboard-truthful-18.10.3.patch' \
+  'COPY patches/omp/session-lifecycle-18.10.3.patch /usr/local/share/bluefin/omp/session-lifecycle-18.10.3.patch' \
   'OMP_PATCH_PATH=/usr/local/share/bluefin/omp/memory-backend-registration.patch' \
   'OMP_CLIPBOARD_PATCH_PATH="$OMP_CLIPBOARD_PATCH_PATH"' \
+  'OMP_SESSION_LIFECYCLE_PATCH_PATH="$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
   'OMP_CLIPBOARD_PATCH_SOURCE_COMMIT="$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"' \
+  'OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT="$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT"' \
   'OMP_CLIPBOARD_PATCH_SHA256="$OMP_CLIPBOARD_PATCH_SHA256"' \
+  'OMP_SESSION_LIFECYCLE_PATCH_SHA256="$OMP_SESSION_LIFECYCLE_PATCH_SHA256"' \
   'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
   'https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/${rtk_asset}' \
   'https://raw.githubusercontent.com/rtk-ai/rtk/v${RTK_VERSION}/hooks/pi/rtk.ts' \
@@ -163,10 +167,15 @@ require "$containerfile" \
   'io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}"' \
   'io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}"' \
   'io.github.joshyorko.review.omp.clipboard.patch.source.commit="${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}"' \
+  'io.github.joshyorko.review.omp.session.lifecycle.patch.source.commit="${OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT}"' \
   'io.github.joshyorko.review.omp.clipboard.patch.sha256="${OMP_CLIPBOARD_PATCH_SHA256}"' \
+  'io.github.joshyorko.review.omp.session.lifecycle.patch.sha256="${OMP_SESSION_LIFECYCLE_PATCH_SHA256}"' \
   '--omp-clipboard-patch-source-commit "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"' \
+  '--omp-session-lifecycle-patch-source-commit "$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT"' \
   '--omp-clipboard-patch-sha256 "$OMP_CLIPBOARD_PATCH_SHA256"' \
+  '--omp-session-lifecycle-patch-sha256 "$OMP_SESSION_LIFECYCLE_PATCH_SHA256"' \
   '--omp-clipboard-patch-path "$OMP_CLIPBOARD_PATCH_PATH"' \
+  '--omp-session-lifecycle-patch-path "$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
   'ln -s extension /out/usr/share/bluefin/review/bluefin-review' \
   'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/bluefin/review/luna-factory' \
   'test -e /out/usr/share/bluefin/review/luna-factory/omp/verifier-probe.ts'
@@ -238,11 +247,14 @@ require scripts/build-derived-omp.sh \
   'git ls-remote --exit-code' \
   'sha256sum --check --status' \
   'sha256sum "$OMP_CLIPBOARD_PATCH_PATH"' \
+  'sha256sum "$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
   'sha512sum --check --status' \
   'git -C "$source_dir" apply --check "$OMP_PATCH_PATH"' \
   'git -C "$source_dir" apply --unidiff-zero --check "$OMP_CLIPBOARD_PATCH_PATH"' \
+  'git -C "$source_dir" apply --check "$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
   'clipboard patch was reviewed for OMP source' \
   'bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests' \
+  'bun --cwd=packages/coding-agent test test/session-exit-lifecycle.test.ts' \
   'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"' \
   'install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun' \
   'bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"'
@@ -517,6 +529,25 @@ trap - EXIT
 if [[ -n "$expect_version" && "$expect_version" != "$version" ]]; then
   fail "expected version ${expect_version}, derived ${version}"
 fi
+
+# Verify patch bytes and qualification, rather than pinning a fixture digest.
+python3 - <<'PY_CHECK'
+import hashlib
+import pathlib
+import re
+root = pathlib.Path.cwd()
+container = (root / "image/appliance/Containerfile").read_text()
+def pin(name):
+    return re.search(r"^ARG " + name + r"=(.+)$", container, re.M).group(1)
+assert pin("OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT") == pin("OMP_SOURCE_COMMIT")
+patch = root / "patches/omp" / pathlib.PurePosixPath(pin("OMP_SESSION_LIFECYCLE_PATCH_PATH")).name
+assert hashlib.sha256(patch.read_bytes()).hexdigest() == pin("OMP_SESSION_LIFECYCLE_PATCH_SHA256")
+assert "!" + str(patch.relative_to(root)) in (root / ".dockerignore").read_text().splitlines()
+build = (root / "scripts/build-derived-omp.sh").read_text()
+assert build.index('apply --unidiff-zero "$OMP_CLIPBOARD_PATCH_PATH"') < build.index('apply "$OMP_SESSION_LIFECYCLE_PATCH_PATH"') < build.index('bun scripts/ci-release-build-binaries.ts')
+assert "api.sessionShutdownLifecycleVersion !== 1" in (root / "scripts/derived-omp-canary.ts").read_text()
+PY_CHECK
+python3 tests/session_lifecycle_packaging_contract.py
 
 echo "appliance-contract: static contract holds (version ${version})"
 
