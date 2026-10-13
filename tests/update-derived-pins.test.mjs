@@ -351,6 +351,23 @@ test("Renovate tracks only shipped Review and CI dependencies", async () => {
 	assert.match(publisher, /node --test tests\/update-derived-pins\.test\.mjs/);
 });
 
+test("Renovate extracts exact CI package names and versions from a fixed fixture", async () => {
+	const config = JSON.parse(await readFile("renovate.json", "utf8"));
+	const manager = config.customManagers.find((candidate) => candidate.datasourceTemplate === "pypi");
+	const fixture = `# CI requirements
+pre-commit==4.6.2 \\
+    --hash=sha256:${X64}
+    # via CI
+sample_pkg==1.2.3rc1+linux \\
+    --hash=sha256:${ARM64}
+`;
+	const matches = [...fixture.matchAll(new RegExp(manager.matchStrings[0], "gm"))];
+	assert.deepEqual(matches.map(({ groups }) => [groups.depName, groups.currentValue]), [
+		["pre-commit", "4.6.2"],
+		["sample_pkg", "1.2.3rc1+linux"],
+	]);
+});
+
 test("Renovate extracts appliance pins and CI package versions", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
 	const appliance = await readFile("image/appliance/Containerfile", "utf8");
@@ -373,6 +390,10 @@ test("Renovate extracts appliance pins and CI package versions", async () => {
 	const regex = new RegExp(manager.matchStrings[0], "gm");
 	const lockfile = await readFile("requirements-ci.lock", "utf8");
 	const matches = [...lockfile.matchAll(regex)];
-	assert.ok(matches.length >= 10, "requirements-ci.lock packages are extracted");
-	assert.ok(matches.some((match) => match.groups.depName === "pre-commit" && match.groups.currentValue === "4.6.2"));
+	const expectedPackages = lockfile.split("\n")
+		.filter((line) => !line.startsWith("#") && line.includes("=="))
+		.map((line) => line.trim().split(/\s+/)[0].split("=="));
+	assert.ok(expectedPackages.length >= 10, "requirements-ci.lock contains the CI packages");
+	assert.equal(expectedPackages.filter(([name]) => name === "pre-commit").length, 1);
+	assert.deepEqual(matches.map(({ groups }) => [groups.depName, groups.currentValue]), expectedPackages);
 });
