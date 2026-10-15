@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const expectedArchiveSha256 = "8d00041c842476b3954b7433fa785de4a8b92bc6eda7622003b192108c6c8713";
 const expectedSourceCommit = "7cc912940b107eb2d771b0d106c640a8eddc9edf";
-const expectedMemoryPatchSha256 = "d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f";
+const expectedMemoryPatchSha256 = "f42d5ab405047709ceb3a43c8b6793a05ae6b045418cf068cbbf86d05b2a9421";
 const expectedPatchSha256 = "608959e93b132d50aa9b6d015b1b6fecc6dbb644e7295628bee1f11640cf224e";
 const expectedOmpVersion = "18.11.1";
 const sourceCheckout = process.env.REVIEW_OMP_SOURCE;
