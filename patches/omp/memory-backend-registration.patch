@@ -303,7 +303,7 @@ index c38c4aef395a661664c6cd4354fd8d1e272dc525..00042a604565f78153b24303b771ff5b
 +				parent: options.parentMnemopiSessionState ?? options.parentHindsightSessionState,
 +			});
 +		},
-+		buildDeveloperInstructions(agentDir, _settings, session) {
++		buildDeveloperInstructions(agentDir, _cwd, _settings, session) {
 +			return instance.buildDeveloperInstructions(agentDir, factoryContext.settings, session);
 +		},
 +		clear(agentDir, cwd, session) {
@@ -805,7 +805,7 @@ index 576fd288daa46a767a63f5783c52eec0924a0ebe..6832e527e11eb88226993d1726af0675
 +import { cfgMemoryBackendSettings } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 +import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
  
-@@ -50,2 +60,198 @@ describe("resolveMemoryBackend", () => {
+@@ -50,2 +60,202 @@ describe("resolveMemoryBackend", () => {
  	});
 +	it("registers extension backends only for their owning session and runs first-turn recall", async () => {
 +		const started: string[] = [];
@@ -829,7 +829,10 @@ index 576fd288daa46a767a63f5783c52eec0924a0ebe..6832e527e11eb88226993d1726af0675
 +					async start(startContext) {
 +						started.push(startContext.settings.profile as string);
 +					},
-+					async buildDeveloperInstructions() {
++					async buildDeveloperInstructions(agentDir, backendSettings, session) {
++						expect(agentDir).toBe(context.agentDir);
++						expect(backendSettings.profile).toBe("work");
++						expect(session).toBe(context.session);
 +						return undefined;
 +					},
 +					async clear() {},
@@ -866,6 +869,7 @@ index 576fd288daa46a767a63f5783c52eec0924a0ebe..6832e527e11eb88226993d1726af0675
 +			taskDepth: 0,
 +		};
 +		const backend = await resolveMemoryBackend(settings, context);
++		await backend.buildDeveloperInstructions(context.agentDir, context.cwd, settings, ownerSession);
 +		await backend.start({
 +			...context,
 +			settings,
