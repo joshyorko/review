@@ -7,11 +7,11 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const expectedArchiveSha256 = "e4fa3c621fd6ef21b71e1b048f056bf7845dd9bada19199cbf698b84d3d70e15";
-const expectedSourceCommit = "81e1d8927a3c16cfaff2e9456baa8c060e1e0e9b";
+const expectedArchiveSha256 = "8d00041c842476b3954b7433fa785de4a8b92bc6eda7622003b192108c6c8713";
+const expectedSourceCommit = "7cc912940b107eb2d771b0d106c640a8eddc9edf";
 const expectedMemoryPatchSha256 = "d558fb25cb4a664595f6ca34ae70d8efe46858c75a667db7028fd01ec1ee368f";
 const expectedPatchSha256 = "608959e93b132d50aa9b6d015b1b6fecc6dbb644e7295628bee1f11640cf224e";
-const expectedOmpVersion = "18.10.3";
+const expectedOmpVersion = "18.11.1";
 const sourceCheckout = process.env.REVIEW_OMP_SOURCE;
 const cachedArchive = process.env.ISSUE140_OMP_ARCHIVE;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
