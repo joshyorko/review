@@ -155,16 +155,37 @@ function slayBashBlockReason(command: string): string | undefined {
 	return undefined;
 }
 
+type LandingAction = "approve" | "merge";
+
+function slayLandingRecovery(items: readonly QueueItem[]): string {
+	const urls = [...new Set(items.filter((item) => item.type === "pr").map((item) => item.url))].join(", ");
+	return `Next: open ${urls} in GitHub. If CI is pending, wait for it to finish there; if it fails, fix the failing checks. Revalidate the current head, reviews, holds, and mergeability. Once eligible, merge or enable auto-merge in GitHub, then run /review reconcile in this Review session. Reconcile only observes GitHub effects; it does not merge or restart work. /review resume is for saved paused work, not this blocked landing. Keep the claims intact.`;
+}
+
+function githubLandingAction(toolName: string | undefined, input: unknown): LandingAction | "invalid" | undefined {
+	let name = toolName;
+	let args = input;
+	if (toolName === "write" && isRecord(input) && typeof input.path === "string") {
+		if (!input.path.startsWith("xd://mcp__github_")) return undefined;
+		name = input.path.slice("xd://".length);
+	}
+	const action = name?.replace(/^mcp__github_+/, "");
+	if (action !== "merge_pull_request" && action !== "pull_request_review_write") return undefined;
+	if (toolName === "write") {
+		if (!isRecord(input) || typeof input.content !== "string") return "invalid";
+		try { args = JSON.parse(input.content); } catch { return "invalid"; }
+	}
+	if (!isRecord(args)) return "invalid";
+	if (action === "merge_pull_request") return "merge";
+	return typeof args.event === "string" && args.event.toUpperCase() === "APPROVE" ? "approve" : undefined;
+}
+
 function slayLandingBlockReason(
-	command: string,
+	actions: readonly LandingAction[],
 	items: readonly QueueItem[],
 	policy?: WorkbenchPolicy,
 ): string | undefined {
-	const mutatesLanding = command.split(/\r?\n|&&|\|\||;/).some((segment) =>
-		/\bgh\s+pr\s+merge\b/.test(segment)
-		|| (/\bgh\s+pr\s+review\b/.test(segment) && /(?:^|\s)--approve(?:[=\s]|$)/.test(segment)),
-	);
-	if (!mutatesLanding) return undefined;
+	if (actions.length === 0) return undefined;
 	// Never approve or merge a pull request that is not genuinely ready to land:
 	// CI alone never implies ready. Every policy input blocks, so a queued hold or
 	// a requested-changes review stops the mutation just as a failing check does.
@@ -172,7 +193,9 @@ function slayLandingBlockReason(
 		if (item.type !== "pr") continue;
 		const state = landingState(item, policy);
 		if (state === "ready-to-land") continue;
-		return `${item.repo}#${item.id} ${landingReason(state)}; refresh and clear it before approval or merge`;
+		// Approval establishes review readiness; it cannot require prior approval.
+		if (state === "unreviewed" && actions.every((action) => action === "approve")) continue;
+		return `${item.repo}#${item.id} ${landingReason(state)}. Review blocked this tool call before it reached GitHub. ${slayLandingRecovery([item])}`;
 	}
 	return undefined;
 }
@@ -530,7 +553,7 @@ export function actionPrompt(
 	const evidence = `Evidence is bounded and read once. Start with \`${evidenceTool}\` using both \`pull_request\` and explicit \`repo\`; child agents do not inherit the coordinator's selected repository. Use \`gh pr diff <n> --repo <r> --name-only\` only to confirm filenames, inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Never assume a checkout exists. Check a repository-specific validator once; if the minimal appliance lacks that toolchain, use hosted check evidence and report the local verification gap instead of installing packages or retrying the absent command. Treat \`merge=dirty\` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose \`--ours\`/\`--theirs\` wholesale. Revalidate live state before any comment, label, assignment, close, push, approval, or merge.`;
 	const reviewFinish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
 	const slayContinuation = "Review Slay coordinator ownership persists through the selected lifecycle's declared terminal condition. Review completion, a fixer return, a push, green checks, or knowing the next action is progress, not completion. Continue already-authorized in-scope work without asking for confirmation already supplied by the objective; authorized actions need no second confirmation, while new scope or effects still require authority. A partial status report is not terminal. If one lane is blocked, finish independent authorized work before reporting that lane's exact blocker and evidence. Stop only when the requested terminal outcome is satisfied and verified, a concrete external blocker prevents further authorized progress, or continuing requires authority or scope the operator did not grant. Existing live GitHub policy, permissions, exact-head checks, holds, self-review rules, and mutation guards still bind terminal conditions. Never sleep or poll. Workers remain bounded and return to the coordinator.";
-	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent}. If it has findings, dispatch one fresh fixer with the exact repository, pull-request number, and head. Each fixer must use its own distinct target checkout under \`$HOME/worktrees\`, created with \`gh repo clone\` and \`gh pr checkout\`, and no two workers may share a checkout or conversation; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --auto --squash\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
+	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent}. If it has findings, dispatch one fresh fixer with the exact repository, pull-request number, and head. Each fixer must use its own distinct target checkout under \`$HOME/worktrees\`, created with \`gh repo clone\` and \`gh pr checkout\`, and no two workers may share a checkout or conversation; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --auto --squash\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. If Review blocks landing, identify it as Review's local guard, not a GitHub rejection. Do not call an observed check required without live rules evidence. Report the current head and whether CI is pending or failing, include the PR URL, and give these recovery steps explicitly: ${slayLandingRecovery(selected)} Never end with only "resume once checks clear" or imply that reconcile will merge the PR. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
 	const repairFinish = "These pull requests were returned to their authenticated author with requested changes. Read the review threads and failing checks, diagnose every requested correction, then dispatch one fresh fixer per pull request. Each fixer owns one unique target checkout under `$HOME/worktrees`, created with `gh repo clone` and `gh pr checkout`; no two workers share a checkout or conversation. Make the smallest complete correction, run focused verification, and push a new head without force. Never review, approve, auto-merge, or merge the author's own pull request. A repair is terminal only after GitHub shows a new head SHA. Report the pushed head and pull-request URL for every item, then stop; the workbench owns the next repository wave.";
 	const issueContext = options?.workbenchMode === "hive"
 		? "Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it."
@@ -1747,6 +1770,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (result.nonSuccessItems?.length) lines.push(`Slay did not satisfy its terminal outcome for ${[...new Set(result.nonSuccessItems)].sort().join(", ")}`);
 				if (result.submittedPrs.length > 0) lines.push(`Observed submitted PRs ${result.submittedPrs.join(", ")}`);
 				if (result.unknown.length > 0) lines.push(`Retained UNKNOWN claims ${result.unknown.join(", ")} for ${batch.id}${sessionStopped(batch) ? ": execution stopped; GitHub effect proof is missing: require unchanged exact PR head/review/auto-merge, a verified terminal PR effect, or one uniquely linked issue submission" : batch.waveExit ? ": missing positive owning-session shutdown settlement" : ""}`);
+				const wave = batch.waves[batch.currentWave];
+				if (result.unknown.length > 0 && batch.kind === "slay" && wave?.items.every((item) => item.type === "pr" && !isRepairRequested(item, mode.currentUserLogin))) {
+					lines.push(`Landing is not verified. If a PR is still open without auto-merge, ${slayLandingRecovery(wave.items)} If GitHub already shows merged or auto-merge accepted and this warning remains, worker, head, or review evidence is unresolved; inspect /review status and report the warning instead of deleting claims.`);
+				}
 				if (activeBatch?.id === batch.id && result.unknown.length === 0) {
 					if (sessionStopped(batch)) lines.push(settleStoppedBatch(ctx, batch, result));
 					else if (preToolProofValid(batch)) lines.push(archivePreToolBatch(ctx, batch, result));
@@ -2753,9 +2780,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			});
 			if (unfinished.length > 0) {
 				const targets = unfinished.map((item) => `${item.repo}#${item.id}`).join(", ");
+				const pendingItems = live.items.filter((current) => unfinished.some((item) => item.repo === current.repo && item.id === current.id));
+				const observed = pendingItems.map((item) => `${item.repo}#${item.id} head=${item.headSha ?? "unknown"}: ${landingReason(landingState(item, policy)) || "merge or accepted auto-merge not observed"}`).join("; ");
 				const error = repairs
 					? `slay repair jobs settled but targets have no new head: ${targets}`
-					: `slay review jobs settled but targets remain open without auto-merge: ${targets}`;
+					: `slay review jobs settled but targets remain open without auto-merge: ${observed}. ${slayLandingRecovery(pendingItems)}`;
 				persistBatch(ctx, { ...activeBatch, state: "blocked", error });
 				ctx.ui.notify(`Slay wave stopped: ${error}`, "error");
 				return;
@@ -3016,23 +3045,31 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	});
 	pi.on("tool_call", (event) => {
 		const { toolCallId, toolName, input } = event as { toolCallId?: string; toolName?: string; input?: unknown };
-		const batchActive = activeBatch?.state === "running" || activeBatch?.state === "paused";
+		const batchActive = activeBatch && ["running", "paused", "blocked"].includes(activeBatch.state);
 		if (toolCallId && activeCtx) rememberToolInvocation(activeCtx, toolCallId);
 		if (toolName === "task" && toolCallId && activeBatch?.state === "running" && activeCtx) {
 			const ids = [...new Set([...(activeBatch.waveToolCallIds ?? []), toolCallId])].sort();
 			persistBatch(activeCtx, { ...activeBatch, waveToolCallIds: ids });
 		}
 		if (activeBatch?.kind !== "slay" || !batchActive) return;
-		if (toolName !== "bash") return;
-		const command = String(isRecord(input) ? input.command ?? "" : "");
-		const reason = slayBashBlockReason(command);
+		const command = toolName === "bash" ? String(isRecord(input) ? input.command ?? "" : "") : "";
+		const reason = toolName === "bash" ? slayBashBlockReason(command) : undefined;
 		if (reason) return { block: true, reason: `Review Slay guard: ${reason}` };
+		const actions: LandingAction[] = [];
+		for (const segment of command.split(/\r?\n|&&|\|\||;/)) {
+			if (/\bgh\s+pr\s+merge\b/.test(segment)) actions.push("merge");
+			if (/\bgh\s+pr\s+review\b/.test(segment) && /(?:^|\s)--approve(?:[=\s]|$)/.test(segment)) actions.push("approve");
+		}
+		const githubAction = githubLandingAction(toolName, input);
+		if (githubAction === "invalid") return { block: true, reason: "Review Slay guard: malformed GitHub landing tool input; no approval or merge was sent" };
+		if (githubAction) actions.push(githubAction);
+		if (actions.length === 0) return;
 		const wave = activeBatch.waves[activeBatch.currentWave];
 		const visible = mode.visibleItems();
 		const currentItems = (wave?.items ?? []).map((item) =>
 			visible.find((candidate) => candidate.repo === item.repo && candidate.id === item.id) ?? item,
 		);
-		const landingBlocker = slayLandingBlockReason(command, currentItems, policy);
+		const landingBlocker = slayLandingBlockReason(actions, currentItems, policy);
 		if (landingBlocker) return { block: true, reason: `Review Slay guard: ${landingBlocker}` };
 	});
 

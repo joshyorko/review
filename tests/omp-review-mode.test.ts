@@ -343,12 +343,12 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 		updatedAt: new Date(NOW).toISOString(),
 		isDraft: false,
 		mergeable: "MERGEABLE",
-		reviewDecision: "REVIEW_REQUIRED",
-		headRefOid: item.headSha,
-		autoMergeRequest: null,
+		reviewDecision: effects[item.id]?.reviewDecision ?? "REVIEW_REQUIRED",
+		headRefOid: effects[item.id]?.headSha ?? item.headSha,
+		autoMergeRequest: effects[item.id]?.autoMerge ? { enabledAt: new Date().toISOString() } : null,
 		changedFiles: 1,
 		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "src/change.ts" }] },
-		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: effects[item.id]?.ciState ?? "SUCCESS" } } }] },
 		author: { login: item.author },
 		repository: { nameWithOwner: item.repo },
 		labels: { nodes: [] },
@@ -375,8 +375,8 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 					state: effect.state,
 					merged: effect.merged,
 					mergedAt: Object.hasOwn(effect, "mergedAt") ? effect.mergedAt : effect.merged ? new Date().toISOString() : null,
-					headRefOid: effect.headSha,
-					autoMergeRequest: effect.autoMerge ? { enabledAt: new Date().toISOString() } : null,
+				headRefOid: effect.headSha,
+				autoMergeRequest: effect.autoMerge ? { enabledAt: new Date().toISOString() } : null,
 					reviewDecision: Object.hasOwn(effect, "reviewDecision") ? effect.reviewDecision : "REVIEW_REQUIRED",
 					author: { login: items.find((item) => item.id === Number(numberText))?.author },
 					latestReviews: { pageInfo: { hasNextPage: effect.reviewsIncomplete === true }, nodes: effect.reviews ?? [] },
@@ -395,12 +395,12 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 				updatedAt: new Date(NOW).toISOString(),
 				isDraft: false,
 				mergeable: "MERGEABLE",
-				reviewDecision: "REVIEW_REQUIRED",
-				headRefOid: item.headSha,
-				autoMergeRequest: null,
+				reviewDecision: effect.reviewDecision ?? "REVIEW_REQUIRED",
+				headRefOid: effect.headSha,
+				autoMergeRequest: effect.autoMerge ? { enabledAt: new Date().toISOString() } : null,
 				changedFiles: 1,
 				files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "src/change.ts" }] },
-				commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+				commits: { nodes: [{ commit: { statusCheckRollup: { state: effect.ciState ?? "SUCCESS" } } }] },
 				author: { login: item.author },
 				repository: { nameWithOwner: item.repo },
 				labels: { nodes: [] },
@@ -4105,6 +4105,43 @@ test("landing state evaluates CI, reviews, holds, and mergeability together", ()
 	assert.deepEqual([...HOLD_LABELS].sort(), ["blocked", "hold"]);
 });
 
+test("Slay landing guards cover GitHub MCP and Bash without requiring an existing approval to approve", async () => {
+	const pi = fakeHost(); pi.flagValues.set("pr", "7");
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	ctx.overlays[0].handleInput("s"); await new Promise((resolve) => setImmediate(resolve));
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const target = batch.waves[0].items[0];
+	const guard = pi.events.get("tool_call");
+	const mcp = (name, args) => guard({ toolName: "write", input: { path: `xd://mcp__github_${name}`, content: JSON.stringify({ owner: "projectbluefin", repo: "other", pullNumber: 7, ...args }) } }, ctx);
+	const approve = () => mcp("pull_request_review_write", { method: "submit_pending", event: "APPROVE" });
+	const merge = () => mcp("merge_pull_request", { merge_method: "squash" });
+	target.ciStatus = "pending";
+	for (const action of [approve, merge, () => guard({ toolName: "bash", input: { command: "gh pr merge 7 --repo projectbluefin/other --auto --squash" } }, ctx)]) {
+		const blocked = await action();
+		assert.equal(blocked?.block, true);
+		assert.match(blocked.reason, /Review.*CI is pending/);
+		assert.match(blocked.reason, /GitHub.*then.*\/review reconcile/i);
+	}
+	assert.equal(await mcp("pull_request_review_write", { method: "create" }), undefined, "creating a pending review is not approval");
+	assert.equal(await mcp("pull_request_review_write", { method: "submit_pending", event: "COMMENT" }), undefined);
+	assert.equal(await guard({ toolName: "write", input: { path: "xd://mcp__github_merge_pull_request", content: "{" } }, ctx)?.block, true);
+	assert.equal(await guard({ toolName: "write", input: { path: "/tmp/notes", content: "{" } }, ctx), undefined);
+	assert.equal(await guard({ toolName: "mcp__github__merge_pull_request", input: { owner: "projectbluefin", repo: "other", pullNumber: 7 } }, ctx)?.block, true);
+	target.ciStatus = "success"; target.reviewState = "review_required";
+	assert.equal(await approve(), undefined, "the first clean-head approval must not depend on an existing approval");
+	assert.equal(await guard({ toolName: "bash", input: { command: "gh pr review 7 --repo projectbluefin/other --approve" } }, ctx), undefined);
+	assert.match((await merge()).reason, /approval/);
+	target.reviewState = "approved";
+	assert.equal(await merge(), undefined);
+	for (const state of ["running", "paused", "blocked"]) {
+		batch.state = state; target.labels = ["hold"];
+		assert.match((await approve()).reason, /hold label/);
+		assert.match((await merge()).reason, /hold label/);
+	}
+});
+
 test("landing reason names the blocker for gates and the UI", () => {
 	assert.equal(landingReason("ci-failing"), "CI is failure");
 	assert.equal(landingReason("ci-pending"), "CI is pending");
@@ -4927,7 +4964,7 @@ async function interruptedIssueSlay(states) {
 	return { env, entries: pi.entries, batch };
 }
 
-async function blockedPrSlayWave() {
+async function blockedPrSlayWave(beforeSettlement = (_fixture) => {}) {
 	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
 	const items = [350, 352, 353, 354].map((id) => queueItem({
 		id,
@@ -4965,6 +5002,7 @@ async function blockedPrSlayWave() {
 		async: { type: "task", state: "completed", jobId: workers[0].id },
 		progress: workers.map((worker, index) => ({ id: worker.agentId, index, status: "completed" })),
 	} }, isError: false }, ctx);
+	beforeSettlement({ items, effects });
 	await pi.events.get("agent_end")({}, ctx);
 	const blocked = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(blocked.state, "blocked");
@@ -4975,8 +5013,41 @@ async function blockedPrSlayWave() {
 	]);
 	assert.ok(claims.every((claim) => claim.owner === `review:${blocked.id}:0`));
 	// Simulate abrupt process loss, preserving the pre-shutdown recovery contract.
-	return { env, items, effects, entries: pi.entries, batch: blocked };
+	return { env, items, effects, entries: pi.entries, batch: blocked, pi, ctx };
 }
+
+test("Slay landing recovery explains pending repaired head and settles only after GitHub merge", async () => {
+	const repairedHead = "f".repeat(40);
+	const { env, items, effects, pi, ctx, batch } = await blockedPrSlayWave(({ items, effects }) => {
+		effects[350] = {
+			state: "OPEN", merged: false, headSha: repairedHead, autoMerge: false,
+			ciState: "PENDING", reviewDecision: "APPROVED",
+			reviews: [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: repairedHead } }],
+		};
+		for (const item of items.slice(1, 3)) effects[item.id] = { state: "MERGED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: null, reviews: [] };
+	});
+	assert.match(batch.error, /CI is pending/);
+	assert.match(batch.error, /https:\/\/github.com\/projectbluefin\/review\/pull\/350/);
+	assert.match(batch.error, /GitHub.*then.*\/review reconcile/i);
+	assert.doesNotMatch(batch.error, /required CI|GitHub.*reject|resume once/i);
+	const claims = () => new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
+	effects[350].ciState = "SUCCESS";
+	await pi.commands.get("review").handler("reconcile", ctx);
+	assert.deepEqual(claims().map((claim) => claim.resource).sort(), ["item:projectbluefin/review#350", "repo:projectbluefin/review"]);
+	const warning = ctx.notifications.at(-1).message;
+	assert.match(warning, /still open|not.*merged/i);
+	assert.match(warning, /does not.*merge/i);
+	assert.match(warning, /GitHub.*then.*\/review reconcile/i);
+	assert.equal(pi.messages.length, 1, "reconcile does not dispatch another worker or attempt a merge");
+	effects[350].state = "MERGED";
+	effects[350].merged = true;
+	await pi.commands.get("review").handler("reconcile", ctx);
+	assert.equal(claims().length, 0);
+	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(recovered.state, "complete");
+	assert.equal(recovered.completedItems, 3);
+	assert.equal(pi.messages.length, 1);
+});
 
 async function reconcileBlockedPrSlayWave(prepare, options = {}, beforeReconcile = () => {}) {
 	const { env, items, effects, entries, batch } = await blockedPrSlayWave();
@@ -5466,6 +5537,9 @@ test("slay prompts require unique target checkouts and live-rule landing", () =>
 	assert.match(slay, /Never use `--admin`/);
 	assert.match(slay, /do not disable and re-arm auto-merge/);
 	assert.match(slay, /report the outstanding approval gate and move on/);
+	assert.match(slay, /Review's local guard, not a GitHub rejection/);
+	assert.match(slay, /merge or enable auto-merge in GitHub, then run \/review reconcile/);
+	assert.match(slay, /Reconcile only observes GitHub effects; it does not merge or restart work/);
 	const reviewerPrompt = readFileSync("image/extension/bluefin-review/agents/reviewer.md", "utf8");
 	assert.match(reviewerPrompt, /review_workbench_diff/);
 	assert.match(reviewerPrompt, /explicit repository/);

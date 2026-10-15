@@ -130,6 +130,29 @@ If OMP records a coordinator error or abort before any tool invocation, Review b
 
 Reconciliation releases only claims with settled evidence. Changing instance keys or scopes does not bypass a host-wide claim.
 
+### PR landing blocked while CI runs
+
+The Review Slay guard runs locally before Bash or packaged GitHub MCP landing
+calls reach GitHub. A pending check is neither failed nor evidence of a GitHub
+rejection. Observed checks are not necessarily required by branch rules.
+Approval can establish review readiness without requiring an existing approval;
+the other landing blockers still apply.
+
+If Slay stops with the PR still open and no accepted auto-merge request:
+
+1. Open the PR URL shown in the guard or blocked-wave message. Wait for pending
+   CI in GitHub, or fix failing checks.
+2. Revalidate the current head, reviews, holds, and mergeability. Once eligible,
+   merge or enable auto-merge through GitHub's ordinary controls.
+3. Run `/review reconcile` in the existing Review session. It observes the
+   GitHub effect and releases claims only when the existing worker and exact-head
+   evidence requirements are met.
+
+`/review reconcile` does not merge or restart work. Green CI alone does not complete
+landing. `/review resume` applies to saved paused work, not this blocked landing.
+Keep claims intact. If GitHub already shows merged or accepted auto-merge and reconciliation still retains UNKNOWN claims, inspect
+`/review status` and report the warning; do not delete claims or bypass guards.
+
 For a PR Slay wave, reconciliation observes the exact PR effect independently of the open queue. A MERGED PR at the captured head settles when authoritative effect evidence and terminal worker coverage are valid; it does not require a fresh approval, and a null aggregate review decision is valid. A MERGED PR whose head changed, or an OPEN PR accepted for auto-merge, settles only when complete latest-review history contains a fresh non-author APPROVED review bound to the current head and submitted during that wave; an explicit CHANGES_REQUESTED decision rejects success, while GitHub may still await additional required human reviews. A CLOSED unmerged PR settles its claims but archives Slay as cancelled without increasing completed-item counts. An unexplained OPEN head, missing or stale required review, incomplete review history, unreadable effect, or contradictory state remains UNKNOWN and keeps its claims.
 
 OMP native `isolated:true` is not required: it isolates the coordinator repository, not the target checkout. Worker communication and async delivery are independent of that option.
