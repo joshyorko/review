@@ -15,7 +15,8 @@ import time
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
+VERSION = (ROOT / "VERSION").read_text().strip()
 COLLECTOR = ROOT / "bin/review-diagnostic-collector"
 LAUNCHER = ROOT / "bin/review"
 CONTAINER_ID = "a" * 64
@@ -289,7 +290,7 @@ case "${1:-} ${2:-} ${3:-}" in
   "pull "*|"image exists"*) exit 0 ;;
   "image inspect "*)
     if [[ "${REMOVE_ENGINE_ON_INSPECT:-0}" == 1 ]]; then rm -f -- "$0"; fi
-    printf '26.08.07|0123456789abcdef|sha256:deadbeef\n'
+    printf '@VERSION@|0123456789abcdef|sha256:deadbeef\n'
     exit 0 ;;
   "run "*)
     printf 'pid=%s args=%s\n' "$$" "$*" >>"${RUN_LOG:?}"
@@ -319,7 +320,7 @@ case "${1:-} ${2:-} ${3:-}" in
 esac
 exit 0
 '''
-        script = script.replace("@FOREIGN@", FOREIGN_ID).replace("@CONTAINER@", CONTAINER_ID)
+        script = script.replace("@FOREIGN@", FOREIGN_ID).replace("@CONTAINER@", CONTAINER_ID).replace("@VERSION@", VERSION)
         fake_engine = launch_bin / "podman"
         fake_engine.write_text(script)
         fake_engine.chmod(0o700)

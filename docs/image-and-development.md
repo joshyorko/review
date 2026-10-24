@@ -62,6 +62,7 @@ bash tests/appliance-contract.sh
 python3 tests/appliance_sbom_contract.py
 bash tests/version-derivation.sh
 bash tests/just-onboarding.sh
+python3 tests/launcher_diagnostic_collector.py
 bash tests/readme-quickstart.sh
 python3 tests/package_review_contract.py
 python3 tests/package_oci_contract.py
