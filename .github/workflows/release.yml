@@ -72,6 +72,17 @@ jobs:
         with:
           repository: joshyorko/homebrew-tools
           path: tools-tap
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: review-candidate-${{ matrix.arch }}
+          path: ${{ runner.temp }}/bundles/*
+          if-no-files-found: error
+      - name: Run candidate SIF on the native host
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/candidate"
+          tar -xzf "$RUNNER_TEMP/bundles/review-${{ matrix.arch }}.tar.gz" -C "$RUNNER_TEMP/candidate"
+          bash tools-tap/scripts/smoke-review-sif.sh "$RUNNER_TEMP/candidate/launcher/review.sif"
       - name: Install and test candidate through Homebrew
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
@@ -81,11 +92,7 @@ jobs:
             review-candidate-check
             --artifact=${{ runner.temp }}/bundles/review-${{ matrix.arch }}.tar.gz
             --version=${{ steps.version.outputs.version }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: review-candidate-${{ matrix.arch }}
-          path: ${{ runner.temp }}/bundles/*
-          if-no-files-found: error
+
 
   publish:
     if: inputs.publish
