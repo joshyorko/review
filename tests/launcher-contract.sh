@@ -36,7 +36,7 @@ for help_flag in --help -h; do
   [[ "$help_output" == Usage:\ review* && "$help_output" == *"review configure"* && "$help_output" == *"review profiles"* && "$help_output" == *"--issues"* ]] || fail "incomplete help"
 done
 version_output="$(env -u GH_TOKEN -u GITHUB_TOKEN REVIEW_RUNTIME=invalid "$repo_root/bin/review" --version)" || fail "version needed runtime setup"
-assert_eq "$version_output" "Review 0.1.0" "standalone Review version"
+assert_eq "$version_output" "Review $(cat "$repo_root/VERSION")" "standalone Review version"
 
 arg_after() {
   local line="$1" wanted="$2" previous="" part
