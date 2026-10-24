@@ -165,7 +165,9 @@ test("OMP upgrades keep version-owned appliance contracts current", async (t) =>
 test("Renovate follows stable OMP releases and the appliance publisher validates pin sync", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
 	assert.equal(config.extends, undefined, "Review must inherit centrally from Patchraptor");
-	assert.equal(config.forkProcessing, "enabled", "central autodiscovery must process this fork");
+	assert.equal(config.forkProcessing, undefined, "Review uses normal repository discovery");
+	assert.equal(config.dependencyDashboard, true);
+	assert.equal(config.dependencyDashboardTitle, "PatchRaptor Dependency Dashboard");
 	const manager = config.customManagers.find((candidate) => candidate.depNameTemplate === "can1357/oh-my-pi");
 	assert.ok(manager, "OMP needs a regex manager for ARG OMP_VERSION");
 	assert.equal(manager.datasourceTemplate, "github-releases");

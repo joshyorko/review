@@ -1,6 +1,5 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "forkProcessing": "enabled",
   "customManagers": [
     {
       "description": "Track the OMP release version in the Review appliance; the post-upgrade task applies verified per-architecture digests.",
@@ -206,5 +205,8 @@
         "executionMode": "branch"
       }
     }
-  ]
+  ],
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "PatchRaptor Dependency Dashboard",
+  "dependencyDashboardAutoclose": false
 }
