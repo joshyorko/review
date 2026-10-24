@@ -138,7 +138,7 @@ jobs:
           bash tests/readme-quickstart.sh
           grep -Fq 'review-appliance' justfile
           grep -Fq 'review-queue' justfile
-          grep -Fq 'github.com/joshyorko/review' README.md
+          grep -Fq 'brew install joshyorko/tools/review' README.md
 
       - name: Build and execute Review appliance
         run: |

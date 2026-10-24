@@ -149,6 +149,10 @@ for helper in "${helpers[@]}"; do
   stage_libraries "$helper"
 done
 
+# OMP extracts its native module at startup; that module also needs this glibc
+# compatibility library, which is absent from the executable-only ldd closure.
+install -D -m 0755 /usr/lib64/libutil.so.1 "${dest}/usr/lib64/libutil.so.1"
+
 # git dispatches to `git-remote-https` by name; upstream ships it as a link to
 # the same binary rather than a second copy.
 ln -sf git-remote-http "${dest}/usr/libexec/git-core/git-remote-https"
