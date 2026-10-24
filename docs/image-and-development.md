@@ -24,7 +24,25 @@ When launched outside Git, it prepares a committed coordinator at
 `$HOME/.local/state/review/coordinator`; it leaves the caller's directory and
 files unchanged.
 
-The release workflow builds immutable OCI images and native SIF bundles from the same committed source. The `review` formula lives in `joshyorko/homebrew-tools`, whose Dagger install checks verify candidate artifacts before publication.
+## Publishing an update
+
+Bump the root `VERSION` to a new semantic version and push the change to `main`.
+After `validate` succeeds, `Review release` automatically builds and tests both
+native architectures at that exact commit, then publishes the versioned OCI/SIF
+release. An already published version is skipped; ordinary pushes still run CI.
+
+`joshyorko/homebrew-tools` checks for new Review releases hourly. Its Dagger
+pipeline verifies the release bundles, tests Homebrew installation, publishes
+the tap's own release assets, and commits the updated formula automatically.
+No formula copying or cross-repository credentials are required. To request an
+immediate tap refresh, run its `Tap Manual` workflow with action `release` and
+package ID `review`.
+
+Once the tap update finishes, run `brew update` followed by
+`brew upgrade joshyorko/tools/review`.
+
+The `Review release` manual workflow remains available for candidate builds;
+leave `publish` disabled to test an unpublished committed ref.
 
 ## Validation
 

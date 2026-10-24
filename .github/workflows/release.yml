@@ -1,6 +1,10 @@
 name: Review release
 
 on:
+  workflow_run:
+    workflows: [validate]
+    branches: [main]
+    types: [completed]
   workflow_dispatch:
     inputs:
       source_ref:
@@ -21,8 +25,48 @@ permissions:
   contents: read
 
 jobs:
+  prepare:
+    if: >-
+      github.repository == 'joshyorko/review' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      build: ${{ steps.source.outputs.build }}
+      publish: ${{ steps.source.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.source_ref || github.sha }}
+          fetch-depth: 0
+      - name: Resolve immutable source and skip published versions
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTOMATIC: ${{ github.event_name == 'workflow_run' }}
+          PUBLISH: ${{ github.event_name == 'workflow_run' || inputs.publish }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          version="$(bash scripts/review-appliance-version.sh)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          # API errors must fail, never masquerade as an unpublished version.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags"
+          if [ "$PUBLISH" = true ] && grep -Fxq "v$version" "$RUNNER_TEMP/release-tags"; then
+            echo "Review $version is already published; bump VERSION to publish new code."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          elif [ "$AUTOMATIC" = true ] && [ "$sha" != "$(git rev-parse origin/main)" ]; then
+            echo "A newer main commit superseded this run."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
-    if: github.repository == 'joshyorko/review'
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
     permissions:
       contents: read
       packages: write
@@ -38,7 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.source_ref || 'main' }}
+          ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 0
       - name: Resolve release version
         id: version
@@ -61,8 +105,8 @@ jobs:
           chmod 0600 "$authfile"
       - name: Build committed launcher and matching native SIF
         env:
-          SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-          REVIEW_SOURCE_REF: ${{ inputs.source_ref || 'main' }}
+          SOURCE_REF: ${{ needs.prepare.outputs.sha }}
+          REVIEW_SOURCE_REF: ${{ needs.prepare.outputs.sha }}
           REVIEW_OCI_PUSH: "1"
           REGISTRY_AUTH_FILE: ${{ runner.temp }}/ghcr-auth.json
         # scripts/package-review performs the authenticated podman push before it builds the SIF.
@@ -95,8 +139,8 @@ jobs:
 
 
   publish:
-    if: inputs.publish
-    needs: build
+    if: needs.prepare.outputs.publish == 'true'
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -104,7 +148,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: main
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: review-candidate-*
