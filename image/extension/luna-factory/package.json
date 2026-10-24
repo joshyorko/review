@@ -1,0 +1,10 @@
+{
+	"name": "luna-factory",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Opt-in OMP-native Luna Factory: validated admission, evidence, convergence, and repair lineage for one scoped objective.",
+	"omp": {
+		"extensions": ["./index.ts"]
+	}
+}

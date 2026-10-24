@@ -1,0 +1,19 @@
+# Release archives are fetched and verified during the image build; do not
+# retain them in the source tree.
+*.sif
+.worktrees/
+image/bluefin-operations/node_modules/
+
+
+__pycache__/
+
+# Local test caches are build artifacts, never source.
+.cache/
+.agents/
+
+# Planning trees, progress files, and per-task reports are session state. The
+# factory bans committing them: they go stale and then mislead every later
+# agent, which is why durable learning belongs in docs/skills/ instead. Ignored
+# so a wide `git add` cannot pull one into the repository.
+.superpowers/
+docs/superpowers/

@@ -1,0 +1,215 @@
+{
+  "generated_at": "2026-09-24",
+  "schema_version": "1.0",
+  "skills": [
+    {
+      "id": "contribution-culture",
+      "name": "contribution-culture",
+      "one_line_purpose": "Do maintainer toil in small changes, never feature development.",
+      "entry_point": "docs/skills/contribution-culture.md",
+      "category": "meta",
+      "status": "active",
+      "tags": [
+        "culture",
+        "toil",
+        "scope",
+        "maintainers",
+        "contribution"
+      ],
+      "description": "Defines the scope and manners of factory work: toil reduction for under-maintained projects in small, reviewable changes, never feature development. Use before deciding how large a change should be or what a task's deliverable is.",
+      "version": "1.4",
+      "last_updated": "2026-08-07",
+      "doc_type": "policy"
+    },
+    {
+      "id": "factory-operations",
+      "name": "factory-operations",
+      "one_line_purpose": "Keep bounded factory work moving until it lands or is externally blocked.",
+      "entry_point": "docs/skills/factory-operations.md",
+      "category": "meta",
+      "status": "active",
+      "tags": [
+        "factory",
+        "operations",
+        "continuation",
+        "scheduling",
+        "verification"
+      ],
+      "description": "Defines repository-neutral continuation, capacity, ownership, and evidence rules for bounded factory work.",
+      "version": "1.3",
+      "last_updated": "2026-08-14",
+      "doc_type": "policy"
+    },
+    {
+      "id": "hive-read-side",
+      "name": "hive-read-side",
+      "one_line_purpose": "Maintain Review's explicit optional Hive read-side integration.",
+      "entry_point": "docs/skills/hive-read-side.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "hive",
+        "review",
+        "read-side",
+        "configuration"
+      ],
+      "description": "Documents the optional Hive projections available only when Review mode and HIVE_HUB are explicitly selected.",
+      "version": "1.0",
+      "last_updated": "2026-09-23",
+      "doc_type": "runbook"
+    },
+    {
+      "id": "image-build",
+      "name": "image-build",
+      "one_line_purpose": "Build and pin the single Review appliance.",
+      "entry_point": "docs/skills/image-build.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "containerfile",
+        "image",
+        "digest",
+        "pinning",
+        "omp",
+        "review"
+      ],
+      "description": "Maintains the Review appliance, release pins, SBOM inputs, and publication workflows.",
+      "version": "3.6",
+      "last_updated": "2026-09-23",
+      "doc_type": "procedure"
+    },
+    {
+      "id": "launcher",
+      "name": "launcher",
+      "one_line_purpose": "Maintain the generic Review appliance launch contract.",
+      "entry_point": "docs/skills/launcher.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "review",
+        "launcher",
+        "podman",
+        "apptainer",
+        "omp",
+        "credentials"
+      ],
+      "description": "Maintains the Review appliance launcher, scope handoff, and credential boundary.",
+      "version": "5.4",
+      "last_updated": "2026-09-23",
+      "doc_type": "runbook"
+    },
+    {
+      "id": "luna-factory",
+      "name": "luna-factory",
+      "one_line_purpose": "Keep the Luna Factory protocol's mechanical decisions in tested extension code.",
+      "entry_point": "docs/skills/luna-factory.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "omp",
+        "extension",
+        "factory",
+        "evidence",
+        "admission"
+      ],
+      "description": "Maintains the opt-in Luna Factory extension in image/extension/luna-factory/. Use when changing admission, evidence reconciliation, convergence, or repair lineage.",
+      "version": "0.2",
+      "last_updated": "2026-09-23",
+      "doc_type": "runbook"
+    },
+    {
+      "id": "pr-workflow",
+      "name": "pr-workflow",
+      "one_line_purpose": "Prepare reviewable branches and pull requests for this repository.",
+      "entry_point": "docs/skills/pr-workflow.md",
+      "category": "meta",
+      "status": "active",
+      "tags": [
+        "git",
+        "pullrequest",
+        "branches",
+        "validation"
+      ],
+      "description": "Defines branch, commit, push, and pull-request practice for Review + Luna Factory changes.",
+      "version": "1.13",
+      "last_updated": "2026-09-23",
+      "doc_type": "policy"
+    },
+    {
+      "id": "review-checks",
+      "name": "review-checks",
+      "one_line_purpose": "Maintain neutral Review agents and generic policy.",
+      "entry_point": "docs/skills/review-checks.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "checks",
+        "review",
+        "subagents",
+        "policy",
+        "omp"
+      ],
+      "description": "Maintains Review's generic policy seam and read-only specialist agents.",
+      "version": "2.2",
+      "last_updated": "2026-09-23",
+      "doc_type": "reference"
+    },
+    {
+      "id": "review-dashboard",
+      "name": "review-dashboard",
+      "one_line_purpose": "Maintain the GitHub Review workbench and mutation guards.",
+      "entry_point": "docs/skills/review-dashboard.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "omp",
+        "extension",
+        "dashboard",
+        "review",
+        "workflowz",
+        "github"
+      ],
+      "description": "Maintains Review queue behavior, evidence, bounded actions, and mutation safeguards.",
+      "version": "5.6",
+      "last_updated": "2026-09-24",
+      "doc_type": "runbook"
+    },
+    {
+      "id": "review-monitoring",
+      "name": "review-monitoring",
+      "one_line_purpose": "Observe Review and Factory without disturbing active work.",
+      "entry_point": "docs/skills/review-monitoring.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "monitoring",
+        "review",
+        "omp",
+        "factory",
+        "container"
+      ],
+      "description": "Use when observing or diagnosing an attended Review appliance or Luna Factory run.",
+      "version": "2.2",
+      "last_updated": "2026-09-23",
+      "doc_type": "procedure"
+    },
+    {
+      "id": "skill-improvement",
+      "name": "skill-improvement",
+      "one_line_purpose": "Keep review documentation source-backed, current, and compact.",
+      "entry_point": "docs/skills/skill-improvement.md",
+      "category": "meta",
+      "status": "active",
+      "tags": [
+        "skills",
+        "documentation",
+        "maintenance",
+        "factory"
+      ],
+      "description": "Maintains repository documentation and skill contracts from current source evidence. Use for repo-wide documentation audits, stale guidance, skill routing, catalog changes, or durable agent learning.",
+      "version": "1.2",
+      "last_updated": "2026-09-15",
+      "doc_type": "reference"
+    }
+  ]
+}

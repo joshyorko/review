@@ -1,0 +1,210 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "forkProcessing": "enabled",
+  "customManagers": [
+    {
+      "description": "Track the OMP release version in the Review appliance; the post-upgrade task applies verified per-architecture digests.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=github-releases depName=can1357/oh-my-pi\\nARG OMP_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "can1357/oh-my-pi",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "Track the GitHub CLI release version in the Review appliance; the post-upgrade task applies verified per-architecture digests.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=github-releases depName=cli/cli\\nARG GH_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "cli/cli",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "Track the RTK release bundled for evaluation; the post-upgrade task refreshes both architecture archive checksums, matching OMP hook checksum, and Apache-2.0 license checksum.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=github-releases depName=rtk-ai/rtk\\nARG RTK_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "rtk-ai/rtk",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "Track the packaged pi-typesafe extension version; the post-upgrade task refreshes the verified npm tarball SHA-256.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG TYPESAFE_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "pi-typesafe",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "Track the TypeSafe JavaScript SDK bundled with pi-typesafe; the post-upgrade task refreshes the verified npm tarball SHA-256.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG TYPESAFE_SDK_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "@typesafe-ai/sdk",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "Track the TypeBox runtime bundled with pi-typesafe; the post-upgrade task refreshes the verified npm tarball SHA-256.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)image/appliance/Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG TYPESAFE_TYPEBOX_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "typebox",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "Track requirements-ci.lock package versions; the post-upgrade task regenerates sha256 hashes from PyPI metadata.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)requirements-ci\\.lock$/"
+      ],
+      "matchStrings": [
+        "(?<depName>[a-zA-Z0-9._-]+)==(?<currentValue>[0-9][a-zA-Z0-9._!*+-]*)"
+      ],
+      "datasourceTemplate": "pypi"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Immutable-ref housekeeping automerges by default. Other code-changing updates require review unless a dependency-specific rule opts into validated automerge. The OMP rule below is the explicit exception; pull-request automerge and squash are stated because branch protection rejects branch-mode automerge.",
+      "matchUpdateTypes": [
+        "pin",
+        "pinDigest"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Track stable OMP releases, refresh the appliance's verified binary digests, and merge after repository checks.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "can1357/oh-my-pi"
+      ],
+      "groupName": "OMP runtime",
+      "rangeStrategy": "replace",
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true,
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-omp-pins.mjs"
+        ],
+        "fileFilters": [
+          "image/appliance/Containerfile"
+        ],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "description": "Track GitHub CLI releases and refresh the appliance's verified binary digests.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "cli/cli"
+      ],
+      "groupName": "GitHub CLI runtime",
+      "rangeStrategy": "replace",
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-gh-pins.mjs"
+        ],
+        "fileFilters": [
+          "image/appliance/Containerfile"
+        ],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "description": "Track the upstream RTK runtime and hook pins for the opt-in appliance evaluation.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "rtk-ai/rtk"
+      ],
+      "groupName": "RTK evaluation runtime",
+      "rangeStrategy": "replace",
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-rtk-pins.mjs"
+        ],
+        "fileFilters": [
+          "image/appliance/Containerfile",
+          "image/extension/rtk/LICENSE"
+        ],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "description": "Group packaged TypeSafe/Jev runtime updates and refresh every verified npm tarball digest after Renovate changes a version pin.",
+      "matchDatasources": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "pi-typesafe",
+        "@typesafe-ai/sdk",
+        "typebox"
+      ],
+      "groupName": "TypeSafe runtime",
+      "rangeStrategy": "replace",
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-typesafe-pins.mjs"
+        ],
+        "fileFilters": [
+          "image/appliance/Containerfile"
+        ],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "description": "Regenerate requirements-ci.lock sha256 hashes when managed PyPI package versions change.",
+      "matchDatasources": [
+        "pypi"
+      ],
+      "postUpgradeTasks": {
+        "commands": [
+          "node scripts/update-requirements-ci-hashes.mjs"
+        ],
+        "fileFilters": [
+          "requirements-ci.lock"
+        ],
+        "executionMode": "branch"
+      }
+    }
+  ]
+}

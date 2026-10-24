@@ -1,0 +1,275 @@
+/**
+ * Span model and Dagger-style tree renderer.
+ *
+ * A span is one step of OMP work with a status and a clock. Live turns and
+ * workflowz tool calls are projected into this shape and drawn by one renderer.
+ * No parallel execution history is reconstructed from another runtime.
+ *
+ * Rendering is pure: it takes spans, a `Painter`, and a width, and returns rows.
+ * No TUI, no clock, no filesystem. The dashboard owns cursor, expansion, and time.
+ */
+
+import {
+	GLYPH,
+	PLAIN_PAINTER,
+	type Painter,
+	type SpanStatus,
+	formatDuration,
+	restrainedRole,
+	statusIcon,
+	statusRole,
+} from "./glyphs.ts";
+import { truncateToWidth } from "./width.ts";
+
+/** Why an OMP span needs a visible badge. */
+export type TraceClass = "cancelled" | "tool" | "unknown";
+
+export function traceClassBadge(cls?: TraceClass): string {
+	if (cls === "cancelled") return "CANCELLED";
+	if (cls === "tool") return "TOOL";
+	if (cls === "unknown") return "UNKNOWN";
+	return "";
+}
+
+export interface Span {
+	/** Stable across refreshes: cursor position and expansion survive a re-poll. */
+	id: string;
+	label: string;
+	/** Dim trailing context: author, reason, counts. */
+	detail?: string;
+	status: SpanStatus;
+	/** Why a terminal span ended abnormally. */
+	cls?: TraceClass;
+	startedAt?: number;
+	endedAt?: number;
+	/** Streamed output; tailed under the span while it is expanded. */
+	logs?: string[];
+	/** Bounded-ingestion accounting and native output references. */
+	output?: OutputRetention;
+	children?: Span[];
+}
+
+export type NativeOutputReference =
+	| { readonly kind: "available"; readonly uri: string; readonly path: string; readonly sourceSessionId: string; readonly complete: boolean }
+	| { readonly kind: "unavailable"; readonly uri?: string; readonly sourceSessionId: string; readonly reason: string };
+
+export interface OutputRetention {
+	readonly omittedBytes: number;
+	readonly omittedSpans: number;
+	readonly omittedJobs?: number;
+	readonly omittedUnknown: boolean;
+	readonly nativeTotalBytes?: number;
+	readonly nativeArtifactElidedBytes?: number;
+	readonly reference?: NativeOutputReference;
+}
+
+export interface RenderedRow {
+	spanId: string;
+	depth: number;
+	kind: "span" | "log";
+	text: string;
+}
+
+export interface TreeOptions {
+	painter: Painter;
+	width: number;
+	/** Wall clock used for live durations, injected so tests are deterministic. */
+	now: number;
+	/** Spinner frame counter. */
+	frame?: number;
+	/** Explicit expand/collapse decisions; absent ids fall back to `defaultExpanded`. */
+	expansion?: ReadonlyMap<string, boolean>;
+	/** Span id under the cursor. */
+	focusedId?: string;
+	/** Log lines kept per expanded span (Dagger caps inline logs at a third of the screen). */
+	maxLogLines?: number;
+}
+
+/** Elapsed time, or undefined for a step that never started. */
+export function spanDuration(span: Span, now: number): number | undefined {
+	if (span.startedAt === undefined) return undefined;
+	const end = span.endedAt ?? now;
+	return Math.max(0, end - span.startedAt);
+}
+
+export function hasChildren(span: Span): boolean {
+	return (span.children?.length ?? 0) > 0;
+}
+
+/**
+ * Dagger's default: work in flight or needing attention opens itself; anything
+ * settled and uninteresting stays one line.
+ */
+export function defaultExpanded(span: Span): boolean {
+	const hasRetention = (node: Span): boolean => Boolean(node.output && (node.output.omittedBytes || node.output.omittedSpans || node.output.omittedJobs || node.output.omittedUnknown || node.output.reference)) || (node.children ?? []).some(hasRetention);
+	return span.status === "running" || span.status === "failure" || span.status === "findings" || hasRetention(span);
+}
+
+function isExpanded(span: Span, expansion?: ReadonlyMap<string, boolean>): boolean {
+	const explicit = expansion?.get(span.id);
+	return explicit ?? defaultExpanded(span);
+}
+
+
+
+function renderSpanRow(span: Span, prefix: string, options: TreeOptions): string {
+	const { painter, now, frame = 0 } = options;
+	const expanded = isExpanded(span, options.expansion);
+	const focused = options.focusedId === span.id;
+	const role = statusRole(span.status);
+
+	const caretGlyph = hasChildren(span) ? (expanded ? GLYPH.caretOpen : GLYPH.caretClosed) : GLYPH.leaf;
+	const caret = focused ? painter.inverse(caretGlyph) : painter.fg(hasChildren(span) ? role : "dim", caretGlyph);
+	const icon = painter.fg(role, statusIcon(span.status, frame));
+
+	let line = `${prefix}${caret} ${icon} `;
+	line += span.status === "pending" ? painter.fg("dim", span.label) : painter.bold(painter.fg("text", span.label));
+
+	const elapsed = spanDuration(span, now);
+	if (elapsed !== undefined) {
+		const text = ` ${formatDuration(elapsed)}`;
+		line += painter.fg(span.status === "running" ? "warning" : "dim", text);
+	}
+	const badge = traceClassBadge(span.cls);
+	if (badge) line += painter.fg(role, ` ${badge}`);
+	if (span.detail) line += painter.fg("dim", ` ${GLYPH.dot} ${span.detail}`);
+
+	return truncateToWidth(line, options.width);
+}
+
+function renderLogRows(span: Span, prefix: string, options: TreeOptions): RenderedRow[] {
+	const logs = span.logs ?? [];
+	const { painter } = options;
+	const gutterRole = restrainedRole(span.status);
+	const rows: RenderedRow[] = [];
+	if (logs.length > 0) {
+		const limit = Math.max(1, options.maxLogLines ?? 8);
+		const hidden = logs.length - limit;
+
+		if (hidden > 0) {
+			const bar = painter.fg(gutterRole, GLYPH.logDashed);
+			rows.push({
+				spanId: span.id,
+				depth: 0,
+				kind: "log",
+				text: truncateToWidth(`${prefix}${bar}${painter.fg("dim", `…${hidden} lines hidden…`)}`, options.width),
+			});
+		}
+
+		for (const log of logs.slice(Math.max(0, hidden))) {
+			const bar = painter.fg(gutterRole, GLYPH.logBar);
+			rows.push({
+				spanId: span.id,
+				depth: 0,
+				kind: "log",
+				text: truncateToWidth(`${prefix}${bar}${painter.fg("toolTitle", log)}`, options.width),
+			});
+		}
+	}
+
+	const retention = span.output;
+	if (retention) {
+		const bar = painter.fg(gutterRole, GLYPH.logDashed);
+		const add = (text: string) => rows.push({
+			spanId: span.id,
+			depth: 0,
+			kind: "log",
+			text: truncateToWidth(`${prefix}${bar}${painter.fg("dim", text)}`, options.width),
+		});
+		if (retention.omittedBytes > 0) add(`preview clipped: ${retention.omittedBytes} bytes omitted`);
+		if (retention.omittedSpans > 0) add(`trace bound: ${retention.omittedSpans} spans omitted`);
+		if ((retention.omittedJobs ?? 0) > 0) add(`async job snapshot bound: ${retention.omittedJobs} jobs omitted`);
+		if (retention.omittedUnknown) add("additional output omitted; byte count unavailable");
+		if (retention.nativeTotalBytes !== undefined) add(`native output size observed: ${retention.nativeTotalBytes} bytes`);
+		if ((retention.nativeArtifactElidedBytes ?? 0) > 0) add(`native artifact sample: ${retention.nativeArtifactElidedBytes} bytes elided`);
+		if (retention.reference?.kind === "available") {
+			const completeness = retention.reference.complete ? "complete" : "sample only";
+			add(`native output ${completeness}: ${retention.reference.uri} · session ${retention.reference.sourceSessionId} · ${retention.reference.path}`);
+		} else if (retention.reference?.kind === "unavailable") {
+			const uri = retention.reference.uri ? ` ${retention.reference.uri}` : "";
+			add(`native output unavailable${uri} · session ${retention.reference.sourceSessionId} · ${retention.reference.reason}`);
+		}
+	}
+	return rows;
+}
+
+/** One ancestor's contribution to a row's left chrome. */
+interface Rail {
+	last: boolean;
+	status: SpanStatus;
+}
+
+/**
+ * Dagger's `fancyIndent`: an ancestor that still has siblings below it keeps a
+ * vertical rail; the last child's rail ends and its descendants indent into blank.
+ * The ancestor at depth `d` owns column `d - 1`; a root owns no column.
+ */
+function railPrefix(painter: Painter, rails: readonly Rail[]): string {
+	let prefix = "";
+	for (const rail of rails) {
+		prefix += painter.fg(restrainedRole(rail.status), rail.last ? GLYPH.railGap : GLYPH.railBar);
+	}
+	return prefix;
+}
+
+/** Flatten spans into styled rows, honoring expansion and the tree chrome. */
+export function renderSpanTree(roots: readonly Span[], options: TreeOptions): RenderedRow[] {
+	const rows: RenderedRow[] = [];
+	const { painter } = options;
+
+	const walk = (span: Span, rails: Rail[], parent: Span | undefined, isLast: boolean, depth: number) => {
+		const ancestorRail = railPrefix(painter, rails);
+		const connector =
+			parent === undefined
+				? ""
+				: painter.fg(restrainedRole(parent.status), isLast ? GLYPH.branchEnd : GLYPH.branchMid);
+
+		rows.push({ spanId: span.id, depth, kind: "span", text: renderSpanRow(span, ancestorRail + connector, options) });
+
+		if (!isExpanded(span, options.expansion)) return;
+
+		// Children sit one column further in; this span's own rail continues only
+		// while it has siblings left below it.
+		const childRails = parent === undefined ? rails : [...rails, { last: isLast, status: span.status }];
+		rows.push(...renderLogRows(span, railPrefix(painter, childRails), options));
+
+		const children = span.children ?? [];
+		for (let i = 0; i < children.length; i++) {
+			walk(children[i]!, childRails, span, i === children.length - 1, depth + 1);
+		}
+	};
+
+	for (let i = 0; i < roots.length; i++) {
+		walk(roots[i]!, [], undefined, i === roots.length - 1, 0);
+	}
+	return rows;
+}
+
+/** Depth-first list of span ids in render order, for cursor movement. */
+export function visibleSpanIds(roots: readonly Span[], expansion?: ReadonlyMap<string, boolean>): string[] {
+	const ids: string[] = [];
+	const walk = (span: Span) => {
+		ids.push(span.id);
+		if (!isExpanded(span, expansion)) return;
+		for (const child of span.children ?? []) walk(child);
+	};
+	for (const span of roots) walk(span);
+	return ids;
+}
+
+/** Locate a span by id across a forest. */
+export function findSpan(roots: readonly Span[], id: string): Span | undefined {
+	for (const span of roots) {
+		if (span.id === id) return span;
+		const hit = findSpan(span.children ?? [], id);
+		if (hit) return hit;
+	}
+	return undefined;
+}
+
+/** Plain-text rendering for tool results and non-TTY output. */
+export function traceToText(roots: readonly Span[], now: number, width = 100): string {
+	return renderSpanTree(roots, { painter: PLAIN_PAINTER, width, now })
+		.map((row) => row.text.trimEnd())
+		.join("\n");
+}

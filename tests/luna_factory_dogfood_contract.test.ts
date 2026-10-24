@@ -1,0 +1,292 @@
+/** Behavioral contracts for the finite, no-publish Factory dogfood path. */
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import test from "node:test";
+import { join } from "node:path";
+import { boundaryOutputLines, reportCapabilities } from "./appliance-runtime-report.ts";
+
+const root = join(import.meta.dirname, "..");
+const read = (name: string) => readFileSync(join(root, name), "utf8");
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const assertIncludes = (source: string, markers: readonly string[]) => {
+  for (const marker of markers) assert.ok(source.includes(marker), marker);
+};
+const isImmutableActionPin = (value: string, repository: string, major: number) =>
+  new RegExp(`^${escapeRegExp(repository)}@[a-f0-9]{40} # v${major}(?:\\.\\d+){0,2}$`).test(value);
+const apptainerV2Pin = /^eWaterCycle\/setup-apptainer@[a-f0-9]{40} # v2 tag target$/;
+
+test("workflow preserves the bounded exact-head no-publish contract", () => {
+  const workflow = read(".github/workflows/luna-factory-dogfood.yml");
+  assertIncludes(workflow, [
+    "pull_request:",
+    "github.event.pull_request.head.sha",
+    "ubuntu-24.04",
+    "bun test tests/luna_factory_dogfood_contract.test.ts",
+    "tests/luna-factory-dogfood.sh",
+    "tests/appliance-runtime-probe.sh",
+    "tests/appliance-runtime-report.ts",
+    "scripts/package-review",
+    "tar -xzf",
+    "review.sif",
+    "podman image rm --ignore",
+    "podman image prune --force",
+    "podman system prune --all --force",
+    'rm -f "$bundle"',
+    "actions/upload-artifact",
+    "podman build --format oci",
+    "tests/appliance-contract.sh --image",
+    "id: capabilities",
+    "steps.capabilities.outputs.oci",
+    "steps.capabilities.outputs.userNamespace",
+    "REVIEW_APPLIANCE_BWRAP_CAPABILITY",
+    "steps.capabilities.outputs.sif",
+    "REVIEW_REVISION",
+    'localhost/review:luna-factory-dogfood-${{ github.event.pull_request.head.sha }}',
+    'LUNA_FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}',
+    '"$LUNA_FACTORY_HEAD_SHA"',
+    "$GITHUB_OUTPUT",
+  ]);
+  for (const forbidden of [
+    "python3",
+    "<<'PY'",
+    "podman push",
+    "ghcr.io",
+    "secrets.",
+    "gh auth",
+    "release create",
+    "REVIEW_OCI_PUSH",
+  ]) assert.doesNotMatch(workflow, new RegExp(escapeRegExp(forbidden)), forbidden);
+  assert.equal(existsSync(join(root, "tests/luna_factory_dogfood_contract.py")), false);
+});
+
+test("packaged verifier probe uses the production preflight and harmless sandbox test", () => {
+  const probe = read("image/extension/luna-factory/omp/verifier-probe.ts");
+  assertIncludes(probe, [
+    'from "./batch-native.ts"',
+    "sandboxPreflight",
+    "sandboxTest",
+    '"true"',
+    '"available"',
+    "uidMap",
+    "maxUserNamespaces",
+    "bwrapVersion",
+  ]);
+  const entrypoint = read("image/appliance/entrypoint.sh");
+  assert.match(entrypoint, /--factory-verifier-probe/);
+  const optedInProbe = entrypoint.indexOf('[[ "${LUNA_FACTORY_ENABLED:-0}" == 1 ]]');
+  const persistentSetup = entrypoint.indexOf("prepare_factory_state_dir() {");
+  assert.ok(optedInProbe >= 0 && optedInProbe < persistentSetup, "verifier qualifies before persistent state setup");
+});
+
+test("OCI Factory dogfood keeps generic qualification separate from krun verifier readiness", () => {
+  const workflow = read(".github/workflows/luna-factory-dogfood.yml");
+  assertIncludes(workflow, [
+    "factory-verifier.json",
+    "bin/review factory-verifier-probe krun",
+    "Factory verifier: available on the packaged podman+krun+keep-id profile.",
+    "Factory verifier: BLOCKED (host prerequisites unavailable).",
+  ]);
+  assert.match(workflow, /Factory verifier qualification failed on a runnable krun profile/);
+  assert.match(workflow, /exit 1/);
+  assert.match(workflow, /if: steps\.capabilities\.outputs\.oci == 'available' && steps\.capabilities\.outputs\.userNamespace == 'available'/);
+  assert.match(workflow, /Record blocked generic OCI selected-batch dogfood/);
+  assertIncludes(workflow, [
+    "Run packaged Review Factory co-load smoke under generic OCI",
+    "Record blocked generic OCI Review Factory co-load smoke",
+  ]);
+});
+
+test("workflow pins the official Apptainer v2 action by immutable digest", () => {
+  const workflow = read(".github/workflows/luna-factory-dogfood.yml");
+  const step = workflow.match(/- name: Install Apptainer\s+uses: ([^\n]+)/);
+  assert.ok(step, "Install Apptainer action step");
+  assert.match(step[1], apptainerV2Pin);
+
+  for (const invalid of [
+    "eWaterCycle/setup-apptainer@v2 # v2 tag target",
+    "eWaterCycle/setup-apptainer@0123456789abcdef0123456789abcdef01234567 # v1 tag target",
+    "other/setup-apptainer@0123456789abcdef0123456789abcdef01234567 # v2 tag target",
+  ]) {
+    assert.doesNotMatch(invalid, apptainerV2Pin);
+  }
+});
+
+test("workflow keeps Renovate-managed actions on immutable refs and their current major", () => {
+  const workflow = read(".github/workflows/luna-factory-dogfood.yml");
+  for (const [repository, major] of [
+    ["actions/checkout", 7],
+    ["oven-sh/setup-bun", 2],
+    ["actions/upload-artifact", 7],
+  ] as const) {
+    const line = workflow.split("\n").map((item) => item.trim()).find((item) => item.replace(/^- /, "").startsWith(`uses: ${repository}@`));
+    assert.ok(line, `${repository} action`);
+    const action = line.replace(/^- /, "").slice("uses: ".length);
+    assert.ok(isImmutableActionPin(action, repository, major), line);
+  }
+
+  assert.equal(isImmutableActionPin("actions/checkout@v7 # v7", "actions/checkout", 7), false);
+  assert.equal(isImmutableActionPin("other/checkout@0123456789abcdef0123456789abcdef01234567 # v7", "actions/checkout", 7), false);
+  assert.equal(isImmutableActionPin("actions/checkout@0123456789abcdef0123456789abcdef01234567 # v6", "actions/checkout", 7), false);
+});
+
+test("harness preserves the local-provider and runtime-boundary contract", () => {
+  const harness = read("tests/luna-factory-dogfood.sh");
+  assertIncludes(harness, [
+    "--network host",
+    "--interactive",
+    "--userns keep-id:uid=65532,gid=65532",
+    "127.0.0.1",
+    "LUNA_FACTORY_ENABLED",
+    '"type":"prompt"',
+    "LUNA_FACTORY_PROBE_ROOT",
+    "luna_factory_open",
+    "luna_factory_candidate",
+    "luna_factory_attempt",
+    "luna_factory_dispatch",
+    "nativeAgentIds",
+    "HOME",
+    "XDG_STATE_HOME",
+    'chmod 0711 "$run_root"',
+    'chmod 0777 "$home" "$state" "$config" "$cache" "$models"',
+    '"$models/models.yml"',
+    "coproc factory_rpc",
+    "shellcheck disable=SC2154",
+    "ready",
+    "available_commands_update",
+    "agent_end",
+    "luna-factory-omp-probe-config.yml",
+    "luna-factory-omp-probe-models.yml",
+    "provider.log",
+    "write_result blocked",
+    "native|oci|sif",
+    "OMP_BINARY",
+    "--mode rpc-ui",
+    "--extension",
+    "native-terminal.jsonl",
+    'status\":\"passed\"',
+    "REVIEW_APPLIANCE_FALLBACK_SIF",
+  ]);
+  assert.doesNotMatch(harness, /rm -rf/);
+  assert.doesNotMatch(harness, /grep -Eq/);
+  assert.doesNotMatch(harness, /exit 0/);
+  assert.doesNotMatch(harness, /--no-session/);
+});
+
+test("Review Factory co-load smoke supplies an explicit Review scope", () => {
+  const smoke = read("tests/review-factory-coload-smoke.sh");
+  assert.ok(smoke.includes("--env REVIEW_DEFAULT_SCOPE=example/repo"));
+});
+
+test("co-load smoke verifies startup refusal without qualifying a blocked verifier", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "factory-coload-contract-"));
+  const bin = join(fixture, "bin");
+  mkdirSync(bin);
+  const version = read("image/appliance/Containerfile").match(/^ARG OMP_VERSION=(\S+)$/m)?.[1];
+  assert.ok(version);
+  writeFileSync(join(bin, "podman"), `#!/usr/bin/env bash
+set -eu
+if [[ "$1" == image ]]; then exit 0; fi
+if [[ "$*" == *--version* ]]; then printf 'omp/%s\\n' "$FIXTURE_OMP_VERSION"; exit 0; fi
+if [[ "$*" == *LUNA_FACTORY_ENABLED=1* ]]; then
+  case "$FIXTURE_COLOAD_RESULT" in
+    blocked|state-leak|omp-leak)
+      printf '%s\\n' '{"kind":"review-factory-verifier","status":"blocked","reason":"namespace unavailable"}'
+      echo 'Review appliance: Factory verifier capability unavailable; refusing opt-in startup before work selection.'
+      if [[ "$FIXTURE_COLOAD_RESULT" == state-leak ]]; then
+        for argument; do
+          if [[ "$argument" == *:/home/review:rw ]]; then mkdir -p "$(printf '%s' "$argument" | cut -d: -f1)/.local/state/review"; fi
+        done
+      fi
+      if [[ "$FIXTURE_COLOAD_RESULT" == omp-leak ]]; then echo '{"statusKey":"review_workbench"}'; fi
+      exit 1
+      ;;
+    unexpected-failure) echo 'unexpected startup failure'; exit 1 ;;
+  esac
+  message='Factory has no batches.'
+else
+  message='Factory is disabled; explicitly enable LUNA_FACTORY_ENABLED=1'
+fi
+printf '%s\\n' '{"statusKey":"review_workbench"}' '{"name":"factory"}' "$message"
+`, { mode: 0o755 });
+  try {
+    for (const outcome of ["available", "blocked", "state-leak", "omp-leak", "unexpected-failure"]) {
+      const result = spawnSync("bash", [join(root, "tests/review-factory-coload-smoke.sh")], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          RUNNER_TEMP: join(fixture, outcome),
+          FIXTURE_OMP_VERSION: version,
+          FIXTURE_COLOAD_RESULT: outcome,
+        },
+      });
+      const output = result.stdout + result.stderr;
+      assert.equal(result.status, outcome === "available" || outcome === "blocked" ? 0 : 1, output);
+      if (outcome === "blocked") assert.match(output, /enabled=blocked disabled=passed/);
+      if (outcome === "available") assert.match(output, /enabled=passed disabled=passed/);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("SIF harness uses Apptainer directly and does not claim krun", () => {
+  const harness = read("tests/luna-factory-dogfood.sh");
+  const sifBranch = harness.split("\nsif)\n")[1]?.split("\nesac")[0];
+  assert.ok(sifBranch, "SIF harness branch");
+  assertIncludes(sifBranch, ["REVIEW_APPLIANCE_FALLBACK_SIF", "factory-verifier-probe apptainer", "apptainer exec", '--home "$home:/home/review"', "--bind"]);
+  assert.doesNotMatch(sifBranch, /krun/);
+});
+
+test("capability probe records the independently classified host boundaries", () => {
+  const probe = read("tests/appliance-runtime-probe.sh");
+  assertIncludes(probe, [
+    "/dev/fuse",
+    "/dev/kvm",
+    "/proc/filesystems",
+    "unshare",
+    "apparmor",
+    "podman",
+    "krun",
+    "apptainer",
+    "squashfuse",
+    "mksquashfs",
+    "unsquashfs",
+    "fuse2fs",
+    "userNamespace",
+    '"apptainer"',
+    '"kvm"',
+    '"krun"',
+    '"sif"',
+  ]);
+  assert.doesNotMatch(probe, /python3 .*<<['"]PY/);
+});
+
+test("runtime report exposes pure capability computation and GitHub outputs", () => {
+  const probes = [
+    { name: "podman.version", exitCode: 0, ok: true, command: "podman --version", stdout: "", stderr: "" },
+    { name: "podman.info", exitCode: 1, ok: false, command: "podman info", stdout: "", stderr: "blocked" },
+  ];
+  const result = reportCapabilities(probes, "head", {}, "2026-01-01T00:00:00.000Z");
+  assert.equal(result.commitSha, "head");
+  assert.equal(result.boundaries.oci.status, "blocked");
+  assert.equal(result.boundaries.oci.reason, "podman-unavailable");
+  assert.match(boundaryOutputLines(result), /oci=blocked/);
+  assert.match(boundaryOutputLines(result), /sif=blocked/);
+  assert.match(boundaryOutputLines(result), /appArmor=blocked/);
+});
+
+test("the TypeScript contract is the only Factory dogfood contract", () => {
+  const validate = read(".github/workflows/validate.yml");
+  assert.match(validate, /node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests\/luna_factory_dogfood_contract\.test\.ts/);
+  assert.doesNotMatch(validate, /luna_factory_dogfood_contract\.py/);
+  assert.doesNotMatch(read("tests/omp-review-mode.sh"), /luna_factory_dogfood_contract\.py/);
+});
+
+test("runtime probe invokes the TypeScript report without an embedded Python serializer", () => {
+  const probe = read("tests/appliance-runtime-probe.sh");
+  assert.match(probe, /appliance-runtime-report\.ts/);
+  assert.doesNotMatch(probe, /python3 .*<<['"]PY/);
+});

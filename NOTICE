@@ -1,0 +1,11 @@
+Review
+
+Review contains work originally developed in projectbluefin/review and
+projectbluefin/contribute, licensed under the Apache License, Version 2.0.
+Original source: https://github.com/projectbluefin/review
+
+Review and Luna Factory modifications: Josh Yorko and contributors.
+
+Bundled third-party software retains its own license and notices. The appliance
+includes license files and an SPDX manifest under /usr/share. Visual credits
+for the retained artwork are recorded in docs/images/README.md.

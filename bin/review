@@ -1,0 +1,752 @@
+#!/usr/bin/env bash
+# Launch the Review appliance, preferring a libkrun KVM microVM.
+set -euo pipefail
+script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+review_version() {
+  local version="" candidate line pattern='"version"[[:space:]]*:[[:space:]]*"([^"]+)"'
+  for candidate in "$repo_root/VERSION" "$repo_root/../VERSION"; do
+    if [[ -r "$candidate" ]]; then
+      IFS= read -r version <"$candidate" || true
+      [[ -z "$version" ]] || break
+    fi
+  done
+  if [[ -z "$version" ]]; then
+    for candidate in "$repo_root/build.json" "$repo_root/../build.json"; do
+      [[ -r "$candidate" ]] || continue
+      while IFS= read -r line; do
+        if [[ "$line" =~ $pattern ]]; then version="${BASH_REMATCH[1]}"; break; fi
+      done <"$candidate"
+      [[ -z "$version" ]] || break
+    done
+  fi
+  printf 'Review %s\n' "${version:-0.1.0}"
+}
+
+case "${1:-}" in
+  -h | --help)
+    cat <<'HELP'
+Usage: review [owner/repo|org:<name>|flags...]
+       review configure [name]
+       review profiles
+       review --version
+
+Review pull requests by default. Use --issues for issues.
+Luna Factory execution is opt-in with --factory=true.
+HELP
+    exit 0
+    ;;
+  --version) review_version; exit 0 ;;
+esac
+
+engine=podman
+KVM_FAILURE=""
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+factory_verifier_probe() (
+  set -euo pipefail
+  local profile="${1:?runtime profile required}" image="${2:?image required}"
+  local selected_engine="$engine" scratch output diagnostics status
+  command -v timeout >/dev/null 2>&1 || fail "timeout is required to qualify the packaged Factory verifier"
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/review-factory-verifier.XXXXXXXX")" || fail "could not prepare an isolated Factory verifier probe directory"
+  chmod 0700 "$scratch"
+  trap 'rm -rf -- "$scratch"' EXIT
+
+  case "$profile" in
+    krun)
+      command -v "$selected_engine" >/dev/null 2>&1 || fail "${selected_engine} is unavailable for the krun verifier probe"
+      timeout --foreground --signal=TERM --kill-after=2s 15s "$selected_engine" image exists "$image" >/dev/null 2>&1 ||
+        fail "Review image is not available locally for the krun verifier probe: ${image}"
+      # The child Bash expands $1 from the separately passed probe path.
+      # shellcheck disable=SC2016
+      timeout --foreground --signal=TERM --kill-after=2s 15s "$selected_engine" run --rm --pull=never \
+        --network=none --runtime=krun --userns keep-id:uid=65532,gid=65532 --entrypoint /usr/bin/bash \
+        "$image" --noprofile --norc -c 'builtin test -r "$1"' review-probe \
+        /usr/share/review/luna-factory/omp/verifier-probe.ts ||
+        fail "Review image lacks the packaged Factory verifier probe: ${image}"
+      if timeout --foreground --signal=TERM --kill-after=5s 45s "$selected_engine" run --rm --pull=never \
+        --network=none --runtime=krun --userns keep-id:uid=65532,gid=65532 --volume "$scratch:/tmp:rw,z" \
+        "$image" --factory-verifier-probe >"$scratch/result.stdout" 2>"$scratch/result.stderr"; then
+        status=0
+      else
+        status=$?
+      fi
+      ;;
+    apptainer)
+      command -v apptainer >/dev/null 2>&1 || fail "Apptainer is unavailable for the Factory verifier probe"
+      mkdir -m 0700 "$scratch/home" "$scratch/tmp"
+      local -a APPTAINER_HOST_ARGS=()
+      prepare_apptainer_host_args 1
+      # The child Bash expands $1 from the separately passed probe path.
+      # shellcheck disable=SC2016
+      if timeout --foreground --signal=TERM --kill-after=5s 180s env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
+        apptainer exec --containall --cleanenv --home "$scratch/home:/home/review" \
+        "${APPTAINER_HOST_ARGS[@]}" \
+        --bind /dev/full:/dev/full --bind "$scratch/tmp:/tmp" "$image" /usr/bin/bash --noprofile --norc \
+        -c 'builtin test -r "$1"' review-probe \
+        /usr/share/review/luna-factory/omp/verifier-probe.ts; then
+        status=0
+      else
+        status=$?
+        if ((status == 1)); then
+          fail "Review image lacks the packaged Factory verifier probe: ${image}"
+        fi
+        fail "Apptainer could not prepare the packaged Factory verifier probe (exit ${status}): ${image}"
+      fi
+      if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" \
+        timeout --foreground --signal=TERM --kill-after=5s 45s apptainer run --containall --no-eval \
+        "${APPTAINER_HOST_ARGS[@]}" \
+        --home "$scratch/home:/home/review" --bind /dev/full:/dev/full --bind "$scratch/tmp:/tmp" "$image" \
+        --factory-verifier-probe >"$scratch/result.stdout" 2>"$scratch/result.stderr"; then
+        status=0
+      else
+        status=$?
+      fi
+      ;;
+    *) fail "unsupported Factory verifier runtime profile: ${profile}" ;;
+  esac
+
+  output="$(cat "$scratch/result.stdout")"
+  diagnostics="$(cat "$scratch/result.stderr")"
+  if ((status != 0)); then
+    echo "Factory verifier capability unavailable in ${profile} profile (exit ${status}): ${diagnostics}${output}" >&2
+    exit "$status"
+  fi
+  if [[ "$output" == *$'\n'* ]] ||
+    [[ "$output" != '{"kind":"review-factory-verifier","status":"available"'* ]]; then
+    echo "Factory verifier profile returned no valid packaged success receipt: ${output}" >&2
+    exit 1
+  fi
+  printf '%s\n' "$output"
+)
+
+factory_verifier_ready() {
+  [[ "${LUNA_FACTORY_ENABLED:-0}" == 1 ]] || return 0
+  local profile="$1" image="$2" output
+  if ! output="$(factory_verifier_probe "$profile" "$image" 2>&1)"; then
+    output="${output#ERROR: }"
+    fail "${output}; refusing Factory-enabled startup before work selection"
+  fi
+}
+
+kvm_runtime_ready() {
+  local device="${REVIEW_TEST_KVM_DEVICE:-/dev/kvm}"
+  if ! command -v "$engine" >/dev/null 2>&1; then KVM_FAILURE="Podman is unavailable"; return 1; fi
+  if ! "$engine" info >/dev/null 2>&1; then KVM_FAILURE="Podman is not reachable"; return 1; fi
+  local selected="${CONTAINER_HOST:-}" connections name uri is_default
+  if [[ -z "$selected" ]]; then
+    connections="$("$engine" system connection list --format '{{.Name}}\t{{.URI}}\t{{.Default}}' 2>/dev/null)" || {
+      KVM_FAILURE="Podman connections could not be resolved"
+      return 1
+    }
+    while IFS=$'\t' read -r name uri is_default; do
+      if [[ -n "${CONTAINER_CONNECTION:-}" && "$name" == "$CONTAINER_CONNECTION" ]] ||
+        [[ -z "${CONTAINER_CONNECTION:-}" && "$is_default" == true ]]; then
+        selected="$uri"
+        break
+      fi
+    done <<<"$connections"
+    if [[ -n "${CONTAINER_CONNECTION:-}" && -z "$selected" ]]; then
+      KVM_FAILURE="the selected Podman connection could not be resolved"
+      return 1
+    fi
+  fi
+  if [[ -n "$selected" && "$selected" != unix://* ]]; then
+    KVM_FAILURE="remote Podman engines are unsupported by the packaged launcher"
+    return 1
+  fi
+  local runtime
+  runtime="$("$engine" info --runtime=krun --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null)" || {
+    KVM_FAILURE="the krun OCI runtime is unavailable"
+    return 1
+  }
+  if [[ "$runtime" != krun ]]; then KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; fi
+  if [[ ! -r "$device" || ! -w "$device" ]]; then KVM_FAILURE="${device} is not readable and writable"; return 1; fi
+  return 0
+}
+
+apptainer_fallback_ready() {
+  local fuse_device="${REVIEW_TEST_FUSE_DEVICE:-/dev/fuse}"
+  command -v apptainer >/dev/null 2>&1 || { APPTAINER_FAILURE="Apptainer fallback is unavailable; install Apptainer"; return 1; }
+  { command -v squashfuse_ll >/dev/null 2>&1 || command -v squashfuse >/dev/null 2>&1; } || {
+    APPTAINER_FAILURE="squashfuse userland is unavailable; install squashfuse"
+    return 1
+  }
+  test -e "$fuse_device" || { APPTAINER_FAILURE="FUSE device ${fuse_device} is missing"; return 1; }
+  test -c "$fuse_device" || { APPTAINER_FAILURE="FUSE device ${fuse_device} is not a character device"; return 1; }
+  if ! test -r "$fuse_device" || ! test -w "$fuse_device"; then
+    APPTAINER_FAILURE="FUSE device ${fuse_device} is not readable and writable"
+    return 1
+  fi
+  return 0
+}
+require_fallback() {
+  if [[ "${REVIEW_LAUNCH_PLAN[runtime]:-auto}" == apptainer ]]; then
+    apptainer_fallback_ready || fail "${APPTAINER_FAILURE}."
+    return 0
+  fi
+  apptainer_fallback_ready || fail "${KVM_FAILURE}; ${APPTAINER_FAILURE}."
+  echo "WARNING: ${KVM_FAILURE}; using the isolated Apptainer fallback without a KVM boundary." >&2
+}
+prepare_apptainer_host_args() {
+  local host_file factory_enabled="${1:-${LUNA_FACTORY_ENABLED:-0}}"
+  APPTAINER_HOST_ARGS=()
+  # Apptainer's overlay root is MS_UNBINDABLE, so bubblewrap cannot bind /usr.
+  # Underlay preserves the read-only image and allows the nested verifier.
+  [[ "$factory_enabled" != 1 ]] || APPTAINER_HOST_ARGS+=(--underlay)
+  for host_file in /etc/localtime /etc/hosts; do
+    test -e "$host_file" || APPTAINER_HOST_ARGS+=(--no-mount "$host_file")
+  done
+  return 0
+}
+
+prepare_apptainer_environment() {
+  local name
+  # Ambient runtime-specific overrides cannot add capabilities to the plan.
+  while IFS= read -r name; do
+    case "$name" in APPTAINERENV_* | SINGULARITYENV_*) unset "$name" ;; esac
+  done < <(compgen -e)
+  for name in "${REVIEW_LAUNCH_ENV_NAMES[@]}"; do
+    [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
+  done
+  export APPTAINERENV_TERM="${TERM:-xterm-256color}" APPTAINERENV_COLORTERM="${COLORTERM:-truecolor}"
+  prepare_apptainer_host_args
+  return 0
+}
+
+detect_review_audio() {
+  local runtime_dir="${REVIEW_TEST_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}}"
+  local pulse_socket="${runtime_dir}/pulse/native"
+  local snd_device="${REVIEW_TEST_SND_DEVICE:-/dev/snd}"
+  local pulse_cookie="${PULSE_COOKIE:-${XDG_CONFIG_HOME:-${HOME:-/no-such-home}/.config}/pulse/cookie}"
+  if [[ "${PULSE_SERVER:-}" == unix:* && -S "${PULSE_SERVER#unix:}" ]]; then
+    pulse_socket="${PULSE_SERVER#unix:}"
+  fi
+
+  REVIEW_AUDIO_PULSE_SOCKET=""
+  REVIEW_AUDIO_PULSE_SERVER=""
+  REVIEW_AUDIO_PULSE_COOKIE=""
+  REVIEW_AUDIO_SND_DEVICE=""
+
+  if [[ -S "$pulse_socket" ]]; then
+    REVIEW_AUDIO_PULSE_SOCKET="$pulse_socket"
+    REVIEW_AUDIO_PULSE_SERVER="unix:/run/review/pulse/native"
+    [[ -r "$pulse_cookie" ]] && REVIEW_AUDIO_PULSE_COOKIE="$pulse_cookie"
+    return 0
+  fi
+  if [[ -d "$snd_device" ]]; then
+    REVIEW_AUDIO_SND_DEVICE="$snd_device"
+    return 0
+  fi
+}
+
+prepare_review_omp_mount() {
+  REVIEW_OMP_CONFIG_VOLUME=""
+  REVIEW_OMP_WARNING=""
+  if [[ "${REVIEW_INHERIT_OMP_CONFIG:-0}" == 1 ]]; then
+    local host_omp="${HOME:-/no-such-home}/.omp"
+    if [[ -d "$host_omp" ]]; then
+      REVIEW_OMP_CONFIG_VOLUME="$host_omp:/home/review/.omp:rw"
+    else
+      REVIEW_OMP_WARNING="WARNING: REVIEW_INHERIT_OMP_CONFIG=1 was requested, but ${host_omp} is absent; using appliance-owned OMP state."
+    fi
+  fi
+}
+
+image_ref_is_moving() {
+  case "$1" in
+    *@sha256:*|*:sha-*|localhost/*) return 1 ;;
+    */*) return 0 ;;
+  esac
+  ! "$engine" image exists "localhost/$1"
+}
+ensure_image() {
+  local ref="$1" product="$2" containerfile="$3" override="$4"
+  if image_ref_is_moving "$ref"; then
+    "$engine" pull "$ref" && return 0
+    if "$engine" image exists "$ref"; then
+      echo "! could not refresh ${ref}; using the local copy, which may be out of date." >&2
+      return 0
+    fi
+  fi
+  "$engine" image exists "$ref" && return 0
+  case "$ref" in
+    localhost/*)
+      echo "ERROR: ${ref} is a locally built image and it is not in local storage." >&2
+      echo "  Build it from a review checkout: podman build -f ${containerfile} -t ${ref#localhost/} ." >&2
+      echo "  Or drop the override to use the published default: unset ${override}" >&2
+      return 1
+      ;;
+  esac
+  "$engine" pull "$ref" && return 0
+  echo "ERROR: cannot obtain ${product} image ${ref}." >&2
+  echo "  Set ${override} to a published tag or digest." >&2
+  return 1
+}
+
+MIN_REVIEW_APPLIANCE_VERSION="0.1.0"
+EXPECTED_IMAGE_SERIES="0.1"
+
+launcher_revision() {
+  local rev=""
+  if command -v git >/dev/null 2>&1 && [[ -d "${repo_root}/.git" ]]; then
+    rev="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || true)"
+  fi
+  if [[ -z "$rev" && -f "${repo_root}/VERSION" ]]; then
+    rev="$(tr -d '[:space:]' <"${repo_root}/VERSION")"
+  fi
+  printf '%s\n' "${rev:-${REVIEW_LAUNCHER_VERSION:-0.1.0}}"
+}
+
+report_launcher_identity() {
+  local rev
+  rev="$(launcher_revision)"
+  echo "✓ review launcher revision: ${rev}" >&2
+}
+
+check_image_compatibility() {
+  local ref="$1" product="$2" version="$3" min_version="$4" is_override="${5:-0}"
+  [[ -n "$version" && "$version" != "unknown" ]] || {
+    if [[ "$is_override" -eq 1 ]]; then
+      echo "! ${product} image ${ref} has unknown version; proceeding with explicit override." >&2
+    fi
+    return 0
+  }
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: ${product} image ${ref} has malformed version label '${version}'; expected numeric MAJOR.MINOR.PATCH." >&2
+    return 1
+  fi
+  local ver_series="${version%.*}"
+  if [[ "$ver_series" != "$EXPECTED_IMAGE_SERIES" ]]; then
+    if [[ "$is_override" -eq 1 ]]; then
+      echo "WARNING: ${product} image ${ref} series (${ver_series}) differs from expected (${EXPECTED_IMAGE_SERIES}); proceeding with explicit override." >&2
+      return 0
+    fi
+    echo "ERROR: ${product} image ${ref} (version ${version}) is incompatible with this launcher (expected series ${EXPECTED_IMAGE_SERIES})." >&2
+    return 1
+  fi
+  local ver_num="${version##*.}" min_num="${min_version##*.}"
+  if [[ "$ver_num" =~ ^[0-9]+$ && "$min_num" =~ ^[0-9]+$ ]]; then
+    if (( 10#$ver_num < 10#$min_num )); then
+      if [[ "$is_override" -eq 1 ]]; then
+        echo "WARNING: ${product} image ${ref} (version ${version}) is older than recommended minimum (${min_version}); proceeding with explicit override." >&2
+        return 0
+      fi
+      echo "ERROR: ${product} image ${ref} (version ${version}) is incompatible with this launcher (requires >= ${min_version})." >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+report_podman_image_identity() {
+  local ref="$1" product="$2" is_override="${3:-0}" min_version="${4:-$MIN_REVIEW_APPLIANCE_VERSION}"
+  local identity version revision digest
+  identity="$("$engine" image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}|{{ index .Config.Labels "org.opencontainers.image.revision" }}|{{ .Digest }}' "$ref" 2>/dev/null)" || {
+    echo "! ${product} image identity unavailable for ${ref}." >&2
+    return 0
+  }
+  IFS='|' read -r version revision digest <<<"$identity"
+  [[ -n "$version" && "$version" != "<no value>" ]] || version=unknown
+  [[ -n "$revision" && "$revision" != "<no value>" ]] || revision=unknown
+  [[ -n "$digest" && "$digest" != "<no value>" ]] || digest=unknown
+  echo "✓ ${product} image ${ref}: version=${version} revision=${revision} digest=${digest}" >&2
+  check_image_compatibility "$ref" "$product" "$version" "$min_version" "$is_override"
+}
+
+inspect_apptainer_image() {
+  local ref="$1"
+  local identity=""
+  if [[ -f "$ref" ]] && command -v apptainer >/dev/null 2>&1; then
+    local json
+    json="$(apptainer inspect --json "$ref" 2>/dev/null || true)"
+    if [[ -n "$json" ]] && command -v python3 >/dev/null 2>&1; then
+      identity="$(python3 -c '
+import json, sys
+def parse():
+    try:
+        d = json.loads(sys.argv[1])
+        labels = d.get("data", {}).get("attributes", {}).get("labels", {})
+        v = labels.get("org.opencontainers.image.version", "")
+        r = labels.get("org.opencontainers.image.revision", "")
+        return f"{v}|{r}|unknown"
+    except Exception:
+        return ""
+res = parse()
+if res:
+    print(res)
+' "$json" 2>/dev/null || true)"
+    fi
+  elif command -v skopeo >/dev/null 2>&1; then
+    local skopeo_ref="$ref"
+    [[ "$skopeo_ref" == *://* ]] || skopeo_ref="docker://${skopeo_ref}"
+    identity="$(skopeo inspect --format '{{ index .Labels "org.opencontainers.image.version" }}|{{ index .Labels "org.opencontainers.image.revision" }}|{{ .Digest }}' "$skopeo_ref" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$identity"
+}
+
+report_apptainer_image_identity() {
+  local ref="$1" product="$2" is_override="${3:-0}" min_version="${4:-$MIN_REVIEW_APPLIANCE_VERSION}"
+  local identity version revision digest
+  identity="$(inspect_apptainer_image "$ref")"
+  if [[ -z "$identity" ]]; then
+    echo "! ${product} image identity unavailable for ${ref}." >&2
+    return 0
+  fi
+  IFS='|' read -r version revision digest <<<"$identity"
+  [[ -n "$version" && "$version" != "<no value>" ]] || version=unknown
+  [[ -n "$revision" && "$revision" != "<no value>" ]] || revision=unknown
+  [[ -n "$digest" && "$digest" != "<no value>" ]] || digest=unknown
+  echo "✓ ${product} image ${ref}: version=${version} revision=${revision} digest=${digest}" >&2
+  check_image_compatibility "$ref" "$product" "$version" "$min_version" "$is_override"
+}
+
+
+ensure_owned_state_dir() {
+  local path="$1" expected_uid="$2" expected_gid="$3" owner group mode
+  if [[ -L "$path" ]]; then
+    fail "persistent Factory state path ${path} is a symlink; refusing to follow it"
+  fi
+  if [[ ! -e "$path" ]]; then
+    mkdir -m 0700 -- "$path" || fail "could not prepare persistent Factory state path ${path}"
+  fi
+  [[ -d "$path" ]] || fail "persistent Factory state path ${path} is not a directory"
+  IFS=: read -r owner group mode < <(stat -c '%u:%g:%a' -- "$path") ||
+    fail "could not inspect persistent Factory state path ${path}"
+  if [[ "$owner" != "$expected_uid" || "$group" != "$expected_gid" || ! -w "$path" ]]; then
+    fail "persistent Factory state path ${path} is owned by ${owner}:${group} (mode ${mode}); expected ${expected_uid}:${expected_gid}. No ownership changes were made; select a fresh REVIEW_INSTANCE or inspect this exact path"
+  fi
+}
+
+prepare_factory_state_home() {
+  local target_home="$1" uid gid path
+  uid="$(id -u)"
+  gid="$(id -g)"
+  for path in \
+    "$target_home" \
+    "$target_home/.local" \
+    "$target_home/.local/state" \
+    "$target_home/.local/state/review" \
+    "$target_home/.local/state/review/factory"; do
+    ensure_owned_state_dir "$path" "$uid" "$gid"
+  done
+}
+
+
+slugify() {
+  local value="$1" slug digest
+  slug="$(printf '%s' "$value" | tr '[:upper:]/:' '[:lower:]--' | tr -cd 'a-z0-9_.-')"
+  slug="${slug:0:28}"
+  [[ -n "$slug" ]] || slug=default
+  digest="$(printf '%s' "$value" | sha256sum | cut -c1-8)"
+  printf '%s-%s\n' "$slug" "$digest"
+}
+
+linux_proc_starttime() {
+  local pid="$1" proc_root="${2:-/proc}" line rest
+  local -a fields
+  IFS= read -r line <"${proc_root}/${pid}/stat" 2>/dev/null || return 1
+  rest="${line##*) }"
+  read -r -a fields <<<"$rest"
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${fields[19]}"
+}
+
+
+resolve_tokens() {
+  REVIEW_GITHUB_AUTH_SOURCE=environment
+  case "${REVIEW_LAUNCH_PLAN[github_auth]}" in
+    environment)
+      [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] || fail "selected environment GitHub source has no credential"
+      export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+      export GITHUB_TOKEN="$GH_TOKEN"
+      ;;
+    gh-cli)
+      command -v gh >/dev/null 2>&1 || fail "selected GitHub CLI source is unavailable"
+      local selected_token
+      selected_token="$(env -u GH_TOKEN -u GITHUB_TOKEN gh auth token --hostname github.com 2>/dev/null)" || fail "selected GitHub CLI source has no stored login"
+      [[ -n "$selected_token" ]] || fail "selected GitHub CLI source has no stored login"
+      export GH_TOKEN="$selected_token" GITHUB_TOKEN="$selected_token"
+      REVIEW_GITHUB_AUTH_SOURCE="GitHub CLI (environment tokens ignored for Review)"
+      ;;
+  esac
+  if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+    GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+    export GH_TOKEN
+    REVIEW_GITHUB_AUTH_SOURCE="GitHub CLI"
+  fi
+  if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] && command -v python3 >/dev/null 2>&1; then
+    GH_TOKEN="$(python3 -c '
+import sqlite3, os, json
+state_dir = os.environ.get("REVIEW_OMP_STATE") or os.path.expanduser("~/.omp")
+db_path = os.path.join(state_dir, "agent/agent.db")
+if os.path.exists(db_path):
+    try:
+        connection = sqlite3.connect(db_path)
+        for provider in ("github-copilot", "github"):
+            row = connection.execute("SELECT data FROM auth_credentials WHERE provider = ?", (provider,)).fetchone()
+            if row:
+                data = json.loads(row[0])
+                token = data.get("access") or data.get("token") or data.get("access_token")
+                if token:
+                    print(token)
+                    break
+    except Exception:
+        pass
+' 2>/dev/null || true)"
+    export GH_TOKEN
+    REVIEW_GITHUB_AUTH_SOURCE="OMP credential fallback"
+  fi
+  export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  export GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if ((REVIEW_LAUNCH_AUTH_EXPLICIT)); then export GITHUB_TOKEN="${GH_TOKEN:-}"; fi
+  export COPILOT_GITHUB_TOKEN="${COPILOT_GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  export GITHUB_COPILOT_TOKEN="${GITHUB_COPILOT_TOKEN:-${COPILOT_GITHUB_TOKEN:-}}"
+  export COPILOT_INTEGRATION_ID="${COPILOT_INTEGRATION_ID:-copilot-developer-cli}"
+}
+
+review_args() {
+  if [[ -f "$repo_root/scripts/parse-review-args.sh" ]]; then
+    # shellcheck source=scripts/parse-review-args.sh
+    source "$repo_root/scripts/parse-review-args.sh"
+    parse_review_args "$@"
+    return
+  fi
+
+  PARSED_REVIEW_ARGS=("$@")
+  if [[ ${#PARSED_REVIEW_ARGS[@]} -gt 0 && "${PARSED_REVIEW_ARGS[0]}" =~ ^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)$ ]]; then
+    local repository="${BASH_REMATCH[1]}"
+    PARSED_REVIEW_ARGS=("${PARSED_REVIEW_ARGS[@]:1}")
+    local -a fallback_args=(--repo "$repository")
+    if [[ ${#PARSED_REVIEW_ARGS[@]} -gt 0 && "${PARSED_REVIEW_ARGS[0]}" =~ ^#?([0-9]+)$ ]]; then
+      fallback_args+=(--pr "${BASH_REMATCH[1]}")
+      PARSED_REVIEW_ARGS=("${PARSED_REVIEW_ARGS[@]:1}")
+    fi
+    PARSED_REVIEW_ARGS=("${fallback_args[@]}" "${PARSED_REVIEW_ARGS[@]}")
+  fi
+}
+
+run_review() {
+  # shellcheck source=scripts/review-launch-plan.sh
+  source "$repo_root/scripts/review-launch-plan.sh"
+  review_launch_resolve "$@"
+  case "$REVIEW_LAUNCH_COMMAND" in
+    configure) review_launch_configure ;;
+    profiles) review_launch_profiles; return ;;
+  esac
+  resolve_tokens
+  review_launch_environment
+  if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
+    echo "WARNING: no GitHub credential found; the queue will load empty." >&2
+    echo "  Run 'gh auth login' or export GH_TOKEN." >&2
+  fi
+
+  review_args "${REVIEW_LAUNCH_ARGS[@]}"
+  local scope="${REVIEW_DEFAULT_SCOPE:-review}" arg previous=""
+  for arg in "${PARSED_REVIEW_ARGS[@]}"; do
+    if [[ "$previous" == --repo ]]; then scope="$arg"; break; fi
+    previous="$arg"
+  done
+
+  local key root home workspace scratch claims_root name image sif="" fallback_sif is_override=0
+  key="$(slugify "${REVIEW_INSTANCE:-review-$scope}")"
+  root="${XDG_STATE_HOME:-${HOME}/.local/state}/review/instances/${key}"
+  home="${root}/home"
+  workspace="${root}/workspace"
+  scratch="${root}/tmp"
+  claims_root="${REVIEW_MUTATION_CLAIMS_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/review/mutation-claims}"
+  mkdir -p "$claims_root"
+  name="review-${key}-$(date +%s)-$$"
+  local review_image="${REVIEW_APPLIANCE_IMAGE:-}"
+  local review_sif="${REVIEW_APPLIANCE_SIF:-}"
+  if [[ -n "$review_image" ]]; then
+    image="$review_image"
+    is_override=1
+  elif [[ -n "$review_sif" ]]; then
+    image="$review_sif"
+    sif="$review_sif"
+    is_override=1
+  else
+    image="ghcr.io/joshyorko/review:stable"
+  fi
+  fallback_sif="${REVIEW_APPLIANCE_FALLBACK_SIF:-}"
+  if [[ "${REVIEW_LAUNCH_PLAN[runtime]}" == krun && ( "$image" == *.sif || -f "$image" ) ]]; then
+    fail "krun requires an OCI image; select auto or apptainer for a SIF"
+  fi
+  mkdir -p "$home" "$workspace" "$scratch"
+  prepare_factory_state_home "$home"
+  mkdir -p "$home/.omp" "$home/.config/pulse"
+  detect_review_audio
+  prepare_review_omp_mount
+  [[ -z "$REVIEW_OMP_WARNING" ]] || echo "$REVIEW_OMP_WARNING" >&2
+  report_launcher_identity
+
+  launch_sif() {
+    local selected_sif="$1"
+    command -v apptainer >/dev/null 2>&1 || fail "Apptainer is required for the packaged Review SIF."
+    [[ -x "$selected_sif" ]] || fail "review SIF is missing or not executable: ${selected_sif}"
+    KVM_FAILURE="the packaged Review SIF was selected"
+    require_fallback
+    review_launch_summary apptainer "$scope"
+    factory_verifier_ready apptainer "$selected_sif"
+    prepare_apptainer_environment
+    [[ -z "$REVIEW_AUDIO_PULSE_SERVER" ]] ||
+      export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
+    local -a sif_args=(run --containall --no-eval)
+    sif_args+=("${APPTAINER_HOST_ARGS[@]}")
+    sif_args+=(--bind /dev/full:/dev/full)
+    sif_args+=(--home "${home}:/home/review" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/claims:rw")
+    export APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT=/claims
+    if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
+      sif_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/review/pulse/native")
+      [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
+        sif_args+=(--bind "${REVIEW_AUDIO_PULSE_COOKIE}:/home/review/.config/pulse/cookie:ro")
+    elif [[ -n "$REVIEW_AUDIO_SND_DEVICE" ]]; then
+      sif_args+=(--bind "${REVIEW_AUDIO_SND_DEVICE}:/dev/snd")
+    fi
+    [[ -z "$REVIEW_OMP_CONFIG_VOLUME" ]] ||
+      sif_args+=(--bind "$REVIEW_OMP_CONFIG_VOLUME")
+    sif_args+=("$selected_sif")
+    sif_args+=("${PARSED_REVIEW_ARGS[@]}")
+    exec apptainer "${sif_args[@]}"
+  }
+
+  if [[ -n "$sif" ]]; then
+    launch_sif "$sif"
+  fi
+
+  if [[ "${REVIEW_LAUNCH_PLAN[runtime]}" != apptainer ]] && kvm_runtime_ready && [[ "$image" != *.sif && ! -f "$image" ]]; then
+    review_launch_summary krun "$scope"
+    ensure_image "$image" "review appliance" "image/appliance/Containerfile" "REVIEW_APPLIANCE_IMAGE"
+    report_podman_image_identity "$image" "review appliance" "$is_override" "$MIN_REVIEW_APPLIANCE_VERSION"
+    factory_verifier_ready krun "$image"
+    local -a podman_args=()
+    podman_args+=(run --runtime=krun --rm --interactive --tty)
+    podman_args+=(--name "$name")
+    podman_args+=(--userns "keep-id:uid=65532,gid=65532")
+    podman_args+=(--volume "${home}:/home/review:rw,z")
+    podman_args+=(--volume "${workspace}:/workspace:rw,z")
+    podman_args+=(--volume "${scratch}:/tmp:rw,z")
+    podman_args+=(--volume "${claims_root}:/claims:rw,z")
+    podman_args+=(--env LUNA_FACTORY_CLAIMS_ROOT=/claims)
+    for arg in "${REVIEW_LAUNCH_ENV_NAMES[@]}"; do
+      case "$arg" in
+        REVIEW_INHERIT_OMP_CONFIG | LUNA_FACTORY_ENABLED | LUNA_FACTORY_CAPACITY) [[ -v "$arg" ]] || continue ;;
+      esac
+      podman_args+=(--env "$arg")
+    done
+    podman_args+=(--env "TERM=${TERM:-xterm-256color}")
+    podman_args+=(--env "COLORTERM=${COLORTERM:-truecolor}")
+    if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
+      podman_args+=(--volume "${REVIEW_AUDIO_PULSE_SOCKET}:/run/review/pulse/native:rw")
+      [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
+        podman_args+=(--volume "${REVIEW_AUDIO_PULSE_COOKIE}:/home/review/.config/pulse/cookie:ro")
+      podman_args+=(--env "PULSE_SERVER=${REVIEW_AUDIO_PULSE_SERVER}")
+    elif [[ -n "$REVIEW_AUDIO_SND_DEVICE" ]]; then
+      podman_args+=(--device "$REVIEW_AUDIO_SND_DEVICE")
+    fi
+    [[ -z "$REVIEW_OMP_CONFIG_VOLUME" ]] ||
+      podman_args+=(--volume "$REVIEW_OMP_CONFIG_VOLUME")
+    local diagnostic_root="" diagnostic_dir="" diagnostic_owner diagnostic_start diagnostic_starttime
+    local diagnostic_proc_root="${REVIEW_TEST_PROC_ROOT:-/proc}"
+    if [[ -d "$root" && ! -L "$root" && -O "$root" ]]; then
+      diagnostic_root="$(cd -- "$root" 2>/dev/null && pwd -P)/diagnostics"
+      if [[ ! -e "$diagnostic_root" && ! -L "$diagnostic_root" ]]; then
+        mkdir -m 0700 -- "$diagnostic_root" 2>/dev/null || true
+      fi
+      if [[ -d "$diagnostic_root" && ! -L "$diagnostic_root" && -O "$diagnostic_root" &&
+        "$(stat -c '%a' -- "$diagnostic_root" 2>/dev/null)" == 700 &&
+        "$(cd -- "$diagnostic_root" 2>/dev/null && pwd -P)" == "$diagnostic_root" ]]; then
+        diagnostic_dir="$(mktemp -d "$diagnostic_root/review-launch-diagnostic.XXXXXXXXXXXXXXXX" 2>/dev/null || true)"
+        if [[ -n "$diagnostic_dir" && ( ! -d "$diagnostic_dir" || -L "$diagnostic_dir" || ! -O "$diagnostic_dir" ||
+          "$(stat -c '%a' -- "$diagnostic_dir" 2>/dev/null)" != 700 ||
+          "$(cd -- "$diagnostic_dir" 2>/dev/null && pwd -P)" != "$diagnostic_dir" ) ]]; then
+          diagnostic_dir=""
+        fi
+      fi
+    fi
+    if [[ -n "$diagnostic_dir" ]]; then
+      diagnostic_owner="${diagnostic_dir##*.}"
+      diagnostic_starttime="$(linux_proc_starttime "$$" "$diagnostic_proc_root" 2>/dev/null || true)"
+      diagnostic_start="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+      local identity_start="$diagnostic_starttime"
+      [[ "$identity_start" =~ ^[0-9]+$ ]] || identity_start=unavailable
+      if [[ "$diagnostic_owner" =~ ^[A-Za-z0-9_-]{16,64}$ ]] &&
+        (umask 077; set -C; \
+          printf 'launcher_pid=%s launcher_start=%s owner=%s\n' "$$" "$identity_start" "$diagnostic_owner" >"$diagnostic_dir/launcher.identity" && \
+          printf 'Review post-exit diagnostic: outcome=unknown evidence=collector_pending\n' >"$diagnostic_dir/collector.report"); then
+        chmod 0600 "$diagnostic_dir/launcher.identity" "$diagnostic_dir/collector.report"
+        if [[ "$diagnostic_starttime" =~ ^[0-9]+$ && -n "$diagnostic_start" &&
+          -x "$repo_root/bin/review-diagnostic-collector" ]]; then
+          podman_args+=(--label "io.review.launch.owner=$diagnostic_owner")
+          local -a diagnostic_env=("PATH=${PATH:-/usr/bin:/bin}" "HOME=${HOME:-/tmp}" "LC_ALL=C")
+          for arg in XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME CONTAINER_HOST CONTAINER_CONNECTION CONTAINERS_CONF CONTAINERS_STORAGE_CONF; do
+            [[ -v "$arg" ]] && diagnostic_env+=("$arg=${!arg}")
+          done
+          env -i "${diagnostic_env[@]}" "$repo_root/bin/review-diagnostic-collector" \
+            "$$" "$diagnostic_starttime" "$diagnostic_owner" "$diagnostic_root" \
+            "$diagnostic_dir" "$diagnostic_proc_root" "$diagnostic_start" \
+            </dev/null >/dev/null &
+        else
+          (umask 077; set -C; \
+            printf 'collector_pid=unavailable launcher_pid=%s launcher_start=%s owner=%s\n' \
+              "$$" "$identity_start" "$diagnostic_owner" >"$diagnostic_dir/collector.identity") || true
+          chmod 0600 "$diagnostic_dir/collector.identity" 2>/dev/null || true
+          printf 'Review post-exit diagnostic: outcome=unknown settlement=unavailable evidence=collector_unavailable\n' \
+            >"$diagnostic_dir/collector.report"
+        fi
+      else
+        diagnostic_dir=""
+      fi
+    fi
+    podman_args+=("$image")
+    podman_args+=("${PARSED_REVIEW_ARGS[@]}")
+    exec "$engine" "${podman_args[@]}"
+  fi
+
+  if [[ "${REVIEW_LAUNCH_PLAN[runtime]}" == krun ]]; then fail "${KVM_FAILURE}; choose auto or apptainer"; fi
+  if [[ -n "$fallback_sif" ]]; then
+    launch_sif "$fallback_sif"
+  fi
+  require_fallback
+  review_launch_summary apptainer "$scope"
+  local apptainer_image="$image"
+  [[ "$apptainer_image" == *://* || "$apptainer_image" == *.sif || -f "$apptainer_image" ]] || apptainer_image="docker://${apptainer_image}"
+  report_apptainer_image_identity "$image" "review appliance" "$is_override" "$MIN_REVIEW_APPLIANCE_VERSION"
+  factory_verifier_ready apptainer "$apptainer_image"
+  prepare_apptainer_environment
+  [[ -z "$REVIEW_AUDIO_PULSE_SERVER" ]] ||
+    export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
+  local -a apptainer_args=(run --containall --no-eval)
+  apptainer_args+=("${APPTAINER_HOST_ARGS[@]}")
+  apptainer_args+=(--bind /dev/full:/dev/full)
+  apptainer_args+=(--home "${home}:/home/review" --pwd /workspace --bind "${workspace}:/workspace,${scratch}:/tmp,${claims_root}:/claims:rw")
+  export APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT=/claims
+  if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
+    apptainer_args+=(--bind "${REVIEW_AUDIO_PULSE_SOCKET}:/run/review/pulse/native")
+    [[ -z "$REVIEW_AUDIO_PULSE_COOKIE" ]] ||
+      apptainer_args+=(--bind "${REVIEW_AUDIO_PULSE_COOKIE}:/home/review/.config/pulse/cookie:ro")
+  elif [[ -n "$REVIEW_AUDIO_SND_DEVICE" ]]; then
+    apptainer_args+=(--bind "${REVIEW_AUDIO_SND_DEVICE}:/dev/snd")
+  fi
+  [[ -z "$REVIEW_OMP_CONFIG_VOLUME" ]] ||
+    apptainer_args+=(--bind "$REVIEW_OMP_CONFIG_VOLUME")
+  apptainer_args+=("$apptainer_image")
+  apptainer_args+=("${PARSED_REVIEW_ARGS[@]}")
+  exec apptainer "${apptainer_args[@]}"
+}
+
+case "${1:-}" in
+  factory-verifier-probe)
+    shift
+    [[ $# -eq 2 ]] || fail "usage: review factory-verifier-probe krun|apptainer IMAGE"
+    factory_verifier_probe "$@"
+    ;;
+  *)
+    run_review "$@"
+    ;;
+esac

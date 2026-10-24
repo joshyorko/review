@@ -1,0 +1,41 @@
+# Invocation overlay owned by the immutable appliance. User and project
+# settings still apply, except that a packaged binary never advertises an
+# in-place update that cannot survive appliance replacement.
+startup:
+  checkUpdate: false
+  setupWizard: false
+
+modelRoles:
+  advisor: "@default"
+advisor:
+  syncBacklog: 1
+
+
+eval:
+  workpool:
+    freshAgents: true
+
+task:
+  maxConcurrency: 4
+  maxRecursionDepth: 1
+  maxRuntimeMs: 3600000
+  softRequestBudget: 90
+  agentIdleTtlMs: 300000
+  isolation:
+    # The appliance launches OMP from its own tiny coordinator Git repository,
+    # so OMP can provide native per-item task isolation even though Review is
+    # not scoped to one target repository. Target repos remain unique per worker.
+    enabled: true
+    apply: false
+
+isolation:
+  backend: auto
+
+read:
+  defaultLimit: 200
+
+tools:
+  intentTracing: false
+  outputMaxColumns: 240
+
+textVerbosity: low

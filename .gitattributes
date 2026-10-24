@@ -1,0 +1,2 @@
+# Unified diff context whitespace is part of the pinned patch bytes.
+patches/omp/*.patch -whitespace

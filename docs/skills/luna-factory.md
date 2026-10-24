@@ -1,0 +1,153 @@
+---
+name: luna-factory
+version: "0.2"
+last_updated: 2026-09-23
+id: luna-factory
+one_line_purpose: Keep the Luna Factory protocol's mechanical decisions in tested extension code.
+entry_point: docs/skills/luna-factory.md
+category: ci-ops
+mcp_compliance_level: partial
+optimization_status: draft
+status: active
+dependencies: [review-dashboard]
+tags: [omp, extension, factory, evidence, admission]
+description: "Maintains the opt-in Luna Factory extension in image/extension/luna-factory/. Use when changing admission, evidence reconciliation, convergence, or repair lineage."
+metadata:
+  type: runbook
+  context7-sources: []
+---
+
+# Luna Factory Extension
+
+`image/extension/luna-factory/` is an opt-in OMP extension that ships beside the
+Review workbench. It keeps the Luna Factory protocol and moves the mechanically
+checkable parts of it — admission, task state, evidence binding, repair lineage,
+completion — out of conversational memory and into tested code.
+
+It is not a second runtime. It adds no database, daemon, scheduler, or worker
+store, and it does not own execution: OMP does.
+
+## When to Use
+
+Use this skill for the reducer, admission rule, evidence reconciliation,
+convergence verdict, journal, capability table, or the extension's tool surface.
+
+## When NOT to Use
+
+Use `review-dashboard.md` for the Review workbench and `launcher.md` for
+container launch mechanics. Factory changes must preserve explicit admission
+and separate Review/Factory authority.
+
+## Core Process
+
+1. Decide which layer the change belongs to. `core/` is pure and must stay
+   host-free: no terminal, no clock, no model. `omp/` is the host and capability
+   boundary. `ui/` only projects the ledger.
+2. Change the rule, then drive it from `tests/luna_factory.test.ts`. The suite
+   drives the pure core directly, so a new rule needs no TUI to be exercised.
+3. Keep the capability table honest. A path that cannot be probed against the
+   packaged OMP is `unsupported`, and the adapter must refuse it rather than
+   route through it.
+
+## Invariants
+
+- A returned worker moves to VERIFY. Only `finish_task` against a receipt that
+  reconciles as proven at the current subject reaches DONE.
+- Integration moves the certified subject, which demotes proof taken against the
+  old head. Proof freshness is not optional.
+- Identity is stamped by the adapter from the ledger. A receipt naming another
+  task, attempt, generation, or subject is contradicted, not merely weak.
+- Artifact references outside the run's roots are rejected, never followed.
+- CONVERGED means mandatory acceptance has current valid proof. QUIESCENT means
+  no authorized autonomous progress remains and may be unconverged. An empty
+  queue, an exhausted budget, and a returned worker imply neither.
+- Completion creates no merge, publish, or deploy authority.
+- Loading the extension starts nothing. Execution requires
+  `LUNA_FACTORY_ENABLED=1`; Factory never infers admission from a visible GitHub
+  or explicitly enabled Hive queue row.
+- `LUNA_FACTORY_ENABLED` and `LUNA_FACTORY_CAPACITY` are the only Factory
+  runtime knobs that are user configuration; both cross the personal appliance
+  boundary by name, and neither value is ever rendered into argv. Loading
+  Factory with the opt-in absent leaves it registered and discoverable, with
+  execution disabled.
+- A Factory-enabled appliance qualifies the selected packaged runtime with the
+  production `sandboxPreflight()` and a harmless `sandboxTest()` before OMP
+  starts. A failed qualification refuses startup; krun and Apptainer remain
+  independent runtime profiles.
+- Review advertises its Factory handoff only while a Factory controller is
+  registered. When the handoff is unreachable, startup and the first
+  invocation report the bounded cause — package absent or not passed as an
+  `--extension` versus a packaged extension that failed to load — instead of
+  blaming the execution opt-in.
+- The Review/Factory command bridge stores selection, controller, and bounded
+  load failure state in one versioned global slot, so cache-busted extension
+  module copies retain the same handoff and identity-safe cleanup.
+
+## Verification
+
+```bash
+bash tests/omp-review-mode.sh
+bash tests/appliance-contract.sh
+bash tests/test-registry.sh
+REVIEW_APPLIANCE_IMAGE=review:test bash tests/review-factory-coload-smoke.sh
+git diff --check
+```
+
+`tests/luna_factory.test.ts` runs under `tests/omp-review-mode.sh` with the rest
+of the extension contracts, so a new suite is registered by naming it there.
+## Selected batches and runtime boundaries
+
+Factory batches use the existing OMP command bridge (`factoryCommand`) and one
+same-host state root. A run once command exits when work is complete or blocked;
+retain keeps the journal, patches, logs, and native artifacts for `inspect`,
+`resume`, `pause`, `stop`, `export`, or explicit `discard`. Stop cancellation
+does not claim rollback or release a conflicting writer until cancellation is
+confirmed. There is no detached service or nested tool runtime.
+
+The shared bound includes native Factory workers, retries, verification, and
+reviewer tasks; unrelated Review work remains usable. Resource ownership is
+keyed by the lower-case repository and item identity in the state root.
+Remote, gateway, and distributed workers are deferred, as are parent #111 gates;
+this skill does not claim dogfood or packaged-runtime success without evidence.
+
+Newly admitted `/factory start pr-ready` work retains a version-4 owned-PR
+lifecycle bound to its original generation, operation, same-repository PR,
+target ref/SHA, branch and head. PR creation alone remains `VERIFY`. While a
+batch is active, the foreground OMP-owned pump observes pending hosted checks
+automatically. Backoff, `Retry-After`, and the lifecycle deadline are persisted;
+waiting consumes no worker capacity or resource claims and makes no model call.
+Pause, stop, and shutdown wake the wait. A restarted or explicitly paused batch
+continues only after `/factory resume`; `/factory reconcile <batch>` stays
+read-only and never substitutes for initial dispatch continuity.
+
+The observed policy combines classic branch protection with applicable
+repository/parent rulesets, and each check must match its declared GitHub App
+source. A required context observed on the current synthetic merge SHA selects
+that subject; otherwise the head SHA is eligible. GitHub Actions checks also
+require a matching workflow run, eligible event, exact attempt, complete jobs
+and steps, and readable bounded logs. Failure repair requires exact check-run
+details and complete bounded annotations; unavailable, truncated, cancelled,
+infrastructure, or superseded evidence remains `UNKNOWN`. GitHub rate-limit
+responses retain that unknown observation and wait until their persisted
+`Retry-After` time before retrying. A log URL or job summary alone never
+authorizes repair.
+
+Every PR-ready publication, initial or repair, commits its local candidate and
+reruns deterministic verification plus independent acceptance against the exact
+committed SHA and tree before any push or PR effect. The separate typed
+current-subject receipt preserves the worker authorization receipt; tree
+equality alone never transfers proof.
+
+A complete current code failure reopens the same admitted task under its
+original generation and attempt appetite. Factory gives the worker an immutable
+failure packet through the existing evidence handles, rechecks the exact PR,
+base, head, acceptance, policy, verifier, and claims. The existing PR identity,
+target, and acceptance revision stay bound; Factory never creates a second PR
+or merges it. Ambiguous push/PR effects stay `UNKNOWN` until exact
+reconciliation and are never blindly repeated. Duplicate failures or
+incomplete diagnostics select `repair-review`. An applicable
+ruleset rule this slice cannot model, including `workflows`, or a `merge_group`
+workflow event remains `UNKNOWN`. Missing policy/source/subject coverage,
+skipped jobs, incomplete pages, or changes during observation remain
+`UNKNOWN`. Legacy PR-ready receipts without a separate current-subject
+verification remain stale during decode.

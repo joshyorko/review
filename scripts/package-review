@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Build an immutable checkout package, then publish it to the personal Brew tap.
+set -euo pipefail
+repo="$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel)"
+work=""
+image=""
+cleanup() {
+  [[ -z "$work" ]] || rm -rf -- "$work"
+  [[ -z "$image" ]] || podman rmi "$image" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+fail() { echo "package-review: $*" >&2; exit 1; }
+action="${1:-}"; shift || true
+case "$action" in
+  build)
+    (($# <= 2)) || fail 'usage: scripts/package-review build [ref] [output-directory]'
+    if (($# == 0)); then
+      [[ -z "$(git -C "$repo" status --porcelain)" ]] || fail 'commit checkout changes first, or name an explicit committed ref'
+      ref="$(git -C "$repo" symbolic-ref --quiet --short HEAD || git -C "$repo" rev-parse HEAD)"
+    else ref="$1"; fi
+    [[ "$ref" != -* ]] || fail 'invalid Git ref'
+    sha="$(git -C "$repo" rev-parse --verify "$ref^{commit}" 2>/dev/null || git -C "$repo" rev-parse --verify "refs/remotes/origin/$ref^{commit}")"
+    source_ref="${REVIEW_SOURCE_REF:-$ref}"
+    arch="$(uname -m)"
+    [[ "$arch" == x86_64 || "$arch" == aarch64 ]] || fail 'native Linux x86_64 or aarch64 required'
+    [[ "$(uname -s)" == Linux ]] || fail 'the SIF package requires Linux'
+    for tool in podman apptainer python3 tar; do command -v "$tool" >/dev/null || fail "missing prerequisite: $tool"; done
+    output="${2:-$repo/.cache/package-review/$sha}"
+    mkdir -p "$output"
+    output="$(cd "$output" && pwd)"
+    work="$(mktemp -d)"
+    mkdir -p "$work/source" "$work/payload/launcher"
+    git -C "$repo" archive "$sha" | tar -xf - -C "$work/source"
+    [[ -f "$work/source/bin/review" && -f "$work/source/image/appliance/Containerfile" ]] || fail 'ref lacks the Review launcher or appliance'
+    version="$(cd "$work/source" && bash scripts/review-appliance-version.sh)"
+    oci_image="ghcr.io/joshyorko/review:sha-${sha}"
+    oci_arch_image="${oci_image}-${arch}"
+    oci_digest=""
+    image="localhost/review:${sha:0:12}-$arch-$$"
+    (
+      cd "$work/source"
+      podman build --format oci --layers --force-rm \
+        --build-arg "REVIEW_VERSION=$version" \
+        --build-arg "REVIEW_REVISION=$sha" \
+        --label "io.github.joshyorko.review.source.ref=$source_ref" \
+        -f image/appliance/Containerfile -t "$image" .
+    )
+    if [[ "${REVIEW_OCI_PUSH:-0}" == 1 ]]; then
+      [[ -n "${REGISTRY_AUTH_FILE:-}" && -r "${REGISTRY_AUTH_FILE}" ]] || fail "REGISTRY_AUTH_FILE must name a readable registry auth file when OCI push is enabled"
+      podman_args=(--format oci --digestfile "$work/oci-digest" --authfile "${REGISTRY_AUTH_FILE}")
+      podman push "${podman_args[@]}" "$image" "docker://${oci_arch_image}"
+      oci_digest="$(< "$work/oci-digest")"
+      [[ "$oci_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "personal OCI push returned an invalid digest"
+    fi
+    podman save --format docker-archive -o "$work/review.tar" "$image"
+    # Local qualification retains the same built image in native OCI format.
+    if [[ -n "${REVIEW_OCI_ARCHIVE:-}" ]]; then
+      [[ ! -e "$REVIEW_OCI_ARCHIVE" ]] || fail "local OCI archive destination already exists"
+      podman save --format oci-archive -o "$REVIEW_OCI_ARCHIVE" "$image"
+    fi
+    APPTAINER_CACHEDIR="$work/apptainer-cache" apptainer build \
+      "$work/payload/launcher/review.sif" "docker-archive:$work/review.tar"
+    chmod 0755 "$work/payload/launcher/review.sif"
+    apptainer inspect --json "$work/payload/launcher/review.sif" > "$work/image.json"
+    python3 - "$work/image.json" "$sha" <<'PY'
+import json,sys
+labels=json.load(open(sys.argv[1]))['data']['attributes']['labels']
+assert labels['org.opencontainers.image.revision']==sys.argv[2], 'SIF revision differs from checkout'
+PY
+    apptainer exec "$work/payload/launcher/review.sif" /usr/bin/omp --version
+    cp "$work/source/LICENSE" "$work/source/NOTICE" "$work/payload/"
+    cp "$work/source/VERSION" "$work/payload/VERSION"
+    cp -a "$work/source/bin" "$work/payload/launcher/"
+    mkdir -p "$work/payload/launcher/scripts"
+    cp "$work/source/scripts/parse-review-args.sh" \
+      "$work/payload/launcher/scripts/parse-review-args.sh"
+    cp "$work/source/scripts/review-launch-plan.sh" \
+      "$work/payload/launcher/scripts/review-launch-plan.sh"
+    python3 - "$work/payload" "$source_ref" "$sha" "$arch" "$oci_image" "$oci_arch_image" "$oci_digest" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+p=Path(sys.argv[1]);ref,sha,arch,oci_image,oci_arch_image,oci_digest=sys.argv[2:]
+meta={'version':(p/'VERSION').read_text().strip(),'ref':ref,'sha':sha,'arch':arch,'oci_image':oci_image,'oci_arch_image':oci_arch_image,'launcher_sha256':hashlib.sha256((p/'launcher/bin/review').read_bytes()).hexdigest(),'sif_sha256':hashlib.sha256((p/'launcher/review.sif').read_bytes()).hexdigest()}
+if oci_digest:
+    meta['oci_arch_digest']=oci_digest
+(p/'build.json').write_text(json.dumps(meta,indent=2)+'\n')
+(p/'build.txt').write_text(f'Review: {ref} @ {sha}\n')
+PY
+    cat > "$work/payload/review" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+root="\$(cd "\$(dirname "\$(readlink -f "\${BASH_SOURCE[0]}")")/../libexec" && pwd)"
+  export REVIEW_MODE=review
+  export REVIEW_APPLIANCE_IMAGE="\${REVIEW_APPLIANCE_IMAGE:-$oci_image}"
+  export REVIEW_APPLIANCE_FALLBACK_SIF="\${REVIEW_APPLIANCE_FALLBACK_SIF:-\$root/launcher/review.sif}"
+  cat "\$root/build.txt"
+exec "\$root/launcher/bin/review" "\$@"
+EOF
+    chmod 0755 "$work/payload/review"
+    rm "$work/payload/VERSION"
+    tar -czf "$work/review-$arch.tar.gz" -C "$work/payload" .
+    python3 - "$work/payload/build.json" "$work/review-$arch.tar.gz" "$output/manifest-$arch.json" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+r=json.loads(Path(sys.argv[1]).read_text());r['archive_sha256']=hashlib.sha256(Path(sys.argv[2]).read_bytes()).hexdigest()
+Path(sys.argv[3]).write_text(json.dumps(r,indent=2)+'\n')
+PY
+    mv "$work/review-$arch.tar.gz" "$output/"
+    echo "Built $source_ref @ $sha in $output"
+    ;;
+  *) fail 'usage: scripts/package-review build [ref] [output-directory]' ;;
+esac

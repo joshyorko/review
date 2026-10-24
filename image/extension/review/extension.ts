@@ -1,0 +1,3226 @@
+/**
+ * Review and optional Hive read-side workbench extension wiring.
+ *
+ * Review uses GitHub as its queue; Hive is optional read-side context, never an
+ * assignment source. OMP owns sessions, tools, and workflowz execution. This file
+ * only joins those seams to the workbench UI.
+ */
+
+import { createHash, randomUUID } from "node:crypto";
+import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
+import { loadWave, saveWave } from "./wave-store.ts";
+import type { CiEvidenceSource, QueueItem } from "./github.ts";
+import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, orgScope, parseScope, resolveToken } from "./github.ts";
+import { isRepairRequested, type Priority } from "./priority.ts";
+import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
+import { registerFactoryClaimInspector, registerFactoryReconciler, registeredFactoryReconciler, registerFactorySelection, factoryBatchSubmitterRegistered, factoryCommand, factoryControllerRegistered, factoryDashboardOpenerRegistered, factoryLoadDiagnostic, openFactoryDashboard, submitFactoryBatch, type ClaimOwnerObservation, type ClaimOwnerWorkerObservation } from "../luna-factory/omp/batch-bridge.ts";
+import { ResourceClaims, factoryClaimsRoot, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
+import { workbenchPainter } from "./paint.ts";
+import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
+import type { KeyMatcher } from "./keys.ts";
+import { type ToolHost, registerTools } from "./tools.ts";
+import { hiveFailureStatus } from "./hive.ts";
+import { landingState, landingReason } from "./landing.ts";
+import { buildReviewRecap, type ReviewRecapInput } from "./recap.ts";
+import { truncateToWidth } from "./width.ts";
+import { GENERIC_WORKBENCH_POLICY, managedPolicyFor, type WorkbenchPolicy } from "./policy.ts";
+import {
+	commentInvocation,
+	createCommentActionPlan,
+	renderCommentActionPlan,
+	validateCommentActionPlan,
+	type CommentActionPlan,
+	type CommentTargetSnapshot,
+} from "./mutations.ts";
+export {
+	type CommentTargetSnapshot,
+	type CommentActionPlan,
+	type CommentPlanValidation,
+	type NativeInvocation,
+	createCommentActionPlan,
+	renderCommentActionPlan,
+	validateCommentActionPlan,
+	commentInvocation,
+} from "./mutations.ts";
+export {
+	GENERIC_WORKBENCH_POLICY,
+	managedPolicyFor,
+	type ManagedRepoPolicy,
+	type WorkbenchPolicy,
+} from "./policy.ts";
+export const STATE_ENTRY = "com.hive.workbench.selection";
+export const BATCH_ENTRY = "com.hive.workbench.batch";
+export const COMMENT_ENTRY = "com.hive.workbench.comment";
+export const HANDOFF_ENTRY = "com.hive.workbench.handoff";
+const RECAP_BRANCH_ENTRY_LIMIT = 512;
+
+export type RepositoryBatchKind = "slay" | "fix" | "diff";
+export type RepositoryBatchState = "running" | "paused" | "blocked" | "complete" | "cancelled";
+type CiSkippedItem = {
+	readonly item: QueueItem;
+	readonly status: "failure" | "pending";
+	readonly evidenceSource: CiEvidenceSource;
+	readonly observedAt: number;
+};
+export type PersistedCiSkippedItem = {
+	readonly repo: string;
+	readonly number: number;
+	readonly headSha: string;
+	readonly ciStatus: "failure" | "pending";
+	readonly ciEvidenceSource: CiEvidenceSource;
+	readonly observedAt: number;
+};
+export type PersistedCandidateExclusion = {
+	readonly repo: string;
+	readonly number: number;
+	readonly headSha?: string;
+	readonly reason: "incomplete changed-file list" | "workflow file change" | "pull request already submitted";
+	readonly detail?: string;
+	readonly observedAt: number;
+};
+type ReconcileObservation =
+	| { readonly kind: "unknown" }
+	| { readonly kind: "settled"; readonly outcome: "success" }
+	| { readonly kind: "settled"; readonly outcome: "non-success"; readonly items: readonly string[] };
+type ReconciliationResult = { settled: string[]; unknown: string[]; submittedPrs: string[]; nonSuccessItems?: string[] };
+
+export interface PersistedRepositoryBatch {
+	readonly version: 1;
+	readonly id: string;
+	readonly kind: RepositoryBatchKind;
+	readonly waves: ReadonlyArray<{ readonly repo: string; readonly items: readonly QueueItem[] }>;
+	readonly currentWave: number;
+	readonly completedItems: number;
+	readonly totalItems: number;
+	/** Fresh CI exclusions retained separately from completed work. */
+	readonly skippedItems?: readonly PersistedCiSkippedItem[];
+	/** Candidate-selection exclusions retained separately from CI evidence. */
+	readonly excludedItems?: readonly PersistedCandidateExclusion[];
+	readonly state: RepositoryBatchState;
+	readonly startedAt: number;
+	readonly waveStartedAt: number;
+	readonly waveIdentity?: string;
+	/** Native OMP session owning this dispatched wave. */
+	readonly waveSessionId?: string;
+	readonly waveExit?: { readonly sessionId: string; readonly waveIdentity: string; readonly choice: "pause" | "cancel"; readonly requestedAt: number };
+	readonly waveShutdown?: { readonly sessionId: string; readonly waveIdentity: string; readonly settled: boolean; readonly pendingJobIds: readonly string[]; readonly reason?: string; readonly observedAt: number };
+	/** Digest of the exact coordinator prompt sent for this wave. */
+	readonly wavePromptDigest?: string;
+	readonly waveToolCallIds?: readonly string[];
+	/** Every tool-call identity observed after this wave was dispatched. */
+	readonly waveToolInvocationIds?: readonly string[];
+	readonly waveTaskWorkers?: Readonly<Record<string, readonly { agentId: string; jobId?: string; resultStatus?: "completed" | "failed" | "cancelled" }[]>>;
+	readonly waveJobBaselineIds?: readonly string[];
+	readonly waveJobIds?: readonly string[];
+	readonly waveTerminalJobStatuses?: Readonly<Record<string, "completed" | "failed" | "cancelled" | "canceled">>;
+	/** Positive native-session proof that the coordinator ended before any tool invocation. */
+	readonly wavePreToolTerminal?: "error" | "aborted";
+	readonly waveEffectResources?: readonly string[];
+	/** Baseline issue submissions captured before this wave was dispatched. */
+	readonly issueSubmittedPrs?: Readonly<Record<string, readonly string[]>>;
+	/** Operator requested cancellation; the current wave must drain before archive. */
+	readonly cancelRequested?: boolean;
+	readonly error?: string;
+}
+
+export interface PersistedCommentResult {
+	readonly version: 1;
+	readonly state: "previewed" | "confirmed" | "complete" | "failed" | "aborted";
+	readonly plan: CommentActionPlan;
+	readonly receipts?: readonly string[];
+	readonly error?: string;
+}
+
+/** Queue refetch cadence. GitHub search is rate limited. */
+const QUEUE_POLL_MS = 60_000;
+// Hive's queue moves with the project, not with the terminal. Polling it on the
+// queue's cadence keeps one hub request per refresh instead of one per repaint.
+const HIVE_POLL_MS = 120_000;
+
+function slayBashBlockReason(command: string): string | undefined {
+	if (/\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i.test(command)) {
+		return "credentials in URL userinfo would be exposed through process arguments";
+	}
+	for (const segment of command.split(/\r?\n|&&|\|\||;/)) {
+		if (/\bgh\s+pr\s+merge\b/.test(segment) && /(?:^|\s)--admin(?:[=\s]|$)/.test(segment)) {
+			return "admin merge bypass is forbidden; use GitHub's ordinary rules";
+		}
+		if (
+			/\bgit(?:\s+(?!push(?:\s|$))\S+)*\s+push(?:\s|$)/.test(segment)
+			&& /(?:^|\s)(?:-f|--force(?:-with-lease)?)(?:=[^\s]+)?(?:\s|$)/.test(segment)
+		) {
+			return "force-pushing a slay target is forbidden";
+		}
+	}
+	return undefined;
+}
+
+type LandingAction = "approve" | "merge";
+type LandingRequest = { readonly action: LandingAction; readonly key: string };
+
+function slayLandingRecovery(items: readonly QueueItem[]): string {
+	const urls = [...new Set(items.filter((item) => item.type === "pr").map((item) => item.url))].join(", ");
+	return `Next: open ${urls} in GitHub. If CI is pending, wait for it to finish there; if it fails, fix the failing checks. Revalidate the current head, reviews, holds, and mergeability. Once eligible, merge or enable auto-merge in GitHub, then run /review reconcile in this Review session. Reconcile only observes GitHub effects; it does not merge or restart work. /review resume is for saved paused work, not this blocked landing. Keep the claims intact.`;
+}
+
+function githubLandingAction(toolName: string | undefined, input: unknown): LandingRequest | "invalid" | undefined {
+	let name = toolName;
+	let args = input;
+	if (toolName === "write" && isRecord(input) && typeof input.path === "string") {
+		if (!input.path.startsWith("xd://mcp__github_")) return undefined;
+		name = input.path.slice("xd://".length);
+	}
+	const action = name?.replace(/^mcp__github_+/, "");
+	if (action !== "merge_pull_request" && action !== "pull_request_review_write") return undefined;
+	if (toolName === "write") {
+		if (!isRecord(input) || typeof input.content !== "string") return "invalid";
+		try { args = JSON.parse(input.content); } catch { return "invalid"; }
+	}
+	if (!isRecord(args)) return "invalid";
+	if (action !== "merge_pull_request" && !(typeof args.event === "string" && args.event.toUpperCase() === "APPROVE")) return undefined;
+	const number = args.pullNumber ?? args.pull_number;
+	if (typeof args.owner !== "string" || !/^[\w.-]+$/.test(args.owner)
+		|| typeof args.repo !== "string" || !/^[\w.-]+$/.test(args.repo)
+		|| typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) return "invalid";
+	return { action: action === "merge_pull_request" ? "merge" : "approve", key: `${args.owner}/${args.repo}#${number}` };
+}
+
+function bashLandingRequest(segment: string, action: LandingAction): LandingRequest | "invalid" {
+	// Resolve only literal identities. Dynamic shell expressions cannot select a
+	// different item after Review has checked its landing state.
+	if (/[|&<>`$\\()"']/.test(segment)
+		|| segment.trim().split(/\s+/).some((token) => /^-[^-]/.test(token) && token !== "-R")
+		|| [...segment.matchAll(/\bgh\s+pr\s+(?:merge|review)\b/g)].length !== 1
+		|| [...segment.matchAll(/(?:^|\s)(?:--repo(?:=|\s)|-R)/g)].length > 1) return "invalid";
+	const target = /\bgh\s+pr\s+(?:merge|review)\s+(\S+)/.exec(segment);
+	const value = target?.[1];
+	const url = value && /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/([1-9]\d*)$/.exec(value);
+	if (url) return /(?:^|\s)(?:--repo(?:=|\s)|-R)/.test(segment) ? "invalid" : { action, key: `${url[1]}#${url[2]}` };
+	const repoFlag = /(?:^|\s)(?:--repo|-R)(?:=|\s+)([\w.-]+\/[\w.-]+)(?=\s|$)/.exec(segment);
+	const repo = repoFlag?.[1];
+	return value && /^[1-9]\d*$/.test(value) && repo ? { action, key: `${repo}#${value}` } : "invalid";
+}
+
+function slayLandingBlockReason(
+	actions: readonly LandingAction[],
+	items: readonly QueueItem[],
+	policy?: WorkbenchPolicy,
+): string | undefined {
+	if (actions.length === 0) return undefined;
+	// Never approve or merge a pull request that is not genuinely ready to land:
+	// CI alone never implies ready. Every policy input blocks, so a queued hold or
+	// a requested-changes review stops the mutation just as a failing check does.
+	for (const item of items) {
+		if (item.type !== "pr") continue;
+		const state = landingState(item, policy);
+		if (state === "ready-to-land") continue;
+		// Approval establishes review readiness; it cannot require prior approval.
+		if (state === "unreviewed" && actions.every((action) => action === "approve")) continue;
+		return `${item.repo}#${item.id} ${landingReason(state)}. Review blocked this tool call before it reached GitHub. ${slayLandingRecovery([item])}`;
+	}
+	return undefined;
+}
+
+export const RAIL_KEYS: readonly RailKey[] = [
+	{ chord: "alt+b", label: "workbench" },
+	{ chord: "alt+s", label: "autoslay" },
+	{ chord: "alt+u", label: "refresh" },
+];
+
+export interface ExtensionOptions {
+	/** Injected by `index.ts` so the overlay understands kitty-protocol chords. */
+	matchKey?: KeyMatcher;
+	org?: string;
+	fetchImpl?: typeof fetch;
+	env?: NodeJS.ProcessEnv;
+	policy?: WorkbenchPolicy;
+}
+
+/** Loose structural types: the extension must build without omp's declarations. */
+interface UiLike {
+	notify(message: string, level?: "info" | "warning" | "error"): void;
+	input(title: string, placeholder?: string): Promise<string | undefined>;
+	select(title: string, options: Array<string | { label: string; description?: string }>): Promise<string | undefined>;
+	confirm(title: string, message: string): Promise<boolean>;
+	editor(title: string, prefill?: string, options?: unknown, editorOptions?: { promptStyle?: boolean }): Promise<string | undefined>;
+	setStatus(key: string, value: string | undefined): void;
+	setWidget(key: string, content: unknown, options?: { placement?: string }): void;
+	setTitle(title: string): void;
+	pasteToEditor(text: string): void;
+	custom<T>(factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown, options?: unknown): Promise<T>;
+	readonly theme: { fg(color: string, text: string): string; bold(text: string): string; inverse(text: string): string };
+}
+
+interface SessionSetupManager {
+	getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>;
+	getSessionId(): string;
+	getLeafId(): string | null;
+	getSessionFile(): string | undefined;
+}
+
+interface CtxLike {
+	hasUI: boolean;
+	ui: UiLike;
+	newSession?(options?: { parentSession?: string; setup?: (sessionManager: SessionSetupManager) => Promise<void> }): Promise<{ cancelled: boolean }>;
+	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>; getSessionId?(): string; getLeafId?(): string | null; getSessionFile?(): string | undefined; saveArtifact?(content: string, toolType: string): Promise<string | undefined>; getArtifactPath?(id: string): Promise<string | null>; getArtifactsDir?(): string | null };
+	getAsyncJobSnapshot?(): {
+		running: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
+		recent: Array<{ id: string; agentId?: string; type?: string; status: string; startTime: number; waveId?: string }>;
+		delivery?: { pendingJobIds: readonly string[] };
+	} | null;
+}
+
+/** The slice of omp's `ExtensionAPI` this mode uses. */
+export interface ReviewExtensionHost {
+	readonly sessionShutdownLifecycleVersion?: number;
+	exec(command: string, args: string[], options?: { timeout?: number }): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }>;
+	zod: unknown;
+	setLabel(label: string): void;
+	on(event: string, handler: (event: unknown, ctx: CtxLike) => unknown): void;
+	registerShortcut(chord: string, options: { description?: string; handler: (ctx: CtxLike) => void }): void;
+	registerFlag(name: string, options: { description?: string; type: "string" | "boolean"; default?: string | boolean }): void;
+	getFlag(name: string): string | boolean | undefined;
+	registerTool(definition: unknown): void;
+	registerCommand?(name: string, definition: { description?: string; handler(args: string, ctx: CtxLike): unknown }): void;
+	appendEntry(customType: string, data?: unknown): void;
+	sendUserMessage(content: string, options?: { deliverAs?: string; waveId?: string }): void;
+	sendMessage?(message: { customType: string; content: string; display?: boolean; details?: unknown }, options?: { triggerTurn?: boolean }): void;
+}
+
+function readLatestCustom<T>(ctx: CtxLike, customType: string): T | undefined {
+	let latest: T | undefined;
+	for (const entry of ctx.sessionManager?.getBranch() ?? []) {
+		if (entry.type === "custom" && entry.customType === customType && entry.data) latest = entry.data as T;
+	}
+	return latest;
+}
+
+function readPersistedBatches(ctx: CtxLike): PersistedRepositoryBatch[] {
+	return (ctx.sessionManager?.getBranch() ?? [])
+		.filter((entry) => entry.type === "custom" && entry.customType === BATCH_ENTRY && entry.data)
+		.map((entry) => entry.data as PersistedRepositoryBatch);
+}
+
+function readPersisted(ctx: CtxLike): PersistedSelection | undefined {
+	return readLatestCustom<PersistedSelection>(ctx, STATE_ENTRY);
+}
+
+function readPersistedComment(ctx: CtxLike): PersistedCommentResult | undefined {
+	return readLatestCustom<PersistedCommentResult>(ctx, COMMENT_ENTRY);
+}
+
+function nativeArtifactId(value: unknown): string | undefined {
+	if (!isRecord(value) || !isRecord(value.details) || !isRecord(value.details.meta) || !isRecord(value.details.meta.truncation)) return undefined;
+	const id = value.details.meta.truncation.artifactId;
+	return typeof id === "string" && /^\d{1,128}$/.test(id) ? id : undefined;
+}
+
+function hasNativeArtifactError(value: unknown): boolean {
+	return isRecord(value) && isRecord(value.details) && isRecord(value.details.meta) && Boolean(value.details.meta.artifactError);
+}
+export async function reconcileBlockedRepositoryClaim(
+	claims: ResourceClaims,
+	batch: PersistedRepositoryBatch,
+	owner: string,
+	resource: string,
+	authoritative: () => Promise<"settled" | "unknown">,
+): Promise<"settled" | "unknown"> {
+	const wave = batch.waves[batch.currentWave];
+	const resources = wave ? [`repo:${wave.repo.toLowerCase()}`, ...wave.items.map((item) => `item:${item.repo.toLowerCase()}#${item.id}`)] : [];
+	if (!["blocked", "cancelled", "paused"].includes(batch.state) || !wave || owner !== `review:${batch.id}:${batch.currentWave}` || !resources.includes(resource.toLowerCase())) return "unknown";
+	if (await authoritative() !== "settled") return "unknown";
+	claims.markSettled(resource, owner);
+	return "settled";
+}
+export function waveWorkersSettled(
+	snapshot: { running: readonly { id: string; status: string }[]; recent: readonly { id: string; status: string }[] } | null | undefined,
+	ids: readonly string[] | undefined,
+	persisted?: Readonly<Record<string, "completed" | "failed" | "cancelled" | "canceled">>,
+): boolean {
+	if (!ids?.length) return false;
+	const observed = new Map([...(snapshot?.running ?? []), ...(snapshot?.recent ?? [])].map((job) => [job.id, job]));
+	return ids.every((id) => {
+		const job = observed.get(id);
+		if (job) return (job.status === "completed" || job.status === "failed" || job.status === "cancelled" || job.status === "canceled") && !(snapshot?.running ?? []).some((running) => running.id === id);
+		const status = persisted?.[id];
+		return status === "completed" || status === "failed" || status === "cancelled" || status === "canceled";
+	});
+}
+export function captureWaveJobIds(
+	snapshot: { running: readonly { id: string }[]; recent: readonly { id: string }[] } | null | undefined,
+	baseline: readonly string[] | undefined,
+): string[] {
+	if (!snapshot) return [];
+	const excluded = new Set(baseline ?? []);
+	return [...snapshot.running, ...snapshot.recent]
+		.map((job) => job.id)
+		.filter((id, index, all) => !excluded.has(id) && all.indexOf(id) === index)
+		.sort();
+}
+export function waveWorkerCoverageComplete(jobIds: readonly string[] | undefined, toolCallIds: readonly string[] | undefined, workers?: PersistedRepositoryBatch["waveTaskWorkers"]): boolean {
+	if (!jobIds?.length || !toolCallIds?.length || !workers) return false;
+	if (Object.keys(workers).length !== toolCallIds.length) return false;
+	const mapped: string[] = [];
+	const agents: string[] = [];
+	for (const call of toolCallIds) {
+		if (!workers[call]?.length) return false;
+		for (const worker of workers[call]) {
+			if (!worker.jobId) return false;
+			mapped.push(worker.jobId);
+			agents.push(worker.agentId);
+		}
+	}
+	return new Set(agents).size === agents.length && new Set(mapped).size === mapped.length
+		&& JSON.stringify([...mapped].sort()) === JSON.stringify([...jobIds].sort());
+}
+
+function slayWaveWorkerBlockReason(batch: PersistedRepositoryBatch, snapshot: ReturnType<NonNullable<CtxLike["getAsyncJobSnapshot"]>>): string | undefined {
+	const ids = batch.waveJobIds ?? [];
+	const baseline = new Set(batch.waveJobBaselineIds ?? []);
+	const observed = [...(snapshot?.running ?? []), ...(snapshot?.recent ?? [])];
+	if (!batch.waveIdentity || !batch.wavePromptDigest
+		|| !waveWorkerCoverageComplete(ids, batch.waveToolCallIds, batch.waveTaskWorkers)
+		|| ids.some((id) => baseline.has(id))
+		|| observed.some((job) => ids.includes(job.id) && job.startTime < batch.waveStartedAt)) {
+		return "the current dispatch lacks complete, fresh workflowz task-to-job evidence. Invoke the workflowz task tool with fresh workers for this dispatch; historical worker resources cannot authorize approval or merge";
+	}
+	if (!waveWorkersSettled(snapshot, ids, batch.waveTerminalJobStatuses)
+		|| snapshot?.delivery?.pendingJobIds.some((id) => ids.includes(id))) {
+		return "the current dispatch workflowz workers lack terminal settlement or still await result delivery; approval and merge must wait for their receipts";
+	}
+	if (ids.some((id) => batch.waveTerminalJobStatuses?.[id] !== "completed")
+		|| Object.values(batch.waveTaskWorkers ?? {}).flat().some((worker) => worker.resultStatus === "failed" || worker.resultStatus === "cancelled")) {
+		return "the current dispatch workflowz worker receipts do not all prove successful completion; failed, cancelled, or unknown work cannot authorize approval or merge";
+	}
+	return undefined;
+}
+
+/** Project persisted worker identities against one current OMP job snapshot. */
+export function observeReviewWaveWorkers(
+	jobIds: readonly string[] | undefined,
+	toolCallIds: readonly string[] | undefined,
+	workers: PersistedRepositoryBatch["waveTaskWorkers"] | undefined,
+	terminalJobStatuses: PersistedRepositoryBatch["waveTerminalJobStatuses"] | undefined,
+	snapshot: { running: readonly { id: string; status: string }[]; recent: readonly { id: string; status: string }[] } | null | undefined,
+): ClaimOwnerWorkerObservation {
+	const recordedJobIds = [...(jobIds ?? [])];
+	const recorded = new Set(recordedJobIds);
+	const live = snapshot !== undefined && snapshot !== null;
+	const observed = live
+		? new Set([...(snapshot.running ?? []), ...(snapshot.recent ?? [])].map((job) => job.id))
+		: undefined;
+	return {
+		jobIds: recordedJobIds,
+		toolCallIds: [...(toolCallIds ?? [])],
+		runningJobIds: live ? snapshot.running.map((job) => job.id).filter((id) => recorded.has(id)) : [],
+		unobservedJobIds: live ? recordedJobIds.filter((id) => !observed?.has(id)) : [],
+		taskWorkers: workers ?? {},
+		terminalJobStatuses: terminalJobStatuses ?? {},
+		coverageComplete: waveWorkerCoverageComplete(jobIds, toolCallIds, workers),
+		settled: waveWorkersSettled(snapshot, jobIds, terminalJobStatuses),
+		source: live ? "live" : (recordedJobIds.length || Object.keys(terminalJobStatuses ?? {}).length ? "persisted" : "unknown"),
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function promptDigest(prompt: string): string {
+	return createHash("sha256").update(prompt).digest("hex");
+}
+
+function messageText(message: unknown): string | undefined {
+	if (!isRecord(message)) return undefined;
+	if (typeof message.content === "string") return message.content;
+	if (!Array.isArray(message.content)) return undefined;
+	const text = message.content
+		.filter((part): part is Record<string, unknown> => isRecord(part) && part.type === "text" && typeof part.text === "string")
+		.map((part) => part.text as string)
+		.join("\n");
+	return text.length > 0 ? text : undefined;
+}
+
+function isWavePrompt(message: unknown, digest: string): boolean {
+	return isRecord(message) && message.role === "user" && typeof messageText(message) === "string" && promptDigest(messageText(message)!) === digest;
+}
+
+function messageHasToolActivity(message: unknown): boolean {
+	if (!isRecord(message)) return false;
+	if (message.role === "toolResult" || message.role === "tool") return true;
+	if (!Array.isArray(message.content)) return false;
+	return message.content.some((part) => isRecord(part) && (part.type === "toolCall" || part.type === "toolResult"));
+}
+
+function terminalAssistantMessage(messages: readonly unknown[]): Record<string, unknown> | undefined {
+	for (const message of [...messages].reverse()) {
+		if (!isRecord(message) || message.role !== "assistant") continue;
+		return message.stopReason === "error" || message.stopReason === "aborted" ? message : undefined;
+	}
+	return undefined;
+}
+
+/**
+ * Require both the native terminal message and its persisted branch context.
+ * Absence of task evidence is never enough: this proof is only accepted when
+ * OMP recorded the coordinator's terminal error/abort and the wave's branch
+ * contains no tool-capable message after its durable checkpoint.
+ */
+function preToolCoordinatorTerminal(
+	event: unknown,
+	ctx: CtxLike,
+	batch: PersistedRepositoryBatch,
+): "error" | "aborted" | undefined {
+	if (!batch.waveIdentity || !isRecord(event) || !Array.isArray(event.messages)) return undefined;
+	if ((batch.waveToolInvocationIds?.length ?? 0) > 0) return undefined;
+	if (!batch.wavePromptDigest) return undefined;
+	const eventPromptIndex = [...event.messages].findLastIndex((message) => isWavePrompt(message, batch.wavePromptDigest!));
+	if (eventPromptIndex < 0) return undefined;
+	const currentMessages = event.messages.slice(eventPromptIndex);
+	const terminal = terminalAssistantMessage(currentMessages);
+	if (!terminal || currentMessages.slice(1).some((message) => isRecord(message) && message.role === "user") || currentMessages.some(messageHasToolActivity)) return undefined;
+	const snapshot = ctx.getAsyncJobSnapshot?.();
+	const baseline = new Set(batch.waveJobBaselineIds ?? []);
+	if (snapshot?.running.some((job) => job.startTime >= batch.waveStartedAt)
+		|| snapshot?.delivery?.pendingJobIds.some((id) => !baseline.has(id))) return undefined;
+	const branch = ctx.sessionManager?.getBranch() ?? [];
+	let checkpoint = -1;
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry?.type !== "custom" || entry.customType !== BATCH_ENTRY || !isRecord(entry.data)) continue;
+		if (entry.data.id === batch.id && entry.data.waveIdentity === batch.waveIdentity) {
+			checkpoint = index;
+			break;
+		}
+	}
+	if (checkpoint < 0) return undefined;
+	const tail = branch.slice(checkpoint + 1);
+	const messages = tail.flatMap((entry) => entry.type === "message" && entry.message !== undefined ? [entry.message] : []);
+	const branchPromptIndex = messages.findIndex((message) => isWavePrompt(message, batch.wavePromptDigest!));
+	if (branchPromptIndex < 0) return undefined;
+	const currentBranchMessages = messages.slice(branchPromptIndex);
+	if (currentBranchMessages.slice(1).some((message) => isRecord(message) && message.role === "user") || currentBranchMessages.some(messageHasToolActivity)) return undefined;
+	const branchTerminal = terminalAssistantMessage(currentBranchMessages);
+	if (!branchTerminal || branchTerminal.stopReason !== terminal.stopReason) return undefined;
+	if (typeof terminal.errorMessage === "string" && branchTerminal.errorMessage !== terminal.errorMessage) return undefined;
+	return terminal.stopReason === "aborted" ? "aborted" : "error";
+}
+
+function preToolProofValid(batch: PersistedRepositoryBatch): boolean {
+	if (batch.wavePreToolTerminal !== "error" && batch.wavePreToolTerminal !== "aborted") return false;
+	if (typeof batch.wavePromptDigest !== "string" || !/^[a-f0-9]{64}$/.test(batch.wavePromptDigest)) return false;
+	if (!Array.isArray(batch.waveToolInvocationIds) || batch.waveToolInvocationIds.length !== 0) return false;
+	if (batch.waveToolCallIds !== undefined && (!Array.isArray(batch.waveToolCallIds) || batch.waveToolCallIds.length > 0)) return false;
+	if (batch.waveTaskWorkers !== undefined && (!isRecord(batch.waveTaskWorkers) || Object.keys(batch.waveTaskWorkers).length > 0)) return false;
+	if (batch.waveJobIds !== undefined && (!Array.isArray(batch.waveJobIds) || batch.waveJobIds.length > 0)) return false;
+	if (batch.waveTerminalJobStatuses !== undefined && (!isRecord(batch.waveTerminalJobStatuses) || Object.keys(batch.waveTerminalJobStatuses).length > 0)) return false;
+	return true;
+}
+
+/** A stopped session is execution evidence, never task-success evidence. */
+export function sessionStopped(batch: PersistedRepositoryBatch): boolean {
+	const receipt = batch.waveShutdown;
+	return !!batch.waveIdentity && !!batch.waveSessionId && receipt?.settled === true
+		&& receipt.sessionId === batch.waveSessionId && receipt.waveIdentity === batch.waveIdentity
+		&& batch.waveExit?.sessionId === receipt.sessionId && batch.waveExit.waveIdentity === receipt.waveIdentity
+		&& Array.isArray(receipt.pendingJobIds) && receipt.pendingJobIds.length === 0;
+}
+
+function preToolRuntimeSettled(ctx: CtxLike, batch: PersistedRepositoryBatch): boolean {
+	const snapshot = ctx.getAsyncJobSnapshot?.();
+	if (!snapshot) return false;
+	const baseline = new Set(Array.isArray(batch.waveJobBaselineIds) ? batch.waveJobBaselineIds : []);
+	return !snapshot.running.some((job) => job.startTime >= batch.waveStartedAt)
+		&& !snapshot.delivery?.pendingJobIds.some((id) => !baseline.has(id));
+}
+
+
+/**
+ * Open a pull request or issue in the local browser (PR Reader `o`).
+ *
+ * The reader header already shows the URL, so a failure to find a browser is
+ * not catastrophic: the shortcut is best-effort and never silently blocks.
+ */
+/** Slay, autoslay, and fix may change pull-request heads; PR slay may also land reviewed heads. */
+export function isImplementationAction(action: DashboardAction): boolean {
+	return action.kind === "fix" || action.kind === "slay" || action.kind === "autoslay";
+}
+/**
+ * Prompts the action keys send. Each one names the evidence the agent must use.
+ *
+ * When Hive ranked the item, the prompt says so and names the queued work it
+ * serves: the point of running this tool against an orchestrated project is that
+ * the review contributes to what the project decided matters, and an agent that
+ * is not told the link cannot honor it.
+ */
+export function actionPrompt(
+	action: DashboardAction,
+	priority?: Priority,
+	options?: { workbenchMode?: WorkbenchMode },
+): string | undefined {
+	if (
+		action.kind === "close"
+		|| action.kind === "scope"
+		|| action.kind === "comment"
+		|| action.kind === "reference"
+		|| action.kind === "autoslay"
+	) return undefined;
+
+	const selected = action.items && action.items.length > 0 ? action.items : [action.item];
+	const reviewerAgent = "reviewer";
+	const toolPrefix = options?.workbenchMode === "hive" ? "hive" : "review";
+	const traceTool = `${toolPrefix}_workbench_trace`;
+	const evidenceTool = selected.every((item) => item.type === "issue")
+		? toolPrefix === "review"
+			? "review_workbench_issue"
+			: "hive_workbench_diff"
+		: `${toolPrefix}_workbench_diff`;
+	const cite = (item: QueueItem) => `${item.repo}#${item.id} (${item.title})`;
+	const stateOf = (item: QueueItem) => {
+		const parts = [
+			item.ciStatus ? `ci=${item.ciStatus}` : "",
+			item.mergeState === "unknown" ? "" : `merge=${item.mergeState}`,
+			item.reviewState === "unknown" ? "" : `review=${item.reviewState}`,
+			item.draft ? "draft" : "",
+		].filter(Boolean);
+		return parts.length > 0 ? ` [queue read: ${parts.join(" ")} — revalidate live before mutating]` : "";
+	};
+	const authority = priority?.hiveRank === undefined
+		? ""
+		: `Hive ranked this work (${priority.reason}); preserve that intent. `;
+	const allIssues = selected.every((item) => item.type === "issue");
+	const allPullRequests = selected.every((item) => item.type === "pr");
+	if (action.kind === "slay" && !allIssues && !allPullRequests) return undefined;
+	const repairWave = allPullRequests && priority?.category === "repair-requested";
+	const evidence = `Evidence is bounded and read once. Start with \`${evidenceTool}\` using both \`pull_request\` and explicit \`repo\`; child agents do not inherit the coordinator's selected repository. Use \`gh pr diff <n> --repo <r> --name-only\` only to confirm filenames, inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Never assume a checkout exists. Check a repository-specific validator once; if the minimal appliance lacks that toolchain, use hosted check evidence and report the local verification gap instead of installing packages or retrying the absent command. Treat \`merge=dirty\` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose \`--ours\`/\`--theirs\` wholesale. Revalidate live state before any comment, label, assignment, close, push, approval, or merge.`;
+	const reviewFinish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
+	const slayContinuation = "Review Slay coordinator ownership persists through the selected lifecycle's declared terminal condition. Review completion, a fixer return, a push, green checks, or knowing the next action is progress, not completion. Continue already-authorized in-scope work without asking for confirmation already supplied by the objective; authorized actions need no second confirmation, while new scope or effects still require authority. A partial status report is not terminal. If one lane is blocked, finish independent authorized work before reporting that lane's exact blocker and evidence. Stop only when the requested terminal outcome is satisfied and verified, a concrete external blocker prevents further authorized progress, or continuing requires authority or scope the operator did not grant. Existing live GitHub policy, permissions, exact-head checks, holds, self-review rules, and mutation guards still bind terminal conditions. Never sleep or poll. Workers remain bounded and return to the coordinator.";
+	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent}. If it has findings, dispatch one fresh fixer with the exact repository, pull-request number, and head. Each fixer must use its own distinct target checkout under \`$HOME/worktrees\`, created with \`gh repo clone\` and \`gh pr checkout\`, and no two workers may share a checkout or conversation; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --auto --squash\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. If Review blocks landing, identify it as Review's local guard, not a GitHub rejection. Do not call an observed check required without live rules evidence. Report the current head and whether CI is pending or failing, include the PR URL, and give these recovery steps explicitly: ${slayLandingRecovery(selected)} Never end with only "resume once checks clear" or imply that reconcile will merge the PR. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
+	const repairFinish = "These pull requests were returned to their authenticated author with requested changes. Read the review threads and failing checks, diagnose every requested correction, then dispatch one fresh fixer per pull request. Each fixer owns one unique target checkout under `$HOME/worktrees`, created with `gh repo clone` and `gh pr checkout`; no two workers share a checkout or conversation. Make the smallest complete correction, run focused verification, and push a new head without force. Never review, approve, auto-merge, or merge the author's own pull request. A repair is terminal only after GitHub shows a new head SHA. Report the pushed head and pull-request URL for every item, then stop; the workbench owns the next repository wave.";
+	const issueContext = options?.workbenchMode === "hive"
+		? "Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it."
+		: "Inspect the complete GitHub issue description before deciding how to implement it.";
+	const issueEvidence = `Evidence is bounded and read once. ${issueContext} Read the target repository's \`AGENTS.md\` and applicable contribution or pull-request guidance before creating a branch. Never assume the working directory is a checkout: use \`gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>\` to materialize one unique workspace per issue under \`$HOME/worktrees\`, then enter that checkout before examining relevant source files and tests. Never clone into \`/tmp\`. Create a dedicated feature branch from the correct target base specified by current operator instructions or repository guidance; use live repository integration state when the base is not explicit, and never assume it is \`main\`. Do not write directly to the base branch. Before running \`gh pr create\`, verify the current branch is the dedicated feature branch and the explicit proposed base matches that resolved target. If the current branch is the integration branch, the intended base is ambiguous or conflicting, or the proposed base differs from policy, do not run \`gh pr create\`; stop and report BLOCKED with the observed head branch, intended and proposed bases, and the policy source. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request targeting that same base whose body contains \`Closes <owner/repo>#<number>\`. Never force-push. Never merge or approve your own pull request.`;
+	const issueWorkflow = options?.workbenchMode === "hive"
+		? "Before dispatching, call `hive_workbench_lookup` with target `queue` and then target `knowledge`. Match every issue key to Hive's entry and include the relevant queue and knowledge evidence in that worker's prompt; report unavailable Hive evidence instead of inventing it. Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique target checkout named in its prompt; do not share a checkout or conversation between items."
+		: "Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique target checkout named in its prompt; do not share a checkout or conversation between items.";
+	const issueInspectSource = toolPrefix === "review"
+		? "Call `review_workbench_issue` with explicit `issue` and `repo` to read the complete issue body, discussion, and linked pull requests."
+		: "Read the complete issue body and discussion with `gh issue view <n> --repo <r> --comments`, and list the pull requests linked to it.";
+	const issueInspectEvidence = `Evidence is bounded and read once. ${issueInspectSource} Inspect only the relevant source files, citing file:line evidence. Do not call pull-request diff tools for an issue. Never sleep or poll. Never assume a checkout exists. Report the request, its current state, and concrete risks.`;
+
+	if (selected.length > 1) {
+		const repository = selected[0]!.repo;
+		if (selected.some((item) => item.repo !== repository)) return undefined;
+		const list = selected.map((item) => `- ${cite(item)}: ${item.url}${stateOf(item)}`).join("\n");
+		const reviewRules = `<<<SUBAGENT-RULES\n${evidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
+		const slayRules = `<<<SUBAGENT-RULES\n${evidence} ${slayFinish}\nSUBAGENT-RULES>>>`;
+		const repairRules = `<<<SUBAGENT-RULES\n${evidence} ${repairFinish}\nSUBAGENT-RULES>>>`;
+		const issueRules = `<<<SUBAGENT-RULES\n${issueEvidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
+		const issueInspectRules = `<<<SUBAGENT-RULES\n${issueInspectEvidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
+		switch (action.kind) {
+			case "slay":
+				if (allIssues) {
+					return `Implement this issue wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\n${slayContinuation} ${issueWorkflow} Copy this block verbatim into every worker prompt:\n${issueRules}`;
+				}
+				if (repairWave) {
+					return `Repair this returned pull-request wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh fixer per pull request through OMP workflowz. Do not share a checkout or conversation between items. Copy this block verbatim into every worker prompt:\n${repairRules}`;
+				}
+				return `Slay this repository wave for ${repository} through review, repair, and landing:\n\n${list}\n\n${slayContinuation} Use the \`task\` tool once with one fresh reviewer item per pull request through OMP workflowz. Do not use eval workpool: its generated boolean output schema is rejected by the current Copilot provider. Keep every repair agent in its own unique \`$HOME/worktrees\` checkout, and never reuse a reviewer for the post-fix head. Coordinate the complete lifecycle after the review workers return. Copy this block verbatim into every worker prompt:\n${slayRules}`;
+			case "diff":
+				return allIssues
+					? `Inspect this issue wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Do not reuse a worker across repositories. Read each issue's body, discussion, and linked pull requests, and report the request, its current state, and concrete risks. Copy this block verbatim into every worker prompt:\n${issueInspectRules}`
+					: `Inspect this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Do not reuse a worker across repositories. Use ${evidenceTool} and report the object evidence and concrete risks. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
+			case "fix":
+				return allIssues
+					? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Each worker must use its unique target checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${issueRules}`
+					: `Fix this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Each worker must use its unique target checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
+		}
+	}
+
+	const item = selected[0]!;
+	const workflow = action.kind === "fix"
+		? "Use the OMP workflowz `task` tool with one fresh item for this target."
+		: action.kind === "slay"
+			? repairWave || allIssues
+				? "Use the OMP workflowz `task` tool with one fresh implementation item for this target."
+				: `Use the OMP workflowz \`task\` tool with one fresh ${reviewerAgent} item for this target; do not use eval workpool.`
+			: "Use the OMP workflowz `task` tool with one fresh item for this target.";
+	switch (action.kind) {
+		case "review":
+			return `Review ${cite(action.item)}. Read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence, covering correctness, security, tests, and simplicity. State explicitly what you verified and what you could not. ${authority} ${reviewFinish}`;
+		case "slay":
+			if (allIssues) {
+				return `Implement ${cite(item)} as an issue. ${slayContinuation} ${issueWorkflow} ${authority} ${issueEvidence} ${reviewFinish}`;
+			}
+			if (repairWave) {
+				return `Repair ${cite(item)} after requested changes. Use ${evidenceTool} and read the review threads, then push a corrected head. ${workflow} ${authority} ${repairFinish}`;
+			}
+			return `Slay ${cite(item)} through review, repair, and landing. ${slayContinuation} Use ${evidenceTool} and ${traceTool}, then run the complete lifecycle with fresh review and fix agents; each fixer owns a distinct \`$HOME/worktrees\` checkout. ${workflow} ${authority} ${slayFinish}`;
+		case "diff":
+			return item.type === "issue"
+				? `Inspect ${cite(item)} as an issue. ${issueInspectEvidence.replace("<n>", String(item.id)).replace("<r>", item.repo)} ${workflow} ${authority} ${reviewFinish}`
+				: `Call ${evidenceTool} for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${authority} ${reviewFinish}`;
+		case "fix":
+			return item.type === "issue"
+				? `Implement ${cite(item)}. ${issueWorkflow} ${authority} ${issueEvidence} ${reviewFinish}`
+				: `Fix ${cite(item)} in its own unique \`$HOME/worktrees\` target checkout. Re-read the live diff and failing checks, diagnose each root cause, run focused verification, and push one clean commit for independent review. ${workflow} ${authority} ${reviewFinish}`;
+		case "request_reviewer":
+			return `Request review on ${cite(action.item)} from repository collaborators. Use \`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-reviewer <reviewer>\` to assign reviewers and prioritize in their maintainer queue.`;
+	}
+}
+
+/**
+ * What the caller keeps after wiring the mode into a host.
+ *
+ * `session_start` returns before its own work is finished, so "the session has
+ * started" and "the queue is on screen" are two different moments. Anything that
+ * needs the second one — a test, a headless caller — awaits this.
+ */
+export interface ReviewExtension {
+	whenStarted(): Promise<void>;
+}
+
+export function createReviewExtension(pi: ReviewExtensionHost, options: ExtensionOptions = {}): ReviewExtension {
+	const env = options.env ?? process.env;
+	const policy = options.policy ?? GENERIC_WORKBENCH_POLICY;
+	const matchKey = options.matchKey;
+	const configuredScope = options.org
+		? orgScope(options.org)
+		: parseScope(env.REVIEW_DEFAULT_SCOPE ?? "", "");
+	const mode = new ReviewMode({
+		org: options.org ?? (configuredScope?.kind === "org" ? configuredScope.value : ""),
+		scope: configuredScope ?? orgScope(""),
+		fetchImpl: options.fetchImpl,
+		env,
+		policy,
+	});
+	const statusKey = mode.isReviewMode() ? "review_workbench" : "hive_workbench";
+
+	let tui: { requestRender(): void } | undefined;
+	const timers: Array<() => void> = [];
+	let dashboardOpen = false;
+	let activeDashboard: ReviewDashboard | undefined;
+	let activeCtx: CtxLike | undefined;
+	let traceSessionId: string | undefined;
+	let traceGeneration = 0;
+	const traceContext = (ctx?: CtxLike): CtxLike | undefined => {
+		const candidate = ctx ?? activeCtx;
+		if (!candidate) return undefined;
+		const sessionId = candidate.sessionManager?.getSessionId?.();
+		if (traceSessionId && sessionId && traceSessionId !== sessionId) return undefined;
+		traceSessionId ??= sessionId;
+		return candidate;
+	};
+	const resetTrace = (ctx: CtxLike): void => {
+		traceGeneration++;
+		mode.session.clear();
+		traceSessionId = ctx.sessionManager?.getSessionId?.();
+	};
+	let factoryHandoffBatchId: string | undefined;
+	let factoryOpenOnly = false;
+	let factoryHandoffRequested = false;
+	let started: Promise<void> = Promise.resolve();
+	const recoveryBatches = new Map<string, PersistedRepositoryBatch>();
+	let activeBatch: PersistedRepositoryBatch | undefined;
+	let batchRequestGeneration = 0;
+	// Local teardown identity distinguishes late callbacks from a restored session
+	// that legitimately reuses the same durable OMP session ID.
+	let shuttingDownSessionId: string | undefined;
+	const ownedWavePrompts = new Set<string>();
+	let pendingExit: { sessionId: string; batch: PersistedRepositoryBatch; choice: "pause" | "cancel" } | undefined;
+	let commentInFlight = false;
+	const uncertainHandoffIds = new Set<string>();
+	pi.setLabel(mode.isReviewMode() ? "Review Workbench" : "Hive Workbench");
+	pi.registerFlag("pr", { description: "Preselect a pull request or issue number", type: "string" });
+	pi.registerFlag("issues", { description: "Start in issues mode instead of pull requests", type: "boolean", default: false });
+	pi.registerFlag("all", { description: "Show all queue items instead of filtering to Hive-assigned work", type: "boolean", default: false });
+	pi.registerFlag("repo", { description: "Review one repository: owner/repo, or org:name for a whole organization", type: "string" });
+	pi.registerFlag("skip-repo", { description: "Comma-separated repositories to skip", type: "string" });
+	pi.registerFlag("autoslay", { description: "Slay the selected or visible queue", type: "boolean", default: false });
+	registerTools(pi as unknown as ToolHost, mode, () => started);
+	const unregisterFactorySelection = registerFactorySelection((action) => mode.factorySelection(action));
+	let claims: ResourceClaims | undefined;
+	const resourceClaims = () => claims ??= new ResourceClaims(factoryStateRoot(env), factoryClaimsRoot(env));
+	const resourcesForBatch = (batch: PersistedRepositoryBatch): string[] => {
+		const wave = batch.waves[batch.currentWave];
+		if (!wave || batch.kind === "diff") return [];
+		return [...new Set(wave.items.flatMap((item) => [
+			`repo:${item.repo.toLowerCase()}`,
+			`item:${item.repo.toLowerCase()}#${item.id}`,
+		]))].sort();
+	};
+	const expectedIssueSubmission = (
+		batch: PersistedRepositoryBatch,
+		item: QueueItem,
+		current: QueueItem,
+	): string[] | undefined => {
+		const key = `${item.repo.toLowerCase()}#${item.id}`;
+		const baseline = batch.issueSubmittedPrs?.[key] ?? item.submittedPrs ?? [];
+		const currentPrs = current.submittedPrs ?? [];
+		const delta = currentPrs.filter((submittedPr) => !baseline.includes(submittedPr));
+		return delta.length === 1 ? delta : undefined;
+	};
+	const sameWaveEvidence = (expected: PersistedRepositoryBatch, current: PersistedRepositoryBatch | undefined): boolean =>
+		current !== undefined
+		&& expected.id === current.id
+		&& JSON.stringify([
+			expected.kind,
+			expected.waves,
+			expected.currentWave,
+			expected.waveStartedAt,
+			expected.waveIdentity,
+			expected.wavePromptDigest,
+			expected.wavePreToolTerminal,
+			expected.waveSessionId,
+			expected.waveExit,
+			expected.waveShutdown,
+			expected.waveToolInvocationIds,
+			expected.waveToolCallIds,
+			expected.waveTaskWorkers,
+			expected.waveJobBaselineIds,
+			expected.waveJobIds,
+			expected.waveTerminalJobStatuses,
+			expected.waveEffectResources,
+			expected.issueSubmittedPrs,
+			expected.skippedItems,
+			expected.cancelRequested,
+		]) === JSON.stringify([
+			current.kind,
+			current.waves,
+			current.currentWave,
+			current.waveStartedAt,
+			current.waveIdentity,
+			current.wavePromptDigest,
+			current.wavePreToolTerminal,
+			current.waveSessionId,
+			current.waveExit,
+			current.waveShutdown,
+			current.waveToolInvocationIds,
+			current.waveToolCallIds,
+			current.waveTaskWorkers,
+			current.waveJobBaselineIds,
+			current.waveJobIds,
+			current.waveTerminalJobStatuses,
+			current.waveEffectResources,
+			current.issueSubmittedPrs,
+			current.skippedItems,
+			current.cancelRequested,
+		]);
+	const latestWaveForArchive = (batch: PersistedRepositoryBatch): PersistedRepositoryBatch | undefined => {
+		if (!batch.waveIdentity) return batch;
+		const latest = loadWave(factoryClaimsRoot(env), `review:${batch.id}:${batch.currentWave}`);
+		if (!sameWaveEvidence(batch, latest)
+			|| (activeBatch?.id === batch.id && !sameWaveEvidence(batch, activeBatch))) return undefined;
+		return latest;
+	};
+	const currentPreToolWave = (ctx: CtxLike, batch: PersistedRepositoryBatch): PersistedRepositoryBatch | undefined => {
+		const latest = latestWaveForArchive(batch);
+		return preToolProofValid(batch)
+			&& preToolProofValid(latest)
+			&& preToolRuntimeSettled(ctx, latest)
+			? latest
+			: undefined;
+	};
+	const issueSubmissionsMatch = (
+		batch: PersistedRepositoryBatch,
+		item: QueueItem,
+		current: QueueItem,
+	): boolean => {
+		const key = `${item.repo.toLowerCase()}#${item.id}`;
+		const baseline = new Set(batch.issueSubmittedPrs?.[key] ?? item.submittedPrs ?? []);
+		const observed = new Set(current.submittedPrs ?? []);
+		return baseline.size === observed.size && [...baseline].every((submission) => observed.has(submission));
+	};
+	const rememberRecoveryBatch = (batch: PersistedRepositoryBatch): void => {
+		if (batch.state === "blocked" || batch.state === "cancelled") recoveryBatches.set(batch.id, batch);
+		else recoveryBatches.delete(batch.id);
+	};
+	const restoreClaimWaves = (): string[] => {
+		const missing: string[] = [];
+		for (const owner of new Set(resourceClaims().list().filter((claim) => claim.owner.startsWith("review:")).map((claim) => claim.owner))) {
+			if (activeBatch && owner === `review:${activeBatch.id}:${activeBatch.currentWave}`) continue;
+			const stored = loadWave(factoryClaimsRoot(env), owner);
+			if (stored) rememberRecoveryBatch({ ...stored, state: stored.state === "cancelled" ? "cancelled" : "blocked" });
+			else if (!batchForOwner(owner)) missing.push(owner);
+		}
+		return missing;
+	};
+	const batchForOwner = (owner: string): PersistedRepositoryBatch | undefined => {
+		const candidates = [activeBatch, ...recoveryBatches.values()].filter(
+			(batch): batch is PersistedRepositoryBatch => batch !== undefined,
+		);
+		return candidates.find((batch) => owner === `review:${batch.id}:${batch.currentWave}`);
+	};
+	const claimItems = (items: readonly QueueItem[], owner: string, allowExisting = true): void => {
+		const resources = [...new Set(items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))];
+		const acquired: string[] = [];
+		try { for (const resource of resources) { resourceClaims().claim(resource, owner, allowExisting); acquired.push(resource); } }
+		catch (error) { for (const resource of acquired) resourceClaims().release(resource, owner); throw error; }
+	};
+	const releaseItems = (items: readonly QueueItem[], owner: string): void => {
+		for (const item of items) {
+			const claimsForItem = resourceClaims();
+			claimsForItem.markSettled(`item:${item.repo.toLowerCase()}#${item.id}`, owner);
+			claimsForItem.markSettled(`repo:${item.repo.toLowerCase()}`, owner);
+			claimsForItem.release(`item:${item.repo.toLowerCase()}#${item.id}`, owner);
+			claimsForItem.release(`repo:${item.repo.toLowerCase()}`, owner);
+		}
+	};
+	const reconcileMutationClaim = async (owner: string, resource: string): Promise<"settled" | "unknown"> => {
+		const batch = batchForOwner(owner);
+		const ctx = activeCtx;
+		if (!batch || !ctx || !batch.waves[batch.currentWave]) return "unknown";
+		return reconcileBlockedRepositoryClaim(
+			resourceClaims(),
+			batch,
+			owner,
+			resource,
+			async () => (await authoritativeReconcile(ctx, batch, resource)).kind === "settled" ? "settled" : "unknown",
+		);
+	};
+	const unregisterFactoryReconciler = registerFactoryReconciler(reconcileMutationClaim);
+	const inspectClaimOwner = (owner: string, resource: string): ClaimOwnerObservation => {
+		const canonicalResource = resource.toLowerCase();
+		const persistedBatch = loadWave(factoryClaimsRoot(env), owner);
+		const batch = batchForOwner(owner) ?? persistedBatch;
+		const emptyWorker = {
+			jobIds: [],
+			toolCallIds: [],
+			runningJobIds: [],
+			unobservedJobIds: [],
+			taskWorkers: {},
+			terminalJobStatuses: {},
+			coverageComplete: false,
+			settled: false,
+			source: "unknown" as const,
+		};
+		if (!batch) {
+			return {
+				source: "review",
+				owner,
+				resource,
+				matches: false,
+				itemKeys: [],
+				recordedControllerState: "unknown",
+				worker: emptyWorker,
+				evidenceRefs: [],
+				sessionRefs: [],
+				missingWorkerReason: "no matching Review batch or durable wave record",
+				effectReconciliation: "unknown",
+				releaseCondition: "retain this claim until the exact owner and external effect are authoritatively reconciled",
+				reconcileAvailable: false,
+			};
+		}
+		const expectedOwner = `review:${batch.id}:${batch.currentWave}`;
+		const expectedResources = resourcesForBatch(batch);
+		const matches = owner === expectedOwner && expectedResources.includes(canonicalResource);
+		if (!matches) {
+			return {
+				source: "review",
+				owner,
+				resource,
+				matches: false,
+				itemKeys: [],
+				recordedControllerState: "unknown",
+				worker: emptyWorker,
+				evidenceRefs: [],
+				sessionRefs: [],
+				missingWorkerReason: "owner/resource does not match one retained Review wave exactly",
+				effectReconciliation: "unknown",
+				releaseCondition: "retain this claim; a mismatching owner or resource cannot authorize release",
+				reconcileAvailable: false,
+			};
+		}
+
+		const liveContext = activeBatch?.id === batch.id ? activeCtx : undefined;
+		const snapshot = liveContext?.getAsyncJobSnapshot?.();
+		const persisted = batch as PersistedRepositoryBatch & { evidenceRefs?: unknown; sessionRefs?: unknown };
+		const stringRefs = (value: unknown): string[] => Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+		const observedWorker = observeReviewWaveWorkers(batch.waveJobIds, batch.waveToolCallIds, batch.waveTaskWorkers, batch.waveTerminalJobStatuses, snapshot);
+		const worker = sessionStopped(batch) ? { ...observedWorker, settled: true, runningJobIds: [], unobservedJobIds: [] } : observedWorker;
+		const preTool = preToolProofValid(batch);
+		let missingWorkerReason: string | undefined;
+		if (sessionStopped(batch) || preTool) missingWorkerReason = undefined;
+		else if (batch.waveExit) missingWorkerReason = batch.waveShutdown?.reason ?? "owning OMP session has not supplied positive shutdown settlement proof";
+		else if (!batch.waveJobIds?.length) missingWorkerReason = "no workflowz job identity is recorded for this wave";
+		else if (!batch.waveToolCallIds?.length) missingWorkerReason = "no task tool-call identity is recorded for this wave";
+		else if (!batch.waveTaskWorkers) missingWorkerReason = "no persisted task-to-worker record is available";
+		else if (!worker.coverageComplete) missingWorkerReason = "task-to-worker/job coverage is missing or ambiguous";
+		else if (!worker.settled) {
+			if (worker.source !== "live") missingWorkerReason = "persisted worker terminal evidence is unavailable after session restart";
+			else if (worker.runningJobIds.length > 0) missingWorkerReason = `worker job${worker.runningJobIds.length === 1 ? "" : "s"} still running: ${worker.runningJobIds.join(", ")}`;
+			else if (worker.unobservedJobIds.length > 0) missingWorkerReason = `live worker snapshot omitted recorded job${worker.unobservedJobIds.length === 1 ? "" : "s"}: ${worker.unobservedJobIds.join(", ")}; terminal result remains unknown`;
+			else missingWorkerReason = "live worker snapshot lacks terminal status evidence";
+		}
+		let claimStatus: "unknown" | "settled" | undefined;
+		try {
+			claimStatus = claims?.list().find((claim) => claim.owner === owner && claim.resource.toLowerCase() === canonicalResource)?.status;
+		} catch {
+			claimStatus = undefined;
+		}
+		const effectReconciliation = claimStatus === "settled"
+			? "settled" as const
+			: sessionStopped(batch) || preTool || worker.settled ? "awaiting" as const : "unknown" as const;
+		return {
+			source: "review",
+			owner,
+			resource,
+			matches: true,
+			batchId: batch.id,
+			runId: batch.id,
+			wave: batch.currentWave,
+			kind: batch.kind,
+			itemKeys: (batch.waves[batch.currentWave]?.items ?? []).map((item) => `${item.repo.toLowerCase()}#${item.id}`),
+			recordedControllerState: persistedBatch?.state ?? batch.state,
+			worker,
+			evidenceRefs: stringRefs(persisted.evidenceRefs),
+			sessionRefs: stringRefs(persisted.sessionRefs),
+			...(missingWorkerReason ? { missingWorkerReason } : {}),
+			coordinatorTerminal: preTool ? batch.wavePreToolTerminal : undefined,
+			effectReconciliation,
+			releaseCondition: claimStatus === "settled"
+				? "the existing controller has marked this exact owner/resource settled; release still requires owner identity verification"
+				: "retain this claim until the existing authoritative worker and external-effect reconciliation marks this exact owner/resource settled",
+			reconcileAvailable: registeredFactoryReconciler() === reconcileMutationClaim,
+		};
+	};
+	const unregisterFactoryClaimInspector = registerFactoryClaimInspector(inspectClaimOwner);
+
+	const repaint = () => tui?.requestRender();
+
+	const syncStatus = (ctx: CtxLike) => {
+		if (!ctx.hasUI) return;
+		const painter = workbenchPainter(ctx.ui.theme, () => mode.queueMode);
+		if (dashboardOpen) ctx.ui.setStatus(statusKey, undefined);
+		else ctx.ui.setStatus(statusKey, statusSegment(mode, painter, Date.now()));
+		const activeItem = mode.selected();
+		if (activeItem) {
+			const kind = activeItem.type === "pr" ? "PR" : "ISSUE";
+			const repo = activeItem.repo.includes("/") ? activeItem.repo.split("/")[1] : activeItem.repo;
+			ctx.ui.setTitle(`${mode.isReviewMode() ? "review workbench" : "hive workbench"} · ${kind} #${activeItem.id} (${repo}) ${activeItem.title}`);
+		} else {
+			ctx.ui.setTitle(`${mode.isReviewMode() ? "review workbench" : "hive workbench"} · ${mode.queueMode} (${mode.position()})`);
+		}
+		repaint();
+	};
+	const authoritativeReconcile = async (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		resource: string,
+	): Promise<ReconcileObservation> => {
+		const wave = batch.waves[batch.currentWave];
+		const expectedResources = resourcesForBatch(batch);
+		if (
+			!["blocked", "cancelled", "paused"].includes(batch.state)
+			|| !wave
+			|| !batch.waveEffectResources
+			|| JSON.stringify(batch.waveEffectResources) !== JSON.stringify(expectedResources)
+			|| !expectedResources.includes(resource.toLowerCase())
+		) return { kind: "unknown" };
+		const preTool = preToolProofValid(batch);
+		const stopped = sessionStopped(batch);
+		if (batch.waveExit && !stopped) return { kind: "unknown" };
+		if (preTool && !stopped && !preToolRuntimeSettled(ctx, batch)) return { kind: "unknown" };
+		if (!preTool && !stopped && !waveWorkerCoverageComplete(batch.waveJobIds, batch.waveToolCallIds, batch.waveTaskWorkers)) return { kind: "unknown" };
+		const jobs = ctx.getAsyncJobSnapshot?.();
+		if (!preTool && !stopped && !waveWorkersSettled(jobs, batch.waveJobIds, batch.waveTerminalJobStatuses)) return { kind: "unknown" };
+		if (batch.kind === "diff") return { kind: "settled", outcome: "success" };
+
+		const targetItems = resource.toLowerCase().startsWith("repo:")
+			? wave.items
+			: wave.items.filter((item) => `item:${item.repo.toLowerCase()}#${item.id}` === resource.toLowerCase());
+		if (targetItems.length === 0) return { kind: "unknown" };
+		let outcome: ReconcileObservation["outcome"] = "success";
+		const nonSuccessItems: string[] = [];
+		for (const type of ["pr", "issue"] as const) {
+			const items = targetItems.filter((item) => item.type === type);
+			if (items.length === 0) continue;
+			if (type === "pr" && batch.kind === "slay" && (!preTool || stopped)) {
+				for (const item of items) {
+					if (stopped) {
+						const unchanged = await fetchItemsByKey([`${item.repo}#${item.id}`], "prs", mode.tokenOptions());
+						const current = unchanged.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+						if (!unchanged.error && current && current.headSha === item.headSha && current.autoMergeEnabled === item.autoMergeEnabled && current.reviewState === item.reviewState) continue;
+					}
+					const observed = await fetchPullRequestEffect(item.repo, item.id, mode.tokenOptions());
+					if (observed.kind !== "observed") return { kind: "unknown" };
+					const pullRequest = observed.pullRequest;
+					if (pullRequest.repo.toLowerCase() !== item.repo.toLowerCase()
+						|| pullRequest.number !== item.id
+						|| pullRequest.url !== item.url) return { kind: "unknown" };
+					if (pullRequest.state === "CLOSED" && !pullRequest.merged) {
+						outcome = "non-success";
+						nonSuccessItems.push(`${item.repo}#${item.id}`);
+						continue;
+					}
+					if (pullRequest.authorLogin === null
+						|| pullRequest.authorLogin.toLowerCase() !== item.author.toLowerCase()
+						|| !pullRequest.reviewsComplete
+						|| pullRequest.reviewDecision === "unknown"
+						|| pullRequest.reviewDecision === "changes_requested") return { kind: "unknown" };
+					const headSha = pullRequest.headSha;
+					if (pullRequest.state === "MERGED" && headSha === item.headSha) continue;
+					const reviewedHead = headSha !== null && pullRequest.latestReviews.some((review) =>
+						review.state === "APPROVED"
+						&& review.authorLogin.toLowerCase() !== pullRequest.authorLogin.toLowerCase()
+						&& review.commitSha === headSha
+						&& review.submittedAt >= batch.waveStartedAt,
+					);
+					if (!reviewedHead) return { kind: "unknown" };
+					// A stopped wave can reconcile its observed approval without claiming
+					// landing completed. Resume will revalidate and admit fresh work.
+					if (stopped && pullRequest.state === "OPEN" && headSha === item.headSha
+						&& !pullRequest.autoMergeEnabled && item.autoMergeEnabled !== true) continue;
+					if (pullRequest.state === "OPEN" && !pullRequest.autoMergeEnabled) return { kind: "unknown" };
+				}
+				continue;
+			}
+			const live = await fetchItemsByKey(
+				items.map((item) => `${item.repo}#${item.id}`),
+				type === "pr" ? "prs" : "issues",
+				mode.tokenOptions(),
+			);
+			if (live.error) return { kind: "unknown" };
+			for (const item of items) {
+				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				if (!current) return { kind: "unknown" };
+				if (
+					type === "pr"
+					&& (current.headSha !== item.headSha
+						|| current.autoMergeEnabled !== item.autoMergeEnabled
+						|| current.reviewState !== item.reviewState)
+				) return { kind: "unknown" };
+				if (type === "issue" && (batch.kind === "slay" || ((preTool || stopped) && batch.kind === "fix"))) {
+					const submission = expectedIssueSubmission(batch, item, current);
+					if (stopped ? !issueSubmissionsMatch(batch, item, current) && submission === undefined : preTool ? !issueSubmissionsMatch(batch, item, current) : submission === undefined) return { kind: "unknown" };
+				}
+			}
+		}
+		if (stopped && !latestWaveForArchive(batch)) return { kind: "unknown" };
+		if (preTool && !stopped) {
+			const latest = loadWave(factoryClaimsRoot(env), `review:${batch.waveIdentity}`);
+			if (!latest || latest.wavePromptDigest !== batch.wavePromptDigest
+				|| !preToolProofValid(latest) || !preToolRuntimeSettled(ctx, latest)) return { kind: "unknown" };
+		}
+		return outcome === "success"
+			? { kind: "settled", outcome }
+			: { kind: "settled", outcome, items: nonSuccessItems };
+	};
+
+	const every = (intervalMs: number, work: () => void) => {
+		const handle = setInterval(() => {
+			try {
+				work();
+			} catch {
+				// Extensions share the session process; a throw from a timer is fatal.
+			}
+		}, intervalMs);
+		(handle as { unref?(): void }).unref?.();
+		timers.push(() => clearInterval(handle));
+	};
+
+	const refreshQueue = async (ctx: CtxLike) => {
+		syncStatus(ctx);
+		const result = await mode.refreshQueue();
+		if (result.error && !result.cancelled && result.items.length === 0 && ctx.hasUI) {
+			ctx.ui.notify(`${mode.isReviewMode() ? "Review" : "Hive"} workbench queue: ${result.error}`, "error");
+		}
+		syncStatus(ctx);
+		return result;
+	};
+
+	const persist = () => pi.appendEntry(STATE_ENTRY, mode.toPersisted());
+
+	const syncBatchProgress = (ctx: CtxLike) => {
+		if (!activeBatch) {
+			mode.setBatchProgress(undefined);
+			return;
+		}
+		const wave = activeBatch.waves[Math.min(activeBatch.currentWave, activeBatch.waves.length - 1)];
+		const jobs = ctx.getAsyncJobSnapshot?.();
+		const runningJobs = jobs?.running.filter((job) => job.startTime >= activeBatch!.waveStartedAt).length ?? 0;
+		const failedJobs = jobs?.recent.filter(
+			(job) => job.startTime >= activeBatch!.waveStartedAt && job.status === "failed",
+		).length ?? 0;
+		mode.setBatchProgress({
+			state: activeBatch.state,
+			repository: wave?.repo ?? "complete",
+			wave: Math.min(activeBatch.currentWave + 1, activeBatch.waves.length),
+			waves: activeBatch.waves.length,
+			completedItems: activeBatch.completedItems,
+			totalItems: activeBatch.totalItems,
+			runningJobs,
+			failedJobs,
+		});
+		repaint();
+	};
+	const rememberWaveEvidence = (ctx: CtxLike): void => {
+		if (!activeBatch || !["running", "paused", "blocked"].includes(activeBatch.state) || !activeBatch.waveIdentity) return;
+		const jobs = ctx.getAsyncJobSnapshot?.();
+		if (!jobs) return;
+		if (activeBatch.waveShutdown) {
+			if (shuttingDownSessionId !== activeBatch.waveSessionId || activeBatch.waveSessionId !== ctx.sessionManager?.getSessionId?.()) return;
+			if (sessionStopped(activeBatch) && jobs.running.some((job) => job.startTime >= activeBatch!.waveStartedAt)) {
+				persistBatch(ctx, { ...activeBatch, waveShutdown: { ...activeBatch.waveShutdown, settled: false, reason: "late native running job contradicts shutdown settlement" } });
+			}
+		}
+		const baseline = new Set(activeBatch.waveJobBaselineIds ?? []);
+		const observed = [...jobs.running, ...jobs.recent];
+		const workers = Object.fromEntries(Object.entries(activeBatch.waveTaskWorkers ?? {}).map(([call, workers]) => [call, workers.map((worker) => {
+			if (worker.jobId) return worker;
+			const matches = observed.filter((job) => job.type === "task" && job.agentId === worker.agentId && !baseline.has(job.id));
+			return matches.length === 1 ? { ...worker, jobId: matches[0].id } : worker;
+		})]));
+		const mapped = new Set(Object.values(workers).flatMap((workers) => workers.flatMap((worker) => worker.jobId ? [worker.jobId] : [])));
+		const associated = observed.filter((job) => mapped.has(job.id));
+		const ids = [...new Set([...(activeBatch.waveJobIds ?? []), ...associated.map((job) => job.id)])].sort();
+		const terminal = { ...(activeBatch.waveTerminalJobStatuses ?? {}) };
+		const runningIds = new Set(jobs.running.map((job) => job.id));
+		for (const id of runningIds) delete terminal[id];
+		for (const job of associated) {
+			if (!runningIds.has(job.id) && (job.status === "completed" || job.status === "failed" || job.status === "cancelled" || job.status === "canceled")) terminal[job.id] = job.status;
+		}
+		const wave = activeBatch.waves[activeBatch.currentWave];
+		const resources = activeBatch.kind === "diff" || !wave
+			? []
+			: [...new Set(wave.items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))].sort();
+		if (JSON.stringify(activeBatch.waveTaskWorkers ?? {}) === JSON.stringify(workers) && JSON.stringify(activeBatch.waveJobIds ?? []) === JSON.stringify(ids) && JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) === JSON.stringify(terminal) && JSON.stringify(activeBatch.waveEffectResources ?? []) === JSON.stringify(resources)) return;
+		persistBatch(ctx, { ...activeBatch, waveTaskWorkers: workers, waveJobIds: ids, waveTerminalJobStatuses: terminal, waveEffectResources: resources });
+	};
+	// OMP 18.4 task details expose the primary async job id directly. Persist it
+	// immediately for single-spawn calls instead of racing the transient job
+	// snapshot; the snapshot remains the authoritative mapper for batch siblings.
+	const rememberTaskResult = (ctx: CtxLike, call: string, result: unknown): void => {
+		if (!activeBatch?.waveToolCallIds?.includes(call) || !result || typeof result !== "object" || !("details" in result)) return;
+		const details = result.details;
+		if (!details || typeof details !== "object" || !("async" in details) || !details.async || typeof details.async !== "object" || !("type" in details.async) || details.async.type !== "task" || !("progress" in details) || !Array.isArray(details.progress)) return;
+		const asyncJobId = "jobId" in details.async && typeof details.async.jobId === "string" && details.async.jobId ? details.async.jobId : undefined;
+		const asyncState = "state" in details.async && typeof details.async.state === "string" ? details.async.state : undefined;
+		const workers: { agentId: string; jobId?: string; resultStatus?: "completed" | "failed" | "cancelled" }[] = [];
+		for (const row of details.progress) {
+			if (!row || typeof row !== "object" || typeof row.id !== "string" || !row.id) return;
+			workers.push({ agentId: row.id, ...(row.status === "completed" || row.status === "failed" ? { resultStatus: row.status } : row.status === "aborted" ? { resultStatus: "cancelled" } : {}) });
+		}
+		const previous = activeBatch.waveTaskWorkers?.[call];
+		if (previous && JSON.stringify(previous.map((worker) => worker.agentId)) !== JSON.stringify(workers.map((worker) => worker.agentId))) {
+			persistBatch(ctx, { ...activeBatch, waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: [] } });
+			return;
+		}
+		const updated = workers.map((worker, index) => ({
+			...previous?.[index],
+			...worker,
+			...(workers.length === 1 && asyncJobId ? { jobId: asyncJobId } : {}),
+		}));
+		const jobIds = [...new Set([...(activeBatch.waveJobIds ?? []), ...updated.flatMap((worker) => worker.jobId ? [worker.jobId] : [])])].sort();
+		const terminal = { ...(activeBatch.waveTerminalJobStatuses ?? {}) };
+		if (workers.length === 1 && asyncJobId && asyncState !== "running") {
+			const status = updated[0]?.resultStatus;
+			if (status) terminal[asyncJobId] = status;
+		}
+		if (JSON.stringify(previous) !== JSON.stringify(updated)
+			|| JSON.stringify(activeBatch.waveJobIds ?? []) !== JSON.stringify(jobIds)
+			|| JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) !== JSON.stringify(terminal)) {
+			persistBatch(ctx, {
+				...activeBatch,
+				waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: updated },
+				waveJobIds: jobIds,
+				waveTerminalJobStatuses: terminal,
+			});
+		}
+		rememberWaveEvidence(ctx);
+	};
+	const rememberDeliveredJobs = (event: unknown, ctx: CtxLike): void => {
+		if (!activeBatch || !event || typeof event !== "object" || !("message" in event)) return;
+		const message = event.message;
+		if (!message || typeof message !== "object" || !("customType" in message) || message.customType !== "async-result" || !("details" in message)) return;
+		const details = message.details;
+		if (!details || typeof details !== "object" || !("jobs" in details) || !Array.isArray(details.jobs)) return;
+		const delivered = new Set(details.jobs.filter((job) => job?.type === "task" && typeof job.jobId === "string").map((job) => job.jobId));
+		const terminal = { ...activeBatch.waveTerminalJobStatuses };
+		// Task progress alone is provisional. OMP's delivery proves the job has
+		// settled, including jobs omitted by the five-row recent snapshot limit.
+		for (const worker of Object.values(activeBatch.waveTaskWorkers ?? {}).flat()) {
+			if (worker.jobId && worker.resultStatus && delivered.has(worker.jobId) && !terminal[worker.jobId]) terminal[worker.jobId] = worker.resultStatus;
+		}
+		if (JSON.stringify(terminal) !== JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {})) persistBatch(ctx, { ...activeBatch, waveTerminalJobStatuses: terminal });
+	};
+
+	const persistBatch = (ctx: CtxLike, batch: PersistedRepositoryBatch) => {
+		saveWave(factoryClaimsRoot(env), batch);
+		activeBatch = batch;
+		rememberRecoveryBatch(batch);
+		pi.appendEntry(BATCH_ENTRY, batch);
+		syncBatchProgress(ctx);
+	};
+	const persistArchivedBatch = (ctx: CtxLike, batch: PersistedRepositoryBatch): boolean => {
+		const wasActive = activeBatch?.id === batch.id;
+		if (wasActive) persistBatch(ctx, batch);
+		else {
+			saveWave(factoryClaimsRoot(env), batch);
+			rememberRecoveryBatch(batch);
+			pi.appendEntry(BATCH_ENTRY, batch);
+			syncBatchProgress(ctx);
+		}
+		return wasActive;
+	};
+	const persistSelectionReceipt = (ctx: CtxLike, batch: PersistedRepositoryBatch): void => {
+		const preserveActive = activeBatch !== undefined && ["running", "paused", "blocked"].includes(activeBatch.state);
+		if (!preserveActive) {
+			persistBatch(ctx, batch);
+			return;
+		}
+		const receipt = activeBatch.id === batch.id || recoveryBatches.has(batch.id)
+			? { ...batch, id: `${batch.id}-${randomUUID()}` }
+			: batch;
+		persistArchivedBatch(ctx, receipt);
+	};
+	const rememberToolInvocation = (ctx: CtxLike, toolCallId: string): void => {
+		if (!activeBatch?.waveIdentity || (!["running", "paused"].includes(activeBatch.state) && !(activeBatch.state === "blocked" && (preToolProofValid(activeBatch) || sessionStopped(activeBatch))))) return;
+		if (activeBatch.waveShutdown && (shuttingDownSessionId !== activeBatch.waveSessionId || activeBatch.waveSessionId !== ctx.sessionManager?.getSessionId?.())) return;
+		const ids = [...new Set([...(activeBatch.waveToolInvocationIds ?? []), toolCallId])].sort();
+		if (JSON.stringify(ids) === JSON.stringify(activeBatch.waveToolInvocationIds ?? [])) return;
+		persistBatch(ctx, { ...activeBatch, waveToolInvocationIds: ids, wavePreToolTerminal: undefined, waveShutdown: activeBatch.waveShutdown ? { ...activeBatch.waveShutdown, settled: false, reason: "late native tool activity contradicts shutdown settlement" } : undefined });
+	};
+
+	const observedSubmittedPrs = async (ctx: CtxLike, batch: PersistedRepositoryBatch): Promise<string[]> => {
+		const wave = batch.waves[batch.currentWave];
+		const issues = wave?.items.filter((item) => item.type === "issue") ?? [];
+		if (issues.length === 0) return [];
+		const live = await fetchItemsByKey(
+			issues.map((item) => `${item.repo}#${item.id}`),
+			"issues",
+			mode.tokenOptions(),
+		);
+		if (live.error) return [];
+		const refs: string[] = [];
+		for (const item of issues) {
+			const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+			const submission = current ? expectedIssueSubmission(batch, item, current) : undefined;
+			if (submission) refs.push(...submission);
+		}
+		return [...new Set(refs)].sort();
+	};
+
+	const reconcileBatchClaims = async (ctx: CtxLike, batch: PersistedRepositoryBatch) => {
+		const owner = `review:${batch.id}:${batch.currentWave}`;
+		const settled: string[] = [];
+		const unknown: string[] = [];
+		const nonSuccessItems: string[] = [];
+		const preTool = preToolProofValid(batch);
+		for (const resource of resourcesForBatch(batch)) {
+			if (resourceClaims().conflict(resource, owner)) {
+				unknown.push(resource);
+				continue;
+			}
+			let observation: ReconcileObservation = { kind: "unknown" };
+			const result = preTool || sessionStopped(batch)
+				? (observation = await authoritativeReconcile(ctx, batch, resource)).kind === "settled" ? "settled" : "unknown"
+				: await reconcileBlockedRepositoryClaim(
+					resourceClaims(),
+					batch,
+					owner,
+					resource,
+					async () => {
+						observation = await authoritativeReconcile(ctx, batch, resource);
+						return observation.kind === "settled" ? "settled" : "unknown";
+					},
+				);
+			if (result === "settled") {
+				settled.push(resource);
+				if (observation.kind === "settled" && observation.outcome === "non-success") nonSuccessItems.push(...observation.items);
+			} else {
+				unknown.push(resource);
+			}
+		}
+		// Finish every awaited evidence read before releasing any claims. A late
+		// tool event during the issue lookup invalidates the proof below while all
+		// pre-tool claims are still UNKNOWN and fenced.
+		const submittedPrs = settled.length > 0 ? await observedSubmittedPrs(ctx, batch) : [];
+		if (sessionStopped(batch)) {
+			if (!latestWaveForArchive(batch)) { unknown.push(...settled); settled.length = 0; }
+		} else if (preTool) {
+			if (!currentPreToolWave(ctx, batch)) {
+				unknown.push(...settled);
+				settled.length = 0;
+			} else if (unknown.length === 0) {
+				// The archive is the synchronous commit point for pre-tool claims.
+				// Leave claims UNKNOWN until its final durable/in-memory proof check.
+			}
+		} else {
+			for (const resource of settled) resourceClaims().reconcile(resource, owner);
+		}
+		return {
+			settled,
+			unknown: [...new Set(unknown)],
+			submittedPrs,
+			nonSuccessItems: [...new Set(nonSuccessItems)],
+		};
+	};
+
+	const settleStoppedBatch = (ctx: CtxLike, batch: PersistedRepositoryBatch, result: ReconciliationResult): string => {
+		if (result.unknown.length || !sessionStopped(batch) || !latestWaveForArchive(batch)) {
+			return `Execution stopped; GitHub effects remain unresolved for ${result.unknown.join(", ") || batch.id}; claims retained`;
+		}
+		const state = batch.waveExit?.choice === "cancel" ? "cancelled" : "paused";
+		const message = `Execution stopped; ${state} without completing work; GitHub effects reconciled${result.submittedPrs.length ? `; existing PRs: ${result.submittedPrs.join(", ")}` : ""}`;
+		persistArchivedBatch(ctx, { ...batch, state, error: message });
+		const owner = `review:${batch.id}:${batch.currentWave}`;
+		for (const resource of result.settled) {
+			resourceClaims().markSettled(resource, owner);
+			resourceClaims().reconcile(resource, owner);
+		}
+		return message;
+	};
+
+	const resumeStoppedBatch = async (ctx: CtxLike): Promise<string> => {
+		const batch = activeBatch;
+		if (pi.sessionShutdownLifecycleVersion !== 1 || !ctx.sessionManager?.getSessionId?.()) return "Resume requires the packaged OMP shutdown lifecycle v1 and a native session identity";
+		const undispatched = batch?.state === "paused" && !batch.waveIdentity;
+		if (!batch || (!undispatched && (batch.waveExit?.choice !== "pause" || !sessionStopped(batch)))) return "Resume requires saved paused work and positive owning-session shutdown proof; use /review status";
+		const result = undispatched ? { settled: [], unknown: [], submittedPrs: [] } : await reconcileBatchClaims(ctx, batch);
+		if (result.unknown.length || !latestWaveForArchive(batch)) return `Resume blocked: GitHub effects unresolved for ${result.unknown.join(", ") || batch.id}; claims retained`;
+		const remaining = batch.waves.slice(batch.currentWave).flatMap((wave) => [...wave.items]);
+		const fresh: QueueItem[] = [];
+		for (const type of ["pr", "issue"] as const) {
+			const items = remaining.filter((item) => item.type === type);
+			if (!items.length) continue;
+			const observed = await fetchItemsByKey(items.map((item) => `${item.repo}#${item.id}`), type === "pr" ? "prs" : "issues", mode.tokenOptions());
+			if (observed.error || observed.items.length !== items.length) return "Resume blocked: saved selection is no longer fully observable on GitHub";
+			for (const item of items) {
+				const current = observed.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				if (current && type === "issue" && expectedIssueSubmission(batch, item, current)) continue;
+				if (!current || (type === "pr" && current.headSha !== item.headSha) || (type === "issue" && !issueSubmissionsMatch(batch, item, current))) return `Resume blocked: ${item.repo}#${item.id} changed; select current work explicitly`;
+				fresh.push(current);
+			}
+		}
+		if (!latestWaveForArchive(batch) || activeBatch?.id !== batch.id || (undispatched && activeBatch !== batch)) return "Resume blocked: saved wave changed during revalidation";
+		if (!undispatched) settleStoppedBatch(ctx, batch, result);
+		activeBatch = undefined;
+		mode.setPaused(false);
+		if (fresh.length === 0) {
+			persistArchivedBatch(ctx, { ...batch, state: "cancelled", error: "Saved work already has submitted PRs; inspect the existing PRs" });
+			return "Saved work already has submitted PRs; no worker was dispatched. Inspect the existing PRs.";
+		}
+		await startRepositoryBatch(ctx, batch.kind, fresh);
+		if (!activeBatch || activeBatch.state !== "running" || !activeBatch.waveIdentity) {
+			mode.setPaused(true);
+			persistBatch(ctx, { ...batch, state: "paused", error: "Fresh admission did not dispatch; saved work remains paused" });
+			return "Fresh admission did not dispatch; saved work remains paused";
+		}
+		const resumed = activeBatch;
+		persistArchivedBatch(ctx, { ...batch, state: "cancelled", error: "Saved selection transferred to a newly admitted run after explicit resume" });
+		persistBatch(ctx, resumed);
+		return "Saved selection revalidated; fresh Review admission requested";
+	};
+
+	const finishRecoveredBatch = async (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		result: ReconciliationResult,
+	): Promise<void> => {
+		if (result.unknown.length > 0 || activeBatch?.id !== batch.id) return;
+		if (sessionStopped(batch)) {
+			settleStoppedBatch(ctx, batch, result);
+			return;
+		}
+		if (result.nonSuccessItems?.length) {
+			archiveSlayNonSuccess(ctx, batch, result);
+			return;
+		}
+		const nextWave = batch.currentWave + 1;
+		const completedItems = batch.completedItems + (batch.waves[batch.currentWave]?.items.length ?? 0);
+		const evidence = result.submittedPrs.length > 0
+			? `; observed submitted PRs ${result.submittedPrs.join(", ")}`
+			: "";
+		if (nextWave >= batch.waves.length) {
+			persistBatch(ctx, {
+				...batch,
+				currentWave: nextWave,
+				completedItems,
+				state: "complete",
+				waveIdentity: undefined,
+				wavePromptDigest: undefined,
+				waveToolCallIds: undefined,
+				waveToolInvocationIds: undefined,
+				waveTaskWorkers: undefined,
+				waveJobBaselineIds: undefined,
+				waveJobIds: undefined,
+				waveTerminalJobStatuses: undefined,
+				wavePreToolTerminal: undefined,
+				waveEffectResources: undefined,
+			});
+			if (ctx.hasUI) ctx.ui.notify(`Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
+			return;
+		}
+		persistBatch(ctx, {
+			...batch,
+			currentWave: nextWave,
+			completedItems,
+			state: mode.paused ? "paused" : "running",
+			waveStartedAt: Date.now(),
+			waveIdentity: undefined,
+			wavePromptDigest: undefined,
+			waveToolCallIds: undefined,
+			waveToolInvocationIds: undefined,
+			waveTaskWorkers: undefined,
+			waveJobBaselineIds: undefined,
+			waveJobIds: undefined,
+			waveTerminalJobStatuses: undefined,
+			wavePreToolTerminal: undefined,
+			waveEffectResources: undefined,
+		});
+		if (ctx.hasUI) ctx.ui.notify(`Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
+		if (!mode.paused) await dispatchCurrentWave(ctx, "followUp");
+	};
+
+	const archiveCancelledBatch = (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		action: "cancel" | "revise",
+		result: ReconciliationResult,
+	): string => {
+		const evidence = result.submittedPrs.length > 0
+			? `; observed submitted PRs ${result.submittedPrs.join(", ")}`
+			: "";
+		const message = result.unknown.length > 0
+			? `${action === "revise" ? "Revision" : "Cancellation"} recorded for ${batch.id}; UNKNOWN claims remain fenced: ${result.unknown.join(", ")}${evidence}`
+			: `${action === "revise" ? "Revision" : "Cancellation"} recorded for ${batch.id}; settled claims released${evidence}`;
+		const preTool = preToolProofValid(batch);
+		const latest = preTool ? currentPreToolWave(ctx, batch) : latestWaveForArchive(batch);
+		if (!latest) {
+			return `${action === "revise" ? "Revision" : "Cancellation"} for ${batch.id} was not archived because wave evidence changed; UNKNOWN claims remain fenced`;
+		}
+		const archived = {
+			...latest,
+			state: "cancelled",
+			error: message,
+			cancelRequested: undefined,
+		} satisfies PersistedRepositoryBatch;
+		const wasActive = persistArchivedBatch(ctx, archived);
+		if (preTool) {
+			const owner = `review:${batch.id}:${batch.currentWave}`;
+			for (const resource of result.settled) {
+				resourceClaims().markSettled(resource, owner);
+				resourceClaims().reconcile(resource, owner);
+			}
+		}
+		if (wasActive) {
+			activeBatch = undefined;
+			mode.setBatchProgress(undefined);
+		}
+		syncStatus(ctx);
+		return message;
+	};
+	const archiveSlayNonSuccess = (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		result: ReconciliationResult,
+	): string => {
+		const latest = latestWaveForArchive(batch);
+		if (!latest) return `Slay ${batch.id} was not archived because wave evidence changed; UNKNOWN claims remain fenced`;
+		const items = [...new Set(result.nonSuccessItems ?? [])].sort();
+		const message = `Slay terminal outcome not satisfied: closed without merging ${items.join(", ")}; settled claims released`;
+		const archived = { ...latest, state: "cancelled", error: message, cancelRequested: undefined } satisfies PersistedRepositoryBatch;
+		const wasActive = persistArchivedBatch(ctx, archived);
+		if (wasActive) {
+			activeBatch = undefined;
+			mode.setBatchProgress(undefined);
+		}
+		syncStatus(ctx);
+		return message;
+	};
+	const archivePreToolBatch = (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		result: { settled: string[]; unknown: string[]; submittedPrs: string[] },
+	): string => {
+		const latest = currentPreToolWave(ctx, batch);
+		if (!latest) {
+			return `Pre-tool coordinator failure for ${batch.id} was not archived because wave evidence changed; UNKNOWN claims remain fenced`;
+		}
+		const message = result.unknown.length > 0
+			? `Pre-tool coordinator failure recorded for ${batch.id}; UNKNOWN claims remain fenced: ${result.unknown.join(", ")}`
+			: `Pre-tool coordinator failure recorded for ${batch.id}; claims released and the wave was not completed`;
+		const archived = { ...latest, state: "cancelled", error: message, cancelRequested: undefined } satisfies PersistedRepositoryBatch;
+		const wasActive = persistArchivedBatch(ctx, archived);
+		const owner = `review:${batch.id}:${batch.currentWave}`;
+		for (const resource of result.settled) {
+			resourceClaims().markSettled(resource, owner);
+			resourceClaims().reconcile(resource, owner);
+		}
+		if (wasActive) {
+			activeBatch = undefined;
+			mode.setBatchProgress(undefined);
+		}
+		syncStatus(ctx);
+		return message;
+	};
+
+	const drainCancelledBatch = async (ctx: CtxLike, batch: PersistedRepositoryBatch): Promise<void> => {
+		const result = batch.waveIdentity
+			? await reconcileBatchClaims(ctx, batch)
+			: { settled: [], unknown: [], submittedPrs: [] };
+		const message = archiveCancelledBatch(ctx, batch, "cancel", result);
+		if (ctx.hasUI) ctx.ui.notify(message, result.unknown.length > 0 ? "warning" : "info");
+	};
+
+	const cancelBlockedBatch = async (ctx: CtxLike, action: "cancel" | "revise"): Promise<string> => {
+		const batch = activeBatch;
+		if (!batch) return "No Review wave is active";
+		if (batch.state === "running" || batch.state === "paused") {
+			if (!batch.waveIdentity) {
+				return archiveCancelledBatch(ctx, batch, action, { settled: [], unknown: [], submittedPrs: [] });
+			}
+			mode.setPaused(true);
+			persistBatch(ctx, {
+				...batch,
+				state: "paused",
+				cancelRequested: true,
+				error: `Cancellation requested; waiting for ${batch.id} to drain`,
+			});
+			return `Cancellation requested for ${batch.id}; current work will drain before claims are reconciled`;
+		}
+		if (batch.state !== "blocked") return "No blocked Review wave is active";
+		const workersSettled = preToolProofValid(batch) || !batch.waveIdentity
+			|| waveWorkersSettled(ctx.getAsyncJobSnapshot?.(), batch.waveJobIds, batch.waveTerminalJobStatuses);
+		if (!workersSettled) return `Run ${batch.id} still has an unaccounted worker; wait for it to drain before ${action}`;
+		const result = batch.waveIdentity
+			? await reconcileBatchClaims(ctx, batch)
+			: { settled: [], unknown: [], submittedPrs: [] };
+		return archiveCancelledBatch(ctx, batch, action, result);
+	};
+
+	const buildRecap = (ctx: CtxLike) => {
+		const branch = ctx.sessionManager?.getBranch() ?? [];
+		const branchStart = Math.max(0, branch.length - RECAP_BRANCH_ENTRY_LIMIT);
+		const olderBranchEntriesOmitted = branchStart;
+		const sessionId = ctx.sessionManager?.getSessionId?.() ?? "unknown-session";
+		const latestCustom = <T>(customType: string, limit: number, identity: (data: Record<string, unknown>) => string | undefined): { values: T[]; omitted: number } => {
+			const values: T[] = [];
+			const seen = new Set<string>();
+			let count = 0;
+			for (let index = branch.length - 1; index >= branchStart; index--) {
+				const entry = branch[index]!;
+				if (entry.type !== "custom" || entry.customType !== customType || !isRecord(entry.data)) continue;
+				const key = identity(entry.data);
+				if (!key || seen.has(key)) continue;
+				seen.add(key);
+				count++;
+				if (values.length < limit) values.push(entry.data as T);
+			}
+			values.reverse();
+			return { values, omitted: Math.max(0, count - limit) };
+		};
+		const batches = latestCustom<PersistedRepositoryBatch>(BATCH_ENTRY, 12, (data) => typeof data.id === "string" ? data.id : undefined);
+		const comments = latestCustom<PersistedCommentResult>(COMMENT_ENTRY, 24, (data) => isRecord(data.plan) && typeof data.plan.id === "string" ? data.plan.id : undefined);
+		const selectedItems = mode.chosenItems();
+		const focused = mode.selected();
+		if (focused && !selectedItems.some((item) => item.repo === focused.repo && item.id === focused.id)) selectedItems.push(focused);
+		const artifacts: ReviewRecapInput["artifacts"] = [];
+		const visit = (span: import("./trace.ts").Span): void => {
+			const ref = span.output?.reference;
+			if (ref?.kind === "available") artifacts.push({ kind: "available", sessionId: ref.sourceSessionId, uri: ref.uri, path: ref.path, complete: ref.complete });
+			else if (ref?.kind === "unavailable") artifacts.push({ kind: "unavailable", sessionId: ref.sourceSessionId, uri: ref.uri, reason: ref.reason });
+			for (const child of span.children ?? []) visit(child);
+		};
+		for (const span of mode.session.roots()) visit(span);
+		return buildReviewRecap({
+			source: { sessionId, branchId: ctx.sessionManager?.getLeafId?.() ?? "unknown-branch", authoritySource: "Review persisted selection, batch, and comment custom entries" },
+			observedAt: Date.now(),
+			scope: mode.scopeLabel(),
+			queue: mode.queueError ? { kind: "unavailable", reason: mode.queueError, observedAt: mode.fetchedAt } : mode.fetchedAt > 0 ? { kind: "available", itemCount: mode.items.length, observedAt: mode.fetchedAt } : { kind: "unavailable", reason: "Review queue has not been observed in this session", observedAt: 0 },
+			selection: selectedItems.map((item) => ({ repo: item.repo, id: item.id, type: item.type === "pr" ? "pr" as const : "issue" as const, title: item.title, url: item.url, headSha: item.type === "pr" ? item.headSha : undefined })),
+			observations: (mode.fetchedAt > 0 ? selectedItems.slice(0, 25) : []).map((item) => ({
+				subject: `${item.repo}#${item.id}${item.type === "pr" ? ` head=${item.headSha ?? "unknown"}` : ""}`,
+				observedAt: mode.fetchedAt > 0 ? mode.fetchedAt : undefined,
+				status: `current queue observation; ci=${item.ciStatus ?? "unknown"}; review=${item.reviewState}; merge=${item.mergeState}`,
+				sourceUrl: item.url,
+			})),
+			operations: batches.values.map((batch) => ({ id: batch.id, kind: batch.kind, state: batch.state, completedItems: batch.completedItems, totalItems: batch.totalItems, startedAt: batch.startedAt, items: batch.waves.slice(0, 12).flatMap((wave) => wave.items.slice(0, 25).map((item) => ({ repo: item.repo, id: item.id, type: item.type, headSha: item.type === "pr" ? item.headSha : undefined }))), skippedItems: (batch.skippedItems ?? []).slice(0, 25), excludedItems: (batch.excludedItems ?? []).slice(0, 25), error: batch.error })),
+			comments: comments.values.map((comment) => ({ state: comment.state, targets: comment.plan.targets.slice(0, 100).map((target) => `${target.repo}#${target.number}`), receipts: (comment.receipts ?? []).slice(0, 100) })),
+			trace: mode.session.roots(),
+			artifacts,
+			verification: [],
+			remaining: [
+				...(olderBranchEntriesOmitted > 0 ? [`${olderBranchEntriesOmitted} older session branch entries were not scanned for recap history.`] : []),
+				...(batches.omitted > 0 ? [`${batches.omitted} older Review operation records omitted from the recap.`] : []),
+				...(comments.omitted > 0 ? [`${comments.omitted} older publication records omitted from the recap.`] : []),
+				...(mode.queueError ? [`Refresh queue: ${mode.queueError}`] : []),
+				...(activeBatch && activeBatch.state !== "complete" && activeBatch.state !== "cancelled" ? [`Reconcile Review wave ${activeBatch.id}; its current outcome may be unknown`] : []),
+				...resourceClaims().list().filter((claim) => claim.owner.startsWith("review:")).slice(0, 16).map((claim) => `Retained claim ${claim.resource}: ${claim.status}; revalidate before work.`),
+				"Refresh selected repositories and pull request heads before continuing.",
+			],
+		});
+	};
+
+	const handoffReviewState = (): string => {
+		const selected = mode.chosenItems();
+		const focused = mode.selected();
+		if (focused && !selected.some((item) => item.repo === focused.repo && item.id === focused.id)) selected.push(focused);
+		return JSON.stringify({
+			scope: mode.scope,
+			queueMode: mode.queueMode,
+			filter: mode.filter,
+			selection: selected.map((item) => [item.repo, item.id, item.type, item.type === "pr" ? item.headSha ?? "unknown" : undefined]).sort((a, b) => `${a[0]}#${a[1]}`.localeCompare(`${b[0]}#${b[1]}`)),
+		});
+	};
+
+	const markUncertainTransition = (recapId: string, sourceSessionId: string, sourceBranchId: string, exportPath: string): void => {
+		uncertainHandoffIds.add(recapId);
+		pi.appendEntry(HANDOFF_ENTRY, { recapId, state: "transition-uncertain", sourceSessionId, sourceBranchId, exportPath });
+	};
+
+	const handoff = async (ctx: CtxLike): Promise<string> => {
+		if (!mode.isReviewMode()) return "Review recap handoff is available only in ordinary Review mode";
+		const sessionManager = ctx.sessionManager;
+		if (!sessionManager?.saveArtifact || !sessionManager.getArtifactPath || !sessionManager.getSessionFile || !ctx.newSession || !pi.sendMessage) return "OMP public session artifact or native handoff API is unavailable";
+		const sourceSessionId = sessionManager.getSessionId?.();
+		const sourceBranchId = sessionManager.getLeafId?.();
+		const sourceSessionFile = sessionManager.getSessionFile();
+		if (!sourceSessionId || !sourceBranchId || !sourceSessionFile || (traceSessionId && traceSessionId !== sourceSessionId)) return "Source session or branch is stale; refresh Review before handoff";
+		const recap = buildRecap(ctx);
+		const reviewStateAtStart = handoffReviewState();
+		const latestAttempts = new Map<string, Record<string, unknown>>();
+		for (const entry of sessionManager.getBranch() ?? []) {
+			if (entry.type !== "custom" || entry.customType !== HANDOFF_ENTRY || !isRecord(entry.data) || typeof entry.data.recapId !== "string") continue;
+			latestAttempts.set(JSON.stringify([entry.data.sourceSessionId, entry.data.sourceBranchId, entry.data.recapId]), entry.data);
+		}
+		const prior = uncertainHandoffIds.has(recap.id) || [...latestAttempts.values()].some((attempt) => attempt.state !== "cancelled" && (attempt.recapId === recap.id || attempt.state === "opening" || attempt.state === "submission-uncertain" || attempt.state === "transition-uncertain"));
+		if (prior) return `Handoff ${recap.id} already has a submission attempt; inspect the fresh session before retrying`;
+		const artifactId = await sessionManager.saveArtifact(recap.handoffText, "review-handoff");
+		if (!artifactId) return "Could not create durable handoff export; no new session or message was created";
+		const exportPath = await sessionManager.getArtifactPath(artifactId);
+		if (!exportPath) return `Handoff export ${artifactId} was created but its path is unavailable; no message was sent`;
+		if (sessionManager.getSessionId?.() !== sourceSessionId || sessionManager.getLeafId?.() !== sourceBranchId || handoffReviewState() !== reviewStateAtStart || buildRecap(ctx).id !== recap.id) return `Source, queue, claims, or selection changed during export; durable recap remains at ${exportPath}, no message was sent`;
+		pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "opening", sourceSessionId, sourceBranchId, exportPath });
+		let setupOutcome: "not-run" | "blocked" | "uncertain" | "submitted" = "not-run";
+		let setupReason = "target session setup did not run";
+		uncertainHandoffIds.add(recap.id);
+		let opened: { cancelled: boolean };
+		try {
+			opened = await ctx.newSession({
+				parentSession: sourceSessionFile,
+				setup: async (targetSession) => {
+					const targetSessionId = targetSession.getSessionId();
+					const targetBranchBeforeWrite = targetSession.getLeafId();
+					const targetSessionFile = targetSession.getSessionFile();
+					if (!targetSessionId || targetSessionId === sourceSessionId || !targetSessionFile || targetSessionFile === sourceSessionFile || handoffReviewState() !== reviewStateAtStart) {
+						setupOutcome = "blocked";
+						setupReason = "target session identity, scope, or selection did not match";
+						pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "transition-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, exportPath });
+						return;
+					}
+					pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "submission-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, freshBranchId: targetBranchBeforeWrite, exportPath });
+					const sendBranchId = targetSession.getLeafId();
+					const attemptRecorded = targetSession.getBranch().some((entry) => entry.type === "custom" && entry.customType === HANDOFF_ENTRY && isRecord(entry.data) && entry.data.recapId === recap.id && entry.data.freshSessionId === targetSessionId && entry.data.state === "submission-uncertain");
+					if (!attemptRecorded || targetSession.getSessionId() !== targetSessionId || targetSession.getLeafId() !== sendBranchId || handoffReviewState() !== reviewStateAtStart) {
+						setupOutcome = "blocked";
+						setupReason = "target session, branch, scope, or selection changed at the send boundary";
+						pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "transition-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, exportPath });
+						return;
+					}
+					try {
+						pi.sendMessage({ customType: "review-handoff", content: recap.handoffText, display: true, details: { reviewHandoffId: recap.id, exportPath } }, { triggerTurn: false });
+						setupOutcome = "submitted";
+						setupReason = "";
+					} catch {
+						setupOutcome = "uncertain";
+						setupReason = "message submission threw without an acknowledgement";
+						pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "transition-uncertain", sourceSessionId, sourceBranchId, freshSessionId: targetSessionId, exportPath });
+					}
+				},
+			});
+		} catch {
+			markUncertainTransition(recap.id, sourceSessionId, sourceBranchId, exportPath);
+			if (setupOutcome === "submitted") return `Fresh session transition is uncertain after message submission; delivery acknowledgement is unavailable. Export: ${exportPath}. Do not retry blindly.`;
+			return `Fresh session transition is uncertain (${setupReason}); export remains at ${exportPath}; do not retry blindly`;
+		}
+		if (opened.cancelled) {
+			uncertainHandoffIds.delete(recap.id);
+			pi.appendEntry(HANDOFF_ENTRY, { recapId: recap.id, state: "cancelled", sourceSessionId, sourceBranchId, exportPath });
+			return `Fresh Review session cancelled; export remains at ${exportPath}; no message was sent`;
+		}
+		if (setupOutcome !== "submitted") return `Fresh session opened but the handoff was not sent (${setupReason}); export remains at ${exportPath}; do not retry blindly`;
+		return `Fresh session opened and handoff ${recap.id} submitted without triggering a model turn; delivery acknowledgement is unavailable. Export: ${exportPath}`;
+	};
+
+	const showReadOnlyRecap = async (ctx: CtxLike, id: string, text: string): Promise<void> => {
+		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+			const painter = theme as { fg(color: string, value: string): string; bold(value: string): string };
+			let scroll = 0;
+			const lines = text.split("\n");
+			const screenHeight = isRecord(tui) && typeof tui.height === "number" ? tui.height : 24;
+			const requestRender = (): void => {
+				if (isRecord(tui) && typeof tui.requestRender === "function") (tui.requestRender as () => void).call(tui);
+			};
+			return {
+				render(width: number): readonly string[] {
+					const bodyHeight = Math.max(1, Math.min(18, screenHeight - 4));
+					const content = lines.slice(scroll, scroll + bodyHeight).map((line) => truncateToWidth(painter.fg("text", line), width));
+					while (content.length < bodyHeight) content.push("");
+					return [
+						truncateToWidth(painter.bold(painter.fg("accent", `Review recap ${id} · read only`)), width),
+						truncateToWidth(painter.fg("border", "─".repeat(width)), width),
+						...content,
+						truncateToWidth(painter.fg("dim", `${scroll + 1}-${Math.min(lines.length, scroll + bodyHeight)} of ${lines.length} · j/k scroll · q/Esc close`), width),
+					];
+				},
+				handleInput(data: string): void {
+					if (data === "q" || data === "\u001b" || data === "\u001b[27;5;27~") { done(undefined); return; }
+					const previous = scroll;
+					if (data === "j" || data === "\u001b[B") scroll = Math.min(Math.max(0, lines.length - 1), scroll + 1);
+					else if (data === "k" || data === "\u001b[A") scroll = Math.max(0, scroll - 1);
+					else if (data === "\u0004" || data === "\u001b[6~") scroll = Math.min(Math.max(0, lines.length - 1), scroll + 16);
+					else if (data === "\u0015" || data === "\u001b[5~") scroll = Math.max(0, scroll - 16);
+					if (scroll !== previous) requestRender();
+				},
+			};
+		}, { overlay: true, overlayOptions: { fullscreen: true, width: "100%", maxHeight: "100%", anchor: "center" } });
+	};
+
+	const reviewCommand = async (rawArgs: string, ctx: CtxLike): Promise<string> => {
+		const args = rawArgs.trim().toLowerCase();
+		if (args === "recap") {
+			const recap = buildRecap(ctx);
+			if (ctx.hasUI) await showReadOnlyRecap(ctx, recap.id, recap.text);
+			return `Review recap ${recap.id}${ctx.hasUI ? " opened for inspection" : `\n${recap.text}`}`;
+		}
+		if (args === "handoff") return handoff(ctx);
+		if (args === "resume") return resumeStoppedBatch(ctx);
+		if (args === "slay" || args === "re-slay") {
+			activeCtx = ctx;
+			await startSlay(ctx, mode.slayableItems(BATCH_LIMIT));
+			return "Review Slay requested";
+		}
+		if (args === "cancel" || args === "drain" || args === "revise") {
+			if (activeBatch?.waveExit && sessionStopped(activeBatch)) {
+				persistBatch(ctx, { ...activeBatch, waveExit: { ...activeBatch.waveExit, choice: "cancel" } });
+				const batch = activeBatch;
+				return settleStoppedBatch(ctx, batch, await reconcileBatchClaims(ctx, batch));
+			}
+			return cancelBlockedBatch(ctx, args === "revise" ? "revise" : "cancel");
+		}
+		if (args === "reconcile" || args === "recover") {
+			const missing = restoreClaimWaves();
+			const candidates = [...new Map(
+				[...recoveryBatches.values(), activeBatch]
+					.filter((batch): batch is PersistedRepositoryBatch => batch !== undefined)
+					.map((batch) => [batch.id, batch]),
+			).values()];
+			if (candidates.length === 0 && missing.length === 0) return "No interrupted or blocked Review waves need reconciliation";
+			const lines: string[] = missing.map((owner) => `Retained UNKNOWN claims for ${owner}: missing or invalid durable recovery record; worker and external-effect evidence required`);
+			for (const batch of candidates) {
+				const result = await reconcileBatchClaims(ctx, batch);
+				if (result.settled.length > 0) lines.push(`Reconciled ${result.settled.join(", ")} for ${batch.id}`);
+				if (result.nonSuccessItems?.length) lines.push(`Slay did not satisfy its terminal outcome for ${[...new Set(result.nonSuccessItems)].sort().join(", ")}`);
+				if (result.submittedPrs.length > 0) lines.push(`Observed submitted PRs ${result.submittedPrs.join(", ")}`);
+				if (result.unknown.length > 0) lines.push(`Retained UNKNOWN claims ${result.unknown.join(", ")} for ${batch.id}${sessionStopped(batch) ? ": execution stopped; GitHub effect proof is missing: require unchanged exact PR head/review/auto-merge, a verified terminal PR effect, or one uniquely linked issue submission" : batch.waveExit ? ": missing positive owning-session shutdown settlement" : ""}`);
+				const wave = batch.waves[batch.currentWave];
+				if (result.unknown.length > 0 && batch.kind === "slay" && wave?.items.every((item) => item.type === "pr" && !isRepairRequested(item, mode.currentUserLogin))) {
+					lines.push(`Landing is not verified. If a PR is still open without auto-merge, ${slayLandingRecovery(wave.items)} If GitHub already shows merged or auto-merge accepted and this warning remains, worker, head, or review evidence is unresolved; inspect /review status and report the warning instead of deleting claims.`);
+				}
+				if (activeBatch?.id === batch.id && result.unknown.length === 0) {
+					if (sessionStopped(batch)) lines.push(settleStoppedBatch(ctx, batch, result));
+					else if (preToolProofValid(batch)) lines.push(archivePreToolBatch(ctx, batch, result));
+					else if (result.nonSuccessItems?.length) lines.push(archiveSlayNonSuccess(ctx, batch, result));
+					else await finishRecoveredBatch(ctx, batch, result);
+				}
+				else if (result.unknown.length === 0 && result.settled.length > 0) {
+					if (sessionStopped(batch)) lines.push(settleStoppedBatch(ctx, batch, result));
+					else if (preToolProofValid(batch)) lines.push(archivePreToolBatch(ctx, batch, result));
+					else if (result.nonSuccessItems?.length) lines.push(archiveSlayNonSuccess(ctx, batch, result));
+					else if (batch.state !== "cancelled") {
+						recoveryBatches.delete(batch.id);
+						const currentWave = batch.currentWave + 1;
+						pi.appendEntry(BATCH_ENTRY, { ...batch, currentWave, completedItems: batch.completedItems + batch.waves[batch.currentWave].items.length, state: currentWave === batch.waves.length ? "complete" : "paused", waveIdentity: undefined });
+					}
+				}
+			}
+			return lines.length > 0 ? lines.join("; ") : "No Review claims were released";
+		}
+		if (args === "" || args === "status") {
+			restoreClaimWaves();
+			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
+			const skippedSummary = (batch: PersistedRepositoryBatch): string => {
+				const ci = (batch.skippedItems ?? []).slice(0, 5).map((item) => `  Skipped CI: ${item.repo}#${item.number} head=${item.headSha} ci=${item.ciStatus} source=${item.ciEvidenceSource} observedAt=${item.observedAt}`);
+				const incompleteFiles = (batch.excludedItems ?? []).slice(0, 5).map((item) => `  Excluded candidate: ${item.repo}#${item.number}${item.headSha ? ` head=${item.headSha}` : ""} reason=${item.reason}${item.detail ? ` detail=${item.detail}` : ""} observedAt=${item.observedAt}`);
+				const omittedCi = Math.max(0, (batch.skippedItems?.length ?? 0) - 5);
+				const omittedFiles = Math.max(0, (batch.excludedItems?.length ?? 0) - 5);
+				const lines = [...ci, ...incompleteFiles,
+					...(omittedCi ? [`  ${omittedCi} additional CI skips omitted`] : []),
+					...(omittedFiles ? [`  ${omittedFiles} additional incomplete-file exclusions omitted`] : []),
+				];
+				return lines.length > 0 ? `\n${lines.join("\n")}` : "";
+			};
+			const batches = [...recoveryBatches.values()].map((batch) =>
+				`${batch.id} ${batch.state}${batch.error ? ` — ${batch.error}` : ""}${skippedSummary(batch)}`);
+			return [
+				activeBatch ? `Active Review wave: ${activeBatch.id} ${activeBatch.state}${activeBatch.error ? ` — ${activeBatch.error}` : ""}${skippedSummary(activeBatch)}` : "No active Review wave",
+				...batches,
+				claims.length > 0
+					? claims.map((claim) => `${claim.resource} is owned by ${claim.owner} [${claim.status}]`).join("\n")
+					: "No Review mutation claims",
+			].join("\n");
+		}
+		return "usage: /review status | recap | handoff | reconcile | resume | drain | cancel | revise | slay";
+	};
+	pi.registerCommand?.("review", {
+		description: "Inspect or recover an interrupted Review repository wave",
+		handler: async (args, ctx) => {
+			try {
+				const message = await reviewCommand(args, ctx);
+				if (ctx.hasUI) ctx.ui.notify(message, /UNKNOWN|unaccounted|No blocked/.test(message) ? "warning" : "info");
+			} catch (error) {
+				if (ctx.hasUI) ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
+	const batchBlocker = async (
+		kind: RepositoryBatchKind,
+		items: readonly QueueItem[],
+		skippedCi: CiSkippedItem[] = [],
+	): Promise<string | undefined> => {
+		if (kind === "diff") return undefined;
+		const allPullRequests = items.every((item) => item.type === "pr");
+		const allIssues = items.every((item) => item.type === "issue");
+		if (kind === "slay" && !allPullRequests && !allIssues) return "Slay waves must not mix pull requests and issues";
+
+		if (kind === "slay" && allPullRequests) {
+			for (const item of items) {
+				const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+				if (!wasRepair && !policy.allowWorkflowSlay && (item.workflowFiles?.length ?? 0) > 0) {
+					return `Cannot dispatch ${item.repo}#${item.id}: changes ${item.workflowFiles![0]}`;
+				}
+				if (!wasRepair && item.changedFilesComplete === false) {
+					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+				}
+			}
+			const live = await fetchItemsByKey(
+				items.map((item) => `${item.repo}#${item.id}`),
+				"prs",
+				mode.tokenOptions(),
+			);
+			if (live.error) return `Live pull-request check failed: ${live.error}`;
+			const dispatchableLiveItems: QueueItem[] = [];
+			for (const item of items) {
+				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
+				if (!exactHeadVerified(item.headSha, current.headSha)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+				const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+				if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
+					return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
+				}
+				if (!wasRepair && (current.ciEvidenceComplete === false || current.ciStatus === undefined)) {
+					return `Cannot dispatch ${item.repo}#${item.id}: CI state is incomplete or unknown`;
+				}
+				if (!wasRepair && (current.ciStatus === "failure" || current.ciStatus === "pending")) {
+					if (current.ciEvidenceSource !== "statusCheckRollup" && current.ciEvidenceSource !== "checkSuites") {
+						return `Cannot dispatch ${item.repo}#${item.id}: CI evidence source is unknown`;
+					}
+					if (!current.headSha) return `Cannot skip ${item.repo}#${item.id}: exact pull-request head is unavailable`;
+					const itemKey = `item:${item.repo.toLowerCase()}#${item.id}`;
+					const repoKey = `repo:${item.repo.toLowerCase()}`;
+					let claimConflict: string | undefined;
+					try {
+						claimConflict = resourceClaims().conflict(repoKey) ?? resourceClaims().conflict(itemKey);
+					} catch (error) {
+						return `Cannot verify mutation ownership for ${item.repo}#${item.id}: ${error instanceof Error ? error.message : String(error)}`;
+					}
+					if (claimConflict) {
+						return `Cannot skip ${item.repo}#${item.id}: ${claimConflict}; inspect/reconcile that work before continuing`;
+					}
+					skippedCi.push({ item: current, status: current.ciStatus, evidenceSource: current.ciEvidenceSource, observedAt: Date.now() });
+					continue;
+				}
+				if (current.changedFilesComplete !== true) {
+					return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+				}
+				dispatchableLiveItems.push(current);
+			}
+			for (const current of dispatchableLiveItems) {
+				const wasRepair = isRepairRequested(current, mode.currentUserLogin);
+				if (!wasRepair && !policy.allowWorkflowSlay && (current.workflowFiles?.length ?? 0) > 0) {
+					return `Cannot dispatch ${current.repo}#${current.id}: changes ${current.workflowFiles![0]}`;
+				}
+			}
+			const liveWorkflowPermission = await workflowPermissionBlocker(dispatchableLiveItems);
+			if (liveWorkflowPermission) return liveWorkflowPermission;
+			return undefined;
+		}
+
+		if (kind === "fix") {
+			const pullRequests = items.filter((item): item is QueueItem & { type: "pr" } => item.type === "pr");
+			let livePullRequests: QueueItem[] = [];
+			if (pullRequests.length > 0) {
+				const live = await fetchItemsByKey(
+					pullRequests.map((item) => `${item.repo}#${item.id}`),
+					"prs",
+					mode.tokenOptions(),
+				);
+				if (live.error) return `Live pull-request check failed: ${live.error}`;
+				for (const item of pullRequests) {
+					const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+					if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
+					if (!exactHeadVerified(item.headSha, current.headSha)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+					const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+					if (wasRepair !== isRepairRequested(current, mode.currentUserLogin)) {
+						return `Cannot dispatch ${item.repo}#${item.id}: requested-changes state changed`;
+					}
+					if (current.changedFilesComplete !== true) {
+						return `Cannot dispatch ${item.repo}#${item.id}: complete changed-file list unavailable`;
+					}
+				}
+				livePullRequests = live.items;
+				for (const item of pullRequests) {
+					const current = livePullRequests.find((candidate) => candidate.repo === item.repo && candidate.id === item.id)!;
+					const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+					if (!wasRepair && !policy.allowWorkflowSlay && (current.workflowFiles?.length ?? 0) > 0) {
+						return `Cannot dispatch ${item.repo}#${item.id}: changes ${current.workflowFiles![0]}`;
+					}
+				}
+			}
+			const workflowPermission = await workflowPermissionBlocker(livePullRequests);
+			if (workflowPermission) return workflowPermission;
+		}
+
+		if (kind === "slay" && allIssues) {
+			const live = await fetchItemsByKey(
+				items.map((item) => `${item.repo}#${item.id}`),
+				"issues",
+				mode.tokenOptions(),
+			);
+			if (live.error) return `Live issue check failed: ${live.error}`;
+			for (const item of items) {
+				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				if (!current) return `Cannot dispatch ${item.repo}#${item.id}: issue is closed or unreadable`;
+				if ((current.submittedPrs?.length ?? 0) > 0) {
+					return `Cannot dispatch ${item.repo}#${item.id}: pull request already submitted (${current.submittedPrs!.join(", ")})`;
+				}
+			}
+		}
+
+		const claimed = items.find((item) => mode.claimFor(item));
+		if (claimed) return `${claimed.repo}#${claimed.id} is already claimed by ${mode.claimFor(claimed)}`;
+		if (kind !== "fix" && !(kind === "slay" && allIssues)) return undefined;
+
+		const managedIssues = items.filter((item) => item.type === "issue" && managedPolicyFor(item.repo, policy));
+		if (managedIssues.length > 0) {
+			const result = await fetchIssueAdmission(
+				managedIssues.map((item) => {
+					const [owner, repo] = item.repo.split("/") as [string, string];
+					return { owner, repo, number: item.id };
+				}),
+				{ token: mode.tokenOptions().token ?? resolveToken(env), fetchImpl: options.fetchImpl },
+			);
+			if (result.error) return `Admission check failed: ${result.error}`;
+			for (const admitted of result.issues) {
+				const key = `${admitted.owner}/${admitted.repo}#${admitted.number}`;
+				const admissionPolicy = managedPolicyFor(`${admitted.owner}/${admitted.repo}`, policy);
+				if (!admissionPolicy) return `Cannot dispatch ${key}: no managed-repository policy`;
+				if (admitted.closed) return `Cannot dispatch ${key}: issue is closed`;
+				if (admitted.labelsTruncated) return `Cannot dispatch ${key}: incomplete label evidence`;
+				for (const denied of admissionPolicy.deniedLabels) {
+					if (admitted.labels.includes(denied)) return `Cannot dispatch ${key}: issue has ${denied} label`;
+				}
+				for (const required of admissionPolicy.requiredLabels) {
+					if (!admitted.labels.includes(required)) return `Cannot dispatch ${key}: missing explicit admission label '${required}'`;
+				}
+			}
+		}
+		if (kind === "slay") return undefined;
+
+		const managedPullRequests = items.filter((item) => item.type === "pr" && managedPolicyFor(item.repo, policy));
+		if (managedPullRequests.length > 0) {
+			const live = await fetchItemsByKey(
+				managedPullRequests.map((item) => `${item.repo}#${item.id}`),
+				"prs",
+				mode.tokenOptions(),
+			);
+			if (live.error) return `Live pull-request check failed: ${live.error}`;
+			const capturedHeads = new Map(managedPullRequests.map((item) => [`${item.repo}#${item.id}`, item.headSha]));
+			mode.reconcileItems(live.items);
+			for (const item of managedPullRequests) {
+				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				if (!current) return `Cannot dispatch ${item.repo}#${item.id}: pull request is closed or unreadable`;
+				if (!exactHeadVerified(item.headSha, current.headSha)) return `Cannot dispatch ${item.repo}#${item.id}: pull request head changed`;
+				const denied = managedPolicyFor(item.repo, policy)?.deniedLabels.find((label) => current.labels.includes(label));
+				if (denied) return `Cannot dispatch ${item.repo}#${item.id}: pull request has ${denied} label`;
+			}
+		}
+		return undefined;
+	};
+
+	const dispatchCurrentWave = async (ctx: CtxLike, deliverAs?: "steer" | "followUp", prevalidated = false) => {
+		if (!activeBatch || activeBatch.waveExit || shuttingDownSessionId) return;
+		if (mode.paused) {
+			persistBatch(ctx, { ...activeBatch, state: "paused" });
+			return;
+		}
+		const dispatchBatch = activeBatch;
+		let wave = activeBatch.waves[activeBatch.currentWave];
+		if (!wave) {
+			persistBatch(ctx, { ...activeBatch, state: "complete" });
+			ctx.ui.notify(activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
+			return;
+		}
+		if (!prevalidated) {
+			const skippedCi: CiSkippedItem[] = [];
+			const blocker = await batchBlocker(activeBatch.kind, wave.items, skippedCi);
+			if (activeBatch !== dispatchBatch || activeBatch.waveExit || shuttingDownSessionId) return;
+			if (blocker) {
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error: blocker });
+				ctx.ui.notify(blocker, "error");
+				return;
+			}
+			if (skippedCi.length > 0) {
+				for (const skipped of skippedCi) notifyCiSkip(ctx, skipped);
+				const skippedKeys = new Set(skippedCi.map(({ item }) => `${item.repo.toLowerCase()}#${item.id}`));
+				const remainingItems = wave.items.filter((item) => !skippedKeys.has(`${item.repo.toLowerCase()}#${item.id}`));
+				const currentWave = activeBatch.currentWave;
+				const waves = remainingItems.length === 0
+					? activeBatch.waves.filter((_candidate, index) => index !== currentWave)
+					: activeBatch.waves.map((candidate, index) => index === currentWave ? { ...candidate, items: remainingItems } : candidate);
+				const skippedItems = [...(activeBatch.skippedItems ?? []), ...skippedCi.map(persistedCiSkip)];
+				const waveReset = {
+					waveIdentity: undefined,
+					wavePromptDigest: undefined,
+					waveToolCallIds: undefined,
+					waveToolInvocationIds: undefined,
+					waveTaskWorkers: undefined,
+					waveJobBaselineIds: undefined,
+					waveJobIds: undefined,
+					waveTerminalJobStatuses: undefined,
+					wavePreToolTerminal: undefined,
+					waveEffectResources: undefined,
+				};
+				if (currentWave >= waves.length) {
+					persistBatch(ctx, {
+						...activeBatch,
+						...waveReset,
+						waves,
+						currentWave: waves.length,
+						skippedItems,
+						state: "complete",
+						error: undefined,
+					});
+					ctx.ui.notify("No eligible PRs remain after current CI checks", "warning");
+					return;
+				}
+				persistBatch(ctx, { ...activeBatch, ...waveReset, waves, skippedItems });
+				if (remainingItems.length === 0) {
+					await dispatchCurrentWave(ctx, deliverAs);
+					return;
+				}
+				wave = activeBatch.waves[activeBatch.currentWave]!;
+			}
+		}
+		const retryingBlockedWave = activeBatch.state === "blocked";
+		const startedAt = Date.now();
+		persistBatch(ctx, { ...activeBatch, state: "running", waveStartedAt: startedAt, error: undefined, cancelRequested: undefined });
+		const waveAction = {
+			kind: activeBatch.kind,
+			item: wave.items[0]!,
+			items: wave.items.length > 1 ? [...wave.items] : undefined,
+		} as DashboardAction;
+		const first = wave.items[0]!;
+		const priority: Priority | undefined = isRepairRequested(first, mode.currentUserLogin)
+			? { category: "repair-requested", source: "local", reason: "changes requested on your pull request", demotion: 0 }
+			: mode.priorityFor(first);
+		const actionText = actionPrompt(waveAction, priority, { workbenchMode: mode.workbenchMode });
+		const prompt = actionText ? `Review dispatch: ${randomUUID()}\n\nThis is a new dispatch, including when resuming saved work. Historical agent:// resources, worker conversations, task results, and job IDs are context only and are invalid as evidence for this dispatch. Invoke the OMP workflowz task tool now with fresh workers for the selected targets; do not reuse or adopt historical workers or job mappings. Before approval or merge, every task invocation in this dispatch must have complete task-to-job receipts, successful terminal worker status, and delivered results.\n\n${actionText}` : undefined;
+		if (!prompt) {
+			persistBatch(ctx, { ...activeBatch!, state: "blocked", error: "wave action produced no prompt" });
+			return;
+		}
+		const before = ctx.getAsyncJobSnapshot?.();
+		const baseline = [...new Set([...(before?.delivery?.pendingJobIds ?? []), ...(before?.running ?? []).map((job) => job.id), ...(before?.recent ?? []).map((job) => job.id)])].sort();
+		const resources = activeBatch.kind === "diff"
+			? []
+			: [...new Set(wave.items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))].sort();
+		persistBatch(ctx, { ...activeBatch, waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`, waveSessionId: ctx.sessionManager?.getSessionId?.(), waveExit: undefined, waveShutdown: undefined, wavePromptDigest: promptDigest(prompt), waveToolCallIds: undefined, waveToolInvocationIds: undefined, waveTaskWorkers: undefined, waveJobBaselineIds: baseline, waveJobIds: undefined, waveTerminalJobStatuses: undefined, wavePreToolTerminal: undefined, waveEffectResources: resources });
+		if (activeBatch.kind !== "diff") {
+			try { claimItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`, !retryingBlockedWave); }
+			catch (error) { persistBatch(ctx, { ...activeBatch, state: "blocked", error: String(error) }); ctx.ui.notify(String(error), "error"); return; }
+		}
+		ctx.ui.notify(`Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
+		ownedWavePrompts.add(promptDigest(prompt));
+		pi.sendUserMessage(prompt, { ...(deliverAs ? { deliverAs } : {}), waveId: `${activeBatch.id}:${activeBatch.currentWave}` });
+		rememberWaveEvidence(ctx);
+	};
+
+	const startRepositoryBatch = async (
+		ctx: CtxLike,
+		kind: RepositoryBatchKind,
+		items: readonly QueueItem[],
+		selection: { totalItems?: number; excludedItems?: readonly PersistedCandidateExclusion[] } = {},
+	) => {
+		if (kind !== "diff" && (pi.sessionShutdownLifecycleVersion !== 1 || !ctx.sessionManager?.getSessionId?.())) {
+			ctx.ui.notify("Review mutations require OMP session shutdown lifecycle v1 and a native session identity; upgrade to the packaged Review OMP runtime", "error");
+			return;
+		}
+		const generation = ++batchRequestGeneration;
+		if (activeBatch?.state === "running" || activeBatch?.state === "paused") {
+			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
+			return;
+		}
+		if (activeBatch?.state === "blocked") {
+			const wave = activeBatch.waves[activeBatch.currentWave];
+			const requested = mode.repositoryWaves(items)[0];
+			if (activeBatch.kind !== kind || !wave || !requested || requested.repo !== wave.repo || requested.items.length !== wave.items.length || requested.items.some((item, index) => item.repo !== wave.items[index]!.repo || item.id !== wave.items[index]!.id)) {
+				ctx.ui.notify(`Run ${activeBatch.id} is blocked; inspect/reconcile its claims before dispatching another mutation`, "warning");
+				return;
+			}
+			await dispatchCurrentWave(ctx);
+			return;
+		}
+		// Queue refresh mutates queue items; admitted subjects must retain their
+		// captured heads and policy evidence independently of that projection.
+		const waves = mode.repositoryWaves(structuredClone(items));
+		if (waves.length === 0) return;
+		const startedAt = Date.now();
+		const issueSubmittedPrs = Object.fromEntries(
+			items
+				.filter((item) => item.type === "issue")
+				.map((item) => [`${item.repo.toLowerCase()}#${item.id}`, [...(item.submittedPrs ?? [])]]),
+		);
+		const batch: PersistedRepositoryBatch = {
+			version: 1,
+			id: `batch-${startedAt.toString(36)}-${randomUUID()}`,
+			kind,
+			waves,
+			currentWave: 0,
+			completedItems: 0,
+			totalItems: selection.totalItems ?? items.length,
+			excludedItems: selection.excludedItems,
+			state: mode.paused ? "paused" : "running",
+			startedAt,
+			waveStartedAt: startedAt,
+			issueSubmittedPrs,
+		};
+		const validations = await Promise.all(waves.map(async (wave) => {
+			const skippedCi: CiSkippedItem[] = [];
+			const blocker = await batchBlocker(kind, wave.items, skippedCi);
+			return { blocker, skippedCi };
+		}));
+		const blocker = validations.find((validation) => validation.blocker !== undefined)?.blocker;
+		if (generation !== batchRequestGeneration || shuttingDownSessionId) return;
+		if (activeBatch?.state === "running" || activeBatch?.state === "paused") return;
+		if (blocker) {
+			persistBatch(ctx, { ...batch, state: "blocked", error: blocker });
+			ctx.ui.notify(blocker, "error");
+			return;
+		}
+		const runnableWaves = waves.flatMap((wave, index) => {
+			const skippedKeys = new Set(validations[index]!.skippedCi.map(({ item }) => `${item.repo.toLowerCase()}#${item.id}`));
+			const runnableItems = wave.items.filter((item) => !skippedKeys.has(`${item.repo.toLowerCase()}#${item.id}`));
+			return runnableItems.length > 0 ? [{ ...wave, items: runnableItems }] : [];
+		});
+		const skippedCi = validations.flatMap((validation) => validation.skippedCi);
+		for (const skipped of skippedCi) notifyCiSkip(ctx, skipped);
+		const skippedItems = skippedCi.map(persistedCiSkip);
+		if (runnableWaves.length === 0) {
+			mode.clearSelected();
+			persist();
+			persistBatch(ctx, { ...batch, waves: [], skippedItems, state: "complete" });
+			ctx.ui.notify("No selected PRs are eligible for dispatch; no work was started", "warning");
+			return;
+		}
+		mode.clearSelected();
+		persist();
+		persistBatch(ctx, { ...batch, waves: runnableWaves, skippedItems });
+		await dispatchCurrentWave(ctx, undefined, true);
+	};
+	const workflowPermissionBlocker = async (items: readonly QueueItem[]): Promise<string | undefined> => {
+		const workflowItem = items.find((item) => item.type === "pr" && (item.workflowFiles?.length ?? 0) > 0);
+		if (!workflowItem) return undefined;
+		const scopes = await fetchOAuthScopes(mode.tokenOptions());
+		if (scopes !== undefined) {
+			if (!scopes.includes("workflow")) {
+				return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token lacks workflow/Actions write permission; grant workflow scope or Actions/Contents write access`;
+			}
+			return undefined;
+		}
+		return `Cannot dispatch ${workflowItem.repo}#${workflowItem.id}: GitHub token workflow/Actions write permission could not be verified; grant workflow scope or Actions/Contents write access`;
+	};
+	const persistedCiSkip = ({ item, status, evidenceSource, observedAt }: CiSkippedItem): PersistedCiSkippedItem => ({
+		repo: item.repo,
+		number: item.id,
+		headSha: item.headSha!,
+		ciStatus: status,
+		ciEvidenceSource: evidenceSource,
+		observedAt,
+	});
+	const notifyCiSkip = (ctx: CtxLike, skipped: CiSkippedItem): void => {
+		ctx.ui.notify(
+			`Skipping ${skipped.item.repo}#${skipped.item.id} head=${skipped.item.headSha}: CI is ${skipped.status} (source=${skipped.evidenceSource}); ordinary PR review/landing waits for checks`,
+			"warning",
+		);
+	};
+
+	const filterUnsupportedSlayItems = (
+		ctx: CtxLike,
+		items: readonly QueueItem[],
+		excludedItems?: PersistedCandidateExclusion[],
+	): QueueItem[] => {
+		const eligible: QueueItem[] = [];
+		for (const item of items) {
+			if (item.type !== "pr") {
+				eligible.push(item);
+				continue;
+			}
+			const wasRepair = isRepairRequested(item, mode.currentUserLogin);
+			if (!wasRepair && (item.workflowFiles?.length ?? 0) > 0 && !policy.allowWorkflowSlay) {
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					headSha: item.headSha,
+					reason: "workflow file change",
+					detail: item.workflowFiles![0],
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${excluded.detail}`, "warning");
+				continue;
+			}
+			if (item.changedFilesComplete === false) {
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					headSha: item.headSha,
+					reason: "incomplete changed-file list",
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
+				ctx.ui.notify(`Skipping ${item.repo}#${item.id}${item.headSha ? ` head=${item.headSha}` : ""}: ${excluded.reason}`, "warning");
+				continue;
+			}
+			eligible.push(item);
+		}
+		return eligible;
+	};
+
+	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[], excludedItems?: PersistedCandidateExclusion[]): QueueItem[] => {
+		const eligible: QueueItem[] = [];
+		for (const item of items) {
+			if (item.type === "issue" && (item.submittedPrs?.length ?? 0) > 0) {
+				const excluded: PersistedCandidateExclusion = {
+					repo: item.repo,
+					number: item.id,
+					reason: "pull request already submitted",
+					detail: item.submittedPrs!.join(", "),
+					observedAt: Date.now(),
+				};
+				excludedItems?.push(excluded);
+				ctx.ui.notify(
+					`Skipping ${item.repo}#${item.id}: pull request already submitted (${excluded.detail})`,
+					"warning",
+				);
+				continue;
+			}
+			eligible.push(item);
+		}
+		return eligible;
+	};
+
+	const startSlay = async (ctx: CtxLike, candidates: readonly QueueItem[] = mode.slayableItems(BATCH_LIMIT)) => {
+		if (candidates.length === 0) {
+			ctx.ui.notify("No queue items available to slay", "warning");
+			return;
+		}
+		const excludedItems: PersistedCandidateExclusion[] = [];
+		const persistExcludedSelection = () => {
+			if (excludedItems.length === 0) return;
+			const startedAt = Date.now();
+			mode.clearSelected();
+			persist();
+			persistSelectionReceipt(ctx, {
+				version: 1,
+				id: `batch-${startedAt.toString(36)}`,
+				kind: "slay",
+				waves: [],
+				currentWave: 0,
+				completedItems: 0,
+				totalItems: candidates.length,
+				state: "complete",
+				startedAt,
+				waveStartedAt: startedAt,
+				excludedItems,
+			});
+		};
+		const eligible = filterUnsupportedSlayItems(ctx, candidates, excludedItems);
+		if (eligible.length === 0) {
+			persistExcludedSelection();
+			return;
+		}
+		const items = filterCompletedIssueSlayItems(ctx, eligible, excludedItems);
+		if (items.length === 0) {
+			persistExcludedSelection();
+			return;
+		}
+		await startRepositoryBatch(ctx, "slay", items, { totalItems: candidates.length, excludedItems });
+	};
+
+	const startAutoslay = async (ctx: CtxLike) => {
+		if (mode.queueMode === "issues") {
+			await startSlay(ctx, mode.visibleItems());
+			return;
+		}
+		if (mode.isReviewMode()) {
+			await startSlay(ctx);
+			return;
+		}
+		const repairs = mode.repairRequestedItems();
+		mode.toggleMode();
+		await refreshQueue(ctx);
+		await startSlay(ctx, [...repairs, ...mode.visibleItems()]);
+	};
+
+	/**
+	 * Point the queue at another repository.
+	 *
+	 * Accepts `owner/repo`, a bare repository name in the configured
+	 * organization, a GitHub URL, or `org:<name>` to go back to a whole
+	 * organization. Anything else is rejected rather than silently searched for.
+	 */
+	const promptForScope = async (ctx: CtxLike): Promise<boolean> => {
+		if (!ctx.hasUI) return false;
+		const answer = await ctx.ui.input("Review which repository?", "owner/repo, or org:name");
+		if (answer === undefined || !answer.trim()) return false;
+		const scope = parseScope(answer, mode.org);
+		if (!scope) {
+			ctx.ui.notify(`Not a repository: ${answer.trim()}`, "error");
+			return false;
+		}
+		mode.setScope(scope);
+		ctx.ui.notify(`Queue scoped to ${mode.scopeLabel()}`, "info");
+		await refreshQueue(ctx);
+		persist();
+		return true;
+	};
+	const dispatch = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
+
+		if (action.kind === "close") return;
+		if (action.kind === "factory") {
+			// Capture the selected work packet before awaiting the operator's
+			// outcome choice. Review selection can change while the menu is open,
+			// but an admitted Factory batch must remain immutable.
+			const capturedItems = mode.factorySelection("inspect");
+			if (!factoryControllerRegistered()) {
+				ctx.ui.notify(`Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
+				return;
+			}
+			const repositories = new Set(capturedItems.map((item) => item.repo));
+			const title = capturedItems.length === 0
+				? "Open Luna Factory"
+				: `Send ${capturedItems.length} selected item${capturedItems.length === 1 ? "" : "s"} across ${repositories.size} repositor${repositories.size === 1 ? "y" : "ies"} to Factory`;
+			const options: Array<string | { label: string; description?: string }> = capturedItems.length === 0
+				? [
+					{ label: "Open Factory", description: "View running and retained Factory work" },
+					"Cancel",
+				]
+				: [
+					{ label: "Implement locally", description: "Make and verify the change. Stop before opening a PR." },
+					{ label: "Inspect only", description: "Research the selected work. Make no changes." },
+					{ label: "Implement and prepare PR", description: "Make and verify the change, then prepare it for review." },
+					{ label: "Open Factory", description: "View running and retained Factory work" },
+					"Cancel",
+				];
+			const choice = await ctx.ui.select(title, options);
+			if (choice === "Open Factory") {
+				factoryHandoffRequested = true;
+				factoryOpenOnly = true;
+				return;
+			}
+			const command = choice === "Implement locally"
+				? "start patch"
+				: choice === "Inspect only"
+					? "start inspect"
+					: choice === "Implement and prepare PR"
+						? "start pr-ready"
+						: undefined;
+			if (command === undefined) return;
+			factoryHandoffRequested = true;
+			try {
+				// Delegate inherited/live capabilities with their original receiver. Factory
+				// captures only execution references; this handler's UI stays scoped here.
+				const factoryCtx = new Proxy(ctx, {
+					get(target, key) {
+						if (key === "reconcileMutationClaim") return reconcileMutationClaim;
+						const value = Reflect.get(target, key, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+					set() { throw new Error("Factory cannot mutate the OMP handler context"); },
+				});
+				if (command.startsWith("start ")) {
+					if (!factoryBatchSubmitterRegistered() || !factoryDashboardOpenerRegistered()) {
+						ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+						return;
+					}
+					const action = command.slice("start ".length) as "inspect" | "patch" | "pr-ready";
+					const handoff = await submitFactoryBatch(action, factoryCtx, capturedItems.map((item) => ({ ...item, action })));
+					ctx.ui.notify(`Factory batch ${handoff.batchId} submitted`, "info");
+					factoryHandoffBatchId = handoff.batchId;
+				} else {
+					ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+				}
+			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+			return;
+		}
+		if (action.kind === "open_browser") {
+			const result = await pi.exec(
+				"gh",
+				[action.item.type === "pr" ? "pr" : "issue", "view", String(action.item.id), "--repo", action.item.repo, "--web"],
+				{ timeout: 15_000 },
+			);
+			if (result.code === 0 && !result.killed) {
+				ctx.ui.notify(`Opened ${action.item.url}`, "info");
+			} else {
+				ctx.ui.pasteToEditor(action.item.url);
+				ctx.ui.notify(`Browser unavailable; added ${action.item.url} to the prompt`, "warning");
+			}
+			return;
+		}
+		if (action.kind === "scope") {
+			await promptForScope(ctx);
+			return;
+		}
+		if (action.kind === "autoslay") {
+			activeCtx = ctx;
+			await startAutoslay(ctx);
+			return;
+		}
+		if (action.kind === "reference") {
+			const items = action.items?.length ? action.items : [action.item];
+			ctx.ui.pasteToEditor(items.map((item) => `${item.repo}#${item.id} — ${item.title}\n${item.url}\n`).join("\n"));
+			ctx.ui.notify(`Added ${items.length === 1 ? "item" : `${items.length} items`} to the prompt`, "info");
+			return;
+		}
+		const capturedItems = action.items && action.items.length > 0 ? [...action.items] : [action.item];
+
+
+
+		if (action.kind === "comment") {
+			if (commentInFlight) {
+				ctx.ui.notify("A comment action is already in progress", "warning");
+				return;
+			}
+			commentInFlight = true;
+			let commentPlan: CommentActionPlan | undefined;
+			const receipts: string[] = [];
+			const commentOwner = `review:comment:${Date.now()}:${Math.random()}`;
+			let claimed = false;
+			let uncertain = false;
+			try {
+				const body = await ctx.ui.editor("Comment on selected work", "");
+				if (body === undefined || !body.trim()) return;
+				const targets: CommentTargetSnapshot[] = capturedItems.map((item) => ({
+					repo: item.repo,
+					number: item.id,
+					type: item.type === "pr" ? "pull_request" : "issue",
+					headSha: item.headSha,
+				}));
+				commentPlan = createCommentActionPlan(targets, body);
+				pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "previewed", plan: commentPlan } satisfies PersistedCommentResult);
+				if (!(await ctx.ui.confirm("Post comment batch?", renderCommentActionPlan(commentPlan)))) {
+					pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "aborted", plan: commentPlan } satisfies PersistedCommentResult);
+					return;
+				}
+
+				const queueMode = capturedItems[0]!.type === "pr" ? "prs" : "issues";
+				const live = await fetchItemsByKey(
+					targets.map((target) => `${target.repo}#${target.number}`),
+					queueMode,
+					mode.tokenOptions(),
+				);
+				if (live.error) throw new Error(`live revalidation failed: ${live.error}`);
+					mode.reconcileItems(live.items);
+					const liveTargets: CommentTargetSnapshot[] = live.items.map((item) => ({
+					repo: item.repo,
+					number: item.id,
+					type: item.type === "pr" ? "pull_request" : "issue",
+					headSha: item.headSha,
+				}));
+				const validation = validateCommentActionPlan(commentPlan, liveTargets);
+				if (!validation.valid) throw new Error(validation.errors.join("; "));
+				claimItems(capturedItems, commentOwner); claimed = true;
+				pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "confirmed", plan: commentPlan } satisfies PersistedCommentResult);
+
+				for (const target of commentPlan.targets) {
+					if (receipts.length > 0) {
+						const current = await fetchItemsByKey(
+							[`${target.repo}#${target.number}`],
+							target.type === "pull_request" ? "prs" : "issues",
+							mode.tokenOptions(),
+						);
+						if (current.error) throw new Error(`live revalidation failed: ${current.error}`);
+						mode.reconcileItems(current.items);
+						const validation = validateCommentActionPlan(
+							{ ...commentPlan, targets: [target] },
+							current.items.map((item) => ({
+								repo: item.repo,
+								number: item.id,
+								type: item.type === "pr" ? "pull_request" : "issue",
+								headSha: item.headSha,
+							})),
+						);
+						if (!validation.valid) throw new Error(validation.errors.join("; "));
+					}
+					const invocation = commentInvocation(target, commentPlan.body);
+					uncertain = true;
+					const result = await pi.exec(invocation.command, [...invocation.args], { timeout: 30_000 });
+					if (result.code !== 0 || result.killed) {
+						throw new Error(result.stderr.trim() || `gh comment exited ${result.code}`);
+					}
+					receipts.push(result.stdout.trim() || `${target.repo}#${target.number}`);
+					pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "confirmed", plan: commentPlan, receipts: [...receipts] } satisfies PersistedCommentResult);
+					uncertain = false;
+				}
+				pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "complete", plan: commentPlan, receipts } satisfies PersistedCommentResult);
+				ctx.ui.notify(`Posted ${receipts.length} GitHub-confirmed comment${receipts.length === 1 ? "" : "s"}`, "info");
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (commentPlan) pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "failed", plan: commentPlan, receipts, error: message } satisfies PersistedCommentResult);
+				ctx.ui.notify(`Comment action stopped: ${message}`, "error");
+			} finally {
+				if (claimed && !uncertain) releaseItems(capturedItems, commentOwner);
+				commentInFlight = false;
+			}
+			return;
+		}
+
+		if (action.kind === "slay") {
+			activeCtx = ctx;
+			await startSlay(ctx, capturedItems);
+			return;
+		}
+		if (action.kind === "fix") {
+			activeCtx = ctx;
+			const excludedItems: PersistedCandidateExclusion[] = [];
+			const supported = filterUnsupportedSlayItems(ctx, capturedItems, excludedItems);
+			if (supported.length === 0) {
+				if (excludedItems.length > 0) {
+					const startedAt = Date.now();
+					mode.clearSelected();
+					persist();
+					persistSelectionReceipt(ctx, {
+						version: 1,
+						id: `batch-${startedAt.toString(36)}`,
+						kind: action.kind,
+						waves: [],
+						currentWave: 0,
+						completedItems: 0,
+						totalItems: capturedItems.length,
+						state: "complete",
+						startedAt,
+						waveStartedAt: startedAt,
+						excludedItems,
+					});
+				}
+				return;
+			}
+			await startRepositoryBatch(ctx, action.kind, supported, { totalItems: capturedItems.length, excludedItems });
+			return;
+		}
+		if (action.kind === "diff") {
+			activeCtx = ctx;
+			await startRepositoryBatch(ctx, action.kind, capturedItems);
+		}
+	};
+	const openDashboard = async (ctx: CtxLike) => {
+		if (!ctx.hasUI || dashboardOpen) return;
+		dashboardOpen = true;
+		let reopen = false;
+		try {
+			const action = await ctx.ui.custom<DashboardAction>(
+				(hostTui, theme, _keybindings, done) => {
+					tui = hostTui as { requestRender(): void };
+					activeDashboard = new ReviewDashboard(
+						tui,
+						workbenchPainter(theme as UiLike["theme"], () => mode.queueMode),
+						mode,
+						done,
+						() => void refreshQueue(ctx),
+						Math.max(14, Math.min(30, (process.stdout.rows ?? 30) - 8)),
+						matchKey,
+						() => {
+							persist();
+							syncStatus(ctx);
+						},
+						(nextAction) => void dispatch(ctx, nextAction),
+						(paused) => {
+							persist();
+							if (!paused && activeBatch?.state === "paused") void dispatchCurrentWave(ctx, "followUp");
+							syncBatchProgress(ctx);
+						},
+						// The dashboard advertises the Factory handoff only while a
+						// controller is registered, so "Factory is not loaded" is not
+						// reachable from a key the workbench offers.
+						() => factoryControllerRegistered(),
+					);
+					return activeDashboard;
+				},
+				{ overlay: false },
+			);
+			if (action.kind !== "close") await dispatch(ctx, action);
+			if (action.kind === "scope") reopen = true;
+			if (action.kind === "factory" && factoryHandoffRequested) {
+				const batchId = factoryHandoffBatchId;
+				const openOnly = factoryOpenOnly;
+				factoryHandoffBatchId = undefined;
+				factoryOpenOnly = false;
+				factoryHandoffRequested = false;
+				if (batchId !== undefined || openOnly) await openFactoryDashboard(ctx, batchId);
+				reopen = true;
+			}
+		} catch {
+			// OMP cancellation closes the workbench without changing batch state.
+		} finally {
+			dashboardOpen = false;
+			activeDashboard = undefined;
+			persist();
+			syncStatus(ctx);
+		}
+		if (reopen) void openDashboard(ctx);
+	};
+
+	const startSession = async (ctx: CtxLike, persisted: PersistedSelection | undefined) => {
+		if (!mode.scope.value) {
+			await promptForScope(ctx);
+			if (!mode.scope.value) return;
+		}
+		const hive = await mode.refreshHive();
+		if (hive.configured && hive.error) {
+			ctx.ui.notify(
+				`${hiveFailureStatus(hive.error)}; local attention order remains active, and review, fix, and slay remain available`,
+				"warning",
+			);
+		}
+		await refreshQueue(ctx);
+		if (persisted?.id) mode.selectById(persisted.repo, persisted.id);
+
+		const persistedBatches = readPersistedBatches(ctx);
+		for (const batch of persistedBatches) rememberRecoveryBatch(batch);
+		restoreClaimWaves();
+		const latest = persistedBatches.at(-1);
+		const latestOwner = latest ? `review:${latest.id}:${latest.currentWave}` : undefined;
+		const recoveredBatch = latestOwner && (latest?.waveExit || resourceClaims().list().some((claim) => claim.owner === latestOwner))
+			? loadWave(factoryClaimsRoot(env), latestOwner) ?? latest : latest;
+		if (recoveredBatch) {
+			activeBatch = recoveredBatch.state === "running" || (recoveredBatch.state === "paused" && recoveredBatch.cancelRequested === true)
+				? {
+					...recoveredBatch,
+					state: "blocked",
+					error: recoveredBatch.cancelRequested === true
+						? "session ended while cancellation was draining the repository wave"
+						: "session ended before the repository wave reached a terminal state",
+				}
+				: ["blocked", "paused"].includes(recoveredBatch.state)
+					? recoveredBatch
+				: undefined;
+			if (activeBatch?.state === "blocked") rememberRecoveryBatch(activeBatch);
+			if (recoveredBatch.state === "running") {
+				pi.appendEntry(BATCH_ENTRY, activeBatch);
+				ctx.ui.notify(`Recovered blocked run ${recoveredBatch.id}; use /review reconcile or /review revise after inspecting the settled external effect`, "warning");
+			}
+			if (activeBatch?.state === "paused") mode.setPaused(true);
+			syncBatchProgress(ctx);
+			if (recoveredBatch.state === "running" && activeBatch?.state === "blocked") {
+				const result = await reconcileBatchClaims(ctx, activeBatch);
+				const resources = resourcesForBatch(activeBatch);
+				if (!preToolProofValid(activeBatch)
+					&& result.unknown.length === 0
+					&& result.settled.length === resources.length
+					&& resources.length > 0) {
+					await finishRecoveredBatch(ctx, activeBatch, result);
+				}
+			}
+		}
+		if (activeBatch && sessionStopped(activeBatch)) {
+			mode.setPaused(true);
+			const saved = activeBatch;
+			const result = await reconcileBatchClaims(ctx, saved);
+			if (activeBatch?.id === saved.id && latestWaveForArchive(saved)) {
+				if (result.unknown.length === 0) settleStoppedBatch(ctx, saved, result);
+				else persistBatch(ctx, { ...saved, state: "blocked", error: `Execution stopped; GitHub effect proof remains unresolved for ${result.unknown.join(", ")}; claims retained` });
+			}
+		}
+		if ((activeBatch?.waveExit && activeBatch.waveExit.choice === "pause") || (activeBatch?.state === "paused" && !activeBatch.waveIdentity)) {
+			mode.setPaused(true);
+			if (sessionStopped(activeBatch) || !activeBatch.waveIdentity) {
+				const choice = await ctx.ui.select("Saved Review work (execution stopped)", ["Leave paused", "Resume saved work", "Cancel saved work"]);
+				if (choice === "Resume saved work") ctx.ui.notify(await resumeStoppedBatch(ctx), "info");
+				else if (choice === "Cancel saved work" && !activeBatch.waveIdentity) persistBatch(ctx, { ...activeBatch, state: "cancelled", error: "Undispatched saved work cancelled" });
+				else if (choice === "Cancel saved work" && activeBatch.waveExit) {
+					persistBatch(ctx, { ...activeBatch, waveExit: { ...activeBatch.waveExit, choice: "cancel" } });
+					const batch = activeBatch;
+					ctx.ui.notify(settleStoppedBatch(ctx, batch, await reconcileBatchClaims(ctx, batch)), "info");
+				}
+			} else ctx.ui.notify(activeBatch.error ?? "Saved work lacks positive owning-session shutdown proof; use /review reconcile", "warning");
+		}
+		const recoveredComment = readPersistedComment(ctx);
+		if (recoveredComment?.state === "previewed" || recoveredComment?.state === "confirmed") {
+			ctx.ui.notify("An interrupted comment plan was not replayed; inspect it before retrying", "warning");
+		}
+
+		const preselect = pi.getFlag("pr");
+		if (typeof preselect === "string" && preselect.trim()) {
+			const number = Number.parseInt(preselect.trim().replace(/^#/, ""), 10);
+			if (Number.isInteger(number) && !mode.selectById(undefined, number)) {
+				ctx.ui.notify(`#${number} is not in the open ${mode.queueMode} queue`, "warning");
+			}
+		}
+		syncStatus(ctx);
+		if (pi.getFlag("autoslay") === true) await startAutoslay(ctx);
+		void openDashboard(ctx);
+	};
+
+	const advanceRepositoryBatch = async (ctx: CtxLike) => {
+		if (!activeBatch || (activeBatch.state !== "running" && !(activeBatch.state === "paused" && activeBatch.cancelRequested))) return;
+		if (activeBatch.waveExit) return;
+		const batchAtEntry = activeBatch;
+		const wave = batchAtEntry.waves[batchAtEntry.currentWave];
+		const jobs = ctx.getAsyncJobSnapshot?.();
+		rememberWaveEvidence(ctx);
+		if (jobs?.running.some((job) => job.startTime >= activeBatch!.waveStartedAt)) return;
+		const knownWaveJobs = new Set(activeBatch.waveJobIds ?? []);
+		if (jobs?.delivery?.pendingJobIds.some((id) => knownWaveJobs.has(id))) return;
+		const covered = waveWorkerCoverageComplete(activeBatch.waveJobIds, activeBatch.waveToolCallIds, activeBatch.waveTaskWorkers);
+		const settled = waveWorkersSettled(jobs, activeBatch.waveJobIds, activeBatch.waveTerminalJobStatuses);
+		const failed = (activeBatch.waveJobIds ?? []).filter((id) => ["failed", "cancelled", "canceled"].includes(activeBatch!.waveTerminalJobStatuses?.[id] ?? ""));
+		if (!covered || !settled || failed.length > 0) {
+			if (batchAtEntry.cancelRequested) {
+				await drainCancelledBatch(ctx, activeBatch);
+				return;
+			}
+			const error = preToolProofValid(activeBatch)
+				? `coordinator ${activeBatch.wavePreToolTerminal === "aborted" ? "aborted" : "failed"} before any tool invocation`
+				: failed.length > 0
+				? `${failed.length} workflowz job${failed.length === 1 ? "" : "s"} failed or were cancelled`
+				: !covered ? "workflowz task-to-job evidence is missing or ambiguous for the repository wave"
+					: "workflowz workers lack terminal settlement evidence for the repository wave";
+			persistBatch(ctx, { ...activeBatch, state: "blocked", error });
+			ctx.ui.notify(`Repository wave stopped: ${error}`, "error");
+			return;
+		}
+		if (batchAtEntry.cancelRequested) {
+			await drainCancelledBatch(ctx, activeBatch);
+			return;
+		}
+		if (activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr")) {
+			const live = await fetchItemsByKey(
+				wave.items.map((item) => `${item.repo}#${item.id}`),
+				"prs",
+				mode.tokenOptions(),
+			);
+			if (live.error) {
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error: live.error });
+				ctx.ui.notify(`Slay wave stopped: ${live.error}`, "error");
+				return;
+			}
+			mode.reconcileItems(live.items);
+			const repairs = wave.items.every((item) => isRepairRequested(item, mode.currentUserLogin));
+			const unfinished = wave.items.filter((item) => {
+				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				if (!current) return false;
+				return repairs ? current.headSha === item.headSha : current.autoMergeEnabled !== true;
+			});
+			if (unfinished.length > 0) {
+				const targets = unfinished.map((item) => `${item.repo}#${item.id}`).join(", ");
+				const pendingItems = live.items.filter((current) => unfinished.some((item) => item.repo === current.repo && item.id === current.id));
+				const observed = pendingItems.map((item) => `${item.repo}#${item.id} head=${item.headSha ?? "unknown"}: ${landingReason(landingState(item, policy)) || "merge or accepted auto-merge not observed"}`).join("; ");
+				const error = repairs
+					? `slay repair jobs settled but targets have no new head: ${targets}`
+					: `slay review jobs settled but targets remain open without auto-merge: ${observed}. ${slayLandingRecovery(pendingItems)}`;
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error });
+				ctx.ui.notify(`Slay wave stopped: ${error}`, "error");
+				return;
+			}
+		}
+		if (activeBatch.kind === "slay" && wave.items.every((item) => item.type === "issue")) {
+			const live = await fetchItemsByKey(
+				wave.items.map((item) => `${item.repo}#${item.id}`),
+				"issues",
+				mode.tokenOptions(),
+			);
+			if (live.error) {
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error: live.error });
+				ctx.ui.notify(`Slay wave stopped: ${live.error}`, "error");
+				return;
+			}
+			const unfinished = wave.items.filter((item) => {
+				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
+				return !current || expectedIssueSubmission(activeBatch!, item, current) === undefined;
+			});
+			if (unfinished.length > 0) {
+				const targets = unfinished.map((item) => `${item.repo}#${item.id}`).join(", ");
+				const error = `issue slay jobs settled without exactly one new submitted pull request (no pull request was submitted or the effect was ambiguous): ${targets}`;
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error });
+				ctx.ui.notify(`Slay wave stopped: ${error}`, "error");
+				return;
+			}
+		}
+		const refreshed = await refreshQueue(ctx);
+		if (refreshed.error) {
+			persistBatch(ctx, { ...activeBatch, state: "blocked", error: refreshed.error });
+			ctx.ui.notify(`Repository wave stopped: ${refreshed.error}`, "error");
+			return;
+		}
+		if (activeBatch.kind !== "diff") releaseItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`);
+		const nextWave = activeBatch.currentWave + 1;
+		const completedItems = activeBatch.completedItems + wave.items.length;
+		if (nextWave >= activeBatch.waves.length) {
+			persistBatch(ctx, { ...activeBatch, currentWave: nextWave, completedItems, state: "complete" });
+			ctx.ui.notify(activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
+			return;
+		}
+		persistBatch(ctx, {
+			...activeBatch,
+			currentWave: nextWave,
+			completedItems,
+			state: mode.paused ? "paused" : "running",
+			waveIdentity: undefined,
+			waveToolCallIds: undefined,
+			waveTaskWorkers: undefined,
+			waveJobBaselineIds: undefined,
+			waveJobIds: undefined,
+			waveTerminalJobStatuses: undefined,
+		});
+		if (!mode.paused) await dispatchCurrentWave(ctx, "followUp");
+	};
+
+	pi.on("session_start", async (_event, ctx) => {
+		shuttingDownSessionId = undefined;
+		ownedWavePrompts.clear();
+		pendingExit = undefined;
+		activeCtx = ctx;
+		resetTrace(ctx);
+		// One bounded startup diagnostic: a missing Factory controller that cannot
+		// be reached only surfaces as a mystery on Shift+F, and the absent
+		// LUNA_FACTORY_ENABLED opt-in is blamed for a load failure.
+		if (!factoryControllerRegistered()) {
+			ctx.ui.notify(`Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
+		}
+		mode.setToken(resolveToken(env));
+		// Mode, scope and filter apply immediately; the remembered item can only be
+		// found once the queue has actually been fetched, so restore runs twice.
+		const persisted = readPersisted(ctx);
+		mode.restore(persisted);
+
+		const flagIssues = pi.getFlag("issues");
+		if (flagIssues === true) mode.queueMode = "issues";
+
+		const flagAll = pi.getFlag("all");
+		if (flagAll === true) mode.hiveOnly = false;
+		if (pi.getFlag("autoslay") === true) mode.hiveOnly = false;
+		// An explicit scope beats a remembered one: you asked for it on the
+		// command line, this run.
+		const flagRepo = pi.getFlag("repo");
+		if (typeof flagRepo === "string" && flagRepo.trim()) {
+			const scope = parseScope(flagRepo, mode.org);
+			if (scope) mode.setScope(scope);
+			else if (ctx.hasUI) ctx.ui.notify(`--repo is not a repository: ${flagRepo}`, "error");
+		}
+		const flagSkipRepo = pi.getFlag("skip-repo");
+		if (typeof flagSkipRepo === "string" && flagSkipRepo.trim()) {
+			for (const r of flagSkipRepo.split(",")) {
+				const trimmed = r.trim().toLowerCase();
+				if (trimmed) mode.skipRepos.add(trimmed);
+			}
+		}
+		if (!ctx.hasUI) {
+			if (!mode.scope.value) {
+				started = mode.refreshQueue().then(() => undefined);
+				return;
+			}
+			started = Promise.all([mode.refreshHive(), refreshQueue(ctx)])
+				.then(() => {
+					mode.restore(persisted);
+				})
+				.catch(() => {
+					// fetchHive and fetchQueue report failure in their results; a
+					// throw here must still leave `started` resolvable for the tools.
+				});
+			return;
+		}
+
+		ctx.ui.setTitle(mode.isReviewMode() ? "review workbench" : "hive workbench");
+		ctx.ui.setWidget(
+			"hive-workbench-rail",
+			(hostTui: unknown, theme: unknown) => {
+				tui = hostTui as { requestRender(): void };
+				return new ReviewRail(
+					tui,
+					workbenchPainter(theme as UiLike["theme"], () => mode.queueMode),
+					mode,
+					RAIL_KEYS,
+					() => dashboardOpen,
+				);
+			},
+			{ placement: "belowEditor" },
+		);
+
+		syncStatus(ctx);
+
+		// Before the first await: a startup that fails or drags must still leave a
+		// session that refreshes itself.
+		every(QUEUE_POLL_MS, () => {
+			void refreshQueue(ctx);
+		});
+		if (mode.isHiveMode()) {
+			every(HIVE_POLL_MS, () => {
+				void mode.refreshHive().then(() => {
+					syncStatus(ctx);
+				});
+			});
+		}
+
+		// Detached: nothing awaits this, so an escaping rejection would take the
+		// whole session process down with it.
+		started = startSession(ctx, persisted).catch((error: unknown) => {
+			ctx.ui.notify(`${mode.isReviewMode() ? "Review" : "Hive"} workbench startup: ${error instanceof Error ? error.message : String(error)}`, "error");
+		});
+	});
+
+	pi.on("session_switch", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
+	pi.on("session_branch", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
+	pi.on("session_tree", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
+	const requestSessionExit = (ctx: CtxLike, sessionId: string, choice: "pause" | "cancel"): void => {
+		const batch = activeBatch;
+		if (!batch || !["running", "paused", "blocked"].includes(batch.state)) return;
+		mode.setPaused(true);
+		batchRequestGeneration++;
+		if (batch.waveExit) return;
+		if (!batch.waveIdentity) {
+			persistBatch(ctx, { ...batch, state: choice === "cancel" ? "cancelled" : "paused", error: "Undispatched work saved; no execution needs stopping" });
+			return;
+		}
+		if (batch.waveSessionId !== sessionId || !batch.wavePromptDigest || !ownedWavePrompts.has(batch.wavePromptDigest)) {
+			persistBatch(ctx, { ...batch, state: "blocked", error: "Exit paused admission; this legacy or foreign wave lacks an owning-session shutdown receipt; use /review reconcile with native worker evidence" });
+			return;
+		}
+		persistBatch(ctx, { ...batch, state: "blocked", waveExit: { sessionId, waveIdentity: batch.waveIdentity, choice, requestedAt: Date.now() }, error: "Exit requested; awaiting owning OMP session shutdown settlement" });
+	};
+	pi.on("session_before_shutdown", async (event, ctx) => {
+		if (!isRecord(event) || typeof event.sessionId !== "string" || event.sessionId !== ctx.sessionManager?.getSessionId?.()) return { cancel: true };
+		const batch = activeBatch;
+		if (!batch || !["running", "paused", "blocked"].includes(batch.state) || batch.waveExit) return;
+		if (!ctx.hasUI) { pendingExit = { sessionId: event.sessionId, batch, choice: "pause" }; return; }
+		const choice = await ctx.ui.select("Review work is active", ["Pause and exit", "Cancel run and exit", "Stay"]);
+		if (choice !== "Pause and exit" && choice !== "Cancel run and exit") { pendingExit = undefined; return { cancel: true }; }
+		// Worker evidence can replace the batch while the operator chooses. Only
+		// a different session or wave invalidates that choice.
+		if (!activeBatch || activeBatch.id !== batch.id || activeBatch.waveIdentity !== batch.waveIdentity
+			|| activeBatch.waveSessionId !== batch.waveSessionId || activeBatch.wavePromptDigest !== batch.wavePromptDigest
+			|| event.sessionId !== ctx.sessionManager?.getSessionId?.()) return { cancel: true };
+		pendingExit = { sessionId: event.sessionId, batch: activeBatch, choice: choice === "Pause and exit" ? "pause" : "cancel" };
+	});
+	pi.on("session_shutdown_cancelled", (event) => {
+		if (isRecord(event) && event.sessionId === pendingExit?.sessionId) pendingExit = undefined;
+	});
+	pi.on("session_shutdown_settled", (event, ctx) => {
+		const batch = activeBatch;
+		if (!batch?.waveExit || !batch.wavePromptDigest || !ownedWavePrompts.has(batch.wavePromptDigest) || !isRecord(event) || event.sessionId !== batch.waveSessionId
+			|| event.sessionId !== shuttingDownSessionId || event.sessionId !== ctx.sessionManager?.getSessionId?.() || batch.waveExit.waveIdentity !== batch.waveIdentity
+			|| typeof event.settled !== "boolean" || !Array.isArray(event.pendingJobIds)
+			|| !event.pendingJobIds.every((id) => typeof id === "string") || batch.waveShutdown) return;
+		const settled = event.settled && event.pendingJobIds.length === 0;
+		persistBatch(ctx, { ...batch, waveShutdown: { sessionId: batch.waveExit.sessionId, waveIdentity: batch.waveExit.waveIdentity,
+			settled, pendingJobIds: [...event.pendingJobIds], reason: typeof event.reason === "string" ? event.reason : undefined, observedAt: Date.now() },
+			error: settled ? "Execution stopped; GitHub effects require /review reconcile before claims can be released" : `Shutdown not proven settled: ${typeof event.reason === "string" ? event.reason : "native owned work remains unaccounted"}; pending jobs: ${event.pendingJobIds.join(", ") || "unknown"}` });
+	});
+	pi.on("session_shutdown", (_event, ctx) => {
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		shuttingDownSessionId = sessionId;
+		batchRequestGeneration++;
+		const choice = pendingExit && pendingExit.sessionId === sessionId && pendingExit.batch.id === activeBatch?.id && pendingExit.batch.waveIdentity === activeBatch?.waveIdentity && pendingExit.batch.wavePromptDigest === activeBatch?.wavePromptDigest ? pendingExit.choice : "pause";
+		pendingExit = undefined;
+		if (sessionId) requestSessionExit(ctx, sessionId, choice);
+		traceGeneration++;
+		mode.session.clear();
+		traceSessionId = undefined;
+		activeCtx = ctx;
+		unregisterFactorySelection();
+		unregisterFactoryReconciler();
+		unregisterFactoryClaimInspector();
+		for (const stop of timers.splice(0)) stop();
+	});
+
+	// ---- live turn trace -----------------------------------------------------
+
+	pi.on("turn_start", (_event, eventCtx) => {
+		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
+		if (!ctxToUse) return;
+		mode.session.startTurn(Date.now());
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		syncBatchProgress(ctxToUse);
+		repaint();
+	});
+	pi.on("turn_end", (event, eventCtx) => {
+		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
+		if (!ctxToUse) return;
+		const message = event && typeof event === "object" && "message" in event ? event.message : undefined;
+		mode.session.endTurn(Date.now(), message);
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		rememberWaveEvidence(ctxToUse);
+		syncBatchProgress(ctxToUse);
+		repaint();
+	});
+	pi.on("agent_end", async (event, eventCtx) => {
+		if (event && typeof event === "object" && "willContinue" in event && event.willContinue === true) return;
+		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
+		if (ctxToUse) {
+			const proof = activeBatch && ["running", "paused"].includes(activeBatch.state)
+				? preToolCoordinatorTerminal(event, ctxToUse, activeBatch)
+				: undefined;
+			if (proof) persistBatch(ctxToUse, { ...activeBatch!, waveToolInvocationIds: activeBatch!.waveToolInvocationIds ?? [], wavePreToolTerminal: proof });
+			await advanceRepositoryBatch(ctxToUse);
+		}
+	});
+	pi.on("message_start", (event, ctx) => {
+		const ctxToUse = traceContext(ctx);
+		if (!ctxToUse) return;
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		rememberDeliveredJobs(event, ctxToUse);
+		rememberWaveEvidence(ctxToUse);
+	});
+	pi.on("tool_result", (event, ctx) => {
+		const ctxToUse = traceContext(ctx);
+		if (!ctxToUse) return;
+		if (event && typeof event === "object" && "toolCallId" in event && typeof event.toolCallId === "string") {
+			rememberToolInvocation(ctxToUse, event.toolCallId);
+			rememberTaskResult(ctxToUse, event.toolCallId, event);
+		}
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		rememberWaveEvidence(ctxToUse);
+	});
+	pi.on("tool_call", async (event) => {
+		const { toolCallId, toolName, input } = event as { toolCallId?: string; toolName?: string; input?: unknown };
+		const batchActive = activeBatch && ["running", "paused", "blocked"].includes(activeBatch.state);
+		if (toolCallId && activeCtx) rememberToolInvocation(activeCtx, toolCallId);
+		if (toolName === "task" && toolCallId && activeBatch?.state === "running" && activeCtx) {
+			const ids = [...new Set([...(activeBatch.waveToolCallIds ?? []), toolCallId])].sort();
+			persistBatch(activeCtx, { ...activeBatch, waveToolCallIds: ids });
+		}
+		if (activeBatch?.kind !== "slay" || !batchActive) return;
+		const command = toolName === "bash" ? String(isRecord(input) ? input.command ?? "" : "") : "";
+		const reason = toolName === "bash" ? slayBashBlockReason(command) : undefined;
+		if (reason) return { block: true, reason: `Review Slay guard: ${reason}` };
+		const requests: LandingRequest[] = [];
+		for (const segment of command.split(/\r?\n|&&|\|\||;/)) {
+			const action = /\bgh\s+pr\s+merge\b/.test(segment) ? "merge"
+				: /\bgh\s+pr\s+review\b/.test(segment) && /(?:^|\s)--approve(?:[=\s]|$)/.test(segment) ? "approve" : undefined;
+			if (!action) continue;
+			const request = bashLandingRequest(segment, action);
+			if (request === "invalid") return { block: true, reason: "Review Slay guard: landing requires a literal PR number and explicit --repo, or a GitHub PR URL" };
+			requests.push(request);
+		}
+		const githubAction = githubLandingAction(toolName, input);
+		if (githubAction === "invalid") return { block: true, reason: "Review Slay guard: malformed GitHub landing tool input; no approval or merge was sent" };
+		if (githubAction) requests.push(githubAction);
+		if (requests.length === 0) return;
+		const wave = activeBatch.waves[activeBatch.currentWave];
+		for (const request of requests) {
+			if (!wave?.items.some((candidate) => `${candidate.repo}#${candidate.id}` === request.key)) {
+				return { block: true, reason: `Review Slay guard: ${request.key} is outside the active wave` };
+			}
+		}
+		if (activeCtx) rememberWaveEvidence(activeCtx);
+		const workerBlocker = slayWaveWorkerBlockReason(activeBatch, activeCtx?.getAsyncJobSnapshot?.());
+		if (workerBlocker) return { block: true, reason: `Review Slay guard: ${workerBlocker}` };
+		const guardedBatch = activeBatch;
+		for (const request of requests) {
+			const live = await fetchItemsByKey([request.key], "prs", mode.tokenOptions());
+			if (!activeBatch || activeBatch.id !== guardedBatch.id || activeBatch.waveIdentity !== guardedBatch.waveIdentity
+				|| activeBatch.wavePromptDigest !== guardedBatch.wavePromptDigest || activeBatch.waveExit) {
+				return { block: true, reason: "Review Slay guard: active wave changed while verifying landing" };
+			}
+			const item = live.items.find((candidate) => `${candidate.repo}#${candidate.id}` === request.key);
+			if (live.error || !item) return { block: true, reason: `Review Slay guard: ${request.key} live landing evidence is unavailable` };
+			let landingItem = item;
+			if (request.action === "merge" && item.reviewState === "unknown" && landingState(item, policy) === "unreviewed") {
+				// GitHub leaves reviewDecision null when no aggregate review policy
+				// applies. A complete, exact-head approval is still observable.
+				const observed = await fetchPullRequestEffect(item.repo, item.id, mode.tokenOptions());
+				if (!activeBatch || activeBatch.id !== guardedBatch.id || activeBatch.waveIdentity !== guardedBatch.waveIdentity
+					|| activeBatch.wavePromptDigest !== guardedBatch.wavePromptDigest || activeBatch.waveExit) {
+					return { block: true, reason: "Review Slay guard: active wave changed while verifying approval" };
+				}
+				if (observed.kind === "observed") {
+					const pr = observed.pullRequest;
+					if (pr.state === "OPEN" && pr.headSha === item.headSha && pr.authorLogin?.toLowerCase() === item.author.toLowerCase()
+						&& pr.reviewsComplete && (pr.reviewDecision === null || pr.reviewDecision === "approved")
+						&& !pr.latestReviews.some((review) => review.state === "CHANGES_REQUESTED")
+						&& pr.latestReviews.some((review) => review.state === "APPROVED" && review.commitSha === pr.headSha
+							&& review.authorLogin.toLowerCase() !== pr.authorLogin?.toLowerCase() && review.submittedAt >= guardedBatch.waveStartedAt)) {
+						landingItem = { ...item, reviewState: "approved" };
+					}
+				}
+			}
+			const landingBlocker = slayLandingBlockReason([request.action], [landingItem], policy);
+			if (landingBlocker) return { block: true, reason: `Review Slay guard: ${landingBlocker}` };
+		}
+		// Native job updates may arrive while live GitHub evidence is fetched.
+		if (activeCtx) rememberWaveEvidence(activeCtx);
+		const latestWorkerBlocker = slayWaveWorkerBlockReason(activeBatch, activeCtx?.getAsyncJobSnapshot?.());
+		if (latestWorkerBlocker) return { block: true, reason: `Review Slay guard: ${latestWorkerBlocker}` };
+	});
+
+	pi.on("tool_execution_start", (event, eventCtx) => {
+		const { toolCallId, toolName, args } = event as { toolCallId: string; toolName: string; args: unknown };
+		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
+		if (!ctxToUse) return;
+		rememberToolInvocation(ctxToUse, toolCallId);
+		mode.session.startTool(toolCallId, toolName, args, Date.now());
+		repaint();
+	});
+	pi.on("tool_execution_update", (event, ctx) => {
+		const { toolCallId, partialResult } = event as { toolCallId: string; partialResult: unknown };
+		const ctxToUse = traceContext(ctx);
+		if (!ctxToUse) return;
+		rememberToolInvocation(ctxToUse, toolCallId);
+		mode.session.updateTool(toolCallId, partialResult);
+		rememberTaskResult(ctxToUse, toolCallId, partialResult);
+		repaint();
+	});
+	pi.on("tool_execution_end", async (event, eventCtx) => {
+		const { toolCallId, result, isError } = event as { toolCallId: string; result: unknown; isError: boolean };
+		const ctxToUse = traceContext(eventCtx as CtxLike | undefined);
+		if (!ctxToUse) return;
+		const generation = traceGeneration;
+		const sourceSessionId = ctxToUse.sessionManager?.getSessionId?.();
+		mode.session.endTool(toolCallId, result, isError === true, Date.now());
+		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
+		rememberToolInvocation(ctxToUse, toolCallId);
+		rememberTaskResult(ctxToUse, toolCallId, result);
+		rememberWaveEvidence(ctxToUse);
+		syncBatchProgress(ctxToUse);
+		repaint();
+		const artifactId = hasNativeArtifactError(result) ? undefined : nativeArtifactId(result);
+		if (artifactId) {
+			let path: string | null = null;
+			try { path = await ctxToUse.sessionManager?.getArtifactPath?.(artifactId) ?? null; } catch { path = null; }
+			if (generation !== traceGeneration || ctxToUse.sessionManager?.getSessionId?.() !== sourceSessionId || traceSessionId !== sourceSessionId) return;
+			mode.session.setArtifactReference(toolCallId, sourceSessionId ?? "unknown-session", path);
+			repaint();
+		}
+	});
+
+	// ---- keyboard ------------------------------------------------------------
+
+	pi.registerShortcut("alt+b", {
+		description: mode.isReviewMode() ? "Open the Review workbench" : "Open the Hive workbench",
+		handler: (ctx) => void openDashboard(ctx),
+	});
+	pi.registerShortcut("alt+s", {
+		description: "Repair returned pull requests, then implement issue waves",
+		handler: (ctx) => { activeCtx = ctx; void startAutoslay(ctx); },
+	});
+	pi.registerShortcut("alt+u", {
+		description: mode.isReviewMode() ? "Refetch the Review workbench queue" : "Refetch the Hive workbench queue",
+		handler: (ctx) => void refreshQueue(ctx),
+	});
+
+	return { whenStarted: () => started };
+}

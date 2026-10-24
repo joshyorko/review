@@ -1,0 +1,123 @@
+# Local + CI hygiene for review.
+#
+# Install with:
+#   pre-commit install --install-hooks
+# `default_install_hook_types` makes `pre-commit install` wire up both the
+# pre-commit and commit-msg hooks, so Conventional Commit checking actually
+# runs on `git commit`.
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+  # ---------------------------------------------------------------- hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0 # v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Unified diff context spaces are part of the patch syntax.
+        exclude: ^patches/omp/.*\.patch$
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-added-large-files
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-json
+      - id: check-yaml
+        # Quadlet units and Kubernetes-style manifests are frequently
+        # multi-document; allow them rather than failing the parse.
+        args: [--allow-multiple-documents]
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+        # image/*.sh are never executed from the work tree: the Containerfile
+        # installs them with `COPY --chmod=0755`.
+        # tests/guest-bootstrap-consumer.py is always launched as
+        # `python3 "$REVIEW_TEST_CONSUMER"`, never exec'd directly.
+        exclude: ^(image/.*\.sh|tests/guest-bootstrap-consumer\.py)$
+
+  # ------------------------------------------------------------------ shell
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1-1 # shellcheck v0.11.0
+    hooks:
+      - id: shellcheck
+        # The wheel bundles the shellcheck binary, so the hook needs no
+        # container runtime and no registry pull: koalaman's own pre-commit
+        # hook runs a Docker Hub image, and anonymous runner pulls of it
+        # rate-limited every main validation run red.
+        # SC1090: the entrypoint sources a path resolved at runtime.
+        # SC2034: the onboarding harness captures launcher output into vars
+        # that are asserted on conditionally.
+        args: [--exclude=SC1090, --exclude=SC2034]
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.13.1-1 # shfmt v3.13.1
+    hooks:
+      # One indent convention for every shell script in the repository:
+      # two spaces. shfmt infers sh vs bash from each file's shebang, so
+      # #!/bin/sh and #!/bin/bash both stay correct.
+      - id: shfmt
+        name: shfmt (2 spaces)
+        args: [--write, --indent=2]
+        files: ^(image|scripts|tests)/.*\.sh$
+
+  # ---------------------------------------------------------------- secrets
+  # This repo handles GitHub tokens and Hive registration tokens.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1 # v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # ---------------------------------------------------------------- actions
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12 # v1.7.12
+    hooks:
+      - id: actionlint
+
+  # --------------------------------------------------------- commit message
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.17.0 # v4.17.0
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+
+  # ------------------------------------------------------------------ local
+  - repo: local
+    hooks:
+      # docs/skills/index.json is generated from front-matter; the checker
+      # fails on a stale manifest (regenerate with --write).
+      - id: check-skill-frontmatter
+        name: skill front-matter valid and index.json fresh
+        language: system
+        entry: bash scripts/check-skill-frontmatter.sh
+        files: ^docs/skills/
+        pass_filenames: false
+      - id: generate-skills
+        name: skill generator rejects unsafe manifest paths
+        language: system
+        entry: bash tests/generate-skills.sh
+        files: ^(scripts/generate-skills\.py|tests/generate-skills\.sh)$
+        pass_filenames: false
+      # The OMP workbench ships as loose TypeScript, so exercise it headlessly
+      # against a fake host on every related change.
+      - id: omp-review-mode
+        name: omp review mode contract
+        language: system
+        entry: bash tests/omp-review-mode.sh
+        files: ^(image/extension/|bin/review-source|tests/omp-review-mode\.(sh|test\.ts))
+        pass_filenames: false
+      # The appliance is assembled from pinned artifacts rather than installed,
+      # so its Containerfile is the whole supply chain. The static half of the
+      # contract needs no container engine and holds the pins, the version
+      # derivation, and the "nothing can install anything" rule.
+      - id: appliance-contract
+        name: review appliance contract
+        language: system
+        entry: bash tests/appliance-contract.sh
+        files: ^(image/appliance/|scripts/(review-appliance-version|generate-appliance-sbom)|tests/appliance-contract\.sh|\.github/workflows/publish-appliance\.yml|\.dockerignore)
+        pass_filenames: false
+      # A commit that merely writes about GitHub's CI-skip directive silently
+      # skips its own validation and publish. Catch it at commit time.
+      - id: check-commit-message
+        name: commit message does not silently skip CI
+        language: system
+        entry: bash scripts/check-commit-message.sh
+        stages: [commit-msg]

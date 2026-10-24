@@ -1,0 +1,889 @@
+#!/usr/bin/env bash
+# Contract for the Review appliance image.
+#
+# Two halves. The static half reads the Containerfile and the version machinery
+# and needs no container engine, so it runs on every commit. The runtime half
+# runs the built image and needs one; CI always passes --image, and locally it
+# is skipped unless you pass one too.
+#
+#   bash tests/appliance-contract.sh
+#   bash tests/appliance-contract.sh --image localhost/review:dev
+#
+# The runtime half exists because this image is assembled rather than installed:
+# a missing shared library or a pruned file does not fail the build, it fails in
+# a maintainer's terminal three days later.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+containerfile="image/appliance/Containerfile"
+image=""
+expect_arch=""
+expect_version=""
+# Node.js 24/npm/npx and the pinned Bun runtime add their immutable runtime closures to the image.
+size_ceiling_bytes=$((750 * 1024 * 1024))
+
+while (($#)); do
+  case "$1" in
+  --image)
+    image="${2:?--image needs a reference}"
+    shift 2
+    ;;
+  --expect-arch)
+    expect_arch="${2:?--expect-arch needs a value}"
+    shift 2
+    ;;
+  --expect-version)
+    expect_version="${2:?--expect-version needs a value}"
+    shift 2
+    ;;
+  *)
+    echo "appliance-contract: unknown argument $1" >&2
+    exit 2
+    ;;
+  esac
+done
+
+fail() {
+  echo "appliance-contract: $*" >&2
+  exit 1
+}
+
+require() {
+  local path="$1"
+  shift
+  local needle
+  for needle in "$@"; do
+    grep -qF -- "$needle" "$path" || fail "${path} must contain: ${needle}"
+  done
+}
+
+forbid() {
+  local path="$1"
+  shift
+  local needle
+  for needle in "$@"; do
+    grep -qF -- "$needle" "$path" && fail "${path} must not contain: ${needle}"
+  done
+  return 0
+}
+
+# ------------------------------------------------------------------- static
+
+# The distribution builder is pinned by tag and digest.
+grep -qE '^ARG RUNTIME_BUILDER_IMAGE=registry\.fedoraproject\.org/fedora-minimal:[^@[:space:]]+@sha256:[0-9a-f]{64}$' "$containerfile" ||
+  fail "RUNTIME_BUILDER_IMAGE must be pinned as tag@sha256 digest"
+forbid "$containerfile" 'ghcr.io/projectbluefin/' 'FSDK_'
+
+# Source and build inputs are pinned; architecture-specific addons and runtime
+# artifacts carry independent checksums and verified package integrity.
+for pin in OMP_SOURCE_SHA256 OMP_PATCH_SHA256 OMP_SESSION_LIFECYCLE_PATCH_SHA256 OMP_CLIPBOARD_PATCH_SHA256 MEMORYD_SOURCE_SHA256 OMP_BUN_X86_64_SHA256 OMP_BUN_AARCH64_SHA256 NODE_X86_64_SHA256 NODE_AARCH64_SHA256 GH_X86_64_SHA256 GH_AARCH64_SHA256 RTK_X86_64_SHA256 RTK_AARCH64_SHA256 RTK_HOOK_SHA256 RTK_LICENSE_SHA256; do
+  grep -qE "^ARG ${pin}=[0-9a-f]{64}$" "$containerfile" ||
+    fail "ARG ${pin} must be a lowercase sha256 digest"
+done
+for pin in OMP_NATIVES_X86_64_SHA512 OMP_NATIVES_AARCH64_SHA512; do
+  grep -qE "^ARG ${pin}=[0-9a-f]{128}$" "$containerfile" ||
+    fail "ARG ${pin} must be a lowercase sha512 digest"
+done
+for pin in OMP_SOURCE_COMMIT OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT OMP_CLIPBOARD_PATCH_SOURCE_COMMIT MEMORYD_SOURCE_COMMIT; do
+  grep -qE "^ARG ${pin}=[0-9a-f]{40}$" "$containerfile" ||
+    fail "ARG ${pin} must be a full lowercase commit SHA"
+done
+omp_source_commit="$(sed -nE 's/^ARG OMP_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
+clipboard_patch_source_commit="$(sed -nE 's/^ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
+[[ "$clipboard_patch_source_commit" == "$omp_source_commit" ]] ||
+  fail "clipboard patch must be reviewed against the exact pinned OMP source commit"
+[[ "$(sed -nE 's|^ARG OMP_CLIPBOARD_PATCH_PATH=([^[:space:]]+)$|\1|p' "$containerfile")" == "/usr/local/share/review/omp/clipboard-truthful-18.10.3.patch" ]] ||
+  fail "clipboard patch path must name the pinned 18.10.3 patch input"
+for pin in OMP_VERSION OMP_BUN_VERSION NODE_VERSION OMP_NATIVES_VERSION RTK_VERSION; do
+  grep -qE "^ARG ${pin}=[0-9]+\\.[0-9]+\\.[0-9]+$" "$containerfile" ||
+    fail "ARG ${pin} must be a semantic version"
+done
+node_major="$(sed -nE 's/^ARG NODE_VERSION=([0-9]+)\..*/\1/p' "$containerfile")"
+if [[ ! "$node_major" =~ ^[0-9]+$ ]] || ((node_major < 24)); then
+  fail "NODE_VERSION must be at least 24"
+fi
+
+# shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
+require "$containerfile" \
+  'FROM ${RUNTIME_BUILDER_IMAGE} AS build' \
+  'FROM scratch' \
+  'COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp' \
+  'COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts' \
+  'COPY patches/omp/memory-backend-registration.patch /usr/local/share/review/omp/memory-backend-registration.patch' \
+  'COPY patches/omp/clipboard-truthful-18.10.3.patch /usr/local/share/review/omp/clipboard-truthful-18.10.3.patch' \
+  'COPY patches/omp/session-lifecycle-18.10.3.patch /usr/local/share/review/omp/session-lifecycle-18.10.3.patch' \
+  'OMP_PATCH_PATH=/usr/local/share/review/omp/memory-backend-registration.patch' \
+  'OMP_CLIPBOARD_PATCH_PATH="$OMP_CLIPBOARD_PATCH_PATH"' \
+  'OMP_SESSION_LIFECYCLE_PATCH_PATH="$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
+  'OMP_CLIPBOARD_PATCH_SOURCE_COMMIT="$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"' \
+  'OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT="$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT"' \
+  'OMP_CLIPBOARD_PATCH_SHA256="$OMP_CLIPBOARD_PATCH_SHA256"' \
+  'OMP_SESSION_LIFECYCLE_PATCH_SHA256="$OMP_SESSION_LIFECYCLE_PATCH_SHA256"' \
+  'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
+  'https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/${rtk_asset}' \
+  'https://raw.githubusercontent.com/rtk-ai/rtk/v${RTK_VERSION}/hooks/pi/rtk.ts' \
+  'install -m 0755 "$workdir/rtk" /out/usr/bin/rtk' \
+  'install -m 0644 "$workdir/rtk.ts" /out/usr/share/review/rtk/rtk.ts' \
+  'grep -qF '\''process.env.RTK_DISABLED === "1"'\'' "$workdir/rtk.ts"' \
+  'test -x /out/usr/bin/rtk' \
+  'test -s /out/usr/share/review/rtk/rtk.ts' \
+  'COPY image/extension/rtk/LICENSE /tmp/rtk-LICENSE' \
+  'echo "${RTK_LICENSE_SHA256}  /tmp/rtk-LICENSE" | sha256sum --check --status' \
+  'RTK_TELEMETRY_DISABLED=1;' \
+  'rtk_version="$(/out/usr/bin/rtk --version)"' \
+  '/out/usr/bin/rtk gain >"$workdir/gain.txt" 2>&1' \
+  'install -m 0644 /tmp/rtk-LICENSE /out/usr/share/licenses/rtk/LICENSE' \
+  'test -s /out/usr/share/licenses/rtk/LICENSE' \
+  '--rtk-archive-sha256 "$rtk_sha"' \
+  '--rtk-hook-sha256 "$RTK_HOOK_SHA256"' \
+  '--rtk-license-sha256 "$RTK_LICENSE_SHA256"' \
+  'io.github.joshyorko.review.rtk.version="${RTK_VERSION}"' \
+  'io.github.joshyorko.review.rtk.x86_64.sha256="${RTK_X86_64_SHA256}"' \
+  'io.github.joshyorko.review.rtk.aarch64.sha256="${RTK_AARCH64_SHA256}"' \
+  'io.github.joshyorko.review.rtk.hook.sha256="${RTK_HOOK_SHA256}"' \
+  'io.github.joshyorko.review.rtk.license.sha256="${RTK_LICENSE_SHA256}"' \
+  'https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz' \
+  'cp -a "$node_dir/lib/node_modules/npm" /out/usr/lib/node_modules/npm' \
+  'ln -s ../lib/node_modules/npm/bin/npm-cli.js /out/usr/bin/npm' \
+  'ln -s ../lib/node_modules/npm/bin/npx-cli.js /out/usr/bin/npx' \
+  '/usr/local/bin/node' \
+  '/usr/local/bin/bun' \
+  'io.github.joshyorko.review.node.version="${NODE_VERSION}"' \
+  'io.github.joshyorko.review.bun.version="${OMP_BUN_VERSION}"' \
+  '--omp-source-commit "$OMP_SOURCE_COMMIT"' \
+  'USER 65532:65532' \
+  'WORKDIR /workspace' \
+  'ENTRYPOINT ["/usr/bin/review-appliance"]' \
+  'COPY image/extension/typesafe-omp-loader.mjs /out/usr/share/review/typesafe-omp-loader.mjs' \
+  'COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/review-appliance' \
+  'COPY image/appliance/config.yml /out/usr/share/review/appliance-config.yml' \
+  'io.github.joshyorko.review.appliance="true"' \
+  'org.opencontainers.image.version="${REVIEW_VERSION}"' \
+  'org.opencontainers.image.revision="${REVIEW_REVISION}"' \
+  'io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}"' \
+  'io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}"' \
+  'io.github.joshyorko.review.omp.clipboard.patch.source.commit="${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}"' \
+  'io.github.joshyorko.review.omp.session.lifecycle.patch.source.commit="${OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT}"' \
+  'io.github.joshyorko.review.omp.clipboard.patch.sha256="${OMP_CLIPBOARD_PATCH_SHA256}"' \
+  'io.github.joshyorko.review.omp.session.lifecycle.patch.sha256="${OMP_SESSION_LIFECYCLE_PATCH_SHA256}"' \
+  '--omp-clipboard-patch-source-commit "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"' \
+  '--omp-session-lifecycle-patch-source-commit "$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT"' \
+  '--omp-clipboard-patch-sha256 "$OMP_CLIPBOARD_PATCH_SHA256"' \
+  '--omp-session-lifecycle-patch-sha256 "$OMP_SESSION_LIFECYCLE_PATCH_SHA256"' \
+  '--omp-clipboard-patch-path "$OMP_CLIPBOARD_PATCH_PATH"' \
+  '--omp-session-lifecycle-patch-path "$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
+  'ln -s extension /out/usr/share/review/review' \
+  'COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/review/luna-factory' \
+  'test -e /out/usr/share/review/luna-factory/omp/verifier-probe.ts'
+
+# Every build-time RTK probe must run after the isolated filesystem and
+# telemetry boundary is established. Also reject missing or substituted
+# license text and exercise the same check against representative bad inputs.
+python3 - "$containerfile" image/extension/rtk/LICENSE <<'PY'
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+containerfile = Path(sys.argv[1]).read_text(encoding="utf-8")
+license_path = Path(sys.argv[2])
+start = containerfile.index("# RTK is shipped for an explicit evaluation")
+end = containerfile.index("# The shell, git, review validators", start)
+rtk_build = containerfile[start:end]
+
+def private_env_precedes_every_probe(source):
+    required = (
+        'export HOME="$workdir/home"',
+        'XDG_CONFIG_HOME="$workdir/config"',
+        'XDG_DATA_HOME="$workdir/data"',
+        'XDG_STATE_HOME="$workdir/state"',
+        "RTK_TELEMETRY_DISABLED=1;",
+    )
+    try:
+        setup_offsets = [source.index(marker) for marker in required]
+        probes = [match.start() for match in re.finditer(r"/out/usr/bin/rtk (?:--version|gain)", source)]
+    except ValueError:
+        return False
+    return bool(probes) and max(setup_offsets) < min(probes)
+
+if not private_env_precedes_every_probe(rtk_build):
+    raise SystemExit("RTK build probes must follow isolated HOME/XDG and telemetry-off setup")
+
+lines = rtk_build.splitlines(keepends=True)
+env_start = next(index for index, line in enumerate(lines) if 'export HOME="$workdir/home"' in line)
+env_end = next(index for index, line in enumerate(lines) if "RTK_TELEMETRY_DISABLED=1;" in line)
+env_block = lines[env_start : env_end + 1]
+misordered = lines[:env_start] + lines[env_end + 1 :]
+version_index = next(index for index, line in enumerate(misordered) if "/out/usr/bin/rtk --version" in line)
+misordered[version_index + 1 : version_index + 1] = env_block
+if private_env_precedes_every_probe("".join(misordered)):
+    raise SystemExit("RTK environment-order contract accepted HOME/XDG/telemetry setup moved after a probe")
+
+pin = re.search(r"^ARG RTK_LICENSE_SHA256=([0-9a-f]{64})$", containerfile, re.MULTILINE)
+if not pin:
+    raise SystemExit("Containerfile must pin the RTK license SHA-256")
+
+def valid_license(contents):
+    return (
+        contents is not None
+        and hashlib.sha256(contents).hexdigest() == pin.group(1)
+        and b"Apache License" in contents
+        and b"Version 2.0, January 2004" in contents
+    )
+
+contents = license_path.read_bytes() if license_path.is_file() else None
+if not valid_license(contents):
+    raise SystemExit("RTK license is missing or does not match its pinned Apache-2.0 source")
+if valid_license(None) or valid_license(b"MIT License\n"):
+    raise SystemExit("RTK license contract accepted a missing or mismatched license")
+PY
+
+# shellcheck disable=SC2016 # These are literal source strings, not expansions.
+require scripts/build-derived-omp.sh \
+  'git ls-remote --exit-code' \
+  'sha256sum --check --status' \
+  'sha256sum "$OMP_CLIPBOARD_PATCH_PATH"' \
+  'sha256sum "$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
+  'sha512sum --check --status' \
+  'git -C "$source_dir" apply --check "$OMP_PATCH_PATH"' \
+  'git -C "$source_dir" apply --unidiff-zero --check "$OMP_CLIPBOARD_PATCH_PATH"' \
+  'git -C "$source_dir" apply --check "$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
+  'clipboard patch was reviewed for OMP source' \
+  'bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests' \
+  'bun --cwd=packages/coding-agent test test/session-exit-lifecycle.test.ts' \
+  'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"' \
+  'install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun' \
+  'bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"'
+# shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
+memory_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply "$OMP_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
+# shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
+clipboard_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply --unidiff-zero "$OMP_CLIPBOARD_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
+[[ -n "$memory_patch_apply_line" && -n "$clipboard_patch_apply_line" && "$memory_patch_apply_line" -lt "$clipboard_patch_apply_line" ]] ||
+  fail "the clipboard patch must apply after the unchanged MemoryBackend patch"
+require .github/workflows/release.yml 'arch: x86_64' 'arch: aarch64'
+
+# shellcheck disable=SC2016 # These are literal source strings, not expansions.
+require image/appliance/entrypoint.sh \
+  'if ((EUID == 0)); then' \
+  'os.setgroups([65532])' \
+  'os.setgid(65532)' \
+  'os.setuid(65532)' \
+  '--factory-verifier-probe' \
+  'verifier-probe.ts' \
+  'refusing opt-in startup before work selection' \
+  'prepare_factory_state_dir' \
+  'export RTK_DISABLED="${RTK_DISABLED:-1}"' \
+  'export RTK_TELEMETRY_DISABLED="${RTK_TELEMETRY_DISABLED:-1}"' \
+  'if [[ "$RTK_DISABLED" == 0 ]]; then' \
+  'extension_args+=(--extension /usr/share/review/rtk/rtk.ts)' \
+  'RTK was explicitly enabled but its binary or immutable hook is missing' \
+  'coordinator_root="$factory_home/.local/state/review/coordinator"' \
+  'git -C "$coordinator_root" init -q' \
+  'cd "$coordinator_root"'
+forbid image/appliance/entrypoint.sh 'review-entrypoint'
+forbid "$containerfile" 'image/contribute' 'bin/review-contribute' 'ghcr.io/projectbluefin/contribute'
+for retired in \
+  bin/review-contribute \
+  deploy/contribute.yaml \
+  deploy/contributor-secret.example.yaml \
+  image/contribute \
+  image/tmux.conf \
+  image/extension/review/blueberry.ts \
+  scripts/contribute-version.sh \
+  scripts/generate-contribute-sbom.py \
+  .github/workflows/publish-contribute.yml \
+  tests/contribute-contract.sh \
+  tests/contribute_sbom_contract.py \
+  tests/blueberry_mode.test.ts \
+  docs/skills/cluster-workers.md \
+  docs/skills/hive-runtime.md \
+  docs/skills/hive-triage.md \
+  docs/skills/upstream-hive.md \
+  docs/skills/pr-labels.md; do
+  [[ ! -e "$retired" ]] || fail "retired Bluefin/Contribute surface remains: $retired"
+done
+forbid .github/workflows/validate.yml 'tests/contribute-contract.sh' 'tests/contribute_sbom_contract.py'
+forbid image/extension/review/policy.ts 'BLUEFIN_POLICY' 'isProjectBluefinRepository'
+# shellcheck disable=SC2016 # Literal launcher text, not shell expansion.
+require image/appliance/entrypoint.sh \
+  'extension_args=(--extension /usr/share/review/extension)' \
+  'extension_args+=(--extension /usr/share/review/luna-factory)' \
+  '"${extension_args[@]}"' \
+  'Luna Factory extension is not packaged at /usr/share/review/luna-factory'
+require image/appliance/config.yml \
+  'startup:' \
+  'checkUpdate: false' \
+  'setupWizard: false' \
+  'enabled: true' \
+  'apply: false' \
+  'backend: auto'
+# The Containerfile must retain the literal build-argument reference.
+# shellcheck disable=SC2016
+require "$containerfile" 'ARG AUDIO_BUILDER_IMAGE=${RUNTIME_BUILDER_IMAGE}'
+# shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
+require "$containerfile" \
+  'FROM ${AUDIO_BUILDER_IMAGE} AS audio' \
+  'microdnf --assumeyes' \
+  'COPY --from=audio /audio-out/ /out/' \
+  'io.github.joshyorko.review.audio.source='
+forbid "$containerfile" 'HEADROOM_' 'headroom-ai' '/usr/bin/headroom' 'headroom-requirements.txt'
+require image/appliance/stage-audio.sh \
+  'libpulse-simple.so.0' \
+  'libasound.so.2' \
+  '/usr/share/alsa' \
+  'ldd'
+test ! -e image/appliance/appliance-mcp.json || fail "the removed Headroom MCP definition still exists"
+test ! -e image/appliance/headroom-requirements.txt || fail "the removed Headroom dependency lock still exists"
+require image/appliance/config.yml 'advisor: "@default"' 'syncBacklog: 1'
+python3 - image/extension/review/.mcp.json <<'PY' || fail "bundled MCP configuration is invalid"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    servers = json.load(stream)["mcpServers"]
+
+expected = {
+    "github": "https://api.githubcopilot.com/mcp/",
+    "context7": "https://mcp.context7.com/mcp",
+}
+assert set(servers) == set(expected)
+for name, url in expected.items():
+    assert servers[name]["type"] == "http"
+    assert servers[name]["url"] == url
+    assert servers[name]["enabled"] is True
+assert "GH_TOKEN" in servers["github"]["headers"]["Authorization"]
+assert "CONTEXT7_API_KEY" in servers["context7"]["headers"]["Authorization"]
+PY
+forbid image/appliance/stage-runtime.sh '/usr/bin/gzip.bin'
+require "$containerfile" \
+  'GIT_CONFIG_KEY_0=credential.https://github.com.helper' \
+  'GIT_CONFIG_VALUE_0="!/usr/bin/gh auth git-credential"'
+for tool in actionlint shellcheck yq jq just openssl; do
+  grep -qF "/usr/bin/${tool}" "$containerfile" ||
+    fail "${tool} must be staged from the pinned Fedora builder"
+done
+
+# Git clone needs the Fedora's upload-pack builtin even for a local bare source.
+# Keep its exec-path helper in the same explicit closure as the HTTPS helper.
+require image/appliance/stage-runtime.sh \
+  '/usr/libexec/git-core/git-remote-http' \
+  '/usr/libexec/git-core/git-upload-pack'
+
+# The point of a distroless appliance is that nothing inside it can install
+# anything. Not one of these may appear, in any stage that reaches the image.
+forbid "$containerfile" \
+  'dnf install' \
+  'apt-get' \
+  'apk add' \
+  'RUN curl | ' \
+  'curl -sL |'
+# shellcheck disable=SC2016 # Literal Containerfile text, not shell expansion.
+require "$containerfile" \
+  '"https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"' \
+  'echo "${node_sha}  $workdir/node.tar.gz" | sha256sum --check --status' \
+  'ARG NODE_VERSION' \
+  'ARG NODE_X86_64_SHA256' \
+  'ARG NODE_AARCH64_SHA256' \
+  'ARG OMP_BUN_VERSION' \
+  '/usr/local/bin/bun'
+forbid "$containerfile" 'PI_VERSION' 'pi-coding-agent' '/usr/bin/pi'
+
+# `SHELL` is silently ignored for the OCI image format; a RUN that relies on it
+# for `set -e` is a RUN whose failures are invisible.
+grep -qE '^SHELL ' "$containerfile" && fail "SHELL is ignored under --format oci; set options inside each RUN"
+
+version="$(bash scripts/review-appliance-version.sh)"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid semantic version: ${version}"
+[[ "$version" == "$(cat VERSION)" ]] || fail "version must match VERSION"
+
+# The mode the image exists to run has to be in the build context.
+[[ -f image/extension/review/index.ts ]] || fail "the review mode entry point is missing"
+[[ -d image/extension/review/agents ]] || fail "the companion agents are missing"
+[[ -f image/extension/luna-factory/index.ts ]] || fail "the Luna Factory extension entry point is missing"
+[[ -d image/extension/luna-factory/agents ]] || fail "the Luna Factory companion agents are missing"
+grep -qF '!scripts/generate-appliance-sbom.py' .dockerignore ||
+  fail ".dockerignore must let the appliance SBOM generator into the build context"
+grep -qF '!scripts/' .dockerignore ||
+  fail ".dockerignore must reopen scripts before allowlisting build inputs"
+grep -qF '!scripts/build-derived-omp.sh' .dockerignore ||
+  fail ".dockerignore must let the derived OMP builder into the build context"
+grep -qF '!scripts/derived-omp-canary.ts' .dockerignore ||
+  fail ".dockerignore must let the derived OMP canary into the build context"
+grep -qF '!patches/omp/memory-backend-registration.patch' .dockerignore ||
+  fail ".dockerignore must let the OMP registration patch into the build context"
+grep -qF '!patches/omp/clipboard-truthful-18.10.3.patch' .dockerignore ||
+  fail ".dockerignore must let the OMP clipboard patch into the build context"
+
+# The generator that fills that SBOM. Its own contract runs here rather than as
+# a separate validate.yml step: the document it writes is part of this image's
+# contract, and the runtime half below only reads it when --image is given.
+python3_contract_output="$(python3 tests/appliance_sbom_contract.py 2>&1)" || {
+  printf '%s\n' "$python3_contract_output" >&2
+  fail "tests/appliance_sbom_contract.py failed"
+}
+
+bash tests/typesafe-appliance-contract.sh
+
+require .github/workflows/release.yml 'scripts/review-appliance-version.sh'
+
+# Exercise the launcher independently of a container engine. A fake omp makes
+# the profile boundary observable and proves that update never reaches omp.
+entrypoint_tmp="$(mktemp -d)"
+trap 'rm -rf "$entrypoint_tmp"' EXIT
+mkdir -m 0700 "$entrypoint_tmp/home"
+cat >"$entrypoint_tmp/omp" <<'EOF'
+#!/usr/bin/bash
+if [[ -n "${REVIEW_CONTRACT_CWD_FILE:-}" ]]; then
+  printf '%s\n' "$PWD" >"$REVIEW_CONTRACT_CWD_FILE"
+fi
+if [[ -n "${REVIEW_CONTRACT_ENV_FILE:-}" ]]; then
+  printf 'RTK_DISABLED=%s\nRTK_TELEMETRY_DISABLED=%s\n' "${RTK_DISABLED:-unset}" "${RTK_TELEMETRY_DISABLED:-unset}" >"$REVIEW_CONTRACT_ENV_FILE"
+fi
+printf '%s\n' "$@"
+EOF
+chmod +x "$entrypoint_tmp/omp"
+coordinator_cwd_file="$entrypoint_tmp/coordinator.cwd"
+default_env_file="$entrypoint_tmp/default.env"
+default_args="$(env -u REVIEW_INHERIT_OMP_CONFIG -u RTK_DISABLED -u RTK_TELEMETRY_DISABLED REVIEW_CONTRACT_CWD_FILE="$coordinator_cwd_file" REVIEW_CONTRACT_ENV_FILE="$default_env_file" LUNA_FACTORY_ENABLED=0 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+grep -qx 'review-appliance' <<<"$default_args" ||
+  fail "the appliance entrypoint did not select its isolated profile"
+grep -Fxq 'RTK_DISABLED=1' "$default_env_file" ||
+  fail "RTK rewriting was not disabled by default"
+grep -Fxq 'RTK_TELEMETRY_DISABLED=1' "$default_env_file" ||
+  fail "RTK telemetry was not disabled by default"
+if grep -Fq '/usr/share/review/rtk/rtk.ts' <<<"$default_args"; then
+  fail "the disabled-by-default appliance loaded the RTK hook"
+fi
+coordinator_root="$entrypoint_tmp/home/.local/state/review/coordinator"
+[[ "$(cat "$coordinator_cwd_file")" == "$coordinator_root" ]] ||
+  fail "the appliance did not launch OMP from its coordinator Git repository"
+git -C "$coordinator_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+  fail "the appliance coordinator path is not a Git worktree"
+[[ -z "$(git -C "$coordinator_root" status --porcelain)" ]] ||
+  fail "the appliance coordinator Git worktree is not clean"
+[[ "$(grep -cx -- '--advisor' <<<"$default_args")" -eq 1 ]] ||
+  fail "the appliance did not enable exactly one OMP advisor"
+mkdir -p "$entrypoint_tmp/home/.omp/profiles/review"
+printf '%s\n' 'operator config sentinel' >"$entrypoint_tmp/home/.omp/profiles/review/settings.json"
+inherited_before="$(sha256sum "$entrypoint_tmp/home/.omp/profiles/review/settings.json")"
+inherited_args="$(REVIEW_INHERIT_OMP_CONFIG=1 LUNA_FACTORY_ENABLED=0 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+grep -qx 'review' <<<"$inherited_args" ||
+  fail "the explicit host omp configuration opt-in did not select the review profile"
+[[ "$(sha256sum "$entrypoint_tmp/home/.omp/profiles/review/settings.json")" == "$inherited_before" ]] ||
+  fail "the inherited OMP profile changed during appliance startup"
+enabled_env_file="$entrypoint_tmp/enabled.env"
+env -u RTK_TELEMETRY_DISABLED RTK_DISABLED=0 REVIEW_CONTRACT_ENV_FILE="$enabled_env_file" LUNA_FACTORY_ENABLED=0 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version >"$entrypoint_tmp/enabled.args" 2>"$entrypoint_tmp/enabled.stderr"
+grep -Fxq 'RTK_DISABLED=0' "$enabled_env_file" ||
+  fail "an explicit RTK evaluation override did not reach OMP"
+grep -Fxq 'RTK_TELEMETRY_DISABLED=1' "$enabled_env_file" ||
+  fail "an RTK evaluation override enabled telemetry"
+if grep -Fq '/usr/share/review/rtk/rtk.ts' "$entrypoint_tmp/enabled.args"; then
+  fail "the entrypoint loaded an RTK hook that is absent from the test host"
+fi
+autoslay_args="$(LUNA_FACTORY_ENABLED=0 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --autoslay)"
+[[ "$(grep -cx -- '--advisor' <<<"$autoslay_args")" -eq 1 ]] ||
+  fail "autoslay duplicated the always-on OMP advisor"
+grep -qx -- '--autoslay' <<<"$autoslay_args" ||
+  fail "autoslay flag did not reach the review extension"
+explicit_advisor_args="$(LUNA_FACTORY_ENABLED=0 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --advisor)"
+[[ "$(grep -cx -- '--advisor' <<<"$explicit_advisor_args")" -eq 1 ]] ||
+  fail "the appliance duplicated an explicit OMP advisor flag"
+if LUNA_FACTORY_ENABLED=0 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh update >"$entrypoint_tmp/update.out" 2>&1; then
+  fail "the immutable appliance accepted an in-place update"
+fi
+grep -q 'immutable appliance' "$entrypoint_tmp/update.out" ||
+  fail "the rejected update did not explain appliance replacement"
+rm -rf "$entrypoint_tmp"
+trap - EXIT
+
+if [[ -n "$expect_version" && "$expect_version" != "$version" ]]; then
+  fail "expected version ${expect_version}, derived ${version}"
+fi
+
+# Verify patch bytes and qualification, rather than pinning a fixture digest.
+python3 - <<'PY_CHECK'
+import hashlib
+import pathlib
+import re
+root = pathlib.Path.cwd()
+container = (root / "image/appliance/Containerfile").read_text()
+def pin(name):
+    return re.search(r"^ARG " + name + r"=(.+)$", container, re.M).group(1)
+assert pin("OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT") == pin("OMP_SOURCE_COMMIT")
+patch = root / "patches/omp" / pathlib.PurePosixPath(pin("OMP_SESSION_LIFECYCLE_PATCH_PATH")).name
+assert hashlib.sha256(patch.read_bytes()).hexdigest() == pin("OMP_SESSION_LIFECYCLE_PATCH_SHA256")
+assert "!" + str(patch.relative_to(root)) in (root / ".dockerignore").read_text().splitlines()
+build = (root / "scripts/build-derived-omp.sh").read_text()
+assert build.index('apply --unidiff-zero "$OMP_CLIPBOARD_PATCH_PATH"') < build.index('apply "$OMP_SESSION_LIFECYCLE_PATCH_PATH"') < build.index('bun scripts/ci-release-build-binaries.ts')
+assert "api.sessionShutdownLifecycleVersion !== 1" in (root / "scripts/derived-omp-canary.ts").read_text()
+PY_CHECK
+python3 tests/session_lifecycle_packaging_contract.py
+
+echo "appliance-contract: static contract holds (version ${version})"
+
+# ------------------------------------------------------------------ runtime
+
+if [[ -z "$image" ]]; then
+  echo "appliance-contract: no --image given; runtime checks skipped"
+  exit 0
+fi
+
+engine="${CONTAINER_ENGINE:-podman}"
+command -v "$engine" >/dev/null 2>&1 || fail "${engine} is required for runtime checks"
+
+inspect() {
+  "$engine" image inspect "$image" --format "$1"
+}
+
+# The body runs in the container's shell, so its expansions must survive this
+# one untouched. Every caller below quotes accordingly.
+# shellcheck disable=SC2016
+run() {
+  "$engine" run --rm --entrypoint /usr/bin/bash "$image" -c "$1"
+}
+trap 'printf "appliance-contract: runtime command failed: %s\n" "$BASH_COMMAND" >&2' ERR
+
+test "$(inspect '{{.Config.User}}')" = "65532:65532" ||
+  fail "image must run as the numeric nonroot uid; kubelet rejects named users under runAsNonRoot"
+test "$(inspect '{{.Config.WorkingDir}}')" = "/workspace"
+test "$(inspect '{{json .Config.Entrypoint}}')" = \
+  '["/usr/bin/review-appliance"]'
+test "$(inspect '{{.ManifestType}}')" = "application/vnd.oci.image.manifest.v1+json" ||
+  fail "the shipped format is OCI, not Docker schema 2"
+
+image_version="$(inspect '{{index .Labels "org.opencontainers.image.version"}}')"
+test "$image_version" = "$version" ||
+  fail "image label version '${image_version}' does not match derived '${version}'"
+test -z "$(inspect '{{index .Labels "io.github.joshyorko.review.headroom.version"}}')"
+test "$(inspect '{{index .Labels "io.github.joshyorko.review.audio.packages"}}')" = "pulseaudio-libs,alsa-lib"
+
+# Sum the layer sizes rather than reading `.Size`: podman's inspect field
+# double-counts files a later layer replaces, and the number a maintainer sees
+# in `podman images` is the sum of the diffs.
+size="$("$engine" history --format json "$image" | python3 -c '
+import json, sys
+print(sum(int(layer.get("size") or 0) for layer in json.load(sys.stdin)))
+')"
+[[ "$size" =~ ^[0-9]+$ ]] || fail "could not measure the image size"
+if ((size > size_ceiling_bytes)); then
+  fail "image is $((size / 1024 / 1024)) MiB, over the $((size_ceiling_bytes / 1024 / 1024)) MiB ceiling"
+fi
+
+if [[ -n "$expect_arch" ]]; then
+  container_arch="$("$engine" run --rm --entrypoint /usr/bin/uname "$image" -m)"
+  test "$container_arch" = "$expect_arch" ||
+    fail "expected a native ${expect_arch} container, got ${container_arch}"
+fi
+
+# Every bundled binary is executed, because "the file exists" says nothing about
+# whether its library closure came along.
+# omp reports itself as "omp/<version>"; the label carries the bare version.
+omp_label="$(inspect '{{index .Labels "io.github.joshyorko.review.omp.version"}}')"
+omp_version="$(run 'omp --version')"
+test "$omp_version" = "omp/${omp_label}" ||
+  fail "the omp binary reports '${omp_version}', but this image claims to ship ${omp_label}"
+# Coreutils comes from the staged runtime, not the distroless base. Execute
+# commands needed by appliance startup and scratch handling before RTK.
+# shellcheck disable=SC2016 # Expanded by run() inside the temporary image.
+run 'set -eu; for tool in basename cat chmod cp cut date dirname env head id install ln ls mkdir mktemp mv pwd readlink realpath rm rmdir sha256sum sha512sum sleep sort stat tail tee timeout touch tr uname wc; do "/usr/bin/$tool" --version >/dev/null; done' ||
+  fail "a staged coreutils command failed to execute"
+rtk_label="$(inspect '{{index .Labels "io.github.joshyorko.review.rtk.version"}}')"
+# shellcheck disable=SC2016 # Expanded by run() inside the temporary image.
+rtk_version="$(run 'work="$(mktemp -d)"; mkdir -p "$work/home" "$work/config" "$work/data" "$work/state"; env HOME="$work/home" XDG_CONFIG_HOME="$work/config" XDG_DATA_HOME="$work/data" XDG_STATE_HOME="$work/state" RTK_TELEMETRY_DISABLED=1 /usr/bin/rtk --version')"
+test "$rtk_version" = "rtk ${rtk_label}" ||
+  fail "the RTK binary does not match the pinned appliance version ${rtk_label}"
+run 'test -x /usr/bin/rtk && test -s /usr/share/review/rtk/rtk.ts && test -s /usr/share/licenses/rtk/LICENSE' ||
+  fail "the RTK binary, immutable OMP hook, or license text is missing"
+node_label="$(inspect '{{index .Labels "io.github.joshyorko.review.node.version"}}')"
+bun_label="$(inspect '{{index .Labels "io.github.joshyorko.review.bun.version"}}')"
+test "$(run 'node --version')" = "v${node_label}" ||
+  fail "node version does not match the pinned appliance version"
+test "$(run 'bun --version')" = "$bun_label" ||
+  fail "bun version does not match the pinned OMP build runtime"
+run 'npm --version && npx --version' >/dev/null ||
+  fail "npm or npx failed to execute"
+
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+run '
+  set -eu
+  gh --version >/dev/null
+  git --version >/dev/null
+  python3 --version >/dev/null
+  python --version >/dev/null
+  actionlint -version >/dev/null
+  shellcheck --version >/dev/null
+  yq --version >/dev/null
+  jq --version >/dev/null
+  just --version >/dev/null
+  gzip --version >/dev/null
+  test "$(git config --get credential.https://github.com.helper)" = "!/usr/bin/gh auth git-credential"
+  test "$(readlink -f /bin/sh)" = /usr/bin/bash
+
+' >/dev/null || fail "a bundled binary failed to execute"
+bwrap_capability="${REVIEW_APPLIANCE_BWRAP_CAPABILITY:-available}"
+case "$bwrap_capability" in
+available)
+  # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+  run '
+      set -eu
+      mounts=()
+      for path in /usr /bin /lib /lib64; do
+        [[ ! -e "$path" ]] || mounts+=(--ro-bind "$path" "$path")
+      done
+      bwrap --unshare-all --die-with-parent --new-session --clearenv \
+        "${mounts[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home \
+        --dir /home/worker --setenv HOME /home/worker \
+        --setenv PATH /usr/bin:/bin /usr/bin/bash --noprofile --norc -c \
+        "node --version && bun --version && npm --version && npx --version"
+    ' >/dev/null || fail "Node, Bun, npm, or npx is unavailable inside the Factory bubblewrap verifier"
+  ;;
+blocked)
+  echo "appliance-contract: generic OCI bubblewrap contract blocked by runner user-namespace capability; krun Factory qualification is separate"
+  ;;
+*)
+  fail "REVIEW_APPLIANCE_BWRAP_CAPABILITY must be available or blocked"
+  ;;
+esac
+
+# git is here to land fixes, which means it has to be able to commit, clone
+# local bare repositories, and reach GitHub over https — with each helper's
+# Fedora executable and library closure included.
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+run '
+  set -eu
+  export HOME=/tmp/gitcheck GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com
+  export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
+  mkdir -p "$HOME/repo" && cd "$HOME/repo"
+  git init -q .
+  echo hello > file
+  git add file
+  git commit -qm "smoke"
+  git log --oneline | grep -q smoke
+  test "$(git --exec-path)" = /usr/libexec/git-core
+  test -x /usr/libexec/git-core/git-upload-pack
+  git --list-cmds=builtins | tr " " "\n" | grep -qx upload-pack
+  test -x /usr/libexec/git-core/git-remote-https
+  ldd /usr/libexec/git-core/git-remote-https | grep -q "not found" && exit 1
+  ldd /usr/libexec/git-core/git-upload-pack | grep -q "not found" && exit 1
+  git clone --quiet --bare "$HOME/repo" "$HOME/repo.git"
+  git clone --quiet --no-local "$HOME/repo.git" "$HOME/checkout"
+  git -C "$HOME/checkout" log --oneline | grep -q smoke
+  exit 0
+' >/dev/null || fail "git helper closure cannot commit, clone local bare repositories, or reach GitHub over https"
+
+# The agent writes sessions, logs and caches under HOME on every run.
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+run 'set -eu; test -w "$HOME"; test "$HOME" = /home/review' >/dev/null ||
+  fail "HOME must exist and be writable by the nonroot user"
+
+# Exercise the normal named-home-volume shape from root because krun currently
+# presents its OCI entrypoint as uid 0 even when the image declares USER 65532.
+identity_fixture="$(mktemp -d)"
+chmod 0755 "$identity_fixture"
+mkdir -m 0700 "$identity_fixture/claims"
+cat >"$identity_fixture/omp" <<'EOF'
+#!/usr/bin/bash
+has_version=false
+for arg; do
+  [[ "$arg" != review-entrypoint ]] || exit 21
+  [[ "$arg" == --version ]] && has_version=true
+done
+$has_version || exit 19
+factory_state="$HOME/.local/state/review/factory"
+origin="$factory_state/origin.git"
+seed="$factory_state/seed"
+workspace="$factory_state/workspaces/probe"
+if [[ ! -d "$origin/objects" ]]; then
+  mkdir -p "$factory_state/workspaces"
+  git init -q "$seed"
+  git -C "$seed" config user.name probe
+  git -C "$seed" config user.email probe@example.test
+  printf 'ownership probe\n' >"$seed/README"
+  git -C "$seed" add README
+  git -C "$seed" commit -qm probe
+  git -C "$seed" branch -M main
+  mkdir -p "$origin"
+  cp -a "$seed/.git/." "$origin/"
+  git --git-dir="$origin" config core.bare true
+  git --git-dir="$origin" update-ref refs/pull/42/head refs/heads/main
+  git --git-dir="$origin" update-server-info
+fi
+python3 - "$origin" "$workspace" "$factory_state/gh" <<'PY'
+import functools
+import http.server
+import os
+import subprocess
+import sys
+import threading
+
+origin, workspace, gh_path = sys.argv[1:]
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=origin)
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+
+def run(*args, env=None):
+    subprocess.run(args, check=True, stdout=subprocess.DEVNULL, env=env)
+
+url = f"http://127.0.0.1:{server.server_port}/"
+with open(gh_path, "w", encoding="utf-8") as gh:
+    gh.write("""#!/usr/bin/bash
+set -eu
+[[ "${1:-} ${2:-}" == "repo clone" ]] || exit 2
+exec git -c protocol.file.allow=never clone -q --no-checkout "$FACTORY_GIT_URL" "${4:?}"
+""")
+os.chmod(gh_path, 0o755)
+env = os.environ.copy()
+env["FACTORY_GIT_URL"] = url
+env["PATH"] = f"{os.path.dirname(gh_path)}:{env['PATH']}"
+if not os.path.isdir(os.path.join(workspace, ".git")):
+    run("gh", "repo", "clone", "example/repo", workspace, "--", "--no-checkout", env=env)
+else:
+    run("git", "-C", workspace, "remote", "set-url", "origin", url)
+run("git", "-C", workspace, "fetch", "-q", "origin", "pull/42/head:refs/remotes/origin/pr-42")
+run("git", "-C", workspace, "checkout", "-q", "--detach", "FETCH_HEAD")
+server.shutdown()
+PY
+[[ -n "$(git -C "$workspace" rev-parse --verify HEAD)" ]] || exit 19
+if [[ -e "$factory_state/retained-probe" ]]; then retained=yes; else retained=no; fi
+touch "$factory_state/retained-probe" "$LUNA_FACTORY_CLAIMS_ROOT/claims-probe"
+printf 'uid=%s gid=%s home=%s state_owner=%s workspace_owner=%s retained=%s\n' "$(id -u)" "$(id -g)" "$HOME" "$(stat -c %u:%g "$factory_state")" "$(stat -c %u:%g "$workspace")" "$retained"
+EOF
+chmod 0755 "$identity_fixture/omp"
+runtime_args=()
+[[ -z "${REVIEW_TEST_RUNTIME:-}" ]] || runtime_args+=(--runtime "$REVIEW_TEST_RUNTIME")
+home_volume="review-appliance-contract-home-$$"
+"$engine" volume create "$home_volume" >/dev/null
+trap 'rm -rf "$identity_fixture"; "$engine" volume rm "$home_volume" >/dev/null 2>&1 || true' EXIT
+run_named_home_probe() {
+  "$engine" run "${runtime_args[@]}" --rm --userns keep-id:uid=65532,gid=65532 --user 0:0 \
+    --volume "$home_volume:/home/review:rw,z" \
+    --volume "$identity_fixture/claims:/claims:rw,z" \
+    --volume "$identity_fixture:/runtime-probe:ro" \
+    --env LUNA_FACTORY_CLAIMS_ROOT=/claims \
+    --env PATH=/runtime-probe:/usr/bin:/bin \
+    --entrypoint /usr/bin/review-appliance "$image" --version
+}
+probe_stdout="$identity_fixture/probe.stdout"
+probe_stderr="$identity_fixture/probe.stderr"
+if ! run_named_home_probe >"$probe_stdout" 2>"$probe_stderr"; then
+  fail "entrypoint probe failed: stdout=$(cat "$probe_stdout") stderr=$(cat "$probe_stderr")"
+fi
+first_identity_output="$(cat "$probe_stdout")"
+[[ "$first_identity_output" == "uid=65532 gid=65532 home=/home/review state_owner=65532:65532 workspace_owner=65532:65532 retained=no" ]] ||
+  fail "entrypoint did not create named-volume Factory state and workspace under bluefin: ${first_identity_output}"
+if ! run_named_home_probe >"$probe_stdout" 2>"$probe_stderr"; then
+  fail "retained entrypoint probe failed: stdout=$(cat "$probe_stdout") stderr=$(cat "$probe_stderr")"
+fi
+retained_identity_output="$(cat "$probe_stdout")"
+[[ "$retained_identity_output" == "uid=65532 gid=65532 home=/home/review state_owner=65532:65532 workspace_owner=65532:65532 retained=yes" ]] ||
+  fail "entrypoint did not retain named-volume Factory state and workspace: ${retained_identity_output}"
+home_mount="$("$engine" volume inspect --format '{{.Mountpoint}}' "$home_volume")"
+[[ "$(stat -c %u:%g "$home_mount/.local/state/review/factory/retained-probe")" == "$(id -u):$(id -g)" ]] ||
+  fail "retained Factory state is not host-owned by the runtime caller"
+[[ "$(stat -c %u:%g "$home_mount/.local/state/review/factory/workspaces/probe")" == "$(id -u):$(id -g)" ]] ||
+  fail "retained Factory workspace is not host-owned by the runtime caller"
+[[ "$(stat -c %u:%g "$identity_fixture/claims/claims-probe")" == "$(id -u):$(id -g)" ]] ||
+  fail "the existing claims mount lost host ownership"
+
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+run '
+  set -eu
+  check() {
+    "$@" || {
+      printf "appliance-contract: runtime check failed: %s\n" "$*" >&2
+      exit 1
+    }
+  }
+  case "$(uname -m)" in
+    x86_64) audio_triplet=x86_64-linux-gnu ;;
+    aarch64) audio_triplet=aarch64-linux-gnu ;;
+    *) exit 1 ;;
+  esac
+  check test -x /usr/bin/review-appliance
+  check grep -q "checkUpdate: false" /usr/share/review/appliance-config.yml
+  check test ! -e /usr/share/review/appliance-mcp.json
+  check test -f /usr/share/review/extension/index.ts
+  check test -d /usr/share/review/extension/agents
+  check test -f /usr/share/review/luna-factory/index.ts
+  check test -d /usr/share/review/luna-factory/agents
+  check test -L /usr/share/review/review
+  check test -f /usr/share/review/review/github.ts
+  check test -f /usr/share/review/sbom.spdx.json
+  check test -e "/usr/lib64/libpulse-simple.so.0"
+  check test -e "/usr/lib64/libasound.so.2"
+  check test -e /usr/share/alsa/alsa.conf
+  check test -d /run/review/pulse
+  pulse_deps="$(ldd "/usr/lib64/libpulse-simple.so.0")" || {
+    printf "appliance-contract: ldd failed for libpulse-simple.so.0\n" >&2
+    exit 1
+  }
+  [[ "$pulse_deps" != *"not found"* ]] || {
+    printf "%s\n" "$pulse_deps" >&2
+    exit 1
+  }
+  alsa_deps="$(ldd "/usr/lib64/libasound.so.2")" || {
+    printf "appliance-contract: ldd failed for libasound.so.2\n" >&2
+    exit 1
+  }
+  [[ "$alsa_deps" != *"not found"* ]] || {
+    printf "%s\n" "$alsa_deps" >&2
+    exit 1
+  }
+' || fail "the review mode, SBOM, or audio closure is missing from the image"
+
+run '
+  set -eu
+  test -x /usr/bin/review-appliance
+  grep -q "checkUpdate: false" /usr/share/review/appliance-config.yml
+  test -f /usr/share/review/extension/index.ts
+  test -d /usr/share/review/extension/agents
+  test -f /usr/share/review/extension/.mcp.json
+  test -f /usr/share/review/sbom.spdx.json
+' >/dev/null || fail "the review mode or its SBOM is missing from the image"
+
+# No OS package manager may enter the final image; npm is the requested Node runtime toolchain, not an OS installer.
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+run '
+  set -eu
+  for forbidden in dnf microdnf apt apt-get apk rpm yum pip pip3; do
+    if command -v "$forbidden" >/dev/null 2>&1; then
+      echo "found package manager: $forbidden" >&2
+      exit 1
+    fi
+  done
+' >/dev/null || fail "a package manager reached the appliance"
+
+sbom_packages="$(run 'cat /usr/share/review/sbom.spdx.json' | python3 -c '
+import json,sys
+document = json.load(sys.stdin)
+print(" ".join(sorted(package["name"] for package in document["packages"])))
+')"
+for component in omp omp-source omp-memory-backend-patch omp-native-addon node bun gh rtk rtk-omp-hook rtk-license review-workbench; do
+  grep -qwF -- "$component" <<<"$sbom_packages" ||
+    fail "the in-image SBOM does not record ${component}"
+done
+grep -qF -- headroom <<<"$sbom_packages" && fail "the in-image SBOM still records Headroom"
+
+# The deliverable itself: the shipped entrypoint, with its profile and extension
+# arguments, starting under the nonroot user. Extension *behavior* is covered by
+# tests/omp-review-mode.sh; what this proves is that the image's own command line
+# is well formed and the binary runs as shipped.
+entry_version="$("$engine" run --rm "$image" --version)"
+test "$entry_version" = "$omp_label" ||
+  fail "the entrypoint printed '${entry_version}', expected ${omp_label}"
+
+update_output="$("$engine" run --rm "$image" update 2>&1 || true)"
+grep -q 'immutable appliance' <<<"$update_output" ||
+  fail "the appliance update command did not explain replacement semantics"
+
+help_output="$("$engine" run --rm "$image" --help)"
+grep -q 'Replace it to update' <<<"$help_output" ||
+  fail "appliance help does not explain replacement semantics"
+grep -q 'REVIEW_INHERIT_OMP_CONFIG=1' <<<"$help_output" ||
+  fail "appliance help does not expose the explicit host-config opt-in"
+
+TYPESAFE_RUNTIME_IMAGE="$image" bash tests/typesafe-appliance-contract.sh
+
+echo "appliance-contract: runtime contract holds ($((size / 1024 / 1024)) MiB, omp ${omp_version})"

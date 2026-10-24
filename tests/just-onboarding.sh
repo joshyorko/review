@@ -1,0 +1,563 @@
+#!/usr/bin/env bash
+# Hermetic behavior contract for the root launcher. External tools are faked;
+# this test never contacts GitHub, a registry, Podman, or Kubernetes.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+real_just="$(command -v just)"
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+home="$scratch/home"
+fake_bin="$scratch/bin"
+podman_log="$scratch/podman.log"
+kubectl_log="$scratch/kubectl.log"
+: >"$kubectl_log"
+apptainer_log="$scratch/apptainer.log"
+kvm="$scratch/kvm"
+mkdir -p "$home" "$fake_bin"
+host_fixture="$scratch/host"
+mkdir -p "$host_fixture/etc"
+touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+filesystem_hook="$scratch/filesystem.sh"
+cat >"$filesystem_hook" <<'EOF'
+if [[ "${REVIEW_TEST_HIDE_KRUN:-0}" == 1 ]]; then
+  command() {
+    if [[ "$#" == 2 && "$1" == -v && "$2" == krun ]]; then return 1; fi
+    builtin command "$@"
+  }
+fi
+test() {
+  if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
+    builtin test -e "$HOST_FIXTURE$2"
+  else
+    builtin test "$@"
+  fi
+}
+command() {
+  if [[ "${FAKE_NO_SKOPEO:-0}" == 1 && "${1:-}" == -v && "${2:-}" == skopeo ]]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+EOF
+export BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture"
+touch "$kvm"
+chmod 0666 "$kvm"
+cat >"$fake_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-} ${2:-}" == "auth status" ]] && exit 0
+exit 1
+EOF
+cat >"$fake_bin/podman" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+if [[ "${1:-}" == info ]]; then
+  if [[ "$*" == *--runtime=krun* ]]; then
+    printf 'runtime-probe %s %s\n' "$*" "${FAKE_KRUN_RUNTIME:-krun}" >>"${PODMAN_LOG:?}"
+    [[ "${FAKE_KRUN_RUNTIME:-krun}" == unavailable ]] && exit 1
+    printf '%s\n' "${FAKE_KRUN_RUNTIME:-krun}"
+    exit 0
+  fi
+  [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]]
+  exit
+fi
+printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
+if [[ "${1:-}" == run && "$*" == *--entrypoint\ /usr/bin/bash* ]]; then exit 0; fi
+if [[ "${1:-}" == run && "$*" == *--factory-verifier-probe* ]]; then
+  echo '{"kind":"review-factory-verifier","status":"available"}'
+  exit 0
+fi
+if [[ "${1:-}" == run && "${FAKE_REMOTE_DEFAULT:-}" != 1 ]]; then
+  previous=""
+  home_mount=""
+  for arg in "$@"; do
+    if [[ "$previous" == --volume ]]; then
+      home_mount="${arg%%:*}"
+      break
+    fi
+    previous="$arg"
+  done
+  [[ -d "$home_mount/.local/state/review/factory" ]] || exit 19
+  [[ "$(stat -c %u:%g "$home_mount/.local/state/review/factory")" == "$(id -u):$(id -g)" ]] || exit 19
+fi
+if [[ "${1:-}" == run && "${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
+  [[ "${AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
+  [[ "${AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || exit 19
+  [[ "${AWS_SECRET_ACCESS_KEY:-}" == test-secret-key ]] || exit 19
+  [[ "${AWS_SESSION_TOKEN:-}" == test-session-token ]] || exit 19
+  [[ "${AWS_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "${AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "$*" != *test-bedrock-bearer* && "$*" != *test-access-key* && "$*" != *test-secret-key* && "$*" != *test-session-token* && "$*" != *us-east-1* ]] || exit 19
+fi
+if [[ "${1:-}" == run && "${EXPECT_PODMAN_REVIEW_SCOPE:-}" == 1 ]]; then
+  [[ "$*" == *"--env REVIEW_DEFAULT_SCOPE"* && "$*" == *"--env REVIEW_MODE"* ]] || exit 19
+  [[ "$*" == *"review-review-org-acme-"* ]] || exit 19
+fi
+if [[ "${1:-}" == run && -n "${EXPECT_EXTENSION:-}" ]]; then
+  previous=""
+  found=0
+  for arg in "$@"; do
+    if [[ "$previous" == --extension ]]; then
+      [[ "$arg" == "$EXPECT_EXTENSION" ]] || exit 19
+      found=1
+    fi
+    previous="$arg"
+  done
+  [[ "$found" == 1 ]] || exit 19
+fi
+if [[ "${1:-}" == run && "${EXPECT_EMPTY_SCOPE:-}" == 1 ]]; then
+  args=("$@")
+  count="${#args[@]}"
+  [[ "$count" -ge 2 && "${args[count - 2]}" == ghcr.io/joshyorko/review:stable && "${args[count - 1]}" == --advisor ]] || exit 19
+fi
+if [[ "${1:-}" == run && "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
+  [[ "$*" == *"--env LUNA_FACTORY_ENABLED"* && "$*" == *"--env LUNA_FACTORY_CAPACITY"* ]] || exit 19
+fi
+if [[ "${1:-}" == run && -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "$EXPECT_RTK_DISABLED" == unset ]]; then
+    [[ "$*" != *"--env RTK_DISABLED"* ]] || exit 19
+  else
+    [[ "${RTK_DISABLED:-}" == "$EXPECT_RTK_DISABLED" && "$*" == *"--env RTK_DISABLED"* ]] || exit 19
+    [[ "$*" != *"RTK_DISABLED=$EXPECT_RTK_DISABLED"* ]] || exit 19
+  fi
+fi
+case "${1:-} ${2:-} ${3:-}" in
+  "system connection list")
+    [[ "${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\tidentity\ttrue\n'
+    exit 0 ;;
+  "image exists "*) [[ "${FAKE_IMAGE_MISSING:-0}" != 1 ]]; exit ;;
+  "pull "*) [[ "${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
+  "inspect --format "*) printf 'false\n'; exit 0 ;;
+  "image inspect --format") printf '0.1.0|0123456789abcdef|sha256:deadbeef\n'; exit 0 ;;
+  "container exists "*) exit 1 ;;
+  "run "*) exit 17 ;;
+esac
+exit 0
+EOF
+cat >"$fake_bin/apptainer" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"/usr/bin/bash --noprofile --norc"* ]]; then exit 0; fi
+if [[ "$*" == *--factory-verifier-probe* ]]; then
+  printf '%s\n' "$*" >>"${HOME:?}/apptainer-verifier.log"
+  echo '{"kind":"review-factory-verifier","status":"available"}'
+  exit 0
+fi
+if [[ "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
+  [[ "${APPTAINERENV_LUNA_FACTORY_ENABLED:-}" == 1 && "${APPTAINERENV_LUNA_FACTORY_CAPACITY:-}" == 7 ]] || exit 19
+  [[ "$*" != *LUNA_FACTORY* && "$*" != *" 7 "* ]] || exit 19
+fi
+if [[ -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "$EXPECT_RTK_DISABLED" == unset ]]; then
+    [[ ! -v APPTAINERENV_RTK_DISABLED && ! -v SINGULARITYENV_RTK_DISABLED ]] || exit 19
+  else
+    [[ "${APPTAINERENV_RTK_DISABLED:-}" == "$EXPECT_RTK_DISABLED" && ! -v SINGULARITYENV_RTK_DISABLED ]] || exit 19
+    for arg in "$@"; do
+      case "$arg" in
+        RTK_DISABLED|RTK_DISABLED=*|"$EXPECT_RTK_DISABLED") exit 19 ;;
+      esac
+    done
+  fi
+fi
+[[ "${APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT:-}" == /claims ]] || exit 19
+printf '%s\n' "$*" >>"${APPTAINER_LOG:-/dev/null}"
+previous=""
+for arg in "$@"; do
+  [[ "$previous" != --home ]] || runtime_home="${arg%%:*}"
+  if [[ "$previous" == --pwd && "$arg" == /home/review/workspace ]]; then
+    [[ -d "$runtime_home/workspace" ]] || exit 19
+  fi
+  previous="$arg"
+done
+if [[ "${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
+  injected=()
+  for name in GH_TOKEN OPENAI_API_KEY CONTEXT7_API_KEY HIVE_HUB AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+    source_name="APPTAINERENV_${name}"
+    [[ -v "$source_name" ]] && injected+=("$name=${!source_name}")
+  done
+  injected+=("EXPECT_CONTEXT7_CREDENTIAL=${EXPECT_CONTEXT7_CREDENTIAL:-0}")
+  injected+=("EXPECT_APPTAINER_HIVE=${EXPECT_APPTAINER_HIVE:-0}")
+  env -i "${injected[@]}" /bin/bash -c '
+    [[ "$GH_TOKEN" == test-gh-token ]] || { echo "contained GH_TOKEN mismatch" >&2; exit 1; }
+    [[ "$OPENAI_API_KEY" == "test-provider-token" ]] || { echo "contained OPENAI_API_KEY mismatch" >&2; exit 1; }
+    if [[ "$EXPECT_APPTAINER_HIVE" == 1 ]]; then
+      [[ "$HIVE_HUB" == https://hive.example.test ]] || { echo "contained HIVE_HUB mismatch" >&2; exit 1; }
+    else
+      [[ -z "$HIVE_HUB" ]] || { echo "unexpected Hive configuration in default Review" >&2; exit 1; }
+    fi
+    [[ -z "$AWS_BEARER_TOKEN_BEDROCK" || "$AWS_BEARER_TOKEN_BEDROCK" == "test-bedrock-token" ]] || { echo "contained AWS bearer mismatch" >&2; exit 1; }
+    [[ -z "$AWS_ACCESS_KEY_ID" || "$AWS_ACCESS_KEY_ID" == "test-access-key" ]] || { echo "contained AWS access-key mismatch" >&2; exit 1; }
+    [[ -z "$AWS_SECRET_ACCESS_KEY" || "$AWS_SECRET_ACCESS_KEY" == "test-secret-key" ]] || { echo "contained AWS secret-key mismatch" >&2; exit 1; }
+    [[ -z "$AWS_SESSION_TOKEN" || "$AWS_SESSION_TOKEN" == "test-session-token" ]] || { echo "contained AWS session-token mismatch" >&2; exit 1; }
+    [[ -z "$AWS_REGION" || "$AWS_REGION" == "us-west-2" ]] || { echo "contained AWS region mismatch" >&2; exit 1; }
+    [[ -z "$AWS_DEFAULT_REGION" || "$AWS_DEFAULT_REGION" == "us-west-2" ]] || { echo "contained default AWS region mismatch" >&2; exit 1; }
+    [[ "$EXPECT_CONTEXT7_CREDENTIAL" != 1 || "$CONTEXT7_API_KEY" == "test-context7-token" ]] || { echo "contained Context7 credential mismatch" >&2; exit 1; }
+  ' || { echo "contained credential environment mismatch" >&2; exit 19; }
+fi
+if [[ "${EXPECT_APPTAINER_AWS_FORWARDING:-}" == 1 ]]; then
+  [[ "${APPTAINERENV_AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || { echo "AWS_BEARER_TOKEN_BEDROCK not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || { echo "AWS_ACCESS_KEY_ID not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_SECRET_ACCESS_KEY:-}" == test-secret-key ]] || { echo "AWS_SECRET_ACCESS_KEY not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_SESSION_TOKEN:-}" == test-session-token ]] || { echo "AWS_SESSION_TOKEN not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_REGION:-}" == us-east-1 ]] || { echo "AWS_REGION not forwarded" >&2; exit 19; }
+  [[ "${APPTAINERENV_AWS_DEFAULT_REGION:-}" == us-east-1 ]] || { echo "AWS_DEFAULT_REGION not forwarded" >&2; exit 19; }
+  [[ "$*" != *test-bedrock-bearer* && "$*" != *test-access-key* && "$*" != *test-secret-key* && "$*" != *test-session-token* && "$*" != *us-east-1* ]] || { echo "AWS credentials leaked into Apptainer argv" >&2; exit 19; }
+fi
+if [[ "${EXPECT_APPTAINER_REVIEW_SCOPE:-}" == 1 ]]; then
+  [[ "${APPTAINERENV_REVIEW_DEFAULT_SCOPE:-}" == "org:acme" ]] || exit 19
+  [[ "${APPTAINERENV_REVIEW_MODE:-}" == "hive" ]] || exit 19
+  [[ "${APPTAINERENV_HIVE_HUB:-}" == "https://hive.example.test" ]] || exit 19
+fi
+exit 18
+EOF
+cat >"$fake_bin/krun" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$fake_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
+exit 99
+EOF
+cat >"$fake_bin/squashfuse_ll" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$fake_bin/squashfuse_ll"
+export REVIEW_TEST_FUSE_DEVICE=/dev/null
+cat >"$fake_bin/skopeo" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$fake_bin/skopeo"
+chmod +x "$fake_bin/gh" "$fake_bin/podman" "$fake_bin/kubectl" "$fake_bin/krun" "$fake_bin/apptainer"
+
+failures=0
+scenario=startup
+fail() {
+  printf 'FAIL [%s]: %s\n' "$scenario" "$1" >&2
+  failures=$((failures + 1))
+}
+contains() { grep -Fq -- "$1" <<<"$2" || fail "expected output to contain: $1"; }
+not_contains() {
+  grep -Fq -- "$1" <<<"$2" && fail "expected output not to contain: $1"
+  return 0
+}
+log_contains() { grep -Fq -- "$1" "$2" || fail "expected $2 to contain: $1"; }
+log_not_contains() {
+  grep -Fq -- "$1" "$2" && fail "expected $2 not to contain: $1"
+  return 0
+}
+configure_host_files() {
+  local mask="$1"
+  rm -f "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+  ((mask & 1)) && touch "$host_fixture/etc/localtime"
+  ((mask & 2)) && touch "$host_fixture/etc/hosts"
+  return 0
+}
+assert_apptainer_host_files() {
+  local call="$1" mask="$2" path bit previous="" runtime_home="" arg
+  for arg in $call; do
+    if [[ "$previous" == --home ]]; then
+      runtime_home="${arg%%:*}"
+      break
+    fi
+    previous="$arg"
+  done
+  [[ -d "$runtime_home/.local/state/review/factory" ]] || fail "Apptainer Factory state was not prepared before launch"
+  [[ "$(stat -c %u:%g "$runtime_home/.local/state/review/factory")" == "$(id -u):$(id -g)" ]] || fail "Apptainer Factory state is not host-owned"
+  for path in /etc/localtime /etc/hosts; do
+    [[ "$path" == /etc/localtime ]] && bit=1 || bit=2
+    if ((mask & bit)); then
+      [[ "$call" != *"--no-mount $path"* ]] || fail "present host file $path was suppressed: $call"
+    else
+      [[ "$call" == *"--no-mount $path"* ]] || fail "missing host file $path was not suppressed: $call"
+    fi
+  done
+}
+run_just() {
+  : >"$podman_log"
+  export APPTAINER_LOG="$apptainer_log"
+  set +e
+  output="$(env HOME="$home" XDG_STATE_HOME="$home/.local/state" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_HIDE_KRUN=1 REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_KRUN_RUNTIME="${FAKE_KRUN_RUNTIME:-krun}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
+  status=$?
+  set -e
+}
+
+scenario="public recipes"
+recipes="$($real_just --justfile "$root/justfile" --list)"
+for recipe in review-queue review-appliance review-appliance-build review-doctor; do
+  contains "$recipe" "$recipes"
+done
+if grep -qF 'migrate_legacy_state' "$root/justfile" "$root/bin/review"; then
+  fail "fresh Review state must not import obsolete distribution state"
+fi
+for retired in contribute review-container; do
+  if grep -Fxq "$retired" <<<"$recipes"; then
+    fail "retired $retired recipe remains"
+  fi
+done
+
+scenario="doctor reports infrastructure readiness and qualified verifier state separately"
+run_just review-doctor
+[[ "$status" -eq 0 ]] || fail "review-doctor failed: $output"
+contains 'Podman krun KVM infrastructure prerequisites ready' "$output"
+contains 'Packaged Factory verifier qualified in krun profile' "$output"
+contains '=== Review image ===' "$output"
+contains 'ghcr.io/joshyorko/review:stable is resolvable' "$output"
+
+scenario="registered krun runtime works without a literal executable on PATH"
+FAKE_KRUN_RUNTIME=krun run_just review-appliance owner/repo
+[[ "$status" -eq 17 ]] || fail "registered krun runtime was not selected without a literal krun executable: $output"
+log_contains 'run --runtime=krun --rm --interactive --tty' "$podman_log"
+log_contains 'runtime-probe info --runtime=krun' "$podman_log"
+[[ ! -s "$apptainer_log" ]] || fail "registered krun runtime fell back to Apptainer"
+
+scenario="unregistered krun runtime keeps the precise Apptainer fallback diagnostic"
+FAKE_KRUN_RUNTIME=unavailable run_just review-doctor
+[[ "$status" -eq 0 ]] || fail "doctor failed while reporting an unavailable krun runtime: $output"
+if [[ "$output" != *"the krun OCI runtime is unavailable"* ]]; then
+  fail "doctor output omitted krun diagnostic; podman log: $(cat "$podman_log"); output: $output"
+fi
+log_contains 'runtime-probe info --runtime=krun' "$podman_log"
+
+scenario="doctor does not claim verifier readiness without a local image"
+FAKE_IMAGE_MISSING=1 run_just review-doctor
+[[ "$status" -eq 0 ]] || fail "doctor failed when verifier qualification was unavailable: $output"
+contains 'Factory verifier unqualified' "$output"
+
+scenario="just launcher qualifies Factory before passing opt-in configuration"
+export LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1
+run_just review-appliance owner/repo
+[[ "$status" -eq 17 ]] || fail "Factory-enabled just launcher did not reach OMP after verifier qualification: $output"
+grep -q '^run .*--factory-verifier-probe' "$podman_log" || fail "just launcher skipped the packaged verifier probe"
+grep -q '^run .*--interactive --tty' "$podman_log" || fail "just launcher did not start the OMP session after the probe"
+unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY EXPECT_FACTORY_ENV
+
+scenario="just Apptainer launch forwards opted-in Factory settings after its independent probe"
+export LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1
+FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
+[[ "$status" -eq 18 ]] || fail "Factory-enabled Apptainer launcher did not reach OMP after its verifier probe: $output"
+grep -q -- '--factory-verifier-probe' "$home/apptainer-verifier.log" || fail "just Apptainer launch skipped the verifier probe"
+log_contains '--underlay' "$apptainer_log"
+log_contains '--bind /dev/full:/dev/full' "$apptainer_log"
+unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY EXPECT_FACTORY_ENV
+
+scenario="Factory-disabled just Apptainer launch keeps the default mount mode"
+: >"$apptainer_log"
+FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
+[[ "$status" -eq 18 ]] || fail "Factory-disabled Apptainer launcher failed: $output"
+log_not_contains '--underlay' "$apptainer_log"
+
+scenario="just launcher forwards only explicit RTK_DISABLED by name to Podman"
+for rtk_value in 0 1; do
+  export RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value"
+  run_just review-appliance owner/repo
+  [[ "$status" -eq 17 ]] || fail "Podman launch failed with explicit RTK_DISABLED=$rtk_value: $output"
+  log_contains '--env RTK_DISABLED' "$podman_log"
+  log_not_contains "RTK_DISABLED=$rtk_value" "$podman_log"
+done
+unset RTK_DISABLED EXPECT_RTK_DISABLED
+export EXPECT_RTK_DISABLED=unset
+run_just review-appliance owner/repo
+[[ "$status" -eq 17 ]] || fail "Podman launch failed with RTK_DISABLED unset: $output"
+if grep -q -- '--env RTK_DISABLED' "$podman_log"; then fail "Podman launcher invented an RTK_DISABLED default"; fi
+
+scenario="just Apptainer forwards only explicit RTK_DISABLED and clears ambient aliases"
+for rtk_value in 0 1; do
+  export RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" APPTAINERENV_RTK_DISABLED=stale SINGULARITYENV_RTK_DISABLED=stale
+  FAKE_PODMAN_INFO_FAIL=1 run_just review-appliance owner/repo
+  [[ "$status" -eq 18 ]] || fail "Apptainer launch failed with explicit RTK_DISABLED=$rtk_value: $output"
+done
+unset RTK_DISABLED
+export EXPECT_RTK_DISABLED=unset APPTAINERENV_RTK_DISABLED=stale SINGULARITYENV_RTK_DISABLED=stale FAKE_PODMAN_INFO_FAIL=1
+run_just review-appliance owner/repo
+[[ "$status" -eq 18 ]] || fail "Apptainer launch failed with RTK_DISABLED unset: $output"
+unset EXPECT_RTK_DISABLED APPTAINERENV_RTK_DISABLED SINGULARITYENV_RTK_DISABLED
+export FAKE_PODMAN_INFO_FAIL=0
+
+scenario="doctor diagnoses missing squashfuse"
+mv "$fake_bin/squashfuse_ll" "$scratch/squashfuse_ll"
+FAKE_PODMAN_INFO_FAIL=1 run_just review-doctor
+[[ "$status" -ne 0 ]] || fail "doctor accepted an Apptainer fallback without squashfuse"
+contains 'squashfuse userland is unavailable' "$output"
+mv "$scratch/squashfuse_ll" "$fake_bin/squashfuse_ll"
+
+scenario="doctor diagnoses missing FUSE device"
+REVIEW_TEST_FUSE_DEVICE="$scratch/missing-fuse" FAKE_PODMAN_INFO_FAIL=1 run_just review-doctor
+[[ "$status" -ne 0 ]] || fail "doctor accepted an Apptainer fallback without a FUSE device"
+contains 'FUSE device' "$output"
+
+scenario="doctor defers remote image resolution without registry tooling"
+FAKE_NO_SKOPEO=1 FAKE_PODMAN_INFO_FAIL=1 run_just review-doctor
+[[ "$status" -eq 0 ]] || fail "doctor treated unavailable non-mutating registry probes as launch failure: $output"
+contains '=== Review image ===' "$output"
+contains 'ghcr.io/joshyorko/review:stable resolution deferred to Apptainer launch' "$output"
+
+scenario="review forwards Bedrock and region credentials to KVM"
+export AWS_BEARER_TOKEN_BEDROCK=test-bedrock-bearer AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_PODMAN_AWS_FORWARDING=1
+run_just review-queue owner/repo
+[[ "$status" -eq 17 ]] || fail "review did not forward Bedrock credentials to Podman: $output"
+log_contains '--env AWS_BEARER_TOKEN_BEDROCK' "$podman_log"
+log_contains '--env AWS_ACCESS_KEY_ID' "$podman_log"
+log_contains '--env AWS_SECRET_ACCESS_KEY' "$podman_log"
+log_contains '--env AWS_SESSION_TOKEN' "$podman_log"
+log_contains '--env AWS_REGION' "$podman_log"
+log_contains '--env AWS_DEFAULT_REGION' "$podman_log"
+log_contains '--env COPILOT_INTEGRATION_ID' "$podman_log"
+log_not_contains 'test-bedrock-bearer' "$podman_log"
+log_not_contains 'test-access-key' "$podman_log"
+log_not_contains 'test-secret-key' "$podman_log"
+log_not_contains 'test-session-token' "$podman_log"
+log_not_contains 'us-east-1' "$podman_log"
+unset EXPECT_PODMAN_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION
+
+scenario="review forwards Bedrock and region credentials to Apptainer"
+export AWS_BEARER_TOKEN_BEDROCK=test-bedrock-bearer AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_APPTAINER_AWS_FORWARDING=1
+: >"$apptainer_log"
+set +e
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 18 ]] || fail "review did not forward Bedrock credentials to Apptainer: $output"
+log_not_contains 'test-bedrock-bearer' "$apptainer_log"
+log_not_contains 'test-access-key' "$apptainer_log"
+log_not_contains 'test-secret-key' "$apptainer_log"
+log_not_contains 'test-session-token' "$apptainer_log"
+log_not_contains 'us-east-1' "$apptainer_log"
+unset EXPECT_APPTAINER_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION
+
+scenario="KVM preflight failure falls back to Apptainer"
+: >"$apptainer_log"
+set +e
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token CONTEXT7_API_KEY=test-context7-token HIVE_HUB= EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=0 EXPECT_CONTEXT7_CREDENTIAL=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 18 ]] || fail "expected fake Apptainer exit 18, got $status"
+contains 'using the isolated Apptainer fallback' "$output"
+log_contains 'run --containall' "$apptainer_log"
+log_contains ':/workspace,' "$apptainer_log"
+log_contains ':/tmp' "$apptainer_log"
+log_not_contains 'test-gh-token' "$apptainer_log"
+log_not_contains 'test-provider-token' "$apptainer_log"
+log_not_contains 'test-context7-token' "$apptainer_log"
+
+for mask in 0 1 2 3; do
+  scenario="Apptainer host-file mask $mask"
+  configure_host_files "$mask"
+  : >"$apptainer_log"
+  set +e
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -eq 18 ]] || fail "review fallback failed for host-file mask $mask: $output"
+  assert_apptainer_host_files "$(cat "$apptainer_log")" "$mask"
+
+done
+configure_host_files 2
+ln -s missing-zoneinfo "$host_fixture/etc/localtime"
+scenario="review fallback suppresses dangling localtime"
+: >"$apptainer_log"
+set +e
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_GH_TOKEN=test-gh-token FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 18 ]] || fail "review fallback failed with dangling localtime: $output"
+assert_apptainer_host_files "$(cat "$apptainer_log")" 2
+
+scenario="review alias preserves argument boundaries"
+EXPECT_EXTENSION="/tmp/review extension" run_just review-queue --extension "/tmp/review extension"
+[[ "$status" -eq 17 ]] || fail "extension argument was split: $output"
+EXPECT_EMPTY_SCOPE=1 run_just review-queue
+[[ "$status" -eq 17 ]] || fail "zero review scope did not add only the advisor flag: $output"
+
+log_contains 'pull ghcr.io/joshyorko/review:stable' "$podman_log"
+contains 'review appliance image ghcr.io/joshyorko/review:stable: version=0.1.0 revision=0123456789abcdef digest=sha256:deadbeef' "$output"
+log_contains ':/tmp:rw' "$podman_log"
+
+scenario="offline review launch reports stale moving tag"
+FAKE_PULL_FAIL=1 run_just review-queue owner/repo
+[[ "$status" -eq 17 ]] || fail "cached review image did not start after refresh failure: $output"
+contains 'using the local copy, which may be out of date' "$output"
+
+scenario="missing review image fails after refresh failure"
+FAKE_PULL_FAIL=1 FAKE_IMAGE_MISSING=1 run_just review-queue owner/repo
+[[ "$status" -ne 0 ]] || fail "missing review image reached podman run"
+contains 'cannot obtain review appliance image' "$output"
+scenario="review-queue delegates to the OMP appliance"
+run_just review-queue --issues
+[[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
+log_contains 'run --runtime=krun --rm --interactive --tty --name review-' "$podman_log"
+log_contains 'ghcr.io/joshyorko/review:stable --issues --advisor' "$podman_log"
+log_contains '--env CONTEXT7_API_KEY' "$podman_log"
+log_contains "$home/.local/state/review/mutation-claims:/claims:rw" "$podman_log"
+log_contains '--env LUNA_FACTORY_CLAIMS_ROOT=/claims' "$podman_log"
+run_just review-queue autoslay
+[[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
+log_contains 'ghcr.io/joshyorko/review:stable --autoslay --advisor' "$podman_log"
+
+scenario="Bedrock bearer-token credentials forward through the Podman/krun path"
+: >"$podman_log"
+set +e
+bedrock_output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="/dev/null" FAKE_PODMAN_INFO_FAIL=0 FAKE_NO_SKOPEO=0 FAKE_PULL_FAIL=0 FAKE_IMAGE_MISSING=0 REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor AWS_BEARER_TOKEN_BEDROCK=test-bedrock-token AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+bedrock_status=$?
+set -e
+[[ "$bedrock_status" -eq 17 ]] || fail "expected fake container exit 17 with Bedrock credentials, got $bedrock_status"
+bedrock_podman_call="$(cat "$podman_log")"
+for bedrock_var in AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+  [[ "$bedrock_podman_call" == *"--env $bedrock_var"* ]] || fail "review Podman/krun did not forward $bedrock_var: $bedrock_podman_call"
+done
+for bedrock_value in test-bedrock-token test-access-key test-secret-key test-session-token us-west-2; do
+  log_not_contains "$bedrock_value" "$podman_log"
+  log_not_contains "$bedrock_value" "$bedrock_output"
+done
+
+scenario="Bedrock bearer-token credentials reach the contained Apptainer process"
+: >"$apptainer_log"
+export EXPECT_APPTAINER_HIVE=1
+set +e
+bedrock_apptainer_output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token HIVE_HUB=https://hive.example.test AWS_BEARER_TOKEN_BEDROCK=test-bedrock-token AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+bedrock_apptainer_status=$?
+set -e
+unset EXPECT_APPTAINER_HIVE
+[[ "$bedrock_apptainer_status" -eq 18 ]] || fail "expected fake Apptainer exit 18 with Bedrock credentials, got $bedrock_apptainer_status: $bedrock_apptainer_output"
+log_contains 'run --containall' "$apptainer_log"
+for bedrock_value in test-bedrock-token test-access-key test-secret-key test-session-token us-west-2; do
+  log_not_contains "$bedrock_value" "$apptainer_log"
+  log_not_contains "$bedrock_value" "$bedrock_apptainer_output"
+done
+
+scenario="review repositories use independent microVM state"
+run_just review-queue owner/repo
+one_review_call="$(cat "$podman_log")"
+[[ "$one_review_call" == *"ghcr.io/joshyorko/review:stable --repo owner/repo --advisor"* ]] || fail "scoped review did not enable the advisor"
+run_just review-queue owner/repo2
+two_review_call="$(cat "$podman_log")"
+[[ "$one_review_call" == *"review-review-owner-repo-"* ]] || fail "first review instance was not scope-named"
+[[ "$two_review_call" == *"review-review-owner-repo2-"* ]] || fail "second review instance was not scope-named"
+
+scenario="default remote engine uses engine-owned review volumes"
+saved_kvm="$kvm"
+kvm="$scratch/missing-kvm"
+FAKE_REMOTE_DEFAULT=1 run_just review-queue owner/repo
+kvm="$saved_kvm"
+[[ "$status" -eq 17 ]] || fail "default remote review did not launch: $output"
+log_contains '-home:/home/review:rw' "$podman_log"
+log_contains '-workspace:/workspace:rw' "$podman_log"
+log_contains 'review-mutation-claims:/claims:rw' "$podman_log"
+log_not_contains "$home/" "$podman_log"
+[[ "$one_review_call" != "$two_review_call" ]] || fail "different review targets must not collide"
+
+scenario="configured Review scope and mode reach Podman"
+EXPECT_PODMAN_REVIEW_SCOPE=1 REVIEW_DEFAULT_SCOPE=org:acme REVIEW_MODE=review run_just review-queue
+[[ "$status" -eq 17 ]] || fail "configured Review scope did not launch: $output"
+
+scenario="configured scope and explicit Hive mode reach Apptainer"
+EXPECT_APPTAINER_REVIEW_SCOPE=1 REVIEW_DEFAULT_SCOPE=org:acme REVIEW_MODE=hive HIVE_HUB=https://hive.example.test FAKE_PODMAN_INFO_FAIL=1 run_just review-queue
+[[ "$status" -eq 18 ]] || fail "explicit Hive configuration did not reach the Apptainer fallback: $output"
+[[ ! -s "$kubectl_log" ]] || fail "GitHub-only Review invoked Kubernetes"
+if ((failures)); then
+  printf 'just-onboarding: %d failure(s)\n' "$failures" >&2
+  exit 1
+fi
+printf 'just-onboarding: OMP-only launcher contract holds\n'

@@ -1,0 +1,1176 @@
+#!/usr/bin/env bash
+# Contract for review argument parsing and OCI/source launcher parity.
+#
+# Verifies that:
+#   1. scripts/parse-review-args.sh parses all shorthand forms and mixed combinations.
+#   2. bin/review runs the OCI appliance through libkrun.
+#   3. bin/review-source forwards identical parsed flags to OMP.
+#   4. Container and source launchers preserve argument parity.
+set -euo pipefail
+
+# Default-launch assertions must not inherit operator opt-ins.
+unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY REVIEW_INHERIT_OMP_CONFIG
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+# shellcheck source=scripts/parse-review-args.sh
+source "${repo_root}/scripts/parse-review-args.sh"
+
+fail() {
+  echo "launcher-contract: $*" >&2
+  exit 1
+}
+
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local label="${3:-}"
+  if [[ "$actual" != "$expected" ]]; then
+    fail "${label}: expected '${expected}', got '${actual}'"
+  fi
+}
+# Help and version need neither credentials nor an isolation runtime.
+for help_flag in --help -h; do
+  help_output="$(env -u GH_TOKEN -u GITHUB_TOKEN REVIEW_RUNTIME=invalid "$repo_root/bin/review" "$help_flag")" || fail "$help_flag needed runtime setup"
+  [[ "$help_output" == Usage:\ review* && "$help_output" == *"review configure"* && "$help_output" == *"review profiles"* && "$help_output" == *"--issues"* ]] || fail "incomplete help"
+done
+version_output="$(env -u GH_TOKEN -u GITHUB_TOKEN REVIEW_RUNTIME=invalid "$repo_root/bin/review" --version)" || fail "version needed runtime setup"
+assert_eq "$version_output" "Review 0.1.0" "standalone Review version"
+
+arg_after() {
+  local line="$1" wanted="$2" previous="" part
+  for part in $line; do
+    if [[ "$previous" == "$wanted" ]]; then
+      printf '%s\n' "$part"
+      return 0
+    fi
+    previous="$part"
+  done
+  return 1
+}
+
+assert_aws_env_names() {
+  local call="$1" context="${2:-launcher}" name
+  for name in AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+    [[ "$call" == *"--env $name"* ]] || fail "$context did not forward $name by name: $call"
+  done
+  for name in AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE; do
+    [[ "$call" != *"--env $name"* ]] || fail "$context forwarded unrelated AWS variable $name: $call"
+  done
+}
+assert_provider_env_names() {
+  local call="$1" context="${2:-launcher}" name
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do
+    [[ "$call" == *"--env $name"* ]] || fail "$context did not preserve $name forwarding: $call"
+  done
+}
+assert_review_scope_env_names() {
+  local call="$1" context="${2:-launcher}" name
+  for name in REVIEW_MODE REVIEW_DEFAULT_SCOPE REVIEW_SKIP_REPOS; do
+    [[ "$call" == *"--env $name"* ]] || fail "$context did not forward generic Review setting $name by name: $call"
+  done
+}
+
+configure_host_files() {
+  local mask="$1"
+  rm -f "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+  ((mask & 1)) && touch "$host_fixture/etc/localtime"
+  ((mask & 2)) && touch "$host_fixture/etc/hosts"
+  return 0
+}
+assert_apptainer_host_files() {
+  local call="$1" mask="$2" path bit
+  for path in /etc/localtime /etc/hosts; do
+    [[ "$path" == /etc/localtime ]] && bit=1 || bit=2
+    if ((mask & bit)); then
+      [[ "$call" != *"--no-mount $path"* ]] || fail "present host file $path was suppressed: $call"
+    else
+      [[ "$call" == *"--no-mount $path"* ]] || fail "missing host file $path was not suppressed: $call"
+    fi
+  done
+}
+assert_apptainer_verification_device() {
+  local call="$1" context="${2:-Apptainer launcher}"
+  [[ "$call" == *"run --containall"* ]] || fail "$context did not keep Apptainer containment: $call"
+  [[ "$call" == *"--bind /dev/full:/dev/full"* ]] || fail "$context did not bind /dev/full: $call"
+}
+
+# --- 1. Parser unit tests across all forms and mixed combinations -------------
+
+test_cases=(
+  "projectbluefin/review|--repo projectbluefin/review"
+  "projectbluefin/review #463|--repo projectbluefin/review --pr 463"
+  "projectbluefin/review 463|--repo projectbluefin/review --pr 463"
+  "projectbluefin/review#463|--repo projectbluefin/review --pr 463"
+  "https://github.com/projectbluefin/review|--repo projectbluefin/review"
+  "https://github.com/projectbluefin/review#463|--repo projectbluefin/review --pr 463"
+  "https://github.com/projectbluefin/review/pull/463|--repo projectbluefin/review --pr 463"
+  "https://github.com/projectbluefin/review/issues/463|--repo projectbluefin/review --pr 463"
+  "org:projectbluefin|--repo org:projectbluefin"
+  "#463|--pr 463"
+  "463|--pr 463"
+  "--repo projectbluefin/review|--repo projectbluefin/review"
+  "--repo projectbluefin/review #463|--repo projectbluefin/review --pr 463"
+  "--repo projectbluefin/review 463|--repo projectbluefin/review --pr 463"
+  "--repo projectbluefin/review#463|--repo projectbluefin/review --pr 463"
+  "--repo=projectbluefin/review#463|--repo projectbluefin/review --pr 463"
+  "--pr 463|--pr 463"
+  "--pr #463|--pr 463"
+  "--pr=463|--pr 463"
+  "--pr=#463|--pr 463"
+  "issues|--issues"
+  "--issues|--issues"
+  "all|--all"
+  "--all|--all"
+  "autoslay|--autoslay --advisor"
+  "--autoslay|--autoslay --advisor"
+  "projectbluefin/review autoslay|--repo projectbluefin/review --autoslay --advisor"
+  "projectbluefin/review --autoslay|--repo projectbluefin/review --autoslay --advisor"
+  "autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
+  "--autoslay projectbluefin/review|--autoslay --repo projectbluefin/review --advisor"
+  "--advisor|--advisor"
+  "bluefin|--repo bluefin"
+  "bluefin #123|--repo bluefin --pr 123"
+  "bluefin#123|--repo bluefin --pr 123"
+  "projectbluefin/review issues|--repo projectbluefin/review --issues"
+  "projectbluefin/review --issues|--repo projectbluefin/review --issues"
+  "issues projectbluefin/review|--issues --repo projectbluefin/review"
+  "--issues projectbluefin/review|--issues --repo projectbluefin/review"
+  "projectbluefin/review #463 --issues|--repo projectbluefin/review --pr 463 --issues"
+  "projectbluefin/review#463 --issues|--repo projectbluefin/review --pr 463 --issues"
+  "--issues projectbluefin/review#463|--issues --repo projectbluefin/review --pr 463"
+  "--issues projectbluefin/review #463|--issues --repo projectbluefin/review --pr 463"
+  "projectbluefin/review issues #463|--repo projectbluefin/review --issues --pr 463"
+  "--repo projectbluefin/review --issues|--repo projectbluefin/review --issues"
+  "--issues --repo projectbluefin/review|--issues --repo projectbluefin/review"
+  "projectbluefin/review --skip-repo lab|--repo projectbluefin/review --skip-repo lab"
+  "--skip-repo lab projectbluefin/review|--skip-repo lab --repo projectbluefin/review"
+)
+
+for case in "${test_cases[@]}"; do
+  input="${case%%|*}"
+  expected="${case#*|}"
+  [[ "$expected" == *--advisor* ]] || expected="$expected --advisor"
+  # shellcheck disable=SC2086
+  parse_review_args $input
+  actual="${PARSED_REVIEW_ARGS[*]:-}"
+  assert_eq "$actual" "$expected" "parse_review_args '$input'"
+done
+parse_review_args "--extension=/tmp/review extension"
+assert_eq "${#PARSED_REVIEW_ARGS[@]}" "2" "single argument with whitespace plus advisor"
+assert_eq "${PARSED_REVIEW_ARGS[0]}" "--extension=/tmp/review extension" "literal extension path"
+assert_eq "${PARSED_REVIEW_ARGS[1]}" "--advisor" "advisor is always enabled"
+
+# Verify standalone execution of parse-review-args.sh
+standalone_out="$("${repo_root}/scripts/parse-review-args.sh" projectbluefin/review#463 --issues | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "$standalone_out" "--repo projectbluefin/review --pr 463 --issues --advisor" "standalone parse-review-args.sh"
+
+# --- 2. Hermetic test of bin/review (KVM OCI launcher) ----------------
+
+scratch="$(mktemp -d)"
+trap '[[ -z "${audio_pid:-}" ]] || kill "$audio_pid" 2>/dev/null || true; rm -rf "$scratch"' EXIT
+
+mkdir -p "$scratch/bin" "$scratch/home/.config/hive"
+# Keep Python available when the runtime fixtures deliberately narrow PATH.
+ln -s "$(command -v python3)" "$scratch/bin/python3"
+version_fixture="$scratch/version-package"
+mkdir -p "$version_fixture/launcher/bin"
+cp "$repo_root/bin/review" "$version_fixture/launcher/bin/review"
+printf '%s\n' '{"version":"0.1.2"}' >"$version_fixture/build.json"
+assert_eq "$("$version_fixture/launcher/bin/review" --version)" "Review 0.1.2" "packaged metadata version"
+printf '%s\n' '0.1.3' >"$version_fixture/launcher/VERSION"
+assert_eq "$("$version_fixture/launcher/bin/review" --version)" "Review 0.1.3" "source VERSION precedence"
+
+host_fixture="$scratch/host"
+mkdir -p "$host_fixture/etc"
+touch "$host_fixture/etc/localtime" "$host_fixture/etc/hosts"
+filesystem_hook="$scratch/filesystem.sh"
+cat >"$filesystem_hook" <<'EOF'
+if [[ "${REVIEW_TEST_HIDE_KRUN:-0}" == 1 ]]; then
+  command() {
+    if [[ "$#" == 2 && "$1" == -v && "$2" == krun ]]; then return 1; fi
+    builtin command "$@"
+  }
+fi
+test() {
+  if [[ "$#" == 2 && "$1" == -e && ( "$2" == /etc/localtime || "$2" == /etc/hosts ) ]]; then
+    builtin test -e "$HOST_FIXTURE$2"
+  else
+    builtin test "$@"
+  fi
+}
+EOF
+export BASH_ENV="$filesystem_hook" HOST_FIXTURE="$host_fixture"
+mock_podman_log="$scratch/podman.log"
+kvm="$scratch/kvm"
+touch "$kvm"
+chmod 0666 "$kvm"
+cat >"$scratch/bin/podman" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == info ]]; then
+  if [[ "\$*" == *--runtime=krun* ]]; then
+    [[ "\${FAKE_KRUN_RUNTIME:-krun}" == unavailable ]] && exit 1
+    printf '%s\\n' "\${FAKE_KRUN_RUNTIME:-krun}"
+  fi
+  exit 0
+fi
+if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
+  [[ "\${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\ttrue\n'
+  exit 0
+fi
+printf '%s\n' "\$*" >>"$mock_podman_log"
+if [[ "\${1:-}" == events ]]; then
+  [[ ! -v RTK_DISABLED ]] || printf '%s\n' 'observer-rtk-disabled-leak' >>"$mock_podman_log"
+  exit 0
+fi
+if [[ "\${1:-}" == run && "\$*" == *--entrypoint\ /usr/bin/bash* ]]; then exit 0; fi
+if [[ "\${1:-}" == run && "\$*" == *--factory-verifier-probe* ]]; then
+  if [[ "\${FAKE_FACTORY_VERIFIER_BLOCKED:-0}" == 1 ]]; then
+    echo "verification sandbox capability unavailable: bwrap: Can't mount proc on /proc: Operation not permitted" >&2
+    exit 78
+  fi
+  echo '{"kind":"review-factory-verifier","status":"available"}'
+  exit 0
+fi
+if [[ "\${1:-}" == run ]]; then
+  previous=""
+  home_mount=""
+  for arg in "\$@"; do
+    if [[ "\$previous" == --volume ]]; then home_mount="\${arg%%:*}"; break; fi
+    previous="\$arg"
+  done
+  [[ -n "\$home_mount" && -d "\$home_mount/.local/state/review/factory" ]] || exit 19
+  [[ "\$(stat -c %u "\$home_mount/.local/state/review/factory")" == "\$(id -u)" ]] || exit 19
+fi
+if [[ "\${1:-}" == run && "\${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
+  [[ "\${AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
+  [[ "\${AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || exit 19
+  [[ "\${AWS_SECRET_ACCESS_KEY:-}" == test-secret-key ]] || exit 19
+  [[ "\${AWS_SESSION_TOKEN:-}" == test-session-token ]] || exit 19
+  [[ "\${AWS_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "\${AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "\$*" != *test-bedrock-bearer* && "\$*" != *test-access-key* && "\$*" != *test-secret-key* && "\$*" != *test-session-token* && "\$*" != *us-east-1* ]] || exit 19
+fi
+if [[ "\${1:-}" == run && -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "\$EXPECT_RTK_DISABLED" == unset ]]; then
+    [[ ! -v RTK_DISABLED && "\$*" != *"--env RTK_DISABLED"* ]] || exit 19
+  else
+    [[ "\${RTK_DISABLED:-}" == "\$EXPECT_RTK_DISABLED" && "\$*" == *"--env RTK_DISABLED"* ]] || exit 19
+    [[ "\$*" != *"RTK_DISABLED=\$EXPECT_RTK_DISABLED"* ]] || exit 19
+  fi
+fi
+[[ -z "\${FAKE_PODMAN_DELAY:-}" ]] || sleep "\$FAKE_PODMAN_DELAY"
+case "\${1:-} \${2:-}" in
+  "pull "*) [[ "\${FAKE_PULL_FAIL:-0}" != 1 ]]; exit ;;
+  "image exists") [[ "\${FAKE_IMAGE_MISSING:-0}" != 1 ]]; exit ;;
+  "image inspect"*) printf '%s|0123456789abcdef|sha256:deadbeef\n' "\${FAKE_INSPECT_VERSION:-0.1.0}"; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$scratch/bin/podman"
+cat >"$scratch/bin/krun" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+mock_apptainer_log="$scratch/apptainer.log"
+cat >"$scratch/bin/apptainer" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$mock_apptainer_log"
+# Mirror Apptainer's default host bind failure before either verifier or UI.
+for host_file in /etc/localtime /etc/hosts; do
+  if [[ ! -e "$host_fixture\$host_file" && " \$* " != *" --no-mount \$host_file "* ]]; then
+    echo "mount source \$host_file is absent" >&2
+    exit 255
+  fi
+done
+if [[ "\$*" == *"/usr/bin/bash --noprofile --norc"* ]]; then exit 0; fi
+if [[ "\$*" == *--factory-verifier-probe* ]]; then
+  echo '{"kind":"review-factory-verifier","status":"available"}'
+  exit 0
+fi
+previous=""
+for arg in "\$@"; do
+  [[ "\$previous" != --home ]] || runtime_home="\${arg%%:*}"
+  if [[ "\$previous" == --pwd && "\$arg" == /home/review/workspace ]]; then
+    [[ -d "\$runtime_home/workspace" ]] || exit 19
+  fi
+  previous="\$arg"
+done
+if [[ "\${EXPECT_APPTAINER_REVIEW_SCOPE:-}" == 1 ]]; then
+  [[ "\${APPTAINERENV_REVIEW_MODE:-}" == review ]] || exit 19
+  [[ "\${APPTAINERENV_REVIEW_DEFAULT_SCOPE:-}" == acme/widgets ]] || exit 19
+  [[ "\${APPTAINERENV_REVIEW_SKIP_REPOS:-}" == acme/skip ]] || exit 19
+fi
+if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
+  injected=()
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+    source_name="APPTAINERENV_\${name}"
+    [[ -v "\$source_name" ]] && injected+=("\$name=\${!source_name}")
+  done
+  if [[ "\${EXPECT_APPTAINER_HIVE:-}" == 1 ]]; then
+    [[ "\${APPTAINERENV_HIVE_HUB:-}" == https://hive.example.test ]] || exit 19
+  fi
+if [[ "\${EXPECT_APPTAINER_NO_HIVE:-}" == 1 ]]; then
+  [[ ! -v APPTAINERENV_HIVE_HUB ]] || exit 19
+fi
+  env -i "\${injected[@]}" /bin/bash -c '
+    [[ "\$GH_TOKEN" == mock-token &&
+       "\$GITHUB_TOKEN" == mock-token &&
+       "\$COPILOT_GITHUB_TOKEN" == test-copilot-token &&
+       "\$GITHUB_COPILOT_TOKEN" == test-github-copilot-token &&
+       "\$COPILOT_INTEGRATION_ID" == test-copilot-integration &&
+       "\$ANTHROPIC_API_KEY" == test-anthropic-key &&
+       "\$ANTHROPIC_OAUTH_TOKEN" == test-anthropic-oauth &&
+       "\$OPENAI_API_KEY" == test-provider-token &&
+       "\$GEMINI_API_KEY" == test-gemini-key ]]
+    [[ -z "\$AWS_BEARER_TOKEN_BEDROCK" || "\$AWS_BEARER_TOKEN_BEDROCK" == test-bedrock-token ]] || exit 19
+    [[ -z "\$AWS_ACCESS_KEY_ID" || "\$AWS_ACCESS_KEY_ID" == test-access-key ]] || exit 19
+    [[ -z "\$AWS_SECRET_ACCESS_KEY" || "\$AWS_SECRET_ACCESS_KEY" == test-secret-key ]] || exit 19
+    [[ -z "\$AWS_SESSION_TOKEN" || "\$AWS_SESSION_TOKEN" == test-session-token ]] || exit 19
+    [[ -z "\$AWS_REGION" || "\$AWS_REGION" == us-west-2 ]] || exit 19
+    [[ -z "\$AWS_DEFAULT_REGION" || "\$AWS_DEFAULT_REGION" == us-west-2 ]] || exit 19
+  ' || exit 19
+fi
+if [[ "\${EXPECT_APPTAINER_AWS_FORWARDING:-}" == 1 ]]; then
+  [[ "\${APPTAINERENV_AWS_BEARER_TOKEN_BEDROCK:-}" == test-bedrock-bearer ]] || exit 19
+  [[ "\${APPTAINERENV_AWS_ACCESS_KEY_ID:-}" == test-access-key ]] || exit 19
+  [[ "\${APPTAINERENV_AWS_SECRET_ACCESS_KEY:-}" == test-secret-key ]] || exit 19
+  [[ "\${APPTAINERENV_AWS_SESSION_TOKEN:-}" == test-session-token ]] || exit 19
+  [[ "\${APPTAINERENV_AWS_REGION:-}" == us-east-1 ]] || exit 19
+  [[ "\${APPTAINERENV_AWS_DEFAULT_REGION:-}" == us-east-1 ]] || exit 19
+  [[ ! -v APPTAINERENV_AWS_PROFILE && ! -v APPTAINERENV_AWS_CONFIG_FILE && ! -v APPTAINERENV_AWS_SHARED_CREDENTIALS_FILE ]] || exit 19
+  [[ "\$*" != *test-bedrock-bearer* && "\$*" != *test-access-key* && "\$*" != *test-secret-key* && "\$*" != *test-session-token* && "\$*" != *us-east-1* ]] || exit 19
+fi
+if [[ "\${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
+  [[ "\${APPTAINERENV_LUNA_FACTORY_ENABLED:-}" == 1 ]] || exit 19
+  [[ "\${APPTAINERENV_LUNA_FACTORY_CAPACITY:-}" == 7 ]] || exit 19
+  # Names, never values: the appliance boundary carries the setting, not argv.
+  [[ "\$*" != *LUNA_FACTORY* && "\$*" != *" 7 "* ]] || exit 19
+fi
+if [[ -v EXPECT_RTK_DISABLED ]]; then
+  if [[ "\${EXPECT_RTK_DISABLED}" == unset ]]; then
+    [[ ! -v APPTAINERENV_RTK_DISABLED ]] || exit 19
+  else
+    [[ "\${APPTAINERENV_RTK_DISABLED:-}" == "\${EXPECT_RTK_DISABLED}" ]] || exit 19
+    for arg in "\$@"; do
+      case "\$arg" in
+        RTK_DISABLED|RTK_DISABLED=*|"\${EXPECT_RTK_DISABLED}") exit 19 ;;
+      esac
+    done
+  fi
+fi
+if [[ "\${EXPECT_NO_FACTORY_ENV:-}" == 1 ]]; then
+  [[ ! -v APPTAINERENV_LUNA_FACTORY_ENABLED && ! -v APPTAINERENV_LUNA_FACTORY_CAPACITY ]] || exit 19
+fi
+exit 0
+EOF
+cat >"$scratch/bin/squashfuse_ll" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$scratch/bin/squashfuse_ll"
+export REVIEW_TEST_FUSE_DEVICE=/dev/null
+chmod +x "$scratch/bin/apptainer"
+# Keep fallback identity checks hermetic even when the host provides skopeo.
+cat >"$scratch/bin/skopeo" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$scratch/bin/skopeo"
+chmod +x "$scratch/bin/krun"
+
+cat >"$scratch/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "auth token"* ]]; then
+  echo "mock-token"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$scratch/bin/gh"
+
+export PATH="$scratch/bin:$PATH"
+export HOME="$scratch/home"
+export XDG_STATE_HOME="$scratch/home/.local/state"
+export REVIEW_TEST_KVM_DEVICE="$kvm"
+export GH_TOKEN=mock-token GITHUB_TOKEN=mock-token
+unset HIVE_HUB
+unset REVIEW_INHERIT_OMP_CONFIG REVIEW_INHERIT_OMP_CONFIG
+unset RTK_DISABLED APPTAINERENV_RTK_DISABLED EXPECT_RTK_DISABLED
+export REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime"
+export REVIEW_TEST_SND_DEVICE="$scratch/no-snd"
+unset REVIEW_APPLIANCE_SIF
+# Keep ambient Bedrock credentials out of fixtures that assert the other provider
+# handoff values; the Bedrock cases below set their own explicit values.
+unset AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION
+
+assert_review() {
+  local input="$1"
+  local expected_flags="$2"
+  [[ "$expected_flags" == *--advisor* ]] || expected_flags="$expected_flags --advisor"
+  : >"$mock_podman_log"
+
+  # shellcheck disable=SC2086
+  "${repo_root}/bin/review" $input >/dev/null 2>&1 || fail "bin/review failed for: $input"
+
+  [[ -f "$mock_podman_log" ]] || fail "bin/review did not invoke podman for: $input"
+  local podman_call
+  podman_call="$(grep '^run ' "$mock_podman_log")"
+  [[ "$podman_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "review did not use the krun OCI runtime: $podman_call"
+  [[ "$podman_call" == *"--name review-"* ]] || fail "review did not use an isolated instance name: $podman_call"
+  [[ "$podman_call" == *":/home/review:rw"* ]] || fail "review did not use target-specific state: $podman_call"
+  local state_volume state_home
+  state_volume="$(arg_after "$podman_call" --volume)"
+  state_home="${state_volume%%:*}"
+  last_state_home="$state_home"
+  [[ -d "$state_home/.omp" ]] || fail "review did not create persistent appliance OMP state"
+  [[ -d "$state_home/.local/state/review/factory" ]] || fail "review did not pre-create Factory XDG state before the container launch"
+  [[ "$(stat -c %u "$state_home/.local/state/review/factory")" == "$(id -u)" ]] || fail "Factory XDG state was not prepared under the host uid mapped to review"
+  [[ "$podman_call" == *"${HOME}/.local/state/review/mutation-claims:/claims:rw,z"* ]] || fail "review did not mount the existing claims root at a non-nested container path"
+  [[ "$podman_call" == *"LUNA_FACTORY_CLAIMS_ROOT=/claims"* ]] || fail "review did not pass the mounted claims root to Factory"
+  [[ "$podman_call" == *":/tmp:rw,z"* ]] || fail "review did not use instance-backed scratch storage: $podman_call"
+
+  grep -qFx "pull ghcr.io/joshyorko/review:stable" "$mock_podman_log" ||
+    fail "bin/review did not refresh the moving stable tag"
+  grep -q '^image inspect --format ' "$mock_podman_log" ||
+    fail "bin/review did not inspect the resolved image identity"
+  local image="ghcr.io/joshyorko/review:stable" passed_flags
+  passed_flags="${podman_call#*"$image"}"
+  passed_flags="$(echo "$passed_flags" | xargs)"
+  assert_eq "$passed_flags" "$expected_flags" "bin/review $input flags"
+  if [[ "$passed_flags" == *"projectbluefin/review"* && "$passed_flags" != *"--repo projectbluefin/review"* ]]; then
+    fail "shorthand reached the appliance as prompt text: $passed_flags"
+  fi
+}
+
+# Podman can resolve the registered krun runtime even when its executable is
+# named crun-krun and no literal `krun` command is available to the launcher.
+mv "$scratch/bin/krun" "$scratch/krun"
+: >"$mock_podman_log"
+: >"$mock_apptainer_log"
+registered_runtime_output="$(FAKE_KRUN_RUNTIME=krun REVIEW_TEST_HIDE_KRUN=1 REVIEW_TEST_KVM_DEVICE="$kvm" "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "review did not select Podman's registered krun runtime without a literal krun executable"
+registered_runtime_call="$(grep '^run ' "$mock_podman_log")"
+if [[ "$registered_runtime_call" != *"run --runtime=krun --rm --interactive --tty"* ]]; then
+  fail "review did not use registered krun runtime: $registered_runtime_call ($registered_runtime_output)"
+fi
+[[ ! -s "$mock_apptainer_log" ]] || fail "review fell back to Apptainer despite registered krun: $(cat "$mock_apptainer_log")"
+unregistered_runtime_output="$(FAKE_KRUN_RUNTIME=unavailable REVIEW_TEST_KVM_DEVICE="$kvm" "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "review did not preserve the Apptainer fallback for an unregistered krun runtime"
+[[ "$unregistered_runtime_output" == *"the krun OCI runtime is unavailable"* ]] ||
+  fail "unregistered krun runtime did not report the existing diagnostic: $unregistered_runtime_output"
+[[ "$unregistered_runtime_output" == *"using the isolated Apptainer fallback"* ]] ||
+  fail "unregistered krun runtime did not select Apptainer: $unregistered_runtime_output"
+mv "$scratch/krun" "$scratch/bin/krun"
+
+: >"$mock_podman_log"
+set +e
+factory_probe_output="$(FAKE_FACTORY_VERIFIER_BLOCKED=1 LUNA_FACTORY_ENABLED=1 \
+  "${repo_root}/bin/review" owner/repo 2>&1)"
+factory_probe_status=$?
+set -e
+[[ "$factory_probe_status" -ne 0 ]] || fail "Factory-enabled Review started after its verifier probe failed"
+[[ "$factory_probe_output" == *"Factory verifier capability unavailable"* ]] ||
+  fail "Factory verifier failure lacked an actionable blocker: $factory_probe_output"
+factory_probe_calls="$(grep '^run ' "$mock_podman_log" || true)"
+[[ "$(grep -c '^run ' "$mock_podman_log" || true)" == 2 ]] ||
+  fail "Factory-enabled Review started the appliance after its verifier probe failed: $factory_probe_calls"
+[[ "$factory_probe_calls" == *"--runtime=krun"* &&
+  "$factory_probe_calls" == *"--userns keep-id:uid=65532,gid=65532"* &&
+  "$factory_probe_calls" == *"--factory-verifier-probe"* ]] ||
+  fail "Factory verifier probe did not use the packaged krun launch profile: $factory_probe_calls"
+[[ "$factory_probe_calls" == *"--network=none"* ]] ||
+  fail "Factory verifier probe did not disable external network access: $factory_probe_calls"
+[[ "$factory_probe_calls" != *"--env"* && "$factory_probe_calls" != *"GH_TOKEN"* ]] ||
+  fail "Factory verifier probe inherited a credential environment: $factory_probe_calls"
+[[ "$factory_probe_calls" != *"--interactive --tty"* ]] ||
+  fail "Factory verifier probe incorrectly started an interactive OMP session"
+
+: >"$mock_podman_log"
+factory_success_output="$(LUNA_FACTORY_ENABLED=1 "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "Factory-enabled Review refused a successful packaged verifier probe: $factory_success_output"
+factory_probe_calls="$(grep '^run ' "$mock_podman_log" || true)"
+[[ "$(grep -c '^run ' "$mock_podman_log" || true)" == 3 ]] ||
+  fail "Factory-enabled Review did not perform package check, verifier probe, then OMP launch: $factory_probe_calls"
+factory_probe_package="$(sed -n '1p' <<<"$factory_probe_calls")"
+factory_probe_runtime="$(sed -n '2p' <<<"$factory_probe_calls")"
+factory_probe_omp="$(sed -n '3p' <<<"$factory_probe_calls")"
+[[ "$factory_probe_package" == *"--entrypoint /usr/bin/bash"* && "$factory_probe_package" == *"verifier-probe.ts"* ]] ||
+  fail "Factory launch did not verify the packaged probe exists: $factory_probe_package"
+[[ "$factory_probe_runtime" == *"--runtime=krun"* && "$factory_probe_runtime" == *"--factory-verifier-probe"* && "$factory_probe_runtime" != *"--interactive --tty"* ]] ||
+  fail "Factory launch did not qualify the noninteractive krun profile: $factory_probe_runtime"
+[[ "$factory_probe_omp" == *"--runtime=krun --rm --interactive --tty"* ]] ||
+  fail "OMP session did not start after verifier qualification: $factory_probe_omp"
+
+bedrock_token="test-bedrock-bearer"
+aws_access_key="test-access-key"
+aws_secret_key="test-secret-key"
+aws_session_token="test-session-token"
+: >"$mock_podman_log"
+AWS_BEARER_TOKEN_BEDROCK="$bedrock_token" AWS_ACCESS_KEY_ID="$aws_access_key" AWS_SECRET_ACCESS_KEY="$aws_secret_key" AWS_SESSION_TOKEN="$aws_session_token" AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_PODMAN_AWS_FORWARDING=1 \
+  "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "bin/review did not forward Bedrock credentials to Podman"
+bedrock_podman_call="$(grep '^run ' "$mock_podman_log")"
+assert_aws_env_names "$bedrock_podman_call" "Podman review"
+assert_provider_env_names "$bedrock_podman_call" "Podman review"
+[[ "$bedrock_podman_call" != *"$bedrock_token"* && "$bedrock_podman_call" != *"$aws_access_key"* && "$bedrock_podman_call" != *"$aws_secret_key"* && "$bedrock_podman_call" != *"$aws_session_token"* && "$bedrock_podman_call" != *us-east-1* ]] ||
+  fail "Podman review exposed AWS credentials in argv/log output"
+
+: >"$mock_apptainer_log"
+AWS_BEARER_TOKEN_BEDROCK="$bedrock_token" AWS_ACCESS_KEY_ID="$aws_access_key" AWS_SECRET_ACCESS_KEY="$aws_secret_key" AWS_SESSION_TOKEN="$aws_session_token" AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_APPTAINER_AWS_FORWARDING=1 \
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "bin/review did not forward Bedrock credentials to Apptainer fallback"
+bedrock_fallback_call="$(cat "$mock_apptainer_log")"
+[[ "$bedrock_fallback_call" != *"$bedrock_token"* && "$bedrock_fallback_call" != *"$aws_access_key"* && "$bedrock_fallback_call" != *"$aws_secret_key"* && "$bedrock_fallback_call" != *"$aws_session_token"* && "$bedrock_fallback_call" != *us-east-1* ]] ||
+  fail "Apptainer fallback exposed AWS credentials in argv/log output"
+
+# RTK_DISABLED remains an opt-in control and is not inherited by the collector.
+for rtk_value in 0 1; do
+  : >"$mock_podman_log"
+  rtk_output="$(RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" \
+    "${repo_root}/bin/review" owner/repo 2>&1)" ||
+    fail "Podman launcher failed with explicit RTK_DISABLED=$rtk_value: $rtk_output"
+  rtk_podman_call="$(grep '^run ' "$mock_podman_log")"
+  [[ "$rtk_podman_call" == *"--env RTK_DISABLED"* ]] || fail "Podman did not forward RTK_DISABLED by name: $rtk_podman_call"
+  [[ "$rtk_podman_call" != *"RTK_DISABLED=$rtk_value"* && "$rtk_output" != *"RTK_DISABLED=$rtk_value"* ]] ||
+    fail "RTK_DISABLED value appeared in Podman argv or launcher output"
+  ! grep -qFx 'observer-rtk-disabled-leak' "$mock_podman_log" || fail "diagnostic collector inherited RTK_DISABLED"
+
+  : >"$mock_apptainer_log"
+  rtk_output="$(RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" APPTAINERENV_RTK_DISABLED=1 \
+    REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/review" owner/repo 2>&1)" ||
+    fail "Apptainer launcher failed with explicit RTK_DISABLED=$rtk_value: $rtk_output"
+  rtk_apptainer_call="$(cat "$mock_apptainer_log")"
+  [[ "$rtk_apptainer_call" == *"run --containall"* ]] || fail "RTK Apptainer case did not select Apptainer"
+  [[ "$rtk_apptainer_call" != *"RTK_DISABLED"* && "$rtk_apptainer_call" != *"RTK_DISABLED=$rtk_value"* ]] ||
+    fail "RTK_DISABLED appeared in Apptainer argv"
+done
+
+: >"$mock_podman_log"
+rtk_output="$(env EXPECT_RTK_DISABLED=unset "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "Podman launcher failed with RTK_DISABLED unset: $rtk_output"
+rtk_podman_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$rtk_podman_call" != *"--env RTK_DISABLED"* ]] || fail "Podman invented a default RTK_DISABLED override"
+! grep -qFx 'observer-rtk-disabled-leak' "$mock_podman_log" || fail "diagnostic collector inherited an unset RTK_DISABLED"
+
+: >"$mock_apptainer_log"
+EXPECT_RTK_DISABLED=unset APPTAINERENV_RTK_DISABLED=0 REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" \
+  "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 || fail "Apptainer launcher failed with RTK_DISABLED unset"
+[[ "$(cat "$mock_apptainer_log")" == *"run --containall"* ]] || fail "unset RTK_DISABLED did not select Apptainer"
+
+: >"$mock_podman_log"
+
+# RTK_DISABLED is an existing opt-in/bypass control, not a launcher default.
+for rtk_value in 0 1; do
+  : >"$mock_podman_log"
+  rtk_output="$(RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" \
+    "${repo_root}/bin/review" owner/repo 2>&1)" ||
+    fail "Podman launcher failed with explicit RTK_DISABLED=$rtk_value: $rtk_output"
+  rtk_podman_call="$(grep '^run ' "$mock_podman_log")"
+  [[ "$rtk_podman_call" == *"--env RTK_DISABLED"* ]] || fail "Podman did not forward RTK_DISABLED by name: $rtk_podman_call"
+  [[ "$rtk_podman_call" != *"RTK_DISABLED=$rtk_value"* && "$rtk_output" != *"RTK_DISABLED=$rtk_value"* ]] ||
+    fail "RTK_DISABLED value appeared in Podman argv or launcher output"
+  ! grep -qFx 'observer-rtk-disabled-leak' "$mock_podman_log" ||
+    fail "diagnostic collector inherited RTK_DISABLED"
+
+  : >"$mock_apptainer_log"
+  rtk_output="$(RTK_DISABLED="$rtk_value" EXPECT_RTK_DISABLED="$rtk_value" APPTAINERENV_RTK_DISABLED=1 \
+    REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/review" owner/repo 2>&1)" ||
+    fail "Apptainer launcher failed with explicit RTK_DISABLED=$rtk_value: $rtk_output"
+  rtk_apptainer_call="$(cat "$mock_apptainer_log")"
+  [[ "$rtk_apptainer_call" == *"run --containall"* ]] || fail "RTK Apptainer case did not select Apptainer"
+  [[ "$rtk_apptainer_call" != *"RTK_DISABLED"* && "$rtk_apptainer_call" != *"RTK_DISABLED=$rtk_value"* ]] ||
+    fail "RTK_DISABLED appeared in Apptainer argv"
+done
+
+: >"$mock_podman_log"
+rtk_output="$(env EXPECT_RTK_DISABLED=unset "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "Podman launcher failed with RTK_DISABLED unset: $rtk_output"
+rtk_podman_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$rtk_podman_call" != *"--env RTK_DISABLED"* ]] || fail "Podman invented a default RTK_DISABLED override"
+! grep -qFx 'observer-rtk-disabled-leak' "$mock_podman_log" || fail "collector inherited an unset RTK_DISABLED"
+
+: >"$mock_apptainer_log"
+EXPECT_RTK_DISABLED=unset APPTAINERENV_RTK_DISABLED=0 REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" \
+  "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 || fail "Apptainer launcher failed with RTK_DISABLED unset"
+[[ "$(cat "$mock_apptainer_log")" == *"run --containall"* ]] || fail "unset RTK_DISABLED did not select Apptainer"
+
+: >"$mock_podman_log"
+offline_output="$(FAKE_PULL_FAIL=1 "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "packaged review did not use its cached image after refresh failure"
+[[ "$offline_output" == *"using the local copy, which may be out of date"* ]] ||
+  fail "packaged review did not report its stale cached image"
+grep -q '^run ' "$mock_podman_log" || fail "packaged review did not launch its cached image"
+
+: >"$mock_podman_log"
+set +e
+offline_output="$(FAKE_PULL_FAIL=1 FAKE_IMAGE_MISSING=1 "${repo_root}/bin/review" owner/repo 2>&1)"
+offline_status=$?
+set -e
+[[ "$offline_status" -ne 0 ]] || fail "packaged review launched without an obtainable image"
+[[ "$offline_output" == *"cannot obtain review appliance image"* ]] ||
+  fail "packaged review missing-image diagnostic was not actionable: $offline_output"
+! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image acquisition failed"
+
+# The installed package uses the generic Review scope/mode interface.
+: >"$mock_podman_log"
+REVIEW_APPLIANCE_IMAGE="ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890" \
+  REVIEW_MODE=review REVIEW_DEFAULT_SCOPE=acme/widgets REVIEW_SKIP_REPOS=acme/ignored \
+  "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "Review OCI override launch failed"
+oci_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$oci_call" == *"ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890"* ]] ||
+  fail "Review OCI override used the wrong image"
+assert_review_scope_env_names "$oci_call" "Podman Review"
+
+# Incompatible review appliance image rejection
+: >"$mock_podman_log"
+set +e
+incompat_output="$(FAKE_INSPECT_VERSION="0.0.9" "${repo_root}/bin/review" owner/repo 2>&1)"
+incompat_status=$?
+set -e
+[[ "$incompat_status" -ne 0 ]] || fail "packaged review accepted incompatible image version 0.0.9"
+[[ "$incompat_output" == *"is incompatible with this launcher (expected series 0.1)"* ]] ||
+  fail "incompatible image diagnostic was not actionable: $incompat_output"
+! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image compatibility check failed"
+# The canonical image setting selects an explicit packaged image.
+: >"$mock_podman_log"
+REVIEW_APPLIANCE_IMAGE="custom/review:alias" FAKE_INSPECT_VERSION="0.1.0" "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "REVIEW_APPLIANCE_IMAGE override failed to start"
+grep -qFx "pull custom/review:alias" "$mock_podman_log" || fail "review alias was not refreshed"
+grep -q '^run .* custom/review:alias ' "$mock_podman_log" || fail "review alias was not passed to the container"
+
+# Non-unknown malformed OCI version labels must fail before execution.
+for malformed_version in 0.1.foo 0.1.0-rc; do
+  : >"$mock_podman_log"
+  set +e
+  malformed_output="$(FAKE_INSPECT_VERSION="$malformed_version" "${repo_root}/bin/review" owner/repo 2>&1)"
+  malformed_status=$?
+  set -e
+  [[ "$malformed_status" -ne 0 ]] || fail "packaged review accepted malformed image version $malformed_version"
+  [[ "$malformed_output" == *"malformed version label '$malformed_version'"* ]] ||
+    fail "malformed review version diagnostic was not actionable: $malformed_output"
+  ! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after malformed version check failed"
+done
+# Explicit image override warning
+: >"$mock_podman_log"
+override_output="$(REVIEW_APPLIANCE_IMAGE="custom/review:old" FAKE_INSPECT_VERSION="0.0.9" "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "explicit review image override failed to start"
+[[ "$override_output" == *"series (0.0) differs from expected (0.1); proceeding with explicit override"* ]] ||
+  fail "explicit override warning missing: $override_output"
+grep -q '^run ' "$mock_podman_log" || fail "explicit override did not launch container"
+
+mv "$scratch/bin/krun" "$scratch/krun"
+export PATH="$scratch/bin:/usr/bin:/bin"
+: >"$mock_apptainer_log"
+fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_NO_HIVE=1 EXPECT_APPTAINER_REVIEW_SCOPE=1 \
+  REVIEW_MODE=review REVIEW_DEFAULT_SCOPE=acme/widgets REVIEW_SKIP_REPOS=acme/skip \
+  COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token \
+  COPILOT_INTEGRATION_ID=test-copilot-integration ANTHROPIC_API_KEY=test-anthropic-key \
+  ANTHROPIC_OAUTH_TOKEN=test-anthropic-oauth OPENAI_API_KEY=test-provider-token \
+  GEMINI_API_KEY=test-gemini-key REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" \
+  "${repo_root}/bin/review" acme/widgets 2>&1)" || fail "review Apptainer fallback lost credentials"
+[[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "review fallback warning is missing"
+[[ "$fallback_output" == *"✓ review launcher revision:"* ]] || fail "review fallback missing launcher revision: $fallback_output"
+[[ "$fallback_output" == *"! review appliance image identity unavailable for ghcr.io/joshyorko/review:stable."* ]] || fail "review fallback missing identity report without registry probe: $fallback_output"
+fallback_call="$(cat "$mock_apptainer_log")"
+[[ "$fallback_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment"
+assert_apptainer_verification_device "$fallback_call" "generic Apptainer fallback"
+[[ "$fallback_call" == *"docker://ghcr.io/joshyorko/review:stable --repo acme/widgets"* ]] || fail "review fallback used the wrong image or scope"
+[[ "$fallback_call" == *":/workspace,"*":/tmp"* ]] || fail "review fallback did not bind workspace and instance-backed scratch together"
+[[ "$fallback_call" != *mock-token* && "$fallback_call" != *test-copilot-token* &&
+  "$fallback_call" != *test-github-copilot-token* && "$fallback_call" != *test-copilot-integration* &&
+  "$fallback_call" != *test-anthropic-key* && "$fallback_call" != *test-anthropic-oauth* &&
+  "$fallback_call" != *test-provider-token* && "$fallback_call" != *test-gemini-key* ]] ||
+  fail "fallback leaked credentials into argv"
+mv "$scratch/krun" "$scratch/bin/krun"
+: >"$mock_podman_log"
+
+# --- Bedrock bearer-token forwarding (regression coverage for #593) ---------
+# The Amazon Bedrock provider credential must reach both Review appliance
+# execution paths through the environment only, never in argv or launcher output.
+BEDROCK_TOKEN="test-bedrock-token"
+AWS_ACCESS_KEY="test-access-key"
+AWS_SECRET_KEY="test-secret-key"
+AWS_SESSION_TOKEN="test-session-token"
+BEDROCK_REGION="us-west-2"
+
+# Podman/krun path: the named --env entries forward each Bedrock variable.
+: >"$mock_podman_log"
+bedrock_podman_output="$(AWS_BEARER_TOKEN_BEDROCK="$BEDROCK_TOKEN" AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_KEY" AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" AWS_REGION="$BEDROCK_REGION" AWS_DEFAULT_REGION="$BEDROCK_REGION" OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$kvm" "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "review did not launch under KVM with Bedrock credentials set"
+bedrock_podman_call="$(grep '^run ' "$mock_podman_log")"
+for bedrock_var in AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+  [[ "$bedrock_podman_call" == *"--env $bedrock_var"* ]] || fail "review Podman/krun did not forward $bedrock_var: $bedrock_podman_call"
+done
+for bedrock_value in "$BEDROCK_TOKEN" "$AWS_ACCESS_KEY" "$AWS_SECRET_KEY" "$AWS_SESSION_TOKEN" "$BEDROCK_REGION"; do
+  [[ "$bedrock_podman_call" != *"$bedrock_value"* ]] || fail "AWS credential reached argv in the Podman path"
+  [[ "$bedrock_podman_output" != *"$bedrock_value"* ]] || fail "AWS credential leaked into launcher output (Podman path)"
+done
+
+# Apptainer fallback path: APPTAINERENV_ prefixed variables reach the process.
+mv "$scratch/bin/krun" "$scratch/krun"
+: >"$mock_apptainer_log"
+bedrock_apptainer_output="$(AWS_BEARER_TOKEN_BEDROCK="$BEDROCK_TOKEN" AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_KEY" AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" AWS_REGION="$BEDROCK_REGION" AWS_DEFAULT_REGION="$BEDROCK_REGION" GH_TOKEN=mock-token GITHUB_TOKEN=mock-token COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token COPILOT_INTEGRATION_ID=test-copilot-integration ANTHROPIC_API_KEY=test-anthropic-key ANTHROPIC_OAUTH_TOKEN=test-anthropic-oauth OPENAI_API_KEY=test-provider-token GEMINI_API_KEY=test-gemini-key REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" EXPECT_APPTAINER_CREDENTIALS=1 "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "review Apptainer fallback lost Bedrock credentials"
+bedrock_apptainer_call="$(cat "$mock_apptainer_log")"
+[[ "$bedrock_apptainer_output" == *"using the isolated Apptainer fallback"* ]] || fail "review fallback warning is missing (Bedrock)"
+[[ "$bedrock_apptainer_call" == *"run --containall"* ]] || fail "review fallback did not use Apptainer containment (Bedrock)"
+for bedrock_value in "$BEDROCK_TOKEN" "$AWS_ACCESS_KEY" "$AWS_SECRET_KEY" "$AWS_SESSION_TOKEN" "$BEDROCK_REGION"; do
+  [[ "$bedrock_apptainer_output" != *"$bedrock_value"* ]] || fail "AWS credential leaked into launcher output (Apptainer path)"
+done
+mv "$scratch/krun" "$scratch/bin/krun"
+: >"$mock_podman_log"
+: >"$mock_apptainer_log"
+fallback_output="$(FAKE_REMOTE_DEFAULT=1 "${repo_root}/bin/review" projectbluefin/review 2>&1)" || fail "default remote connection fallback failed"
+[[ "$fallback_output" == *"remote Podman engines are unsupported"* ]] || fail "default remote engine was not diagnosed"
+[[ ! -s "$mock_podman_log" ]] || fail "packaged launcher sent host bind mounts to a remote engine"
+[[ -s "$mock_apptainer_log" ]] || fail "default remote connection did not use local fallback"
+
+: >"$mock_podman_log"
+FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/review" projectbluefin/review >/dev/null 2>&1 &
+review_one_pid=$!
+FAKE_PODMAN_DELAY=0.1 "${repo_root}/bin/review" projectbluefin/repo2 >/dev/null 2>&1 &
+review_two_pid=$!
+wait "$review_one_pid" "$review_two_pid"
+mapfile -t concurrent_review_calls < <(grep '^run ' "$mock_podman_log")
+assert_eq "${#concurrent_review_calls[@]}" "2" "concurrent review launch count"
+assert_eq "$(grep -cFx 'pull ghcr.io/joshyorko/review:stable' "$mock_podman_log")" "2" "concurrent review refresh count"
+first_repo_call="${concurrent_review_calls[0]}"
+second_repo_call="${concurrent_review_calls[1]}"
+[[ "$(arg_after "$first_repo_call" --name)" != "$(arg_after "$second_repo_call" --name)" ]] || fail "concurrent reviews collided on container name"
+[[ "$(arg_after "$first_repo_call" --volume)" != "$(arg_after "$second_repo_call" --volume)" ]] || fail "concurrent reviews collided on state volume"
+assert_review "projectbluefin/review #463" "--repo projectbluefin/review --pr 463"
+
+# Existing state with unexpected ownership is preserved and blocks before Podman.
+retained_marker="$last_state_home/.local/state/review/factory/retained-proof.txt"
+printf 'retain this evidence\n' >"$retained_marker"
+blocked_state_path="$last_state_home/.local"
+cat >"$scratch/bin/stat" <<EOF
+#!/usr/bin/env bash
+if [[ "\${4:-}" == "$blocked_state_path" ]]; then
+  printf '100000:100000:1755\\n'
+  exit 0
+fi
+exec /usr/bin/stat "\$@"
+EOF
+chmod +x "$scratch/bin/stat"
+set +e
+blocked_state_output="$("${repo_root}/bin/review" projectbluefin/review#463 2>&1)"
+blocked_state_status=$?
+set -e
+[[ "$blocked_state_status" -ne 0 ]] || fail "launcher used an existing Factory state tree owned by a subordinate uid"
+[[ "$blocked_state_output" == *"owned by 100000:100000 (mode 1755); expected $(id -u):$(id -g). No ownership changes were made"* ]] ||
+  fail "launcher did not report the exact retained-state ownership blocker: $blocked_state_output"
+[[ "$(cat "$retained_marker")" == "retain this evidence" ]] || fail "launcher changed retained Factory evidence after ownership mismatch"
+[[ "$(/usr/bin/stat -c %u:%g "$last_state_home/.local")" == "$(id -u):$(id -g)" ]] || fail "launcher changed existing Factory parent ownership"
+rm -f "$scratch/bin/stat"
+
+assert_review "projectbluefin/review#463" "--repo projectbluefin/review --pr 463"
+assert_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
+assert_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
+assert_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
+
+# The appliance-owned OMP directory is persistent state, not a host bind.
+default_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$default_review_call" != *".omp:/home/review/.omp"* ]] ||
+  fail "review imported host ~/.omp without the explicit opt-in"
+
+mkdir -p "$HOME/.omp"
+: >"$mock_podman_log"
+REVIEW_INHERIT_OMP_CONFIG=1 "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "review host-config opt-in failed"
+inherited_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$inherited_review_call" == *"$HOME/.omp:/home/review/.omp:rw"* ]] ||
+  fail "review host-config opt-in did not add the requested host ~/.omp bind"
+unset REVIEW_INHERIT_OMP_CONFIG
+
+# A real Pulse socket is the preferred transport, and only that socket is
+# projected; the containing runtime directory never crosses the boundary.
+audio_runtime="$scratch/audio-runtime"
+audio_socket="$audio_runtime/pulse/native"
+mkdir -p "$(dirname "$audio_socket")"
+python3 -c 'import socket,sys,time; server=socket.socket(socket.AF_UNIX); server.bind(sys.argv[1]); time.sleep(30)' "$audio_socket" &
+audio_pid=$!
+for _ in $(seq 1 50); do
+  [[ -S "$audio_socket" ]] && break
+  sleep 0.1
+done
+[[ -S "$audio_socket" ]] || fail "test Pulse socket was not created"
+: >"$mock_podman_log"
+REVIEW_TEST_RUNTIME_DIR="$audio_runtime" "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "review Pulse projection failed"
+pulse_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$pulse_review_call" == *"$audio_socket:/run/review/pulse/native:rw"* ]] ||
+  fail "review did not bind the detected Pulse socket"
+[[ "$pulse_review_call" == *"--env PULSE_SERVER=unix:/run/review/pulse/native"* ]] ||
+  fail "review did not set the contained Pulse server endpoint"
+[[ "$pulse_review_call" != *"$audio_runtime:/run"* ]] ||
+  fail "review projected the entire runtime directory for audio"
+kill "$audio_pid" 2>/dev/null || true
+audio_pid=""
+
+# With no Pulse socket, an explicitly present ALSA device is the narrow
+# fallback. With neither, startup stays successful and passes no audio bind.
+snd_device="$scratch/snd"
+mkdir -p "$snd_device"
+: >"$mock_podman_log"
+REVIEW_TEST_SND_DEVICE="$snd_device" "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "review ALSA projection failed"
+alsa_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$alsa_review_call" == *"--device $snd_device"* ]] ||
+  fail "review did not project the explicit ALSA device fallback"
+: >"$mock_podman_log"
+REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime" REVIEW_TEST_SND_DEVICE="$scratch/no-snd" "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "headless review launch failed"
+headless_review_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$headless_review_call" != *"--device"* && "$headless_review_call" != *"/run/review/pulse/native"* ]] ||
+  fail "headless review projected an unavailable audio transport"
+
+# The personal Brew bundle selects its native SIF explicitly and keeps the
+# same isolated state/config/audio rules as the OCI path.
+sif="$scratch/review.sif"
+touch "$sif"
+chmod 0755 "$sif"
+: >"$mock_apptainer_log"
+REVIEW_APPLIANCE_SIF="$sif" "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "packaged SIF review launch failed"
+sif_call="$(cat "$mock_apptainer_log")"
+[[ "$sif_call" == *"run --containall"* && "$sif_call" == *"$sif"* ]] ||
+  fail "packaged SIF did not use the selected immutable image"
+assert_apptainer_verification_device "$sif_call" "explicit packaged SIF launch"
+[[ "$sif_call" != *".omp:/home/review/.omp"* ]] ||
+  fail "packaged SIF imported host ~/.omp without the explicit opt-in"
+
+: >"$mock_apptainer_log"
+AWS_BEARER_TOKEN_BEDROCK="$bedrock_token" AWS_ACCESS_KEY_ID="$aws_access_key" AWS_SECRET_ACCESS_KEY="$aws_secret_key" AWS_SESSION_TOKEN="$aws_session_token" AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 EXPECT_APPTAINER_AWS_FORWARDING=1 \
+  REVIEW_APPLIANCE_SIF="$sif" "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "packaged SIF did not forward Bedrock credentials to Apptainer"
+sif_credential_call="$(cat "$mock_apptainer_log")"
+[[ "$sif_credential_call" == *"$sif"* ]] || fail "packaged SIF credential test used the wrong image"
+[[ "$sif_credential_call" != *"$bedrock_token"* && "$sif_credential_call" != *"$aws_access_key"* && "$sif_credential_call" != *"$aws_secret_key"* && "$sif_credential_call" != *"$aws_session_token"* && "$sif_credential_call" != *us-east-1* ]] ||
+  fail "packaged SIF exposed AWS credentials in argv/log output"
+unset REVIEW_APPLIANCE_SIF
+
+: >"$mock_apptainer_log"
+REVIEW_APPLIANCE_FALLBACK_SIF="$sif" REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" \
+  "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "personal packaged SIF fallback launch failed"
+fallback_sif_call="$(cat "$mock_apptainer_log")"
+[[ "$fallback_sif_call" == *"$sif"* && "$fallback_sif_call" != *"docker://ghcr.io/joshyorko/review:stable"* ]] ||
+  fail "personal fallback did not use the bundled SIF"
+unset REVIEW_APPLIANCE_FALLBACK_SIF
+
+# --- 3. Hermetic test of bin/review-source (Source launcher) ----------------------
+
+mock_omp_log="$scratch/omp.log"
+cat >"$scratch/bin/omp" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$mock_omp_log"
+if [[ -n "\${REVIEW_CONTRACT_CWD_FILE:-}" ]]; then
+  printf '%s\n' "\$PWD" >"\$REVIEW_CONTRACT_CWD_FILE"
+fi
+exit 0
+EOF
+chmod +x "$scratch/bin/omp"
+
+assert_omp_review() {
+  local input="$1"
+  local expected_flags="$2"
+  [[ "$expected_flags" == *--advisor* ]] || expected_flags="$expected_flags --advisor"
+  rm -f "$mock_omp_log"
+
+  # shellcheck disable=SC2086
+  "${repo_root}/bin/review-source" $input >/dev/null 2>&1 || fail "bin/review-source failed for: $input"
+
+  [[ -f "$mock_omp_log" ]] || fail "bin/review-source did not invoke omp for: $input"
+  local omp_call
+  omp_call="$(cat "$mock_omp_log")"
+
+  # omp --profile review --extension <path> [FLAGS...]
+  local passed_flags
+  passed_flags="$(echo "$omp_call" | sed -E 's/^--profile review (--extension [^ ]+ )+//' | xargs)"
+
+  assert_eq "$passed_flags" "$expected_flags" "bin/review-source $input flags"
+  if [[ "$passed_flags" == *"projectbluefin/review"* && "$passed_flags" != *"--repo projectbluefin/review"* ]]; then
+    fail "shorthand reached omp as prompt text: $passed_flags"
+  fi
+}
+
+assert_omp_review "projectbluefin/review" "--repo projectbluefin/review"
+assert_omp_review "projectbluefin/review #463" "--repo projectbluefin/review --pr 463"
+assert_omp_review "projectbluefin/review#463" "--repo projectbluefin/review --pr 463"
+assert_omp_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
+assert_omp_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
+assert_omp_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
+
+# Review and Luna Factory are two extensions, and the source launcher must pass
+# both. Dropping the Factory one is exactly how a Review session that offers the
+# Shift+F handoff reaches "Factory is not loaded" with no other symptom.
+factory_omp_call="$(cat "$mock_omp_log")"
+assert_eq "$(grep -o -- '--extension' <<<"$factory_omp_call" | wc -l | xargs)" "2" "bin/review-source extension count"
+[[ "$factory_omp_call" == *"--extension ${repo_root}/image/extension/review"* ]] ||
+  fail "bin/review-source did not pass the Review extension: $factory_omp_call"
+[[ "$factory_omp_call" == *"--extension ${repo_root}/image/extension/luna-factory"* ]] ||
+  fail "bin/review-source dropped the packaged Luna Factory extension: $factory_omp_call"
+
+# A source tree without the Factory package keeps the single-extension command
+# line, and says so once on stderr instead of failing later inside the session.
+source_only="$scratch/source-only"
+mkdir -p "$source_only/bin" "$source_only/image/extension/review" "$source_only/scripts"
+cp "${repo_root}/bin/review-source" "$source_only/bin/review-source"
+cp "${repo_root}/scripts/parse-review-args.sh" "$source_only/scripts/parse-review-args.sh"
+chmod +x "$source_only/bin/review-source"
+rm -f "$mock_omp_log"
+absent_stderr="$(GH_TOKEN=mock-token GITHUB_TOKEN=mock-token "${source_only}/bin/review-source" --repo owner/repo 2>&1 >/dev/null)" ||
+  fail "bin/review-source failed without the Factory package"
+absent_call="$(cat "$mock_omp_log")"
+assert_eq "$(grep -o -- '--extension' <<<"$absent_call" | wc -l | xargs)" "1" "bin/review-source extension count without Factory"
+[[ "$absent_call" == *"--extension ${source_only}/image/extension/review"* ]] ||
+  fail "bin/review-source did not pass the Review extension without Factory: $absent_call"
+[[ "$absent_stderr" == *"Luna Factory extension is not packaged"* ]] ||
+  fail "bin/review-source did not report the missing Factory package: $absent_stderr"
+
+# Native task isolation needs a Git baseline. Keep an existing caller checkout
+# as-is, including its current HEAD and uncommitted files.
+caller_checkout="$scratch/caller-checkout"
+mkdir -p "$caller_checkout"
+git -C "$caller_checkout" init -q
+git -C "$caller_checkout" config user.name "Review Contract"
+git -C "$caller_checkout" config user.email "review-contract@localhost"
+printf 'committed input\n' >"$caller_checkout/input.txt"
+git -C "$caller_checkout" add input.txt
+git -C "$caller_checkout" commit -qm "test: caller baseline"
+caller_head="$(git -C "$caller_checkout" rev-parse HEAD)"
+printf 'caller edit\n' >>"$caller_checkout/input.txt"
+printf 'caller data\n' >"$caller_checkout/keep.txt"
+caller_status="$(git -C "$caller_checkout" status --porcelain)"
+caller_cwd_file="$scratch/caller.cwd"
+(
+  cd "$caller_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token REVIEW_CONTRACT_CWD_FILE="$caller_cwd_file" \
+    HOME="$scratch/caller-home" PATH="$scratch/bin:$PATH" "$source_only/bin/review-source" --repo owner/repo >/dev/null 2>&1
+) || fail "bin/review-source failed inside an existing caller checkout"
+[[ "$(cat "$caller_cwd_file")" == "$caller_checkout" ]] ||
+  fail "bin/review-source did not retain the caller Git checkout"
+[[ "$(git -C "$caller_checkout" rev-parse HEAD)" == "$caller_head" ]] ||
+  fail "bin/review-source changed the caller checkout baseline"
+[[ "$(git -C "$caller_checkout" status --porcelain)" == "$caller_status" ]] ||
+  fail "bin/review-source changed caller checkout files"
+[[ "$(cat "$caller_checkout/keep.txt")" == 'caller data' ]] ||
+  fail "bin/review-source removed caller data"
+
+# Outside a Git checkout, source mode creates its own committed isolation
+# baseline under user state and leaves the invocation directory untouched.
+outside_checkout="$scratch/outside-checkout"
+mkdir -p "$outside_checkout"
+printf 'keep me\n' >"$outside_checkout/caller.txt"
+outside_home="$scratch/outside-home"
+outside_cwd_file="$scratch/outside.cwd"
+(
+  cd "$outside_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token REVIEW_CONTRACT_CWD_FILE="$outside_cwd_file" \
+    HOME="$outside_home" PATH="$scratch/bin:$PATH" "$source_only/bin/review-source" --repo owner/repo >/dev/null 2>&1
+) || fail "bin/review-source failed outside a Git checkout"
+source_coordinator="$outside_home/.local/state/review/coordinator"
+[[ "$(cat "$outside_cwd_file")" == "$source_coordinator" ]] ||
+  fail "bin/review-source did not enter its source coordinator repository"
+[[ "$(git -C "$source_coordinator" rev-parse --is-inside-work-tree)" == true ]] ||
+  fail "bin/review-source source coordinator is not a Git repository"
+[[ "$(git -C "$source_coordinator" log -1 --format=%s)" == 'chore: initialize Review coordinator' ]] ||
+  fail "bin/review-source source coordinator has no baseline commit"
+[[ -z "$(git -C "$source_coordinator" status --porcelain)" ]] ||
+  fail "bin/review-source source coordinator is not clean"
+source_coordinator_head="$(git -C "$source_coordinator" rev-parse HEAD)"
+(
+  cd "$outside_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token REVIEW_CONTRACT_CWD_FILE="$outside_cwd_file" \
+    HOME="$outside_home" PATH="$scratch/bin:$PATH" "$source_only/bin/review-source" --repo owner/repo >/dev/null 2>&1
+) || fail "bin/review-source failed when reusing its source coordinator"
+[[ "$(git -C "$source_coordinator" rev-parse HEAD)" == "$source_coordinator_head" ]] ||
+  fail "bin/review-source changed the reused source coordinator baseline"
+printf 'keep coordinator data\n' >"$source_coordinator/operator-data.txt"
+dirty_coordinator_stderr="$(
+  cd "$outside_checkout"
+  GH_TOKEN=mock-token GITHUB_TOKEN=mock-token HOME="$outside_home" PATH="$scratch/bin:$PATH" \
+    "$source_only/bin/review-source" --repo owner/repo 2>&1 >/dev/null
+)" && fail "bin/review-source accepted a dirty source coordinator"
+[[ "$dirty_coordinator_stderr" == *"source coordinator has uncommitted files"* ]] ||
+  fail "bin/review-source did not explain its dirty source coordinator refusal: $dirty_coordinator_stderr"
+[[ "$(git -C "$source_coordinator" rev-parse HEAD)" == "$source_coordinator_head" ]] ||
+  fail "bin/review-source changed the dirty source coordinator baseline"
+[[ "$(cat "$source_coordinator/operator-data.txt")" == 'keep coordinator data' ]] ||
+  fail "bin/review-source removed source coordinator data"
+[[ "$(cat "$outside_checkout/caller.txt")" == 'keep me' ]] ||
+  fail "bin/review-source changed the non-repository caller directory"
+rm -rf "$source_only"
+
+# --- 3b. Factory runtime config crosses the appliance boundary ---------------
+
+# Factory has exactly two public runtime knobs: the execution opt-in and the
+# shared capacity bound. Both are user configuration, so both must reach every
+# personal appliance path by name, and neither value may appear in argv.
+assert_factory_podman_env_names() {
+  local call="$1" context="${2:-launcher}"
+  for name in LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY; do
+    [[ "$call" == *"--env $name"* ]] || fail "$context did not forward $name by name: $call"
+  done
+  [[ "$call" != *"--env LUNA_FACTORY_ENABLED="* && "$call" != *"--env LUNA_FACTORY_CAPACITY="* ]] ||
+    fail "$context forwarded a Factory value instead of its name: $call"
+}
+
+: >"$mock_podman_log"
+LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "bin/review did not launch with Factory configuration set"
+factory_podman_call="$(grep '^run ' "$mock_podman_log")"
+assert_factory_podman_env_names "$factory_podman_call" "Podman review"
+[[ "$factory_podman_call" != *"LUNA_FACTORY_ENABLED=1"* && "$factory_podman_call" != *"LUNA_FACTORY_CAPACITY=7"* ]] ||
+  fail "Podman review exposed Factory configuration values in argv: $factory_podman_call"
+
+# Absence stays absence: an unset opt-in must not become an appliance default.
+# `env -u` because this contract must not depend on the developer's own shell.
+: >"$mock_podman_log"
+env -u LUNA_FACTORY_ENABLED -u LUNA_FACTORY_CAPACITY \
+  "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 || fail "bin/review did not launch without Factory configuration"
+default_podman_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$default_podman_call" != *"--env LUNA_FACTORY_ENABLED"* && "$default_podman_call" != *"--env LUNA_FACTORY_CAPACITY"* ]] ||
+  fail "Podman review invented Factory execution configuration the host never set: $default_podman_call"
+[[ "$default_podman_call" == *"--env LUNA_FACTORY_CLAIMS_ROOT=/claims"* ]] ||
+  fail "Podman review did not pass its mounted claims root: $default_podman_call"
+
+# The generic Apptainer fallback and the packaged SIF share one environment
+# seam, so a non-default capacity has to survive both.
+: >"$mock_apptainer_log"
+factory_apptainer_output="$(LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1 \
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/review" owner/repo 2>&1)" ||
+  fail "Apptainer fallback did not forward Factory configuration: $factory_apptainer_output"
+
+factory_sif="$scratch/factory.sif"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$factory_sif"
+chmod +x "$factory_sif"
+: >"$mock_apptainer_log"
+LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1 REVIEW_APPLIANCE_SIF="$factory_sif" \
+  "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "packaged Review SIF did not forward Factory configuration"
+[[ "$(cat "$mock_apptainer_log")" == *"$factory_sif"* ]] || fail "packaged Review SIF was not the selected artifact"
+
+: >"$mock_apptainer_log"
+env -u LUNA_FACTORY_ENABLED -u LUNA_FACTORY_CAPACITY EXPECT_NO_FACTORY_ENV=1 \
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "Apptainer fallback did not launch without Factory configuration"
+
+mv "$scratch/bin/krun" "$scratch/krun"
+for factory_enabled in 0 1; do
+  for selected_artifact in oci sif; do
+    for fixture in 0 1 2 3 dangling-localtime; do
+      mask="$fixture"
+      if [[ "$fixture" == dangling-localtime ]]; then mask=2; fi
+      configure_host_files "$mask"
+      if [[ "$fixture" == dangling-localtime ]]; then
+        ln -s missing-zoneinfo "$host_fixture/etc/localtime"
+      fi
+      selected_sif=""
+      [[ "$selected_artifact" != sif ]] || selected_sif="$factory_sif"
+      : >"$mock_apptainer_log"
+      host_files_output="$(LUNA_FACTORY_ENABLED="$factory_enabled" REVIEW_APPLIANCE_SIF="$selected_sif" \
+        REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/review" owner/repo 2>&1)" ||
+        fail "Factory=$factory_enabled $selected_artifact failed for host fixture $fixture: $host_files_output"
+      calls=0
+      while IFS= read -r call; do
+        [[ "$call" == exec\ * || "$call" == run\ * ]] || continue
+        calls=$((calls + 1))
+        assert_apptainer_host_files "$call" "$mask"
+        [[ "$call" == *"--bind /dev/full:/dev/full"* ]] || fail "Apptainer call lost verifier device: $call"
+      done <"$mock_apptainer_log"
+      assert_eq "$calls" "$((1 + 2 * factory_enabled))" "preflight/final invocation count"
+    done
+  done
+done
+configure_host_files 3
+
+mv "$scratch/bin/squashfuse_ll" "$scratch/squashfuse_ll"
+set +e
+fallback_output="$(env PATH="$scratch/bin:/usr/bin:/bin" HOME="$HOME" GH_TOKEN="$GH_TOKEN" GITHUB_TOKEN="$GITHUB_TOKEN" BASH_ENV="$BASH_ENV" HOST_FIXTURE="$HOST_FIXTURE" REVIEW_TEST_FUSE_DEVICE="$REVIEW_TEST_FUSE_DEVICE" REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/review" owner/repo 2>&1)"
+fallback_status=$?
+set -e
+[[ "$fallback_status" -ne 0 ]] || fail "review fallback accepted missing squashfuse"
+[[ "$fallback_output" == *"squashfuse"* ]] || fail "missing squashfuse diagnostic was not actionable: $fallback_output"
+mv "$scratch/squashfuse_ll" "$scratch/bin/squashfuse_ll"
+
+mv "$scratch/krun" "$scratch/bin/krun"
+
+# --- 5. Parity test: KVM container and source launchers use identical flags ---
+
+for case in "${test_cases[@]}"; do
+  input="${case%%|*}"
+  expected="${case#*|}"
+  assert_review "$input" "$expected"
+  assert_omp_review "$input" "$expected"
+done
+
+# --- 6. Credential-resolution parity across launchers -------------------------
+
+launchers=(review review-source)
+
+extract_keyring_reader() {
+  awk '/state_dir = os.environ.get\("REVIEW_OMP_STATE"\)/,/^'"'"' 2>\/dev\/null/' "$1" |
+    sed -e '$d' -e 's/[[:space:]]*$//'
+}
+
+for name in "${launchers[@]}"; do
+  block="$(extract_keyring_reader "${repo_root}/bin/${name}")"
+  [[ -n "$block" ]] || fail "bin/${name}: no omp-keyring reader found"
+  grep -qF 'REVIEW_OMP_STATE' <<<"$block" ||
+    fail "bin/${name}: omp-keyring reader ignores the REVIEW_OMP_STATE override"
+done
+
+# Functional test: verify REVIEW_OMP_STATE is honored when GH_TOKEN is unset
+custom_state="$scratch/custom-omp-state"
+mkdir -p "$custom_state/agent"
+python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('$custom_state/agent/agent.db')
+conn.execute('CREATE TABLE auth_credentials (provider TEXT, data TEXT)')
+conn.execute('INSERT INTO auth_credentials VALUES (?, ?)', ('github-copilot', json.dumps({'access_token': 'custom-omp-token'})))
+conn.commit()
+conn.close()
+"
+
+mock_cred_bin="$scratch/cred-bin"
+mkdir -p "$mock_cred_bin"
+ln -s "$(command -v python3)" "$mock_cred_bin/python3"
+cat >"$mock_cred_bin/podman" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == info && "$*" == *--runtime=krun* ]]; then
+  printf 'krun\n'
+  exit 0
+fi
+case "${1:-} ${2:-}" in
+  "info "|"pull "*|"image exists") exit 0 ;;
+  "run "*) echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$mock_cred_bin/podman"
+
+cat >"$mock_cred_bin/krun" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$mock_cred_bin/krun"
+
+cat >"$mock_cred_bin/omp" <<'EOF'
+#!/usr/bin/env bash
+echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"
+exit 0
+EOF
+chmod +x "$mock_cred_bin/omp"
+
+review_cred_out="$(env -i PATH="$mock_cred_bin:/usr/bin:/bin" HOME="$scratch/home" REVIEW_OMP_STATE="$custom_state" REVIEW_TEST_KVM_DEVICE="$kvm" "${repo_root}/bin/review" projectbluefin/review 2>/dev/null)" || fail "bin/review credential test failed"
+assert_eq "$review_cred_out" "custom-omp-token copilot-developer-cli" "bin/review resolves REVIEW_OMP_STATE and COPILOT_INTEGRATION_ID"
+
+omp_cred_out="$(env -i PATH="$mock_cred_bin:/usr/bin:/bin" HOME="$scratch/home" REVIEW_OMP_STATE="$custom_state" "${repo_root}/bin/review-source" projectbluefin/review 2>/dev/null)" || fail "bin/review-source credential test failed"
+assert_eq "$omp_cred_out" "custom-omp-token copilot-developer-cli" "bin/review-source resolves REVIEW_OMP_STATE and COPILOT_INTEGRATION_ID"
+
+echo "launcher-contract: all shorthand forms and launcher parity assertions passed"

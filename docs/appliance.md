@@ -1,0 +1,136 @@
+# Review appliance
+
+The appliance packages the GitHub-generic OMP Review workbench and Luna Factory. It accepts repositories (`owner/repo`) and organizations (`org:<name>`); it has no implicit organization scope.
+
+```bash
+just review-appliance acme/widgets
+# Source checkout, without the appliance:
+bin/review-source org:acme
+```
+
+The rootless launcher prefers Podman with `krun` and KVM, then reports missing prerequisites and falls back to isolated Apptainer. Runs stay in the foreground. `Ctrl-C` stops only the active invocation.
+
+After a Podman/krun run, a private sibling collector waits for the direct launcher PID and Linux process start time to settle, then makes a label-scoped, non-streaming Podman event query with a three-second command deadline and up to 250 ms for TERM before KILL. Its mode-0600 scalar receipt remains under `${XDG_STATE_HOME:-$HOME/.local/state}/review/instances/<instance>/diagnostics/`. Clean exits and exit 130 stay quiet. Other evidenced non-clean results print one bounded diagnostic line; unavailable collection and event-query results remain quiet in the terminal and are recorded as unknown. The `podman_oom_reported` result records Podman's OOM flag and does not attribute guest-kernel or host memory pressure. A terminated query with status 137 is labeled `query_terminated`; a container exit code 137 alone remains unknown. The launcher keeps direct foreground `exec`, `--rm`, TTY and signal delivery; Apptainer is unchanged.
+
+The immutable appliance skips OMP's first-run setup wizard, but you must still authenticate with each provider before using it.
+
+When `LUNA_FACTORY_ENABLED=1`, the packaged launcher and entrypoint qualify the selected runtime with Factory's bubblewrap preflight and a harmless sandbox test before OMP opens. `just review-doctor` reports runtime prerequisites and packaged verifier qualification separately. A failed probe refuses Factory-enabled startup; Apptainer is qualified independently when selected.
+
+The package-presence check uses the shipped Bash built-in `test`; the minimal image does not include `/usr/bin/test`.
+
+For Apptainer, verifier preflight and normal SIF/OCI startup suppress the default `/etc/localtime` and `/etc/hosts` binds only when the host source is absent, including a dangling symlink. Present host files retain their normal mounts. Preflight runs with an isolated environment and reports runtime setup errors with their exit status and diagnostics before refusing startup.
+
+Factory-enabled Apptainer launches select underlay mode for both preflight and the final process. Apptainer's default overlay root is unbindable, which prevents bubblewrap from mounting the image's `/usr` into its verifier sandbox. Underlay retains the read-only image, containment and bubblewrap checks; it does not require root or a writable image. Apptainer 1.5 emits a deprecation warning for this supported option. Factory-disabled launches keep the default mount mode.
+
+## Scope, mode, and authentication
+
+A fresh interactive session without an explicit, restored, or configured scope asks for one. Headless callers must pass `owner/repo` or `org:<name>`. `REVIEW_DEFAULT_SCOPE` supplies an explicit generic default; the launcher does not infer an organization from this fork, the GitHub login, or image metadata.
+
+GitHub credentials come from `gh auth token` or inherited `GH_TOKEN`/`GITHUB_TOKEN` and supported OMP provider credentials. GitHub remains the authority for repository access, reviews, workflow changes, and landing. Review never elevates token permissions.
+
+Review defaults to GitHub-only mode. It makes no Hive request and does not search `~/.config/hive` for contributor registration. Existing users may explicitly set `REVIEW_MODE=hive` and `HIVE_HUB` to opt into the optional read-side integration. That integration supplies context only; it does not assign or complete contributor work. The old Hive contributor image and launcher are not part of this product.
+
+Luna Factory is packaged beside Review. Loading it starts no work; execution requires `LUNA_FACTORY_ENABLED=1`. Factory retains its own admission, claims, evidence, and durable state boundaries.
+
+## Host launch profiles
+
+The installed `review` alias and source `bin/review` launcher can save host launch intent. Profiles do not apply to `just review-appliance` or native `bin/review-source`; those entrypoints retain their existing configuration.
+
+```bash
+review configure personal
+review profiles
+review --launcher-profile personal acme/widgets
+review --runtime apptainer acme/widgets
+```
+
+`configure` runs only on an interactive host terminal and starts no isolation runtime or login. Press Enter to retain a setting, or enter `-` to clear `env_groups` or `env_names`. It asks whether to save and make the profile the default before writing private files atomically. EOF or Ctrl-C before saving leaves the previous profile intact.
+
+Configuration requires the host's native `flock`. A concurrent save reports busy before publishing any intent; retry after the active save exits. Cancellation retains the lock until rollback settles, then the kernel releases it. Normal launches do not acquire this save lock.
+
+Profiles live at `${XDG_CONFIG_HOME:-$HOME/.config}/review/launcher/profiles/<name>.profile`. A `default` file beside `profiles/` contains one profile name. Headless setup may write this complete v1 format directly:
+
+```text
+version=1
+runtime=apptainer
+github_auth=gh-cli
+inherit_omp=true
+factory_enabled=false
+factory_capacity=2
+env_groups=aws-sdk,typesafe
+env_names=
+```
+
+All eight fields are required. Profiles contain choices and approved variable names, never credential values or executable shell. Unknown fields, duplicate fields, invalid values, unreadable files and unsafe names fail before runtime creation. Profile names use 1–64 letters, digits, dots, underscores or hyphens and start with a letter or digit. `none` is reserved: `--launcher-profile none` ignores a saved default for one launch.
+
+Launcher CLI choices override explicit environment settings, which override the selected profile, then current defaults. `REVIEW_LAUNCH_PROFILE` selects a profile. The supported pairs are `--runtime` / `REVIEW_RUNTIME`, `--github-auth` / `REVIEW_GITHUB_AUTH`, `--inherit-omp` / `REVIEW_INHERIT_OMP_CONFIG`, `--factory` / `LUNA_FACTORY_ENABLED`, `--factory-capacity` / `LUNA_FACTORY_CAPACITY`, `--env-groups` / `REVIEW_ENV_GROUPS`, and `--env-names` / `REVIEW_ENV_NAMES`. Booleans accept `true`, `false`, `1` or `0`; an explicit zero overrides an enabled profile. Factory capacity retains its existing range of 1–100. OMP's `--profile` is separate and is forwarded unchanged.
+
+Runtime `auto` preserves the current krun/KVM preference and isolated Apptainer fallback. `krun` requires that supported boundary and an OCI image; it never silently downgrades. `apptainer` selects its normal SIF/OCI path directly and still requires Apptainer, squashfuse and accessible FUSE. Factory-enabled startup still qualifies the selected verifier before OMP opens. Enabling Factory never dispatches work by itself.
+
+GitHub source `auto` preserves the existing environment, stored CLI and bounded OMP fallback order. `environment` uses only `GH_TOKEN`, then `GITHUB_TOKEN`, and refuses a missing credential. `gh-cli` queries the stored github.com login with both token variables removed only from that child process, then forwards the selected authority through both GitHub token aliases. It can deliberately ignore a Codespaces-injected token without changing the parent environment. Review never logs in automatically, stores tokens in profiles, or silently falls through from a selected missing source. GitHub permissions remain authoritative. GitHub authentication does not select commit metadata: Factory publication currently uses `Luna Factory / factory@localhost`.
+
+Provider groups are `aws-sdk`, `bedrock-bearer`, `openai`, `anthropic`, `gemini`, `typesafe` and `copilot`. They select only the launcher's existing canonical approved names from the current host environment; `env_names` may select individual approved names. Unselected provider names stay outside both runtime paths. GitHub auth, Review/Factory controls and terminal settings retain their separate launcher contracts. Ambient `APPTAINERENV_*` and `SINGULARITYENV_*` overrides cannot inject additional capabilities. No AWS directory or generic host environment is mounted or inherited.
+
+`RTK_DISABLED` remains a fixed approved launcher control, not a profile field or provider group. The host value crosses Podman/krun or Apptainer only when it is explicitly set.
+
+Configured launches print a bounded preflight with the resolved runtime, credential source, Factory settings and selected/present/missing capabilities. Variable presence does not prove provider authentication. `--launcher-quiet` suppresses this launch-plan summary; runtime and safety diagnostics remain visible. With no profile or host override, existing environment-driven launches retain their behavior and scope-keyed persistent paths.
+
+## Factory dashboard
+
+Open `/factory` in an interactive session to inspect retained batches. Its
+cockpit shows the selected run, work type, repositories, outcome counts,
+capacity, attempts, and the selected item's next safe action. Model information
+appears only when Factory recorded a verified route. Review's `Shift+F` handoff
+opens the submitted batch directly. `/factory status` and the textual controls
+remain available for scripts and headless sessions.
+
+Use `j/k` or arrows to select an item, `Enter` or `Tab` for detail, `b` for batch
+history, `a` for available actions, `e` for evidence, `c` for ownership, and `?`
+for help. `d` opens exact IDs and debug details; `v` views the recorded worker
+session. `m` loads older runs in history. The roster summarizes setup failures;
+press `Enter` on a blocked item to inspect the full sanitized error. `d` keeps
+technical IDs and state paths behind a separate disclosure. Narrow terminals
+keep the blocker and next action visible. Closing with `q` or `Esc` does not
+pause or stop work.
+
+The overview shows observed work, recorded proof, and items needing attention.
+The inspector shows acceptance, dependencies, attempts, blockers, and the next
+safe action. Missing model, effort, token, or cost observations remain unknown.
+UNKNOWN effects require reconciliation; they cannot be blindly retried. Stop
+prevents further dispatch and does not roll back external effects. Scope
+revisions remain visible and prevent original-scope convergence.
+
+Writable items keep detected Go, Node, or Python checks as mandatory work.
+Unknown repositories need explicit `requiredChecks` when submitted as a batch.
+Missing toolchains or known unprepared dependencies block before a worker
+attempt. Worker-proposed checks cannot replace the captured list.
+
+Use `/factory debug` for a diagnostic hint. Bare text is never treated as a
+conversational objective. Use `/factory -- <objective>` to steer one explicitly;
+the appliance's `/workspace` may be empty and is not the selected repository.
+
+Evidence previews load on demand and read at most 64 KiB of a regular artifact
+inside the Factory state root. They do not execute artifact content. Opening
+the dashboard makes no model or GitHub calls. Corrupt state is preserved and
+shown as an error.
+
+`/factory` is the guaranteed entry point. No global shortcut is installed:
+OMP 18.3.1 cannot check extension chords against every effective user binding.
+
+## Isolation and state
+
+The appliance uses its own OMP profile; host `.omp` configuration and MCP servers are not inherited by default. Set `REVIEW_INHERIT_OMP_CONFIG=1` only when intentionally using the host `review` profile. Provider credentials remain environment inputs and are not copied into image layers or command arguments.
+
+Persistent OMP state lives under the appliance-owned home (`/home/review`). Workspace and `/tmp` are separate target-specific directories, so simultaneous targets do not share mutable checkouts. `REVIEW_INSTANCE` provides an override for separating sessions with the same target.
+
+## Image and personal package
+
+The image derives from a digest-pinned Fedora builder, builds OMP from pinned source plus the generic registration patch on each native architecture, and verifies GitHub CLI artifacts against per-architecture SHA-256 pins. The derived binary and its source, patch, and native-package provenance are recorded in the SBOM. Review and Luna Factory extensions remain packaged; MemoryD's adapter is not included pending distribution authorization. The TypeSafe OMP loader is optional; Review starts without a TypeSafe key. Audio is included for OMP voice support when the host exposes a supported PulseAudio socket or `/dev/snd`.
+The image includes checksum-verified Node.js 24 with its bundled npm/npx and the checksum-verified pinned Bun runtime used to build OMP. These runtimes are staged into the shared root filesystem used by both OCI and Apptainer packaging; no system package manager is added.
+
+Current source and SBOM provenance identify [`joshyorko/review`](https://github.com/joshyorko/review). The personal Homebrew workflow builds an immutable OCI image and matching native SIF from the selected committed ref on `main`, then publishes the package to `joshyorko/homebrew-tools`.
+
+Install `review` from `joshyorko/homebrew-tools`. The source launcher is `bin/review-source`.
+
+The image is immutable: pull a newer artifact to update it. `omp update` is disabled inside the appliance.
+
+The runtime stages its shell utilities, including coreutils, from the pinned Fedora builder. The final image is assembled from the staged runtime and contains no package manager.
