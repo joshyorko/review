@@ -34,7 +34,7 @@ The product ships one OMP appliance from `image/appliance/Containerfile`. It car
 
 ## Publication
 
-`release.yml` automatically builds matching native OCI/SIF candidates at the exact successful `validate` commit on `main` when its `VERSION` is unpublished. Bump `VERSION` with a change to request a release; already published versions are skipped. The tools tap polls new stable releases hourly and publishes its Dagger-verified package and formula automatically. Validate the candidate with the tools tap's Dagger and Homebrew checks before publishing a stable release. The tools tap owns the formula; no development tap is updated by this repository.
+`release.yml` automatically builds matching native OCI/SIF candidates at the exact successful `validate` commit on `main` when its `VERSION` is unpublished. Bump `VERSION` with a change to request a release; already published versions are skipped. The tools tap polls new stable releases hourly and updates its Dagger-verified formula automatically to use the original Review release assets. Review owns the only package release. Validate the candidate with the tools tap's Dagger and Homebrew checks before publishing a stable release. The tools tap owns the formula; no development tap is updated by this repository.
 
 ## Verification
 

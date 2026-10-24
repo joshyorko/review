@@ -32,11 +32,12 @@ native architectures at that exact commit, then publishes the versioned OCI/SIF
 release. An already published version is skipped; ordinary pushes still run CI.
 
 `joshyorko/homebrew-tools` checks for new Review releases hourly. Its Dagger
-pipeline verifies the release bundles, tests Homebrew installation, publishes
-the tap's own release assets, and commits the updated formula automatically.
+pipeline verifies the release bundles, tests Homebrew installation, and commits
+the updated formula automatically. The formula downloads the original Review
+release assets; there is only one package release.
 No formula copying or cross-repository credentials are required. To request an
-immediate tap refresh, run its `Tap Manual` workflow with action `release` and
-package ID `review`.
+immediate tap refresh, run its `Tap Auto Update` workflow with slot ID
+`review-hourly`.
 
 Once the tap update finishes, run `brew update` followed by
 `brew upgrade joshyorko/tools/review`.
