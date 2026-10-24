@@ -140,6 +140,9 @@ jobs:
           podman manifest push --all --format oci --authfile "$authfile" \
             --digestfile "$RUNNER_TEMP/oci-index-digest" "$image" "docker://$image"
           grep -Eq '^sha256:[0-9a-f]{64}$' "$RUNNER_TEMP/oci-index-digest"
+          version="$(bash scripts/review-appliance-version.sh)"
+          podman manifest push --all --format oci --authfile "$authfile" "$image" "docker://ghcr.io/joshyorko/review:v$version"
+          podman manifest push --all --format oci --authfile "$authfile" "$image" "docker://ghcr.io/joshyorko/review:stable"
           echo "Published $image @ $(cat "$RUNNER_TEMP/oci-index-digest")"
       - name: Validate native bundles and generate formula
         run: python3 scripts/review-formula.py "$RUNNER_TEMP/bundles" "$RUNNER_TEMP/formula"

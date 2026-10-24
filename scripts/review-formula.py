@@ -55,7 +55,7 @@ def prepare(bundles: Path, output: Path):
         scope = 'on_intel' if r['arch'] == 'x86_64' else 'on_arm'
         lines += [f'  {scope} do', f'    url "https://github.com/joshyorko/review/releases/download/{tag}/{name}"',
                   f'    sha256 "{actual}"', '  end']
-    lines += ['  livecheck do', '    url :stable', '    strategy :github_latest', '  end', '  def install', '    libexec.install "launcher", "build.json", "build.txt"',
+    lines += ['  livecheck do', '    url :stable', '    strategy :github_latest', '  end', '  def install', '    libexec.install "launcher", "build.json", "build.txt", "LICENSE", "NOTICE"',
               '    bin.install "review"',
               '  end', '  test do', '    assert_match "Usage: review", shell_output("#{bin}/review --help 2>&1")',
               '    assert_predicate libexec/"launcher/review.sif", :executable?', '  end', 'end', '']

@@ -243,7 +243,7 @@ class FormulaContract(unittest.TestCase):
         self.assertEqual((self.output / "sha").read_text().strip(), "a" * 40)
         self.assertEqual(formula.count("version "), 1)
         self.assertNotIn("projectreview/review", formula)
-        self.assertIn('libexec.install "launcher", "build.json", "build.txt"', formula)
+        self.assertIn('libexec.install "launcher", "build.json", "build.txt", "LICENSE", "NOTICE"', formula)
         self.assertIn('bin.install "review"', formula)
 
     def test_mixed_source_commits_cannot_be_published_together(self):
