@@ -125,6 +125,17 @@ Reopen the same conversation through the packaged launcher with `--resume`,
 then choose **Resume saved work** or run `/review resume` after leaving it paused.
 Those are alternative ways to resume the saved work, not two required steps.
 
+For a positively stopped PR **Fix** wave, recovery also accepts forward pushes
+when GitHub's immutable commit comparison proves the current head descends from
+the captured head. The PR must remain open with the same author, URL, review
+state, and auto-merge state. Recovery rechecks the observed heads before
+releasing ownership, records them in the paused receipt, and preserves the
+original captured subjects without crediting completed work. Explicit resume
+admits fresh workers against those verified current heads. Diverged or rewound
+heads, changed review or auto-merge state, unreadable evidence, and missing
+shutdown proof retain claims. A separate Fix attempt rejected by an existing
+owner creates no replacement wave; reopen the owning saved session.
+
 Normal Review commands provide recovery without claim-file or Factory archaeology:
 
 - `/review status` shows the active/recoverable waves and Review-owned claims.

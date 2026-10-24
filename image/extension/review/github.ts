@@ -675,6 +675,30 @@ export async function fetchItemsByKey(
 	}
 }
 
+/** Verify a stopped Fix's forward push against immutable GitHub commit IDs. */
+export async function isForwardHead(repo: string, before: string | undefined, after: string | undefined, options: FetchOptions = {}): Promise<boolean> {
+	if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)
+		|| !before || !after || !/^[a-f0-9]{40}$/.test(before) || !/^[a-f0-9]{40}$/.test(after) || before === after) return false;
+	try {
+		const response = await (options.fetchImpl ?? fetch)(`https://api.github.com/repos/${repo}/compare/${before}...${after}?per_page=1`, {
+			headers: headers(options.token ?? resolveToken()),
+			signal: deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, options.signal),
+			redirect: "error",
+		});
+		if (!response.ok) return false;
+		const data: unknown = await response.json();
+		if (!data || typeof data !== "object"
+			|| !("status" in data) || data.status !== "ahead"
+			|| !("ahead_by" in data) || typeof data.ahead_by !== "number" || !Number.isSafeInteger(data.ahead_by) || data.ahead_by <= 0
+			|| !("behind_by" in data) || data.behind_by !== 0
+			|| !("base_commit" in data) || !data.base_commit || typeof data.base_commit !== "object"
+			|| !("sha" in data.base_commit) || data.base_commit.sha !== before
+			|| !("merge_base_commit" in data) || !data.merge_base_commit || typeof data.merge_base_commit !== "object"
+			|| !("sha" in data.merge_base_commit) || data.merge_base_commit.sha !== before) return false;
+		return true;
+	} catch { return false; }
+}
+
 /**
  * Observe the external effect of one Slay PR by identity. This deliberately
  * bypasses the open-only queue projection so CLOSED and MERGED remain visible.
