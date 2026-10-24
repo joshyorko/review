@@ -10,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import { loadWave, saveWave } from "./wave-store.ts";
 import type { CiEvidenceSource, QueueItem } from "./github.ts";
-import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, orgScope, parseScope, resolveToken } from "./github.ts";
+import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, isForwardHead, orgScope, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection, type WorkbenchMode } from "./mode.ts";
 import { registerFactoryClaimInspector, registerFactoryReconciler, registeredFactoryReconciler, registerFactorySelection, factoryBatchSubmitterRegistered, factoryCommand, factoryControllerRegistered, factoryDashboardOpenerRegistered, factoryLoadDiagnostic, openFactoryDashboard, submitFactoryBatch, type ClaimOwnerObservation, type ClaimOwnerWorkerObservation } from "../luna-factory/omp/batch-bridge.ts";
@@ -80,9 +80,9 @@ export type PersistedCandidateExclusion = {
 };
 type ReconcileObservation =
 	| { readonly kind: "unknown" }
-	| { readonly kind: "settled"; readonly outcome: "success" }
+	| { readonly kind: "settled"; readonly outcome: "success"; readonly observedPrHeads?: Readonly<Record<string, string>> }
 	| { readonly kind: "settled"; readonly outcome: "non-success"; readonly items: readonly string[] };
-type ReconciliationResult = { settled: string[]; unknown: string[]; submittedPrs: string[]; nonSuccessItems?: string[] };
+type ReconciliationResult = { settled: string[]; unknown: string[]; submittedPrs: string[]; nonSuccessItems?: string[]; observedPrHeads?: Readonly<Record<string, string>> };
 
 export interface PersistedRepositoryBatch {
 	readonly version: 1;
@@ -1004,6 +1004,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		repaint();
 	};
+	const observedPrHeadsValid = async (batch: PersistedRepositoryBatch, heads: Readonly<Record<string, string>>): Promise<boolean> => {
+		if (Object.keys(heads).length === 0) return true;
+		const live = await fetchItemsByKey(Object.keys(heads), "prs", mode.tokenOptions());
+		const items = batch.waves[batch.currentWave]?.items ?? [];
+		return !live.error && Object.entries(heads).every(([key, head]) => {
+			const current = live.items.find((item) => `${item.repo.toLowerCase()}#${item.id}` === key);
+			const original = items.find((item) => `${item.repo.toLowerCase()}#${item.id}` === key);
+			return current && original && current.headSha === head && current.author === original.author && current.url === original.url
+				&& current.autoMergeEnabled === original.autoMergeEnabled && current.reviewState === original.reviewState;
+		});
+	};
 	const authoritativeReconcile = async (
 		ctx: CtxLike,
 		batch: PersistedRepositoryBatch,
@@ -1033,6 +1044,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (targetItems.length === 0) return { kind: "unknown" };
 		let outcome: ReconcileObservation["outcome"] = "success";
 		const nonSuccessItems: string[] = [];
+		const observedPrHeads: Record<string, string> = {};
 		for (const type of ["pr", "issue"] as const) {
 			const items = targetItems.filter((item) => item.type === type);
 			if (items.length === 0) continue;
@@ -1085,18 +1097,24 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const item of items) {
 				const current = live.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
 				if (!current) return { kind: "unknown" };
-				if (
-					type === "pr"
-					&& (current.headSha !== item.headSha
-						|| current.autoMergeEnabled !== item.autoMergeEnabled
-						|| current.reviewState !== item.reviewState)
-				) return { kind: "unknown" };
+				if (type === "pr") {
+					if (current.autoMergeEnabled !== item.autoMergeEnabled || current.reviewState !== item.reviewState) return { kind: "unknown" };
+					if (current.headSha !== item.headSha
+						&& !(stopped && batch.kind === "fix" && await isForwardHead(item.repo, item.headSha, current.headSha, mode.tokenOptions()))) return { kind: "unknown" };
+					if (stopped && batch.kind === "fix") {
+						if (!current.headSha || current.author !== item.author || current.url !== item.url) return { kind: "unknown" };
+						observedPrHeads[`${item.repo.toLowerCase()}#${item.id}`] = current.headSha;
+					}
+				}
 				if (type === "issue" && (batch.kind === "slay" || ((preTool || stopped) && batch.kind === "fix"))) {
 					const submission = expectedIssueSubmission(batch, item, current);
 					if (stopped ? !issueSubmissionsMatch(batch, item, current) && submission === undefined : preTool ? !issueSubmissionsMatch(batch, item, current) : submission === undefined) return { kind: "unknown" };
 				}
 			}
 		}
+		// The Factory bridge also calls this observer directly, so the immutable
+		// comparison must be followed by a fresh read before either caller settles.
+		if (!await observedPrHeadsValid(batch, observedPrHeads)) return { kind: "unknown" };
 		if (stopped && !latestWaveForArchive(batch)) return { kind: "unknown" };
 		if (preTool && !stopped) {
 			const latest = loadWave(factoryClaimsRoot(env), `review:${batch.waveIdentity}`);
@@ -1104,7 +1122,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				|| !preToolProofValid(latest) || !preToolRuntimeSettled(ctx, latest)) return { kind: "unknown" };
 		}
 		return outcome === "success"
-			? { kind: "settled", outcome }
+			? { kind: "settled", outcome, observedPrHeads }
 			: { kind: "settled", outcome, items: nonSuccessItems };
 	};
 
@@ -1307,6 +1325,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const settled: string[] = [];
 		const unknown: string[] = [];
 		const nonSuccessItems: string[] = [];
+		const observedPrHeads: Record<string, string> = {};
+		let inconsistentHeads = false;
 		const preTool = preToolProofValid(batch);
 		for (const resource of resourcesForBatch(batch)) {
 			if (resourceClaims().conflict(resource, owner)) {
@@ -1329,6 +1349,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (result === "settled") {
 				settled.push(resource);
 				if (observation.kind === "settled" && observation.outcome === "non-success") nonSuccessItems.push(...observation.items);
+				if (observation.kind === "settled" && observation.outcome === "success") {
+					for (const [key, head] of Object.entries(observation.observedPrHeads ?? {})) {
+						if (observedPrHeads[key] && observedPrHeads[key] !== head) inconsistentHeads = true;
+						observedPrHeads[key] = head;
+					}
+				}
 			} else {
 				unknown.push(resource);
 			}
@@ -1337,6 +1363,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		// tool event during the issue lookup invalidates the proof below while all
 		// pre-tool claims are still UNKNOWN and fenced.
 		const submittedPrs = settled.length > 0 ? await observedSubmittedPrs(ctx, batch) : [];
+		if (!await observedPrHeadsValid(batch, observedPrHeads)) inconsistentHeads = true;
+		if (inconsistentHeads) { unknown.push(...settled); settled.length = 0; }
 		if (sessionStopped(batch)) {
 			if (!latestWaveForArchive(batch)) { unknown.push(...settled); settled.length = 0; }
 		} else if (preTool) {
@@ -1355,6 +1383,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			unknown: [...new Set(unknown)],
 			submittedPrs,
 			nonSuccessItems: [...new Set(nonSuccessItems)],
+			observedPrHeads,
 		};
 	};
 
@@ -1363,7 +1392,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return `Execution stopped; GitHub effects remain unresolved for ${result.unknown.join(", ") || batch.id}; claims retained`;
 		}
 		const state = batch.waveExit?.choice === "cancel" ? "cancelled" : "paused";
-		const message = `Execution stopped; ${state} without completing work; GitHub effects reconciled${result.submittedPrs.length ? `; existing PRs: ${result.submittedPrs.join(", ")}` : ""}`;
+		const heads = Object.entries(result.observedPrHeads ?? {}).map(([key, head]) => `${key}@${head}`);
+		const message = `Execution stopped; ${state} without completing work; GitHub effects reconciled${heads.length ? `; verified PR heads: ${heads.join(", ")}` : ""}${result.submittedPrs.length ? `; existing PRs: ${result.submittedPrs.join(", ")}` : ""}`;
 		persistArchivedBatch(ctx, { ...batch, state, error: message });
 		const owner = `review:${batch.id}:${batch.currentWave}`;
 		for (const resource of result.settled) {
@@ -1378,7 +1408,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (pi.sessionShutdownLifecycleVersion !== 1 || !ctx.sessionManager?.getSessionId?.()) return "Resume requires the packaged OMP shutdown lifecycle v1 and a native session identity";
 		const undispatched = batch?.state === "paused" && !batch.waveIdentity;
 		if (!batch || (!undispatched && (batch.waveExit?.choice !== "pause" || !sessionStopped(batch)))) return "Resume requires saved paused work and positive owning-session shutdown proof; use /review status";
-		const result = undispatched ? { settled: [], unknown: [], submittedPrs: [] } : await reconcileBatchClaims(ctx, batch);
+		const result: ReconciliationResult = undispatched ? { settled: [], unknown: [], submittedPrs: [] } : await reconcileBatchClaims(ctx, batch);
 		if (result.unknown.length || !latestWaveForArchive(batch)) return `Resume blocked: GitHub effects unresolved for ${result.unknown.join(", ") || batch.id}; claims retained`;
 		const remaining = batch.waves.slice(batch.currentWave).flatMap((wave) => [...wave.items]);
 		const fresh: QueueItem[] = [];
@@ -1390,7 +1420,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			for (const item of items) {
 				const current = observed.items.find((candidate) => candidate.repo === item.repo && candidate.id === item.id);
 				if (current && type === "issue" && expectedIssueSubmission(batch, item, current)) continue;
-				if (!current || (type === "pr" && current.headSha !== item.headSha) || (type === "issue" && !issueSubmissionsMatch(batch, item, current))) return `Resume blocked: ${item.repo}#${item.id} changed; select current work explicitly`;
+				const observedHead = result.observedPrHeads?.[`${item.repo.toLowerCase()}#${item.id}`];
+				const expectedHead = observedHead ?? item.headSha;
+				if (!current || (type === "pr" && (current.headSha !== expectedHead || (observedHead && (current.autoMergeEnabled !== item.autoMergeEnabled || current.reviewState !== item.reviewState)))) || (type === "issue" && !issueSubmissionsMatch(batch, item, current))) return `Resume blocked: ${item.repo}#${item.id} changed; select current work explicitly`;
 				fresh.push(current);
 			}
 		}
@@ -1815,7 +1847,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				if (result.settled.length > 0) lines.push(`Reconciled ${result.settled.join(", ")} for ${batch.id}`);
 				if (result.nonSuccessItems?.length) lines.push(`Slay did not satisfy its terminal outcome for ${[...new Set(result.nonSuccessItems)].sort().join(", ")}`);
 				if (result.submittedPrs.length > 0) lines.push(`Observed submitted PRs ${result.submittedPrs.join(", ")}`);
-				if (result.unknown.length > 0) lines.push(`Retained UNKNOWN claims ${result.unknown.join(", ")} for ${batch.id}${sessionStopped(batch) ? ": execution stopped; GitHub effect proof is missing: require unchanged exact PR head/review/auto-merge, a verified terminal PR effect, or one uniquely linked issue submission" : batch.waveExit ? ": missing positive owning-session shutdown settlement" : ""}`);
+				if (result.unknown.length > 0) lines.push(`Retained UNKNOWN claims ${result.unknown.join(", ")} for ${batch.id}${sessionStopped(batch) ? ": execution stopped; GitHub effect proof is missing: require unchanged exact PR head/review/auto-merge, a verified forward Fix head with unchanged review/auto-merge, a verified terminal PR effect, or one uniquely linked issue submission" : batch.waveExit ? ": missing positive owning-session shutdown settlement" : ""}`);
 				const wave = batch.waves[batch.currentWave];
 				if (result.unknown.length > 0 && batch.kind === "slay" && wave?.items.every((item) => item.type === "pr" && !isRepairRequested(item, mode.currentUserLogin))) {
 					lines.push(`Landing is not verified. If a PR is still open without auto-merge, ${slayLandingRecovery(wave.items)} If GitHub already shows merged or auto-merge accepted and this warning remains, worker, head, or review evidence is unresolved; inspect /review status and report the warning instead of deleting claims.`);
@@ -2177,6 +2209,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		// Queue refresh mutates queue items; admitted subjects must retain their
 		// captured heads and policy evidence independently of that projection.
+		if (kind === "fix") {
+			for (const item of items) {
+				const conflict = resourceClaims().conflict(`repo:${item.repo.toLowerCase()}`) ?? resourceClaims().conflict(`item:${item.repo.toLowerCase()}#${item.id}`);
+				if (conflict) { ctx.ui.notify(`${conflict}; reopen the owning saved session and use /review resume`, "error"); return; }
+			}
+		}
 		const waves = mode.repositoryWaves(structuredClone(items));
 		if (waves.length === 0) return;
 		const startedAt = Date.now();

@@ -18,7 +18,7 @@ import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/exten
 import { workbenchPainter } from "../image/extension/review/paint.ts";
 import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/review/width.ts";
-import { classifyCi, fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, fetchQueue, parseScope, searchExpression, toCiStatus } from "../image/extension/review/github.ts";
+import { classifyCi, fetchDiff, exactHeadVerified, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, fetchQueue, isForwardHead, parseScope, searchExpression, toCiStatus } from "../image/extension/review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/review/hive.ts";
 import { categorize, prioritize } from "../image/extension/review/priority.ts";
 import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/review/mode.ts";
@@ -44,7 +44,7 @@ import {
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { saveWave } from "../image/extension/review/wave-store.ts";
-import { factoryHandoffState, registerFactoryController, registerFactoryBatchSubmitter, registerFactoryDashboardOpener } from "../image/extension/luna-factory/omp/batch-bridge.ts";
+import { factoryHandoffState, registerFactoryController, registerFactoryBatchSubmitter, registerFactoryDashboardOpener, registeredFactoryReconciler } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -7645,6 +7645,151 @@ async function exitFixture() {
 	fixture.ctx.sessionManager.getSessionId = () => fixture.ctx.sessionId;
 	return fixture;
 }
+
+test("forward-head proof rejects failed, malformed, or mismatched GitHub comparisons", async () => {
+	const before = "a".repeat(40); const after = "b".repeat(40);
+	for (const scenario of ["ahead", "http-error", "unreadable", "wrong-base", "wrong-merge-base", "diverged", "behind", "no-progress", "malformed"]) {
+		const data = { status: "ahead", ahead_by: 1, behind_by: 0, base_commit: { sha: before }, merge_base_commit: { sha: before } };
+		if (scenario === "wrong-base") data.base_commit.sha = after;
+		if (scenario === "wrong-merge-base") data.merge_base_commit.sha = after;
+		if (scenario === "diverged") Object.assign(data, { status: "diverged", behind_by: 1 });
+		if (scenario === "behind") Object.assign(data, { status: "behind", ahead_by: 0, behind_by: 1 });
+		if (scenario === "no-progress") data.ahead_by = 0;
+		const fetchImpl = async (url, options) => {
+			assert.equal(String(url), `https://api.github.com/repos/example/rcc/compare/${before}...${after}?per_page=1`);
+			assert.equal(options.redirect, "error");
+			if (scenario === "unreadable") throw new Error("unavailable");
+			return { ok: scenario !== "http-error", json: async () => scenario === "malformed" ? null : data };
+		};
+		assert.equal(await isForwardHead("example/rcc", before, after, { token: "t", fetchImpl }), scenario === "ahead", scenario);
+	}
+});
+
+async function pausedPrFixFixture() {
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const items = [224, 225].map((id) => queueItem({
+		id, repo: "example/rcc", author: "maintainer", title: `fix target ${id}`,
+		url: `https://github.com/example/rcc/pull/${id}`, headSha: String(id === 224 ? "a" : "b").repeat(40),
+		ciStatus: "failure", changedFiles: 1, changedFilesComplete: true,
+	}));
+	const effects = Object.fromEntries(items.map((item) => [item.id, {
+		state: "OPEN", merged: false, headSha: item.headSha, autoMerge: false,
+		reviewDecision: "REVIEW_REQUIRED", reviews: [],
+	}]));
+	const comparison = { status: "ahead", ahead_by: 1, behind_by: 0, afterRead: () => {} };
+	const compareCalls: string[] = [];
+	const base = recoveredPrSlayFetch(items, effects);
+	const fetchImpl = async (url, init) => {
+		const match = /\/compare\/([a-f0-9]{40})\.\.\.([a-f0-9]{40})/.exec(String(url));
+		if (!match) return base(url, init);
+		compareCalls.push(String(url));
+		return { ok: true, status: 200, json: async () => {
+			comparison.afterRead();
+			return { status: comparison.status, ahead_by: comparison.ahead_by, behind_by: comparison.behind_by,
+				base_commit: { sha: match[1] }, merge_base_commit: { sha: match[1] } };
+		} };
+	};
+	const pi = fakeHost(); const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager.getSessionId = () => ctx.sessionId;
+	const review = createReviewExtension(pi, { org: "example", fetchImpl, env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	ctx.overlays.at(-1).handleInput("A"); ctx.overlays.at(-1).handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1);
+	const original = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	await completeReviewTask(pi, ctx, 2);
+	const reconcile = registeredFactoryReconciler(); assert.ok(reconcile);
+	ctx.selectResponses.push("Pause and exit");
+	await pi.events.get("session_before_shutdown")({ sessionId: ctx.sessionId, reason: "shutdown" }, ctx);
+	pi.events.get("session_shutdown")({}, ctx);
+	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
+	const restart = async (choice = "Leave paused") => {
+		const restarted = fakeHost(); const next = fakeCtx(); next.ui.parent = next;
+		next.sessionId = "restarted-fix-session";
+		next.sessionManager.getSessionId = () => next.sessionId;
+		next.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
+		next.selectResponses.push(choice);
+		const restored = createReviewExtension(restarted, { org: "example", fetchImpl, env });
+		await restarted.events.get("session_start")({}, next); await restored.whenStarted();
+		return { restarted, next };
+	};
+	return { pi, ctx, env, items, effects, comparison, compareCalls, original, restart, reconcile };
+}
+
+test("Review paused Fix resumes at verified forward heads from the saved-session popup", async () => {
+	const { env, effects, original, restart, compareCalls } = await pausedPrFixFixture();
+	effects[224].headSha = "c".repeat(40); effects[225].headSha = "d".repeat(40);
+	const { restarted, next } = await restart("Resume saved work");
+	assert.equal(restarted.messages.length, 1, next.notifications.map((n) => n.message).join("\n"));
+	const resumed = restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.notEqual(resumed.id, original.id);
+	assert.equal(resumed.completedItems, 0);
+	assert.deepEqual(resumed.waves[0].items.map((item) => item.headSha).sort(), ["c".repeat(40), "d".repeat(40)]);
+	assert.deepEqual(original.waves[0].items.map((item) => item.headSha).sort(), ["a".repeat(40), "b".repeat(40)]);
+	assert.ok(compareCalls.length >= 2);
+	assert.ok(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().every((claim) => claim.owner === `review:${resumed.id}:0`));
+});
+
+for (const scenario of ["diverged", "behind", "unknown-comparison", "review-changed", "auto-merge-changed", "shutdown-unsettled", "head-race", "closed-pr"]) test(`Review paused Fix retains changed-head claims for ${scenario}`, async () => {
+	const { pi, ctx, env, effects, comparison, restart } = await pausedPrFixFixture();
+	effects[224].headSha = "c".repeat(40);
+	if (scenario === "diverged") Object.assign(comparison, { status: "diverged", behind_by: 1 });
+	if (scenario === "behind") Object.assign(comparison, { status: "behind", ahead_by: 0, behind_by: 1 });
+	if (scenario === "unknown-comparison") Object.assign(comparison, { status: "ahead", ahead_by: undefined });
+	if (scenario === "review-changed") effects[224].reviewDecision = "APPROVED";
+	if (scenario === "auto-merge-changed") effects[224].autoMerge = true;
+	if (scenario === "closed-pr") effects[224].state = "CLOSED";
+	if (scenario === "head-race") comparison.afterRead = () => { effects[224].headSha = (effects[224].headSha === "c".repeat(40) ? "e" : "c").repeat(40); };
+	if (scenario === "shutdown-unsettled") {
+		const saved = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+		const unsettled = { ...saved, waveShutdown: { ...saved.waveShutdown, settled: false, pendingJobIds: ["worker"] } };
+		saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, unsettled); pi.entries.push({ customType: BATCH_ENTRY, data: unsettled });
+	}
+	const { restarted, next } = await restart("Resume saved work");
+	assert.equal(restarted.messages.length, 0);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 3);
+});
+
+test("Review paused Fix releases verified stopped claims while preserving work for later resume", async () => {
+	const { env, effects, original, restart } = await pausedPrFixFixture();
+	effects[224].headSha = "c".repeat(40);
+	const { restarted, next } = await restart();
+	assert.equal(restarted.messages.length, 0);
+	const paused = restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(paused.id, original.id); assert.equal(paused.state, "paused"); assert.equal(paused.completedItems, 0);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	await restarted.commands.get("review").handler("resume", next);
+	assert.equal(restarted.messages.length, 1);
+	const resumed = restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.notEqual(resumed.id, original.id);
+	assert.equal(resumed.waves[0].items.find((item) => item.id === 224).headSha, "c".repeat(40));
+});
+
+for (const changed of ["none", "head", "review", "auto-merge"]) test(`Review Factory reconciliation rechecks stopped Fix progress after comparison (${changed})`, async () => {
+	const { env, effects, original, comparison, reconcile } = await pausedPrFixFixture();
+	effects[224].headSha = "c".repeat(40);
+	comparison.afterRead = () => {
+		if (changed === "head") effects[224].headSha = "e".repeat(40);
+		if (changed === "review") effects[224].reviewDecision = "APPROVED";
+		if (changed === "auto-merge") effects[224].autoMerge = true;
+	};
+	const result = await reconcile(`review:${original.id}:0`, "item:example/rcc#224");
+	assert.equal(result, changed === "none" ? "settled" : "unknown");
+	const claim = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().find((claim) => claim.resource === "item:example/rcc#224");
+	assert.equal(claim?.status, changed === "none" ? "settled" : "unknown");
+});
+
+test("Review Fix ownership rejection preserves the saved run without creating another wave", async () => {
+	const { pi, ctx, env, effects, original } = await pausedPrFixFixture();
+	const other = fakeHost(); const next = fakeCtx(); next.ui.parent = next;
+	const review = createReviewExtension(other, { org: "example", fetchImpl: recoveredPrSlayFetch(original.waves[0].items, effects), env });
+	await other.events.get("session_start")({}, next); await review.whenStarted();
+	next.overlays.at(-1).handleInput("A"); next.overlays.at(-1).handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(other.messages.length, 0);
+	assert.equal(other.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0);
+	assert.ok(next.notifications.some((n) => n.message.includes(`review:${original.id}:0`)));
+});
 
 for (const choice of ["Stay", undefined]) test(`Review exit ${choice ?? "dismiss"} preserves wave and claims`, async () => {
 	const { pi, ctx, env } = await exitFixture();
