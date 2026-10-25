@@ -89,6 +89,11 @@ jobs:
           set -euo pipefail
           bash tests/test-registry.sh
 
+      - name: Launcher post-exit diagnostics and signal delivery
+        run: |
+          set -euo pipefail
+          python3 tests/launcher_diagnostic_collector.py
+
       # The omp review mode and the appliance it ships in. The mode is the only
       # TypeScript here and executes only inside a TUI, so it is driven
       # headlessly against a fake host; the appliance's static contract holds
