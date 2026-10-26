@@ -148,6 +148,8 @@ Normal Review commands provide recovery without claim-file or Factory archaeolog
 
 If OMP records a coordinator error or abort before any tool invocation, Review binds that terminal event to the unique dispatched prompt and saves the proof. Explicit reconciliation can release its claims after checking that GitHub effects are unchanged and no worker is running or awaiting delivery. The wave is cancelled, not completed. Missing terminal proof, tool activity, or uncertain effects keep ownership protected. Existing records without this proof remain fenced.
 
+After a provider/model error, select a working model and run `/review reconcile` before starting the selection again. A blocked wave with retained claims rejects retries without changing its original dispatch or worker evidence. A claim conflict before dispatch records no dispatched prompt or owning-session identity.
+
 Reconciliation releases only claims with settled evidence. Changing instance keys or scopes does not bypass a host-wide claim.
 
 ### PR landing blocked while CI runs
