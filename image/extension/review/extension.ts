@@ -2098,12 +2098,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 		if (!prevalidated) {
+			const retainedClaims = activeBatch.state === "blocked" && activeBatch.waveIdentity
+				&& resourcesForBatch(activeBatch).some((resource) => resourceClaims().conflict(resource));
 			const skippedCi: CiSkippedItem[] = [];
 			const blocker = await batchBlocker(activeBatch.kind, wave.items, skippedCi);
 			if (activeBatch !== dispatchBatch || activeBatch.waveExit || shuttingDownSessionId) return;
 			if (blocker) {
-				persistBatch(ctx, { ...activeBatch, state: "blocked", error: blocker });
+				if (!retainedClaims) persistBatch(ctx, { ...activeBatch, state: "blocked", error: blocker });
 				ctx.ui.notify(blocker, "error");
+				return;
+			}
+			if (retainedClaims) {
+				ctx.ui.notify(`Run ${activeBatch.id} retains mutation claims; use /review reconcile before retrying`, "warning");
 				return;
 			}
 			if (skippedCi.length > 0) {
@@ -2150,7 +2156,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		const retryingBlockedWave = activeBatch.state === "blocked";
 		const startedAt = Date.now();
-		persistBatch(ctx, { ...activeBatch, state: "running", waveStartedAt: startedAt, error: undefined, cancelRequested: undefined });
 		const waveAction = {
 			kind: activeBatch.kind,
 			item: wave.items[0]!,
@@ -2171,11 +2176,24 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const resources = activeBatch.kind === "diff"
 			? []
 			: [...new Set(wave.items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))].sort();
-		persistBatch(ctx, { ...activeBatch, waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`, waveSessionId: ctx.sessionManager?.getSessionId?.(), waveExit: undefined, waveShutdown: undefined, wavePromptDigest: promptDigest(prompt), waveToolCallIds: undefined, waveToolInvocationIds: undefined, waveTaskWorkers: undefined, waveJobBaselineIds: baseline, waveJobIds: undefined, waveTerminalJobStatuses: undefined, wavePreToolTerminal: undefined, waveEffectResources: resources });
 		if (activeBatch.kind !== "diff") {
+			if (!activeBatch.waveIdentity) saveWave(factoryClaimsRoot(env), {
+				...activeBatch,
+				state: "blocked",
+				waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`,
+				waveSessionId: undefined,
+				wavePromptDigest: undefined,
+				waveEffectResources: resources,
+				error: "Mutation admission pending; no coordinator prompt dispatched",
+			});
 			try { claimItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`, !retryingBlockedWave); }
-			catch (error) { persistBatch(ctx, { ...activeBatch, state: "blocked", error: String(error) }); ctx.ui.notify(String(error), "error"); return; }
+			catch (error) {
+				if (!activeBatch.waveIdentity) persistBatch(ctx, { ...activeBatch, state: "blocked", error: String(error) });
+				ctx.ui.notify(String(error), "error");
+				return;
+			}
 		}
+		persistBatch(ctx, { ...activeBatch, state: "running", waveStartedAt: startedAt, error: undefined, cancelRequested: undefined, waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`, waveSessionId: ctx.sessionManager?.getSessionId?.(), waveExit: undefined, waveShutdown: undefined, wavePromptDigest: promptDigest(prompt), waveToolCallIds: undefined, waveToolInvocationIds: undefined, waveTaskWorkers: undefined, waveJobBaselineIds: baseline, waveJobIds: undefined, waveTerminalJobStatuses: undefined, wavePreToolTerminal: undefined, waveEffectResources: resources });
 		ctx.ui.notify(`Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
 		ownedWavePrompts.add(promptDigest(prompt));
 		pi.sendUserMessage(prompt, { ...(deliverAs ? { deliverAs } : {}), waveId: `${activeBatch.id}:${activeBatch.currentWave}` });

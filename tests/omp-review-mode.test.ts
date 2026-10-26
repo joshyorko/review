@@ -43,7 +43,7 @@ import {
 
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
-import { saveWave } from "../image/extension/review/wave-store.ts";
+import { loadWave, saveWave } from "../image/extension/review/wave-store.ts";
 import { factoryHandoffState, registerFactoryController, registerFactoryBatchSubmitter, registerFactoryDashboardOpener, registeredFactoryReconciler } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const NOW = 1_800_000_000_000;
@@ -4627,7 +4627,7 @@ test("pre-tool coordinator failure is durable evidence for explicit recovery wit
 	assert.notEqual(recovered.state, "complete");
 });
 
-async function preToolFailureFixture(submittedPrs: string[] = [], fetchFactory = issueBackedFetch) {
+async function preToolFailureFixture(submittedPrs: string[] = [], fetchFactory = issueBackedFetch, kind = "fix") {
 	const states = { "projectbluefin/review#77": { title: "pre-tool failure", submittedPrs } };
 	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
 	const pi = fakeHost();
@@ -4637,8 +4637,11 @@ async function preToolFailureFixture(submittedPrs: string[] = [], fetchFactory =
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fetchFactory(states), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	ctx.overlays[0].handleInput("A");
-	ctx.overlays[0].handleInput("f");
+	if (kind === "slay") await pi.commands.get("review").handler("slay", ctx);
+	else {
+		ctx.overlays[0].handleInput("A");
+		ctx.overlays[0].handleInput("f");
+	}
 	for (let i = 0; i < 20; i++) await Promise.resolve();
 	const running = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	const assistantError = {
@@ -4655,8 +4658,94 @@ async function preToolFailureFixture(submittedPrs: string[] = [], fetchFactory =
 			{ type: "message", message: assistantError },
 		],
 	};
+	ctx.sessionManager.getSessionId = () => ctx.sessionId;
 	return { states, env, pi, ctx, review, running, assistantError, userMessage };
 }
+
+test("retrying a claimed pre-tool failure preserves its original recovery proof", async () => {
+	const fixture = await preToolFailureFixture([], issueBackedFetch, "slay");
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const owner = `review:${blocked.waveIdentity}`;
+	const saved = loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, owner);
+	const claims = new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT);
+	const before = claims.list();
+	for (let retry = 0; retry < 2; retry++) {
+		await fixture.pi.commands.get("review").handler("slay", fixture.ctx);
+		assert.deepEqual(loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, owner), saved);
+		assert.deepEqual(claims.list(), before);
+		assert.equal(fixture.pi.messages.length, 1);
+	}
+	await fixture.pi.commands.get("review").handler("reconcile", fixture.ctx);
+	assert.equal(claims.list().length, 0, "the original proof still permits explicit reconciliation");
+	assert.equal(loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, owner).state, "cancelled");
+});
+
+test("retrying a claimed worker failure preserves its native worker evidence", async () => {
+	const fixture = await preToolFailureFixture([], issueBackedFetch, "slay");
+	fixture.pi.events.get("tool_call")({ toolCallId: "worker-call", toolName: "task", input: {} }, fixture.ctx);
+	await fixture.pi.events.get("agent_end")({}, fixture.ctx);
+	const blocked = fixture.pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const saved = loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, `review:${blocked.waveIdentity}`);
+	await fixture.pi.commands.get("review").handler("slay", fixture.ctx);
+	assert.deepEqual(loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, `review:${blocked.waveIdentity}`), saved);
+	assert.equal(fixture.pi.messages.length, 1);
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("a live admission blocker on retry preserves the claimed dispatch evidence", async () => {
+	const fixture = await preToolFailureFixture([], issueBackedFetch, "slay");
+	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
+	const owner = `review:${fixture.running.waveIdentity}`;
+	const saved = loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, owner);
+	fixture.states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
+	await fixture.pi.commands.get("review").handler("slay", fixture.ctx);
+	assert.deepEqual(loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, owner), saved);
+	assert.equal(fixture.pi.messages.length, 1);
+	assert.ok(fixture.ctx.notifications.some((notice) => /pull request already submitted/.test(notice.message)));
+	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+test("a Slay claim conflict never records an undispatched prompt as an owned wave", async () => {
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+	const pi = fakeHost(); pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
+	claims.claim("repo:projectbluefin/review", "another-owner");
+	const before = claims.list();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({ "projectbluefin/review#77": { title: "claim conflict", submittedPrs: [] } }), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+	const blocked = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(blocked.state, "blocked");
+	assert.equal(blocked.waveIdentity, undefined);
+	assert.equal(blocked.wavePromptDigest, undefined);
+	assert.equal(pi.messages.length, 0);
+	assert.deepEqual(claims.list(), before);
+});
+
+test("mutation admission saves its recovery subject before acquiring claims", async () => {
+	const claim = ResourceClaims.prototype.claim;
+	let observed = 0;
+	ResourceClaims.prototype.claim = function(resource, owner, allowExisting) {
+		const pending = loadWave(ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT, owner);
+		assert.ok(pending, "the first acquired resource must already have a durable recovery record");
+		assert.equal(pending.state, "blocked");
+		assert.equal(pending.waveSessionId, undefined);
+		assert.equal(pending.wavePromptDigest, undefined);
+		assert.ok(pending.waveEffectResources.includes(resource.toLowerCase()));
+		observed++;
+		return claim.call(this, resource, owner, allowExisting);
+	};
+	try {
+		const fixture = await preToolFailureFixture([], issueBackedFetch, "slay");
+		assert.equal(observed, 2);
+		assert.equal(fixture.pi.messages.length, 1);
+	} finally {
+		ResourceClaims.prototype.claim = claim;
+	}
+});
 
 test("tool invocation without a job keeps the Review claims UNKNOWN", async () => {
 	const fixture = await preToolFailureFixture();
