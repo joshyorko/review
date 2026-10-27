@@ -16,8 +16,8 @@
 !patches/
 !patches/omp/
 !patches/omp/memory-backend-registration.patch
-!patches/omp/clipboard-truthful-18.10.3.patch
-!patches/omp/session-lifecycle-18.10.3.patch
+!patches/omp/clipboard-truthful.patch
+!patches/omp/session-lifecycle.patch
 **/__pycache__/
 **/*.pyc
 

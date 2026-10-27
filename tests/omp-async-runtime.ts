@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 
-/** Run upstream's unmodified manager. Only its logging dependency is replaced. */
+/** Run upstream's unmodified manager with logging and unused IRC side effects isolated. */
 export async function loadPackagedJobManager(root: string) {
 	const appliance = readFileSync(new URL("../image/appliance/Containerfile", import.meta.url), "utf8");
 	const expectedVersion = appliance.match(/^ARG OMP_VERSION=(\S+)$/m)?.[1];
@@ -18,6 +18,10 @@ export async function loadPackagedJobManager(root: string) {
 		resolve(specifier, context, next) {
 			if (specifier === "@oh-my-pi/pi-utils" && context.parentURL?.endsWith("/async/job-manager.ts")) {
 				return { url: "data:text/javascript,export const logger = { warn: console.warn, error: console.error };", shortCircuit: true };
+			}
+			if (specifier === "../irc/bus" && context.parentURL?.endsWith("/async/job-manager.ts")) {
+				// These cases use unowned jobs; fail if upstream starts routing their replies through IRC.
+				return { url: "data:text/javascript,export class IrcBus { static recordReply() { throw new Error('Unexpected IRC reply in async delivery regression'); } }", shortCircuit: true };
 			}
 			return next(specifier, context);
 		},

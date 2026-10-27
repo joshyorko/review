@@ -28,8 +28,8 @@ ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=${"3".repeat(40)}
 ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT=${"3".repeat(40)}
 ARG OMP_CLIPBOARD_PATCH_SHA256=${"4".repeat(64)}
 ARG OMP_SESSION_LIFECYCLE_PATCH_SHA256=${"4".repeat(64)}
-ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/review/omp/clipboard-truthful-18.9.2.patch
-ARG OMP_SESSION_LIFECYCLE_PATCH_PATH=/usr/local/share/review/omp/session-lifecycle-18.9.2.patch
+ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/review/omp/clipboard-truthful.patch
+ARG OMP_SESSION_LIFECYCLE_PATCH_PATH=/usr/local/share/review/omp/session-lifecycle.patch
 ARG OMP_NATIVES_VERSION=18.1.22
 ARG OMP_NATIVES_X86_64_SHA512=${"a".repeat(128)}
 ARG OMP_NATIVES_AARCH64_SHA512=${"b".repeat(128)}
@@ -87,8 +87,8 @@ test("updateContainerfile replaces the exact version, source, and native-addon p
 	assert.match(updated, new RegExp(`^ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT=${"3".repeat(40)}$`, "m"));
 	assert.match(updated, new RegExp(`^ARG OMP_CLIPBOARD_PATCH_SHA256=${"4".repeat(64)}$`, "m"));
 	assert.match(updated, new RegExp(`^ARG OMP_SESSION_LIFECYCLE_PATCH_SHA256=${"4".repeat(64)}$`, "m"));
-	assert.match(updated, /^ARG OMP_CLIPBOARD_PATCH_PATH=\/usr\/local\/share\/review\/omp\/clipboard-truthful-18\.9\.2\.patch$/m);
-	assert.match(updated, /^ARG OMP_SESSION_LIFECYCLE_PATCH_PATH=\/usr\/local\/share\/review\/omp\/session-lifecycle-18\.9\.2\.patch$/m);
+	assert.match(updated, /^ARG OMP_CLIPBOARD_PATCH_PATH=\/usr\/local\/share\/review\/omp\/clipboard-truthful\.patch$/m);
+	assert.match(updated, /^ARG OMP_SESSION_LIFECYCLE_PATCH_PATH=\/usr\/local\/share\/review\/omp\/session-lifecycle\.patch$/m);
 	assert.match(updated, /^ARG OMP_NATIVES_VERSION=18\.2\.1$/m);
 	assert.match(updated, new RegExp(`^ARG OMP_NATIVES_X86_64_SHA512=${NATIVE_X64_SHA512}$`, "m"));
 	assert.match(updated, new RegExp(`^ARG OMP_NATIVES_AARCH64_SHA512=${NATIVE_ARM64_SHA512}$`, "m"));
@@ -121,8 +121,8 @@ test("syncOmpPins resolves stable tag source and both scoped npm integrity pins"
 	assert.match(appliance, new RegExp(`^ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT=${"3".repeat(40)}$`, "m"));
 	assert.match(appliance, new RegExp(`^ARG OMP_CLIPBOARD_PATCH_SHA256=${"4".repeat(64)}$`, "m"));
 	assert.match(appliance, new RegExp(`^ARG OMP_SESSION_LIFECYCLE_PATCH_SHA256=${"4".repeat(64)}$`, "m"));
-	assert.match(appliance, /^ARG OMP_CLIPBOARD_PATCH_PATH=\/usr\/local\/share\/review\/omp\/clipboard-truthful-18\.9\.2\.patch$/m);
-	assert.match(appliance, /^ARG OMP_SESSION_LIFECYCLE_PATCH_PATH=\/usr\/local\/share\/review\/omp\/session-lifecycle-18\.9\.2\.patch$/m);
+	assert.match(appliance, /^ARG OMP_CLIPBOARD_PATCH_PATH=\/usr\/local\/share\/review\/omp\/clipboard-truthful\.patch$/m);
+	assert.match(appliance, /^ARG OMP_SESSION_LIFECYCLE_PATCH_PATH=\/usr\/local\/share\/review\/omp\/session-lifecycle\.patch$/m);
 	assert.match(appliance, new RegExp(`^ARG OMP_NATIVES_X86_64_SHA512=${NATIVE_X64_SHA512}$`, "m"));
 	assert.match(appliance, new RegExp(`^ARG OMP_NATIVES_AARCH64_SHA512=${NATIVE_ARM64_SHA512}$`, "m"));
 });
@@ -187,4 +187,22 @@ test("Renovate follows stable OMP releases and the appliance publisher validates
 	const workflow = await readFile(".github/workflows/validate.yml", "utf8");
 	assert.match(workflow, /push:/);
 	assert.match(workflow, /node --test tests\/update-omp-pins\.test\.mjs/);
+});
+
+test("pinned OMP source regression follows the current release and patch pins", async () => {
+	const fixture = await readFile("tests/fixtures/issue-140-clipboard-truth.test.mjs", "utf8");
+	for (const name of ["OMP_VERSION", "OMP_SOURCE_COMMIT", "OMP_SOURCE_SHA256", "OMP_PATCH_SHA256", "OMP_CLIPBOARD_PATCH_SHA256"]) {
+		assert.match(fixture, new RegExp(`pinnedArg\\("${name}"\\)`), `${name} comes from Containerfile`);
+	}
+	assert.doesNotMatch(fixture, /18\.12\.6|45c35e40c46166dc726ccc52f5d27f40f2449f99|645df2d527de1b0ff62514ac14250230622439d5d5e84f781ffa06d38415b8d0|608959e93b132d50aa9b6d015b1b6fecc6dbb644e7295628bee1f11640cf224e/);
+});
+
+test("OMP Renovate candidates run exact-source qualification before the strict pin contract", async () => {
+	const workflow = await readFile(".github/workflows/validate.yml", "utf8");
+	const sourceRegression = workflow.indexOf("name: Pinned OMP source regressions");
+	const qualification = workflow.indexOf("name: Requalify OMP compatibility patches");
+	const applianceContract = workflow.indexOf("name: Appliance pin contract");
+	assert.ok(sourceRegression >= 0 && sourceRegression < qualification && qualification < applianceContract);
+	assert.match(workflow, /node scripts\/qualify-omp-upgrade\.mjs --if-stale/);
+	assert.match(workflow, /REVIEW_OMP_PATCH_QUALIFICATION=1/);
 });
