@@ -69,6 +69,7 @@ assert labels['org.opencontainers.image.revision']==sys.argv[2], 'SIF revision d
 PY
     apptainer exec "$work/payload/launcher/review.sif" /usr/bin/omp --version
     cp "$work/source/LICENSE" "$work/source/NOTICE" "$work/payload/"
+    cp "$work/source/CHANGELOG.md" "$work/payload/launcher/CHANGELOG.md"
     cp "$work/source/VERSION" "$work/payload/VERSION"
     cp -a "$work/source/bin" "$work/payload/launcher/"
     mkdir -p "$work/payload/launcher/scripts"
@@ -93,7 +94,7 @@ root="\$(cd "\$(dirname "\$(readlink -f "\${BASH_SOURCE[0]}")")/../libexec" && p
   export REVIEW_MODE=review
   export REVIEW_APPLIANCE_IMAGE="\${REVIEW_APPLIANCE_IMAGE:-$oci_image}"
   export REVIEW_APPLIANCE_FALLBACK_SIF="\${REVIEW_APPLIANCE_FALLBACK_SIF:-\$root/launcher/review.sif}"
-  cat "\$root/build.txt"
+  if [[ "\${1:-}" != changelog ]]; then cat "\$root/build.txt"; fi
 exec "\$root/launcher/bin/review" "\$@"
 EOF
     chmod 0755 "$work/payload/review"

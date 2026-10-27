@@ -65,6 +65,7 @@ jobs:
             echo "A newer main commit superseded this run."
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
+            python3 scripts/review-changelog.py section "$version" > /dev/null
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -158,6 +159,8 @@ jobs:
           pattern: review-candidate-*
           path: ${{ runner.temp }}/bundles
           merge-multiple: true
+      - name: Validate native bundles and generate formula
+        run: python3 scripts/review-formula.py "$RUNNER_TEMP/bundles" "$RUNNER_TEMP/formula"
       - name: Publish the matching OCI index
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -192,8 +195,6 @@ jobs:
           podman manifest push --all --format oci --authfile "$authfile" "$image" "docker://ghcr.io/joshyorko/review:v$version"
           podman manifest push --all --format oci --authfile "$authfile" "$image" "docker://ghcr.io/joshyorko/review:stable"
           echo "Published $image @ $(cat "$RUNNER_TEMP/oci-index-digest")"
-      - name: Validate native bundles and generate formula
-        run: python3 scripts/review-formula.py "$RUNNER_TEMP/bundles" "$RUNNER_TEMP/formula"
       - name: Publish verified release assets
         env:
           GH_TOKEN: ${{ github.token }}

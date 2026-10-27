@@ -28,6 +28,7 @@ class BrewDevContract(unittest.TestCase):
         (self.repo / "LICENSE").write_text("Apache-2.0\n")
         (self.repo / "NOTICE").write_text("Review attribution\n")
         (self.repo / "VERSION").write_text("0.1.0\n")
+        (self.repo / "CHANGELOG.md").write_text("# Changelog\n\n## [0.1.0]\n\nFixture release.\n")
         (self.repo / "bin").mkdir()
         (self.repo / "bin/review").write_text("#!/bin/sh\necho committed-launcher\n")
         (self.repo / "image/appliance").mkdir(parents=True)
@@ -205,6 +206,17 @@ class BrewDevContract(unittest.TestCase):
                                   env=self.env, capture_output=True, text=True)
         self.assertEqual(launched.returncode, 0, launched.stderr)
         self.assertIn("personal", launched.stdout)
+        for name in ('git', 'gh', 'podman', 'apptainer', 'omp'):
+            tool = tools / name
+            tool.write_text('#!/bin/sh\necho unexpected-runtime >&2\nexit 99\n')
+            tool.chmod(0o755)
+        viewed = subprocess.run([str(package / 'bin/review'), 'changelog'], cwd=self.root,
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(viewed.returncode, 0, viewed.stderr)
+        self.assertEqual(viewed.stdout, (self.repo / 'CHANGELOG.md').read_text())
+        invalid = subprocess.run([str(package / 'bin/review'), 'changelog', 'extra'],
+                                 env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(invalid.returncode, 0)
 
     def test_release_workflow_uses_main_without_old_tap_credentials(self):
         workflow = (SCRIPT.parents[1] / ".github/workflows/release.yml").read_text()
@@ -219,6 +231,7 @@ class FormulaContract(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.output = self.root / "output"
+        (self.root / "CHANGELOG.md").write_text("# Changelog\n\n## [0.1.0]\n\nFixture release.\n")
         spec = importlib.util.spec_from_file_location("brew_formula", SCRIPT.with_name("review-formula.py"))
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
@@ -234,7 +247,7 @@ class FormulaContract(unittest.TestCase):
     def test_both_native_architectures_share_one_version_and_sha(self):
         for arch in ["x86_64", "aarch64"]:
             self.bundle(arch)
-        self.module.prepare(self.root, self.output)
+        self.module.prepare(self.root, self.output, self.root / "CHANGELOG.md")
         formula = (self.output / "review.rb").read_text()
         self.assertIn("on_intel do", formula)
         self.assertIn("on_arm do", formula)
@@ -246,25 +259,41 @@ class FormulaContract(unittest.TestCase):
         self.assertIn('libexec.install "launcher", "build.json", "build.txt", "LICENSE", "NOTICE"', formula)
         self.assertIn('bin.install "review"', formula)
 
+    def test_release_notes_preserve_committed_section_and_append_provenance(self):
+        self.bundle('x86_64')
+        self.module.prepare(self.root, self.output, self.root / 'CHANGELOG.md')
+        notes = (self.output / 'notes').read_text()
+        self.assertTrue(notes.startswith('## [0.1.0]\n\nFixture release.\n\n'))
+        self.assertIn('### Build provenance', notes)
+
+    def test_missing_duplicate_or_empty_section_blocks_formula(self):
+        self.bundle('x86_64')
+        for text in ('## [9.0.0]\nOther.', '## [0.1.0]\n',
+                     '## [0.1.0]\nOne.\n## [0.1.0]\nTwo.'):
+            (self.root / 'CHANGELOG.md').write_text(text)
+            with self.assertRaises(ValueError):
+                self.module.prepare(self.root, self.output, self.root / 'CHANGELOG.md')
+            self.assertFalse(self.output.exists())
+
     def test_mixed_source_commits_cannot_be_published_together(self):
         self.bundle("x86_64")
         self.bundle("aarch64", "b" * 40)
         with self.assertRaisesRegex(ValueError, "one source"):
-            self.module.prepare(self.root, self.output)
+            self.module.prepare(self.root, self.output, self.root / "CHANGELOG.md")
         self.assertFalse(self.output.exists())
 
     def test_corrupt_archive_is_rejected_before_formula_is_written(self):
         self.bundle("x86_64")
         (self.root / "review-x86_64.tar.gz").write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "checksum"):
-            self.module.prepare(self.root, self.output)
+            self.module.prepare(self.root, self.output, self.root / "CHANGELOG.md")
         self.assertFalse(self.output.exists())
 
     def test_unidentified_archive_is_not_uploaded(self):
         self.bundle("x86_64")
         (self.root / "review-aarch64.tar.gz").write_bytes(b"unidentified")
         with self.assertRaisesRegex(ValueError, "match exactly"):
-            self.module.prepare(self.root, self.output)
+            self.module.prepare(self.root, self.output, self.root / "CHANGELOG.md")
 
 
 if __name__ == "__main__":

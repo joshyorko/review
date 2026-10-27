@@ -29,11 +29,20 @@ case "${1:-}" in
 Usage: review [owner/repo|org:<name>|flags...]
        review configure [name]
        review profiles
+       review changelog
        review --version
 
 Review pull requests by default. Use --issues for issues.
 Luna Factory execution is opt-in with --factory=true.
 HELP
+    exit 0
+    ;;
+  changelog)
+    if (($# != 1)); then echo 'Usage: review changelog' >&2; exit 2; fi
+    if [[ ! -r "$repo_root/CHANGELOG.md" ]]; then
+      echo 'review: bundled changelog is missing' >&2; exit 1
+    fi
+    cat "$repo_root/CHANGELOG.md"
     exit 0
     ;;
   --version) review_version; exit 0 ;;
