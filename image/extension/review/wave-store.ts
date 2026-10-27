@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PersistedRepositoryBatch } from "./extension.ts";
+import { isOperatorPolicySnapshot } from "./operator-policy.ts";
+import { parseReviewerReceiptState } from "./reviewer-receipts.ts";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const filename = (root: string, owner: string): string => join(root, "review-waves", `${digest(owner)}.json`);
@@ -35,6 +37,10 @@ export function loadWave(root: string, owner: string): PersistedRepositoryBatch 
 			|| !["slay", "fix", "diff"].includes(batch.kind) || !Array.isArray(batch.waves)
 			|| !batch.waves[batch.currentWave]?.items?.length) return;
 		if (batch.waveSessionId !== undefined && (typeof batch.waveSessionId !== "string" || !batch.waveSessionId)) return;
+		if (batch.waveOperatorPolicy !== undefined && (!isOperatorPolicySnapshot(batch.waveOperatorPolicy) || batch.waveOperatorPolicy.repository !== batch.waves[batch.currentWave].repo.toLowerCase())) return;
+		if (batch.waveReviewerReceipts !== undefined && !parseReviewerReceiptState(batch.waveReviewerReceipts)) return;
+		if (batch.waveWriterAgents !== undefined && (!Array.isArray(batch.waveWriterAgents) || !batch.waveWriterAgents.every((id: unknown) => typeof id === "string" && id.length > 0))) return;
+		if (batch.waveLandingHeads !== undefined && (!batch.waveLandingHeads || typeof batch.waveLandingHeads !== "object" || Array.isArray(batch.waveLandingHeads) || Object.entries(batch.waveLandingHeads).some(([key, value]) => !batch.waves[batch.currentWave].items.some((item: { repo: string; id: number }) => `${item.repo.toLowerCase()}#${item.id}` === key) || typeof value !== "string" || !/^[a-f0-9]{40}$/.test(value)))) return;
 		if (batch.waveExit !== undefined) {
 			const exit = batch.waveExit;
 			if (!exit || typeof exit.sessionId !== "string" || !exit.sessionId || typeof exit.waveIdentity !== "string" || !exit.waveIdentity || exit.sessionId !== batch.waveSessionId || exit.waveIdentity !== batch.waveIdentity

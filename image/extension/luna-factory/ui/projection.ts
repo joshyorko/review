@@ -24,6 +24,8 @@ import type {
 	SemanticResult,
 } from "../core/model.ts";
 import type { ResourceClaim } from "../omp/batch-store.ts";
+import type { OperatorPolicySnapshot } from "../../review/operator-policy.ts";
+import type { OperatorPolicySnapshot } from "../../review/operator-policy.ts";
 
 export interface ProjectionOptions {
 	/** Omit all actions that would change Factory state. */
@@ -132,6 +134,8 @@ export interface ProjectedClaim {
 }
 
 export interface ProjectedItem {
+	readonly operatorPolicy?: OperatorPolicySnapshot;
+	readonly operatorPolicy?: OperatorPolicySnapshot;
 	readonly observation?: { readonly status: "proven" | "unproved" | "unknown"; readonly source: string; readonly revision: string };
 	readonly key: string;
 	readonly repo: string;
@@ -520,6 +524,8 @@ export function projectItem(batch: Batch, item: BatchItem, options: ProjectionOp
 	if (!options.readOnly && item.selected.action !== "inspect" && ["BLOCKED", "QUEUED", "CANCELLED"].includes(item.stage) && !uncertainOperation) actions.push("exclude");
 	const next = nextSafeAction(batch, item, stage, dependency, claims, options.readOnly === true, options.activeItemKeys?.includes(item.selected.key) === true, retry);
 	const details = detailRows(batch, item, stage, proof, dependency, claims, attemptHistory, historyForDetails, options.readOnly === true);
+	if (item.selected.operatorPolicy) details.push(`human review policy: ${item.selected.operatorPolicy.mode} (${item.selected.operatorPolicy.source}; ${item.selected.operatorPolicy.digest})`);
+	if (item.selected.operatorPolicy) details.push(`human review policy: ${item.selected.operatorPolicy.mode} (${item.selected.operatorPolicy.source}; ${item.selected.operatorPolicy.digest})`);
 	if (graph) {
 		details.push(`convergence: ${graph.verdict}; ${graphNode?.decision ?? "UNKNOWN"}`,
 			...(batch.convergence?.observation?.relations.filter((edge) => edge.from === item.selected.key || edge.to === item.selected.key).map((edge) => `${edge.authority === "authoritative" ? "Authoritative" : "Inferred, non-authorizing"} ${edge.kind}: ${edge.from} -> ${edge.to}; ${edge.source}`) ?? []));
@@ -533,6 +539,7 @@ export function projectItem(batch: Batch, item: BatchItem, options: ProjectionOp
 			? "unknown" as const
 			: activeKeys.includes(item.selected.key.toLowerCase()) ? "active" as const : "unknown" as const;
 	return {
+		...(item.selected.operatorPolicy ? { operatorPolicy: item.selected.operatorPolicy } : {}),
 		...(observation ? { observation: { status: observation.status, source: observation.source.identity, revision: observation.revision } } : {}),
 		key: item.selected.key,
 		repo: item.selected.repo,

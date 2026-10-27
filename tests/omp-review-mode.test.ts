@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { beforeEach, afterEach } from "node:test";
 import { loadPackagedJobManager } from "./omp-async-runtime.ts";
+import { createReviewerOutputSchema } from "../image/extension/review/reviewer-receipts.ts";
 
 import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/extension/review/glyphs.ts";
 import { workbenchPainter } from "../image/extension/review/paint.ts";
@@ -34,7 +35,7 @@ import {
 	HANDOFF_ENTRY,
 	GENERIC_WORKBENCH_POLICY,
 	actionPrompt,
-	createReviewExtension,
+	createReviewExtension as createReviewExtensionImpl,
 	createCommentActionPlan,
 	renderCommentActionPlan,
 	validateCommentActionPlan,
@@ -289,7 +290,7 @@ function hiveBackedFetch(items, calls = []) {
 
 function landingGuardFetch(items) {
 	const base = hiveBackedFetch(items);
-	return async (url, init) => {
+	const fetchImpl = async (url, init) => {
 		const response = await base(url, init);
 		if (!String(url).includes("/graphql")) return response;
 		const payload = await response.json();
@@ -305,6 +306,25 @@ function landingGuardFetch(items) {
 		else for (const value of Object.values(payload.data)) if (value?.issueOrPullRequest) value.issueOrPullRequest = update(value.issueOrPullRequest);
 		return { ...response, json: async () => payload };
 	};
+	fetchImpl.reviewItems = items;
+	return fetchImpl;
+}
+
+function createReviewExtension(pi, options) {
+	const observer = options.humanReviewObserver ?? (async (repository, number) => {
+		const item = options.fetchImpl?.reviewItems?.find((candidate) => candidate.repo.toLowerCase() === repository.toLowerCase() && candidate.id === number);
+		if (!item) return { kind: "unknown", reason: "fixture has no matching pull request" };
+		const approved = item.reviewState === "approved";
+		const facts = {
+			repository: item.repo, number: item.id, headSha: item.headSha, baseRef: "main", authorLogin: item.author,
+			viewerLogin: "maintainer", canMerge: true, requiredApprovals: 1, requiresCodeOwnerReview: false,
+			requiresLastPushApproval: false, githubReviewState: item.reviewState === "changes_requested" ? "changes_requested" : approved ? "approved" : "required",
+			currentHumanApprovals: approved ? [{ login: "maintainer", headSha: item.headSha, submittedAt: Date.now() }] : [],
+			digest: `fixture:${repository}#${number}:${item.headSha}:${item.reviewState}`, observedAt: Date.now(),
+		};
+		return { kind: "observed", facts };
+	});
+	return createReviewExtensionImpl(pi, { ...options, humanReviewObserver: observer });
 }
 
 function issueBackedFetch(states) {
@@ -519,26 +539,39 @@ function observeTask(pi, ctx, id, call = `call-${id}`) {
 	} }, isError: false }, ctx);
 }
 
-async function completeReviewTask(pi, ctx, count = 1) {
-	const workers = Array.from({ length: count }, (_, index) => ({
-		id: `review-job-${index}`, agentId: `review-agent-${index}`, type: "task", status: "completed", startTime: Date.now() + 1,
-	}));
-	await pi.events.get("tool_call")({ toolCallId: "fresh-review-task", toolName: "task", input: { tasks: workers.map((worker) => ({ task: worker.agentId })) } }, ctx);
-	ctx.asyncJobs.recent.push(...workers);
-	await pi.events.get("tool_execution_end")({ toolCallId: "fresh-review-task", result: { details: {
-		async: { type: "task", state: "completed", jobId: workers[0].id },
-		progress: workers.map((worker, index) => ({ id: worker.agentId, index, status: "completed" })),
-	} }, isError: false }, ctx);
-	await deliverTaskResults(pi, ctx, workers.map((worker) => worker.id));
+async function completeReviewTask(pi, ctx, count = 1, { deliver = true, prefix = "review", headOverrides = {} } = {}) {
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	const subjects = (batch?.waves?.[batch.currentWave]?.items ?? []).filter((item) => item.type === "pr").slice(0, count);
+	for (const [index, item] of subjects.entries()) {
+		const subject = { repository: item.repo.toLowerCase(), number: item.id, headSha: headOverrides[item.id] ?? item.headSha };
+		const data = { ...subject, verdict: "clean", findings: [], summary: "Reviewed the exact admitted head." };
+		const agentId = `${prefix}-agent-${index}`;
+		const jobId = `${prefix}-job-${index}`;
+		const toolCallId = `fresh-review-task-${prefix}-${index}`;
+		const task = { agent: "reviewer", name: agentId, schemaMode: "strict", outputSchema: createReviewerOutputSchema(subject) };
+		await pi.events.get("tool_call")({ toolCallId, toolName: "task", input: task }, ctx);
+		const worker = { id: jobId, agentId, type: "task", status: "completed", startTime: Date.now() + 1 };
+		ctx.asyncJobs.recent.push(worker);
+		await pi.events.get("tool_execution_end")({ toolCallId, result: { details: {
+			async: { type: "task", state: deliver ? "completed" : "running", jobId },
+			progress: [{ id: agentId, index: 0, status: deliver ? "completed" : "running" }],
+			results: deliver ? [{ id: agentId, agent: "reviewer", agentSource: "user", exitCode: 0, structuredOutput: { status: "valid", data } }] : [],
+		} }, isError: false }, ctx);
+		if (deliver) await deliverTaskResults(pi, ctx, [jobId], [{ jobId, type: "task", status: "completed", agentId, schema: { status: "valid", data } }]);
+		else {
+			ctx.asyncJobs.delivery.pendingJobIds.push(jobId);
+			ctx.asyncJobs.delivery.pending = ctx.asyncJobs.delivery.pendingJobIds.length;
+		}
+	}
 }
 
-function deliverTaskResults(pi, ctx, jobIds) {
+function deliverTaskResults(pi, ctx, jobIds, jobs = jobIds.map((jobId) => ({ jobId, type: "task" }))) {
 	ctx.asyncJobs.delivery.pendingJobIds = ctx.asyncJobs.delivery.pendingJobIds.filter((id) => !jobIds.includes(id));
 	ctx.asyncJobs.delivery.pending = ctx.asyncJobs.delivery.pendingJobIds.length;
 	return pi.events.get("message_start")({ message: {
 		role: "custom",
 		customType: "async-result",
-		details: { jobs: jobIds.map((jobId) => ({ jobId, type: "task" })) },
+		details: { jobs },
 	} }, ctx);
 }
 
@@ -3053,7 +3086,7 @@ test("--autoslay repairs returned pull requests before implementing issue waves"
 	ctx.asyncJobs.recent = [{ id: "repair", status: "completed", startTime: Date.now() + 1 }];
 	observeTask(pi, ctx, "repair");
 	await pi.events.get("agent_end")({}, ctx);
-	assert.equal(pi.messages.length, 2);
+	assert.equal(pi.messages.length, 2, JSON.stringify(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data));
 	assert.match(pi.messages[1], /Implement projectbluefin\/review#77/);
 	assert.match(pi.messages[1], /hive_workbench_lookup.*queue.*knowledge/);
 	assert.match(pi.messages[1], /workflowz/);
@@ -3193,7 +3226,7 @@ test("slay skips known red and pending ordinary PRs without blocking eligible wa
 	assert.match(status, /Skipped CI: projectbluefin\/other#44 head=4{40} ci=pending source=checkSuites observedAt=/);
 });
 
-test("slay rechecks and skips a later-wave PR that turns pending after an earlier accepted auto-merge wave", async () => {
+test("slay blocks an auto-merge state without a recorded exact-head landing attempt", async () => {
 	let firstAutoMerge = false;
 	let laterCi = "success";
 	const items = [
@@ -3241,25 +3274,17 @@ test("slay rechecks and skips a later-wave PR that turns pending after an earlie
 
 	firstAutoMerge = true;
 	laterCi = "pending";
-	ctx.asyncJobs.recent = [{ id: "first-review", status: "completed", startTime: Date.now() + 1 }];
-	observeTask(pi, ctx, "first-review");
+	await completeReviewTask(pi, ctx);
 	await pi.events.get("agent_end")({}, ctx);
 
 	assert.equal(pi.messages.length, 1, "a newly pending later wave is skipped before any dispatch");
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	assert.equal(batch.state, "complete", JSON.stringify(batch));
-	assert.equal(batch.currentWave, 1);
-	assert.equal(batch.completedItems, 1);
+	assert.equal(batch.state, "blocked", JSON.stringify(batch));
+	assert.equal(batch.currentWave, 0);
+	assert.equal(batch.completedItems, 0);
 	assert.equal(batch.totalItems, 2);
-	assert.deepEqual(batch.skippedItems, [{
-		repo: "projectbluefin/other",
-		number: 62,
-		headSha: "c".repeat(40),
-		ciStatus: "pending",
-		ciEvidenceSource: "statusCheckRollup",
-		observedAt: batch.skippedItems[0].observedAt,
-	}]);
-	assert.ok(ctx.notifications.some((notification) => /skipping .*#62 head=c{40}: CI is pending \(source=statusCheckRollup\)/i.test(notification.message)));
+	assert.deepEqual(batch.skippedItems, [], "a later pending wave is not read past an unverified landing effect");
+	assert.ok(ctx.notifications.some((notification) => /unverified|reconcile/i.test(notification.message)));
 });
 
 test("all known red and pending selections persist a terminal skipped-only batch", async () => {
@@ -4055,9 +4080,9 @@ test("active slay blocks privileged and credential-bearing bash mutations", asyn
 	assert.match(failedReviewBlock.reason, /CI is failure/);
 	assert.doesNotMatch(failedReviewBlock.reason, /Hive/i);
 	target.ciStatus = "pending";
-	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /CI is pending/);
+	assert.match((await call(`gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}`)).reason, /CI is pending/);
 	target.ciStatus = "success";
-	assert.equal(await call("gh pr merge 7 --repo projectbluefin/other --auto --squash"), undefined);
+	assert.equal(await call(`gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}`), undefined);
 });
 
 
@@ -4083,27 +4108,94 @@ test("slay gate refuses a blocked landing state and allows only complete readine
 
 	// Green CI but a requested-changes review blocks approval and merge.
 	target.reviewState = "changes_requested";
-	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /changes_requested/);
+	assert.match((await call(`gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}`)).reason, /changes_requested/);
 	assert.match((await call("gh pr review 7 --repo projectbluefin/other --approve")).reason, /changes_requested/);
 
 	// Green CI and approved but a hold label blocks.
 	target.reviewState = "approved";
 	target.labels = ["hold"];
-	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /hold label/);
+	assert.match((await call(`gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}`)).reason, /hold label/);
 
 	// Green, approved, unheld but a dirty merge blocks.
 	target.labels = [];
 	target.mergeState = "dirty";
-	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /conflicts/);
+	assert.match((await call(`gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}`)).reason, /conflicts/);
 
 	// Green, approved, clean but pending CI blocks.
 	target.mergeState = "clean";
 	target.ciStatus = "pending";
-	assert.match((await call("gh pr merge 7 --repo projectbluefin/other --auto --squash")).reason, /CI is pending/);
+	assert.match((await call(`gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}`)).reason, /CI is pending/);
 
 	// A green, approved, clean, unheld pull request is the only ready-to-land state.
 	target.ciStatus = "success";
-	assert.equal(await call("gh pr merge 7 --repo projectbluefin/other --auto --squash"), undefined);
+	assert.equal(await call(`gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}`), undefined);
+});
+
+for (const scenario of [
+	{ mode: "solo", requiredApprovals: 0, expected: "allow" },
+	{ mode: "team", requiredApprovals: 0, expected: "team-block" },
+	{ mode: "solo", requiredApprovals: 1, expected: "github-block" },
+	{ mode: "solo", requiredApprovals: 0, expected: "policy-drift" },
+	{ mode: "solo", requiredApprovals: 0, expected: "head-drift" },
+	{ mode: "solo", requiredApprovals: 0, expected: "undelivered" },
+	{ mode: "solo", requiredApprovals: 0, expected: "repair-review" },
+]) test(`#79 ${scenario.mode} landing policy applies independent reviewer and GitHub gates (${scenario.expected})`, async () => {
+	const target = queueItem({ id: 79, repo: "example/solo", author: "maintainer", headSha: "7".repeat(40), reviewState: "review_required", ciStatus: "success", labels: [] });
+	const env = { ...ISOLATED_ENV, HOME: ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, REVIEW_MODE: "review" };
+	const observer = async (repository, number) => ({ kind: "observed", facts: {
+		repository, number, headSha: target.headSha, baseRef: "main", authorLogin: "maintainer", viewerLogin: "maintainer",
+		canMerge: true, requiredApprovals: scenario.requiredApprovals, requiresCodeOwnerReview: false, requiresLastPushApproval: false,
+		githubReviewState: scenario.requiredApprovals ? "required" : "none", currentHumanApprovals: [], digest: `#79:${scenario.mode}:${target.headSha}`, observedAt: Date.now(),
+	} });
+	const pi = fakeHost(); pi.flagValues.set("pr", "79");
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "example", fetchImpl: landingGuardFetch([target]), env, humanReviewObserver: observer });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler(`policy example/solo ${scenario.mode}`, ctx);
+	assert.match(ctx.notifications.at(-1).message, /Starts no work/);
+	assert.equal(pi.messages.length, 0, "policy selection does not dispatch work");
+	await pi.commands.get("review").handler("policy example/solo", ctx);
+	assert.match(ctx.notifications.at(-1).message, new RegExp(`${scenario.mode} \\(explicit\\)`));
+	const restarted = fakeHost();
+	const restartedCtx = fakeCtx(); restartedCtx.ui.parent = restartedCtx;
+	const restartedReview = createReviewExtension(restarted, { org: "example", fetchImpl: landingGuardFetch([target]), env, humanReviewObserver: observer });
+	await restarted.events.get("session_start")({}, restartedCtx); await restartedReview.whenStarted();
+	await restarted.commands.get("review").handler("policy example/solo", restartedCtx);
+	assert.match(restartedCtx.notifications.at(-1).message, new RegExp(`${scenario.mode} \\(explicit\\)`), "policy survives extension restart");
+	ctx.overlays[0].handleInput("s"); await new Promise((resolve) => setImmediate(resolve));
+	await completeReviewTask(pi, ctx, 1, { deliver: scenario.expected !== "undelivered" });
+	const guard = pi.events.get("tool_call");
+	if (scenario.expected === "policy-drift") await pi.commands.get("review").handler("policy example/solo team", ctx);
+	if (scenario.expected === "head-drift") target.headSha = "8".repeat(40);
+	if (scenario.expected === "allow") {
+		const noHead = await guard({ toolName: "bash", input: { command: "gh pr merge 79 --repo example/solo --squash" } }, ctx);
+		assert.match(noHead.reason, /server-enforced head guard/);
+		const mcpNoHead = await guard({ toolName: "mcp__github_merge_pull_request", input: { owner: "example", repo: "solo", pullNumber: 79, merge_method: "squash" } }, ctx);
+		assert.match(mcpNoHead.reason, /server-enforced head guard/);
+		const autoMerge = await guard({ toolName: "bash", input: { command: `gh pr merge 79 --repo example/solo --auto --squash --match-head-commit ${target.headSha}` } }, ctx);
+		assert.match(autoMerge.reason, /direct head-bound merge only/);
+		assert.equal(await guard({ toolName: "mcp__github_merge_pull_request", input: { owner: "example", repo: "solo", pullNumber: 79, merge_method: "squash", sha: target.headSha } }, ctx), undefined);
+	}
+	if (scenario.expected === "repair-review") {
+		target.headSha = "9".repeat(40);
+		const stale = await guard({ toolName: "bash", input: { command: `gh pr merge 79 --repo example/solo --squash --match-head-commit ${target.headSha}` } }, ctx);
+		assert.equal(stale?.block, true, "repair invalidates the old head receipt");
+		assert.match(stale.reason, /reviewer receipt for the current head/);
+		await completeReviewTask(pi, ctx, 1, { prefix: "repair", headOverrides: { [target.id]: target.headSha } });
+	}
+	const result = await guard({ toolName: "bash", input: { command: `gh pr merge 79 --repo example/solo --squash --match-head-commit ${target.headSha}` } }, ctx);
+	if (scenario.expected === "allow" || scenario.expected === "repair-review") assert.equal(result, undefined);
+	else {
+		assert.equal(result?.block, true);
+		const expectedReason = {
+			"team-block": /team policy/,
+			"github-block": /GitHub requires an eligible approving review/,
+			"policy-drift": /operator policy changed/,
+			"head-drift": /(?:current PR identity or head differs|reviewer receipt for the current head)/,
+			"undelivered": /await result delivery/,
+		}[scenario.expected];
+		assert.match(result.reason, expectedReason);
+	}
 });
 
 for (const surface of ["bash", "mcp", "xd"]) for (const evidence of [
@@ -4141,10 +4233,10 @@ for (const surface of ["bash", "mcp", "xd"]) for (const evidence of [
 	const claims = new ResourceClaims(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT);
 	const before = claims.list();
 	for (const action of ["approve", "merge"]) {
-		const args = { owner: "projectbluefin", repo: "other", pullNumber: 7, ...(action === "approve" ? { method: "submit_pending", event: "APPROVE" } : { merge_method: "squash" }) };
+		const args = { owner: "projectbluefin", repo: "other", pullNumber: 7, ...(action === "approve" ? { method: "submit_pending", event: "APPROVE" } : { merge_method: "squash", sha: target.headSha }) };
 		const name = action === "approve" ? "pull_request_review_write" : "merge_pull_request";
 		const result = await guard(surface === "bash"
-			? { toolName: "bash", input: { command: action === "approve" ? "gh pr review 7 --repo projectbluefin/other --approve" : "gh pr merge 7 --repo projectbluefin/other --auto --squash" } }
+			? { toolName: "bash", input: { command: action === "approve" ? "gh pr review 7 --repo projectbluefin/other --approve" : `gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}` } }
 			: surface === "mcp" ? { toolName: `mcp__github_${name}`, input: args }
 				: { toolName: "write", input: { path: `xd://mcp__github_${name}`, content: JSON.stringify(args) } }, ctx);
 		if (evidence === "current" || evidence === "consumed") assert.equal(result, undefined, action);
@@ -4170,12 +4262,13 @@ test("Slay rechecks current worker receipts after fetching live landing evidence
 		}
 		return fetch(url, init);
 	};
+	fetchImpl.reviewItems = [target];
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
 	ctx.overlays[0].handleInput("s"); await new Promise((resolve) => setImmediate(resolve));
 	await completeReviewTask(pi, ctx);
 	interruptLanding = true;
-	const result = await pi.events.get("tool_call")({ toolName: "bash", input: { command: "gh pr merge 7 --repo projectbluefin/other --auto --squash" } }, ctx);
+	const result = await pi.events.get("tool_call")({ toolName: "bash", input: { command: `gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}` } }, ctx);
 	assert.equal(result?.block, true);
 	assert.match(result.reason, /current dispatch workflowz workers lack terminal settlement/);
 });
@@ -4229,9 +4322,9 @@ test("Slay landing guards cover GitHub MCP and Bash without requiring an existin
 	const guard = pi.events.get("tool_call");
 	const mcp = (name, args) => guard({ toolName: "write", input: { path: `xd://mcp__github_${name}`, content: JSON.stringify({ owner: "projectbluefin", repo: "other", pullNumber: 7, ...args }) } }, ctx);
 	const approve = () => mcp("pull_request_review_write", { method: "submit_pending", event: "APPROVE" });
-	const merge = () => mcp("merge_pull_request", { merge_method: "squash" });
+	const merge = () => mcp("merge_pull_request", { merge_method: "squash", sha: target.headSha });
 	target.ciStatus = "pending";
-	for (const action of [approve, merge, () => guard({ toolName: "bash", input: { command: "gh pr merge 7 --repo projectbluefin/other --auto --squash" } }, ctx)]) {
+	for (const action of [approve, merge, () => guard({ toolName: "bash", input: { command: `gh pr merge 7 --repo projectbluefin/other --squash --match-head-commit ${target.headSha}` } }, ctx)]) {
 		const blocked = await action();
 		assert.equal(blocked?.block, true);
 		assert.match(blocked.reason, /Review.*CI is pending/);
@@ -4245,7 +4338,7 @@ test("Slay landing guards cover GitHub MCP and Bash without requiring an existin
 	target.ciStatus = "success"; target.reviewState = "review_required";
 	assert.equal(await approve(), undefined, "the first clean-head approval must not depend on an existing approval");
 	assert.equal(await guard({ toolName: "bash", input: { command: "gh pr review 7 --repo projectbluefin/other --approve" } }, ctx), undefined);
-	assert.match((await merge()).reason, /approval/);
+	assert.match((await merge()).reason, /(?:approval|review)/i);
 	target.reviewState = "approved";
 	assert.equal(await merge(), undefined);
 	for (const state of ["running", "paused", "blocked"]) {
@@ -4268,15 +4361,16 @@ for (const surface of ["bash", "mcp", "xd"]) test(`Slay ${surface} landing guard
 	await completeReviewTask(pi, ctx, 2);
 	const guard = pi.events.get("tool_call");
 	const merge = (number) => {
-		const args = { owner: "example", repo: "repo", pullNumber: number, merge_method: "squash" };
+		const item = items.find((candidate) => candidate.id === number);
+		const args = { owner: "example", repo: "repo", pullNumber: number, merge_method: "squash", sha: item?.headSha ?? "a".repeat(40) };
 		return guard(surface === "bash"
-			? { toolName: "bash", input: { command: `gh pr merge ${number} --repo example/repo --auto --squash` } }
+			? { toolName: "bash", input: { command: `gh pr merge ${number} --repo example/repo --squash --match-head-commit ${item?.headSha ?? "a".repeat(40)}` } }
 			: surface === "mcp"
 				? { toolName: "mcp__github_merge_pull_request", input: args }
 				: { toolName: "write", input: { path: "xd://mcp__github_merge_pull_request", content: JSON.stringify(args) } }, ctx);
 	};
 	assert.equal(await merge(468), undefined, "an unrelated unreviewed PR must not block the approved target");
-	assert.match((await merge(467)).reason, /example\/repo#467.*approval/);
+	assert.match((await merge(467)).reason, /example\/repo#467.*(?:approval|review)/i);
 	assert.match((await merge(999)).reason, /outside the active wave/);
 	if (surface === "bash") for (const command of [
 		"gh pr merge 468 --repo example/repo | gh pr merge 467 --repo example/repo",
@@ -4301,12 +4395,23 @@ for (const scenario of ["approved", "stale", "self", "changes-requested", "incom
 		reviewsIncomplete: scenario === "incomplete", reviews: [],
 	};
 	const pi = fakeHost(); const ctx = fakeCtx(); ctx.ui.parent = ctx;
-	const review = createReviewExtension(pi, { org: "example", fetchImpl: recoveredPrSlayFetch([item], { 468: effect }, { unreadable: scenario === "unreadable" }), env: ISOLATED_ENV });
+	const humanReviewObserver = async (repository, number) => {
+		if (scenario === "incomplete" || scenario === "unreadable") return { kind: "unknown", reason: "fixture does not have complete human-review evidence" };
+		const current = effect.reviews.filter((review) => review.state === "APPROVED" && review.author.login.toLowerCase() !== item.author.toLowerCase() && review.commit?.oid === effect.headSha);
+		return { kind: "observed", facts: {
+			repository, number, headSha: effect.headSha, baseRef: "main", authorLogin: item.author, viewerLogin: "maintainer", canMerge: true,
+			requiredApprovals: 0, requiresCodeOwnerReview: false, requiresLastPushApproval: false,
+			githubReviewState: scenario === "changes-requested" ? "changes_requested" : "none",
+			currentHumanApprovals: current.map((review) => ({ login: review.author.login, headSha: review.commit.oid, submittedAt: Date.parse(review.submittedAt) })),
+			digest: `exact-head:${scenario}:${effect.headSha}`, observedAt: Date.now(),
+		} };
+	};
+	const review = createReviewExtension(pi, { org: "example", fetchImpl: recoveredPrSlayFetch([item], { 468: effect }, { unreadable: scenario === "unreadable" }), env: ISOLATED_ENV, humanReviewObserver });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
 	ctx.overlays[0].handleInput("s"); await new Promise((resolve) => setImmediate(resolve));
 	await completeReviewTask(pi, ctx);
 	effect.reviews.push({ state: scenario === "changes-requested" ? "CHANGES_REQUESTED" : "APPROVED", submittedAt: new Date(Date.now() + 1).toISOString(), author: { login: scenario === "self" ? "contributor" : "maintainer" }, commit: { oid: scenario === "stale" ? "b".repeat(40) : item.headSha } });
-	const result = await pi.events.get("tool_call")({ toolName: "bash", input: { command: "gh pr merge 468 --repo example/repo --auto --squash" } }, ctx);
+	const result = await pi.events.get("tool_call")({ toolName: "bash", input: { command: `gh pr merge 468 --repo example/repo --squash --match-head-commit ${item.headSha}` } }, ctx);
 	if (scenario === "approved") assert.equal(result, undefined, "a complete current-head approval is valid without an aggregate policy decision");
 	else assert.equal(result?.block, true, "ambiguous, stale, self or blocking reviews must retain the landing gate");
 });
@@ -4394,17 +4499,18 @@ test("comment batches revalidate later heads and retain partial receipts", async
 });
 
 test("pinned OMP agent_end advances repository waves only after final settlement", async () => {
-	const items = [
-		{ id: 1, repo: "projectbluefin/a", title: "a one", headSha: "1".repeat(40), autoMergeEnabled: true },
-		{ id: 2, repo: "projectbluefin/a", title: "a two", headSha: "2".repeat(40), autoMergeEnabled: true },
-		{ id: 3, repo: "projectbluefin/b", title: "b one", headSha: "3".repeat(40), autoMergeEnabled: true },
-	];
+	const items = {
+		"projectbluefin/a#1": { title: "a one", submittedPrs: [] },
+		"projectbluefin/a#2": { title: "a two", submittedPrs: [] },
+		"projectbluefin/b#3": { title: "b one", submittedPrs: [] },
+	};
 	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, {
 		org: "projectbluefin",
-		fetchImpl: hiveBackedFetch(items),
+		fetchImpl: issueBackedFetch(items),
 		env: { ...ISOLATED_ENV, HIVE_HUB: "wss://hive.example/contribute" },
 	});
 	await pi.events.get("session_start")({}, ctx);
@@ -4432,8 +4538,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	await pi.events.get("turn_end")({}, ctx);
 	const captured = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.deepEqual(captured.waveJobIds, ["worker-1", "worker-2"], "staggered workers are accumulated by exact wave identity");
-	assert.match(pi.messages[0], /^Slay this repository wave for projectbluefin\/a through review, repair, and landing:/m);
-	assert.match(pi.messages[0], /Use the `task` tool once with one fresh reviewer item per pull request/);
+	assert.match(pi.messages[0], /Implement this repository wave for projectbluefin\/a, opening one review-ready pull request per issue/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/b/);
 
@@ -4456,7 +4561,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.equal(pi.messages.length, 1, "resume waits for pending async-result deliveries");
 	await deliverTaskResults(pi, ctx, ["worker-1", "worker-2"]);
 	await pi.events.get("agent_end")({}, ctx);
-	assert.equal(pi.messages.length, 2);
+	assert.equal(pi.messages.length, 2, JSON.stringify(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data));
 	assert.match(pi.messages[1], /projectbluefin\/b/);
 	assert.doesNotMatch(pi.messages[1], /projectbluefin\/a/);
 
@@ -5222,8 +5327,8 @@ async function interruptedIssueSlay(states) {
 	return { env, entries: pi.entries, batch };
 }
 
-async function blockedPrSlayWave(beforeSettlement = (_fixture) => {}) {
-	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
+async function blockedPrSlayWave(beforeSettlement = (_fixture) => {}, { legacy = true, policyMode, landingObserver } = {}) {
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review", ...(policyMode ? { HOME: ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT } : {}) };
 	const items = [350, 352, 353, 354].map((id) => queueItem({
 		id,
 		repo: "projectbluefin/review",
@@ -5245,25 +5350,50 @@ async function blockedPrSlayWave(beforeSettlement = (_fixture) => {}) {
 	}]));
 	const pi = fakeHost();
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
-	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env });
+	const humanReviewObserver = landingObserver ? async (repository, number) => {
+		const item = items.find((candidate) => candidate.repo.toLowerCase() === repository.toLowerCase() && candidate.id === number);
+		return { kind: "observed", facts: {
+			repository, number, headSha: item.headSha, baseRef: "main", authorLogin: item.author, viewerLogin: "maintainer", canMerge: true,
+			requiredApprovals: 0, requiresCodeOwnerReview: false, requiresLastPushApproval: false, githubReviewState: "none",
+			currentHumanApprovals: [], digest: `solo:${repository}#${number}:${item.headSha}`, observedAt: Date.now(),
+		} };
+	} : undefined;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env, ...(humanReviewObserver ? { humanReviewObserver } : {}) });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	if (policyMode) await pi.commands.get("review").handler(`policy projectbluefin/review ${policyMode}`, ctx);
 	ctx.overlays.at(-1).handleInput("A");
 	ctx.overlays.at(-1).handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 1);
 	const dispatched = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.deepEqual(dispatched.waves[0].items.map((item) => item.id), [350, 352, 353]);
-	const workers = [350, 352, 353].map((id) => ({ id: `reviewer-${id}`, agentId: `reviewer-${id}`, type: "task", status: "completed", startTime: Date.now() + 1 }));
-	ctx.asyncJobs.recent = workers;
-	pi.events.get("tool_call")({ toolCallId: "review-call", toolName: "task", input: { isolated: false } }, ctx);
-	await pi.events.get("tool_execution_end")({ toolCallId: "review-call", result: { details: {
-		async: { type: "task", state: "completed", jobId: workers[0].id },
-		progress: workers.map((worker, index) => ({ id: worker.agentId, index, status: "completed" })),
-	} }, isError: false }, ctx);
+	if (legacy) {
+		const workers = [350, 352, 353].map((id) => ({ id: `reviewer-${id}`, agentId: `reviewer-${id}`, type: "task", status: "completed", startTime: Date.now() + 1 }));
+		ctx.asyncJobs.recent = workers;
+		pi.events.get("tool_call")({ toolCallId: "review-call", toolName: "task", input: { isolated: false } }, ctx);
+		await pi.events.get("tool_execution_end")({ toolCallId: "review-call", result: { details: {
+			async: { type: "task", state: "completed", jobId: workers[0].id },
+			progress: workers.map((worker, index) => ({ id: worker.agentId, index, status: "completed" })),
+		} }, isError: false }, ctx);
+	} else {
+		await completeReviewTask(pi, ctx, 3);
+		if (landingObserver) for (const item of items.slice(0, 3)) {
+			const result = await pi.events.get("tool_call")({ toolName: "bash", input: { command: `gh pr merge ${item.id} --repo ${item.repo} --squash --match-head-commit ${item.headSha}` } }, ctx);
+			assert.equal(result, undefined, "the solo exact-head guard admits the direct merge attempt");
+		}
+	}
 	beforeSettlement({ items, effects });
 	await pi.events.get("agent_end")({}, ctx);
 	const blocked = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(blocked.state, "blocked");
+	if (legacy) {
+		// Simulate abrupt loss of the legacy writer before #79 persisted policy or reviewer receipts.
+		delete blocked.waveOperatorPolicy;
+		delete blocked.waveReviewerReceipts;
+		delete blocked.waveWriterAgents;
+		saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, blocked);
+		pi.appendEntry(BATCH_ENTRY, blocked);
+	}
 	assert.ok(blocked.waveTerminalJobStatuses && Object.keys(blocked.waveTerminalJobStatuses).length === 3);
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
 	assert.deepEqual(claims.map((claim) => claim.resource).sort(), [
@@ -5347,6 +5477,30 @@ test("/review reconcile recovers a merged three-PR Slay wave and admits the next
 	await pi.commands.get("review").handler("slay", ctx);
 	assert.equal(pi.messages.length, 1, "a new Slay dispatch is not blocked by the recovered wave's old claims");
 	assert.match(ctx.notifications.map((notification) => notification.message).join("\n"), /Reconciled/);
+});
+
+test("#79 solo merge acknowledgement loss reconciles the recorded reviewed heads and releases the same claims", async () => {
+	const { env, items, effects, entries, batch } = await blockedPrSlayWave(() => {}, { legacy: false, policyMode: "solo", landingObserver: true });
+	for (const item of batch.waves[0].items) effects[item.id] = { state: "MERGED", merged: true, headSha: item.headSha, autoMerge: false, reviewDecision: null, reviews: [] };
+	const pi = fakeHost();
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager = { getSessionId: () => "restart-session", getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
+	const humanReviewObserver = async (repository, number) => {
+		const item = items.find((candidate) => candidate.repo.toLowerCase() === repository.toLowerCase() && candidate.id === number);
+		return { kind: "observed", facts: {
+			repository, number, headSha: item.headSha, baseRef: "main", authorLogin: item.author, viewerLogin: "maintainer", canMerge: true,
+			requiredApprovals: 0, requiresCodeOwnerReview: false, requiresLastPushApproval: false, githubReviewState: "none",
+			currentHumanApprovals: [], digest: `solo:${repository}#${number}:${item.headSha}`, observedAt: Date.now(),
+		} };
+	};
+	createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env, humanReviewObserver });
+	await pi.events.get("session_start")({}, ctx);
+	await pi.commands.get("review").handler("reconcile", ctx);
+	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(recovered.state, "complete");
+	assert.equal(recovered.completedItems, 3);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	assert.deepEqual(batch.waveLandingHeads, Object.fromEntries(batch.waves[0].items.map((item) => [`${item.repo.toLowerCase()}#${item.id}`, item.headSha])));
 });
 
 test("stopped Slay reconciles a merged forward head for a solo operator", async () => {
@@ -5824,7 +5978,7 @@ test("slay prompts require unique target checkouts and live-rule landing", () =>
 		assert.doesNotMatch(prompt, /--json [\w,]*\bbody\b/);
 		assert.doesNotMatch(prompt, /isolated: true/);
 	}
-	assert.match(slay, /`task` tool once with one fresh reviewer item per pull request/);
+	assert.match(slay, /review each head with a fresh reviewer/i);
 	assert.match(slay, /Do not use eval workpool/);
 	assert.match(slay, /fresh fixer/);
 	assert.doesNotMatch(slay, /Do not request OMP-native/);
@@ -5833,7 +5987,7 @@ test("slay prompts require unique target checkouts and live-rule landing", () =>
 	assert.match(slay, /\$HOME\/worktrees/);
 	assert.match(slay, /rules\/branches\/<branch>/);
 	assert.match(slay, /reviewed head must equal the live head/i);
-	assert.match(slay, /gh pr merge <n> --repo <r> --auto --squash/);
+	assert.match(slay, /--match-head-commit <reviewed-sha>/);
 	assert.match(slay, /Never use `--admin`/);
 	assert.match(slay, /do not disable and re-arm auto-merge/);
 	assert.match(slay, /report the outstanding approval gate and move on/);
@@ -8053,7 +8207,7 @@ test("Review resumed stopped work uses a fresh claim owner and prompt after curr
 	assert.equal(current.waveSessionId, "new-session");
 	assert.equal(current.waveShutdown, undefined);
 	assert.notEqual(current.wavePromptDigest, old.wavePromptDigest);
-	assert.equal(pi.messages.length, 2);
+	assert.equal(pi.messages.length, 2, JSON.stringify(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data));
 	assert.ok(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().every((claim) => claim.owner.includes(current.id)));
 	const restarted = fakeHost(); restarted.flagValues.set("issues", true);
 	const next = fakeCtx(); next.ui.parent = next; next.sessionId = ctx.sessionId;

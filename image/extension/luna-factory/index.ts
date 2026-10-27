@@ -31,6 +31,7 @@ import { registerFactoryController, registerFactoryBatchSubmitter, registerFacto
 import type { NativeSDK, NativeContext, SchemaBuilder } from "./omp/batch-native.ts";
 import type { FactoryAction, SelectedItem } from "./core/batch.ts";
 import { resolveToken } from "../review/github.ts";
+import { operatorPolicyPath, readOperatorPolicy } from "../review/operator-policy.ts";
 import { runPackagedBatchProbe } from "./omp/batch-probe.ts";
 import { FactoryDashboard, type FactoryDashboardAction, type FactoryDashboardPresentation, type FactoryDashboardSnapshot, type FactoryDashboardPrimitives, type FactoryDashboardTheme } from "./ui/dashboard.ts";
 import { readBoundedEvidence, sessionEvidence } from "./ui/evidence.ts";
@@ -214,9 +215,9 @@ const FACTORY_START_MODES = ["inspect", "patch", "pr-ready"] as const;
 const FACTORY_CONVERGE_MODES = ["inspect", "patch"] as const;
 const FACTORY_CLAIMS_COMMANDS = ["status", "inspect", "reconcile"] as const;
 const FACTORY_START_COMMANDS = ["start", "selected", "run", "converge"] as const;
-const FACTORY_BATCH_COMMANDS = ["start", "selected", "run", "converge", "reconcile", "status", "inspect", "claims", "pause", "resume", "stop", "retry", "exclude", "export", "discard"] as const;
+const FACTORY_BATCH_COMMANDS = ["start", "selected", "run", "converge", "reconcile", "status", "inspect", "claims", "policy", "pause", "resume", "stop", "retry", "exclude", "export", "discard"] as const;
 const FACTORY_BATCH_ID_COMMANDS = ["status", "inspect", "resume", "pause", "stop", "retry", "exclude", "export", "discard", "reconcile"] as const;
-const FACTORY_COMPLETION_VERBS = ["status", "start", "selected", "run", "converge", "reconcile", "inspect", "resume", "pause", "drain", "abort", "stop", "retry", "exclude", "export", "discard", "claims", "help", "--help", "debug", "--debug", "why", "--"] as const;
+const FACTORY_COMPLETION_VERBS = ["status", "start", "selected", "run", "converge", "reconcile", "inspect", "resume", "pause", "drain", "abort", "stop", "retry", "exclude", "export", "discard", "claims", "policy", "help", "--help", "debug", "--debug", "why", "--"] as const;
 
 function text(value: string): ToolContent[] {
 	return [{ type: "text", text: value }];
@@ -1250,7 +1251,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 		if (!batchService) {
 			const capacity = Number(env.LUNA_FACTORY_CAPACITY ?? "2");
 			if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("LUNA_FACTORY_CAPACITY must be between 1 and 100");
-			batchService = new BatchService(factoryStateRoot(env), new BatchGitHub(resolveToken(env)), host.pi, host.zod as unknown as SchemaBuilder, capacity, factoryClaimsRoot(env));
+			batchService = new BatchService(factoryStateRoot(env), new BatchGitHub(resolveToken(env)), host.pi, host.zod as unknown as SchemaBuilder, capacity, factoryClaimsRoot(env), undefined, undefined, undefined, env);
 		}
 		return batchService;
 	};
@@ -1331,6 +1332,11 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 			if (await verifier(owner, resource) !== "settled") return `Retained ${resource} for ${owner}; external effect remains UNKNOWN`;
 			claims.reconcile(resource, owner);
 			return `Reconciled ${resource} for ${owner}; claim released`;
+		}
+		if (verb === "policy") {
+			if (!id || rest.length > 0) throw new Error("usage: /factory policy <owner/repo>");
+			const policy = readOperatorPolicy(id, env);
+			return `Human review policy: ${policy.repository} ${policy.mode} (${policy.source}; ${policy.digest})\nPolicy store: ${operatorPolicyPath(env)}\nScope: one repository entry in this instance's HOME store`;
 		}
 		const service = batches();
 		if (FACTORY_START_COMMANDS.includes(verb as typeof FACTORY_START_COMMANDS[number])) {
@@ -1477,7 +1483,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					return;
 				}
 				const commandVerb = args.match(/^\S+/)?.[0];
-				if (!ledger && (args.length === 0 || FACTORY_BATCH_COMMANDS.includes(commandVerb as typeof FACTORY_BATCH_COMMANDS[number]))) {
+				if (commandVerb === "policy" || !ledger && (args.length === 0 || FACTORY_BATCH_COMMANDS.includes(commandVerb as typeof FACTORY_BATCH_COMMANDS[number]))) {
 					try { notifyCommand(ctx, await batchCommand(args || "status", ctx)); }
 					catch (error) { notifyCommand(ctx, error instanceof Error ? error.message : String(error), "error"); }
 					return;
@@ -1487,7 +1493,7 @@ export function createLunaFactoryExtension(host: FactoryHost, options: FactoryOp
 					return;
 				}
 				if (args === "help" || args === "--help") {
-					notifyCommand(ctx, "Selected batches: /factory (dashboard), Review Shift+F, /factory start inspect|patch|pr-ready. Finite convergence: /factory converge inspect|patch --target-ref <branch> over the explicit Review selection. Headless /factory run JSON supplies targetRef on every convergence item. Controls: status|inspect <batch>, reconcile <batch>, pause|resume|stop <batch>, retry|exclude <batch> <item>, claims status|reconcile, export|discard <batch>. Diagnostics: /factory debug. Conversational objective: /factory -- <objective>.");
+							notifyCommand(ctx, "Selected batches: /factory (dashboard), Review Shift+F, /factory start inspect|patch|pr-ready. Read policy: /factory policy <owner/repo>. Finite convergence: /factory converge inspect|patch --target-ref <branch> over the explicit Review selection. Headless /factory run JSON supplies targetRef on every convergence item. Controls: status|inspect <batch>, reconcile <batch>, pause|resume|stop <batch>, retry|exclude <batch> <item>, claims status|reconcile, export|discard <batch>. Diagnostics: /factory debug. Conversational objective: /factory -- <objective>.");
 					return;
 				}
 				if (args === "debug" || args === "--debug") {

@@ -21,6 +21,8 @@ import { type HiveSnapshot, type HiveWorkItem, EMPTY_HIVE, fetchHive, fetchHiveK
 import { type PrioritizedQueue, type Priority, isRepairRequested, itemKey, prioritize } from "./priority.ts";
 import { type LandingState, landingState } from "./landing.ts";
 import { GENERIC_WORKBENCH_POLICY, type WorkbenchPolicy } from "./policy.ts";
+import { readOperatorPolicy, type OperatorPolicySnapshot } from "./operator-policy.ts";
+import type { OperatorLandingDecision } from "./operator-landing.ts";
 import { SessionTrace } from "./session.ts";
 import type { FactoryAction, SelectedItem } from "../luna-factory/core/batch.ts";
 
@@ -126,6 +128,8 @@ export class ReviewMode {
 	private fetchImpl?: typeof fetch;
 	private env: NodeJS.ProcessEnv;
 	private policy: WorkbenchPolicy;
+	private operatorPolicies = new Map<string, OperatorPolicySnapshot>();
+	private operatorLanding = new Map<string, { head: string | undefined; decision: OperatorLandingDecision }>();
 	private inflight?: AbortController;
 	private ranked: PrioritizedQueue = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
 	skipRepos: Set<string>;
@@ -205,7 +209,28 @@ export class ReviewMode {
 	 * project this, so the UI maps to the same state the slay gate enforces.
 	 */
 	landingStateFor(item: QueueItem): LandingState {
-		return landingState(item, this.policy);
+		const state = landingState(item, this.policy);
+		const observed = this.operatorLanding.get(itemKey(item));
+		if (observed && observed.head === item.headSha && !observed.decision.allowed && state === "ready-to-land") return "incomplete";
+		return state === "unreviewed" && observed && observed.head === item.headSha && observed.decision.allowed ? "ready-to-land" : state;
+	}
+
+	operatorPolicyFor(repository: string): OperatorPolicySnapshot | undefined {
+		return this.operatorPolicies.get(repository.toLowerCase());
+	}
+
+	refreshOperatorPolicies(): void {
+		this.operatorLanding.clear();
+		for (const repository of new Set(this.items.map((item) => item.repo.toLowerCase()))) this.operatorPolicies.set(repository, readOperatorPolicy(repository, this.env));
+	}
+
+	recordOperatorLanding(item: QueueItem, decision: OperatorLandingDecision): void {
+		this.operatorLanding.set(itemKey(item), { head: item.headSha, decision });
+	}
+
+	operatorLandingReasonFor(item: QueueItem): string | undefined {
+		const observed = this.operatorLanding.get(itemKey(item));
+		return observed && observed.head === item.headSha && !observed.decision.allowed ? observed.decision.reason : undefined;
 	}
 
 	/** Which provider ordered the queue: Hive's priority, or local categories. */
@@ -589,6 +614,7 @@ export class ReviewMode {
 			if (result.viewerLogin) this.currentUserLogin = result.viewerLogin;
 			const previousKey = this.selectedKey();
 			this.items = [...result.items, ...missing];
+			this.refreshOperatorPolicies();
 			this.reprioritize();
 			if (previousKey) {
 				const index = this.visibleItems().findIndex((item) => itemKey(item) === previousKey);

@@ -419,6 +419,7 @@ export class FactoryDashboard {
 			...(item.blocker ? ["Recorded error", sanitizeRetainedError(item.blocker), ""] : []),
 			...(this.source.evidenceWarnings?.[`${batch.id}:${item.key}`] ? ["Evidence is unavailable. Recorded proof needs revalidation before this run can be archived.", ""] : []),
 			"Acceptance", selected.selected.acceptance ?? "Use the captured issue's acceptance.", "",
+			...(selected.selected.operatorPolicy ? [`Human review policy: ${selected.selected.operatorPolicy.mode} (${selected.selected.operatorPolicy.source}; ${selected.selected.operatorPolicy.digest})`, ""] : []),
 			`Attempts: ${item.attempts} of ${item.maxAttempts}`, `Run limit: ${batch.capacity} workers at once`, `Proof: ${item.proof.current ? "recorded current for this revision" : item.proof.stage === "unknown" ? "not yet proven" : "awaiting owner acceptance"}`,
 			...(item.dependencies.length ? ["", "Waiting for", ...item.dependencies.map((edge) => `${edge.satisfied ? "✓" : "○"} ${edge.requires} — ${edge.stage === "verified-patch" ? "verified patch" : edge.stage === "pr-ready" ? "PR ready" : "merged upstream"}`)] : []),
 			...(item.operation ? ["", `Last operation: ${item.operation.phase} · ${item.operation.state}`] : []),

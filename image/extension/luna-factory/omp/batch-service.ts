@@ -13,6 +13,7 @@ import { requiredChecks, packageCheckScripts } from "./batch-checks.ts";
 import { BatchGitHub } from "./batch-github.ts";
 import { runNative, sandboxTest, sandboxPreflight, NativeExecutionError, resolveNativeBinding, validateNativeSDK, type NativeBinding, type NativeContext, type NativeRequestPolicy, type NativeSDK, type SchemaBuilder, type SemanticOutcome } from "./batch-native.ts";
 import { createExecutionPolicy, observeProviderResponse, reserveProviderRequest, routeForModel, settleProviderUsage } from "./policy.ts";
+import { readOperatorPolicy } from "../../review/operator-policy.ts";
 
 const command = promisify(execFile);
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -113,6 +114,7 @@ export class BatchService {
 	private readonly preflight: typeof sandboxPreflight;
 	private readonly runVerification: typeof sandboxTest;
 	private readonly timing: BatchTiming;
+	private readonly env: NodeJS.ProcessEnv;
 	private readonly continuationWakeups = new Set<() => void>();
 
 	constructor(root: string, github: BatchGitHub, sdk: NativeSDK | undefined, schema: SchemaBuilder, capacity: number, claimsRoot = root, preflight: typeof sandboxPreflight = sandboxPreflight, runVerification: typeof sandboxTest = sandboxTest, timing: BatchTiming = {
@@ -124,7 +126,7 @@ export class BatchService {
 			signal?.addEventListener("abort", finish, { once: true });
 			if (signal?.aborted) finish();
 		}),
-	}) {
+	}, env: NodeJS.ProcessEnv = process.env) {
 		this.root = root;
 		this.github = github;
 		this.sdk = sdk;
@@ -133,6 +135,7 @@ export class BatchService {
 		this.preflight = preflight;
 		this.runVerification = runVerification;
 		this.timing = timing;
+		this.env = env;
 		if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100) throw new Error("invalid shared Factory capacity");
 		this.store = new BatchStore(root);
 		this.claims = new ResourceClaims(root, claimsRoot);
@@ -296,6 +299,9 @@ export class BatchService {
 		return result;
 	}
 	private async submitCaptured(selected: SelectedItem[], options: BatchOptions): Promise<Batch> {
+		// Review handoffs and /factory JSON can carry stale or forged metadata. Re-resolve
+		// policy from the trusted same-instance HOME store at this admission boundary.
+		selected = selected.map((item) => ({ ...item, operatorPolicy: readOperatorPolicy(item.repo, this.env) }));
 		this.store.acquire();
 		if (this.fatal) throw new Error(this.fatal);
 		const preliminary = createBatch(selected, { ...options, capacity: Math.min(options.capacity, this.capacity), id: `batch-${randomUUID()}` });
@@ -324,6 +330,7 @@ export class BatchService {
 			}
 		}));
 		const batch = createBatch(snapshot, { ...options, capacity: preliminary.capacity, id: preliminary.id });
+		batch.operatorPolicy = Object.fromEntries(batch.items.flatMap((item) => item.selected.operatorPolicy ? [[item.selected.repo, item.selected.operatorPolicy] as const] : []));
 		for (const item of batch.items) {
 			const conflict = existing.find((other) => other.items.some((candidate) => candidate.stage !== "EXCLUDED" && candidate.stage !== "DONE" && (candidate.selected.key === item.selected.key || candidate.selected.overlaps.includes(item.selected.key) || item.selected.overlaps.includes(candidate.selected.key))));
 			if (conflict) { item.stage = "BLOCKED"; item.blocker = `already tracked by ${conflict.id}; attach there instead of competing execution`; }

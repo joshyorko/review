@@ -32,6 +32,23 @@ Review defaults to GitHub-only mode. It makes no Hive request and does not searc
 
 Luna Factory is packaged beside Review. Loading it starts no work; execution requires `LUNA_FACTORY_ENABLED=1`. Factory retains its own admission, claims, evidence, and durable state boundaries.
 
+Human-review presets are explicit per repository: `/review policy owner/repo`
+reads the effective mode, and `/review policy owner/repo solo|team` sets it
+without starting work. Missing entries use `team`. Review and co-loaded Factory
+share the strict versioned store at `$HOME/.config/review/operator-policy.json`
+inside the mounted instance home (`/home/review`); host `XDG_CONFIG_HOME` does
+not redirect it. Existing waves retain their captured policy and cannot gain
+solo authority from a later setting. `/factory policy owner/repo` reads the
+same snapshot, including while Factory execution is disabled.
+
+Both modes require a fresh structured read-only reviewer receipt for the exact
+head. `solo` removes only Review's extra local human-approval minimum when
+current GitHub policy proves no external review is required; `team` also
+requires an eligible non-author human approval on the current head. GitHub
+protections, checks, holds, permissions, claims, workflow safeguards and
+operation scope remain active. Factory's `pr-ready` and `verified-patch`
+outcomes retain independent acceptance and do not grant landing authority.
+
 ## Host launch profiles
 
 The installed `review` alias and source `bin/review` launcher can save host launch intent. Profiles do not apply to `just review-appliance` or native `bin/review-source`; those entrypoints retain their existing configuration.

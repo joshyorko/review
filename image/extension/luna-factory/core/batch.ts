@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { emptyLedger, type Ledger, type OperationReceipt, type RunId, type CriterionId } from "./model.ts";
 import { criterionProven } from "./evidence.ts";
 import type { ExecutionPolicy, RequestAccounting } from "../omp/policy.ts";
+import type { OperatorPolicySnapshot } from "../../review/operator-policy.ts";
 import { evaluateWorkGraph, type WorkGraphObservation, type WorkGraphDecision } from "./graph.ts";
 
 export type FactoryAction = "inspect" | "patch" | "pr-ready";
@@ -32,6 +33,8 @@ export interface SelectedItem {
 	overlaps: string[];
 	/** Operator/repository checks captured before the worker can propose commands. */
 	requiredChecks?: string[];
+	/** Human review preference captured from the trusted per-repository runtime store. */
+	operatorPolicy?: OperatorPolicySnapshot;
 	blocker?: string;
 }
 export interface Prerequisite { item: string; requires: string; stage: OutcomeStage }
@@ -108,6 +111,8 @@ export interface Batch {
 	usage: { modelCalls: number; peakWorkers: number; inputTokens: number | null; outputTokens: number | null; cost: number | null };
 	/** Fixed route and non-monetary limits captured before the first provider request. */
 	executionPolicy?: ExecutionPolicy;
+	/** Human review policy snapshots for the repositories in this batch; informational only. */
+	operatorPolicy?: Record<string, OperatorPolicySnapshot>;
 	/** Pre-request reservations survive crashes and are shared by workers and acceptance sessions. */
 	requestAccounting: RequestAccounting;
 	policyBlocker?: string;
@@ -259,6 +264,7 @@ export function batchSummary(batch: Batch, root: string): string {
 		`Factory ${batch.id}: ${batchConverged(batch) ? "CONVERGED" : batch.control} · ${proven}/${scope} proven · capacity ${batch.capacity}`,
 		`Current scope: ${proven} proven · ${active} active · ${blocked} blocked · ${unknown} unknown/unresolved · ${cancelled} cancelled · ${excluded} excluded (${scope}/${batch.items.length} items)`,
 		`State: ${root}; ${batch.mode === "once" ? "run once (unfinished work retained)" : "keep for resume"}. No detached service; process termination interrupts work.`,
+		...(batch.operatorPolicy ? [`Human review policy: ${Object.entries(batch.operatorPolicy).sort(([a], [b]) => a.localeCompare(b)).map(([repo, policy]) => `${repo} ${policy.mode} (${policy.source}; ${policy.digest})`).join(" · ")}`] : []),
 		...batch.items.flatMap((item) => {
 			const attempts = item.ledger.tasks.flatMap((task) => task.attempts.map((attempt) => ({ task, attempt })));
 				const stage = graph?.nodes.find((node) => node.key === item.selected.key)?.decision ?? (item.stage === "DONE" && !batchItemProofCurrent(item) ? "UNKNOWN (stored proof is not current)" : item.stage);

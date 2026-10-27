@@ -9,6 +9,7 @@ import { parseJournal, type JournalRead } from "../core/journal.ts";
 import { validateExecutionPolicy, validateRequestAccounting } from "./policy.ts";
 import { parseOperationReceipt } from "../core/schema.ts";
 import type { Ledger, OperationReceipt } from "../core/model.ts";
+import { isOperatorPolicySnapshot } from "../../review/operator-policy.ts";
 
 
 function migrateLegacyOperation(batchId: string, item: Batch["items"][number], ledger: Ledger): void {
@@ -183,10 +184,19 @@ export class BatchStore {
 			}
 		} else if (batch.convergence !== undefined) throw new Error("old selected batch cannot acquire convergence authority implicitly");
 		createBatch(batch.items.map((item) => item.selected), { id, capacity: batch.capacity, maxAttempts: batch.maxAttempts, maxTotalAttempts: batch.maxTotalAttempts, mode: batch.mode, dependencies: batch.dependencies, converge: batch.version === 3 });
+		if (batch.operatorPolicy !== undefined) {
+			if (!batch.operatorPolicy || typeof batch.operatorPolicy !== "object" || Array.isArray(batch.operatorPolicy)) throw new Error("invalid batch operator policy metadata; preserve original state");
+			for (const [repository, policy] of Object.entries(batch.operatorPolicy)) {
+				if (!isOperatorPolicySnapshot(policy) || policy.repository !== repository || repository !== repository.toLowerCase()) throw new Error("invalid batch operator policy snapshot; preserve original state");
+			}
+			const selectedPolicies = Object.fromEntries(batch.items.flatMap((item) => item.selected.operatorPolicy ? [[item.selected.repo, item.selected.operatorPolicy] as const] : []));
+			if (JSON.stringify(Object.entries(batch.operatorPolicy).sort(([a], [b]) => a.localeCompare(b))) !== JSON.stringify(Object.entries(selectedPolicies).sort(([a], [b]) => a.localeCompare(b)))) throw new Error("batch and selected operator policy snapshots disagree; preserve original state");
+		}
 		for (const item of batch.items) {
 			if (!item.selected || !Array.isArray(item.sessions) || !item.sessions.every((session) => typeof session === "string") || !Number.isSafeInteger(item.attempts) || item.attempts < 0 || !["QUEUED", "RUNNING", "VERIFY", "DONE", "BLOCKED", "UNKNOWN", "CANCELLED", "EXCLUDED"].includes(item.stage)) {
 				throw new Error("invalid item state; no execution allowed");
 			}
+			if (item.selected.operatorPolicy !== undefined && (!isOperatorPolicySnapshot(item.selected.operatorPolicy) || item.selected.operatorPolicy.repository !== item.selected.repo)) throw new Error("invalid selected operator policy snapshot; preserve original state");
 			const parsed = validateItemLedger(item, true);
 			if (parsed.ok) item.ledger = parsed.ledger;
 			if (legacy) {

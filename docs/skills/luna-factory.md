@@ -82,6 +82,26 @@ and separate Review/Factory authority.
 - The Review/Factory command bridge stores selection, controller, and bounded
   load failure state in one versioned global slot, so cache-busted extension
   module copies retain the same handoff and identity-safe cleanup.
+- Co-loaded Factory reads the same per-repository human-review preset as
+  Review. `/factory policy owner/repo` is read-only and works while execution
+  is disabled; it does not admit work or authorize landing.
+
+## Shared human-review policy
+
+Review stores explicit per-repository `solo` or `team` presets in the
+instance-owned `$HOME/.config/review/operator-policy.json` file. In the
+appliance, `$HOME` is `/home/review`; host `XDG_CONFIG_HOME` does not choose
+this store. Missing entries resolve to `team`. The operator reads or sets a
+preset with `/review policy owner/repo [solo|team]`; setting one starts no
+work. Factory captures and displays the same snapshots on direct admission and
+Review handoff. An existing selected batch does not silently gain authority
+after a policy change.
+
+The preset is human-landing context only. Factory keeps its independent native
+acceptance and exact-subject proof requirements, including for `verified-patch`
+and `pr-ready`; either outcome may be prepared under either preset. Factory
+does not approve, merge, or request auto-merge, and the preset does not change
+those boundaries.
 
 ## Verification
 

@@ -24,6 +24,10 @@ import { landingState, landingReason } from "./landing.ts";
 import { buildReviewRecap, type ReviewRecapInput } from "./recap.ts";
 import { truncateToWidth } from "./width.ts";
 import { GENERIC_WORKBENCH_POLICY, managedPolicyFor, type WorkbenchPolicy } from "./policy.ts";
+import { readOperatorPolicy, writeOperatorPolicy, operatorPolicyCurrent, operatorPolicyPath, type OperatorPolicySnapshot } from "./operator-policy.ts";
+import { observeHumanReviewPolicy } from "./human-review-policy.ts";
+import { operatorLandingDecision } from "./operator-landing.ts";
+import { createReviewerOutputSchema, createReviewerReceiptState, admitReviewerTask, captureReviewerResult, captureReviewerDelivery, getCleanReviewerReceipt, reviewerDefinitionTrusted, type ReviewerReceiptState, type ReviewSubject } from "./reviewer-receipts.ts";
 import {
 	commentInvocation,
 	createCommentActionPlan,
@@ -116,6 +120,12 @@ export interface PersistedRepositoryBatch {
 	/** Positive native-session proof that the coordinator ended before any tool invocation. */
 	readonly wavePreToolTerminal?: "error" | "aborted";
 	readonly waveEffectResources?: readonly string[];
+	/** Human policy captured by explicit admission; absent on legacy waves. */
+	readonly waveOperatorPolicy?: OperatorPolicySnapshot;
+	/** Expected heads of prospective, guarded landing requests, never effect proof. */
+	readonly waveLandingHeads?: Readonly<Record<string, string>>;
+	readonly waveReviewerReceipts?: ReviewerReceiptState;
+	readonly waveWriterAgents?: readonly string[];
 	/** Baseline issue submissions captured before this wave was dispatched. */
 	readonly issueSubmittedPrs?: Readonly<Record<string, readonly string[]>>;
 	/** Operator requested cancellation; the current wave must drain before archive. */
@@ -156,7 +166,7 @@ function slayBashBlockReason(command: string): string | undefined {
 }
 
 type LandingAction = "approve" | "merge";
-type LandingRequest = { readonly action: LandingAction; readonly key: string };
+type LandingRequest = { readonly action: LandingAction; readonly key: string; readonly expectedHead?: string };
 
 function slayLandingRecovery(items: readonly QueueItem[]): string {
 	const urls = [...new Set(items.filter((item) => item.type === "pr").map((item) => item.url))].join(", ");
@@ -182,23 +192,27 @@ function githubLandingAction(toolName: string | undefined, input: unknown): Land
 	if (typeof args.owner !== "string" || !/^[\w.-]+$/.test(args.owner)
 		|| typeof args.repo !== "string" || !/^[\w.-]+$/.test(args.repo)
 		|| typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) return "invalid";
-	return { action: action === "merge_pull_request" ? "merge" : "approve", key: `${args.owner}/${args.repo}#${number}` };
+	if (args.sha !== undefined && (typeof args.sha !== "string" || !/^[a-f0-9]{40}$/.test(args.sha))) return "invalid";
+	return { action: action === "merge_pull_request" ? "merge" : "approve", key: `${args.owner}/${args.repo}#${number}`, ...(typeof args.sha === "string" ? { expectedHead: args.sha } : {}) };
 }
 
 function bashLandingRequest(segment: string, action: LandingAction): LandingRequest | "invalid" {
 	// Resolve only literal identities. Dynamic shell expressions cannot select a
 	// different item after Review has checked its landing state.
-	if (/[|&<>`$\\()"']/.test(segment)
+	if (!/^\s*gh\s+pr\s+(?:merge|review)\b/.test(segment) || /[|&<>`$\\()"']/.test(segment)
 		|| segment.trim().split(/\s+/).some((token) => /^-[^-]/.test(token) && token !== "-R")
 		|| [...segment.matchAll(/\bgh\s+pr\s+(?:merge|review)\b/g)].length !== 1
 		|| [...segment.matchAll(/(?:^|\s)(?:--repo(?:=|\s)|-R)/g)].length > 1) return "invalid";
 	const target = /\bgh\s+pr\s+(?:merge|review)\s+(\S+)/.exec(segment);
 	const value = target?.[1];
+	const headFlags = [...segment.matchAll(/(?:^|\s)--match-head-commit(?:=|\s+)(\S+)/g)];
+	if (headFlags.length > 1 || headFlags.some((match) => !/^[a-f0-9]{40}$/.test(match[1]))) return "invalid";
+	const expectedHead = headFlags[0]?.[1];
 	const url = value && /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/([1-9]\d*)$/.exec(value);
-	if (url) return /(?:^|\s)(?:--repo(?:=|\s)|-R)/.test(segment) ? "invalid" : { action, key: `${url[1]}#${url[2]}` };
+	if (url) return /(?:^|\s)(?:--repo(?:=|\s)|-R)/.test(segment) ? "invalid" : { action, key: `${url[1]}#${url[2]}`, expectedHead };
 	const repoFlag = /(?:^|\s)(?:--repo|-R)(?:=|\s+)([\w.-]+\/[\w.-]+)(?=\s|$)/.exec(segment);
 	const repo = repoFlag?.[1];
-	return value && /^[1-9]\d*$/.test(value) && repo ? { action, key: `${repo}#${value}` } : "invalid";
+	return value && /^[1-9]\d*$/.test(value) && repo ? { action, key: `${repo}#${value}`, expectedHead } : "invalid";
 }
 
 function slayLandingBlockReason(
@@ -234,6 +248,8 @@ export interface ExtensionOptions {
 	fetchImpl?: typeof fetch;
 	env?: NodeJS.ProcessEnv;
 	policy?: WorkbenchPolicy;
+	/** Injectable transport boundary for deterministic policy tests. */
+	humanReviewObserver?: typeof observeHumanReviewPolicy;
 }
 
 /** Loose structural types: the extension must build without omp's declarations. */
@@ -260,6 +276,7 @@ interface SessionSetupManager {
 
 interface CtxLike {
 	hasUI: boolean;
+	cwd?: string;
 	ui: UiLike;
 	newSession?(options?: { parentSession?: string; setup?: (sessionManager: SessionSetupManager) => Promise<void> }): Promise<{ cancelled: boolean }>;
 	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>; getSessionId?(): string; getLeafId?(): string | null; getSessionFile?(): string | undefined; saveArtifact?(content: string, toolType: string): Promise<string | undefined>; getArtifactPath?(id: string): Promise<string | null>; getArtifactsDir?(): string | null };
@@ -595,7 +612,7 @@ export function actionPrompt(
 	const evidence = `Evidence is bounded and read once. Start with \`${evidenceTool}\` using both \`pull_request\` and explicit \`repo\`; child agents do not inherit the coordinator's selected repository. Use \`gh pr diff <n> --repo <r> --name-only\` only to confirm filenames, inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Never assume a checkout exists. Check a repository-specific validator once; if the minimal appliance lacks that toolchain, use hosted check evidence and report the local verification gap instead of installing packages or retrying the absent command. Treat \`merge=dirty\` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose \`--ours\`/\`--theirs\` wholesale. Revalidate live state before any comment, label, assignment, close, push, approval, or merge.`;
 	const reviewFinish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
 	const slayContinuation = "Review Slay coordinator ownership persists through the selected lifecycle's declared terminal condition. Review completion, a fixer return, a push, green checks, or knowing the next action is progress, not completion. Continue already-authorized in-scope work without asking for confirmation already supplied by the objective; authorized actions need no second confirmation, while new scope or effects still require authority. A partial status report is not terminal. If one lane is blocked, finish independent authorized work before reporting that lane's exact blocker and evidence. Stop only when the requested terminal outcome is satisfied and verified, a concrete external blocker prevents further authorized progress, or continuing requires authority or scope the operator did not grant. Existing live GitHub policy, permissions, exact-head checks, holds, self-review rules, and mutation guards still bind terminal conditions. Never sleep or poll. Workers remain bounded and return to the coordinator.";
-	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent}. If it has findings, dispatch one fresh fixer with the exact repository, pull-request number, and head. Each fixer must use its own distinct target checkout under \`$HOME/worktrees\`, created with \`gh repo clone\` and \`gh pr checkout\`, and no two workers may share a checkout or conversation; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --auto --squash\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. If Review blocks landing, identify it as Review's local guard, not a GitHub rejection. Do not call an observed check required without live rules evidence. Report the current head and whether CI is pending or failing, include the PR URL, and give these recovery steps explicitly: ${slayLandingRecovery(selected)} Never end with only "resume once checks clear" or imply that reconcile will merge the PR. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
+	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent} using a unique named task, strict outputSchema pinned to repository/PR/head, and no tools override. If it has findings, dispatch one fresh fixer with the exact repository, pull-request number, and head. Each fixer must use its own distinct target checkout under \`$HOME/worktrees\`, created with \`gh repo clone\` and \`gh pr checkout\`, and no two workers may share a checkout or conversation; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --squash --match-head-commit <reviewed-sha>\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. If Review blocks landing, identify it as Review's local guard, not a GitHub rejection. Do not call an observed check required without live rules evidence. Report the current head and whether CI is pending or failing, include the PR URL, and give these recovery steps explicitly: ${slayLandingRecovery(selected)} Never end with only "resume once checks clear" or imply that reconcile will merge the PR. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
 	const repairFinish = "These pull requests were returned to their authenticated author with requested changes. Read the review threads and failing checks, diagnose every requested correction, then dispatch one fresh fixer per pull request. Each fixer owns one unique target checkout under `$HOME/worktrees`, created with `gh repo clone` and `gh pr checkout`; no two workers share a checkout or conversation. Make the smallest complete correction, run focused verification, and push a new head without force. Never review, approve, auto-merge, or merge the author's own pull request. A repair is terminal only after GitHub shows a new head SHA. Report the pushed head and pull-request URL for every item, then stop; the workbench owns the next repository wave.";
 	const issueContext = options?.workbenchMode === "hive"
 		? "Inspect the complete issue description and the supplied Hive queue and knowledge evidence before deciding how to implement it."
@@ -626,7 +643,7 @@ export function actionPrompt(
 				if (repairWave) {
 					return `Repair this returned pull-request wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh fixer per pull request through OMP workflowz. Do not share a checkout or conversation between items. Copy this block verbatim into every worker prompt:\n${repairRules}`;
 				}
-				return `Slay this repository wave for ${repository} through review, repair, and landing:\n\n${list}\n\n${slayContinuation} Use the \`task\` tool once with one fresh reviewer item per pull request through OMP workflowz. Do not use eval workpool: its generated boolean output schema is rejected by the current Copilot provider. Keep every repair agent in its own unique \`$HOME/worktrees\` checkout, and never reuse a reviewer for the post-fix head. Coordinate the complete lifecycle after the review workers return. Copy this block verbatim into every worker prompt:\n${slayRules}`;
+				return `Slay this repository wave for ${repository} through review, repair, and landing:\n\n${list}\n\n${slayContinuation} Use the \`task\` tool with one fresh named invocation per reviewer through OMP workflowz; never batch reviewer subjects. Do not use eval workpool: its generated boolean output schema is rejected by the current Copilot provider. Keep every repair agent in its own unique \`$HOME/worktrees\` checkout, and never reuse a reviewer for the post-fix head. Coordinate the complete lifecycle after the review workers return. Copy this block verbatim into every worker prompt:\n${slayRules}`;
 			case "diff":
 				return allIssues
 					? `Inspect this issue wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Do not reuse a worker across repositories. Read each issue's body, discussion, and linked pull requests, and report the request, its current state, and concrete risks. Copy this block verbatim into every worker prompt:\n${issueInspectRules}`
@@ -684,6 +701,7 @@ export interface ReviewExtension {
 export function createReviewExtension(pi: ReviewExtensionHost, options: ExtensionOptions = {}): ReviewExtension {
 	const env = options.env ?? process.env;
 	const policy = options.policy ?? GENERIC_WORKBENCH_POLICY;
+	const humanReviewObserver = options.humanReviewObserver ?? observeHumanReviewPolicy;
 	const matchKey = options.matchKey;
 	const configuredScope = options.org
 		? orgScope(options.org)
@@ -702,6 +720,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let dashboardOpen = false;
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
+	const reviewerTrust = () => reviewerDefinitionTrusted({
+		cwd: activeCtx?.cwd ?? process.cwd(), home: env.HOME, agentDir: env.PI_CODING_AGENT_DIR,
+		profile: process.argv.includes("--profile") ? process.argv[process.argv.indexOf("--profile") + 1]
+			: env.HOME === "/home/review" ? env.REVIEW_INHERIT_OMP_CONFIG === "1" ? "review" : "review-appliance" : undefined,
+	});
 	let traceSessionId: string | undefined;
 	let traceGeneration = 0;
 	const traceContext = (ctx?: CtxLike): CtxLike | undefined => {
@@ -782,6 +805,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			expected.waveJobIds,
 			expected.waveTerminalJobStatuses,
 			expected.waveEffectResources,
+			expected.waveOperatorPolicy,
+			expected.waveLandingHeads,
+			expected.waveReviewerReceipts,
+			expected.waveWriterAgents,
 			expected.issueSubmittedPrs,
 			expected.skippedItems,
 			expected.cancelRequested,
@@ -803,6 +830,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			current.waveJobIds,
 			current.waveTerminalJobStatuses,
 			current.waveEffectResources,
+			current.waveOperatorPolicy,
+			current.waveLandingHeads,
+			current.waveReviewerReceipts,
+			current.waveWriterAgents,
 			current.issueSubmittedPrs,
 			current.skippedItems,
 			current.cancelRequested,
@@ -1007,7 +1038,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const observedPrHeadsValid = async (batch: PersistedRepositoryBatch, heads: Readonly<Record<string, string>>): Promise<boolean> => {
 		if (Object.keys(heads).length === 0) return true;
 		const items = batch.waves[batch.currentWave]?.items ?? [];
-		if (batch.kind !== "slay" || !sessionStopped(batch)) {
+		if (batch.kind !== "slay" || (!sessionStopped(batch) && !batch.waveOperatorPolicy)) {
 			const live = await fetchItemsByKey(Object.keys(heads), "prs", mode.tokenOptions());
 			return !live.error && Object.entries(heads).every(([key, head]) => {
 				const current = live.items.find((item) => `${item.repo.toLowerCase()}#${item.id}` === key);
@@ -1020,12 +1051,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const original = items.find((item) => `${item.repo.toLowerCase()}#${item.id}` === key);
 			if (!original) return false;
 			const effect = await fetchPullRequestEffect(original.repo, original.id, mode.tokenOptions());
-			if (effect.kind !== "observed" || effect.pullRequest.state !== "MERGED" || !effect.pullRequest.merged
+			if (effect.kind !== "observed"
+				|| !(effect.pullRequest.state === "MERGED" && effect.pullRequest.merged || !sessionStopped(batch) && batch.waveOperatorPolicy && effect.pullRequest.state === "OPEN" && effect.pullRequest.autoMergeEnabled)
 				|| effect.pullRequest.headSha !== head || effect.pullRequest.repo.toLowerCase() !== original.repo.toLowerCase()
 				|| effect.pullRequest.number !== original.id || effect.pullRequest.url !== original.url
 				|| effect.pullRequest.authorLogin?.toLowerCase() !== original.author.toLowerCase()
 				|| !effect.pullRequest.reviewsComplete || effect.pullRequest.reviewDecision === "unknown"
 				|| effect.pullRequest.reviewDecision === "changes_requested") return false;
+			if (!sessionStopped(batch) && batch.waveOperatorPolicy && (!batch.waveIdentity || !batch.waveReviewerReceipts || !getCleanReviewerReceipt(batch.waveReviewerReceipts, { waveIdentity: batch.waveIdentity, subject: { repository: original.repo.toLowerCase(), number: original.id, headSha: head }, excludedAgentIds: batch.waveWriterAgents }))) return false;
 		}
 		return true;
 	};
@@ -1086,6 +1119,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 						|| pullRequest.reviewDecision === "unknown"
 						|| pullRequest.reviewDecision === "changes_requested") return { kind: "unknown" };
 					const headSha = pullRequest.headSha;
+					if (!stopped && batch.waveOperatorPolicy && (pullRequest.state === "MERGED" || pullRequest.state === "OPEN" && pullRequest.autoMergeEnabled)) {
+						const receipt = headSha && batch.waveIdentity && batch.waveReviewerReceipts && getCleanReviewerReceipt(batch.waveReviewerReceipts, { waveIdentity: batch.waveIdentity, subject: { repository: item.repo.toLowerCase(), number: item.id, headSha }, excludedAgentIds: batch.waveWriterAgents });
+						if (!receipt || !headSha) return { kind: "unknown" };
+						observedPrHeads[`${item.repo.toLowerCase()}#${item.id}`] = headSha;
+						continue;
+					}
 					if (pullRequest.state === "MERGED" && headSha === item.headSha) {
 						if (stopped) observedPrHeads[`${item.repo.toLowerCase()}#${item.id}`] = headSha;
 						continue;
@@ -1239,7 +1278,28 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	// OMP 18.4 task details expose the primary async job id directly. Persist it
 	// immediately for single-spawn calls instead of racing the transient job
 	// snapshot; the snapshot remains the authoritative mapper for batch siblings.
-	const rememberTaskResult = (ctx: CtxLike, call: string, result: unknown): void => {
+	const rememberReviewerResult = (ctx: CtxLike, call: string, result: unknown, delivered: boolean): void => {
+		if (!activeBatch?.waveOperatorPolicy || !activeBatch.waveIdentity || !isRecord(result) || !isRecord(result.details)) return;
+		const details = result.details;
+		let state = activeBatch.waveReviewerReceipts ?? createReviewerReceiptState();
+		const writers = new Set(activeBatch.waveWriterAgents ?? []);
+		for (const row of [...(Array.isArray(details.progress) ? details.progress : []), ...(Array.isArray(details.results) ? details.results : [])]) {
+			if (isRecord(row) && typeof row.id === "string" && typeof row.agent === "string" && row.agent !== "reviewer") writers.add(row.id);
+		}
+		const admission = state.admissions[call];
+		if (admission && Array.isArray(details.results)) for (const native of details.results) {
+			if (!isRecord(native) || native.id !== admission.agentId) continue;
+			state = captureReviewerResult(state, {
+				waveIdentity: activeBatch.waveIdentity, subject: admission.subject, toolCallId: call,
+				result: { id: native.id, agent: native.agent, agentSource: native.agentSource, exitCode: native.exitCode, error: native.error, aborted: native.aborted, structuredOutput: isRecord(native.structuredOutput) ? native.structuredOutput : undefined },
+				jobId: isRecord(details.async) && typeof details.async.jobId === "string" ? details.async.jobId : undefined,
+				deliveryRequired: isRecord(details.async) && !(delivered && details.async.state === "completed"),
+			});
+		}
+		if (JSON.stringify(state) !== JSON.stringify(activeBatch.waveReviewerReceipts) || JSON.stringify([...writers]) !== JSON.stringify(activeBatch.waveWriterAgents ?? [])) persistBatch(ctx, { ...activeBatch, waveReviewerReceipts: state, waveWriterAgents: [...writers] });
+	};
+	const rememberTaskResult = (ctx: CtxLike, call: string, result: unknown, delivered = false): void => {
+		rememberReviewerResult(ctx, call, result, delivered);
 		if (!activeBatch?.waveToolCallIds?.includes(call) || !result || typeof result !== "object" || !("details" in result)) return;
 		const details = result.details;
 		if (!details || typeof details !== "object" || !("async" in details) || !details.async || typeof details.async !== "object" || !("type" in details.async) || details.async.type !== "task" || !("progress" in details) || !Array.isArray(details.progress)) return;
@@ -1284,6 +1344,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (!message || typeof message !== "object" || !("customType" in message) || message.customType !== "async-result" || !("details" in message)) return;
 		const details = message.details;
 		if (!details || typeof details !== "object" || !("jobs" in details) || !Array.isArray(details.jobs)) return;
+		if (activeBatch.waveOperatorPolicy && activeBatch.waveIdentity && activeBatch.waveReviewerReceipts) {
+			let state = activeBatch.waveReviewerReceipts;
+			for (const admission of Object.values(state.admissions)) state = captureReviewerDelivery(state, { waveIdentity: activeBatch.waveIdentity, subject: admission.subject, toolCallId: admission.toolCallId, details });
+			if (JSON.stringify(state) !== JSON.stringify(activeBatch.waveReviewerReceipts)) persistBatch(ctx, { ...activeBatch, waveReviewerReceipts: state });
+		}
 		const delivered = new Set(details.jobs.filter((job) => job?.type === "task" && typeof job.jobId === "string").map((job) => job.jobId));
 		const terminal = { ...activeBatch.waveTerminalJobStatuses };
 		// Task progress alone is provisional. OMP's delivery proves the job has
@@ -1511,6 +1576,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				waveTerminalJobStatuses: undefined,
 				wavePreToolTerminal: undefined,
 				waveEffectResources: undefined,
+			waveOperatorPolicy: undefined, waveReviewerReceipts: undefined, waveWriterAgents: undefined, waveLandingHeads: undefined,
 			});
 			if (ctx.hasUI) ctx.ui.notify(`Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
 			return;
@@ -1531,6 +1597,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			waveTerminalJobStatuses: undefined,
 			wavePreToolTerminal: undefined,
 			waveEffectResources: undefined,
+			waveOperatorPolicy: undefined, waveReviewerReceipts: undefined, waveWriterAgents: undefined, waveLandingHeads: undefined,
 		});
 		if (ctx.hasUI) ctx.ui.notify(`Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
 		if (!mode.paused) await dispatchCurrentWave(ctx, "followUp");
@@ -1843,6 +1910,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const reviewCommand = async (rawArgs: string, ctx: CtxLike): Promise<string> => {
 		const args = rawArgs.trim().toLowerCase();
+		if (args === "policy" || args.startsWith("policy ")) {
+			const parts = args.split(/\s+/);
+			if (parts.length < 2 || parts.length > 3 || (parts[2] !== undefined && parts[2] !== "solo" && parts[2] !== "team")) return "usage: /review policy owner/repo [solo|team]";
+			const selected = parts[2] === undefined ? readOperatorPolicy(parts[1], env) : writeOperatorPolicy(parts[1], parts[2], env);
+			mode.refreshOperatorPolicies();
+			syncStatus(ctx);
+			return `${selected.repository}: ${selected.mode} (${selected.source}); instance policy: ${operatorPolicyPath(env)}${parts[2] ? ". Starts no work. Existing waves retain their captured policy; changed policy requires fresh admission before landing." : ""}`;
+		}
 		if (args === "recap") {
 			const recap = buildRecap(ctx);
 			if (ctx.hasUI) await showReadOnlyRecap(ctx, recap.id, recap.text);
@@ -1925,7 +2000,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					: "No Review mutation claims",
 			].join("\n");
 		}
-		return "usage: /review status | recap | handoff | reconcile | resume | drain | cancel | revise | slay";
+		return "usage: /review policy owner/repo [solo|team] | status | recap | handoff | reconcile | resume | drain | cancel | revise | slay";
 	};
 	pi.registerCommand?.("review", {
 		description: "Inspect or recover an interrupted Review repository wave",
@@ -2162,6 +2237,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					waveTerminalJobStatuses: undefined,
 					wavePreToolTerminal: undefined,
 					waveEffectResources: undefined,
+			waveOperatorPolicy: undefined, waveReviewerReceipts: undefined, waveWriterAgents: undefined, waveLandingHeads: undefined,
 				};
 				if (currentWave >= waves.length) {
 					persistBatch(ctx, {
@@ -2185,6 +2261,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 		}
 		const retryingBlockedWave = activeBatch.state === "blocked";
+		let waveOperatorPolicy: OperatorPolicySnapshot;
+		try { waveOperatorPolicy = readOperatorPolicy(wave.repo, env); }
+		catch (error) { ctx.ui.notify(`Cannot admit Review policy: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
 		const startedAt = Date.now();
 		const waveAction = {
 			kind: activeBatch.kind,
@@ -2195,8 +2274,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const priority: Priority | undefined = isRepairRequested(first, mode.currentUserLogin)
 			? { category: "repair-requested", source: "local", reason: "changes requested on your pull request", demotion: 0 }
 			: mode.priorityFor(first);
-		const actionText = actionPrompt(waveAction, priority, { workbenchMode: mode.workbenchMode });
-		const prompt = actionText ? `Review dispatch: ${randomUUID()}\n\nThis is a new dispatch, including when resuming saved work. Historical agent:// resources, worker conversations, task results, and job IDs are context only and are invalid as evidence for this dispatch. Invoke the OMP workflowz task tool now with fresh workers for the selected targets; do not reuse or adopt historical workers or job mappings. Before approval or merge, every task invocation in this dispatch must have complete task-to-job receipts, successful terminal worker status, and delivered results.\n\n${actionText}` : undefined;
+		const actionText = actionPrompt(waveAction, priority, { workbenchMode: mode.workbenchMode })?.replace("Use the `task` tool with one fresh named invocation per reviewer through OMP workflowz; never batch reviewer subjects.", "Use one fresh named `task` invocation per reviewer, dispatched asynchronously through OMP workflowz; do not batch reviewer subjects into one task call.").replaceAll("gh pr merge <n> --repo <r> --squash --match-head-commit <reviewed-sha>", "gh pr merge <n> --repo <r> --squash --match-head-commit <reviewed-sha>");
+		const reviewerSchemas = wave.items.filter((item) => item.type === "pr" && item.headSha).map((item) => ({ repository: item.repo.toLowerCase(), number: item.id, schema: createReviewerOutputSchema({ repository: item.repo.toLowerCase(), number: item.id, headSha: item.headSha! }) }));
+		const policyInstructions = `Human review policy for ${waveOperatorPolicy.repository}: ${waveOperatorPolicy.mode} (${waveOperatorPolicy.source}). Both modes require a fresh independent reviewer for the exact live head. ${waveOperatorPolicy.mode === "solo" ? "The authorized operator may land their own PR when GitHub requirements permit, without self-approval or an additional local human approval." : "Team policy requires an eligible non-author human approval for landing."} Native GitHub requirements, CI, holds, permissions and claims still apply. Never manufacture GitHub APPROVED state. Every merge command must use gh pr merge --match-head-commit <reviewed-sha>, or the packaged MCP sha argument with that same SHA; otherwise the guard refuses it.`;
+		const reviewerInstructions = `For every reviewer task use agent=reviewer, a fresh unique name, schemaMode=strict, no tools override, and outputSchema equal to the subject schema below. Return only the structured result. After a repair, use the same schema with headSha.const replaced by the freshly fetched new head and a different reviewer. A completed job or prose verdict cannot satisfy this receipt. Subject schemas: ${JSON.stringify(reviewerSchemas)}`;
+		const prompt = actionText ? `Review dispatch: ${randomUUID()}\n\nThis is a new dispatch, including when resuming saved work. Historical agent:// resources, worker conversations, task results, and job IDs are context only and are invalid as evidence for this dispatch. Invoke the OMP workflowz task tool now with fresh workers for the selected targets; do not reuse or adopt historical workers or job mappings. Before approval or merge, every task invocation in this dispatch must have complete task-to-job receipts, successful terminal worker status, and delivered results.\n\n${policyInstructions}\n\n${reviewerInstructions}\n\n${actionText}` : undefined;
 		if (!prompt) {
 			persistBatch(ctx, { ...activeBatch!, state: "blocked", error: "wave action produced no prompt" });
 			return;
@@ -2214,6 +2296,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				waveSessionId: undefined,
 				wavePromptDigest: undefined,
 				waveEffectResources: resources,
+				waveOperatorPolicy, waveReviewerReceipts: createReviewerReceiptState(), waveWriterAgents: undefined, waveLandingHeads: undefined,
 				error: "Mutation admission pending; no coordinator prompt dispatched",
 			});
 			try { claimItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`, !retryingBlockedWave); }
@@ -2223,7 +2306,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				return;
 			}
 		}
-		persistBatch(ctx, { ...activeBatch, state: "running", waveStartedAt: startedAt, error: undefined, cancelRequested: undefined, waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`, waveSessionId: ctx.sessionManager?.getSessionId?.(), waveExit: undefined, waveShutdown: undefined, wavePromptDigest: promptDigest(prompt), waveToolCallIds: undefined, waveToolInvocationIds: undefined, waveTaskWorkers: undefined, waveJobBaselineIds: baseline, waveJobIds: undefined, waveTerminalJobStatuses: undefined, wavePreToolTerminal: undefined, waveEffectResources: resources });
+		persistBatch(ctx, { ...activeBatch, state: "running", waveStartedAt: startedAt, error: undefined, cancelRequested: undefined, waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`, waveSessionId: ctx.sessionManager?.getSessionId?.(), waveExit: undefined, waveShutdown: undefined, wavePromptDigest: promptDigest(prompt), waveToolCallIds: undefined, waveToolInvocationIds: undefined, waveTaskWorkers: undefined, waveJobBaselineIds: baseline, waveJobIds: undefined, waveTerminalJobStatuses: undefined, wavePreToolTerminal: undefined, waveEffectResources: resources, waveOperatorPolicy, waveLandingHeads: undefined, waveReviewerReceipts: createReviewerReceiptState(), waveWriterAgents: undefined });
 		ctx.ui.notify(`Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
 		ownedWavePrompts.add(promptDigest(prompt));
 		pi.sendUserMessage(prompt, { ...(deliverAs ? { deliverAs } : {}), waveId: `${activeBatch.id}:${activeBatch.currentWave}` });
@@ -2953,6 +3036,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(`Repository wave stopped: ${refreshed.error}`, "error");
 			return;
 		}
+		if (activeBatch.waveOperatorPolicy && activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr") && !wave.items.every((item) => isRepairRequested(item, mode.currentUserLogin))) {
+			const verified = activeBatch;
+			const observed = await authoritativeReconcile(ctx, { ...verified, state: "blocked" }, `repo:${wave.repo.toLowerCase()}`);
+			if (observed.kind !== "settled" || observed.outcome !== "success" || !sameWaveEvidence(verified, activeBatch)) {
+				persistBatch(ctx, { ...activeBatch, state: "blocked", error: "Slay landing is unverified: exact reviewed head and authoritative merged/auto-merge effect required; use /review reconcile" });
+				ctx.ui.notify(activeBatch.error!, "warning");
+				return;
+			}
+		}
 		if (activeBatch.kind !== "diff") releaseItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`);
 		const nextWave = activeBatch.currentWave + 1;
 		const completedItems = activeBatch.completedItems + wave.items.length;
@@ -3176,7 +3268,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (!ctxToUse) return;
 		if (event && typeof event === "object" && "toolCallId" in event && typeof event.toolCallId === "string") {
 			rememberToolInvocation(ctxToUse, event.toolCallId);
-			rememberTaskResult(ctxToUse, event.toolCallId, event);
+			rememberTaskResult(ctxToUse, event.toolCallId, event, true);
 		}
 		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
 		rememberWaveEvidence(ctxToUse);
@@ -3188,6 +3280,33 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (toolName === "task" && toolCallId && activeBatch?.state === "running" && activeCtx) {
 			const ids = [...new Set([...(activeBatch.waveToolCallIds ?? []), toolCallId])].sort();
 			persistBatch(activeCtx, { ...activeBatch, waveToolCallIds: ids });
+			if (activeBatch.waveOperatorPolicy && activeBatch.waveIdentity && isRecord(input)) {
+				const taskItems = Array.isArray(input.tasks) ? input.tasks : [input];
+				const reviewerItems = taskItems.filter((item) => isRecord(item) && item.agent === "reviewer");
+				if (reviewerItems.length > 0) {
+					if (taskItems.length !== 1 || !isRecord(reviewerItems[0])) return { block: true, reason: "Review requires one named, subject-bound reviewer per task invocation" };
+					const task = reviewerItems[0];
+					const schema = isRecord(task.outputSchema) && isRecord(task.outputSchema.properties) ? task.outputSchema.properties : undefined;
+					const repository = schema && isRecord(schema.repository) ? schema.repository.const : undefined;
+					const number = schema && isRecord(schema.number) ? schema.number.const : undefined;
+					const headSha = schema && isRecord(schema.headSha) ? schema.headSha.const : undefined;
+					if (typeof repository !== "string" || typeof number !== "number" || !Number.isSafeInteger(number) || typeof headSha !== "string" || !/^[a-f0-9]{40}$/.test(headSha) || typeof task.name !== "string") return { block: true, reason: "Review reviewer requires an explicit name and strict repository/PR/head output schema" };
+					const subject: ReviewSubject = { repository, number, headSha };
+					const batch = activeBatch;
+					if (batch.waveWriterAgents?.includes(task.name) || Object.values(batch.waveReviewerReceipts?.admissions ?? {}).some((admitted) => admitted.agentId === task.name && admitted.toolCallId !== toolCallId)) return { block: true, reason: "Review requires a fresh reviewer identity; fixers and earlier reviewers cannot be reused" };
+					if (!batch.waves[batch.currentWave]?.items.some((item) => item.type === "pr" && item.repo.toLowerCase() === repository && item.id === number)) return { block: true, reason: "Reviewer subject is outside the admitted wave" };
+					const trust = reviewerTrust();
+					if (!trust.trusted) return { block: true, reason: `Review reviewer definition is unavailable: ${trust.reason}` };
+					const live = await fetchItemsByKey([`${repository}#${number}`], "prs", mode.tokenOptions());
+					if (!activeBatch || activeBatch.id !== batch.id || activeBatch.waveIdentity !== batch.waveIdentity || activeBatch.waveExit || live.error || live.items[0]?.headSha !== headSha) return { block: true, reason: "Reviewer subject changed or is unreadable before dispatch" };
+					const admission = admitReviewerTask(activeBatch.waveReviewerReceipts ?? createReviewerReceiptState(), { waveIdentity: activeBatch.waveIdentity!, subject, toolCallId, taskInput: task, agentId: task.name });
+					if (!admission.admitted) return { block: true, reason: admission.reason ?? "Reviewer admission failed" };
+					persistBatch(activeCtx, { ...activeBatch, waveReviewerReceipts: admission.state });
+				} else {
+					const names = taskItems.flatMap((item) => isRecord(item) && typeof item.name === "string" ? [item.name] : []);
+					if (names.length) persistBatch(activeCtx, { ...activeBatch, waveWriterAgents: [...new Set([...(activeBatch.waveWriterAgents ?? []), ...names])] });
+				}
+			}
 		}
 		if (activeBatch?.kind !== "slay" || !batchActive) return;
 		const command = toolName === "bash" ? String(isRecord(input) ? input.command ?? "" : "") : "";
@@ -3216,6 +3335,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const workerBlocker = slayWaveWorkerBlockReason(activeBatch, activeCtx?.getAsyncJobSnapshot?.());
 		if (workerBlocker) return { block: true, reason: `Review Slay guard: ${workerBlocker}` };
 		const guardedBatch = activeBatch;
+		const landingHeads = { ...guardedBatch.waveLandingHeads };
 		for (const request of requests) {
 			const live = await fetchItemsByKey([request.key], "prs", mode.tokenOptions());
 			if (!activeBatch || activeBatch.id !== guardedBatch.id || activeBatch.waveIdentity !== guardedBatch.waveIdentity
@@ -3224,6 +3344,27 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}
 			const item = live.items.find((candidate) => `${candidate.repo}#${candidate.id}` === request.key);
 			if (live.error || !item) return { block: true, reason: `Review Slay guard: ${request.key} live landing evidence is unavailable` };
+			if (guardedBatch.waveOperatorPolicy) {
+				const snapshot = guardedBatch.waveOperatorPolicy;
+				const basic = landingState(item, policy);
+				if (basic !== "ready-to-land" && basic !== "unreviewed") return { block: true, reason: `Review Slay guard: ${request.key} ${landingReason(basic)}. ${slayLandingRecovery([item])}` };
+				if (toolName === "bash" && /(?:^|\s)--(?:auto|disable-auto|delete-branch)(?:[=\s]|$)/.test(command)) return { block: true, reason: "Review operator policy permits direct head-bound merge only; auto-merge enrollment and branch deletion are outside this operation" };
+				if (!operatorPolicyCurrent(snapshot, env)) return { block: true, reason: "Review operator policy changed; reconcile existing effects and admit fresh work before landing" };
+				const observation = await humanReviewObserver(item.repo, item.id, mode.tokenOptions());
+				if (observation.kind !== "observed") return { block: true, reason: `Review cannot verify GitHub human-review requirements: ${observation.reason}` };
+				if (!activeBatch || activeBatch.id !== guardedBatch.id || activeBatch.waveIdentity !== guardedBatch.waveIdentity || activeBatch.waveExit) return { block: true, reason: "Review wave changed while reading GitHub review policy" };
+				const subject: ReviewSubject = { repository: item.repo.toLowerCase(), number: item.id, headSha: item.headSha ?? "" };
+				const trust = reviewerTrust();
+				const receipt = activeBatch.waveReviewerReceipts && getCleanReviewerReceipt(activeBatch.waveReviewerReceipts, { waveIdentity: activeBatch.waveIdentity!, subject, excludedAgentIds: activeBatch.waveWriterAgents });
+				const decision = operatorLandingDecision({ item, operatorPolicy: snapshot, github: observation.facts, reviewerClean: trust.trusted && receipt !== undefined, action: request.action, policy });
+				mode.recordOperatorLanding(item, decision);
+				if (!decision.allowed) return { block: true, reason: `Review Slay guard: ${request.key}: ${decision.reason}` };
+				if (request.action === "merge" && request.expectedHead !== item.headSha) return { block: true, reason: "Review requires a server-enforced head guard: use gh pr merge --match-head-commit <reviewed-sha>, or MCP sha; a route without this argument cannot land" };
+				const rechecked = await humanReviewObserver(item.repo, item.id, mode.tokenOptions());
+				if (rechecked.kind !== "observed" || rechecked.facts.digest !== observation.facts.digest || !operatorPolicyCurrent(snapshot, env)) return { block: true, reason: "GitHub subject, credential or review policy changed before landing" };
+				if (request.action === "merge" && item.headSha) landingHeads[request.key.toLowerCase()] = item.headSha;
+				continue;
+			}
 			let landingItem = item;
 			if (request.action === "merge" && item.reviewState === "unknown" && landingState(item, policy) === "unreviewed") {
 				// GitHub leaves reviewDecision null when no aggregate review policy
@@ -3251,6 +3392,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (activeCtx) rememberWaveEvidence(activeCtx);
 		const latestWorkerBlocker = slayWaveWorkerBlockReason(activeBatch, activeCtx?.getAsyncJobSnapshot?.());
 		if (latestWorkerBlocker) return { block: true, reason: `Review Slay guard: ${latestWorkerBlocker}` };
+		if (!activeBatch || activeBatch.id !== guardedBatch.id || activeBatch.waveIdentity !== guardedBatch.waveIdentity || activeBatch.waveExit || (activeBatch.waveOperatorPolicy && (!operatorPolicyCurrent(activeBatch.waveOperatorPolicy, env) || !sameWaveEvidence(guardedBatch, activeBatch) || !reviewerTrust().trusted))) return { block: true, reason: "Review wave, reviewer evidence or operator policy changed at the landing boundary" };
+		if (activeCtx && activeBatch.waveOperatorPolicy && JSON.stringify(landingHeads) !== JSON.stringify(activeBatch.waveLandingHeads ?? {})) persistBatch(activeCtx, { ...activeBatch, waveLandingHeads: landingHeads });
 	});
 
 	pi.on("tool_execution_start", (event, eventCtx) => {
@@ -3279,7 +3422,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		mode.session.endTool(toolCallId, result, isError === true, Date.now());
 		mode.session.syncAsyncJobs(ctxToUse.getAsyncJobSnapshot?.());
 		rememberToolInvocation(ctxToUse, toolCallId);
-		rememberTaskResult(ctxToUse, toolCallId, result);
+		rememberTaskResult(ctxToUse, toolCallId, result, true);
 		rememberWaveEvidence(ctxToUse);
 		syncBatchProgress(ctxToUse);
 		repaint();

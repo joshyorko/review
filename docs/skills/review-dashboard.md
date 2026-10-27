@@ -89,7 +89,28 @@ The normal Review help and status bars omit Hive controls and status. Do not add
 
 Review specialists use neutral definitions in `image/extension/review/agents/`: `reviewer`, `review-security`, `review-correctness`, `review-test-coverage`, `review-simplicity`, `review-ci-triage`, and `review-queue-triage`. They remain read-only; the coordinator may dispatch fresh fixers only after explicit user intent and current evidence.
 
-A pull-request lifecycle verifies the exact head and live repository rules before mutation. Returned pull requests from the authenticated user stay in a repair-only lane: never self-review, self-approve, or self-merge. Preserve workflow-file permission checks, incomplete-file-list fail-closed behavior, mutation claims, and ambiguous-effect reconciliation.
+A pull-request lifecycle verifies the exact head and live repository rules before mutation. Never self-review, self-approve, or self-merge. Preserve workflow-file permission checks, incomplete-file-list fail-closed behavior, mutation claims, and ambiguous-effect reconciliation.
+
+Use `/review policy owner/repo` to read the effective per-repository human-review
+preset and `/review policy owner/repo solo|team` to set it explicitly. Missing
+entries default to `team`. The strict, versioned store is
+`$HOME/.config/review/operator-policy.json` inside the appliance instance home
+(`/home/review`); host `XDG_CONFIG_HOME` is not its locator. A setting starts
+no work. Newly admitted waves capture the policy snapshot, and changing it
+cannot silently widen an active or restored wave; reconcile effects and admit
+fresh work before landing under a changed preset.
+
+Both modes require a fresh native structured receipt from the trusted,
+read-only reviewer, bound to the current repository, PR, and exact head. `solo`
+allows an authorized operator to land their own PR without another local human
+approval only when fresh GitHub evidence proves no external review requirement
+applies. `team` additionally requires an eligible non-author human approval on
+the current head. GitHub's active branch protection and rulesets remain
+authoritative in either mode. Never synthesize `APPROVED`, use reviewer prose
+or worker completion as a reviewer receipt, or bypass CI, holds, permissions,
+claims, workflow protections, subject checks, or operation scope. Bash merges
+must use `gh pr merge --match-head-commit <reviewed-sha>`; packaged MCP merges
+must send the same expected SHA through the server-enforced argument.
 
 Issue work reads the GitHub issue and bounded discussion. A multi-issue wave uses OMP workflowz tasks with one fresh worker per item and unique target checkouts under `$HOME/worktrees`. Workers may submit changes through pull requests; they do not approve or merge their own work. A settled job or empty queue alone is not terminal proof.
 
@@ -189,6 +210,14 @@ Keep claims intact. If GitHub already shows merged or accepted auto-merge and re
 `/review status` and report the warning; do not delete claims or bypass guards.
 
 For a PR Slay wave, reconciliation observes the exact PR effect independently of the open queue. A MERGED PR at the captured head settles when authoritative effect evidence and terminal worker coverage are valid; it does not require a fresh approval, and a null aggregate review decision is valid. For a positively stopped wave, a changed-head MERGED PR also settles when GitHub verifies that its head is strictly forward of the captured head and a fresh terminal-effect read confirms the same PR identity, author, head, merge, and complete review evidence. The stopped wave receives no completion credit. Other changed-head MERGED PRs and OPEN PRs accepted for auto-merge still require a fresh non-author APPROVED review bound to the current head and submitted during the wave. An explicit CHANGES_REQUESTED decision rejects success. A CLOSED unmerged PR settles its claims but archives Slay as cancelled without increasing completed-item counts. An unexplained OPEN head, missing or stale required review, incomplete review history, unreadable effect, or contradictory state remains UNKNOWN and keeps its claims.
+
+This existing stopped-wave recovery remains policy-independent: legacy waves
+without captured policy and reviewer receipts keep their prior authoritative
+terminal-effect rules and never gain solo landing authority from a later
+setting. A newly admitted solo wave may reconcile its terminal PR effect only
+when its persisted clean reviewer receipt still names the exact reviewed head
+and its captured operation scope. Stopped work receives no completion credit
+from claim settlement.
 
 OMP native `isolated:true` is not required: it isolates the coordinator repository, not the target checkout. Worker communication and async delivery are independent of that option.
 
