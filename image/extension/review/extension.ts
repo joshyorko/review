@@ -1006,14 +1006,28 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 	const observedPrHeadsValid = async (batch: PersistedRepositoryBatch, heads: Readonly<Record<string, string>>): Promise<boolean> => {
 		if (Object.keys(heads).length === 0) return true;
-		const live = await fetchItemsByKey(Object.keys(heads), "prs", mode.tokenOptions());
 		const items = batch.waves[batch.currentWave]?.items ?? [];
-		return !live.error && Object.entries(heads).every(([key, head]) => {
-			const current = live.items.find((item) => `${item.repo.toLowerCase()}#${item.id}` === key);
+		if (batch.kind !== "slay" || !sessionStopped(batch)) {
+			const live = await fetchItemsByKey(Object.keys(heads), "prs", mode.tokenOptions());
+			return !live.error && Object.entries(heads).every(([key, head]) => {
+				const current = live.items.find((item) => `${item.repo.toLowerCase()}#${item.id}` === key);
+				const original = items.find((item) => `${item.repo.toLowerCase()}#${item.id}` === key);
+				return current && original && current.headSha === head && current.author === original.author && current.url === original.url
+					&& current.autoMergeEnabled === original.autoMergeEnabled && current.reviewState === original.reviewState;
+			});
+		}
+		for (const [key, head] of Object.entries(heads)) {
 			const original = items.find((item) => `${item.repo.toLowerCase()}#${item.id}` === key);
-			return current && original && current.headSha === head && current.author === original.author && current.url === original.url
-				&& current.autoMergeEnabled === original.autoMergeEnabled && current.reviewState === original.reviewState;
-		});
+			if (!original) return false;
+			const effect = await fetchPullRequestEffect(original.repo, original.id, mode.tokenOptions());
+			if (effect.kind !== "observed" || effect.pullRequest.state !== "MERGED" || !effect.pullRequest.merged
+				|| effect.pullRequest.headSha !== head || effect.pullRequest.repo.toLowerCase() !== original.repo.toLowerCase()
+				|| effect.pullRequest.number !== original.id || effect.pullRequest.url !== original.url
+				|| effect.pullRequest.authorLogin?.toLowerCase() !== original.author.toLowerCase()
+				|| !effect.pullRequest.reviewsComplete || effect.pullRequest.reviewDecision === "unknown"
+				|| effect.pullRequest.reviewDecision === "changes_requested") return false;
+		}
+		return true;
 	};
 	const authoritativeReconcile = async (
 		ctx: CtxLike,
@@ -1072,7 +1086,23 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 						|| pullRequest.reviewDecision === "unknown"
 						|| pullRequest.reviewDecision === "changes_requested") return { kind: "unknown" };
 					const headSha = pullRequest.headSha;
-					if (pullRequest.state === "MERGED" && headSha === item.headSha) continue;
+					if (pullRequest.state === "MERGED" && headSha === item.headSha) {
+						if (stopped) observedPrHeads[`${item.repo.toLowerCase()}#${item.id}`] = headSha;
+						continue;
+					}
+					if (stopped && pullRequest.state === "MERGED" && headSha
+						&& await isForwardHead(item.repo, item.headSha, headSha, mode.tokenOptions())) {
+						const rechecked = await fetchPullRequestEffect(item.repo, item.id, mode.tokenOptions());
+						if (rechecked.kind !== "observed" || rechecked.pullRequest.state !== "MERGED"
+							|| !rechecked.pullRequest.merged || rechecked.pullRequest.headSha !== headSha
+							|| rechecked.pullRequest.repo.toLowerCase() !== item.repo.toLowerCase()
+							|| rechecked.pullRequest.number !== item.id || rechecked.pullRequest.url !== item.url
+							|| rechecked.pullRequest.authorLogin?.toLowerCase() !== item.author.toLowerCase()
+							|| !rechecked.pullRequest.reviewsComplete || rechecked.pullRequest.reviewDecision === "unknown"
+							|| rechecked.pullRequest.reviewDecision === "changes_requested") return { kind: "unknown" };
+						observedPrHeads[`${item.repo.toLowerCase()}#${item.id}`] = headSha;
+						continue;
+					}
 					const reviewedHead = headSha !== null && pullRequest.latestReviews.some((review) =>
 						review.state === "APPROVED"
 						&& review.authorLogin.toLowerCase() !== pullRequest.authorLogin.toLowerCase()

@@ -374,6 +374,11 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 		labels: { nodes: [] },
 	}));
 	return async (url, init) => {
+		const comparison = /\/compare\/([a-f0-9]{40})\.\.\.([a-f0-9]{40})/.exec(String(url));
+		if (comparison && options.forwardComparison) return { ok: true, json: async () => {
+			if (options.headRace) for (const effect of Object.values(effects)) effect.headSha = (effect.headSha === "e".repeat(40) ? "f" : "e").repeat(40);
+			return { status: options.diverged ? "diverged" : "ahead", ahead_by: 1, behind_by: options.diverged ? 1 : 0, base_commit: { sha: comparison[1] }, merge_base_commit: { sha: comparison[1] } };
+		} };
 		if (!String(url).includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
 		const body = JSON.parse(String(init?.body ?? "{}"));
 		if (options.unreadable && body.query.includes("pullRequest(number:")) return { ok: false, status: 503, statusText: "Unavailable", json: async () => ({}) };
@@ -382,6 +387,7 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "maintainer" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } }) };
 		}
 		if (body.query.includes("pullRequest(number:")) {
+			if (options.changeEarlierOnComparison && body.query.includes("pullRequest(number: 352)")) effects[350].headSha = effects[350].headSha === "e".repeat(40) ? "f".repeat(40) : "e".repeat(40);
 			const match = /repository\(owner: "([^\"]+)", name: "([^\"]+)"\)\s*\{\s*nameWithOwner pullRequest\(number: (\d+)\)/.exec(body.query);
 			const [, owner, name, numberText] = match ?? [];
 			const effect = numberText ? effects[Number(numberText)] : undefined;
@@ -5341,6 +5347,48 @@ test("/review reconcile recovers a merged three-PR Slay wave and admits the next
 	await pi.commands.get("review").handler("slay", ctx);
 	assert.equal(pi.messages.length, 1, "a new Slay dispatch is not blocked by the recovered wave's old claims");
 	assert.match(ctx.notifications.map((notification) => notification.message).join("\n"), /Reconciled/);
+});
+
+test("stopped Slay reconciles a merged forward head for a solo operator", async () => {
+	const { recovered, claims } = await reconcileBlockedPrSlayWave(({ env, items, effects, batch }) => {
+		batch.waveSessionId = "stopped-session";
+		batch.waveExit = { sessionId: batch.waveSessionId, waveIdentity: batch.waveIdentity, choice: "pause", requestedAt: Date.now() };
+		batch.waveShutdown = { sessionId: batch.waveSessionId, waveIdentity: batch.waveIdentity, settled: true, pendingJobIds: [], observedAt: Date.now() };
+		saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, batch);
+		for (const item of items.slice(0, 3)) effects[item.id] = {
+			state: "MERGED", merged: true, headSha: "f".repeat(40), autoMerge: false, reviewDecision: null, reviews: [],
+		};
+	}, { forwardComparison: true });
+	assert.equal(claims.length, 0);
+	assert.equal(recovered.completedItems, 0);
+});
+
+test("stopped Slay revalidates an earlier merged PR after later resource reads", async () => {
+	const { claims } = await reconcileBlockedPrSlayWave(({ env, items, effects, batch }) => {
+		batch.waveSessionId = "stopped-session";
+		batch.waveExit = { sessionId: batch.waveSessionId, waveIdentity: batch.waveIdentity, choice: "pause", requestedAt: Date.now() };
+		batch.waveShutdown = { sessionId: batch.waveSessionId, waveIdentity: batch.waveIdentity, settled: true, pendingJobIds: [], observedAt: Date.now() };
+		saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, batch);
+		for (const item of items.slice(0, 3)) effects[item.id] = {
+			state: "MERGED", merged: true, headSha: "f".repeat(40), autoMerge: false, reviewDecision: null, reviews: [],
+		};
+	}, { forwardComparison: true, changeEarlierOnComparison: true });
+	assert.equal(claims.length, 4, "a changed earlier terminal effect keeps all wave claims UNKNOWN");
+});
+
+for (const scenario of ["diverged", "head-race", "incomplete-reviews", "changes-requested", "unsettled"]) test(`stopped Slay retains merged changed-head claims for ${scenario}`, async () => {
+	const { claims } = await reconcileBlockedPrSlayWave(({ env, items, effects, batch }) => {
+		batch.waveSessionId = "stopped-session";
+		batch.waveExit = { sessionId: batch.waveSessionId, waveIdentity: batch.waveIdentity, choice: "pause", requestedAt: Date.now() };
+		batch.waveShutdown = { sessionId: batch.waveSessionId, waveIdentity: batch.waveIdentity, settled: scenario !== "unsettled", pendingJobIds: [], observedAt: Date.now() };
+		saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, batch);
+		for (const item of items.slice(0, 3)) effects[item.id] = {
+			state: "MERGED", merged: true, headSha: "f".repeat(40), autoMerge: false,
+			reviewDecision: scenario === "changes-requested" ? "CHANGES_REQUESTED" : null,
+			reviewsIncomplete: scenario === "incomplete-reviews", reviews: [],
+		};
+	}, { forwardComparison: true, diverged: scenario === "diverged", headRace: scenario === "head-race" });
+	assert.equal(claims.length, 4);
 });
 
 test("reconcile accepts open auto-merge at a changed head with fresh head-bound review", async () => {
