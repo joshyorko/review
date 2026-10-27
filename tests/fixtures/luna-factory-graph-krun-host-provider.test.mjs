@@ -151,6 +151,25 @@ test("krun host transport sends the unchanged fixture route through host network
 	assert.equal(canonicalVersion.stdout.trim(), "omp/1.2.3");
 });
 
+test("graph driver gives its version probe the same private environment as execution", (t) => {
+	const f = setup(); t.after(() => rmSync(f.temp, { recursive: true, force: true }));
+	const podman = join(f.temp, "bin/podman");
+	writeFileSync(podman, readFileSync(podman, "utf8")
+		.replaceAll("process.env.GRAPH130_TEST_PODMAN_CAPTURE", JSON.stringify(f.capture))
+		.replaceAll("process.env.GRAPH130_TEST_IMAGE_INSPECT", JSON.stringify(f.inspect))
+		.replace('const args = process.argv.slice(2);', `if (process.env.XDG_DATA_HOME !== ${JSON.stringify(join(f.home, ".local/share"))}) throw new Error("host Podman image store was lost");\nconst args = process.argv.slice(2);`));
+	const driver = spawnSync(process.execPath, [join(repository, "tests/fixtures/luna-factory-graph-acceptance-driver.mjs"), "krun-host-provider"], {
+		encoding: "utf8", timeout: 15_000,
+		env: { ...f.env, GRAPH130_EVIDENCE: f.root, OMP_BINARY: helper },
+	});
+	const plans = calls(f).filter((argv) => argv[0] === "run");
+	assert.equal(plans.length, 2, `the fake runtime must reach both version and graph execution; ${driver.stderr}`);
+	assert.ok(plans[0].includes("--version"));
+	assert.ok(plans[1].includes("--mode"));
+	// Fake Podman never executes OMP or writes guest receipts; this is only an environment test.
+	assert.notEqual(driver.status, 0);
+});
+
 test("krun host transport rejects a foreign runtime extension with a familiar suffix", (t) => {
 	const f = setup(); t.after(() => rmSync(f.temp, { recursive: true, force: true }));
 	const foreign = join(f.temp, "foreign/tests/fixtures/luna-factory-graph-acceptance-runtime.ts");

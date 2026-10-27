@@ -172,6 +172,7 @@ now="$(date +%s)"
 grep -Fxq "source=$GRAPH130_EXPECTED_IMAGE_ID" "$GRAPH130_GRANT_FILE" || { echo "root grant image ID mismatch" >&2; exit 12; }
 grep -Fxq "image-digest=$GRAPH130_EXPECTED_IMAGE_DIGEST" "$GRAPH130_GRANT_FILE" || { echo "root grant image digest mismatch" >&2; exit 12; }
 uid="$(id -u)"
+/usr/bin/uname -sr > "$GRAPH130_ROOT/krun-guest-kernel.txt"
 printf "%s\n" "$uid" > "$GRAPH130_ROOT/krun-effective-uid.txt"
 [[ "$uid" == 65532 ]] || { echo "effective UID mismatch" >&2; exit 13; }
 /usr/bin/omp --version > "$GRAPH130_ROOT/krun-omp-version.txt"

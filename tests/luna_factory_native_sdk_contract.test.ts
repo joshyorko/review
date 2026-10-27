@@ -39,6 +39,17 @@ type Tool = {
 
 class PrivateAgentRegistry {}
 
+test("native execution refuses an SDK that does not bind its request policy", async () => {
+	const workspace = await mkdtemp(join(tmpdir(), "factory-native-policy-"));
+	try {
+		let options: Record<string, unknown> | undefined;
+		const sdk = sdkContract((value) => { options = value; });
+		const policy = { before: () => ({ allowed: false as const, reason: "denied" }), response() {}, usage() {}, blocked() {} };
+		await assert.rejects(runNative(sdk, schema, { model: {}, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } }, item(workspace), workspace, "worker", new AbortController().signal, () => {}, () => {}, "", { attemptId: "T1-a1" }, policy), /did not bind the Factory request policy/);
+		assert.equal(options?.restrictToolNames, true);
+	} finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
 function sdkContract(capture: (options: Record<string, unknown>) => void): NativeSDK {
 	const sdk = {
 		Settings: {

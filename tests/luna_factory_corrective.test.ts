@@ -112,6 +112,7 @@ test("an independent rejection survives queue clearing and reaches the bounded r
  try{
   ready(f);f.item.selected.action="inspect";f.item.ledger.goal.permittedEffects=["read"];
   const sdk={Settings:{isolated:()=>({})},SessionManager:{create:()=>({})},AgentRegistry:class{},async createAgentSession(options:Record<string,unknown>){
+   for(const extension of (options.preloadedPreparedExtensions ?? []) as {factory(api:unknown):void}[]) extension.factory({on(){}});
    const tools=options.customTools as Array<{name:string;execute(id:string,args:unknown):Promise<unknown>}>;
    const report=tools.find(t=>t.name==="factory_report")!;const path=join(f.root,`session-${workers+reviews}.jsonl`);writeFileSync(path,"session\n");
    const listeners=new Set<(event:{type:string})=>void>();
@@ -197,6 +198,7 @@ test("changed mandatory checks block retained work without an automatic second w
   ready(f);writeFileSync(join(f.path,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));
   f.item.attempts=1;f.item.selected.requiredChecks=["npm test"];f.item.checkScripts=packageCheckScripts(f.path);
   const sdk={Settings:{isolated:()=>({})},SessionManager:{create:()=>({})},AgentRegistry:class{},async createAgentSession(options:Record<string,unknown>){
+   for(const extension of (options.preloadedPreparedExtensions ?? []) as {factory(api:unknown):void}[]) extension.factory({on(){}});
    const tools=options.customTools as Array<{name:string;execute(id:string,args:unknown):Promise<unknown>}>;
    const report=tools.find(t=>t.name==="factory_report")!;const sessionFile=join(f.root,"worker-session.jsonl");writeFileSync(sessionFile,"session\n");
    const listeners=new Set<(event:{type:string})=>void>();

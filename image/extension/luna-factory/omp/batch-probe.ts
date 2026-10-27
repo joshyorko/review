@@ -52,6 +52,7 @@ function fakeSdk(root: string): NativeSDK {
 		SessionManager: { create: () => ({}) },
 		AgentRegistry: class {},
 		async createAgentSession(options: Record<string, any>) {
+			for (const extension of options.preloadedPreparedExtensions ?? []) extension.factory({ on() {} });
 			const tools = options.customTools as Array<{ name: string; execute(id: string, args: any): Promise<unknown> }>;
 			const report = tools.find((tool) => tool.name === "factory_report");
 			if (!report) throw new Error("probe worker report tool missing");

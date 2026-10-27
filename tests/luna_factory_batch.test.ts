@@ -1300,10 +1300,10 @@ test("hosted failure diagnostics flow through retained handles into a fresh same
 		}
 	}, { acceptanceScript: "#!/usr/bin/env bash\nset -euo pipefail\ntest \"$(cat value.txt)\" = 1\n" });
 	const requestPolicyExtensions: number[] = [];
-	const sdk = fixture.sdk as unknown as { createAgentSession(options: { extensions?: readonly unknown[] }): Promise<unknown> };
+	const sdk = fixture.sdk as unknown as { createAgentSession(options: { preloadedPreparedExtensions?: readonly unknown[] }): Promise<unknown> };
 	const originalCreateAgentSession = sdk.createAgentSession.bind(fixture.sdk);
 	sdk.createAgentSession = async (options) => {
-		requestPolicyExtensions.push(options.extensions?.length ?? 0);
+		requestPolicyExtensions.push(options.preloadedPreparedExtensions?.length ?? 0);
 		return originalCreateAgentSession(options as never);
 	};
 	let remote = ""; let branch = ""; let targetSha = ""; let candidateSha = ""; let pullIdentity = "PR_node_70"; let hideExistingPullOnce = false;
@@ -1814,6 +1814,7 @@ test("accepted aggregate cannot override a false native acceptance predicate", a
 		SessionManager: { create: () => ({}) },
 		AgentRegistry: class {},
 		async createAgentSession(options: Record<string, unknown>) {
+			for (const extension of (options.preloadedPreparedExtensions ?? []) as { factory(api: unknown): void }[]) extension.factory({ on() {} });
 			const tools = options.customTools as Array<{ name: string; execute(id: string, args: Record<string, unknown>): Promise<unknown> }>;
 			const report = tools.find((tool) => tool.name === "factory_report");
 			assert.ok(report);
@@ -1903,6 +1904,7 @@ test("a replacement inspection worker reuses its operation identity and retains 
 		SessionManager: { create: () => ({}) },
 		AgentRegistry: class {},
 		async createAgentSession(options: Record<string, unknown>) {
+			for (const extension of (options.preloadedPreparedExtensions ?? []) as { factory(api: unknown): void }[]) extension.factory({ on() {} });
 			const tools = options.customTools as Array<{ name: string; execute(id: string, args: Record<string, unknown>): Promise<unknown> }>;
 			const report = tools.find((tool) => tool.name === "factory_report");
 			assert.ok(report, "the private inspection session has its evidence tool");
