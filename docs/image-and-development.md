@@ -26,10 +26,18 @@ files unchanged.
 
 ## Publishing an update
 
-Bump the root `VERSION` to a new semantic version and push the change to `main`.
+Run the **Request Review release** workflow on `main` and enter the next stable
+version (for example, `0.1.4`). It creates a version-bump pull request and
+explicitly dispatches `validate` against that PR's exact head; review and merge
+that PR to request the release. Repository Actions settings must allow GitHub
+Actions to create pull requests. If PR creation fails after the branch is pushed,
+open a PR from `release/v<VERSION>` or remove that branch before retrying.
+
+Alternatively, bump the root `VERSION` in a PR and merge it to `main`.
 After `validate` succeeds, `Review release` automatically builds and tests both
 native architectures at that exact commit, then publishes the versioned OCI/SIF
-release. An already published version is skipped; ordinary pushes still run CI.
+release. An already published version is skipped on automatic runs; a manual publish
+request for one fails with an actionable error. Ordinary pushes still run CI.
 
 `joshyorko/homebrew-tools` checks for new Review releases hourly. Its Dagger
 pipeline verifies the release bundles, tests Homebrew installation, and commits

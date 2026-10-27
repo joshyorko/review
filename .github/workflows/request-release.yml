@@ -1,0 +1,70 @@
+name: Request Review release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Next stable version (MAJOR.MINOR.PATCH)'
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: review-release-request
+  cancel-in-progress: false
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check release request target
+        env:
+          REQUEST_REPOSITORY: ${{ github.repository }}
+          REQUEST_REF: ${{ github.ref }}
+        run: |
+          if [ "$REQUEST_REPOSITORY" != joshyorko/review ] || [ "$REQUEST_REF" != refs/heads/main ]; then
+            echo "::error::Run this workflow on main in joshyorko/review."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Validate version and create release pull request
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          current="$(bash scripts/review-appliance-version.sh)"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags"
+          git tag --list >> "$RUNNER_TEMP/release-tags"
+          python3 scripts/validate-release-version.py "$current" "$REQUESTED_VERSION" < "$RUNNER_TEMP/release-tags"
+          branch="release/v$REQUESTED_VERSION"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "::error::Branch $branch already exists; inspect its pull request or remove the branch before retrying."
+            exit 1
+          fi
+          git switch -c "$branch"
+          printf '%s\n' "$REQUESTED_VERSION" > VERSION
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add VERSION
+          git commit -m "chore: release $REQUESTED_VERSION"
+          git push origin "HEAD:refs/heads/$branch"
+          gh pr create --base main --head "$branch" --title "chore: release $REQUESTED_VERSION" \
+            --body "Bump VERSION to $REQUESTED_VERSION. After this PR is merged, successful main validation triggers the release workflow."
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Dispatch exact pull-request validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: ${{ steps.release.outputs.branch }}
+        run: |
+          set -euo pipefail
+          expected_sha="$(gh pr view "$RELEASE_BRANCH" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+          gh workflow run validate.yml --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_BRANCH" -f "expected_sha=$expected_sha"
