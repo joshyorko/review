@@ -14,9 +14,6 @@ assert.ok(["native", "krun-host-provider"].includes(mode), "select native source
 if (mode === "krun-host-provider") {
 	assert.equal(resolve(process.env.OMP_BINARY ?? ""), join(repository, "tests/fixtures/luna-factory-graph-krun-host-provider.sh"), "krun mode uses the reviewed host-provider shim");
 }
-const runtimeKind = mode === "native"
-	? "native OMP 18.4.12 with mounted source; not packaged-image proof"
-	: "packaged OCI OMP via krun host-loopback provider; mounted source identity checked in guest";
 const root = resolve(process.env.GRAPH130_EVIDENCE ?? join("/var/tmp", `luna-factory-graph-acceptance-${process.pid}`));
 mkdirSync(root, { recursive: true });
 const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim();
@@ -140,6 +137,9 @@ try {
 	const binary = executable(process.env.OMP_BINARY ?? "omp");
 	const version = execFileSync(binary, ["--version"], { encoding: "utf8" }).trim();
 	assert.equal(version, `omp/${expectedVersion}`, "fixture runtime must match the packaged OMP version");
+	const runtimeKind = mode === "native"
+		? `native ${version} with mounted source; not packaged-image proof`
+		: "packaged OCI OMP via krun host-loopback provider; mounted source identity checked in guest";
 	const launcherSha256 = execFileSync("sha256sum", [binary], { encoding: "utf8" }).split(/\s/)[0];
 	const binaryIdentity = mode === "native" ? { binary, binaryDigest: launcherSha256 } : { launcher: binary, launcherSha256, launcherVersion: version };
 	writeFileSync(join(root, "runtime-identity.json"), JSON.stringify({ mode, ...binaryIdentity, sourceHead: head, sourceDirty: sourceDiff.length !== 0, sourceDiffDigest, harnessHead, harnessDigest: initialHarnessDigest, evidence: root, runtimeKind }, null, 2));
