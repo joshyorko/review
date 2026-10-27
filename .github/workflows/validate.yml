@@ -7,17 +7,48 @@ name: validate
 on:
   push:
   pull_request:
-
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact generated pull-request head to validate
+        required: true
+        type: string
 permissions:
   attestations: read
   contents: read
-
+  pull-requests: read
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
+      - name: Verify explicitly dispatched release pull request
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EVENT_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = joshyorko/review
+          test "$EXPECTED_SHA" = "$(git rev-parse HEAD)"
+          pull="$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=$GITHUB_REPOSITORY:$EVENT_REF&state=open" \
+            --jq "[.[] | select(.head.sha == \"$EXPECTED_SHA\" and .head.ref == \"$EVENT_REF\")] | length")"
+          test "$pull" = 1
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify explicitly dispatched release pull request
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EVENT_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = joshyorko/review
+          test "$EXPECTED_SHA" = "$(git rev-parse HEAD)"
+          pull="$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=$GITHUB_REPOSITORY:$EVENT_REF&state=open" \
+            --jq '[.[] | select(.head.sha == env.EXPECTED_SHA and .head.ref == env.EVENT_REF)] | length')"
+          test "$pull" = 1
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7

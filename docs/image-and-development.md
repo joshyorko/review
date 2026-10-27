@@ -27,11 +27,11 @@ files unchanged.
 ## Publishing an update
 
 Run the **Request Review release** workflow on `main` and enter the next stable
-version (for example, `0.1.4`). It creates a version-bump pull request; review
-and merge that PR to request the release. Repository Actions settings must allow
-GitHub Actions to create pull requests. GitHub may require approval before the
-automatically created PR runs its checks. If PR creation fails after the branch
-is pushed, open a PR from `release/v<VERSION>` or remove that branch before retrying.
+version (for example, `0.1.4`). It creates a version-bump pull request and
+explicitly dispatches `validate` against that PR's exact head; review and merge
+that PR to request the release. Repository Actions settings must allow GitHub
+Actions to create pull requests. If PR creation fails after the branch is pushed,
+open a PR from `release/v<VERSION>` or remove that branch before retrying.
 
 Alternatively, bump the root `VERSION` in a PR and merge it to `main`.
 After `validate` succeeds, `Review release` automatically builds and tests both
