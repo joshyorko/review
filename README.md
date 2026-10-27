@@ -62,3 +62,21 @@ Hive remains an optional, explicitly selected read-side integration for existing
 - [Documentation index](docs/SKILL.md)
 
 Licensed under [Apache 2.0](LICENSE). [Visual credits](docs/images/README.md).
+
+### Release notes
+
+Run `review changelog` to read Review's bundled release history offline. It does
+not start the appliance or inspect the current directory's repository.
+
+Maintainers can preview a release with `just changelog 0.1.4`. Install the pinned
+authoring tool into a disposable directory with
+`bash scripts/install-git-cliff.sh /tmp/review-git-cliff`, then add that directory
+to `PATH`. The request-release workflow installs it automatically.
+
+In **Request Review release**, choose `patch`, `minor`, or `major`, or supply an
+exact version override without a `v` prefix. The workflow opens a PR containing
+`VERSION` and a git-cliff draft in `CHANGELOG.md`. Review and edit those notes
+before merging. Passing main validation triggers publication; the matching
+committed section is packaged and published with build provenance appended.
+Notes are curated, not a guarantee that every commit is described. The baseline
+`v<CURRENT_VERSION>` tag must exist and be an ancestor of the source commit.

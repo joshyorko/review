@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Validate native bundles and generate the stable Review formula."""
+import importlib.util
 import hashlib
 import json
 from pathlib import Path
@@ -7,7 +8,7 @@ import re
 import sys
 
 
-def prepare(bundles: Path, output: Path):
+def prepare(bundles: Path, output: Path, changelog=None):
     records = [json.loads(p.read_text()) for p in sorted(bundles.glob('manifest-*.json'))]
     if not records:
         raise ValueError('no bundle manifests')
@@ -59,11 +60,15 @@ def prepare(bundles: Path, output: Path):
               '    bin.install "review"',
               '  end', '  test do', '    assert_match "Usage: review", shell_output("#{bin}/review --help 2>&1")',
               '    assert_predicate libexec/"launcher/review.sif", :executable?', '  end', 'end', '']
+    spec = importlib.util.spec_from_file_location('review_changelog', Path(__file__).with_name('review-changelog.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    notes = module.section(Path(changelog or Path(__file__).resolve().parents[1] / 'CHANGELOG.md').read_text(), version)
     output.mkdir(parents=True, exist_ok=True)
     (output/'review.rb').write_text('\n'.join(lines))
     (output/'sha').write_text(sha+'\n')
     (output/'tag').write_text(tag+'\n')
-    (output/'notes').write_text(f'Source: {ref}\nCommit: {sha}\nOCI: {oci_image}\nNative Linux launcher and SIF from the same commit.\n')
+    (output/'notes').write_text(notes + f'\n\n### Build provenance\n\nSource: {ref}\nCommit: {sha}\nOCI: {oci_image}\nNative Linux launcher and SIF from the same commit.\n')
 
 
 if __name__ == '__main__':

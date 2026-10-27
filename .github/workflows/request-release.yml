@@ -3,9 +3,14 @@ name: Request Review release
 on:
   workflow_dispatch:
     inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
       version:
-        description: 'Next stable version (MAJOR.MINOR.PATCH)'
-        required: true
+        description: 'Optional exact version override (MAJOR.MINOR.PATCH)'
+        required: false
         type: string
 
 permissions:
@@ -34,17 +39,23 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+      - name: Install pinned changelog generator
+        run: bash scripts/install-git-cliff.sh "$RUNNER_TEMP/git-cliff"
       - name: Validate version and create release pull request
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
           current="$(bash scripts/review-appliance-version.sh)"
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags"
           git tag --list >> "$RUNNER_TEMP/release-tags"
-          python3 scripts/validate-release-version.py "$current" "$REQUESTED_VERSION" < "$RUNNER_TEMP/release-tags"
+          REQUESTED_VERSION="$(python3 scripts/validate-release-version.py "$current" "${REQUESTED_VERSION:-${REQUESTED_BUMP:-patch}}" < "$RUNNER_TEMP/release-tags")"
+          export PATH="$RUNNER_TEMP/git-cliff:$PATH"
+          python3 scripts/review-changelog.py draft "$current" "$REQUESTED_VERSION" > "$RUNNER_TEMP/release-section"
+          python3 scripts/review-changelog.py prepend "$REQUESTED_VERSION" < "$RUNNER_TEMP/release-section"
           branch="release/v$REQUESTED_VERSION"
           if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
             echo "::error::Branch $branch already exists; inspect its pull request or remove the branch before retrying."
@@ -54,11 +65,13 @@ jobs:
           printf '%s\n' "$REQUESTED_VERSION" > VERSION
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add VERSION
+          git add VERSION CHANGELOG.md
           git commit -m "chore: release $REQUESTED_VERSION"
           git push origin "HEAD:refs/heads/$branch"
+          printf 'Bump VERSION to %s. After merge, successful main validation triggers publication.\n\n' "$REQUESTED_VERSION" > "$RUNNER_TEMP/release-body"
+          cat "$RUNNER_TEMP/release-section" >> "$RUNNER_TEMP/release-body"
           gh pr create --base main --head "$branch" --title "chore: release $REQUESTED_VERSION" \
-            --body "Bump VERSION to $REQUESTED_VERSION. After this PR is merged, successful main validation triggers the release workflow."
+            --body-file "$RUNNER_TEMP/release-body"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
       - name: Dispatch exact pull-request validation
         env:

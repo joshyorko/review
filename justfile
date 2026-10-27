@@ -591,3 +591,7 @@ review-doctor:
     echo ""
     echo "${pass} checks passed, ${fail} failed."
     [[ "$fail" -eq 0 ]] || exit 1
+
+# Preview the next release section without changing files (requires git-cliff 2.14.2).
+changelog version:
+    python3 scripts/review-changelog.py draft "$(cat VERSION)" "{{version}}"

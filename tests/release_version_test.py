@@ -20,6 +20,13 @@ class ReleaseVersionTest(unittest.TestCase):
                 self.assertNotEqual(self.check_version(requested).returncode, 0)
         self.assertNotEqual(self.check_version('0.1.4', existing='v0.1.4\n').returncode, 0)
 
+    def test_explicit_bump_choices(self):
+        for bump, expected in [('patch', '0.1.4'), ('minor', '0.2.0'), ('major', '1.0.0')]:
+            result = self.check_version(bump)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), expected)
+        self.assertNotEqual(self.check_version('patch', existing='v0.1.4\n').returncode, 0)
+
     def test_rejects_invalid_current_version(self):
         self.assertNotEqual(self.check_version('0.1.4', current='broken').returncode, 0)
 
