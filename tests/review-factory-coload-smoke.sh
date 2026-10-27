@@ -10,9 +10,12 @@ image="${REVIEW_APPLIANCE_IMAGE:-${REVIEW_APPLIANCE_IMAGE:-localhost/review:fact
 runtime="${REVIEW_SMOKE_RUNTIME:-}"
 runtime_args=()
 case "$runtime" in
-  "") ;;
-  krun) runtime_args+=(--runtime=krun) ;;
-  *) echo "review-factory-coload-smoke: REVIEW_SMOKE_RUNTIME must be empty or krun" >&2; exit 2 ;;
+"") ;;
+krun) runtime_args+=(--runtime=krun) ;;
+*)
+  echo "review-factory-coload-smoke: REVIEW_SMOKE_RUNTIME must be empty or krun" >&2
+  exit 2
+  ;;
 esac
 run_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/review-factory-coload-$$"
 enabled_result=passed
@@ -62,13 +65,13 @@ run_case() {
       '{"id":"factory-status","type":"prompt","message":"/factory status"}' >"$output" 2>&1
   else
     printf '%s\n' \
-    '{"id":"commands","type":"get_available_commands"}' \
-    '{"id":"factory-status","type":"prompt","message":"/factory status"}' |
-    timeout --signal=TERM --kill-after=5s 30s podman run --rm --interactive --network host \
-      --userns keep-id:uid=65532,gid=65532 "${env_args[@]}" \
-      --volume "$home:/home/review:rw" "$image" \
-      --mode rpc-ui --no-skills --no-rules --no-pty --model local-probe/deterministic \
-      >"$output" 2>&1
+      '{"id":"commands","type":"get_available_commands"}' \
+      '{"id":"factory-status","type":"prompt","message":"/factory status"}' |
+      timeout --signal=TERM --kill-after=5s 30s podman run --rm --interactive --network host \
+        --userns keep-id:uid=65532,gid=65532 "${env_args[@]}" \
+        --volume "$home:/home/review:rw" "$image" \
+        --mode rpc-ui --no-skills --no-rules --no-pty --model local-probe/deterministic \
+        >"$output" 2>&1
   fi
   local status=$?
   set -e
@@ -124,21 +127,21 @@ policy_rpc() {
       "$request" >"$output" 2>&1
   else
     printf '%s\n' \
-    '{"id":"commands","type":"get_available_commands"}' \
-    "$request" |
-    timeout --signal=TERM --kill-after=5s 30s podman run --rm --interactive --network host \
-      --userns keep-id:uid=65532,gid=65532 \
-      --env HOME=/home/review \
-      --env XDG_CONFIG_HOME=/host-xdg \
-      --env XDG_STATE_HOME=/home/review/.local/state \
-      --env XDG_CACHE_HOME=/home/review/.cache \
-      --env REVIEW_DEFAULT_SCOPE=example/repo \
-      --env REVIEW_MODE=review \
-      --env GH_TOKEN= \
-      --env GITHUB_TOKEN= \
-      --volume "$policy_home:/home/review:rw" "$image" \
-      --mode rpc-ui --no-skills --no-rules --no-pty --model local-probe/deterministic \
-      >"$output" 2>&1
+      '{"id":"commands","type":"get_available_commands"}' \
+      "$request" |
+      timeout --signal=TERM --kill-after=5s 30s podman run --rm --interactive --network host \
+        --userns keep-id:uid=65532,gid=65532 \
+        --env HOME=/home/review \
+        --env XDG_CONFIG_HOME=/host-xdg \
+        --env XDG_STATE_HOME=/home/review/.local/state \
+        --env XDG_CACHE_HOME=/home/review/.cache \
+        --env REVIEW_DEFAULT_SCOPE=example/repo \
+        --env REVIEW_MODE=review \
+        --env GH_TOKEN= \
+        --env GITHUB_TOKEN= \
+        --volume "$policy_home:/home/review:rw" "$image" \
+        --mode rpc-ui --no-skills --no-rules --no-pty --model local-probe/deterministic \
+        >"$output" 2>&1
   fi
   status=$?
   set -e
@@ -173,10 +176,10 @@ grep -Fq 'example/repo: solo (explicit)' "$run_root/policy-restart.jsonl" || {
   exit 1
 }
 [[ "$(grep -o 'example/repo' "$run_root/policy-restart.jsonl" | wc -l)" -ge 2 &&
-  "$(grep -o 'solo' "$run_root/policy-restart.jsonl" | wc -l)" -ge 2 ]] || {
-    echo "review-factory-coload-smoke: Factory did not read matching solo policy; evidence=$run_root/policy-restart.jsonl" >&2
-    exit 1
-  }
+"$(grep -o 'solo' "$run_root/policy-restart.jsonl" | wc -l)" -ge 2 ]] || {
+  echo "review-factory-coload-smoke: Factory did not read matching solo policy; evidence=$run_root/policy-restart.jsonl" >&2
+  exit 1
+}
 grep -Fq '"id":"factory-policy"' "$run_root/policy-restart.jsonl" || {
   echo "review-factory-coload-smoke: Factory policy read did not return; evidence=$run_root/policy-restart.jsonl" >&2
   exit 1

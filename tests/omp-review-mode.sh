@@ -20,10 +20,10 @@ test_files=(
   tests/review-recap.test.ts
   tests/pr_reader.test.ts
   tests/personal_policy.test.ts
-	tests/operator_policy.test.ts
-	tests/human_review_policy.test.ts
-	tests/reviewer_receipts.test.ts
-	tests/operator_landing.test.ts
+  tests/operator_policy.test.ts
+  tests/human_review_policy.test.ts
+  tests/reviewer_receipts.test.ts
+  tests/operator_landing.test.ts
   tests/luna_factory.test.ts
   tests/luna_factory_dogfood_contract.test.ts
   tests/luna_factory_native.test.ts
