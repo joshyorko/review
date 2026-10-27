@@ -25,10 +25,11 @@ test("reads team by default without creating instance state", () => {
 	const state = env();
 	const snapshot = readOperatorPolicy("Example/Repo", state);
 	assert.deepEqual(snapshot, {
-		version: 1,
+		version: 2,
 		repository: "example/repo",
 		mode: "team",
 		source: "default",
+		revision: 0,
 		digest: snapshot.digest,
 	});
 	assert.equal(operatorPolicyCurrent(snapshot, state), true);
@@ -54,10 +55,10 @@ test("writes explicit normalized policy and preserves unrelated repositories", (
 	assert.equal(readOperatorPolicy("example/repo", state).mode, "solo");
 	assert.equal(readOperatorPolicy("another/repo", state).source, "explicit");
 	assert.deepEqual(JSON.parse(readFileSync(operatorPolicyPath(state), "utf8")), {
-		version: 1,
+		version: 2,
 		repositories: [
-			{ repository: "another/repo", mode: "team" },
-			{ repository: "example/repo", mode: "solo" },
+			{ repository: "another/repo", mode: "team", revision: 1 },
+			{ repository: "example/repo", mode: "solo", revision: 1 },
 		],
 	});
 });
@@ -68,6 +69,20 @@ test("same mode writes are idempotent", () => {
 	const second = writeOperatorPolicy("OWNER/REPO", "solo", state);
 	assert.equal(first.digest, second.digest);
 	assert.equal(readFileSync(operatorPolicyPath(state), "utf8").match(/owner\/repo/g)?.length, 1);
+	assert.equal(first.revision, 1);
+	assert.equal(second.revision, 1);
+});
+
+test("policy revision prevents old solo snapshots returning current after an ABA change", () => {
+	const state = env();
+	const original = writeOperatorPolicy("owner/repo", "solo", state);
+	assert.equal(original.revision, 1);
+	writeOperatorPolicy("owner/repo", "team", state);
+	const afterRestart = writeOperatorPolicy("owner/repo", "solo", state);
+	assert.equal(afterRestart.revision, 3);
+	assert.equal(operatorPolicyCurrent(original, state), false);
+	assert.equal(readOperatorPolicy("owner/repo", state).revision, 3);
+	assert.equal(isOperatorPolicySnapshot({ ...original, revision: 2 }), false);
 });
 
 test("rejects invalid repositories and modes", () => {
@@ -83,11 +98,12 @@ test("rejects malformed and duplicate normalized stored entries", () => {
 	mkdirSync(join(state.HOME!, ".config", "review"), { recursive: true });
 	const path = operatorPolicyPath(state);
 	for (const contents of [
-		'{"version":2,"repositories":[]}',
-		'{"version":1,"repositories":[],"extra":true}',
-		'{"version":1,"repositories":[{"repository":"owner/repo","mode":"solo","extra":true}]}',
-		'{"version":1,"repositories":[{"repository":"owner/repo","mode":"global"}]}',
-		'{"version":1,"repositories":[{"repository":"Owner/Repo","mode":"solo"},{"repository":"owner/repo","mode":"team"}]}',
+		'{"version":1,"repositories":[]}',
+		'{"version":2,"repositories":[],"extra":true}',
+		'{"version":2,"repositories":[{"repository":"owner/repo","mode":"solo","revision":1,"extra":true}]}',
+		'{"version":2,"repositories":[{"repository":"owner/repo","mode":"global","revision":1}]}',
+		'{"version":2,"repositories":[{"repository":"Owner/Repo","mode":"solo","revision":1},{"repository":"owner/repo","mode":"team","revision":1}]}',
+		'{"version":2,"repositories":[{"repository":"owner/repo","mode":"solo","revision":0}]}',
 	]) {
 		writeFileSync(path, contents);
 		assert.throws(() => readOperatorPolicy("owner/repo", state), /invalid|corrupt|duplicate/i);
@@ -109,8 +125,9 @@ test("rejects a solo snapshot marked as default even with its matching digest", 
 	const repository = "owner/repo";
 	const mode = "solo";
 	const source = "default";
-	const digest = createHash("sha256").update(JSON.stringify({ version: 1, repository, mode, source })).digest("hex");
-	assert.equal(isOperatorPolicySnapshot({ version: 1, repository, mode, source, digest }), false);
+	const revision = 0;
+	const digest = createHash("sha256").update(JSON.stringify({ version: 2, repository, mode, source, revision })).digest("hex");
+	assert.equal(isOperatorPolicySnapshot({ version: 2, repository, mode, source, revision, digest }), false);
 });
 
 test("uses HOME path even when XDG_CONFIG_HOME points elsewhere", () => {

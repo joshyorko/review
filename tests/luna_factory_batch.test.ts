@@ -171,13 +171,16 @@ test("Factory admission replaces caller policy snapshots with trusted per-reposi
 			selected("owner/two#2", "patch", { operatorPolicy: { ...forged, mode: "solo" } as never }),
 		], { capacity: 1, maxAttempts: 1, maxTotalAttempts: 2, mode: "retain" });
 		assert.deepEqual(batch.items.map((item) => item.selected.operatorPolicy?.mode), ["solo", "team"]);
+		assert.deepEqual(batch.items.map((item) => item.selected.operatorPolicy?.revision), [1, 0]);
 		assert.deepEqual(Object.keys(batch.operatorPolicy ?? {}).sort(), ["owner/one", "owner/two"]);
 		assert.equal(batch.operatorPolicy?.["owner/two"]?.source, "default");
 		assert.match(batchSummary(batch, root), /owner\/one solo \(explicit;/);
 		assert.match(batchSummary(batch, root), /owner\/two team \(default;/);
 		for (const item of batch.items) done(batch, item.selected.key);
 		assert.equal(batchConverged(batch), true);
-		writeOperatorPolicy("owner/one", "team", { HOME: root });
+		const changedPolicy = writeOperatorPolicy("owner/one", "team", { HOME: root });
+		assert.equal(changedPolicy.revision, 2);
+		assert.equal(batch.items[0]?.selected.operatorPolicy?.revision, 1, "the admitted snapshot retains its original policy generation");
 		assert.equal(batchConverged(batch), true, "human review policy changes do not invalidate native acceptance proof");
 		await service.shutdown();
 	} finally {

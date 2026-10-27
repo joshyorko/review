@@ -25,7 +25,6 @@ import type {
 } from "../core/model.ts";
 import type { ResourceClaim } from "../omp/batch-store.ts";
 import type { OperatorPolicySnapshot } from "../../review/operator-policy.ts";
-import type { OperatorPolicySnapshot } from "../../review/operator-policy.ts";
 
 export interface ProjectionOptions {
 	/** Omit all actions that would change Factory state. */
@@ -134,7 +133,6 @@ export interface ProjectedClaim {
 }
 
 export interface ProjectedItem {
-	readonly operatorPolicy?: OperatorPolicySnapshot;
 	readonly operatorPolicy?: OperatorPolicySnapshot;
 	readonly observation?: { readonly status: "proven" | "unproved" | "unknown"; readonly source: string; readonly revision: string };
 	readonly key: string;
@@ -524,7 +522,6 @@ export function projectItem(batch: Batch, item: BatchItem, options: ProjectionOp
 	if (!options.readOnly && item.selected.action !== "inspect" && ["BLOCKED", "QUEUED", "CANCELLED"].includes(item.stage) && !uncertainOperation) actions.push("exclude");
 	const next = nextSafeAction(batch, item, stage, dependency, claims, options.readOnly === true, options.activeItemKeys?.includes(item.selected.key) === true, retry);
 	const details = detailRows(batch, item, stage, proof, dependency, claims, attemptHistory, historyForDetails, options.readOnly === true);
-	if (item.selected.operatorPolicy) details.push(`human review policy: ${item.selected.operatorPolicy.mode} (${item.selected.operatorPolicy.source}; ${item.selected.operatorPolicy.digest})`);
 	if (item.selected.operatorPolicy) details.push(`human review policy: ${item.selected.operatorPolicy.mode} (${item.selected.operatorPolicy.source}; ${item.selected.operatorPolicy.digest})`);
 	if (graph) {
 		details.push(`convergence: ${graph.verdict}; ${graphNode?.decision ?? "UNKNOWN"}`,
