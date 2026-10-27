@@ -63,7 +63,8 @@ export function fixtureSDK(root: string, respond: (tools: readonly FixtureTool[]
 	let serial = 0;
 	return {
 		Settings: { isolated: (overrides: unknown) => overrides }, SessionManager: { create: () => ({}) }, AgentRegistry: class {},
-		async createAgentSession(options: { customTools: FixtureTool[] }) {
+		async createAgentSession(options: { customTools: FixtureTool[]; preloadedPreparedExtensions?: { factory(api: unknown): void }[] }) {
+			for (const extension of options.preloadedPreparedExtensions ?? []) extension.factory({ on() {} });
 			const listeners = new Set<(event: { type: string }) => void>();
 			const sessionFile = join(root, `fixture-session-${++serial}.jsonl`);
 			writeFileSync(sessionFile, "deterministic provider fixture\n");

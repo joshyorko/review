@@ -125,7 +125,7 @@ export default function graphAcceptanceRuntime(pi: ExtensionAPI) {
 			assert.equal(observed.at(-1)?.status, "unknown", "current state re-observation supersedes prior observed proof");
 			assert.match(inspected, /AUTONOMOUSLY_QUIESCENT/); assert.match(inspected, /example\/observed#1.*UNKNOWN/);
 			assert.match(inspected, /graph observation unknown|captured acceptance revision is missing or changed/i);
-			assert.match(inspected, /observed model calls/);
+			assert.match(inspected, /durable request reservations/);
 			assert.equal(a.proof?.subject, a.selected.head); assert.equal(a.proof?.acceptanceRevision, a.selected.acceptanceRevision);
 			assert.equal(c.proof?.subject, c.selected.head); assert.equal(c.ledger.criteria[0]?.assumptions?.some((entry: any) => entry.kind === "dependency-outcome" && entry.value === "proven"), true);
 			assert.equal(a.ledger.tasks[0]?.attempts.at(-1)?.generation, a.ledger.generation); assert.equal(c.ledger.tasks[0]?.attempts.at(-1)?.generation, c.ledger.generation);
@@ -134,7 +134,13 @@ export default function graphAcceptanceRuntime(pi: ExtensionAPI) {
 				assert.ok(checks.some((text: string) => /exit: 0/.test(text)), `${item.selected.key} retains the actual mandatory bwrap acceptance result`);
 			}
 			assert.equal(readFileSync(join(a.workspace, "value.txt"), "utf8"), "1\n", "the repaired mutation exists in the actual Git workspace");
-			writeFileSync(join(root, "result.json"), JSON.stringify({ status: "passed", outcome: "AUTONOMOUSLY_QUIESCENT", blocker: "example/observed#1 exact merged-PR observation became UNKNOWN; restore authoritative GitHub access and reconcile", batchId: id, competingBatchId: competingId, selected: final.items.map((item: any) => ({ key: item.selected.key, stage: item.stage, attempts: item.attempts, subject: item.selected.head, acceptanceRevision: item.selected.acceptanceRevision })), capacity: final.capacity, peakWorkers: final.usage.peakWorkers, modelCalls: final.usage.modelCalls, observedProof: observed, sourceSnapshot: "captured local GitHub responses; not live GitHub evidence", actualGitAndVerifier: true, operatorFollowups: 0 }, null, 2));
+			delete process.env.GRAPH130_UNKNOWN;
+			await factoryCommand(`reconcile ${id}`, contextForCommand);
+			const restored = await factoryCommand(`inspect ${id}`, contextForCommand);
+			assert.match(restored, /CONVERGED/, "restored authoritative observation proves all selected outcomes");
+			const recovered = JSON.parse(readFileSync(batchFile, "utf8"));
+			assert.equal(recovered.usage.modelCalls, final.usage.modelCalls, "mechanical re-observation consumes no model requests");
+			writeFileSync(join(root, "result.json"), JSON.stringify({ status: "passed", outcome: "AUTONOMOUSLY_QUIESCENT", recoveredOutcome: "CONVERGED", recoveryAction: "restore observation and explicitly reconcile", blocker: "example/observed#1 exact merged-PR observation became UNKNOWN; restore authoritative GitHub access and reconcile", batchId: id, competingBatchId: competingId, selected: final.items.map((item: any) => ({ key: item.selected.key, stage: item.stage, attempts: item.attempts, subject: item.selected.head, acceptanceRevision: item.selected.acceptanceRevision })), capacity: final.capacity, peakWorkers: final.usage.peakWorkers, modelCalls: final.usage.modelCalls, competingModelCalls: competingSettled.usage.modelCalls, observedProof: observed, sourceSnapshot: "captured local GitHub responses; not live GitHub evidence", actualGitAndVerifier: true, operatorFollowups: 0 }, null, 2));
 			console.log(JSON.stringify({ status: "passed", batchId: id, outcome: "AUTONOMOUSLY_QUIESCENT", attempts: [a.attempts, b.attempts, c.attempts], peakWorkers: final.usage.peakWorkers, modelCalls: final.usage.modelCalls, operatorFollowups: 0 }));
 		} finally { globalThis.fetch = originalFetch; }
 		process.exit(0);

@@ -161,7 +161,8 @@ test("portable selected graph runs actual fixture checks and repair without foll
 	let sessions = 0;
 	const schema = { object: () => ({}), string: () => ({}), array: () => ({}), number: () => ({}), boolean: () => ({}) };
 	type Tool = { name: string; execute(id: string, args: unknown): Promise<{ content: { text: string }[] }> };
-	const sdk = { Settings: { isolated: () => ({}) }, SessionManager: { create: () => ({}) }, AgentRegistry: class {}, async createAgentSession(options: { customTools: Tool[] }) {
+	const sdk = { Settings: { isolated: () => ({}) }, SessionManager: { create: () => ({}) }, AgentRegistry: class {}, async createAgentSession(options: { customTools: Tool[]; preloadedPreparedExtensions?: { factory(api: unknown): void }[] }) {
+		for (const extension of options.preloadedPreparedExtensions ?? []) extension.factory({ on() {} });
 		const file = join(root, `native-${++sessions}.jsonl`); writeFileSync(file, "native fixture session\n");
 		const listeners = new Set<(event: { type: string }) => void>();
 		return { session: { sessionFile: file, subscribe(fn: (event: { type: string }) => void) { listeners.add(fn); return () => listeners.delete(fn); }, async abort() {}, async dispose() {}, async prompt(prompt: string) {

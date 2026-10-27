@@ -97,6 +97,17 @@ test("denied provider hook aborts Advisor-local work before the primary session"
 	assert.throws(() => controller.signal.throwIfAborted(), /aborted/i);
 });
 
+test("an assistant message without a route leaves usage unresolved", () => {
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	let settlements = 0;
+	let blocks = 0;
+	const extension = createRequestPolicyExtension({ before: () => ({ allowed: true, payload: {} }), response() {}, usage() { settlements++; }, blocked() { blocks++; } }, () => {});
+	extension({ on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler) } as never);
+	handlers.get("assistant_message")!({ message: { usage } }, { model: undefined });
+	assert.equal(settlements, 0);
+	assert.equal(blocks, 0);
+});
+
 test("usage settles the oldest response reservation and missing usage stays reserved", () => {
 	const policy = createExecutionPolicy(route, 1_000, { maxRequests: 3, deadlineAt: 10_000 });
 	const first = reserveProviderRequest(policy, { sequence: 0, reservations: [] }, route, payload, 2_000);
