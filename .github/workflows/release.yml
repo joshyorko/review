@@ -55,6 +55,10 @@ jobs:
           # API errors must fail, never masquerade as an unpublished version.
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags"
           if [ "$PUBLISH" = true ] && grep -Fxq "v$version" "$RUNNER_TEMP/release-tags"; then
+            if [ "$AUTOMATIC" = false ]; then
+              echo "::error::Review $version is already published; run Request Review release with a new version."
+              exit 1
+            fi
             echo "Review $version is already published; bump VERSION to publish new code."
             echo "build=false" >> "$GITHUB_OUTPUT"
           elif [ "$AUTOMATIC" = true ] && [ "$sha" != "$(git rev-parse origin/main)" ]; then
