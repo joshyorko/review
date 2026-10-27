@@ -110,6 +110,7 @@ export default function graphAcceptanceRuntime(pi: ExtensionAPI) {
 			assert.equal(competingSettled.items[0].attempts, 1);
 			assert.equal(competingSettled.items[0].proof?.stage, "verified-patch");
 			const inspected = await factoryCommand(`inspect ${id}`, contextForCommand);
+			writeFileSync(join(root, "inspect-quiescent.txt"), inspected);
 			const final = JSON.parse(readFileSync(batchFile, "utf8"));
 			const byKey = new Map(final.items.map((item: any) => [item.selected.key, item]));
 			const a = byKey.get("example/a#1") as any; const b = byKey.get("example/b#1") as any; const c = byKey.get("example/a#2") as any; const d = byKey.get("example/observed#1") as any;
@@ -137,7 +138,8 @@ export default function graphAcceptanceRuntime(pi: ExtensionAPI) {
 			delete process.env.GRAPH130_UNKNOWN;
 			await factoryCommand(`reconcile ${id}`, contextForCommand);
 			const restored = await factoryCommand(`inspect ${id}`, contextForCommand);
-			assert.match(restored, /CONVERGED/, "restored authoritative observation proves all selected outcomes");
+			writeFileSync(join(root, "inspect-converged.txt"), restored);
+			assert.match(restored, /Convergence: CONVERGED;/, "restored authoritative observation proves all selected outcomes");
 			const recovered = JSON.parse(readFileSync(batchFile, "utf8"));
 			assert.equal(recovered.usage.modelCalls, final.usage.modelCalls, "mechanical re-observation consumes no model requests");
 			writeFileSync(join(root, "result.json"), JSON.stringify({ status: "passed", outcome: "AUTONOMOUSLY_QUIESCENT", recoveredOutcome: "CONVERGED", recoveryAction: "restore observation and explicitly reconcile", blocker: "example/observed#1 exact merged-PR observation became UNKNOWN; restore authoritative GitHub access and reconcile", batchId: id, competingBatchId: competingId, selected: final.items.map((item: any) => ({ key: item.selected.key, stage: item.stage, attempts: item.attempts, subject: item.selected.head, acceptanceRevision: item.selected.acceptanceRevision })), capacity: final.capacity, peakWorkers: final.usage.peakWorkers, modelCalls: final.usage.modelCalls, competingModelCalls: competingSettled.usage.modelCalls, observedProof: observed, sourceSnapshot: "captured local GitHub responses; not live GitHub evidence", actualGitAndVerifier: true, operatorFollowups: 0 }, null, 2));

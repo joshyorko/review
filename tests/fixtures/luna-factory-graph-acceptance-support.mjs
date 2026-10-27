@@ -10,6 +10,7 @@ const krunEnvironmentNames = new Set([
 	"REVIEW_TEST_KRUN_IMAGE_DIGEST",
 	"REVIEW_TEST_KRUN_OMP_SHA256",
 	"REVIEW_TEST_KRUN_GRANT_FILE",
+	"XDG_DATA_HOME",
 ]);
 
 export function graphAcceptanceChildEnvironment({ pathPrefix, home, configHome, cacheHome, stateHome, root, source, harnessRoot, krunRuntimeEnvironment = {} }) {

@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { spawn, execFileSync } from "node:child_process";
 import { accessSync, constants, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { once } from "node:events";
 import { graphAcceptanceChildEnvironment, installGhShim, seedRepos } from "./luna-factory-graph-acceptance-support.mjs";
 
@@ -135,22 +136,26 @@ writeFileSync(join(root, "home/.omp/profiles/review-appliance/agent/models.yml")
 
 try {
 	const binary = executable(process.env.OMP_BINARY ?? "omp");
-	const version = execFileSync(binary, ["--version"], { encoding: "utf8" }).trim();
-	assert.equal(version, `omp/${expectedVersion}`, "fixture runtime must match the packaged OMP version");
-	const runtimeKind = mode === "native"
-		? `native ${version} with mounted source; not packaged-image proof`
-		: "packaged OCI OMP via krun host-loopback provider; mounted source identity checked in guest";
-	const launcherSha256 = execFileSync("sha256sum", [binary], { encoding: "utf8" }).split(/\s/)[0];
-	const binaryIdentity = mode === "native" ? { binary, binaryDigest: launcherSha256 } : { launcher: binary, launcherSha256, launcherVersion: version };
-	writeFileSync(join(root, "runtime-identity.json"), JSON.stringify({ mode, ...binaryIdentity, sourceHead: head, sourceDirty: sourceDiff.length !== 0, sourceDiffDigest, harnessHead, harnessDigest: initialHarnessDigest, evidence: root, runtimeKind }, null, 2));
 	const krunRuntimeEnvironment = {};
 	if (mode === "krun-host-provider") {
+		// The host Podman CLI needs its existing image store even though OMP uses a private HOME.
+		// This variable is not forwarded into the guest by the krun helper.
+		krunRuntimeEnvironment.XDG_DATA_HOME = process.env.XDG_DATA_HOME ?? join(homedir(), ".local/share");
 		for (const name of ["REVIEW_TEST_KRUN_ROOT_REVIEWED", "REVIEW_TEST_KRUN_SLOT_GRANTED", "REVIEW_TEST_KRUN_SLOT_EXPIRES_EPOCH", "REVIEW_TEST_KRUN_IMAGE_ID", "REVIEW_TEST_KRUN_IMAGE_DIGEST", "REVIEW_TEST_KRUN_OMP_SHA256", "REVIEW_TEST_KRUN_GRANT_FILE"]) {
 			assert.ok(process.env[name], `krun host-provider mode requires ${name}`);
 			krunRuntimeEnvironment[name] = process.env[name];
 		}
 	}
 	const env = graphAcceptanceChildEnvironment({ pathPrefix: shim, home: join(root, "home"), configHome: join(root, "home/.config"), cacheHome: join(root, "home/.cache"), stateHome: join(root, "state"), root, source, harnessRoot: mode === "krun-host-provider" ? repository : undefined, krunRuntimeEnvironment });
+	const version = execFileSync(binary, ["--version"], { encoding: "utf8", env }).trim();
+	assert.equal(version, `omp/${expectedVersion}`, "fixture runtime must match the packaged OMP version");
+	const runtimeKind = mode === "native"
+		? `native ${version} with mounted source; not packaged-image proof`
+		: "packaged OCI OMP via krun host-loopback provider; mounted source identity checked in guest";
+	const launcherSha256 = execFileSync("sha256sum", [binary], { encoding: "utf8" }).split(/\s/)[0];
+	const binaryIdentity = mode === "native" ? { binary, binaryDigest: launcherSha256 } : { launcher: binary, launcherSha256, launcherVersion: version };
+	writeFileSync(join(root, "runtime-identity.json"), JSON.stringify({ mode, ...binaryIdentity, sourceHead: head, sourceDirty: sourceDiff.length !== 0, sourceDiffDigest, harnessHead, harnessDigest: initialHarnessDigest, evidence: root, runtimeKind, host: { platform: process.platform, arch: process.arch, node: process.version, kernel: execFileSync("uname", ["-sr"], { encoding: "utf8" }).trim() } }, null, 2));
+
 	const args = ["--mode", "rpc", "--no-ui", "--no-skills", "--no-rules", "--no-extensions", "--no-pty", "--config", join(root, "home/.config/omp/omp.yml"), "--model", "local-probe/deterministic", "--extension", join(source, "image/extension/luna-factory"), "--extension", join(repository, "tests/fixtures/luna-factory-graph-acceptance-runtime.ts")];
 	const output = createWriteStream(join(root, "native-graph.log"));
 	child = spawn(binary, args, { cwd: join(root, "omp-cwd"), env, stdio: ["pipe", "pipe", "pipe"] });
@@ -167,7 +172,7 @@ try {
 		assert.equal(packagedOmpSha256, process.env.REVIEW_TEST_KRUN_OMP_SHA256, "actual packaged OMP bytes match the immutable runtime pin");
 		assert.equal(readFileSync(join(root, "krun-factory-source.diff"), "utf8"), "", "mounted Factory source matches packaged bytes");
 		assert.match(readFileSync(join(root, "krun-bwrap-version.txt"), "utf8"), /^bubblewrap/);
-		packagedOmpIdentity = { version: packagedVersion, sha256: packagedOmpSha256, effectiveUid: 65532, productionEntrypoint: "/usr/bin/review-appliance", factorySourceMatch: true };
+		packagedOmpIdentity = { version: packagedVersion, sha256: packagedOmpSha256, effectiveUid: 65532, kernel: readFileSync(join(root, "krun-guest-kernel.txt"), "utf8").trim(), productionEntrypoint: "/usr/bin/review-appliance", factorySourceMatch: true };
 	}
 	const result = JSON.parse(readFileSync(join(root, "result.json"), "utf8")); assert.equal(result.status, "passed");
 	assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim(), initialSourceHead, "production source head stayed fixed during acceptance");
