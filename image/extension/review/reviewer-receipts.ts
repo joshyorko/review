@@ -1,5 +1,5 @@
 /** Native, exact-subject receipts for the packaged Review reviewer. */
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -37,6 +37,8 @@ export interface ReviewerAdmission {
 	agentId: string;
 	subject: ReviewSubject;
 	outputSchema: unknown;
+	nativeJob?: { jobId: string; agentId: string; agent: "reviewer"; agentSource: "user"; status: "pending" | "running" | "completed" };
+	rejected?: true;
 	result?: ReviewerReceipt;
 	deliveredJobIds: string[];
 }
@@ -62,7 +64,7 @@ export interface ReviewerResult {
 	exitCode?: unknown;
 	error?: unknown;
 	aborted?: unknown;
-	structuredOutput?: { status?: unknown; data?: unknown };
+	structuredOutput?: { source?: unknown; mode?: unknown; status?: unknown; data?: unknown; error?: unknown };
 }
 
 export function createReviewerOutputSchema(subject: ReviewSubject): Record<string, unknown> {
@@ -107,30 +109,24 @@ export interface ReviewerTrustResult {
 
 const PACKAGED_REVIEWER_SHA256 = "d2e5e1e7f46183bf72fabf6dd45c11820b431751ac5d038f9f2b4f90b586ebde";
 
-function declaresReviewer(filePath: string): boolean {
+function shadowedInDirectory(directory: string): boolean {
 	try {
-		const source = readFileSync(filePath, "utf8");
-		return /^\s*name\s*:\s*["']?reviewer["']?\s*$/m.test(source.split("---", 3)[1] ?? "");
-	} catch {
-		return false;
+		const directoryInfo = lstatSync(directory);
+		if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) return true;
+		// Supported isolation has no custom agents. Refuse every potential native
+		// definition, without approximating YAML names, comments, aliases or tools.
+		return readdirSync(directory, { withFileTypes: true }).some(entry => entry.name.endsWith(".md"));
+	} catch (error) {
+		return !(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 	}
 }
 
-function shadowedInDirectory(directory: string): boolean {
-	if (!existsSync(directory)) return false;
+function presentOrAmbiguous(filePath: string): boolean {
 	try {
-		return readdirSync(directory, { withFileTypes: true }).some(entry => {
-			if (!entry.name.endsWith(".md")) return false;
-			const filePath = path.join(directory, entry.name);
-			try {
-				if (lstatSync(filePath).isSymbolicLink()) return true;
-			} catch {
-				return true;
-			}
-			return declaresReviewer(filePath);
-		});
-	} catch {
+		lstatSync(filePath);
 		return true;
+	} catch (error) {
+		return !(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 	}
 }
 
@@ -146,22 +142,62 @@ export function reviewerDefinitionTrusted(input: {
 	agentDir?: string;
 	profile?: string | null;
 	reviewerPath?: string;
+	extensionPaths?: readonly string[];
+	argv?: readonly string[];
+	env?: Readonly<Record<string, string | undefined>>;
 }): ReviewerTrustResult {
+	const env = input.env ?? process.env;
+	const argv = input.argv ?? process.argv;
 	const home = input.home ?? homedir();
 	const projectDirectory = nearestOmpAgentDirectory(input.cwd);
-	const profile = input.profile === undefined ? process.env.OMP_PROFILE ?? process.env.PI_PROFILE : input.profile ?? undefined;
-	const configDir = process.env.PI_CONFIG_DIR || ".omp";
-	const agentDir = input.agentDir ?? (input.profile === undefined ? process.env.PI_CODING_AGENT_DIR : undefined) ?? path.join(
+	const rawProfile = input.profile === undefined ? env.OMP_PROFILE ?? env.PI_PROFILE : input.profile ?? undefined;
+	const profile = rawProfile?.trim() === "default" ? undefined : rawProfile?.trim() || undefined;
+	if (profile && (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(profile) || profile.endsWith("."))) {
+		return { trusted: false, reason: "custom OMP profile path is unsupported" };
+	}
+	const configDir = env.PI_CONFIG_DIR || ".omp";
+	if (configDir !== ".omp" || env.CLAUDE_CONFIG_DIR?.trim() || argv.some(arg => arg === "--plugin-dir" || arg.startsWith("--plugin-dir="))) {
+		return { trusted: false, reason: "custom OMP configuration roots or injected plugin directories are unsupported for reviewer trust" };
+	}
+	const agentDir = path.join(
 		home,
 		configDir,
 		...(profile ? ["profiles", profile] : []),
 		"agent",
 	);
+	const configuredAgentDir = input.agentDir ?? env.PI_CODING_AGENT_DIR;
+	if (configuredAgentDir && path.resolve(configuredAgentDir) !== path.resolve(agentDir)) {
+		return { trusted: false, reason: "custom OMP agent directory is unsupported; native task discovery uses the active profile root" };
+	}
 	const userDirectory = path.join(agentDir, "agents");
-	if (shadowedInDirectory(projectDirectory)) return { trusted: false, reason: "project OMP reviewer shadows the packaged reviewer" };
-	if (shadowedInDirectory(userDirectory)) return { trusted: false, reason: "user OMP reviewer shadows the packaged reviewer" };
+	if (shadowedInDirectory(projectDirectory)) return { trusted: false, reason: "project OMP reviewer trust unavailable: custom agent definitions or ambiguous roots are unsupported" };
+	if (shadowedInDirectory(userDirectory)) return { trusted: false, reason: "user OMP reviewer trust unavailable: custom agent definitions or ambiguous roots are unsupported" };
+	// If omp-plugins is disabled at runtime, discovery can still select a
+	// marketplace agent with user provenance. Require every fallback registry to
+	// be absent instead of inferring the live capability setting from disk.
+	const registryRoots = [path.join(home, ".claude"), path.join(home, configDir), path.dirname(agentDir)];
+	if (env.XDG_DATA_HOME) {
+		registryRoots.push(path.join(env.XDG_DATA_HOME, "omp"));
+		if (profile) registryRoots.push(path.join(env.XDG_DATA_HOME, "omp", "profiles", profile));
+	}
+	let ancestor = path.resolve(input.cwd);
+	while (true) {
+		registryRoots.push(path.join(ancestor, configDir));
+		const parent = path.dirname(ancestor);
+		if (parent === ancestor) break;
+		ancestor = parent;
+	}
+	if (registryRoots.some(root => presentOrAmbiguous(path.join(root, "plugins", "installed_plugins.json")))) {
+		return { trusted: false, reason: "marketplace agent registries are unsupported for isolated packaged reviewer trust" };
+	}
 	const definitionPath = input.reviewerPath ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "agents", "reviewer.md");
 	try {
+		const extensionPaths = input.extensionPaths ?? explicitExtensionPaths(argv);
+		// Native resolution places explicit roots before configured extensions and
+		// plugins. SDK/configured-only sessions need separate qualification.
+		if (!extensionPaths[0] || realpathSync(path.resolve(input.cwd, extensionPaths[0])) !== realpathSync(path.dirname(fileURLToPath(import.meta.url)))) {
+			return { trusted: false, reason: "reviewer trust requires Review as the first explicit CLI extension; custom runtime layouts are unsupported" };
+		}
 		if (lstatSync(definitionPath).isSymbolicLink()) return { trusted: false, reason: "packaged reviewer definition is a symlink" };
 		const source = readFileSync(definitionPath, "utf8");
 		if (createHash("sha256").update(source).digest("hex") !== PACKAGED_REVIEWER_SHA256) {
@@ -178,13 +214,28 @@ export function reviewerDefinitionTrusted(input: {
 	}
 }
 
+function explicitExtensionPaths(argv: readonly string[]): string[] {
+	const roots: string[] = [];
+	for (let index = 0; index < argv.length; index += 1) {
+		const arg = argv[index]!;
+		if (arg === "--") break;
+		if (arg === "--extension" || arg === "-e") roots.push(argv[++index] ?? "");
+		else if (arg.startsWith("--extension=")) roots.push(arg.slice("--extension=".length));
+	}
+	return roots;
+}
+
 function nearestOmpAgentDirectory(cwd: string): string {
 	let current = path.resolve(cwd);
 	while (true) {
 		const candidate = path.join(current, ".omp", "agents");
 		try {
-			if (lstatSync(candidate).isDirectory()) return candidate;
-		} catch {
+			// Native discovery follows directory symlinks. Return them for refusal
+			// rather than skipping to an ancestor and overlooking their definitions.
+			lstatSync(candidate);
+			return candidate;
+		} catch (error) {
+			if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) return candidate;
 			// Continue to the next ancestor, matching OMP's nearest-config lookup.
 		}
 		const parent = path.dirname(current);
@@ -246,7 +297,7 @@ function invalidateAdmission(state: ReviewerReceiptState, toolCallId: string, ad
 		...state,
 		admissions: {
 			...state.admissions,
-			[toolCallId]: { ...admission, result: undefined, deliveredJobIds: [] },
+			[toolCallId]: { ...admission, rejected: true, result: undefined, deliveredJobIds: [] },
 		},
 	};
 }
@@ -303,9 +354,10 @@ export function captureReviewerResult(
 	const admission = state.admissions[input.toolCallId];
 	const result = input.result;
 	const data = result.structuredOutput?.data;
-	if (!admission || admission.waveIdentity !== input.waveIdentity || canonical(admission.subject) !== canonical(input.subject) ||
+	if (!admission || admission.rejected || admission.waveIdentity !== input.waveIdentity || canonical(admission.subject) !== canonical(input.subject) ||
 		result.id !== admission.agentId || result.agent !== "reviewer" || result.agentSource !== "user" ||
 		result.exitCode !== 0 || result.error || result.aborted || result.structuredOutput?.status !== "valid" ||
+		result.structuredOutput.source !== "caller" || result.structuredOutput.mode !== "strict" || result.structuredOutput.error !== undefined ||
 		!validPayload(data, input.subject)) {
 		return admission && result.id === admission.agentId
 			? invalidateAdmission(state, input.toolCallId, admission)
@@ -329,40 +381,75 @@ export function captureReviewerResult(
 			...state.admissions,
 			[input.toolCallId]: {
 				...admission,
-			result: receipt,
+				result: receipt,
 				deliveredJobIds: input.deliveryRequired ? admission.deliveredJobIds : [...new Set([...admission.deliveredJobIds, jobId])],
 			},
 		},
 	};
 }
 
-/** Record async delivery only for a previously captured result and matching native job. */
+/** Persist native async resolution; asynchronous spawns do not enter results[]. */
+export function captureReviewerTaskProgress(
+	state: ReviewerReceiptState,
+	input: { waveIdentity: string; subject: ReviewSubject; toolCallId: string; details: unknown },
+): ReviewerReceiptState {
+	const admission = state.admissions[input.toolCallId];
+	if (!admission || admission.rejected || admission.waveIdentity !== input.waveIdentity || canonical(admission.subject) !== canonical(input.subject)) return state;
+	if (!input.details || typeof input.details !== "object" || Array.isArray(input.details)) return state;
+	const details = input.details as Record<string, unknown>;
+	if (!details.async || typeof details.async !== "object" || Array.isArray(details.async)) return state;
+	const async = details.async as Record<string, unknown>;
+	const rows = details.progress;
+	if (async.type !== "task" || typeof async.jobId !== "string" || !async.jobId ||
+		!Array.isArray(rows) || rows.length !== 1 || !rows[0] || typeof rows[0] !== "object" || Array.isArray(rows[0])) {
+		return invalidateAdmission(state, input.toolCallId, admission);
+	}
+	const row = rows[0] as Record<string, unknown>;
+	if (row.id !== admission.agentId || row.agent !== "reviewer" || row.agentSource !== "user" ||
+		(row.status !== "pending" && row.status !== "running" && row.status !== "completed") ||
+		(async.state !== "running" && async.state !== "completed") ||
+		(async.state === "completed" && row.status !== "completed") ||
+		(admission.nativeJob && (admission.nativeJob.jobId !== async.jobId ||
+			admission.nativeJob.status === "completed" && row.status !== "completed"))) {
+		return invalidateAdmission(state, input.toolCallId, admission);
+	}
+	const nativeJob: NonNullable<ReviewerAdmission["nativeJob"]> = {
+		jobId: async.jobId, agentId: admission.agentId, agent: "reviewer", agentSource: "user", status: row.status,
+	};
+	return { ...state, admissions: { ...state.admissions, [input.toolCallId]: { ...admission, nativeJob } } };
+}
+
+/** Accept only the completed delivered schema for the previously resolved native task job. */
 export function captureReviewerDelivery(
 	state: ReviewerReceiptState,
 	input: { waveIdentity: string; subject: ReviewSubject; toolCallId: string; details: unknown },
 ): ReviewerReceiptState {
 	const admission = state.admissions[input.toolCallId];
-	if (!admission || admission.waveIdentity !== input.waveIdentity || canonical(admission.subject) !== canonical(input.subject)) return state;
+	if (!admission || admission.rejected || admission.waveIdentity !== input.waveIdentity || canonical(admission.subject) !== canonical(input.subject)) return state;
 	if (!input.details || typeof input.details !== "object" || Array.isArray(input.details)) return state;
 	const jobs = (input.details as Record<string, unknown>).jobs;
 	if (!Array.isArray(jobs)) return state;
 	const nativeJobs = jobs.filter((job): job is Record<string, unknown> => !!job && typeof job === "object" && !Array.isArray(job));
-	const forAgent = nativeJobs.filter(job => job.agentId === admission.agentId);
-	const delivered = forAgent
-		.filter(job => job.type === "task" && job.status === "completed" &&
-			typeof job.jobId === "string" && job.schema && typeof job.schema === "object" &&
-			(job.schema as Record<string, unknown>).status === "valid" &&
-			canonical((job.schema as Record<string, unknown>).data) === canonical(admission.result?.payload));
-	if (!admission.result || admission.result.verdict === "unknown") return state;
-	if (forAgent.length > 0 && delivered.length !== 1) return invalidateAdmission(state, input.toolCallId, admission);
-	if (delivered.length !== 1) return state;
-	const jobId = delivered[0]!.jobId as string;
-	const receipt = { ...admission.result, jobId };
+	const native = admission.nativeJob;
+	if (!native) return state;
+	const matching = nativeJobs.filter(job => job.agentId === admission.agentId || job.jobId === native.jobId);
+	if (matching.length === 0) return state;
+	const job = matching[0]!;
+	if (matching.length !== 1 || job.agentId !== admission.agentId || job.jobId !== native.jobId ||
+		job.type !== "task" || job.status !== "completed" || native.status !== "completed" ||
+		!job.schema || typeof job.schema !== "object" || Array.isArray(job.schema)) return invalidateAdmission(state, input.toolCallId, admission);
+	const schema = job.schema as Record<string, unknown>;
+	if (schema.source !== "caller" || schema.mode !== "strict" || schema.status !== "valid" || schema.error !== undefined || !validPayload(schema.data, admission.subject) ||
+		admission.result && canonical(admission.result.payload) !== canonical(schema.data)) return invalidateAdmission(state, input.toolCallId, admission);
+	const receipt: ReviewerReceipt = {
+		version: 1, waveIdentity: admission.waveIdentity, toolCallId: admission.toolCallId, agentId: admission.agentId,
+		jobId: native.jobId, agentSource: "user", subject: { ...admission.subject }, verdict: schema.data.verdict, payload: schema.data,
+	};
 	return {
 		...state,
 		admissions: {
 			...state.admissions,
-			[input.toolCallId]: { ...admission, result: receipt, deliveredJobIds: [...new Set([...admission.deliveredJobIds, jobId])] },
+			[input.toolCallId]: { ...admission, result: receipt, deliveredJobIds: [native.jobId] },
 		},
 	};
 }
@@ -376,7 +463,7 @@ export function getCleanReviewerReceipt(
 		receipt && receipt.verdict === "clean" && receipt.waveIdentity === input.waveIdentity &&
 		canonical(receipt.subject) === canonical(input.subject) && receipt.agentSource === "user" &&
 		receipt.agentId !== undefined && !input.excludedAgentIds?.includes(receipt.agentId) &&
-		state.admissions[receipt.toolCallId]?.deliveredJobIds.includes(receipt.jobId));
+		!state.admissions[receipt.toolCallId]?.rejected && state.admissions[receipt.toolCallId]?.deliveredJobIds.includes(receipt.jobId));
 }
 
 /** Parse durable wave-store data without accepting partial or forged receipts. */
@@ -392,9 +479,22 @@ export function parseReviewerReceiptState(value: unknown): ReviewerReceiptState 
 		!validSubject(admission.subject as ReviewSubject) ||
 		canonical(admission.outputSchema) !== canonical(createReviewerOutputSchema(admission.subject as ReviewSubject)) ||
 			!Array.isArray(admission.deliveredJobIds) || !admission.deliveredJobIds.every(id => typeof id === "string")) return undefined;
+		if (admission.rejected !== undefined && admission.rejected !== true) return undefined;
+		if (admission.rejected && (admission.result !== undefined || admission.deliveredJobIds.length > 0)) return undefined;
+		if (admission.nativeJob !== undefined) {
+			if (!admission.nativeJob || typeof admission.nativeJob !== "object" || Array.isArray(admission.nativeJob)) return undefined;
+			const native = admission.nativeJob as Record<string, unknown>;
+			if (typeof native.jobId !== "string" || !native.jobId || native.agentId !== admission.agentId || native.agent !== "reviewer" ||
+				native.agentSource !== "user" || !["pending", "running", "completed"].includes(String(native.status))) return undefined;
+		}
 		if (admission.result === undefined) continue;
 		if (!admission.result || typeof admission.result !== "object" || Array.isArray(admission.result)) return undefined;
 		const receipt = admission.result as Record<string, unknown>;
+		if (admission.nativeJob) {
+			const native = admission.nativeJob as Record<string, unknown>;
+			if (native.status !== "completed" || receipt.jobId !== native.jobId ||
+				admission.deliveredJobIds.some(id => id !== native.jobId)) return undefined;
+		}
 		if (receipt.version !== 1 || receipt.waveIdentity !== admission.waveIdentity || receipt.toolCallId !== key ||
 			receipt.agentId !== admission.agentId || receipt.agentSource !== "user" || typeof receipt.jobId !== "string" ||
 			!exactSubject(receipt.subject, admission.subject as ReviewSubject) ||

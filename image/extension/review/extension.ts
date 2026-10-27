@@ -27,7 +27,8 @@ import { GENERIC_WORKBENCH_POLICY, managedPolicyFor, type WorkbenchPolicy } from
 import { readOperatorPolicy, writeOperatorPolicy, operatorPolicyCurrent, operatorPolicyPath, type OperatorPolicySnapshot } from "./operator-policy.ts";
 import { observeHumanReviewPolicy } from "./human-review-policy.ts";
 import { operatorLandingDecision } from "./operator-landing.ts";
-import { createReviewerOutputSchema, createReviewerReceiptState, admitReviewerTask, captureReviewerResult, captureReviewerDelivery, getCleanReviewerReceipt, reviewerDefinitionTrusted, type ReviewerReceiptState, type ReviewSubject } from "./reviewer-receipts.ts";
+import { mcpExpectedHeadQualified } from "./merge-transport.ts";
+import { createReviewerOutputSchema, createReviewerReceiptState, admitReviewerTask, captureReviewerResult, captureReviewerTaskProgress, captureReviewerDelivery, getCleanReviewerReceipt, reviewerDefinitionTrusted, type ReviewerReceiptState, type ReviewSubject } from "./reviewer-receipts.ts";
 import {
 	commentInvocation,
 	createCommentActionPlan,
@@ -166,7 +167,7 @@ function slayBashBlockReason(command: string): string | undefined {
 }
 
 type LandingAction = "approve" | "merge";
-type LandingRequest = { readonly action: LandingAction; readonly key: string; readonly expectedHead?: string };
+type LandingRequest = { readonly action: LandingAction; readonly key: string; readonly expectedHead?: string; readonly mcpToolName?: string };
 
 function slayLandingRecovery(items: readonly QueueItem[]): string {
 	const urls = [...new Set(items.filter((item) => item.type === "pr").map((item) => item.url))].join(", ");
@@ -193,7 +194,7 @@ function githubLandingAction(toolName: string | undefined, input: unknown): Land
 		|| typeof args.repo !== "string" || !/^[\w.-]+$/.test(args.repo)
 		|| typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) return "invalid";
 	if (args.sha !== undefined && (typeof args.sha !== "string" || !/^[a-f0-9]{40}$/.test(args.sha))) return "invalid";
-	return { action: action === "merge_pull_request" ? "merge" : "approve", key: `${args.owner}/${args.repo}#${number}`, ...(typeof args.sha === "string" ? { expectedHead: args.sha } : {}) };
+	return { action: action === "merge_pull_request" ? "merge" : "approve", key: `${args.owner}/${args.repo}#${number}`, mcpToolName: name, ...(typeof args.sha === "string" ? { expectedHead: args.sha } : {}) };
 }
 
 function bashLandingRequest(segment: string, action: LandingAction): LandingRequest | "invalid" {
@@ -250,6 +251,7 @@ export interface ExtensionOptions {
 	policy?: WorkbenchPolicy;
 	/** Injectable transport boundary for deterministic policy tests. */
 	humanReviewObserver?: typeof observeHumanReviewPolicy;
+	reviewerDefinitionCheck?: typeof reviewerDefinitionTrusted;
 }
 
 /** Loose structural types: the extension must build without omp's declarations. */
@@ -297,6 +299,7 @@ export interface ReviewExtensionHost {
 	registerShortcut(chord: string, options: { description?: string; handler: (ctx: CtxLike) => void }): void;
 	registerFlag(name: string, options: { description?: string; type: "string" | "boolean"; default?: string | boolean }): void;
 	getFlag(name: string): string | boolean | undefined;
+	getAllTools?(): readonly unknown[];
 	registerTool(definition: unknown): void;
 	registerCommand?(name: string, definition: { description?: string; handler(args: string, ctx: CtxLike): unknown }): void;
 	appendEntry(customType: string, data?: unknown): void;
@@ -720,11 +723,19 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let dashboardOpen = false;
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
-	const reviewerTrust = () => reviewerDefinitionTrusted({
-		cwd: activeCtx?.cwd ?? process.cwd(), home: env.HOME, agentDir: env.PI_CODING_AGENT_DIR,
-		profile: process.argv.includes("--profile") ? process.argv[process.argv.indexOf("--profile") + 1]
-			: env.HOME === "/home/review" ? env.REVIEW_INHERIT_OMP_CONFIG === "1" ? "review" : "review-appliance" : undefined,
-	});
+	let reviewerTrustFailure: ReturnType<typeof reviewerDefinitionTrusted> | undefined;
+	const reviewerTrust = () => {
+		if (reviewerTrustFailure) return reviewerTrustFailure;
+		const observed = (options.reviewerDefinitionCheck ?? reviewerDefinitionTrusted)({
+			cwd: activeCtx?.cwd ?? process.cwd(), home: env.HOME, env,
+			profile: env.OMP_PROFILE ?? env.PI_PROFILE ?? null,
+		});
+		if (!observed.trusted) reviewerTrustFailure = observed;
+		return observed;
+	};
+	// Native discovery caches marketplace roots. Never re-authorize a session
+	// that observed customization merely because its registry was later deleted.
+	reviewerTrust();
 	let traceSessionId: string | undefined;
 	let traceGeneration = 0;
 	const traceContext = (ctx?: CtxLike): CtxLike | undefined => {
@@ -1058,7 +1069,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				|| effect.pullRequest.authorLogin?.toLowerCase() !== original.author.toLowerCase()
 				|| !effect.pullRequest.reviewsComplete || effect.pullRequest.reviewDecision === "unknown"
 				|| effect.pullRequest.reviewDecision === "changes_requested") return false;
-			if (!sessionStopped(batch) && batch.waveOperatorPolicy && (!batch.waveIdentity || !batch.waveReviewerReceipts || !getCleanReviewerReceipt(batch.waveReviewerReceipts, { waveIdentity: batch.waveIdentity, subject: { repository: original.repo.toLowerCase(), number: original.id, headSha: head }, excludedAgentIds: batch.waveWriterAgents }))) return false;
+			if (batch.waveOperatorPolicy && (!batch.waveIdentity || !batch.waveReviewerReceipts || !getCleanReviewerReceipt(batch.waveReviewerReceipts, { waveIdentity: batch.waveIdentity, subject: { repository: original.repo.toLowerCase(), number: original.id, headSha: head }, excludedAgentIds: batch.waveWriterAgents }))) return false;
 		}
 		return true;
 	};
@@ -1119,7 +1130,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 						|| pullRequest.reviewDecision === "unknown"
 						|| pullRequest.reviewDecision === "changes_requested") return { kind: "unknown" };
 					const headSha = pullRequest.headSha;
-					if (!stopped && batch.waveOperatorPolicy && (pullRequest.state === "MERGED" || pullRequest.state === "OPEN" && pullRequest.autoMergeEnabled)) {
+					if (batch.waveOperatorPolicy && (pullRequest.state === "MERGED" || pullRequest.state === "OPEN" && pullRequest.autoMergeEnabled)) {
 						const receipt = headSha && batch.waveIdentity && batch.waveReviewerReceipts && getCleanReviewerReceipt(batch.waveReviewerReceipts, { waveIdentity: batch.waveIdentity, subject: { repository: item.repo.toLowerCase(), number: item.id, headSha }, excludedAgentIds: batch.waveWriterAgents });
 						if (!receipt || !headSha) return { kind: "unknown" };
 						observedPrHeads[`${item.repo.toLowerCase()}#${item.id}`] = headSha;
@@ -1129,7 +1140,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 						if (stopped) observedPrHeads[`${item.repo.toLowerCase()}#${item.id}`] = headSha;
 						continue;
 					}
-					if (stopped && pullRequest.state === "MERGED" && headSha
+					if (stopped && !batch.waveOperatorPolicy && pullRequest.state === "MERGED" && headSha
 						&& await isForwardHead(item.repo, item.headSha, headSha, mode.tokenOptions())) {
 						const rechecked = await fetchPullRequestEffect(item.repo, item.id, mode.tokenOptions());
 						if (rechecked.kind !== "observed" || rechecked.pullRequest.state !== "MERGED"
@@ -1287,13 +1298,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (isRecord(row) && typeof row.id === "string" && typeof row.agent === "string" && row.agent !== "reviewer") writers.add(row.id);
 		}
 		const admission = state.admissions[call];
-		if (admission && Array.isArray(details.results)) for (const native of details.results) {
+		if (admission) state = captureReviewerTaskProgress(state, {
+			waveIdentity: activeBatch.waveIdentity, subject: admission.subject, toolCallId: call, details,
+		});
+		if (admission && !isRecord(details.async) && Array.isArray(details.results)) for (const native of details.results) {
 			if (!isRecord(native) || native.id !== admission.agentId) continue;
 			state = captureReviewerResult(state, {
 				waveIdentity: activeBatch.waveIdentity, subject: admission.subject, toolCallId: call,
 				result: { id: native.id, agent: native.agent, agentSource: native.agentSource, exitCode: native.exitCode, error: native.error, aborted: native.aborted, structuredOutput: isRecord(native.structuredOutput) ? native.structuredOutput : undefined },
-				jobId: isRecord(details.async) && typeof details.async.jobId === "string" ? details.async.jobId : undefined,
-				deliveryRequired: isRecord(details.async) && !(delivered && details.async.state === "completed"),
+				deliveryRequired: !delivered,
 			});
 		}
 		if (JSON.stringify(state) !== JSON.stringify(activeBatch.waveReviewerReceipts) || JSON.stringify([...writers]) !== JSON.stringify(activeBatch.waveWriterAgents ?? [])) persistBatch(ctx, { ...activeBatch, waveReviewerReceipts: state, waveWriterAgents: [...writers] });
@@ -3348,6 +3361,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				const snapshot = guardedBatch.waveOperatorPolicy;
 				const basic = landingState(item, policy);
 				if (basic !== "ready-to-land" && basic !== "unreviewed") return { block: true, reason: `Review Slay guard: ${request.key} ${landingReason(basic)}. ${slayLandingRecovery([item])}` };
+				if (request.action === "merge" && request.mcpToolName) {
+					let qualified = false;
+					try { qualified = mcpExpectedHeadQualified(pi.getAllTools?.() ?? [], request.mcpToolName); } catch { /* Missing native metadata cannot authorize a merge. */ }
+					if (!qualified) return { block: true, reason: "GitHub MCP merge has no qualified native expected-head contract; use gh pr merge --squash --match-head-commit <reviewed-sha>" };
+				}
 				if (toolName === "bash" && /(?:^|\s)--(?:auto|disable-auto|delete-branch)(?:[=\s]|$)/.test(command)) return { block: true, reason: "Review operator policy permits direct head-bound merge only; auto-merge enrollment and branch deletion are outside this operation" };
 				if (!operatorPolicyCurrent(snapshot, env)) return { block: true, reason: "Review operator policy changed; reconcile existing effects and admit fresh work before landing" };
 				const observation = await humanReviewObserver(item.repo, item.id, mode.tokenOptions());

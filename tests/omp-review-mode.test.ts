@@ -11,9 +11,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test, { beforeEach, afterEach } from "node:test";
 import { loadPackagedJobManager } from "./omp-async-runtime.ts";
-import { createReviewerOutputSchema } from "../image/extension/review/reviewer-receipts.ts";
+import { createReviewerOutputSchema, reviewerDefinitionTrusted } from "../image/extension/review/reviewer-receipts.ts";
 
 import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/extension/review/glyphs.ts";
 import { workbenchPainter } from "../image/extension/review/paint.ts";
@@ -52,6 +53,7 @@ const NOW = 1_800_000_000_000;
 // No hub, no home: these tests must not read the developer's own Hive
 // registration and must never open a socket.
 const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", REVIEW_MODE: "hive", LUNA_FACTORY_STATE_ROOT: "", LUNA_FACTORY_CLAIMS_ROOT: "" };
+const REVIEW_EXTENSION_ROOT = fileURLToPath(new URL("../image/extension/review", import.meta.url));
 beforeEach(() => {
 	ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "review-state-"));
 	ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT = mkdtempSync(join(tmpdir(), "review-claims-"));
@@ -324,7 +326,11 @@ function createReviewExtension(pi, options) {
 		};
 		return { kind: "observed", facts };
 	});
-	return createReviewExtensionImpl(pi, { ...options, humanReviewObserver: observer });
+	return createReviewExtensionImpl(pi, {
+		...options,
+		humanReviewObserver: observer,
+		reviewerDefinitionCheck: options.reviewerDefinitionCheck ?? (input => reviewerDefinitionTrusted({ ...input, extensionPaths: [REVIEW_EXTENSION_ROOT] })),
+	});
 }
 
 function issueBackedFetch(states) {
@@ -459,9 +465,15 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 }
 
 /** Fake omp extension host recording every registration. */
-function fakeHost() {
+function fakeHost({ qualifiedMcp = true, mcpShaDescription = "SHA that pull request head must match to allow merge" } = {}) {
 	const zodLeaf = () => ({ optional: () => zodLeaf(), describe: () => zodLeaf(), toJsonSchema: () => ({}) });
 	return {
+		toolInfo: qualifiedMcp ? [{
+			name: "mcp__github_merge_pull_request",
+			mcpServerName: "github",
+			mcpToolName: "merge_pull_request",
+			parameters: { type: "object", properties: { sha: { type: "string", description: mcpShaDescription } } },
+		}] : [],
 		sessionShutdownLifecycleVersion: 1,
 		labels: [],
 		events: new Map(),
@@ -500,6 +512,9 @@ function fakeHost() {
 		},
 		getFlag(name) {
 			return this.flagValues.get(name);
+		},
+		getAllTools() {
+			return this.toolInfo;
 		},
 		registerTool(definition) {
 			this.tools.set(definition.name, definition);
@@ -554,10 +569,10 @@ async function completeReviewTask(pi, ctx, count = 1, { deliver = true, prefix =
 		ctx.asyncJobs.recent.push(worker);
 		await pi.events.get("tool_execution_end")({ toolCallId, result: { details: {
 			async: { type: "task", state: deliver ? "completed" : "running", jobId },
-			progress: [{ id: agentId, index: 0, status: deliver ? "completed" : "running" }],
-			results: deliver ? [{ id: agentId, agent: "reviewer", agentSource: "user", exitCode: 0, structuredOutput: { status: "valid", data } }] : [],
+			progress: [{ id: agentId, index: 0, agent: "reviewer", agentSource: "user", status: deliver ? "completed" : "running" }],
+			results: [],
 		} }, isError: false }, ctx);
-		if (deliver) await deliverTaskResults(pi, ctx, [jobId], [{ jobId, type: "task", status: "completed", agentId, schema: { status: "valid", data } }]);
+		if (deliver) await deliverTaskResults(pi, ctx, [jobId], [{ jobId, type: "task", status: "completed", agentId, schema: { source: "caller", mode: "strict", status: "valid", data } }]);
 		else {
 			ctx.asyncJobs.delivery.pendingJobIds.push(jobId);
 			ctx.asyncJobs.delivery.pending = ctx.asyncJobs.delivery.pendingJobIds.length;
@@ -4136,9 +4151,12 @@ for (const scenario of [
 	{ mode: "team", requiredApprovals: 0, expected: "team-block" },
 	{ mode: "solo", requiredApprovals: 1, expected: "github-block" },
 	{ mode: "solo", requiredApprovals: 0, expected: "policy-drift" },
+	{ mode: "solo", requiredApprovals: 0, expected: "policy-aba" },
 	{ mode: "solo", requiredApprovals: 0, expected: "head-drift" },
 	{ mode: "solo", requiredApprovals: 0, expected: "undelivered" },
 	{ mode: "solo", requiredApprovals: 0, expected: "repair-review" },
+	{ mode: "solo", requiredApprovals: 0, expected: "mcp-unqualified" },
+	{ mode: "solo", requiredApprovals: 0, expected: "mcp-sha-unsupported" },
 ]) test(`#79 ${scenario.mode} landing policy applies independent reviewer and GitHub gates (${scenario.expected})`, async () => {
 	const target = queueItem({ id: 79, repo: "example/solo", author: "maintainer", headSha: "7".repeat(40), reviewState: "review_required", ciStatus: "success", labels: [] });
 	const env = { ...ISOLATED_ENV, HOME: ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, REVIEW_MODE: "review" };
@@ -4147,7 +4165,10 @@ for (const scenario of [
 		canMerge: true, requiredApprovals: scenario.requiredApprovals, requiresCodeOwnerReview: false, requiresLastPushApproval: false,
 		githubReviewState: scenario.requiredApprovals ? "required" : "none", currentHumanApprovals: [], digest: `#79:${scenario.mode}:${target.headSha}`, observedAt: Date.now(),
 	} });
-	const pi = fakeHost(); pi.flagValues.set("pr", "79");
+	const pi = fakeHost({
+		qualifiedMcp: scenario.expected !== "mcp-unqualified",
+		mcpShaDescription: scenario.expected === "mcp-sha-unsupported" ? "SHA supplied to merge API" : undefined,
+	}); pi.flagValues.set("pr", "79");
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "example", fetchImpl: landingGuardFetch([target]), env, humanReviewObserver: observer });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
@@ -4165,8 +4186,15 @@ for (const scenario of [
 	ctx.overlays[0].handleInput("s"); await new Promise((resolve) => setImmediate(resolve));
 	await completeReviewTask(pi, ctx, 1, { deliver: scenario.expected !== "undelivered" });
 	const guard = pi.events.get("tool_call");
-	if (scenario.expected === "policy-drift") await pi.commands.get("review").handler("policy example/solo team", ctx);
+	if (scenario.expected === "policy-drift" || scenario.expected === "policy-aba") await pi.commands.get("review").handler("policy example/solo team", ctx);
+	if (scenario.expected === "policy-aba") await pi.commands.get("review").handler("policy example/solo solo", ctx);
 	if (scenario.expected === "head-drift") target.headSha = "8".repeat(40);
+	if (scenario.expected === "mcp-unqualified" || scenario.expected === "mcp-sha-unsupported") {
+		const result = await guard({ toolName: "mcp__github_merge_pull_request", input: { owner: "example", repo: "solo", pullNumber: 79, merge_method: "squash", sha: target.headSha } }, ctx);
+		assert.equal(result?.block, true);
+		assert.match(result.reason, /GitHub MCP merge has no qualified native expected-head contract; use gh pr merge --squash --match-head-commit/);
+		return;
+	}
 	if (scenario.expected === "allow") {
 		const noHead = await guard({ toolName: "bash", input: { command: "gh pr merge 79 --repo example/solo --squash" } }, ctx);
 		assert.match(noHead.reason, /server-enforced head guard/);
@@ -4191,6 +4219,7 @@ for (const scenario of [
 			"team-block": /team policy/,
 			"github-block": /GitHub requires an eligible approving review/,
 			"policy-drift": /operator policy changed/,
+			"policy-aba": /operator policy changed/,
 			"head-drift": /(?:current PR identity or head differs|reviewer receipt for the current head)/,
 			"undelivered": /await result delivery/,
 		}[scenario.expected];
@@ -5515,6 +5544,37 @@ test("stopped Slay reconciles a merged forward head for a solo operator", async 
 	}, { forwardComparison: true });
 	assert.equal(claims.length, 0);
 	assert.equal(recovered.completedItems, 0);
+});
+
+test("stopped new-policy Slay retains claims when GitHub merged an unreviewed forward head", async () => {
+	const { env, items, effects, entries, batch } = await blockedPrSlayWave(() => {}, {
+		legacy: false,
+		policyMode: "solo",
+		landingObserver: true,
+	});
+	batch.waveSessionId = "stopped-new-policy-session";
+	batch.waveExit = { sessionId: batch.waveSessionId, waveIdentity: batch.waveIdentity, choice: "pause", requestedAt: Date.now() };
+	batch.waveShutdown = { sessionId: batch.waveSessionId, waveIdentity: batch.waveIdentity, settled: true, pendingJobIds: [], observedAt: Date.now() };
+	saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, batch);
+	for (const item of items.slice(0, 3)) effects[item.id] = {
+		state: "MERGED", merged: true, headSha: "f".repeat(40), autoMerge: false, reviewDecision: null, reviews: [],
+	};
+	const pi = fakeHost();
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	ctx.sessionManager = { getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: recoveredPrSlayFetch(items, effects, { forwardComparison: true }),
+		env,
+	});
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("reconcile", ctx);
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
+	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(recovered.state, "blocked");
+	assert.equal(recovered.completedItems, 0);
+	assert.equal(claims.length, 4, "forward-head merge without a matching persisted reviewer receipt retains ownership");
+	assert.ok(claims.every((claim) => claim.owner === `review:${batch.id}:0`));
 });
 
 test("stopped Slay revalidates an earlier merged PR after later resource reads", async () => {

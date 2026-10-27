@@ -2,6 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { operatorLandingDecision } from "../image/extension/review/operator-landing.ts";
 import { readOperatorPolicy } from "../image/extension/review/operator-policy.ts";
+import { mcpExpectedHeadQualified } from "../image/extension/review/merge-transport.ts";
+
+test("MCP merge needs native provenance and a declared expected-head contract", () => {
+	const name = "mcp__github_merge_pull_request";
+	const tool = { name, mcpServerName: "github", mcpToolName: "merge_pull_request", parameters: { type: "object", properties: { sha: { type: "string", description: "SHA that pull request head must match to allow merge" } } } };
+	assert.equal(mcpExpectedHeadQualified([tool], name), true);
+	assert.equal(mcpExpectedHeadQualified([], name), false);
+	assert.equal(mcpExpectedHeadQualified([{ ...tool, mcpServerName: undefined }], name), false);
+	assert.equal(mcpExpectedHeadQualified([{ ...tool, parameters: { properties: {} } }], name), false);
+	assert.equal(mcpExpectedHeadQualified([tool], "other_tool"), false);
+});
 
 const item = { type: "pr", repo: "owner/repo", id: 1, author: "owner", draft: false, labels: [], ciStatus: "success", ciEvidenceComplete: true, mergeState: "clean", reviewState: "unknown", headSha: "a".repeat(40) };
 const facts = { repository: item.repo, number: 1, headSha: item.headSha, baseRef: "main", authorLogin: "owner", viewerLogin: "owner", canMerge: true, requiredApprovals: 0, requiresCodeOwnerReview: false, requiresLastPushApproval: false, githubReviewState: "none", currentHumanApprovals: [], digest: "d".repeat(64), observedAt: Date.now() };

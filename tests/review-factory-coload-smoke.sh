@@ -2,10 +2,18 @@
 # Exercise the packaged Review appliance with Review and Luna Factory loaded
 # together. The local model catalog keeps this smoke credential-free; command
 # RPCs do not invoke model turns or provider requests.
+# REVIEW_SMOKE_RUNTIME=krun selects the VM runtime and its TTY/EOT RPC transport.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${REVIEW_APPLIANCE_IMAGE:-${REVIEW_APPLIANCE_IMAGE:-localhost/review:factory-handoff}}"
+runtime="${REVIEW_SMOKE_RUNTIME:-}"
+runtime_args=()
+case "$runtime" in
+  "") ;;
+  krun) runtime_args+=(--runtime=krun) ;;
+  *) echo "review-factory-coload-smoke: REVIEW_SMOKE_RUNTIME must be empty or krun" >&2; exit 2 ;;
+esac
 run_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/review-factory-coload-$$"
 enabled_result=passed
 mkdir -p "$run_root"
@@ -21,7 +29,8 @@ podman image exists "$image" || {
 }
 
 omp_version="$(sed -nE 's/^ARG OMP_VERSION=([^[:space:]]+)$/\1/p' "$root/image/appliance/Containerfile")"
-version="$(podman run --rm --entrypoint /usr/bin/omp "$image" --version)"
+# Version output remains non-TTY even when RPC needs krun's terminal transport.
+version="$(podman run "${runtime_args[@]}" --rm --entrypoint /usr/bin/omp "$image" --version)"
 grep -Fxq "omp/$omp_version" <<<"$version" || {
   echo "review-factory-coload-smoke: expected omp/$omp_version, got: $version" >&2
   exit 1
@@ -48,7 +57,11 @@ run_case() {
   fi
 
   set +e
-  printf '%s\n' \
+  if [[ "$runtime" == krun ]]; then
+    python3 "$root/tests/fixtures/review-factory-coload-rpc.py" "$image" "$home" "$flag" \
+      '{"id":"factory-status","type":"prompt","message":"/factory status"}' >"$output" 2>&1
+  else
+    printf '%s\n' \
     '{"id":"commands","type":"get_available_commands"}' \
     '{"id":"factory-status","type":"prompt","message":"/factory status"}' |
     timeout --signal=TERM --kill-after=5s 30s podman run --rm --interactive --network host \
@@ -56,6 +69,7 @@ run_case() {
       --volume "$home:/home/review:rw" "$image" \
       --mode rpc-ui --no-skills --no-rules --no-pty --model local-probe/deterministic \
       >"$output" 2>&1
+  fi
   local status=$?
   set -e
   if [[ "$flag" == enabled && "$status" -eq 1 ]] &&
@@ -105,7 +119,11 @@ policy_rpc() {
   local name="$1" request="$2" output status
   output="$run_root/policy-$name.jsonl"
   set +e
-  printf '%s\n' \
+  if [[ "$runtime" == krun ]]; then
+    python3 "$root/tests/fixtures/review-factory-coload-rpc.py" "$image" "$policy_home" absent \
+      "$request" >"$output" 2>&1
+  else
+    printf '%s\n' \
     '{"id":"commands","type":"get_available_commands"}' \
     "$request" |
     timeout --signal=TERM --kill-after=5s 30s podman run --rm --interactive --network host \
@@ -121,6 +139,7 @@ policy_rpc() {
       --volume "$policy_home:/home/review:rw" "$image" \
       --mode rpc-ui --no-skills --no-rules --no-pty --model local-probe/deterministic \
       >"$output" 2>&1
+  fi
   status=$?
   set -e
   [[ "$status" -eq 0 ]] || {
