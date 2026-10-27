@@ -24,6 +24,7 @@ import { BatchStore, ResourceClaims } from "../image/extension/luna-factory/omp/
 import { captureWaveJobIds, reconcileBlockedRepositoryClaim, waveWorkerCoverageComplete, waveWorkersSettled } from "../image/extension/review/extension.ts";
 import { BatchService, semanticOutcomeFor } from "../image/extension/luna-factory/omp/batch-service.ts";
 import { BatchGitHub } from "../image/extension/luna-factory/omp/batch-github.ts";
+import { readOperatorPolicy, writeOperatorPolicy } from "../image/extension/review/operator-policy.ts";
 import { binding as repairBinding, git as fixtureGit, portableRepairFixture, readArtifacts as readRepairArtifacts, report as repairReport, tool as repairTool } from "./fixtures/luna-factory-repair-acceptance-support.ts";
 
 const selected = (key: string, action: SelectedItem["action"] = "patch", extra: Partial<SelectedItem> = {}): SelectedItem => {
@@ -152,6 +153,42 @@ test("selection identity is canonical, duplicate selected keys are refused, and 
 	assert.equal(selectionIdentity(items), selectionIdentity([...items].reverse()));
 	assert.throws(() => createBatch([items[0]!, items[0]!], options("dead")), /duplicate selected identity/);
 	assert.equal(createBatch(items, { ...options("beef"), mode: "retain" }).mode, "retain");
+});
+
+test("Factory admission replaces caller policy snapshots with trusted per-repository policy", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-operator-policy-"));
+	const hostHome = await mkdtemp(join(tmpdir(), "factory-operator-policy-host-"));
+	const previousHome = process.env.HOME;
+	try {
+		process.env.HOME = hostHome;
+		writeOperatorPolicy("owner/one", "solo", { HOME: root });
+		writeOperatorPolicy("owner/one", "team", { HOME: hostHome });
+		const forged = readOperatorPolicy("owner/two", { HOME: join(root, "forged") });
+		const github = { snapshot: async (item: SelectedItem) => item } as never;
+		const service = new BatchService(join(root, "state"), github, undefined, {} as never, 1, join(root, "claims"), undefined, undefined, undefined, { ...process.env, HOME: root });
+		const batch = await service.submit([
+			selected("owner/one#1", "patch", { operatorPolicy: forged }),
+			selected("owner/two#2", "patch", { operatorPolicy: { ...forged, mode: "solo" } as never }),
+		], { capacity: 1, maxAttempts: 1, maxTotalAttempts: 2, mode: "retain" });
+		assert.deepEqual(batch.items.map((item) => item.selected.operatorPolicy?.mode), ["solo", "team"]);
+		assert.deepEqual(batch.items.map((item) => item.selected.operatorPolicy?.revision), [1, 0]);
+		assert.deepEqual(Object.keys(batch.operatorPolicy ?? {}).sort(), ["owner/one", "owner/two"]);
+		assert.equal(batch.operatorPolicy?.["owner/two"]?.source, "default");
+		assert.match(batchSummary(batch, root), /owner\/one solo \(explicit;/);
+		assert.match(batchSummary(batch, root), /owner\/two team \(default;/);
+		for (const item of batch.items) done(batch, item.selected.key);
+		assert.equal(batchConverged(batch), true);
+		const changedPolicy = writeOperatorPolicy("owner/one", "team", { HOME: root });
+		assert.equal(changedPolicy.revision, 2);
+		assert.equal(batch.items[0]?.selected.operatorPolicy?.revision, 1, "the admitted snapshot retains its original policy generation");
+		assert.equal(batchConverged(batch), true, "human review policy changes do not invalidate native acceptance proof");
+		await service.shutdown();
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		await rm(root, { recursive: true, force: true });
+		await rm(hostHome, { recursive: true, force: true });
+	}
 });
 test("absence of a semantic result is neutral for patches but uncertain for inspections", () => {
 	assert.equal(semanticOutcomeFor("patch", "none"), "none");

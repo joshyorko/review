@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { batchSummary, createBatch } from "../image/extension/luna-factory/core/batch.ts";
@@ -8,6 +8,7 @@ import { BatchStore } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { BatchService } from "../image/extension/luna-factory/omp/batch-service.ts";
 import { createRequestPolicyExtension } from "../image/extension/luna-factory/omp/batch-native.ts";
 import { createExecutionPolicy, reserveProviderRequest, routeForModel, settleProviderUsage, usageObservationFromOmp, type RequestAccounting } from "../image/extension/luna-factory/omp/policy.ts";
+import { readOperatorPolicy } from "../image/extension/review/operator-policy.ts";
 
 const route = routeForModel({ provider: "anthropic", id: "claude-test", api: "anthropic-messages", baseUrl: "https://api.example.test" });
 const payload = { model: "claude-test", messages: [{ role: "user", content: "hi" }] };
@@ -42,6 +43,27 @@ test("oversized serialized payload refuses on its byte limit alone", () => {
 	const result = reserveProviderRequest(policy, { sequence: 0, reservations: [] }, route, payload, 2_000);
 	assert.equal(result.ok, false);
 	if (!result.ok) assert.match(result.reason, /input byte limit/);
+});
+
+test("batch-store validates optional operator-policy snapshots and keeps legacy batches readable", async () => {
+	const root = await mkdtemp(join(tmpdir(), "factory-policy-store-"));
+	try {
+		const selected = { key: "org/repo#3", repo: "org/repo", number: 3, kind: "issue" as const, action: "inspect" as const, overlaps: [], base: "c".repeat(40), operatorPolicy: readOperatorPolicy("org/repo", { HOME: root }) };
+		const batch = createBatch([selected], { id: "batch-acde9012", capacity: 1, maxAttempts: 1, maxTotalAttempts: 1, mode: "once" });
+		batch.operatorPolicy = { "org/repo": selected.operatorPolicy };
+		const store = new BatchStore(root); store.acquire(); store.write(batch);
+		assert.equal(store.read(batch.id).items[0]?.selected.operatorPolicy?.mode, "team");
+		const path = join(root, `${batch.id}.json`);
+		const tampered = JSON.parse(await readFile(path, "utf8"));
+		tampered.items[0].selected.operatorPolicy.digest = "0".repeat(64);
+		await writeFile(path, JSON.stringify(tampered));
+		assert.throws(() => store.read(batch.id), /operator policy snapshot/i);
+		store.release();
+		const legacy = createBatch([{ key: "org/legacy#4", repo: "org/legacy", number: 4, kind: "issue", action: "inspect", overlaps: [], base: "d".repeat(40) }], { id: "batch-acde9013", capacity: 1, maxAttempts: 1, maxTotalAttempts: 1, mode: "once" });
+		const legacyStore = new BatchStore(join(root, "legacy")); legacyStore.acquire(); legacyStore.write(legacy);
+		assert.equal(legacyStore.read(legacy.id).items[0]?.selected.operatorPolicy, undefined);
+		legacyStore.release();
+	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("durable reservation refusal maps to the native policy denial discriminant", () => {

@@ -110,8 +110,6 @@ ARG RTK_X86_64_SHA256
 ARG RTK_AARCH64_SHA256
 ARG RTK_HOOK_SHA256
 ARG RTK_LICENSE_SHA256
-ARG REVIEW_VERSION
-ARG REVIEW_REVISION
 
 # actionlint is distributed upstream rather than in Fedora's package set.
 RUN set -eu; \
@@ -289,6 +287,9 @@ COPY --from=audio /audio-out/ /out/
 # component of this image arrived as a release archive, so the archive
 # provenance is recorded here or it is recorded nowhere.
 COPY --chmod=0755 scripts/generate-appliance-sbom.py /usr/local/libexec/appliance-sbom
+# Source checkpoint metadata does not change the pinned OMP/toolchain build.
+ARG REVIEW_VERSION
+ARG REVIEW_REVISION
 RUN arch="$(uname -m)"; \
     case "$arch" in \
       x86_64) native_package=pi-natives-linux-x64; native_sha="$OMP_NATIVES_X86_64_SHA512"; gh_sha="$GH_X86_64_SHA256"; rtk_sha="$RTK_X86_64_SHA256"; node_sha="$NODE_X86_64_SHA256"; bun_sha="$OMP_BUN_X86_64_SHA256" ;; \

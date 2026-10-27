@@ -43,6 +43,7 @@ import { itemOverview, sanitizeRetainedError } from "../image/extension/luna-fac
 import { projectBatch } from "../image/extension/luna-factory/ui/projection.ts";
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { factoryCommand, factoryHandoffState, factoryLoadDiagnostic, registerFactoryController, registerFactorySelection, reportFactoryLoadFailure, selectedFactoryItems } from "../image/extension/luna-factory/omp/batch-bridge.ts";
+import { operatorPolicyPath, writeOperatorPolicy } from "../image/extension/review/operator-policy.ts";
 
 const ROOTS = ["/artifacts"];
 const REDUCE = { artifactRoots: ROOTS };
@@ -2457,6 +2458,30 @@ test("selected batch command remains opt-in", async () => {
 	assert.ok(host.notifications.some((message) => /LUNA_FACTORY_ENABLED=1|Factory is disabled/.test(message)));
 });
 
+test("Factory policy command reads the injected per-repository store without opt-in or state effects", async () => {
+	const home = mkdtempSync(join(tmpdir(), "luna-factory-policy-read-"));
+	try {
+		const stateRoot = join(home, "factory-state");
+		const env = { HOME: home, LUNA_FACTORY_STATE_ROOT: stateRoot };
+		const snapshot = writeOperatorPolicy("Owner/Repo", "solo", env);
+		const policyPath = operatorPolicyPath(env);
+		const contents = readFileSync(policyPath, "utf8");
+		const host = fakeHost();
+		createLunaFactoryExtension(host as never, { env, artifactRoots: ROOTS });
+		const command = host.commands.get("factory");
+		assert.ok(command);
+		await command.handler("policy Owner/Repo", startCtx(host));
+		const output = host.notifications.at(-1) ?? "";
+		assert.match(output, /owner\/repo solo \(explicit;/);
+		assert.match(output, new RegExp(policyPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.match(output, /one repository entry in this instance's HOME store/);
+		assert.equal(existsSync(stateRoot), false, "policy inspection must not create Factory state or a batch");
+		assert.equal(readFileSync(policyPath, "utf8"), contents, "policy inspection must not mutate the shared store");
+		assert.equal(host.nativeTaskCalls.count, 0);
+		assert.equal(snapshot.repository, "owner/repo");
+	} finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 test("converge command accepts only inspect and patch even though start also accepts pr-ready", async () => {
 	const host = fakeHost();
 	createLunaFactoryExtension(host as never, { env: FULL_ENV, artifactRoots: ROOTS });
@@ -2473,7 +2498,7 @@ test("Factory command completion follows the accepted grammar and reads retained
 	const complete = host.commands.get("factory")?.getArgumentCompletions;
 	assert.ok(complete);
 	assert.deepEqual(complete("")?.map((item) => item.label), [
-		"status", "start", "selected", "run", "converge", "reconcile", "inspect", "resume", "pause", "drain", "abort", "stop", "retry", "exclude", "export", "discard", "claims", "help", "--help", "debug", "--debug", "why", "--",
+		"status", "start", "selected", "run", "converge", "reconcile", "inspect", "resume", "pause", "drain", "abort", "stop", "retry", "exclude", "export", "discard", "claims", "policy", "help", "--help", "debug", "--debug", "why", "--",
 	]);
 	assert.deepEqual(complete("start ")?.map((item) => item.label), ["inspect", "patch", "pr-ready"]);
 	assert.deepEqual(complete("converge ")?.map((item) => item.label), ["inspect", "patch"]);

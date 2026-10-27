@@ -70,6 +70,7 @@ const HELP: readonly string[] = [
 	"  tab              toggle pull requests and issues",
 	"  t                switch between queue and trace panes",
 	"  /review status|reconcile|drain|cancel|revise|slay  recover blocked waves safely",
+	"  /review policy owner/repo [solo|team]  inspect or select human review policy",
 	"  v                read the highlighted pull request or issue",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
@@ -1349,6 +1350,8 @@ export class ReviewDashboard {
 			lines.push(truncateToWidth(this.painter.fg("dim", item.type === "pr"
 				? `Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`
 				: `State: ${this.issueReaderDetail?.state ?? "unknown"}`), width));
+			const operatorPolicy = this.mode.operatorPolicyFor(item.repo);
+			lines.push(truncateToWidth(this.painter.fg("dim", `Human review policy: ${operatorPolicy?.mode ?? "team"} (${operatorPolicy?.source ?? "default"})${item.type === "pr" ? ` · Landing: ${this.mode.landingStateFor(item)}` : ""}`), width));
 			const detailLines = item.type === "pr" ? prDetailToLines(this.readerDetail) : issueDetailToLines(this.issueReaderDetail);
 			let linesToShow = detailLines;
 			if (this.readerError) {

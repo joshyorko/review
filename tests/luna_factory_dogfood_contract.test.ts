@@ -206,6 +206,35 @@ if [[ "$*" == *LUNA_FACTORY_ENABLED=1* ]]; then
   esac
   message='Factory has no batches.'
 else
+  [[ "$*" == *'--env GH_TOKEN='* && "$*" == *'--env GITHUB_TOKEN='* && "$*" == *'--model local-probe/deterministic'* ]] || { echo 'policy smoke must stay credential-free on its local model' >&2; exit 1; }
+  request="$(cat)"
+  home=""
+  if [[ "$request" == *'/review policy example/repo solo'* ]]; then
+    for argument; do
+      if [[ "$argument" == *:/home/review:rw ]]; then
+        home="$(printf '%s' "$argument" | cut -d: -f1)"
+        mkdir -p "$home/.config/review"
+        printf '%s\n' '{"version":2,"repositories":[{"repository":"example/repo","mode":"solo","revision":1}]}' >"$home/.config/review/operator-policy.json"
+      fi
+    done
+    [[ -n "$home" && -s "$home/.config/review/operator-policy.json" ]] || { echo 'policy was not written beneath mounted HOME' >&2; exit 1; }
+    printf '%s\n' '{"statusKey":"review_workbench"}' '{"name":"factory"}' 'example/repo: solo (explicit); instance policy: /home/review/.config/review/operator-policy.json'
+    exit 0
+  fi
+  if [[ "$request" == *'/review policy example/repo'* || "$request" == *'/factory policy example/repo'* ]]; then
+    for argument; do
+      if [[ "$argument" == *:/home/review:rw ]]; then
+        home="$(printf '%s' "$argument" | cut -d: -f1)"
+      fi
+    done
+    [[ -n "$home" && -s "$home/.config/review/operator-policy.json" ]] || { echo 'persisted policy is missing from mounted HOME' >&2; exit 1; }
+    grep -Fq '"version":2' "$home/.config/review/operator-policy.json" || { echo 'unexpected policy schema version' >&2; exit 1; }
+    grep -Fq '"mode":"solo"' "$home/.config/review/operator-policy.json" || { echo 'unexpected persisted mode' >&2; exit 1; }
+    grep -Fq 'review-policy' <<<"$request" && printf '%s\n' '{"id":"review-policy","message":"example/repo: solo (explicit)"}'
+    grep -Fq 'factory-policy' <<<"$request" && printf '%s\n' '{"id":"factory-policy","message":"example/repo: solo (explicit)"}'
+    printf '%s\n' '{"statusKey":"review_workbench"}' '{"name":"factory"}'
+    exit 0
+  fi
   message='Factory is disabled; explicitly enable LUNA_FACTORY_ENABLED=1'
 fi
 printf '%s\\n' '{"statusKey":"review_workbench"}' '{"name":"factory"}' "$message"

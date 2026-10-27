@@ -21,6 +21,23 @@ Review scope follows explicit operator intent: an explicit repository/organizati
 
 GitHub owns current state. A queue row is an observation, not a task assignment. Before any mutation, preserve the relevant item identity and exact head, refresh live evidence and permissions, and refuse stale or mismatched subjects. An absent permission or required check remains a real gate; optional Hive context cannot bypass it.
 
+The operator may explicitly set a per-repository human-review preset with
+`/review policy owner/repo solo|team`; `/review policy owner/repo` reads the
+effective preset. Missing entries use `team`. The versioned policy is stored in
+the appliance instance HOME at `$HOME/.config/review/operator-policy.json`
+(`$HOME` is `/home/review` in the package); host `XDG_CONFIG_HOME` does not
+select this store. Setting a preset starts no work. Newly admitted Review waves
+capture the selected snapshot, and a later change cannot widen an existing
+wave; fresh admission is required before landing under changed policy.
+
+Both presets require a fresh, structured, independent, read-only reviewer
+receipt for the exact current head. `solo` removes only Review's additional
+local human-approval minimum when current GitHub requirements prove that no
+external review is required. `team` also requires an eligible non-author human
+approval on the current head. GitHub requirements, CI, holds, permissions,
+workflow protections, claims, exact-head checks, and mutation scope apply in
+both modes. No local agent receipt becomes a GitHub review or approval.
+
 ## Review and Factory separation
 
 Review is the source and observation front-end. Review specialist agents return evidence and recommendations; they have no comment, approval, push, or merge capability. Human-confirmed Slay intent may authorize a bounded coordinator lifecycle, subject to the existing live permission, exact-head, ruleset, mutation-claim, and no-self-review safeguards.
@@ -35,6 +52,13 @@ Luna Factory is a separate execution controller co-loaded with Review. Loading i
 - `CONVERGED` means every mandatory acceptance criterion has current valid proof. `QUIESCENT` means no authorized autonomous progress remains; it may still be unconverged. An empty queue, exhausted budget, or returned worker implies neither.
 - A failed check reopens the same admitted task for bounded repair. Preserve attempt lineage; a new worker or commit does not reset it. New observations are candidates and require independent admission.
 - Claims enforce single-writer/resource exclusion across Review and Factory work. Stop and cancellation do not imply rollback or release until the external effect is known.
+
+Co-loaded Factory snapshots and displays the same per-repository preset on
+direct admission and Review handoff. `/factory policy owner/repo` is a
+read-only view available even when Factory execution is disabled. The preset
+does not admit work, grant merge authority, or change Factory's independent
+native acceptance proofs. `pr-ready` and `verified-patch` remain available
+under either preset, and all existing acceptance requirements remain in force.
 
 ## Selected batches and runtime
 
