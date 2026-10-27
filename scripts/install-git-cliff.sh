@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Authoring-only tool, pinned to upstream release bytes. No host installation.
 set -euo pipefail
-[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'git-cliff authoring installer requires Linux x86_64' >&2; exit 1; }
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || {
+  echo 'git-cliff authoring installer requires Linux x86_64' >&2
+  exit 1
+}
 destination="${1:?usage: install-git-cliff.sh destination-directory}"
 mkdir -p "$destination"
 work="$(mktemp -d)"
